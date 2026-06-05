@@ -20,7 +20,7 @@
 
 #include "utils/structured_log.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 AtomicFileWriter::AtomicFileWriter(std::string filepath, bool unique_suffix) : filepath_(std::move(filepath)) {
   if (unique_suffix) {
@@ -52,7 +52,7 @@ Expected<void, Error> AtomicFileWriter::Commit() {
 #ifndef _WIN32
   // Fsync the temp file to ensure data is durable before rename
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-  int file_desc = open(temp_filepath_.c_str(), O_RDONLY);
+  int file_desc = open(temp_filepath_.c_str(), O_RDWR);
   if (file_desc >= 0) {
     if (fsync(file_desc) != 0) {
       StructuredLog()
@@ -114,4 +114,4 @@ void AtomicFileWriter::Rollback() {
   }
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

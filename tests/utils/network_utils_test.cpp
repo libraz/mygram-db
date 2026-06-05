@@ -7,8 +7,7 @@
 
 #include <gtest/gtest.h>
 
-namespace mygram {
-namespace utils {
+namespace mygramdb::utils {
 
 TEST(NetworkUtilsTest, ParseIPv4_Valid) {
   auto ip = ParseIPv4("192.168.1.1");
@@ -260,5 +259,4 @@ TEST(NetworkUtilsTest, GetPeerIP_NonSocketFd) {
   EXPECT_EQ(GetPeerIP(1), "unknown");
 }
 
-}  // namespace utils
-}  // namespace mygram
+}  // namespace mygramdb::utils

@@ -74,16 +74,18 @@ Expected<void, Error> IoReactor::Start() {
 
   // Take mux_lifecycle_ exclusively to publish mux_ atomically with
   // running_=true. Lock order: start_stop_mutex_ -> mux_lifecycle_.
+  std::string backend_name;
   {
     std::unique_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
     mux_ = std::move(mux);
+    backend_name = mux_->Name();
+    running_.store(true, std::memory_order_release);
   }
-  running_.store(true, std::memory_order_release);
   event_loop_thread_ = std::thread([this]() { EventLoop(); });
 
   mygram::utils::StructuredLog()
       .Event("reactor_started")
-      .Field("backend", mux_->Name())
+      .Field("backend", backend_name)
       .Field("poll_timeout_ms", static_cast<int64_t>(config_.poll_timeout_ms))
       .Info();
   return {};
@@ -368,7 +370,7 @@ void IoReactor::EventLoop() {
     // in-loop avoids spawning a dedicated reaper thread; the cost is one
     // shared-lock acquisition per interval over connections_, which is
     // negligible compared to Poll itself.
-    if (config_.idle_timeout_sec > 0 && config_.reaper_interval_sec > 0) {
+    if ((config_.idle_timeout_sec > 0 || config_.initial_read_timeout_sec > 0) && config_.reaper_interval_sec > 0) {
       const auto now = std::chrono::steady_clock::now();
       if (now - last_reaper_run_ >= std::chrono::seconds(config_.reaper_interval_sec)) {
         last_reaper_run_ = now;
@@ -384,8 +386,15 @@ void IoReactor::ReapIdleConnections() {
   // (shared) and connections_mutex_ (unique). Holding the shared lock here
   // and then upgrading to unique inside Unregister would deadlock.
   const auto now = std::chrono::steady_clock::now();
-  const auto deadline = std::chrono::seconds(config_.idle_timeout_sec);
-  std::vector<std::pair<int, std::chrono::seconds>> to_close;
+  const auto idle_deadline = std::chrono::seconds(config_.idle_timeout_sec);
+  const auto initial_read_deadline = std::chrono::seconds(config_.initial_read_timeout_sec);
+  struct ReapCandidate {
+    int fd;
+    std::chrono::seconds age;
+    const char* reason;
+    int timeout_sec;
+  };
+  std::vector<ReapCandidate> to_close;
   {
     std::shared_lock<std::shared_mutex> lock(connections_mutex_);
     to_close.reserve(connections_.size());
@@ -393,21 +402,33 @@ void IoReactor::ReapIdleConnections() {
       if (!conn) {
         continue;
       }
-      const auto idle_for = now - conn->LastActive();
-      if (idle_for >= deadline) {
-        to_close.emplace_back(fd, std::chrono::duration_cast<std::chrono::seconds>(idle_for));
+      if (config_.initial_read_timeout_sec > 0 && !conn->HasReceivedFrame()) {
+        const auto initial_age = now - conn->CreatedAt();
+        if (initial_age >= initial_read_deadline) {
+          to_close.push_back({fd, std::chrono::duration_cast<std::chrono::seconds>(initial_age), "initial_read_timeout",
+                              config_.initial_read_timeout_sec});
+          continue;
+        }
+      }
+      if (config_.idle_timeout_sec > 0) {
+        const auto idle_for = now - conn->LastActive();
+        if (idle_for >= idle_deadline) {
+          to_close.push_back({fd, std::chrono::duration_cast<std::chrono::seconds>(idle_for), "idle_timeout",
+                              config_.idle_timeout_sec});
+        }
       }
     }
   }
 
-  for (const auto& [fd, idle_for] : to_close) {
+  for (const auto& candidate : to_close) {
     mygram::utils::StructuredLog()
         .Event("connection_reaped")
-        .Field("fd", static_cast<int64_t>(fd))
-        .Field("idle_seconds", static_cast<int64_t>(idle_for.count()))
-        .Field("idle_timeout_sec", static_cast<int64_t>(config_.idle_timeout_sec))
+        .Field("fd", static_cast<int64_t>(candidate.fd))
+        .Field("reason", candidate.reason)
+        .Field("age_seconds", static_cast<int64_t>(candidate.age.count()))
+        .Field("timeout_sec", static_cast<int64_t>(candidate.timeout_sec))
         .Info();
-    Unregister(fd);
+    Unregister(candidate.fd);
   }
 }
 

@@ -9,22 +9,11 @@
 #include <charconv>
 #include <string_view>
 
+#include "utils/string_utils.h"
+
 namespace mygramdb::mysql {
 
 namespace {
-
-/**
- * @brief Trim whitespace from both ends of a string_view
- */
-std::string_view Trim(std::string_view sv) {
-  while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\n' || sv.front() == '\r')) {
-    sv.remove_prefix(1);
-  }
-  while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\n' || sv.back() == '\r')) {
-    sv.remove_suffix(1);
-  }
-  return sv;
-}
 
 /**
  * @brief Count occurrences of a character in a string_view
@@ -53,7 +42,7 @@ mygram::utils::Expected<MariaDBGTID, mygram::utils::Error> MariaDBGTID::Parse(co
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  std::string_view sv = Trim(std::string_view(gtid_str));
+  std::string_view sv = mygram::utils::TrimAsciiWhitespaceView(std::string_view(gtid_str));
 
   if (sv.empty()) {
     return MakeUnexpected(MakeError(ErrorCode::kMariaDBInvalidGTID, "Empty GTID string"));
@@ -112,7 +101,7 @@ mygram::utils::Expected<std::vector<MariaDBGTID>, mygram::utils::Error> MariaDBG
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  std::string_view sv = Trim(std::string_view(gtid_set_str));
+  std::string_view sv = mygram::utils::TrimAsciiWhitespaceView(std::string_view(gtid_set_str));
 
   if (sv.empty()) {
     return std::vector<MariaDBGTID>{};
@@ -133,7 +122,7 @@ mygram::utils::Expected<std::vector<MariaDBGTID>, mygram::utils::Error> MariaDBG
       start = comma_pos + 1;
     }
 
-    entry = Trim(entry);
+    entry = mygram::utils::TrimAsciiWhitespaceView(entry);
     if (entry.empty()) {
       continue;
     }
@@ -164,7 +153,7 @@ std::string MariaDBGTID::SetToString(const std::vector<MariaDBGTID>& gtids) {
 }
 
 bool MariaDBGTID::IsMariaDBGtidFormat(const std::string& gtid_str) {
-  std::string_view sv = Trim(std::string_view(gtid_str));
+  std::string_view sv = mygram::utils::TrimAsciiWhitespaceView(std::string_view(gtid_str));
   if (sv.empty()) {
     return false;
   }

@@ -1456,6 +1456,7 @@ TEST_F(MygramClientTest, CApiReplicationStatus) {
 // =============================================================================
 
 using mygramdb::client::detail::IsResponseComplete;
+using mygramdb::client::detail::ResponseCompletionState;
 
 /**
  * @brief Test single-line response detection
@@ -1482,6 +1483,25 @@ TEST(IsResponseCompleteTest, IncompleteNoCrlf) {
   EXPECT_FALSE(IsResponseComplete(""));
   EXPECT_FALSE(IsResponseComplete("X"));
   EXPECT_FALSE(IsResponseComplete("XY"));
+}
+
+TEST(IsResponseCompleteTest, StatefulDetectionFindsCrlfAcrossAppendedChunks) {
+  ResponseCompletionState state;
+  std::string response = "OK COUNT 4\r";
+  EXPECT_FALSE(IsResponseComplete(response, state));
+
+  response += "\n";
+  EXPECT_TRUE(IsResponseComplete(response, state));
+}
+
+TEST(IsResponseCompleteTest, StatefulDetectionReusesFirstCrlfForMultilineCompletion) {
+  ResponseCompletionState state;
+  std::string response = "OK INFO\r\nversion: 1.0\r\n";
+  EXPECT_FALSE(IsResponseComplete(response, state));
+  EXPECT_NE(state.first_crlf, std::string_view::npos);
+
+  response += "END\r\n";
+  EXPECT_TRUE(IsResponseComplete(response, state));
 }
 
 /**

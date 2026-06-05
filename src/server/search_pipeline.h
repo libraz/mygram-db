@@ -78,6 +78,9 @@ enum class CacheMissReason : std::uint8_t {
 std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
                                               int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams);
 
+/// @brief Merge already-sorted per-term n-gram lists into one sorted unique list for cache invalidation.
+std::vector<std::string> MergeSortedTermNgramsForCache(const std::vector<SearchTermInfo>& term_infos);
+
 /// @brief Execute the core search pipeline: intersection, NOT filter, filter application, verify_text
 ///
 /// Performs the full search execution:

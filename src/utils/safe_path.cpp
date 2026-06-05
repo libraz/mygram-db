@@ -10,7 +10,7 @@
 #include <filesystem>
 #include <string>
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 namespace {
 
@@ -54,28 +54,6 @@ Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Empty base directory"));
   }
 
-  // Validate extension up-front against the raw input. We lower-case both
-  // sides for a case-insensitive match. This must happen before canonical()
-  // resolves any symlinks so that the user-visible name is what we check.
-  if (allowed_extensions.size() > 0) {
-    std::filesystem::path input_path{std::string(input)};
-    std::string ext = input_path.extension().string();
-    if (ext.empty() || !ExtensionAllowed(ext, allowed_extensions)) {
-      // Build a comma-separated list for the error message.
-      std::string allowed_list;
-      bool first = true;
-      for (std::string_view a : allowed_extensions) {
-        if (!first) {
-          allowed_list.append(", ");
-        }
-        allowed_list.append(a);
-        first = false;
-      }
-      return MakeUnexpected(
-          MakeError(ErrorCode::kInvalidArgument, "Disallowed file extension; allowed: " + allowed_list));
-    }
-  }
-
   std::string filepath{input};
   if (filepath[0] != '/') {
     std::string base{base_dir};
@@ -99,10 +77,28 @@ Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string
           ErrorCode::kInvalidArgument,
           "Invalid filepath: path must be within " + std::string(base_dir_label) + " (" + std::string(base_dir) + ")"));
     }
+
+    if (allowed_extensions.size() > 0) {
+      std::string ext = resolved.extension().string();
+      if (ext.empty() || !ExtensionAllowed(ext, allowed_extensions)) {
+        std::string allowed_list;
+        bool first = true;
+        for (std::string_view a : allowed_extensions) {
+          if (!first) {
+            allowed_list.append(", ");
+          }
+          allowed_list.append(a);
+          first = false;
+        }
+        return MakeUnexpected(
+            MakeError(ErrorCode::kInvalidArgument, "Disallowed file extension; allowed: " + allowed_list));
+      }
+    }
+
     return resolved.string();
   } catch (const std::exception& e) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, std::string("Invalid filepath: ") + e.what()));
   }
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

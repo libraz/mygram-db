@@ -9,7 +9,7 @@
 
 #include <string>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 // --- StripSQLComments Tests ---
 

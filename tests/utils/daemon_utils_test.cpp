@@ -20,7 +20,7 @@
 #include <stdexcept>
 #endif
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 #ifndef _WIN32
 
@@ -241,6 +241,45 @@ TEST(DaemonUtilsTest, WorkingDirectoryIsRoot) {
 
       std::filesystem::remove(test_file);
     }
+  }
+}
+
+/**
+ * @brief Test daemon file creation mask is conservative.
+ */
+TEST(DaemonUtilsTest, FileCreationMaskIsConservative) {
+  std::string temp_file = GenerateTempFilePath();
+  std::string test_file = temp_file + ".umask_test";
+
+  std::filesystem::remove(test_file);
+
+  pid_t pid = fork();
+  ASSERT_NE(pid, -1);
+
+  if (pid == 0) {
+    bool result = Daemonize();
+
+    if (result) {
+      std::ofstream ofs(test_file);
+      ofs << "daemon_file" << std::endl;
+      ofs.close();
+
+      sleep(1);
+    }
+
+    std::exit(result ? 0 : 1);
+  } else {
+    int status;
+    waitpid(pid, &status, 0);
+    sleep(2);
+
+    ASSERT_TRUE(std::filesystem::exists(test_file)) << "Daemon did not create umask test file";
+
+    struct stat st {};
+    ASSERT_EQ(stat(test_file.c_str(), &st), 0);
+    EXPECT_EQ(st.st_mode & 0777, 0640);
+
+    std::filesystem::remove(test_file);
   }
 }
 

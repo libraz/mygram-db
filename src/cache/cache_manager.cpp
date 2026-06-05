@@ -5,7 +5,7 @@
 
 #include "cache/cache_manager.h"
 
-#include "query/cache_key.h"
+#include "cache/cache_key.h"
 
 namespace mygramdb::cache {
 
@@ -163,6 +163,9 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   // registered in InvalidationManager but not present in QueryCache (or vice
   // versa). See serialize_mutex_ doc in cache_manager.h.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  if (!enabled_.load(std::memory_order_acquire)) {
+    return false;
+  }
 
   // Insert into cache
   const bool inserted = query_cache_->Insert(key, result, metadata, query_cost_ms);
@@ -268,12 +271,6 @@ bool CacheManager::Enable() {
 }
 
 void CacheManager::Disable() {
-  // Stop the invalidation queue first so no new background work can be
-  // enqueued while we tear down. Stop() drains any pending invalidations.
-  if (invalidation_queue_ && invalidation_queue_->IsRunning()) {
-    invalidation_queue_->Stop();
-  }
-
   // CR-7 (Disable race): flip enabled_ to false BEFORE Clear() so that any
   // concurrent Insert observing the post-flip state short-circuits at the
   // enabled_ check and never inserts after Clear() has finished. The previous
@@ -285,21 +282,25 @@ void CacheManager::Disable() {
   // We use std::memory_order_release so the flip happens-before the Clear
   // call below from this thread's perspective and is visible to readers that
   // pair it with an acquire load on enabled_.
+  enabled_.store(false, std::memory_order_release);
+
+  // Stop the invalidation queue after closing the public enabled_ gate so no
+  // new invalidation work can be enqueued while Stop() drains pending work.
+  if (invalidation_queue_ && invalidation_queue_->IsRunning()) {
+    invalidation_queue_->Stop();
+  }
+
   //
   // Clear() short-circuits when !enabled_, so we run query_cache_->Clear()
   // and invalidation_mgr_->Clear() directly here. This is the safe default:
   // invalidation events arriving during the disabled window would be
   // silently dropped, so we proactively flush rather than leave potentially
   // stale entries to be served on re-enable.
-  enabled_.store(false, std::memory_order_release);
-
   // Run the same body as CacheManager::Clear() but bypass the enabled_ guard.
   // We still take serialize_mutex_ to serialize against any in-flight Insert
-  // that already passed the enabled_ check before we flipped it; that Insert
-  // either finishes before us (and gets cleared here) or finishes after us
-  // (and finds invalidation_mgr_ / query_cache_ ready to accept the entry,
-  // but a subsequent Lookup will short-circuit on !enabled_ and the entry
-  // will be wiped on the next Disable/Enable cycle).
+  // that already passed the enabled_ check before we flipped it. Insert()
+  // re-checks enabled_ after acquiring the same mutex, so a caller that was
+  // queued behind this Clear exits without adding post-disable metadata.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
   if (query_cache_) {
     query_cache_->Clear();

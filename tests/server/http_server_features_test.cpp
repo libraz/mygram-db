@@ -3,8 +3,12 @@
  * @brief HTTP server advanced features and regression tests
  */
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <httplib.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <nlohmann/json.hpp>
@@ -22,6 +26,41 @@ using json = nlohmann::json;
 
 namespace mygramdb {
 namespace server {
+
+namespace {
+
+uint16_t FindAvailableLoopbackPort() {
+  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return 0;
+  }
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(0);
+
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    ::close(fd);
+    return 0;
+  }
+
+  sockaddr_in actual_addr{};
+  socklen_t addr_len = sizeof(actual_addr);
+  if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual_addr), &addr_len) != 0) {
+    ::close(fd);
+    return 0;
+  }
+
+  ::close(fd);
+  return ntohs(actual_addr.sin_port);
+}
+
+std::string LoopbackUrl(uint16_t port) {
+  return "http://127.0.0.1:" + std::to_string(port);
+}
+
+}  // namespace
 
 class HttpServerTest : public ::testing::Test {
  protected:
@@ -65,6 +104,9 @@ class HttpServerTest : public ::testing::Test {
 
     table_contexts_["test"] = &table_context_;
 
+    port_ = FindAvailableLoopbackPort();
+    ASSERT_GT(port_, 0);
+
     // Create config
     config_ = std::make_unique<config::Config>();
     config_->mysql.host = "127.0.0.1";
@@ -75,7 +117,7 @@ class HttpServerTest : public ::testing::Test {
     config_->api.tcp.port = 11016;
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
-    config_->api.http.port = 18080;  // Use different port for testing
+    config_->api.http.port = port_;
     config_->api.http.enable_cors = false;
     config_->api.http.cors_allow_origin = "*";
     config_->replication.enable = false;
@@ -84,7 +126,7 @@ class HttpServerTest : public ::testing::Test {
     // Create HTTP server
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
-    http_config.port = 18080;
+    http_config.port = port_;
     http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
     http_config.enable_cors = false;
@@ -107,13 +149,16 @@ class HttpServerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<HttpServer> http_server_;
+  uint16_t port_ = 0;
 };
 
 TEST_F(HttpServerTest, CORSHeaders) {
   // Create a separate server with CORS enabled
+  uint16_t cors_port = FindAvailableLoopbackPort();
+  ASSERT_GT(cors_port, 0);
   HttpServerConfig cors_config;
   cors_config.bind = "127.0.0.1";
-  cors_config.port = 18081;
+  cors_config.port = cors_port;
   cors_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
   cors_config.enable_cors = true;
   cors_config.cors_allow_origin = "*";
@@ -121,7 +166,7 @@ TEST_F(HttpServerTest, CORSHeaders) {
   auto cors_server = std::make_unique<HttpServer>(cors_config, table_contexts_, config_.get(), nullptr);
   ASSERT_TRUE(cors_server->Start());
 
-  httplib::Client client("http://127.0.0.1:18081");
+  httplib::Client client(LoopbackUrl(cors_port));
   auto res = client.Get("/health");
 
   ASSERT_TRUE(res);
@@ -134,9 +179,11 @@ TEST_F(HttpServerTest, CORSHeaders) {
 
 TEST_F(HttpServerTest, CORSPreflight) {
   // Create a separate server with CORS enabled
+  uint16_t cors_port = FindAvailableLoopbackPort();
+  ASSERT_GT(cors_port, 0);
   HttpServerConfig cors_config;
   cors_config.bind = "127.0.0.1";
-  cors_config.port = 18081;
+  cors_config.port = cors_port;
   cors_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
   cors_config.enable_cors = true;
   cors_config.cors_allow_origin = "*";
@@ -144,7 +191,7 @@ TEST_F(HttpServerTest, CORSPreflight) {
   auto cors_server = std::make_unique<HttpServer>(cors_config, table_contexts_, config_.get(), nullptr);
   ASSERT_TRUE(cors_server->Start());
 
-  httplib::Client client("http://127.0.0.1:18081");
+  httplib::Client client(LoopbackUrl(cors_port));
   auto res = client.Options("/test/search");
 
   ASSERT_TRUE(res);
@@ -159,7 +206,7 @@ TEST_F(HttpServerTest, CORSPreflight) {
 TEST_F(HttpServerTest, PrometheusMetricsEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client(LoopbackUrl(port_));
   auto res = client.Get("/metrics");
 
   ASSERT_TRUE(res);
@@ -204,7 +251,7 @@ TEST_F(HttpServerTest, PrometheusMetricsEndpoint) {
 TEST_F(HttpServerTest, ReplicationStatusNotConfigured) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client(LoopbackUrl(port_));
   auto res = client.Get("/replication/status");
 
   ASSERT_TRUE(res);
@@ -268,6 +315,9 @@ class HttpServerMultiTableTest : public ::testing::Test {
     table_contexts_["table1"] = &table_context1_;
     table_contexts_["table2"] = &table_context2_;
 
+    port_ = FindAvailableLoopbackPort();
+    ASSERT_GT(port_, 0);
+
     // Create config
     config_ = std::make_unique<config::Config>();
     config_->mysql.host = "127.0.0.1";
@@ -278,14 +328,14 @@ class HttpServerMultiTableTest : public ::testing::Test {
     config_->api.tcp.port = 11016;
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
-    config_->api.http.port = 18081;  // Different port
+    config_->api.http.port = port_;
     config_->replication.enable = false;
     config_->replication.server_id = 12345;
 
     // Create HTTP server
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
-    http_config.port = 18081;
+    http_config.port = port_;
     http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
     http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
@@ -303,12 +353,13 @@ class HttpServerMultiTableTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<HttpServer> http_server_;
+  uint16_t port_ = 0;
 };
 
 TEST_F(HttpServerMultiTableTest, SearchDifferentTables) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18081");
+  httplib::Client client(LoopbackUrl(port_));
 
   // Search table1
   json request1;
@@ -340,7 +391,7 @@ TEST_F(HttpServerMultiTableTest, SearchDifferentTables) {
 TEST_F(HttpServerMultiTableTest, GetDocumentFromDifferentTables) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18081");
+  httplib::Client client(LoopbackUrl(port_));
 
   // Get from table1
   auto res1 = client.Get("/table1/1");
@@ -364,7 +415,7 @@ TEST_F(HttpServerMultiTableTest, GetDocumentFromDifferentTables) {
 TEST_F(HttpServerMultiTableTest, InfoShowsMultipleTables) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18081");
+  httplib::Client client(LoopbackUrl(port_));
   auto res = client.Get("/info");
 
   ASSERT_TRUE(res);
@@ -391,7 +442,7 @@ TEST_F(HttpServerMultiTableTest, InfoShowsMultipleTables) {
 TEST_F(HttpServerMultiTableTest, TableIsolation) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18081");
+  httplib::Client client(LoopbackUrl(port_));
 
   // Search for "machine" in table1 - should find it
   json request1;
@@ -419,7 +470,7 @@ TEST_F(HttpServerMultiTableTest, TableIsolation) {
 TEST_F(HttpServerMultiTableTest, InvalidTableName) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18081");
+  httplib::Client client(LoopbackUrl(port_));
 
   // Try to search non-existent table
   json request;

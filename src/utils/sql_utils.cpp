@@ -7,7 +7,7 @@
 
 #include <cctype>
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 std::string StripSQLComments(const std::string& query) {
   std::string result;
@@ -157,4 +157,4 @@ bool MatchTableName(const std::string& str, size_t& pos, const std::string& tabl
   return true;
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

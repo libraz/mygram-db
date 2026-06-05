@@ -15,7 +15,9 @@
 #include <string>
 #include <string_view>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Transparent hash for heterogeneous lookup with string_view
@@ -47,4 +49,4 @@ struct TransparentStringEqual {
   bool operator()(std::string_view lhs, std::string_view rhs) const { return lhs == rhs; }
 };
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

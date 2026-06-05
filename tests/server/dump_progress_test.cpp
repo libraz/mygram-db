@@ -131,4 +131,27 @@ TEST(DumpProgressTest, ResetAndJoinWorkerNonDeadlock) {
   }
 }
 
+TEST(DumpProgressTest, GetSnapshotReturnsConsistentProgressFields) {
+  DumpProgress progress;
+  progress.Reset(DumpStatus::SAVING, "/tmp/snapshot.dmp", 3);
+  progress.UpdateTable("articles", 2);
+
+  auto snapshot = progress.GetSnapshot();
+  EXPECT_EQ(snapshot.status, DumpStatus::SAVING);
+  EXPECT_TRUE(snapshot.IsInProgress());
+  EXPECT_EQ(snapshot.filepath, "/tmp/snapshot.dmp");
+  EXPECT_EQ(snapshot.current_table, "articles");
+  EXPECT_EQ(snapshot.tables_processed, 2);
+  EXPECT_EQ(snapshot.tables_total, 3);
+  EXPECT_GE(snapshot.elapsed_seconds, 0.0);
+
+  progress.Complete("/tmp/snapshot.dmp");
+  auto completed = progress.GetSnapshot();
+  EXPECT_EQ(completed.status, DumpStatus::COMPLETED);
+  EXPECT_FALSE(completed.IsInProgress());
+  EXPECT_EQ(completed.last_result_filepath, "/tmp/snapshot.dmp");
+  EXPECT_TRUE(completed.error_message.empty());
+  EXPECT_GE(completed.elapsed_seconds, 0.0);
+}
+
 }  // namespace mygramdb::server

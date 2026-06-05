@@ -13,8 +13,9 @@
 
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/namespace_compat.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 using mygram::utils::Error;
 using mygram::utils::Expected;
@@ -162,4 +163,4 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
  */
 std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::string_view timezone_str);
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

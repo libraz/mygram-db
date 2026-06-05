@@ -21,12 +21,17 @@ namespace mygramdb::client::detail {
  * @param suffix The suffix to test for
  * @return true if @p str has @p suffix at its end
  */
-inline bool EndsWith(const std::string& str, std::string_view suffix) {
+inline bool EndsWith(std::string_view str, std::string_view suffix) {
   if (str.size() < suffix.size()) {
     return false;
   }
   return str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
+
+struct ResponseCompletionState {
+  size_t first_crlf = std::string_view::npos;
+  size_t scan_offset = 0;
+};
 
 /**
  * @brief Check if a response buffer contains a complete protocol response
@@ -47,7 +52,7 @@ inline bool EndsWith(const std::string& str, std::string_view suffix) {
  * @param response The accumulated response data so far
  * @return true if the response is complete and we can stop reading
  */
-inline bool IsResponseComplete(const std::string& response) {
+inline bool IsResponseComplete(std::string_view response, ResponseCompletionState& state) {
   // Minimum valid response: "X\r\n" (3 bytes)
   constexpr size_t kMinResponseSize = 3;
   if (response.size() < kMinResponseSize) {
@@ -59,9 +64,18 @@ inline bool IsResponseComplete(const std::string& response) {
     return false;
   }
 
-  // Find the first \r\n to identify the response type from the first line
-  size_t first_crlf = response.find("\r\n");
-  if (first_crlf == std::string::npos) {
+  // Find the first \r\n to identify the response type from the first line.
+  // The stateful overload remembers the search position so callers that append
+  // chunks do not rescan the full accumulated response after every recv().
+  if (state.first_crlf == std::string_view::npos) {
+    state.first_crlf = response.find("\r\n", state.scan_offset);
+    if (state.first_crlf == std::string_view::npos) {
+      state.scan_offset = response.size() > 0 ? response.size() - 1 : 0;
+      return false;
+    }
+  }
+  const size_t first_crlf = state.first_crlf;
+  if (first_crlf == std::string_view::npos) {
     return false;
   }
 
@@ -124,6 +138,11 @@ inline bool IsResponseComplete(const std::string& response) {
 
   // Multi-line response with content after first line (e.g., SEARCH with DEBUG)
   return EndsWith(response, kDoubleCrlf);
+}
+
+inline bool IsResponseComplete(std::string_view response) {
+  ResponseCompletionState state;
+  return IsResponseComplete(response, state);
 }
 
 }  // namespace mygramdb::client::detail

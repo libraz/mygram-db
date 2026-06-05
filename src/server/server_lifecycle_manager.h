@@ -114,7 +114,8 @@ class ServerLifecycleManager {
       const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
       std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
       std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
-      std::atomic<bool>& mysql_reconnecting, mysql::IBinlogReader* binlog_reader
+      std::atomic<bool>& mysql_reconnecting, replication_pause::Counter& replication_pause_counter,
+      mysql::IBinlogReader* binlog_reader
 #ifdef USE_MYSQL
       ,
       SyncOperationManager* sync_manager
@@ -154,7 +155,8 @@ class ServerLifecycleManager {
                          const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
                          std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
                          std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
-                         std::atomic<bool>& mysql_reconnecting, mysql::IBinlogReader* binlog_reader
+                         std::atomic<bool>& mysql_reconnecting, replication_pause::Counter& replication_pause_counter,
+                         mysql::IBinlogReader* binlog_reader
 #ifdef USE_MYSQL
                          ,
                          SyncOperationManager* sync_manager
@@ -174,6 +176,7 @@ class ServerLifecycleManager {
   std::atomic<bool>& optimization_in_progress_;
   std::atomic<bool>& replication_paused_for_dump_;
   std::atomic<bool>& mysql_reconnecting_;
+  replication_pause::Counter& replication_pause_counter_;
 
   mysql::IBinlogReader* binlog_reader_;
 #ifdef USE_MYSQL

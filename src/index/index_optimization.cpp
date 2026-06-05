@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 
 #include "absl/container/flat_hash_map.h"
 #include "index/index.h"
@@ -285,6 +286,9 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
       }
     }
     // Lock released - brief pause allows other operations to proceed
+    if (batch_end < total_terms) {
+      std::this_thread::yield();
+    }
 
     // Log progress every 10% or at the end
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)

@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <string_view>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Compute Levenshtein edit distance between two UTF-8 strings
@@ -39,4 +41,4 @@ uint32_t LevenshteinDistance(std::string_view a, std::string_view b, uint32_t ma
  */
 bool ContainsFuzzyMatch(std::string_view text, std::string_view term, uint32_t max_distance);
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

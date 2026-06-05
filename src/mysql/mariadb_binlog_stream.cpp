@@ -21,12 +21,6 @@
 
 namespace mygramdb::mysql {
 
-/// Heartbeat period in nanoseconds (3 seconds) for MariaDB connection keepalive
-static constexpr uint64_t kHeartbeatPeriodNs = 3000000000;
-
-/// Size of the OK byte prefix in binlog protocol buffer
-static constexpr size_t kBinlogOKByteSize = 1;
-
 mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSession(Connection& conn) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -60,7 +54,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
   }
 
   // Configure heartbeat to keep connection alive during idle periods
-  std::string heartbeat_query = "SET @master_heartbeat_period = " + std::to_string(kHeartbeatPeriodNs);
+  std::string heartbeat_query = "SET @master_heartbeat_period = " + std::to_string(kBinlogHeartbeatPeriodNs);
   if (mysql_query(conn.GetHandle(), heartbeat_query.c_str()) != 0) {
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
@@ -138,41 +132,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
 }
 
 BinlogFetchResult MariaDBBinlogStream::Fetch(Connection& conn) {
-  BinlogFetchResult result;
-
-  mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "mariadb_calling_binlog_fetch").Debug();
-  int rc = mysql_binlog_fetch(conn.GetHandle(), &rpl_);
-
-  if (rc != 0) {
-    unsigned int err_no = mysql_errno(conn.GetHandle());
-    const char* err_str = mysql_error(conn.GetHandle());
-    result.error_code = err_no;
-    result.error_message =
-        "Failed to fetch MariaDB binlog event: " + std::string(err_str) + " (errno: " + std::to_string(err_no) + ")";
-
-    if (err_no == kMySQLErrServerLost) {
-      result.status = BinlogFetchResult::Status::kConnectionLost;
-    } else if (err_no == kMySQLErrGoneAway) {
-      result.status = BinlogFetchResult::Status::kServerGoneAway;
-    } else if (err_no == kMySQLErrBinlogPurged) {
-      result.status = BinlogFetchResult::Status::kBinlogPurged;
-    } else {
-      result.status = BinlogFetchResult::Status::kError;
-    }
-    return result;
-  }
-
-  // Check if we have data
-  if (rpl_.size == 0 || rpl_.buffer == nullptr) {
-    result.status = BinlogFetchResult::Status::kNoData;
-    return result;
-  }
-
-  // Strip OK byte prefix (same protocol as MySQL: buffer[0] = 0x00 OK byte)
-  result.status = BinlogFetchResult::Status::kOK;
-  result.event_data = rpl_.buffer + kBinlogOKByteSize;
-  result.event_length = rpl_.size - kBinlogOKByteSize;
-  return result;
+  return FetchBinlogEvent(conn, rpl_, "mariadb_calling_binlog_fetch", "Failed to fetch MariaDB binlog event");
 }
 
 void MariaDBBinlogStream::Close(Connection& conn) {

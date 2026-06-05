@@ -229,6 +229,23 @@ TEST_F(VariableHandlerTest, SetVariableUnknown) {
   EXPECT_TRUE(response.find("Unknown variable") != std::string::npos) << "Response: " << response;
 }
 
+TEST_F(VariableHandlerTest, SetMultipleVariablesRollsBackOnFailure) {
+  auto before = variable_manager_->GetVariable("logging.level");
+  ASSERT_TRUE(before);
+
+  query::Query query;
+  query.type = query::QueryType::SET;
+  query.variable_assignments.push_back({"logging.level", "debug"});
+  query.variable_assignments.push_back({"api.default_limit", "0"});
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  auto after = variable_manager_->GetVariable("logging.level");
+  ASSERT_TRUE(after);
+  EXPECT_EQ(*after, *before);
+}
+
 // ============================================================================
 // SYNC Blocking Tests (MySQL connection changes)
 // ============================================================================

@@ -28,6 +28,7 @@ gtest_discover_tests(command_line_parser_test
 add_executable(application_test application_test.cpp)
 target_link_libraries(application_test
     PRIVATE
+    mygramdb_app
     GTest::gtest_main
 )
 

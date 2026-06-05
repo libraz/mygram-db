@@ -7,7 +7,9 @@
 
 #include <atomic>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief RAII guard that sets an atomic<bool> flag to true on construction
@@ -234,4 +236,4 @@ class OperationGuard {
   bool released_ = false;
 };
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

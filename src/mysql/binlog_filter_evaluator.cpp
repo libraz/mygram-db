@@ -126,10 +126,28 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     return mygram::utils::CompareValues(val, target, filter.op);
 
   } else if (std::holds_alternative<uint64_t>(value)) {
-    // Datetime/timestamp (stored as uint64_t epoch)
     uint64_t val = std::get<uint64_t>(value);
 
-    // Parse target value: support both epoch seconds and ISO8601 format
+    if (filter.type == "bigint_unsigned") {
+      uint64_t target = 0;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+      auto [ptr_u, ec_u] = std::from_chars(filter.value.data(), filter.value.data() + filter.value.size(), target);
+      if (ec_u != std::errc() || ptr_u != filter.value.data() + filter.value.size()) {
+        std::string reason = (ec_u == std::errc::result_out_of_range) ? "out_of_range" : "parse_error";
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "invalid_unsigned_integer_filter")
+            .Field("reason", reason)
+            .Field("value", filter.value)
+            .Field("column_name", filter.name)
+            .Warn();
+        return false;
+      }
+      return mygram::utils::CompareValues(val, target, filter.op);
+    }
+
+    // Datetime/timestamp (stored as uint64_t epoch). Parse target value:
+    // support both epoch seconds and ISO8601 format.
     auto target_opt = mygram::utils::ParseDatetimeValue(filter.value, datetime_timezone);
     if (!target_opt) {
       mygram::utils::StructuredLog()
@@ -143,8 +161,6 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
       return false;  // Fail-closed: reject document on invalid filter
     }
     uint64_t target = *target_opt;
-
-    // Perform comparison
     return mygram::utils::CompareValues(val, target, filter.op);
 
   } else if (std::holds_alternative<storage::TimeValue>(value)) {

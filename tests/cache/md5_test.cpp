@@ -3,7 +3,7 @@
  * @brief Unit tests for MD5 implementation
  */
 
-#include "query/md5.h"
+#include "cache/md5.h"
 
 #include <gtest/gtest.h>
 

@@ -11,7 +11,7 @@
 #include <functional>
 #include <utility>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 // Helper type alias for ScopeGuard tests
 using ScopeGuardFunc = ScopeGuard<std::function<void()>>;

@@ -8,12 +8,15 @@
 #ifdef USE_MYSQL
 
 #include <atomic>
+#include <cctype>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "config/config.h"
 #include "index/index.h"
@@ -23,6 +26,7 @@
 #include "mysql/connection_validator.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
+#include "server/server_types.h"
 #include "storage/document_store.h"
 
 // Forward declarations
@@ -192,7 +196,26 @@ struct BinlogEvent {
     for (char c : query) {
       upper += static_cast<char>(::toupper(static_cast<unsigned char>(c)));
     }
-    if (upper.find("TRUNCATE") != std::string::npos) {
+    std::vector<std::string> tokens;
+    std::string token;
+    for (char c : upper) {
+      if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+        token += c;
+      } else if (!token.empty()) {
+        tokens.push_back(std::move(token));
+        token.clear();
+      }
+    }
+    if (!token.empty()) {
+      tokens.push_back(std::move(token));
+    }
+
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+      if (tokens[i] == "TRUNCATE" && tokens[i + 1] == "TABLE") {
+        return DDLType::kTruncate;
+      }
+    }
+    if (tokens.size() == 1 && tokens[0] == "TRUNCATE") {
       return DDLType::kTruncate;
     }
     // Check ALTER before DROP to avoid matching "ALTER TABLE ... DROP COLUMN"
@@ -350,20 +373,24 @@ class BinlogReader final : public IBinlogReader {
   std::unique_ptr<Connection> binlog_connection_;    // Dedicated connection for binlog reading (internally owned)
   std::unique_ptr<Connection> metadata_connection_;  // Dedicated connection for metadata queries (internally owned)
 
-  // Multi-table support
+  // Table contexts keyed by table name. The deprecated single-table
+  // constructor is normalized into this map via legacy_table_context_.
   std::unordered_map<std::string, server::TableContext*> table_contexts_;
-  bool multi_table_mode_ = false;
 
-  // Single-table mode (deprecated)
-  index::Index* index_ = nullptr;
-  storage::DocumentStore* doc_store_ = nullptr;
-  config::TableConfig table_config_;
+  // Backing storage for the deprecated single-table constructor. It keeps
+  // non-owning raw pointers because that legacy API receives externally owned
+  // Index / DocumentStore references; production multi-table construction uses
+  // TableContext::index/doc_store directly.
+  server::TableContext legacy_table_context_;
+  index::Index* legacy_index_ = nullptr;
+  storage::DocumentStore* legacy_doc_store_ = nullptr;
 
   config::MysqlConfig mysql_config_;
   Config config_;
 
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
+  std::atomic<bool> processing_failure_reconnect_requested_{false};
   std::mutex stop_mutex_;  ///< Serializes Stop() calls to prevent concurrent join races
 
   // Event queue (using unique_ptr to avoid copying large BinlogEvent objects)

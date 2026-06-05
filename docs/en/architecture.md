@@ -208,10 +208,6 @@ graph TB
   - Progress callbacks for monitoring
   - Cancelable operations
 
-**DumpManager** (`dump_manager.h`)
-- **Responsibility**: Snapshot persistence to disk
-- **Format**: V1 format with compression and metadata
-
 ---
 
 ### Service Layer (Background Workers)

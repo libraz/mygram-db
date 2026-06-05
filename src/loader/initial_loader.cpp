@@ -166,6 +166,18 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
 
   // Build SELECT query
   std::string query = BuildSelectQuery();
+  if (query.empty()) {
+    std::string error_msg = "Invalid required filter value in initial load query";
+    auto rollback_result_query = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result_query) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", rollback_result_query.error().message())
+          .Warn();
+    }
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  }
   mygram::utils::StructuredLog().Event("initial_load_query").Field("query", query).Info();
 
   auto start_time = std::chrono::steady_clock::now();
@@ -506,13 +518,13 @@ std::string InitialLoader::BuildSelectQuery() const {
   }
 
   // Build SELECT clause from collected columns
-  bool first = true;
+  bool first_select_column = true;
   for (const auto& col : selected_columns) {
-    if (!first) {
+    if (!first_select_column) {
       query << ", ";
     }
     query << quote_identifier(col);
-    first = false;
+    first_select_column = false;
   }
 
   query << " FROM " << quote_identifier(table_config_.name);
@@ -553,12 +565,12 @@ std::string InitialLoader::BuildSelectQuery() const {
     };
 
     query << " WHERE ";
-    bool first = true;
+    bool first_required_filter = true;
     for (const auto& filter : table_config_.required_filters) {
-      if (!first) {
+      if (!first_required_filter) {
         query << " AND ";
       }
-      first = false;
+      first_required_filter = false;
 
       query << quote_identifier(filter.name) << " ";
 
@@ -586,9 +598,7 @@ std::string InitialLoader::BuildSelectQuery() const {
                 .Field("filter_name", filter.name)
                 .Field("value", filter.value)
                 .Error();
-            query.str("");
-            query << "SELECT 1 WHERE FALSE /* invalid numeric filter value */";
-            return query.str();
+            return "";
           }
           query << filter.value;
         }
@@ -746,6 +756,8 @@ storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fie
         try_parse_numeric(uint32_t{});
       } else if (type == "bigint") {
         try_parse_numeric(int64_t{});
+      } else if (type == "bigint_unsigned") {
+        try_parse_numeric(uint64_t{});
       }
       // Float types
       else if (type == "float" || type == "double") {

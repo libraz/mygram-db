@@ -23,7 +23,7 @@
 #include "mysql/connection_validator.h"
 #include "mysql/gtid_encoder.h"
 #include "mysql/mariadb_gtid.h"
-#include "server/tcp_server.h"  // For TableContext definition
+#include "server/server_types.h"  // For TableContext definition
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -31,61 +31,47 @@
 namespace mygramdb::mysql {
 
 bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
-  // Determine which index/doc_store/config to use based on mode
-  index::Index* current_index = nullptr;
-  storage::DocumentStore* current_doc_store = nullptr;
-  const config::TableConfig* current_config = nullptr;
-
-  if (multi_table_mode_) {
-    // Multi-table mode: lookup table from event
-    auto table_iter = table_contexts_.find(event.table_name);
-    if (table_iter == table_contexts_.end()) {
-      // Event is for a table we're not tracking, skip silently
-      // Log first few occurrences for debugging
-      int current_count = skip_log_count_.fetch_add(1);
-      if (current_count < 10) {
-        mygram::utils::StructuredLog()
-            .Event("binlog_event_skipped")
-            .Field("table", event.table_name)
-            .Field("reason", "non-tracked table")
-            .Field("skip_count", static_cast<uint64_t>(current_count + 1))
-            .Info();
-      }
-      auto* stats = server_stats_.load(std::memory_order_acquire);
-      if (stats != nullptr) {
-        stats->IncrementReplEventsSkippedOtherTables();
-      }
-      return true;
-    }
-    if (!table_iter->second->index || !table_iter->second->doc_store) {
+  auto table_iter = table_contexts_.find(event.table_name);
+  if (table_iter == table_contexts_.end()) {
+    // Event is for a table we're not tracking, skip silently. Log the first
+    // few occurrences for debugging.
+    int current_count = skip_log_count_.fetch_add(1);
+    if (current_count < 10) {
       mygram::utils::StructuredLog()
-          .Event("binlog_error")
-          .Field("type", "null_table_context")
+          .Event("binlog_event_skipped")
           .Field("table", event.table_name)
-          .Field("gtid", event.gtid)
-          .Field("error", "Table context has null index or doc_store")
-          .Error();
-      return false;
+          .Field("reason", "non-tracked table")
+          .Field("skip_count", static_cast<uint64_t>(current_count + 1))
+          .Info();
     }
-    current_index = table_iter->second->index.get();
-    current_doc_store = table_iter->second->doc_store.get();
-    current_config = &table_iter->second->config;
-  } else {
-    // Single-table mode: skip events for other tables
-    if (event.table_name != table_config_.name) {
-      auto* stats = server_stats_.load(std::memory_order_acquire);
-      if (stats != nullptr) {
-        stats->IncrementReplEventsSkippedOtherTables();
-      }
-      return true;
+    auto* stats = server_stats_.load(std::memory_order_acquire);
+    if (stats != nullptr) {
+      stats->IncrementReplEventsSkippedOtherTables();
     }
-    current_index = index_;
-    current_doc_store = doc_store_;
-    current_config = &table_config_;
+    return true;
   }
 
-  // Invalidate column names cache on ALTER TABLE DDL to avoid stale column name mappings
-  // (TABLE_MAP_EVENT detects column count/type changes but not column renames)
+  auto* table_context = table_iter->second;
+  const bool is_legacy_context = table_context == &legacy_table_context_;
+  index::Index* current_index =
+      table_context->index ? table_context->index.get() : (is_legacy_context ? legacy_index_ : nullptr);
+  storage::DocumentStore* current_doc_store =
+      table_context->doc_store ? table_context->doc_store.get() : (is_legacy_context ? legacy_doc_store_ : nullptr);
+  const config::TableConfig* current_config = &table_context->config;
+  if (current_index == nullptr || current_doc_store == nullptr) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "null_table_context")
+        .Field("table", event.table_name)
+        .Field("gtid", event.gtid)
+        .Field("error", "Table context has null index or doc_store")
+        .Error();
+    return false;
+  }
+
+  // Invalidate column names cache on ALTER TABLE DDL to avoid stale column
+  // name mappings. The next monitored TABLE_MAP_EVENT fetches fresh names
+  // before AddOrUpdate(), allowing SchemaEquals() to detect column renames.
   if (event.type == BinlogEventType::DDL) {
     std::string query_upper = event.text;
     std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
@@ -109,13 +95,7 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
   }
 
   // Get BM25 stats for the table (if available)
-  server::BM25Stats* bm25_stats = nullptr;
-  if (multi_table_mode_) {
-    auto table_iter = table_contexts_.find(event.table_name);
-    if (table_iter != table_contexts_.end()) {
-      bm25_stats = &table_iter->second->bm25_stats;
-    }
-  }
+  server::BM25Stats* bm25_stats = &table_context->bm25_stats;
 
   // Delegate to BinlogEventProcessor
   return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, mysql_config_,
@@ -353,13 +333,9 @@ bool BinlogReader::ValidateConnection() {
   // Collect required table names from configuration
   std::vector<std::string> required_tables;
 
-  if (multi_table_mode_) {
-    required_tables.reserve(table_contexts_.size());
-    for (const auto& [table_name, ctx] : table_contexts_) {
-      required_tables.push_back(ctx->config.name);
-    }
-  } else {
-    required_tables.push_back(table_config_.name);
+  required_tables.reserve(table_contexts_.size());
+  for (const auto& [table_name, ctx] : table_contexts_) {
+    required_tables.push_back(ctx->config.name);
   }
 
   // Get expected server UUID (empty on first connection)

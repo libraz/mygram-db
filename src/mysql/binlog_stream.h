@@ -16,12 +16,19 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "mysql/connection.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
 namespace mygramdb::mysql {
+
+/// Heartbeat period in nanoseconds (3 seconds) to keep binlog connections alive.
+constexpr uint64_t kBinlogHeartbeatPeriodNs = 3000000000ULL;
+
+/// Size of the OK byte prefix in MySQL/MariaDB binlog protocol buffers.
+constexpr size_t kBinlogOkByteSize = 1;
 
 /**
  * @brief Result of a binlog fetch operation
@@ -46,6 +53,12 @@ struct BinlogFetchResult {
   unsigned int error_code = 0;
   std::string error_message;
 };
+
+/**
+ * @brief Shared MYSQL_RPL fetch implementation used by MySQL and MariaDB streams.
+ */
+BinlogFetchResult FetchBinlogEvent(Connection& conn, MYSQL_RPL& rpl, std::string_view log_action,
+                                   std::string_view error_prefix);
 
 /**
  * @brief Abstract interface for binlog streaming protocol

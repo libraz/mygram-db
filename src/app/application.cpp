@@ -23,6 +23,15 @@ namespace mygramdb::app {
 
 namespace {
 constexpr int kShutdownCheckIntervalMs = 100;  // Shutdown check interval (ms)
+
+bool HasParentDirectoryComponent(const std::filesystem::path& path) {
+  for (const auto& component : path) {
+    if (component == "..") {
+      return true;
+    }
+  }
+  return false;
+}
 }  // namespace
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays) - Standard C/C++ main signature
@@ -78,7 +87,19 @@ int Application::Run() {
     return special_exit_code;  // Early exit
   }
 
-  // Log startup message
+  // Apply logging configuration
+  auto logging_result = config_manager_->ApplyLoggingConfig();
+  if (!logging_result) {
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "logging_config_failed")
+        .Field("phase", "startup")
+        .Field("error", logging_result.error().to_string())
+        .Error();
+    return 1;
+  }
+
+  // Log startup message after applying the configured logger.
   mygram::utils::StructuredLog().Event("application_starting").Field("version", Version::FullString()).Info();
 
   // Check root privilege
@@ -89,18 +110,6 @@ int Application::Run() {
         .Field("type", "root_privilege_check_failed")
         .Field("phase", "startup")
         .Field("error", root_check.error().to_string())
-        .Error();
-    return 1;
-  }
-
-  // Apply logging configuration
-  auto logging_result = config_manager_->ApplyLoggingConfig();
-  if (!logging_result) {
-    mygram::utils::StructuredLog()
-        .Event("application_error")
-        .Field("type", "logging_config_failed")
-        .Field("phase", "startup")
-        .Field("error", logging_result.error().to_string())
         .Error();
     return 1;
   }
@@ -293,6 +302,14 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
 
   try {
     std::filesystem::path dump_path(dump_dir);
+
+    // SECURITY: Reject traversal before create_directories(). Canonical checks
+    // after creation are too late because the path may already have escaped.
+    if (HasParentDirectoryComponent(dump_path)) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kPermissionDenied,
+          "Dump directory path contains '..' component before creation: " + dump_path.string()));
+    }
 
     // Create directory if it doesn't exist
     if (!std::filesystem::exists(dump_path)) {

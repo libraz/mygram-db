@@ -10,6 +10,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include "config/config_internal.h"
 #include "utils/error.h"
 #include "utils/memory_utils.h"
 
@@ -159,6 +160,29 @@ TEST(ConfigTest, DefaultValues) {
   // specified in the YAML; they are no longer hardcoded inside HttpServer.
   EXPECT_EQ(config.api.http.read_timeout_sec, defaults::kHttpTimeoutSec);
   EXPECT_EQ(config.api.http.write_timeout_sec, defaults::kHttpTimeoutSec);
+}
+
+TEST(ConfigTest, GlobalNgramSizeAlsoAppliesToImplicitKanjiNgramSize) {
+  json config_json = {{"index", {{"ngram_size", 3}}},
+                      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  ASSERT_EQ(config_result->tables.size(), 1);
+  EXPECT_EQ(config_result->tables[0].ngram_size, 3);
+  EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 3);
+}
+
+TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
+  json config_json = {
+      {"index", {{"ngram_size", 3}}},
+      {"tables", json::array({{{"name", "test"}, {"kanji_ngram_size", 1}, {"text_source", {{"column", "text"}}}}})}};
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  ASSERT_EQ(config_result->tables.size(), 1);
+  EXPECT_EQ(config_result->tables[0].ngram_size, 3);
+  EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 1);
 }
 
 /**

@@ -20,7 +20,7 @@
 #include <fstream>
 #include <string>
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 class AtomicFileWriterTest : public ::testing::Test {
  protected:
@@ -234,4 +234,4 @@ TEST_F(AtomicFileWriterTest, DestructorAfterRollbackDoesNotDoubleRemove) {
   EXPECT_FALSE(std::filesystem::exists(final_path));
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

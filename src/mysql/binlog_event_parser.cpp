@@ -20,7 +20,7 @@
 #include "mysql/binlog_filter_evaluator.h"
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
-#include "server/tcp_server.h"  // For TableContext definition
+#include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
 #include "utils/sql_utils.h"
 #include "utils/structured_log.h"
@@ -44,6 +44,19 @@ constexpr size_t kTaggedGTIDEventMinLength = 46;
 /// Size of the fixed-length fields in a QUERY_EVENT (thread_id + exec_time +
 /// db_len + error_code + status_vars_len = 4+4+1+2+2 = 13 bytes)
 constexpr size_t kQueryEventFixedFieldsSize = 13;
+
+size_t PackedIntegerSize(uint8_t first_byte) {
+  if (first_byte < 252) {
+    return 1;
+  }
+  if (first_byte == 252) {
+    return 3;
+  }
+  if (first_byte == 253) {
+    return 4;
+  }
+  return 9;
+}
 
 // ============================================================================
 // ROWS_EVENT common helper structures and functions
@@ -460,19 +473,6 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
           .Error();
       return {};
 
-    case MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT:
-      // binlog_row_value_options=PARTIAL_JSON causes partial updates.
-      // Not supported - log warning and skip.
-      mygram::utils::StructuredLog()
-          .Event("binlog_warning")
-          .Field("type", "unsupported_event")
-          .Field("event_type", "PARTIAL_UPDATE_ROWS_EVENT")
-          .Field("message",
-                 "PARTIAL_UPDATE_ROWS_EVENT is not supported. "
-                 "JSON column updates may be lost.")
-          .Warn();
-      return {};
-
     case MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT:
       // MySQL 8.4+ tagged GTIDs - handled by caller (binlog_reader) like GTID_LOG_EVENT
       return {};
@@ -639,8 +639,22 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   // Standard binlog event header: LOG_EVENT_HEADER_LEN = 19 bytes
   //   [timestamp(4)][type(1)][server_id(4)][event_size(4)][log_pos(4)][flags(2)]
   // (see mysql-8.4.7/libs/mysql/binlog/event/binlog_event.h)
+  uint32_t event_size = binlog_util::uint4korr(buffer + 9);
+  if (event_size < mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize ||
+      event_size > length) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "invalid_event_size")
+        .Field("event_size", static_cast<uint64_t>(event_size))
+        .Field("length", static_cast<uint64_t>(length))
+        .Error();
+    return {};
+  }
+
+  const unsigned char* event_end = buffer + event_size - mygram::constants::kBinlogChecksumSize;
   const unsigned char* ptr = buffer + mygram::constants::kBinlogEventHeaderLen;
-  unsigned long remaining = length - mygram::constants::kBinlogEventHeaderLen;
+  unsigned long remaining = static_cast<unsigned long>(event_end - ptr);
 
   mygram::utils::StructuredLog()
       .Event("binlog_debug")
@@ -769,6 +783,17 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   }
 
   // Parse column count (packed integer)
+  size_t column_count_packed_size = PackedIntegerSize(*ptr);
+  if (remaining < column_count_packed_size) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_parse_error")
+        .Field("function", "ParseTableMapEvent")
+        .Field("reason", "truncated_column_count")
+        .Field("remaining", static_cast<uint64_t>(remaining))
+        .Field("required", static_cast<uint64_t>(column_count_packed_size))
+        .Error();
+    return {};
+  }
   const unsigned char* ptr_before_packed = ptr;
   uint64_t column_count = binlog_util::read_packed_integer(&ptr);
 
@@ -814,6 +839,17 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
 
   // Parse metadata length (packed integer)
   if (remaining > 0) {
+    size_t metadata_len_packed_size = PackedIntegerSize(*ptr);
+    if (remaining < metadata_len_packed_size) {
+      mygram::utils::StructuredLog()
+          .Event("binlog_parse_error")
+          .Field("function", "ParseTableMapEvent")
+          .Field("reason", "truncated_metadata_length")
+          .Field("remaining", static_cast<uint64_t>(remaining))
+          .Field("required", static_cast<uint64_t>(metadata_len_packed_size))
+          .Error();
+      return {};
+    }
     const unsigned char* ptr_before_meta_len = ptr;
     uint64_t metadata_len = binlog_util::read_packed_integer(&ptr);
     size_t meta_len_size = ptr - ptr_before_meta_len;
@@ -939,14 +975,24 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
     ptr = metadata_start + metadata_len;
   }
 
-  // Parse NULL bitmap if present
-  if (ptr < buffer + length) {
+  // Parse NULL bitmap. TABLE_MAP always carries one bit per column after the
+  // metadata block; do not treat trailing checksum bytes as a substitute.
+  if (column_count > 0) {
     size_t null_bitmap_size = binlog_util::bitmap_bytes(column_count);
-    if (ptr + null_bitmap_size <= buffer + length) {
+    if (ptr + null_bitmap_size <= event_end) {
       for (uint64_t i = 0; i < column_count; i++) {
         metadata.columns[i].is_nullable = binlog_util::bitmap_is_set(ptr, i);
       }
       ptr += null_bitmap_size;
+    } else {
+      mygram::utils::StructuredLog()
+          .Event("binlog_parse_error")
+          .Field("function", "ParseTableMapEvent")
+          .Field("reason", "truncated_null_bitmap")
+          .Field("remaining", static_cast<uint64_t>(event_end - ptr))
+          .Field("required", static_cast<uint64_t>(null_bitmap_size))
+          .Error();
+      return {};
     }
   }
 

@@ -22,6 +22,11 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
 
     case query::QueryType::REPLICATION_STOP: {
 #ifdef USE_MYSQL
+      if (ctx_.replication_paused_for_dump.load()) {
+        return ResponseFormatter::FormatError(
+            "Cannot stop replication while DUMP SAVE/LOAD is in progress. "
+            "Replication state is owned by the DUMP operation until it completes.");
+      }
       if (ctx_.binlog_reader != nullptr) {
         if (ctx_.binlog_reader->IsRunning()) {
           mygram::utils::StructuredLog().Event("replication_stopping").Field("source", "user_request").Info();

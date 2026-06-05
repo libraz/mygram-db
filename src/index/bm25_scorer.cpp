@@ -12,7 +12,7 @@
 namespace mygramdb::index {
 
 double BM25Scorer::ComputeIDF(uint64_t total_docs, uint64_t doc_freq) {
-  if (total_docs == 0 || doc_freq == 0) {
+  if (total_docs == 0) {
     return 0.0;
   }
   // Clamp doc_freq to total_docs to avoid negative values

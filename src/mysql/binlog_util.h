@@ -13,9 +13,9 @@
 
 #ifdef USE_MYSQL
 
+#include <array>
 #include <cstdint>
 #include <string>
-#include <vector>
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-*,cppcoreguidelines-avoid-*,cppcoreguidelines-pro-type-vararg,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return,readability-redundant-casting,readability-math-missing-parentheses,readability-implicit-bool-conversion,modernize-avoid-c-arrays)
 
@@ -147,8 +147,19 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
     return "0";
   }
 
+  // MySQL DECIMAL precision is capped at 65 digits; the encoded byte length is
+  // smaller than that, but 65 keeps this stack buffer aligned with the protocol
+  // limit and avoids per-row heap allocation.
+  constexpr size_t kMaxDecimalBufferBytes = 65;
+  if (static_cast<size_t>(total_size) > kMaxDecimalBufferBytes) {
+    return "0";
+  }
+
   // Make a copy and apply sign-based transformation
-  std::vector<unsigned char> buf(data, data + total_size);
+  std::array<unsigned char, kMaxDecimalBufferBytes> buf{};
+  for (int i = 0; i < total_size; ++i) {
+    buf[static_cast<size_t>(i)] = data[i];
+  }
 
   // Check sign bit (MSB of first byte): 0x80 set = positive, 0x80 clear = negative
   bool is_negative = (buf[0] & 0x80) == 0;
@@ -163,8 +174,8 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
   buf[0] ^= 0x80;  // Reverse sign bit toggle for both positive and negative
   if (is_negative) {
     // For negative: also XOR all bytes with 0xFF to get original magnitude
-    for (auto& byte : buf) {
-      byte ^= 0xFF;
+    for (int i = 0; i < total_size; ++i) {
+      buf[static_cast<size_t>(i)] ^= 0xFF;
     }
   }
 
@@ -280,10 +291,23 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
 
     // BLOB/TEXT types
     case 242:    // MYSQL_TYPE_VECTOR (same encoding as BLOB)
+    case 249:    // MYSQL_TYPE_TINY_BLOB
+    case 250:    // MYSQL_TYPE_MEDIUM_BLOB
+    case 251:    // MYSQL_TYPE_LONG_BLOB
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT)
       // metadata indicates the number of length bytes (1, 2, 3, or 4)
       uint32_t blob_len = 0;
-      switch (metadata) {
+      uint16_t blob_len_bytes = metadata;
+      if (blob_len_bytes == 0) {
+        if (col_type == 249) {
+          blob_len_bytes = 1;
+        } else if (col_type == 250) {
+          blob_len_bytes = 3;
+        } else if (col_type == 251) {
+          blob_len_bytes = 4;
+        }
+      }
+      switch (blob_len_bytes) {
         case 1:
           blob_len = *master_data;
           break;
@@ -300,14 +324,15 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
           // Invalid metadata - return 0 to indicate error
           return 0;
       }
-      return metadata + blob_len;  // length bytes + actual data
+      return blob_len_bytes + blob_len;  // length bytes + actual data
     }
 
     // STRING (CHAR)
     case 254: {  // MYSQL_TYPE_STRING
       unsigned char type = metadata >> 8;
       if (type == 0xf7 || type == 0xf8) {  // ENUM or SET
-        return metadata & 0xff;
+        uint32_t pack_length = metadata & 0xff;
+        return pack_length == 0 ? 1 : pack_length;
       } else {
         // Fixed-length or variable-length string
         uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
@@ -320,6 +345,10 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
         return length;
       }
     }
+
+    case 247:  // MYSQL_TYPE_ENUM
+    case 248:  // MYSQL_TYPE_SET
+      return metadata == 0 ? 1 : (metadata & 0xff);
 
     // NULL type
     case 6:  // MYSQL_TYPE_NULL

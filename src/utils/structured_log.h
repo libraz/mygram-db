@@ -13,11 +13,13 @@
 #include <atomic>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "utils/error.h"
+#include "utils/namespace_compat.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 /**
  * @brief Maximum query / request length to log.
@@ -27,6 +29,10 @@ namespace mygram::utils {
  * and limits the blast radius of log-injection sequences embedded in queries.
  */
 constexpr size_t kMaxQueryLogLength = 200;
+
+inline bool IsDebugLogEnabled() {
+  return spdlog::should_log(spdlog::level::debug);
+}
 
 /**
  * @brief Log output format
@@ -93,11 +99,11 @@ class StructuredLog {
   /**
    * @brief Add string field (const char*)
    */
-  StructuredLog& Field(const std::string& key, const char* value) {
-    if (GetFormat() == LogFormat::JSON) {
+  StructuredLog& Field(std::string_view key, const char* value) {
+    if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, Escape(std::string(value))));
     } else {
-      fields_text_.push_back(MakeTextField(key, std::string(value)));
+      fields_.push_back(MakeTextField(key, std::string(value)));
     }
     return *this;
   }
@@ -105,11 +111,11 @@ class StructuredLog {
   /**
    * @brief Add string field (std::string)
    */
-  StructuredLog& Field(const std::string& key, const std::string& value) {
-    if (GetFormat() == LogFormat::JSON) {
+  StructuredLog& Field(std::string_view key, const std::string& value) {
+    if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, Escape(value)));
     } else {
-      fields_text_.push_back(MakeTextField(key, value));
+      fields_.push_back(MakeTextField(key, value));
     }
     return *this;
   }
@@ -117,11 +123,11 @@ class StructuredLog {
   /**
    * @brief Add string field (std::string_view)
    */
-  StructuredLog& Field(const std::string& key, std::string_view value) {
-    if (GetFormat() == LogFormat::JSON) {
+  StructuredLog& Field(std::string_view key, std::string_view value) {
+    if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, Escape(std::string(value))));
     } else {
-      fields_text_.push_back(MakeTextField(key, std::string(value)));
+      fields_.push_back(MakeTextField(key, std::string(value)));
     }
     return *this;
   }
@@ -129,12 +135,12 @@ class StructuredLog {
   /**
    * @brief Add integer field
    */
-  StructuredLog& Field(const std::string& key, int64_t value) {
+  StructuredLog& Field(std::string_view key, int64_t value) {
     std::string val_str = std::to_string(value);
-    if (GetFormat() == LogFormat::JSON) {
+    if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, val_str, false));
     } else {
-      fields_text_.push_back(key + "=" + val_str);
+      fields_.push_back(MakeRawTextField(key, val_str));
     }
     return *this;
   }
@@ -142,12 +148,12 @@ class StructuredLog {
   /**
    * @brief Add unsigned integer field
    */
-  StructuredLog& Field(const std::string& key, uint64_t value) {
+  StructuredLog& Field(std::string_view key, uint64_t value) {
     std::string val_str = std::to_string(value);
-    if (GetFormat() == LogFormat::JSON) {
+    if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, val_str, false));
     } else {
-      fields_text_.push_back(key + "=" + val_str);
+      fields_.push_back(MakeRawTextField(key, val_str));
     }
     return *this;
   }
@@ -155,12 +161,12 @@ class StructuredLog {
   /**
    * @brief Add double field
    */
-  StructuredLog& Field(const std::string& key, double value) {
+  StructuredLog& Field(std::string_view key, double value) {
     std::string val_str = std::to_string(value);
-    if (GetFormat() == LogFormat::JSON) {
+    if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, val_str, false));
     } else {
-      fields_text_.push_back(key + "=" + val_str);
+      fields_.push_back(MakeRawTextField(key, val_str));
     }
     return *this;
   }
@@ -168,12 +174,12 @@ class StructuredLog {
   /**
    * @brief Add boolean field
    */
-  StructuredLog& Field(const std::string& key, bool value) {
+  StructuredLog& Field(std::string_view key, bool value) {
     std::string val_str = value ? "true" : "false";
-    if (GetFormat() == LogFormat::JSON) {
+    if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, val_str, false));
     } else {
-      fields_text_.push_back(key + "=" + val_str);
+      fields_.push_back(MakeRawTextField(key, val_str));
     }
     return *this;
   }
@@ -223,6 +229,11 @@ class StructuredLog {
   void Debug() { spdlog::debug("{}", Build()); }
 
   /**
+   * @brief Log as trace level
+   */
+  void Trace() { spdlog::trace("{}", Build()); }
+
+  /**
    * @brief Log as critical level
    */
   void Critical() { spdlog::critical("{}", Build()); }
@@ -230,16 +241,16 @@ class StructuredLog {
  private:
   std::string event_;
   std::string message_;
-  std::vector<std::string> fields_;                               // JSON format fields
-  std::vector<std::string> fields_text_;                          // Text format fields
+  LogFormat format_snapshot_{GetFormat()};
+  std::vector<std::string> fields_;
   static inline std::atomic<LogFormat> format_{LogFormat::JSON};  // Default to JSON (thread-safe)
 
   /**
    * @brief Build log string in selected format
-   * Thread-safe: Reads format atomically
+   * Uses the format captured when this builder was constructed.
    */
   std::string Build() const {
-    if (format_.load(std::memory_order_relaxed) == LogFormat::TEXT) {
+    if (format_snapshot_ == LogFormat::TEXT) {
       return BuildText();
     }
     return BuildJSON();
@@ -313,7 +324,7 @@ class StructuredLog {
     }
 
     // Add custom fields
-    for (const auto& field : fields_text_) {
+    for (const auto& field : fields_) {
       if (!first) {
         text += ' ';
       }
@@ -327,7 +338,7 @@ class StructuredLog {
   /**
    * @brief Create a JSON field
    */
-  static std::string MakeJSONField(const std::string& key, const std::string& value, bool quoted = true) {
+  static std::string MakeJSONField(std::string_view key, const std::string& value, bool quoted = true) {
     std::string result;
     if (quoted) {
       result.reserve(key.size() + value.size() + 5);  // "key":"value"
@@ -349,13 +360,32 @@ class StructuredLog {
   /**
    * @brief Create a text field (key=value or key="value")
    */
-  static std::string MakeTextField(const std::string& key, const std::string& value) {
+  static std::string MakeTextField(std::string_view key, const std::string& value) {
     // Quote string values that contain spaces or special characters
+    std::string result;
     if (value.find(' ') != std::string::npos || value.find('"') != std::string::npos ||
         value.find('\n') != std::string::npos) {
-      return key + "=\"" + EscapeText(value) + "\"";
+      result.reserve(key.size() + value.size() + 3);
+      result.append(key);
+      result += "=\"";
+      result += EscapeText(value);
+      result += '"';
+      return result;
     }
-    return key + "=" + value;
+    result.reserve(key.size() + value.size() + 1);
+    result.append(key);
+    result += '=';
+    result += value;
+    return result;
+  }
+
+  static std::string MakeRawTextField(std::string_view key, const std::string& value) {
+    std::string result;
+    result.reserve(key.size() + value.size() + 1);
+    result.append(key);
+    result += '=';
+    result += value;
+    return result;
   }
 
   /**
@@ -489,4 +519,4 @@ inline void LogQueryParseError(const std::string& query, const std::string& erro
       .Error();
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

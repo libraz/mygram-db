@@ -132,6 +132,24 @@ TEST_F(ReplicationHandlerTest, StopWhenNotRunningReturnsError) {
   EXPECT_NE(response.find("Replication is not configured"), std::string::npos);
 }
 
+TEST_F(ReplicationHandlerTest, ReplicationStopBlockedWhenPausedForDump) {
+  query::Query query;
+  query.type = query::QueryType::REPLICATION_STOP;
+
+  replication_paused_for_dump_ = true;
+
+  ReplicationHandler handler(handler_ctx_);
+  ConnectionContext conn_ctx;
+
+  std::string response = handler.Handle(query, conn_ctx);
+
+  EXPECT_NE(response.find("ERROR"), std::string::npos);
+  EXPECT_NE(response.find("DUMP SAVE/LOAD is in progress"), std::string::npos);
+  EXPECT_NE(response.find("Cannot stop replication"), std::string::npos);
+
+  replication_paused_for_dump_ = false;
+}
+
 /**
  * @brief Test that REPLICATION START is blocked when SYNC is in progress
  *

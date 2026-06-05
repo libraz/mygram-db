@@ -26,8 +26,6 @@
 
 #include "mysql/rows_parser.h"
 
-#include <spdlog/spdlog.h>
-
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -176,14 +174,13 @@ mygram::utils::Expected<internal::RowsEventHeader, mygram::utils::Error> interna
   }
 
   return RowsEventHeader{
-      ptr,                                      // row_data_ptr (or second-bitmap start for UPDATE)
-      end,                                      // end
-      column_count,                             // column_count
-      columns_present,                          // columns_present
-      bitmap_size,                              // bitmap_size
-      binlog_util::bitmap_bytes(column_count),  // null_bitmap_size
-      pk_col_idx,                               // pk_col_idx
-      text_col_idx,                             // text_col_idx
+      ptr,              // row_data_ptr (or second-bitmap start for UPDATE)
+      end,              // end
+      column_count,     // column_count
+      columns_present,  // columns_present
+      bitmap_size,      // bitmap_size
+      pk_col_idx,       // pk_col_idx
+      text_col_idx,     // text_col_idx
   };
 }
 
@@ -208,7 +205,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
   ptr += null_bitmap_size;
 
   // Debug: Show bitmaps
-  if (spdlog::should_log(spdlog::level::debug)) {
+  if (mygram::utils::IsDebugLogEnabled()) {
     std::string col_bitmap_str;
     std::string null_bitmap_str;
     for (uint64_t i = 0; i < column_count; i++) {
@@ -228,12 +225,15 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
   }
 
   RowData row;
+  row.table_metadata = meta;
+  row.column_values.resize(meta->columns.size());
+  row.column_values_present.assign(meta->columns.size(), false);
 
   // Parse each column value
   for (uint64_t col_idx = 0; col_idx < column_count; col_idx++) {
     // Check if column is present in this event
     if (!binlog_util::bitmap_is_set(columns_present, col_idx)) {
-      if (spdlog::should_log(spdlog::level::debug)) {
+      if (mygram::utils::IsDebugLogEnabled()) {
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
             .Field("action", "column_not_in_bitmap")
@@ -247,7 +247,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
     const auto& col_meta = meta->columns[col_idx];
     bool is_null = binlog_util::bitmap_is_set(null_bitmap, col_idx);
 
-    if (spdlog::should_log(spdlog::level::debug)) {
+    if (mygram::utils::IsDebugLogEnabled()) {
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
           .Field("action", "parsing_column")
@@ -297,18 +297,23 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
       return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, msg));
     }
 
-    // Store in row data
-    row.columns[col_meta.name] = value;
+    row.column_values[col_idx] = std::move(value);
+    row.column_values_present[col_idx] = true;
+    const std::string& stored_value = row.column_values[col_idx];
 
     // Check if this is the primary key or text column (using cached indices)
     if (static_cast<int>(col_idx) == pk_col_idx) {
-      row.primary_key = value;
-      if (spdlog::should_log(spdlog::level::debug)) {
-        mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "set_pk").Field("value", value).Debug();
+      row.primary_key = stored_value;
+      if (mygram::utils::IsDebugLogEnabled()) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_debug")
+            .Field("action", "set_pk")
+            .Field("value", stored_value)
+            .Debug();
       }
     }
     if (static_cast<int>(col_idx) == text_col_idx) {
-      row.text = value;
+      row.text = stored_value;
     }
 
     // Advance pointer by field size (if not NULL)
@@ -342,17 +347,17 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
         }
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, msg, col_meta.name));
       }
-      if (spdlog::should_log(spdlog::level::debug)) {
+      if (mygram::utils::IsDebugLogEnabled()) {
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
             .Field("action", "decoded_value")
-            .Field("value_preview", value.size() > 50 ? value.substr(0, 50) + "..." : value)
+            .Field("value_preview", stored_value.size() > 50 ? stored_value.substr(0, 50) + "..." : stored_value)
             .Field("field_size", static_cast<uint64_t>(field_size))
             .Debug();
       }
       ptr += field_size;
     } else {
-      if (spdlog::should_log(spdlog::level::debug)) {
+      if (mygram::utils::IsDebugLogEnabled()) {
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "column_is_null").Debug();
       }
     }
@@ -396,11 +401,11 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRo
 
     while (ptr < end) {
       auto result =
-          internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->null_bitmap_size,
+          internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->bitmap_size,
                                    header->column_count, header->pk_col_idx, header->text_col_idx, "WRITE_ROWS", "");
       if (!result) {
         // Truncation at null bitmap boundary means we reached end of rows
-        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->null_bitmap_size > end) {
+        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->bitmap_size > end) {
           break;
         }
         return MakeUnexpected(result.error());
@@ -487,23 +492,23 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
         .Debug();
 
     while (ptr < end) {
-      if (spdlog::should_log(spdlog::level::debug)) {
+      if (mygram::utils::IsDebugLogEnabled()) {
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
             .Field("action", "row_start")
             .Field("ptr_offset", static_cast<int64_t>(ptr - buffer))
-            .Field("null_bitmap_size", static_cast<uint64_t>(header->null_bitmap_size))
+            .Field("null_bitmap_size", static_cast<uint64_t>(header->bitmap_size))
             .Debug();
       }
 
       // Parse before image
       auto before_result = internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present,
-                                                    header->null_bitmap_size, header->column_count, header->pk_col_idx,
+                                                    header->bitmap_size, header->column_count, header->pk_col_idx,
                                                     header->text_col_idx, "UPDATE_ROWS", "before");
       if (!before_result) {
         // Truncation in UPDATE is treated as end-of-rows (lenient)
         if (before_result.error().code() == ErrorCode::kMySQLFieldTruncated) {
-          if (spdlog::should_log(spdlog::level::debug)) {
+          if (mygram::utils::IsDebugLogEnabled()) {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
                 .Field("action", "parse_ended_early_before_image")
@@ -517,13 +522,13 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
       ptr = before_result->next_ptr;
 
       // Parse after image
-      auto after_result = internal::ParseSingleRow(ptr, end, table_metadata, columns_after, header->null_bitmap_size,
-                                                   header->column_count, header->pk_col_idx, header->text_col_idx,
-                                                   "UPDATE_ROWS", "after");
+      auto after_result =
+          internal::ParseSingleRow(ptr, end, table_metadata, columns_after, header->bitmap_size, header->column_count,
+                                   header->pk_col_idx, header->text_col_idx, "UPDATE_ROWS", "after");
       if (!after_result) {
         // Truncation in UPDATE is treated as end-of-rows (lenient)
         if (after_result.error().code() == ErrorCode::kMySQLFieldTruncated) {
-          if (spdlog::should_log(spdlog::level::debug)) {
+          if (mygram::utils::IsDebugLogEnabled()) {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
                 .Field("action", "parse_ended_early_after_image")
@@ -596,11 +601,11 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteR
 
     while (ptr < end) {
       auto result =
-          internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->null_bitmap_size,
+          internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->bitmap_size,
                                    header->column_count, header->pk_col_idx, header->text_col_idx, "DELETE_ROWS", "");
       if (!result) {
         // Truncation at null bitmap boundary means we reached end of rows
-        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->null_bitmap_size > end) {
+        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->bitmap_size > end) {
           break;
         }
         return MakeUnexpected(result.error());

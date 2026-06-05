@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 // ============================================================================
 // TimezoneOffset Tests
@@ -313,4 +313,4 @@ TEST(ConvertToEpochBugFixTest, KnownUTCEpochValue) {
   EXPECT_EQ(*epoch0, 0);
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

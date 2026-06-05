@@ -360,5 +360,23 @@ TEST_F(ThreadPoolTest, ShutdownWithTimeoutAbortsAfterDeadline) {
   EXPECT_LT(elapsed, 1500) << "Shutdown must not block far past task duration; got " << elapsed << "ms";
 }
 
+TEST_F(ThreadPoolTest, ShutdownTimeoutDiscardsPendingTasks) {
+  ThreadPool pool(1);
+  std::atomic<int> executed{0};
+
+  ASSERT_TRUE(pool.Submit([&executed]() {
+    executed.fetch_add(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }));
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_TRUE(pool.Submit([&executed]() { executed.fetch_add(1); }));
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  pool.Shutdown(/*graceful=*/true, /*timeout_ms=*/50);
+
+  EXPECT_EQ(executed.load(), 1) << "Pending tasks should be discarded after shutdown timeout";
+}
+
 }  // namespace server
 }  // namespace mygramdb

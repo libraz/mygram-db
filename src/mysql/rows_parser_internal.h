@@ -36,7 +36,6 @@ struct RowsEventHeader {
   uint64_t column_count;                 ///< Number of columns in the event
   const unsigned char* columns_present;  ///< First column bitmap (before-image for UPDATE)
   size_t bitmap_size;                    ///< Size of each column bitmap in bytes
-  size_t null_bitmap_size;               ///< Size of per-row null bitmap in bytes
   int pk_col_idx;                        ///< Index of primary key column, or -1 if not found
   int text_col_idx;                      ///< Index of text column, or -1 if not found
 };

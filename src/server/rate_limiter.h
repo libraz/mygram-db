@@ -7,7 +7,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -171,15 +170,15 @@ class RateLimiter {
   std::chrono::seconds inactivity_timeout_;     ///< Client inactivity timeout
 
   struct ClientBucket {
-    std::unique_ptr<TokenBucket> bucket;
+    TokenBucket bucket;
     std::chrono::steady_clock::time_point last_access;
 
     ClientBucket(size_t capacity, size_t refill_rate)
-        : bucket(std::make_unique<TokenBucket>(capacity, refill_rate)), last_access(std::chrono::steady_clock::now()) {}
+        : bucket(capacity, refill_rate), last_access(std::chrono::steady_clock::now()) {}
   };
 
-  std::unordered_map<std::string, std::unique_ptr<ClientBucket>> client_buckets_;  ///< Per-client buckets
-  mutable std::mutex mutex_;                                                       ///< Protects client_buckets_
+  std::unordered_map<std::string, ClientBucket> client_buckets_;  ///< Per-client buckets
+  mutable std::mutex mutex_;                                      ///< Protects client_buckets_
 
   // Statistics (atomic counters avoid the need for a separate stats_mutex_)
   std::atomic<uint64_t> total_requests_{0};

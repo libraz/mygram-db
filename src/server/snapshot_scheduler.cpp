@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -19,6 +20,8 @@
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/fd_guard.h"
 #include "utils/flag_guard.h"
 #include "utils/structured_log.h"
@@ -30,14 +33,17 @@ constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every se
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
                                      mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
-                                     std::atomic<bool>& replication_paused_for_dump)
+                                     std::atomic<bool>& replication_paused_for_dump,
+                                     replication_pause::Counter* replication_pause_counter)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
       binlog_reader_(binlog_reader),
       dump_save_in_progress_(dump_save_in_progress),
-      replication_paused_for_dump_(replication_paused_for_dump) {
+      replication_paused_for_dump_(replication_paused_for_dump),
+      replication_pause_counter_(replication_pause_counter != nullptr ? replication_pause_counter
+                                                                      : &local_replication_pause_counter_) {
   // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
   // which is the only production caller. Tests must also provide a non-null catalog.
 }
@@ -46,10 +52,10 @@ SnapshotScheduler::~SnapshotScheduler() {
   Stop();
 }
 
-void SnapshotScheduler::Start() {
+mygram::utils::Expected<void, mygram::utils::Error> SnapshotScheduler::Start() {
   if (config_.interval_sec <= 0) {
     mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
-    return;
+    return {};
   }
 
   // Hold start_stop_mutex_ across the entire Start sequence so that a
@@ -62,7 +68,7 @@ void SnapshotScheduler::Start() {
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
     mygram::utils::StructuredLog().Event("snapshot_scheduler_already_running").Warn();
-    return;
+    return {};
   }
 
   mygram::utils::StructuredLog()
@@ -71,7 +77,16 @@ void SnapshotScheduler::Start() {
       .Field("retain", static_cast<uint64_t>(config_.retain))
       .Info();
 
-  scheduler_thread_ = std::make_unique<std::thread>(&SnapshotScheduler::SchedulerLoop, this);
+  try {
+    scheduler_thread_ = std::make_unique<std::thread>(&SnapshotScheduler::SchedulerLoop, this);
+  } catch (const std::exception& e) {
+    running_.store(false, std::memory_order_release);
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
+                                 std::string("Failed to start snapshot scheduler thread: ") + e.what()));
+  }
+
+  return {};
 }
 
 void SnapshotScheduler::Stop() {
@@ -184,31 +199,45 @@ void SnapshotScheduler::TakeSnapshot() {
     // DumpHandler::DumpSaveWorker.
     //
     // H-C3: Coordinate Stop()/Start() with concurrent dump operations via the
-    // process-wide replication_pause counter. We capture replication_was_running
-    // at the moment we decide to pause; the counter then dedupes the actual
-    // Stop()/Start() so that if a manual DUMP LOAD is also pausing replication
-    // simultaneously, exactly one of us calls Stop() and exactly one of us
-    // (the last releaser) calls Start(). The replication_paused_for_dump_ flag
+    // injected replication_pause counter. After acquiring first-pauser
+    // ownership, re-check IsRunning() before Stop(): a manual REPLICATION STOP
+    // can race between the initial IsRunning() check and our pause acquisition.
+    // If it already stopped the reader, we release the counter immediately and
+    // do not auto-Start at the end.
+    //
+    // The counter dedupes the actual Stop()/Start() so that if a manual DUMP
+    // LOAD is also pausing replication simultaneously, exactly one of us calls
+    // Stop() and exactly one of us (the last releaser) calls Start(). The
+    // replication_paused_for_dump_ flag
     // remains the read-only "is paused" indicator used by REPLICATION STATUS /
     // DUMP STATUS responses; we set it on first pause and clear it on last
     // release so the indicator tracks the counter.
-    bool replication_was_running = (binlog_reader_ != nullptr) && binlog_reader_->IsRunning();
-    replication_pause::Scope pause_scope;
-    if (replication_was_running) {
+    bool replication_pause_acquired = false;
+    replication_pause::Scope pause_scope(*replication_pause_counter_);
+    if ((binlog_reader_ != nullptr) && binlog_reader_->IsRunning()) {
       const bool first_pauser = pause_scope.Acquire();
+      replication_pause_acquired = true;
       if (first_pauser) {
+        if (!binlog_reader_->IsRunning()) {
+          pause_scope.Release();
+          replication_pause_acquired = false;
+        } else {
+          replication_paused_for_dump_.store(true, std::memory_order_release);
+          binlog_reader_->Stop();
+        }
+      }
+      if (replication_pause_acquired) {
         // We are the first pauser: actually stop the reader and assert the
         // observable flag. Subsequent pausers piggy-back on this Stop().
-        binlog_reader_->Stop();
-        replication_paused_for_dump_.store(true, std::memory_order_release);
+        // If first_pauser is false, another operation already owns the Stop().
+        mygram::utils::StructuredLog()
+            .Event("replication_paused_for_dump")
+            .Field("operation", "snapshot")
+            .Field("filepath", dump_path.string())
+            .Field("auto_resume", "true")
+            .Field("first_pauser", first_pauser)
+            .Info();
       }
-      mygram::utils::StructuredLog()
-          .Event("replication_paused_for_dump")
-          .Field("operation", "snapshot")
-          .Field("filepath", dump_path.string())
-          .Field("auto_resume", "true")
-          .Field("first_pauser", first_pauser)
-          .Info();
     }
 
     // RAII restore: even on exception or early return, replication is resumed
@@ -219,8 +248,8 @@ void SnapshotScheduler::TakeSnapshot() {
     // explicitly here so we observe the last_releaser bool.
     const std::string dump_path_str = dump_path.string();
     auto restore_replication =
-        mygram::utils::ScopeGuard([this, replication_was_running, &dump_path_str, &pause_scope]() {
-          if (!replication_was_running) {
+        mygram::utils::ScopeGuard([this, replication_pause_acquired, &dump_path_str, &pause_scope]() {
+          if (!replication_pause_acquired) {
             // We did not enter the pause counter (replication was already stopped
             // when we started), so we have nothing to release.
             return;

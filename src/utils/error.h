@@ -14,7 +14,9 @@
 #include <string>
 #include <utility>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Error codes for all MygramDB modules
@@ -572,4 +574,4 @@ inline Error MakeErrorWithLocation(ErrorCode code, const std::string& message, c
 #define MYGRAM_ERROR(code, message) \
   mygram::utils::MakeError(code, message, std::string(__FILE__) + ":" + std::to_string(__LINE__))
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

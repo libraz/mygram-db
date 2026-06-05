@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "cache/cache_entry.h"
-#include "query/cache_key.h"
+#include "cache/cache_key.h"
 
 namespace mygramdb::cache {
 

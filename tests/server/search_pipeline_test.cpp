@@ -267,6 +267,24 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheWithNullManagerIsNoop) {
   InsertToCache(nullptr, query, doc_ids_, term_infos, 1.0, 2, 0, false);
 }
 
+TEST(SearchPipelineCacheTest, MergeSortedTermNgramsForCacheUsesKWaySortedUniqueMerge) {
+  std::vector<SearchTermInfo> term_infos = {
+      {{"aa", "cc", "ee"}, 10},
+      {{"aa", "bb", "ee", "ff"}, 20},
+      {{"bb", "dd"}, 30},
+      {{}, 0},
+  };
+
+  auto merged = MergeSortedTermNgramsForCache(term_infos);
+
+  EXPECT_EQ(merged, (std::vector<std::string>{"aa", "bb", "cc", "dd", "ee", "ff"}));
+}
+
+TEST(SearchPipelineCacheTest, MergeSortedTermNgramsForCacheHandlesEmptyInput) {
+  EXPECT_TRUE(MergeSortedTermNgramsForCache({}).empty());
+  EXPECT_TRUE(MergeSortedTermNgramsForCache({{{}, 0}, {{}, 0}}).empty());
+}
+
 // =============================================================================
 // ExecuteWithFuzzy: empty n-gram detection (m-17)
 // =============================================================================

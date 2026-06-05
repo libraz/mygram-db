@@ -14,7 +14,7 @@
 
 #include "utils/structured_log.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 constexpr int kIPv4BitCount = 32;
 
@@ -179,4 +179,4 @@ std::string GetPeerIP(int fd) {
   return "unknown";
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

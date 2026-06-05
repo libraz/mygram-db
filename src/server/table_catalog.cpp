@@ -5,8 +5,6 @@
 
 #include "server/table_catalog.h"
 
-#include <spdlog/spdlog.h>
-
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {

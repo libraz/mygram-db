@@ -305,3 +305,37 @@ TEST(DumpFormatV1Test, ReadDumpTruncatedFileReturnsReadError) {
 
   CleanupTestFile(filepath);
 }
+
+TEST(DumpFormatV1Test, ReadDumpRejectsTruncatedDeclaredConfigSection) {
+  auto filepath = TestTempFilePath("truncated_config_section");
+  CleanupTestFile(filepath);
+
+  {
+    std::ofstream ofs(filepath, std::ios::binary);
+    ASSERT_TRUE(ofs.good());
+    ofs.write(mygramdb::storage::dump_format::kMagicNumber.data(), 4);
+    uint32_t version = static_cast<uint32_t>(mygramdb::storage::dump_format::FormatVersion::V1);
+    WriteBinary(ofs, version);
+
+    HeaderV1 header;
+    header.header_size = 32;
+    header.flags = 0;
+    header.dump_timestamp = 1;
+    header.total_file_size = 0;
+    header.file_crc32 = 0;
+    ASSERT_TRUE(WriteHeaderV1(ofs, header).has_value());
+
+    uint32_t config_len = 4;
+    WriteBinary(ofs, config_len);
+    ofs.write("xx", 2);
+  }
+
+  std::string gtid;
+  mygramdb::config::Config config;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+  auto result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+
+  CleanupTestFile(filepath);
+}

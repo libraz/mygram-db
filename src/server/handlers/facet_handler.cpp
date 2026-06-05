@@ -82,12 +82,11 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
       // Facets benefit from the search-result cache: keep skip_cache_lookup
       // false (default) so FACET and SEARCH share cached posting-list
       // resolutions.
-      auto* facet_table_ctx = ctx_.table_catalog ? ctx_.table_catalog->GetTable(query.table) : nullptr;
       search_pipeline::FullPipelineParams params;
-      if (facet_table_ctx != nullptr) {
-        params = search_pipeline::BuildPipelineParamsFromContext(*facet_table_ctx, ctx_.full_config, ctx_.cache_manager,
-                                                                 SearchHandler::GetFilterThreshold(),
-                                                                 /*attach_bm25_stats=*/true);
+      if (table_ctx->table_context != nullptr) {
+        params = search_pipeline::BuildPipelineParamsFromContext(
+            *table_ctx->table_context, ctx_.full_config, ctx_.cache_manager, SearchHandler::GetFilterThreshold(),
+            /*attach_bm25_stats=*/true);
       } else {
         // Defensive fallback: catalog evicted the entry between GetTable and
         // here. Wire the locals so the pipeline can still execute.

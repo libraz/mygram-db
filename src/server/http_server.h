@@ -28,6 +28,7 @@
 #include "server/rate_limiter.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
+#include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/network_utils.h"
@@ -44,9 +45,7 @@ namespace mygramdb::server {
 
 // HTTP server configuration defaults
 namespace defaults {
-constexpr int kHttpPort = 8080;
-constexpr int kHttpTimeoutSec = 5;
-constexpr size_t kHttpDefaultMaxBodyBytes = 16 * 1024 * 1024;  // 16 MiB
+constexpr size_t kHttpDefaultMaxBodyBytes = 16 * mygram::constants::kBytesPerMegabyte;  // 16 MiB
 }  // namespace defaults
 
 /**
@@ -54,9 +53,9 @@ constexpr size_t kHttpDefaultMaxBodyBytes = 16 * 1024 * 1024;  // 16 MiB
  */
 struct HttpServerConfig {
   std::string bind = "127.0.0.1";
-  int port = defaults::kHttpPort;
-  int read_timeout_sec = defaults::kHttpTimeoutSec;
-  int write_timeout_sec = defaults::kHttpTimeoutSec;
+  int port = config::defaults::kHttpPort;
+  int read_timeout_sec = config::defaults::kHttpTimeoutSec;
+  int write_timeout_sec = config::defaults::kHttpTimeoutSec;
   bool enable_cors = false;
   std::string cors_allow_origin;
   std::vector<std::string> allow_cidrs;

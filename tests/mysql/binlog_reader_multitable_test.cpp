@@ -430,22 +430,18 @@ TEST_F(BinlogReaderFixture, SkipsColumnFetchForNonMonitoredTablesMultiTableMode)
   EXPECT_TRUE(multi_reader.table_contexts_.find("other_table") == multi_reader.table_contexts_.end())
       << "other_table should NOT be in table_contexts_";
 
-  // Verify multi_table_mode is true
-  EXPECT_TRUE(multi_reader.multi_table_mode_) << "Should be in multi-table mode";
+  EXPECT_EQ(multi_reader.table_contexts_.size(), 1u);
 }
 
 /**
- * @brief Test single-table mode correctly identifies monitored table
+ * @brief Test legacy single-table constructor normalizes to table_contexts_
  *
- * In single-table mode, only the configured table_config_.name should be monitored.
+ * The deprecated constructor still exists for test/backward compatibility, but
+ * the reader internals use table_contexts_ for both construction paths.
  */
-TEST_F(BinlogReaderFixture, SkipsColumnFetchForNonMonitoredTablesSingleTableMode) {
-  // reader_ is already created in single-table mode with "articles" table
-  EXPECT_FALSE(reader_->multi_table_mode_) << "Should be in single-table mode";
-  EXPECT_EQ(reader_->table_config_.name, "articles") << "Configured table should be 'articles'";
-
-  // In single-table mode, the check is: (metadata.table_name == table_config_.name)
-  // This can be verified indirectly through ProcessEvent which uses similar logic
+TEST_F(BinlogReaderFixture, LegacyConstructorSkipsNonMonitoredTables) {
+  ASSERT_NE(reader_->table_contexts_.find("articles"), reader_->table_contexts_.end());
+  EXPECT_EQ(reader_->table_contexts_.at("articles")->config.name, "articles");
 
   // Verify event for configured table is processed
   BinlogEvent articles_event = MakeEvent(BinlogEventType::INSERT, "1", 1, "test");

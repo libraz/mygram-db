@@ -10,7 +10,7 @@
 #include <cstdint>
 #include <limits>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 // --- Integer types ---
 

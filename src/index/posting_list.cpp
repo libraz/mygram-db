@@ -5,8 +5,6 @@
 
 #include "index/posting_list.h"
 
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
@@ -726,7 +724,11 @@ bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
     // Write size
     if (delta_compressed_.size() > std::numeric_limits<uint32_t>::max()) {
-      spdlog::warn("Cannot serialize delta list larger than 4G entries (size={})", delta_compressed_.size());
+      mygram::utils::StructuredLog()
+          .Event("posting_list_serialize_failed")
+          .Field("reason", "delta_list_too_large")
+          .Field("size", static_cast<uint64_t>(delta_compressed_.size()))
+          .Warn();
       return false;
     }
     auto size = static_cast<uint32_t>(delta_compressed_.size());
@@ -741,7 +743,11 @@ bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
 
     if (roaring_size > std::numeric_limits<uint32_t>::max()) {
-      spdlog::warn("Cannot serialize bitmap larger than 4GB (size={})", roaring_size);
+      mygram::utils::StructuredLog()
+          .Event("posting_list_serialize_failed")
+          .Field("reason", "bitmap_too_large")
+          .Field("size", static_cast<uint64_t>(roaring_size))
+          .Warn();
       return false;
     }
     auto roaring_size_u32 = static_cast<uint32_t>(roaring_size);

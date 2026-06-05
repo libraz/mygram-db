@@ -21,7 +21,10 @@ target_include_directories(mygramclient_static
     ${CMAKE_SOURCE_DIR}/src/client
 )
 
-# Link libraries (none needed - client is self-contained)
+target_link_libraries(mygramclient_static
+  PUBLIC
+    mygramdb_utils
+)
 
 # Shared library (for node-gyp and other dynamic bindings)
 add_library(mygramclient_shared SHARED
@@ -43,6 +46,11 @@ target_include_directories(mygramclient_shared
     ${CMAKE_SOURCE_DIR}/src
   PRIVATE
     ${CMAKE_SOURCE_DIR}/src/client
+)
+
+target_link_libraries(mygramclient_shared
+  PUBLIC
+    mygramdb_utils
 )
 
 # Install targets

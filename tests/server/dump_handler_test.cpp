@@ -72,6 +72,7 @@ class DumpHandlerTest : public ::testing::Test {
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
+        .replication_pause_counter = &replication_pause_counter_,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
 #endif
@@ -120,6 +121,7 @@ class DumpHandlerTest : public ::testing::Test {
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
   std::atomic<bool> mysql_reconnecting_{false};
+  replication_pause::Counter replication_pause_counter_;
 #ifdef USE_MYSQL
 #endif
   std::unique_ptr<HandlerContext> handler_ctx_;
@@ -557,6 +559,7 @@ TEST_F(DumpHandlerTest, DumpSaveWithNullConfig) {
       .optimization_in_progress = optimization_in_progress_,
       .replication_paused_for_dump = replication_paused_for_dump_,
       .mysql_reconnecting = mysql_reconnecting_,
+      .replication_pause_counter = &replication_pause_counter_,
 #ifdef USE_MYSQL
       .sync_manager = nullptr,
 #endif
@@ -1166,6 +1169,7 @@ class DumpHandlerGtidTest : public ::testing::Test {
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
+        .replication_pause_counter = &replication_pause_counter_,
         .binlog_reader = mock_binlog_reader_.get(),
         .sync_manager = nullptr,
     });
@@ -1199,6 +1203,7 @@ class DumpHandlerGtidTest : public ::testing::Test {
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
   std::atomic<bool> mysql_reconnecting_{false};
+  replication_pause::Counter replication_pause_counter_;
 };
 
 /**
@@ -1693,7 +1698,7 @@ TEST_F(DumpHandlerGtidTest, DumpLoadClearsLoadingFlagOnError) {
 namespace mygramdb::server {
 
 /**
- * @brief Direct unit test of the process-wide replication-pause counter.
+ * @brief Direct unit test of a replication-pause counter instance.
  *
  * The counter is the substrate that DumpSaveWorker, HandleDumpLoad, and
  * SnapshotScheduler::TakeSnapshot share to dedup binlog Stop()/Start()
@@ -1701,27 +1706,25 @@ namespace mygramdb::server {
  * dump operations so the test stays fast and deterministic.
  */
 TEST(ReplicationPauseCounterTest, FirstPauserDetectedOnce) {
-  replication_pause::ResetForTesting();
-  EXPECT_FALSE(replication_pause::IsPaused());
+  replication_pause::Counter counter;
+  EXPECT_FALSE(counter.IsPaused());
 
   // First pauser sees the 0->1 transition.
-  EXPECT_TRUE(replication_pause::RequestPause());
-  EXPECT_TRUE(replication_pause::IsPaused());
+  EXPECT_TRUE(counter.RequestPause());
+  EXPECT_TRUE(counter.IsPaused());
 
   // Subsequent pausers do NOT see a 0->1 transition.
-  EXPECT_FALSE(replication_pause::RequestPause());
-  EXPECT_FALSE(replication_pause::RequestPause());
-  EXPECT_TRUE(replication_pause::IsPaused());
+  EXPECT_FALSE(counter.RequestPause());
+  EXPECT_FALSE(counter.RequestPause());
+  EXPECT_TRUE(counter.IsPaused());
 
   // Only the last releaser sees the 1->0 transition.
-  EXPECT_FALSE(replication_pause::ReleasePause());
-  EXPECT_TRUE(replication_pause::IsPaused());
-  EXPECT_FALSE(replication_pause::ReleasePause());
-  EXPECT_TRUE(replication_pause::IsPaused());
-  EXPECT_TRUE(replication_pause::ReleasePause());
-  EXPECT_FALSE(replication_pause::IsPaused());
-
-  replication_pause::ResetForTesting();
+  EXPECT_FALSE(counter.ReleasePause());
+  EXPECT_TRUE(counter.IsPaused());
+  EXPECT_FALSE(counter.ReleasePause());
+  EXPECT_TRUE(counter.IsPaused());
+  EXPECT_TRUE(counter.ReleasePause());
+  EXPECT_FALSE(counter.IsPaused());
 }
 
 /**
@@ -1735,8 +1738,7 @@ TEST(ReplicationPauseCounterTest, FirstPauserDetectedOnce) {
  * builds, sanitizers).
  */
 TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLast) {
-  replication_pause::ResetForTesting();
-
+  replication_pause::Counter counter;
   constexpr int kThreads = 32;
   std::atomic<int> first_pauser_count{0};
   std::atomic<int> last_releaser_count{0};
@@ -1750,7 +1752,7 @@ TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLas
       while (!start.load(std::memory_order_acquire)) {
         std::this_thread::yield();
       }
-      if (replication_pause::RequestPause()) {
+      if (counter.RequestPause()) {
         first_pauser_count.fetch_add(1, std::memory_order_relaxed);
       }
       // Barrier: wait until every thread has paused before any thread releases.
@@ -1758,7 +1760,7 @@ TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLas
       while (paused_count.load(std::memory_order_acquire) < kThreads) {
         std::this_thread::yield();
       }
-      if (replication_pause::ReleasePause()) {
+      if (counter.ReleasePause()) {
         last_releaser_count.fetch_add(1, std::memory_order_relaxed);
       }
     });
@@ -1771,9 +1773,7 @@ TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLas
 
   EXPECT_EQ(first_pauser_count.load(), 1) << "Exactly one thread must observe the 0->1 transition";
   EXPECT_EQ(last_releaser_count.load(), 1) << "Exactly one thread must observe the 1->0 transition";
-  EXPECT_FALSE(replication_pause::IsPaused()) << "Counter must be drained back to 0 after all releases";
-
-  replication_pause::ResetForTesting();
+  EXPECT_FALSE(counter.IsPaused()) << "Counter must be drained back to 0 after all releases";
 }
 
 /**
@@ -1786,17 +1786,15 @@ TEST(ReplicationPauseCounterTest, ConcurrentPauseReleaseHasExactlyOneFirstAndLas
  * call binlog Start) and that the counter is restored to 0.
  */
 TEST(ReplicationPauseCounterTest, UnbalancedReleaseReturnsFalseAndKeepsCounterNonNegative) {
-  replication_pause::ResetForTesting();
+  replication_pause::Counter counter;
 
-  EXPECT_FALSE(replication_pause::ReleasePause()) << "Unbalanced ReleasePause must not report 'last releaser'";
-  EXPECT_FALSE(replication_pause::IsPaused()) << "Counter must remain at 0 after defensive recovery";
+  EXPECT_FALSE(counter.ReleasePause()) << "Unbalanced ReleasePause must not report 'last releaser'";
+  EXPECT_FALSE(counter.IsPaused()) << "Counter must remain at 0 after defensive recovery";
 
   // A normal pause/release pair after the defensive recovery still works.
-  EXPECT_TRUE(replication_pause::RequestPause());
-  EXPECT_TRUE(replication_pause::ReleasePause());
-  EXPECT_FALSE(replication_pause::IsPaused());
-
-  replication_pause::ResetForTesting();
+  EXPECT_TRUE(counter.RequestPause());
+  EXPECT_TRUE(counter.ReleasePause());
+  EXPECT_FALSE(counter.IsPaused());
 }
 
 }  // namespace mygramdb::server
@@ -1855,6 +1853,7 @@ class DumpHandlerAsyncTest : public ::testing::Test {
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
+        .replication_pause_counter = &replication_pause_counter_,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
 #endif
@@ -1894,6 +1893,7 @@ class DumpHandlerAsyncTest : public ::testing::Test {
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
   std::atomic<bool> mysql_reconnecting_{false};
+  replication_pause::Counter replication_pause_counter_;
   std::unique_ptr<HandlerContext> handler_ctx_;
   std::unique_ptr<DumpHandler> handler_;
   std::string test_filepath_;

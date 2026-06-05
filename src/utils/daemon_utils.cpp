@@ -16,7 +16,13 @@
 
 #include "utils/structured_log.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
+
+namespace {
+
+constexpr int kDaemonFileCreationMask = 0027;
+
+}  // namespace
 
 bool Daemonize() {
 #ifdef _WIN32
@@ -81,8 +87,8 @@ bool Daemonize() {
     // Not fatal, continue
   }
 
-  // Step 5: Set file mode creation mask
-  umask(0);
+  // Step 5: Set a conservative file mode creation mask.
+  umask(kDaemonFileCreationMask);
 
   // Step 6: Redirect standard file descriptors to /dev/null
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
@@ -110,4 +116,4 @@ bool Daemonize() {
 #endif
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

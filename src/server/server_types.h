@@ -21,8 +21,10 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "query/synonym_dictionary.h"
+#include "server/replication_pause_counter.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
+#include "utils/constants.h"
 #include "utils/network_utils.h"
 
 namespace mygramdb::mysql {
@@ -47,11 +49,10 @@ class TableCatalog;
 class SyncOperationManager;
 
 // Default constants
-constexpr uint16_t kDefaultPort = 11016;       // memcached default port
-constexpr int kDefaultMaxConnections = 10000;  // Maximum concurrent connections
-constexpr int kDefaultRecvBufferSize = 4096;   // Receive buffer size
-constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size
-constexpr int kDefaultLimit = 100;             // Default LIMIT for SEARCH queries (range: 5-1000)
+constexpr uint16_t kDefaultPort = static_cast<uint16_t>(config::defaults::kTcpPort);  // MygramDB TCP port
+constexpr int kDefaultMaxConnections = 10000;                                         // Maximum concurrent connections
+constexpr int kDefaultRecvBufferSize = 4096;                                          // Receive buffer size
+constexpr int kDefaultSendBufferSize = 65536;                                         // Send buffer size
 
 /**
  * @brief TCP server configuration
@@ -63,13 +64,15 @@ struct ServerConfig {
   int worker_threads = 0;  // Number of worker threads (0 = CPU count)
   int recv_buffer_size = kDefaultRecvBufferSize;
   int send_buffer_size = kDefaultSendBufferSize;
-  int default_limit = kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
+  int default_limit = config::defaults::kDefaultLimit;  // Default LIMIT for SEARCH queries (range: 5-1000)
   int max_query_length = config::defaults::kDefaultQueryLengthLimit;  // Max characters for query expressions
 
   // Connection I/O tunables.
-  int recv_timeout_sec = 60;          ///< SO_RCVTIMEO seconds applied to accepted sockets (0 = disabled)
+  int recv_timeout_sec = 60;          ///< Initial first-frame timeout seconds (0 = disabled)
   int thread_pool_queue_size = 1000;  ///< ThreadPool task queue bound; 0 = unbounded
-  int64_t max_write_queue_bytes = 16LL * 1024 * 1024;  ///< Per-connection slow-reader cap; see config.h
+  int64_t max_write_queue_bytes =
+      16LL *
+      static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  ///< Per-connection slow-reader cap; see config.h
 
   // TCP keepalive applied per-accepted client socket. See
   // config.h ApiConfig::tcp::keepalive for rationale.
@@ -203,6 +206,21 @@ enum class DumpStatus : uint8_t {
  * @brief Progress tracking for async dump operations
  */
 struct DumpProgress {
+  struct Snapshot {
+    DumpStatus status = DumpStatus::IDLE;
+    std::string filepath;
+    std::string current_table;
+    size_t tables_processed = 0;
+    size_t tables_total = 0;
+    std::chrono::steady_clock::time_point start_time;
+    std::chrono::steady_clock::time_point end_time;
+    std::string error_message;
+    std::string last_result_filepath;
+    double elapsed_seconds = 0.0;
+
+    [[nodiscard]] bool IsInProgress() const { return status == DumpStatus::SAVING || status == DumpStatus::LOADING; }
+  };
+
   mutable std::mutex mutex;
   DumpStatus status = DumpStatus::IDLE;
   std::string filepath;                              // Target/source file path
@@ -277,21 +295,40 @@ struct DumpProgress {
   }
 
   /**
+   * @brief Return a consistent copy of all progress fields.
+   */
+  Snapshot GetSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    Snapshot snapshot;
+    snapshot.status = status;
+    snapshot.filepath = filepath;
+    snapshot.current_table = current_table;
+    snapshot.tables_processed = tables_processed;
+    snapshot.tables_total = tables_total;
+    snapshot.start_time = start_time;
+    snapshot.end_time = end_time;
+    snapshot.error_message = error_message;
+    snapshot.last_result_filepath = last_result_filepath;
+
+    auto end = snapshot.IsInProgress() ? std::chrono::steady_clock::now() : snapshot.end_time;
+    snapshot.elapsed_seconds = std::chrono::duration<double>(end - snapshot.start_time).count();
+    return snapshot;
+  }
+
+  /**
    * @brief Get elapsed time in seconds
    */
   double GetElapsedSeconds() const {
-    std::lock_guard<std::mutex> lock(mutex);
-    auto end =
-        (status == DumpStatus::SAVING || status == DumpStatus::LOADING) ? std::chrono::steady_clock::now() : end_time;
-    return std::chrono::duration<double>(end - start_time).count();
+    auto snapshot = GetSnapshot();
+    return snapshot.elapsed_seconds;
   }
 
   /**
    * @brief Check if a dump operation is currently in progress
    */
   bool IsInProgress() const {
-    std::lock_guard<std::mutex> lock(mutex);
-    return status == DumpStatus::SAVING || status == DumpStatus::LOADING;
+    auto snapshot = GetSnapshot();
+    return snapshot.IsInProgress();
   }
 
   /**
@@ -355,6 +392,7 @@ struct HandlerContext {
   std::atomic<bool>& optimization_in_progress;
   std::atomic<bool>& replication_paused_for_dump;  // True when replication is paused for DUMP SAVE/LOAD
   std::atomic<bool>& mysql_reconnecting;           // True when MySQL reconnection is in progress
+  replication_pause::Counter* replication_pause_counter = nullptr;  // Shared DUMP/Snapshot pause counter
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
   mysql::IBinlogReader* binlog_reader = nullptr;
 #ifdef USE_MYSQL

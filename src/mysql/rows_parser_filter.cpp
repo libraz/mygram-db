@@ -62,8 +62,8 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
 
   for (const auto& filter_config : filter_configs) {
     // Check if column exists in row data
-    auto iterator = row_data.columns.find(filter_config.name);
-    if (iterator == row_data.columns.end()) {
+    const std::string* value = row_data.FindColumnValue(filter_config.name);
+    if (value == nullptr) {
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_warning")
           .Field("type", "filter_column_not_found")
@@ -72,7 +72,7 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
       continue;
     }
 
-    const std::string& value_str = iterator->second;
+    const std::string& value_str = *value;
 
     // Skip empty values (NULL)
     if (value_str.empty()) {
@@ -94,6 +94,8 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
       try_parse_numeric(filter_config.name, value_str, uint32_t{});
     } else if (filter_config.type == "bigint") {
       try_parse_numeric(filter_config.name, value_str, int64_t{});
+    } else if (filter_config.type == "bigint_unsigned") {
+      try_parse_numeric(filter_config.name, value_str, uint64_t{});
     } else if (filter_config.type == "float" || filter_config.type == "double") {
       try_parse_numeric(filter_config.name, value_str, double{});
     } else if (filter_config.type == "datetime" || filter_config.type == "date") {

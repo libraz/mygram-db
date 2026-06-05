@@ -87,30 +87,40 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     // Stale socket detection
     if (access(config_.unix_socket_path.c_str(), F_OK) == 0) {
       int probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-      if (probe_fd >= 0) {
-        struct sockaddr_un probe_addr {};
-        probe_addr.sun_family = AF_UNIX;
-        // Safe: path length already validated above (< sizeof(sun_path)), struct is zero-initialized
-        std::memcpy(probe_addr.sun_path, config_.unix_socket_path.c_str(), config_.unix_socket_path.size());
-        if (connect(probe_fd, ToSockaddrUn(&probe_addr), sizeof(probe_addr)) == 0) {
-          close(probe_fd);
-          auto error = MakeError(ErrorCode::kNetworkUnixSocketStale,
-                                 "Another server is already listening on: " + config_.unix_socket_path);
-          mygram::utils::StructuredLog()
-              .Event("unix_socket_stale_check_failed")
-              .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
-              .Field(log_fields::kFieldError, error.to_string())
-              .Error();
-          return MakeUnexpected(error);
-        }
-        close(probe_fd);
-        // Stale socket file - remove it
-        unlink(config_.unix_socket_path.c_str());
+      if (probe_fd < 0) {
+        auto error = MakeError(
+            ErrorCode::kNetworkSocketCreationFailed,
+            "Failed to probe existing unix socket " + config_.unix_socket_path + ": " + std::string(strerror(errno)));
         mygram::utils::StructuredLog()
-            .Event("unix_socket_stale_removed")
+            .Event("unix_socket_probe_create_failed")
             .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
-            .Info();
+            .Field(log_fields::kFieldError, error.to_string())
+            .Error();
+        return MakeUnexpected(error);
       }
+
+      struct sockaddr_un probe_addr {};
+      probe_addr.sun_family = AF_UNIX;
+      // Safe: path length already validated above (< sizeof(sun_path)), struct is zero-initialized
+      std::memcpy(probe_addr.sun_path, config_.unix_socket_path.c_str(), config_.unix_socket_path.size());
+      if (connect(probe_fd, ToSockaddrUn(&probe_addr), sizeof(probe_addr)) == 0) {
+        close(probe_fd);
+        auto error = MakeError(ErrorCode::kNetworkUnixSocketStale,
+                               "Another server is already listening on: " + config_.unix_socket_path);
+        mygram::utils::StructuredLog()
+            .Event("unix_socket_stale_check_failed")
+            .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
+            .Field(log_fields::kFieldError, error.to_string())
+            .Error();
+        return MakeUnexpected(error);
+      }
+      close(probe_fd);
+      // Stale socket file - remove it
+      unlink(config_.unix_socket_path.c_str());
+      mygram::utils::StructuredLog()
+          .Event("unix_socket_stale_removed")
+          .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
+          .Info();
     }
 
     // Create socket. We construct the fd in a local first and only publish it
@@ -221,7 +231,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
 
   // Bind
   struct sockaddr_in address = {};
-  std::memset(&address, 0, sizeof(address));
   address.sin_family = AF_INET;
   address.sin_port = htons(config_.port);
 

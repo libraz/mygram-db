@@ -11,7 +11,7 @@
 
 #include "cache/cache_manager.h"
 #include "mysql/binlog_filter_evaluator.h"
-#include "server/tcp_server.h"  // For ServerStats
+#include "server/server_stats.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 

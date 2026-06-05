@@ -25,7 +25,8 @@ TEST(BM25ScorerTest, ComputeIDFBasic) {
 }
 
 TEST(BM25ScorerTest, ComputeIDFZeroDocFreq) {
-  EXPECT_DOUBLE_EQ(BM25Scorer::ComputeIDF(100, 0), 0.0);
+  EXPECT_NEAR(BM25Scorer::ComputeIDF(100, 0), std::log((100.0 + 0.5) / 0.5 + 1.0), 1e-10);
+  EXPECT_GT(BM25Scorer::ComputeIDF(100, 0), BM25Scorer::ComputeIDF(100, 1));
 }
 
 TEST(BM25ScorerTest, ComputeIDFZeroTotalDocs) {

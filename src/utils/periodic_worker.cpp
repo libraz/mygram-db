@@ -10,7 +10,7 @@
 
 #include "utils/structured_log.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 PeriodicWorker::PeriodicWorker(std::string name) : name_(std::move(name)) {}
 
@@ -140,4 +140,4 @@ void PeriodicWorker::Loop() {
   }
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

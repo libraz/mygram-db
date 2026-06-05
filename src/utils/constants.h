@@ -11,6 +11,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "utils/namespace_compat.h"
+
 namespace mygram::constants {
 
 // ============================================================================

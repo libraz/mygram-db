@@ -9,10 +9,10 @@
 
 #include <thread>
 
+#include "cache/cache_key.h"
 #include "cache/cache_types.h"
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
-#include "query/cache_key.h"
 
 namespace mygramdb::cache {
 
@@ -333,6 +333,29 @@ TEST(InvalidationQueueTest, EnqueueWhileStopped) {
 
   // Entry should be erased (buffered events processed on start)
   EXPECT_FALSE(cache.Lookup(key).has_value());
+}
+
+TEST(InvalidationQueueTest, EnqueueAfterStopDoesNotInvalidateOrErase) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+  InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
+
+  auto key = CacheKeyGenerator::Generate("query1");
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"gol", "ola", "lan", "ang"};
+  cache.Insert(key, {1, 2, 3}, meta, 15.0);
+  mgr.RegisterCacheEntry(key, meta);
+
+  queue.Start();
+  queue.Stop();
+
+  queue.Enqueue("posts", "", "golang");
+
+  auto result = cache.Lookup(key);
+  ASSERT_TRUE(result.has_value()) << "Enqueue after Stop must not run Phase 1 invalidation";
+  EXPECT_EQ(result->size(), 3U);
 }
 
 /**

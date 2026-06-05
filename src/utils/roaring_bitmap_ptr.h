@@ -20,7 +20,9 @@
 #include <memory>
 #include <vector>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Custom deleter that frees a `roaring_bitmap_t` via
@@ -71,4 +73,4 @@ inline RoaringBitmapPtr MakeRoaringFromVector(const std::vector<uint32_t>& doc_i
   return bm;
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

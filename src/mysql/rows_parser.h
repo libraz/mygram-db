@@ -27,10 +27,28 @@ namespace mygramdb::mysql {
 struct RowData {
   std::string primary_key;
   std::string text;  // Extracted text for full-text search
-  // TODO(perf): Consider changing to vector<string> indexed by column position
-  // to avoid per-row string key allocations. Requires updating all consumers
-  // (rows_parser.cpp, rows_event_processor.cpp, ExtractFilters).
+  const TableMetadata* table_metadata = nullptr;
+  std::vector<std::string> column_values;                // Values indexed by TableMetadata::columns ordinal
+  std::vector<bool> column_values_present;               // True when the row image included the ordinal
   std::unordered_map<std::string, std::string> columns;  // All column values as strings
+
+  [[nodiscard]] const std::string* FindColumnValue(const std::string& column_name) const {
+    if (table_metadata != nullptr && column_values.size() == table_metadata->columns.size() &&
+        column_values_present.size() == table_metadata->columns.size()) {
+      for (size_t i = 0; i < table_metadata->columns.size(); ++i) {
+        if (column_values_present[i] && table_metadata->columns[i].name == column_name) {
+          return &column_values[i];
+        }
+      }
+    }
+    auto it = columns.find(column_name);
+    return it == columns.end() ? nullptr : &it->second;
+  }
+
+  [[nodiscard]] std::string GetColumnValue(const std::string& column_name) const {
+    const std::string* value = FindColumnValue(column_name);
+    return value == nullptr ? std::string{} : *value;
+  }
 };
 
 /**

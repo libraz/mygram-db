@@ -42,11 +42,19 @@
  *
  * All multi-byte integers are stored in little-endian format.
  * CRC32 checksums use zlib implementation (polynomial: 0xEDB88320).
+ *
+ * Snapshot consistency contract:
+ * WriteDumpV2 serializes each table's Index and DocumentStore as separate
+ * component snapshots. Callers that require a cross-component, cross-table
+ * point-in-time dump must quiesce writers before calling this function. The
+ * server dump paths satisfy this by pausing replication and blocking DUMP LOAD;
+ * direct callers must provide equivalent exclusion.
  */
 
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <sstream>
@@ -68,6 +76,8 @@ using mygram::utils::Error;
 using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
+
+using DumpTableProgressCallback = std::function<void(const std::string& table_name, size_t tables_processed)>;
 
 // Reuse string limits from V1
 using dump_v1::kMaxConfigSectionLength;
@@ -168,6 +178,10 @@ Expected<void, Error> ReadSectionEnvelope(std::istream& input_stream, dump_forma
 /**
  * @brief Write complete dump to file (Version 2 format)
  *
+ * @pre Writers that can mutate any Index or DocumentStore in table_contexts are
+ *      paused for the duration of the call when a point-in-time dump is needed.
+ *      The function does not acquire a global multi-component snapshot lock.
+ *
  * @param filepath Output file path
  * @param gtid Current GTID for replication resume
  * @param config Full configuration to serialize
@@ -180,7 +194,8 @@ Expected<void, Error> WriteDumpV2(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats = nullptr,
-    const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr);
+    const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
+    const DumpTableProgressCallback& table_progress_callback = {});
 
 /**
  * @brief Read complete dump from file (Version 2 format)
@@ -216,7 +231,8 @@ Expected<void, Error> WriteDump(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats = nullptr,
-    const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr);
+    const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
+    const DumpTableProgressCallback& table_progress_callback = {});
 
 /**
  * @brief Read dump from file (auto-detects V1 or V2 format)

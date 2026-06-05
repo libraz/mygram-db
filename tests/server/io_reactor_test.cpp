@@ -634,6 +634,50 @@ TEST_F(IoReactorTest, ActiveConnectionIsNotReaped) {
   reactor->Stop();
 }
 
+TEST_F(IoReactorTest, InitialReadTimeoutClosesConnectionDespitePartialBytes) {
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 50;
+  cfg.idle_timeout_sec = 300;
+  cfg.initial_read_timeout_sec = 1;
+  cfg.reaper_interval_sec = 1;
+  cfg.event_loop_threads = 1;
+
+  auto pool = std::make_unique<ThreadPool>(1, 16);
+  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+
+  std::atomic<int> close_callback_count{0};
+  reactor->SetCloseCallback([&](int) { close_callback_count.fetch_add(1); });
+
+  ASSERT_TRUE(reactor->Start());
+
+  SocketPair sp;
+  int client_fd = sp.TakeClient();
+  int peer_fd = sp.Peer();
+#ifdef SO_NOSIGPIPE
+  int nosigpipe = 1;
+  (void)::setsockopt(peer_fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
+  auto conn = ReactorConnection::Create(client_fd, reactor.get(), /*dispatcher=*/nullptr, pool.get());
+  ASSERT_TRUE(reactor->Register(conn));
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+  while (std::chrono::steady_clock::now() < deadline && reactor->ConnectionCount() == 1u) {
+    const char* msg = "x";
+#ifdef MSG_NOSIGNAL
+    const ssize_t r = ::send(peer_fd, msg, 1, MSG_NOSIGNAL);
+#else
+    const ssize_t r = ::send(peer_fd, msg, 1, 0);
+#endif
+    (void)r;
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+
+  EXPECT_EQ(reactor->ConnectionCount(), 0u) << "Initial read timeout should close incomplete first frames";
+  EXPECT_GE(close_callback_count.load(), 1);
+
+  reactor->Stop();
+}
+
 // ---------------------------------------------------------------------------
 // Test 23: RegisterRollbackOnMuxAddFailure (Fix N-5)
 //

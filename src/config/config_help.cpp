@@ -10,25 +10,14 @@
 #include <sstream>
 
 #include "config/config_schema_embedded.h"
+#include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::config {
 
 namespace {
-
-/**
- * @brief Convert string to lowercase for case-insensitive comparison
- *
- * @param str Input string
- * @return Lowercase string
- */
-std::string ToLower(const std::string& str) {
-  std::string result = str;
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char ch_value) { return std::tolower(ch_value); });
-  return result;
-}
 
 /**
  * @brief Convert JSON value to string representation
@@ -170,6 +159,13 @@ nlohmann::json ConfigToJson(const Config& config) {
        }},
   };
 
+  // BM25 configuration
+  json["bm25"] = {
+      {"enable", config.bm25.enable},
+      {"k1", config.bm25.k1},
+      {"b", config.bm25.b},
+  };
+
   // Dump configuration
   json["dump"] = {
       {"dir", config.dump.dir},
@@ -221,10 +217,9 @@ nlohmann::json ConfigToJson(const Config& config) {
   };
 
   // Cache configuration
-  constexpr size_t kBytesPerMB = 1024 * 1024;  // Bytes in one megabyte
   json["cache"] = {
       {"enabled", config.cache.enabled},
-      {"max_memory_mb", config.cache.max_memory_bytes / kBytesPerMB},  // Convert bytes to MB for display
+      {"max_memory_mb", config.cache.max_memory_bytes / mygram::constants::kBytesPerMegabyte},
       {"min_query_cost_ms", config.cache.min_query_cost_ms},
       {"ttl_seconds", config.cache.ttl_seconds},
       {"invalidation_strategy", config.cache.invalidation_strategy},
@@ -241,12 +236,12 @@ nlohmann::json ConfigToJson(const Config& config) {
 }
 
 /**
- * @brief Split path into components (local helper)
+ * @brief Split path into components.
  *
  * @param path Dot-separated path
  * @return Vector of path components
  */
-std::vector<std::string> SplitPathHelper(const std::string& path) {
+std::vector<std::string> SplitPathComponents(const std::string& path) {
   std::vector<std::string> result;
   if (path.empty()) {
     return result;
@@ -275,7 +270,7 @@ std::optional<nlohmann::json> NavigateJsonPath(const nlohmann::json& json, const
     return json;
   }
 
-  std::vector<std::string> parts = SplitPathHelper(path);
+  std::vector<std::string> parts = SplitPathComponents(path);
   nlohmann::json current = json;
 
   for (const auto& part : parts) {
@@ -634,26 +629,13 @@ ConfigHelpInfo ConfigSchemaExplorer::ExtractHelpInfo(const std::string& path, co
 }
 
 std::vector<std::string> ConfigSchemaExplorer::SplitPath(const std::string& path) {
-  std::vector<std::string> result;
-  if (path.empty()) {
-    return result;
-  }
-
-  std::istringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '.')) {
-    if (!part.empty()) {
-      result.push_back(part);
-    }
-  }
-
-  return result;
+  return SplitPathComponents(path);
 }
 
 // Standalone functions
 
 bool IsSensitiveField(const std::string& path) {
-  std::string lower_path = ToLower(path);
+  std::string lower_path = mygram::utils::ToLower(path);
   return lower_path.find("password") != std::string::npos || lower_path.find("secret") != std::string::npos ||
          lower_path.find("ssl_key") != std::string::npos || lower_path.find("api_key") != std::string::npos ||
          lower_path.find("auth_key") != std::string::npos || lower_path.find("private_key") != std::string::npos ||

@@ -5,7 +5,6 @@
 
 #include "query/query_normalizer.h"
 
-#include <algorithm>
 #include <cctype>
 #include <string>
 
@@ -20,8 +19,10 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const std::str
   // Start with command type
   switch (query.type) {
     case query::QueryType::SEARCH:
+      result += 'S';
+      break;
     case query::QueryType::COUNT:
-      result += 'Q';  // Unified prefix: both SEARCH and COUNT cache full results
+      result += 'C';
       break;
     default:
       // Only SEARCH and COUNT queries are cacheable
@@ -29,9 +30,7 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const std::str
   }
 
   // Add table name (lowercase for case-insensitive consistency)
-  std::string lowercase_table = query.table;
-  std::transform(lowercase_table.begin(), lowercase_table.end(), lowercase_table.begin(),
-                 [](unsigned char chr) { return std::tolower(chr); });
+  std::string lowercase_table = mygram::utils::ToLower(query.table);
   result += ' ';
   result += lowercase_table;
 
@@ -163,12 +162,8 @@ std::string QueryNormalizer::NormalizeSortClause(const std::optional<query::Orde
 
   if (sort.has_value()) {
     // Normalize PK column name to canonical placeholder (case-insensitive)
-    std::string sort_col_lower = sort->column;
-    std::transform(sort_col_lower.begin(), sort_col_lower.end(), sort_col_lower.begin(),
-                   [](unsigned char chr) { return std::tolower(chr); });
-    std::string pk_col_lower = primary_key_column;
-    std::transform(pk_col_lower.begin(), pk_col_lower.end(), pk_col_lower.begin(),
-                   [](unsigned char chr) { return std::tolower(chr); });
+    std::string sort_col_lower = mygram::utils::ToLower(sort->column);
+    std::string pk_col_lower = mygram::utils::ToLower(primary_key_column);
     if (sort->column.empty() || sort_col_lower == pk_col_lower) {
       result.append("__pk__");
     } else {

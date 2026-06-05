@@ -12,6 +12,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include "storage/dump_format_v1.h"
 #include "utils/binary_io.h"
@@ -400,6 +402,40 @@ TEST(DumpFormatV2Test, DispatchReadsV2File) {
   EXPECT_EQ(read_gtid, gtid);
 
   cleanup();
+}
+
+TEST(DumpFormatV2Test, WriteDumpReportsTableProgressAsTablesBegin) {
+  auto filepath = TempFilePath("progress_callback");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index articles_idx;
+  DocumentStore articles_ds;
+  Index comments_idx;
+  DocumentStore comments_ds;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts;
+  contexts["articles"] = {&articles_idx, &articles_ds};
+  contexts["comments"] = {&comments_idx, &comments_ds};
+
+  std::vector<std::pair<std::string, size_t>> progress_calls;
+  auto result = WriteDump(filepath, "GTID:progress", cfg, contexts, nullptr, nullptr,
+                          [&](const std::string& table_name, size_t tables_processed) {
+                            progress_calls.emplace_back(table_name, tables_processed);
+                          });
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(progress_calls.size(), contexts.size());
+
+  std::unordered_map<std::string, size_t> processed_by_table;
+  for (const auto& [table_name, tables_processed] : progress_calls) {
+    processed_by_table[table_name] = tables_processed;
+  }
+
+  ASSERT_NE(processed_by_table.find("articles"), processed_by_table.end());
+  ASSERT_NE(processed_by_table.find("comments"), processed_by_table.end());
+  EXPECT_NE(processed_by_table["articles"], processed_by_table["comments"]);
+  EXPECT_LT(processed_by_table["articles"], contexts.size());
+  EXPECT_LT(processed_by_table["comments"], contexts.size());
 }
 
 // ============================================================================

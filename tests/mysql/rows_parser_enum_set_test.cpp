@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
 
 #ifdef USE_MYSQL
@@ -25,8 +26,7 @@ class EnumSetDecodeTest : public ::testing::Test {};
 // ============================================================================
 
 TEST_F(EnumSetDecodeTest, Enum1ByteValue) {
-  // 1-byte ENUM with metadata high byte = 1
-  uint16_t metadata = (1 << 8);  // enum_size = 1
+  uint16_t metadata = 1;  // enum_size = 1
   unsigned char data[] = {42};
   const unsigned char* end = data + sizeof(data);
 
@@ -36,7 +36,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteValue) {
 }
 
 TEST_F(EnumSetDecodeTest, Enum1ByteZero) {
-  uint16_t metadata = (1 << 8);
+  uint16_t metadata = 1;
   unsigned char data[] = {0};
   const unsigned char* end = data + sizeof(data);
 
@@ -46,7 +46,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteZero) {
 }
 
 TEST_F(EnumSetDecodeTest, Enum1ByteMax) {
-  uint16_t metadata = (1 << 8);
+  uint16_t metadata = 1;
   unsigned char data[] = {255};
   const unsigned char* end = data + sizeof(data);
 
@@ -56,8 +56,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteMax) {
 }
 
 TEST_F(EnumSetDecodeTest, Enum2ByteValue) {
-  // 2-byte ENUM with metadata high byte = 2
-  uint16_t metadata = (2 << 8);
+  uint16_t metadata = 2;
   // Little-endian: 0x0301 = 1 | (3 << 8) = 769
   unsigned char data[] = {0x01, 0x03};
   const unsigned char* end = data + sizeof(data);
@@ -68,7 +67,7 @@ TEST_F(EnumSetDecodeTest, Enum2ByteValue) {
 }
 
 TEST_F(EnumSetDecodeTest, Enum2ByteZero) {
-  uint16_t metadata = (2 << 8);
+  uint16_t metadata = 2;
   unsigned char data[] = {0x00, 0x00};
   const unsigned char* end = data + sizeof(data);
 
@@ -89,7 +88,7 @@ TEST_F(EnumSetDecodeTest, EnumDefaultTo1ByteWhenMetadataZero) {
 }
 
 TEST_F(EnumSetDecodeTest, Enum1ByteTruncated) {
-  uint16_t metadata = (1 << 8);
+  uint16_t metadata = 1;
   unsigned char data[] = {42};
   const unsigned char* end = data;  // No data available
 
@@ -98,7 +97,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteTruncated) {
 }
 
 TEST_F(EnumSetDecodeTest, Enum2ByteTruncated) {
-  uint16_t metadata = (2 << 8);
+  uint16_t metadata = 2;
   unsigned char data[] = {0x01};
   const unsigned char* end = data + 1;  // Only 1 byte, need 2
 
@@ -107,7 +106,7 @@ TEST_F(EnumSetDecodeTest, Enum2ByteTruncated) {
 }
 
 TEST_F(EnumSetDecodeTest, EnumNull) {
-  uint16_t metadata = (1 << 8);
+  uint16_t metadata = 1;
   unsigned char data[] = {42};
   const unsigned char* end = data + sizeof(data);
 
@@ -121,7 +120,7 @@ TEST_F(EnumSetDecodeTest, EnumNull) {
 // ============================================================================
 
 TEST_F(EnumSetDecodeTest, Set1ByteValue) {
-  uint16_t metadata = (1 << 8);   // set_size = 1
+  uint16_t metadata = 1;          // set_size = 1
   unsigned char data[] = {0x05};  // bits 0 and 2 set
   const unsigned char* end = data + sizeof(data);
 
@@ -131,7 +130,7 @@ TEST_F(EnumSetDecodeTest, Set1ByteValue) {
 }
 
 TEST_F(EnumSetDecodeTest, Set2ByteValue) {
-  uint16_t metadata = (2 << 8);
+  uint16_t metadata = 2;
   // Little-endian: 0x0301 = 1 | (3 << 8) = 769
   unsigned char data[] = {0x01, 0x03};
   const unsigned char* end = data + sizeof(data);
@@ -142,7 +141,7 @@ TEST_F(EnumSetDecodeTest, Set2ByteValue) {
 }
 
 TEST_F(EnumSetDecodeTest, Set4ByteValue) {
-  uint16_t metadata = (4 << 8);
+  uint16_t metadata = 4;
   unsigned char data[] = {0x0F, 0x00, 0x00, 0x01};
   const unsigned char* end = data + sizeof(data);
 
@@ -153,7 +152,7 @@ TEST_F(EnumSetDecodeTest, Set4ByteValue) {
 }
 
 TEST_F(EnumSetDecodeTest, Set8ByteValue) {
-  uint16_t metadata = (8 << 8);
+  uint16_t metadata = 8;
   unsigned char data[] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80};
   const unsigned char* end = data + sizeof(data);
 
@@ -175,7 +174,7 @@ TEST_F(EnumSetDecodeTest, SetDefaultTo1ByteWhenMetadataZero) {
 }
 
 TEST_F(EnumSetDecodeTest, Set1ByteTruncated) {
-  uint16_t metadata = (1 << 8);
+  uint16_t metadata = 1;
   unsigned char data[] = {0x05};
   const unsigned char* end = data;  // No data available
 
@@ -184,7 +183,7 @@ TEST_F(EnumSetDecodeTest, Set1ByteTruncated) {
 }
 
 TEST_F(EnumSetDecodeTest, Set4ByteTruncated) {
-  uint16_t metadata = (4 << 8);
+  uint16_t metadata = 4;
   unsigned char data[] = {0x01, 0x02};
   const unsigned char* end = data + 2;  // Only 2 bytes, need 4
 
@@ -193,13 +192,110 @@ TEST_F(EnumSetDecodeTest, Set4ByteTruncated) {
 }
 
 TEST_F(EnumSetDecodeTest, SetNull) {
-  uint16_t metadata = (2 << 8);
+  uint16_t metadata = 2;
   unsigned char data[] = {0xFF, 0xFF};
   const unsigned char* end = data + sizeof(data);
 
   auto result = DecodeFieldValue(248, data, metadata, true, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "");
+}
+
+TEST_F(EnumSetDecodeTest, StringEncodedEnumReadsConfiguredPackLength) {
+  uint16_t metadata = static_cast<uint16_t>((247 << 8) | 2);
+  unsigned char data[] = {0x01, 0x03};
+  const unsigned char* end = data + sizeof(data);
+
+  auto result = DecodeFieldValue(254, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "769");
+  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata), 2U);
+}
+
+TEST_F(EnumSetDecodeTest, StringEncodedSetReadsEightBytePackLength) {
+  uint16_t metadata = static_cast<uint16_t>((248 << 8) | 8);
+  unsigned char data[] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80};
+  const unsigned char* end = data + sizeof(data);
+  uint64_t expected = 1ULL | (static_cast<uint64_t>(0x80) << 56);
+
+  auto result = DecodeFieldValue(254, data, metadata, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, std::to_string(expected));
+  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata), 8U);
+}
+
+TEST_F(EnumSetDecodeTest, StringEncodedEnumReportsTruncatedPackLength) {
+  uint16_t metadata = static_cast<uint16_t>((247 << 8) | 2);
+  unsigned char data[] = {0x01};
+  const unsigned char* end = data + sizeof(data);
+
+  auto result = DecodeFieldValue(254, data, metadata, false, end, false);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(EnumSetDecodeTest, TinyMediumAndLongBlobTypesFallbackToBlobDecoder) {
+  {
+    unsigned char data[] = {3, 'a', 'b', 'c'};
+    const unsigned char* end = data + sizeof(data);
+    auto result = DecodeFieldValue(249, data, 0, false, end, false);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "abc");
+    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(249, data, 0), 4U);
+  }
+  {
+    unsigned char data[] = {3, 0, 0, 'd', 'e', 'f'};
+    const unsigned char* end = data + sizeof(data);
+    auto result = DecodeFieldValue(250, data, 0, false, end, false);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "def");
+    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(250, data, 0), 6U);
+  }
+  {
+    unsigned char data[] = {3, 0, 0, 0, 'g', 'h', 'i'};
+    const unsigned char* end = data + sizeof(data);
+    auto result = DecodeFieldValue(251, data, 0, false, end, false);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "ghi");
+    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(251, data, 0), 7U);
+  }
+}
+
+TEST_F(EnumSetDecodeTest, OldDatetimeFormatsAsComparableTimestampString) {
+  const uint64_t encoded = 20240605123456ULL;
+  unsigned char data[] = {
+      static_cast<unsigned char>(encoded & 0xFF),         static_cast<unsigned char>((encoded >> 8) & 0xFF),
+      static_cast<unsigned char>((encoded >> 16) & 0xFF), static_cast<unsigned char>((encoded >> 24) & 0xFF),
+      static_cast<unsigned char>((encoded >> 32) & 0xFF), static_cast<unsigned char>((encoded >> 40) & 0xFF),
+      static_cast<unsigned char>((encoded >> 48) & 0xFF), static_cast<unsigned char>((encoded >> 56) & 0xFF)};
+  const unsigned char* end = data + sizeof(data);
+
+  auto result = DecodeFieldValue(12, data, 0, false, end, false);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "2024-06-05 12:34:56");
+}
+
+TEST_F(EnumSetDecodeTest, OldDatetimeReportsTruncatedPayload) {
+  unsigned char data[] = {0x01, 0x02, 0x03, 0x04};
+  const unsigned char* end = data + sizeof(data);
+
+  auto result = DecodeFieldValue(12, data, 0, false, end, false);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(EnumSetDecodeTest, GeometryReportsTruncatedLengthPrefix) {
+  unsigned char data[] = {0x03, 0x00};
+  const unsigned char* end = data + sizeof(data);
+
+  auto result = DecodeFieldValue(255, data, 4, false, end, false);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(EnumSetDecodeTest, GeometryReportsTruncatedPayload) {
+  unsigned char data[] = {0x04, 0x00, 0x00, 0x00, 0x01, 0x02};
+  const unsigned char* end = data + sizeof(data);
+
+  auto result = DecodeFieldValue(255, data, 4, false, end, false);
+  EXPECT_FALSE(result.has_value());
 }
 
 #else

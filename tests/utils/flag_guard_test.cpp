@@ -10,7 +10,7 @@
 #include <atomic>
 #include <stdexcept>
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 namespace {
 
 // --- AtomicFlagGuard tests ---
@@ -225,4 +225,4 @@ TEST(OperationGuardTest, DismissAfterReleaseIsNoOp) {
 }
 
 }  // namespace
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

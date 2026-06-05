@@ -204,6 +204,13 @@ TEST_F(BinlogFilterEvaluatorTest, Uint32Comparison) {
   EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(value, filter));
 }
 
+TEST_F(BinlogFilterEvaluatorTest, Uint64BigintUnsignedComparison) {
+  auto filter = MakeFilter("ubig", "bigint_unsigned", ">=", "18446744073709551614");
+
+  FilterValue value = uint64_t{18446744073709551615ULL};
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(value, filter));
+}
+
 // ===========================================================================
 // Float/Double comparison tests
 // ===========================================================================

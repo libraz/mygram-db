@@ -34,7 +34,9 @@
 #include <utility>
 #include <variant>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Tag type for constructing Expected with an error value
@@ -162,15 +164,15 @@ class Expected {
    * @brief Assign an error
    */
   Expected& operator=(const Unexpected<E>& unexpected) {
-    storage_ = unexpected.error;
+    storage_.template emplace<1>(unexpected.error);
     return *this;
   }
 
   /**
    * @brief Assign an error (move)
    */
-  Expected& operator=(Unexpected<E>&& unexpected) noexcept(std::is_nothrow_move_assignable_v<E>) {
-    storage_ = std::move(unexpected).error;
+  Expected& operator=(Unexpected<E>&& unexpected) noexcept(std::is_nothrow_constructible_v<E, E&&>) {
+    storage_.template emplace<1>(std::move(unexpected).error);
     return *this;
   }
 
@@ -638,4 +640,4 @@ class Expected<void, E> {
   std::optional<E> error_;  // Only constructed when has_value_ is false
 };
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

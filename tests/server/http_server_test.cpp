@@ -383,8 +383,8 @@ TEST_F(HttpServerStartupTest, FromConfigIgnoresNonPositiveTimeouts) {
   cfg.api.http.write_timeout_sec = -1;
 
   HttpServerConfig hc = HttpServerConfig::FromConfig(cfg);
-  EXPECT_EQ(hc.read_timeout_sec, defaults::kHttpTimeoutSec);
-  EXPECT_EQ(hc.write_timeout_sec, defaults::kHttpTimeoutSec);
+  EXPECT_EQ(hc.read_timeout_sec, config::defaults::kHttpTimeoutSec);
+  EXPECT_EQ(hc.write_timeout_sec, config::defaults::kHttpTimeoutSec);
 }
 
 }  // namespace server

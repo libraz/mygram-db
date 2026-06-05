@@ -1269,6 +1269,15 @@ TEST(QueryParserTest, SortMultipleColumnsNoOrderError) {
   EXPECT_NE(query.error().message().find("Multiple column sorting is not supported"), std::string::npos);
 }
 
+TEST(QueryParserTest, SortAllowsLowercaseFollowingClauseKeyword) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT created_at DESC highlight");
+
+  ASSERT_TRUE(query) << query.error().message();
+  ASSERT_TRUE(query->order_by.has_value());
+  EXPECT_TRUE(query->highlight.has_value());
+}
+
 /**
  * @brief Test COUNT with parentheses
  */

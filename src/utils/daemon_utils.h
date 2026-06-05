@@ -5,7 +5,9 @@
 
 #pragma once
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Daemonize the current process
@@ -23,4 +25,4 @@ namespace mygram::utils {
  */
 bool Daemonize();
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

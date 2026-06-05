@@ -11,7 +11,7 @@
 #include <limits>
 #include <string>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 // ---------------------------------------------------------------------------
 // CompareValues<int64_t> tests

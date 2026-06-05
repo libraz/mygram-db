@@ -83,8 +83,8 @@ class Application {
    *
    * Workflow:
    * 1. Handle special modes (--help, --version, --config-test)
-   * 2. Check root privilege
-   * 3. Apply logging configuration
+   * 2. Apply logging configuration
+   * 3. Log startup and check root privilege
    * 4. Daemonize (if --daemon)
    * 5. Verify dump directory
    * 6. Setup signal handlers

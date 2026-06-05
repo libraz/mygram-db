@@ -10,6 +10,16 @@ configure_file(
 # Make version.h available to all targets
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
+# Shared cache key target used by both query parsing and cache storage.
+add_library(mygramdb_cache_key STATIC
+  cache/cache_key.cpp
+  cache/md5.cpp
+)
+
+target_include_directories(mygramdb_cache_key PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
 # Subdirectories
 add_subdirectory(app)
 add_subdirectory(config)

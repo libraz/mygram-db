@@ -293,8 +293,8 @@ TEST_F(RowsParserTest, ParseSimpleIntRow) {
 
   const auto& row = result->front();
   EXPECT_EQ("123", row.primary_key);
-  EXPECT_EQ("123", row.columns.at("id"));
-  EXPECT_EQ("456", row.columns.at("value"));
+  EXPECT_EQ("123", row.GetColumnValue("id"));
+  EXPECT_EQ("456", row.GetColumnValue("value"));
 }
 
 TEST_F(RowsParserTest, ParseVarcharRow) {
@@ -330,7 +330,7 @@ TEST_F(RowsParserTest, ParseVarcharRow) {
   const auto& row = result->front();
   EXPECT_EQ("1", row.primary_key);
   EXPECT_EQ("test", row.text);
-  EXPECT_EQ("test", row.columns.at("name"));
+  EXPECT_EQ("test", row.GetColumnValue("name"));
 }
 
 TEST_F(RowsParserTest, ParseTextRow) {
@@ -366,7 +366,7 @@ TEST_F(RowsParserTest, ParseTextRow) {
   const auto& row = result->front();
   EXPECT_EQ("100", row.primary_key);
   EXPECT_EQ("Hello, World!", row.text);
-  EXPECT_EQ("Hello, World!", row.columns.at("content"));
+  EXPECT_EQ("Hello, World!", row.GetColumnValue("content"));
 }
 
 TEST_F(RowsParserTest, ParseMultipleRows) {
@@ -821,7 +821,7 @@ TEST_F(DateTimeParsingTest, Datetime2BasicParsing) {
   ASSERT_EQ(1, result->size());
 
   const auto& row = result->front();
-  EXPECT_EQ("2025-11-25 14:30:45", row.columns.at("dt_col"));
+  EXPECT_EQ("2025-11-25 14:30:45", row.GetColumnValue("dt_col"));
 }
 
 /**
@@ -838,7 +838,7 @@ TEST_F(DateTimeParsingTest, Datetime2YearBoundary) {
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
-  EXPECT_EQ("2000-01-01 00:00:00", result->front().columns.at("dt_col"));
+  EXPECT_EQ("2000-01-01 00:00:00", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -854,7 +854,7 @@ TEST_F(DateTimeParsingTest, Datetime2MaxTimeValues) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("2023-12-31 23:59:59", result->front().columns.at("dt_col"));
+  EXPECT_EQ("2023-12-31 23:59:59", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -870,7 +870,7 @@ TEST_F(DateTimeParsingTest, Datetime2WithMicroseconds) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("2025-06-15 10:20:30.123456", result->front().columns.at("dt_col"));
+  EXPECT_EQ("2025-06-15 10:20:30.123456", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -886,7 +886,7 @@ TEST_F(DateTimeParsingTest, Datetime2WithMilliseconds) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("2025-06-15 10:20:30.123000", result->front().columns.at("dt_col"));
+  EXPECT_EQ("2025-06-15 10:20:30.123000", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -902,7 +902,7 @@ TEST_F(DateTimeParsingTest, Time2BasicParsing) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("14:30:45", result->front().columns.at("dt_col"));
+  EXPECT_EQ("14:30:45", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -918,7 +918,7 @@ TEST_F(DateTimeParsingTest, Time2WithMicroseconds) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("10:20:30.654321", result->front().columns.at("dt_col"));
+  EXPECT_EQ("10:20:30.654321", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -934,7 +934,7 @@ TEST_F(DateTimeParsingTest, Time2MaxHour) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("838:59:59", result->front().columns.at("dt_col"));
+  EXPECT_EQ("838:59:59", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -950,7 +950,7 @@ TEST_F(DateTimeParsingTest, TimeOldFormat) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("12:34:56", result->front().columns.at("dt_col"));
+  EXPECT_EQ("12:34:56", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -966,7 +966,7 @@ TEST_F(DateTimeParsingTest, Timestamp2BasicParsing) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("1732545600", result->front().columns.at("dt_col"));
+  EXPECT_EQ("1732545600", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -982,7 +982,7 @@ TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("1732545600.123456", result->front().columns.at("dt_col"));
+  EXPECT_EQ("1732545600.123456", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -998,7 +998,7 @@ TEST_F(DateTimeParsingTest, DateParsing) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("2025-11-25", result->front().columns.at("dt_col"));
+  EXPECT_EQ("2025-11-25", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -1014,7 +1014,7 @@ TEST_F(DateTimeParsingTest, DateLeapYear) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("2024-02-29", result->front().columns.at("dt_col"));
+  EXPECT_EQ("2024-02-29", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -1036,7 +1036,7 @@ TEST_F(DateTimeParsingTest, Datetime2BugReproduction) {
   ASSERT_TRUE(result.has_value());
   // Before fix: was "0110-00-25 14:30:00" (year=110, month=0)
   // After fix: should be "2025-11-25 14:30:00"
-  EXPECT_EQ("2025-11-25 14:30:00", result->front().columns.at("dt_col"));
+  EXPECT_EQ("2025-11-25 14:30:00", result->front().GetColumnValue("dt_col"));
 }
 
 TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
@@ -1050,6 +1050,7 @@ TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
   row_data.columns["int_col"] = "-2147483648";
   row_data.columns["int_u_col"] = "4294967295";
   row_data.columns["bigint_col"] = "-9223372036854775808";
+  row_data.columns["bigint_u_col"] = "18446744073709551615";
   row_data.columns["float_col"] = "3.14";
   row_data.columns["string_col"] = "test";
 
@@ -1062,12 +1063,13 @@ TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
   filter_configs.push_back({"int_col", "int", false, false, ""});
   filter_configs.push_back({"int_u_col", "int_unsigned", false, false, ""});
   filter_configs.push_back({"bigint_col", "bigint", false, false, ""});
+  filter_configs.push_back({"bigint_u_col", "bigint_unsigned", false, false, ""});
   filter_configs.push_back({"float_col", "float", false, false, ""});
   filter_configs.push_back({"string_col", "string", false, false, ""});
 
   auto filters = ExtractFilters(row_data, filter_configs);
 
-  EXPECT_EQ(filters.size(), 10);
+  EXPECT_EQ(filters.size(), 11);
   EXPECT_EQ(std::get<bool>(filters["bool_col"]), true);
   EXPECT_EQ(std::get<int8_t>(filters["tinyint_col"]), -128);
   EXPECT_EQ(std::get<uint8_t>(filters["tinyint_u_col"]), 255);
@@ -1076,6 +1078,7 @@ TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
   EXPECT_EQ(std::get<int32_t>(filters["int_col"]), -2147483648);
   EXPECT_EQ(std::get<uint32_t>(filters["int_u_col"]), 4294967295U);
   EXPECT_EQ(std::get<int64_t>(filters["bigint_col"]), -9223372036854775807LL - 1);
+  EXPECT_EQ(std::get<uint64_t>(filters["bigint_u_col"]), 18446744073709551615ULL);
   EXPECT_NEAR(std::get<double>(filters["float_col"]), 3.14, 0.01);
   EXPECT_EQ(std::get<std::string>(filters["string_col"]), "test");
 }
@@ -1232,7 +1235,7 @@ TEST_F(RowsParserTest, YearTypeParsing) {
   EXPECT_EQ("1", row.primary_key);
 
   // Should return "2024" (not "[UNSUPPORTED_TYPE:13]")
-  std::string year_value = row.columns.at("birth_year");
+  std::string year_value = row.GetColumnValue("birth_year");
   EXPECT_NE("[UNSUPPORTED_TYPE:13]", year_value);
   EXPECT_EQ("2024", year_value);
 }
@@ -1272,7 +1275,7 @@ TEST_F(RowsParserTest, YearMinValue) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("1901", result->front().columns.at("year_col"));
+  EXPECT_EQ("1901", result->front().GetColumnValue("year_col"));
 }
 
 /**
@@ -1310,7 +1313,7 @@ TEST_F(RowsParserTest, YearMaxValue) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("2155", result->front().columns.at("year_col"));
+  EXPECT_EQ("2155", result->front().GetColumnValue("year_col"));
 }
 
 /**
@@ -1349,7 +1352,7 @@ TEST_F(RowsParserTest, YearZeroValue) {
 
   ASSERT_TRUE(result.has_value());
   // 0 is a special value in MySQL YEAR type representing 0000
-  EXPECT_EQ("0000", result->front().columns.at("year_col"));
+  EXPECT_EQ("0000", result->front().GetColumnValue("year_col"));
 }
 
 /**
@@ -1397,7 +1400,7 @@ TEST_F(RowsParserTest, FloatTypeParsing) {
   EXPECT_EQ("1", row.primary_key);
 
   // Should return a float string (not "[UNSUPPORTED_TYPE:4]")
-  std::string float_value = row.columns.at("price");
+  std::string float_value = row.GetColumnValue("price");
   EXPECT_NE("[UNSUPPORTED_TYPE:4]", float_value);
 
   // Parse and check value is approximately 3.14
@@ -1450,7 +1453,7 @@ TEST_F(RowsParserTest, DoubleTypeParsing) {
   EXPECT_EQ("1", row.primary_key);
 
   // Should return a double string (not "[UNSUPPORTED_TYPE:5]")
-  std::string double_value = row.columns.at("price");
+  std::string double_value = row.GetColumnValue("price");
   EXPECT_NE("[UNSUPPORTED_TYPE:5]", double_value);
 
   // Parse and check value is approximately 3.14159265359
@@ -1493,7 +1496,7 @@ TEST_F(RowsParserTest, FloatSpecialValues) {
                                       MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
     ASSERT_TRUE(result.has_value());
-    double parsed = std::stod(result->front().columns.at("val"));
+    double parsed = std::stod(result->front().GetColumnValue("val"));
     EXPECT_NEAR(0.0, parsed, 0.0001);
   }
 
@@ -1511,7 +1514,7 @@ TEST_F(RowsParserTest, FloatSpecialValues) {
                                       MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
     ASSERT_TRUE(result.has_value());
-    double parsed = std::stod(result->front().columns.at("val"));
+    double parsed = std::stod(result->front().GetColumnValue("val"));
     EXPECT_NEAR(-123.456, parsed, 0.01);
   }
 }
@@ -1569,7 +1572,7 @@ TEST_F(RowsParserTest, BitTypeParsing) {
   EXPECT_EQ("1", row.primary_key);
 
   // Should return the numeric value (not "[UNSUPPORTED_TYPE:16]")
-  std::string bit_value = row.columns.at("flags");
+  std::string bit_value = row.GetColumnValue("flags");
   EXPECT_NE("[UNSUPPORTED_TYPE:16]", bit_value);
   EXPECT_EQ("170", bit_value);  // 0b10101010 = 170
 }
@@ -1616,7 +1619,7 @@ TEST_F(RowsParserTest, BitMultipleBytes) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string bit_value = result->front().columns.at("flags");
+  std::string bit_value = result->front().GetColumnValue("flags");
   EXPECT_NE("[UNSUPPORTED_TYPE:16]", bit_value);
   // The value should be the numeric representation
   // 0x1234 = 4660 (big-endian)
@@ -1665,7 +1668,7 @@ TEST_F(RowsParserTest, BitPartialByte) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string bit_value = result->front().columns.at("flags");
+  std::string bit_value = result->front().GetColumnValue("flags");
   EXPECT_NE("[UNSUPPORTED_TYPE:16]", bit_value);
   EXPECT_EQ("21", bit_value);  // 0b10101 = 21
 }
@@ -1728,7 +1731,7 @@ TEST_F(RowsParserTest, ValidUtf8PassThrough) {
 
     ASSERT_TRUE(result.has_value()) << "Failed for string: " << test_str;
     ASSERT_EQ(1, result->size());
-    EXPECT_EQ(test_str, result->front().columns.at("content")) << "Mismatch for valid UTF-8 string: " << test_str;
+    EXPECT_EQ(test_str, result->front().GetColumnValue("content")) << "Mismatch for valid UTF-8 string: " << test_str;
   }
 }
 
@@ -1801,7 +1804,7 @@ TEST_F(RowsParserTest, InvalidUtf8Sanitized) {
     ASSERT_TRUE(result.has_value()) << "Failed for: " << tc.description;
     ASSERT_EQ(1, result->size());
 
-    std::string content = result->front().columns.at("content");
+    std::string content = result->front().GetColumnValue("content");
 
     // The result should NOT contain the invalid bytes as-is
     // It should either be sanitized or contain replacement characters
@@ -1866,7 +1869,7 @@ TEST_F(RowsParserTest, BlobTextUtf8Sanitization) {
   ASSERT_EQ(1, result->size());
 
   // The BLOB content should be sanitized - no crash and valid output
-  std::string content = result->front().columns.at("data");
+  std::string content = result->front().GetColumnValue("data");
   EXPECT_FALSE(content.empty()) << "BLOB content should not be empty";
 
   // Result should be valid UTF-8 (either sanitized or marked as invalid)
@@ -1911,7 +1914,7 @@ TEST_F(RowsParserTest, EmptyStringHandling) {
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
-  EXPECT_EQ("", result->front().columns.at("content"));
+  EXPECT_EQ("", result->front().GetColumnValue("content"));
 }
 
 // =============================================================================
@@ -1952,7 +1955,7 @@ TEST_F(RowsParserTest, UnsignedIntLargeValue) {
 
   // Bug #32: Before fix, this would be "-294967296" (overflow to negative)
   // After fix, this should be "4000000000"
-  EXPECT_EQ("4000000000", result->front().columns.at("id"))
+  EXPECT_EQ("4000000000", result->front().GetColumnValue("id"))
       << "Bug #32: UNSIGNED INT should preserve large positive values";
 }
 
@@ -1987,7 +1990,7 @@ TEST_F(RowsParserTest, UnsignedTinyIntLargeValue) {
 
   // Bug #32: Before fix, this would be "-56" (overflow to negative)
   // After fix, this should be "200"
-  EXPECT_EQ("200", result->front().columns.at("id")) << "Bug #32: UNSIGNED TINYINT should preserve values 128-255";
+  EXPECT_EQ("200", result->front().GetColumnValue("id")) << "Bug #32: UNSIGNED TINYINT should preserve values 128-255";
 }
 
 /**
@@ -2022,7 +2025,7 @@ TEST_F(RowsParserTest, UnsignedSmallIntLargeValue) {
 
   // Bug #32: Before fix, this would be "-15536" (overflow to negative)
   // After fix, this should be "50000"
-  EXPECT_EQ("50000", result->front().columns.at("id"))
+  EXPECT_EQ("50000", result->front().GetColumnValue("id"))
       << "Bug #32: UNSIGNED SMALLINT should preserve values 32768-65535";
 }
 
@@ -2058,7 +2061,7 @@ TEST_F(RowsParserTest, UnsignedBigIntLargeValue) {
 
   // Bug #32: Before fix, this would be negative (overflow)
   // After fix, this should be "10000000000000000000"
-  EXPECT_EQ("10000000000000000000", result->front().columns.at("id"))
+  EXPECT_EQ("10000000000000000000", result->front().GetColumnValue("id"))
       << "Bug #32: UNSIGNED BIGINT should preserve values > INT64_MAX";
 }
 
@@ -2094,7 +2097,8 @@ TEST_F(RowsParserTest, SignedIntNegativeValue) {
   ASSERT_EQ(1, result->size());
 
   // Should correctly show negative value
-  EXPECT_EQ("-1000", result->front().columns.at("id")) << "SIGNED INT should still handle negative values correctly";
+  EXPECT_EQ("-1000", result->front().GetColumnValue("id"))
+      << "SIGNED INT should still handle negative values correctly";
 }
 
 // =============================================================================
@@ -2161,8 +2165,8 @@ TEST_F(RowsParserTest, GeometryTypeBasic) {
   ASSERT_EQ(1, result->size());
 
   // The geometry column should exist and not contain [UNSUPPORTED_TYPE:255]
-  ASSERT_TRUE(result->front().columns.find("location") != result->front().columns.end());
-  std::string geo_value = result->front().columns.at("location");
+  ASSERT_NE(result->front().FindColumnValue("location"), nullptr);
+  std::string geo_value = result->front().GetColumnValue("location");
   EXPECT_TRUE(geo_value.find("UNSUPPORTED") == std::string::npos)
       << "BUG-0072: GEOMETRY should not return UNSUPPORTED_TYPE, got: " << geo_value;
 }
@@ -2208,8 +2212,8 @@ TEST_F(RowsParserTest, GeometryTypeEmpty) {
   ASSERT_EQ(1, result->size());
 
   // Empty geometry should result in empty string
-  ASSERT_TRUE(result->front().columns.find("location") != result->front().columns.end());
-  EXPECT_EQ("", result->front().columns.at("location")) << "Empty GEOMETRY should return empty string";
+  ASSERT_NE(result->front().FindColumnValue("location"), nullptr);
+  EXPECT_EQ("", result->front().GetColumnValue("location")) << "Empty GEOMETRY should return empty string";
 }
 
 // =============================================================================
@@ -2274,8 +2278,8 @@ TEST_F(RowsParserTest, VectorTypeBasic) {
   ASSERT_EQ(1, result->size());
 
   // The vector column should exist and contain hex representation
-  ASSERT_TRUE(result->front().columns.find("embedding") != result->front().columns.end());
-  std::string vec_value = result->front().columns.at("embedding");
+  ASSERT_NE(result->front().FindColumnValue("embedding"), nullptr);
+  std::string vec_value = result->front().GetColumnValue("embedding");
   EXPECT_TRUE(vec_value.find("UNSUPPORTED") == std::string::npos)
       << "VECTOR should not return UNSUPPORTED_TYPE, got: " << vec_value;
   // Verify hex output matches the input bytes
@@ -2322,8 +2326,8 @@ TEST_F(RowsParserTest, VectorTypeEmpty) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  ASSERT_TRUE(result->front().columns.find("embedding") != result->front().columns.end());
-  EXPECT_EQ("", result->front().columns.at("embedding")) << "Empty VECTOR should return empty string";
+  ASSERT_NE(result->front().FindColumnValue("embedding"), nullptr);
+  EXPECT_EQ("", result->front().GetColumnValue("embedding")) << "Empty VECTOR should return empty string";
 }
 
 // =============================================================================
@@ -2461,7 +2465,7 @@ TEST_F(RowsParserTest, DecimalPositiveInteger) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string decimal_value = result->front().columns.at("amount");
+  std::string decimal_value = result->front().GetColumnValue("amount");
   EXPECT_EQ("12345", decimal_value) << "BUG-0087: DECIMAL positive integer should be parsed correctly";
 }
 
@@ -2502,7 +2506,7 @@ TEST_F(RowsParserTest, DecimalNegativeInteger) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string decimal_value = result->front().columns.at("amount");
+  std::string decimal_value = result->front().GetColumnValue("amount");
   EXPECT_EQ("-12345", decimal_value) << "BUG-0087: DECIMAL negative integer should be parsed correctly";
 }
 
@@ -2543,7 +2547,7 @@ TEST_F(RowsParserTest, DecimalWithFraction) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string decimal_value = result->front().columns.at("price");
+  std::string decimal_value = result->front().GetColumnValue("price");
   EXPECT_EQ("12345678.90", decimal_value) << "BUG-0087: DECIMAL with fraction should be parsed correctly";
 }
 
@@ -2584,7 +2588,7 @@ TEST_F(RowsParserTest, DecimalNegativeWithFraction) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string decimal_value = result->front().columns.at("balance");
+  std::string decimal_value = result->front().GetColumnValue("balance");
   EXPECT_EQ("-99999.99", decimal_value) << "BUG-0087: DECIMAL negative with fraction should be parsed correctly";
 }
 
@@ -2625,7 +2629,7 @@ TEST_F(RowsParserTest, DecimalZero) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string decimal_value = result->front().columns.at("amount");
+  std::string decimal_value = result->front().GetColumnValue("amount");
   // Zero should be parsed as "0" or "0.00"
   EXPECT_TRUE(decimal_value == "0" || decimal_value == "0.00")
       << "BUG-0087: DECIMAL zero should be parsed correctly, got: " << decimal_value;
@@ -2668,7 +2672,7 @@ TEST_F(RowsParserTest, DecimalSmallValue) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  std::string decimal_value = result->front().columns.at("rate");
+  std::string decimal_value = result->front().GetColumnValue("rate");
   EXPECT_EQ("0.1234", decimal_value) << "BUG-0087: DECIMAL small value should be parsed correctly";
 }
 
@@ -2788,12 +2792,11 @@ TEST_F(RowsParserTest, MinimalModePartialColumns) {
   ASSERT_EQ(1, result->size());
 
   // Present columns should be parsed
-  EXPECT_EQ("42", result->front().columns.at("id"));
-  EXPECT_EQ("1", result->front().columns.at("status"));
+  EXPECT_EQ("42", result->front().GetColumnValue("id"));
+  EXPECT_EQ("1", result->front().GetColumnValue("status"));
 
   // Missing column should not be in the result
-  EXPECT_EQ(result->front().columns.find("name"), result->front().columns.end())
-      << "BUG-0085: Missing column should not appear in result";
+  EXPECT_EQ(result->front().FindColumnValue("name"), nullptr) << "BUG-0085: Missing column should not appear in result";
 }
 
 /**
@@ -2833,9 +2836,9 @@ TEST_F(RowsParserTest, MinimalModeOnlyPrimaryKey) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  EXPECT_EQ("100", result->front().columns.at("id"));
+  EXPECT_EQ("100", result->front().GetColumnValue("id"));
   EXPECT_EQ("100", result->front().primary_key);
-  EXPECT_EQ(result->front().columns.find("data"), result->front().columns.end());
+  EXPECT_EQ(result->front().FindColumnValue("data"), nullptr);
 }
 
 /**
@@ -2952,8 +2955,8 @@ TEST_F(RowsParserV2Test, V2WriteRowsWithoutStmtEndFlag) {
 
   ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with flags=0x0000 should parse (was the bug case)";
   ASSERT_EQ(1, result->size());
-  EXPECT_EQ("1", result->front().columns.at("id"));
-  EXPECT_EQ("hello", result->front().columns.at("name"));
+  EXPECT_EQ("1", result->front().GetColumnValue("id"));
+  EXPECT_EQ("hello", result->front().GetColumnValue("name"));
 }
 
 /**
@@ -2980,8 +2983,8 @@ TEST_F(RowsParserV2Test, V2WriteRowsWithExtraDataPresent) {
 
   ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with extra data should skip extra bytes and parse correctly";
   ASSERT_EQ(1, result->size());
-  EXPECT_EQ("42", result->front().columns.at("id"));
-  EXPECT_EQ("world", result->front().columns.at("name"));
+  EXPECT_EQ("42", result->front().GetColumnValue("id"));
+  EXPECT_EQ("world", result->front().GetColumnValue("name"));
 }
 
 /**
@@ -3005,8 +3008,8 @@ TEST_F(RowsParserV2Test, V2WriteRowsBothFlagsSet) {
 
   ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with both flags should parse correctly";
   ASSERT_EQ(1, result->size());
-  EXPECT_EQ("99", result->front().columns.at("id"));
-  EXPECT_EQ("both", result->front().columns.at("name"));
+  EXPECT_EQ("99", result->front().GetColumnValue("id"));
+  EXPECT_EQ("both", result->front().GetColumnValue("name"));
 }
 
 /**
@@ -3028,8 +3031,8 @@ TEST_F(RowsParserV2Test, V1WriteRowsNoVarHeader) {
 
   ASSERT_TRUE(result.has_value()) << "V1 WRITE_ROWS should parse without var_header_len";
   ASSERT_EQ(1, result->size());
-  EXPECT_EQ("7", result->front().columns.at("id"));
-  EXPECT_EQ("v1test", result->front().columns.at("name"));
+  EXPECT_EQ("7", result->front().GetColumnValue("id"));
+  EXPECT_EQ("v1test", result->front().GetColumnValue("name"));
 }
 
 /**
@@ -3057,12 +3060,12 @@ TEST_F(RowsParserV2Test, V2UpdateRowsWithoutStmtEndFlag) {
   ASSERT_EQ(1, result->size());
 
   // Check before image
-  EXPECT_EQ("1", result->front().first.columns.at("id"));
-  EXPECT_EQ("old_name", result->front().first.columns.at("name"));
+  EXPECT_EQ("1", result->front().first.GetColumnValue("id"));
+  EXPECT_EQ("old_name", result->front().first.GetColumnValue("name"));
 
   // Check after image
-  EXPECT_EQ("1", result->front().second.columns.at("id"));
-  EXPECT_EQ("new_name", result->front().second.columns.at("name"));
+  EXPECT_EQ("1", result->front().second.GetColumnValue("id"));
+  EXPECT_EQ("new_name", result->front().second.GetColumnValue("name"));
 }
 
 /**
@@ -3085,8 +3088,8 @@ TEST_F(RowsParserV2Test, V2DeleteRowsWithoutStmtEndFlag) {
 
   ASSERT_TRUE(result.has_value()) << "V2 DELETE_ROWS with flags=0x0000 should parse correctly";
   ASSERT_EQ(1, result->size());
-  EXPECT_EQ("5", result->front().columns.at("id"));
-  EXPECT_EQ("deleted", result->front().columns.at("name"));
+  EXPECT_EQ("5", result->front().GetColumnValue("id"));
+  EXPECT_EQ("deleted", result->front().GetColumnValue("name"));
 }
 
 /**
@@ -3108,8 +3111,8 @@ TEST_F(RowsParserV2Test, V2BatchInsertMultipleEvents) {
 
   ASSERT_TRUE(result1.has_value()) << "Intermediate batch event (flags=0x0000) should parse correctly";
   ASSERT_EQ(1, result1->size());
-  EXPECT_EQ("10", result1->front().columns.at("id"));
-  EXPECT_EQ("batch1", result1->front().columns.at("name"));
+  EXPECT_EQ("10", result1->front().GetColumnValue("id"));
+  EXPECT_EQ("batch1", result1->front().GetColumnValue("name"));
 
   // Second event: flags=0x0001 (final, STMT_END_F set)
   auto row_data2 = BuildSingleRowData(11, "batch2");
@@ -3120,8 +3123,8 @@ TEST_F(RowsParserV2Test, V2BatchInsertMultipleEvents) {
 
   ASSERT_TRUE(result2.has_value()) << "Final batch event (flags=0x0001) should parse correctly";
   ASSERT_EQ(1, result2->size());
-  EXPECT_EQ("11", result2->front().columns.at("id"));
-  EXPECT_EQ("batch2", result2->front().columns.at("name"));
+  EXPECT_EQ("11", result2->front().GetColumnValue("id"));
+  EXPECT_EQ("batch2", result2->front().GetColumnValue("name"));
 }
 
 // =============================================================================
@@ -3261,8 +3264,8 @@ TEST_F(ParseSingleRowTest, BasicIntRow) {
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
   EXPECT_EQ("42", result->row.primary_key);
-  EXPECT_EQ("42", result->row.columns.at("id"));
-  EXPECT_EQ("99", result->row.columns.at("value"));
+  EXPECT_EQ("42", result->row.GetColumnValue("id"));
+  EXPECT_EQ("99", result->row.GetColumnValue("value"));
   EXPECT_EQ(result->next_ptr, buf.data() + buf.size());
 }
 
@@ -3295,7 +3298,7 @@ TEST_F(ParseSingleRowTest, NullColumn) {
   ASSERT_TRUE(result.has_value()) << result.error().message();
   EXPECT_EQ("7", result->row.primary_key);
   EXPECT_EQ("", result->row.text);  // NULL is represented as empty string
-  EXPECT_EQ("", result->row.columns.at("value"));
+  EXPECT_EQ("", result->row.GetColumnValue("value"));
   EXPECT_EQ(result->next_ptr, buf.data() + buf.size());
 }
 
@@ -3325,7 +3328,7 @@ TEST_F(ParseSingleRowTest, VarcharColumn) {
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
   EXPECT_EQ("hello", result->row.text);
-  EXPECT_EQ("hello", result->row.columns.at("name"));
+  EXPECT_EQ("hello", result->row.GetColumnValue("name"));
 }
 
 TEST_F(ParseSingleRowTest, TruncatedAtNullBitmap) {
@@ -3383,10 +3386,10 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapSkipsColumns) {
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
   EXPECT_EQ("10", result->row.primary_key);
-  EXPECT_EQ("10", result->row.columns.at("a"));
-  EXPECT_EQ("30", result->row.columns.at("c"));
+  EXPECT_EQ("10", result->row.GetColumnValue("a"));
+  EXPECT_EQ("30", result->row.GetColumnValue("c"));
   // column b should not be in the map
-  EXPECT_EQ(result->row.columns.find("b"), result->row.columns.end());
+  EXPECT_EQ(result->row.FindColumnValue("b"), nullptr);
 }
 
 #endif  // USE_MYSQL

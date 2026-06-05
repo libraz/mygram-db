@@ -11,7 +11,7 @@
 
 #include <sstream>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 /**
  * @brief Test fixture for structured logging tests
@@ -298,6 +298,21 @@ TEST_F(StructuredLogTest, TextFormatMultipleFields) {
   EXPECT_NE(output.find("message=\"Connection failed\""), std::string::npos);
 
   // Restore JSON format for other tests
+  StructuredLog::SetFormat(LogFormat::JSON);
+}
+
+TEST_F(StructuredLogTest, FormatIsCapturedPerBuilder) {
+  StructuredLog::SetFormat(LogFormat::JSON);
+
+  auto log = StructuredLog().Event("test_event").Field("key", "value");
+  StructuredLog::SetFormat(LogFormat::TEXT);
+  log.Info();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("\"event\":\"test_event\""), std::string::npos);
+  EXPECT_NE(output.find("\"key\":\"value\""), std::string::npos);
+  EXPECT_EQ(output.find("event=test_event"), std::string::npos);
+
   StructuredLog::SetFormat(LogFormat::JSON);
 }
 

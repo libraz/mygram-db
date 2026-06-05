@@ -13,6 +13,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <queue>
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
@@ -145,6 +146,54 @@ std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& se
   }
 
   return term_infos;
+}
+
+std::vector<std::string> MergeSortedTermNgramsForCache(const std::vector<SearchTermInfo>& term_infos) {
+  struct HeapEntry {
+    size_t term_index = 0;
+    size_t ngram_index = 0;
+  };
+
+  struct Greater {
+    const std::vector<SearchTermInfo>* term_infos = nullptr;
+
+    bool operator()(const HeapEntry& lhs, const HeapEntry& rhs) const {
+      return (*term_infos)[lhs.term_index].ngrams[lhs.ngram_index] >
+             (*term_infos)[rhs.term_index].ngrams[rhs.ngram_index];
+    }
+  };
+
+  size_t total_ngrams = 0;
+  for (const auto& term_info : term_infos) {
+    total_ngrams += term_info.ngrams.size();
+  }
+
+  std::vector<std::string> all_ngrams;
+  all_ngrams.reserve(total_ngrams);
+
+  std::priority_queue<HeapEntry, std::vector<HeapEntry>, Greater> heap(Greater{&term_infos});
+  for (size_t term_index = 0; term_index < term_infos.size(); ++term_index) {
+    if (!term_infos[term_index].ngrams.empty()) {
+      heap.push(HeapEntry{term_index, 0});
+    }
+  }
+
+  while (!heap.empty()) {
+    HeapEntry entry = heap.top();
+    heap.pop();
+
+    const auto& ngram = term_infos[entry.term_index].ngrams[entry.ngram_index];
+    if (all_ngrams.empty() || all_ngrams.back() != ngram) {
+      all_ngrams.push_back(ngram);
+    }
+
+    ++entry.ngram_index;
+    if (entry.ngram_index < term_infos[entry.term_index].ngrams.size()) {
+      heap.push(entry);
+    }
+  }
+
+  return all_ngrams;
 }
 
 SearchPipelineResult Execute(const query::Query& query, const std::vector<SearchTermInfo>& term_infos,
@@ -631,18 +680,7 @@ void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query
   if (cache_manager == nullptr || !cache_manager->IsEnabled()) {
     return;
   }
-  // Merge ngram vectors from term_infos using concatenate + sort + unique
-  std::vector<std::string> all_ngrams;
-  size_t total_ngrams = 0;
-  for (const auto& term_info : term_infos) {
-    total_ngrams += term_info.ngrams.size();
-  }
-  all_ngrams.reserve(total_ngrams);
-  for (const auto& term_info : term_infos) {
-    all_ngrams.insert(all_ngrams.end(), term_info.ngrams.begin(), term_info.ngrams.end());
-  }
-  std::sort(all_ngrams.begin(), all_ngrams.end());
-  all_ngrams.erase(std::unique(all_ngrams.begin(), all_ngrams.end()), all_ngrams.end());
+  auto all_ngrams = MergeSortedTermNgramsForCache(term_infos);
   cache_manager->Insert(query, results, all_ngrams, query_time_ms, ngram_size, kanji_ngram_size, cross_boundary);
 }
 

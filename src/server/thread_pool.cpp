@@ -141,22 +141,26 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
 
       auto elapsed = std::chrono::steady_clock::now() - start;
       if (elapsed >= timeout_duration) {
-        // Timeout reached - log warning but still wait for workers to finish
-        // IMPORTANT: We do NOT detach() workers because:
-        // - Detached threads may access the pool's members after destruction (use-after-free)
-        // - This causes undefined behavior and potential crashes
-        // - The timeout only controls how long we wait for tasks to complete
-        // - After timeout, we still wait for workers to finish their current tasks
-        size_t remaining_tasks = GetQueueSize();
+        size_t remaining_tasks = 0;
+        {
+          std::scoped_lock lock(queue_mutex_);
+          remaining_tasks = tasks_.size();
+          while (!tasks_.empty()) {
+            tasks_.pop();
+          }
+        }
         if (remaining_tasks > 0) {
           mygram::utils::StructuredLog()
               .Event("thread_pool_shutdown_timeout")
               .Field("remaining_tasks", static_cast<uint64_t>(remaining_tasks))
+              .Field("action", "discarded_pending_tasks")
               .Warn();
         }
       }
 
-      // Always join workers to ensure clean shutdown (even after timeout)
+      // Always join workers to ensure clean shutdown. After a timeout, only
+      // already-running tasks are allowed to finish; queued tasks were
+      // discarded above so shutdown cannot be extended by unstarted work.
       for (auto& worker : workers_) {
         if (worker.joinable()) {
           worker.join();
@@ -221,45 +225,40 @@ void ThreadPool::WorkerThread() {
         return;
       }
 
-      // Get next task
-      // Note: This check is technically redundant after the wait() condition,
-      // but kept for defensive programming and clarity
-      if (!tasks_.empty()) {
-        task = std::move(tasks_.front());
-        tasks_.pop();
-      }
+      // Get next task. The wait predicate plus shutdown/empty check above
+      // guarantee a task is available here.
+      task = std::move(tasks_.front());
+      tasks_.pop();
     }
 
     // Execute task (outside lock)
-    if (task) {
-      // RAII guard to ensure active_workers_ is properly managed
-      // even if task() throws an exception that escapes the catch blocks.
-      // After the decrement, also notify any Shutdown() waiter so it can wake
-      // promptly when the pool fully drains, instead of relying on a polling
-      // sleep.
-      active_workers_++;
-      mygram::utils::ScopeGuard worker_guard([this]() {
-        active_workers_--;
-        // Cheap check: only signal when we're plausibly idle. The waiter
-        // re-checks the predicate under idle_cv_mutex_, so spurious wakeups
-        // are safe; we just want to avoid the syscall on every task.
-        if (active_workers_.load() == 0) {
-          NotifyIdleObservers();
-        }
-      });
-
-      try {
-        task();
-      } catch (const std::exception& e) {
-        mygram::utils::StructuredLog().Event("worker_thread_exception").Field("error", e.what()).Error();
-      } catch (...) {
-        std::ostringstream tid;
-        tid << std::this_thread::get_id();
-        mygram::utils::StructuredLog().Event("worker_thread_unknown_exception").Field("thread_id", tid.str()).Error();
+    // RAII guard to ensure active_workers_ is properly managed
+    // even if task() throws an exception that escapes the catch blocks.
+    // After the decrement, also notify any Shutdown() waiter so it can wake
+    // promptly when the pool fully drains, instead of relying on a polling
+    // sleep.
+    active_workers_++;
+    mygram::utils::ScopeGuard worker_guard([this]() {
+      active_workers_--;
+      // Cheap check: only signal when we're plausibly idle. The waiter
+      // re-checks the predicate under idle_cv_mutex_, so spurious wakeups
+      // are safe; we just want to avoid the syscall on every task.
+      if (active_workers_.load() == 0) {
+        NotifyIdleObservers();
       }
-      // Note: worker_guard will automatically decrement active_workers_ and
-      // call NotifyIdleObservers() if the pool is now idle.
+    });
+
+    try {
+      task();
+    } catch (const std::exception& e) {
+      mygram::utils::StructuredLog().Event("worker_thread_exception").Field("error", e.what()).Error();
+    } catch (...) {
+      std::ostringstream tid;
+      tid << std::this_thread::get_id();
+      mygram::utils::StructuredLog().Event("worker_thread_unknown_exception").Field("thread_id", tid.str()).Error();
     }
+    // Note: worker_guard will automatically decrement active_workers_ and
+    // call NotifyIdleObservers() if the pool is now idle.
   }
 }
 

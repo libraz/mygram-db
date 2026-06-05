@@ -12,8 +12,9 @@
 #include <sstream>
 
 #include "utils/constants.h"
+#include "utils/numeric_parse.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 using mygram::utils::ErrorCode;
 
@@ -185,16 +186,11 @@ Expected<uint64_t, Error> DateTimeProcessor::DateTimeToEpoch(std::string_view da
 }
 
 Expected<uint64_t, Error> DateTimeProcessor::TimestampToEpoch(std::string_view timestamp_str) {
-  try {
-    size_t pos = 0;
-    uint64_t epoch = std::stoull(std::string(timestamp_str), &pos);
-    if (pos != timestamp_str.length()) {
-      return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid timestamp: trailing characters"));
-    }
-    return epoch;
-  } catch (const std::exception& e) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, std::string("Invalid timestamp: ") + e.what()));
+  auto epoch = ParseNumeric<uint64_t>(timestamp_str);
+  if (!epoch.has_value()) {
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid timestamp"));
   }
+  return *epoch;
 }
 
 Expected<int64_t, Error> DateTimeProcessor::TimeToSeconds(std::string_view time_str) {
@@ -474,13 +470,7 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
 std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::string_view timezone_str) {
   // If numeric, treat as epoch seconds
   if (IsNumericString(value_str)) {
-    try {
-      return std::stoull(std::string(value_str));
-    } catch (const std::invalid_argument&) {
-      return std::nullopt;
-    } catch (const std::out_of_range&) {
-      return std::nullopt;
-    }
+    return ParseNumeric<uint64_t>(value_str);
   }
 
   // Parse timezone offset
@@ -493,4 +483,4 @@ std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::stri
   return ConvertToEpoch(value_str, *offset_opt);
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

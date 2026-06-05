@@ -7,9 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 TEST(CRC32Test, EmptyData) {
   uint32_t crc = ComputeCRC32("", 0);
@@ -48,4 +49,23 @@ TEST(CRC32Test, PointerOverloadMatchesStringOverload) {
   uint32_t crc_ptr = ComputeCRC32(data.data(), data.size());
   uint32_t crc_str = ComputeCRC32(data);
   EXPECT_EQ(crc_ptr, crc_str);
+}
+
+TEST(CRC32Test, UpdateCRC32MatchesManualChunks) {
+  std::string data;
+  data.reserve(64 * 1024);
+  for (int i = 0; i < 4096; ++i) {
+    data += "chunked-crc32-data";
+  }
+
+  uint32_t chunked_crc = 0;
+  size_t offset = 0;
+  constexpr size_t kChunkSize = 257;
+  while (offset < data.size()) {
+    const size_t length = std::min(kChunkSize, data.size() - offset);
+    chunked_crc = UpdateCRC32(chunked_crc, data.data() + offset, length);
+    offset += length;
+  }
+
+  EXPECT_EQ(chunked_crc, ComputeCRC32(data));
 }

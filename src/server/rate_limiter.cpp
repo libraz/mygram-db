@@ -122,14 +122,14 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
     }
 
     // Create new bucket for this client
-    bucket_iter = client_buckets_.emplace(client_ip, std::make_unique<ClientBucket>(capacity_, refill_rate_)).first;
+    bucket_iter = client_buckets_.try_emplace(client_ip, capacity_, refill_rate_).first;
   }
 
   // Update last access time
-  bucket_iter->second->last_access = now;
+  bucket_iter->second.last_access = now;
 
   // Try to consume token
-  bool allowed = bucket_iter->second->bucket->TryConsume();
+  bool allowed = bucket_iter->second.bucket.TryConsume();
 
   // Update statistics
   if (allowed) {
@@ -148,7 +148,7 @@ void RateLimiter::SweepExpiredBuckets() {
   size_t removed = 0;
 
   for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
-    if (now - it->second->last_access > inactivity_timeout_) {
+    if (now - it->second.last_access > inactivity_timeout_) {
       it = client_buckets_.erase(it);
       removed++;
     } else {

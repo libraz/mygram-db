@@ -16,6 +16,7 @@
 #include "utils/constants.h"
 #include "utils/datetime_converter.h"
 #include "utils/memory_utils.h"
+#include "utils/numeric_parse.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -73,7 +74,7 @@ std::string GetConfigValueWithEnvOverride(const std::optional<std::string>& json
 /**
  * @brief Convert YAML node to JSON object recursively
  */
-json YamlToJson(const YAML::Node& node) {
+json YamlToJsonImpl(const YAML::Node& node) {
   switch (node.Type()) {
     case YAML::NodeType::Null:
       return {};
@@ -88,14 +89,14 @@ json YamlToJson(const YAML::Node& node) {
     case YAML::NodeType::Sequence: {
       json result = json::array();
       for (const auto& item : node) {
-        result.push_back(YamlToJson(item));
+        result.push_back(YamlToJsonImpl(item));
       }
       return result;
     }
     case YAML::NodeType::Map: {
       json result = json::object();
       for (const auto& key_value : node) {
-        result[key_value.first.as<std::string>()] = YamlToJson(key_value.second);
+        result[key_value.first.as<std::string>()] = YamlToJsonImpl(key_value.second);
       }
       return result;
     }
@@ -130,9 +131,10 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
     // Port: environment variable takes precedence
     auto env_port = GetEnvValue("MYGRAM_MYSQL_PORT");
     if (env_port.has_value()) {
-      try {
-        config.port = std::stoi(env_port.value());
-      } catch (const std::exception&) {
+      auto parsed_port = mygram::utils::ParseNumeric<int>(env_port.value());
+      if (parsed_port.has_value()) {
+        config.port = *parsed_port;
+      } else {
         // Invalid port in environment variable, fall through to config file value
         mygram::utils::StructuredLog()
             .Event("config_env_override_rejected")
@@ -472,6 +474,9 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
     }
     if (syn.contains("file")) {
       config.synonyms.file = syn["file"].get<std::string>();
+      if (auto v = internal::ValidatePathNoTraversal(config.synonyms.file, "tables[].synonyms.file"); !v) {
+        return MakeUnexpected(v.error());
+      }
     }
   }
 
@@ -481,7 +486,7 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
 /**
  * @brief Parse configuration from JSON object
  */
-mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const json& root) {
+mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(const json& root) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -514,6 +519,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const 
       // Apply global ngram_size if not set per-table
       if (!table_json.contains("ngram_size")) {
         table.ngram_size = global_ngram_size;
+        if (!table_json.contains("kanji_ngram_size")) {
+          table.kanji_ngram_size = table.ngram_size;
+        }
       }
       config.tables.push_back(std::move(table));
     }
@@ -927,21 +935,11 @@ mygram::utils::Expected<mygram::utils::DateTimeProcessor, mygram::utils::Error> 
 namespace internal {
 
 mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const nlohmann::json& root) {
-  // Use a namespace-qualified call via a local using-declaration to avoid
-  // infinite recursion. The anonymous namespace injects its names into the
-  // enclosing namespace (mygramdb::config), so we can capture a pointer to
-  // the anonymous-namespace version before the internal:: version is in scope.
-  using ParseFn = mygram::utils::Expected<Config, mygram::utils::Error> (*)(const nlohmann::json&);
-  // NOLINTNEXTLINE(misc-redundant-expression)
-  static const ParseFn parse_impl = &::mygramdb::config::ParseConfigFromJson;
-  return parse_impl(root);
+  return ParseConfigFromJsonImpl(root);
 }
 
 nlohmann::json YamlToJson(const YAML::Node& node) {
-  using YamlFn = nlohmann::json (*)(const YAML::Node&);
-  // NOLINTNEXTLINE(misc-redundant-expression)
-  static const YamlFn yaml_impl = &::mygramdb::config::YamlToJson;
-  return yaml_impl(node);
+  return YamlToJsonImpl(node);
 }
 
 }  // namespace internal

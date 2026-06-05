@@ -27,6 +27,7 @@ mygram::utils::Expected<CommandHandler::TableContextResult, mygram::utils::Error
   }
 
   return TableContextResult{
+      .table_context = table_ctx,
       .index = table_ctx->index.get(),
       .doc_store = table_ctx->doc_store.get(),
       .ngram_size = table_ctx->config.ngram_size,

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
+#include <vector>
 
 #include "config/runtime_variable_manager.h"
 #include "server/response_formatter.h"
@@ -63,14 +64,35 @@ std::string VariableHandler::HandleSet(const Query& query) {
   }
 #endif
 
-  // Apply each variable assignment
+  std::vector<std::pair<std::string, std::string>> applied_old_values;
+  applied_old_values.reserve(query.variable_assignments.size());
+
+  // Apply each variable assignment. If a later assignment fails, roll back
+  // the earlier successful changes so multi-SET is all-or-nothing from the
+  // user's perspective.
   for (const auto& [variable_name, value] : query.variable_assignments) {
+    auto old_value = ctx_.variable_manager->GetVariable(variable_name);
+    if (!old_value) {
+      return ResponseFormatter::FormatError("Failed to set variable '" + variable_name +
+                                            "': " + old_value.error().message());
+    }
+
     auto result = ctx_.variable_manager->SetVariable(variable_name, value);
     if (!result) {
-      // Return error for the first failed assignment
+      for (auto it = applied_old_values.rbegin(); it != applied_old_values.rend(); ++it) {
+        auto rollback = ctx_.variable_manager->SetVariable(it->first, it->second);
+        if (!rollback) {
+          mygram::utils::StructuredLog()
+              .Event("variable_set_rollback_failed")
+              .Field("variable", it->first)
+              .Field("error", rollback.error().to_string())
+              .Error();
+        }
+      }
       return ResponseFormatter::FormatError("Failed to set variable '" + variable_name +
                                             "': " + result.error().message());
     }
+    applied_old_values.emplace_back(variable_name, *old_value);
   }
 
   // Success

@@ -110,6 +110,18 @@ TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesMysqlSslPathError) {
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
 }
 
+TEST(ConfigErrorHandlingTest, ParseConfigFromJsonRejectsSynonymsFilePathTraversal) {
+  json config_json = {{"tables", json::array({{{"name", "test"},
+                                               {"primary_key", "id"},
+                                               {"text_source", {{"column", "body"}}},
+                                               {"synonyms", {{"enable", true}, {"file", "../synonyms.tsv"}}}}})}};
+
+  auto result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(result.has_value()) << "ParseConfigFromJson should fail for path traversal in synonyms.file";
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
+  EXPECT_NE(result.error().message().find("synonyms.file"), std::string::npos);
+}
+
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonSucceedsForValidMinimalConfig) {
   json config_json = {
       {"tables", json::array({{{"name", "test"}, {"primary_key", "id"}, {"text_source", {{"column", "body"}}}}})}};
@@ -118,6 +130,43 @@ TEST(ConfigErrorHandlingTest, ParseConfigFromJsonSucceedsForValidMinimalConfig) 
   ASSERT_TRUE(result.has_value()) << "ParseConfigFromJson should succeed: " << result.error().message();
   EXPECT_EQ(result->tables.size(), 1);
   EXPECT_EQ(result->tables[0].name, "test");
+}
+
+TEST(ConfigErrorHandlingTest, LoadConfigAcceptsBigintUnsignedFilterTypes) {
+  std::string config_path = CreateTempYamlConfig(
+      "mysql:\n"
+      "  host: \"127.0.0.1\"\n"
+      "  port: 3306\n"
+      "  user: \"test\"\n"
+      "  password: \"test\"\n"
+      "  database: \"test\"\n"
+      "\n"
+      "tables:\n"
+      "  - name: \"test_table\"\n"
+      "    primary_key: \"id\"\n"
+      "    text_source:\n"
+      "      column: \"content\"\n"
+      "    required_filters:\n"
+      "      - name: \"account_id\"\n"
+      "        type: \"bigint_unsigned\"\n"
+      "        op: \">=\"\n"
+      "        value: \"18446744073709551614\"\n"
+      "    filters:\n"
+      "      - name: \"account_id\"\n"
+      "        type: \"bigint_unsigned\"\n"
+      "\n"
+      "replication:\n"
+      "  enable: false\n");
+
+  auto result = LoadConfig(config_path);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(result->tables.size(), 1);
+  ASSERT_EQ(result->tables[0].required_filters.size(), 1);
+  ASSERT_EQ(result->tables[0].filters.size(), 1);
+  EXPECT_EQ(result->tables[0].required_filters[0].type, "bigint_unsigned");
+  EXPECT_EQ(result->tables[0].filters[0].type, "bigint_unsigned");
+
+  std::filesystem::remove(config_path);
 }
 
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesInvalidServerId) {

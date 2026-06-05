@@ -11,7 +11,7 @@
 
 #include "utils/error.h"
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 // ========== Test Expected<T, E> with value ==========
 
@@ -62,6 +62,26 @@ TEST(ExpectedTest, ErrorAccess) {
 
   EXPECT_EQ(result.error().code(), ErrorCode::kTimeout);
   EXPECT_EQ(result.error().message(), "Operation timed out");
+}
+
+TEST(ExpectedTest, AssignUnexpectedReplacesValueWithError) {
+  Expected<int, Error> result(42);
+
+  result = MakeUnexpected(MakeError(ErrorCode::kTimeout, "Timed out"));
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kTimeout);
+  EXPECT_EQ(result.error().message(), "Timed out");
+}
+
+TEST(ExpectedTest, MoveAssignUnexpectedReplacesValueWithError) {
+  Expected<std::string, Error> result("value");
+
+  result = MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid"));
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(result.error().message(), "Invalid");
 }
 
 TEST(ExpectedTest, ValueOr) {

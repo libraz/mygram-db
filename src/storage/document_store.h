@@ -64,7 +64,7 @@ struct TimeValue {
  * - int32_t: INT/MEDIUMINT (-2B to 2B)
  * - uint32_t: INT UNSIGNED (0 to 4B)
  * - int64_t: BIGINT
- * - uint64_t: DATETIME/TIMESTAMP (epoch timestamp)
+ * - uint64_t: BIGINT UNSIGNED or DATETIME/TIMESTAMP (epoch timestamp)
  * - TimeValue: TIME (seconds since midnight, -3020399 to 3020399)
  * - double: FLOAT/DOUBLE
  * - std::string: VARCHAR/TEXT
@@ -78,7 +78,7 @@ using FilterValue = std::variant<std::monostate,  // NULL value
                                  int32_t,         // INT/MEDIUMINT
                                  uint32_t,        // INT UNSIGNED
                                  int64_t,         // BIGINT
-                                 uint64_t,        // DATETIME/TIMESTAMP (epoch timestamp)
+                                 uint64_t,        // BIGINT UNSIGNED or DATETIME/TIMESTAMP (epoch timestamp)
                                  TimeValue,       // TIME (seconds since midnight)
                                  std::string,     // VARCHAR/TEXT
                                  double           // FLOAT/DOUBLE

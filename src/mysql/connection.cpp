@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "mysql/gtid_encoder.h"
+#include "utils/numeric_parse.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic) - UUID binary parsing
@@ -715,14 +716,15 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
     if (col_result_exp) {
       MYSQL_ROW col_row = mysql_fetch_row(col_result_exp->get());
       if ((col_row != nullptr) && (col_row[0] != nullptr)) {
-        try {
-          if (std::stoi(col_row[0]) == 0) {
+        auto column_count = mygram::utils::ParseNumeric<int>(col_row[0]);
+        if (column_count.has_value()) {
+          if (*column_count == 0) {
             return MakeUnexpected(
                 MakeError(ErrorCode::kMySQLColumnNotFound,
                           "Column '" + column + "' does not exist in table '" + database + "." + table + "'",
                           database + "." + table + "." + column));
           }
-        } catch (const std::exception& e) {
+        } else {
           return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema, "Invalid column count value",
                                           database + "." + table + "." + column));
         }

@@ -5,12 +5,11 @@
 
 #include "query/result_sorter.h"
 
-#include <spdlog/spdlog.h>
-
 #include <algorithm>
 #include <array>
 #include <charconv>
 #include <cstring>
+#include <iterator>
 #include <optional>
 #include <variant>
 
@@ -398,6 +397,73 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
   return sorted_results;
 }
 
+std::vector<DocId> ResultSorter::SortWithBatchedSchwartzianTransformPartial(const std::vector<DocId>& results,
+                                                                            const storage::DocumentStore& doc_store,
+                                                                            const OrderByClause& order_by,
+                                                                            const std::string& primary_key_column,
+                                                                            size_t top_k) {
+  if (results.empty() || top_k == 0) {
+    return {};
+  }
+
+  top_k = std::min(top_k, results.size());
+  const bool ascending = (order_by.order == SortOrder::ASC);
+  const auto entry_less = [ascending](const SortEntry& lhs, const SortEntry& rhs) {
+    int cmp = lhs.sort_key.compare(rhs.sort_key);
+    return ascending ? (cmp < 0) : (cmp > 0);
+  };
+
+  std::vector<SortEntry> top_entries;
+  try {
+    top_entries.reserve(top_k);
+  } catch (const std::bad_alloc&) {
+    mygram::utils::StructuredLog()
+        .Event("sort_fallback")
+        .Field("reason", "batched_topk_allocation_failed")
+        .Field("top_k", static_cast<uint64_t>(top_k))
+        .Error();
+    return {};
+  }
+
+  for (size_t offset = 0; offset < results.size(); offset += kSchwartzianBatchSize) {
+    size_t batch_size = std::min(kSchwartzianBatchSize, results.size() - offset);
+    std::vector<DocId> batch(results.begin() + static_cast<std::ptrdiff_t>(offset),
+                             results.begin() + static_cast<std::ptrdiff_t>(offset + batch_size));
+
+    std::vector<SortEntry> batch_entries;
+    try {
+      batch_entries.reserve(batch.size());
+    } catch (const std::bad_alloc&) {
+      mygram::utils::StructuredLog()
+          .Event("sort_fallback")
+          .Field("reason", "batched_sort_allocation_failed")
+          .Field("batch_size", static_cast<uint64_t>(batch.size()))
+          .Error();
+      return {};
+    }
+
+    PrecomputeSortKeys(batch, doc_store, order_by, primary_key_column, batch_entries);
+    top_entries.insert(top_entries.end(), std::make_move_iterator(batch_entries.begin()),
+                       std::make_move_iterator(batch_entries.end()));
+
+    if (top_entries.size() > top_k) {
+      std::partial_sort(top_entries.begin(), top_entries.begin() + static_cast<std::ptrdiff_t>(top_k),
+                        top_entries.end(), entry_less);
+      top_entries.resize(top_k);
+    }
+  }
+
+  std::sort(top_entries.begin(), top_entries.end(), entry_less);
+
+  std::vector<DocId> sorted_results;
+  sorted_results.reserve(top_entries.size());
+  for (const auto& entry : top_entries) {
+    sorted_results.push_back(entry.doc_id);
+  }
+
+  return sorted_results;
+}
+
 bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
   // Optimization: for primary key ordering, try numeric comparison first
   // This avoids string allocation for numeric primary keys
@@ -544,13 +610,21 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
 
     if (!sorted_results.empty()) {
       // Success - return directly (already paginated to total_needed)
-      spdlog::trace("Used Schwartzian Transform + partial_sort for {} out of {} results", total_needed, results.size());
+      mygram::utils::StructuredLog()
+          .Event("result_sort_strategy")
+          .Field("strategy", "schwartzian_partial_sort")
+          .Field("needed", static_cast<uint64_t>(total_needed))
+          .Field("result_count", static_cast<uint64_t>(results.size()))
+          .Trace();
 
       // Apply OFFSET within the partial-sorted results, with limit clamped to remaining size
       return ApplyOffsetLimit(sorted_results, query.offset, query.limit);
     }
     // Fall through to traditional partial_sort if Schwartzian failed
-    spdlog::trace("Schwartzian Transform failed, falling back to traditional partial_sort");
+    mygram::utils::StructuredLog()
+        .Event("result_sort_strategy")
+        .Field("strategy", "schwartzian_failed_fallback")
+        .Trace();
   } else if (use_schwartzian) {
     // Schwartzian Transform: Pre-compute sort keys, then full sort
     // Expected: 30-50% reduction in sort time for N >= 10,000
@@ -558,17 +632,34 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     auto sorted_results = SortWithSchwartzianTransform(results, doc_store, order_by, primary_key_column);
     results = std::move(sorted_results);
 
-    spdlog::trace("Used Schwartzian Transform for {} results", results.size());
+    mygram::utils::StructuredLog()
+        .Event("result_sort_strategy")
+        .Field("strategy", "schwartzian_full_sort")
+        .Field("result_count", static_cast<uint64_t>(results.size()))
+        .Trace();
   } else if (use_partial_sort) {
-    // Traditional partial_sort: O(N * log(K)) where K = total_needed
-    // Note: This path has lock contention issues with parallel execution
-    // Used only for very large result sets (> 5M) to avoid memory explosion
+    auto sorted_results =
+        SortWithBatchedSchwartzianTransformPartial(results, doc_store, order_by, primary_key_column, total_needed);
+    if (!sorted_results.empty()) {
+      mygram::utils::StructuredLog()
+          .Event("result_sort_strategy")
+          .Field("strategy", "schwartzian_batched_partial_sort")
+          .Field("needed", static_cast<uint64_t>(total_needed))
+          .Field("result_count", static_cast<uint64_t>(results.size()))
+          .Trace();
+      return ApplyOffsetLimit(sorted_results, query.offset, query.limit);
+    }
+
     SortComparator comparator(doc_store, order_by, primary_key_column);
     std::partial_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(total_needed), results.end(),
                       comparator);
 
-    spdlog::trace("Used traditional partial_sort for {} out of {} results (large dataset fallback)", total_needed,
-                  results.size());
+    mygram::utils::StructuredLog()
+        .Event("result_sort_strategy")
+        .Field("strategy", "traditional_partial_sort")
+        .Field("needed", static_cast<uint64_t>(total_needed))
+        .Field("result_count", static_cast<uint64_t>(results.size()))
+        .Trace();
   } else {
     // Full sort: O(N * log(N))
     // Use when result set is too small for Schwartzian Transform (< 100)
@@ -576,7 +667,11 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     SortComparator comparator(doc_store, order_by, primary_key_column);
     std::sort(results.begin(), results.end(), comparator);
 
-    spdlog::trace("Used full sort for {} results", results.size());
+    mygram::utils::StructuredLog()
+        .Event("result_sort_strategy")
+        .Field("strategy", "traditional_full_sort")
+        .Field("result_count", static_cast<uint64_t>(results.size()))
+        .Trace();
   }
 
   // Apply OFFSET and LIMIT after sorting

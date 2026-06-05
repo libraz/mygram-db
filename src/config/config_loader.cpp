@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include "config/config.h"
 #include "config/config_internal.h"
@@ -24,18 +25,18 @@ using json = nlohmann::json;
 // NOLINTNEXTLINE(performance-enum-size)
 enum class FileFormat { kYaml, kJson, kUnknown };
 
-constexpr size_t kJsonExtLength = 5;  // ".json"
-constexpr size_t kYamlExtLength = 5;  // ".yaml"
-constexpr size_t kYmlExtLength = 4;   // ".yml"
+bool HasExtension(std::string_view path, std::string_view ext) {
+  return path.size() >= ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0;
+}
 
 FileFormat DetectFileFormat(const std::string& path) {
-  if (path.size() >= kJsonExtLength && path.substr(path.size() - kJsonExtLength) == ".json") {
+  if (HasExtension(path, ".json")) {
     return FileFormat::kJson;
   }
-  if (path.size() >= kYamlExtLength && path.substr(path.size() - kYamlExtLength) == ".yaml") {
+  if (HasExtension(path, ".yaml")) {
     return FileFormat::kYaml;
   }
-  if (path.size() >= kYmlExtLength && path.substr(path.size() - kYmlExtLength) == ".yml") {
+  if (HasExtension(path, ".yml")) {
     return FileFormat::kYaml;
   }
   return FileFormat::kUnknown;
@@ -167,7 +168,10 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::
   }
 }
 
-mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::string& path) {
+namespace {
+
+mygram::utils::Expected<Config, mygram::utils::Error> LoadYamlConfig(const std::string& path,
+                                                                     const std::string& schema_path) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -177,14 +181,19 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
     YAML::Node yaml_root = YAML::LoadFile(path);
     json json_root = internal::YamlToJson(yaml_root);
 
-    // Validate config against schema (same as LoadConfig does for YAML)
-    {
-      std::string config_json_str = json_root.dump();
-      std::string empty_schema;  // Use embedded schema
-      auto validation_result = ValidateConfigJson(config_json_str, empty_schema);
-      if (!validation_result) {
-        return MakeUnexpected(validation_result.error());
+    std::string config_json_str = json_root.dump();
+    std::string schema_str;
+    if (!schema_path.empty()) {
+      auto schema_result = internal::ReadFileToString(schema_path);
+      if (!schema_result) {
+        return MakeUnexpected(schema_result.error());
       }
+      schema_str = *schema_result;
+    }
+    // ValidateConfigJson will use embedded schema if schema_str is empty.
+    auto validation_result = ValidateConfigJson(config_json_str, schema_str);
+    if (!validation_result) {
+      return MakeUnexpected(validation_result.error());
     }
 
     // Parse config from JSON object
@@ -227,6 +236,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
   }
 }
 
+}  // namespace
+
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::string& path) {
+  return LoadYamlConfig(path, "");
+}
+
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::string& path,
                                                                  const std::string& schema_path) {
   using mygram::utils::Error;
@@ -251,63 +266,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
           .Field("format", "yaml")
           .Field("path", path)
           .Debug();
-      // Parse YAML once, validate, then reuse the parsed JSON
-      try {
-        YAML::Node yaml_root = YAML::LoadFile(path);
-        json json_root = internal::YamlToJson(yaml_root);
-        std::string config_json_str = json_root.dump();
-        std::string schema_str;
-        if (!schema_path.empty()) {
-          auto schema_result = internal::ReadFileToString(schema_path);
-          if (!schema_result) {
-            return MakeUnexpected(schema_result.error());
-          }
-          schema_str = *schema_result;
-        }
-        // ValidateConfigJson will use embedded schema if schema_str is empty
-        auto validation_result = ValidateConfigJson(config_json_str, schema_str);
-        if (!validation_result) {
-          return MakeUnexpected(validation_result.error());
-        }
-
-        // Reuse the already-parsed JSON instead of re-reading and re-parsing the file
-        auto config_result = internal::ParseConfigFromJson(json_root);
-        if (!config_result) {
-          return MakeUnexpected(config_result.error());
-        }
-        auto& config = *config_result;
-
-        // Apply log format immediately so subsequent logs use the configured format
-        mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
-
-        mygram::utils::StructuredLog()
-            .Event("config_loaded")
-            .Field("path", path)
-            .Field("tables", static_cast<uint64_t>(config.tables.size()))
-            .Field("mysql_host", config.mysql.host)
-            .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
-            .Info();
-
-        return config;
-      } catch (const YAML::Exception& e) {
-        std::stringstream err_msg;
-        err_msg << "YAML parse error in configuration file: " << path << "\n";
-        err_msg << "  Error details: " << e.what() << "\n";
-        if (e.mark.line != static_cast<size_t>(-1)) {
-          err_msg << "  Error location: line " << (e.mark.line + 1) << ", column " << (e.mark.column + 1) << "\n";
-        }
-        err_msg << "  Common issues:\n";
-        err_msg << "    - Incorrect indentation (use spaces, not tabs)\n";
-        err_msg << "    - Missing colon after key name\n";
-        err_msg << "    - Unquoted special characters in values\n";
-        err_msg << "    - Inconsistent list formatting\n";
-        err_msg << "  Tip: Check YAML syntax, especially indentation\n";
-        err_msg << "  Example config: examples/config.yaml";
-        return MakeUnexpected(MakeError(ErrorCode::kConfigYamlError, err_msg.str(), path));
-      } catch (const std::exception& e) {
-        return MakeUnexpected(MakeError(ErrorCode::kConfigParseError,
-                                        std::string("Failed to load config from ") + path + ": " + e.what(), path));
-      }
+      return LoadYamlConfig(path, schema_path);
 
     case FileFormat::kUnknown:
     default:

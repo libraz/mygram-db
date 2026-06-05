@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 #include <sys/stat.h>
 
+#include <cassert>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -237,7 +238,8 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   // below early-returns or throws, the destructor drops the counter so we
   // do not leak a pause increment. The destructor does NOT call Start();
   // the explicit Release() path below owns that side-effect.
-  replication_pause::Scope pause_scope;
+  assert(ctx_.replication_pause_counter != nullptr);
+  replication_pause::Scope pause_scope(*ctx_.replication_pause_counter);
 
 #ifdef USE_MYSQL
   std::string gtid;
@@ -287,16 +289,6 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 
   // Convert table contexts to format expected by dump API
   auto converted_contexts = ctx_.table_catalog->GetDumpableContexts();
-  {
-    size_t table_index = 0;
-    for (const auto& [table_name, ctx_pair] : converted_contexts) {
-      if (ctx_.dump_progress != nullptr) {
-        ctx_.dump_progress->UpdateTable(table_name, table_index);
-      }
-      ++table_index;
-    }
-  }
-
   // Call dump API (writes V2 format)
   mygram::utils::StructuredLog()
       .Event("dump_save_write_starting")
@@ -305,7 +297,12 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
       .Field("tables", static_cast<uint64_t>(converted_contexts.size()))
       .Info();
 
-  auto result = storage::dump_v2::WriteDump(filepath, gtid, *ctx_.full_config, converted_contexts);
+  auto result = storage::dump_v2::WriteDump(filepath, gtid, *ctx_.full_config, converted_contexts, nullptr, nullptr,
+                                            [this](const std::string& table_name, size_t tables_processed) {
+                                              if (ctx_.dump_progress != nullptr) {
+                                                ctx_.dump_progress->UpdateTable(table_name, tables_processed);
+                                              }
+                                            });
 
   mygram::utils::StructuredLog()
       .Event("dump_save_write_finished")
@@ -479,6 +476,18 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         "Cannot load dump while another DUMP LOAD is in progress. "
         "Please wait for current load to complete.");
   }
+  if (ctx_.dump_save_in_progress.load()) {
+    loading_guard.Release();
+    return ResponseFormatter::FormatError(
+        "Cannot load dump while DUMP SAVE is in progress. "
+        "Please wait for save to complete.");
+  }
+  if (ctx_.optimization_in_progress.load()) {
+    loading_guard.Release();
+    return ResponseFormatter::FormatError(
+        "Cannot load dump while OPTIMIZE is in progress. "
+        "Please wait for optimization to complete.");
+  }
 
 #ifdef USE_MYSQL
   // Check if replication is running (need to stop it before DUMP LOAD)
@@ -499,7 +508,8 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // leak the increment. The destructor itself does NOT call Start();
   // the ScopeGuard / explicit-success branches own that side-effect.
   bool first_pauser = false;
-  replication_pause::Scope pause_scope;
+  assert(ctx_.replication_pause_counter != nullptr);
+  replication_pause::Scope pause_scope(*ctx_.replication_pause_counter);
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
     first_pauser = pause_scope.Acquire();
     if (first_pauser) {
@@ -825,8 +835,8 @@ std::string DumpHandler::HandleDumpStatus() {
   // Overall status from DumpProgress (if available)
   std::string status;
   if (ctx_.dump_progress != nullptr) {
-    std::lock_guard<std::mutex> lock(ctx_.dump_progress->mutex);
-    switch (ctx_.dump_progress->status) {
+    auto progress_snapshot = ctx_.dump_progress->GetSnapshot();
+    switch (progress_snapshot.status) {
       case DumpStatus::IDLE:
         status = "IDLE";
         break;
@@ -846,31 +856,27 @@ std::string DumpHandler::HandleDumpStatus() {
     result << "status: " << status << "\r\n";
 
     // Show progress details if operation in progress or recently completed/failed
-    if (ctx_.dump_progress->status != DumpStatus::IDLE) {
-      result << "filepath: " << ctx_.dump_progress->filepath << "\r\n";
-      result << "tables_processed: " << ctx_.dump_progress->tables_processed << "\r\n";
-      result << "tables_total: " << ctx_.dump_progress->tables_total << "\r\n";
+    if (progress_snapshot.status != DumpStatus::IDLE) {
+      result << "filepath: " << progress_snapshot.filepath << "\r\n";
+      result << "tables_processed: " << progress_snapshot.tables_processed << "\r\n";
+      result << "tables_total: " << progress_snapshot.tables_total << "\r\n";
 
-      if (!ctx_.dump_progress->current_table.empty()) {
-        result << "current_table: " << ctx_.dump_progress->current_table << "\r\n";
+      if (!progress_snapshot.current_table.empty()) {
+        result << "current_table: " << progress_snapshot.current_table << "\r\n";
       }
 
       // Show elapsed time
-      auto now = std::chrono::steady_clock::now();
-      auto end = (ctx_.dump_progress->status == DumpStatus::SAVING || ctx_.dump_progress->status == DumpStatus::LOADING)
-                     ? now
-                     : ctx_.dump_progress->end_time;
-      double elapsed = std::chrono::duration<double>(end - ctx_.dump_progress->start_time).count();
-      result << "elapsed_seconds: " << std::fixed << std::setprecision(2) << elapsed << "\r\n";
+      result << "elapsed_seconds: " << std::fixed << std::setprecision(2) << progress_snapshot.elapsed_seconds
+             << "\r\n";
 
       // Show error message if failed
-      if (ctx_.dump_progress->status == DumpStatus::FAILED && !ctx_.dump_progress->error_message.empty()) {
-        result << "error: " << ctx_.dump_progress->error_message << "\r\n";
+      if (progress_snapshot.status == DumpStatus::FAILED && !progress_snapshot.error_message.empty()) {
+        result << "error: " << progress_snapshot.error_message << "\r\n";
       }
 
       // Show last result filepath if completed
-      if (ctx_.dump_progress->status == DumpStatus::COMPLETED && !ctx_.dump_progress->last_result_filepath.empty()) {
-        result << "result_filepath: " << ctx_.dump_progress->last_result_filepath << "\r\n";
+      if (progress_snapshot.status == DumpStatus::COMPLETED && !progress_snapshot.last_result_filepath.empty()) {
+        result << "result_filepath: " << progress_snapshot.last_result_filepath << "\r\n";
       }
     }
   } else {

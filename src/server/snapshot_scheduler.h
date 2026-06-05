@@ -13,6 +13,9 @@
 #include <thread>
 
 #include "config/config.h"
+#include "server/replication_pause_counter.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::mysql {
 class IBinlogReader;
@@ -56,7 +59,8 @@ class SnapshotScheduler {
    */
   SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog, const config::Config* full_config,
                     std::string dump_dir, mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
-                    std::atomic<bool>& replication_paused_for_dump);
+                    std::atomic<bool>& replication_paused_for_dump,
+                    replication_pause::Counter* replication_pause_counter = nullptr);
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -71,7 +75,7 @@ class SnapshotScheduler {
    *
    * Starts the background thread that periodically creates snapshots.
    */
-  void Start();
+  mygram::utils::Expected<void, mygram::utils::Error> Start();
 
   /**
    * @brief Stop the scheduler
@@ -84,7 +88,7 @@ class SnapshotScheduler {
    * @brief Check if scheduler is running
    * @return true if running
    */
-  bool IsRunning() const { return running_; }
+  bool IsRunning() const { return running_.load(std::memory_order_acquire); }
 
  private:
   /**
@@ -128,6 +132,8 @@ class SnapshotScheduler {
   // REPLICATION START requests are rejected, mirroring the behavior of
   // manual DUMP SAVE/LOAD.
   std::atomic<bool>& replication_paused_for_dump_;
+  replication_pause::Counter local_replication_pause_counter_;
+  replication_pause::Counter* replication_pause_counter_;
 };
 
 }  // namespace mygramdb::server

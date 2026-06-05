@@ -12,6 +12,7 @@ target_include_directories(mygramdb_cache PUBLIC
 
 target_link_libraries(mygramdb_cache PUBLIC
   mygramdb_query  # For Query AST types and cache key generation
+  mygramdb_cache_key
   mygramdb_utils
   lz4              # For LZ4 compression
   spdlog::spdlog

@@ -108,12 +108,12 @@ TEST_F(CliStringHelperTest, ToUpperBasic) {
 }
 
 TEST_F(CliStringHelperTest, TrimWhitespace) {
-  EXPECT_EQ(Trim("  hello  "), "hello");
-  EXPECT_EQ(Trim("\t\nhello\r\n"), "hello");
-  EXPECT_EQ(Trim("hello"), "hello");
-  EXPECT_EQ(Trim("   "), "");
-  EXPECT_EQ(Trim(""), "");
-  EXPECT_EQ(Trim("hello world"), "hello world");
+  EXPECT_EQ(TrimAsciiWhitespace("  hello  "), "hello");
+  EXPECT_EQ(TrimAsciiWhitespace("\t\nhello\r\n"), "hello");
+  EXPECT_EQ(TrimAsciiWhitespace("hello"), "hello");
+  EXPECT_EQ(TrimAsciiWhitespace("   "), "");
+  EXPECT_EQ(TrimAsciiWhitespace(""), "");
+  EXPECT_EQ(TrimAsciiWhitespace("hello world"), "hello world");
 }
 
 TEST_F(CliStringHelperTest, NormalizeCrlfReplacesAllOccurrences) {

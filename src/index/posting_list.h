@@ -14,6 +14,7 @@
 #include <shared_mutex>
 #include <vector>
 
+#include "config/config.h"
 #include "types/doc_id.h"
 
 namespace mygramdb::index {
@@ -21,7 +22,7 @@ namespace mygramdb::index {
 /**
  * @brief Default density threshold for Roaring bitmap strategy (18%)
  */
-constexpr double kDefaultRoaringThreshold = 0.18;
+constexpr double kDefaultRoaringThreshold = config::defaults::kRoaringThreshold;
 
 // DocId is now defined in types/doc_id.h and re-exported via namespace
 

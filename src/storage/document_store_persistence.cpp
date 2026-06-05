@@ -62,20 +62,6 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   // [filters...]
   // v2+: [4 bytes: normalized_text_length] [normalized_text_length bytes: text]
 
-  // Snapshot data structures under a brief lock, then serialize without holding
-  // the lock. This avoids blocking writers for the entire serialization duration.
-  uint32_t next_id = 0;
-  absl::flat_hash_map<DocId, std::string> snap_doc_id_to_pk;
-  absl::flat_hash_map<DocId, FilterMap> snap_doc_filters;
-  absl::flat_hash_map<DocId, std::string> snap_doc_texts;
-  {
-    std::shared_lock lock(mutex_);
-    next_id = static_cast<uint32_t>(next_doc_id_);
-    snap_doc_id_to_pk = doc_id_to_pk_;
-    snap_doc_filters = doc_filters_;
-    snap_doc_texts = doc_texts_;
-  }  // Lock released here — writers can proceed during serialization
-
   // Write magic number
   out.write("MGDS", 4);
 
@@ -83,87 +69,92 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   uint32_t version = 2;
   WriteBinary(out, version);
 
-  // Write next_doc_id
-  WriteBinary(out, next_id);
-
   // Write GTID (for replication position)
   auto gtid_len = static_cast<uint32_t>(replication_gtid.size());
-  WriteBinary(out, gtid_len);
-  if (gtid_len > 0) {
-    out.write(replication_gtid.data(), static_cast<std::streamsize>(gtid_len));
-  }
+  {
+    std::shared_lock lock(mutex_);
 
-  // Check stream after writing header section
-  if (!out.good())
-    return false;
+    // Write next_doc_id
+    auto next_id = static_cast<uint32_t>(next_doc_id_);
+    WriteBinary(out, next_id);
 
-  // Write document count
-  auto doc_count = static_cast<uint64_t>(snap_doc_id_to_pk.size());
-  WriteBinary(out, doc_count);
-
-  // Write doc_id -> pk mappings
-  for (const auto& [doc_id, primary_key_str] : snap_doc_id_to_pk) {
-    // Write doc_id
-    auto doc_id_value = static_cast<uint32_t>(doc_id);
-    WriteBinary(out, doc_id_value);
-
-    // Write pk length and pk
-    auto pk_len = static_cast<uint32_t>(primary_key_str.size());
-    WriteBinary(out, pk_len);
-    out.write(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
-
-    // Write filters for this document
-    auto filter_it = snap_doc_filters.find(doc_id);
-    uint32_t filter_count = 0;
-    if (filter_it != snap_doc_filters.end()) {
-      filter_count = static_cast<uint32_t>(filter_it->second.size());
-    }
-    WriteBinary(out, filter_count);
-
-    if (filter_count > 0) {
-      for (const auto& [name, value] : filter_it->second) {
-        // Write filter name
-        auto name_len = static_cast<uint32_t>(name.size());
-        WriteBinary(out, name_len);
-        out.write(name.data(), static_cast<std::streamsize>(name_len));
-
-        // Write filter type and value
-        auto type_idx = static_cast<uint8_t>(value.index());
-        WriteBinary(out, type_idx);
-
-        std::visit(
-            [&out](const auto& filter_value) {
-              using T = std::decay_t<decltype(filter_value)>;
-              if constexpr (std::is_same_v<T, std::monostate>) {
-                // std::monostate (NULL) has no data to write
-              } else if constexpr (std::is_same_v<T, std::string>) {
-                auto str_len = static_cast<uint32_t>(filter_value.size());
-                WriteBinary(out, str_len);
-                out.write(filter_value.data(), static_cast<std::streamsize>(str_len));
-              } else if constexpr (std::is_same_v<T, TimeValue>) {
-                WriteBinary(out, filter_value.seconds);
-              } else {
-                WriteBinary(out, filter_value);
-              }
-            },
-            value);
-      }
+    WriteBinary(out, gtid_len);
+    if (gtid_len > 0) {
+      out.write(replication_gtid.data(), static_cast<std::streamsize>(gtid_len));
     }
 
-    // Write normalized text (v2+)
-    auto text_it = snap_doc_texts.find(doc_id);
-    if (text_it != snap_doc_texts.end()) {
-      auto text_len = static_cast<uint32_t>(text_it->second.size());
-      WriteBinary(out, text_len);
-      out.write(text_it->second.data(), static_cast<std::streamsize>(text_len));
-    } else {
-      uint32_t text_len = 0;
-      WriteBinary(out, text_len);
-    }
-
-    // Periodic check to detect write failures early (e.g., disk full)
+    // Check stream after writing header section
     if (!out.good())
       return false;
+
+    // Write document count
+    auto doc_count = static_cast<uint64_t>(doc_id_to_pk_.size());
+    WriteBinary(out, doc_count);
+
+    // Write doc_id -> pk mappings
+    for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
+      // Write doc_id
+      auto doc_id_value = static_cast<uint32_t>(doc_id);
+      WriteBinary(out, doc_id_value);
+
+      // Write pk length and pk
+      auto pk_len = static_cast<uint32_t>(primary_key_str.size());
+      WriteBinary(out, pk_len);
+      out.write(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
+
+      // Write filters for this document
+      auto filter_it = doc_filters_.find(doc_id);
+      uint32_t filter_count = 0;
+      if (filter_it != doc_filters_.end()) {
+        filter_count = static_cast<uint32_t>(filter_it->second.size());
+      }
+      WriteBinary(out, filter_count);
+
+      if (filter_count > 0) {
+        for (const auto& [name, value] : filter_it->second) {
+          // Write filter name
+          auto name_len = static_cast<uint32_t>(name.size());
+          WriteBinary(out, name_len);
+          out.write(name.data(), static_cast<std::streamsize>(name_len));
+
+          // Write filter type and value
+          auto type_idx = static_cast<uint8_t>(value.index());
+          WriteBinary(out, type_idx);
+
+          std::visit(
+              [&out](const auto& filter_value) {
+                using T = std::decay_t<decltype(filter_value)>;
+                if constexpr (std::is_same_v<T, std::monostate>) {
+                  // std::monostate (NULL) has no data to write
+                } else if constexpr (std::is_same_v<T, std::string>) {
+                  auto str_len = static_cast<uint32_t>(filter_value.size());
+                  WriteBinary(out, str_len);
+                  out.write(filter_value.data(), static_cast<std::streamsize>(str_len));
+                } else if constexpr (std::is_same_v<T, TimeValue>) {
+                  WriteBinary(out, filter_value.seconds);
+                } else {
+                  WriteBinary(out, filter_value);
+                }
+              },
+              value);
+        }
+      }
+
+      // Write normalized text (v2+)
+      auto text_it = doc_texts_.find(doc_id);
+      if (text_it != doc_texts_.end()) {
+        auto text_len = static_cast<uint32_t>(text_it->second.size());
+        WriteBinary(out, text_len);
+        out.write(text_it->second.data(), static_cast<std::streamsize>(text_len));
+      } else {
+        uint32_t text_len = 0;
+        WriteBinary(out, text_len);
+      }
+
+      // Periodic check to detect write failures early (e.g., disk full)
+      if (!out.good())
+        return false;
+    }
   }
 
   return out.good();
@@ -181,7 +172,10 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
 
   // Read version
   uint32_t version = 0;
-  ReadBinary(in, version);
+  if (!ReadBinary(in, version)) {
+    return MakeUnexpected(
+        MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read document store version", context));
+  }
   if (version < 1 || version > 2) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                     "Unsupported document store file version: " + std::to_string(version), context));
@@ -189,16 +183,14 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
 
   // Read next_doc_id (will be set later under lock)
   uint32_t next_id = 0;
-  ReadBinary(in, next_id);
-  if (!in.good()) {
+  if (!ReadBinary(in, next_id)) {
     return MakeUnexpected(
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read next_doc_id from snapshot", context));
   }
 
   // Read GTID (for replication position)
   uint32_t gtid_len = 0;
-  ReadBinary(in, gtid_len);
-  if (!in.good()) {
+  if (!ReadBinary(in, gtid_len)) {
     return MakeUnexpected(
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID length from snapshot", context));
   }
@@ -211,7 +203,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
   if (gtid_len > 0) {
     std::string gtid(gtid_len, '\0');
     in.read(gtid.data(), static_cast<std::streamsize>(gtid_len));
-    if (!in.good()) {
+    if (in.gcount() != static_cast<std::streamsize>(gtid_len)) {
       return MakeUnexpected(
           MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID data from snapshot", context));
     }
@@ -224,8 +216,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
 
   // Read document count
   uint64_t doc_count = 0;
-  ReadBinary(in, doc_count);
-  if (!in.good()) {
+  if (!ReadBinary(in, doc_count)) {
     return MakeUnexpected(
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read document count from snapshot", context));
   }
@@ -253,8 +244,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
   for (uint64_t i = 0; i < doc_count; ++i) {
     // Read doc_id
     uint32_t doc_id_value = 0;
-    ReadBinary(in, doc_id_value);
-    if (!in.good()) {
+    if (!ReadBinary(in, doc_id_value)) {
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
                                       "Failed to read doc_id for document " + std::to_string(i), context));
     }
@@ -262,8 +252,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
 
     // Read pk length and pk
     uint32_t pk_len = 0;
-    ReadBinary(in, pk_len);
-    if (!in.good()) {
+    if (!ReadBinary(in, pk_len)) {
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
                                       "Failed to read primary key length for doc_id " + std::to_string(doc_id),
                                       context));
@@ -277,7 +266,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
 
     std::string primary_key_str(pk_len, '\0');
     in.read(primary_key_str.data(), static_cast<std::streamsize>(pk_len));
-    if (!in.good()) {
+    if (in.gcount() != static_cast<std::streamsize>(pk_len)) {
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                       "Failed to read primary key data at document " + std::to_string(i), context));
     }
@@ -287,8 +276,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
 
     // Read filters
     uint32_t filter_count = 0;
-    ReadBinary(in, filter_count);
-    if (!in.good()) {
+    if (!ReadBinary(in, filter_count)) {
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
                                       "Failed to read filter count for doc_id " + std::to_string(doc_id), context));
     }
@@ -305,8 +293,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
       for (uint32_t j = 0; j < filter_count; ++j) {
         // Read filter name
         uint32_t name_len = 0;
-        ReadBinary(in, name_len);
-        if (!in.good()) {
+        if (!ReadBinary(in, name_len)) {
           return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
                                           "Failed to read filter name length for doc_id " + std::to_string(doc_id),
                                           context));
@@ -320,15 +307,14 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
 
         std::string name(name_len, '\0');
         in.read(name.data(), static_cast<std::streamsize>(name_len));
-        if (!in.good()) {
+        if (in.gcount() != static_cast<std::streamsize>(name_len)) {
           return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                           "Failed to read filter name data at document " + std::to_string(i), context));
         }
 
         // Read filter type
         uint8_t type_idx = 0;
-        ReadBinary(in, type_idx);
-        if (!in.good()) {
+        if (!ReadBinary(in, type_idx)) {
           return MakeUnexpected(
               MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read filter type", context));
         }
@@ -342,67 +328,100 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
           }
           case kTypeIndexBool: {  // bool
             bool bool_value = false;
-            ReadBinary(in, bool_value);
+            if (!ReadBinary(in, bool_value)) {
+              return MakeUnexpected(
+                  MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read bool filter value", context));
+            }
             value = bool_value;
             break;
           }
           case kTypeIndexInt8: {  // int8_t
             int8_t int8_value = 0;
-            ReadBinary(in, int8_value);
+            if (!ReadBinary(in, int8_value)) {
+              return MakeUnexpected(
+                  MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read int8 filter value", context));
+            }
             value = int8_value;
             break;
           }
           case kTypeIndexUInt8: {  // uint8_t
             uint8_t uint8_value = 0;
-            ReadBinary(in, uint8_value);
+            if (!ReadBinary(in, uint8_value)) {
+              return MakeUnexpected(
+                  MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read uint8 filter value", context));
+            }
             value = uint8_value;
             break;
           }
           case kTypeIndexInt16: {  // int16_t
             int16_t int16_value = 0;
-            ReadBinary(in, int16_value);
+            if (!ReadBinary(in, int16_value)) {
+              return MakeUnexpected(
+                  MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read int16 filter value", context));
+            }
             value = int16_value;
             break;
           }
           case kTypeIndexUInt16: {  // uint16_t
             uint16_t uint16_value = 0;
-            ReadBinary(in, uint16_value);
+            if (!ReadBinary(in, uint16_value)) {
+              return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                              "Failed to read uint16 filter value", context));
+            }
             value = uint16_value;
             break;
           }
           case kTypeIndexInt32: {  // int32_t
             int32_t int32_value = 0;
-            ReadBinary(in, int32_value);
+            if (!ReadBinary(in, int32_value)) {
+              return MakeUnexpected(
+                  MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read int32 filter value", context));
+            }
             value = int32_value;
             break;
           }
           case kTypeIndexUInt32: {  // uint32_t
             uint32_t uint32_value = 0;
-            ReadBinary(in, uint32_value);
+            if (!ReadBinary(in, uint32_value)) {
+              return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                              "Failed to read uint32 filter value", context));
+            }
             value = uint32_value;
             break;
           }
           case kTypeIndexInt64: {  // int64_t
             int64_t int64_value = 0;
-            ReadBinary(in, int64_value);
+            if (!ReadBinary(in, int64_value)) {
+              return MakeUnexpected(
+                  MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read int64 filter value", context));
+            }
             value = int64_value;
             break;
           }
           case kTypeIndexUInt64: {  // uint64_t
             uint64_t uint64_value = 0;
-            ReadBinary(in, uint64_value);
+            if (!ReadBinary(in, uint64_value)) {
+              return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                              "Failed to read uint64 filter value", context));
+            }
             value = uint64_value;
             break;
           }
           case kTypeIndexTimeValue: {  // TimeValue
             TimeValue time_value{};
-            ReadBinary(in, time_value.seconds);
+            if (!ReadBinary(in, time_value.seconds)) {
+              return MakeUnexpected(
+                  MakeError(mygram::utils::ErrorCode::kStorageCorrupted, "Failed to read time filter value", context));
+            }
             value = time_value;
             break;
           }
           case kTypeIndexString: {  // std::string
             uint32_t str_len = 0;
-            ReadBinary(in, str_len);
+            if (!ReadBinary(in, str_len)) {
+              return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                              "Failed to read string filter length", context));
+            }
             if (str_len > kMaxFilterStringLength) {
               return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                               "Filter string length " + std::to_string(str_len) +
@@ -411,7 +430,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
             }
             std::string string_value(str_len, '\0');
             in.read(string_value.data(), static_cast<std::streamsize>(str_len));
-            if (!in.good()) {
+            if (in.gcount() != static_cast<std::streamsize>(str_len)) {
               return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                               "Failed to read filter string data at document " + std::to_string(i),
                                               context));
@@ -421,7 +440,10 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
           }
           case kTypeIndexDouble: {  // double
             double double_value = NAN;
-            ReadBinary(in, double_value);
+            if (!ReadBinary(in, double_value)) {
+              return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                              "Failed to read double filter value", context));
+            }
             value = double_value;
             break;
           }
@@ -439,7 +461,11 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     // Read normalized text (v2+)
     if (version >= 2) {
       uint32_t text_len = 0;
-      ReadBinary(in, text_len);
+      if (!ReadBinary(in, text_len)) {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                                        "Failed to read normalized text length for doc_id " + std::to_string(doc_id),
+                                        context));
+      }
       if (text_len > kMaxNormalizedTextLength) {
         return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                         "Normalized text length " + std::to_string(text_len) +
@@ -449,7 +475,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
       if (text_len > 0) {
         std::string text(text_len, '\0');
         in.read(text.data(), static_cast<std::streamsize>(text_len));
-        if (!in.good()) {
+        if (in.gcount() != static_cast<std::streamsize>(text_len)) {
           return MakeUnexpected(
               MakeError(mygram::utils::ErrorCode::kStorageReadError,
                         "Stream error while reading normalized text for doc_id " + std::to_string(doc_id), context));
@@ -459,7 +485,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     }
   }
 
-  if (!in.good()) {
+  if (in.bad() || in.fail()) {
     return MakeUnexpected(
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Stream error after reading all documents", context));
   }

@@ -7,7 +7,12 @@
 
 #include <gtest/gtest.h>
 
-using namespace mygram::utils;
+#include <cerrno>
+
+#include "utils/errno_utils.h"
+#include "utils/numeric_parse.h"
+
+using namespace mygramdb::utils;
 
 /**
  * @brief Test UTF-8 to codepoints conversion
@@ -758,6 +763,41 @@ TEST(StringUtilsTest, CrossBoundaryNgramsUnigrams) {
 // ============================================================================
 // ToUpper tests
 // ============================================================================
+
+TEST(StringUtilsTest, TrimAsciiWhitespaceBasic) {
+  EXPECT_EQ(TrimAsciiWhitespace("  hello\t\r\n"), "hello");
+  EXPECT_EQ(TrimAsciiWhitespace("\tvalue with spaces\n"), "value with spaces");
+  EXPECT_EQ(TrimAsciiWhitespace(""), "");
+  EXPECT_EQ(TrimAsciiWhitespace(" \t\r\n"), "");
+}
+
+TEST(StringUtilsTest, TrimAsciiWhitespaceViewReturnsSubview) {
+  std::string input = "\r\nabc\t";
+  std::string_view trimmed = TrimAsciiWhitespaceView(input);
+  EXPECT_EQ(trimmed, "abc");
+  EXPECT_EQ(trimmed.data(), input.data() + 2);
+}
+
+TEST(StringUtilsTest, ToLowerBasic) {
+  EXPECT_EQ(ToLower("HELLO"), "hello");
+  EXPECT_EQ(ToLower("Mixed-CASE_123"), "mixed-case_123");
+  EXPECT_EQ(ToLower(""), "");
+}
+
+TEST(StringUtilsTest, FormatErrnoIncludesSyscallMessageAndCode) {
+  std::string message = FormatErrno("open", EACCES);
+  EXPECT_NE(message.find("open failed:"), std::string::npos);
+  EXPECT_NE(message.find("errno=" + std::to_string(EACCES)), std::string::npos);
+}
+
+TEST(StringUtilsTest, ParseNumericSupportsIntegerBaseAndRequiresFullInput) {
+  auto hex_value = ParseNumeric<uint32_t>("ff", 16);
+  ASSERT_TRUE(hex_value.has_value());
+  EXPECT_EQ(*hex_value, 255u);
+
+  EXPECT_FALSE(ParseNumeric<uint32_t>("ffx", 16).has_value());
+  EXPECT_FALSE(ParseNumeric<uint32_t>("12x", 10).has_value());
+}
 
 /**
  * @brief Test basic lowercase to uppercase conversion

@@ -25,7 +25,7 @@
 #include "mysql/binlog_stream.h"
 #include "mysql/gtid_encoder.h"
 #include "mysql/mariadb_event_parser.h"
-#include "server/tcp_server.h"  // For TableContext definition
+#include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
 #include "utils/crc32.h"
 #include "utils/structured_log.h"
@@ -189,6 +189,16 @@ void BinlogReader::ReaderThreadFunc() {
     bool connection_lost = false;
 
     while (!should_stop_ && !connection_lost) {
+      if (processing_failure_reconnect_requested_.exchange(false, std::memory_order_acq_rel)) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_processing_failure_reconnect")
+            .Field("gtid", GetCurrentGTID())
+            .Warn();
+        connection_lost = true;
+        binlog_stream_->Close(*binlog_connection_);
+        break;
+      }
+
       auto fetch = binlog_stream_->Fetch(*binlog_connection_);
 
       // Log first fetch result for debugging
@@ -204,6 +214,11 @@ void BinlogReader::ReaderThreadFunc() {
       // Check should_stop_ immediately after blocking call to avoid use-after-free
       if (should_stop_) {
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "stop_requested_exiting").Debug();
+        break;
+      }
+      if (processing_failure_reconnect_requested_.load(std::memory_order_acquire)) {
+        connection_lost = true;
+        binlog_stream_->Close(*binlog_connection_);
         break;
       }
 
@@ -403,12 +418,7 @@ void BinlogReader::ReaderThreadFunc() {
                 .Field("table_id", metadata_opt->table_id)
                 .Debug();
 
-            bool is_monitored_table = false;
-            if (multi_table_mode_) {
-              is_monitored_table = table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
-            } else {
-              is_monitored_table = (metadata_opt->table_name == table_config_.name);
-            }
+            const bool is_monitored_table = table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
 
             if (is_monitored_table) {
               if (!FetchColumnNames(metadata_opt.value())) {
@@ -494,9 +504,9 @@ void BinlogReader::ReaderThreadFunc() {
       }
 
       // Parse the binlog event using BinlogEventParser
-      auto events = BinlogEventParser::ParseBinlogEvent(
-          event_buffer, event_length, reader_last_gtid, table_metadata_cache_, table_contexts_,
-          multi_table_mode_ ? nullptr : &table_config_, multi_table_mode_, mysql_config_.datetime_timezone);
+      auto events =
+          BinlogEventParser::ParseBinlogEvent(event_buffer, event_length, reader_last_gtid, table_metadata_cache_,
+                                              table_contexts_, nullptr, true, mysql_config_.datetime_timezone);
 
       if (!events.empty()) {
         mygram::utils::StructuredLog()
@@ -578,7 +588,17 @@ void BinlogReader::WorkerThreadFunc() {
           .Field("primary_key", event->primary_key)
           .Field("gtid", event->gtid)
           .Error();
-      // GTID is not updated on failure so event can be retried on reconnect
+      {
+        std::scoped_lock lock(queue_mutex_);
+        while (!event_queue_.empty()) {
+          event_queue_.pop();
+        }
+      }
+      queue_full_cv_.notify_all();
+      processing_failure_reconnect_requested_.store(true, std::memory_order_release);
+      // GTID is not updated on failure. The reader is forced to reconnect
+      // from the last processed GTID, and queued later events are discarded
+      // so they cannot permanently skip the failed event.
     }
   }
 
@@ -591,7 +611,7 @@ void BinlogReader::PushEvent(std::unique_ptr<BinlogEvent> event) {
   // Wait if queue is full
   queue_full_cv_.wait(lock, [this] { return should_stop_ || event_queue_.size() < config_.queue_size; });
 
-  if (should_stop_) {
+  if (should_stop_ || processing_failure_reconnect_requested_.load(std::memory_order_acquire)) {
     return;
   }
 

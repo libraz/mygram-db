@@ -123,6 +123,20 @@ TEST_F(SafePathTest, ExtensionMatchIsCaseInsensitive) {
   ASSERT_TRUE(result) << result.error().message();
 }
 
+TEST_F(SafePathTest, RejectsSymlinkWhenResolvedExtensionIsDisallowed) {
+  auto target = TouchFile("real.txt");
+  auto link = base_dir_ / "alias.yaml";
+  std::error_code ec;
+  std::filesystem::create_symlink(target, link, ec);
+  if (ec) {
+    GTEST_SKIP() << "Cannot create symlinks on this filesystem: " << ec.message();
+  }
+
+  auto result = mygram::utils::ResolveSafePath("alias.yaml", base_dir_.string(), {".yaml", ".yml"});
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("Disallowed file extension"), std::string::npos);
+}
+
 // Symlink whose target lies outside base_dir must be rejected (canonical()
 // follows symlinks; lexically_relative then catches the escape).
 TEST_F(SafePathTest, RejectsSymlinkPointingOutsideBaseDir) {

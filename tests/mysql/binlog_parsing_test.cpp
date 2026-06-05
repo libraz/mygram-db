@@ -46,6 +46,69 @@ std::vector<uint8_t> CreateBinlogHeader(MySQLBinlogEventType event_type, uint32_
   return header;
 }
 
+void PatchEventSize(std::vector<uint8_t>& event_without_ok_byte) {
+  uint32_t event_size = static_cast<uint32_t>(event_without_ok_byte.size());
+  event_without_ok_byte[9] = event_size & 0xFF;
+  event_without_ok_byte[10] = (event_size >> 8) & 0xFF;
+  event_without_ok_byte[11] = (event_size >> 16) & 0xFF;
+  event_without_ok_byte[12] = (event_size >> 24) & 0xFF;
+}
+
+std::vector<uint8_t> CreateMinimalTableMapEvent(uint8_t null_bitmap, bool include_null_bitmap) {
+  std::vector<uint8_t> event = CreateBinlogHeader(MySQLBinlogEventType::TABLE_MAP_EVENT, 0);
+
+  // table_id + flags
+  event.insert(event.end(), {0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+
+  const std::string db_name = "testdb";
+  event.push_back(static_cast<uint8_t>(db_name.size()));
+  event.insert(event.end(), db_name.begin(), db_name.end());
+  event.push_back(0x00);
+
+  const std::string table_name = "articles";
+  event.push_back(static_cast<uint8_t>(table_name.size()));
+  event.insert(event.end(), table_name.begin(), table_name.end());
+  event.push_back(0x00);
+
+  event.push_back(3);  // column count
+  event.push_back(static_cast<uint8_t>(ColumnType::LONG));
+  event.push_back(static_cast<uint8_t>(ColumnType::VARCHAR));
+  event.push_back(static_cast<uint8_t>(ColumnType::BLOB));
+
+  event.push_back(3);  // metadata length
+  event.push_back(0xFF);
+  event.push_back(0x00);  // VARCHAR max length
+  event.push_back(0x02);  // BLOB length bytes
+
+  if (include_null_bitmap) {
+    event.push_back(null_bitmap);
+  }
+
+  // CRC32 checksum bytes. Parser already receives checksum-verified events
+  // but must not treat these bytes as TABLE_MAP payload.
+  event.insert(event.end(), {0xFF, 0xFF, 0xFF, 0xFF});
+  PatchEventSize(event);
+  return event;
+}
+
+std::vector<uint8_t> CreateTableMapEventPrefix() {
+  std::vector<uint8_t> event = CreateBinlogHeader(MySQLBinlogEventType::TABLE_MAP_EVENT, 0);
+
+  event.insert(event.end(), {0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+
+  const std::string db_name = "testdb";
+  event.push_back(static_cast<uint8_t>(db_name.size()));
+  event.insert(event.end(), db_name.begin(), db_name.end());
+  event.push_back(0x00);
+
+  const std::string table_name = "articles";
+  event.push_back(static_cast<uint8_t>(table_name.size()));
+  event.insert(event.end(), table_name.begin(), table_name.end());
+  event.push_back(0x00);
+
+  return event;
+}
+
 /**
  * @brief Test GTID event extraction with actual data
  */
@@ -179,6 +242,26 @@ TEST(BinlogParsingTest, ParseTableMapEventActual) {
   // Verify table_id
   uint64_t table_id = table_map_event[20] | (table_map_event[21] << 8);
   EXPECT_EQ(table_id, 0x1234);
+}
+
+TEST(BinlogParsingTest, ParseTableMapEventExcludesChecksumFromNullBitmap) {
+  auto event = CreateMinimalTableMapEvent(/*null_bitmap=*/0x06, /*include_null_bitmap=*/true);
+
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+  ASSERT_TRUE(metadata.has_value());
+  ASSERT_EQ(metadata->columns.size(), 3u);
+  EXPECT_FALSE(metadata->columns[0].is_nullable);
+  EXPECT_TRUE(metadata->columns[1].is_nullable);
+  EXPECT_TRUE(metadata->columns[2].is_nullable);
+}
+
+TEST(BinlogParsingTest, ParseTableMapEventRejectsMissingNullBitmapBeforeChecksum) {
+  auto event = CreateMinimalTableMapEvent(/*null_bitmap=*/0x00, /*include_null_bitmap=*/false);
+
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+  EXPECT_FALSE(metadata.has_value());
 }
 
 /**
@@ -507,97 +590,76 @@ TEST(BinlogParsingTest, TruncatedBufferHandling) {
  * - Remaining bytes tracking after packed integer reads
  */
 TEST(BinlogParsingSecurityTest, TableMapIntegerOverflowProtection) {
-  // This test verifies the security improvements added to ParseTableMapEvent:
-  // 1. Column count must not exceed MAX_COLUMNS (4096)
-  // 2. Remaining bytes are properly tracked after reading packed integers
-  // 3. Buffer boundaries are checked before all reads
+  auto event = CreateTableMapEventPrefix();
+  // 4097 as a 0xfc length-encoded integer, exceeding kMySQLMaxColumns.
+  event.insert(event.end(), {0xFC, 0x01, 0x10});
+  event.insert(event.end(), {0xAA, 0xBB, 0xCC, 0xDD});
+  PatchEventSize(event);
 
-  // Note: We cannot easily construct a valid TABLE_MAP event in a unit test
-  // because it requires proper MySQL binlog format with correct checksums.
-  // The security fixes are verified through:
-  // - Code review of the implementation
-  // - Integration tests with real MySQL binlog events
-  // - Manual testing with malformed binlog data
-
-  // The key security improvements are:
-  // - Line 1337-1342: Update remaining after reading packed integer
-  // - Line 1344-1350: Validate column_count <= MAX_COLUMNS (4096)
-  // - Line 1359-1361: Check remaining before reading each column type
-  // - Line 1380-1388: Update remaining after reading metadata length packed integer
-  // - Line 1403, 1414, 1422, 1431, 1439, 1447: Check metadata_end boundary
-
-  SUCCEED() << "Integer overflow protections verified in ParseTableMapEvent (binlog_reader.cpp:1333-1450)";
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+  EXPECT_FALSE(metadata.has_value());
 }
 
 /**
  * @brief Test column count limit enforcement
  */
 TEST(BinlogParsingSecurityTest, ColumnCountLimit) {
-  // Verifies that column_count > 4096 is rejected
-  // This prevents:
-  // 1. Excessive memory allocation (reserve could allocate GBs)
-  // 2. Integer overflow when calculating buffer sizes
-  // 3. DoS attacks via resource exhaustion
+  auto valid_event = CreateMinimalTableMapEvent(0x00, true);
+  auto valid_metadata = BinlogEventParser::ParseTableMapEvent(valid_event.data(), valid_event.size());
+  ASSERT_TRUE(valid_metadata.has_value());
+  EXPECT_EQ(valid_metadata->columns.size(), 3);
 
-  // The check is at binlog_reader.cpp:1345-1350
-  constexpr uint64_t MAX_COLUMNS = 4096;
+  auto excessive_event = CreateTableMapEventPrefix();
+  // 10000 as a 0xfc length-encoded integer.
+  excessive_event.insert(excessive_event.end(), {0xFC, 0x10, 0x27});
+  excessive_event.insert(excessive_event.end(), {0xAA, 0xBB, 0xCC, 0xDD});
+  PatchEventSize(excessive_event);
 
-  // Normal column count should be accepted
-  EXPECT_LE(100, MAX_COLUMNS) << "Normal column count should be within limit";
-
-  // Excessive column count should be rejected
-  EXPECT_GT(10000, MAX_COLUMNS) << "Excessive column count exceeds limit";
-  EXPECT_GT(65535, MAX_COLUMNS) << "uint16_t max exceeds column limit";
-
-  SUCCEED() << "Column count limit (MAX_COLUMNS=4096) prevents resource exhaustion";
+  auto excessive_metadata = BinlogEventParser::ParseTableMapEvent(excessive_event.data(), excessive_event.size());
+  EXPECT_FALSE(excessive_metadata.has_value());
 }
 
 /**
  * @brief Test remaining bytes tracking
  */
 TEST(BinlogParsingSecurityTest, RemainingBytesTracking) {
-  // Verifies that 'remaining' variable is properly updated after:
-  // 1. Reading packed integers (variable length encoding)
-  // 2. Reading column types (1 byte per column)
-  // 3. Reading metadata (variable length per column type)
+  auto event = CreateTableMapEventPrefix();
+  // 0xfc declares a 3-byte packed integer, but only the first byte is present
+  // before the CRC32 trailer.
+  event.push_back(0xFC);
+  event.insert(event.end(), {0xAA, 0xBB, 0xCC, 0xDD});
+  PatchEventSize(event);
 
-  // Before security fix:
-  // - read_packed_integer(&ptr) advanced ptr but didn't update remaining
-  // - Could read beyond buffer end
-  // - Integer overflow: remaining - large_value → underflow
-
-  // After security fix (binlog_reader.cpp:1334-1342):
-  // - const unsigned char* ptr_before_packed = ptr;
-  // - uint64_t column_count = read_packed_integer(&ptr);
-  // - size_t packed_int_size = ptr - ptr_before_packed;
-  // - if (remaining < packed_int_size) return nullopt;
-  // - remaining -= packed_int_size;
-
-  SUCCEED() << "Remaining bytes properly tracked to prevent buffer overruns";
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+  EXPECT_FALSE(metadata.has_value());
 }
 
 /**
  * @brief Test metadata bounds checking
  */
 TEST(BinlogParsingSecurityTest, MetadataBoundsChecking) {
-  // Verifies that metadata parsing checks bounds using metadata_end
+  auto truncated_meta_len_event = CreateTableMapEventPrefix();
+  truncated_meta_len_event.push_back(1);  // column count
+  truncated_meta_len_event.push_back(static_cast<uint8_t>(ColumnType::LONG));
+  // 0xfc declares a 3-byte metadata length, but only the first byte is present.
+  truncated_meta_len_event.push_back(0xFC);
+  truncated_meta_len_event.insert(truncated_meta_len_event.end(), {0xAA, 0xBB, 0xCC, 0xDD});
+  PatchEventSize(truncated_meta_len_event);
 
-  // For each column type:
-  // - VARCHAR/VAR_STRING: reads 2 bytes (ptr + 2 <= metadata_end)
-  // - BLOB variants: reads 1 byte (ptr + 1 <= metadata_end)
-  // - STRING: reads 2 bytes (ptr + 2 <= metadata_end)
-  // - FLOAT/DOUBLE: reads 1 byte (ptr + 1 <= metadata_end)
-  // - NEWDECIMAL: reads 2 bytes (ptr + 2 <= metadata_end)
-  // - BIT: reads 2 bytes (ptr + 2 <= metadata_end)
+  auto truncated_meta_len =
+      BinlogEventParser::ParseTableMapEvent(truncated_meta_len_event.data(), truncated_meta_len_event.size());
+  EXPECT_FALSE(truncated_meta_len.has_value());
 
-  // Before security fix:
-  // - Used metadata_start + metadata_len (could overflow)
+  auto oversized_metadata_event = CreateTableMapEventPrefix();
+  oversized_metadata_event.push_back(1);  // column count
+  oversized_metadata_event.push_back(static_cast<uint8_t>(ColumnType::LONG));
+  oversized_metadata_event.push_back(4);  // metadata length, but no metadata bytes before CRC32
+  oversized_metadata_event.insert(oversized_metadata_event.end(), {0xAA, 0xBB, 0xCC, 0xDD});
+  PatchEventSize(oversized_metadata_event);
 
-  // After security fix (binlog_reader.cpp:1390-1391):
-  // - const unsigned char* metadata_end = metadata_start + metadata_len;
-  // - All checks use metadata_end (computed once, checked for overflow)
-
-  SUCCEED() << "Metadata bounds checking prevents buffer overflow";
+  auto oversized_metadata =
+      BinlogEventParser::ParseTableMapEvent(oversized_metadata_event.data(), oversized_metadata_event.size());
+  EXPECT_FALSE(oversized_metadata.has_value());
 }
 
 /**
@@ -1383,24 +1445,6 @@ TEST(BinlogParsingTest, TransactionPayloadEventReturnsEmpty) {
                                                     nullptr, false);
 
   EXPECT_TRUE(events.empty()) << "TRANSACTION_PAYLOAD_EVENT should return empty vector";
-}
-
-TEST(BinlogParsingTest, PartialUpdateRowsEventReturnsEmpty) {
-  std::vector<uint8_t> buffer(50, 0);
-  buffer[4] = 39;  // event_type = PARTIAL_UPDATE_ROWS_EVENT
-  auto event_size = static_cast<uint32_t>(buffer.size());
-  buffer[9] = event_size & 0xFF;
-  buffer[10] = (event_size >> 8) & 0xFF;
-  buffer[11] = (event_size >> 16) & 0xFF;
-  buffer[12] = (event_size >> 24) & 0xFF;
-
-  TableMetadataCache cache;
-  std::unordered_map<std::string, server::TableContext*> table_contexts;
-
-  auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:1", cache, table_contexts,
-                                                    nullptr, false);
-
-  EXPECT_TRUE(events.empty()) << "PARTIAL_UPDATE_ROWS_EVENT should return empty vector";
 }
 
 // ===========================================================================

@@ -18,8 +18,8 @@
 #include <vector>
 
 #include "cache/cache_entry.h"
+#include "cache/cache_key.h"
 #include "cache/result_compressor.h"
-#include "query/cache_key.h"
 #include "utils/periodic_worker.h"
 
 namespace mygramdb::cache {
@@ -423,6 +423,9 @@ class QueryCache {
   // Map: cache key -> (cache entry, LRU iterator)
   std::unordered_map<CacheKey, std::pair<CacheEntry, std::list<CacheKey>::iterator>> cache_map_;
 
+  // Reverse index for table-scoped clears: table name -> cache keys.
+  std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_cache_keys_;
+
   // Configuration
   size_t max_memory_bytes_;
   std::atomic<double> min_query_cost_ms_;
@@ -487,6 +490,12 @@ class QueryCache {
    */
   void RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason,
                          std::vector<CacheKey>* evicted_keys = nullptr);
+
+  /**
+   * @brief Remove a key from the table reverse index while holding exclusive lock.
+   * @pre Caller must hold exclusive lock on mutex_
+   */
+  void RemoveTableIndexEntryLocked(const CacheKey& key, const std::string& table);
 
   /**
    * @brief Invoke eviction_callback_ for each key in @p keys.

@@ -310,17 +310,12 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseSort(const
   // (not a known keyword), it's likely a multi-column sort attempt
   if (pos < tokens.size()) {
     const auto& peek_token = tokens[pos];
-
-    // Lambda to check if token is a known keyword
-    auto is_known_keyword = [&peek_token]() -> bool {
-      return EqualsIgnoreCase(peek_token, "LIMIT") || EqualsIgnoreCase(peek_token, "OFFSET") ||
-             EqualsIgnoreCase(peek_token, "FILTER") || EqualsIgnoreCase(peek_token, "AND") ||
-             EqualsIgnoreCase(peek_token, "NOT") || EqualsIgnoreCase(peek_token, "HIGHLIGHT") ||
-             EqualsIgnoreCase(peek_token, "FUZZY");
-    };
+    std::string peek_upper = peek_token;
+    std::transform(peek_upper.begin(), peek_upper.end(), peek_upper.begin(),
+                   [](unsigned char chr) { return std::toupper(chr); });
 
     // If next token is not a known keyword, it might be a second column name
-    if (!is_known_keyword()) {
+    if (!internal::IsClauseKeyword(peek_upper)) {
       return MakeUnexpected(MakeError(
           ErrorCode::kQueryInvalidSort,
           "Multiple column sorting is not supported. Hint: Sort by a single column only. Use application-level "

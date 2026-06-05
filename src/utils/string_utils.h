@@ -12,7 +12,9 @@
 #include <utility>
 #include <vector>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Normalize text according to configuration
@@ -136,6 +138,30 @@ bool IsValidUtf8(std::string_view text);
 std::string SanitizeUtf8(std::string_view text);
 
 /**
+ * @brief Trim ASCII whitespace (space, tab, CR, LF) from both ends.
+ *
+ * @param str Input string
+ * @return Trimmed copy
+ */
+std::string TrimAsciiWhitespace(std::string_view str);
+
+/**
+ * @brief Trim ASCII whitespace (space, tab, CR, LF) from both ends without copying.
+ *
+ * @param str Input string view
+ * @return View into the original string
+ */
+std::string_view TrimAsciiWhitespaceView(std::string_view str);
+
+/**
+ * @brief Convert a string to lowercase (ASCII only)
+ *
+ * @param str Input string
+ * @return Lowercase copy of the string
+ */
+std::string ToLower(std::string_view str);
+
+/**
  * @brief Convert a string to uppercase (ASCII only)
  *
  * @param str Input string
@@ -196,4 +222,4 @@ size_t CountCodePoints(std::string_view text);
  */
 bool IsUnicodeWhitespace(std::string_view text, size_t pos, size_t& char_len);
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

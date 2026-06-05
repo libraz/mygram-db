@@ -5,27 +5,19 @@
 
 #pragma once
 
-#include <algorithm>
 #include <cctype>
 #include <string>
 #include <string_view>
 
+#include "config/config.h"
+#include "utils/string_utils.h"
+
 namespace mygramdb::query::internal {
 
 /// Maximum LIMIT value (1000)
-constexpr uint32_t kMaxLimit = 1000;
+constexpr uint32_t kMaxLimit = static_cast<uint32_t>(config::defaults::kMaxLimit);
 
-/**
- * @brief Convert string to lowercase
- *
- * Used to normalize column names (MySQL column names are case-insensitive).
- */
-inline std::string ToLower(std::string_view str) {
-  std::string result(str);
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char character) { return std::tolower(character); });
-  return result;
-}
+using mygram::utils::ToLower;
 
 /**
  * @brief Case-insensitive string comparison (optimized, no allocations)

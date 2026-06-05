@@ -9,7 +9,7 @@
 
 #include <cstdint>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 TEST(EndianUtilsTest, RoundTripUint16) {
   uint16_t value = 0x1234;

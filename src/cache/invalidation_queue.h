@@ -18,8 +18,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "cache/cache_key.h"
 #include "cache/cache_types.h"
-#include "query/cache_key.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::cache {
 
@@ -95,7 +97,7 @@ class InvalidationQueue {
   /**
    * @brief Start background worker thread for batch processing
    */
-  void Start();
+  mygram::utils::Expected<void, mygram::utils::Error> Start();
 
   /**
    * @brief Stop worker thread gracefully

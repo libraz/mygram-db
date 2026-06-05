@@ -18,6 +18,7 @@
 #include <variant>
 
 #include "cache/cache_manager.h"
+#include "config/config.h"
 #include "query/highlighter.h"
 #include "query/query_parser.h"
 #include "query/result_sorter.h"
@@ -30,6 +31,7 @@
 #include "storage/document_store.h"
 #include "utils/memory_utils.h"
 #include "utils/network_utils.h"
+#include "utils/numeric_parse.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 #include "version.h"
@@ -55,22 +57,7 @@ constexpr int kHttpNotFound = 404;
 constexpr int kHttpTooManyRequests = 429;
 constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
-
-std::vector<mygram::utils::CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
-  std::vector<mygram::utils::CIDR> parsed;
-  parsed.reserve(allow_cidrs.size());
-
-  for (const auto& cidr_str : allow_cidrs) {
-    auto cidr = mygram::utils::CIDR::Parse(cidr_str);
-    if (!cidr) {
-      mygram::utils::StructuredLog().Event("invalid_cidr_entry").Field("cidr", cidr_str).Warn();
-      continue;
-    }
-    parsed.push_back(*cidr);
-  }
-
-  return parsed;
-}
+constexpr auto kHttpServerReadyTimeout = std::chrono::seconds(5);
 
 json FilterValueToJson(const storage::FilterValue& value) {
   json serialized = nullptr;
@@ -111,12 +98,60 @@ std::optional<std::string> JsonFilterValueToString(const json& val) {
   return std::nullopt;
 }
 
+bool IsValidUtf8ContinuationByte(unsigned char byte) {
+  return (byte & 0xC0U) == 0x80U;
+}
+
+bool ConsumeValidUtf8CodePoint(std::string_view text, size_t& index) {
+  const auto first = static_cast<unsigned char>(text[index]);
+  size_t needed = 0;
+  uint32_t code_point = 0;
+
+  if (first >= 0xC2U && first <= 0xDFU) {
+    needed = 2;
+    code_point = first & 0x1FU;
+  } else if (first >= 0xE0U && first <= 0xEFU) {
+    needed = 3;
+    code_point = first & 0x0FU;
+  } else if (first >= 0xF0U && first <= 0xF4U) {
+    needed = 4;
+    code_point = first & 0x07U;
+  } else {
+    return false;
+  }
+
+  if (index + needed > text.size()) {
+    return false;
+  }
+
+  for (size_t offset = 1; offset < needed; ++offset) {
+    const auto byte = static_cast<unsigned char>(text[index + offset]);
+    if (!IsValidUtf8ContinuationByte(byte)) {
+      return false;
+    }
+    code_point = (code_point << 6U) | (byte & 0x3FU);
+  }
+
+  if ((needed == 3 && code_point < 0x800U) || (needed == 4 && code_point < 0x10000U)) {
+    return false;
+  }
+  if (code_point >= 0xD800U && code_point <= 0xDFFFU) {
+    return false;
+  }
+  if (code_point > 0x10FFFFU) {
+    return false;
+  }
+
+  index += needed;
+  return true;
+}
+
 /**
  * @brief Validate a table name supplied via the HTTP API.
  *
  * Permitted characters:
  * - ASCII letters, digits, underscore, hyphen, and dot.
- * - Any non-ASCII byte (>= 0x80), which lets UTF-8-encoded names such as
+ * - Well-formed UTF-8 non-ASCII code points, which lets names such as
  *   "テーブル" pass through unchanged.
  *
  * Rejected: empty names, ASCII whitespace, ASCII control characters, and any
@@ -137,12 +172,15 @@ bool IsValidTableName(std::string_view table) {
   if (table.size() > kMaxTableNameLength) {
     return false;
   }
-  for (char c : table) {
-    auto u = static_cast<unsigned char>(c);
+  for (size_t i = 0; i < table.size();) {
+    auto u = static_cast<unsigned char>(table[i]);
     bool ascii_safe =
         (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' || u == '-' || u == '.';
-    bool non_ascii = u >= 0x80;
-    if (!ascii_safe && !non_ascii) {
+    if (ascii_safe) {
+      ++i;
+      continue;
+    }
+    if (u < 0x80 || !ConsumeValidUtf8CodePoint(table, i)) {
       return false;
     }
   }
@@ -487,7 +525,7 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       rate_limiter_(std::move(rate_limiter)),
       loading_(loading),
       tcp_stats_(tcp_stats) {
-  parsed_allow_cidrs_ = ParseAllowCidrs(config_.allow_cidrs);
+  parsed_allow_cidrs_ = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
 
   if (full_config_ != nullptr) {
     const auto configured_limit = full_config_->api.max_query_length;
@@ -593,7 +631,7 @@ void HttpServer::SetupAccessControl() {
     }
 
     // Check CIDR-based access control first
-    if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+    if (!parsed_allow_cidrs_.empty() && !mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
       RecordRequest();
       mygram::utils::StructuredLog()
           .Event("http_request_rejected_acl")
@@ -719,7 +757,23 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
       running_.store(false, std::memory_order_release);
     }
   });
-  server_->wait_until_ready();
+  const auto ready_deadline = std::chrono::steady_clock::now() + kHttpServerReadyTimeout;
+  while (!server_->is_running() && std::chrono::steady_clock::now() < ready_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  if (!server_->is_running()) {
+    server_->stop();
+    running_.store(false, std::memory_order_release);
+    if (server_thread_ && server_thread_->joinable()) {
+      server_thread_->join();
+    }
+    auto error = MakeError(ErrorCode::kNetworkBindFailed, "HTTP server did not become ready before timeout");
+    mygram::utils::StructuredLog()
+        .Event("http_server_ready_timeout")
+        .Field(log_fields::kFieldError, error.to_string())
+        .Error();
+    return MakeUnexpected(error);
+  }
 
   mygram::utils::StructuredLog()
       .Event("http_server_started")
@@ -853,7 +907,13 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
         SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
         return std::nullopt;
       }
-      query_str << " LIMIT " << body["limit"].get<int>();
+      const int64_t limit = body["limit"].get<int64_t>();
+      if (limit <= 0 || limit > config::defaults::kMaxLimit) {
+        SendError(res, kHttpBadRequest,
+                  "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
+        return std::nullopt;
+      }
+      query_str << " LIMIT " << limit;
     }
 
     // Add offset
@@ -862,7 +922,13 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
         SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
         return std::nullopt;
       }
-      query_str << " OFFSET " << body["offset"].get<int>();
+      const int64_t offset = body["offset"].get<int64_t>();
+      if (offset < 0 || offset > std::numeric_limits<uint32_t>::max()) {
+        SendError(res, kHttpBadRequest,
+                  "Invalid offset: must be between 0 and " + std::to_string(std::numeric_limits<uint32_t>::max()));
+        return std::nullopt;
+      }
+      query_str << " OFFSET " << offset;
     }
   }
 
@@ -1100,22 +1166,20 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     auto* current_doc_store = lookup.table_ctx->doc_store.get();
 
     // Parse ID
-    uint64_t doc_id = 0;
-    try {
-      doc_id = std::stoull(id_str);
-    } catch (const std::exception& e) {
+    auto doc_id = mygram::utils::ParseNumeric<uint64_t>(id_str);
+    if (!doc_id.has_value()) {
       SendError(res, kHttpBadRequest, "Invalid document ID");
       return;
     }
 
     // Validate DocId range (DocId is uint32_t, stoull returns uint64_t)
-    if (doc_id > std::numeric_limits<uint32_t>::max()) {
+    if (*doc_id > std::numeric_limits<uint32_t>::max()) {
       SendError(res, kHttpNotFound, "Document not found");
       return;
     }
 
     // Get document
-    auto doc = current_doc_store->GetDocument(static_cast<storage::DocId>(doc_id));
+    auto doc = current_doc_store->GetDocument(static_cast<storage::DocId>(*doc_id));
     if (!doc) {
       SendError(res, kHttpNotFound, "Document not found");
       return;
@@ -1150,7 +1214,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     json response;
 
     // Use TCP server's stats if available (includes all protocol stats), otherwise use HTTP-only stats
-    const ServerStats& effective_stats = (tcp_stats_ != nullptr) ? *tcp_stats_ : stats_;
+    ServerStats& effective_stats = GetEffectiveStats();
 
     // Server info
     response["server"] = "MygramDB";
@@ -1199,17 +1263,14 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     size_t total_memory = total_index_memory + total_doc_memory;
 
     // Update memory usage on the effective stats instance
-    if (tcp_stats_ != nullptr) {
-      tcp_stats_->UpdateMemoryUsage(total_memory);
-    } else {
-      stats_.UpdateMemoryUsage(total_memory);
-    }
+    effective_stats.UpdateMemoryUsage(total_memory);
 
     json memory_obj;
     memory_obj["used_memory_bytes"] = total_memory;
     memory_obj["used_memory_human"] = mygram::utils::FormatBytes(total_memory);
-    memory_obj["peak_memory_bytes"] = effective_stats.GetPeakMemoryUsage();
-    memory_obj["peak_memory_human"] = mygram::utils::FormatBytes(effective_stats.GetPeakMemoryUsage());
+    const auto peak_memory = effective_stats.GetPeakMemoryUsage();
+    memory_obj["peak_memory_bytes"] = peak_memory;
+    memory_obj["peak_memory_human"] = mygram::utils::FormatBytes(peak_memory);
     memory_obj["used_memory_index"] = mygram::utils::FormatBytes(total_index_memory);
     memory_obj["used_memory_documents"] = mygram::utils::FormatBytes(total_doc_memory);
 

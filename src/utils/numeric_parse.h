@@ -16,7 +16,9 @@
 #include <string_view>
 #include <type_traits>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Parse a numeric value from a string using std::from_chars
@@ -32,7 +34,7 @@ namespace mygram::utils {
  * @return Parsed value, or std::nullopt on failure
  */
 template <typename T>
-std::optional<T> ParseNumeric(std::string_view str) {
+std::optional<T> ParseNumeric(std::string_view str, int base = 10) {
   static_assert(std::is_arithmetic_v<T>, "ParseNumeric requires an arithmetic type");
 
   if constexpr (std::is_floating_point_v<T>) {
@@ -52,7 +54,7 @@ std::optional<T> ParseNumeric(std::string_view str) {
   } else {
     T val{};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), val);
+    auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), val, base);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
     if (ec != std::errc() || ptr != str.data() + str.size()) {
       return std::nullopt;
@@ -61,4 +63,4 @@ std::optional<T> ParseNumeric(std::string_view str) {
   }
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

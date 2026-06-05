@@ -95,6 +95,15 @@ class ResultSorter {
   static constexpr size_t kSchwartzianTransformMaxSize = 50'000'000;
 
   /**
+   * @brief Batch size for oversized partial sorts.
+   *
+   * When the full Schwartzian entry array would exceed kSchwartzianTransformMaxSize,
+   * partial sorts can still avoid comparator-side DocumentStore lookups by
+   * precomputing keys in bounded batches and retaining only the top K entries.
+   */
+  static constexpr size_t kSchwartzianBatchSize = 1'000'000;
+
+  /**
    * @brief Entry for Schwartzian Transform (pre-computed sort key)
    */
   struct SortEntry {
@@ -176,6 +185,12 @@ class ResultSorter {
                                                                 const storage::DocumentStore& doc_store,
                                                                 const OrderByClause& order_by,
                                                                 const std::string& primary_key_column, size_t top_k);
+
+  static std::vector<DocId> SortWithBatchedSchwartzianTransformPartial(const std::vector<DocId>& results,
+                                                                       const storage::DocumentStore& doc_store,
+                                                                       const OrderByClause& order_by,
+                                                                       const std::string& primary_key_column,
+                                                                       size_t top_k);
 
   /**
    * @brief Compare function for sorting

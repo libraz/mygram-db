@@ -17,10 +17,10 @@
 namespace mygramdb::server {
 namespace protocol {
 
-constexpr size_t kErrorPrefixLen = 6;             // Byte offset past "ERROR " (6 bytes)
-constexpr size_t kOkSavedPrefixLen = 9;           // Byte offset past "OK SAVED " (9 bytes)
-constexpr size_t kOkLoadedPrefixLen = 10;         // Byte offset past "OK LOADED " (10 bytes)
-constexpr size_t kDefaultRecvBufferSize = 65536;  // 64KB receive buffer
+constexpr size_t kErrorPrefixLen = 6;                   // Byte offset past "ERROR " (6 bytes)
+constexpr size_t kOkSavedPrefixLen = 9;                 // Byte offset past "OK SAVED " (9 bytes)
+constexpr size_t kOkLoadedPrefixLen = 10;               // Byte offset past "OK LOADED " (10 bytes)
+constexpr size_t kDefaultClientRecvBufferSize = 65536;  // 64KB client receive buffer
 
 }  // namespace protocol
 }  // namespace mygramdb::server

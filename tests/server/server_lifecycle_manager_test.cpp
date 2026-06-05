@@ -61,15 +61,16 @@ class ServerLifecycleManagerTest : public ::testing::Test {
 
   // Helper: Create lifecycle manager with current config
   std::unique_ptr<ServerLifecycleManager> CreateManager() {
-    auto result = ServerLifecycleManager::Create(
-        server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_,
-        dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
-        nullptr  // binlog_reader
+    auto result =
+        ServerLifecycleManager::Create(server_config_, table_contexts_, dump_dir_, &full_config_, stats_,
+                                       dump_load_in_progress_, dump_save_in_progress_, optimization_in_progress_,
+                                       replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
+                                       nullptr  // binlog_reader
 #ifdef USE_MYSQL
-        ,
-        sync_manager_.get()
+                                       ,
+                                       sync_manager_.get()
 #endif
-    );
+        );
     EXPECT_TRUE(result) << "Create failed: " << result.error().to_string();
     return std::move(*result);
   }
@@ -88,6 +89,7 @@ class ServerLifecycleManagerTest : public ::testing::Test {
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
   std::atomic<bool> mysql_reconnecting_{false};
+  replication_pause::Counter replication_pause_counter_;
 
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
@@ -224,6 +226,7 @@ TEST_F(ServerLifecycleManagerTest, Initialize_HandlerContextHasCorrectDependenci
   EXPECT_EQ(&handler_context->optimization_in_progress, &optimization_in_progress_);
   EXPECT_EQ(&handler_context->replication_paused_for_dump, &replication_paused_for_dump_);
   EXPECT_EQ(&handler_context->mysql_reconnecting, &mysql_reconnecting_);
+  EXPECT_EQ(handler_context->replication_pause_counter, &replication_pause_counter_);
 
   // Cleanup
   result->acceptor->Stop();
@@ -383,7 +386,7 @@ TEST_F(ServerLifecycleManagerTest, Constructor_NullFullConfig_SkipsOptionalCompo
       ServerLifecycleManager::Create(server_config_, table_contexts_, dump_dir_,
                                      nullptr,  // full_config = nullptr
                                      stats_, dump_load_in_progress_, dump_save_in_progress_, optimization_in_progress_,
-                                     replication_paused_for_dump_, mysql_reconnecting_,
+                                     replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
                                      nullptr  // binlog_reader
 #ifdef USE_MYSQL
                                      ,
@@ -436,7 +439,7 @@ TEST_F(ServerLifecycleManagerTest, Initialize_StopsAtFirstError) {
 TEST_F(ServerLifecycleManagerTest, Create_ValidArgs_ReturnsValidObject) {
   auto result = ServerLifecycleManager::Create(
       server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
-      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
+      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
       nullptr  // binlog_reader
 #ifdef USE_MYSQL
       ,
@@ -456,7 +459,7 @@ TEST_F(ServerLifecycleManagerTest, Create_ValidArgs_ReturnsValidObject) {
 TEST_F(ServerLifecycleManagerTest, Create_NullSyncManager_ReturnsError) {
   auto result = ServerLifecycleManager::Create(
       server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
-      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_,
+      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
       nullptr,  // binlog_reader
       nullptr   // sync_manager = null
   );

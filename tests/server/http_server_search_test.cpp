@@ -341,6 +341,46 @@ TEST_F(HttpServerTest, SearchMissingQuery) {
   EXPECT_EQ(body["error"], "Missing required field: q");
 }
 
+TEST_F(HttpServerTest, SearchRejectsInvalidPaginationBounds) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  auto expect_bad_request = [&](json request_body, const std::string& expected_error_fragment) {
+    auto res = client.Post("/test/search", request_body.dump(), "application/json");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 400);
+    auto body = json::parse(res->body);
+    ASSERT_TRUE(body.contains("error"));
+    EXPECT_NE(body["error"].get<std::string>().find(expected_error_fragment), std::string::npos);
+  };
+
+  json negative_limit;
+  negative_limit["q"] = "machine";
+  negative_limit["limit"] = -1;
+  expect_bad_request(negative_limit, "Invalid limit");
+
+  json zero_limit;
+  zero_limit["q"] = "machine";
+  zero_limit["limit"] = 0;
+  expect_bad_request(zero_limit, "Invalid limit");
+
+  json too_large_limit;
+  too_large_limit["q"] = "machine";
+  too_large_limit["limit"] = config::defaults::kMaxLimit + 1;
+  expect_bad_request(too_large_limit, "Invalid limit");
+
+  json negative_offset;
+  negative_offset["q"] = "machine";
+  negative_offset["offset"] = -1;
+  expect_bad_request(negative_offset, "Invalid offset");
+
+  json too_large_offset;
+  too_large_offset["q"] = "machine";
+  too_large_offset["offset"] = 4294967296LL;
+  expect_bad_request(too_large_offset, "Invalid offset");
+}
+
 TEST_F(HttpServerTest, SearchInvalidJSON) {
   ASSERT_TRUE(http_server_->Start());
 
@@ -1256,6 +1296,24 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithSemicolon) {
   auto res = client.Post("/test%3Bdrop/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
+}
+
+TEST_F(HttpServerTest, SearchRejectsTableNameWithInvalidUtf8) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+
+  // %E3%81 is a truncated three-byte UTF-8 sequence.
+  auto res = client.Post("/test%E3%81/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("Invalid table name"), std::string::npos);
 }
 
 /**

@@ -14,6 +14,7 @@
 #include <thread>
 
 #include "storage/document_store.h"
+#include "storage/document_store_internal.h"
 
 using namespace mygramdb::storage;
 
@@ -821,6 +822,33 @@ TEST_F(DocumentStoreSerializationTest, LoadFromStreamTruncatedBeforeDocCount) {
   std::string truncated(valid_data.begin(), valid_data.begin() + kDocCountOffset);
   std::istringstream truncated_stream(truncated);
 
+  DocumentStore store;
+  auto result = store.LoadFromStream(truncated_stream);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsTruncatedPrimitiveFilterValue) {
+  std::ostringstream out;
+  out.write("MGDS", 4);
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // version
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // next_doc_id
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // gtid length
+  mygramdb::storage::internal::WriteBinary(out, uint64_t{1});  // doc_count
+
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{1});  // doc_id
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // pk length
+  out.write("pk", 2);
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{1});  // filter_count
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{6});  // filter name length
+  out.write("status", 6);
+  mygramdb::storage::internal::WriteBinary(out, mygramdb::storage::internal::kTypeIndexInt32);
+
+  int32_t partial_value = 42;
+  auto value_bytes =
+      reinterpret_cast<const char*>(&partial_value);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+  out.write(value_bytes, 2);
+
+  std::istringstream truncated_stream(out.str());
   DocumentStore store;
   auto result = store.LoadFromStream(truncated_stream);
   EXPECT_FALSE(result.has_value());

@@ -9,11 +9,12 @@
 #include <string>
 #include <vector>
 
+#include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
 // Forward declarations
-namespace mygram::utils {
+namespace mygramdb::utils {
 class DateTimeProcessor;
 }
 
@@ -126,7 +127,7 @@ struct FilterConfig {
   std::string name;
   std::string type;  // Type options:
                      // Integer: "tinyint", "tinyint_unsigned", "smallint", "smallint_unsigned",
-                     //          "int", "int_unsigned", "bigint" (or legacy "int")
+                     //          "int", "int_unsigned", "bigint", "bigint_unsigned"
                      // Float: "float", "double"
                      // String: "string", "varchar", "text"
                      // Date: "datetime", "date", "timestamp"
@@ -277,10 +278,11 @@ struct ApiConfig {
     /// 0 = auto (see ThreadPool: max(hardware_concurrency() * 4, 64))
     int worker_threads = 0;
 
-    /// SO_RCVTIMEO (seconds) applied to each client connection.
-    /// Drives the blocking recv() idle watchdog; also bounds the worst-case
-    /// time a worker remains stuck on a dead peer before Linux's own TCP
-    /// keepalive probes expire. Default: 60.
+    /// Initial TCP read timeout (seconds).
+    /// In the reactor I/O path, a connection must complete its first
+    /// CRLF-delimited frame within this duration or the reaper closes it.
+    /// This prevents handshake-only / slow-drip clients from occupying
+    /// connection slots until the longer general idle timeout. Default: 60.
     int recv_timeout_sec = 60;  // NOLINT(readability-magic-numbers)
 
     /// Thread pool task queue size. Once a connection is accepted but cannot
@@ -295,17 +297,13 @@ struct ApiConfig {
     /// `reactor_write_queue_overflow` warnings in steady state should either
     /// raise this cap (if the responses are legitimately large) or
     /// investigate the client(s) that are failing to drain their socket.
-    int64_t max_write_queue_bytes = 16LL * 1024 * 1024;  // 16 MiB
+    int64_t max_write_queue_bytes = 16LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  // 16 MiB
 
     /// Per-connection TCP keepalive (applied to accepted client sockets).
     ///
-    /// Under the blocking-recv I/O model, a half-open TCP connection (peer's
-    /// host died but the socket was never closed) keeps a worker thread parked
-    /// in recv() until either `recv_timeout_sec` fires or TCP keepalive probes
-    /// expire. The Linux defaults (2 hour idle + 75s interval * 9 probes) are
-    /// too permissive for a latency-sensitive server, so we tighten them here.
-    /// This is kept as a defense-in-depth measure even after the reactor
-    /// refactor switches away from blocking recv.
+    /// TCP keepalive handles dead-peer detection after connection setup. It is
+    /// separate from `recv_timeout_sec`, which enforces the application-level
+    /// first-frame deadline in the reactor.
     struct {
       bool enabled = true;
       int idle_sec = 60;      ///< TCP_KEEPIDLE: start probing after N seconds idle
@@ -340,7 +338,7 @@ struct ApiConfig {
     /// per-connection write queue cap and from the query parser's
     /// `max_query_length`; it is a coarse network-level guard against memory
     /// exhaustion via giant POST bodies.
-    int64_t max_body_bytes = 16LL * 1024 * 1024;  // 16 MiB
+    int64_t max_body_bytes = 16LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  // 16 MiB
   } http;
 
   struct {
@@ -389,11 +387,12 @@ struct LoggingConfig {
  * @brief Query cache configuration
  */
 struct CacheConfig {
-  bool enabled = true;                          ///< Enable/disable cache (default: true)
-  size_t max_memory_bytes = 32 * 1024 * 1024;   ///< Maximum cache memory in bytes (default: 32MB)  // NOLINT
-  double min_query_cost_ms = 10.0;              ///< Minimum query cost to cache (default: 10ms)  // NOLINT
-  int ttl_seconds = 3600;                       ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
-  std::string invalidation_strategy = "ngram";  ///< Invalidation strategy: "ngram", "table"
+  bool enabled = true;  ///< Enable/disable cache (default: true)
+  size_t max_memory_bytes =
+      32 * mygram::constants::kBytesPerMegabyte;  ///< Maximum cache memory in bytes (default: 32MB)  // NOLINT
+  double min_query_cost_ms = 10.0;                ///< Minimum query cost to cache (default: 10ms)  // NOLINT
+  int ttl_seconds = 3600;                         ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
+  std::string invalidation_strategy = "ngram";    ///< Invalidation strategy: "ngram", "table"
 
   // Advanced tuning
   bool compression_enabled = true;  ///< Enable LZ4 compression (default: true)

@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "server/server_types.h"
+#include "utils/constants.h"
 
 namespace mygramdb::server {
 
@@ -92,14 +93,14 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /// from config so that lowering `max_query_length` at runtime cannot make
   /// the reactor drop well-formed but large requests that are still in
   /// flight on an existing connection.
-  static constexpr size_t kMaxReadBufferBytes = 1 * 1024 * 1024;  // 1 MiB
+  static constexpr size_t kMaxReadBufferBytes = mygram::constants::kBytesPerMegabyte;  // 1 MiB
 
   /// Hard upper bound on unsent response bytes; once exceeded the reactor
   /// forcibly closes the connection to protect against slow-reader OOM
   /// (see design doc §7 R3). Phase 3 enforces this cap in `EnqueueResponse`:
   /// a push that would exceed the cap sets `closing_` and causes the drain
   /// task to tear down the connection.
-  static constexpr size_t kDefaultMaxWriteQueueBytes = 16 * 1024 * 1024;  // 16 MiB
+  static constexpr size_t kDefaultMaxWriteQueueBytes = 16 * mygram::constants::kBytesPerMegabyte;  // 16 MiB
 
   /**
    * @brief Factory. Must be used instead of a bare constructor because
@@ -179,6 +180,16 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   [[nodiscard]] std::chrono::steady_clock::time_point LastActive() const {
     return last_active_.load(std::memory_order_relaxed);
   }
+
+  /// Timestamp captured at construction/accept time. Used for initial-read
+  /// timeouts so a client cannot keep a socket forever by slowly dripping
+  /// partial bytes without ever completing a frame.
+  [[nodiscard]] std::chrono::steady_clock::time_point CreatedAt() const {
+    return created_at_.load(std::memory_order_relaxed);
+  }
+
+  /// Whether this connection has completed at least one CRLF-delimited frame.
+  [[nodiscard]] bool HasReceivedFrame() const { return received_frame_.load(std::memory_order_acquire); }
 
   /// Returns the number of frames currently in `pending_frames_`. Exposed for tests only.
   [[nodiscard]] size_t PendingFrameCountForTest() const {
@@ -319,6 +330,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /// last response has been queued for send.
   std::atomic<bool> read_eof_{false};
   std::atomic<bool> drain_scheduled_{false};
+  std::atomic<bool> received_frame_{false};
 
   // Mirror of `write_queue_bytes_` for lock-free metric readers.
   std::atomic<size_t> pending_write_bytes_{0};
@@ -328,6 +340,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   // connection that is actively performing I/O is never reaped, while a
   // connection that connected but never sent or read a byte ages out after
   // `IoReactor::idle_timeout_`.
+  std::atomic<std::chrono::steady_clock::time_point> created_at_{std::chrono::steady_clock::now()};
   std::atomic<std::chrono::steady_clock::time_point> last_active_{std::chrono::steady_clock::now()};
 };
 

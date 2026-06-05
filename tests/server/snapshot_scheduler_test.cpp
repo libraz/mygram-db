@@ -445,7 +445,13 @@ class StubBinlogReader : public mygramdb::mysql::IBinlogReader {
     stop_count_.fetch_add(1, std::memory_order_acq_rel);
   }
 
-  bool IsRunning() const override { return running_.load(std::memory_order_acquire); }
+  bool IsRunning() const override {
+    bool running = running_.load(std::memory_order_acquire);
+    if (stop_after_true_is_running_.exchange(false, std::memory_order_acq_rel) && running) {
+      running_.store(false, std::memory_order_release);
+    }
+    return running;
+  }
 
   std::string GetCurrentGTID() const override {
     if (observed_flag_ != nullptr && observed_flag_->load(std::memory_order_acquire)) {
@@ -465,6 +471,7 @@ class StubBinlogReader : public mygramdb::mysql::IBinlogReader {
 
   void SetGtidForTest(const std::string& gtid) { current_gtid_ = gtid; }
   void SetRunningForTest(bool running) { running_.store(running, std::memory_order_release); }
+  void StopAfterNextTrueIsRunningForTest() { stop_after_true_is_running_.store(true, std::memory_order_release); }
   void ObserveFlagAtGetGtid(std::atomic<bool>* flag) { observed_flag_ = flag; }
 
   int StartCount() const { return start_count_.load(std::memory_order_acquire); }
@@ -474,11 +481,12 @@ class StubBinlogReader : public mygramdb::mysql::IBinlogReader {
 
  private:
   std::string current_gtid_;
-  std::atomic<bool> running_{false};
+  mutable std::atomic<bool> running_{false};
   std::atomic<int> start_count_{0};
   std::atomic<int> stop_count_{0};
   mutable std::atomic<int> get_gtid_count_{0};
   mutable std::atomic<bool> flag_seen_true_at_gtid_{false};
+  mutable std::atomic<bool> stop_after_true_is_running_{false};
   std::atomic<bool>* observed_flag_ = nullptr;
 };
 
@@ -555,6 +563,32 @@ TEST_F(SnapshotSchedulerTest, TakeSnapshotSkipsReplicationControlWhenStopped) {
       << "replication_paused_for_dump must remain false when replication wasn't running";
 }
 
+TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartIfManualStopWinsRaceBeforePause) {
+  StubBinlogReader stub;
+  stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
+  stub.SetRunningForTest(true);
+  stub.StopAfterNextTrueIsRunningForTest();
+
+  replication_pause::Counter counter;
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_, &counter);
+
+  scheduler.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  scheduler.Stop();
+
+  EXPECT_EQ(stub.StopCount(), 0) << "Snapshot must not Stop() after a manual Stop wins the IsRunning/Stop race";
+  EXPECT_EQ(stub.StartCount(), 0) << "Snapshot must not restart replication it did not pause";
+  EXPECT_FALSE(counter.IsPaused());
+  EXPECT_FALSE(replication_paused_for_dump_.load());
+  EXPECT_FALSE(stub.IsRunning());
+}
+
 /**
  * @brief H-C3 regression: when another operation is already holding the
  *        replication-pause counter, the auto-snapshot must NOT call
@@ -577,8 +611,8 @@ TEST_F(SnapshotSchedulerTest, TakeSnapshotSkipsReplicationControlWhenStopped) {
 TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartWhenAnotherOperationHoldsPause) {
   // Simulate "DUMP LOAD already paused replication" by pre-incrementing
   // the shared counter and stopping the stub reader.
-  replication_pause::ResetForTesting();
-  ASSERT_TRUE(replication_pause::RequestPause()) << "Test pre-condition: counter should start at 0";
+  replication_pause::Counter counter;
+  ASSERT_TRUE(counter.RequestPause()) << "Test pre-condition: counter should start at 0";
 
   StubBinlogReader stub;
   stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
@@ -592,7 +626,7 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartWhenAnotherOperationHold
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
-                              dump_save_in_progress_, replication_paused_for_dump_);
+                              dump_save_in_progress_, replication_paused_for_dump_, &counter);
 
   scheduler.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(2500));
@@ -611,11 +645,9 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartWhenAnotherOperationHold
       << "replication_paused_for_dump must remain asserted while any operation holds the pause";
 
   // Now release our pre-held pause; counter returns to 0.
-  EXPECT_TRUE(replication_pause::ReleasePause()) << "Test should be the last releaser after the snapshot ran";
-  EXPECT_FALSE(replication_pause::IsPaused());
+  EXPECT_TRUE(counter.ReleasePause()) << "Test should be the last releaser after the snapshot ran";
+  EXPECT_FALSE(counter.IsPaused());
 
-  // Cleanup so other tests in this binary start with a clean counter.
-  replication_pause::ResetForTesting();
   replication_paused_for_dump_ = false;
 }
 
@@ -630,8 +662,8 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartWhenAnotherOperationHold
  * counter increment when the "another operation" branch is taken.
  */
 TEST_F(SnapshotSchedulerTest, AutoSnapshotPauseResumeStillWorksOnCleanCounter) {
-  replication_pause::ResetForTesting();
-  ASSERT_FALSE(replication_pause::IsPaused()) << "Pre-condition: counter starts at 0";
+  replication_pause::Counter counter;
+  ASSERT_FALSE(counter.IsPaused()) << "Pre-condition: counter starts at 0";
 
   StubBinlogReader stub;
   stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
@@ -642,7 +674,7 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotPauseResumeStillWorksOnCleanCounter) {
   dump_config.retain = 3;
 
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
-                              dump_save_in_progress_, replication_paused_for_dump_);
+                              dump_save_in_progress_, replication_paused_for_dump_, &counter);
 
   scheduler.Start();
   std::this_thread::sleep_for(std::chrono::milliseconds(2500));
@@ -655,10 +687,8 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotPauseResumeStillWorksOnCleanCounter) {
   EXPECT_GE(stub.StartCount(), 1);
   EXPECT_EQ(stub.StopCount(), stub.StartCount())
       << "Every Stop() must be matched by a Start() when the snapshot is the sole pauser";
-  EXPECT_FALSE(replication_pause::IsPaused()) << "Counter must be drained back to 0 after the snapshot finishes";
+  EXPECT_FALSE(counter.IsPaused()) << "Counter must be drained back to 0 after the snapshot finishes";
   EXPECT_FALSE(replication_paused_for_dump_.load());
-
-  replication_pause::ResetForTesting();
 }
 
 #endif  // USE_MYSQL

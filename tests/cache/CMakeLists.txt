@@ -6,7 +6,7 @@ add_executable(md5_test
 )
 
 target_link_libraries(md5_test PRIVATE
-  mygramdb_query  # md5 moved to query module
+  mygramdb_cache_key
   GTest::gtest_main
 )
 
@@ -21,7 +21,7 @@ add_executable(cache_key_test
 )
 
 target_link_libraries(cache_key_test PRIVATE
-  mygramdb_query  # cache_key moved to query module
+  mygramdb_cache_key
   GTest::gtest_main
 )
 

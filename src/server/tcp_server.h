@@ -189,6 +189,7 @@ class TcpServer {
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};  // Replication paused for DUMP SAVE/LOAD
   std::atomic<bool> mysql_reconnecting_{false};           // MySQL reconnection in progress
+  replication_pause::Counter replication_pause_counter_;
   // Set by Stop() before joining the dump worker so DumpSaveWorker / DumpLoadWorker
   // can skip the post-operation binlog Start() when the server is tearing down
   // (see CR-3 / CR-10 audit, May 2026). Without this, a worker that observes

@@ -14,8 +14,10 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
+#include "storage/dump_format_v1_internal.h"
 #include "utils/atomic_file_writer.h"
 #include "utils/binary_io.h"
 #include "utils/fd_guard.h"
@@ -115,54 +117,135 @@ class FdStreambuf : public std::streambuf {
 #endif
 
 // Use shared WriteBinary/ReadBinary from utils/binary_io.h
+using internal::ReadString;
+using internal::WriteString;
 using mygram::utils::ReadBinary;
 using mygram::utils::WriteBinary;
 
-/**
- * @brief Write string to stream (length-prefixed)
- *
- * Note: Uses local implementation instead of shared WriteString for consistency
- * with ReadString which has security validation.
- */
-bool WriteString(std::ostream& output_stream, const std::string& str) {
-  auto len = static_cast<uint32_t>(str.size());
-  if (!WriteBinary(output_stream, len)) {
-    return false;
+#ifndef _WIN32
+bool WriteAllAt(int fd, const void* data, size_t size, off_t offset) {
+  const auto* current = static_cast<const char*>(data);
+  size_t remaining = size;
+  off_t current_offset = offset;
+  while (remaining > 0) {
+    ssize_t written = pwrite(fd, current, remaining, current_offset);
+    if (written < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (written == 0) {
+      return false;
+    }
+    current += written;
+    remaining -= static_cast<size_t>(written);
+    current_offset += written;
   }
-  if (len > 0) {
-    output_stream.write(str.data(), len);
-  }
-  return output_stream.good();
+  return true;
 }
 
-/**
- * @brief Read string from stream (length-prefixed) with field-specific size limit
- * @param input_stream Input stream to read from
- * @param str Output string
- * @param max_length Maximum allowed string length for this field type
- * @return true if read succeeded and length is within limit, false otherwise
- */
-bool ReadString(std::istream& input_stream, std::string& str, uint32_t max_length = kMaxGeneralStringLength) {
-  uint32_t len = 0;
-  if (!ReadBinary(input_stream, len)) {
-    return false;
+template <typename T>
+bool WriteBinaryAt(int fd, T value, off_t offset) {
+  if constexpr (std::is_integral_v<T>) {
+    value = mygram::utils::ToLittleEndian(value);
   }
-  if (len > max_length) {
-    StructuredLog()
-        .Event("storage_validation_error")
-        .Field("type", "string_length_exceeded")
-        .Field("length", static_cast<uint64_t>(len))
-        .Field("max_length", static_cast<uint64_t>(max_length))
-        .Error();
-    return false;
+  return WriteAllAt(fd, &value, sizeof(value), offset);
+}
+
+template <typename WritePayload>
+Expected<void, Error> WriteSizedPayloadToFd(std::ostream& output_stream, int file_descriptor,
+                                            WritePayload&& write_payload) {
+  output_stream.flush();
+  if (!output_stream.good()) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
   }
-  if (len > 0) {
-    str.resize(len);
-    input_stream.read(str.data(), len);
-  } else {
-    str.clear();
+
+  off_t length_offset = lseek(file_descriptor, 0, SEEK_CUR);
+  if (length_offset < 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to locate payload length"));
   }
-  return input_stream.good();
+
+  uint64_t payload_length = 0;
+  if (!WriteBinary(output_stream, payload_length)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+  }
+  output_stream.flush();
+
+  off_t payload_start = lseek(file_descriptor, 0, SEEK_CUR);
+  if (payload_start < 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to locate payload start"));
+  }
+
+  if (auto result = write_payload(output_stream); !result) {
+    return result;
+  }
+  output_stream.flush();
+
+  off_t payload_end = lseek(file_descriptor, 0, SEEK_CUR);
+  if (payload_end < payload_start) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to locate payload end"));
+  }
+  payload_length = static_cast<uint64_t>(payload_end - payload_start);
+  if (!WriteBinaryAt(file_descriptor, payload_length, length_offset)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write payload length"));
+  }
+  return {};
+}
+
+Expected<uint32_t, Error> CalculateCRC32StreamingFd(int fd, uint64_t file_size, size_t crc_offset) {
+  constexpr size_t kChunkSize = 1024 * 1024;
+  constexpr size_t kCrcFieldSize = 4;
+
+  uint32_t crc = 0;
+  std::vector<char> buffer(kChunkSize);
+  uint64_t bytes_read = 0;
+
+  while (bytes_read < file_size) {
+    size_t to_read = std::min(kChunkSize, static_cast<size_t>(file_size - bytes_read));
+    ssize_t actually_read = pread(fd, buffer.data(), to_read, static_cast<off_t>(bytes_read));
+    if (actually_read < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to read file for CRC32"));
+    }
+    if (actually_read == 0) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Unexpected EOF while calculating CRC32"));
+    }
+
+    auto chunk_size = static_cast<size_t>(actually_read);
+    if (crc_offset >= bytes_read && crc_offset < bytes_read + chunk_size) {
+      size_t offset_in_chunk = crc_offset - bytes_read;
+      size_t zero_bytes = std::min(kCrcFieldSize, chunk_size - offset_in_chunk);
+      std::memset(&buffer[offset_in_chunk], 0, zero_bytes);
+    }
+    if (crc_offset + kCrcFieldSize > bytes_read && crc_offset < bytes_read) {
+      size_t zero_end = std::min<size_t>(kCrcFieldSize - (bytes_read - crc_offset), chunk_size);
+      std::memset(buffer.data(), 0, zero_end);
+    }
+
+    crc = static_cast<uint32_t>(
+        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(chunk_size)));  // NOLINT
+    bytes_read += chunk_size;
+  }
+
+  return crc;
+}
+#endif
+
+bool ReadExactString(std::istream& input_stream, uint64_t length, std::string& output) {
+  output.assign(static_cast<size_t>(length), '\0');
+  if (length == 0) {
+    return true;
+  }
+  input_stream.read(output.data(), static_cast<std::streamsize>(length));
+  return input_stream.gcount() == static_cast<std::streamsize>(length);
+}
+
+bool SkipExact(std::istream& input_stream, uint64_t length) {
+  input_stream.seekg(static_cast<std::streamoff>(length), std::ios::cur);
+  return !input_stream.fail() && !input_stream.bad();
 }
 
 }  // namespace
@@ -586,7 +669,8 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
 
 }  // namespace
 
-Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config::Config& config) {
+[[maybe_unused]] static Expected<void, Error> LegacySerializeConfig(std::ostream& output_stream,
+                                                                    const config::Config& config) {
   // MySQL config (excluding sensitive credentials)
   if (!WriteString(output_stream, config.mysql.host)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.host"));
@@ -756,7 +840,8 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
   return {};
 }
 
-Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config) {
+[[maybe_unused]] static Expected<void, Error> LegacyDeserializeConfig(std::istream& input_stream,
+                                                                      config::Config& config) {
   constexpr uint32_t kMaxTableCount = 10000;  // Reasonable limit for table count
   // MySQL config
   if (!ReadString(input_stream, config.mysql.host, kMaxConfigValueLength)) {
@@ -1009,7 +1094,7 @@ Expected<void, Error> WriteDumpV1(
     // O_NOFOLLOW: Fail if the file is a symbolic link
     // S_IRUSR | S_IWUSR: Set permissions to 600 (rw-------)
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX open() requires varargs for mode
-    int file_descriptor = open(temp_filepath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    int file_descriptor = open(temp_filepath.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
     if (file_descriptor < 0) {
       LogStorageError("create_temp_file", temp_filepath, std::strerror(errno));
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -1149,7 +1234,27 @@ Expected<void, Error> WriteDumpV1(
         }
       }
 
-      // Save index directly to stringstream
+#ifndef _WIN32
+      if (auto result = WriteSizedPayloadToFd(ofs, file_descriptor,
+                                              [&](std::ostream& stream) -> Expected<void, Error> {
+                                                if (auto index_result = index->SaveToStream(stream); !index_result) {
+                                                  StructuredLog()
+                                                      .Event("storage_error")
+                                                      .Field("operation", "save_index")
+                                                      .Field("filepath", temp_filepath)
+                                                      .Field("table", table_name)
+                                                      .Field("error", index_result.error().message())
+                                                      .Error();
+                                                  return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                                                                  "Write operation failed"));
+                                                }
+                                                return {};
+                                              });
+          !result) {
+        return result;
+      }
+#else
+      // Save index to stringstream where fd-based length patching is unavailable.
       std::ostringstream index_stream;
       if (auto index_result = index->SaveToStream(index_stream); !index_result) {
         StructuredLog()
@@ -1168,8 +1273,29 @@ Expected<void, Error> WriteDumpV1(
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       ofs.write(index_data.data(), static_cast<std::streamsize>(index_len));
+#endif
 
-      // Save document store directly to stringstream
+#ifndef _WIN32
+      if (auto result = WriteSizedPayloadToFd(
+              ofs, file_descriptor,
+              [&](std::ostream& stream) -> Expected<void, Error> {
+                if (auto doc_result = doc_store->SaveToStream(stream, ""); !doc_result) {
+                  StructuredLog()
+                      .Event("storage_error")
+                      .Field("operation", "save_documents")
+                      .Field("filepath", temp_filepath)
+                      .Field("table", table_name)
+                      .Field("error", doc_result.error().message())
+                      .Error();
+                  return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+                }
+                return {};
+              });
+          !result) {
+        return result;
+      }
+#else
+      // Save document store to stringstream where fd-based length patching is unavailable.
       std::ostringstream doc_stream;
       if (auto result = doc_store->SaveToStream(doc_stream, ""); !result) {
         StructuredLog()
@@ -1188,6 +1314,7 @@ Expected<void, Error> WriteDumpV1(
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
       ofs.write(doc_data.data(), static_cast<std::streamsize>(doc_len));
+#endif
 
       StructuredLog().Event("dump_table_saved").Field("table", table_name).Debug();
     }
@@ -1197,70 +1324,33 @@ Expected<void, Error> WriteDumpV1(
       LogStorageError("write_dump", temp_filepath, "Stream error during write");
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
-    // Close the fd explicitly before subsequent file operations that reopen by path.
-    // FDGuard destructor is a no-op after this since fd is already closed.
-    fd_guard.Release();
-    close(file_descriptor);
-
-    // Calculate file size
-    std::ifstream ifs_size(temp_filepath, std::ios::binary | std::ios::ate);
-    if (!ifs_size) {
-      LogStorageError("reopen_file", temp_filepath, "Failed to reopen for size calculation");
+    // Calculate file size from the verified fd and patch header fields in place.
+    // Reopening temp_filepath by name here would reintroduce a TOCTOU window.
+    if (fstat(file_descriptor, &file_stat) != 0) {
+      LogStorageError("stat_temp_file", temp_filepath, std::strerror(errno));
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
-    uint64_t file_size = static_cast<uint64_t>(ifs_size.tellg());
-    ifs_size.close();
+    uint64_t file_size = static_cast<uint64_t>(file_stat.st_size);
 
     // Update total_file_size in the header
-    {
-      std::fstream update_stream1(temp_filepath, std::ios::in | std::ios::out | std::ios::binary);
-      if (!update_stream1) {
-        LogStorageError("open_file", temp_filepath, "Failed to open for header update");
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
-
-      // Seek to total_file_size position
-      update_stream1.seekp(kHeaderTotalFileSizeOffset);
-      if (!WriteBinary(update_stream1, file_size)) {
-        LogStorageError("write_header_field", temp_filepath, "Failed to write total_file_size");
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
-      update_stream1.close();
+    if (!WriteBinaryAt(file_descriptor, file_size, kHeaderTotalFileSizeOffset)) {
+      LogStorageError("write_header_field", temp_filepath, "Failed to write total_file_size");
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
     // Calculate CRC32 of the file
-    std::ifstream ifs(temp_filepath, std::ios::binary);
-    if (!ifs) {
-      LogStorageError("reopen_file", temp_filepath, "Failed to reopen for CRC calculation");
+    const size_t crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
+    auto crc_result = CalculateCRC32StreamingFd(file_descriptor, file_size, crc_offset);
+    if (!crc_result) {
+      LogStorageError("calculate_crc32", temp_filepath, crc_result.error().message());
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
-
-    // CRC field is at offset defined by kHeaderFileCRC32Offset
-    const size_t crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
-
-    uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
-    ifs.close();
+    uint32_t calculated_crc = crc_result.value();
 
     // Update header with CRC
-    {
-      std::fstream update_stream2(temp_filepath, std::ios::in | std::ios::out | std::ios::binary);
-      if (!update_stream2) {
-        LogStorageError("open_file", temp_filepath, "Failed to open for CRC update");
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
-
-      // Seek to file_crc32 position
-      update_stream2.seekp(kHeaderFileCRC32Offset);
-      if (!WriteBinary(update_stream2, calculated_crc)) {
-        LogStorageError("write_header_field", temp_filepath, "Failed to write file_crc32");
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
-
-      update_stream2.close();
-      if (!update_stream2.good()) {
-        LogStorageError("update_header", temp_filepath, "Stream error during header update");
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-      }
+    if (!WriteBinaryAt(file_descriptor, calculated_crc, kHeaderFileCRC32Offset)) {
+      LogStorageError("write_header_field", temp_filepath, "Failed to write file_crc32");
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
     // Atomic commit: fsync temp file, rename to final path, fsync directory
@@ -1423,8 +1513,11 @@ Expected<void, Error> ReadDumpV1(
       LogStorageError("read_config_section", filepath, "Config section too large: " + std::to_string(config_len));
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Config section exceeds maximum size"));
     }
-    std::string config_data(config_len, '\0');
-    ifs.read(config_data.data(), static_cast<std::streamsize>(config_len));
+    std::string config_data;
+    if (!ReadExactString(ifs, config_len, config_data)) {
+      LogStorageError("read_config_section", filepath, "Config section is truncated");
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+    }
     std::istringstream config_stream(config_data);
     if (auto result = DeserializeConfig(config_stream, config); !result) {
       LogStorageError("deserialize_config", filepath, result.error().message());
@@ -1441,8 +1534,11 @@ Expected<void, Error> ReadDumpV1(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Statistics section exceeds maximum size"));
     }
     if (stats_len > 0 && stats != nullptr) {
-      std::string stats_data(stats_len, '\0');
-      ifs.read(stats_data.data(), static_cast<std::streamsize>(stats_len));
+      std::string stats_data;
+      if (!ReadExactString(ifs, stats_len, stats_data)) {
+        LogStorageError("read_stats_section", filepath, "Statistics section is truncated");
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      }
       std::istringstream stats_stream(stats_data);
       if (auto result = DeserializeStatistics(stats_stream, *stats); !result) {
         LogStorageError("deserialize_statistics", filepath, result.error().message());
@@ -1450,7 +1546,10 @@ Expected<void, Error> ReadDumpV1(
       }
     } else if (stats_len > 0) {
       // Skip statistics if not requested
-      ifs.seekg(stats_len, std::ios::cur);
+      if (!SkipExact(ifs, stats_len)) {
+        LogStorageError("skip_stats_section", filepath, "Statistics section is truncated");
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      }
     }
 
     // Read table data section
@@ -1458,6 +1557,13 @@ Expected<void, Error> ReadDumpV1(
     if (!ReadBinary(ifs, table_count)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
     }
+
+    // Maximum allowed size for table data sections (prevents OOM from malicious/corrupt dumps)
+    // Use physical memory as the upper bound; fall back to 64 GB if unavailable.
+    const uint64_t kMaxTableDataSectionLength = [] {
+      auto mem_info = mygram::utils::GetSystemMemoryInfo();
+      return mem_info ? mem_info->total_physical_bytes : 64ULL * 1024 * 1024 * 1024;
+    }();
 
     for (uint32_t i = 0; i < table_count; ++i) {
       std::string table_name;
@@ -1471,8 +1577,11 @@ Expected<void, Error> ReadDumpV1(
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
       }
       if (table_stats_len > 0 && table_stats != nullptr) {
-        std::string table_stats_data(table_stats_len, '\0');
-        ifs.read(table_stats_data.data(), static_cast<std::streamsize>(table_stats_len));
+        std::string table_stats_data;
+        if (!ReadExactString(ifs, table_stats_len, table_stats_data)) {
+          LogStorageError("read_table_stats_section", filepath, "Table statistics section is truncated");
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+        }
         std::istringstream table_stats_stream(table_stats_data);
         TableStatistics table_stat;
         if (auto result = DeserializeTableStatistics(table_stats_stream, table_stat); !result) {
@@ -1488,15 +1597,11 @@ Expected<void, Error> ReadDumpV1(
         (*table_stats)[table_name] = table_stat;
       } else if (table_stats_len > 0) {
         // Skip table statistics if not requested
-        ifs.seekg(table_stats_len, std::ios::cur);
+        if (!SkipExact(ifs, table_stats_len)) {
+          LogStorageError("skip_table_stats_section", filepath, "Table statistics section is truncated");
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+        }
       }
-
-      // Maximum allowed size for table data sections (prevents OOM from malicious/corrupt dumps)
-      // Use physical memory as the upper bound; fall back to 64 GB if unavailable
-      const uint64_t kMaxTableDataSectionLength = [] {
-        auto mem_info = mygram::utils::GetSystemMemoryInfo();
-        return mem_info ? mem_info->total_physical_bytes : 64ULL * 1024 * 1024 * 1024;
-      }();
 
       // Check if table context exists
       if (table_contexts.count(table_name) == 0) {
@@ -1516,7 +1621,10 @@ Expected<void, Error> ReadDumpV1(
           return MakeUnexpected(
               MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
         }
-        ifs.seekg(static_cast<std::streamoff>(index_len), std::ios::cur);
+        if (!SkipExact(ifs, index_len)) {
+          LogStorageError("skip_index_section", filepath, "Index section is truncated");
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+        }
 
         uint64_t doc_len = 0;
         if (!ReadBinary(ifs, doc_len)) {
@@ -1526,7 +1634,10 @@ Expected<void, Error> ReadDumpV1(
           return MakeUnexpected(
               MakeError(ErrorCode::kStorageDumpReadError, "Document data length exceeds physical memory"));
         }
-        ifs.seekg(static_cast<std::streamoff>(doc_len), std::ios::cur);
+        if (!SkipExact(ifs, doc_len)) {
+          LogStorageError("skip_document_section", filepath, "Document section is truncated");
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+        }
         continue;
       }
 
@@ -1545,8 +1656,11 @@ Expected<void, Error> ReadDumpV1(
 
       if (index_len > 0) {
         // Standard mode: load index from dump
-        std::string index_data(index_len, '\0');
-        ifs.read(index_data.data(), static_cast<std::streamsize>(index_len));
+        std::string index_data;
+        if (!ReadExactString(ifs, index_len, index_data)) {
+          LogStorageError("read_index_section", filepath, "Index section is truncated");
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+        }
 
         // Load index directly from stringstream
         std::istringstream index_stream(index_data);
@@ -1579,8 +1693,11 @@ Expected<void, Error> ReadDumpV1(
         return MakeUnexpected(
             MakeError(ErrorCode::kStorageDumpReadError, "Document data length exceeds physical memory"));
       }
-      std::string doc_data(doc_len, '\0');
-      ifs.read(doc_data.data(), static_cast<std::streamsize>(doc_len));
+      std::string doc_data;
+      if (!ReadExactString(ifs, doc_len, doc_data)) {
+        LogStorageError("read_document_section", filepath, "Document section is truncated");
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+      }
 
       // Load document store directly from stringstream
       std::istringstream doc_stream(doc_data);
@@ -1620,7 +1737,8 @@ Expected<void, Error> ReadDumpV1(
  * @param crc_offset Position of the CRC field to zero out during calculation
  * @return CRC32 checksum of the file
  */
-uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset) {
+[[maybe_unused]] static uint32_t LegacyCalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size,
+                                                               size_t crc_offset) {
   constexpr size_t kChunkSize = 1024 * 1024;  // 1MB chunks
   constexpr size_t kCrcFieldSize = 4;
 
@@ -1666,7 +1784,8 @@ uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t 
 // Snapshot Integrity Verification
 // ============================================================================
 
-Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error) {
+[[maybe_unused]] static Expected<void, Error> LegacyVerifyDumpIntegrity(const std::string& filepath,
+                                                                        dump_format::IntegrityError& integrity_error) {
   try {
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
@@ -1736,7 +1855,7 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       // CRC field offset defined by kHeaderFileCRC32Offset
       const size_t crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
 
-      uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
+      uint32_t calculated_crc = LegacyCalculateCRC32Streaming(ifs, file_size, crc_offset);
 
       if (calculated_crc != header.file_crc32) {
         integrity_error.type = dump_format::CRCErrorType::FileCRC;
@@ -1771,7 +1890,7 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
 // Snapshot File Information
 // ============================================================================
 
-Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpInfo& info) {
+[[maybe_unused]] static Expected<void, Error> LegacyGetDumpInfo(const std::string& filepath, DumpInfo& info) {
   try {
     std::ifstream ifs(filepath, std::ios::binary | std::ios::ate);
     if (!ifs) {

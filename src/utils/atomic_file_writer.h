@@ -10,8 +10,9 @@
 
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/namespace_compat.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 /**
  * @brief RAII helper for atomic file writes via temp-file + fsync + rename.
@@ -64,6 +65,6 @@ class AtomicFileWriter {
   bool rolled_back_ = false;
 };
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils
 
 #endif  // MYGRAMDB_UTILS_ATOMIC_FILE_WRITER_H_

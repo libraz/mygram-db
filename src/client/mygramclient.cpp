@@ -31,6 +31,7 @@
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/numeric_parse.h"
+#include "utils/string_utils.h"
 
 using namespace mygram::utils;
 
@@ -52,18 +53,6 @@ Expected<void, Error> CheckErrorResponse(const std::string& response) {
     return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(proto::kErrorPrefixLen)));
   }
   return {};
-}
-
-/**
- * @brief Trim ASCII whitespace (space, tab, CR, LF) from both ends
- */
-std::string TrimAsciiWhitespace(std::string_view str) {
-  size_t start = str.find_first_not_of(" \t\r\n");
-  if (start == std::string_view::npos) {
-    return std::string();
-  }
-  size_t end = str.find_last_not_of(" \t\r\n");
-  return std::string(str.substr(start, end - start + 1));
 }
 
 /**
@@ -100,8 +89,8 @@ std::vector<std::pair<std::string, std::string>> ParseColonKeyValueLines(const s
     if (colon == std::string_view::npos) {
       continue;
     }
-    std::string key = TrimAsciiWhitespace(line.substr(0, colon));
-    std::string value = TrimAsciiWhitespace(line.substr(colon + 1));
+    std::string key = mygram::utils::TrimAsciiWhitespace(line.substr(0, colon));
+    std::string value = mygram::utils::TrimAsciiWhitespace(line.substr(colon + 1));
     if (key.empty()) {
       continue;
     }
@@ -119,7 +108,7 @@ std::vector<std::pair<std::string, std::string>> ParseColonKeyValueLines(const s
 std::string StripMillisecondSuffix(const std::string& value) {
   constexpr std::string_view kMs = "ms";
   if (value.size() >= kMs.size() && value.compare(value.size() - kMs.size(), kMs.size(), kMs) == 0) {
-    return TrimAsciiWhitespace(std::string_view(value).substr(0, value.size() - kMs.size()));
+    return mygram::utils::TrimAsciiWhitespace(std::string_view(value).substr(0, value.size() - kMs.size()));
   }
   return value;
 }
@@ -614,6 +603,9 @@ class MygramClient::Impl {
     while (total_sent < msg.size()) {
       ssize_t sent = send(sock_, msg.c_str() + total_sent, msg.size() - total_sent, 0);
       if (sent < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
         return MakeUnexpected(
             MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to send command: ") + strerror(errno)));
       }
@@ -623,12 +615,16 @@ class MygramClient::Impl {
     // Receive response (loop until complete response is received)
     std::string response;
     std::vector<char> buffer(config_.recv_buffer_size);
+    detail::ResponseCompletionState completion_state;
 
     while (true) {
       ssize_t received = recv(sock_, buffer.data(), buffer.size() - 1, 0);
       if (received <= 0) {
         if (received == 0) {
           return MakeUnexpected(MakeError(ErrorCode::kClientConnectionClosed, "Connection closed by server"));
+        }
+        if (errno == EINTR) {
+          continue;
         }
         return MakeUnexpected(
             MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to receive response: ") + strerror(errno)));
@@ -637,7 +633,7 @@ class MygramClient::Impl {
       response.append(buffer.data(), static_cast<size_t>(received));
 
       // Check if the accumulated response is complete
-      if (detail::IsResponseComplete(response)) {
+      if (detail::IsResponseComplete(response, completion_state)) {
         break;
       }
     }
@@ -830,55 +826,30 @@ class MygramClient::Impl {
 
     // Parse Redis-style INFO response (multi-line key: value format)
     ServerInfo info;
-    std::istringstream iss(response);
-    std::string line;
-
-    // Skip first line "OK INFO"
-    std::getline(iss, line);
-
-    while (std::getline(iss, line)) {
-      // Skip empty lines and section headers (lines starting with #)
-      if (line.empty() || line[0] == '#' || line[0] == '\r') {
-        continue;
-      }
-
-      // Parse "key: value" format
-      size_t colon_pos = line.find(':');
-      if (colon_pos != std::string::npos) {
-        std::string key = line.substr(0, colon_pos);
-        std::string value = line.substr(colon_pos + 1);
-
-        // Trim leading/trailing whitespace from value
-        size_t start = value.find_first_not_of(" \t\r\n");
-        size_t end = value.find_last_not_of(" \t\r\n");
-        if (start != std::string::npos) {
-          value = value.substr(start, end - start + 1);
-        }
-
-        if (key == "version") {
-          info.version = value;
-        } else if (key == "uptime_seconds") {
-          info.uptime_seconds = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
-        } else if (key == "total_requests") {
-          info.total_requests = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
-        } else if (key == "connected_clients") {
-          // Server emits "connected_clients" (not "active_connections").
-          info.active_connections = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
-        } else if (key == "used_memory_bytes") {
-          // Server emits "used_memory_bytes" as the total numeric memory usage.
-          // Map it onto ServerInfo::index_size_bytes (preserves API; the field
-          // represents total resident memory bytes, not strictly index-only).
-          info.index_size_bytes = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
-        } else if (key == "doc_count" || key == "total_documents") {
-          info.doc_count = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
-        } else if (key == "tables") {
-          // Parse comma-separated table names
-          std::istringstream table_iss(value);
-          std::string table;
-          while (std::getline(table_iss, table, ',')) {
-            if (!table.empty()) {
-              info.tables.push_back(table);
-            }
+    for (const auto& [key, value] : ParseColonKeyValueLines(response)) {
+      if (key == "version") {
+        info.version = value;
+      } else if (key == "uptime_seconds") {
+        info.uptime_seconds = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
+      } else if (key == "total_requests") {
+        info.total_requests = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
+      } else if (key == "connected_clients") {
+        // Server emits "connected_clients" (not "active_connections").
+        info.active_connections = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
+      } else if (key == "used_memory_bytes") {
+        // Server emits "used_memory_bytes" as the total numeric memory usage.
+        // Map it onto ServerInfo::index_size_bytes (preserves API; the field
+        // represents total resident memory bytes, not strictly index-only).
+        info.index_size_bytes = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
+      } else if (key == "doc_count" || key == "total_documents") {
+        info.doc_count = mygram::utils::ParseNumeric<uint64_t>(value).value_or(0);
+      } else if (key == "tables") {
+        // Parse comma-separated table names
+        std::istringstream table_iss(value);
+        std::string table;
+        while (std::getline(table_iss, table, ',')) {
+          if (!table.empty()) {
+            info.tables.push_back(table);
           }
         }
       }

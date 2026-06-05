@@ -113,6 +113,13 @@ TEST_F(BinlogReaderFixture, PushAndPopEvents) {
   EXPECT_EQ(reader_->GetQueueSize(), 0);
 }
 
+TEST(BinlogReaderDDLTest, ClassifyTruncateOnlyForTruncateTableStatement) {
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("TRUNCATE TABLE articles"), DDLType::kTruncate);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("truncate table `articles`"), DDLType::kTruncate);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles CHANGE old_col truncate_data TEXT"), DDLType::kAlter);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles DROP COLUMN truncate_data"), DDLType::kAlter);
+}
+
 /**
  * @brief Verify PushEvent blocks when queue is full until space becomes available
  */
@@ -903,6 +910,52 @@ TEST_F(BinlogReaderFixture, ConvertSingleGtidToRangeAlwaysUsed) {
   }
 
   EXPECT_EQ(reconnect_gtid, "uuid1:1-103") << "Must convert current_gtid_ to range, not use executed_gtid_set_";
+}
+
+TEST_F(BinlogReaderFixture, ProcessingFailureRequestsReconnectAndDropsQueuedEvents) {
+  server::TableContext broken_context;
+  broken_context.name = "broken";
+  broken_context.config = table_config_;
+  broken_context.config.name = "broken";
+  broken_context.index.reset();
+  broken_context.doc_store.reset();
+
+  reader_->table_contexts_["broken"] = &broken_context;
+  reader_->current_gtid_ = "uuid:1";
+
+  auto failing_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1));
+  failing_event->table_name = "broken";
+  failing_event->gtid = "uuid:2";
+  auto later_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "3", 1));
+  later_event->table_name = "broken";
+  later_event->gtid = "uuid:3";
+
+  {
+    std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
+    reader_->event_queue_.push(std::move(failing_event));
+    reader_->event_queue_.push(std::move(later_event));
+  }
+  reader_->queue_cv_.notify_one();
+
+  std::thread worker([this]() { reader_->WorkerThreadFunc(); });
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  EXPECT_TRUE(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire));
+  EXPECT_EQ(reader_->current_gtid_, "uuid:1");
+  {
+    std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
+    EXPECT_TRUE(reader_->event_queue_.empty());
+  }
+
+  reader_->should_stop_ = true;
+  reader_->queue_cv_.notify_all();
+  worker.join();
+  reader_->should_stop_ = false;
 }
 
 // ===========================================================================

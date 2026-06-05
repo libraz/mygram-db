@@ -3,8 +3,12 @@
  * @brief HTTP server basic lifecycle and core endpoint tests
  */
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
 #include <httplib.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <nlohmann/json.hpp>
@@ -22,6 +26,37 @@ using json = nlohmann::json;
 
 namespace mygramdb {
 namespace server {
+
+namespace {
+
+uint16_t FindAvailableLoopbackPort() {
+  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return 0;
+  }
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(0);
+
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    ::close(fd);
+    return 0;
+  }
+
+  sockaddr_in actual_addr{};
+  socklen_t addr_len = sizeof(actual_addr);
+  if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual_addr), &addr_len) != 0) {
+    ::close(fd);
+    return 0;
+  }
+
+  ::close(fd);
+  return ntohs(actual_addr.sin_port);
+}
+
+}  // namespace
 
 class HttpServerTest : public ::testing::Test {
  protected:
@@ -216,15 +251,18 @@ TEST_F(HttpServerTest, ConfigEndpoint) {
 }
 
 TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
+  uint16_t port = FindAvailableLoopbackPort();
+  ASSERT_GT(port, 0);
+
   HttpServerConfig restricted_config;
   restricted_config.bind = "127.0.0.1";
-  restricted_config.port = 18082;
+  restricted_config.port = port;
   restricted_config.allow_cidrs = {"10.0.0.0/8"};
 
   auto restricted_server = std::make_unique<HttpServer>(restricted_config, table_contexts_, config_.get(), nullptr);
   ASSERT_TRUE(restricted_server->Start());
 
-  httplib::Client client("http://127.0.0.1:18082");
+  httplib::Client client("http://127.0.0.1:" + std::to_string(port));
 
   // Non-health endpoints should be rejected by CIDR
   auto res = client.Get("/info");

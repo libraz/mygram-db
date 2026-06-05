@@ -28,6 +28,7 @@ namespace mygramdb::server {
 class ThreadPool {
  public:
   using Task = std::function<void()>;
+  static constexpr uint32_t kDefaultShutdownTimeoutMs = 30000;
 
   /**
    * @brief Construct thread pool
@@ -74,7 +75,7 @@ class ThreadPool {
    * @param graceful If true, wait for pending tasks to complete. If false, abandon pending tasks.
    * @param timeout_ms Maximum time to wait for pending tasks (0 = no timeout)
    */
-  void Shutdown(bool graceful = true, uint32_t timeout_ms = 0);
+  void Shutdown(bool graceful = true, uint32_t timeout_ms = kDefaultShutdownTimeoutMs);
 
  private:
   std::vector<std::thread> workers_;

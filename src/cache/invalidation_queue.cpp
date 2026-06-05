@@ -5,8 +5,13 @@
 
 #include "cache/invalidation_queue.h"
 
+#include <exception>
+
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
+#include "index/index.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::cache {
@@ -21,9 +26,20 @@ InvalidationQueue::~InvalidationQueue() {
 
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
                                 bool filter_columns_changed) {
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (stopped_.load()) {
+      mygram::utils::StructuredLog()
+          .Event("cache_invalidation_queue_enqueue_after_stop")
+          .Field("count", static_cast<uint64_t>(0))
+          .Warn();
+      return;
+    }
+  }
+
   // Get ngram settings for this specific table
-  int ngram_size = 2;                 // Default (match index::kDefaultNgramSize)
-  int kanji_ngram_size = 1;           // Default (match index::kDefaultKanjiNgramSize)
+  int ngram_size = index::kDefaultNgramSize;
+  int kanji_ngram_size = index::kDefaultKanjiNgramSize;
   bool cross_boundary_ngrams = true;  // Default
   auto config_iter = ngram_configs_.find(table_name);
   if (config_iter != ngram_configs_.end()) {
@@ -123,11 +139,11 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   queue_cv_.notify_one();
 }
 
-void InvalidationQueue::Start() {
+mygram::utils::Expected<void, mygram::utils::Error> InvalidationQueue::Start() {
   // Atomically check and set running_ to prevent concurrent Start() calls
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
-    return;  // Already running
+    return {};  // Already running
   }
 
   // H-M5: reset stopped_ on every successful Start() so that a Stop()/Start()
@@ -141,7 +157,17 @@ void InvalidationQueue::Start() {
   // queue_mutex_ in Enqueue).
   stopped_.store(false, std::memory_order_release);
 
-  worker_thread_ = std::thread(&InvalidationQueue::WorkerLoop, this);
+  try {
+    worker_thread_ = std::thread(&InvalidationQueue::WorkerLoop, this);
+  } catch (const std::exception& e) {
+    running_.store(false, std::memory_order_release);
+    stopped_.store(true, std::memory_order_release);
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
+                                 std::string("Failed to start invalidation queue worker: ") + e.what()));
+  }
+
+  return {};
 }
 
 void InvalidationQueue::Stop() {

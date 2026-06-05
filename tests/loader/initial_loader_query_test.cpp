@@ -16,6 +16,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cctype>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -316,6 +318,44 @@ class SqlEscapingTest : public ::testing::Test {
     }
     return query.str();
   }
+
+  static bool IsValidNumericValue(const std::string& value) {
+    if (value.empty()) {
+      return false;
+    }
+    size_t start = 0;
+    if (value[0] == '-' || value[0] == '+') {
+      start = 1;
+    }
+    if (start >= value.size()) {
+      return false;
+    }
+    bool has_dot = false;
+    for (size_t i = start; i < value.size(); ++i) {
+      if (value[i] == '.') {
+        if (has_dot) {
+          return false;
+        }
+        has_dot = true;
+      } else if (std::isdigit(static_cast<unsigned char>(value[i])) == 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static std::optional<std::string> BuildWhereClauseValidated(
+      const std::vector<config::RequiredFilterConfig>& filters) {
+    for (const auto& filter : filters) {
+      const bool requires_quoting = filter.type == "string" || filter.type == "varchar" || filter.type == "text" ||
+                                    filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
+      if (!requires_quoting && filter.op != "IS NULL" && filter.op != "IS NOT NULL" &&
+          !IsValidNumericValue(filter.value)) {
+        return std::nullopt;
+      }
+    }
+    return BuildWhereClause(filters);
+  }
 };
 
 /**
@@ -371,6 +411,16 @@ TEST_F(SqlEscapingTest, NumericFilterNotQuoted) {
 
   std::string clause = BuildWhereClause({filter});
   EXPECT_EQ(clause, " WHERE enabled = 1");
+}
+
+TEST_F(SqlEscapingTest, InvalidNumericFilterIsRejected) {
+  config::RequiredFilterConfig filter;
+  filter.name = "enabled";
+  filter.type = "int";
+  filter.op = "=";
+  filter.value = "1 OR 1=1";
+
+  EXPECT_FALSE(BuildWhereClauseValidated({filter}).has_value());
 }
 
 // ===========================================================================

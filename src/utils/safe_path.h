@@ -15,8 +15,9 @@
 
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/namespace_compat.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 /**
  * @brief Resolve `input` to an absolute path guaranteed to be inside `base_dir`.
@@ -57,4 +58,4 @@ Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string
                                              std::initializer_list<std::string_view> allowed_extensions = {},
                                              std::string_view base_dir_label = "base directory");
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

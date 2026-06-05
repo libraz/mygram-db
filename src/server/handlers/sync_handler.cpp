@@ -27,9 +27,6 @@ std::string SyncHandler::Handle(const query::Query& query, ConnectionContext& co
 }
 
 std::string SyncHandler::HandleSync(const query::Query& query) {
-  if (sync_manager_ == nullptr) {
-    return ResponseFormatter::FormatError("SYNC manager not initialized");
-  }
   auto result = sync_manager_->StartSync(query.table);
   if (!result) {
     return ResponseFormatter::FormatError(result.error().message());
@@ -38,20 +35,10 @@ std::string SyncHandler::HandleSync(const query::Query& query) {
 }
 
 std::string SyncHandler::HandleSyncStatus(const query::Query& /*query*/) {
-  if (sync_manager_ == nullptr) {
-    // Null sync_manager_ is a configuration error, not an idle state — emit
-    // a proper protocol error rather than masking it as IDLE. The earlier
-    // raw "status=IDLE message=..." payload also lacked the OK/ERROR
-    // framing prefix that downstream parsers rely on.
-    return ResponseFormatter::FormatError("SYNC manager not initialized");
-  }
   return sync_manager_->GetSyncStatus();
 }
 
 std::string SyncHandler::HandleSyncStop(const query::Query& query) {
-  if (sync_manager_ == nullptr) {
-    return ResponseFormatter::FormatError("SYNC manager not initialized");
-  }
   return sync_manager_->StopSync(query.table);
 }
 

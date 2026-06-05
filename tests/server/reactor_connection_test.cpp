@@ -209,11 +209,9 @@ TEST_F(ReactorConnectionTest, OnReadableParsesSingleFrame) {
 // drain task can run.  We use a zero-thread pool so no drain task executes.
 
 TEST_F(ReactorConnectionNoDispatcherTest, OnReadableParsesSingleFrameCountBeforeDrain) {
-  // With nullptr dispatcher, ScheduleDrainTask returns false → OnReadable
-  // returns false when frames are present. We need a pool with dispatcher to
-  // count pre-drain.  However the test below (MultipleFrames) covers counting.
-  // This test just checks partial-frame behaviour; see full fixture below.
-  SUCCEED();
+  WriteAll(peer_fd_, "INFO\r\n");
+  EXPECT_FALSE(conn_->OnReadable());
+  EXPECT_TRUE(conn_->IsClosing());
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +336,30 @@ TEST_F(ReactorConnectionNoDispatcherTest, OnReadableRespectsMaxReadBuffer) {
   EXPECT_TRUE(conn_->IsClosing());
 
   writer.join();
+
+  char response[128]{};
+  ssize_t n = ::recv(peer_fd_, response, sizeof(response) - 1, 0);
+  ASSERT_GT(n, 0) << "Expected request-too-large error response";
+  EXPECT_NE(std::string(response, static_cast<size_t>(n)).find("ERROR request too large"), std::string::npos);
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {
+  conn_.reset();
+  if (peer_fd_ >= 0) {
+    ::close(peer_fd_);
+    peer_fd_ = -1;
+  }
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  peer_fd_ = fds[0];
+  rc_fd_ = fds[1];
+  SetNonBlocking(rc_fd_);
+  conn_ = ReactorConnection::Create(rc_fd_, /*reactor=*/nullptr, /*dispatcher=*/nullptr, /*pool=*/nullptr,
+                                    /*stats=*/nullptr, /*max_write_queue_bytes=*/4);
+
+  EXPECT_FALSE(conn_->EnqueueResponse("hello"));
+  EXPECT_TRUE(conn_->IsClosing());
 }
 
 // ---------------------------------------------------------------------------

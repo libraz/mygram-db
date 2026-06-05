@@ -14,10 +14,10 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
-#include <cstring>
 #include <string>
 #include <vector>
 
+#include "utils/errno_utils.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -28,6 +28,7 @@ namespace {
 using mygram::utils::Error;
 using mygram::utils::ErrorCode;
 using mygram::utils::Expected;
+using mygram::utils::FormatErrno;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
@@ -42,19 +43,6 @@ constexpr std::size_t kInitialEventsCapacity = 64;
 /// with comfortable headroom. Beyond this cap, excess ready events roll
 /// over to the next Poll — harmless because epoll is level-triggered.
 constexpr std::size_t kMaxEventsCapacity = 4096;
-
-/// Build the `errno`-decorated error message suffix used everywhere in this
-/// translation unit. Captures `errno` by value to avoid TOCTOU between the
-/// failing syscall and the `strerror` call.
-std::string FormatErrno(const char* syscall_label, int captured_errno) {
-  std::string msg = syscall_label;
-  msg += " failed: ";
-  msg += std::strerror(captured_errno);
-  msg += " (errno=";
-  msg += std::to_string(captured_errno);
-  msg += ")";
-  return msg;
-}
 
 /// Translate the reactor-level interest bitmask to an `epoll_event.events`
 /// mask. `EPOLLRDHUP | EPOLLERR | EPOLLHUP` are always armed so the reactor

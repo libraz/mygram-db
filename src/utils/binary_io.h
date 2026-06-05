@@ -18,9 +18,11 @@
 #include <string>
 #include <type_traits>
 
+#include "utils/constants.h"
 #include "utils/endian_utils.h"
+#include "utils/namespace_compat.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 /**
  * @brief Write binary data to stream in little-endian format
@@ -118,7 +120,7 @@ inline bool ReadString(std::istream& input_stream, std::string& str) {
   if (!ReadBinary(input_stream, len)) {
     return false;
   }
-  constexpr uint32_t kMaxReasonableStringLength = 64 * 1024 * 1024;  // 64 MB
+  constexpr uint32_t kMaxReasonableStringLength = 64 * static_cast<uint32_t>(mygram::constants::kBytesPerMegabyte);
   if (len > kMaxReasonableStringLength) {
     return false;
   }
@@ -131,4 +133,4 @@ inline bool ReadString(std::istream& input_stream, std::string& str) {
   return true;
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

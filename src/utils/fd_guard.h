@@ -9,7 +9,9 @@
 
 #include <utility>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief RAII guard for file descriptors
@@ -148,4 +150,4 @@ class ScopeGuard {
   bool released_ = false;
 };
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

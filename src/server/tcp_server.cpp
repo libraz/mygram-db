@@ -120,14 +120,15 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   // Initialize all server components via ServerLifecycleManager
   // This centralizes component creation and dependency ordering
-  auto lifecycle_manager_result = ServerLifecycleManager::Create(
-      config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
-      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, binlog_reader_
+  auto lifecycle_manager_result =
+      ServerLifecycleManager::Create(config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_,
+                                     dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_,
+                                     mysql_reconnecting_, replication_pause_counter_, binlog_reader_
 #ifdef USE_MYSQL
-      ,
-      sync_manager_.get()
+                                     ,
+                                     sync_manager_.get()
 #endif
-  );
+      );
   if (!lifecycle_manager_result) {
     return MakeUnexpected(lifecycle_manager_result.error());
   }
@@ -190,6 +191,9 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   ReactorConfig rcfg;
   if (config_.max_write_queue_bytes > 0) {
     rcfg.max_write_queue_bytes = static_cast<size_t>(config_.max_write_queue_bytes);
+  }
+  if (config_.recv_timeout_sec > 0) {
+    rcfg.initial_read_timeout_sec = config_.recv_timeout_sec;
   }
   reactor_ = std::make_unique<IoReactor>(thread_pool_.get(), dispatcher_.get(), rcfg);
   // When the reactor tears down a connection, decrement the acceptor's

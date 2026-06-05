@@ -5,7 +5,9 @@
 #include <cstring>
 #include <map>
 #include <sstream>
-#include <stdexcept>
+
+#include "utils/numeric_parse.h"
+#include "utils/string_utils.h"
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-*,cppcoreguidelines-pro-*,readability-magic-numbers) - GTID
 // binary encoding
@@ -181,13 +183,12 @@ mygram::utils::Expected<void, Error> GtidEncoder::ParseUuid(const std::string& u
 
   // Convert hex string to bytes
   for (size_t i = 0; i < 16; ++i) {
-    std::string byte_str = hex_str.substr(i * 2, 2);
-    char* end = nullptr;
-    unsigned long byte_val = std::strtoul(byte_str.c_str(), &end, 16);
-    if (end != byte_str.c_str() + 2) {
+    std::string_view byte_str(hex_str.data() + (i * 2), 2);
+    auto byte_val = mygram::utils::ParseNumeric<uint32_t>(byte_str, 16);
+    if (!byte_val.has_value() || *byte_val > std::numeric_limits<uint8_t>::max()) {
       return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid UUID hex digits: " + uuid_str));
     }
-    uuid_bytes[i] = static_cast<uint8_t>(byte_val);
+    uuid_bytes[i] = static_cast<uint8_t>(*byte_val);
   }
 
   return {};
@@ -205,31 +206,35 @@ mygram::utils::Expected<GtidEncoder::Interval, Error> GtidEncoder::ParseInterval
   Interval interval{};
   size_t dash_pos = trimmed.find('-');
 
-  try {
-    if (dash_pos == std::string::npos) {
-      // Single transaction number (e.g., "5")
-      interval.start = std::stoll(trimmed);
-      // Check for overflow before adding 1
-      if (interval.start >= INT64_MAX) {
-        return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
-      }
-      interval.end = interval.start + 1;  // exclusive end
-    } else {
-      // Range (e.g., "1-3" means transactions 1,2,3)
-      std::string start_str = trimmed.substr(0, dash_pos);
-      std::string end_str = trimmed.substr(dash_pos + 1);
-      interval.start = std::stoll(start_str);
-      int64_t end_inclusive = std::stoll(end_str);
-      // Check for overflow before adding 1
-      if (end_inclusive >= INT64_MAX) {
-        return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
-      }
-      interval.end = end_inclusive + 1;  // convert to exclusive
+  if (dash_pos == std::string::npos) {
+    // Single transaction number (e.g., "5")
+    auto start = mygram::utils::ParseNumeric<int64_t>(trimmed);
+    if (!start.has_value()) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval number format: " + interval_str));
     }
-  } catch (const std::invalid_argument&) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval number format: " + interval_str));
-  } catch (const std::out_of_range&) {
-    return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Interval number out of range: " + interval_str));
+    interval.start = *start;
+    // Check for overflow before adding 1
+    if (interval.start >= INT64_MAX) {
+      return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
+    }
+    interval.end = interval.start + 1;  // exclusive end
+  } else {
+    // Range (e.g., "1-3" means transactions 1,2,3)
+    std::string_view trimmed_view(trimmed);
+    std::string_view start_str = mygram::utils::TrimAsciiWhitespaceView(trimmed_view.substr(0, dash_pos));
+    std::string_view end_str = mygram::utils::TrimAsciiWhitespaceView(trimmed_view.substr(dash_pos + 1));
+    auto start = mygram::utils::ParseNumeric<int64_t>(start_str);
+    auto end = mygram::utils::ParseNumeric<int64_t>(end_str);
+    if (!start.has_value() || !end.has_value()) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval number format: " + interval_str));
+    }
+    interval.start = *start;
+    int64_t end_inclusive = *end;
+    // Check for overflow before adding 1
+    if (end_inclusive >= INT64_MAX) {
+      return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
+    }
+    interval.end = end_inclusive + 1;  // convert to exclusive
   }
 
   if (interval.start <= 0 || interval.end <= interval.start) {

@@ -44,6 +44,13 @@
  * All multi-byte integers are stored in little-endian format.
  * All strings are UTF-8 encoded with length-prefix (uint32_t).
  * CRC32 checksums use zlib implementation (polynomial: 0xEDB88320).
+ *
+ * Snapshot consistency contract:
+ * WriteDumpV1 serializes each table's Index and DocumentStore as separate
+ * component snapshots. Callers that require a cross-component, cross-table
+ * point-in-time dump must quiesce writers before calling this function. The
+ * server dump paths satisfy this by pausing replication and blocking DUMP LOAD;
+ * direct callers must provide equivalent exclusion.
  */
 
 #pragma once
@@ -225,6 +232,10 @@ Expected<void, Error> ReadHeaderV1(std::istream& input_stream, HeaderV1& header)
  * 5. Write table data sections
  * 6. Calculate file CRC32 and update header
  * 7. Atomic rename from temp file to final path
+ *
+ * @pre Writers that can mutate any Index or DocumentStore in table_contexts are
+ *      paused for the duration of the call when a point-in-time dump is needed.
+ *      The function does not acquire a global multi-component snapshot lock.
  *
  * @param filepath Output file path (e.g., "/var/lib/mygramdb/dumps/mygramdb.dmp")
  * @param gtid Current GTID for replication resume

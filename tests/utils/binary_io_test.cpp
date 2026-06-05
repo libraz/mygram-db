@@ -11,7 +11,7 @@
 #include <sstream>
 #include <string>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 TEST(BinaryIOTest, WriteThenReadUint32) {
   std::stringstream ss;

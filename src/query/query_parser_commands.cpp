@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "query/cache_key.h"
+#include "cache/cache_key.h"
 #include "query/query_normalizer.h"
 #include "query/query_parser.h"
 #include "query/query_parser_internal.h"

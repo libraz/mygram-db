@@ -21,6 +21,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "server/io_reactor.h"
@@ -37,6 +38,31 @@ constexpr const char kFrameDelimiter[] = "\r\n";
 constexpr size_t kFrameDelimiterLen = 2;
 constexpr const char kResponseTerminator[] = "\r\n";
 constexpr size_t kResponseTerminatorLen = 2;
+
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
+void BestEffortSendError(int fd, std::string_view message) {
+  std::string response = "ERROR ";
+  response.append(message);
+  response.append(kResponseTerminator, kResponseTerminatorLen);
+
+  size_t sent = 0;
+  while (sent < response.size()) {
+    ssize_t n = ::send(fd, response.data() + sent, response.size() - sent, kSendFlags);
+    if (n > 0) {
+      sent += static_cast<size_t>(n);
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    break;
+  }
+}
 }  // namespace
 
 std::shared_ptr<ReactorConnection> ReactorConnection::Create(int fd, IoReactor* reactor, RequestDispatcher* dispatcher,
@@ -53,6 +79,9 @@ ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatch
       dispatcher_(dispatcher),
       thread_pool_(thread_pool),
       stats_(stats) {
+  const auto now = std::chrono::steady_clock::now();
+  created_at_.store(now, std::memory_order_relaxed);
+  last_active_.store(now, std::memory_order_relaxed);
   conn_ctx_.client_fd = fd_;
   read_buf_.reserve(kDefaultReadBufferBytes);
 }
@@ -96,6 +125,7 @@ bool ReactorConnection::OnReadable() {
             .Field("buf_bytes", static_cast<uint64_t>(read_buf_.size() + static_cast<size_t>(n)))
             .Field("cap_bytes", static_cast<uint64_t>(kMaxReadBufferBytes))
             .Warn();
+        BestEffortSendError(fd_, "request too large");
         closing_.store(true, std::memory_order_release);
         return false;
       }
@@ -214,13 +244,16 @@ bool ReactorConnection::OnWritable() {
   }
 
   // Peer already half-closed and the drain task has no more work in flight:
-  // we just flushed the last response, so unregister now.
-  // Check without acquiring frame_mutex_ to avoid lock ordering issues
-  // (write_mutex_ is already held). drain_scheduled_ == false means DrainTask
-  // is not running/pending, and since we hold write_mutex_, no new responses
-  // can be enqueued. A false positive (pending_frames_ not actually empty) is
-  // harmless — the next OnWritable or DrainTask will handle it.
-  if (read_eof_.load(std::memory_order_acquire) && !drain_scheduled_.load(std::memory_order_acquire)) {
+  // we just flushed the last response, so unregister now. Release
+  // write_mutex_ before taking frame_mutex_ to preserve the file-wide lock
+  // order (frame_mutex_ -> write_mutex_).
+  lock.unlock();
+  bool should_close = false;
+  if (read_eof_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+    should_close = pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire);
+  }
+  if (should_close) {
     closing_.store(true, std::memory_order_release);
     return false;
   }
@@ -265,6 +298,9 @@ size_t ReactorConnection::ExtractFramesLocked() {
     // Single splice at the end to avoid quadratic erase-per-frame cost.
     read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<std::ptrdiff_t>(consumed));
   }
+  if (enqueued > 0) {
+    received_frame_.store(true, std::memory_order_release);
+  }
   return enqueued;
 }
 
@@ -279,6 +315,7 @@ bool ReactorConnection::ScheduleDrainTask() {
   if (thread_pool_ == nullptr || dispatcher_ == nullptr) {
     // Misconfiguration — no way to process the frames.
     drain_scheduled_.store(false, std::memory_order_release);
+    closing_.store(true, std::memory_order_release);
     return false;
   }
 
@@ -429,6 +466,7 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
         .Field("attempted_bytes", static_cast<uint64_t>(payload_bytes))
         .Field("cap_bytes", static_cast<uint64_t>(max_write_queue_bytes_))
         .Warn();
+    closing_.store(true, std::memory_order_release);
     return false;
   }
 
@@ -443,6 +481,7 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
   // immediately, register EPOLLOUT on EAGAIN).
   if (!write_armed_) {
     if (!DrainWriteQueueLocked()) {
+      closing_.store(true, std::memory_order_release);
       return false;  // fatal send error
     }
     if (write_queue_.empty()) {
@@ -452,6 +491,7 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
     // loop takes over.
     if (reactor_ == nullptr) {
       // Unit-test harness with no reactor and residue we cannot arm on.
+      closing_.store(true, std::memory_order_release);
       return false;
     }
     auto arm_result = reactor_->ArmWrite(fd_);
@@ -461,6 +501,7 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
           .Field("fd", static_cast<int64_t>(fd_))
           .Field("error", arm_result.error().to_string())
           .Warn();
+      closing_.store(true, std::memory_order_release);
       return false;
     }
     write_armed_ = true;
@@ -471,18 +512,6 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
 }
 
 bool ReactorConnection::DrainWriteQueueLocked() {
-  // MSG_NOSIGNAL is defined on all platforms we target (Linux, macOS, BSDs).
-  // Falling back to 0 in the #else preserves correctness via SO_NOSIGPIPE
-  // that the acceptor sets per-socket on macOS (see
-  // ConnectionAcceptor::SetSocketOptions). The ifdef guards an unlikely
-  // future port to a platform that lacks both MSG_NOSIGNAL and a per-socket
-  // alternative; on such a platform SIGPIPE would have to be ignored
-  // process-wide (signal_manager.cpp already does this) for correctness.
-#ifdef MSG_NOSIGNAL
-  constexpr int kSendFlags = MSG_NOSIGNAL;
-#else
-  constexpr int kSendFlags = 0;
-#endif
   while (!write_queue_.empty()) {
     const std::string& front = write_queue_.front();
     const char* data = front.data() + front_offset_;

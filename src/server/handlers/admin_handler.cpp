@@ -18,31 +18,38 @@
 
 namespace mygramdb::server {
 
+namespace {
+
+void EnsureEndsWithCrLf(std::string& result) {
+  if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
+    result.append("\r\n");
+  }
+}
+
+}  // namespace
+
 std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
   (void)conn_ctx;  // Unused for admin commands
 
   switch (query.type) {
     case query::QueryType::INFO: {
-      {
-        // INFO is the only AdminHandler command that requires table_catalog.
-        // CONFIG HELP/SHOW/VERIFY operate purely on the loaded config and intentionally
-        // do not need a catalog (verified by ConfigHandlerTest which constructs handler
-        // with table_catalog=nullptr). Keep the null-check scoped to commands that
-        // dereference the catalog so config commands remain usable in admin-only contexts.
-        if (ctx_.table_catalog == nullptr) {
-          return ResponseFormatter::FormatError("Table catalog not initialized");
-        }
-        const auto& tables = ctx_.table_catalog->GetTables();
-        // 1. Aggregate metrics (domain layer, pure function)
-        auto metrics = StatisticsService::AggregateMetrics(tables);
-
-        // 2. Update stats (domain layer, explicit side effect)
-        StatisticsService::UpdateServerStatistics(ctx_.stats, metrics);
-
-        // 3. Format response (presentation layer, pure function)
-        return ResponseFormatter::FormatInfoResponse(metrics, ctx_.stats, tables, ctx_.binlog_reader,
-                                                     ctx_.cache_manager);
+      // INFO is the only AdminHandler command that requires table_catalog.
+      // CONFIG HELP/SHOW/VERIFY operate purely on the loaded config and intentionally
+      // do not need a catalog (verified by ConfigHandlerTest which constructs handler
+      // with table_catalog=nullptr). Keep the null-check scoped to commands that
+      // dereference the catalog so config commands remain usable in admin-only contexts.
+      if (ctx_.table_catalog == nullptr) {
+        return ResponseFormatter::FormatError("Table catalog not initialized");
       }
+      const auto& tables = ctx_.table_catalog->GetTables();
+      // 1. Aggregate metrics (domain layer, pure function)
+      auto metrics = StatisticsService::AggregateMetrics(tables);
+
+      // 2. Update stats (domain layer, explicit side effect)
+      StatisticsService::UpdateServerStatistics(ctx_.stats, metrics);
+
+      // 3. Format response (presentation layer, pure function)
+      return ResponseFormatter::FormatInfoResponse(metrics, ctx_.stats, tables, ctx_.binlog_reader, ctx_.cache_manager);
     }
 
     case query::QueryType::CONFIG_HELP:
@@ -71,10 +78,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
     // Show top-level sections
     auto paths = explorer.ListPaths("");
     std::string result = config::ConfigSchemaExplorer::FormatPathList(paths, "");
-    // Ensure result ends with \r\n for multi-line end-of-response detection
-    if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
-      result.append("\r\n");
-    }
+    EnsureEndsWithCrLf(result);
     return ResponseFormatter::FormatOk() + "\r\n" + result;
   }
 
@@ -85,10 +89,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
   }
 
   std::string result = config::ConfigSchemaExplorer::FormatHelp(help_info.value());
-  // Ensure result ends with \r\n for multi-line end-of-response detection
-  if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
-    result.append("\r\n");
-  }
+  EnsureEndsWithCrLf(result);
   return ResponseFormatter::FormatOk() + "\r\n" + result;
 }
 
@@ -108,9 +109,7 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
   // Ensure result ends with \r\n so the server's appended \r\n produces
   // the \r\n\r\n end-of-response marker that clients use to detect
   // multi-line response completion.
-  if (result.size() < 2 || result[result.size() - 2] != '\r' || result[result.size() - 1] != '\n') {
-    result.append("\r\n");
-  }
+  EnsureEndsWithCrLf(result);
   return ResponseFormatter::FormatOk() + "\r\n" + result;
 }
 

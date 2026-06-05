@@ -74,6 +74,7 @@ class CommandHandler {
    * @brief Result of GetTableContext lookup
    */
   struct TableContextResult {
+    TableContext* table_context = nullptr;
     index::Index* index = nullptr;
     storage::DocumentStore* doc_store = nullptr;
     int ngram_size = 0;

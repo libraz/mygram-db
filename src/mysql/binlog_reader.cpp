@@ -24,7 +24,7 @@
 #include "mysql/mariadb_binlog_stream.h"
 #include "mysql/mysql_binlog_stream.h"
 #include "mysql/server_flavor.h"
-#include "server/tcp_server.h"  // For TableContext definition
+#include "server/server_types.h"  // For TableContext definition
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -36,13 +36,14 @@ BinlogReader::BinlogReader(Connection& connection, index::Index& index, storage:
                            config::TableConfig table_config, config::MysqlConfig mysql_config, const Config& config,
                            server::ServerStats* stats)
     : connection_(connection),
-
-      index_(&index),
-      doc_store_(&doc_store),
-      table_config_(std::move(table_config)),
       mysql_config_(std::move(mysql_config)),
       config_(config),
       current_gtid_(config.start_gtid) {
+  legacy_table_context_.name = table_config.name;
+  legacy_table_context_.config = std::move(table_config);
+  legacy_index_ = &index;
+  legacy_doc_store_ = &doc_store;
+  table_contexts_.emplace(legacy_table_context_.name, &legacy_table_context_);
   server_stats_.store(stats, std::memory_order_relaxed);
 }
 
@@ -52,7 +53,6 @@ BinlogReader::BinlogReader(Connection& connection,
                            config::MysqlConfig mysql_config, const Config& config, server::ServerStats* stats)
     : connection_(connection),
       table_contexts_(std::move(table_contexts)),
-      multi_table_mode_(true),
       mysql_config_(std::move(mysql_config)),
       config_(config),
       current_gtid_(config.start_gtid) {
@@ -206,36 +206,17 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     return MakeUnexpected(GetLastErrorObject());
   }
 
-  // Validate primary keys for all tables
-  if (multi_table_mode_) {
-    for (const auto& [table_name, ctx] : table_contexts_) {
-      auto validate_result =
-          connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name, ctx->config.primary_key);
-      if (!validate_result) {
-        std::string error_msg =
-            "Primary key validation failed for table '" + table_name + "': " + validate_result.error().message();
-        SetLastError(MakeError(validate_result.error().code(), error_msg, table_name));
-        mygram::utils::StructuredLog()
-            .Event("binlog_error")
-            .Field("type", "primary_key_validation_failed")
-            .Field("table", table_name)
-            .Field("gtid", current_gtid_)
-            .Field("error", error_msg)
-            .Error();
-        return MakeUnexpected(GetLastErrorObject());
-      }
-    }
-  } else {
-    // Single-table mode
-    auto validate_result = connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name,
-                                                            table_config_.primary_key);
+  for (const auto& [table_name, ctx] : table_contexts_) {
+    auto validate_result =
+        connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name, ctx->config.primary_key);
     if (!validate_result) {
-      std::string error_msg = "Primary key validation failed: " + validate_result.error().message();
-      SetLastError(MakeError(validate_result.error().code(), error_msg, table_config_.name));
+      std::string error_msg =
+          "Primary key validation failed for table '" + table_name + "': " + validate_result.error().message();
+      SetLastError(MakeError(validate_result.error().code(), error_msg, table_name));
       mygram::utils::StructuredLog()
           .Event("binlog_error")
           .Field("type", "primary_key_validation_failed")
-          .Field("table", table_config_.name)
+          .Field("table", table_name)
           .Field("gtid", current_gtid_)
           .Field("error", error_msg)
           .Error();
@@ -294,6 +275,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   }
 
   should_stop_.store(false, std::memory_order_relaxed);
+  processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
   // Note: running_ is already set to true by compare_exchange_strong above
 
   // Reset debug log counters for this run
@@ -376,6 +358,7 @@ void BinlogReader::Stop() {
 
   running_ = false;
   should_stop_.store(false, std::memory_order_relaxed);  // Reset for next Start()
+  processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
   mygram::utils::StructuredLog()
       .Event("binlog_reader_stopped")
       .Field("events_processed", static_cast<int64_t>(processed_events_.load()))

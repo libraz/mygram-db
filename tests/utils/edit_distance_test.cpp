@@ -7,7 +7,7 @@
 
 #include <gtest/gtest.h>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 class EditDistanceTest : public ::testing::Test {};
 

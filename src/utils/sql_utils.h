@@ -7,7 +7,9 @@
 
 #include <string>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /// @brief Remove SQL comments (/* ... */ and -- ...) from a query string.
 /// @param sql SQL query string
@@ -41,4 +43,4 @@ bool MatchKeyword(const std::string& str, size_t& pos, const std::string& keywor
 /// @return true if table_name matches at pos
 bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name);
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

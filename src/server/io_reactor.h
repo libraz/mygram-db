@@ -76,6 +76,11 @@ struct ReactorConfig {
   /// deadline that complements (does not replace) keepalive.
   int idle_timeout_sec = 300;
 
+  /// Initial read timeout (seconds). A connection that has not completed its
+  /// first CRLF-terminated frame within this duration from accept time is
+  /// closed by the reaper. 0 disables the initial deadline.
+  int initial_read_timeout_sec = 0;
+
   /// How often the reaper sweeps the connection table (seconds). Tuned for
   /// the typical idle_timeout of minutes: scanning every 5s gives a worst-
   /// case extra dwell of 5s before a stale connection is closed.
@@ -218,8 +223,8 @@ class IoReactor {
   void EventLoop();
   void DispatchEvent(const reactor::ReadyEvent& ev);
 
-  /// Sweep the connection table and close any connection whose
-  /// `LastActive()` is older than `config_.idle_timeout_sec`. Called from
+  /// Sweep the connection table and close any connection that exceeded either
+  /// the initial-read deadline or the ordinary idle deadline. Called from
   /// the event loop on a `reaper_interval_sec` cadence so it runs without
   /// any extra threads. The reaper takes a shared lock on
   /// `connections_mutex_`, copies the candidate fds into a local vector, and

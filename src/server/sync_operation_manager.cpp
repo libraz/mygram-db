@@ -615,6 +615,8 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Stop replication BEFORE clearing data to prevent the reader/worker
     // threads from re-adding documents into the cleared index/doc_store.
+    // This relies on IBinlogReader::Stop()'s synchronous contract: after Stop()
+    // returns, no binlog worker thread may write into index/doc_store.
     // Save the current GTID so we can restore replication if SYNC is
     // cancelled or fails.
     if (full_config_->replication.enable && reader != nullptr && reader->IsRunning()) {

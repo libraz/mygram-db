@@ -12,7 +12,9 @@
 #include <cstring>
 #include <type_traits>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 namespace detail {
 
@@ -128,4 +130,4 @@ inline double FromLittleEndianDouble(double value) {
   return ToLittleEndianDouble(value);
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

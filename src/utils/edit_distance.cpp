@@ -13,7 +13,7 @@
 
 #include "utils/string_utils.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 namespace {
 
@@ -254,4 +254,4 @@ bool ContainsFuzzyMatch(std::string_view text, std::string_view term, uint32_t m
   return false;
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

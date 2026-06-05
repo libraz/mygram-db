@@ -19,7 +19,7 @@
 #include <unicode/unistr.h>
 #endif
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 namespace {
 
@@ -555,6 +555,27 @@ std::string SanitizeUtf8(std::string_view text) {
 // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
 // NOLINTEND(readability-identifier-length)
 
+std::string_view TrimAsciiWhitespaceView(std::string_view str) {
+  constexpr std::string_view kAsciiWhitespace = " \t\r\n";
+  const size_t start = str.find_first_not_of(kAsciiWhitespace);
+  if (start == std::string_view::npos) {
+    return {};
+  }
+  const size_t end = str.find_last_not_of(kAsciiWhitespace);
+  return str.substr(start, end - start + 1);
+}
+
+std::string TrimAsciiWhitespace(std::string_view str) {
+  return std::string(TrimAsciiWhitespaceView(str));
+}
+
+std::string ToLower(std::string_view str) {
+  std::string result(str);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char character) { return std::tolower(character); });
+  return result;
+}
+
 std::string ToUpper(std::string_view str) {
   std::string result(str);
   std::transform(result.begin(), result.end(), result.begin(),
@@ -689,4 +710,4 @@ bool IsUnicodeWhitespace(std::string_view text, size_t pos, size_t& char_len) {
 }
 // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

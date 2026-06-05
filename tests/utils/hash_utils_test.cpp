@@ -10,7 +10,7 @@
 #include <string>
 #include <string_view>
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 TEST(TransparentStringHashTest, SameContentSameHash) {
   TransparentStringHash hasher;

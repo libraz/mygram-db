@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "config/config.h"
 #include "server/protocol_constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -110,11 +111,11 @@ struct ReplicationStatus {
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers) - Default MygramDB
 // client settings
 struct ClientConfig {
-  std::string host = "127.0.0.1";                                        // Server hostname
-  uint16_t port = 11016;                                                 // Default port for MygramDB protocol
-  uint32_t timeout_ms = 5000;                                            // Default timeout in milliseconds
-  uint32_t recv_buffer_size = server::protocol::kDefaultRecvBufferSize;  // Default buffer size (64KB)
-  std::string unix_socket_path;                                          // Unix socket path (empty = use TCP)
+  std::string host = "127.0.0.1";                                              // Server hostname
+  uint16_t port = static_cast<uint16_t>(config::defaults::kTcpPort);           // Default port for MygramDB protocol
+  uint32_t timeout_ms = 5000;                                                  // Default timeout in milliseconds
+  uint32_t recv_buffer_size = server::protocol::kDefaultClientRecvBufferSize;  // Default buffer size (64KB)
+  std::string unix_socket_path;                                                // Unix socket path (empty = use TCP)
 };
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 

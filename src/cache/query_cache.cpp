@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 
+#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::cache {
@@ -311,6 +312,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     temp_entry.metadata.created_at = std::chrono::steady_clock::now();
     temp_entry.metadata.last_accessed = temp_entry.metadata.created_at;
     temp_entry.invalidated.store(false);
+    const std::string table_name = temp_entry.metadata.table;
 
     // Insert into LRU list (front = most recent)
     lru_list_.push_front(key);
@@ -318,6 +320,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
     // Insert into cache map using emplace to avoid copy
     cache_map_.emplace(key, std::make_pair(std::move(temp_entry), lru_it));
+    table_to_cache_keys_[table_name].insert(key);
 
     // Update memory tracking
     total_memory_bytes_ += entry_memory;
@@ -388,6 +391,7 @@ bool QueryCache::Erase(const CacheKey& key) {
     stats_.current_entries--;
     stats_.current_memory_bytes = total_memory_bytes_;
     stats_.invalidations_deferred++;
+    RemoveTableIndexEntryLocked(key, iter->second.first.metadata.table);
 
     // Remove from cache map
     cache_map_.erase(iter);
@@ -427,6 +431,7 @@ bool QueryCache::EraseWithoutCallback(const CacheKey& key) {
   stats_.current_entries--;
   stats_.current_memory_bytes = total_memory_bytes_;
   stats_.invalidations_deferred++;
+  RemoveTableIndexEntryLocked(key, iter->second.first.metadata.table);
 
   // Remove from cache map
   cache_map_.erase(iter);
@@ -459,6 +464,7 @@ void QueryCache::Clear() {
     // Swap with empty containers to release allocated capacity
     decltype(lru_list_)().swap(lru_list_);
     decltype(cache_map_)().swap(cache_map_);
+    decltype(table_to_cache_keys_)().swap(table_to_cache_keys_);
     total_memory_bytes_ = 0;
     stats_.current_entries = 0;
     stats_.current_memory_bytes = 0;
@@ -476,10 +482,11 @@ void QueryCache::ClearTable(const std::string& table) {
   {
     std::unique_lock lock(mutex_);
 
-    // Find all entries for this table
     std::vector<CacheKey> to_erase;
-    for (const auto& [key, entry_pair] : cache_map_) {
-      if (entry_pair.first.metadata.table == table) {
+    auto table_iter = table_to_cache_keys_.find(table);
+    if (table_iter != table_to_cache_keys_.end()) {
+      to_erase.reserve(table_iter->second.size());
+      for (const auto& key : table_iter->second) {
         to_erase.push_back(key);
       }
     }
@@ -517,7 +524,7 @@ bool QueryCache::CorruptEntryForTest(const CacheKey& key) {
   constexpr uint8_t kCorruptByte = 0xFF;
   // Force a large original_size so even if the bytes happened to look valid,
   // the size mismatch triggers a decompression failure (1 MiB of DocIds).
-  constexpr size_t kCorruptOriginalSize = 1024 * 1024;
+  constexpr size_t kCorruptOriginalSize = mygram::constants::kBytesPerMegabyte;
 
   auto corrupted = std::make_shared<std::vector<uint8_t>>(std::vector<uint8_t>(kCorruptPayloadBytes, kCorruptByte));
   iter->second.first.compressed = std::shared_ptr<const std::vector<uint8_t>>(std::move(corrupted));
@@ -626,8 +633,21 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
       break;
   }
 
+  RemoveTableIndexEntryLocked(key, iter->second.first.metadata.table);
+
   // Remove from cache map
   cache_map_.erase(iter);
+}
+
+void QueryCache::RemoveTableIndexEntryLocked(const CacheKey& key, const std::string& table) {
+  auto table_iter = table_to_cache_keys_.find(table);
+  if (table_iter == table_to_cache_keys_.end()) {
+    return;
+  }
+  table_iter->second.erase(key);
+  if (table_iter->second.empty()) {
+    table_to_cache_keys_.erase(table_iter);
+  }
 }
 
 void QueryCache::Touch(const CacheKey& key) {

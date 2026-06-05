@@ -1,5 +1,4 @@
 add_library(mygramdb_storage STATIC
-  dump_manager.cpp
   document_store.cpp
   document_store_persistence.cpp
   document_store_retrieval.cpp

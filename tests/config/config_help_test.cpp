@@ -220,6 +220,24 @@ TEST(ConfigHelpTest, FormatConfigForDisplayEntireConfig) {
   EXPECT_EQ(output.find("secret123"), std::string::npos);
 }
 
+TEST(ConfigHelpTest, ConfigToJsonIncludesBM25Section) {
+  Config config;
+  config.bm25.enable = true;
+  config.bm25.k1 = 1.7;
+  config.bm25.b = 0.6;
+
+  auto result = FormatConfigForDisplay(config, "bm25");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  const auto& output = *result;
+
+  EXPECT_NE(output.find("enable"), std::string::npos);
+  EXPECT_NE(output.find("true"), std::string::npos);
+  EXPECT_NE(output.find("k1"), std::string::npos);
+  EXPECT_NE(output.find("1.7"), std::string::npos);
+  EXPECT_NE(output.find("b"), std::string::npos);
+  EXPECT_NE(output.find("0.6"), std::string::npos);
+}
+
 // Test SplitPath (via public interface behavior)
 TEST_F(ConfigSchemaExplorerTest, PathNavigationSimple) {
   auto help = explorer().GetHelp("mysql");

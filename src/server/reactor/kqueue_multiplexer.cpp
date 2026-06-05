@@ -15,11 +15,11 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
-#include <cstring>
 #include <string>
 #include <vector>
 
 #include "utils/constants.h"
+#include "utils/errno_utils.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -30,6 +30,7 @@ namespace {
 using mygram::utils::Error;
 using mygram::utils::ErrorCode;
 using mygram::utils::Expected;
+using mygram::utils::FormatErrno;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
@@ -49,18 +50,6 @@ constexpr std::size_t kMaxEventBufferSize = 4096;
 /// timespec conversion below readable under clang-tidy's magic-number rule).
 constexpr long kNanosPerMilli = 1'000'000L;
 constexpr int64_t kMillisPerSecond = mygram::constants::kMillisecondsPerSecond;
-
-/// Build an errno-decorated error message suffix. Captures `captured_errno` by
-/// value to avoid TOCTOU between the failing syscall and the `strerror` call.
-std::string FormatErrno(const char* syscall_label, int captured_errno) {
-  std::string msg = syscall_label;
-  msg += " failed: ";
-  msg += std::strerror(captured_errno);
-  msg += " (errno=";
-  msg += std::to_string(captured_errno);
-  msg += ")";
-  return msg;
-}
 
 }  // namespace
 

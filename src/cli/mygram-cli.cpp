@@ -29,10 +29,12 @@
 #include <vector>
 
 #include "client/mygramclient.h"
+#include "config/config.h"
 #include "server/protocol_constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/numeric_parse.h"
+#include "utils/string_utils.h"
 #include "version.h"
 
 #ifdef HAVE_READLINE
@@ -48,14 +50,14 @@ namespace lib = mygramdb::client;
 namespace proto = mygramdb::server::protocol;
 
 // Re-exported protocol constants (also referenced from tests)
-[[maybe_unused]] constexpr size_t kReceiveBufferSize = proto::kDefaultRecvBufferSize;
+[[maybe_unused]] constexpr size_t kReceiveBufferSize = proto::kDefaultClientRecvBufferSize;
 constexpr size_t kErrorPrefixLength = proto::kErrorPrefixLen;
 constexpr size_t kOkSavedPrefixLength = proto::kOkSavedPrefixLen;
 constexpr size_t kOkLoadedPrefixLength = proto::kOkLoadedPrefixLen;
 
 // CLI behavior constants
-constexpr int kMaxWaitReadyRetries = 100;          // ~5 minutes at 3s interval
-constexpr uint16_t kDefaultPort = 11016;           // Default MygramDB port
+constexpr int kMaxWaitReadyRetries = 100;  // ~5 minutes at 3s interval
+constexpr uint16_t kDefaultPort = static_cast<uint16_t>(mygramdb::config::defaults::kTcpPort);
 constexpr uint32_t kInteractiveTimeoutMs = 30000;  // 30 seconds for interactive sessions
 constexpr int kMinTcpPort = 1;
 constexpr int kMaxTcpPort = 65535;
@@ -65,22 +67,8 @@ constexpr unsigned char kAsciiPrintableMin = 0x20;  // First printable ASCII cod
 // String helpers
 // =============================================================================
 
-std::string ToUpper(std::string str) {
-  for (char& character : str) {
-    character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
-  }
-  return str;
-}
-
-std::string Trim(const std::string& str) {
-  const auto* whitespace = " \t\r\n";
-  size_t start = str.find_first_not_of(whitespace);
-  if (start == std::string::npos) {
-    return "";
-  }
-  size_t end = str.find_last_not_of(whitespace);
-  return str.substr(start, end - start + 1);
-}
+using mygram::utils::ToUpper;
+using mygram::utils::TrimAsciiWhitespace;
 
 /**
  * @brief Helper: case-sensitive prefix check.
@@ -432,7 +420,7 @@ class MygramClient {
     lib_cfg.port = config_.port;
     lib_cfg.unix_socket_path = config_.socket_path;
     lib_cfg.timeout_ms = kInteractiveTimeoutMs;
-    lib_cfg.recv_buffer_size = proto::kDefaultRecvBufferSize;
+    lib_cfg.recv_buffer_size = proto::kDefaultClientRecvBufferSize;
     client_ = std::make_unique<lib::MygramClient>(std::move(lib_cfg));
   }
 
@@ -584,7 +572,7 @@ class MygramClient {
       }
       // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
       std::unique_ptr<char, decltype(&free)> input(raw_input, &free);
-      line = Trim(input.get());
+      line = TrimAsciiWhitespace(input.get());
 
       // Add only non-empty, non-trivial commands to history
       if (!line.empty() && !IsTrivialCommand(line)) {
@@ -596,7 +584,7 @@ class MygramClient {
       if (!std::getline(std::cin, line)) {
         break;
       }
-      line = Trim(line);
+      line = TrimAsciiWhitespace(line);
 #endif
 
       if (line.empty()) {

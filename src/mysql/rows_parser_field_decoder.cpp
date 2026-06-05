@@ -166,10 +166,23 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
     }
 
+    case 249:    // MYSQL_TYPE_TINY_BLOB
+    case 250:    // MYSQL_TYPE_MEDIUM_BLOB
+    case 251:    // MYSQL_TYPE_LONG_BLOB
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT, MEDIUMTEXT, LONGTEXT)
       uint32_t blob_len = 0;
       const unsigned char* blob_data = nullptr;
-      switch (metadata) {
+      uint16_t blob_len_bytes = metadata;
+      if (blob_len_bytes == 0) {
+        if (col_type == 249) {
+          blob_len_bytes = 1;
+        } else if (col_type == 250) {
+          blob_len_bytes = 3;
+        } else if (col_type == 251) {
+          blob_len_bytes = 4;
+        }
+      }
+      switch (blob_len_bytes) {
         case 1:  // TINYBLOB/TINYTEXT
           if (data + 1 > end) {
             return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
@@ -222,10 +235,24 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       unsigned char type = metadata >> 8;
       if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM) ||
           type == static_cast<unsigned char>(mysql::ColumnType::SET)) {
-        if (data + 1 > end) {
+        uint8_t pack_length = metadata & 0xFF;
+        if (pack_length == 0) {
+          pack_length = 1;
+        }
+        if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM) && pack_length > 2) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid ENUM metadata"));
+        }
+        if (type == static_cast<unsigned char>(mysql::ColumnType::SET) && pack_length > 8) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid SET metadata"));
+        }
+        if (data + pack_length > end) {
           return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         }
-        return std::to_string(*data);
+        uint64_t value = 0;
+        for (uint8_t i = 0; i < pack_length; ++i) {
+          value |= static_cast<uint64_t>(data[i]) << (i * 8);
+        }
+        return std::to_string(value);
       }
       uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
       uint32_t str_len = 0;
@@ -353,9 +380,26 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     case 12: {  // MYSQL_TYPE_DATETIME (8 bytes, old format)
-      // 8 bytes, packed format
+      if (data + 8 > end) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+      }
+      // Old DATETIME stores YYYYMMDDHHMMSS as an 8-byte little-endian integer.
       uint64_t val = binlog_util::uint8korr(data);
-      return std::to_string(val);  // Simplified - return as number
+      uint64_t second = val % 100;
+      val /= 100;
+      uint64_t minute = val % 100;
+      val /= 100;
+      uint64_t hour = val % 100;
+      val /= 100;
+      uint64_t day = val % 100;
+      val /= 100;
+      uint64_t month = val % 100;
+      uint64_t year = val / 100;
+
+      std::ostringstream oss;
+      oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day
+          << ' ' << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2) << second;
+      return oss.str();
     }
 
     case 18: {  // MYSQL_TYPE_DATETIME2 (5+ bytes, new format)
@@ -566,25 +610,45 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
       switch (metadata) {
         case 1:
+          if (data + 1 > end) {
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+          }
           geo_len = data[0];
           geo_data = data + 1;
           break;
         case 2:
+          if (data + 2 > end) {
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+          }
           geo_len = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8);
           geo_data = data + 2;
           break;
         case 3:
+          if (data + 3 > end) {
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+          }
           geo_len = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
                     (static_cast<uint32_t>(data[2]) << 16);
           geo_data = data + 3;
           break;
         case 4:
+          if (data + 4 > end) {
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+          }
           geo_len = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
                     (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
           geo_data = data + 4;
           break;
         default:
           return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid GEOMETRY metadata"));
+      }
+      if (geo_len > kMaxFieldLength || geo_data + geo_len > end) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "geometry_length_exceeds_bounds")
+            .Field("length", static_cast<uint64_t>(geo_len))
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
 
       // Return WKB data as hex string
@@ -599,7 +663,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     case 247: {  // MYSQL_TYPE_ENUM
       // ENUM values are stored as 1 or 2 byte integers
       // The metadata byte tells us the size
-      uint8_t enum_size = (metadata >> 8) & 0xFF;  // high byte of metadata
+      uint8_t enum_size = metadata & 0xFF;
       if (enum_size == 0) {
         enum_size = 1;  // default to 1 byte if metadata not available
       }
@@ -617,12 +681,13 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
     case 248: {  // MYSQL_TYPE_SET
       // SET values are stored as 1-8 byte bitmask
-      uint8_t set_size = (metadata >> 8) & 0xFF;
+      uint8_t set_size = metadata & 0xFF;
       if (set_size == 0) {
         set_size = 1;
       }
-      if (set_size > 8)
-        set_size = 8;
+      if (set_size > 8) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid SET metadata"));
+      }
       if (data + set_size > end)
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       uint64_t val = 0;

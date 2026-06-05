@@ -7,7 +7,7 @@
 
 #include "utils/network_utils.h"
 
-using namespace mygram::utils;
+using namespace mygramdb::utils;
 
 /**
  * @brief Test that empty ACL denies all connections (fail-closed)

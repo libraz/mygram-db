@@ -391,7 +391,7 @@ TEST(QueryNormalizerTest, EmptySearchText) {
 
   // Should produce valid normalized query without search text
   EXPECT_FALSE(normalized.empty());
-  EXPECT_NE(normalized.find("Q posts"), std::string::npos);
+  EXPECT_NE(normalized.find("S posts"), std::string::npos);
   EXPECT_NE(normalized.find("FILTER status = active"), std::string::npos);
 }
 
@@ -449,9 +449,8 @@ TEST(QueryNormalizerTest, CountQuery) {
 
   std::string normalized = QueryNormalizer::Normalize(query1);
 
-  // COUNT queries should use unified "Q" prefix (same as SEARCH)
   EXPECT_FALSE(normalized.empty());
-  EXPECT_EQ(normalized.find("Q"), 0);
+  EXPECT_EQ(normalized.find("C"), 0);
 }
 
 /**
@@ -767,9 +766,9 @@ TEST(QueryNormalizerTest, SortColumnCaseInsensitive) {
 // =============================================================================
 
 /**
- * @brief SEARCH and COUNT for the same query should produce identical cache keys
+ * @brief SEARCH and COUNT for the same query should not share cache keys
  */
-TEST(QueryNormalizerTest, SearchAndCountProduceSameNormalizedString) {
+TEST(QueryNormalizerTest, SearchAndCountProduceDifferentNormalizedStrings) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "articles";
@@ -785,22 +784,24 @@ TEST(QueryNormalizerTest, SearchAndCountProduceSameNormalizedString) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  EXPECT_EQ(normalized1, normalized2) << "SEARCH and COUNT should produce the same normalized cache key";
+  EXPECT_NE(normalized1, normalized2) << "SEARCH and COUNT must not collide in the cache";
 }
 
 /**
- * @brief Both SEARCH and COUNT should use the unified "Q" prefix
+ * @brief SEARCH and COUNT should use distinct prefixes
  */
-TEST(QueryNormalizerTest, UnifiedPrefixIsQ) {
-  query::Query query;
-  query.type = query::QueryType::SEARCH;
-  query.table = "articles";
-  query.search_text = "test";
-  query.limit = 100;
+TEST(QueryNormalizerTest, SearchAndCountPrefixesAreDistinct) {
+  query::Query search_query;
+  search_query.type = query::QueryType::SEARCH;
+  search_query.table = "articles";
+  search_query.search_text = "test";
+  search_query.limit = 100;
 
-  std::string normalized = QueryNormalizer::Normalize(query);
+  query::Query count_query = search_query;
+  count_query.type = query::QueryType::COUNT;
 
-  EXPECT_EQ(normalized.substr(0, 2), "Q ") << "Normalized string should start with 'Q '";
+  EXPECT_EQ(QueryNormalizer::Normalize(search_query).substr(0, 2), "S ");
+  EXPECT_EQ(QueryNormalizer::Normalize(count_query).substr(0, 2), "C ");
 }
 
 }  // namespace mygramdb::cache

@@ -10,7 +10,9 @@
 #include <limits>
 #include <string_view>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Compare two values using a string operator ("=", "!=", "<", ">", "<=", ">=")
@@ -98,4 +100,4 @@ inline bool CompareDoubleValuesRelative(double lhs, double rhs, std::string_view
   return false;
 }
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

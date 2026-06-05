@@ -82,6 +82,7 @@ class SearchHandler : public CommandHandler {
     query::DebugInfo debug_info;  ///< Debug info (populated when debug_mode)
     index::Index* current_index = nullptr;
     storage::DocumentStore* current_doc_store = nullptr;
+    TableContext* table_context = nullptr;
     int current_ngram_size = 0;
     int current_kanji_ngram_size = 0;
     bool current_cross_boundary = false;
@@ -154,6 +155,12 @@ class SearchHandler : public CommandHandler {
   void PopulatePostPipelineDebugInfo(const query::Query& query,
                                      const search_pipeline::FullPipelineOutput& pipeline_output,
                                      PipelineOutput& output) const;
+
+  /**
+   * @brief Generate highlight snippets for already-paginated results.
+   */
+  static std::vector<std::string> GenerateHighlightSnippets(const query::Query& query, const PipelineOutput& output,
+                                                            const std::vector<storage::DocId>& paginated_results);
 };
 
 }  // namespace mygramdb::server

@@ -54,8 +54,9 @@
 
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/namespace_compat.h"
 
-namespace mygram::utils {
+namespace mygramdb::utils {
 
 class PeriodicWorker {
  public:
@@ -127,4 +128,4 @@ class PeriodicWorker {
   std::thread thread_;
 };
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils

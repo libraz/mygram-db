@@ -184,7 +184,7 @@
                     "tinyint", "tinyint_unsigned",
                     "smallint", "smallint_unsigned",
                     "int", "int_unsigned",
-                    "bigint",
+                    "bigint", "bigint_unsigned",
                     "float", "double",
                     "string", "varchar", "text",
                     "datetime", "date", "timestamp", "time"
@@ -225,7 +225,7 @@
                     "tinyint", "tinyint_unsigned",
                     "smallint", "smallint_unsigned",
                     "int", "int_unsigned",
-                    "bigint",
+                    "bigint", "bigint_unsigned",
                     "float", "double",
                     "string", "varchar", "text",
                     "datetime", "date", "timestamp", "time"

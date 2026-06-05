@@ -252,13 +252,8 @@ TEST_F(HealthEndpointTest, ConcurrentHealthChecks) {
       if (res && res->status == 200) {
         success_count++;
       } else if (!res) {
-        auto err = thread_client.get_openssl_verify_result();
-        if (err != 0) {
-          other_error_count++;
-        } else {
-          // Connection or timeout failure
-          connection_failed_count++;
-        }
+        // Connection or timeout failure
+        connection_failed_count++;
       } else {
         // Got response but not 200
         other_error_count++;

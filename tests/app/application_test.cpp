@@ -3,7 +3,11 @@
  * @brief Unit tests for Application helper logic (dump directory validation)
  */
 
+#include "app/application.h"
+
 #include <gtest/gtest.h>
+#include <spdlog/sinks/stdout_sinks.h>
+#include <spdlog/spdlog.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -16,6 +20,7 @@ namespace {
  * @brief Validates a dump directory path using the same logic as Application::VerifyDumpDirectory.
  *
  * This standalone function mirrors the validation in application.cpp:
+ * - Reject ".." path components before creating any directory
  * - Canonicalize with weakly_canonical
  * - Reject paths containing ".." after normalization
  * - Check directory existence or creatability
@@ -27,6 +32,12 @@ namespace {
 std::string ValidateDumpDirectory(const std::string& dump_dir) {
   try {
     std::filesystem::path dump_path(dump_dir);
+
+    for (const auto& component : dump_path) {
+      if (component == "..") {
+        return "Path contains '..' component before creation: " + dump_path.string();
+      }
+    }
 
     // Create directory if it doesn't exist
     if (!std::filesystem::exists(dump_path)) {
@@ -83,29 +94,15 @@ TEST_F(DumpDirectoryValidationTest, AbsolutePathOutsideCwd) {
   EXPECT_TRUE(result.empty()) << "Error: " << result;
 }
 
-/**
- * @brief Test that a path containing ".." is rejected
- */
-TEST_F(DumpDirectoryValidationTest, PathWithDoubleDotRejected) {
-  // Create a path that resolves but contains ".." which would remain
-  // after normalization if pointing above root.
-  // We need a path that after weakly_canonical still has ".." -
-  // this happens when the path goes above an existing ancestor.
-  // In practice, weakly_canonical resolves ".." away for existing paths,
-  // so we test the logic by using a path with ".." that goes above root.
-  // On POSIX, "/.." normalizes to "/" and has no ".." component.
-  // The protection catches paths like "/nonexistent/../../etc" where
-  // weakly_canonical can't fully resolve the non-existent parts.
-
-  // Create a nested directory structure, then reference ".." from it
+TEST_F(DumpDirectoryValidationTest, PathWithDoubleDotRejectedBeforeCreation) {
   std::filesystem::path nested = base_dir_ / "a" / "b";
   std::filesystem::create_directories(nested);
 
-  // This path resolves to base_dir_/a which is valid (no ".." after canonical)
-  std::filesystem::path traversal = nested / "..";
+  std::filesystem::path traversal = nested / ".." / "escaped";
   std::string result = ValidateDumpDirectory(traversal.string());
-  // weakly_canonical resolves this fully, so ".." is gone - should succeed
-  EXPECT_TRUE(result.empty()) << "Error: " << result;
+  EXPECT_FALSE(result.empty());
+  EXPECT_NE(result.find("before creation"), std::string::npos);
+  EXPECT_FALSE(std::filesystem::exists(base_dir_ / "a" / "escaped"));
 }
 
 /**
@@ -132,6 +129,56 @@ TEST_F(DumpDirectoryValidationTest, TmpPathSucceeds) {
   std::string result = ValidateDumpDirectory(dump_path.string());
   EXPECT_TRUE(result.empty()) << "Error: " << result;
   std::filesystem::remove_all(dump_path);
+}
+
+TEST_F(DumpDirectoryValidationTest, RunLogsStartupAfterApplyingLoggingConfig) {
+  std::filesystem::path log_path = base_dir_ / "mygramdb.log";
+  std::filesystem::path dump_file = base_dir_ / "not_a_directory";
+  std::ofstream(dump_file) << "regular file";
+
+  std::filesystem::path config_path = base_dir_ / "config.yaml";
+  std::ofstream config(config_path);
+  config << "mysql:\n"
+         << "  host: \"127.0.0.1\"\n"
+         << "  port: 3306\n"
+         << "  user: \"test\"\n"
+         << "  password: \"test\"\n"
+         << "  database: \"test\"\n"
+         << "tables:\n"
+         << "  - name: \"test_table\"\n"
+         << "    primary_key: \"id\"\n"
+         << "    text_source:\n"
+         << "      column: \"content\"\n"
+         << "replication:\n"
+         << "  enable: false\n"
+         << "  server_id: 12345\n"
+         << "dump:\n"
+         << "  dir: \"" << dump_file.string() << "\"\n"
+         << "logging:\n"
+         << "  level: \"info\"\n"
+         << "  format: \"json\"\n"
+         << "  file: \"" << log_path.string() << "\"\n";
+  config.close();
+
+  std::string program = "mygramdb";
+  std::string config_flag = "-c";
+  std::string config_arg = config_path.string();
+  char* argv[] = {program.data(), config_flag.data(), config_arg.data()};
+
+  auto app = mygramdb::app::Application::Create(3, argv);
+  ASSERT_TRUE(app.has_value()) << app.error().to_string();
+  EXPECT_NE((*app)->Run(), 0);
+
+  spdlog::default_logger()->flush();
+  std::ifstream log_file(log_path);
+  ASSERT_TRUE(log_file.is_open());
+  std::string log_contents((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
+  EXPECT_NE(log_contents.find("application_starting"), std::string::npos);
+
+  spdlog::drop_all();
+  auto console_sink = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+  auto logger = std::make_shared<spdlog::logger>("default", console_sink);
+  spdlog::set_default_logger(logger);
 }
 
 }  // namespace

@@ -35,7 +35,7 @@
 
 #pragma once
 
-#include <string>
+#include <string_view>
 
 namespace mygramdb::server::log_fields {
 
@@ -44,20 +44,20 @@ namespace mygramdb::server::log_fields {
 // ---------------------------------------------------------------------------
 
 /// Canonical filesystem path field. Replaces both `path` and `filepath`.
-inline const std::string kFieldFilepath = "filepath";
+constexpr std::string_view kFieldFilepath = "filepath";
 
 // ---------------------------------------------------------------------------
 // Network / connection identifiers
 // ---------------------------------------------------------------------------
 
 /// File descriptor (signed int64). Replaces `client_fd` and `connection_fd`.
-inline const std::string kFieldFd = "fd";
+constexpr std::string_view kFieldFd = "fd";
 
 /// Remote client IP address as a string. Replaces `remote_addr`.
-inline const std::string kFieldClientIp = "client_ip";
+constexpr std::string_view kFieldClientIp = "client_ip";
 
 /// Remote client port number (signed int64).
-inline const std::string kFieldClientPort = "client_port";
+constexpr std::string_view kFieldClientPort = "client_port";
 
 // ---------------------------------------------------------------------------
 // Replication / GTID
@@ -67,7 +67,7 @@ inline const std::string kFieldClientPort = "client_port";
 /// `replication_gtid` and `current_gtid` (in `response_formatter.cpp` /
 /// `http_server.cpp`) are deliberately NOT changed — those are part of the
 /// stable client-facing wire format.
-inline const std::string kFieldGtid = "gtid";
+constexpr std::string_view kFieldGtid = "gtid";
 
 // ---------------------------------------------------------------------------
 // Errors and operations
@@ -75,36 +75,36 @@ inline const std::string kFieldGtid = "gtid";
 
 /// Free-form error message string. Pair with `kFieldErrorCode` when an
 /// `Error` is available — prefer `StructuredLog::FieldError(err)`.
-inline const std::string kFieldError = "error";
+constexpr std::string_view kFieldError = "error";
 
 /// Numeric error code.
-inline const std::string kFieldErrorCode = "error_code";
+constexpr std::string_view kFieldErrorCode = "error_code";
 
 /// Logical operation name (e.g. `dump_save`, `accept`). Used to disambiguate
 /// when the same event name applies to multiple operations.
-inline const std::string kFieldOperation = "operation";
+constexpr std::string_view kFieldOperation = "operation";
 
 // ---------------------------------------------------------------------------
 // Request / table / document context
 // ---------------------------------------------------------------------------
 
 /// Table name.
-inline const std::string kFieldTable = "table";
+constexpr std::string_view kFieldTable = "table";
 
 /// Document identifier (signed int64).
-inline const std::string kFieldDocId = "doc_id";
+constexpr std::string_view kFieldDocId = "doc_id";
 
 /// Request identifier (string).
-inline const std::string kFieldRequestId = "request_id";
+constexpr std::string_view kFieldRequestId = "request_id";
 
 // ---------------------------------------------------------------------------
 // Timing and counts
 // ---------------------------------------------------------------------------
 
 /// Duration in milliseconds (double or int64).
-inline const std::string kFieldDurationMs = "duration_ms";
+constexpr std::string_view kFieldDurationMs = "duration_ms";
 
 /// Generic count field (uint64).
-inline const std::string kFieldCount = "count";
+constexpr std::string_view kFieldCount = "count";
 
 }  // namespace mygramdb::server::log_fields

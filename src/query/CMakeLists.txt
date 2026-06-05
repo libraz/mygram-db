@@ -4,9 +4,7 @@ add_library(mygramdb_query STATIC
   query_parser_clauses.cpp
   query_ast.cpp
   result_sorter.cpp
-  cache_key.cpp
   query_normalizer.cpp
-  md5.cpp
   synonym_dictionary.cpp
   highlighter.cpp
 )
@@ -17,6 +15,7 @@ target_include_directories(mygramdb_query PUBLIC
 
 target_link_libraries(mygramdb_query PUBLIC
   mygramdb_storage  # Includes mygramdb_index transitively
+  mygramdb_cache_key
   mygramdb_utils
   spdlog::spdlog
 )

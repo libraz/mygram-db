@@ -14,7 +14,9 @@
 #include <string>
 #include <vector>
 
-namespace mygram::utils {
+#include "utils/namespace_compat.h"
+
+namespace mygramdb::utils {
 
 /**
  * @brief Helper to safely cast sockaddr_in* to sockaddr* for socket API
@@ -112,4 +114,4 @@ std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs);
  */
 std::string GetPeerIP(int fd);
 
-}  // namespace mygram::utils
+}  // namespace mygramdb::utils
