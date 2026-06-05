@@ -30,7 +30,7 @@ namespace mygramdb::cache {
  * Snapshot of cache statistics for reporting.
  * All fields are plain values (no atomic or mutex).
  *
- * M-16 (schema-drift guard): @see kCacheStatsFieldVersion below. Both
+ * Schema-drift guard: @see kCacheStatsFieldVersion below. Both
  * CacheStatisticsSnapshot and CacheStatistics share the same field set.
  * Whenever you add/remove/rename a field on either struct, you MUST:
  *   1. Mirror the change on the other struct.
@@ -61,6 +61,8 @@ struct CacheStatisticsSnapshot {
   uint64_t ttl_expirations = 0;         ///< TTL-expired entries removed
   uint64_t decompression_failures = 0;  ///< Entries removed due to decompression failure
   uint64_t rejection_count = 0;         ///< Inserts rejected for being below min_query_cost_ms threshold
+  uint64_t rejection_oversize = 0;      ///< Inserts rejected because the entry exceeds max_memory_bytes
+  uint64_t rejection_duplicate = 0;     ///< Inserts rejected because the cache key is already present
   uint64_t forced_clears = 0;           ///< Bulk Clear()/ClearTable() invocations (count of bulk operations)
   uint64_t stale_lru_entries = 0;       ///< LRU-list keys that were missing from cache_map_ (defensive counter)
 
@@ -107,12 +109,12 @@ struct CacheStatisticsSnapshot {
  *
  * Bumped whenever fields are added / removed / renamed on either struct so
  * that the static_assert at the bottom of this file trips and forces the
- * reviewer to keep both structs and QueryCache::GetStatistics() in sync (M-16).
+ * reviewer to keep both structs and QueryCache::GetStatistics() in sync.
  *
  * Current schema (must match exactly):
- *   17 atomic uint64_t counters in CacheStatistics
+ *   19 atomic uint64_t counters in CacheStatistics
  *   3 timing doubles guarded by timing_mutex_ in CacheStatistics
- *   17 plain uint64_t counters in CacheStatisticsSnapshot
+ *   19 plain uint64_t counters in CacheStatisticsSnapshot
  *   1 invalidation_index_memory_bytes counter (snapshot only, populated by
  *     CacheManager from InvalidationManager)
  *   4 configuration snapshot fields (max_memory_bytes, min_query_cost_ms,
@@ -121,7 +123,7 @@ struct CacheStatisticsSnapshot {
  *   3 helper methods on snapshot (HitRate, AverageCacheHitLatency,
  *     AverageCacheMissLatency) and 1 accessor (TotalTimeSaved)
  */
-inline constexpr uint32_t kCacheStatsFieldVersion = 1;
+inline constexpr uint32_t kCacheStatsFieldVersion = 2;
 
 /**
  * @brief Internal cache statistics (thread-safe, non-copyable)
@@ -148,9 +150,11 @@ struct CacheStatistics {
   std::atomic<uint64_t> evictions{0};
   std::atomic<uint64_t> ttl_expirations{0};
   std::atomic<uint64_t> decompression_failures{0};
-  std::atomic<uint64_t> rejection_count{0};    ///< Inserts rejected for being below min_query_cost_ms threshold
-  std::atomic<uint64_t> forced_clears{0};      ///< Bulk Clear()/ClearTable() invocations
-  std::atomic<uint64_t> stale_lru_entries{0};  ///< LRU keys not found in cache_map_ during EvictForSpace
+  std::atomic<uint64_t> rejection_count{0};      ///< Inserts rejected for being below min_query_cost_ms threshold
+  std::atomic<uint64_t> rejection_oversize{0};   ///< Inserts rejected because the entry exceeds max_memory_bytes
+  std::atomic<uint64_t> rejection_duplicate{0};  ///< Inserts rejected because cache key is already present
+  std::atomic<uint64_t> forced_clears{0};        ///< Bulk Clear()/ClearTable() invocations
+  std::atomic<uint64_t> stale_lru_entries{0};    ///< LRU keys not found in cache_map_ during EvictForSpace
 
   // Timing statistics (protected by mutex)
   mutable std::mutex timing_mutex_;
@@ -252,14 +256,14 @@ class QueryCache {
               double query_cost_ms);
 
   /**
-   * @brief Mark cache entry as invalidated (Phase 1: immediate)
+   * @brief Mark cache entry as invalidated (Step 1: immediate)
    * @param key Cache key
    * @return true if entry was found and marked
    */
   bool MarkInvalidated(const CacheKey& key);
 
   /**
-   * @brief Erase cache entry (Phase 2: deferred)
+   * @brief Erase cache entry (Step 2: deferred)
    * @param key Cache key
    * @return true if entry was found and erased
    */
@@ -314,6 +318,8 @@ class QueryCache {
     snapshot.ttl_expirations = stats_.ttl_expirations.load();
     snapshot.decompression_failures = stats_.decompression_failures.load();
     snapshot.rejection_count = stats_.rejection_count.load();
+    snapshot.rejection_oversize = stats_.rejection_oversize.load();
+    snapshot.rejection_duplicate = stats_.rejection_duplicate.load();
     snapshot.forced_clears = stats_.forced_clears.load();
     snapshot.stale_lru_entries = stats_.stale_lru_entries.load();
     // Configuration snapshot. max_memory_bytes_ and compression_enabled_ are
@@ -455,9 +461,8 @@ class QueryCache {
   std::unordered_set<CacheKey> pending_expired_keys_;        ///< TTL-expired keys
   std::unordered_set<CacheKey> pending_decompression_keys_;  ///< Decompression-failed keys
 
-  // Background LRU refresh worker. M-8 unified the previous std::thread +
-  // std::condition_variable + atomic<bool> trio with the rest of MygramDB's
-  // periodic-task plumbing via PeriodicWorker; the worker invokes
+  // Background LRU refresh worker. PeriodicWorker owns the previous
+  // std::thread + std::condition_variable + atomic<bool> trio; the worker invokes
   // RefreshLRU() at a fixed cadence and is stopped (with a fast cv-wake)
   // by the destructor.
   mygram::utils::PeriodicWorker lru_refresh_worker_{"query_cache_lru_refresh"};
@@ -535,7 +540,7 @@ class QueryCache {
 };
 
 // ---------------------------------------------------------------------------
-// M-16 schema-drift sentinel.
+// Cache statistics schema-drift sentinel.
 //
 // The sizes below are deliberately spelled out so a structural change to
 // CacheStatisticsSnapshot (or, indirectly, CacheStatistics) trips this
@@ -554,9 +559,9 @@ class QueryCache {
 // contains a std::mutex whose size is implementation-defined and would make
 // the assertion brittle.
 // ---------------------------------------------------------------------------
-inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 200;
+inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 216;
 static_assert(sizeof(CacheStatisticsSnapshot) == kExpectedCacheStatisticsSnapshotSize,
               "CacheStatisticsSnapshot layout changed: also update CacheStatistics, "
-              "QueryCache::GetStatistics(), and bump kCacheStatsFieldVersion (see M-16).");
+              "QueryCache::GetStatistics(), and bump kCacheStatsFieldVersion.");
 
 }  // namespace mygramdb::cache

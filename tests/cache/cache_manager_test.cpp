@@ -697,7 +697,7 @@ TEST(CacheManagerTest, ClearDoesNotLeavePhantomInvalidationMetadata) {
 /**
  * @brief Test CacheManager destructor safety with small cache triggering evictions
  *
- * Regression test for P0: Exercises LRU eviction during destruction by using
+ * Regression test for Exercises LRU eviction during destruction by using
  * a very small cache that has active evictions happening.
  */
 TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {

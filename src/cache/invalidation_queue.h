@@ -55,8 +55,8 @@ struct InvalidationEvent {
  * to avoid redundant invalidation work.
  *
  * Two-phase invalidation:
- * 1. Phase 1 (Immediate): Extract ngrams, mark cache entries as invalidated
- * 2. Phase 2 (Deferred): Batch process, erase invalidated entries from cache
+ * 1. Step 1 (Immediate): Extract ngrams, mark cache entries as invalidated
+ * 2. Step 2 (Deferred): Batch process, erase invalidated entries from cache
  */
 class InvalidationQueue {
  public:
@@ -84,8 +84,8 @@ class InvalidationQueue {
    * @brief Enqueue invalidation event (non-blocking)
    *
    * Extracts ngrams from old/new text and marks affected cache entries
-   * as invalidated immediately (Phase 1). Actual erasure is deferred
-   * to background worker (Phase 2).
+   * as invalidated immediately (Step 1). Actual erasure is deferred
+   * to background worker (Step 2).
    *
    * @param table_name Table that was modified
    * @param old_text Previous text content

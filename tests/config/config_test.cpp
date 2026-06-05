@@ -154,12 +154,63 @@ TEST(ConfigTest, DefaultValues) {
   EXPECT_EQ(config.mysql.write_timeout_ms, 3600000);  // Default: 1 hour
   EXPECT_EQ(config.build.batch_size, 5000);
   EXPECT_EQ(config.memory.hard_limit_mb, 8192);
+  EXPECT_EQ(config.memory.normalize.width, "narrow");
+  EXPECT_FALSE(config.memory.normalize.lower);
   EXPECT_EQ(config.api.tcp.port, 11016);
   EXPECT_FALSE(config.api.http.enable);
   // H-N8: HTTP read/write timeouts must default to kHttpTimeoutSec when not
   // specified in the YAML; they are no longer hardcoded inside HttpServer.
   EXPECT_EQ(config.api.http.read_timeout_sec, defaults::kHttpTimeoutSec);
   EXPECT_EQ(config.api.http.write_timeout_sec, defaults::kHttpTimeoutSec);
+}
+
+TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
+  std::ofstream f("schema_exposed_keys.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "index:\n";
+  f << "  ngram_size: 3\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f << "    synonyms:\n";
+  f << "      enable: true\n";
+  f << "      file: synonyms.tsv\n";
+  f << "dump:\n";
+  f << "  default_filename: custom.dmp\n";
+  f << "api:\n";
+  f << "  http:\n";
+  f << "    enable: true\n";
+  f << "    max_body_bytes: 1048576\n";
+  f << "  unix_socket:\n";
+  f << "    path: /tmp/mygramdb-test.sock\n";
+  f << "  max_query_length: 0\n";
+  f << "bm25:\n";
+  f << "  enable: true\n";
+  f << "  k1: 1.7\n";
+  f << "  b: 0.6\n";
+  f.close();
+
+  auto config_result = LoadConfig("schema_exposed_keys.yaml");
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  const Config& config = *config_result;
+
+  ASSERT_EQ(config.tables.size(), 1);
+  EXPECT_EQ(config.tables[0].ngram_size, 3);
+  EXPECT_TRUE(config.tables[0].synonyms.enable);
+  EXPECT_EQ(config.tables[0].synonyms.file, "synonyms.tsv");
+  EXPECT_EQ(config.dump.default_filename, "custom.dmp");
+  EXPECT_TRUE(config.api.http.enable);
+  EXPECT_EQ(config.api.http.max_body_bytes, 1048576);
+  EXPECT_EQ(config.api.unix_socket.path, "/tmp/mygramdb-test.sock");
+  EXPECT_EQ(config.api.max_query_length, 0);
+  EXPECT_TRUE(config.bm25.enable);
+  EXPECT_DOUBLE_EQ(config.bm25.k1, 1.7);
+  EXPECT_DOUBLE_EQ(config.bm25.b, 0.6);
 }
 
 TEST(ConfigTest, GlobalNgramSizeAlsoAppliesToImplicitKanjiNgramSize) {

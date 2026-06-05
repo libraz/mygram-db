@@ -785,15 +785,25 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
       sent_total += static_cast<size_t>(n);
     }
 
-    // Either we got EPIPE/ECONNRESET during send, or the server closed the
-    // connection which we observe as recv() == 0.
+    // Either we got EPIPE/ECONNRESET during send, or the server may first send
+    // an error response and then close the connection.
     if (!got_epipe) {
-      char buf = 0;
+      char buf[256];
       struct timeval tv {};
       tv.tv_sec = 3;
       setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-      ssize_t n = recv(s, &buf, 1, 0);
-      EXPECT_LE(n, 0) << "Expected server to close over-cap connection";
+      bool observed_close = false;
+      for (int i = 0; i < 16; ++i) {
+        ssize_t n = recv(s, buf, sizeof(buf), 0);
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+          observed_close = true;
+          break;
+        }
+        if (n < 0) {
+          break;
+        }
+      }
+      EXPECT_TRUE(observed_close) << "Expected server to close over-cap connection";
     }
     close(s);
   }
@@ -967,7 +977,7 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
 /**
  * Design-doc §3.1 G1: with a small worker pool and a large number of idle
  * persistent connections, a newly-arriving active client must be served in
- * well under 500 ms.  This is the Phase 3 upgrade of
+ * well under 500 ms.  This is the Step 3 upgrade of
  * `ReactorServesPersistentFleetWithoutStarvation`: instead of 128 idle
  * clients, this test pushes the scale up to the per-process fd budget.
  *
@@ -1191,7 +1201,7 @@ TEST_F(ReactorIntegrationTest, MaxQueryLengthEnforcedInReactorMode) {
 // Currently TcpServer routes UDS fds through the blocking HandleConnection
 // path unconditionally (tcp_server.cpp historical line ~306). This test
 // passes today because of that fallback, but we need a regression gate:
-// Phase 4 deletes HandleConnection, so UDS must be migrated to the reactor
+// Step 4 deletes HandleConnection, so UDS must be migrated to the reactor
 // handler before then. Keep this test green through the transition.
 TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   // Unique socket path per run so parallel test runs don't collide.

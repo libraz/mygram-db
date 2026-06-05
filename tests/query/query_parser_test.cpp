@@ -316,7 +316,7 @@ TEST(QueryParserTest, SearchMissingArgs) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles");
 
-  // After BUG-2 fix: error paths now return MakeUnexpected instead of partial Query
+  // After  fix: error paths now return MakeUnexpected instead of partial Query
   EXPECT_FALSE(query.has_value());
 }
 
@@ -1039,6 +1039,43 @@ TEST(QueryParserTest, SearchWithParenthesesAndSort) {
   EXPECT_TRUE(query->IsValid());
 }
 
+TEST(QueryParserTest, SearchWithTopLevelOrAndSort) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads golang OR python SORT DESC LIMIT 10");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SEARCH);
+  EXPECT_EQ(query->table, "threads");
+  EXPECT_EQ(query->search_text, "golang OR python");
+  EXPECT_TRUE(query->and_terms.empty());
+  EXPECT_TRUE(query->not_terms.empty());
+  EXPECT_TRUE(query->order_by.has_value());
+  EXPECT_EQ(query->order_by->order, SortOrder::DESC);
+  EXPECT_EQ(query->limit, 10);
+}
+
+TEST(QueryParserTest, SearchWithTopLevelOrKeepsAndInAstExpression) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads golang OR python AND tutorial FILTER status = 1");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->search_text, "golang OR python AND tutorial");
+  EXPECT_TRUE(query->and_terms.empty());
+  ASSERT_EQ(query->filters.size(), 1);
+  EXPECT_EQ(query->filters[0].column, "status");
+}
+
+TEST(QueryParserTest, SearchWithoutTopLevelOrKeepsLegacyAndClause) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH threads golang AND tutorial SORT DESC");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->search_text, "golang");
+  ASSERT_EQ(query->and_terms.size(), 1);
+  EXPECT_EQ(query->and_terms[0], "tutorial");
+  EXPECT_TRUE(query->order_by.has_value());
+}
+
 /**
  * @brief Test SORT with nested parentheses and quoted phrase
  */
@@ -1620,11 +1657,11 @@ TEST(QueryParserTest, ParsePerformanceWithOptimization) {
 }
 
 // =============================================================================
-// Bug #27: SET command boundary check tests
+// SET command boundary check tests
 // =============================================================================
 
 /**
- * @test Bug #27: Valid SET command should parse correctly
+ * @test Valid SET command should parse correctly
  */
 TEST(QueryParserTest, Bug27_SetCommandValid) {
   QueryParser parser;
@@ -1638,7 +1675,7 @@ TEST(QueryParserTest, Bug27_SetCommandValid) {
 }
 
 /**
- * @test Bug #27: Multiple SET assignments should parse correctly
+ * @test Multiple SET assignments should parse correctly
  */
 TEST(QueryParserTest, Bug27_SetCommandMultiple) {
   QueryParser parser;
@@ -1654,7 +1691,7 @@ TEST(QueryParserTest, Bug27_SetCommandMultiple) {
 }
 
 /**
- * @test Bug #27: Empty SET should return error (not crash)
+ * @test Empty SET should return error (not crash)
  */
 TEST(QueryParserTest, Bug27_SetCommandEmpty) {
   QueryParser parser;
@@ -1664,7 +1701,7 @@ TEST(QueryParserTest, Bug27_SetCommandEmpty) {
 }
 
 /**
- * @test Bug #27: SET with only variable name should return error (not crash)
+ * @test SET with only variable name should return error (not crash)
  */
 TEST(QueryParserTest, Bug27_SetCommandOnlyVariable) {
   QueryParser parser;
@@ -1674,7 +1711,7 @@ TEST(QueryParserTest, Bug27_SetCommandOnlyVariable) {
 }
 
 /**
- * @test Bug #27: SET with variable and equals only should return error (not crash)
+ * @test SET with variable and equals only should return error (not crash)
  */
 TEST(QueryParserTest, Bug27_SetCommandNoValue) {
   QueryParser parser;
@@ -1684,7 +1721,7 @@ TEST(QueryParserTest, Bug27_SetCommandNoValue) {
 }
 
 /**
- * @test Bug #27: SET with trailing comma should handle gracefully
+ * @test SET with trailing comma should handle gracefully
  */
 TEST(QueryParserTest, Bug27_SetCommandTrailingComma) {
   QueryParser parser;
@@ -1699,7 +1736,7 @@ TEST(QueryParserTest, Bug27_SetCommandTrailingComma) {
 }
 
 /**
- * @test Bug #27: SET with comma but no second assignment should return error
+ * @test SET with comma but no second assignment should return error
  */
 TEST(QueryParserTest, Bug27_SetCommandIncompleteSecond) {
   QueryParser parser;
@@ -1709,7 +1746,7 @@ TEST(QueryParserTest, Bug27_SetCommandIncompleteSecond) {
 }
 
 /**
- * @test Bug #27: SET with comma and partial second assignment
+ * @test SET with comma and partial second assignment
  */
 TEST(QueryParserTest, Bug27_SetCommandPartialSecond) {
   QueryParser parser;
@@ -1719,7 +1756,7 @@ TEST(QueryParserTest, Bug27_SetCommandPartialSecond) {
 }
 
 /**
- * @test Bug #27: SET with three assignments should parse correctly
+ * @test SET with three assignments should parse correctly
  */
 TEST(QueryParserTest, Bug27_SetCommandThreeAssignments) {
   QueryParser parser;
@@ -1731,7 +1768,7 @@ TEST(QueryParserTest, Bug27_SetCommandThreeAssignments) {
 }
 
 /**
- * @test Bug #27: SET missing equals sign should return error
+ * @test SET missing equals sign should return error
  */
 TEST(QueryParserTest, Bug27_SetCommandMissingEquals) {
   QueryParser parser;
@@ -2390,7 +2427,7 @@ TEST(CountParensInTokenTest, EscapedQuoteDoesNotEndQuoteState) {
 }
 
 // ============================================================================
-// Error return validation tests (BUG-2 fixes)
+// Error return validation tests ( fixes)
 // ============================================================================
 
 TEST(QueryParserBugFixTest, SearchMissingArgsReturnsError) {
@@ -2648,7 +2685,7 @@ TEST(QueryParserFuzzyTest, FuzzyInvalidNonNumeric) {
   EXPECT_FALSE(result.has_value());
 }
 
-// BUG-4: from_chars instead of stoi - non-numeric after FUZZY is an error
+// from_chars instead of stoi - non-numeric after FUZZY is an error
 TEST(QueryParserFuzzyTest, FuzzyNonNumericIsError) {
   // Non-numeric token after FUZZY should not be consumed as a number.
   // "nonsense" is not a valid keyword, so parser should error.

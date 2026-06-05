@@ -354,7 +354,7 @@ TEST(InvalidationQueueTest, EnqueueAfterStopDoesNotInvalidateOrErase) {
   queue.Enqueue("posts", "", "golang");
 
   auto result = cache.Lookup(key);
-  ASSERT_TRUE(result.has_value()) << "Enqueue after Stop must not run Phase 1 invalidation";
+  ASSERT_TRUE(result.has_value()) << "Enqueue after Stop must not run Step 1 invalidation";
   EXPECT_EQ(result->size(), 3U);
 }
 

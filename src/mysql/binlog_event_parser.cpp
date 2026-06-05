@@ -164,19 +164,19 @@ std::string ConcatenateTextColumns(const RowData& row, const std::vector<std::st
   std::string result;
   size_t total_size = 0;
   for (const auto& col_name : concat_columns) {
-    auto col_iter = row.columns.find(col_name);
-    if (col_iter != row.columns.end() && !col_iter->second.empty()) {
-      total_size += col_iter->second.size() + 1;  // +1 for separator
+    const std::string* value = row.FindColumnValue(col_name);
+    if (value != nullptr && !value->empty()) {
+      total_size += value->size() + 1;  // +1 for separator
     }
   }
   result.reserve(total_size);
   for (const auto& col_name : concat_columns) {
-    auto col_iter = row.columns.find(col_name);
-    if (col_iter != row.columns.end() && !col_iter->second.empty()) {
+    const std::string* value = row.FindColumnValue(col_name);
+    if (value != nullptr && !value->empty()) {
       if (!result.empty()) {
         result += " ";  // Space separator between columns
       }
-      result += col_iter->second;
+      result += *value;
     }
   }
   return result;
@@ -424,6 +424,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
             event.ddl_type = classified_ddl_type;
             event.table_name = table_name;
             event.text = query;  // Store the DDL query
+            event.gtid = current_gtid;
             events.push_back(std::move(event));
           }
         }
@@ -438,7 +439,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
           event.ddl_type = classified_ddl_type;
           event.table_name = table_config->name;
           event.text = query;  // Store the DDL query
-          return {event};      // Return as vector with single element
+          event.gtid = current_gtid;
+          return {event};  // Return as vector with single element
         }
       }
 
@@ -458,6 +460,12 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
     case MySQLBinlogEventType::XID_EVENT:
       // Transaction commit marker
+      if (!current_gtid.empty()) {
+        BinlogEvent event;
+        event.type = BinlogEventType::COMMIT;
+        event.gtid = current_gtid;
+        return {event};
+      }
       return {};
 
     case MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT:

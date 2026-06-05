@@ -4,6 +4,9 @@
  */
 
 #include <cctype>
+#ifndef _WIN32
+#include <arpa/inet.h>
+#endif
 #include <nlohmann/json-schema.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -17,6 +20,69 @@
 namespace mygramdb::config {
 
 namespace internal {
+namespace {
+
+bool IsValidIpLiteral(const std::string& address) {
+#ifndef _WIN32
+  in_addr ipv4_addr{};
+  if (inet_pton(AF_INET, address.c_str(), &ipv4_addr) == 1) {
+    return true;
+  }
+
+  in6_addr ipv6_addr{};
+  if (inet_pton(AF_INET6, address.c_str(), &ipv6_addr) == 1) {
+    return true;
+  }
+
+  const size_t scope_pos = address.find('%');
+  if (scope_pos != std::string::npos && scope_pos > 0 && scope_pos + 1 < address.size()) {
+    const std::string ipv6_part = address.substr(0, scope_pos);
+    const std::string scope_part = address.substr(scope_pos + 1);
+    for (char character : scope_part) {
+      const auto chr = static_cast<unsigned char>(character);
+      if (std::isalnum(chr) == 0 && character != '_' && character != '-' && character != '.') {
+        return false;
+      }
+    }
+    return inet_pton(AF_INET6, ipv6_part.c_str(), &ipv6_addr) == 1;
+  }
+#endif
+  return false;
+}
+
+bool IsValidHostname(const std::string& address) {
+  if (address.empty() || address.size() > 253 || address.front() == '.' || address.back() == '.') {
+    return false;
+  }
+
+  size_t label_start = 0;
+  while (label_start < address.size()) {
+    size_t label_end = address.find('.', label_start);
+    if (label_end == std::string::npos) {
+      label_end = address.size();
+    }
+    const size_t label_len = label_end - label_start;
+    if (label_len == 0 || label_len > 63) {
+      return false;
+    }
+    for (size_t i = label_start; i < label_end; ++i) {
+      const char character = address[i];
+      const auto chr = static_cast<unsigned char>(character);
+      const bool edge = i == label_start || i + 1 == label_end;
+      if (std::isalnum(chr) != 0) {
+        continue;
+      }
+      if (character == '-' && !edge) {
+        continue;
+      }
+      return false;
+    }
+    label_start = label_end + 1;
+  }
+  return true;
+}
+
+}  // namespace
 
 mygram::utils::Expected<void, mygram::utils::Error> ValidatePathNoTraversal(const std::string& path,
                                                                             const std::string& field_name) {
@@ -87,6 +153,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateBindAddress(const st
                                           "': address contains whitespace. "
                                           "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
     }
+  }
+
+  if (!IsValidIpLiteral(address) && !IsValidHostname(address)) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Invalid bind address in '" + field_name +
+                                        "': address is not a valid IP address or hostname. "
+                                        "Use a valid IP address (e.g., 127.0.0.1, 0.0.0.0, ::1) or hostname."));
   }
 
   return {};

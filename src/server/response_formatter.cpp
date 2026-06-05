@@ -5,10 +5,12 @@
 
 #include "server/response_formatter.h"
 
+#include <cctype>
 #include <iomanip>
 #include <sstream>
 
 #include "cache/cache_manager.h"
+#include "server/protocol_constants.h"
 #include "server/statistics_service.h"
 #include "server/tcp_server.h"
 #include "utils/memory_utils.h"
@@ -28,6 +30,90 @@ namespace {
 constexpr size_t kResponseBaseBufferSize = 32;
 // Average primary key size estimate (including space delimiter)
 constexpr size_t kEstimatedPrimaryKeySize = 12;
+
+bool NeedsGetValueQuoting(std::string_view value) {
+  if (value.empty()) {
+    return true;
+  }
+  for (unsigned char ch : value) {
+    if (std::isspace(ch) != 0 || ch == '"' || ch == '\\' || std::iscntrl(ch) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void WriteEscapedGetStringValue(std::ostream& oss, std::string_view value) {
+  if (!NeedsGetValueQuoting(value)) {
+    oss << value;
+    return;
+  }
+
+  oss << '"';
+  for (unsigned char ch : value) {
+    switch (ch) {
+      case '\\':
+        oss << "\\\\";
+        break;
+      case '"':
+        oss << "\\\"";
+        break;
+      case '\r':
+        oss << "\\r";
+        break;
+      case '\n':
+        oss << "\\n";
+        break;
+      case '\t':
+        oss << "\\t";
+        break;
+      default:
+        if (std::iscntrl(ch) != 0) {
+          oss << "\\x" << std::uppercase << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(ch)
+              << std::nouppercase << std::dec << std::setfill(' ');
+        } else {
+          oss << static_cast<char>(ch);
+        }
+        break;
+    }
+  }
+  oss << '"';
+}
+
+std::string EscapePrometheusLabelValue(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (char ch : value) {
+    switch (ch) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      default:
+        escaped += ch;
+        break;
+    }
+  }
+  return escaped;
+}
+
+std::string SanitizePrimaryKeyForResponse(std::string_view primary_key) {
+  std::string sanitized;
+  sanitized.reserve(primary_key.size());
+  for (unsigned char ch : primary_key) {
+    if (std::isspace(ch) != 0 || std::iscntrl(ch) != 0) {
+      sanitized += '_';
+    } else {
+      sanitized += static_cast<char>(ch);
+    }
+  }
+  return sanitized;
+}
 
 /**
  * @brief Write the cache section of a debug block into `oss`.
@@ -170,7 +256,7 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   std::string response;
   response.reserve(kResponseBaseBufferSize + results.size() * kEstimatedPrimaryKeySize);
 
-  response += "OK RESULTS ";
+  response.append(protocol::kOkResultsWithSpacePrefix);
   response += std::to_string(total_results);
 
   // Append primary keys (already in correct order)
@@ -179,7 +265,7 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   for (const auto& primary_key : primary_keys) {
     if (!primary_key.empty()) {
       response += ' ';
-      response += primary_key;
+      response += SanitizePrimaryKeyForResponse(primary_key);
     } else {
       // Doc ID exists in index but not in document store - data inconsistency
       missing_count++;
@@ -224,7 +310,7 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
   std::string response;
   response.reserve(kHighlightBaseBuffer + results.size() * kEstimatedLineSize);
 
-  response += "OK RESULTS ";
+  response.append(protocol::kOkResultsWithSpacePrefix);
   response += std::to_string(total_results);
 
   // Each result on its own line: pk\tsnippet
@@ -233,7 +319,7 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
       continue;  // Skip missing documents
     }
     response += "\r\n";
-    response += primary_keys[i];
+    response += SanitizePrimaryKeyForResponse(primary_keys[i]);
     response += '\t';
     if (i < snippets.size()) {
       response += snippets[i];
@@ -245,13 +331,17 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
     AppendDebugBlock(response, *debug_info, /*include_detailed_counts=*/false);
   }
 
+  response += "\r\n";
   return response;
 }
 
 std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::DebugInfo* debug_info) {
   // Fast path for non-debug responses
   if (debug_info == nullptr) {
-    return "OK COUNT " + std::to_string(count);
+    std::string response;
+    response.append(protocol::kOkCountWithSpacePrefix);
+    response += std::to_string(count);
+    return response;
   }
 
   // Debug path: use ostringstream for convenience. Cache section is now
@@ -260,7 +350,7 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
   // "cache: miss (not found)\r\nquery_cost_ms: ..." here while SEARCH emitted
   // "cache: miss\r\ncache_reason: not_found\r\ncache_cost_ms: ...").
   std::ostringstream oss;
-  oss << "OK COUNT " << count;
+  oss << protocol::kOkCountWithSpacePrefix << count;
   oss << "\r\n\r\n# DEBUG\r\n";
   oss << "query_time: " << std::fixed << std::setprecision(3) << debug_info->query_time_ms << "ms\r\n";
   oss << "index_time: " << debug_info->index_time_ms << "ms\r\n";
@@ -276,7 +366,10 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
 
 std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<std::string, uint64_t>>& value_counts,
                                                    const query::DebugInfo* debug_info) {
-  std::string response = "OK FACET " + std::to_string(value_counts.size()) + "\r\n";
+  std::string response;
+  response.append(protocol::kOkFacetWithSpacePrefix);
+  response += std::to_string(value_counts.size());
+  response += "\r\n";
 
   for (const auto& [value, count] : value_counts) {
     // Escape tabs to prevent protocol ambiguity (tab is the field separator).
@@ -311,7 +404,7 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
   }
 
   std::ostringstream oss;
-  oss << "OK DOC " << doc->primary_key;
+  oss << protocol::kOkDocWithSpacePrefix << doc->primary_key;
 
   // Add filters
   // Default precision for floating point values in response
@@ -327,12 +420,14 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
           } else if constexpr (std::is_same_v<T, bool>) {
             oss << (filter_value ? "true" : "false");
           } else if constexpr (std::is_same_v<T, std::string>) {
-            oss << filter_value;
+            WriteEscapedGetStringValue(oss, filter_value);
           } else if constexpr (std::is_same_v<T, double>) {
             oss << std::fixed << std::setprecision(kDefaultDoublePrecision) << filter_value;
           } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
             // TimeValue: output as seconds
             oss << filter_value.seconds;
+          } else if constexpr (std::is_same_v<T, int8_t> || std::is_same_v<T, uint8_t>) {
+            oss << static_cast<int>(filter_value);
           } else {
             oss << filter_value;
           }
@@ -348,7 +443,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
                                                   mysql::IBinlogReader* binlog_reader,
                                                   cache::CacheManager* cache_manager) {
   std::ostringstream oss;
-  oss << "OK INFO\r\n\r\n";
+  oss << protocol::kOkInfoPrefix << "\r\n\r\n";
 
   // Server information
   oss << "# Server\r\n";
@@ -548,17 +643,23 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
 }
 
 std::string ResponseFormatter::FormatSaveResponse(const std::string& filepath) {
-  return "OK SAVED " + filepath;
+  std::string response;
+  response.append(protocol::kOkSavedPrefix);
+  response += filepath;
+  return response;
 }
 
 std::string ResponseFormatter::FormatLoadResponse(const std::string& filepath) {
-  return "OK LOADED " + filepath;
+  std::string response;
+  response.append(protocol::kOkLoadedPrefix);
+  response += filepath;
+  return response;
 }
 
 std::string ResponseFormatter::FormatReplicationStatusResponse(mysql::IBinlogReader* binlog_reader) {
 #ifdef USE_MYSQL
   std::ostringstream oss;
-  oss << "OK REPLICATION\r\n";
+  oss << protocol::kOkReplicationHeader;
 
   if (binlog_reader != nullptr) {
     bool is_running = binlog_reader->IsRunning();
@@ -582,11 +683,11 @@ std::string ResponseFormatter::FormatReplicationStatusResponse(mysql::IBinlogRea
 }
 
 std::string ResponseFormatter::FormatReplicationStopResponse() {
-  return "OK REPLICATION_STOPPED";
+  return std::string(protocol::kOkReplicationStopped);
 }
 
 std::string ResponseFormatter::FormatReplicationStartResponse() {
-  return "OK REPLICATION_STARTED";
+  return std::string(protocol::kOkReplicationStarted);
 }
 
 std::string ResponseFormatter::FormatPrometheusMetrics(
@@ -737,7 +838,8 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# HELP mygramdb_index_documents_total Total number of documents in the index\n";
   oss << "# TYPE mygramdb_index_documents_total gauge\n";
   for (const auto& [table_name, ctx] : table_contexts) {
-    oss << "mygramdb_index_documents_total{table=\"" << table_name << "\"} " << ctx->doc_store->Size() << "\n";
+    const std::string table_label = EscapePrometheusLabelValue(table_name);
+    oss << "mygramdb_index_documents_total{table=\"" << table_label << "\"} " << ctx->doc_store->Size() << "\n";
   }
   oss << "\n";
 
@@ -752,14 +854,16 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# HELP mygramdb_index_terms_total Total number of unique terms\n";
   oss << "# TYPE mygramdb_index_terms_total gauge\n";
   for (const auto& [table_name, stats_entry] : cached_stats) {
-    oss << "mygramdb_index_terms_total{table=\"" << table_name << "\"} " << stats_entry.total_terms << "\n";
+    const std::string table_label = EscapePrometheusLabelValue(table_name);
+    oss << "mygramdb_index_terms_total{table=\"" << table_label << "\"} " << stats_entry.total_terms << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_postings_total Total number of postings\n";
   oss << "# TYPE mygramdb_index_postings_total gauge\n";
   for (const auto& [table_name, stats_entry] : cached_stats) {
-    oss << "mygramdb_index_postings_total{table=\"" << table_name << "\"} " << stats_entry.total_postings << "\n";
+    const std::string table_label = EscapePrometheusLabelValue(table_name);
+    oss << "mygramdb_index_postings_total{table=\"" << table_label << "\"} " << stats_entry.total_postings << "\n";
   }
   oss << "\n";
 
@@ -767,8 +871,9 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# TYPE mygramdb_index_postings_per_term_avg gauge\n";
   for (const auto& [table_name, stats_entry] : cached_stats) {
     if (stats_entry.total_terms > 0) {
+      const std::string table_label = EscapePrometheusLabelValue(table_name);
       double avg = static_cast<double>(stats_entry.total_postings) / static_cast<double>(stats_entry.total_terms);
-      oss << "mygramdb_index_postings_per_term_avg{table=\"" << table_name << "\"} " << std::fixed
+      oss << "mygramdb_index_postings_per_term_avg{table=\"" << table_label << "\"} " << std::fixed
           << std::setprecision(2) << avg << "\n";
     }
   }
@@ -777,7 +882,8 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# HELP mygramdb_index_delta_encoded_lists Delta-encoded posting lists count\n";
   oss << "# TYPE mygramdb_index_delta_encoded_lists gauge\n";
   for (const auto& [table_name, stats_entry] : cached_stats) {
-    oss << "mygramdb_index_delta_encoded_lists{table=\"" << table_name << "\"} " << stats_entry.delta_encoded_lists
+    const std::string table_label = EscapePrometheusLabelValue(table_name);
+    oss << "mygramdb_index_delta_encoded_lists{table=\"" << table_label << "\"} " << stats_entry.delta_encoded_lists
         << "\n";
   }
   oss << "\n";
@@ -785,7 +891,8 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# HELP mygramdb_index_roaring_bitmap_lists Roaring bitmap posting lists count\n";
   oss << "# TYPE mygramdb_index_roaring_bitmap_lists gauge\n";
   for (const auto& [table_name, stats_entry] : cached_stats) {
-    oss << "mygramdb_index_roaring_bitmap_lists{table=\"" << table_name << "\"} " << stats_entry.roaring_bitmap_lists
+    const std::string table_label = EscapePrometheusLabelValue(table_name);
+    oss << "mygramdb_index_roaring_bitmap_lists{table=\"" << table_label << "\"} " << stats_entry.roaring_bitmap_lists
         << "\n";
   }
   oss << "\n";
@@ -794,7 +901,8 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# TYPE mygramdb_index_optimization_in_progress gauge\n";
   for (const auto& [table_name, ctx] : table_contexts) {
     int optimizing = ctx->index->IsOptimizing() ? 1 : 0;
-    oss << "mygramdb_index_optimization_in_progress{table=\"" << table_name << "\"} " << optimizing << "\n";
+    const std::string table_label = EscapePrometheusLabelValue(table_name);
+    oss << "mygramdb_index_optimization_in_progress{table=\"" << table_label << "\"} " << optimizing << "\n";
   }
   oss << "\n";
 
@@ -939,26 +1047,27 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
 }
 
 std::string ResponseFormatter::FormatError(std::string_view message) {
-  std::string result = "ERROR ";
+  std::string result(protocol::kErrorPrefix);
   result += message;
   return result;
 }
 
 std::string ResponseFormatter::FormatOk(std::string_view body) {
   if (body.empty()) {
-    return "+OK";
+    return std::string(protocol::kPlusOkPrefix);
   }
   std::string result;
-  result.reserve(4 + body.size());
-  result += "+OK ";
+  result.reserve(protocol::kPlusOkPrefixLen + 1 + body.size());
+  result.append(protocol::kPlusOkPrefix);
+  result += ' ';
   result += body;
   return result;
 }
 
 std::string ResponseFormatter::FormatStatus(std::string_view body) {
   std::string result;
-  result.reserve(3 + body.size());
-  result += "OK ";
+  result.reserve(protocol::kOkPrefixLen + body.size());
+  result.append(protocol::kOkPrefix);
   result += body;
   return result;
 }

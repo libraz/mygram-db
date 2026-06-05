@@ -48,14 +48,14 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     cross_boundary_ngrams = config_iter->second.cross_boundary_ngrams;
   }
 
-  // Phase 1: Immediate invalidation (mark entries)
+  // Step 1: Immediate invalidation (mark entries)
   std::unordered_set<CacheKey> affected_keys;
   if (invalidation_mgr_ != nullptr) {
     affected_keys = invalidation_mgr_->InvalidateAffectedEntries(
         table_name, old_text, new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams, filter_columns_changed);
   }
 
-  // Phase 2: Queue for deferred deletion or process immediately
+  // Step 2: Queue for deferred deletion or process immediately
   // Check stopped_ and running_ inside lock to prevent TOCTOU race with Stop()
   bool process_immediately = false;
   {
@@ -77,8 +77,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     } else {
       // Worker is running, add to queue with backpressure check
       if (pending_cache_keys_.size() >= max_queue_size_) {
-        // Queue full - drop new entries (Phase 1 already marked entries as invalidated,
-        // so correctness is preserved; Phase 2 erasure will happen on next RefreshLRU/eviction)
+        // Queue full - drop new entries (Step 1 already marked entries as invalidated,
+        // so correctness is preserved; Step 2 erasure will happen on next RefreshLRU/eviction)
         mygram::utils::StructuredLog()
             .Event("cache_invalidation_queue_overflow")
             .Field("queue_size", static_cast<uint64_t>(pending_cache_keys_.size()))
@@ -172,7 +172,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InvalidationQueue::Start() {
 
 void InvalidationQueue::Stop() {
   // stopped_ is stored *before* acquiring queue_mutex_ on purpose: callers
-  // that already completed Phase 1 (the lockless preparation in Enqueue) will
+  // that already completed Step 1 (the lockless preparation in Enqueue) will
   // then try to acquire queue_mutex_, observe stopped_ == true, log a warning,
   // and return without enqueueing. Moving this store inside the lock would
   // open a window where late Phase-1 callers acquire the lock before stopped_

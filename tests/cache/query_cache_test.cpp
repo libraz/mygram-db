@@ -1069,7 +1069,7 @@ TEST(QueryCacheTest, TTLMultipleEntriesExpiration) {
 }
 
 // =============================================================================
-// Bug #19: ClearTable skips eviction callback
+// ClearTable skips eviction callback
 // =============================================================================
 // When ClearTable() removes entries, it does NOT call the eviction callback,
 // but EvictForSpace() DOES call it. This causes the InvalidationManager to
@@ -1077,7 +1077,7 @@ TEST(QueryCacheTest, TTLMultipleEntriesExpiration) {
 // =============================================================================
 
 /**
- * @test Bug #19: ClearTable should call eviction callback for each removed entry
+ * @test ClearTable should call eviction callback for each removed entry
  *
  * When QueryCache::ClearTable() removes entries, it should call the eviction
  * callback so that InvalidationManager can clean up its reverse index.
@@ -1115,9 +1115,9 @@ TEST(QueryCacheTest, Bug19_ClearTableCallsEvictionCallback) {
   // ClearTable should trigger eviction callbacks
   cache.ClearTable("posts");
 
-  // Bug #19: Before fix, evicted_keys would be empty
+  // Before fix, evicted_keys would be empty
   // After fix: evicted_keys should contain all 3 keys
-  EXPECT_EQ(3, evicted_keys.size()) << "Bug #19: ClearTable should call eviction callback for each removed entry";
+  EXPECT_EQ(3, evicted_keys.size()) << "ClearTable should call eviction callback for each removed entry";
 
   // Verify all keys were evicted
   EXPECT_NE(std::find(evicted_keys.begin(), evicted_keys.end(), key1), evicted_keys.end());
@@ -1131,7 +1131,7 @@ TEST(QueryCacheTest, Bug19_ClearTableCallsEvictionCallback) {
 }
 
 /**
- * @test Bug #19: ClearTable with multiple tables only evicts specified table
+ * @test ClearTable with multiple tables only evicts specified table
  */
 TEST(QueryCacheTest, Bug19_ClearTableOnlyAffectsSpecifiedTable) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -1171,7 +1171,7 @@ TEST(QueryCacheTest, Bug19_ClearTableOnlyAffectsSpecifiedTable) {
 }
 
 /**
- * @test Bug #19: ClearTable with no matching entries should not crash
+ * @test ClearTable with no matching entries should not crash
  */
 TEST(QueryCacheTest, Bug19_ClearTableNoMatchingEntries) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -1200,7 +1200,7 @@ TEST(QueryCacheTest, Bug19_ClearTableNoMatchingEntries) {
 }
 
 // =============================================================================
-// Bug #33: Eviction callback timing verification
+// Eviction callback timing verification
 // =============================================================================
 // The eviction callback should be called BEFORE deleting the entry.
 // Note: The callback cannot safely call cache methods that acquire locks
@@ -1209,7 +1209,7 @@ TEST(QueryCacheTest, Bug19_ClearTableNoMatchingEntries) {
 // =============================================================================
 
 /**
- * @test Bug #33: Eviction callback is called with correct keys
+ * @test Eviction callback is called with correct keys
  *
  * Verifies that the eviction callback is called with the correct cache key
  * when entries are evicted. The callback should receive valid keys.
@@ -1254,12 +1254,12 @@ TEST(QueryCacheTest, Bug33_EvictionCallbackReceivesCorrectKeys) {
   // Verify that eviction callback was called
   auto stats = cache.GetStatistics();
   if (stats.evictions > 0) {
-    EXPECT_FALSE(evicted_keys.empty()) << "Bug #33: Callback should be called during eviction";
+    EXPECT_FALSE(evicted_keys.empty()) << "Callback should be called during eviction";
   }
 }
 
 /**
- * @test Bug #33: ClearTable callback receives all cleared keys
+ * @test ClearTable callback receives all cleared keys
  */
 TEST(QueryCacheTest, Bug33_ClearTableCallbackReceivesAllKeys) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -1289,14 +1289,14 @@ TEST(QueryCacheTest, Bug33_ClearTableCallbackReceivesAllKeys) {
 }
 
 // =============================================================================
-// BUG-0070: Lock upgrade performance optimization
+// Lock upgrade performance optimization
 // =============================================================================
 // Lookup() should not require lock upgrade (shared -> exclusive) for LRU update.
 // Instead, use atomic access count and background LRU refresh.
 // =============================================================================
 
 /**
- * @test BUG-0070: Verify concurrent lookups don't block each other due to lock upgrade
+ * @test Verify concurrent lookups don't block each other due to lock upgrade
  *
  * Before fix: Each cache hit required lock upgrade which serialized readers
  * After fix: Atomic access count update allows full reader concurrency
@@ -1365,7 +1365,7 @@ TEST(QueryCacheTest, Bug0070_ConcurrentLookupsNoLockUpgrade) {
 }
 
 /**
- * @test BUG-0070: LRU refresh still works with approximate updates
+ * @test LRU refresh still works with approximate updates
  */
 TEST(QueryCacheTest, Bug0070_ApproximateLRUStillEvictsOldEntries) {
   // Small cache to trigger evictions (sized for accurate MemoryUsage accounting)
@@ -1410,7 +1410,7 @@ TEST(QueryCacheTest, Bug0070_ApproximateLRUStillEvictsOldEntries) {
 }
 
 /**
- * @test BUG-0070: Access count is properly incremented
+ * @test Access count is properly incremented
  */
 TEST(QueryCacheTest, Bug0070_AccessCountIncrement) {
   QueryCache cache(10 * 1024 * 1024, 1.0);
@@ -2280,6 +2280,37 @@ TEST(QueryCacheTest, RejectionCountIncrementsForLowCostInsert) {
   EXPECT_EQ(cache.GetStatistics().rejection_count - baseline, 2U);
 }
 
+TEST(QueryCacheTest, DedicatedRejectionCountersTrackOversizeAndDuplicateInserts) {
+  QueryCache cache(/* max_memory_bytes= */ 4096, /* min_query_cost_ms= */ 0.0,
+                   /* ttl_seconds= */ 0, /* compression_enabled= */ false);
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"foo", "bar"};
+
+  auto duplicate_key = CacheKeyGenerator::Generate("duplicate query");
+  std::vector<DocId> small_result = {1, 2, 3};
+  ASSERT_TRUE(cache.Insert(duplicate_key, small_result, meta, 1.0));
+
+  auto baseline = cache.GetStatistics();
+  EXPECT_FALSE(cache.Insert(duplicate_key, small_result, meta, 1.0));
+
+  auto after_duplicate = cache.GetStatistics();
+  EXPECT_EQ(after_duplicate.rejection_duplicate - baseline.rejection_duplicate, 1U);
+  EXPECT_EQ(after_duplicate.rejection_oversize, baseline.rejection_oversize);
+  EXPECT_EQ(after_duplicate.rejection_count, baseline.rejection_count);
+
+  auto oversize_key = CacheKeyGenerator::Generate("oversize query");
+  std::vector<DocId> huge_result(10000, 42);
+  EXPECT_FALSE(cache.Insert(oversize_key, huge_result, meta, 1.0));
+
+  auto after_oversize = cache.GetStatistics();
+  EXPECT_EQ(after_oversize.rejection_oversize - after_duplicate.rejection_oversize, 1U);
+  EXPECT_EQ(after_oversize.rejection_duplicate, after_duplicate.rejection_duplicate);
+  EXPECT_EQ(after_oversize.rejection_count, baseline.rejection_count);
+  EXPECT_FALSE(cache.Lookup(oversize_key).has_value());
+}
+
 /**
  * @brief forced_clears must increment per Clear()/ClearTable() invocation,
  *        not per evicted entry.
@@ -2510,7 +2541,7 @@ TEST(QueryCacheTest, EraseWithoutCallbackSuppressesEvictionCallback) {
 }
 
 // =============================================================================
-// Phase 3 (HIGH): H-M3 / H-M6 / H-M7 regression tests
+// Step 3 (HIGH): H-M3 / H-M6 / H-M7 regression tests
 // =============================================================================
 
 /**
@@ -2702,7 +2733,7 @@ TEST(QueryCacheTest, EvictionCallbackCanCallGetMetadataWithoutDeadlock) {
 }
 
 // =============================================================================
-// Phase 3 (HIGH): H-M1 memory accounting overhead
+// Step 3 (HIGH): H-M1 memory accounting overhead
 // =============================================================================
 
 /**

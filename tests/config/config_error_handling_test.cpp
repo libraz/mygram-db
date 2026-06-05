@@ -3,10 +3,10 @@
  * @brief Tests for config error handling improvements
  *
  * Tests:
- * - ParseConfigFromJson error propagation (Issue C-1)
- * - ValidatePathNoTraversal returning Expected error (Issue H-6)
- * - ValidateBindAddress returning Expected error (Issue H-6)
- * - Invalid MYGRAM_MYSQL_PORT handling (Issue M-14)
+ * - ParseConfigFromJson error propagation
+ * - ValidatePathNoTraversal returning Expected error
+ * - ValidateBindAddress returning Expected error
+ * - Invalid MYGRAM_MYSQL_PORT handling
  */
 
 #include <gtest/gtest.h>
@@ -89,7 +89,7 @@ class ScopedEnvVar {
 }  // namespace
 
 // ===========================================================================
-// Issue C-1: ParseConfigFromJson error propagation
+// ParseConfigFromJson error propagation
 // ===========================================================================
 
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesTableError) {
@@ -178,7 +178,7 @@ TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesInvalidServerId) {
 }
 
 // ===========================================================================
-// Issue H-6: ValidatePathNoTraversal returns Expected
+// ValidatePathNoTraversal returns Expected
 // ===========================================================================
 
 TEST(ConfigErrorHandlingTest, ValidatePathNoTraversalAcceptsNormalPath) {
@@ -213,7 +213,7 @@ TEST(ConfigErrorHandlingTest, ValidatePathNoTraversalRejectsNullByte) {
 }
 
 // ===========================================================================
-// Issue H-6: ValidateBindAddress returns Expected
+// ValidateBindAddress returns Expected
 // ===========================================================================
 
 TEST(ConfigErrorHandlingTest, ValidateBindAddressAcceptsValidIPv4) {
@@ -254,11 +254,10 @@ TEST(ConfigErrorHandlingTest, ValidateBindAddressRejectsNullByte) {
 }
 
 // ===========================================================================
-// Issue M-14: Invalid MYGRAM_MYSQL_PORT does not crash
+// Invalid MYGRAM_MYSQL_PORT returns a clear config error
 // ===========================================================================
 
-TEST(ConfigErrorHandlingTest, InvalidMysqlPortEnvDoesNotCrash) {
-  // Set an invalid port value and verify config loading still works (falls through to default)
+TEST(ConfigErrorHandlingTest, InvalidMysqlPortEnvReturnsConfigError) {
   ScopedEnvVar env("MYGRAM_MYSQL_PORT", "not_a_number");
 
   std::string config_path = CreateTempYamlConfig(
@@ -279,10 +278,9 @@ TEST(ConfigErrorHandlingTest, InvalidMysqlPortEnvDoesNotCrash) {
       "  enable: false\n");
 
   auto result = LoadConfig(config_path);
-  // Should succeed, falling back to config file port value
-  ASSERT_TRUE(result.has_value()) << "Config should load despite invalid MYGRAM_MYSQL_PORT: "
-                                  << result.error().message();
-  EXPECT_EQ(result->mysql.port, 3306) << "Should use config file port when env is invalid";
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
+  EXPECT_NE(result.error().message().find("MYGRAM_MYSQL_PORT"), std::string::npos);
 
   std::filesystem::remove(config_path);
 }

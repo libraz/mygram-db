@@ -246,6 +246,14 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     return false;
   }
 
+  {
+    std::shared_lock lock(mutex_);
+    if (cache_map_.find(key) != cache_map_.end()) {
+      stats_.rejection_duplicate.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+  }
+
   // Compress result (if enabled)
   std::vector<uint8_t> compressed;
   if (compression_enabled_) {
@@ -275,6 +283,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
   // Don't cache if entry is too large.
   // Safe without lock: max_memory_bytes_ is const after construction (no setter exists).
   if (entry_memory > max_memory_bytes_) {
+    stats_.rejection_oversize.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
 
@@ -289,6 +298,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
     // Check if already exists
     if (cache_map_.find(key) != cache_map_.end()) {
+      stats_.rejection_duplicate.fetch_add(1, std::memory_order_relaxed);
       return false;
     }
 

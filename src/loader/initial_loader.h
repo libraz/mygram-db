@@ -67,6 +67,16 @@ class InitialLoader {
       const ProgressCallback& progress_callback = {});
 
   /**
+   * @brief Load initial data using an already-open consistent snapshot.
+   *
+   * The caller must have executed START TRANSACTION WITH CONSISTENT SNAPSHOT
+   * on the shared connection and captured snapshot_gtid inside that transaction.
+   * This method does not COMMIT on success; the caller owns the transaction.
+   */
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromExistingSnapshot(
+      const std::string& snapshot_gtid, const ProgressCallback& progress_callback = {});
+
+  /**
    * @brief Get GTID captured at load time
    *
    * This GTID represents the state of the database when the initial load
@@ -103,6 +113,9 @@ class InitialLoader {
   std::atomic<uint64_t> processed_rows_{0};
   std::atomic<bool> cancelled_{false};
   std::string start_gtid_;  // GTID captured at load time
+
+  [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadInternal(
+      const ProgressCallback& progress_callback, bool manage_transaction, const std::string* existing_snapshot_gtid);
 
   /**
    * @brief Flush accumulated document and index batches to storage

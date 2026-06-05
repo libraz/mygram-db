@@ -184,6 +184,21 @@ gtest_discover_tests(config_security_test
   PROPERTIES RESOURCE_LOCK config_file_io
 )
 
+file(GLOB MYGRAMDB_EXAMPLE_YAML_CONFIGS
+  "${PROJECT_SOURCE_DIR}/examples/*.yaml"
+)
+
+foreach(example_config IN LISTS MYGRAMDB_EXAMPLE_YAML_CONFIGS)
+  get_filename_component(example_name "${example_config}" NAME_WE)
+  add_test(
+    NAME example_yaml_config_${example_name}
+    COMMAND $<TARGET_FILE:mygramdb> -t "${example_config}"
+  )
+  set_tests_properties(example_yaml_config_${example_name}
+    PROPERTIES RESOURCE_LOCK config_file_io
+  )
+endforeach()
+
 # Copy test config file to build directory
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/test_config.yaml

@@ -989,7 +989,7 @@ TEST_F(ResultSorterTest, NegativeZeroVsPositiveZero) {
 }
 
 // =============================================================================
-// Bug #7: Signed integer sort with extreme values (XOR sign-bit technique)
+// Signed integer sort with extreme values (XOR sign-bit technique)
 // =============================================================================
 
 /**
@@ -1145,7 +1145,7 @@ TEST_F(ResultSorterTest, SignedIntSortWithSchwartzianTransform) {
 }
 
 // =============================================================================
-// Bug #8: Sort column name case sensitivity
+// Sort column name case sensitivity
 // =============================================================================
 
 /**

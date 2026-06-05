@@ -109,6 +109,59 @@ std::vector<uint8_t> CreateTableMapEventPrefix() {
   return event;
 }
 
+std::vector<uint8_t> BuildQueryEvent(const std::string& database, const std::string& query) {
+  auto event = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::QUERY_EVENT);
+  test::BinlogEventBuilder::AppendLittleEndian32(event, 1);  // thread_id
+  test::BinlogEventBuilder::AppendLittleEndian32(event, 0);  // query_exec_time
+  event.push_back(static_cast<uint8_t>(database.size()));
+  test::BinlogEventBuilder::AppendLittleEndian16(event, 0);  // error_code
+  test::BinlogEventBuilder::AppendLittleEndian16(event, 0);  // status_vars_len
+  event.insert(event.end(), database.begin(), database.end());
+  event.push_back(0x00);
+  event.insert(event.end(), query.begin(), query.end());
+  test::BinlogEventBuilder::AppendLittleEndian32(event, 0);  // checksum placeholder
+  test::BinlogEventBuilder::FixEventSizeWithChecksum(event);
+  return event;
+}
+
+void AppendVarchar(std::vector<uint8_t>& row_data, const std::string& value) {
+  row_data.push_back(static_cast<uint8_t>(value.size()));
+  row_data.insert(row_data.end(), value.begin(), value.end());
+}
+
+TableMetadata CreateConcatTableMetadata(uint64_t table_id) {
+  TableMetadata metadata;
+  metadata.table_id = table_id;
+  metadata.database_name = "testdb";
+  metadata.table_name = "articles";
+
+  ColumnMetadata id;
+  id.name = "id";
+  id.type = ColumnType::LONG;
+  metadata.columns.push_back(id);
+
+  for (const std::string& name : {"title", "body", "tags"}) {
+    ColumnMetadata column;
+    column.name = name;
+    column.type = ColumnType::VARCHAR;
+    column.metadata = 255;
+    metadata.columns.push_back(column);
+  }
+
+  return metadata;
+}
+
+std::vector<uint8_t> BuildConcatRowData(int32_t id, const std::string& title, const std::string& body,
+                                        const std::string& tags) {
+  std::vector<uint8_t> row_data;
+  row_data.push_back(0x00);  // null bitmap for 4 non-null columns
+  test::BinlogEventBuilder::AppendLittleEndian32(row_data, static_cast<uint32_t>(id));
+  AppendVarchar(row_data, title);
+  AppendVarchar(row_data, body);
+  AppendVarchar(row_data, tags);
+  return row_data;
+}
+
 /**
  * @brief Test GTID event extraction with actual data
  */
@@ -1142,7 +1195,7 @@ TEST(BinlogParsingTest, MultipleRowsWithChecksumBoundary) {
 }
 
 // ============================================================================
-// Phase 3a: ExtractTaggedGTID tests (MySQL 8.4+)
+// Step 3a: ExtractTaggedGTID tests (MySQL 8.4+)
 // ============================================================================
 
 TEST(BinlogParsingTest, ExtractTaggedGTID_BasicFormat) {
@@ -1271,6 +1324,62 @@ TEST(BinlogParsingTest, ConcatTextSourceUsesAllColumns) {
 
   std::string expected_text = title + " " + body + " " + tags;
   EXPECT_EQ(expected_text, "Hello World This is the body text news tech");
+}
+
+TEST(BinlogParsingTest, ParseBinlogEventConcatTextSourceUsesOrdinalColumnValues) {
+  constexpr uint64_t kTableId = 42;
+  TableMetadataCache cache;
+  cache.Add(kTableId, CreateConcatTableMetadata(kTableId));
+
+  config::TableConfig table_config;
+  table_config.name = "articles";
+  table_config.primary_key = "id";
+  table_config.text_source.concat = {"title", "body", "tags"};
+
+  auto row_data = BuildConcatRowData(7, "Hello World", "This is the body text", "news tech");
+  auto event = test::BinlogEventBuilder::BuildWriteRowsV2(kTableId, 0x0000, 2, {}, 4, {0x0F}, row_data);
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:9", cache, table_contexts,
+                                                    &table_config, false, "+00:00");
+
+  ASSERT_EQ(events.size(), 1);
+  EXPECT_EQ(events[0].type, BinlogEventType::INSERT);
+  EXPECT_EQ(events[0].primary_key, "7");
+  EXPECT_EQ(events[0].text, "Hello World This is the body text news tech");
+  EXPECT_EQ(events[0].gtid, "uuid:9");
+}
+
+TEST(BinlogParsingTest, QueryDdlEventCarriesCurrentGtid) {
+  TableMetadataCache cache;
+  config::TableConfig table_config;
+  table_config.name = "articles";
+
+  auto event = BuildQueryEvent("testdb", "ALTER TABLE articles ADD COLUMN status INT");
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:10", cache, table_contexts,
+                                                    &table_config, false, "+00:00");
+
+  ASSERT_EQ(events.size(), 1);
+  EXPECT_EQ(events[0].type, BinlogEventType::DDL);
+  EXPECT_EQ(events[0].table_name, "articles");
+  EXPECT_EQ(events[0].gtid, "uuid:10");
+}
+
+TEST(BinlogParsingTest, XidEventProducesCommitMarkerWithCurrentGtid) {
+  auto event = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::XID_EVENT);
+  test::BinlogEventBuilder::AppendLittleEndian64(event, 123);  // xid
+  test::BinlogEventBuilder::AppendLittleEndian32(event, 0);    // checksum placeholder
+  test::BinlogEventBuilder::FixEventSizeWithChecksum(event);
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:11", cache, table_contexts, nullptr, true);
+
+  ASSERT_EQ(events.size(), 1);
+  EXPECT_EQ(events[0].type, BinlogEventType::COMMIT);
+  EXPECT_EQ(events[0].gtid, "uuid:11");
 }
 
 /**

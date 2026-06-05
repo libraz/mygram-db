@@ -853,3 +853,29 @@ TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsTruncatedPrimitiveFi
   auto result = store.LoadFromStream(truncated_stream);
   EXPECT_FALSE(result.has_value());
 }
+
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamBumpsNextDocIdAboveLoadedMax) {
+  std::ostringstream out;
+  out.write("MGDS", 4);
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});   // version
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{1});   // stale next_doc_id
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{0});   // gtid length
+  mygramdb::storage::internal::WriteBinary(out, uint64_t{1});   // doc_count
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{42});  // doc_id
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{4});   // pk length
+  out.write("docA", 4);
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // filter_count
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // normalized text length
+
+  std::istringstream input_stream(out.str());
+  DocumentStore store;
+  auto load_result = store.LoadFromStream(input_stream);
+  ASSERT_TRUE(load_result.has_value()) << load_result.error().to_string();
+
+  auto add_result = store.AddDocument("docB");
+
+  ASSERT_TRUE(add_result.has_value()) << add_result.error().to_string();
+  EXPECT_EQ(*add_result, 43);
+  EXPECT_EQ(store.GetDocId("docA"), 42);
+  EXPECT_EQ(store.GetDocId("docB"), 43);
+}

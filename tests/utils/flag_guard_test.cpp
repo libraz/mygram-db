@@ -100,7 +100,7 @@ TEST(AtomicFlagResetGuardTest, TypicalCompareExchangePattern) {
   EXPECT_FALSE(flag.load());
 }
 
-// --- OperationGuard tests (Phase 4 H-D1) ---
+// --- OperationGuard tests ---
 
 TEST(OperationGuardTest, TryAcquireOnFalseFlagReturnsEngagedAndSetsFlag) {
   std::atomic<bool> flag{false};

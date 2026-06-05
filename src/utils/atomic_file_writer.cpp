@@ -14,6 +14,7 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
@@ -21,6 +22,15 @@
 #include "utils/structured_log.h"
 
 namespace mygramdb::utils {
+
+#ifndef _WIN32
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#endif
 
 AtomicFileWriter::AtomicFileWriter(std::string filepath, bool unique_suffix) : filepath_(std::move(filepath)) {
   if (unique_suffix) {
@@ -52,18 +62,41 @@ Expected<void, Error> AtomicFileWriter::Commit() {
 #ifndef _WIN32
   // Fsync the temp file to ensure data is durable before rename
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-  int file_desc = open(temp_filepath_.c_str(), O_RDWR);
-  if (file_desc >= 0) {
-    if (fsync(file_desc) != 0) {
-      StructuredLog()
-          .Event("storage_warning")
-          .Field("operation", "fsync_temp_file")
-          .Field("filepath", temp_filepath_)
-          .Field("errno", static_cast<int64_t>(errno))
-          .Warn();
-    }
-    close(file_desc);
+  int file_desc = open(temp_filepath_.c_str(), O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+  if (file_desc < 0) {
+    StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "open_temp_file")
+        .Field("filepath", temp_filepath_)
+        .Field("errno", static_cast<int64_t>(errno))
+        .Error();
+    Rollback();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to safely open temp file", temp_filepath_));
   }
+
+  struct stat file_stat {};
+  if (fstat(file_desc, &file_stat) != 0 || !S_ISREG(file_stat.st_mode)) {
+    const int saved_errno = errno;
+    close(file_desc);
+    StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "validate_temp_file")
+        .Field("filepath", temp_filepath_)
+        .Field("errno", static_cast<int64_t>(saved_errno))
+        .Error();
+    Rollback();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Temp file is not a regular file", temp_filepath_));
+  }
+
+  if (fsync(file_desc) != 0) {
+    StructuredLog()
+        .Event("storage_warning")
+        .Field("operation", "fsync_temp_file")
+        .Field("filepath", temp_filepath_)
+        .Field("errno", static_cast<int64_t>(errno))
+        .Warn();
+  }
+  close(file_desc);
 #endif
 
   // Atomic rename: temp file -> final path

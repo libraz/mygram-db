@@ -16,12 +16,23 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <string>
 
 namespace mygramdb::server::replication_pause {
 
 class Counter {
  public:
-  bool RequestPause() noexcept { return count_.fetch_add(1, std::memory_order_acq_rel) == 0; }
+  bool RequestPause() noexcept {
+    const bool first_pauser = count_.fetch_add(1, std::memory_order_acq_rel) == 0;
+    if (first_pauser) {
+      std::lock_guard<std::mutex> lock(drain_mutex_);
+      drained_gtid_.clear();
+      drain_published_ = false;
+    }
+    return first_pauser;
+  }
 
   bool ReleasePause() noexcept {
     int prev = count_.fetch_sub(1, std::memory_order_acq_rel);
@@ -34,10 +45,37 @@ class Counter {
 
   bool IsPaused() const noexcept { return count_.load(std::memory_order_acquire) > 0; }
 
-  void ResetForTesting() noexcept { count_.store(0, std::memory_order_release); }
+  void ResetForTesting() noexcept {
+    count_.store(0, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(drain_mutex_);
+      drained_gtid_.clear();
+      drain_published_ = false;
+    }
+    drain_cv_.notify_all();
+  }
+
+  void PublishDrainedGTID(std::string gtid) {
+    {
+      std::lock_guard<std::mutex> lock(drain_mutex_);
+      drained_gtid_ = std::move(gtid);
+      drain_published_ = true;
+    }
+    drain_cv_.notify_all();
+  }
+
+  std::string WaitForDrainedGTID() {
+    std::unique_lock<std::mutex> lock(drain_mutex_);
+    drain_cv_.wait(lock, [this]() { return drain_published_ || count_.load(std::memory_order_acquire) <= 0; });
+    return drained_gtid_;
+  }
 
  private:
   std::atomic<int> count_{0};
+  std::mutex drain_mutex_;
+  std::condition_variable drain_cv_;
+  bool drain_published_ = false;
+  std::string drained_gtid_;
 };
 
 class Scope {

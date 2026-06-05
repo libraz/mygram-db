@@ -192,7 +192,7 @@ TEST_F(CacheOffsetLimitIntegrationTest, CacheHitRespectsOffsetLimit) {
 
   ASSERT_TRUE(result2.success) << "Response: " << response2;
   EXPECT_EQ(result2.total_count, 100);
-  // BUG FIX: Before fix, this would return 100 IDs. After fix, should return 5.
+  // Before the pagination fix, this returned 100 IDs. It should now return 5.
   EXPECT_EQ(result2.ids.size(), 5) << "Cache hit should respect LIMIT 5, got " << result2.ids.size() << " results";
 
   close(sock);

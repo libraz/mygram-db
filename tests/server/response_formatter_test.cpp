@@ -175,6 +175,28 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithResults) {
   EXPECT_TRUE(response.find("pk3") != std::string::npos);
 }
 
+TEST_F(ResponseFormatterTest, FormatSearchResponseSanitizesPrimaryKeyDelimiters) {
+  auto doc_id = table_context_.doc_store->AddDocument("pk with\r\nnewline\tand tab");
+
+  std::vector<index::DocId> results = {*doc_id};
+
+  std::string response = ResponseFormatter::FormatSearchResponse(results, 1, table_context_.doc_store.get());
+
+  EXPECT_EQ(response, "OK RESULTS 1 pk_with__newline_and_tab");
+}
+
+TEST_F(ResponseFormatterTest, FormatSearchResponseWithHighlightsTerminatesMultilineResponse) {
+  auto doc_id1 = table_context_.doc_store->AddDocument("pk1");
+
+  std::vector<index::DocId> results = {*doc_id1};
+  std::vector<std::string> snippets = {"hello <em>world</em>"};
+
+  std::string response =
+      ResponseFormatter::FormatSearchResponseWithHighlights(results, 1, table_context_.doc_store.get(), snippets);
+
+  EXPECT_EQ(response, "OK RESULTS 1\r\npk1\thello <em>world</em>\r\n");
+}
+
 /**
  * @brief Test SEARCH response with pagination (total > returned)
  */
@@ -441,6 +463,28 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetrics) {
   // Should contain Prometheus format metrics
   EXPECT_TRUE(response.find("#") != std::string::npos);  // Prometheus comments
   EXPECT_TRUE(response.find("mygramdb_") != std::string::npos || response.find("mygram_") != std::string::npos);
+}
+
+TEST_F(ResponseFormatterTest, FormatPrometheusMetricsEscapesTableLabelValues) {
+  TableContext special_table;
+  special_table.name = "line\nbad\\name\"quote";
+  special_table.config.ngram_size = 1;
+  special_table.index = std::make_unique<index::Index>(1);
+  special_table.doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, TableContext*> contexts;
+  contexts[special_table.name] = &special_table;
+
+  ServerStats stats;
+  auto metrics = StatisticsService::AggregateMetrics(contexts);
+
+  std::string response = ResponseFormatter::FormatPrometheusMetrics(metrics, stats, contexts, nullptr);
+
+  EXPECT_NE(response.find("table=\"line\\nbad\\\\name\\\"quote\""), std::string::npos);
+  EXPECT_EQ(response.find("table=\"line\nbad"), std::string::npos)
+      << "Prometheus label values must not contain raw newlines";
+  EXPECT_EQ(response.find("table=\"line\\nbad\\name\"quote\""), std::string::npos)
+      << "Prometheus label values must escape backslash and quote";
 }
 
 /**

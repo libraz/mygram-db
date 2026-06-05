@@ -36,10 +36,12 @@ struct BM25Stats;
 
 namespace mygramdb::server {
 
-/// @brief Term information with n-grams and estimated posting list size
+/// @brief Term information with n-grams, posting estimate, and term-level document frequency
 struct SearchTermInfo {
   std::vector<std::string> ngrams;
   size_t estimated_size;
+  uint64_t term_doc_freq = 0;
+  std::string normalized_term;
 };
 
 /// @brief Result of search pipeline execution (before pagination)

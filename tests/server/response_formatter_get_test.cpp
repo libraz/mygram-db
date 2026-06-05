@@ -34,6 +34,24 @@ TEST(ResponseFormatterGetTest, StringFilter) {
   EXPECT_EQ(response, "OK DOC pk2 category=tech");
 }
 
+TEST(ResponseFormatterGetTest, StringFilterWithSpacesIsQuoted) {
+  storage::Document doc;
+  doc.primary_key = "pk_space";
+  doc.filters["display_name"] = std::string("Alice Smith");
+
+  auto response = ResponseFormatter::FormatGetResponse(doc);
+  EXPECT_EQ(response, "OK DOC pk_space display_name=\"Alice Smith\"");
+}
+
+TEST(ResponseFormatterGetTest, StringFilterEscapesQuotesAndBackslashes) {
+  storage::Document doc;
+  doc.primary_key = "pk_quote";
+  doc.filters["label"] = std::string("a \"quoted\" path\\name");
+
+  auto response = ResponseFormatter::FormatGetResponse(doc);
+  EXPECT_EQ(response, "OK DOC pk_quote label=\"a \\\"quoted\\\" path\\\\name\"");
+}
+
 /**
  * @brief Test GET response with double filter
  */

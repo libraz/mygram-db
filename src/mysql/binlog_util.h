@@ -92,6 +92,50 @@ inline uint64_t read_packed_integer(const unsigned char** ptr) {
   return (uint64_t)uint8korr(pos + 1);
 }
 
+inline bool read_packed_integer(const unsigned char** ptr, const unsigned char* end, uint64_t* value) {
+  if (ptr == nullptr || *ptr == nullptr || value == nullptr || *ptr >= end) {
+    return false;
+  }
+
+  const unsigned char* pos = *ptr;
+  if (*pos < 251) {
+    *value = static_cast<uint64_t>(*pos);
+    *ptr = pos + 1;
+    return true;
+  }
+
+  if (*pos == 251) {
+    *value = 0;
+    *ptr = pos + 1;
+    return true;
+  }
+
+  if (*pos == 252) {
+    if (end - pos < 3) {
+      return false;
+    }
+    *value = static_cast<uint64_t>(uint2korr(pos + 1));
+    *ptr = pos + 3;
+    return true;
+  }
+
+  if (*pos == 253) {
+    if (end - pos < 4) {
+      return false;
+    }
+    *value = static_cast<uint64_t>(uint3korr(pos + 1));
+    *ptr = pos + 4;
+    return true;
+  }
+
+  if (end - pos < 9) {
+    return false;
+  }
+  *value = static_cast<uint64_t>(uint8korr(pos + 1));
+  *ptr = pos + 9;
+  return true;
+}
+
 /**
  * @brief Calculate number of bytes needed for bitmap
  */

@@ -19,6 +19,14 @@
 
 namespace mygramdb::mysql {
 
+namespace {
+
+std::string CurrentConnectionError(Connection& conn) {
+  return std::string(mysql_error(conn.GetHandle()));
+}
+
+}  // namespace
+
 mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::SetupSession(Connection& conn) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -26,8 +34,9 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::SetupSess
 
   // Request CRC32 checksums so we can verify data integrity on each event
   if (mysql_query(conn.GetHandle(), "SET @source_binlog_checksum='CRC32'") != 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError,
-                                    std::string("Failed to set binlog checksum to CRC32: ") + conn.GetLastError()));
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError,
+                  std::string("Failed to set binlog checksum to CRC32: ") + CurrentConnectionError(conn)));
   }
   mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "checksum_crc32_enabled").Debug();
 
@@ -38,7 +47,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::SetupSess
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "heartbeat_config_failed")
-        .Field("error", conn.GetLastError())
+        .Field("error", CurrentConnectionError(conn))
         .Debug();
   }
 

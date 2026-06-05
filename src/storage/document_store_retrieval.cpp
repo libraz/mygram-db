@@ -65,7 +65,7 @@ std::vector<std::optional<Document>> DocumentStore::GetDocumentsBatch(const std:
 
 std::optional<DocId> DocumentStore::GetDocId(std::string_view primary_key) const {
   std::shared_lock lock(mutex_);
-  // BUG-0081: absl::flat_hash_map with TransparentStringHash enables heterogeneous lookup
+  // absl::flat_hash_map with TransparentStringHash enables heterogeneous lookup.
   // No temporary std::string allocation required
   auto iterator = pk_to_doc_id_.find(primary_key);
   if (iterator == pk_to_doc_id_.end()) {
@@ -152,7 +152,7 @@ std::vector<std::vector<std::optional<FilterValue>>> DocumentStore::GetFilterVal
 
   // Outer loop over doc_ids to avoid redundant doc_filters_ lookups per column.
   // Each doc_id lookup is O(1) amortized for flat_hash_map, but doing it once
-  // per doc instead of once per (doc, column) pair saves M-1 lookups per doc
+  // Fetching once per doc instead of once per (doc, column) pair saves repeated lookups per doc.
   // (reviewed: result layout [column][doc_index] is preserved).
   for (size_t di = 0; di < doc_ids.size(); ++di) {
     auto doc_it = doc_filters_.find(doc_ids[di]);

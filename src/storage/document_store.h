@@ -407,7 +407,7 @@ class DocumentStore {
   absl::flat_hash_map<DocId, std::string> doc_id_to_pk_;
 
   // Primary Key -> DocID mapping (reverse index)
-  // Uses absl::flat_hash_map with transparent hash for heterogeneous lookup (BUG-0081)
+  // Uses absl::flat_hash_map with transparent hash for heterogeneous lookup.
   // This allows GetDocId(std::string_view) without creating temporary std::string
   absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
       pk_to_doc_id_;

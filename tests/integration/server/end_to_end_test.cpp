@@ -389,7 +389,7 @@ TEST_F(EndToEndTest, WorkflowWithFuzzySearch) {
   response = client.SendCommand("SEARCH posts wrld FUZZY");
   EXPECT_TRUE(response.find("OK RESULTS") == 0);
 
-  // BUG-1 regression: Short term in multi-term fuzzy should work correctly
+  //  regression: Short term in multi-term fuzzy should work correctly
   // "hello" AND "x" FUZZY — "x" has no ngrams, should return empty (not silently skip)
   response = client.SendCommand("SEARCH posts hello AND x FUZZY");
   // "x" generates no trigrams, so it should yield 0 results
@@ -447,7 +447,7 @@ TEST_F(EndToEndTest, WorkflowWithFacet) {
 }
 
 /**
- * @brief Test FACET with NOT filter (BUG-2 regression)
+ * @brief Test FACET with NOT filter ( regression)
  */
 TEST_F(EndToEndTest, FacetWithNotFilter) {
   TcpClient client("127.0.0.1", port_);

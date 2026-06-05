@@ -4,8 +4,8 @@
  *
  * The acceptor sets a dozen-plus socket options on the listening socket and on
  * each accepted client fd. Each call previously had its own inline boilerplate
- * (setsockopt + errno snapshot + StructuredLog warning). M-7 collapses that
- * duplication into a single helper here so that:
+ * (setsockopt + errno snapshot + StructuredLog warning). This helper keeps
+ * that duplication in one place so that:
  *   - the warning event name (`setsockopt_failed`) and field shape stay
  *     consistent across call sites, and
  *   - adding a new tunable (e.g. SO_LINGER) is a one-line change.

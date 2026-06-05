@@ -293,7 +293,37 @@
                 "enum": ["auto", "always", "never"]
               }
             }
+          },
+          "synonyms": {
+            "type": "object",
+            "description": "Synonym expansion configuration for this table",
+            "additionalProperties": false,
+            "properties": {
+              "enable": {
+                "type": "boolean",
+                "description": "Enable synonym expansion",
+                "default": false
+              },
+              "file": {
+                "type": "string",
+                "description": "Path to synonym TSV file"
+              }
+            }
           }
+        }
+      }
+    },
+    "index": {
+      "type": "object",
+      "description": "Legacy global index configuration (deprecated; prefer per-table ngram_size)",
+      "additionalProperties": false,
+      "properties": {
+        "ngram_size": {
+          "type": "integer",
+          "description": "Legacy global n-gram size applied to tables without per-table ngram_size",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 10
         }
       }
     },
@@ -625,6 +655,13 @@
               "default": 5,
               "minimum": 1,
               "maximum": 3600
+            },
+            "max_body_bytes": {
+              "type": "integer",
+              "description": "Maximum HTTP request body size in bytes. 0 disables the limit.",
+              "default": 16777216,
+              "minimum": 0,
+              "maximum": 1073741824
             }
           }
         },
@@ -637,9 +674,9 @@
         },
         "max_query_length": {
           "type": "integer",
-          "description": "Maximum character length allowed for search query expressions (text + conditions)",
+          "description": "Maximum character length allowed for search query expressions (text + conditions). 0 = unlimited.",
           "default": 128,
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 4096
         },
         "rate_limiting": {
@@ -672,6 +709,18 @@
               "default": 10000,
               "minimum": 10,
               "maximum": 100000
+            }
+          }
+        },
+        "unix_socket": {
+          "type": "object",
+          "description": "Unix domain socket configuration",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Unix socket path. Empty string disables Unix socket support.",
+              "default": ""
             }
           }
         }
@@ -796,6 +845,31 @@
               "minimum": 0
             }
           }
+        }
+      }
+    },
+    "bm25": {
+      "type": "object",
+      "description": "BM25 relevance scoring configuration",
+      "additionalProperties": false,
+      "properties": {
+        "enable": {
+          "type": "boolean",
+          "description": "Enable BM25 scoring",
+          "default": false
+        },
+        "k1": {
+          "type": "number",
+          "description": "Term frequency saturation parameter",
+          "default": 1.2,
+          "minimum": 0.0
+        },
+        "b": {
+          "type": "number",
+          "description": "Document length normalization parameter",
+          "default": 0.75,
+          "minimum": 0.0,
+          "maximum": 1.0
         }
       }
     }

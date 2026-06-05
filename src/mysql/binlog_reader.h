@@ -49,6 +49,7 @@ enum class BinlogEventType : uint8_t {
   UPDATE,
   DELETE,
   DDL,  // DDL operations (TRUNCATE, ALTER, DROP)
+  COMMIT,
   UNKNOWN
 };
 
@@ -96,6 +97,8 @@ struct BinlogEvent {
         return !table_name.empty() && !primary_key.empty();
       case BinlogEventType::DDL:
         return !table_name.empty();
+      case BinlogEventType::COMMIT:
+        return !gtid.empty();
       case BinlogEventType::UNKNOWN:
       default:
         return false;
@@ -407,6 +410,7 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<uint64_t> processed_events_{0};
   std::atomic<uint64_t> crc_errors_{0};
   std::string current_gtid_;
+  std::string pending_commit_gtid_;
   std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
   std::atomic<server::ServerStats*> server_stats_{nullptr};   // Optional server statistics tracker
@@ -431,8 +435,13 @@ class BinlogReader final : public IBinlogReader {
   // Table metadata cache
   TableMetadataCache table_metadata_cache_;
 
-  // Column names cache: key = "database.table", value = vector of column names in order
-  std::unordered_map<std::string, std::vector<std::string>> column_names_cache_;
+  struct ColumnDefinition {
+    std::string name;
+    bool is_unsigned = false;
+  };
+
+  // Column definition cache: key = "database.table", value = column definitions in ordinal order
+  std::unordered_map<std::string, std::vector<ColumnDefinition>> column_names_cache_;
   mutable std::mutex column_names_cache_mutex_;
 
   // Binlog stream protocol handler (MySQL or MariaDB)
@@ -481,6 +490,12 @@ class BinlogReader final : public IBinlogReader {
    * @brief Worker thread function
    */
   void WorkerThreadFunc();
+
+  /**
+   * @brief Process one queued worker event and update replication position when safe.
+   * @return false when processing failed and reconnect is required
+   */
+  bool ProcessQueuedEvent(const BinlogEvent& event);
 
   /**
    * @brief Push event to queue (blocking if full)

@@ -1,6 +1,6 @@
 /**
  * @file io_reactor_test.cpp
- * @brief Unit tests for IoReactor (Phase 2.T5).
+ * @brief Unit tests for IoReactor (Step 2.T5).
  *
  * Uses MockEventMultiplexer injected via SetMultiplexerFactoryForTest() to
  * exercise registration, unregistration, event dispatch, and lifecycle without

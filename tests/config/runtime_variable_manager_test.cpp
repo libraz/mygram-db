@@ -752,7 +752,7 @@ TEST(RuntimeVariableManagerTest, SetApiMaxQueryLengthValid) {
   Config config = CreateTestConfig();
   auto manager = std::move(*RuntimeVariableManager::Create(config));
 
-  std::vector<int> valid_lengths = {1, 64, 256, 512, 1024};
+  std::vector<int> valid_lengths = {0, 1, 64, 256, 512, 1024};
   for (int length : valid_lengths) {
     auto result = manager->SetVariable("api.max_query_length", std::to_string(length));
     EXPECT_TRUE(result) << "Failed to set api.max_query_length to " << length << ": " << result.error().to_string();
@@ -764,19 +764,15 @@ TEST(RuntimeVariableManagerTest, SetApiMaxQueryLengthValid) {
 }
 
 /**
- * @brief Test SetVariable for api.max_query_length (invalid - zero or negative)
+ * @brief Test SetVariable for api.max_query_length (invalid - negative)
  */
 TEST(RuntimeVariableManagerTest, SetApiMaxQueryLengthInvalid) {
   Config config = CreateTestConfig();
   auto manager = std::move(*RuntimeVariableManager::Create(config));
 
-  // Zero
-  auto result1 = manager->SetVariable("api.max_query_length", "0");
-  EXPECT_FALSE(result1);
-
   // Negative
-  auto result2 = manager->SetVariable("api.max_query_length", "-1");
-  EXPECT_FALSE(result2);
+  auto result = manager->SetVariable("api.max_query_length", "-1");
+  EXPECT_FALSE(result);
 
   // Original value should remain unchanged
   auto get_result = manager->GetVariable("api.max_query_length");

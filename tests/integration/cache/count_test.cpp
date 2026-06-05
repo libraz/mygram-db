@@ -259,11 +259,10 @@ TEST_F(CacheCountIntegrationTest, CountCacheClear) {
 }
 
 /**
- * @brief Test COUNT and SEARCH queries share the same cache entry
+ * @brief Test COUNT and SEARCH queries coexist as separate cache entries
  *
- * Both SEARCH and COUNT store full result sets (DocId lists), so they
- * share a single cache entry with a unified "Q" prefix. COUNT extracts
- * the count from the cached result set.
+ * SEARCH and COUNT use distinct cache-key prefixes, so they do not collide
+ * even when the table, term, filters, and default sort are otherwise equal.
  */
 TEST_F(CacheCountIntegrationTest, CountAndSearchCacheCoexistence) {
   int sock = CreateClientSocket();
@@ -275,14 +274,14 @@ TEST_F(CacheCountIntegrationTest, CountAndSearchCacheCoexistence) {
   ASSERT_TRUE(count_result.success);
   EXPECT_EQ(count_result.count, 50);
 
-  // Execute SEARCH query with same search term - should be a cache hit
+  // Execute SEARCH query with same search term.
   auto search_response = SendCommand(sock, "SEARCH articles test LIMIT 10");
   EXPECT_TRUE(search_response.find("OK RESULTS 50") == 0);
 
-  // Both share the same cache entry (unified "Q" prefix)
+  // COUNT and SEARCH intentionally keep separate cache entries.
   auto stats = SendCommand(sock, "CACHE STATS");
-  EXPECT_TRUE(stats.find("current_entries: 1") != std::string::npos)
-      << "COUNT and SEARCH should share a single cache entry. Stats: " << stats;
+  EXPECT_TRUE(stats.find("current_entries: 2") != std::string::npos)
+      << "COUNT and SEARCH should keep distinct cache entries. Stats: " << stats;
 
   // Verify both can be retrieved from cache
   auto count_response2 = SendCommand(sock, "COUNT articles test");

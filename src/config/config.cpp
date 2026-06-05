@@ -8,6 +8,8 @@
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
 
+#include <charconv>
+#include <cstdint>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
@@ -28,10 +30,112 @@ using json = nlohmann::json;
 
 constexpr size_t kGtidPrefixLength = mygram::constants::kGtidPrefixLength;
 
+bool IsRequiredFilterValueKey(const std::string& key) {
+  return key == "value";
+}
+
+bool IsStrictIntegerLiteral(const std::string& value) {
+  if (value.empty()) {
+    return false;
+  }
+  size_t pos = 0;
+  if (value[pos] == '-') {
+    ++pos;
+    if (pos == value.size()) {
+      return false;
+    }
+  }
+  if (value[pos] == '0') {
+    return pos + 1 == value.size();
+  }
+  if (value[pos] < '1' || value[pos] > '9') {
+    return false;
+  }
+  for (++pos; pos < value.size(); ++pos) {
+    if (value[pos] < '0' || value[pos] > '9') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool IsStrictDecimalLiteral(const std::string& value) {
+  size_t dot_count = 0;
+  size_t digit_count = 0;
+  for (size_t i = 0; i < value.size(); ++i) {
+    const char ch = value[i];
+    if (i == 0 && ch == '-') {
+      continue;
+    }
+    if (ch == '.') {
+      ++dot_count;
+      continue;
+    }
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+    ++digit_count;
+  }
+  return dot_count == 1 && digit_count > 0;
+}
+
+json ParseYamlScalar(const YAML::Node& node, bool preserve_scalar_string) {
+  const std::string value = node.as<std::string>();
+  if (preserve_scalar_string) {
+    return value;
+  }
+  if (value == "true") {
+    return true;
+  }
+  if (value == "false") {
+    return false;
+  }
+  if (IsStrictIntegerLiteral(value)) {
+    if (!value.empty() && value[0] == '-') {
+      int64_t signed_value = 0;
+      auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), signed_value);
+      if (ec == std::errc() && ptr == value.data() + value.size()) {
+        return signed_value;
+      }
+    } else {
+      uint64_t unsigned_value = 0;
+      auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), unsigned_value);
+      if (ec == std::errc() && ptr == value.data() + value.size()) {
+        return unsigned_value;
+      }
+    }
+    return value;
+  }
+  if (IsStrictDecimalLiteral(value)) {
+    double double_value = 0.0;
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), double_value);
+    if (ec == std::errc() && ptr == value.data() + value.size()) {
+      return double_value;
+    }
+  }
+  return value;
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateBasenameOnly(const std::string& filename,
+                                                                         const std::string& field_name) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  if (filename.empty()) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "'" + field_name + "' must not be empty."));
+  }
+  if (filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kConfigInvalidValue, "'" + field_name + "' must be a basename, not a path."));
+  }
+  return internal::ValidatePathNoTraversal(filename, field_name);
+}
+
 /**
  * @brief Get value from environment variable
  *
- * BUG-0091: Enables reading sensitive configuration from environment variables
+ * Enables reading sensitive configuration from environment variables
  * instead of storing them in configuration files.
  *
  * @param env_var_name Environment variable name
@@ -74,17 +178,12 @@ std::string GetConfigValueWithEnvOverride(const std::optional<std::string>& json
 /**
  * @brief Convert YAML node to JSON object recursively
  */
-json YamlToJsonImpl(const YAML::Node& node) {
+json YamlToJsonImpl(const YAML::Node& node, bool preserve_scalar_string = false) {
   switch (node.Type()) {
     case YAML::NodeType::Null:
       return {};
     case YAML::NodeType::Scalar: {
-      try {
-        return json::parse(node.as<std::string>());
-      } catch (const json::parse_error&) {
-        // Not valid JSON, return as plain string
-        return node.as<std::string>();
-      }
+      return ParseYamlScalar(node, preserve_scalar_string);
     }
     case YAML::NodeType::Sequence: {
       json result = json::array();
@@ -96,7 +195,8 @@ json YamlToJsonImpl(const YAML::Node& node) {
     case YAML::NodeType::Map: {
       json result = json::object();
       for (const auto& key_value : node) {
-        result[key_value.first.as<std::string>()] = YamlToJsonImpl(key_value.second);
+        const std::string key = key_value.first.as<std::string>();
+        result[key] = YamlToJsonImpl(key_value.second, IsRequiredFilterValueKey(key));
       }
       return result;
     }
@@ -108,7 +208,7 @@ json YamlToJsonImpl(const YAML::Node& node) {
 /**
  * @brief Parse MySQL configuration from JSON
  *
- * BUG-0091: Sensitive values (password, user) can be provided via environment variables:
+ * Sensitive values (password, user) can be provided via environment variables:
  *   - MYGRAM_MYSQL_PASSWORD: MySQL password (takes precedence over config file)
  *   - MYGRAM_MYSQL_USER: MySQL username (takes precedence over config file)
  *   - MYGRAM_MYSQL_HOST: MySQL host (takes precedence over config file)
@@ -135,13 +235,15 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
       if (parsed_port.has_value()) {
         config.port = *parsed_port;
       } else {
-        // Invalid port in environment variable, fall through to config file value
         mygram::utils::StructuredLog()
             .Event("config_env_override_rejected")
             .Field("variable", "MYGRAM_MYSQL_PORT")
             .Field("value", env_port.value())
             .Field("reason", "invalid integer value")
-            .Warn();
+            .Error();
+        return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+            mygram::utils::ErrorCode::kConfigInvalidValue,
+            "Invalid MYGRAM_MYSQL_PORT value: expected integer, got '" + env_port.value() + "'"));
       }
     } else if (json_obj.contains("port")) {
       config.port = json_obj["port"].get<int>();
@@ -271,12 +373,13 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
     // value can be string or number, convert to string
     if (json_obj["value"].is_string()) {
       config.value = json_obj["value"].get<std::string>();
+    } else if (json_obj["value"].is_number_unsigned()) {
+      config.value = std::to_string(json_obj["value"].get<uint64_t>());
     } else if (json_obj["value"].is_number_integer()) {
       // Integer types: format without decimal point
       config.value = std::to_string(json_obj["value"].get<int64_t>());
     } else if (json_obj["value"].is_number_float()) {
-      // Floating point types: format with decimal point
-      config.value = std::to_string(json_obj["value"].get<double>());
+      config.value = json_obj["value"].dump();
     } else if (json_obj["value"].is_boolean()) {
       config.value = json_obj["value"].get<bool>() ? "1" : "0";
     }
@@ -664,6 +767,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         return MakeUnexpected(v.error());
       }
     }
+    if (dmp.contains("default_filename")) {
+      config.dump.default_filename = dmp["default_filename"].get<std::string>();
+      if (auto v = ValidateBasenameOnly(config.dump.default_filename, "dump.default_filename"); !v) {
+        return MakeUnexpected(v.error());
+      }
+    }
     if (dmp.contains("interval_sec")) {
       config.dump.interval_sec = dmp["interval_sec"].get<int>();
     }
@@ -756,6 +865,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       if (http.contains("write_timeout_sec")) {
         config.api.http.write_timeout_sec = http["write_timeout_sec"].get<int>();
       }
+      if (http.contains("max_body_bytes")) {
+        config.api.http.max_body_bytes = http["max_body_bytes"].get<int64_t>();
+      }
     }
     if (api.contains("default_limit")) {
       config.api.default_limit = api["default_limit"].get<int>();
@@ -782,6 +894,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       const auto& unix_socket = api["unix_socket"];
       if (unix_socket.contains("path")) {
         config.api.unix_socket.path = unix_socket["path"].get<std::string>();
+        if (auto v = internal::ValidatePathNoTraversal(config.api.unix_socket.path, "api.unix_socket.path"); !v) {
+          return MakeUnexpected(v.error());
+        }
       }
     }
   }

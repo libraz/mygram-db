@@ -92,7 +92,7 @@ TEST_F(InstancePreservationTest, MakeUniqueChangesInstancePointer) {
   ASSERT_TRUE(doc_id.has_value());
   index_->AddDocument(*doc_id, "test document");
 
-  // Replace with new instances (the OLD BUG behavior)
+  // Replace with new instances, matching the previously broken behavior.
   index_ = std::make_unique<index::Index>();
   doc_store_ = std::make_unique<storage::DocumentStore>();
 

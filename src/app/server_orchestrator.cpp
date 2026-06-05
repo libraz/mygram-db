@@ -7,6 +7,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cctype>
+
 #include "app/mysql_reconnection_handler.h"
 #include "app/signal_manager.h"
 #include "config/runtime_variable_manager.h"
@@ -301,10 +304,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
   mysql_connection_ = std::make_unique<mysql::Connection>(mysql_config);
 
-  if (!mysql_connection_->Connect("snapshot builder")) {
+  auto connect_result = mysql_connection_->Connect("snapshot builder");
+  if (!connect_result) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed,
-                                 "Failed to connect to MySQL: " + mysql_connection_->GetLastError()));
+                                 "Failed to connect to MySQL: " + connect_result.error().message()));
   }
 
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "mysql_connected").Debug();
@@ -324,6 +328,56 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     return {};
   }
 
+  const bool use_shared_snapshot = deps_.config.replication.enable && deps_.config.tables.size() > 1;
+  std::string shared_snapshot_gtid;
+  if (use_shared_snapshot) {
+    auto start_txn_result = mysql_connection_->ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
+    if (!start_txn_result) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
+          "Failed to start shared consistent snapshot: " + start_txn_result.error().message()));
+    }
+
+    auto gtid_result = mysql_connection_->GetExecutedGTID();
+    if (gtid_result) {
+      shared_snapshot_gtid = *gtid_result;
+      shared_snapshot_gtid.erase(std::remove_if(shared_snapshot_gtid.begin(), shared_snapshot_gtid.end(),
+                                                [](unsigned char chr) { return std::isspace(chr); }),
+                                 shared_snapshot_gtid.end());
+    }
+    if (shared_snapshot_gtid.empty()) {
+      auto rollback_result = mysql_connection_->ExecuteUpdate("ROLLBACK");
+      if (!rollback_result) {
+        mygram::utils::StructuredLog()
+            .Event("loader_warning")
+            .Field("operation", "rollback_shared_snapshot")
+            .Field("error", rollback_result.error().message())
+            .Warn();
+      }
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
+          "GTID is empty - cannot start multi-table replication from undefined snapshot position"));
+    }
+
+    snapshot_gtid_ = shared_snapshot_gtid;
+    mygram::utils::StructuredLog()
+        .Event("shared_snapshot_gtid_captured")
+        .Field("gtid", shared_snapshot_gtid)
+        .Field("tables", static_cast<uint64_t>(deps_.config.tables.size()))
+        .Info();
+  }
+
+  auto rollback_shared_snapshot = [this]() {
+    auto rollback_result = mysql_connection_->ExecuteUpdate("ROLLBACK");
+    if (!rollback_result) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback_shared_snapshot")
+          .Field("error", rollback_result.error().message())
+          .Warn();
+    }
+  };
+
   for (const auto& table_config : deps_.config.tables) {
     auto& ctx = table_contexts_[table_config.name];
 
@@ -336,7 +390,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     loader::InitialLoader initial_loader(*mysql_connection_, *ctx->index, *ctx->doc_store, table_config,
                                          deps_.config.mysql, deps_.config.build);
 
-    auto load_result = initial_loader.Load([this, &table_config, &initial_loader](const auto& progress) {
+    auto progress_callback = [this, &table_config, &initial_loader](const auto& progress) {
       // Check cancellation flag in progress callback
       if (SignalManager::IsShutdownRequested()) {
         mygram::utils::StructuredLog().Event("initial_load_cancellation_requested").Info();
@@ -352,10 +406,17 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
             .Field("rows_per_sec", progress.rows_per_second)
             .Debug();
       }
-    });
+    };
+
+    auto load_result = use_shared_snapshot
+                           ? initial_loader.LoadFromExistingSnapshot(shared_snapshot_gtid, progress_callback)
+                           : initial_loader.Load(progress_callback);
 
     // Check if shutdown was requested
     if (SignalManager::IsShutdownRequested()) {
+      if (use_shared_snapshot) {
+        rollback_shared_snapshot();
+      }
       mygram::utils::StructuredLog()
           .Event("initial_load_cancelled")
           .Field("table", table_config.name)
@@ -366,6 +427,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     }
 
     if (!load_result) {
+      if (use_shared_snapshot) {
+        rollback_shared_snapshot();
+      }
       return mygram::utils::MakeUnexpected(load_result.error());
     }
 
@@ -397,12 +461,22 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
           .Info();
     }
 
-    // Capture GTID from first table's initial load
-    if (snapshot_gtid_.empty() && deps_.config.replication.enable) {
+    // Capture GTID from single-table initial load. Multi-table loads use one
+    // shared transaction and set snapshot_gtid_ before loading any table.
+    if (!use_shared_snapshot && snapshot_gtid_.empty() && deps_.config.replication.enable) {
       snapshot_gtid_ = initial_loader.GetStartGTID();
       if (!snapshot_gtid_.empty()) {
         mygram::utils::StructuredLog().Event("snapshot_gtid_captured").Field("gtid", snapshot_gtid_).Info();
       }
+    }
+  }
+
+  if (use_shared_snapshot) {
+    auto commit_result = mysql_connection_->ExecuteUpdate("COMMIT");
+    if (!commit_result) {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
+                                   "Failed to commit shared consistent snapshot: " + commit_result.error().message()));
     }
   }
 #endif

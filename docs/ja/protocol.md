@@ -99,17 +99,17 @@ GET articles 12345
 ### レスポンス
 
 ```
-DOC <primary_key> <filter1=value1> <filter2=value2> ...
+OK DOC <primary_key> <filter1=value1> <filter2=value2> ...
 ```
 
 例：
 ```
-DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
+OK DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
 ```
 
 見つからない場合：
 ```
-(error) Document not found
+ERROR Document not found
 ```
 
 ---
@@ -541,11 +541,10 @@ FACET articles category "機械学習" FILTER status = 1 LIMIT 10
 ### レスポンス
 
 ```
-OK FACET <column>
-<value1> <count1>
-<value2> <count2>
+OK FACET <num_values>
+<value1>	<count1>
+<value2>	<count2>
 ...
-END
 ```
 
 結果はカウントの降順でソートされます。
@@ -567,6 +566,7 @@ REPLICATION STATUS
 複数行のキーバリュー形式：
 
 ```
+OK REPLICATION
 status: <running|stopped|not_configured>
 current_gtid: <current_gtid>
 processed_events: <count>
@@ -584,6 +584,7 @@ END
 
 例（実行中）：
 ```
+OK REPLICATION
 status: running
 current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
 processed_events: 5000
@@ -593,6 +594,7 @@ END
 
 例（停止中）：
 ```
+OK REPLICATION
 status: stopped
 current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
 processed_events: 5000
@@ -614,7 +616,7 @@ REPLICATION STOP
 ### レスポンス
 
 ```
-OK REPLICATION STOPPED
+OK REPLICATION_STOPPED
 ```
 
 ---
@@ -632,7 +634,7 @@ REPLICATION START
 ### レスポンス
 
 ```
-OK REPLICATION STARTED
+OK REPLICATION_STARTED
 ```
 
 ---
@@ -838,7 +840,7 @@ OK RESULTS 5 1 2 3 4 5
 利用可能なコマンド:
   SEARCH, COUNT, GET              - 検索と取得
   INFO, CONFIG                    - サーバー情報と設定
-  DUMP SAVE/LOAD/VERIFY/INFO      - スナップショット管理
+  DUMP SAVE/LOAD/VERIFY/INFO/STATUS - スナップショット管理
   REPLICATION STATUS/STOP/START   - レプリケーション制御
   OPTIMIZE                        - インデックス最適化
   DEBUG ON/OFF                    - デバッグモードの有効化/無効化

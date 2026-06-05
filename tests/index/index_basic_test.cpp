@@ -231,7 +231,7 @@ TEST(IndexTest, DocumentIdOrdering) {
 }
 
 // =============================================================================
-// UpdateDocument empty posting list cleanup (Bug #15)
+// UpdateDocument empty posting list cleanup
 // =============================================================================
 
 /**
@@ -262,7 +262,7 @@ TEST(IndexTest, UpdateDocumentRemovesEmptyPostingLists) {
   EXPECT_EQ(index.Count("y"), 1);
   EXPECT_EQ(index.Count("z"), 1);
 
-  // Bug #15: Empty posting lists for old terms should be removed
+  // Empty posting lists for old terms should be removed
   // Before fix: term_postings_ would still contain entries for a, b, c with empty lists
   // After fix: term_postings_ should only contain x, y, z
   EXPECT_EQ(index.Count("a"), 0) << "Old term 'a' should have count 0";
@@ -270,7 +270,7 @@ TEST(IndexTest, UpdateDocumentRemovesEmptyPostingLists) {
   EXPECT_EQ(index.Count("c"), 0) << "Old term 'c' should have count 0";
 
   // Critical check: TermCount should be 3 (only x, y, z), not 6
-  EXPECT_EQ(index.TermCount(), 3) << "Bug #15: Empty posting lists should be removed after UpdateDocument";
+  EXPECT_EQ(index.TermCount(), 3) << "Empty posting lists should be removed after UpdateDocument";
 }
 
 /**
@@ -306,7 +306,7 @@ TEST(IndexTest, MultipleUpdatesNoPostingListGrowth) {
 }
 
 /**
- * @test Update with partial overlap should clean up removed terms (Bug #15)
+ * @test Update with partial overlap should clean up removed terms
  */
 TEST(IndexTest, UpdateDocumentPartialOverlapCleansUp) {
   Index index(1);  // Unigram index
@@ -325,11 +325,11 @@ TEST(IndexTest, UpdateDocumentPartialOverlapCleansUp) {
   EXPECT_EQ(index.Count("d"), 1) << "Term 'd' should be added";
 
   // TermCount should be 3 (b, c, d), not 4 (including empty 'a')
-  EXPECT_EQ(index.TermCount(), 3) << "Bug #15: Empty posting list for 'a' should be removed";
+  EXPECT_EQ(index.TermCount(), 3) << "Empty posting list for 'a' should be removed";
 }
 
 /**
- * @test Update document to empty text should remove all postings (Bug #15)
+ * @test Update document to empty text should remove all postings
  */
 TEST(IndexTest, UpdateDocumentToEmptyRemovesAllPostings) {
   Index index(1);  // Unigram index
@@ -342,14 +342,14 @@ TEST(IndexTest, UpdateDocumentToEmptyRemovesAllPostings) {
   index.UpdateDocument(1, "abc", "");
 
   // All posting lists should be removed
-  EXPECT_EQ(index.TermCount(), 0) << "Bug #15: All empty posting lists should be removed";
+  EXPECT_EQ(index.TermCount(), 0) << "All empty posting lists should be removed";
   EXPECT_EQ(index.Count("a"), 0);
   EXPECT_EQ(index.Count("b"), 0);
   EXPECT_EQ(index.Count("c"), 0);
 }
 
 /**
- * @test Update with multiple documents does partial cleanup (Bug #15)
+ * @test Update with multiple documents does partial cleanup
  */
 TEST(IndexTest, UpdateDocumentMultiDocsPartialCleanup) {
   Index index(1);  // Unigram index
@@ -370,15 +370,15 @@ TEST(IndexTest, UpdateDocumentMultiDocsPartialCleanup) {
   EXPECT_EQ(index.Count("a"), 0) << "Term 'a' should have count 0";
 
   // TermCount should be 3: b (from doc2), c (from doc2), x (from doc1)
-  EXPECT_EQ(index.TermCount(), 3) << "Bug #15: Empty posting list for 'a' should be removed";
+  EXPECT_EQ(index.TermCount(), 3) << "Empty posting list for 'a' should be removed";
 }
 
 // =============================================================================
-// RemoveDocument empty posting list cleanup (Bug #14)
+// RemoveDocument empty posting list cleanup
 // =============================================================================
 
 /**
- * @test RemoveDocument should remove empty posting lists (Bug #14)
+ * @test RemoveDocument should remove empty posting lists
  */
 TEST(IndexTest, RemoveDocumentRemovesEmptyPostingLists) {
   Index index(1);  // Unigram index
@@ -391,11 +391,11 @@ TEST(IndexTest, RemoveDocumentRemovesEmptyPostingLists) {
   index.RemoveDocument(1, "abc");
 
   // All posting lists should be removed since doc was the only one
-  EXPECT_EQ(index.TermCount(), 0) << "Bug #14: Empty posting lists should be removed after RemoveDocument";
+  EXPECT_EQ(index.TermCount(), 0) << "Empty posting lists should be removed after RemoveDocument";
 }
 
 /**
- * @test RemoveDocument with multiple documents does partial cleanup (Bug #14)
+ * @test RemoveDocument with multiple documents does partial cleanup
  */
 TEST(IndexTest, RemoveDocumentPartialCleanup) {
   Index index(1);  // Unigram index
@@ -415,7 +415,7 @@ TEST(IndexTest, RemoveDocumentPartialCleanup) {
   EXPECT_EQ(index.Count("c"), 1);
 
   // TermCount should be 2: b, c (not 3 including empty 'a')
-  EXPECT_EQ(index.TermCount(), 2) << "Bug #14: Empty posting list for 'a' should be removed";
+  EXPECT_EQ(index.TermCount(), 2) << "Empty posting list for 'a' should be removed";
 }
 
 // =============================================================================

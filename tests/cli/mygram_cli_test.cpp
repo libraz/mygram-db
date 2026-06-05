@@ -253,6 +253,20 @@ TEST_F(CliPrintResponseTest, SearchResponseLargeCount) {
   EXPECT_NE(output.find("showing 10"), std::string::npos);
 }
 
+TEST_F(CliPrintResponseTest, SearchResponseWithHighlights) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK RESULTS 2\r\npk1\thello <em>world</em>\r\npk2\tsecond snippet");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("2 results"), std::string::npos);
+  EXPECT_NE(output.find("showing 2"), std::string::npos);
+  EXPECT_NE(output.find("1) pk1"), std::string::npos);
+  EXPECT_NE(output.find("hello <em>world</em>"), std::string::npos);
+  EXPECT_NE(output.find("2) pk2"), std::string::npos);
+  EXPECT_NE(output.find("second snippet"), std::string::npos);
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+}
+
 // =============================================================================
 // PrintResponse — COUNT responses
 // =============================================================================

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <utility>
 
 #include "mysql/binlog_event_processor.h"
@@ -111,11 +112,12 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
     std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
     auto cache_it = column_names_cache_.find(cache_key);
     if (cache_it != column_names_cache_.end()) {
-      // Cache hit: update column names from cache
-      const auto& column_names = cache_it->second;
-      if (column_names.size() == metadata.columns.size()) {
+      // Cache hit: update column definitions from cache
+      const auto& column_definitions = cache_it->second;
+      if (column_definitions.size() == metadata.columns.size()) {
         for (size_t i = 0; i < metadata.columns.size(); i++) {
-          metadata.columns[i].name = column_names[i];
+          metadata.columns[i].name = column_definitions[i].name;
+          metadata.columns[i].is_unsigned = column_definitions[i].is_unsigned;
         }
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
@@ -131,9 +133,9 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
           .Field("type", "column_cache_mismatch")
           .Field("database", metadata.database_name)
           .Field("table", metadata.table_name)
-          .Field("cached_count", static_cast<int64_t>(column_names.size()))
+          .Field("cached_count", static_cast<int64_t>(column_definitions.size()))
           .Field("current_count", static_cast<int64_t>(metadata.columns.size()))
-          .Message("Cached column names have mismatched count")
+          .Message("Cached column definitions have mismatched count")
           .Warn();
       column_names_cache_.erase(cache_it);  // Remove stale cache entry
     }
@@ -171,6 +173,7 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
 
   auto result_exp = metadata_connection_->Execute(query);
   if (!result_exp) {
+    std::string first_error = result_exp.error().message();
     // Connection may have been lost (e.g., after MySQL restart).
     // Try to reconnect the metadata connection and retry once.
     mygram::utils::StructuredLog()
@@ -178,7 +181,7 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
         .Field("type", "column_query_failed_retrying")
         .Field("database", metadata.database_name)
         .Field("table", metadata.table_name)
-        .Field("error", metadata_connection_->GetLastError())
+        .Field("error", first_error)
         .Warn();
 
     auto reconnect_result = metadata_connection_->Reconnect(true /* silent */);
@@ -192,29 +195,42 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
           .Field("type", "column_query_failed")
           .Field("database", metadata.database_name)
           .Field("table", metadata.table_name)
-          .Field("error", metadata_connection_->GetLastError())
+          .Field("error", result_exp.error().message())
           .Error();
       return false;
     }
   }
 
-  std::vector<std::string> column_names;
-  column_names.reserve(metadata.columns.size());
+  auto is_unsigned_type = [](const char* column_type) {
+    if (column_type == nullptr) {
+      return false;
+    }
+    std::string type(column_type);
+    std::transform(type.begin(), type.end(), type.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return type.find("unsigned") != std::string::npos;
+  };
+
+  std::vector<BinlogReader::ColumnDefinition> column_definitions;
+  column_definitions.reserve(metadata.columns.size());
 
   MYSQL_ROW row = nullptr;
   while ((row = mysql_fetch_row(result_exp->get())) != nullptr) {
-    column_names.emplace_back(row[0]);
+    BinlogReader::ColumnDefinition column_definition;
+    column_definition.name = row[0] == nullptr ? std::string{} : std::string(row[0]);
+    column_definition.is_unsigned = is_unsigned_type(row[1]);
+    column_definitions.push_back(std::move(column_definition));
   }
 
   // result automatically freed by MySQLResult destructor
 
-  if (column_names.size() != metadata.columns.size()) {
+  if (column_definitions.size() != metadata.columns.size()) {
     mygram::utils::StructuredLog()
         .Event("binlog_error")
         .Field("type", "column_count_mismatch")
         .Field("database", metadata.database_name)
         .Field("table", metadata.table_name)
-        .Field("show_columns_count", static_cast<int64_t>(column_names.size()))
+        .Field("show_columns_count", static_cast<int64_t>(column_definitions.size()))
         .Field("binlog_count", static_cast<int64_t>(metadata.columns.size()))
         .Error();
     return false;
@@ -222,13 +238,14 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
 
   // Update metadata with actual column names
   for (size_t i = 0; i < metadata.columns.size(); i++) {
-    metadata.columns[i].name = column_names[i];
+    metadata.columns[i].name = column_definitions[i].name;
+    metadata.columns[i].is_unsigned = column_definitions[i].is_unsigned;
   }
 
   // Store in cache
   {
     std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
-    column_names_cache_[cache_key] = std::move(column_names);
+    column_names_cache_[cache_key] = std::move(column_definitions);
   }
 
   mygram::utils::StructuredLog()
@@ -301,6 +318,38 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
 
 void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {
   std::scoped_lock lock(gtid_mutex_);
+
+  if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
+    auto parsed = MariaDBGTID::Parse(gtid);
+    if (parsed) {
+      std::map<uint32_t, MariaDBGTID> by_domain;
+
+      auto current_set = MariaDBGTID::ParseSet(current_gtid_);
+      if (current_set) {
+        for (const auto& existing : *current_set) {
+          auto iter = by_domain.find(existing.domain_id);
+          if (iter == by_domain.end() || existing.sequence_no > iter->second.sequence_no) {
+            by_domain[existing.domain_id] = existing;
+          }
+        }
+      }
+
+      auto iter = by_domain.find(parsed->domain_id);
+      if (iter == by_domain.end() || parsed->sequence_no >= iter->second.sequence_no) {
+        by_domain[parsed->domain_id] = *parsed;
+      }
+
+      std::vector<MariaDBGTID> merged;
+      merged.reserve(by_domain.size());
+      for (const auto& [domain_id, domain_gtid] : by_domain) {
+        (void)domain_id;
+        merged.push_back(domain_gtid);
+      }
+      current_gtid_ = MariaDBGTID::SetToString(merged);
+      return;
+    }
+  }
+
   current_gtid_ = gtid;
   // Note: executed_gtid_set_ is intentionally NOT updated here.
   // UpdateCurrentGTID is called with single GTIDs from binlog events (e.g., "uuid:101").

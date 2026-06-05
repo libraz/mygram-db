@@ -225,6 +225,11 @@ When MygramDB receives a shutdown signal (SIGTERM/SIGINT) during SYNC:
 2. **Server waits for cleanup**
    - Maximum wait time: 30 seconds
    - Background threads terminate gracefully
+   - If SYNC is blocked inside a MySQL read during the initial snapshot, the
+     shutdown response is bounded by the configured MySQL `read_timeout_ms`
+     (converted to seconds for the dedicated binlog/snapshot connection).
+     Lower this value if operators require faster SIGTERM/SIGINT response
+     during long-running reads.
 
 3. **Server shuts down**
    - MySQL connections closed

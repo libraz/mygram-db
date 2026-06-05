@@ -440,11 +440,11 @@ TEST(IndexSearchTest, DuplicateNgramsProduceCorrectResults) {
 }
 
 // =============================================================================
-// SearchAnd optimization (Bug #16)
+// SearchAnd optimization
 // =============================================================================
 
 /**
- * @test Bug #16: SearchAnd with limit should not materialize all documents
+ * @test SearchAnd with limit should not materialize all documents
  *
  * This test verifies that SearchAnd returns correct results when using
  * the optimized path (limit > 0, reverse = true, multiple terms).
@@ -482,7 +482,7 @@ TEST(IndexTest, SearchAndWithLimitCorrectResults) {
 }
 
 /**
- * @test Bug #16: SearchAnd with single term should use GetTopN optimization
+ * @test SearchAnd with single term should use GetTopN optimization
  */
 TEST(IndexTest, SearchAndSingleTermGetTopN) {
   Index index(1);  // Unigram index
@@ -506,7 +506,7 @@ TEST(IndexTest, SearchAndSingleTermGetTopN) {
 }
 
 /**
- * @test Bug #16: SearchAnd with multiple terms returns correct intersection
+ * @test SearchAnd with multiple terms returns correct intersection
  *
  * Note: For small posting lists (< 10000), SearchAnd returns results in
  * ascending DocId order. The caller applies limit/reverse as needed.
@@ -542,7 +542,7 @@ TEST(IndexTest, SearchAndMultipleTermsIntersection) {
 }
 
 /**
- * @test Bug #16: SearchAnd should handle non-existent term gracefully
+ * @test SearchAnd should handle non-existent term gracefully
  */
 TEST(IndexTest, SearchAndNonExistentTermEmpty) {
   Index index(1);
@@ -558,7 +558,7 @@ TEST(IndexTest, SearchAndNonExistentTermEmpty) {
 }
 
 /**
- * @test Bug #16: SearchAnd with large posting lists should not allocate excessively
+ * @test SearchAnd with large posting lists should not allocate excessively
  *
  * This test creates a scenario where the streaming optimization would be triggered
  * (high selectivity, large posting lists) and verifies correct behavior.
@@ -593,7 +593,7 @@ TEST(IndexTest, SearchAndLargePostingListsTopN) {
 }
 
 /**
- * @test M-1: SearchAnd standard path truncates results to limit
+ * @test SearchAnd standard path truncates results to limit
  *
  * Verifies that the standard (non-streaming) intersection path applies the
  * limit parameter, returning at most `limit` elements.

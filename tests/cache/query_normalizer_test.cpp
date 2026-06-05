@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "query/query_parser.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::cache {
 
@@ -343,6 +344,34 @@ TEST(QueryNormalizerTest, NotTermsOrdering) {
 
   // Different NOT term order should produce same normalized query (sorted alphabetically)
   EXPECT_EQ(normalized1, normalized2);
+}
+
+TEST(QueryNormalizerTest, SearchAndNotTermsUseIndexTextNormalizerWhenProvided) {
+  auto text_normalizer = [](std::string_view text) {
+    return mygram::utils::NormalizeText(text, /* normalize_nfkc= */ true, "keep", /* normalize_lower= */ true);
+  };
+
+  query::Query query1;
+  query1.type = query::QueryType::SEARCH;
+  query1.table = "posts";
+  query1.search_text = "HELLO";
+  query1.and_terms = {"ＣＡＦＥ", "WORLD"};
+  query1.not_terms = {"ＮＯＩＳＥ"};
+
+  query::Query query2;
+  query2.type = query::QueryType::SEARCH;
+  query2.table = "posts";
+  query2.search_text = "hello";
+  query2.and_terms = {"world", "cafe"};
+  query2.not_terms = {"noise"};
+
+  std::string normalized1 = QueryNormalizer::Normalize(query1, "id", text_normalizer);
+  std::string normalized2 = QueryNormalizer::Normalize(query2, "id", text_normalizer);
+
+  EXPECT_EQ(normalized1, normalized2);
+  EXPECT_NE(normalized1.find("hello"), std::string::npos);
+  EXPECT_NE(normalized1.find("AND cafe"), std::string::npos);
+  EXPECT_NE(normalized1.find("NOT noise"), std::string::npos);
 }
 
 /**

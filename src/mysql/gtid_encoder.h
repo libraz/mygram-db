@@ -55,8 +55,8 @@ class GtidEncoder {
 
  private:
   struct Interval {
-    int64_t start;
-    int64_t end;  // exclusive
+    uint64_t start;
+    uint64_t end;  // exclusive
   };
 
   struct Sid {

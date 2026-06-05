@@ -39,6 +39,10 @@ void SignalHandlerFunction(int signal) {
 }  // namespace
 
 Expected<std::unique_ptr<SignalManager>, mygram::utils::Error> SignalManager::Create() {
+  // Process invariant: SignalManager is designed for one live instance per
+  // process. POSIX handlers are process-global and this instance captures the
+  // previous handlers for RAII restoration; overlapping instances would make
+  // destructor restore order ambiguous.
   auto manager = std::unique_ptr<SignalManager>(new SignalManager());
 
   auto register_result = manager->RegisterHandlers();

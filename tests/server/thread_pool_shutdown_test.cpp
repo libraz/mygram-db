@@ -91,8 +91,8 @@ TEST_F(ThreadPoolShutdownTest, ImmediateShutdownMaySkipTasks) {
  * @brief Test graceful shutdown with timeout
  *
  * Note: Timeout controls how long we wait for queued tasks to complete.
- * After timeout, we still wait for active workers to finish their current tasks.
- * This ensures all workers are properly joined (no detach).
+ * After timeout, pending tasks may be discarded, but active workers still
+ * finish their current tasks and are joined (no detach).
  */
 TEST_F(ThreadPoolShutdownTest, GracefulShutdownWithTimeout) {
   std::atomic<int> completed_tasks{0};
@@ -121,8 +121,8 @@ TEST_F(ThreadPoolShutdownTest, GracefulShutdownWithTimeout) {
   int completed = completed_tasks.load();
   std::cout << "Completed " << completed << "/" << total_tasks << " tasks with 500ms timeout" << std::endl;
 
-  // All tasks should complete because we wait for workers to finish
-  EXPECT_EQ(completed, total_tasks) << "All tasks should complete (workers are joined)";
+  EXPECT_GT(completed, 0) << "Some tasks should complete before timeout";
+  EXPECT_LT(completed, total_tasks) << "Pending tasks may be discarded after timeout";
 
   // Should take longer than timeout because we wait for active workers
   EXPECT_GT(duration.count(), 500) << "Should wait for workers beyond timeout";
@@ -379,13 +379,13 @@ TEST_F(ThreadPoolShutdownTest, WorkersJoinedAfterTimeout) {
   auto elapsed =
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time).count();
 
-  // All tasks should have completed because we wait for workers to join
+  // Only the two active tasks should have completed. The two queued tasks are
+  // discarded after timeout; workers are still joined, not detached.
   int completed = shared_counter->load();
   std::cout << "Tasks completed: " << completed << "/4" << std::endl;
   std::cout << "Total time: " << elapsed << "ms" << std::endl;
 
-  // All started tasks should complete (2 workers × 2 tasks = 4 total)
-  EXPECT_EQ(completed, 4) << "All tasks should complete (workers are joined, not detached)";
+  EXPECT_EQ(completed, 2) << "Active tasks should complete; pending tasks are discarded after timeout";
 
   // Should take longer than timeout (100ms) because we wait for workers
   EXPECT_GT(elapsed, 100) << "Should wait for workers to finish after timeout";

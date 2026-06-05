@@ -9,6 +9,7 @@
 #include <sstream>
 
 #include "cache/cache_manager.h"
+#include "server/protocol_constants.h"
 #include "server/response_formatter.h"
 
 namespace mygramdb::server {
@@ -56,7 +57,7 @@ std::string CacheHandler::HandleStats() {
   auto stats = ctx_.cache_manager->GetStatistics();
 
   std::ostringstream oss;
-  oss << "OK CACHE_STATS\r\n\r\n";
+  oss << protocol::kOkCacheStatsPrefix << "\r\n\r\n";
 
   // Cache status
   oss << "# Cache\r\n";

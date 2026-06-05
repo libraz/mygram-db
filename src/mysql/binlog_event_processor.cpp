@@ -16,6 +16,13 @@
 #include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
+namespace {
+
+std::string NormalizeForCacheInvalidation(const std::string& text, index::Index& index) {
+  return text.empty() ? std::string{} : index.NormalizeText(text);
+}
+
+}  // namespace
 
 bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& index,
                                         storage::DocumentStore& doc_store, const config::TableConfig& table_config,
@@ -77,7 +84,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           stats->IncrementReplInsertApplied();
         }
         if (cache_manager != nullptr) {
-          cache_manager->Invalidate(event.table_name, "", event.text);
+          cache_manager->Invalidate(event.table_name, "", normalized);
         }
       } else {
         // Condition not satisfied -> do not index
@@ -130,7 +137,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         }
         if (cache_manager != nullptr) {
           const std::string& old_text_for_cache = event.old_text.empty() ? event.text : event.old_text;
-          cache_manager->Invalidate(event.table_name, old_text_for_cache, "");
+          cache_manager->Invalidate(event.table_name, NormalizeForCacheInvalidation(old_text_for_cache, index), "");
         }
 
       } else if (!exists && matches_required) {
@@ -166,7 +173,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           stats->IncrementReplUpdateAdded();
         }
         if (cache_manager != nullptr) {
-          cache_manager->Invalidate(event.table_name, "", event.text);
+          cache_manager->Invalidate(event.table_name, "", normalized);
         }
 
       } else if (exists && matches_required) {
@@ -243,7 +250,8 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         }
         if (cache_manager != nullptr) {
           bool filter_changed = (old_filters != event.filters);
-          cache_manager->Invalidate(event.table_name, event.old_text, event.text, filter_changed);
+          cache_manager->Invalidate(event.table_name, NormalizeForCacheInvalidation(event.old_text, index),
+                                    NormalizeForCacheInvalidation(event.text, index), filter_changed);
         }
 
       } else {
@@ -296,7 +304,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           stats->IncrementReplDeleteApplied();
         }
         if (cache_manager != nullptr) {
-          cache_manager->Invalidate(event.table_name, event.text, "");
+          cache_manager->Invalidate(event.table_name, NormalizeForCacheInvalidation(event.text, index), "");
         }
       } else {
         // Not in index, nothing to do

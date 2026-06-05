@@ -143,3 +143,18 @@ TEST(IndexSerializationTest, LoadFromStreamTermLengthJustOverBoundary) {
   EXPECT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageCorrupted);
 }
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsNgramSizeMismatch) {
+  Index source(2);
+  source.AddDocument(1, "hello world");
+
+  std::ostringstream serialized;
+  ASSERT_TRUE(source.SaveToStream(serialized).has_value());
+
+  Index target(3);
+  std::istringstream input(serialized.str());
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}

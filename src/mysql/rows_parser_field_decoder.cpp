@@ -32,11 +32,36 @@ using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
 uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision) {
-  static constexpr uint32_t kMultipliers[] = {0, 100000, 10000, 1000, 100, 10, 1};
+  static constexpr uint32_t kMultipliers[] = {0, 10000, 10000, 100, 100, 1, 1};
   if (precision == 0 || precision > 6) {
     return 0;
   }
   return static_cast<uint32_t>(std::abs(frac)) * kMultipliers[precision];
+}
+
+bool HasBytes(const unsigned char* data, const unsigned char* end, size_t bytes) {
+  return data <= end && static_cast<size_t>(end - data) >= bytes;
+}
+
+Expected<void, Error> RequireBytes(const unsigned char* data, const unsigned char* end, size_t bytes) {
+  if (!HasBytes(data, end, bytes)) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+  }
+  return {};
+}
+
+Expected<size_t, Error> DecimalBinarySize(uint8_t precision, uint8_t scale) {
+  if (scale > precision) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DECIMAL metadata"));
+  }
+
+  int intg = precision - scale;
+  int intg0 = intg / 9;
+  int intg_rem = intg % 9;
+  int frac0 = scale / 9;
+  int frac_rem = scale % 9;
+  static constexpr int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+  return static_cast<size_t>(intg0 * 4 + kDig2Bytes[intg_rem] + frac0 * 4 + kDig2Bytes[frac_rem]);
 }
 
 Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata,
@@ -49,6 +74,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
   switch (col_type) {
     // Integer types - handle UNSIGNED vs SIGNED correctly
     case 1: {  // MYSQL_TYPE_TINY
+      if (auto available = RequireBytes(data, end, 1); !available) {
+        return MakeUnexpected(available.error());
+      }
       if (is_unsigned) {
         auto val = static_cast<uint8_t>(*data);
         return std::to_string(val);
@@ -57,6 +85,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       return std::to_string(val);
     }
     case 2: {  // MYSQL_TYPE_SHORT
+      if (auto available = RequireBytes(data, end, 2); !available) {
+        return MakeUnexpected(available.error());
+      }
       if (is_unsigned) {
         auto val = binlog_util::uint2korr(data);
         return std::to_string(val);
@@ -65,6 +96,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       return std::to_string(val);
     }
     case 3: {  // MYSQL_TYPE_LONG
+      if (auto available = RequireBytes(data, end, 4); !available) {
+        return MakeUnexpected(available.error());
+      }
       if (is_unsigned) {
         auto val = binlog_util::uint4korr(data);
         return std::to_string(val);
@@ -73,6 +107,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       return std::to_string(val);
     }
     case 8: {  // MYSQL_TYPE_LONGLONG
+      if (auto available = RequireBytes(data, end, 8); !available) {
+        return MakeUnexpected(available.error());
+      }
       if (is_unsigned) {
         auto val = binlog_util::uint8korr(data);
         return std::to_string(val);
@@ -81,6 +118,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       return std::to_string(val);
     }
     case 9: {  // MYSQL_TYPE_INT24
+      if (auto available = RequireBytes(data, end, 3); !available) {
+        return MakeUnexpected(available.error());
+      }
       uint32_t val = binlog_util::uint3korr(data);
       if (!is_unsigned && (val & 0x800000) != 0U) {
         val |= 0xFF000000;  // Sign extend for signed values only
@@ -93,16 +133,16 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
     // Floating point types
     case 4: {  // MYSQL_TYPE_FLOAT
-      if (data + 4 > end) {
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+      if (auto available = RequireBytes(data, end, 4); !available) {
+        return MakeUnexpected(available.error());
       }
       float val = 0;
       memcpy(&val, data, sizeof(float));
       return std::to_string(val);
     }
     case 5: {  // MYSQL_TYPE_DOUBLE
-      if (data + 8 > end) {
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+      if (auto available = RequireBytes(data, end, 8); !available) {
+        return MakeUnexpected(available.error());
       }
       double val = 0;
       memcpy(&val, data, sizeof(double));
@@ -111,6 +151,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
     // YEAR type
     case 13: {  // MYSQL_TYPE_YEAR
+      if (auto available = RequireBytes(data, end, 1); !available) {
+        return MakeUnexpected(available.error());
+      }
       // 1 byte: 0 means 0000, 1-255 means year 1901-2155 (value + 1900)
       uint8_t year_byte = *data;
       if (year_byte == 0) {
@@ -333,6 +376,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
     // Date/Time types (simple representation as strings)
     case 10: {  // MYSQL_TYPE_DATE (3 bytes)
+      if (auto available = RequireBytes(data, end, 3); !available) {
+        return MakeUnexpected(available.error());
+      }
       // Format: 3 bytes, little-endian
       // Bit layout: | year (14 bits) | month (4 bits) | day (5 bits) |
       uint32_t val = binlog_util::uint3korr(data);
@@ -345,12 +391,22 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     case 7: {  // MYSQL_TYPE_TIMESTAMP (4 bytes)
+      if (auto available = RequireBytes(data, end, 4); !available) {
+        return MakeUnexpected(available.error());
+      }
       // Unix timestamp (seconds since 1970-01-01), no fractional seconds
       uint32_t timestamp = binlog_util::uint4korr(data);
       return std::to_string(timestamp);
     }
 
     case 17: {  // MYSQL_TYPE_TIMESTAMP2 (4+ bytes)
+      if (metadata > 6) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid TIMESTAMP2 metadata"));
+      }
+      size_t field_bytes = 4 + ((metadata + 1) / 2);
+      if (auto available = RequireBytes(data, end, field_bytes); !available) {
+        return MakeUnexpected(available.error());
+      }
       // MySQL TIMESTAMP2 format (see mysql-source/mysys/my_time.cc):
       // - 4 bytes for seconds (big-endian)
       // - Additional bytes for fractional seconds based on precision (metadata)
@@ -380,8 +436,8 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     case 12: {  // MYSQL_TYPE_DATETIME (8 bytes, old format)
-      if (data + 8 > end) {
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+      if (auto available = RequireBytes(data, end, 8); !available) {
+        return MakeUnexpected(available.error());
       }
       // Old DATETIME stores YYYYMMDDHHMMSS as an 8-byte little-endian integer.
       uint64_t val = binlog_util::uint8korr(data);
@@ -403,6 +459,13 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     case 18: {  // MYSQL_TYPE_DATETIME2 (5+ bytes, new format)
+      if (metadata > 6) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DATETIME2 metadata"));
+      }
+      size_t field_bytes = 5 + ((metadata + 1) / 2);
+      if (auto available = RequireBytes(data, end, field_bytes); !available) {
+        return MakeUnexpected(available.error());
+      }
       // MySQL DATETIME2 format (see mysql-source/mysys/my_time.cc):
       // - 5 bytes base datetime stored as unsigned with DATETIMEF_INT_OFS offset
       // - Additional bytes for fractional seconds based on precision (metadata)
@@ -424,9 +487,8 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       constexpr int64_t kDatetimeIntOfs = 0x8000000000LL;
       int64_t intpart = static_cast<int64_t>(packed) - kDatetimeIntOfs;
 
-      // Handle negative values (dates before year 0) - just use absolute value
       if (intpart < 0) {
-        intpart = -intpart;
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid negative DATETIME2 value"));
       }
 
       // Extract datetime parts per MySQL format:
@@ -444,13 +506,18 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       int64_t hms = intpart & 0x1FFFF;
       int64_t year_month = ymd >> 5;
 
-      unsigned int day = ymd & 0x1F;
-      unsigned int month = year_month % 13;
-      auto year = static_cast<unsigned int>(year_month / 13);
+      int64_t day = ymd & 0x1F;
+      int64_t month = year_month % 13;
+      int64_t year = year_month / 13;
 
-      unsigned int second = hms & 0x3F;
-      unsigned int minute = (hms >> 6) & 0x3F;
-      auto hour = static_cast<unsigned int>(hms >> 12);
+      int64_t second = hms & 0x3F;
+      int64_t minute = (hms >> 6) & 0x3F;
+      int64_t hour = hms >> 12;
+
+      if (year < 0 || month < 0 || month > 12 || day < 0 || day > 31 || hour < 0 || hour > 23 || minute < 0 ||
+          minute > 59 || second < 0 || second > 59) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DATETIME2 component value"));
+      }
 
       std::ostringstream oss;
       oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day
@@ -477,6 +544,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     case 11: {  // MYSQL_TYPE_TIME (3 bytes, old format)
+      if (auto available = RequireBytes(data, end, 3); !available) {
+        return MakeUnexpected(available.error());
+      }
       // Old TIME format: 3 bytes, stored as HHMMSS
       uint32_t val = binlog_util::uint3korr(data);
       unsigned int second = val % 100;
@@ -490,6 +560,13 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     case 19: {  // MYSQL_TYPE_TIME2 (3+ bytes, new format)
+      if (metadata > 6) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid TIME2 metadata"));
+      }
+      size_t field_bytes = 3 + ((metadata + 1) / 2);
+      if (auto available = RequireBytes(data, end, field_bytes); !available) {
+        return MakeUnexpected(available.error());
+      }
       // MySQL TIME2 format (see mysql-source/mysys/my_time.cc):
       // - 3 bytes base time stored as unsigned with TIMEF_INT_OFS offset
       // - Additional bytes for fractional seconds based on precision (metadata)
@@ -547,6 +624,13 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       // metadata: (precision << 8) | scale
       uint8_t precision = metadata >> 8;
       uint8_t scale = metadata & 0xFF;
+      auto decimal_size = DecimalBinarySize(precision, scale);
+      if (!decimal_size) {
+        return MakeUnexpected(decimal_size.error());
+      }
+      if (auto available = RequireBytes(data, end, *decimal_size); !available) {
+        return MakeUnexpected(available.error());
+      }
       return binlog_util::decode_decimal(data, precision, scale);
     }
 

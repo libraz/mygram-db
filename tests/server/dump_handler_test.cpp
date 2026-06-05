@@ -2009,7 +2009,7 @@ TEST_F(DumpHandlerAsyncTest, ConcurrentAsyncSaveBlocked) {
 
 #ifdef USE_MYSQL
 // ===========================================================================
-// P2: DUMP SAVE stops replication before capturing GTID
+// DUMP SAVE stops replication before capturing GTID
 // ===========================================================================
 
 /**
@@ -2047,7 +2047,7 @@ class MockBinlogReaderForDumpTest : public mysql::IBinlogReader {
 };
 
 /**
- * @brief P2: Verify DumpSaveWorker stops replication before capturing GTID
+ * @brief Verify DumpSaveWorker stops replication before capturing GTID
  *
  * Previously, GetCurrentGTID() was called before Stop(), creating a race
  * condition where the worker thread could process events between GTID

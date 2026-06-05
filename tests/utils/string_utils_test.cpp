@@ -1148,7 +1148,7 @@ TEST(StringUtilsTest, Utf8ToCodepointsBufferMatchesVectorOverload) {
   }
 }
 
-// BUG-14 fix: GenerateHybridNgrams zero/negative guard
+//  fix: GenerateHybridNgrams zero/negative guard
 TEST(StringUtilsBugFixTest, GenerateHybridNgramsZeroSizeReturnsEmpty) {
   EXPECT_TRUE(GenerateHybridNgrams("hello", 0, 1).empty());
   EXPECT_TRUE(GenerateHybridNgrams("hello", 2, 0).empty());

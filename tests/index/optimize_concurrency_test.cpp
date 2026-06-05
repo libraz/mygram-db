@@ -579,7 +579,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringOptimizeDetectsChange) {
     while (!optimize_started.load()) {
       std::this_thread::yield();
     }
-    // Small delay to let Optimize start Phase 1
+    // Small delay to let Optimize start Step 1
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
 
     test_index->RemoveDocument(50, "common term document 50");
@@ -651,7 +651,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringBatchOptimizeDetectsChange) {
  *
  * Bug: When a posting list's version changes during optimization, the old code used
  * Union(optimized_posting, current_posting) to merge. This resurrected documents
- * that were removed between Clone() and Phase 2, because the optimized_posting
+ * that were removed between Clone() and Step 2, because the optimized_posting
  * (cloned before removal) still contained the removed doc IDs.
  *
  * Fix: When version mismatch is detected, skip the swap for that term and keep

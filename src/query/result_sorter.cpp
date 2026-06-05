@@ -322,17 +322,17 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
     return sorted_results;
   }
 
-  // Phase 1: Pre-compute sort keys for all DocIDs (O(N) lookups)
+  // Step 1: Pre-compute sort keys for all DocIDs (O(N) lookups)
   PrecomputeSortKeys(results, doc_store, order_by, primary_key_column, entries);
 
-  // Phase 2: Sort by pre-computed keys (O(N log N) string comparisons, no lock acquisitions)
+  // Step 2: Sort by pre-computed keys (O(N log N) string comparisons, no lock acquisitions)
   bool ascending = (order_by.order == SortOrder::ASC);
   std::sort(entries.begin(), entries.end(), [ascending](const SortEntry& lhs, const SortEntry& rhs) {
     int cmp = lhs.sort_key.compare(rhs.sort_key);
     return ascending ? (cmp < 0) : (cmp > 0);
   });
 
-  // Phase 3: Extract sorted DocIDs (O(N))
+  // Step 3: Extract sorted DocIDs (O(N))
   std::vector<DocId> sorted_results;
   sorted_results.reserve(entries.size());
   for (const auto& entry : entries) {
@@ -376,10 +376,10 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
     return {};  // Let caller handle fallback
   }
 
-  // Phase 1: Pre-compute sort keys for all DocIDs
+  // Step 1: Pre-compute sort keys for all DocIDs
   PrecomputeSortKeys(results, doc_store, order_by, primary_key_column, entries);
 
-  // Phase 2: partial_sort by pre-computed keys (O(N log K), no lock acquisitions)
+  // Step 2: partial_sort by pre-computed keys (O(N log K), no lock acquisitions)
   bool ascending = (order_by.order == SortOrder::ASC);
   std::partial_sort(entries.begin(), entries.begin() + static_cast<std::ptrdiff_t>(top_k), entries.end(),
                     [ascending](const SortEntry& lhs, const SortEntry& rhs) {
@@ -387,7 +387,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
                       return ascending ? (cmp < 0) : (cmp > 0);
                     });
 
-  // Phase 3: Extract top K sorted DocIDs
+  // Step 3: Extract top K sorted DocIDs
   std::vector<DocId> sorted_results;
   sorted_results.reserve(top_k);
   for (size_t i = 0; i < top_k; ++i) {

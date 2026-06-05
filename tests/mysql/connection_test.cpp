@@ -159,8 +159,10 @@ TEST(MySQLConnectionTest, IsGTIDModeEnabledWithoutConnection) {
 
   Connection conn(config);
 
-  // Should return false when not connected (doesn't crash)
-  EXPECT_FALSE(conn.IsGTIDModeEnabled());
+  // Should return an error when not connected (doesn't crash)
+  auto result = conn.IsGTIDModeEnabled();
+  EXPECT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLDisconnected);
 }
 
 /**

@@ -74,8 +74,8 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
 
     const std::string& value_str = *value;
 
-    // Skip empty values (NULL)
-    if (value_str.empty()) {
+    // Skip explicit NULL values. Empty strings are valid filter values for string columns.
+    if (row_data.IsColumnNull(filter_config.name)) {
       continue;
     }
 

@@ -5,10 +5,10 @@
  * Tests for:
  * - SELECT query generation: duplicate column avoidance in BuildSelectQuery()
  * - Batch processing: final batch indexing, duplicate handling, edge cases
- * - Bug #4: Last batch not indexed
- * - Bug #5: index_batch/doc_ids size mismatch
- * - Bug #35: GTID capture timing issue (requires MySQL integration test)
- * - P3: GTID capture simplification (regression test)
+ * - Last batch not indexed
+ * - index_batch/doc_ids size mismatch
+ * - GTID capture timing issue (requires MySQL integration test)
+ * - GTID capture simplification (regression test)
  */
 
 #ifdef USE_MYSQL
@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -25,6 +26,8 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "loader/initial_loader.h"
+#include "mysql_test_helpers.h"
 #include "storage/document_store.h"
 
 namespace mygramdb::loader {
@@ -447,7 +450,7 @@ class BatchProcessingTest : public ::testing::Test {
 /**
  * @brief Test that final batch is properly indexed
  *
- * Bug #4: The last batch of documents should be indexed even when
+ * The last batch of documents should be indexed even when
  * it's smaller than the batch size.
  */
 TEST_F(BatchProcessingTest, FinalBatchIsIndexed) {
@@ -487,7 +490,7 @@ TEST_F(BatchProcessingTest, FinalBatchIsIndexed) {
     }
   }
 
-  // Process final batch (Bug #4: this should work correctly)
+  // Process final batch (this should work correctly)
   ASSERT_FALSE(doc_batch.empty()) << "Final batch should not be empty";
   ASSERT_EQ(doc_batch.size(), 2) << "Final batch should have 2 items";
   ASSERT_EQ(doc_batch.size(), index_batch.size()) << "doc_batch and index_batch should have same size in final batch";
@@ -518,7 +521,7 @@ TEST_F(BatchProcessingTest, FinalBatchIsIndexed) {
 /**
  * @brief Test batch processing with duplicates
  *
- * Bug #5: When duplicates exist, doc_ids may not match index_batch properly.
+ * When duplicates exist, doc_ids may not match index_batch properly.
  */
 TEST_F(BatchProcessingTest, DuplicatesHandledCorrectly) {
   std::vector<storage::DocumentStore::DocumentItem> doc_batch;
@@ -551,7 +554,7 @@ TEST_F(BatchProcessingTest, DuplicatesHandledCorrectly) {
   // Verify the duplicate behavior
   EXPECT_EQ(doc_ids[0], doc_ids[2]) << "Duplicate should return same doc_id";
 
-  // To fix Bug #5: Need to skip duplicates when indexing
+  // To fix Need to skip duplicates when indexing
   // Current implementation would incorrectly index "third text" with doc_ids[0]
 }
 
@@ -622,11 +625,11 @@ TEST_F(BatchProcessingTest, SingleItemBatch) {
 }
 
 // ===========================================================================
-// P3: GTID capture simplification (regression tests)
+// GTID capture simplification (regression tests)
 // ===========================================================================
 
 /**
- * @brief P3: Verify GTID is captured inside consistent snapshot (regression test)
+ * @brief Verify GTID is captured inside consistent snapshot (regression test)
  *
  * The old code had a retry loop that captured GTID before and after
  * START TRANSACTION WITH CONSISTENT SNAPSHOT, comparing them.
@@ -668,6 +671,89 @@ TEST_F(BatchProcessingTest, GtidCapturedInsideConsistentSnapshotDocumented) {
   EXPECT_EQ(doc_store_->Size(), 1);
   auto results = index_->SearchAnd({"te"});
   EXPECT_EQ(results.size(), 1);
+}
+
+TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGtid) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection loader_connection(connection_config);
+  auto loader_connect = loader_connection.Connect("initial-loader-shared-snapshot-test");
+  if (!loader_connect) {
+    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
+  }
+  auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  }
+  if (!*gtid_mode_enabled) {
+    GTEST_SKIP() << "MySQL GTID mode is not enabled";
+  }
+
+  mysql::Connection writer_connection(connection_config);
+  auto writer_connect = writer_connection.Connect("initial-loader-shared-snapshot-writer");
+  if (!writer_connect) {
+    GTEST_SKIP() << "MySQL writer connection failed: " << writer_connect.error().message();
+  }
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table_a = "mygram_it_snapshot_a_" + suffix;
+  const std::string table_b = "mygram_it_snapshot_b_" + suffix;
+
+  auto cleanup = [&]() {
+    (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table_a);
+    (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table_b);
+  };
+  cleanup();
+
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE " + table_a +
+                                              " (id VARCHAR(32) PRIMARY KEY, content TEXT) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE " + table_b +
+                                              " (id VARCHAR(32) PRIMARY KEY, content TEXT) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table_a + " VALUES ('1', 'snapshot old alpha')"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table_b + " VALUES ('1', 'snapshot old beta')"));
+
+  ASSERT_TRUE(loader_connection.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT"));
+  auto gtid_result = loader_connection.GetExecutedGTID();
+  ASSERT_TRUE(gtid_result) << gtid_result.error().message();
+  std::string snapshot_gtid = *gtid_result;
+  snapshot_gtid.erase(
+      std::remove_if(snapshot_gtid.begin(), snapshot_gtid.end(), [](unsigned char chr) { return std::isspace(chr); }),
+      snapshot_gtid.end());
+  ASSERT_FALSE(snapshot_gtid.empty());
+
+  auto make_table_config = [](const std::string& table_name) {
+    config::TableConfig table_config;
+    table_config.name = table_name;
+    table_config.primary_key = "id";
+    table_config.text_source.column = "content";
+    table_config.ngram_size = 1;
+    return table_config;
+  };
+
+  index::Index index_a(1);
+  storage::DocumentStore store_a;
+  loader::InitialLoader loader_a(loader_connection, index_a, store_a, make_table_config(table_a));
+  ASSERT_TRUE(loader_a.LoadFromExistingSnapshot(snapshot_gtid));
+
+  ASSERT_TRUE(
+      writer_connection.ExecuteUpdate("UPDATE " + table_b + " SET content = 'snapshot new beta' WHERE id = '1'"));
+
+  index::Index index_b(1);
+  storage::DocumentStore store_b;
+  loader::InitialLoader loader_b(loader_connection, index_b, store_b, make_table_config(table_b));
+  ASSERT_TRUE(loader_b.LoadFromExistingSnapshot(snapshot_gtid));
+  ASSERT_TRUE(loader_connection.ExecuteUpdate("COMMIT"));
+
+  auto doc_id_b = store_b.GetDocId("1");
+  ASSERT_TRUE(doc_id_b.has_value());
+  auto loaded_text_b = store_b.GetNormalizedText(*doc_id_b);
+  ASSERT_TRUE(loaded_text_b.has_value());
+  EXPECT_EQ(*loaded_text_b, "snapshot old beta");
+
+  cleanup();
 }
 
 }  // namespace mygramdb::loader

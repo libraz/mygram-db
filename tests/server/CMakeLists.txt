@@ -20,6 +20,7 @@ gtest_discover_tests(server_stats_test
 
 add_executable(response_formatter_test
   response_formatter_test.cpp
+  response_formatter_get_test.cpp
 )
 
 target_link_libraries(response_formatter_test
@@ -863,7 +864,7 @@ gtest_discover_tests(replication_pause_counter_test
 
 add_subdirectory(reactor)
 
-# IoReactor tests (Phase 2.T5)
+# IoReactor tests (Step 2.T5)
 
 add_executable(io_reactor_test
   io_reactor_test.cpp
@@ -888,7 +889,7 @@ gtest_discover_tests(io_reactor_test
     RESOURCE_LOCK thread_resources
 )
 
-# ReactorConnection unit tests (Phase 2.T4)
+# ReactorConnection unit tests (Step 2.T4)
 
 add_executable(reactor_connection_test
   reactor_connection_test.cpp

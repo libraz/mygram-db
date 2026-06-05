@@ -255,7 +255,7 @@ TEST(IndexConcurrentTest, LoadFromFile) {
  *
  * Regression test for: Optimize held shared_ptr copies of old posting lists while
  * working outside the lock. If LoadFromStream replaced term_postings_ concurrently,
- * Optimize would overwrite the new data with stale optimized copies in Phase 2.
+ * Optimize would overwrite the new data with stale optimized copies in Step 2.
  * Fix: load_generation_ counter incremented by LoadFromStream; Optimize checks it
  * before applying results and discards them if generation changed.
  */

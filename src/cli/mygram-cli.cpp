@@ -175,8 +175,8 @@ std::string JoinArgsForCommand(const std::vector<std::string>& args) {
 #ifdef USE_READLINE
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
-const char* command_list[] = {"SEARCH", "COUNT", "GET",  "INFO", "CONFIG",   "SAVE", "LOAD", "FACET", "REPLICATION",
-                              "DEBUG",  "CACHE", "DUMP", "SYNC", "OPTIMIZE", "quit", "exit", "help",  nullptr};
+const char* command_list[] = {"SEARCH", "COUNT", "GET",  "INFO",     "CONFIG", "FACET", "REPLICATION", "DEBUG",
+                              "CACHE",  "DUMP",  "SYNC", "OPTIMIZE", "quit",   "exit",  "help",        nullptr};
 
 char* CommandGenerator(const char* text, int state) {
   static int list_index;
@@ -316,12 +316,6 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
     return nullptr;
   }
 
-  if (command == "SAVE" || command == "LOAD") {
-    // Defer to filename completion
-    rl_attempted_completion_over = 0;
-    return nullptr;
-  }
-
   if (command == "REPLICATION") {
     if (token_count == 1) {
       current_keywords = {"STATUS", "STOP", "START"};
@@ -350,8 +344,14 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
 
   if (command == "DUMP") {
     if (token_count == 1) {
-      current_keywords = {"SAVE", "VERIFY", "INFO", "STATUS"};
+      current_keywords = {"SAVE", "LOAD", "VERIFY", "INFO", "STATUS"};
       return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    if (token_count == 2 &&
+        (tokens[1] == "SAVE" || tokens[1] == "LOAD" || tokens[1] == "VERIFY" || tokens[1] == "INFO")) {
+      // Defer to filename completion
+      rl_attempted_completion_over = 0;
+      return nullptr;
     }
     return nullptr;
   }
@@ -628,76 +628,73 @@ class MygramClient {
     }
 
     // Order matters: check more specific prefixes before more general ones.
-    constexpr size_t kOkPrefixLen = 3;  // strlen("OK ")
-
-    if (StartsWith(response, "OK RESULTS")) {
+    if (StartsWith(response, proto::kOkResultsPrefix)) {
       PrintSearchOrCountResponse(response, /*is_search=*/true);
       return;
     }
-    if (StartsWith(response, "OK COUNT")) {
+    if (StartsWith(response, proto::kOkCountPrefix)) {
       PrintSearchOrCountResponse(response, /*is_search=*/false);
       return;
     }
-    if (StartsWith(response, "OK DEBUG_ON")) {
+    if (StartsWith(response, proto::kOkDebugOn)) {
       std::cout << "Debug mode enabled\n";
       return;
     }
-    if (StartsWith(response, "OK DEBUG_OFF")) {
+    if (StartsWith(response, proto::kOkDebugOff)) {
       std::cout << "Debug mode disabled\n";
       return;
     }
-    if (StartsWith(response, "OK OPTIMIZED")) {
-      std::cout << response.substr(kOkPrefixLen) << '\n';
+    if (StartsWith(response, proto::kOkOptimizedPrefix)) {
+      std::cout << response.substr(proto::kOkPrefixLen) << '\n';
       return;
     }
-    if (StartsWith(response, "OK DOC")) {
-      std::cout << response.substr(kOkPrefixLen) << '\n';
+    if (StartsWith(response, proto::kOkDocPrefix)) {
+      std::cout << response.substr(proto::kOkPrefixLen) << '\n';
       return;
     }
-    if (StartsWith(response, "OK SAVED")) {
+    if (StartsWith(response, proto::kOkSavedPrefix)) {
       std::cout << "Snapshot saved to: " << response.substr(kOkSavedPrefixLength) << '\n';
       return;
     }
-    if (StartsWith(response, "OK LOADED")) {
+    if (StartsWith(response, proto::kOkLoadedPrefix)) {
       std::cout << "Snapshot loaded from: " << response.substr(kOkLoadedPrefixLength) << '\n';
       return;
     }
-    if (StartsWith(response, "OK REPLICATION_STOPPED")) {
+    if (StartsWith(response, proto::kOkReplicationStopped)) {
       std::cout << "Replication stopped successfully\n";
       return;
     }
-    if (StartsWith(response, "OK REPLICATION_STARTED")) {
+    if (StartsWith(response, proto::kOkReplicationStarted)) {
       std::cout << "Replication started successfully\n";
       return;
     }
-    if (StartsWith(response, "OK INFO") || StartsWith(response, "OK REPLICATION") ||
-        StartsWith(response, "OK CACHE_STATS") || StartsWith(response, "OK DUMP_STATUS")) {
+    if (StartsWith(response, proto::kOkInfoPrefix) || StartsWith(response, proto::kOkReplicationPrefix) ||
+        StartsWith(response, proto::kOkCacheStatsPrefix) || StartsWith(response, proto::kOkDumpStatusPrefix)) {
       // Multi-line responses with potential trailing END marker.
       // Strip leading status line + normalize CRLF + strip END.
       // Note: CONFIG SHOW emits "+OK\r\n..." (handled below), not "OK CONFIG".
       std::cout << FormatMultiLineBody(response) << '\n';
       return;
     }
-    if (StartsWith(response, "OK DUMP_INFO") || StartsWith(response, "OK DUMP_STARTED") ||
-        StartsWith(response, "OK DUMP_VERIFIED")) {
+    if (StartsWith(response, proto::kOkDumpInfoPrefix) || StartsWith(response, proto::kOkDumpStartedPrefix) ||
+        StartsWith(response, proto::kOkDumpVerifiedPrefix)) {
       PrintHeaderAndBody(response);
       return;
     }
-    if (StartsWith(response, "OK FACET")) {
+    if (StartsWith(response, proto::kOkFacetPrefix)) {
       // OK FACET <num>\r\n<value>\t<count>\r\n...
       PrintHeaderAndBody(response);
       return;
     }
-    if (StartsWith(response, "OK CACHE_CLEARED") || StartsWith(response, "OK CACHE_ENABLED") ||
-        StartsWith(response, "OK CACHE_DISABLED") || StartsWith(response, "OK SYNC")) {
+    if (StartsWith(response, proto::kOkCacheCleared) || StartsWith(response, proto::kOkCacheEnabled) ||
+        StartsWith(response, proto::kOkCacheDisabled) || StartsWith(response, proto::kOkSyncPrefix)) {
       // Single-line status responses; strip "OK "
-      std::cout << response.substr(kOkPrefixLen) << '\n';
+      std::cout << response.substr(proto::kOkPrefixLen) << '\n';
       return;
     }
-    if (StartsWith(response, "+OK")) {
+    if (StartsWith(response, proto::kPlusOkPrefix)) {
       // Admin / variable responses: "+OK\r\n<body>" or "+OK <message>"
-      constexpr size_t kPlusOkLen = 3;  // strlen("+OK")
-      std::string body = response.substr(kPlusOkLen);
+      std::string body = response.substr(proto::kPlusOkPrefixLen);
       if (!body.empty() && (body.front() == '\r' || body.front() == '\n')) {
         body = NormalizeCrlf(std::move(body));
         // Trim leading newlines after normalization
@@ -718,7 +715,7 @@ class MygramClient {
       }
       return;
     }
-    if (StartsWith(response, "ERROR")) {
+    if (StartsWith(response, proto::kErrorPrefix)) {
       std::cout << "(error) " << response.substr(kErrorPrefixLength) << '\n';
       return;
     }
@@ -790,14 +787,12 @@ class MygramClient {
               << "  GET <table> <primary_key>\n"
               << "  INFO              - Show server statistics\n"
               << "  CONFIG            - Show current configuration\n"
-              << "  SAVE [filename]   - Save snapshot to disk\n"
-              << "  LOAD <filename>   - Load snapshot from disk\n"
               << "  FACET <table> <column> [WHERE <text>]   - Compute facet counts\n"
               << "  REPLICATION STATUS|STOP|START\n"
               << "  DEBUG ON|OFF      - Toggle per-connection debug output\n"
               << "  OPTIMIZE [table]  - Compact posting lists for one or all tables\n"
               << "  CACHE STATS|CLEAR|ENABLE|DISABLE\n"
-              << "  DUMP SAVE|VERIFY|INFO|STATUS\n"
+              << "  DUMP SAVE|LOAD|VERIFY|INFO|STATUS\n"
               << "  SYNC START|STOP|STATUS\n"
               << '\n'
               << "Query syntax examples:\n"
@@ -847,9 +842,34 @@ class MygramClient {
       iss >> count;
 
       std::vector<std::string> ids;
-      std::string token;
-      while (iss >> token) {
-        ids.push_back(token);
+      std::vector<std::string> snippets;
+
+      if (main_response.find('\n') == std::string::npos) {
+        std::string token;
+        while (iss >> token) {
+          ids.push_back(token);
+        }
+      } else {
+        size_t first_line_end = main_response.find('\n');
+        std::istringstream rows(main_response.substr(first_line_end + 1));
+        std::string line;
+        while (std::getline(rows, line)) {
+          if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+          }
+          if (line.empty()) {
+            continue;
+          }
+
+          size_t tab_pos = line.find('\t');
+          if (tab_pos == std::string::npos) {
+            ids.push_back(line);
+            snippets.emplace_back();
+          } else {
+            ids.push_back(line.substr(0, tab_pos));
+            snippets.push_back(line.substr(tab_pos + 1));
+          }
+        }
       }
 
       std::cout << '(' << count << " results";
@@ -862,6 +882,9 @@ class MygramClient {
 
       for (size_t i = 0; i < ids.size(); ++i) {
         std::cout << (i + 1) << ") " << ids[i] << '\n';
+        if (i < snippets.size() && !snippets[i].empty()) {
+          std::cout << "   " << NormalizeCrlf(snippets[i]) << '\n';
+        }
       }
     } else {
       uint64_t count = 0;

@@ -300,7 +300,7 @@ TEST(DocumentStoreTest, MemoryUsage) {
 }
 
 /**
- * @test M-2: MemoryUsage should not double-count slot overhead
+ * @test MemoryUsage should not double-count slot overhead
  *
  * With N documents, slot overhead (sizeof(pair<DocId,string>) per capacity)
  * should be counted once via capacity-based accounting. The per-element loop
@@ -1084,14 +1084,14 @@ TEST(DocumentStoreTest, ConcurrentFilterOperations) {
 }
 
 // =============================================================================
-// Bug #20: DocumentStore filter map buckets not reclaimed
+// DocumentStore filter map buckets not reclaimed
 // =============================================================================
 // After many insertions and deletions, the unordered_map bucket count doesn't
 // shrink, causing memory waste. The Compact() method should reduce memory usage.
 // =============================================================================
 
 /**
- * @test Bug #20: Memory should be reclaimed after Compact()
+ * @test Memory should be reclaimed after Compact()
  *
  * After adding and removing many documents, calling Compact() should
  * reduce memory usage by rehashing the internal hash maps.
@@ -1129,22 +1129,21 @@ TEST(DocumentStoreTest, Bug20_CompactReducesMemoryUsage) {
   // Get memory usage after compact
   size_t memory_after_compact = store.MemoryUsage();
 
-  // Bug #20: Compact() should rehash maps and reduce bucket overhead.
+  // Compact() should rehash maps and reduce bucket overhead.
   // After compaction, memory should be less than before compaction.
-  EXPECT_LT(memory_after_compact, memory_before_compact) << "Bug #20: Compact() should reduce memory usage. "
+  EXPECT_LT(memory_after_compact, memory_before_compact) << "Compact() should reduce memory usage. "
                                                          << "Before compact: " << memory_before_compact << " bytes, "
                                                          << "After compact: " << memory_after_compact << " bytes";
 
   // After removing 99% of documents and compacting, memory should be
   // significantly less than the peak with all 10000 documents.
-  EXPECT_LT(memory_after_compact, memory_peak * 0.5)
-      << "Bug #20: Memory after removing 99% of docs and compacting should be "
-      << "well below peak. Peak: " << memory_peak << " bytes, "
-      << "After compact: " << memory_after_compact << " bytes";
+  EXPECT_LT(memory_after_compact, memory_peak * 0.5) << "Memory after removing 99% of docs and compacting should be "
+                                                     << "well below peak. Peak: " << memory_peak << " bytes, "
+                                                     << "After compact: " << memory_after_compact << " bytes";
 }
 
 /**
- * @test Bug #20: Clear() should also reclaim memory
+ * @test Clear() should also reclaim memory
  */
 TEST(DocumentStoreTest, Bug20_ClearReclaimsMemory) {
   DocumentStore store;
@@ -1167,12 +1166,12 @@ TEST(DocumentStoreTest, Bug20_ClearReclaimsMemory) {
   // Memory should be minimal after clear
   size_t memory_after_clear = store.MemoryUsage();
 
-  // Bug #20: After fix, Clear() should release most memory
-  EXPECT_LT(memory_after_clear, memory_after_add * 0.1) << "Bug #20: Clear() should release most memory";
+  // After fix, Clear() should release most memory
+  EXPECT_LT(memory_after_clear, memory_after_add * 0.1) << "Clear() should release most memory";
 }
 
 /**
- * @test Bug #36: Stream error checking during LoadFromFile
+ * @test Stream error checking during LoadFromFile
  *
  * This test verifies that stream read operations during snapshot loading
  * have proper error checking to detect corrupted or truncated files.

@@ -514,8 +514,8 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyApiMaxQueryLength(int value) {
-  if (value <= 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.max_query_length must be > 0"));
+  if (value < 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.max_query_length must be >= 0"));
   }
 
   std::unique_lock lock(mutex_);

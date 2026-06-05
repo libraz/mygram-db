@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <thread>
 #include <vector>
 
@@ -180,6 +181,23 @@ TEST_F(MygramClientTest, SearchWithLimit) {
   EXPECT_EQ(resp.results.size(), 1);  // But only 1 returned due to LIMIT
 }
 
+TEST_F(MygramClientTest, SearchWithHighlightsReturnsSnippets) {
+  const std::string text = mygram::utils::NormalizeText("Hello world example", true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, text));
+  index_->AddDocument(1, text);
+
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->SearchWithHighlights("test", "hello", 10);
+  ASSERT_TRUE(result) << "Search error: " << result.error().message();
+
+  const auto& resp = *result;
+  EXPECT_EQ(resp.total_count, 1);
+  ASSERT_EQ(resp.results.size(), 1);
+  EXPECT_EQ(resp.results[0].primary_key, "highlight_doc");
+  EXPECT_NE(resp.results[0].snippet.find("<em>hello</em>"), std::string::npos);
+}
+
 /**
  * @brief Test search with AND terms
  */
@@ -319,6 +337,23 @@ TEST_F(MygramClientTest, GetDocument) {
   EXPECT_TRUE(found_status);
 }
 
+TEST_F(MygramClientTest, GetPreservesStringFilterValuesWithSpaces) {
+  storage::FilterMap filters;
+  filters["display_name"] = std::string("Alice Smith");
+  doc_store_->AddDocument("space_doc", filters);
+  index_->AddDocument(1, "hello");
+
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Get("test", "space_doc");
+  ASSERT_TRUE(result) << "Get error: " << result.error().message();
+
+  ASSERT_EQ(result->primary_key, "space_doc");
+  ASSERT_EQ(result->fields.size(), 1u);
+  EXPECT_EQ(result->fields[0].first, "display_name");
+  EXPECT_EQ(result->fields[0].second, "Alice Smith");
+}
+
 /**
  * @brief Test INFO command
  *
@@ -431,6 +466,35 @@ TEST_F(MygramClientTest, GetConfigMultiLineComplete) {
 
   // Verify the response is multi-line (contains internal CRLF or LF)
   EXPECT_NE(response.find('\n'), std::string::npos) << "CONFIG response should be multi-line";
+}
+
+TEST_F(MygramClientTest, SaveAndLoadUseDumpCommands) {
+  AddTestDocuments();
+
+  ASSERT_TRUE(client_->Connect());
+  std::filesystem::create_directories("dumps");
+
+  const std::string dump_name =
+      "client_save_load_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".dmp";
+
+  auto save_result = client_->Save(dump_name);
+  ASSERT_TRUE(save_result) << "Save error: " << save_result.error().message();
+  EXPECT_NE(save_result->find(dump_name), std::string::npos);
+
+  index_->Clear();
+  doc_store_->Clear();
+
+  auto empty_search = client_->Search("test", "hello", 100);
+  ASSERT_TRUE(empty_search) << "Search after clear failed: " << empty_search.error().message();
+  ASSERT_EQ(empty_search->total_count, 0u);
+
+  auto load_result = client_->Load(*save_result);
+  ASSERT_TRUE(load_result) << "Load error: " << load_result.error().message();
+  EXPECT_NE(load_result->find(dump_name), std::string::npos);
+
+  auto restored_search = client_->Search("test", "hello", 100);
+  ASSERT_TRUE(restored_search) << "Search after load failed: " << restored_search.error().message();
+  EXPECT_EQ(restored_search->total_count, 2u);
 }
 
 /**
@@ -628,6 +692,82 @@ TEST_F(MygramClientTest, CApiSendCommand) {
   mygramclient_free_string(response);
 
   // Cleanup
+  mygramclient_disconnect(c_client);
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiGetPreservesStringFilterValuesWithSpaces) {
+  storage::FilterMap filters;
+  filters["display_name"] = std::string("Alice Smith");
+  doc_store_->AddDocument("space_doc", filters);
+  index_->AddDocument(1, "hello");
+
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+
+  MygramDocument_C* doc = nullptr;
+  ASSERT_EQ(mygramclient_get(c_client, "test", "space_doc", &doc), 0)
+      << "Get error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(doc, nullptr);
+  ASSERT_STREQ(doc->primary_key, "space_doc");
+  ASSERT_EQ(doc->field_count, 1u);
+  EXPECT_STREQ(doc->field_keys[0], "display_name");
+  EXPECT_STREQ(doc->field_values[0], "Alice Smith");
+
+  mygramclient_free_document(doc);
+  mygramclient_disconnect(c_client);
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiSaveAndLoadUseDumpCommands) {
+  AddTestDocuments();
+  std::filesystem::create_directories("dumps");
+
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+
+  const std::string dump_name =
+      "c_api_save_load_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".dmp";
+
+  char* saved_path = nullptr;
+  ASSERT_EQ(mygramclient_save(c_client, dump_name.c_str(), &saved_path), 0)
+      << "Save error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(saved_path, nullptr);
+  std::string saved_path_str(saved_path);
+  EXPECT_NE(saved_path_str.find(dump_name), std::string::npos);
+  mygramclient_free_string(saved_path);
+
+  index_->Clear();
+  doc_store_->Clear();
+
+  char* loaded_path = nullptr;
+  ASSERT_EQ(mygramclient_load(c_client, saved_path_str.c_str(), &loaded_path), 0)
+      << "Load error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(loaded_path, nullptr);
+  EXPECT_NE(std::string(loaded_path).find(dump_name), std::string::npos);
+  mygramclient_free_string(loaded_path);
+
+  char* response = nullptr;
+  ASSERT_EQ(mygramclient_send_command(c_client, "COUNT test hello", &response), 0)
+      << "COUNT error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(std::string(response).find("OK COUNT 2") == 0) << response;
+  mygramclient_free_string(response);
+
   mygramclient_disconnect(c_client);
   mygramclient_destroy(c_client);
 }
@@ -1585,6 +1725,11 @@ TEST(IsResponseCompleteTest, SearchWithDebugRequiresDoubleCrlf) {
 
   // COUNT with DEBUG block
   EXPECT_TRUE(IsResponseComplete("OK COUNT 42\r\n\r\n# DEBUG\r\nquery_time: 2.0ms\r\n\r\n"));
+}
+
+TEST(IsResponseCompleteTest, SearchWithHighlightRequiresTrailingBlankLine) {
+  EXPECT_FALSE(IsResponseComplete("OK RESULTS 1\r\npk1\thello <em>world</em>\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK RESULTS 1\r\npk1\thello <em>world</em>\r\n\r\n"));
 }
 
 /**

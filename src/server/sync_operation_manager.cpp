@@ -64,7 +64,7 @@ SyncOperationManager::~SyncOperationManager() {
 // StartSync uses a two-phase locking pattern to safely reuse table-name slots
 // in sync_threads_ while never holding sync_mutex_ across a thread join.
 //
-// Phase 1 (under sync_mutex_):
+// Step 1 (under sync_mutex_):
 //   - Validate table existence and that no sync is currently is_running.
 //   - If a stale, non-joined std::thread is parked in sync_threads_ for this
 //     table (e.g. a previous SYNC ran to completion but its slot was never
@@ -74,10 +74,10 @@ SyncOperationManager::~SyncOperationManager() {
 //     them give a clean error rather than racing into a partially-modified
 //     map state.
 //
-// Phase 2 (lock released): join the moved-out thread. This is purely a
+// Step 2 (lock released): join the moved-out thread. This is purely a
 //   resource-cleanup step; no other locks are held.
 //
-// Phase 3 (under sync_mutex_ again): re-validate that no concurrent caller
+// Step 3 (under sync_mutex_ again): re-validate that no concurrent caller
 //   has flipped is_running back to true (e.g. another StartSync that ran the
 //   same dance), initialize sync_states_[table_name], publish the new thread
 //   into sync_threads_ via std::thread, and mark syncing_tables_.
@@ -119,7 +119,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
                                     "Cannot start SYNC for '" + table_name + "': server is shutting down"));
   }
 
-  // Phase 1: validation + grab any stale thread under the lock.
+  // Step 1: validation + grab any stale thread under the lock.
   std::thread previous_thread;
   {
     std::unique_lock<std::mutex> lock(sync_mutex_);
@@ -144,7 +144,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     // Concurrent StartSync racers checking is_running above must see this
     // claim and bail out. Earlier versions only claimed when a previous
     // thread existed; for the first concurrent burst (no stale thread), all
-    // racers passed the check and Phase 3 spawned multiple threads -> abort
+    // racers passed the check and Step 3 spawned multiple threads -> abort
     // (regression test ConcurrentStartSyncIsRaceFree).
     sync_states_[table_name].is_running = true;
     sync_states_[table_name].status = "JOINING_PREVIOUS";
@@ -159,14 +159,14 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     }
   }
 
-  // Phase 2: join the previous thread WITHOUT holding sync_mutex_, so that
+  // Step 2: join the previous thread WITHOUT holding sync_mutex_, so that
   // its terminal update_state lambda (which itself acquires sync_mutex_) can
   // make progress.
   if (previous_thread.joinable()) {
     previous_thread.join();
   }
 
-  // Phase 3: re-acquire the lock and finish initialization.
+  // Step 3: re-acquire the lock and finish initialization.
   {
     std::unique_lock<std::mutex> lock(sync_mutex_);
 
@@ -197,7 +197,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     }
 
     // Initialize state. is_running may already be true if we set it during
-    // Phase 1 (JOINING_PREVIOUS); in either case we want it true now.
+    // Step 1 (JOINING_PREVIOUS); in either case we want it true now.
     sync_states_[table_name].is_running = true;
     sync_states_[table_name].status = "STARTING";
     sync_states_[table_name].table_name = table_name;
@@ -223,7 +223,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     }
   }
 
-  return "OK SYNC STARTED table=" + table_name + " job_id=1";
+  return ResponseFormatter::FormatStatus("SYNC STARTED table=" + table_name + " job_id=1");
 }
 
 std::string SyncOperationManager::GetSyncStatus() {
@@ -365,7 +365,7 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
     // update_state has already run (reviewed: sync_mutex_ is released at line 259
     // before join, so the thread can acquire it in update_state).
 
-    return "OK SYNC STOPPED count=" + std::to_string(tables_to_stop.size());
+    return ResponseFormatter::FormatStatus("SYNC STOPPED count=" + std::to_string(tables_to_stop.size()));
   }
 
   // Stop specific table
@@ -423,7 +423,7 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
     thread_to_join.join();
   }
 
-  return "OK SYNC STOPPED table=" + table_name;
+  return ResponseFormatter::FormatStatus("SYNC STOPPED table=" + table_name);
 }
 
 void SyncOperationManager::RequestShutdown() {

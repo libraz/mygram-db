@@ -51,6 +51,13 @@ struct SignalFlags {
  * - Create() registers signal handlers (SIGINT, SIGTERM)
  * - Destructor restores original signal handlers
  * - RAII ensures cleanup even on exception
+ *
+ * Process invariant:
+ * - Exactly one live SignalManager instance is supported per process.
+ *   POSIX signal handlers and signal_flags_ are process-global, and each
+ *   instance stores the handlers that were current at registration time.
+ *   Overlapping instances would make destructor restore order ambiguous and
+ *   can reinstall stale handlers.
  */
 class SignalManager {
  public:

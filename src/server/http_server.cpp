@@ -1156,7 +1156,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 
     // Extract table name and ID from URL. Use the shared resolution helper so
     // GET applies the same table-name whitelist and null-context guards as
-    // SEARCH and COUNT (M-6 follow-up).
+    // SEARCH and COUNT.
     std::string id_str = req.matches[2];
     auto lookup = ResolveHttpTableContext(req.matches[1]);
     if (lookup.table_ctx == nullptr) {
@@ -1387,19 +1387,30 @@ void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Resp
 void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Response& res) {
   // Health probe — not counted in total_requests; see HandleHealth.
   // Readiness probe: Return 200 OK if ready to accept traffic, 503 otherwise
-  bool is_ready = (loading_ == nullptr || !loading_->load());
+  const bool is_loading = (loading_ != nullptr && loading_->load());
+#ifdef USE_MYSQL
+  const bool replication_unavailable = (binlog_reader_ != nullptr && !binlog_reader_->IsRunning());
+#else
+  const bool replication_unavailable = false;
+#endif
+  bool is_ready = !is_loading && !replication_unavailable;
 
   json response;
+  response["loading"] = is_loading;
+#ifdef USE_MYSQL
+  if (binlog_reader_ != nullptr) {
+    response["replication_running"] = !replication_unavailable;
+  }
+#endif
+
   if (is_ready) {
     response["status"] = "ready";
-    response["loading"] = false;
     response["timestamp"] =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     SendJson(res, kHttpOk, response);
   } else {
     response["status"] = "not_ready";
-    response["loading"] = true;
-    response["reason"] = "Server is loading";
+    response["reason"] = is_loading ? "Server is loading" : "Replication is not running";
     response["timestamp"] =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     SendJson(res, kHttpServiceUnavailable, response);
@@ -1413,7 +1424,12 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
 
   // Overall status
   bool is_loading = (loading_ != nullptr && loading_->load());
-  response["status"] = is_loading ? "degraded" : "healthy";
+#ifdef USE_MYSQL
+  const bool replication_unavailable = (binlog_reader_ != nullptr && !binlog_reader_->IsRunning());
+#else
+  const bool replication_unavailable = false;
+#endif
+  response["status"] = (is_loading || replication_unavailable) ? "degraded" : "healthy";
   response["timestamp"] =
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -1568,8 +1584,7 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
   RecordRequest();
 
   try {
-    // Use TCP server's stats if available (includes all protocol stats), otherwise use HTTP-only stats
-    ServerStats& effective_stats = (tcp_stats_ != nullptr) ? *tcp_stats_ : stats_;
+    ServerStats& effective_stats = GetEffectiveStats();
 
     // Aggregate metrics
     auto aggregated_metrics = StatisticsService::AggregateMetrics(table_contexts_);

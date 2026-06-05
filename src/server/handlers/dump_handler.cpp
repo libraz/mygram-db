@@ -17,6 +17,7 @@
 #include "cache/cache_manager.h"
 #include "server/log_field_names.h"
 #include "server/operation_names.h"
+#include "server/protocol_constants.h"
 #include "server/replication_pause_counter.h"
 #include "server/sync_operation_manager.h"
 #include "server/table_catalog.h"
@@ -118,7 +119,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   }
 
   // Atomic test-and-set on dump_save_in_progress, bundled with a release-on-
-  // scope-exit RAII guard via OperationGuard::TryAcquire (Phase 4 H-D1).
+  // scope-exit RAII guard via OperationGuard::TryAcquire.
   //
   // CR-2: do NOT split this into a separate load() + store(true) — that race
   // lets two concurrent DUMP SAVE clients both observe false and then both
@@ -244,9 +245,9 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 #ifdef USE_MYSQL
   std::string gtid;
 
-  // Stop replication first, then capture GTID.
-  // This ensures the worker thread has drained all queued events
-  // before we capture the final processed GTID position.
+  // Stop replication first, then publish the drained GTID.
+  // This ensures the worker thread has drained all queued events before every
+  // concurrent dump/snapshot records the same final processed GTID position.
   //
   // H-C3: Coordinate the actual Stop() with concurrent pause requests via
   // the process-wide replication_pause counter. Only the first pauser
@@ -261,16 +262,15 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
       first_pauser = pause_scope.Acquire();
       if (first_pauser) {
         ctx_.binlog_reader->Stop();
+        gtid = ctx_.binlog_reader->GetCurrentGTID();
+        ctx_.replication_pause_counter->PublishDrainedGTID(gtid);
         ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+      } else {
+        gtid = ctx_.replication_pause_counter->WaitForDrainedGTID();
       }
+    } else {
+      gtid = ctx_.binlog_reader->GetCurrentGTID();
     }
-  }
-
-  // Capture GTID after stopping replication (last processed position).
-  // If we were not the first pauser the reader is already stopped by an
-  // earlier pauser, so this still reads the last-processed position.
-  if (ctx_.binlog_reader != nullptr) {
-    gtid = ctx_.binlog_reader->GetCurrentGTID();
   }
 
   if (replication_was_running) {
@@ -363,8 +363,8 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
             .Field("filepath", filepath)
             .Info();
       } else {
-        // H-D4: standardize on the Expected<void, Error> chain rather than
-        // the legacy bool + GetLastError() shape. The bool overload of
+        // Use the Expected<void, Error> chain rather than the legacy bool +
+        // GetLastError() shape. The bool overload of
         // Expected and the explicit error()-message branch are the same
         // pattern used by the DUMP LOAD restore_replication ScopeGuard, so
         // both restart paths now read identically.
@@ -459,7 +459,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   std::string filepath = std::move(*resolved);
 
   // Atomic test-and-set on dump_load_in_progress, bundled with a release-on-
-  // scope-exit RAII guard via OperationGuard::TryAcquire (Phase 4 H-D1).
+  // scope-exit RAII guard via OperationGuard::TryAcquire.
   //
   // CR-2: do NOT split this into a separate load() + later AtomicFlagGuard —
   // that race lets two concurrent DUMP LOAD clients both observe false and
@@ -657,7 +657,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
             .Field("gtid", gtid)
             .Info();
       } else {
-        // H-D4: use Expected<void, Error> chain (same pattern as the
+        // Use the Expected<void, Error> chain (same pattern as the
         // restore_replication ScopeGuard above).
         auto start_result = ctx_.binlog_reader->Start();
         if (start_result) {
@@ -803,7 +803,7 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
   // DUMP LOAD to accept the basename and resolve it against the server-side
   // dump_dir.
   std::ostringstream result;
-  result << "OK DUMP_INFO " << filepath << "\r\n";
+  result << protocol::kOkDumpInfoPrefix << " " << filepath << "\r\n";
   result << "version: " << info.version << "\r\n";
   result << "gtid: " << info.gtid << "\r\n";
   result << "tables: " << info.table_count << "\r\n";
@@ -818,7 +818,7 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
 
 std::string DumpHandler::HandleDumpStatus() {
   std::ostringstream result;
-  result << "OK DUMP_STATUS\r\n";
+  result << protocol::kOkDumpStatusPrefix << "\r\n";
 
   // Check dump save status
   bool save_in_progress = ctx_.dump_save_in_progress.load();

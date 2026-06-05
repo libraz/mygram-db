@@ -142,7 +142,7 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
 
   // Prepare metadata for invalidation tracking.
   //
-  // M-15: created_at / last_accessed are intentionally left default-constructed
+  // created_at / last_accessed are intentionally left default-constructed.
   // here. QueryCache::Insert() stamps them with std::chrono::steady_clock::now()
   // immediately before the entry enters cache_map_, and that is the
   // authoritative timestamp used for TTL accounting. InvalidationManager

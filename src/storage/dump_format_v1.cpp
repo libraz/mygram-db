@@ -1038,7 +1038,7 @@ Expected<void, Error> WriteDumpV1(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats) {
-  // Atomic write strategy (BUG-0077):
+  // Atomic write strategy:
   // 1. Write to temporary file with unique suffix to avoid concurrent write collisions
   // 2. fsync the temporary file
   // 3. Atomically rename to final path

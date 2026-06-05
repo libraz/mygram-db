@@ -20,14 +20,21 @@ using namespace mygramdb::mysql;
 namespace {
 
 /**
+ * @brief Helper to extract a little-endian uint64 from binary data
+ */
+uint64_t ReadUInt64LE(const std::vector<uint8_t>& data, size_t offset) {
+  uint64_t result = 0;
+  for (size_t i = 0; i < 8; ++i) {
+    result |= static_cast<uint64_t>(data[offset + i]) << (i * 8);
+  }
+  return result;
+}
+
+/**
  * @brief Helper to extract a little-endian int64 from binary data
  */
 int64_t ReadInt64LE(const std::vector<uint8_t>& data, size_t offset) {
-  int64_t result = 0;
-  for (size_t i = 0; i < 8; ++i) {
-    result |= static_cast<int64_t>(data[offset + i]) << (i * 8);
-  }
-  return result;
+  return static_cast<int64_t>(ReadUInt64LE(data, offset));
 }
 
 /**
@@ -406,7 +413,7 @@ TEST_F(GtidEncoderTest, MultiServerGtidSet) {
 }
 
 // ===========================================================================
-// Newline handling tests (P1: MySQL returns GTID sets with embedded newlines)
+// Newline handling tests (MySQL returns GTID sets with embedded newlines)
 // ===========================================================================
 
 TEST_F(GtidEncoderTest, NewlineBetweenUuidsIsTrimmed) {
@@ -455,7 +462,7 @@ TEST_F(GtidEncoderTest, EmptyGtidReturnsExpectedValue) {
 }
 
 // ===========================================================================
-// Interval merging tests (P2: sort and merge overlapping/adjacent intervals)
+// Interval merging tests (sort and merge overlapping/adjacent intervals)
 // ===========================================================================
 
 TEST_F(GtidEncoderTest, OverlappingIntervalsAreMerged) {
@@ -532,23 +539,36 @@ TEST_F(GtidEncoderTest, NonOverlappingIntervalsArePreserved) {
 // Overflow protection tests (P3)
 // ===========================================================================
 
-TEST_F(GtidEncoderTest, OverflowCheckForMaxValue) {
-  // INT64_MAX (9223372036854775807) as single transaction would need exclusive end
-  // INT64_MAX + 1, which overflows int64_t
-  std::string gtid = "00000000-0000-0000-0000-000000000001:9223372036854775807";
+TEST_F(GtidEncoderTest, AllowsTransactionIdAboveSignedInt64Max) {
+  std::string gtid = "00000000-0000-0000-0000-000000000001:9223372036854775808";
+  auto result = GtidEncoder::Encode(gtid);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(ReadUInt64LE(*result, 32), 9223372036854775808ULL);
+  EXPECT_EQ(ReadUInt64LE(*result, 40), 9223372036854775809ULL);
+}
+
+TEST_F(GtidEncoderTest, AllowsRangeEndAboveSignedInt64Max) {
+  std::string gtid = "00000000-0000-0000-0000-000000000001:1-9223372036854775808";
+  auto result = GtidEncoder::Encode(gtid);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(ReadUInt64LE(*result, 32), 1ULL);
+  EXPECT_EQ(ReadUInt64LE(*result, 40), 9223372036854775809ULL);
+}
+
+TEST_F(GtidEncoderTest, OverflowCheckForUint64MaxValue) {
+  std::string gtid = "00000000-0000-0000-0000-000000000001:18446744073709551615";
   auto result = GtidEncoder::Encode(gtid);
   EXPECT_FALSE(result.has_value());
 }
 
-TEST_F(GtidEncoderTest, OverflowCheckForNearMaxRangeEnd) {
-  // Range ending at INT64_MAX would need exclusive end INT64_MAX + 1
-  std::string gtid = "00000000-0000-0000-0000-000000000001:1-9223372036854775807";
+TEST_F(GtidEncoderTest, OverflowCheckForUint64MaxRangeEnd) {
+  std::string gtid = "00000000-0000-0000-0000-000000000001:1-18446744073709551615";
   auto result = GtidEncoder::Encode(gtid);
   EXPECT_FALSE(result.has_value());
 }
 
 // ===========================================================================
-// Single GTID encoding tests (BUG 1: verify single GTID creates correct interval)
+// Single GTID encoding tests (verify single GTID creates correct interval)
 // ===========================================================================
 
 TEST_F(GtidEncoderTest, SingleGtidCreatesIntervalFromTransactionNumber) {

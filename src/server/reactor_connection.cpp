@@ -2,7 +2,7 @@
  * @file reactor_connection.cpp
  * @brief Per-connection state + drain-task-per-connection pattern.
  *
- * Implements the Phase 2 read side + Phase 3 non-blocking write queue of
+ * Implements the Step 2 read side + Step 3 non-blocking write queue of
  * the reactor refactor described in docs/ja/design/reactor-io-refactor.md
  * §4.3/§7 R3.
  */

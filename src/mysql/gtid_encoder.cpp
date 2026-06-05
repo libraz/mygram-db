@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <sstream>
 
@@ -208,14 +209,14 @@ mygram::utils::Expected<GtidEncoder::Interval, Error> GtidEncoder::ParseInterval
 
   if (dash_pos == std::string::npos) {
     // Single transaction number (e.g., "5")
-    auto start = mygram::utils::ParseNumeric<int64_t>(trimmed);
+    auto start = mygram::utils::ParseNumeric<uint64_t>(trimmed);
     if (!start.has_value()) {
       return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval number format: " + interval_str));
     }
     interval.start = *start;
     // Check for overflow before adding 1
-    if (interval.start >= INT64_MAX) {
-      return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
+    if (interval.start >= std::numeric_limits<uint64_t>::max()) {
+      return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to UINT64_MAX"));
     }
     interval.end = interval.start + 1;  // exclusive end
   } else {
@@ -223,16 +224,16 @@ mygram::utils::Expected<GtidEncoder::Interval, Error> GtidEncoder::ParseInterval
     std::string_view trimmed_view(trimmed);
     std::string_view start_str = mygram::utils::TrimAsciiWhitespaceView(trimmed_view.substr(0, dash_pos));
     std::string_view end_str = mygram::utils::TrimAsciiWhitespaceView(trimmed_view.substr(dash_pos + 1));
-    auto start = mygram::utils::ParseNumeric<int64_t>(start_str);
-    auto end = mygram::utils::ParseNumeric<int64_t>(end_str);
+    auto start = mygram::utils::ParseNumeric<uint64_t>(start_str);
+    auto end = mygram::utils::ParseNumeric<uint64_t>(end_str);
     if (!start.has_value() || !end.has_value()) {
       return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval number format: " + interval_str));
     }
     interval.start = *start;
-    int64_t end_inclusive = *end;
+    uint64_t end_inclusive = *end;
     // Check for overflow before adding 1
-    if (end_inclusive >= INT64_MAX) {
-      return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to INT64_MAX"));
+    if (end_inclusive >= std::numeric_limits<uint64_t>::max()) {
+      return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to UINT64_MAX"));
     }
     interval.end = end_inclusive + 1;  // convert to exclusive
   }

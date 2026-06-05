@@ -126,8 +126,8 @@ class AtomicFlagResetGuard {
  *   AtomicFlagResetGuard reset_guard(flag);
  * @endcode
  * pattern that several handlers (DUMP SAVE, DUMP LOAD, automatic
- * snapshot, OPTIMIZE, ...) repeated almost verbatim. Phase 4 H-D1
- * folds the test-and-set into a single factory call:
+ * snapshot, OPTIMIZE, ...) repeated almost verbatim. OperationGuard folds
+ * the test-and-set into a single factory call:
  *
  * @code
  *   auto guard = OperationGuard::TryAcquire(ctx_.dump_save_in_progress);

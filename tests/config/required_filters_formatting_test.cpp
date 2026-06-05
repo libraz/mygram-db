@@ -353,3 +353,48 @@ logging:
   // Clean up
   std::remove(temp_file.c_str());
 }
+
+TEST(RequiredFiltersFormattingTest, YamlScalarFilterValuesPreserveOriginalText) {
+  const char* yaml_content = R"(
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "test"
+  password: "test"
+  database: "test"
+
+tables:
+  - name: "test_table"
+    primary_key: "id"
+    text_source:
+      column: "content"
+    required_filters:
+      - name: "external_id"
+        type: "varchar"
+        op: "="
+        value: 1e3
+      - name: "account_id"
+        type: "bigint_unsigned"
+        op: "="
+        value: 18446744073709551615
+
+replication:
+  server_id: 12345
+)";
+
+  std::string temp_file = "/tmp/test_filter_scalar_preserve.yaml";
+  std::ofstream ofs(temp_file);
+  ofs << yaml_content;
+  ofs.close();
+
+  auto config_result = LoadConfig(temp_file);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+
+  ASSERT_EQ(config_result->tables.size(), 1);
+  const auto& required_filters = config_result->tables[0].required_filters;
+  ASSERT_EQ(required_filters.size(), 2);
+  EXPECT_EQ(required_filters[0].value, "1e3");
+  EXPECT_EQ(required_filters[1].value, "18446744073709551615");
+
+  std::remove(temp_file.c_str());
+}

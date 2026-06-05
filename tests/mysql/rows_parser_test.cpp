@@ -459,6 +459,7 @@ TEST_F(RowsParserTest, ExtractFiltersWithNullValues) {
   RowData row_data;
   row_data.primary_key = "123";
   row_data.columns["status"] = "";  // NULL value
+  row_data.null_columns.insert("status");
   row_data.columns["category"] = "tech";
 
   std::vector<mygramdb::config::FilterConfig> filter_configs;
@@ -472,6 +473,21 @@ TEST_F(RowsParserTest, ExtractFiltersWithNullValues) {
   EXPECT_TRUE(filters.find("status") == filters.end());
   EXPECT_TRUE(filters.find("category") != filters.end());
   EXPECT_EQ(std::get<std::string>(filters["category"]), "tech");
+}
+
+TEST_F(RowsParserTest, ExtractFiltersPreservesEmptyStringValues) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.columns["category"] = "";
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"category", "string", false, false, ""});
+
+  auto filters = ExtractFilters(row_data, filter_configs);
+
+  ASSERT_EQ(filters.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<std::string>(filters["category"]));
+  EXPECT_EQ(std::get<std::string>(filters["category"]), "");
 }
 
 TEST_F(RowsParserTest, ExtractFiltersMissingColumn) {
@@ -517,6 +533,11 @@ TEST_F(RowsParserTest, ExtractFiltersInvalidTypeConversion) {
  */
 class DateTimeParsingTest : public RowsParserTest {
  protected:
+  static uint32_t ScaleMicrosecondsForStoredFraction(uint8_t precision, uint32_t microseconds) {
+    static constexpr uint32_t kDivisors[] = {1, 10000, 10000, 100, 100, 1, 1};
+    return (precision <= 6) ? microseconds / kDivisors[precision] : microseconds;
+  }
+
   /**
    * @brief Encode DATETIME2 value to MySQL binary format
    *
@@ -550,28 +571,7 @@ class DateTimeParsingTest : public RowsParserTest {
     // Add fractional seconds if precision > 0
     if (precision > 0) {
       int frac_bytes = (precision + 1) / 2;
-      uint32_t frac = microseconds;
-      // Convert microseconds to the appropriate precision
-      switch (precision) {
-        case 1:
-          frac = microseconds / 100000;
-          break;
-        case 2:
-          frac = microseconds / 10000;
-          break;
-        case 3:
-          frac = microseconds / 1000;
-          break;
-        case 4:
-          frac = microseconds / 100;
-          break;
-        case 5:
-          frac = microseconds / 10;
-          break;
-        case 6:
-          frac = microseconds;
-          break;
-      }
+      uint32_t frac = ScaleMicrosecondsForStoredFraction(precision, microseconds);
       // Write fractional bytes in big-endian
       for (int i = frac_bytes - 1; i >= 0; i--) {
         result.push_back((frac >> (i * 8)) & 0xFF);
@@ -611,27 +611,7 @@ class DateTimeParsingTest : public RowsParserTest {
     // Add fractional seconds if precision > 0
     if (precision > 0) {
       int frac_bytes = (precision + 1) / 2;
-      uint32_t frac = microseconds;
-      switch (precision) {
-        case 1:
-          frac = microseconds / 100000;
-          break;
-        case 2:
-          frac = microseconds / 10000;
-          break;
-        case 3:
-          frac = microseconds / 1000;
-          break;
-        case 4:
-          frac = microseconds / 100;
-          break;
-        case 5:
-          frac = microseconds / 10;
-          break;
-        case 6:
-          frac = microseconds;
-          break;
-      }
+      uint32_t frac = ScaleMicrosecondsForStoredFraction(precision, microseconds);
       for (int i = frac_bytes - 1; i >= 0; i--) {
         result.push_back((frac >> (i * 8)) & 0xFF);
       }
@@ -657,27 +637,7 @@ class DateTimeParsingTest : public RowsParserTest {
     // Add fractional seconds if precision > 0
     if (precision > 0) {
       int frac_bytes = (precision + 1) / 2;
-      uint32_t frac = microseconds;
-      switch (precision) {
-        case 1:
-          frac = microseconds / 100000;
-          break;
-        case 2:
-          frac = microseconds / 10000;
-          break;
-        case 3:
-          frac = microseconds / 1000;
-          break;
-        case 4:
-          frac = microseconds / 100;
-          break;
-        case 5:
-          frac = microseconds / 10;
-          break;
-        case 6:
-          frac = microseconds;
-          break;
-      }
+      uint32_t frac = ScaleMicrosecondsForStoredFraction(precision, microseconds);
       for (int i = frac_bytes - 1; i >= 0; i--) {
         result.push_back((frac >> (i * 8)) & 0xFF);
       }
@@ -824,6 +784,18 @@ TEST_F(DateTimeParsingTest, Datetime2BasicParsing) {
   EXPECT_EQ("2025-11-25 14:30:45", row.GetColumnValue("dt_col"));
 }
 
+TEST_F(DateTimeParsingTest, Datetime2NegativePackedValueRejected) {
+  // DATETIMEF_INT_OFS - 1 decodes to a negative intpart. The decoder must not
+  // turn that into an unrelated positive date by taking abs(intpart).
+  std::vector<unsigned char> datetime_bytes = {0x7F, 0xFF, 0xFF, 0xFF, 0xFF};
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME2), datetime_bytes.data(), 0,
+                                           /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                           /*is_unsigned=*/false);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
+}
+
 /**
  * @test DATETIME2 parsing - edge case: year boundary
  */
@@ -889,6 +861,33 @@ TEST_F(DateTimeParsingTest, Datetime2WithMilliseconds) {
   EXPECT_EQ("2025-06-15 10:20:30.123000", result->front().GetColumnValue("dt_col"));
 }
 
+TEST_F(DateTimeParsingTest, Datetime2Precision1UsesMySQLStoredByteScale) {
+  auto datetime_bytes = EncodeDatetime2(2025, 6, 15, 10, 20, 30);
+  datetime_bytes.push_back(0x0A);  // MySQL stores .1 as 10 in the single fractional byte.
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 1);
+  auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
+
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ("2025-06-15 10:20:30.100000", result->front().GetColumnValue("dt_col"));
+}
+
+TEST_F(DateTimeParsingTest, Datetime2Precision3UsesMySQLStoredByteScale) {
+  auto datetime_bytes = EncodeDatetime2(2025, 6, 15, 10, 20, 30);
+  datetime_bytes.push_back(0x04);
+  datetime_bytes.push_back(0xD2);  // 1234 stored fractional units => 123400 usec for odd precision 3.
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 3);
+  auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
+
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ("2025-06-15 10:20:30.123400", result->front().GetColumnValue("dt_col"));
+}
+
 /**
  * @test TIME2 parsing - basic time
  */
@@ -919,6 +918,21 @@ TEST_F(DateTimeParsingTest, Time2WithMicroseconds) {
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("10:20:30.654321", result->front().GetColumnValue("dt_col"));
+}
+
+TEST_F(DateTimeParsingTest, Time2Precision5UsesMySQLStoredByteScale) {
+  auto time_bytes = EncodeTime2(10, 20, 30);
+  time_bytes.push_back(0x01);
+  time_bytes.push_back(0xE2);
+  time_bytes.push_back(0x3A);  // 123450 stored units => 123450 usec for odd precision 5.
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 5);
+  auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
+
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ("10:20:30.123450", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -983,6 +997,19 @@ TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("1732545600.123456", result->front().GetColumnValue("dt_col"));
+}
+
+TEST_F(DateTimeParsingTest, Timestamp2Precision1UsesMySQLStoredByteScale) {
+  auto timestamp_bytes = EncodeTimestamp2(1732545600);
+  timestamp_bytes.push_back(0x0A);  // MySQL stores .1 as 10 in the single fractional byte.
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIMESTAMP2, 1);
+  auto buffer = CreateDateTimeEvent(table_meta, timestamp_bytes);
+
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ("1732545600.100000", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -1084,11 +1111,11 @@ TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
 }
 
 // =============================================================================
-// BLOB Edge Cases (Bug #10)
+// BLOB Edge Cases
 // =============================================================================
 
 /**
- * @test Bug #10: BLOB with invalid metadata value should not crash
+ * @test BLOB with invalid metadata value should not crash
  *
  * The BLOB parsing code has a switch statement for metadata values 1-4,
  * but no default case. If metadata is 0 or >4, blob_len and blob_data
@@ -1144,7 +1171,7 @@ TEST_F(RowsParserTest, BlobInvalidMetadataZero) {
 }
 
 /**
- * @test Bug #10: BLOB with metadata=5 (out of range) should not crash
+ * @test BLOB with metadata=5 (out of range) should not crash
  */
 TEST_F(RowsParserTest, BlobInvalidMetadataFive) {
   TableMetadata table_meta;
@@ -1185,11 +1212,11 @@ TEST_F(RowsParserTest, BlobInvalidMetadataFive) {
 }
 
 // =============================================================================
-// Missing Column Type Handlers: YEAR, BIT, FLOAT, DOUBLE (Bug #11)
+// Missing Column Type Handlers: YEAR, BIT, FLOAT, DOUBLE
 // =============================================================================
 
 /**
- * @test Bug #11: YEAR type should be parsed correctly
+ * @test YEAR type should be parsed correctly
  *
  * MySQL YEAR type is stored as 1 byte: (year - 1900)
  * So 2024 is stored as 124 (2024-1900)
@@ -1241,7 +1268,7 @@ TEST_F(RowsParserTest, YearTypeParsing) {
 }
 
 /**
- * @test Bug #11: YEAR=1901 (minimum valid year)
+ * @test YEAR=1901 (minimum valid year)
  */
 TEST_F(RowsParserTest, YearMinValue) {
   TableMetadata table_meta;
@@ -1279,7 +1306,7 @@ TEST_F(RowsParserTest, YearMinValue) {
 }
 
 /**
- * @test Bug #11: YEAR=2155 (maximum valid year)
+ * @test YEAR=2155 (maximum valid year)
  */
 TEST_F(RowsParserTest, YearMaxValue) {
   TableMetadata table_meta;
@@ -1317,7 +1344,7 @@ TEST_F(RowsParserTest, YearMaxValue) {
 }
 
 /**
- * @test Bug #11: YEAR=0 (zero value - special case)
+ * @test YEAR=0 (zero value - special case)
  */
 TEST_F(RowsParserTest, YearZeroValue) {
   TableMetadata table_meta;
@@ -1356,7 +1383,7 @@ TEST_F(RowsParserTest, YearZeroValue) {
 }
 
 /**
- * @test Bug #11: FLOAT type should be parsed correctly
+ * @test FLOAT type should be parsed correctly
  */
 TEST_F(RowsParserTest, FloatTypeParsing) {
   TableMetadata table_meta;
@@ -1409,7 +1436,7 @@ TEST_F(RowsParserTest, FloatTypeParsing) {
 }
 
 /**
- * @test Bug #11: DOUBLE type should be parsed correctly
+ * @test DOUBLE type should be parsed correctly
  */
 TEST_F(RowsParserTest, DoubleTypeParsing) {
   TableMetadata table_meta;
@@ -1462,7 +1489,7 @@ TEST_F(RowsParserTest, DoubleTypeParsing) {
 }
 
 /**
- * @test Bug #11: FLOAT with special values (zero, negative, very large)
+ * @test FLOAT with special values (zero, negative, very large)
  */
 TEST_F(RowsParserTest, FloatSpecialValues) {
   TableMetadata table_meta;
@@ -1520,7 +1547,7 @@ TEST_F(RowsParserTest, FloatSpecialValues) {
 }
 
 /**
- * @test Bug #11: BIT type should be parsed correctly
+ * @test BIT type should be parsed correctly
  *
  * MySQL BIT(n) is stored as (bytes, bits) where:
  * - bytes = n / 8
@@ -1578,7 +1605,7 @@ TEST_F(RowsParserTest, BitTypeParsing) {
 }
 
 /**
- * @test Bug #11: BIT with multiple bytes
+ * @test BIT with multiple bytes
  */
 TEST_F(RowsParserTest, BitMultipleBytes) {
   TableMetadata table_meta;
@@ -1627,7 +1654,7 @@ TEST_F(RowsParserTest, BitMultipleBytes) {
 }
 
 /**
- * @test Bug #11: BIT with partial byte (e.g., BIT(5))
+ * @test BIT with partial byte (e.g., BIT(5))
  */
 TEST_F(RowsParserTest, BitPartialByte) {
   TableMetadata table_meta;
@@ -1674,11 +1701,11 @@ TEST_F(RowsParserTest, BitPartialByte) {
 }
 
 // =============================================================================
-// Character Encoding / UTF-8 Handling (Bug #9)
+// Character Encoding / UTF-8 Handling
 // =============================================================================
 
 /**
- * @test Bug #9: Valid UTF-8 strings should pass through unchanged
+ * @test Valid UTF-8 strings should pass through unchanged
  */
 TEST_F(RowsParserTest, ValidUtf8PassThrough) {
   TableMetadata table_meta;
@@ -1736,7 +1763,7 @@ TEST_F(RowsParserTest, ValidUtf8PassThrough) {
 }
 
 /**
- * @test Bug #9: Invalid UTF-8 sequences should be sanitized
+ * @test Invalid UTF-8 sequences should be sanitized
  *
  * Invalid bytes should be replaced with U+FFFD (replacement character)
  */
@@ -1825,7 +1852,7 @@ TEST_F(RowsParserTest, InvalidUtf8Sanitized) {
 }
 
 /**
- * @test Bug #9: BLOB/TEXT types should also sanitize UTF-8
+ * @test BLOB/TEXT types should also sanitize UTF-8
  */
 TEST_F(RowsParserTest, BlobTextUtf8Sanitization) {
   TableMetadata table_meta;
@@ -1878,7 +1905,7 @@ TEST_F(RowsParserTest, BlobTextUtf8Sanitization) {
 }
 
 /**
- * @test Bug #9: Empty string should be handled correctly
+ * @test Empty string should be handled correctly
  */
 TEST_F(RowsParserTest, EmptyStringHandling) {
   TableMetadata table_meta;
@@ -1918,11 +1945,11 @@ TEST_F(RowsParserTest, EmptyStringHandling) {
 }
 
 // =============================================================================
-// Unsigned Integer Overflow (Bug #32)
+// Unsigned Integer Overflow
 // =============================================================================
 
 /**
- * @test Bug #32: UNSIGNED INT column should preserve large positive values
+ * @test UNSIGNED INT column should preserve large positive values
  *
  * An UNSIGNED INT can hold values 0-4294967295, but casting to int32_t
  * causes overflow for values > 2147483647.
@@ -1953,14 +1980,13 @@ TEST_F(RowsParserTest, UnsignedIntLargeValue) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  // Bug #32: Before fix, this would be "-294967296" (overflow to negative)
+  // Before fix, this would be "-294967296" (overflow to negative)
   // After fix, this should be "4000000000"
-  EXPECT_EQ("4000000000", result->front().GetColumnValue("id"))
-      << "Bug #32: UNSIGNED INT should preserve large positive values";
+  EXPECT_EQ("4000000000", result->front().GetColumnValue("id")) << "UNSIGNED INT should preserve large positive values";
 }
 
 /**
- * @test Bug #32: UNSIGNED TINYINT should handle values 128-255
+ * @test UNSIGNED TINYINT should handle values 128-255
  *
  * UNSIGNED TINYINT range is 0-255, but SIGNED TINYINT is -128 to 127.
  * Value 200 would become -56 if incorrectly cast to int8_t.
@@ -1988,13 +2014,13 @@ TEST_F(RowsParserTest, UnsignedTinyIntLargeValue) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  // Bug #32: Before fix, this would be "-56" (overflow to negative)
+  // Before fix, this would be "-56" (overflow to negative)
   // After fix, this should be "200"
-  EXPECT_EQ("200", result->front().GetColumnValue("id")) << "Bug #32: UNSIGNED TINYINT should preserve values 128-255";
+  EXPECT_EQ("200", result->front().GetColumnValue("id")) << "UNSIGNED TINYINT should preserve values 128-255";
 }
 
 /**
- * @test Bug #32: UNSIGNED SMALLINT should handle values 32768-65535
+ * @test UNSIGNED SMALLINT should handle values 32768-65535
  *
  * UNSIGNED SMALLINT range is 0-65535, but SIGNED SMALLINT is -32768 to 32767.
  */
@@ -2023,14 +2049,13 @@ TEST_F(RowsParserTest, UnsignedSmallIntLargeValue) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  // Bug #32: Before fix, this would be "-15536" (overflow to negative)
+  // Before fix, this would be "-15536" (overflow to negative)
   // After fix, this should be "50000"
-  EXPECT_EQ("50000", result->front().GetColumnValue("id"))
-      << "Bug #32: UNSIGNED SMALLINT should preserve values 32768-65535";
+  EXPECT_EQ("50000", result->front().GetColumnValue("id")) << "UNSIGNED SMALLINT should preserve values 32768-65535";
 }
 
 /**
- * @test Bug #32: UNSIGNED BIGINT should handle values > INT64_MAX
+ * @test UNSIGNED BIGINT should handle values > INT64_MAX
  */
 TEST_F(RowsParserTest, UnsignedBigIntLargeValue) {
   TableMetadata table_meta;
@@ -2059,14 +2084,14 @@ TEST_F(RowsParserTest, UnsignedBigIntLargeValue) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  // Bug #32: Before fix, this would be negative (overflow)
+  // Before fix, this would be negative (overflow)
   // After fix, this should be "10000000000000000000"
   EXPECT_EQ("10000000000000000000", result->front().GetColumnValue("id"))
-      << "Bug #32: UNSIGNED BIGINT should preserve values > INT64_MAX";
+      << "UNSIGNED BIGINT should preserve values > INT64_MAX";
 }
 
 /**
- * @test Bug #32: Signed integers should still work correctly
+ * @test Signed integers should still work correctly
  *
  * Ensure that fixing unsigned doesn't break signed integer handling.
  */
@@ -2102,11 +2127,11 @@ TEST_F(RowsParserTest, SignedIntNegativeValue) {
 }
 
 // =============================================================================
-// GEOMETRY Type Support (BUG-0072)
+// GEOMETRY Type Support
 // =============================================================================
 
 /**
- * @test BUG-0072: GEOMETRY type should be parsed as WKB hex string
+ * @test GEOMETRY type should be parsed as WKB hex string
  *
  * GEOMETRY columns store data in WKB (Well-Known Binary) format.
  * The parser should handle this type and return a hex representation.
@@ -2161,18 +2186,18 @@ TEST_F(RowsParserTest, GeometryTypeBasic) {
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
-  ASSERT_TRUE(result.has_value()) << "BUG-0072: GEOMETRY type should be parsed successfully";
+  ASSERT_TRUE(result.has_value()) << "GEOMETRY type should be parsed successfully";
   ASSERT_EQ(1, result->size());
 
   // The geometry column should exist and not contain [UNSUPPORTED_TYPE:255]
   ASSERT_NE(result->front().FindColumnValue("location"), nullptr);
   std::string geo_value = result->front().GetColumnValue("location");
   EXPECT_TRUE(geo_value.find("UNSUPPORTED") == std::string::npos)
-      << "BUG-0072: GEOMETRY should not return UNSUPPORTED_TYPE, got: " << geo_value;
+      << "GEOMETRY should not return UNSUPPORTED_TYPE, got: " << geo_value;
 }
 
 /**
- * @test BUG-0072: Empty GEOMETRY (zero-length) should be handled correctly
+ * @test Empty GEOMETRY (zero-length) should be handled correctly
  */
 TEST_F(RowsParserTest, GeometryTypeEmpty) {
   TableMetadata table_meta;
@@ -2331,7 +2356,7 @@ TEST_F(RowsParserTest, VectorTypeEmpty) {
 }
 
 // =============================================================================
-// DECIMAL Type Precision (BUG-0087)
+// DECIMAL Type Precision
 // =============================================================================
 
 /**
@@ -2428,7 +2453,7 @@ inline std::vector<unsigned char> EncodeDecimalValue(const std::string& value, u
 }
 
 /**
- * @test BUG-0087: DECIMAL positive integer value
+ * @test DECIMAL positive integer value
  */
 TEST_F(RowsParserTest, DecimalPositiveInteger) {
   TableMetadata table_meta;
@@ -2466,11 +2491,11 @@ TEST_F(RowsParserTest, DecimalPositiveInteger) {
   ASSERT_EQ(1, result->size());
 
   std::string decimal_value = result->front().GetColumnValue("amount");
-  EXPECT_EQ("12345", decimal_value) << "BUG-0087: DECIMAL positive integer should be parsed correctly";
+  EXPECT_EQ("12345", decimal_value) << "DECIMAL positive integer should be parsed correctly";
 }
 
 /**
- * @test BUG-0087: DECIMAL negative integer value
+ * @test DECIMAL negative integer value
  */
 TEST_F(RowsParserTest, DecimalNegativeInteger) {
   TableMetadata table_meta;
@@ -2507,11 +2532,11 @@ TEST_F(RowsParserTest, DecimalNegativeInteger) {
   ASSERT_EQ(1, result->size());
 
   std::string decimal_value = result->front().GetColumnValue("amount");
-  EXPECT_EQ("-12345", decimal_value) << "BUG-0087: DECIMAL negative integer should be parsed correctly";
+  EXPECT_EQ("-12345", decimal_value) << "DECIMAL negative integer should be parsed correctly";
 }
 
 /**
- * @test BUG-0087: DECIMAL with fractional part
+ * @test DECIMAL with fractional part
  */
 TEST_F(RowsParserTest, DecimalWithFraction) {
   TableMetadata table_meta;
@@ -2548,11 +2573,11 @@ TEST_F(RowsParserTest, DecimalWithFraction) {
   ASSERT_EQ(1, result->size());
 
   std::string decimal_value = result->front().GetColumnValue("price");
-  EXPECT_EQ("12345678.90", decimal_value) << "BUG-0087: DECIMAL with fraction should be parsed correctly";
+  EXPECT_EQ("12345678.90", decimal_value) << "DECIMAL with fraction should be parsed correctly";
 }
 
 /**
- * @test BUG-0087: DECIMAL negative with fractional part
+ * @test DECIMAL negative with fractional part
  */
 TEST_F(RowsParserTest, DecimalNegativeWithFraction) {
   TableMetadata table_meta;
@@ -2589,11 +2614,11 @@ TEST_F(RowsParserTest, DecimalNegativeWithFraction) {
   ASSERT_EQ(1, result->size());
 
   std::string decimal_value = result->front().GetColumnValue("balance");
-  EXPECT_EQ("-99999.99", decimal_value) << "BUG-0087: DECIMAL negative with fraction should be parsed correctly";
+  EXPECT_EQ("-99999.99", decimal_value) << "DECIMAL negative with fraction should be parsed correctly";
 }
 
 /**
- * @test BUG-0087: DECIMAL zero value
+ * @test DECIMAL zero value
  */
 TEST_F(RowsParserTest, DecimalZero) {
   TableMetadata table_meta;
@@ -2632,11 +2657,11 @@ TEST_F(RowsParserTest, DecimalZero) {
   std::string decimal_value = result->front().GetColumnValue("amount");
   // Zero should be parsed as "0" or "0.00"
   EXPECT_TRUE(decimal_value == "0" || decimal_value == "0.00")
-      << "BUG-0087: DECIMAL zero should be parsed correctly, got: " << decimal_value;
+      << "DECIMAL zero should be parsed correctly, got: " << decimal_value;
 }
 
 /**
- * @test BUG-0087: DECIMAL small value (less than 1)
+ * @test DECIMAL small value (less than 1)
  */
 TEST_F(RowsParserTest, DecimalSmallValue) {
   TableMetadata table_meta;
@@ -2673,11 +2698,11 @@ TEST_F(RowsParserTest, DecimalSmallValue) {
   ASSERT_EQ(1, result->size());
 
   std::string decimal_value = result->front().GetColumnValue("rate");
-  EXPECT_EQ("0.1234", decimal_value) << "BUG-0087: DECIMAL small value should be parsed correctly";
+  EXPECT_EQ("0.1234", decimal_value) << "DECIMAL small value should be parsed correctly";
 }
 
 // =============================================================================
-// binlog_row_image=MINIMAL/NOBLOB Support (BUG-0085)
+// binlog_row_image=MINIMAL/NOBLOB Support
 // =============================================================================
 
 /**
@@ -2740,7 +2765,7 @@ inline std::vector<unsigned char> CreateWriteRowsEventWithBitmap(const TableMeta
 }
 
 /**
- * @test BUG-0085: MINIMAL mode - only some columns present
+ * @test MINIMAL mode - only some columns present
  *
  * Simulates binlog_row_image=MINIMAL where only the primary key and
  * modified columns are present in the event.
@@ -2788,7 +2813,7 @@ TEST_F(RowsParserTest, MinimalModePartialColumns) {
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
-  ASSERT_TRUE(result.has_value()) << "BUG-0085: Parser should handle MINIMAL mode";
+  ASSERT_TRUE(result.has_value()) << "Parser should handle MINIMAL mode";
   ASSERT_EQ(1, result->size());
 
   // Present columns should be parsed
@@ -2796,11 +2821,11 @@ TEST_F(RowsParserTest, MinimalModePartialColumns) {
   EXPECT_EQ("1", result->front().GetColumnValue("status"));
 
   // Missing column should not be in the result
-  EXPECT_EQ(result->front().FindColumnValue("name"), nullptr) << "BUG-0085: Missing column should not appear in result";
+  EXPECT_EQ(result->front().FindColumnValue("name"), nullptr) << "Missing column should not appear in result";
 }
 
 /**
- * @test BUG-0085: MINIMAL mode with only primary key present
+ * @test MINIMAL mode with only primary key present
  */
 TEST_F(RowsParserTest, MinimalModeOnlyPrimaryKey) {
   TableMetadata table_meta;
@@ -2842,7 +2867,7 @@ TEST_F(RowsParserTest, MinimalModeOnlyPrimaryKey) {
 }
 
 /**
- * @test BUG-0085: All columns missing (edge case - should handle gracefully)
+ * @test All columns missing (edge case - should handle gracefully)
  */
 TEST_F(RowsParserTest, NoColumnsPresent) {
   TableMetadata table_meta;
@@ -3149,8 +3174,8 @@ TEST_F(RowsParserTest, WriteRowsEventSizeTooSmall) {
   buffer[11] = 0;
   buffer[12] = 0;
 
-  auto result =
-      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -3215,9 +3240,41 @@ TEST_F(RowsParserTest, WriteRowsEventSizeExceedsLength) {
   buffer[11] = 0;
   buffer[12] = 0;
 
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(RowsParserTest, WriteRowsEventRejectsTruncatedPackedColumnCount) {
+  TableMetadata table_meta;
+  table_meta.table_id = 1;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "test_table";
+  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+
+  std::vector<unsigned char> buffer(19, 0);
+  for (int i = 0; i < 6; ++i) {
+    buffer.push_back(0);  // table_id
+  }
+  buffer.push_back(0);  // flags
+  buffer.push_back(0);
+  buffer.push_back(2);  // V2 var_header_len: length field only
+  buffer.push_back(0);
+  buffer.push_back(252);  // packed integer marker requiring two following bytes
+  for (int i = 0; i < 4; ++i) {
+    buffer.push_back(0);  // checksum
+  }
+
+  uint32_t event_size = static_cast<uint32_t>(buffer.size());
+  buffer[9] = event_size & 0xFF;
+  buffer[10] = (event_size >> 8) & 0xFF;
+  buffer[11] = (event_size >> 16) & 0xFF;
+  buffer[12] = (event_size >> 24) & 0xFF;
+
   auto result =
       ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
-  EXPECT_FALSE(result.has_value());
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
 }
 
 // ---------------------------------------------------------------------------
@@ -3299,6 +3356,8 @@ TEST_F(ParseSingleRowTest, NullColumn) {
   EXPECT_EQ("7", result->row.primary_key);
   EXPECT_EQ("", result->row.text);  // NULL is represented as empty string
   EXPECT_EQ("", result->row.GetColumnValue("value"));
+  EXPECT_TRUE(result->row.IsColumnNull("value"));
+  EXPECT_FALSE(result->row.IsColumnNull("id"));
   EXPECT_EQ(result->next_ptr, buf.data() + buf.size());
 }
 
@@ -3344,6 +3403,28 @@ TEST_F(ParseSingleRowTest, TruncatedAtNullBitmap) {
 
   // Empty buffer -- can't even read null bitmap
   std::vector<unsigned char> buf;
+
+  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
+                                                          cols_present.data(), null_bitmap_size, 1,
+                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
+}
+
+TEST_F(ParseSingleRowTest, TruncatedFixedLengthColumnFailsBeforeDecode) {
+  TableMetadata meta;
+  meta.table_id = 1;
+  meta.database_name = "db";
+  meta.table_name = "tbl";
+  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+
+  auto cols_present = AllColumnsPresent(1);
+  size_t null_bitmap_size = 1;
+
+  std::vector<unsigned char> buf;
+  buf.push_back(0x00);  // null bitmap: no NULLs
+  buf.push_back(0x01);  // only one of four LONG bytes
 
   auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
                                                           cols_present.data(), null_bitmap_size, 1,

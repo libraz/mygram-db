@@ -241,8 +241,8 @@ struct MemoryConfig {
 
   struct {
     bool nfkc = true;
-    std::string width = "keep";
-    bool lower = true;
+    std::string width = "narrow";
+    bool lower = false;
   } normalize;
   std::string verify_text = "off";  ///< N-gram post-filter: "off", "ascii", "all"
 };

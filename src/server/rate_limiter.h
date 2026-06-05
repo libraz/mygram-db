@@ -189,10 +189,10 @@ class RateLimiter {
   // O(n) latency spikes on the request hot path. The previous implementation
   // swept inside AllowRequest under mutex_, blocking all rate-limit checks
   // (including for unrelated clients) while every expired bucket was removed.
-  // Now AllowRequest is strictly O(1) on the bucket count. M-8 unified the
-  // hand-rolled cv-loop with the rest of MygramDB's periodic-task plumbing
-  // via PeriodicWorker; the worker calls SweepExpiredBuckets() on its own
-  // thread and respects stop signals via its internal cv.
+  // Now AllowRequest is strictly O(1) on the bucket count. PeriodicWorker
+  // owns the previous hand-rolled cv-loop; the worker calls
+  // SweepExpiredBuckets() on its own thread and respects stop signals via its
+  // internal cv.
   mygram::utils::PeriodicWorker sweeper_{"rate_limiter_sweeper"};
 
   /**

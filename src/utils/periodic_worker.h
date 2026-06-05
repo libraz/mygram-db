@@ -5,9 +5,9 @@
  * Several modules in MygramDB needed the same shape of a background
  * thread: "sleep up to N ms, then run a maintenance task; on shutdown,
  * wake immediately instead of holding the join() for the full
- * interval." Phase 4 M-8 unifies that pattern here so each module no
- * longer carries its own std::condition_variable + atomic<bool> +
- * std::thread plumbing.
+ * interval." This type centralizes that pattern so each module no longer
+ * carries its own std::condition_variable + atomic<bool> + std::thread
+ * plumbing.
  *
  * Lifetime model:
  *   - PeriodicWorker is constructed without arguments. The worker

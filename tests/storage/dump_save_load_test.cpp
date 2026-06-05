@@ -56,7 +56,7 @@ int main() {
   filter.bitmap_index = true;
   table_config.filters.push_back(filter);
 
-  std::cout << "\n=== Phase 1: Build and Save Snapshot ===" << std::endl;
+  std::cout << "\n=== Step 1: Build and Save Snapshot ===" << std::endl;
 
   // Create index and document store
   auto index = std::make_unique<mygramdb::index::Index>(table_config.ngram_size);
@@ -64,8 +64,9 @@ int main() {
 
   // Connect to MySQL
   auto mysql_conn = std::make_unique<mygramdb::mysql::Connection>(mysql_config);
-  if (!mysql_conn->Connect()) {
-    std::cerr << "Failed to connect to MySQL: " << mysql_conn->GetLastError() << std::endl;
+  auto connect_result = mysql_conn->Connect();
+  if (!connect_result) {
+    std::cerr << "Failed to connect to MySQL: " << connect_result.error().message() << std::endl;
     return 1;
   }
   std::cout << "✓ Connected to MySQL" << std::endl;
@@ -113,7 +114,7 @@ int main() {
   }
   std::cout << "✓ Document store saved to " << docstore_file << std::endl;
 
-  std::cout << "\n=== Phase 2: Load from Disk ===" << std::endl;
+  std::cout << "\n=== Step 2: Load from Disk ===" << std::endl;
 
   // Create new empty index and document store
   auto index2 = std::make_unique<mygramdb::index::Index>(table_config.ngram_size);

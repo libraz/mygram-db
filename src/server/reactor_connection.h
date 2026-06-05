@@ -2,7 +2,7 @@
  * @file reactor_connection.h
  * @brief Heap-allocated per-connection state for the reactor I/O model.
  *
- * This is the Phase 2/3 implementation of the per-connection state object
+ * This is the Step 2/3 implementation of the per-connection state object
  * described in docs/ja/design/reactor-io-refactor.md §4.3. An instance is
  * created per accepted client socket and lives on the heap as a
  * `std::shared_ptr`, jointly owned by:
@@ -97,7 +97,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   /// Hard upper bound on unsent response bytes; once exceeded the reactor
   /// forcibly closes the connection to protect against slow-reader OOM
-  /// (see design doc §7 R3). Phase 3 enforces this cap in `EnqueueResponse`:
+  /// (see design doc §7 R3). Step 3 enforces this cap in `EnqueueResponse`:
   /// a push that would exceed the cap sets `closing_` and causes the drain
   /// task to tear down the connection.
   static constexpr size_t kDefaultMaxWriteQueueBytes = 16 * mygram::constants::kBytesPerMegabyte;  // 16 MiB
@@ -152,7 +152,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /**
    * @brief Handle `event::kWritable` for this connection.
    *
-   * Phase 3: drain `write_queue_` via non-blocking `send()` until EAGAIN
+   * Step 3: drain `write_queue_` via non-blocking `send()` until EAGAIN
    * or empty. On full drain, call `reactor_->DisarmWrite(fd_)` and return
    * true (or false if `closing_` was also set, so the reactor tears down
    * the fd). On partial drain, leave the queue armed and return true. On
@@ -214,7 +214,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    * @brief Enqueue a response for non-blocking send on this connection.
    *
    * The CRLF terminator is appended internally; callers should pass just
-   * the response body. This is the Phase 3 write-path entry point used by
+   * the response body. This is the Step 3 write-path entry point used by
    * `DrainTask`.
    *
    * The worker thread (drain task) owns the fast path: if the queue was
@@ -255,7 +255,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    *
    * Pops frames from `pending_frames_`, dispatches each through
    * `RequestDispatcher`, and enqueues each response for non-blocking send
-   * via `EnqueueResponse` (Phase 3 write path). Implements the Netty/Vert.x
+   * via `EnqueueResponse` (Step 3 write path). Implements the Netty/Vert.x
    * "clear-then-recheck" idiom to guarantee progress when new frames arrive
    * during the window between observing an empty queue and clearing
    * `drain_scheduled_`.

@@ -99,17 +99,17 @@ GET articles 12345
 ### Response
 
 ```
-DOC <primary_key> <filter1=value1> <filter2=value2> ...
+OK DOC <primary_key> <filter1=value1> <filter2=value2> ...
 ```
 
 Example:
 ```
-DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
+OK DOC 12345 status=1 category=tech created_at=2024-01-15T10:30:00
 ```
 
 Not found:
 ```
-(error) Document not found
+ERROR Document not found
 ```
 
 ---
@@ -541,11 +541,10 @@ FACET articles category "machine learning" FILTER status = 1 LIMIT 10
 ### Response
 
 ```
-OK FACET <column>
-<value1> <count1>
-<value2> <count2>
+OK FACET <num_values>
+<value1>	<count1>
+<value2>	<count2>
 ...
-END
 ```
 
 Results are sorted by count in descending order.
@@ -567,6 +566,7 @@ REPLICATION STATUS
 Multi-line key-value format:
 
 ```
+OK REPLICATION
 status: <running|stopped|not_configured>
 current_gtid: <current_gtid>
 processed_events: <count>
@@ -584,6 +584,7 @@ END
 
 Example (running):
 ```
+OK REPLICATION
 status: running
 current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
 processed_events: 5000
@@ -593,6 +594,7 @@ END
 
 Example (stopped):
 ```
+OK REPLICATION
 status: stopped
 current_gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100
 processed_events: 5000
@@ -614,7 +616,7 @@ REPLICATION STOP
 ### Response
 
 ```
-OK REPLICATION STOPPED
+OK REPLICATION_STOPPED
 ```
 
 ---
@@ -632,7 +634,7 @@ REPLICATION START
 ### Response
 
 ```
-OK REPLICATION STARTED
+OK REPLICATION_STARTED
 ```
 
 ---
@@ -955,7 +957,7 @@ In interactive mode, type `help` to see available commands:
 Available commands:
   SEARCH, COUNT, GET              - Search and retrieval
   INFO, CONFIG                    - Server information and configuration
-  DUMP SAVE/LOAD/VERIFY/INFO      - Snapshot management
+  DUMP SAVE/LOAD/VERIFY/INFO/STATUS - Snapshot management
   REPLICATION STATUS/STOP/START   - Replication control
   OPTIMIZE                        - Index optimization
   DEBUG ON/OFF                    - Enable/disable debug mode

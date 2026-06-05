@@ -576,11 +576,7 @@ void BinlogReader::WorkerThreadFunc() {
       break;
     }
 
-    // Only update GTID and counter on successful processing
-    if (ProcessEvent(*event)) {
-      processed_events_++;
-      UpdateCurrentGTID(event->gtid);
-    } else {
+    if (!ProcessQueuedEvent(*event)) {
       mygram::utils::StructuredLog()
           .Event("binlog_error")
           .Field("type", "event_processing_failed")
@@ -603,6 +599,35 @@ void BinlogReader::WorkerThreadFunc() {
   }
 
   mygram::utils::StructuredLog().Event("binlog_worker_thread_stopped").Info();
+}
+
+bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
+  if (event.type == BinlogEventType::COMMIT) {
+    std::string commit_gtid = event.gtid.empty() ? pending_commit_gtid_ : event.gtid;
+    if (!commit_gtid.empty()) {
+      UpdateCurrentGTID(commit_gtid);
+      pending_commit_gtid_.clear();
+    }
+    return true;
+  }
+
+  if (!ProcessEvent(event)) {
+    return false;
+  }
+
+  processed_events_++;
+
+  if (event.type == BinlogEventType::DDL) {
+    if (!event.gtid.empty()) {
+      UpdateCurrentGTID(event.gtid);
+    }
+    return true;
+  }
+
+  if (!event.gtid.empty()) {
+    pending_commit_gtid_ = event.gtid;
+  }
+  return true;
 }
 
 void BinlogReader::PushEvent(std::unique_ptr<BinlogEvent> event) {

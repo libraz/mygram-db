@@ -124,7 +124,7 @@ class ResultSorter {
                                 const std::string& primary_key_column = "id");
 
   /**
-   * @brief Pre-compute sort keys for all DocIDs (Phase 1 of Schwartzian Transform)
+   * @brief Pre-compute sort keys for all DocIDs (Step 1 of Schwartzian Transform)
    *
    * Builds the SortEntry vector with pre-computed sort keys using batch lookups.
    * Shared by SortWithSchwartzianTransform and SortWithSchwartzianTransformPartial.

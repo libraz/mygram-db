@@ -1,6 +1,6 @@
 /**
  * @file atomic_write_test.cpp
- * @brief Tests for atomic write (temp file + rename) strategy (BUG-0077)
+ * @brief Tests for atomic write (temp file + rename) strategy
  *
  * Verifies that dump writes use atomic temp-file-then-rename strategy
  * to prevent file corruption during crashes.

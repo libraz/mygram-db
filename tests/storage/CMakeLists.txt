@@ -120,7 +120,7 @@ gtest_discover_tests(dump_security_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
-# Endian serialization tests (BUG-0076)
+# Endian serialization tests
 add_executable(endian_serialization_test
   endian_serialization_test.cpp
 )
@@ -138,7 +138,7 @@ gtest_discover_tests(endian_serialization_test
   DISCOVERY_TIMEOUT 30
 )
 
-# Atomic write tests (BUG-0077)
+# Atomic write tests
 add_executable(atomic_write_test
   atomic_write_test.cpp
 )

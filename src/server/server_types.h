@@ -187,7 +187,7 @@ struct TableContext {
   std::unique_ptr<index::Index> index;
   std::unique_ptr<storage::DocumentStore> doc_store;
   BM25Stats bm25_stats;
-  std::unique_ptr<query::SynonymDictionary> synonym_dict;  ///< Synonym dictionary (Phase 1B)
+  std::unique_ptr<query::SynonymDictionary> synonym_dict;  ///< Synonym dictionary (Step 1B)
   // Note: BinlogReader is shared across all tables (single GTID stream)
 };
 

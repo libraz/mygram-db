@@ -75,7 +75,7 @@ class InvalidationManager {
   /**
    * @brief Invalidate cache entries affected by text change
    *
-   * Performs Phase 1 invalidation (immediate mark) by extracting ngrams
+   * Performs Step 1 invalidation (immediate mark) by extracting ngrams
    * from old and new text, finding changed ngrams, and marking affected
    * cache entries as invalidated.
    *

@@ -163,6 +163,36 @@ TEST(BindAddressValidationTest, ValidIPv6AllInterfaces) {
   std::filesystem::remove(path);
 }
 
+TEST(BindAddressValidationTest, ValidIPv6FullAddress) {
+  std::string path = CreateBindAddressConfig("2001:0db8:85a3:0000:0000:8a2e:0370:7334", "");
+  auto result = LoadConfig(path);
+  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
+  if (result) {
+    EXPECT_EQ(result->api.tcp.bind, "2001:0db8:85a3:0000:0000:8a2e:0370:7334");
+  }
+  std::filesystem::remove(path);
+}
+
+TEST(BindAddressValidationTest, ValidIPv6MappedIPv4Address) {
+  std::string path = CreateBindAddressConfig("::ffff:127.0.0.1", "");
+  auto result = LoadConfig(path);
+  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
+  if (result) {
+    EXPECT_EQ(result->api.tcp.bind, "::ffff:127.0.0.1");
+  }
+  std::filesystem::remove(path);
+}
+
+TEST(BindAddressValidationTest, ValidScopedIPv6Address) {
+  std::string path = CreateBindAddressConfig("fe80::1%lo0", "");
+  auto result = LoadConfig(path);
+  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
+  if (result) {
+    EXPECT_EQ(result->api.tcp.bind, "fe80::1%lo0");
+  }
+  std::filesystem::remove(path);
+}
+
 TEST(BindAddressValidationTest, ValidIPv4Address) {
   std::string path = CreateBindAddressConfig("192.168.1.100", "");
   auto result = LoadConfig(path);
@@ -200,6 +230,16 @@ TEST(BindAddressValidationTest, ValidHttpBindIPv6) {
   EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
   if (result) {
     EXPECT_EQ(result->api.http.bind, "::1");
+  }
+  std::filesystem::remove(path);
+}
+
+TEST(BindAddressValidationTest, RejectInvalidHostnameCharacters) {
+  std::string path = CreateBindAddressConfig("bad;host", "");
+  auto result = LoadConfig(path);
+  EXPECT_FALSE(result);
+  if (!result) {
+    EXPECT_TRUE(result.error().message().find("valid IP address or hostname") != std::string::npos);
   }
   std::filesystem::remove(path);
 }

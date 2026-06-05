@@ -18,6 +18,7 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mysql/binlog_reader_interface.h"
 #include "server/http_server.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
@@ -25,6 +26,28 @@
 using json = nlohmann::json;
 
 namespace mygramdb::server {
+
+class HealthFakeBinlogReader final : public mysql::IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+    running_.store(true, std::memory_order_release);
+    return {};
+  }
+
+  void Stop() override { running_.store(false, std::memory_order_release); }
+
+  bool IsRunning() const override { return running_.load(std::memory_order_acquire); }
+  std::string GetCurrentGTID() const override { return "uuid:1"; }
+  void SetCurrentGTID(const std::string&) override {}
+  std::string GetLastError() const override { return ""; }
+  uint64_t GetProcessedEvents() const override { return 7; }
+  size_t GetQueueSize() const override { return 0; }
+
+  void SetRunning(bool running) { running_.store(running, std::memory_order_release); }
+
+ private:
+  std::atomic<bool> running_{true};
+};
 
 class HealthEndpointTest : public ::testing::Test {
  protected:
@@ -46,7 +69,7 @@ class HealthEndpointTest : public ::testing::Test {
 
     // Create server with loading flag
     loading_ = false;
-    server_ = std::make_unique<HttpServer>(http_config, table_contexts_, nullptr, nullptr, nullptr, &loading_);
+    server_ = std::make_unique<HttpServer>(http_config, table_contexts_, nullptr, &binlog_reader_, nullptr, &loading_);
 
     // Start server
     ASSERT_TRUE(server_->Start());
@@ -86,6 +109,7 @@ class HealthEndpointTest : public ::testing::Test {
   TableContext table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<HttpServer> server_;
+  HealthFakeBinlogReader binlog_reader_;
   std::atomic<bool> loading_;
   int port_{0};
   std::string base_url_;
@@ -155,6 +179,27 @@ TEST_F(HealthEndpointTest, ReadinessProbeReflectsServerState) {
 }
 
 /**
+ * @brief Readiness should fail when configured replication is stopped.
+ */
+TEST_F(HealthEndpointTest, ReadinessProbeReflectsReplicationState) {
+  httplib::Client client(base_url_);
+  client.set_connection_timeout(5);
+
+  loading_ = false;
+  binlog_reader_.SetRunning(false);
+
+  auto res = client.Get("/health/ready");
+  ASSERT_TRUE(res) << "Request failed";
+  EXPECT_EQ(res->status, 503) << "Readiness probe should return 503 when replication is stopped";
+
+  auto response = json::parse(res->body);
+  EXPECT_EQ(response["status"], "not_ready");
+  EXPECT_FALSE(response.value("loading", true));
+  EXPECT_FALSE(response.value("replication_running", true));
+  EXPECT_EQ(response["reason"], "Replication is not running");
+}
+
+/**
  * @brief Test /health/detail endpoint (detailed health check)
  *
  * Detail endpoint returns comprehensive component status for monitoring.
@@ -189,6 +234,10 @@ TEST_F(HealthEndpointTest, DetailedHealthReturnsComponentStatus) {
   EXPECT_EQ(components["index"]["status"], "ok");
   EXPECT_TRUE(components["index"].contains("total_terms"));
   EXPECT_TRUE(components["index"].contains("total_documents"));
+
+  ASSERT_TRUE(components.contains("binlog"));
+  EXPECT_EQ(components["binlog"]["status"], "connected");
+  EXPECT_TRUE(components["binlog"]["running"]);
 }
 
 /**
@@ -209,6 +258,29 @@ TEST_F(HealthEndpointTest, DetailedHealthDuringLoading) {
   auto& components = response["components"];
   EXPECT_EQ(components["server"]["status"], "loading");
   EXPECT_TRUE(components["server"]["loading"]);
+}
+
+/**
+ * @brief Detailed health should degrade when configured replication is stopped.
+ */
+TEST_F(HealthEndpointTest, DetailedHealthReflectsReplicationStopped) {
+  httplib::Client client(base_url_);
+  client.set_connection_timeout(5);
+
+  loading_ = false;
+  binlog_reader_.SetRunning(false);
+
+  auto res = client.Get("/health/detail");
+  ASSERT_TRUE(res) << "Request failed";
+  EXPECT_EQ(res->status, 200) << "Detail endpoint should return 200 OK even when degraded";
+
+  auto response = json::parse(res->body);
+  EXPECT_EQ(response["status"], "degraded");
+
+  auto& components = response["components"];
+  ASSERT_TRUE(components.contains("binlog"));
+  EXPECT_EQ(components["binlog"]["status"], "disconnected");
+  EXPECT_FALSE(components["binlog"]["running"]);
 }
 
 /**

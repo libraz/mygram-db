@@ -3,9 +3,9 @@
  * @brief Unit tests for replication handler bug fixes
  *
  * This file contains regression tests for the following bugs:
- * 1. Bug #3: Replication can be started without GTID (should be prevented)
- * 2. Bug #1: Binlog reader thread doesn't clear running_ flag on exit
- * 3. Bug #2: SYNC doesn't restart replication when already running
+ * 1. Replication can be started without GTID (should be prevented)
+ * 2. Binlog reader thread doesn't clear running_ flag on exit
+ * 3. SYNC doesn't restart replication when already running
  */
 
 #ifdef USE_MYSQL
@@ -73,7 +73,7 @@ class ReplicationHandlerTest : public ::testing::Test {
 /**
  * @brief Test that REPLICATION START is rejected when GTID is not set
  *
- * Regression test for Bug #3: Replication could be started without GTID,
+ * Regression test for Replication could be started without GTID,
  * leading to binlog purge errors and inconsistent state.
  *
  * Expected behavior:
@@ -101,7 +101,7 @@ TEST_F(ReplicationHandlerTest, RejectReplicationStartWithoutGTID) {
 /**
  * @brief Test that REPLICATION STATUS returns stopped when not running
  *
- * Regression test for Bug #1: Verify that status reflects actual state
+ * Regression test for Verify that status reflects actual state
  */
 TEST_F(ReplicationHandlerTest, StatusReflectsNotRunningState) {
   query::Query query;

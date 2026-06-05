@@ -48,7 +48,7 @@ struct VariableInfo {
  * - mysql.host (triggers reconnection)
  * - mysql.port (triggers reconnection)
  * - api.default_limit (5-1000)
- * - api.max_query_length (>0)
+ * - api.max_query_length (>=0, 0 = unlimited)
  * - api.rate_limiting.enable (true/false)
  * - api.rate_limiting.capacity (>0)
  * - api.rate_limiting.refill_rate (>0)

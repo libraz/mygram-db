@@ -9,6 +9,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
 #include <utility>
 
 namespace rp = mygramdb::server::replication_pause;
@@ -123,4 +127,39 @@ TEST_F(ReplicationPauseScopeTest, MultipleScopesNestRequestRelease) {
   EXPECT_FALSE(first.Release()) << "first to release while second still holds is NOT last_releaser";
   EXPECT_TRUE(second.Release()) << "second (and only remaining) holder IS last_releaser";
   EXPECT_FALSE(counter_.IsPaused());
+}
+
+TEST_F(ReplicationPauseScopeTest, LaterPauserWaitsForPublishedDrainedGtid) {
+  rp::Scope first(counter_);
+  ASSERT_TRUE(first.Acquire());
+
+  auto waiter = std::async(std::launch::async, [this]() { return counter_.WaitForDrainedGTID(); });
+  EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout)
+      << "a later pauser must not observe GTID until the first pauser publishes the drained position";
+
+  counter_.PublishDrainedGTID("uuid:42");
+  EXPECT_EQ(waiter.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_EQ(waiter.get(), "uuid:42");
+  EXPECT_TRUE(first.Release());
+}
+
+TEST_F(ReplicationPauseScopeTest, NewFirstPauserResetsPreviousDrainedGtid) {
+  {
+    rp::Scope first(counter_);
+    ASSERT_TRUE(first.Acquire());
+    counter_.PublishDrainedGTID("uuid:1");
+    ASSERT_TRUE(first.Release());
+  }
+
+  rp::Scope next(counter_);
+  ASSERT_TRUE(next.Acquire());
+
+  auto waiter = std::async(std::launch::async, [this]() { return counter_.WaitForDrainedGTID(); });
+  EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout)
+      << "a new pause epoch must not reuse the previous drained GTID";
+
+  counter_.PublishDrainedGTID("uuid:2");
+  EXPECT_EQ(waiter.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_EQ(waiter.get(), "uuid:2");
+  EXPECT_TRUE(next.Release());
 }

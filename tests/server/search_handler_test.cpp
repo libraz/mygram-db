@@ -3,9 +3,9 @@
  * @brief Unit tests for search handler logic
  *
  * Tests for:
- * - Reuse calculation with zero/small/large result sets (Bug #21)
- * - Total results tracking after filter application (Bug #22)
- * - Stale cache detection (Bug #25)
+ * - Reuse calculation with zero/small/large result sets
+ * - Total results tracking after filter application
+ * - Stale cache detection
  * - Floating-point epsilon comparison for filters (H3)
  * - Adaptive cache validation sampling (M1)
  * - Configurable FilterByNgrams threshold (M6)
@@ -28,7 +28,7 @@ namespace mygramdb {
 namespace server {
 
 // =============================================================================
-// Reuse calculation with division-by-zero guard (Bug #21)
+// Reuse calculation with division-by-zero guard
 // =============================================================================
 // The bug is in search_handler.cpp:205
 //
@@ -45,7 +45,7 @@ namespace server {
  * @brief Test the specific calculation that causes division by zero
  *
  * This test directly validates the problematic calculation at line 205.
- * Bug #21: Division by zero in search optimization.
+ * Division by zero in search optimization.
  */
 TEST(SearchHandlerTest, ReuseCalculationWithZeroResults) {
   // Simulate the calculation at line 205
@@ -92,7 +92,7 @@ TEST(SearchHandlerTest, ReuseCalculationWithZeroResults) {
 /**
  * @brief Test edge case: very small result set
  *
- * Bug #21: Single result should not cause division issues.
+ * Single result should not cause division issues.
  */
 TEST(SearchHandlerTest, ReuseCalculationSmallResultSet) {
   size_t total_results = 1;  // Single result
@@ -122,7 +122,7 @@ TEST(SearchHandlerTest, ReuseCalculationSmallResultSet) {
 /**
  * @brief Test normal case: large result set
  *
- * Bug #21: Large result set should use GetTopN optimization.
+ * Large result set should use GetTopN optimization.
  */
 TEST(SearchHandlerTest, ReuseCalculationLargeResultSet) {
   size_t total_results = 1000;  // Many results
@@ -152,7 +152,7 @@ TEST(SearchHandlerTest, ReuseCalculationLargeResultSet) {
 /**
  * @brief Test that the fix correctly handles zero total_results
  *
- * Bug #21: Verifies the proposed fix (checking total_results > 0
+ * Verifies the proposed fix (checking total_results > 0
  * before performing the division) across multiple edge cases.
  */
 TEST(SearchHandlerTest, ReuseCalculationEdgeCases) {
@@ -192,7 +192,7 @@ TEST(SearchHandlerTest, ReuseCalculationEdgeCases) {
 }
 
 // =============================================================================
-// Total results tracking after filter application (Bug #22)
+// Total results tracking after filter application
 // =============================================================================
 // When GetTopN optimization is used, total_results is set before filters are
 // applied. After filtering, the results vector shrinks but total_results
@@ -205,7 +205,7 @@ TEST(SearchHandlerTest, ReuseCalculationEdgeCases) {
 /**
  * @brief Test that total_results tracking logic is correct
  *
- * Bug #22: total_results must be updated after filter application.
+ * total_results must be updated after filter application.
  */
 TEST(SearchHandlerTest, TotalResultsUpdatedAfterFilter) {
   // Simulate the problematic code path:
@@ -225,14 +225,14 @@ TEST(SearchHandlerTest, TotalResultsUpdatedAfterFilter) {
   size_t fixed_total_results = after_filter_results;  // Updated to 20
 
   // The bug causes pagination to be wrong
-  EXPECT_NE(buggy_total_results, after_filter_results) << "Bug #22: total_results not updated after filtering";
+  EXPECT_NE(buggy_total_results, after_filter_results) << "total_results not updated after filtering";
   EXPECT_EQ(fixed_total_results, after_filter_results) << "Fixed: total_results matches filtered count";
 }
 
 /**
  * @brief Test the correct code flow for total_results
  *
- * Bug #22: After the fix at line 274-277:
+ * After the fix at line 274-277:
  * if (!can_optimize) {
  *   total_results = results.size();
  * }
@@ -277,7 +277,7 @@ TEST(SearchHandlerTest, TotalResultsReflectsFilteredCount) {
 }
 
 // =============================================================================
-// Stale cache detection (Bug #25)
+// Stale cache detection
 // =============================================================================
 // When cache is hit, the cached DocIds might be stale (documents deleted since
 // cache population). The fix validates a sample of cached DocIds before use
@@ -290,7 +290,7 @@ TEST(SearchHandlerTest, TotalResultsReflectsFilteredCount) {
 /**
  * @test Conceptual test for stale cache detection
  *
- * Bug #25: Verifies that stale DocIds can be detected
+ * Verifies that stale DocIds can be detected
  * by checking if they exist in the document store.
  */
 TEST(SearchHandlerTest, StaleCacheDetection) {
@@ -316,14 +316,14 @@ TEST(SearchHandlerTest, StaleCacheDetection) {
     }
   }
 
-  // Bug #25: Validation should detect the stale cache
+  // Validation should detect the stale cache
   EXPECT_TRUE(cache_is_stale) << "Should detect stale cache when DocIds are deleted";
 }
 
 /**
  * @test Fresh cache should not be detected as stale
  *
- * Bug #25: Validates that valid cache entries pass validation.
+ * Validates that valid cache entries pass validation.
  */
 TEST(SearchHandlerTest, FreshCacheNotStale) {
   // Simulated scenario:
@@ -346,7 +346,7 @@ TEST(SearchHandlerTest, FreshCacheNotStale) {
 }
 
 // =============================================================================
-// COUNT handler TOCTOU validation on cached results (Bug #4)
+// COUNT handler TOCTOU validation on cached results
 // =============================================================================
 // HandleCount returned cached result count directly WITHOUT validating that
 // the cached DocIds still exist. If documents are deleted after caching,
@@ -362,7 +362,7 @@ TEST(SearchHandlerTest, FreshCacheNotStale) {
 /**
  * @test COUNT stale cache detection should invalidate cached count
  *
- * Bug #4: Verifies that stale DocIds in cached results cause COUNT
+ * Verifies that stale DocIds in cached results cause COUNT
  * to fall through to normal execution instead of returning inflated count.
  */
 TEST(SearchHandlerTest, CountStaleCacheDetection) {
@@ -402,7 +402,7 @@ TEST(SearchHandlerTest, CountStaleCacheDetection) {
 /**
  * @test COUNT fresh cache should return cached count directly
  *
- * Bug #4: When cache is fresh, COUNT should still return the cached count
+ * When cache is fresh, COUNT should still return the cached count
  * without re-executing the query.
  */
 TEST(SearchHandlerTest, CountFreshCacheReturnsDirectly) {
@@ -429,7 +429,7 @@ TEST(SearchHandlerTest, CountFreshCacheReturnsDirectly) {
 /**
  * @test COUNT empty cached results should not be flagged as stale
  *
- * Bug #4: Edge case - empty cached results should pass validation.
+ * Edge case - empty cached results should pass validation.
  */
 TEST(SearchHandlerTest, CountEmptyCacheNotStale) {
   std::vector<uint32_t> cached_doc_ids = {};

@@ -1,6 +1,6 @@
 /**
  * @file endian_serialization_test.cpp
- * @brief Tests for endian-aware binary serialization (BUG-0076)
+ * @brief Tests for endian-aware binary serialization
  *
  * Verifies that dump files use consistent little-endian format
  * for cross-platform compatibility.

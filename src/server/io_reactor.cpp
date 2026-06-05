@@ -1,6 +1,6 @@
 /**
  * @file io_reactor.cpp
- * @brief Phase 2 IoReactor implementation — single-threaded event loop.
+ * @brief Step 2 IoReactor implementation — single-threaded event loop.
  */
 
 #include "server/io_reactor.h"

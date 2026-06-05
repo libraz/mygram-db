@@ -233,6 +233,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
       new_pk_to_doc_id;
   absl::flat_hash_map<DocId, FilterMap> new_doc_filters;
   absl::flat_hash_map<DocId, std::string> new_doc_texts;
+  DocId max_loaded_doc_id = 0;
 
   // Reserve capacity to avoid rehashing during bulk insertion
   new_doc_id_to_pk.reserve(static_cast<size_t>(doc_count));
@@ -249,6 +250,9 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
                                       "Failed to read doc_id for document " + std::to_string(i), context));
     }
     auto doc_id = static_cast<DocId>(doc_id_value);
+    if (doc_id > max_loaded_doc_id) {
+      max_loaded_doc_id = doc_id;
+    }
 
     // Read pk length and pk
     uint32_t pk_len = 0;
@@ -496,6 +500,13 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     new_filter_index->AddDocument(doc_id, filters);
   }
 
+  DocId restored_next_id = next_id;
+  if (max_loaded_doc_id == UINT32_MAX) {
+    restored_next_id = 0;
+  } else if (max_loaded_doc_id > 0 && restored_next_id <= max_loaded_doc_id) {
+    restored_next_id = max_loaded_doc_id + 1;
+  }
+
   // Swap the loaded data in with minimal lock time
   {
     std::unique_lock lock(mutex_);
@@ -504,7 +515,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     doc_filters_ = std::move(new_doc_filters);
     doc_texts_ = std::move(new_doc_texts);
     filter_index_ = std::move(new_filter_index);
-    next_doc_id_ = next_id;
+    next_doc_id_ = restored_next_id;
   }
 
   return {};

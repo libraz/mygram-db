@@ -184,9 +184,9 @@ class Connection {
 
   /**
    * @brief Check if GTID mode is enabled on the server
-   * @return true if GTID_MODE is ON, false otherwise
+   * @return true if GTID_MODE is ON, false if OFF, or Error on query failure
    */
-  bool IsGTIDModeEnabled();
+  mygram::utils::Expected<bool, mygram::utils::Error> IsGTIDModeEnabled();
 
   /**
    * @brief Get latest GTID from SHOW BINARY LOG STATUS
@@ -214,13 +214,8 @@ class Connection {
                                                                            const std::string& table,
                                                                            const std::string& column);
 
-  /**
-   * @brief Get last error message
-   */
   [[nodiscard]] ServerFlavor GetFlavor() const { return flavor_; }
   [[nodiscard]] const std::string& GetServerVersion() const { return server_version_; }
-
-  [[nodiscard]] const std::string& GetLastError() const { return last_error_; }
 
   /**
    * @brief Get connection configuration
@@ -237,12 +232,11 @@ class Connection {
   MYSQL* mysql_ = nullptr;
   ServerFlavor flavor_ = ServerFlavor::kMySQL;
   std::string server_version_;
-  std::string last_error_;
 
   /**
-   * @brief Set last error message from MySQL
+   * @brief Get current MySQL client error message
    */
-  void SetMySQLError();
+  [[nodiscard]] std::string GetMySQLErrorMessage() const;
 };
 
 }  // namespace mygramdb::mysql

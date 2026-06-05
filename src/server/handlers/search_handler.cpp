@@ -436,14 +436,16 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     // Reuse pre-computed term_infos (already normalized and ngram-generated)
     std::vector<std::string> normalized_terms;
     std::vector<uint64_t> term_dfs;
-    normalized_terms.reserve(output.all_search_terms.size());
+    normalized_terms.reserve(output.term_infos.size());
     term_dfs.reserve(output.term_infos.size());
-    for (const auto& term : output.all_search_terms) {
-      normalized_terms.push_back(output.current_index->NormalizeText(term));
-    }
-    for (const auto& ti : output.term_infos) {
-      uint64_t df = (ti.estimated_size == std::numeric_limits<size_t>::max()) ? 0 : ti.estimated_size;
-      term_dfs.push_back(df);
+    for (size_t i = 0; i < output.term_infos.size(); ++i) {
+      const auto& ti = output.term_infos[i];
+      if (!ti.normalized_term.empty()) {
+        normalized_terms.push_back(ti.normalized_term);
+      } else if (i < output.all_search_terms.size()) {
+        normalized_terms.push_back(output.current_index->NormalizeText(output.all_search_terms[i]));
+      }
+      term_dfs.push_back(ti.term_doc_freq);
     }
 
     auto scored = index::BM25Scorer::ScoreDocuments(

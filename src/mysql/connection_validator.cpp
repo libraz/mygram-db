@@ -166,7 +166,11 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGTIDEnabled(Connection& conn) {
-  if (!conn.IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = conn.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    return mygram::utils::MakeUnexpected(gtid_mode_enabled.error());
+  }
+  if (!*gtid_mode_enabled) {
     return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
         mygram::utils::ErrorCode::kMySQLGTIDNotEnabled, "GTID mode is not enabled on MySQL server (gtid_mode != ON)"));
   }

@@ -12,7 +12,11 @@
 #include <string>
 #include <string_view>
 
+#include "server/protocol_constants.h"
+
 namespace mygramdb::client::detail {
+
+namespace proto = mygramdb::server::protocol;
 
 /**
  * @brief Check whether a string ends with a given suffix
@@ -82,49 +86,48 @@ inline bool IsResponseComplete(std::string_view response, ResponseCompletionStat
   // Check if this is a single-line response (first \r\n is at the end)
   bool is_single_line = (first_crlf == response.size() - 2);
 
-  // Known prefix lengths for multi-line response detection
-  constexpr size_t kOkInfoLen = 7;          // "OK INFO"
-  constexpr size_t kOkReplicationLen = 14;  // "OK REPLICATION"
-  constexpr size_t kOkCacheStatsLen = 14;   // "OK CACHE_STATS"
-  constexpr size_t kOkDumpInfoLen = 12;     // "OK DUMP_INFO"
-  constexpr size_t kOkDumpStatusLen = 14;   // "OK DUMP_STATUS"
-  constexpr size_t kPlusOkLen = 3;          // "+OK"
-  constexpr size_t kOkFacetLen = 8;         // "OK FACET"
   constexpr std::string_view kEndMarker = "END\r\n";
   constexpr std::string_view kDoubleCrlf = "\r\n\r\n";
 
   // INFO: first line is exactly "OK INFO"
-  if (first_crlf == kOkInfoLen && response.compare(0, kOkInfoLen, "OK INFO") == 0) {
+  if (first_crlf == proto::kOkInfoPrefix.size() &&
+      response.compare(0, proto::kOkInfoPrefix.size(), proto::kOkInfoPrefix) == 0) {
     return EndsWith(response, kEndMarker);
   }
 
   // REPLICATION STATUS: first line is exactly "OK REPLICATION"
-  if (first_crlf == kOkReplicationLen && response.compare(0, kOkReplicationLen, "OK REPLICATION") == 0) {
+  if (first_crlf == proto::kOkReplicationPrefix.size() &&
+      response.compare(0, proto::kOkReplicationPrefix.size(), proto::kOkReplicationPrefix) == 0) {
     return EndsWith(response, kEndMarker);
   }
 
   // CACHE_STATS: first line is exactly "OK CACHE_STATS"
-  if (first_crlf == kOkCacheStatsLen && response.compare(0, kOkCacheStatsLen, "OK CACHE_STATS") == 0) {
+  if (first_crlf == proto::kOkCacheStatsPrefix.size() &&
+      response.compare(0, proto::kOkCacheStatsPrefix.size(), proto::kOkCacheStatsPrefix) == 0) {
     return EndsWith(response, kEndMarker);
   }
 
   // DUMP_INFO: first line starts with "OK DUMP_INFO" (followed by " <filepath>")
-  if (first_crlf >= kOkDumpInfoLen && response.compare(0, kOkDumpInfoLen, "OK DUMP_INFO") == 0) {
+  if (first_crlf >= proto::kOkDumpInfoPrefix.size() &&
+      response.compare(0, proto::kOkDumpInfoPrefix.size(), proto::kOkDumpInfoPrefix) == 0) {
     return EndsWith(response, kEndMarker);
   }
 
   // DUMP_STATUS: first line is exactly "OK DUMP_STATUS"
-  if (first_crlf == kOkDumpStatusLen && response.compare(0, kOkDumpStatusLen, "OK DUMP_STATUS") == 0) {
+  if (first_crlf == proto::kOkDumpStatusPrefix.size() &&
+      response.compare(0, proto::kOkDumpStatusPrefix.size(), proto::kOkDumpStatusPrefix) == 0) {
     return EndsWith(response, kEndMarker);
   }
 
   // CONFIG: first line starts with "+OK"
-  if (first_crlf >= kPlusOkLen && response.compare(0, kPlusOkLen, "+OK") == 0) {
+  if (first_crlf >= proto::kPlusOkPrefix.size() &&
+      response.compare(0, proto::kPlusOkPrefix.size(), proto::kPlusOkPrefix) == 0) {
     return EndsWith(response, kDoubleCrlf);
   }
 
   // FACET: first line starts with "OK FACET"
-  if (first_crlf >= kOkFacetLen && response.compare(0, kOkFacetLen, "OK FACET") == 0) {
+  if (first_crlf >= proto::kOkFacetPrefix.size() &&
+      response.compare(0, proto::kOkFacetPrefix.size(), proto::kOkFacetPrefix) == 0) {
     return EndsWith(response, kDoubleCrlf);
   }
 

@@ -15,8 +15,10 @@
 #include <memory>
 #include <queue>
 
+#include "cache/cache_key.h"
 #include "cache/cache_manager.h"
 #include "config/config.h"
+#include "query/query_normalizer.h"
 #include "query/synonym_dictionary.h"
 #include "server/server_types.h"
 #include "storage/filter_index.h"
@@ -116,6 +118,23 @@ void ApplyNotAndFilters(SearchPipelineResult& result, const query::Query& query,
   }
 }
 
+query::Query WithCanonicalCacheKey(const query::Query& query, const FullPipelineParams& params) {
+  query::Query cache_query = query;
+  cache_query.cache_key.reset();
+
+  auto text_normalizer = [&params](std::string_view text) {
+    return params.current_index != nullptr ? params.current_index->NormalizeText(text) : std::string(text);
+  };
+  const std::string normalized =
+      cache::QueryNormalizer::Normalize(cache_query, params.primary_key_column, text_normalizer);
+  if (!normalized.empty()) {
+    const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
+    cache_query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  }
+
+  return cache_query;
+}
+
 }  // namespace
 
 std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
@@ -142,7 +161,12 @@ std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& se
       }
     }
 
-    term_infos.push_back({std::move(ngrams), min_size});
+    uint64_t term_doc_freq = 0;
+    if (!ngrams.empty() && min_size > 0 && min_size != std::numeric_limits<size_t>::max()) {
+      term_doc_freq = static_cast<uint64_t>(current_index->SearchAnd(ngrams).size());
+    }
+
+    term_infos.push_back({std::move(ngrams), min_size, term_doc_freq, std::move(normalized)});
   }
 
   return term_infos;
@@ -713,7 +737,12 @@ std::vector<SynonymTermGroup> ExpandTermsWithSynonyms(const std::vector<std::str
         }
       }
 
-      group.variants.push_back({std::move(ngrams), min_size});
+      uint64_t term_doc_freq = 0;
+      if (!ngrams.empty() && min_size > 0 && min_size != std::numeric_limits<size_t>::max()) {
+        term_doc_freq = static_cast<uint64_t>(current_index->SearchAnd(ngrams).size());
+      }
+
+      group.variants.push_back({std::move(ngrams), min_size, term_doc_freq, synonym});
       group.normalized_terms.push_back(synonym);
     }
 
@@ -947,6 +976,8 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     return output;
   }
 
+  const query::Query cache_query = WithCanonicalCacheKey(query, params);
+
   // Try cache lookup first (skip if caller already checked)
   auto cache_lookup_start = std::chrono::high_resolution_clock::now();
   if (params.skip_cache_lookup) {
@@ -957,7 +988,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     output.cache_miss_reason = CacheMissReason::kDisabled;
   } else {
     CacheMissReason miss_reason = CacheMissReason::kDisabled;
-    auto cache_result = TryCacheLookup(query, params.cache_manager, params.current_doc_store, &miss_reason);
+    auto cache_result = TryCacheLookup(cache_query, params.cache_manager, params.current_doc_store, &miss_reason);
     output.cache_miss_reason = miss_reason;
     if (cache_result) {
       auto cache_lookup_end = std::chrono::high_resolution_clock::now();
@@ -1013,7 +1044,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     // list during one query may not be missing for the next, and a cached
     // empty entry would mask future legitimate results until invalidated.
     if (!output.empty_term_detected) {
-      InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+      InsertToCache(params.cache_manager, cache_query, output.results, output.term_infos, output.query_time_ms,
                     params.ngram_size, params.kanji_ngram_size, cross_boundary);
     }
     return output;
@@ -1048,7 +1079,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
           all_term_infos.push_back(variant);
         }
       }
-      InsertToCache(params.cache_manager, query, output.results, all_term_infos, output.query_time_ms,
+      InsertToCache(params.cache_manager, cache_query, output.results, all_term_infos, output.query_time_ms,
                     params.ngram_size, params.kanji_ngram_size, cross_boundary);
     }
     return output;
@@ -1083,7 +1114,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   // Store in cache if enabled. Skip on early-exit (empty posting list); see
   // the fuzzy path for the rationale.
   if (!output.empty_term_detected) {
-    InsertToCache(params.cache_manager, query, output.results, output.term_infos, output.query_time_ms,
+    InsertToCache(params.cache_manager, cache_query, output.results, output.term_infos, output.query_time_ms,
                   params.ngram_size, params.kanji_ngram_size, cross_boundary);
   }
 

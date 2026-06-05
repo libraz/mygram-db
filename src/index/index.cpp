@@ -80,7 +80,7 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     return;
   }
 
-  // Phase 1: Generate n-grams for all documents (no locking, CPU-intensive)
+  // Step 1: Generate n-grams for all documents (no locking, CPU-intensive)
   // Map: term -> vector of doc_ids containing that term
   absl::flat_hash_map<std::string, std::vector<DocId>> term_to_docs;
 
@@ -98,12 +98,12 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     }
   }
 
-  // Phase 2: Sort doc_ids for each term (enables batch insertion optimization)
+  // Step 2: Sort doc_ids for each term (enables batch insertion optimization)
   for (auto& [term, doc_ids] : term_to_docs) {
     std::sort(doc_ids.begin(), doc_ids.end());
   }
 
-  // Phase 3: Add to posting lists (with exclusive lock, minimal lock time)
+  // Step 3: Add to posting lists (with exclusive lock, minimal lock time)
   // Use PostingList::AddBatch() for better performance
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 

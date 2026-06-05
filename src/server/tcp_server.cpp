@@ -185,7 +185,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   // Reactor I/O model: create the IoReactor up front. This is the only I/O
   // path; the legacy blocking one-thread-per-connection model was removed in
-  // Phase 4. On platforms with no supported event multiplexer (neither epoll
+  // Step 4. On platforms with no supported event multiplexer (neither epoll
   // nor kqueue), IoReactor::Start() returns kNetworkReactorUnsupported and
   // we propagate that error up — there is no fallback.
   ReactorConfig rcfg;
@@ -293,7 +293,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 void TcpServer::Stop() {
   mygram::utils::StructuredLog().Event("tcp_server_stopping").Debug();
 
-  // Phase 1: announce shutdown.
+  // Step 1: announce shutdown.
   //
   // Set shutdown_in_progress_ BEFORE joining any worker so long-running
   // workers (DumpSaveWorker, DumpLoadWorker) observe the flag at every
@@ -303,7 +303,7 @@ void TcpServer::Stop() {
   // destructor that is about to run after Stop() returns (CR-10).
   shutdown_in_progress_.store(true, std::memory_order_release);
 
-  // Phase 2: stop ingest paths that may touch binlog_reader_.
+  // Step 2: stop ingest paths that may touch binlog_reader_.
   //
   // Order rationale (CR-3 / CR-10):
   //   (a) The dump worker may be inside DumpSaveWorker / DumpLoadWorker,
@@ -317,7 +317,7 @@ void TcpServer::Stop() {
   //   (c) snapshot_scheduler_ wakes its loop and joins, including any
   //       in-flight TakeSnapshot that touches binlog_reader_.
   //
-  // After Phase 2 completes, no caller other than Stop() itself ever calls
+  // After Step 2 completes, no caller other than Stop() itself ever calls
   // into binlog_reader_ again, so its destructor (which fires when this
   // TcpServer is destroyed, after Stop() returns) is race-free.
   dump_progress_.JoinWorker();
@@ -335,7 +335,7 @@ void TcpServer::Stop() {
     scheduler_->Stop();
   }
 
-  // Phase 3: tear down the network stack.
+  // Step 3: tear down the network stack.
   //
   // Stop the IoReactor BEFORE the acceptor. Rationale: `ConnectionAcceptor::Stop`
   // eagerly close(2)s every fd in its active_fds_ set — which includes the
@@ -359,7 +359,7 @@ void TcpServer::Stop() {
     acceptor_->Stop();
   }
 
-  // Phase 4: drain remaining drain tasks.
+  // Step 4: drain remaining drain tasks.
   //
   // Shutdown thread pool LAST. Tasks queued on the pool may still hold
   // shared_ptr<ReactorConnection> copies that reach into close_callback_
@@ -377,7 +377,7 @@ void TcpServer::Stop() {
   // tcp_server.h) tears down handlers / dispatcher / reactor / acceptor /
   // ... / scheduler / sync_manager_ / cache_manager_ / table_catalog_ /
   // thread_pool_ / acceptor_, and finally binlog_reader_ is dropped by the
-  // owner that constructed this TcpServer. By Phase 1+2 above, no thread
+  // owner that constructed this TcpServer. By Step 1+2 above, no thread
   // managed by this server still calls into binlog_reader_, so that drop
   // is safe.
 

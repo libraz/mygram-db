@@ -244,7 +244,7 @@ TEST_F(SyncOperationManagerDeadlockTest, GetSyncStatusUsesCRLFLineEndings) {
 }
 
 /**
- * @test M-4: WaitForCompletion returns promptly when no syncs are active
+ * @test WaitForCompletion returns promptly when no syncs are active
  *
  * Verifies that WaitForCompletion uses condition variable notification
  * instead of busy-polling, returning quickly when syncing_tables_ is empty.

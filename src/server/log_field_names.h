@@ -2,7 +2,7 @@
  * @file log_field_names.h
  * @brief Canonical StructuredLog field-name and event-name constants.
  *
- * Phase 4A introduces this header to eliminate field-name drift across
+ * Step 4A introduces this header to eliminate field-name drift across
  * server / cache logs (e.g. `path` vs `filepath`, `remote_addr` vs
  * `client_ip`, `client_fd` vs `connection_fd` vs `fd`).
  *

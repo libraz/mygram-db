@@ -402,13 +402,13 @@ TEST(InvalidationManagerTest, ConcurrentClearTableNoDeadlock) {
 }
 
 // =============================================================================
-// Bug #17: InvalidationManager metadata leak when re-registering cache entry
+// InvalidationManager metadata leak when re-registering cache entry
 // =============================================================================
 
 /**
  * @brief Test that re-registering a cache entry cleans up stale reverse index entries
  *
- * Bug #17: When a cache entry is re-registered with different ngrams, the old ngrams
+ * When a cache entry is re-registered with different ngrams, the old ngrams
  * in the reverse index are not cleaned up, causing a memory leak.
  */
 TEST(InvalidationManagerTest, Bug17_ReRegisterCacheEntryCleansUpStaleNgrams) {
@@ -436,9 +436,9 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterCacheEntryCleansUpStaleNgrams) {
   // Entry count should still be 1
   EXPECT_EQ(1, mgr.GetTrackedEntryCount());
 
-  // Bug #17: Before fix, ngram count would be 3 (aaa still in reverse index)
+  // Before fix, ngram count would be 3 (aaa still in reverse index)
   // After fix: ngram count should be 2 (bbb, ccc)
-  EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "Bug #17: Stale ngram 'aaa' should be removed from reverse index";
+  EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "Stale ngram 'aaa' should be removed from reverse index";
 
   // Verify invalidation works correctly with new ngrams
   auto invalidated_aaa = mgr.InvalidateAffectedEntries("posts", "", "aaa", 3, 2);
@@ -471,9 +471,9 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterCompletelyDifferentNgrams) {
   meta2.ngrams = {"aaa", "bbb"};
   mgr.RegisterCacheEntry(key, meta2);
 
-  // Bug #17: Before fix, ngram count would be 5
+  // Before fix, ngram count would be 5
   // After fix: ngram count should be 2
-  EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "Bug #17: All old ngrams should be cleaned up";
+  EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "All old ngrams should be cleaned up";
 
   // Verify old ngrams don't cause invalidation
   auto invalidated_xxx = mgr.InvalidateAffectedEntries("posts", "", "xxx", 3, 2);
@@ -505,12 +505,12 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterDifferentTable) {
   mgr.RegisterCacheEntry(key, meta2);
 
   // table1 should be empty, table2 should have the new ngrams
-  EXPECT_EQ(0, mgr.GetTrackedNgramCount("table1")) << "Bug #17: Old table's ngrams should be cleaned up";
+  EXPECT_EQ(0, mgr.GetTrackedNgramCount("table1")) << "Old table's ngrams should be cleaned up";
   EXPECT_EQ(2, mgr.GetTrackedNgramCount("table2"));
 }
 
 // =============================================================================
-// Bug #18: Cache invalidation uses symmetric difference
+// Cache invalidation uses symmetric difference
 // =============================================================================
 // The concern is that symmetric difference might miss invalidations where
 // unchanged ngrams are involved. However, analysis shows symmetric difference
@@ -520,7 +520,7 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterDifferentTable) {
 // =============================================================================
 
 /**
- * @test Bug #18: Verify symmetric difference handles partial updates correctly
+ * @test Verify symmetric difference handles partial updates correctly
  *
  * When text is updated and some ngrams remain unchanged, caches for those
  * unchanged ngrams should NOT be invalidated (the document still matches).
@@ -555,7 +555,7 @@ TEST(InvalidationManagerTest, Bug18_PartialUpdateUnchangedNgramsNotInvalidated) 
   auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello world", "hello earth", 3, 2);
 
   // key1 (hello) should NOT be invalidated - document still matches
-  EXPECT_EQ(invalidated.find(key1), invalidated.end()) << "Bug #18: Unchanged ngrams should not cause invalidation";
+  EXPECT_EQ(invalidated.find(key1), invalidated.end()) << "Unchanged ngrams should not cause invalidation";
 
   // key2 (world) SHOULD be invalidated - removed from document
   EXPECT_NE(invalidated.find(key2), invalidated.end()) << "Removed ngrams should cause invalidation";
@@ -568,7 +568,7 @@ TEST(InvalidationManagerTest, Bug18_PartialUpdateUnchangedNgramsNotInvalidated) 
 }
 
 /**
- * @test Bug #18: Verify no invalidation when text is identical
+ * @test Verify no invalidation when text is identical
  *
  * When old and new text are the same, no caches should be invalidated.
  */
@@ -586,11 +586,11 @@ TEST(InvalidationManagerTest, Bug18_IdenticalTextNoInvalidation) {
   auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2);
 
   // No invalidation should occur
-  EXPECT_EQ(0, invalidated.size()) << "Bug #18: Identical text should not cause any invalidation";
+  EXPECT_EQ(0, invalidated.size()) << "Identical text should not cause any invalidation";
 }
 
 /**
- * @test Bug #18: Verify complete text replacement invalidates correctly
+ * @test Verify complete text replacement invalidates correctly
  */
 TEST(InvalidationManagerTest, Bug18_CompleteTextReplacementInvalidatesAll) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -1404,7 +1404,7 @@ TEST(InvalidationManagerTest, ClearTableUpdatesReverseIndex) {
 }
 
 // =============================================================================
-// Phase 3 (HIGH): H-M2 / H-M7 regression tests
+// Step 3 (HIGH): H-M2 / H-M7 regression tests
 // =============================================================================
 
 /**

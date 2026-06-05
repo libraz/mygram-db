@@ -142,6 +142,7 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
       auto elapsed = std::chrono::steady_clock::now() - start;
       if (elapsed >= timeout_duration) {
         size_t remaining_tasks = 0;
+        const auto active_workers = active_workers_.load();
         {
           std::scoped_lock lock(queue_mutex_);
           remaining_tasks = tasks_.size();
@@ -149,13 +150,13 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
             tasks_.pop();
           }
         }
-        if (remaining_tasks > 0) {
-          mygram::utils::StructuredLog()
-              .Event("thread_pool_shutdown_timeout")
-              .Field("remaining_tasks", static_cast<uint64_t>(remaining_tasks))
-              .Field("action", "discarded_pending_tasks")
-              .Warn();
-        }
+        mygram::utils::StructuredLog()
+            .Event("thread_pool_shutdown_timeout")
+            .Field("timeout_ms", static_cast<uint64_t>(timeout_ms))
+            .Field("remaining_tasks", static_cast<uint64_t>(remaining_tasks))
+            .Field("active_workers", static_cast<uint64_t>(active_workers))
+            .Field("action", remaining_tasks > 0 ? "discarded_pending_tasks" : "waiting_for_active_tasks")
+            .Warn();
       }
 
       // Always join workers to ensure clean shutdown. After a timeout, only

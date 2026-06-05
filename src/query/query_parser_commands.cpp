@@ -27,6 +27,11 @@ using internal::kMaxLimit;
 constexpr size_t kMaxTermCount = 64;
 using mygram::utils::ToUpper;
 
+static bool IsNonExpressionClauseKeyword(const std::string& token) {
+  return token == "FILTER" || token == "SORT" || token == "LIMIT" || token == "OFFSET" || token == "HIGHLIGHT" ||
+         token == "FUZZY" || token == "FACET";
+}
+
 /**
  * @brief Extract search text tokens from a command's token list
  *
@@ -77,8 +82,30 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
   }
 
-  // Extract search text: consume tokens until we hit a keyword
-  // Handle parentheses by tracking nesting level - but respect quoted strings
+  // Top-level OR is part of the boolean expression syntax handled by QueryASTParser.
+  // Preserve legacy AND/NOT clauses unless the expression contains top-level OR.
+  bool has_top_level_or = false;
+  {
+    int scan_paren_depth = 0;
+    for (size_t i = start_pos; i < tokens.size(); ++i) {
+      const std::string upper = ToUpper(tokens[i]);
+      auto [open, close] = detail::CountParensInToken(tokens[i]);
+      scan_paren_depth += open - close;
+      if (scan_paren_depth == 0 && IsNonExpressionClauseKeyword(upper)) {
+        break;
+      }
+      if (scan_paren_depth == 0 && EqualsIgnoreCase(tokens[i], "ORDER")) {
+        break;
+      }
+      if (scan_paren_depth == 0 && upper == "OR") {
+        has_top_level_or = true;
+        break;
+      }
+    }
+  }
+
+  // Extract search text: consume tokens until we hit a command clause keyword.
+  // Handle parentheses by tracking nesting level - but respect quoted strings.
   size_t pos = start_pos;
   std::vector<std::string> search_tokens;
   int paren_depth = 0;
@@ -90,8 +117,11 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
     auto [open, close] = detail::CountParensInToken(token);
     paren_depth += open - close;
 
-    // Check if this is a keyword (only when not inside parentheses)
-    if (paren_depth == 0 && IsClauseKeyword(ToUpper(token))) {
+    const std::string upper_token = ToUpper(token);
+
+    // Check if this is a clause keyword (only when not inside parentheses).
+    if (paren_depth == 0 &&
+        (IsNonExpressionClauseKeyword(upper_token) || (!has_top_level_or && IsClauseKeyword(upper_token)))) {
       break;  // Stop consuming search text
     }
 

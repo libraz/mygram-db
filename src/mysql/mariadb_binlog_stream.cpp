@@ -21,6 +21,14 @@
 
 namespace mygramdb::mysql {
 
+namespace {
+
+std::string CurrentConnectionError(Connection& conn) {
+  return std::string(mysql_error(conn.GetHandle()));
+}
+
+}  // namespace
+
 mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSession(Connection& conn) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -30,7 +38,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
   // Query the server's checksum setting and mirror it
   if (mysql_query(conn.GetHandle(), "SET @master_binlog_checksum = @@global.binlog_checksum") != 0) {
     return MakeUnexpected(MakeError(ErrorCode::kMariaDBProtocolError,
-                                    std::string("Failed to set binlog checksum: ") + conn.GetLastError()));
+                                    std::string("Failed to set binlog checksum: ") + CurrentConnectionError(conn)));
   }
   mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "mariadb_checksum_configured").Debug();
 
@@ -40,7 +48,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "mariadb_strict_mode_failed")
-        .Field("error", conn.GetLastError())
+        .Field("error", CurrentConnectionError(conn))
         .Debug();
   }
 
@@ -49,7 +57,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "mariadb_ignore_duplicates_failed")
-        .Field("error", conn.GetLastError())
+        .Field("error", CurrentConnectionError(conn))
         .Debug();
   }
 
@@ -59,7 +67,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "mariadb_heartbeat_config_failed")
-        .Field("error", conn.GetLastError())
+        .Field("error", CurrentConnectionError(conn))
         .Debug();
   }
 
@@ -88,7 +96,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
   std::string gtid_query = "SET @slave_connect_state = '" + gtid + "'";
   if (mysql_query(conn.GetHandle(), gtid_query.c_str()) != 0) {
     return MakeUnexpected(MakeError(ErrorCode::kMariaDBProtocolError,
-                                    std::string("Failed to set slave_connect_state: ") + conn.GetLastError()));
+                                    std::string("Failed to set slave_connect_state: ") + CurrentConnectionError(conn)));
   }
 
   mygram::utils::StructuredLog()

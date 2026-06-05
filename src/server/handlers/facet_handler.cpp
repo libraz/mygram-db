@@ -126,7 +126,7 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     } else {
       // Convert results to Roaring bitmap for efficient facet counting using
       // the shared RAII helper. Note: this duplicates the bitmap-construction
-      // step performed inside ExecuteFullPipeline; Phase 3 will eliminate the
+      // step performed inside ExecuteFullPipeline; Step 3 will eliminate the
       // duplication once the pipeline exposes its working bitmap via the
       // output struct.
       auto result_bitmap = mygram::utils::MakeRoaringFromVector(results);

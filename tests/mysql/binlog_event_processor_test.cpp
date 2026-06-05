@@ -9,8 +9,13 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
+#include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/index.h"
+#include "query/query_ast.h"
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 
@@ -145,7 +150,7 @@ TEST_F(BinlogEventProcessorTest, UpdateIsAtomic) {
 /**
  * @brief Test that document store and index stay in sync
  *
- * Bug #6: If doc_store.AddDocument succeeds but index.AddDocument fails,
+ * If doc_store.AddDocument succeeds but index.AddDocument fails,
  * the document would be in the store but not searchable.
  */
 TEST_F(BinlogEventProcessorTest, StoreAndIndexStayInSync) {
@@ -220,7 +225,7 @@ TEST_F(BinlogEventProcessorTest, DeleteNonExistentHandled) {
 }
 
 /**
- * @brief Bug #34: Test that UPDATE uses Index::UpdateDocument for atomic text updates
+ * @brief Test that UPDATE uses Index::UpdateDocument for atomic text updates
  *
  * This test verifies that when both old_text and new_text are provided,
  * the update is performed atomically to prevent partial index states.
@@ -273,7 +278,7 @@ TEST_F(BinlogEventProcessorTest, UpdateUsesAtomicIndexUpdate) {
 }
 
 /**
- * @brief Bug #34: Test that UPDATE handles doc_store.UpdateDocument return value
+ * @brief Test that UPDATE handles doc_store.UpdateDocument return value
  *
  * When doc_store.UpdateDocument returns false (document was removed),
  * the processor should handle it gracefully.
@@ -309,7 +314,7 @@ TEST_F(BinlogEventProcessorTest, UpdateHandlesStoreUpdateFailure) {
 }
 
 /**
- * @brief Bug #34: Test that DELETE handles index removal errors gracefully
+ * @brief Test that DELETE handles index removal errors gracefully
  *
  * DELETE should succeed even if the document was already partially removed
  * from the index.
@@ -344,7 +349,7 @@ TEST_F(BinlogEventProcessorTest, DeleteWithEmptyText) {
 }
 
 /**
- * @brief Bug #34: Test UPDATE transition (exists && !matches_required)
+ * @brief Test UPDATE transition (exists && !matches_required)
  *
  * When a document transitions out of required conditions, both index
  * and document store should be updated consistently.
@@ -994,6 +999,39 @@ TEST_F(BinlogEventProcessorTest, UpdateFilterOnlyKeepsTextSearchable) {
 TEST_F(BinlogEventProcessorTest, ProcessEventWithNullCacheManager) {
   BinlogEvent event = BinlogEvent::CreateInsert("test_table", "pk_cache1", "hello world");
   EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_));
+}
+
+TEST_F(BinlogEventProcessorTest, CacheInvalidationUsesNormalizedBinlogText) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs[table_config_.name] = cache::NgramConfig{
+      .ngram_size = index_->GetNgramSize(),
+      .kanji_ngram_size = index_->GetKanjiNgramSize(),
+      .cross_boundary_ngrams = index_->GetCrossBoundaryNgrams(),
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = table_config_.name;
+  query.search_text = "abc";
+  query.limit = 100;
+  query.limit_explicit = false;
+
+  ASSERT_TRUE(cache_manager.Insert(query, {1}, {"ab", "bc"}, 15.0, index_->GetNgramSize(), index_->GetKanjiNgramSize(),
+                                   index_->GetCrossBoundaryNgrams()));
+  ASSERT_TRUE(cache_manager.Lookup(query).has_value());
+
+  BinlogEvent insert_event = BinlogEvent::CreateInsert(table_config_.name, "pk_fullwidth", "ＡＢＣ");
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                 nullptr, &cache_manager));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_FALSE(cache_manager.Lookup(query).has_value())
+      << "full-width binlog text must be normalized before cache invalidation n-gram extraction";
 }
 
 /**

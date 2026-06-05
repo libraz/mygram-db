@@ -27,9 +27,12 @@ namespace mygramdb::client {
  */
 struct SearchResult {
   std::string primary_key;  // Document primary key
+  std::string snippet;      // Highlight snippet (empty for non-highlight searches)
 
   SearchResult() = default;
   explicit SearchResult(std::string primary_key_value) : primary_key(std::move(primary_key_value)) {}
+  SearchResult(std::string primary_key_value, std::string snippet_value)
+      : primary_key(std::move(primary_key_value)), snippet(std::move(snippet_value)) {}
 };
 
 /**
@@ -213,6 +216,21 @@ class MygramClient {
    * @return Expected<SearchResponse, Error>
    */
   mygram::utils::Expected<SearchResponse, mygram::utils::Error> Search(
+      const std::string& table, const std::string& query,
+      uint32_t limit = 1000,  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+                              // - Default result limit
+      uint32_t offset = 0, const std::vector<std::string>& and_terms = {},
+      const std::vector<std::string>& not_terms = {},
+      const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& sort_column = "",
+      bool sort_desc = true) const;
+
+  /**
+   * @brief Search for documents and return highlighted snippets
+   *
+   * The returned SearchResult::snippet field contains the server-generated
+   * highlight snippet. It is empty when the server returns no snippet.
+   */
+  mygram::utils::Expected<SearchResponse, mygram::utils::Error> SearchWithHighlights(
       const std::string& table, const std::string& query,
       uint32_t limit = 1000,  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
                               // - Default result limit

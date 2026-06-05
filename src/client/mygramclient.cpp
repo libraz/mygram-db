@@ -44,12 +44,13 @@ namespace {
 
 constexpr int64_t kMillisecondsPerSecond = mygram::constants::kMillisecondsPerSecond;
 constexpr int64_t kMicrosecondsPerMillisecond = mygram::constants::kMicrosecondsPerMillisecond;
+constexpr std::chrono::milliseconds kDumpStatusPollInterval{100};
 
 /**
  * @brief Check if response is an error and return appropriate Expected
  */
 Expected<void, Error> CheckErrorResponse(const std::string& response) {
-  if (response.find("ERROR") == 0) {
+  if (response.compare(0, proto::kErrorPrefix.size(), proto::kErrorPrefix) == 0) {
     return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(proto::kErrorPrefixLen)));
   }
   return {};
@@ -186,14 +187,94 @@ std::pair<std::string, std::string> SplitDebugBlock(const std::string& response)
  */
 std::vector<std::pair<std::string, std::string>> ParseKeyValuePairs(const std::string& str) {
   std::vector<std::pair<std::string, std::string>> pairs;
-  std::istringstream iss(str);
-  std::string token;
+  size_t pos = 0;
+  auto skip_spaces = [&]() {
+    while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) != 0) {
+      ++pos;
+    }
+  };
+  auto hex_value = [](char ch) -> int {
+    if (ch >= '0' && ch <= '9') {
+      return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+      return 10 + (ch - 'a');
+    }
+    if (ch >= 'A' && ch <= 'F') {
+      return 10 + (ch - 'A');
+    }
+    return -1;
+  };
 
-  while (iss >> token) {
-    size_t pos = token.find('=');
-    if (pos != std::string::npos) {
-      std::string key = token.substr(0, pos);
-      std::string value = token.substr(pos + 1);
+  while (pos < str.size()) {
+    skip_spaces();
+    const size_t key_start = pos;
+    while (pos < str.size() && str[pos] != '=' && std::isspace(static_cast<unsigned char>(str[pos])) == 0) {
+      ++pos;
+    }
+    if (pos >= str.size() || str[pos] != '=') {
+      while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) == 0) {
+        ++pos;
+      }
+      continue;
+    }
+
+    std::string key = str.substr(key_start, pos - key_start);
+    ++pos;  // skip '='
+
+    std::string value;
+    if (pos < str.size() && str[pos] == '"') {
+      ++pos;
+      while (pos < str.size()) {
+        char ch = str[pos++];
+        if (ch == '"') {
+          break;
+        }
+        if (ch == '\\' && pos < str.size()) {
+          char escaped = str[pos++];
+          switch (escaped) {
+            case 'n':
+              value.push_back('\n');
+              break;
+            case 'r':
+              value.push_back('\r');
+              break;
+            case 't':
+              value.push_back('\t');
+              break;
+            case '\\':
+            case '"':
+              value.push_back(escaped);
+              break;
+            case 'x':
+              if (pos + 1 < str.size()) {
+                const int high = hex_value(str[pos]);
+                const int low = hex_value(str[pos + 1]);
+                if (high >= 0 && low >= 0) {
+                  value.push_back(static_cast<char>((high << 4) | low));
+                  pos += 2;
+                  break;
+                }
+              }
+              value.push_back('x');
+              break;
+            default:
+              value.push_back(escaped);
+              break;
+          }
+        } else {
+          value.push_back(ch);
+        }
+      }
+    } else {
+      const size_t value_start = pos;
+      while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) == 0) {
+        ++pos;
+      }
+      value = str.substr(value_start, pos - value_start);
+    }
+
+    if (!key.empty()) {
       pairs.emplace_back(std::move(key), std::move(value));
     }
   }
@@ -650,7 +731,7 @@ class MygramClient::Impl {
                                          uint32_t offset, const std::vector<std::string>& and_terms,
                                          const std::vector<std::string>& not_terms,
                                          const std::vector<std::pair<std::string, std::string>>& filters,
-                                         const std::string& sort_column, bool sort_desc) const {
+                                         const std::string& sort_column, bool sort_desc, bool highlight = false) const {
     if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
@@ -686,6 +767,10 @@ class MygramClient::Impl {
     }
     // Default is SORT DESC (primary key descending), so no need to add it explicitly
 
+    if (highlight) {
+      cmd << " HIGHLIGHT";
+    }
+
     // LIMIT / OFFSET clauses.
     // - When both are set, prefer the atomic MySQL-style "LIMIT offset,count" form.
     // - When only LIMIT is set, emit "LIMIT <n>".
@@ -701,7 +786,7 @@ class MygramClient::Impl {
 
     // Parse response: "OK RESULTS <total_count> [<id1> <id2> ...]"
     // optionally followed by "\r\n\r\n# DEBUG\r\n<key: value>...".
-    auto result = SendAndExpectPrefix(cmd.str(), "OK RESULTS");
+    auto result = SendAndExpectPrefix(cmd.str(), proto::kOkResultsPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -709,7 +794,17 @@ class MygramClient::Impl {
 
     auto [main_part, debug_part] = SplitDebugBlock(response);
 
-    std::istringstream iss(main_part);
+    auto strip_trailing_cr = [](std::string& value) {
+      if (!value.empty() && value.back() == '\r') {
+        value.pop_back();
+      }
+    };
+
+    size_t first_line_end = main_part.find('\n');
+    std::string header_line = first_line_end == std::string::npos ? main_part : main_part.substr(0, first_line_end);
+    strip_trailing_cr(header_line);
+
+    std::istringstream iss(header_line);
     std::string status;
     std::string results_str;
     uint64_t total_count = 0;
@@ -718,10 +813,29 @@ class MygramClient::Impl {
     SearchResponse resp;
     resp.total_count = total_count;
 
-    // Remaining whitespace-separated tokens on the main line are primary keys.
-    std::string token;
-    while (iss >> token) {
-      resp.results.emplace_back(token);
+    if (first_line_end == std::string::npos) {
+      // Remaining whitespace-separated tokens on the main line are primary keys.
+      std::string token;
+      while (iss >> token) {
+        resp.results.emplace_back(token);
+      }
+    } else {
+      std::string rows = main_part.substr(first_line_end + 1);
+      std::istringstream row_stream(rows);
+      std::string line;
+      while (std::getline(row_stream, line)) {
+        strip_trailing_cr(line);
+        if (line.empty()) {
+          continue;
+        }
+
+        size_t tab_pos = line.find('\t');
+        if (tab_pos == std::string::npos) {
+          resp.results.emplace_back(line);
+        } else {
+          resp.results.emplace_back(line.substr(0, tab_pos), line.substr(tab_pos + 1));
+        }
+      }
     }
 
     if (!debug_part.empty()) {
@@ -757,7 +871,7 @@ class MygramClient::Impl {
 
     // Parse response: "OK COUNT <n>" optionally followed by
     // "\r\n\r\n# DEBUG\r\n<key: value>...".
-    auto result = SendAndExpectPrefix(cmd.str(), "OK COUNT");
+    auto result = SendAndExpectPrefix(cmd.str(), proto::kOkCountPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -795,7 +909,7 @@ class MygramClient::Impl {
     cmd << "GET " << table << " " << primary_key;
 
     // Parse response: OK DOC <primary_key> [<key=value>...]
-    auto result = SendAndExpectPrefix(cmd.str(), "OK DOC");
+    auto result = SendAndExpectPrefix(cmd.str(), proto::kOkDocPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -818,7 +932,7 @@ class MygramClient::Impl {
   }
 
   Expected<ServerInfo, Error> Info() const {
-    auto result = SendAndExpectPrefix("INFO", "OK INFO");
+    auto result = SendAndExpectPrefix("INFO", proto::kOkInfoPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -870,14 +984,19 @@ class MygramClient::Impl {
       }
     }
 
-    std::string cmd = filepath.empty() ? "SAVE" : "SAVE " + filepath;
+    std::string cmd = filepath.empty() ? "DUMP SAVE" : "DUMP SAVE " + filepath;
 
-    // Parse: OK SAVED <filepath>
-    auto result = SendAndExpectPrefix(cmd, "OK SAVED");
+    auto result = SendAndExpectPrefix(cmd, std::string_view{});
     if (!result) {
       return MakeUnexpected(result.error());
     }
-    return result->substr(proto::kOkSavedPrefixLen);  // Return filepath after "OK SAVED "
+    if (result->compare(0, proto::kOkSavedPrefix.size(), proto::kOkSavedPrefix) == 0) {
+      return result->substr(proto::kOkSavedPrefixLen);  // Return filepath after "OK SAVED "
+    }
+    if (result->compare(0, proto::kOkDumpStartedPrefix.size(), proto::kOkDumpStartedPrefix) == 0) {
+      return WaitForDumpSaveCompletion(result->substr(proto::kOkDumpStartedPrefix.size()));
+    }
+    return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Unexpected response format"));
   }
 
   Expected<std::string, Error> Load(const std::string& filepath) const {
@@ -886,15 +1005,53 @@ class MygramClient::Impl {
     }
 
     // Parse: OK LOADED <filepath>
-    auto result = SendAndExpectPrefix("LOAD " + filepath, "OK LOADED");
+    auto result = SendAndExpectPrefix("DUMP LOAD " + filepath, proto::kOkLoadedPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
     return result->substr(proto::kOkLoadedPrefixLen);  // Return filepath after "OK LOADED "
   }
 
+  Expected<std::string, Error> WaitForDumpSaveCompletion(const std::string& started_filepath) const {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+      auto status_result = SendAndExpectPrefix("DUMP STATUS", proto::kOkDumpStatusPrefix);
+      if (!status_result) {
+        return MakeUnexpected(status_result.error());
+      }
+
+      std::string status;
+      std::string result_filepath;
+      std::string error_message;
+      for (const auto& [key, value] : ParseColonKeyValueLines(*status_result)) {
+        if (key == "status") {
+          status = value;
+        } else if (key == "result_filepath") {
+          result_filepath = value;
+        } else if (key == "filepath" && result_filepath.empty()) {
+          result_filepath = value;
+        } else if (key == "error") {
+          error_message = value;
+        }
+      }
+
+      if (status == "COMPLETED") {
+        return result_filepath.empty() ? started_filepath : result_filepath;
+      }
+      if (status == "FAILED") {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kClientServerError, error_message.empty() ? "DUMP SAVE failed" : error_message));
+      }
+
+      std::this_thread::sleep_for(kDumpStatusPollInterval);
+    }
+
+    return MakeUnexpected(MakeError(ErrorCode::kClientTimeout, "Timed out waiting for DUMP SAVE to complete after " +
+                                                                   std::to_string(config_.timeout_ms) + " ms"));
+  }
+
   Expected<ReplicationStatus, Error> GetReplicationStatus() const {
-    auto result = SendAndExpectPrefix("REPLICATION STATUS", "OK REPLICATION");
+    auto result = SendAndExpectPrefix("REPLICATION STATUS", proto::kOkReplicationPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -992,6 +1149,15 @@ mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::Sear
     const std::vector<std::pair<std::string, std::string>>& filters, const std::string& sort_column,
     bool sort_desc) const {
   return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, sort_column, sort_desc);
+}
+
+mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::SearchWithHighlights(
+    const std::string& table, const std::string& query, uint32_t limit, uint32_t offset,
+    const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
+    const std::vector<std::pair<std::string, std::string>>& filters, const std::string& sort_column,
+    bool sort_desc) const {
+  return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, sort_column, sort_desc,
+                       /*highlight=*/true);
 }
 
 mygram::utils::Expected<CountResponse, mygram::utils::Error> MygramClient::Count(

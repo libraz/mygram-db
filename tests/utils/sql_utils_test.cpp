@@ -184,7 +184,7 @@ TEST(MatchTableNameTest, FollowedBySemicolon) {
   EXPECT_EQ(pos, 5U);
 }
 
-// BUG-3 fix: pos restoration on failure
+//  fix: pos restoration on failure
 TEST(MatchTableNameBugFixTest, PosRestoredOnBacktickFailure) {
   std::string str = "`other_table` WHERE";
   size_t pos = 0;

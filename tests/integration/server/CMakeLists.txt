@@ -133,7 +133,7 @@ gtest_discover_tests(verify_text_integration_test
     RESOURCE_LOCK server_port
 )
 
-# Reactor starvation regression tests (Phase 2.T7)
+# Reactor starvation regression tests (Step 2.T7)
 #
 # Reactor-mode invariant checks:
 #   T1 — 128 persistent clients + late client served promptly
@@ -156,7 +156,7 @@ gtest_discover_tests(reactor_starvation_regression_test
     TIMEOUT 120
 )
 
-# Reactor I/O model integration tests (Phase 2.T6)
+# Reactor I/O model integration tests (Step 2.T6)
 #
 # Exercises the end-to-end reactor path: IoReactor (epoll/kqueue) ->
 # ReactorConnection drain-task pattern -> RequestDispatcher.

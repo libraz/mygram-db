@@ -47,7 +47,7 @@ void Index::Optimize(uint64_t total_docs) {
   // concurrently and replaces term_postings_, our snapshot is stale.
   const uint64_t gen_before = load_generation_.load(std::memory_order_acquire);
 
-  // Phase 1a: Take snapshot of posting list VERSIONS and pointers (brief shared_lock)
+  // Step 1a: Take snapshot of posting list VERSIONS and pointers (brief shared_lock)
   // IMPORTANT: We store both versions and shared_ptrs:
   // - shared_ptr copies keep posting lists alive during optimization
   // - Version snapshots capture state at T0, unaffected by concurrent mutations
@@ -63,7 +63,7 @@ void Index::Optimize(uint64_t total_docs) {
   }
   // Lock released - AddDocument/RemoveDocument can now proceed
 
-  // Phase 1b: Create optimized copies outside the lock (CPU-intensive work)
+  // Step 1b: Create optimized copies outside the lock (CPU-intensive work)
   // This doesn't block any operations - searches and writes continue normally
   // The snapshot keeps posting lists alive via shared_ptr reference counting
   absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
@@ -72,7 +72,7 @@ void Index::Optimize(uint64_t total_docs) {
     optimized_postings[term] = posting->Clone(total_docs);
   }
 
-  // Phase 2: Atomically swap the old index with the new optimized index
+  // Step 2: Atomically swap the old index with the new optimized index
   // Brief exclusive lock to update the map
   size_t term_count = 0;
   size_t merged_count = 0;
@@ -92,9 +92,9 @@ void Index::Optimize(uint64_t total_docs) {
 
       // Update only terms that still exist in the index
       // This preserves concurrent modifications:
-      // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
-      // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
-      // - Terms modified during Phase 1: keep current version (source of truth),
+      // - Terms removed during Step 1: won't be re-added (not in term_postings_)
+      // - Terms added during Step 1: won't be optimized (not in optimized_postings)
+      // - Terms modified during Step 1: keep current version (source of truth),
       //   skip optimization for this term
       for (auto& [term, optimized_posting] : optimized_postings) {
         auto current_it = term_postings_.find(term);
@@ -191,7 +191,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
   for (size_t i = 0; i < total_terms; i += batch_size) {
     size_t batch_end = std::min(i + batch_size, total_terms);
 
-    // Phase 1a: Take snapshot of posting list VERSIONS for this batch (brief shared_lock)
+    // Step 1a: Take snapshot of posting list VERSIONS for this batch (brief shared_lock)
     // IMPORTANT: We store versions (not sizes) to detect all concurrent mutations:
     // - Version-based detection catches balanced Remove+Add (size unchanged but data changed)
     // - shared_ptr copies keep posting lists alive during optimization
@@ -210,7 +210,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     }
     // Lock released - AddDocument/RemoveDocument can proceed
 
-    // Phase 1b: Create optimized copies for this batch (CPU-intensive, outside lock)
+    // Step 1b: Create optimized copies for this batch (CPU-intensive, outside lock)
     absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
     for (size_t j = i; j < batch_end; ++j) {
       const auto& term = terms[j];
@@ -235,7 +235,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
       optimized_postings[term] = std::move(optimized);
     }
 
-    // Phase 2: Atomically swap the optimized batch (brief exclusive lock)
+    // Step 2: Atomically swap the optimized batch (brief exclusive lock)
     {
       std::unique_lock<std::shared_mutex> lock(postings_mutex_);
 
@@ -252,9 +252,9 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
 
       // Update only terms that still exist in the index
       // This preserves concurrent modifications:
-      // - Terms removed during Phase 1: won't be re-added (not in term_postings_)
-      // - Terms added during Phase 1: won't be optimized (not in optimized_postings)
-      // - Terms modified during Phase 1: keep current version (source of truth),
+      // - Terms removed during Step 1: won't be re-added (not in term_postings_)
+      // - Terms added during Step 1: won't be optimized (not in optimized_postings)
+      // - Terms modified during Step 1: keep current version (source of truth),
       //   skip optimization for this term
       for (size_t j = i; j < batch_end; ++j) {
         const auto& term = terms[j];

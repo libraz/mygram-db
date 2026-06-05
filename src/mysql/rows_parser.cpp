@@ -133,7 +133,16 @@ mygram::utils::Expected<internal::RowsEventHeader, mygram::utils::Error> interna
     return MakeUnexpected(
         MakeError(ErrorCode::kMySQLBinlogError, std::string(event_type_label) + " event too short for column_count"));
   }
-  uint64_t column_count = binlog_util::read_packed_integer(&ptr);
+  uint64_t column_count = 0;
+  if (!binlog_util::read_packed_integer(&ptr, end, &column_count)) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", std::string(event_type_label) + "_too_short")
+        .Field("section", "column_count")
+        .Error();
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError, std::string(event_type_label) + " event too short for column_count"));
+  }
 
   if (column_count != table_metadata->columns.size()) {
     mygram::utils::StructuredLog()
@@ -228,6 +237,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
   row.table_metadata = meta;
   row.column_values.resize(meta->columns.size());
   row.column_values_present.assign(meta->columns.size(), false);
+  row.column_values_null.assign(meta->columns.size(), false);
 
   // Parse each column value
   for (uint64_t col_idx = 0; col_idx < column_count; col_idx++) {
@@ -299,6 +309,10 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
 
     row.column_values[col_idx] = std::move(value);
     row.column_values_present[col_idx] = true;
+    row.column_values_null[col_idx] = is_null;
+    if (is_null) {
+      row.null_columns.insert(col_meta.name);
+    }
     const std::string& stored_value = row.column_values[col_idx];
 
     // Check if this is the primary key or text column (using cached indices)

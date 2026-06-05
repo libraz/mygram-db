@@ -200,16 +200,16 @@ TEST(ConfigSecurityTest, EnvVarOverridesMySQLPort) {
   EXPECT_EQ(result->mysql.port, 3307);
 }
 
-TEST(ConfigSecurityTest, InvalidEnvVarPortFallsBackToConfig) {
+TEST(ConfigSecurityTest, InvalidEnvVarPortReturnsError) {
   ScopedEnvVar env("MYGRAM_MYSQL_PORT", "not_a_number");
 
   std::string path = CreateMinimalConfig();
   auto result = LoadConfig(path);
   std::filesystem::remove(path);
 
-  ASSERT_TRUE(result.has_value()) << result.error().to_string();
-  // Should fall back to config file value (3306)
-  EXPECT_EQ(result->mysql.port, 3306);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
+  EXPECT_NE(result.error().message().find("MYGRAM_MYSQL_PORT"), std::string::npos);
 }
 
 // --- YAML null value handling ---

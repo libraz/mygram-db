@@ -20,6 +20,10 @@
 #include <fstream>
 #include <string>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 namespace mygramdb::utils {
 
 class AtomicFileWriterTest : public ::testing::Test {
@@ -156,6 +160,25 @@ TEST_F(AtomicFileWriterTest, CommitWithNoTempFileWritten) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageFileNotFound);
 }
+
+#ifndef _WIN32
+TEST_F(AtomicFileWriterTest, CommitRejectsSymlinkTempFile) {
+  std::string final_path = TestPath("output.dat");
+  std::string target_path = TestPath("target.dat");
+  WriteToFile(target_path, "target data");
+
+  AtomicFileWriter writer(final_path);
+  std::filesystem::create_symlink(target_path, writer.GetTempPath());
+
+  auto result = writer.Commit();
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageWriteError);
+  EXPECT_FALSE(std::filesystem::exists(final_path));
+  EXPECT_EQ(ReadFile(target_path), "target data");
+  EXPECT_FALSE(std::filesystem::exists(writer.GetTempPath()));
+}
+#endif
 
 TEST_F(AtomicFileWriterTest, EmptyContentWrite) {
   std::string final_path = TestPath("empty.dat");

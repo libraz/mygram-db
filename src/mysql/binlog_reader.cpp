@@ -198,7 +198,13 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   }
 
   // Check if GTID mode is enabled (using main connection)
-  if (!connection_.IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = connection_.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    SetLastError(gtid_mode_enabled.error());
+    mygram::utils::LogBinlogError("gtid_mode_query_failed", current_gtid_, GetLastError());
+    return MakeUnexpected(GetLastErrorObject());
+  }
+  if (!*gtid_mode_enabled) {
     SetLastError(MakeError(ErrorCode::kMySQLGTIDNotEnabled,
                            "GTID mode is not enabled on MySQL server. "
                            "Please enable GTID mode (gtid_mode=ON) for binlog replication."));
@@ -276,6 +282,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   should_stop_.store(false, std::memory_order_relaxed);
   processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
+  pending_commit_gtid_.clear();
   // Note: running_ is already set to true by compare_exchange_strong above
 
   // Reset debug log counters for this run
@@ -373,6 +380,7 @@ std::string BinlogReader::GetCurrentGTID() const {
 void BinlogReader::SetCurrentGTID(const std::string& gtid) {
   std::scoped_lock lock(gtid_mutex_);
   current_gtid_ = gtid;
+  pending_commit_gtid_.clear();
   // Update executed_gtid_set_ for REPLICATION STATUS display only.
   // Reconnection always uses current_gtid_ (via ConvertSingleGtidToRange),
   // never executed_gtid_set_, to prevent skipping undelivered events.

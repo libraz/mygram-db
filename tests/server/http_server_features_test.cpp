@@ -523,16 +523,19 @@ class HttpServerKanjiTest : public ::testing::Test {
 
     table_contexts_["test_kanji"] = &table_context_;
 
+    port_ = FindAvailableLoopbackPort();
+    ASSERT_GT(port_, 0);
+
     // Create config
     config_ = std::make_unique<config::Config>();
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
-    config_->api.http.port = 18082;
+    config_->api.http.port = port_;
 
     // Create HTTP server
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
-    http_config.port = 18082;
+    http_config.port = port_;
     http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
     http_config.enable_cors = false;
 
@@ -552,12 +555,13 @@ class HttpServerKanjiTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<HttpServer> http_server_;
+  uint16_t port_ = 0;
 };
 
 TEST_F(HttpServerKanjiTest, SearchWithKanjiNgramSize) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18082");
+  httplib::Client client(LoopbackUrl(port_));
 
   // Search for "学習" (learning) - should match both documents
   json request_body;

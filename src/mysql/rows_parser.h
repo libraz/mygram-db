@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "config/config.h"
@@ -30,7 +31,9 @@ struct RowData {
   const TableMetadata* table_metadata = nullptr;
   std::vector<std::string> column_values;                // Values indexed by TableMetadata::columns ordinal
   std::vector<bool> column_values_present;               // True when the row image included the ordinal
+  std::vector<bool> column_values_null;                  // True when the row image included an explicit NULL
   std::unordered_map<std::string, std::string> columns;  // All column values as strings
+  std::unordered_set<std::string> null_columns;          // Explicit NULLs for map-backed/manual RowData
 
   [[nodiscard]] const std::string* FindColumnValue(const std::string& column_name) const {
     if (table_metadata != nullptr && column_values.size() == table_metadata->columns.size() &&
@@ -43,6 +46,18 @@ struct RowData {
     }
     auto it = columns.find(column_name);
     return it == columns.end() ? nullptr : &it->second;
+  }
+
+  [[nodiscard]] bool IsColumnNull(const std::string& column_name) const {
+    if (table_metadata != nullptr && column_values_present.size() == table_metadata->columns.size() &&
+        column_values_null.size() == table_metadata->columns.size()) {
+      for (size_t i = 0; i < table_metadata->columns.size(); ++i) {
+        if (column_values_present[i] && table_metadata->columns[i].name == column_name) {
+          return column_values_null[i];
+        }
+      }
+    }
+    return null_columns.find(column_name) != null_columns.end();
   }
 
   [[nodiscard]] std::string GetColumnValue(const std::string& column_name) const {

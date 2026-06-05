@@ -377,7 +377,7 @@ TEST(SyncOperationManagerTest, SyncThreadsProperlyManaged) {
  * Previously SyncOperationManager returned a bare "status=IDLE message=..."
  * line, while every other status reply produced by the TCP protocol carries
  * an "OK ..." prefix. Mixing the two confused log scrapers and frustrated
- * grep-based diagnostics. After Phase 3-C the IDLE response is wrapped via
+ * grep-based diagnostics. After Step 3-C the IDLE response is wrapped via
  * ResponseFormatter::FormatStatus so the prefix matches the active-sync
  * branch produced by SendResponse.
  */

@@ -2,7 +2,7 @@
  * @file io_reactor.h
  * @brief Single-threaded reactor event loop built on `EventMultiplexer`.
  *
- * Phase 2 implementation of docs/ja/design/reactor-io-refactor.md §4.4.
+ * Step 2 implementation of docs/ja/design/reactor-io-refactor.md §4.4.
  *
  * Responsibilities:
  *   1. Own one `reactor::EventMultiplexer` instance (epoll on Linux, kqueue
@@ -17,8 +17,8 @@
  *   4. Provide thread-safe `Register`/`Unregister`/`ArmWrite`/`DisarmWrite`
  *      callable from the accept thread or from worker threads.
  *
- * Sharding across multiple event-loop threads is a Phase 3.5 optimisation;
- * Phase 2 ships a single loop and measures first.
+ * Sharding across multiple event-loop threads is a Step 3.5 optimisation;
+ * Step 2 ships a single loop and measures first.
  */
 
 #pragma once
@@ -48,12 +48,12 @@ class RequestDispatcher;
  * @brief Runtime-tunable reactor settings.
  *
  * Additional fields for sharding count, event-loop CPU affinity, and write
- * queue tuning will land alongside Phase 3 work. Values plumbed from YAML
+ * queue tuning will land alongside Step 3 work. Values plumbed from YAML
  * (`api.tcp.*`) feed into this struct.
  */
 struct ReactorConfig {
   /// Number of event-loop threads. Currently ignored (hard-coded to 1);
-  /// sharding is Phase 3.5 (design doc §7 R2).
+  /// sharding is Step 3.5 (design doc §7 R2).
   int event_loop_threads = 1;
 
   /// Per-connection soft cap on pending write bytes before the reactor
@@ -198,7 +198,7 @@ class IoReactor {
   /**
    * @brief Arm `kWritable` on an already-registered fd.
    *
-   * Called from production paths (Phase 3 feature) when a drain task can
+   * Called from production paths (Step 3 feature) when a drain task can
    * no longer write synchronously and needs to resume on the next writable
    * event.
    */

@@ -1,6 +1,6 @@
 /**
  * @file reactor_connection_test.cpp
- * @brief Unit tests for ReactorConnection (Phase 2.T4).
+ * @brief Unit tests for ReactorConnection (Step 2.T4).
  *
  * Test harness uses a socketpair(AF_UNIX, SOCK_STREAM) so the test controls
  * one end and ReactorConnection owns the other.  The RC-owned fd is put into
@@ -183,13 +183,13 @@ class ReactorConnectionNoDispatcherTest : public ::testing::Test {
 };
 
 // ---------------------------------------------------------------------------
-// Phase 3 stubs
+// Step 3 stubs
 // ---------------------------------------------------------------------------
 
-// SKIP — Phase 3: non-blocking write queue not yet implemented.
+// SKIP — Step 3: non-blocking write queue not yet implemented.
 // TEST(..., QueueCapRejectsOversizedWrite) {}
 
-// SKIP — Phase 2 has no EnqueueResponse method.
+// SKIP — Step 2 has no EnqueueResponse method.
 // TEST(..., EnqueueResponseFailsWhenClosing) {}
 
 // ---------------------------------------------------------------------------
@@ -460,7 +460,7 @@ TEST_F(ReactorConnectionTest, DrainTaskOrderingPreserved) {
 
 // SKIP — DrainTaskReschedulesAfterEmptyCheck: deterministic triggering of the
 // reschedule window requires injecting artificial delays between queue-empty
-// check and drain_scheduled_ CAS; covered by TSan stress runs in Phase 2.T5.
+// check and drain_scheduled_ CAS; covered by TSan stress runs in Step 2.T5.
 
 // ---------------------------------------------------------------------------
 // Bug fix regression (P1-3): EofWithFrameDispatchedDoesNotDropResponse

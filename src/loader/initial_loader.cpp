@@ -51,13 +51,23 @@ InitialLoader::InitialLoader(mysql::Connection& connection, index::Index& index,
       build_config_(std::move(build_config)) {}
 
 mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const ProgressCallback& progress_callback) {
+  return LoadInternal(progress_callback, true, nullptr);
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadFromExistingSnapshot(
+    const std::string& snapshot_gtid, const ProgressCallback& progress_callback) {
+  return LoadInternal(progress_callback, false, &snapshot_gtid);
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
+    const ProgressCallback& progress_callback, bool manage_transaction, const std::string* existing_snapshot_gtid) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
   // Debug: log doc_store instance address to verify same instance is used by replication
-  // This helps diagnose BUG where replication uses different instance than SYNC populated
+  // This helps diagnose replication using a different instance than SYNC populated.
   mygram::utils::StructuredLog()
       .Event("initial_loader_start")
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for debug address logging
@@ -77,7 +87,17 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
   }
 
   // Check if GTID mode is enabled
-  if (!connection_.IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = connection_.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    mygram::utils::StructuredLog()
+        .Event("loader_error")
+        .Field("operation", "initial_load")
+        .Field("type", "gtid_mode_query_failed")
+        .Field("error", gtid_mode_enabled.error().message())
+        .Error();
+    return MakeUnexpected(gtid_mode_enabled.error());
+  }
+  if (!*gtid_mode_enabled) {
     std::string error_msg =
         "GTID mode is not enabled on MySQL server. "
         "Please enable GTID mode (gtid_mode=ON) for replication support.";
@@ -106,33 +126,38 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Start transaction with consistent snapshot for GTID consistency.
-  // InnoDB's consistent snapshot guarantees that @@global.gtid_executed
-  // read inside the transaction reflects the snapshot point.
-  mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
-  auto start_txn_result = connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
-  if (!start_txn_result) {
-    std::string error_msg = "Failed to start consistent snapshot: " + start_txn_result.error().message();
-    mygram::utils::StructuredLog()
-        .Event("loader_error")
-        .Field("operation", "initial_load")
-        .Field("type", "transaction_start_failed")
-        .Field("error", error_msg)
-        .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
-  }
+  start_gtid_.clear();
+  if (manage_transaction) {
+    // Start transaction with consistent snapshot for GTID consistency.
+    // InnoDB's consistent snapshot guarantees that @@global.gtid_executed
+    // read inside the transaction reflects the snapshot point.
+    mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
+    auto start_txn_result = connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
+    if (!start_txn_result) {
+      std::string error_msg = "Failed to start consistent snapshot: " + start_txn_result.error().message();
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "transaction_start_failed")
+          .Field("error", error_msg)
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    }
 
-  // Capture GTID inside the transaction — consistent with the snapshot.
-  // Uses flavor-aware GetExecutedGTID() which queries:
-  //   MySQL:   @@GLOBAL.gtid_executed
-  //   MariaDB: @@GLOBAL.gtid_current_pos
-  auto gtid_result = connection_.GetExecutedGTID();
-  if (gtid_result && !gtid_result->empty()) {
-    start_gtid_ = *gtid_result;
-    // Remove whitespace (MySQL may include newlines in multi-UUID sets)
-    start_gtid_.erase(
-        std::remove_if(start_gtid_.begin(), start_gtid_.end(), [](unsigned char chr) { return std::isspace(chr); }),
-        start_gtid_.end());
+    // Capture GTID inside the transaction — consistent with the snapshot.
+    // Uses flavor-aware GetExecutedGTID() which queries:
+    //   MySQL:   @@GLOBAL.gtid_executed
+    //   MariaDB: @@GLOBAL.gtid_current_pos
+    auto gtid_result = connection_.GetExecutedGTID();
+    if (gtid_result && !gtid_result->empty()) {
+      start_gtid_ = *gtid_result;
+      // Remove whitespace (MySQL may include newlines in multi-UUID sets)
+      start_gtid_.erase(
+          std::remove_if(start_gtid_.begin(), start_gtid_.end(), [](unsigned char chr) { return std::isspace(chr); }),
+          start_gtid_.end());
+    }
+  } else if (existing_snapshot_gtid != nullptr) {
+    start_gtid_ = *existing_snapshot_gtid;
   }
 
   // GTID must not be empty for replication to work
@@ -326,17 +351,19 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::Load(const Pr
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Commit the transaction (releases the snapshot)
-  auto commit_result = connection_.ExecuteUpdate("COMMIT");
-  if (!commit_result) {
-    std::string error_msg = "Failed to commit transaction: " + commit_result.error().message();
-    mygram::utils::StructuredLog()
-        .Event("loader_error")
-        .Field("operation", "initial_load")
-        .Field("type", "commit_failed")
-        .Field("error", error_msg)
-        .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  if (manage_transaction) {
+    // Commit the transaction (releases the snapshot)
+    auto commit_result = connection_.ExecuteUpdate("COMMIT");
+    if (!commit_result) {
+      std::string error_msg = "Failed to commit transaction: " + commit_result.error().message();
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "commit_failed")
+          .Field("error", error_msg)
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    }
   }
 
   auto end_time = std::chrono::steady_clock::now();

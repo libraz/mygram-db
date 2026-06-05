@@ -40,7 +40,7 @@ gtest_discover_tests(memory_utils_test
   DISCOVERY_TIMEOUT 30
 )
 
-# PeriodicWorker tests (M-8 unified periodic-task abstraction)
+# PeriodicWorker tests
 add_executable(periodic_worker_test
   periodic_worker_test.cpp
 )

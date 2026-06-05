@@ -93,7 +93,11 @@ TEST_F(BinlogReaderResourceTest, MultipleStartStopCycles) {
   }
 
   // Check if GTID mode is enabled
-  if (!connection_->IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  }
+  if (!*gtid_mode_enabled) {
     GTEST_SKIP() << "MySQL GTID mode is not enabled";
   }
 
@@ -136,7 +140,11 @@ TEST_F(BinlogReaderResourceTest, ConcurrentStartAttempts) {
     GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
   }
 
-  if (!connection_->IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  }
+  if (!*gtid_mode_enabled) {
     GTEST_SKIP() << "MySQL GTID mode is not enabled";
   }
 
@@ -185,7 +193,11 @@ TEST_F(BinlogReaderResourceTest, DestructorCleanup) {
     GTEST_SKIP() << "MySQL connection failed";
   }
 
-  if (!connection_->IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  }
+  if (!*gtid_mode_enabled) {
     GTEST_SKIP() << "MySQL GTID mode is not enabled";
   }
 
@@ -219,7 +231,11 @@ TEST_F(BinlogReaderResourceTest, QueueSizeManagement) {
     GTEST_SKIP() << "MySQL connection failed";
   }
 
-  if (!connection_->IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  }
+  if (!*gtid_mode_enabled) {
     GTEST_SKIP() << "MySQL GTID mode is not enabled";
   }
 
@@ -254,7 +270,11 @@ TEST_F(BinlogReaderResourceTest, GTIDPersistence) {
     GTEST_SKIP() << "MySQL connection failed";
   }
 
-  if (!connection_->IsGTIDModeEnabled()) {
+  auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  }
+  if (!*gtid_mode_enabled) {
     GTEST_SKIP() << "MySQL GTID mode is not enabled";
   }
 

@@ -95,10 +95,9 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
               .Field("gtid", current_gtid)
               .Info();
 
-          // H-D4: use Expected<void, Error> chain rather than the legacy
-          // bool + GetLastError() pair. This matches the pattern used by
-          // dump_handler.cpp's restart paths so all replication-Start sites
-          // surface errors via the same Expected -> FieldError() flow.
+          // Use Expected<void, Error> rather than the legacy bool + GetLastError()
+          // pair. This matches dump_handler.cpp's restart paths so all
+          // replication-Start sites surface errors via the same FieldError() flow.
           auto start_result = ctx_.binlog_reader->Start();
           if (start_result) {
             return ResponseFormatter::FormatReplicationStartResponse();

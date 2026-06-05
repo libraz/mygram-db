@@ -285,6 +285,41 @@ TEST(SearchPipelineCacheTest, MergeSortedTermNgramsForCacheHandlesEmptyInput) {
   EXPECT_TRUE(MergeSortedTermNgramsForCache({{{}, 0}, {{}, 0}}).empty());
 }
 
+TEST(SearchPipelineBM25Test, GenerateTermInfosUsesTermIntersectionForDocumentFrequency) {
+  index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
+  index.AddDocument(1, "abc");
+  index.AddDocument(2, "abq");
+  index.AddDocument(3, "xbc");
+
+  auto term_infos = GenerateTermInfos({"abc"}, &index, /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                      /* cross_boundary_ngrams= */ true);
+
+  ASSERT_EQ(term_infos.size(), 1);
+  EXPECT_EQ(term_infos[0].ngrams, (std::vector<std::string>{"ab", "bc"}));
+  EXPECT_EQ(term_infos[0].estimated_size, 2u);
+  EXPECT_EQ(term_infos[0].term_doc_freq, 1u);
+  EXPECT_EQ(term_infos[0].normalized_term, "abc");
+}
+
+TEST(SearchPipelineBM25Test, TermDocumentFrequencyStaysPairedWithNormalizedTermAfterSorting) {
+  index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
+  index.AddDocument(1, "rare common");
+  index.AddDocument(2, "common only");
+  index.AddDocument(3, "common extra");
+
+  auto term_infos = GenerateTermInfos({"common", "rare"}, &index, /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                      /* cross_boundary_ngrams= */ true);
+  std::sort(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) {
+    return lhs.estimated_size < rhs.estimated_size;
+  });
+
+  ASSERT_EQ(term_infos.size(), 2);
+  ASSERT_EQ(term_infos[0].normalized_term, "rare");
+  EXPECT_EQ(term_infos[0].term_doc_freq, 1u);
+  ASSERT_EQ(term_infos[1].normalized_term, "common");
+  EXPECT_EQ(term_infos[1].term_doc_freq, 3u);
+}
+
 // =============================================================================
 // ExecuteWithFuzzy: empty n-gram detection (m-17)
 // =============================================================================
@@ -999,6 +1034,34 @@ TEST_F(FullPipelineCacheTest, CacheHitFlagSetRegardlessOfDebugMode) {
   EXPECT_TRUE(second_output.cache_hit);
   EXPECT_EQ(second_output.cache_miss_reason, CacheMissReason::kHit);
   EXPECT_EQ(second_output.path_taken, PipelinePath::CACHE_HIT);
+  EXPECT_EQ(second_output.results, first_output.results);
+}
+
+TEST_F(FullPipelineCacheTest, CanonicalCacheKeyOverridesParserPrecomputedKey) {
+  query::Query first_query;
+  first_query.type = query::QueryType::SEARCH;
+  first_query.table = "test";
+  first_query.search_text = "LEARNING";
+  first_query.limit = 100;
+  auto stale_key = cache::CacheKeyGenerator::Generate("parser-default-stale-key");
+  first_query.cache_key = std::make_pair(stale_key.hash_high, stale_key.hash_low);
+
+  query::Query second_query;
+  second_query.type = query::QueryType::SEARCH;
+  second_query.table = "test";
+  second_query.search_text = "learning";
+  second_query.limit = 100;
+
+  auto params = MakeParams();
+
+  auto first_output = ExecuteFullPipeline(first_query, params);
+  ASSERT_TRUE(first_output.success);
+  EXPECT_FALSE(first_output.cache_hit);
+  ASSERT_FALSE(first_output.results.empty());
+
+  auto second_output = ExecuteFullPipeline(second_query, params);
+  ASSERT_TRUE(second_output.success);
+  EXPECT_TRUE(second_output.cache_hit);
   EXPECT_EQ(second_output.results, first_output.results);
 }
 

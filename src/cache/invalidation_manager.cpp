@@ -138,7 +138,7 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
     }
   }
 
-  // Phase 1: Immediate invalidation (mark entries as invalidated)
+  // Step 1: Immediate invalidation (mark entries as invalidated)
   for (const auto& key : affected_keys) {
     if (cache_ != nullptr) {
       cache_->MarkInvalidated(key);

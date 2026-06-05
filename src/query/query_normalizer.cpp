@@ -12,7 +12,8 @@
 
 namespace mygramdb::cache {
 
-std::string QueryNormalizer::Normalize(const query::Query& query, const std::string& primary_key_column) {
+std::string QueryNormalizer::Normalize(const query::Query& query, const std::string& primary_key_column,
+                                       const TextNormalizer& text_normalizer) {
   std::string result;
   result.reserve(128);  // Pre-allocate to reduce reallocations
 
@@ -37,19 +38,19 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const std::str
   // Add main search text
   if (!query.search_text.empty()) {
     result += ' ';
-    result += NormalizeSearchText(query.search_text);
+    result += NormalizeSearchText(query.search_text, text_normalizer);
   }
 
   // Add AND terms
   if (!query.and_terms.empty()) {
     result += ' ';
-    result.append(NormalizeAndTerms(query.and_terms));
+    result.append(NormalizeAndTerms(query.and_terms, text_normalizer));
   }
 
   // Add NOT terms
   if (!query.not_terms.empty()) {
     result += ' ';
-    result.append(NormalizeNotTerms(query.not_terms));
+    result.append(NormalizeNotTerms(query.not_terms, text_normalizer));
   }
 
   // Add filters (sorted for consistency)
@@ -70,7 +71,7 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const std::str
   return result;
 }
 
-std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
+std::string QueryNormalizer::NormalizeSearchText(const std::string& text, const TextNormalizer& text_normalizer) {
   // Normalize whitespace: collapse multiple spaces (including Unicode spaces) to single space
   std::string normalized;
   normalized.reserve(text.size());
@@ -98,12 +99,21 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text) {
     normalized.pop_back();
   }
 
+  if (text_normalizer) {
+    return text_normalizer(normalized);
+  }
+
   return normalized;
 }
 
-std::string QueryNormalizer::NormalizeAndTerms(const std::vector<std::string>& and_terms) {
+std::string QueryNormalizer::NormalizeAndTerms(const std::vector<std::string>& and_terms,
+                                               const TextNormalizer& text_normalizer) {
   // Sort AND terms for consistent cache key
-  std::vector<std::string> sorted_terms = and_terms;
+  std::vector<std::string> sorted_terms;
+  sorted_terms.reserve(and_terms.size());
+  for (const auto& term : and_terms) {
+    sorted_terms.push_back(NormalizeSearchText(term, text_normalizer));
+  }
   std::sort(sorted_terms.begin(), sorted_terms.end());
 
   std::string result;
@@ -117,9 +127,14 @@ std::string QueryNormalizer::NormalizeAndTerms(const std::vector<std::string>& a
   return result;
 }
 
-std::string QueryNormalizer::NormalizeNotTerms(const std::vector<std::string>& not_terms) {
+std::string QueryNormalizer::NormalizeNotTerms(const std::vector<std::string>& not_terms,
+                                               const TextNormalizer& text_normalizer) {
   // Sort NOT terms for consistent cache key
-  std::vector<std::string> sorted_terms = not_terms;
+  std::vector<std::string> sorted_terms;
+  sorted_terms.reserve(not_terms.size());
+  for (const auto& term : not_terms) {
+    sorted_terms.push_back(NormalizeSearchText(term, text_normalizer));
+  }
   std::sort(sorted_terms.begin(), sorted_terms.end());
 
   std::string result;

@@ -185,7 +185,7 @@ TEST_F(FilterIndexFacetTest, DeserializeToDisplayString_EmptyString) {
   EXPECT_EQ(FilterIndex::DeserializeToDisplayString(""), "NULL");
 }
 
-// BUG-5: DeserializeToDisplayString for double is locale-independent
+// DeserializeToDisplayString for double is locale-independent
 TEST_F(FilterIndexFacetTest, DeserializeDoubleLocaleIndependent) {
   // Verify that decimal point is always '.' not ','
   FilterValue double_val = 3.14;

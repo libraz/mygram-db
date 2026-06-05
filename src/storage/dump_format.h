@@ -94,8 +94,8 @@ enum class SectionType : uint32_t {
   kConfig = 1,         // Configuration section
   kStatistics = 2,     // Global dump statistics
   kTableData = 3,      // Table data (index + docstore)
-  kTableBM25 = 5,      // BM25 term frequency data (Phase 1A, reserved)
-  kTableSynonyms = 7,  // Synonym dictionary (Phase 1B, reserved)
+  kTableBM25 = 5,      // BM25 term frequency data (Step 1A, reserved)
+  kTableSynonyms = 7,  // Synonym dictionary (Step 1B, reserved)
   // 8-15: Reserved for future expansion
 };
 
@@ -125,8 +125,8 @@ namespace flags_v2 {
 constexpr uint32_t kNone = 0x00000000;            // No optional sections
 constexpr uint32_t kWithStatistics = 0x00000008;  // Contains statistics section (same bit as V1)
 constexpr uint32_t kWithCRC = 0x00000010;         // Contains CRC checksums (same bit as V1)
-constexpr uint32_t kHasBM25Data = 0x00000020;     // Contains BM25 term frequency data (Phase 1A)
-constexpr uint32_t kHasSynonymData = 0x00000080;  // Contains synonym dictionary data (Phase 1B)
+constexpr uint32_t kHasBM25Data = 0x00000020;     // Contains BM25 term frequency data (Step 1A)
+constexpr uint32_t kHasSynonymData = 0x00000080;  // Contains synonym dictionary data (Step 1B)
 }  // namespace flags_v2
 
 /**

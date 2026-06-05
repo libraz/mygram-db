@@ -164,9 +164,9 @@ void SnapshotScheduler::SchedulerLoop() {
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
-    // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire
-    // (Phase 4 H-D1). Prevents TOCTOU race between checking and setting the
-    // flag — same contract as HandleDumpSave / HandleDumpLoad in DumpHandler.
+    // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire.
+    // Prevents TOCTOU race between checking and setting the flag; same contract
+    // as HandleDumpSave / HandleDumpLoad in DumpHandler.
     auto dump_save_guard = mygram::utils::OperationGuard::TryAcquire(dump_save_in_progress_);
     if (!dump_save_guard.engaged()) {
       // Another dump operation (manual or auto) is already in progress.
@@ -191,6 +191,7 @@ void SnapshotScheduler::TakeSnapshot() {
         .Field(log_fields::kFieldFilepath, dump_path.string())
         .Info();
 
+    std::string gtid;
 #ifdef USE_MYSQL
     // Pause replication while writing the snapshot. Without this, the binlog
     // worker thread may concurrently mutate Index/DocumentStore while WriteDump
@@ -213,31 +214,39 @@ void SnapshotScheduler::TakeSnapshot() {
     // DUMP STATUS responses; we set it on first pause and clear it on last
     // release so the indicator tracks the counter.
     bool replication_pause_acquired = false;
+    bool first_pauser = false;
     replication_pause::Scope pause_scope(*replication_pause_counter_);
     if ((binlog_reader_ != nullptr) && binlog_reader_->IsRunning()) {
-      const bool first_pauser = pause_scope.Acquire();
+      first_pauser = pause_scope.Acquire();
       replication_pause_acquired = true;
       if (first_pauser) {
         if (!binlog_reader_->IsRunning()) {
+          replication_pause_counter_->PublishDrainedGTID("");
           pause_scope.Release();
           replication_pause_acquired = false;
         } else {
           replication_paused_for_dump_.store(true, std::memory_order_release);
           binlog_reader_->Stop();
+          gtid = binlog_reader_->GetCurrentGTID();
+          replication_pause_counter_->PublishDrainedGTID(gtid);
         }
+      } else {
+        gtid = replication_pause_counter_->WaitForDrainedGTID();
       }
-      if (replication_pause_acquired) {
-        // We are the first pauser: actually stop the reader and assert the
-        // observable flag. Subsequent pausers piggy-back on this Stop().
-        // If first_pauser is false, another operation already owns the Stop().
-        mygram::utils::StructuredLog()
-            .Event("replication_paused_for_dump")
-            .Field("operation", "snapshot")
-            .Field("filepath", dump_path.string())
-            .Field("auto_resume", "true")
-            .Field("first_pauser", first_pauser)
-            .Info();
-      }
+    } else if (binlog_reader_ != nullptr) {
+      gtid = binlog_reader_->GetCurrentGTID();
+    }
+    if (replication_pause_acquired) {
+      // We are the first pauser: actually stop the reader and assert the
+      // observable flag. Subsequent pausers piggy-back on this Stop().
+      // If first_pauser is false, another operation already owns the Stop().
+      mygram::utils::StructuredLog()
+          .Event("replication_paused_for_dump")
+          .Field("operation", "snapshot")
+          .Field("filepath", dump_path.string())
+          .Field("auto_resume", "true")
+          .Field("first_pauser", first_pauser)
+          .Info();
     }
 
     // RAII restore: even on exception or early return, replication is resumed
@@ -279,9 +288,9 @@ void SnapshotScheduler::TakeSnapshot() {
                 .Field(log_fields::kFieldFilepath, dump_path_str)
                 .Info();
           } else {
-            // H-D4: surface the error via FieldError(start_result.error()) instead
-            // of the legacy GetLastError() string, so the numeric error_code is
-            // included alongside the message.
+            // Surface the error via FieldError(start_result.error()) instead of the
+            // legacy GetLastError() string, so the numeric error_code is included
+            // alongside the message.
             mygram::utils::StructuredLog()
                 .Event("replication_restart_failed")
                 .Field("operation", "snapshot")
@@ -291,13 +300,6 @@ void SnapshotScheduler::TakeSnapshot() {
           }
         });
 #endif
-
-    // Get current GTID (after stopping replication so we record the last
-    // processed position, matching DumpSaveWorker's ordering).
-    std::string gtid;
-    if (binlog_reader_ != nullptr) {
-      gtid = binlog_reader_->GetCurrentGTID();
-    }
 
     // Get dumpable contexts from catalog
     auto dumpable = catalog_->GetDumpableContexts();
@@ -320,7 +322,6 @@ void SnapshotScheduler::TakeSnapshot() {
 
     // restore_replication runs here (when in scope), resuming replication
     // before dump_save_guard releases the dump_save_in_progress flag.
-
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog().Event("snapshot_save_exception").Field(log_fields::kFieldError, e.what()).Error();
   }

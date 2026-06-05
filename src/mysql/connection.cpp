@@ -67,11 +67,7 @@ std::string GTID::ToString() const {
 
 // Connection implementation
 
-Connection::Connection(Config config) : config_(std::move(config)), mysql_(mysql_init(nullptr)) {
-  if (mysql_ == nullptr) {
-    last_error_ = "Failed to initialize MySQL handle";
-  }
-}
+Connection::Connection(Config config) : config_(std::move(config)), mysql_(mysql_init(nullptr)) {}
 
 Connection::~Connection() {
   Close();
@@ -81,8 +77,7 @@ Connection::Connection(Connection&& other) noexcept
     : config_(std::move(other.config_)),
       mysql_(other.mysql_),
       flavor_(other.flavor_),
-      server_version_(std::move(other.server_version_)),
-      last_error_(std::move(other.last_error_)) {
+      server_version_(std::move(other.server_version_)) {
   other.mysql_ = nullptr;
 }
 
@@ -93,7 +88,6 @@ Connection& Connection::operator=(Connection&& other) noexcept {
     mysql_ = other.mysql_;
     flavor_ = other.flavor_;
     server_version_ = std::move(other.server_version_);
-    last_error_ = std::move(other.last_error_);
     other.mysql_ = nullptr;
   }
   return *this;
@@ -106,8 +100,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
   using mygram::utils::MakeUnexpected;
 
   if (mysql_ == nullptr) {
-    last_error_ = "MySQL handle not initialized";
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, "MySQL handle not initialized"));
   }
 
   // Enable RSA public key retrieval for caching_sha2_password without SSL.
@@ -202,27 +195,27 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
   if (mysql_real_connect(mysql_, config_.host.c_str(), config_.user.c_str(), config_.password.c_str(),
                          config_.database.empty() ? nullptr : config_.database.c_str(), config_.port, nullptr,
                          0) == nullptr) {
-    SetMySQLError();
+    std::string error = GetMySQLErrorMessage();
     // Structured logging
     mygram::utils::StructuredLog()
         .Event("mysql_connection_error")
         .Field("host", config_.host)
         .Field("port", static_cast<uint64_t>(config_.port))
         .Field("context", context)
-        .Field("error", last_error_)
+        .Field("error", error)
         .Error();
     return MakeUnexpected(
-        MakeError(ErrorCode::kMySQLConnectionFailed, last_error_, config_.host + ":" + std::to_string(config_.port)));
+        MakeError(ErrorCode::kMySQLConnectionFailed, error, config_.host + ":" + std::to_string(config_.port)));
   }
 
   // Set character set to utf8mb4 for full Unicode support (including emoji)
   // This is critical for proper handling of multi-byte characters in binlog parsing
   if (mysql_set_character_set(mysql_, "utf8mb4") != 0) {
-    SetMySQLError();
+    std::string error = GetMySQLErrorMessage();
     mygram::utils::StructuredLog()
         .Event("mysql_charset_error")
         .Field("charset", "utf8mb4")
-        .Field("error", last_error_)
+        .Field("error", error)
         .Warn();
     // Continue anyway - most ASCII-based operations will still work
   } else {
@@ -241,10 +234,10 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
       ", SESSION interactive_timeout = " + std::to_string(config_.session_timeout_sec);
   if (mysql_query(mysql_, set_timeout_query.c_str()) != 0) {
     // Log warning but don't fail connection - timeout setting is not critical
-    SetMySQLError();
+    std::string error = GetMySQLErrorMessage();
     mygram::utils::StructuredLog()
         .Event("mysql_session_timeout_warning")
-        .Field("error", last_error_)
+        .Field("error", error)
         .Field("note", "non-critical")
         .Warn();
   } else {
@@ -297,15 +290,14 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Ping() {
   using mygram::utils::MakeUnexpected;
 
   if (mysql_ == nullptr) {
-    last_error_ = "Not connected";
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Not connected"));
   }
 
   int result = mysql_ping(mysql_);
   if (result != 0) {
-    SetMySQLError();
-    mygram::utils::StructuredLog().Event("mysql_warning").Field("operation", "ping").Field("error", last_error_).Warn();
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+    std::string error = GetMySQLErrorMessage();
+    mygram::utils::StructuredLog().Event("mysql_warning").Field("operation", "ping").Field("error", error).Warn();
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, error));
   }
 
   return {};
@@ -318,8 +310,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect(bool s
   using mygram::utils::MakeUnexpected;
 
   if (mysql_ == nullptr) {
-    last_error_ = "MySQL handle not initialized";
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, "MySQL handle not initialized"));
   }
 
   if (!silent) {
@@ -337,13 +328,12 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect(bool s
   // Reinitialize
   mysql_ = mysql_init(nullptr);
   if (mysql_ == nullptr) {
-    last_error_ = "Failed to initialize MySQL handle";
     mygram::utils::StructuredLog()
         .Event("mysql_error")
         .Field("operation", "reconnect")
-        .Field("error", last_error_)
+        .Field("error", "Failed to initialize MySQL handle")
         .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, "Failed to initialize MySQL handle"));
   }
 
   // Reconnect
@@ -365,23 +355,22 @@ mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::Execute(c
   using mygram::utils::MakeUnexpected;
 
   if (mysql_ == nullptr) {
-    last_error_ = "Not connected";
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Not connected"));
   }
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "execute_query").Field("query", query).Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
-    SetMySQLError();
-    mygram::utils::LogMySQLQueryError(query, last_error_);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, last_error_, query));
+    std::string error = GetMySQLErrorMessage();
+    mygram::utils::LogMySQLQueryError(query, error);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
   }
 
   MYSQL_RES* result = mysql_store_result(mysql_);
   if ((result == nullptr) && mysql_field_count(mysql_) > 0) {
-    SetMySQLError();
-    mygram::utils::LogMySQLQueryError(query, "Failed to store result: " + last_error_);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, last_error_, query));
+    std::string error = GetMySQLErrorMessage();
+    mygram::utils::LogMySQLQueryError(query, "Failed to store result: " + error);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
   }
 
   return MySQLResult(result);
@@ -394,21 +383,20 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(co
   using mygram::utils::MakeUnexpected;
 
   if (mysql_ == nullptr) {
-    last_error_ = "Not connected";
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, last_error_));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Not connected"));
   }
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "execute_update").Field("query", query).Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
-    SetMySQLError();
+    std::string error = GetMySQLErrorMessage();
     mygram::utils::StructuredLog()
         .Event("mysql_error")
         .Field("operation", "execute_update")
         .Field("query", query)
-        .Field("error", last_error_)
+        .Field("error", error)
         .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, last_error_, query));
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
   }
 
   return {};
@@ -512,7 +500,15 @@ std::optional<std::string> Connection::GetServerUUID() {
   return uuid;
 }
 
-bool Connection::IsGTIDModeEnabled() {
+mygram::utils::Expected<bool, mygram::utils::Error> Connection::IsGTIDModeEnabled() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  if (!IsConnected()) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Not connected"));
+  }
+
   if (flavor_ == ServerFlavor::kMariaDB) {
     mygram::utils::StructuredLog()
         .Event("mysql_debug")
@@ -528,14 +524,14 @@ bool Connection::IsGTIDModeEnabled() {
     mygram::utils::StructuredLog()
         .Event("mysql_warning")
         .Field("operation", "query_gtid_mode")
-        .Field("error", last_error_)
+        .Field("error", result.error().message())
         .Warn();
-    return false;
+    return MakeUnexpected(result.error());
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to fetch @@GLOBAL.gtid_mode result"));
   }
 
   std::string mode(row[0]);
@@ -686,7 +682,8 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
 
   auto result_exp = Execute(query);
   if (!result_exp) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to query table schema: " + last_error_,
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed,
+                                    "Failed to query table schema: " + result_exp.error().message(),
                                     database + "." + table));
   }
 
@@ -749,10 +746,11 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
   return {};
 }
 
-void Connection::SetMySQLError() {
+std::string Connection::GetMySQLErrorMessage() const {
   if (mysql_ != nullptr) {
-    last_error_ = std::string(mysql_error(mysql_));
+    return std::string(mysql_error(mysql_));
   }
+  return "MySQL handle not initialized";
 }
 
 }  // namespace mygramdb::mysql

@@ -357,8 +357,10 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
           .Event("index_ngram_mismatch")
           .Field("stream_ngram", static_cast<uint64_t>(ngram))
           .Field("current_ngram", static_cast<uint64_t>(ngram_size_))
-          .Warn();
-      // Continue anyway, but this might cause issues
+          .Error();
+      return MakeUnexpected(MakeError(
+          ErrorCode::kStorageVersionMismatch,
+          "Index ngram_size mismatch: stream=" + std::to_string(ngram) + " current=" + std::to_string(ngram_size_)));
     }
 
     // Read term count

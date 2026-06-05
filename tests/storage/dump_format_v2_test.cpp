@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "storage/dump_format_v1.h"
+#include "storage/dump_format_v1_internal.h"
 #include "utils/binary_io.h"
 
 using namespace mygramdb::storage;
@@ -104,6 +105,57 @@ std::string TempFilePath(const std::string& suffix) {
 /// Helper: cleanup temp file
 void CleanupFile(const std::string& path) {
   std::filesystem::remove(path);
+}
+
+std::string SerializeIndex(Index& index) {
+  std::ostringstream stream;
+  auto result = index.SaveToStream(stream);
+  EXPECT_TRUE(result.has_value()) << (result ? "" : result.error().message());
+  return stream.str();
+}
+
+std::string SerializeDocStore(DocumentStore& doc_store) {
+  std::ostringstream stream;
+  auto result = doc_store.SaveToStream(stream, "");
+  EXPECT_TRUE(result.has_value()) << (result ? "" : result.error().message());
+  return stream.str();
+}
+
+std::string BuildTableSectionData(const std::string& table_name, const std::string& index_data,
+                                  const std::string& doc_data) {
+  std::ostringstream section;
+  EXPECT_TRUE(dump_v1::internal::WriteString(section, table_name));
+  uint32_t table_stats_len = 0;
+  EXPECT_TRUE(WriteBinary(section, table_stats_len));
+  auto index_len = static_cast<uint64_t>(index_data.size());
+  EXPECT_TRUE(WriteBinary(section, index_len));
+  section.write(index_data.data(), static_cast<std::streamsize>(index_data.size()));
+  auto doc_len = static_cast<uint64_t>(doc_data.size());
+  EXPECT_TRUE(WriteBinary(section, doc_len));
+  section.write(doc_data.data(), static_cast<std::streamsize>(doc_data.size()));
+  EXPECT_TRUE(section.good());
+  return section.str();
+}
+
+void WriteManualV2Dump(const std::string& filepath, const Config& config,
+                       const std::vector<std::string>& table_sections) {
+  std::ofstream out(filepath, std::ios::binary);
+  ASSERT_TRUE(out) << "Failed to open " << filepath;
+  out.write(dump_format::kMagicNumber.data(), static_cast<std::streamsize>(dump_format::kMagicNumber.size()));
+  auto version = static_cast<uint32_t>(dump_format::FormatVersion::V2);
+  ASSERT_TRUE(WriteBinary(out, version));
+
+  HeaderV2 header;
+  header.section_count = static_cast<uint32_t>(1 + table_sections.size());
+  ASSERT_TRUE(WriteHeaderV2(out, header).has_value());
+
+  std::ostringstream config_stream;
+  ASSERT_TRUE(dump_v1::SerializeConfig(config_stream, config).has_value());
+  ASSERT_TRUE(WriteSectionEnvelope(out, dump_format::SectionType::kConfig, config_stream.str()).has_value());
+  for (const auto& table_section : table_sections) {
+    ASSERT_TRUE(WriteSectionEnvelope(out, dump_format::SectionType::kTableData, table_section).has_value());
+  }
+  ASSERT_TRUE(out.good());
 }
 
 /// RAII guard that cleans up a temp file on construction and destruction.
@@ -335,6 +387,113 @@ TEST(DumpFormatV2Test, DumpWithoutStatistics) {
 
   // Stats should not have been overwritten (no stats section in dump)
   EXPECT_EQ(read_stats.total_documents, 999u);
+}
+
+TEST(DumpFormatV2Test, FailedMultiTableLoadLeavesExistingTablesUnchanged) {
+  auto filepath = TempFilePath("failed_multitable_atomicity");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  TableConfig comments = cfg.tables[0];
+  comments.name = "comments";
+  cfg.tables.push_back(comments);
+
+  Index source_articles_index(2, 1);
+  ASSERT_TRUE(source_articles_index.AddDocument(1, "new article text"));
+  DocumentStore source_articles_store;
+  ASSERT_TRUE(source_articles_store.AddDocument("new-article", {}, "new article text").has_value());
+  const auto articles_section = BuildTableSectionData("articles", SerializeIndex(source_articles_index),
+                                                      SerializeDocStore(source_articles_store));
+
+  Index source_comments_index(2, 1);
+  ASSERT_TRUE(source_comments_index.AddDocument(1, "new comment text"));
+  const auto comments_section =
+      BuildTableSectionData("comments", SerializeIndex(source_comments_index), "not a valid document store");
+
+  WriteManualV2Dump(filepath, cfg, {articles_section, comments_section});
+
+  DocumentStore existing_articles_store;
+  auto old_doc_id = existing_articles_store.AddDocument("old-article", {}, "old article text");
+  ASSERT_TRUE(old_doc_id.has_value()) << old_doc_id.error().message();
+  Index existing_articles_index(2, 1);
+  ASSERT_TRUE(existing_articles_index.AddDocument(*old_doc_id, "old article text"));
+  Index existing_comments_index(2, 1);
+  DocumentStore existing_comments_store;
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&existing_articles_index, &existing_articles_store};
+  read_contexts["comments"] = {&existing_comments_index, &existing_comments_store};
+
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_EQ(existing_articles_store.GetPrimaryKey(*old_doc_id), std::optional<std::string>("old-article"));
+  EXPECT_EQ(existing_articles_index.Count("ol"), 1u);
+  EXPECT_EQ(existing_articles_index.Count("ne"), 0u);
+}
+
+TEST(DumpFormatV2Test, LoadFailsWhenConfiguredTableIsMissingFromDump) {
+  auto filepath = TempFilePath("missing_configured_table");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index source_index(2, 1);
+  DocumentStore source_store;
+  const auto articles_section =
+      BuildTableSectionData("articles", SerializeIndex(source_index), SerializeDocStore(source_store));
+  WriteManualV2Dump(filepath, cfg, {articles_section});
+
+  Index articles_index(2, 1);
+  DocumentStore articles_store;
+  Index comments_index(2, 1);
+  DocumentStore comments_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&articles_index, &articles_store};
+  read_contexts["comments"] = {&comments_index, &comments_store};
+
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_NE(read_result.error().message().find("Missing configured tables"), std::string::npos);
+}
+
+TEST(DumpFormatV2Test, LoadFailsWhenDumpContainsUnexpectedTable) {
+  auto filepath = TempFilePath("unexpected_dump_table");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  TableConfig comments = cfg.tables[0];
+  comments.name = "comments";
+  cfg.tables.push_back(comments);
+
+  Index source_articles_index(2, 1);
+  DocumentStore source_articles_store;
+  const auto articles_section = BuildTableSectionData("articles", SerializeIndex(source_articles_index),
+                                                      SerializeDocStore(source_articles_store));
+  Index source_comments_index(2, 1);
+  DocumentStore source_comments_store;
+  const auto comments_section = BuildTableSectionData("comments", SerializeIndex(source_comments_index),
+                                                      SerializeDocStore(source_comments_store));
+  WriteManualV2Dump(filepath, cfg, {articles_section, comments_section});
+
+  Index articles_index(2, 1);
+  ASSERT_TRUE(articles_index.AddDocument(1, "old article text"));
+  DocumentStore articles_store;
+  ASSERT_TRUE(articles_store.AddDocument("old-article", {}, "old article text").has_value());
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&articles_index, &articles_store};
+
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_NE(read_result.error().message().find("unexpected dump tables"), std::string::npos);
+  EXPECT_EQ(articles_index.Count("ol"), 1u);
 }
 
 // ============================================================================
