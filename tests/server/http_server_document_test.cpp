@@ -112,7 +112,7 @@ TEST_F(HttpServerTest, GetDocumentEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
-  auto res = client.Get("/test/1");
+  auto res = client.Get("/test/article_1");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -131,7 +131,7 @@ TEST_F(HttpServerTest, GetDocumentNotFound) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
-  auto res = client.Get("/test/999");
+  auto res = client.Get("/test/missing_pk");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 404);

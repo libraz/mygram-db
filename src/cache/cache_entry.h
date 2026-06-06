@@ -30,7 +30,7 @@ namespace {
  * NOT a strict accounting figure — exact size depends on the standard library
  * implementation, allocator padding, and whether shared_ptr is constructed
  * with make_shared (combined block) versus the two-arg form (separate block).
- * H-M1 uses this constant only to avoid the 5-10% under-report seen in fleet
+ * This constant avoids the 5-10% under-report seen in fleet
  * memory profiles before this fix.
  */
 constexpr size_t kSharedPtrControlBlockOverhead = 24;
@@ -205,7 +205,7 @@ struct CacheEntry {
     // Compressed data (shared_ptr + vector heap allocation)
     size_t size = sizeof(CacheEntry);
     if (compressed) {
-      // H-M1: include the shared_ptr control block. Without this, large fleets
+      // include the shared_ptr control block. Without this, large fleets
       // observed ~5-10% under-report against process RSS because every entry
       // owns one control block on the heap.
       size += sizeof(std::vector<uint8_t>) + compressed->capacity() + kSharedPtrControlBlockOverhead;

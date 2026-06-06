@@ -756,6 +756,85 @@ TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGt
   cleanup();
 }
 
+TEST(InitialLoaderIntegrationTest, ExistingSnapshotErrorDoesNotRollbackCallerTransaction) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection loader_connection(connection_config);
+  auto loader_connect = loader_connection.Connect("initial-loader-existing-snapshot-rollback-test");
+  if (!loader_connect) {
+    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
+  }
+  auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled) {
+    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  }
+  if (!*gtid_mode_enabled) {
+    GTEST_SKIP() << "MySQL GTID mode is not enabled";
+  }
+
+  mysql::Connection writer_connection(connection_config);
+  auto writer_connect = writer_connection.Connect("initial-loader-existing-snapshot-rollback-writer");
+  if (!writer_connect) {
+    GTEST_SKIP() << "MySQL writer connection failed: " << writer_connect.error().message();
+  }
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string load_table = "mygram_it_existing_snapshot_load_" + suffix;
+  const std::string probe_table = "mygram_it_existing_snapshot_probe_" + suffix;
+
+  auto cleanup = [&]() {
+    (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS " + load_table);
+    (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS " + probe_table);
+  };
+  cleanup();
+
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE " + load_table +
+                                              " (id VARCHAR(32) PRIMARY KEY, content TEXT, status INT) ENGINE=InnoDB"));
+  ASSERT_TRUE(
+      writer_connection.ExecuteUpdate("CREATE TABLE " + probe_table + " (id VARCHAR(32) PRIMARY KEY) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + load_table + " VALUES ('1', 'snapshot text', 1)"));
+
+  ASSERT_TRUE(loader_connection.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT"));
+  auto gtid_result = loader_connection.GetExecutedGTID();
+  ASSERT_TRUE(gtid_result) << gtid_result.error().message();
+  std::string snapshot_gtid = *gtid_result;
+  snapshot_gtid.erase(
+      std::remove_if(snapshot_gtid.begin(), snapshot_gtid.end(), [](unsigned char chr) { return std::isspace(chr); }),
+      snapshot_gtid.end());
+  ASSERT_FALSE(snapshot_gtid.empty());
+  ASSERT_TRUE(loader_connection.ExecuteUpdate("INSERT INTO " + probe_table + " VALUES ('kept')"));
+
+  config::TableConfig table_config;
+  table_config.name = load_table;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "int";
+  required_filter.op = "=";
+  required_filter.value = "1 OR 1";
+  table_config.required_filters.push_back(required_filter);
+
+  index::Index index(1);
+  storage::DocumentStore store;
+  loader::InitialLoader loader(loader_connection, index, store, table_config);
+  EXPECT_FALSE(loader.LoadFromExistingSnapshot(snapshot_gtid));
+  ASSERT_TRUE(loader_connection.ExecuteUpdate("COMMIT"));
+
+  auto count_result = writer_connection.Execute("SELECT COUNT(*) FROM " + probe_table + " WHERE id = 'kept'");
+  ASSERT_TRUE(count_result) << count_result.error().message();
+  MYSQL_ROW row = mysql_fetch_row(count_result->get());
+  ASSERT_NE(row, nullptr);
+  ASSERT_NE(row[0], nullptr);
+  EXPECT_STREQ(row[0], "1");
+
+  cleanup();
+}
+
 }  // namespace mygramdb::loader
 
 #endif  // USE_MYSQL

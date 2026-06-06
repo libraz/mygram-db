@@ -56,6 +56,17 @@ TEST(BM25SortTest, SortByScoreWithOffset) {
   EXPECT_EQ(sorted[1], 4);  // score 2.0
 }
 
+TEST(BM25SortTest, SortByScoreUsesDocIdTieBreaker) {
+  std::vector<DocId> results = {3, 1, 2};
+  std::vector<double> scores = {1.0, 1.0, 1.0};
+
+  auto ascending = ResultSorter::SortByScore(results, scores, SortOrder::ASC, 0, 0);
+  EXPECT_EQ(ascending, (std::vector<DocId>{1, 2, 3}));
+
+  auto descending = ResultSorter::SortByScore(results, scores, SortOrder::DESC, 0, 0);
+  EXPECT_EQ(descending, (std::vector<DocId>{3, 2, 1}));
+}
+
 TEST(BM25SortTest, SortByScoreEmpty) {
   std::vector<DocId> results;
   std::vector<double> scores;

@@ -10,7 +10,7 @@
  * Test 1: 128 persistent clients + 1 late client, worker_threads=2 — late
  *   client MUST get a response within 500 ms.
  * Test 2: 128 persistent clients each sending 10 INFO requests —
- *   no ERR SERVER_BUSY, all responses are OK INFO.
+ *   no ERROR SERVER_BUSY, all responses are OK INFO.
  *
  * Labeled "INTEGRATION" — runs via `ctest -L INTEGRATION`.
  * RESOURCE_LOCK "server_port" — each test binds a real OS port.
@@ -326,7 +326,7 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
 
 // ---------------------------------------------------------------------------
 // Test 2 — Throughput: 128 persistent clients × 10 INFO requests, no
-//           ERR SERVER_BUSY, all responses are "OK INFO".
+//           ERROR SERVER_BUSY, all responses are "OK INFO".
 // ---------------------------------------------------------------------------
 /**
  * Open 128 connections and send 10 sequential INFO requests on each. In
@@ -394,7 +394,7 @@ TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) 
           total_error.fetch_add(1, std::memory_order_relaxed);
           return;
         }
-        if (resp.find("ERR SERVER_BUSY") != std::string::npos) {
+        if (resp.find("ERROR SERVER_BUSY") != std::string::npos) {
           total_busy.fetch_add(1, std::memory_order_relaxed);
         } else if (resp.size() >= 7 && resp.substr(0, 7) == "OK INFO") {
           total_ok.fetch_add(1, std::memory_order_relaxed);
@@ -416,7 +416,7 @@ TEST_F(ReactorStarvationRegressionTest, ReactorHighConcurrencyShowsNoQueueFull) 
             << std::endl;
 
   // --- Assertions ---
-  EXPECT_EQ(total_busy.load(), 0) << "Reactor mode sent ERR SERVER_BUSY " << total_busy.load()
+  EXPECT_EQ(total_busy.load(), 0) << "Reactor mode sent ERROR SERVER_BUSY " << total_busy.load()
                                   << " times. The worker pool should not saturate when the reactor is active.";
 
   EXPECT_EQ(total_ok.load(), kExpectedTotal)

@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -17,11 +18,100 @@
 using namespace mygramdb::config;
 using json = nlohmann::json;
 
+namespace {
+
+std::string TempConfigPath(const std::string& filename) {
+  auto dir = std::filesystem::temp_directory_path() / "mygramdb_config_test";
+  std::filesystem::create_directories(dir);
+  return (dir / filename).string();
+}
+
+std::string SourcePath(const std::string& relative_path) {
+#ifdef MYGRAMDB_SOURCE_DIR
+  return (std::filesystem::path(MYGRAMDB_SOURCE_DIR) / relative_path).string();
+#else
+  return relative_path;
+#endif
+}
+
+}  // namespace
+
 /**
  * @brief Test loading valid configuration file
  */
 TEST(ConfigTest, LoadValidConfig) {
-  auto config_result = LoadConfig("test_config.yaml");
+  const auto path = TempConfigPath("test_config.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n"
+    << "  host: \"127.0.0.1\"\n"
+    << "  port: 3306\n"
+    << "  user: \"test_user\"\n"
+    << "  password: \"test_pass\"\n"
+    << "  database: \"test_db\"\n"
+    << "  use_gtid: true\n"
+    << "  binlog_format: \"ROW\"\n"
+    << "  binlog_row_image: \"FULL\"\n"
+    << "  connect_timeout_ms: 5000\n"
+    << "  read_timeout_ms: 7200000\n"
+    << "  write_timeout_ms: 7200000\n"
+    << "tables:\n"
+    << "  - name: \"test_table\"\n"
+    << "    primary_key: \"id\"\n"
+    << "    text_source:\n"
+    << "      column: \"content\"\n"
+    << "    ngram_size: 1\n"
+    << "    filters:\n"
+    << "      - name: \"status\"\n"
+    << "        type: \"int\"\n"
+    << "        dict_compress: true\n"
+    << "        bitmap_index: true\n"
+    << "      - name: \"created_at\"\n"
+    << "        type: \"datetime\"\n"
+    << "        bucket: \"hour\"\n"
+    << "    posting:\n"
+    << "      block_size: 64\n"
+    << "      freq_bits: 0\n"
+    << "      use_roaring: \"auto\"\n"
+    << "build:\n"
+    << "  mode: \"select_snapshot\"\n"
+    << "  batch_size: 1000\n"
+    << "  parallelism: 1\n"
+    << "  throttle_ms: 0\n"
+    << "replication:\n"
+    << "  enable: true\n"
+    << "  server_id: 100\n"
+    << "  start_from: \"snapshot\"\n"
+    << "memory:\n"
+    << "  hard_limit_mb: 1024\n"
+    << "  soft_target_mb: 512\n"
+    << "  arena_chunk_mb: 32\n"
+    << "  roaring_threshold: 0.2\n"
+    << "  minute_epoch: true\n"
+    << "  normalize:\n"
+    << "    nfkc: true\n"
+    << "    width: \"narrow\"\n"
+    << "    lower: false\n"
+    << "dump:\n"
+    << "  dir: \"/tmp/test_dumps\"\n"
+    << "  interval_sec: 300\n"
+    << "  retain: 2\n"
+    << "api:\n"
+    << "  tcp:\n"
+    << "    bind: \"127.0.0.1\"\n"
+    << "    port: 11016\n"
+    << "  http:\n"
+    << "    enable: false\n"
+    << "    bind: \"127.0.0.1\"\n"
+    << "    port: 8080\n"
+    << "network:\n"
+    << "  allow_cidrs:\n"
+    << "    - \"127.0.0.1/32\"\n"
+    << "logging:\n"
+    << "  level: \"debug\"\n"
+    << "  format: \"text\"\n";
+  f.close();
+
+  auto config_result = LoadConfig(path);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   Config config = *config_result;
 
@@ -390,6 +480,144 @@ TEST(ConfigTest, InvalidStartFrom) {
   }
 }
 
+TEST(ConfigTest, MultiTableAutoInitialSnapshotRejectsLatestStartFrom) {
+  const auto path = TempConfigPath("multi_table_latest_start_from.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "  - name: comments\n";
+  f << "    text_source:\n";
+  f << "      column: body\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  auto_initial_snapshot: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: latest\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    EXPECT_TRUE(error_msg.find("multi-table auto_initial_snapshot requires start_from: snapshot") != std::string::npos)
+        << error_msg;
+    EXPECT_TRUE(error_msg.find("shared consistent snapshot GTID") != std::string::npos) << error_msg;
+  }
+}
+
+TEST(ConfigTest, MultiTableAutoInitialSnapshotRejectsExplicitGtidStartFrom) {
+  const auto path = TempConfigPath("multi_table_gtid_start_from.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "  - name: comments\n";
+  f << "    text_source:\n";
+  f << "      column: body\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  auto_initial_snapshot: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    EXPECT_TRUE(error_msg.find("multi-table auto_initial_snapshot requires start_from: snapshot") != std::string::npos)
+        << error_msg;
+  }
+}
+
+TEST(ConfigTest, MultiTableAutoInitialSnapshotAllowsSnapshotStartFrom) {
+  const auto path = TempConfigPath("multi_table_snapshot_start_from.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "  - name: comments\n";
+  f << "    text_source:\n";
+  f << "      column: body\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  auto_initial_snapshot: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: snapshot\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  ASSERT_TRUE(result) << result.error().message();
+  EXPECT_EQ(result->replication.start_from, "snapshot");
+}
+
+TEST(ConfigTest, ReservedConfigKnobsAreMarkedNotYetEnforcedInSchema) {
+  std::ifstream f(SourcePath("src/config/config-schema.json"));
+  ASSERT_TRUE(f.is_open());
+  json schema = json::parse(f);
+
+  auto expect_reserved = [&](const std::vector<std::string>& path) {
+    const json* node = &schema;
+    for (const auto& key : path) {
+      ASSERT_TRUE(node->contains(key)) << key;
+      node = &(*node)[key];
+    }
+    ASSERT_TRUE(node->contains("description"));
+    const std::string description = (*node)["description"].get<std::string>();
+    EXPECT_NE(description.find("Reserved / not yet enforced"), std::string::npos) << description;
+  };
+
+  expect_reserved({"properties", "build", "properties", "parallelism"});
+  expect_reserved({"properties", "build", "properties", "throttle_ms"});
+  expect_reserved({"properties", "replication", "properties", "reconnect_backoff_min_ms"});
+  expect_reserved({"properties", "replication", "properties", "reconnect_backoff_max_ms"});
+  expect_reserved({"properties", "memory", "properties", "hard_limit_mb"});
+  expect_reserved({"properties", "memory", "properties", "soft_target_mb"});
+  expect_reserved({"properties", "memory", "properties", "arena_chunk_mb"});
+  expect_reserved({"properties", "cache", "properties", "invalidation_strategy"});
+  expect_reserved({"properties", "cache", "properties", "eviction_batch_size"});
+}
+
+TEST(ConfigTest, BinlogRowImageSchemaAllowsOnlyFull) {
+  std::ifstream f(SourcePath("src/config/config-schema.json"));
+  ASSERT_TRUE(f.is_open());
+  json schema = json::parse(f);
+
+  const auto& row_image = schema["properties"]["mysql"]["properties"]["binlog_row_image"];
+  ASSERT_TRUE(row_image.contains("enum"));
+  ASSERT_EQ(row_image["enum"].size(), 1u);
+  EXPECT_EQ(row_image["enum"][0].get<std::string>(), "FULL");
+}
+
+TEST(ConfigTest, CMakeRequiresIcuWhenEnabled) {
+  std::ifstream f(SourcePath("CMakeLists.txt"));
+  ASSERT_TRUE(f.is_open());
+  const std::string cmake((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+
+  EXPECT_NE(cmake.find("message(FATAL_ERROR"), std::string::npos);
+  EXPECT_NE(cmake.find("ICU not found"), std::string::npos);
+  EXPECT_NE(cmake.find("-DUSE_ICU=OFF"), std::string::npos);
+}
+
 /**
  * @brief Test loading valid JSON configuration file
  */
@@ -414,11 +642,12 @@ TEST(ConfigTest, LoadValidJSONConfig) {
             {"replication", {{"enable", true}, {"server_id", 200}, {"start_from", "latest"}}},
             {"logging", {{"level", "info"}, {"format", "json"}}}};
 
-  std::ofstream f("test_config.json");
+  const auto path = TempConfigPath("test_config.json");
+  std::ofstream f(path);
   f << j.dump(2);
   f.close();
 
-  auto config_result = LoadConfig("test_config.json");
+  auto config_result = LoadConfig(path);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   Config config = *config_result;
 
@@ -450,6 +679,31 @@ TEST(ConfigTest, LoadValidJSONConfig) {
   // Logging config
   EXPECT_EQ(config.logging.level, "info");
   EXPECT_EQ(config.logging.format, "json");
+}
+
+TEST(ConfigTest, RejectsUnsupportedBinlogRowImage) {
+  json j = {
+      {"mysql",
+       {{"host", "127.0.0.1"},
+        {"port", 3306},
+        {"user", "json_user"},
+        {"password", "json_pass"},
+        {"database", "json_db"},
+        {"use_gtid", true},
+        {"binlog_format", "ROW"},
+        {"binlog_row_image", "MINIMAL"}}},
+      {"tables",
+       {{{"name", "json_table"}, {"primary_key", "id"}, {"text_source", {{"column", "content"}}}, {"ngram_size", 2}}}}};
+
+  const auto path = TempConfigPath("test_invalid_row_image.json");
+  std::ofstream f(path);
+  f << j.dump(2);
+  f.close();
+
+  auto config_result = LoadConfig(path);
+  ASSERT_FALSE(config_result);
+  EXPECT_EQ(config_result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
+  EXPECT_NE(config_result.error().message().find("binlog_row_image"), std::string::npos);
 }
 
 /**

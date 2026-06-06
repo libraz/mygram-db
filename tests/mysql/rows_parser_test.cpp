@@ -1435,6 +1435,18 @@ TEST_F(RowsParserTest, FloatTypeParsing) {
   EXPECT_NEAR(3.14, parsed, 0.01);
 }
 
+TEST_F(RowsParserTest, FloatTypeUsesRoundTripPrecision) {
+  const float value = 123456.789f;
+  auto bytes = EncodeFloat(value);
+
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::FLOAT), bytes.data(), 0, false,
+                                            bytes.data() + bytes.size());
+
+  ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
+  EXPECT_NE(*decoded, std::to_string(value));
+  EXPECT_FLOAT_EQ(std::stof(*decoded), value);
+}
+
 /**
  * @test DOUBLE type should be parsed correctly
  */
@@ -1486,6 +1498,18 @@ TEST_F(RowsParserTest, DoubleTypeParsing) {
   // Parse and check value is approximately 3.14159265359
   double parsed = std::stod(double_value);
   EXPECT_NEAR(3.14159265359, parsed, 0.00001);
+}
+
+TEST_F(RowsParserTest, DoubleTypeUsesRoundTripPrecision) {
+  const double value = 0.12345678901234566;
+  auto bytes = EncodeDouble(value);
+
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DOUBLE), bytes.data(), 0, false,
+                                            bytes.data() + bytes.size());
+
+  ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
+  EXPECT_NE(*decoded, std::to_string(value));
+  EXPECT_DOUBLE_EQ(std::stod(*decoded), value);
 }
 
 /**

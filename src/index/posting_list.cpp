@@ -177,20 +177,29 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
 
   assert(std::is_sorted(doc_ids.begin(), doc_ids.end()));
 
+  const std::vector<DocId>* normalized_doc_ids = &doc_ids;
+  std::vector<DocId> deduped_doc_ids;
+  if (std::adjacent_find(doc_ids.begin(), doc_ids.end()) != doc_ids.end()) {
+    deduped_doc_ids.reserve(doc_ids.size());
+    std::unique_copy(doc_ids.begin(), doc_ids.end(), std::back_inserter(deduped_doc_ids));
+    normalized_doc_ids = &deduped_doc_ids;
+  }
+
   std::unique_lock lock(mutex_);  // Exclusive access for write
   auto strategy = strategy_.load(std::memory_order_relaxed);
   if (strategy == PostingStrategy::kDeltaCompressed) {
     // Merge sorted arrays
     auto existing = DecodeDelta(delta_compressed_);
     std::vector<DocId> merged;
-    merged.reserve(existing.size() + doc_ids.size());
-    std::set_union(existing.begin(), existing.end(), doc_ids.begin(), doc_ids.end(), std::back_inserter(merged));
+    merged.reserve(existing.size() + normalized_doc_ids->size());
+    std::set_union(existing.begin(), existing.end(), normalized_doc_ids->begin(), normalized_doc_ids->end(),
+                   std::back_inserter(merged));
     delta_compressed_ = EncodeDelta(merged);
     if (!merged.empty()) {
       last_doc_id_ = merged.back();
     }
   } else {
-    roaring_bitmap_add_many(roaring_bitmap_, doc_ids.size(), doc_ids.data());
+    roaring_bitmap_add_many(roaring_bitmap_, normalized_doc_ids->size(), normalized_doc_ids->data());
   }
   UpdateCountsAndVersion();
 }
@@ -822,6 +831,11 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
     roaring_bitmap_ = roaring_bitmap_portable_deserialize_safe(GetDeserializationPointer(buffer, offset), size);
 
     if (roaring_bitmap_ == nullptr) {
+      return false;
+    }
+    if (!roaring_bitmap_internal_validate(roaring_bitmap_, nullptr)) {
+      roaring_bitmap_free(roaring_bitmap_);
+      roaring_bitmap_ = nullptr;
       return false;
     }
 

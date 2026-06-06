@@ -199,7 +199,7 @@ TEST_F(ConnectionAcceptorTcpTest, ReactorHandlerRejectionSendsServerBusy) {
 
   if (n > 0) {
     std::string response(buf, static_cast<size_t>(n));
-    EXPECT_NE(response.find("SERVER_BUSY"), std::string::npos) << "Expected SERVER_BUSY response, got: " << response;
+    EXPECT_EQ(response.rfind("ERROR SERVER_BUSY", 0), 0u) << "Expected ERROR SERVER_BUSY response, got: " << response;
   }
 
   acceptor.Stop();

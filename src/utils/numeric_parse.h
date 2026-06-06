@@ -9,7 +9,10 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cctype>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -40,12 +43,22 @@ std::optional<T> ParseNumeric(std::string_view str, int base = 10) {
   if constexpr (std::is_floating_point_v<T>) {
     // std::from_chars for floating-point is not reliably available in C++17
     // (Apple Clang does not support it). Use std::stod with exception handling.
+    if (str.empty() || str.front() == '+') {
+      return std::nullopt;
+    }
+    if (std::any_of(str.begin(), str.end(), [](unsigned char ch) { return std::isspace(ch) != 0; })) {
+      return std::nullopt;
+    }
+
     try {
       std::string tmp(str);
       size_t pos = 0;
       double val = std::stod(tmp, &pos);
       if (pos != tmp.size()) {
         return std::nullopt;  // Trailing characters
+      }
+      if (!std::isfinite(val)) {
+        return std::nullopt;
       }
       return static_cast<T>(val);
     } catch (...) {

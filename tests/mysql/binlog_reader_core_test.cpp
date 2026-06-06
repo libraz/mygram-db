@@ -515,8 +515,8 @@ TEST_F(BinlogReaderFixture, UpdateCurrentGtidDoesNotOverwriteExecutedGtidSet) {
   // Simulate receiving a GTID event (single GTID)
   reader_->UpdateCurrentGTID("uuid1:101");
 
-  // current_gtid_ should be updated to single GTID
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:101");
+  // current_gtid_ should retain the full set and merge the applied GTID.
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:1-101,uuid2:1-50");
 
   // executed_gtid_set_ MUST NOT be overwritten by single GTID
   {
@@ -568,14 +568,27 @@ TEST_F(BinlogReaderFixture, GetExecutedGtidSetReturnsFullSetForReconnection) {
   reader_->UpdateCurrentGTID("uuid1:102");
   reader_->UpdateCurrentGTID("uuid1:103");
 
-  // current_gtid_ should be latest single GTID
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:103");
+  // current_gtid_ should retain the full set and merge all applied GTIDs.
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:1-103,uuid2:1-50");
 
   // executed_gtid_set_ should still be the full set (for reconnection use)
   {
     std::scoped_lock lock(reader_->gtid_mutex_);
     EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100,uuid2:1-50");
   }
+}
+
+TEST_F(BinlogReaderFixture, MySqlCurrentGtidTracksAllUuids) {
+  reader_->SetCurrentGTID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-50");
+
+  reader_->UpdateCurrentGTID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:51");
+  EXPECT_EQ(reader_->GetCurrentGTID(),
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-51");
+
+  reader_->UpdateCurrentGTID("cccccccc-cccc-cccc-cccc-cccccccccccc:7");
+  EXPECT_EQ(reader_->GetCurrentGTID(),
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-51,"
+            "cccccccc-cccc-cccc-cccc-cccccccccccc:7");
 }
 
 TEST_F(BinlogReaderFixture, MariaDbCurrentGtidTracksAllDomains) {

@@ -314,8 +314,8 @@ tables:
 build:
   mode: "select_snapshot"           # 構築モード(現在はselect_snapshotのみ)
   batch_size: 5000                  # スナップショット中のバッチあたりの行数
-  parallelism: 2                    # 並列構築スレッド数
-  throttle_ms: 0                    # バッチ間のスロットル遅延(ミリ秒)
+  parallelism: 2                    # 予約済み / 現在は未強制
+  throttle_ms: 0                    # 予約済み / 現在は未強制
 ```
 
 #### パラメータ
@@ -324,14 +324,14 @@ build:
 |-----------|------|---------|-------------|------------|
 | `mode` | string | `select_snapshot` | 構築モード(現在は`select_snapshot`のみ) | ❌ 不可 |
 | `batch_size` | integer | `5000` | スナップショット中にバッチごとに処理する行数 | ❌ 不可 |
-| `parallelism` | integer | `2` | 並列構築スレッド数 | ❌ 不可 |
-| `throttle_ms` | integer | `0` | バッチ間のスロットル遅延(ミリ秒)(0 = スロットルなし) | ❌ 不可 |
+| `parallelism` | integer | `2` | 予約済み / 現在は未強制 | ❌ 不可 |
+| `throttle_ms` | integer | `0` | 予約済み / 現在は未強制 | ❌ 不可 |
 
 **パフォーマンスチューニング**:
 - **大きい`batch_size`(10000+)**: 初期スナップショットが高速、メモリ使用量が多い
 - **小さい`batch_size`(1000-2000)**: スナップショットが低速、メモリ使用量が少ない
-- **高い`parallelism`**: マルチコアシステムで高速、メモリ使用量が多い
-- **0以外の`throttle_ms`**: スナップショット中のMySQL負荷を軽減(本番データベースで有用)
+- `parallelism`と`throttle_ms`は将来互換のため受け付けられますが、
+  現在のスナップショットローダでは強制されません。
 
 ---
 
@@ -344,8 +344,8 @@ replication:
   server_id: 12345                  # MySQLサーバーID(一意である必要がある)
   start_from: "snapshot"            # レプリケーション開始位置
   queue_size: 10000                 # binlogイベントキューサイズ
-  reconnect_backoff_min_ms: 500     # 最小再接続バックオフ遅延
-  reconnect_backoff_max_ms: 10000   # 最大再接続バックオフ遅延
+  reconnect_backoff_min_ms: 500     # 予約済み / 現在は未強制
+  reconnect_backoff_max_ms: 10000   # 予約済み / 現在は未強制
 ```
 
 #### パラメータ
@@ -357,8 +357,8 @@ replication:
 | `server_id` | integer | *必須* | MySQLサーバーID(0以外でレプリケーショントポロジ内で一意である必要がある) | ❌ 不可 |
 | `start_from` | string | `snapshot` | レプリケーション開始位置: `snapshot`、`latest`、または`gtid=<UUID:txn>` | ❌ 不可 |
 | `queue_size` | integer | `10000` | binlogイベントキューサイズ(リーダーとプロセッサ間のバッファ) | ❌ 不可 |
-| `reconnect_backoff_min_ms` | integer | `500` | 最小再接続バックオフ遅延(ミリ秒) | ❌ 不可 |
-| `reconnect_backoff_max_ms` | integer | `10000` | 最大再接続バックオフ遅延(ミリ秒) | ❌ 不可 |
+| `reconnect_backoff_min_ms` | integer | `500` | 予約済み / 現在は未強制。再接続遅延は組み込みスケジュールを使用 | ❌ 不可 |
+| `reconnect_backoff_max_ms` | integer | `10000` | 予約済み / 現在は未強制。再接続遅延は組み込みスケジュールを使用 | ❌ 不可 |
 
 #### レプリケーション開始位置
 
@@ -367,6 +367,11 @@ replication:
 | `snapshot` | スナップショットGTIDから開始(推奨) | スナップショットデータとの整合性を保証 |
 | `latest` | 現在のGTIDから開始(新しい変更のみ) | 履歴データをスキップし、新しい変更のみ追跡 |
 | `gtid=<UUID:txn>` | 特定のGTIDから開始 | 既知の位置から再開 |
+
+複数テーブルを設定して`auto_initial_snapshot: true`を使用する場合、
+`start_from`は`snapshot`である必要があります。`latest`や`gtid=...`は
+共有consistent snapshotのGTIDを無視し、スナップショット時点から指定した
+開始位置までのbinlogイベントをスキップする可能性があります。
 
 **例**:
 ```yaml
@@ -390,9 +395,9 @@ echo $((RANDOM * RANDOM))
 
 ```yaml
 memory:
-  hard_limit_mb: 8192               # ハードメモリ制限(MB)
-  soft_target_mb: 4096              # ソフトメモリターゲット(MB)
-  arena_chunk_mb: 64                # アリーナチャンクサイズ(MB)
+  hard_limit_mb: 8192               # 予約済み / 現在は未強制
+  soft_target_mb: 4096              # 予約済み / 現在は未強制
+  arena_chunk_mb: 64                # 予約済み / 現在は未強制
   roaring_threshold: 0.18           # Roaringビットマップ閾値(密度)
   minute_epoch: true                # 分精度エポックを使用
 
@@ -410,9 +415,9 @@ memory:
 
 | パラメータ | 型 | デフォルト | 説明 | ホットリロード |
 |-----------|------|---------|-------------|------------|
-| `hard_limit_mb` | integer | `8192` | ハードメモリ制限(MB)(OOM保護) | ❌ 不可 |
-| `soft_target_mb` | integer | `4096` | ソフトメモリターゲット(MB)(退避トリガー) | ❌ 不可 |
-| `arena_chunk_mb` | integer | `64` | アリーナチャンクサイズ(MB)(メモリアロケータ) | ❌ 不可 |
+| `hard_limit_mb` | integer | `8192` | 予約済み / 現在は未強制。現時点ではOOM保護上限ではありません | ❌ 不可 |
+| `soft_target_mb` | integer | `4096` | 予約済み / 現在は未強制。現時点では退避トリガーではありません | ❌ 不可 |
+| `arena_chunk_mb` | integer | `64` | 予約済み / 現在は未強制。現時点ではアロケータチャンクサイズは設定できません | ❌ 不可 |
 | `roaring_threshold` | float | `0.18` | Roaringビットマップのポスティングリスト密度閾値(0.0-1.0) | ❌ 不可 |
 | `minute_epoch` | boolean | `true` | タイムスタンプに分精度エポックを使用 | ❌ 不可 |
 | `normalize.nfkc` | boolean | `true` | NFKC正規化を適用(Unicode互換性) | ❌ 不可 |
@@ -478,6 +483,8 @@ dump:
 - ファイル名: `auto_YYYYMMDD_HHMMSS.dmp`
 - 古い自動保存ファイルはクリーンアップされる(最新の`retain`個のファイルを保持)
 - 手動ダンプ(`DUMP SAVE`経由)はクリーンアップの**対象外**
+- 自動保存されたダンプファイルは起動時に自動読み込みされません。再起動後に
+  復元する場合は、`DUMP VERIFY`と`DUMP LOAD`を明示的に実行してください。
 
 **推奨値**:
 - **開発**: `0`(無効)
@@ -539,7 +546,7 @@ api:
 
 **HTTPエンドポイント**:
 - `POST /{table}/search`: 検索クエリ
-- `GET /{table}/:id`: プライマリキーでドキュメントを取得
+- `GET /{table}/:primary_key`: プライマリキーでドキュメントを取得
 - `GET /info`: サーバー情報
 - `GET /health`: ヘルスチェック(Kubernetes対応)
 
@@ -664,11 +671,11 @@ cache:
   max_memory_mb: 32                 # 最大キャッシュメモリ(MB)
   min_query_cost_ms: 10.0           # キャッシュする最小クエリコスト(ミリ秒)
   ttl_seconds: 3600                 # キャッシュエントリのTTL(0 = TTLなし)
-  invalidation_strategy: "ngram"    # 無効化戦略
+  invalidation_strategy: "ngram"    # "table"は予約済み / 現在は未強制
 
   # 詳細チューニング
   compression_enabled: true         # LZ4圧縮を有効化
-  eviction_batch_size: 10           # 退避バッチサイズ
+  eviction_batch_size: 10           # 予約済み / 現在は未強制
 
   # 無効化キュー
   invalidation:
@@ -684,9 +691,9 @@ cache:
 | `max_memory_mb` | integer | `32` | 最大キャッシュメモリ(MB) | ⚠️ 部分的 |
 | `min_query_cost_ms` | float | `10.0` | キャッシュする最小クエリコスト(ミリ秒) | ⚠️ 部分的 |
 | `ttl_seconds` | integer | `3600` | キャッシュエントリのTTL(秒)(0 = TTLなし) | ⚠️ 部分的 |
-| `invalidation_strategy` | string | `ngram` | 無効化戦略: `ngram`、`table` | ⚠️ 部分的 |
+| `invalidation_strategy` | string | `ngram` | `ngram`は現在有効。`table`は受け付けるが予約済み / 現在は未強制 | ⚠️ 部分的 |
 | `compression_enabled` | boolean | `true` | キャッシュされた結果のLZ4圧縮を有効化 | ⚠️ 部分的 |
-| `eviction_batch_size` | integer | `10` | 一度に退避するエントリ数 | ⚠️ 部分的 |
+| `eviction_batch_size` | integer | `10` | 予約済み / 現在は未強制。退避は現在1件ずつ実行されます | ⚠️ 部分的 |
 | `invalidation.batch_size` | integer | `1000` | N個の一意な(table, ngram)ペア後に無効化を処理 | ⚠️ 部分的 |
 | `invalidation.max_delay_ms` | integer | `100` | 無効化処理前の最大遅延 | ⚠️ 部分的 |
 
@@ -698,9 +705,8 @@ cache:
 - **使用例**: 本番環境
 
 **`table`**:
-- **積極的**: 任意の変更でテーブルキャッシュ全体を無効化
-- **シンプル**: N-gram追跡のオーバーヘッドなし
-- **使用例**: 非常に高い書き込みレート、小さいキャッシュ
+- 予約済み / 現在は未強制。将来互換のため値は受け付けられますが、
+  現在の無効化は`ngram`経路を使用します。
 
 #### キャッシュチューニング
 
@@ -897,8 +903,8 @@ SHOW VARIABLES LIKE '%port%';
 ### パフォーマンス
 
 1. **メモリ**:
-   - ✅ `memory.hard_limit_mb`をシステムRAMの50-70%に設定
-   - ✅ `memory.soft_target_mb`を`hard_limit_mb`の50%に設定
+   - ✅ プロセスRSSを外部で監視してください。`memory.hard_limit_mb`と
+     `memory.soft_target_mb`は予約済み / 現在は未強制です
 
 2. **キャッシュ**:
    - ✅ キャッシュを有効化(`cache.enabled: true`)
@@ -931,8 +937,9 @@ SHOW VARIABLES LIKE '%port%';
 ### 高可用性
 
 1. **ダンプ永続化**:
-   - ✅ 高速再起動のために自動保存を有効化
+   - ✅ 再起動後の手動復旧を速くするために自動保存を有効化
    - ✅ ダンプファイルをS3/GCSにバックアップ
+   - ✅ 復元時は`DUMP VERIFY`と`DUMP LOAD`を明示的に実行
 
 2. **レプリケーション**:
    - ✅ 整合性のために`start_from: "snapshot"`を使用

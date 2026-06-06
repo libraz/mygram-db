@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <type_traits>
 #include <unordered_set>
@@ -63,43 +64,60 @@ struct PendingTableLoad {
   std::string table_name;
   index::Index* index = nullptr;
   DocumentStore* doc_store = nullptr;
-  std::string index_data;
-  std::string doc_data;
+  std::unique_ptr<index::Index> loaded_index;
+  std::unique_ptr<DocumentStore> loaded_doc_store;
 };
 
-Expected<void, Error> ValidatePendingTableLoad(const PendingTableLoad& pending) {
-  index::Index temp_index(pending.index->GetNgramSize(), pending.index->GetKanjiNgramSize(),
-                          index::kDefaultRoaringThreshold, pending.index->GetCrossBoundaryNgrams(),
-                          pending.index->GetNormalizeNfkc(), pending.index->GetNormalizeWidth(),
-                          pending.index->GetNormalizeLower());
-  std::istringstream index_stream(pending.index_data);
-  if (auto index_result = temp_index.LoadFromStream(index_stream); !index_result) {
+Expected<void, Error> LoadPendingTableData(PendingTableLoad& pending, const std::string& index_data,
+                                           const std::string& doc_data) {
+  auto loaded_index = std::make_unique<index::Index>(
+      pending.index->GetNgramSize(), pending.index->GetKanjiNgramSize(), index::kDefaultRoaringThreshold,
+      pending.index->GetCrossBoundaryNgrams(), pending.index->GetNormalizeNfkc(), pending.index->GetNormalizeWidth(),
+      pending.index->GetNormalizeLower());
+  std::istringstream index_stream(index_data);
+  if (auto index_result = loaded_index->LoadFromStream(index_stream); !index_result) {
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDumpReadError, "LoadFromStream failed for index", index_result.error().message()));
   }
 
-  DocumentStore temp_doc_store;
-  std::istringstream doc_stream(pending.doc_data);
-  if (auto result = temp_doc_store.LoadFromStream(doc_stream, nullptr); !result) {
+  auto loaded_doc_store = std::make_unique<DocumentStore>();
+  std::istringstream doc_stream(doc_data);
+  if (auto result = loaded_doc_store->LoadFromStream(doc_stream, nullptr); !result) {
     return result;
   }
 
+  pending.loaded_index = std::move(loaded_index);
+  pending.loaded_doc_store = std::move(loaded_doc_store);
+  return {};
+}
+
+uint32_t ExpectedHeaderSizeV2(const HeaderV2& header) {
+  return static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + 4 + header.gtid.size());
+}
+
+Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV2& header) {
+  const uint32_t expected_header_size = ExpectedHeaderSizeV2(header);
+  if (header.header_size != expected_header_size) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                    "Invalid V2 header size: expected " + std::to_string(expected_header_size) +
+                                        ", got " + std::to_string(header.header_size)));
+  }
+  if (header.total_file_size == 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V2 header: total_file_size is zero"));
+  }
+  if (header.section_count == 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V2 header: section_count is zero"));
+  }
+  if ((header.flags & dump_format::flags_v2::kWithCRC) != 0 && header.file_crc32 == 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V2 header: file_crc32 is zero"));
+  }
   return {};
 }
 
 Expected<void, Error> ApplyPendingTableLoads(const std::vector<PendingTableLoad>& pending_loads) {
   for (const auto& pending : pending_loads) {
-    std::istringstream index_stream(pending.index_data);
-    if (auto index_result = pending.index->LoadFromStream(index_stream); !index_result) {
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "LoadFromStream failed for index",
-                                      index_result.error().message()));
-    }
-
-    std::istringstream doc_stream(pending.doc_data);
-    if (auto result = pending.doc_store->LoadFromStream(doc_stream, nullptr); !result) {
-      return result;
-    }
-
+    pending.index->ReplaceWithLoaded(*pending.loaded_index);
+    pending.doc_store->ReplaceWithLoaded(*pending.loaded_doc_store);
     StructuredLog().Event("dump_v2_table_loaded").Field("table", pending.table_name).Info();
   }
 
@@ -1026,10 +1044,18 @@ Expected<void, Error> ReadDumpV2(
       LogStorageError("read_header_v2", filepath, result.error().message());
       return result;
     }
+    if (auto result = ValidateHeaderIntegrityFields(header); !result) {
+      LogStorageError("validate_header_v2", filepath, result.error().message());
+      if (integrity_error != nullptr) {
+        integrity_error->type = dump_format::CRCErrorType::FileCRC;
+        integrity_error->message = result.error().message();
+      }
+      return result;
+    }
     gtid = header.gtid;
 
     // Verify file size
-    if (header.total_file_size > 0) {
+    {
       std::streampos saved_pos = ifs.tellg();
       ifs.seekg(0, std::ios::end);
       auto actual_size = static_cast<uint64_t>(ifs.tellg());
@@ -1205,9 +1231,10 @@ Expected<void, Error> ReadDumpV2(
           if (!ReadBinary(table_stream, index_len)) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read index length"));
           }
+          std::string index_data;
           if (index_len > 0) {
-            pending.index_data.resize(index_len);
-            table_stream.read(pending.index_data.data(), static_cast<std::streamsize>(index_len));
+            index_data.resize(index_len);
+            table_stream.read(index_data.data(), static_cast<std::streamsize>(index_len));
             if (!table_stream.good()) {
               return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read index data"));
             }
@@ -1220,13 +1247,14 @@ Expected<void, Error> ReadDumpV2(
           if (!ReadBinary(table_stream, doc_len)) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read docstore length"));
           }
-          pending.doc_data.resize(doc_len);
-          table_stream.read(pending.doc_data.data(), static_cast<std::streamsize>(doc_len));
+          std::string doc_data;
+          doc_data.resize(doc_len);
+          table_stream.read(doc_data.data(), static_cast<std::streamsize>(doc_len));
           if (!table_stream.good()) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read docstore data"));
           }
 
-          if (auto result = ValidatePendingTableLoad(pending); !result) {
+          if (auto result = LoadPendingTableData(pending, index_data, doc_data); !result) {
             return result;
           }
 
@@ -1445,17 +1473,20 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       integrity_error.message = "Failed to read V2 header: " + result.error().message();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
+    if (auto result = ValidateHeaderIntegrityFields(header); !result) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = result.error().message();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
 
     // Verify file size
-    if (header.total_file_size > 0) {
-      ifs2.seekg(0, std::ios::end);
-      auto actual_size = static_cast<uint64_t>(ifs2.tellg());
-      if (actual_size != header.total_file_size) {
-        integrity_error.type = dump_format::CRCErrorType::FileCRC;
-        integrity_error.message = "File size mismatch: expected " + std::to_string(header.total_file_size) +
-                                  " bytes, got " + std::to_string(actual_size) + " bytes";
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
-      }
+    ifs2.seekg(0, std::ios::end);
+    auto actual_size = static_cast<uint64_t>(ifs2.tellg());
+    if (actual_size != header.total_file_size) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "File size mismatch: expected " + std::to_string(header.total_file_size) +
+                                " bytes, got " + std::to_string(actual_size) + " bytes";
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
 
     // Verify file-level CRC32

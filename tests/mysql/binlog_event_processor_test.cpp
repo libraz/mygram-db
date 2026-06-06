@@ -1034,6 +1034,41 @@ TEST_F(BinlogEventProcessorTest, CacheInvalidationUsesNormalizedBinlogText) {
       << "full-width binlog text must be normalized before cache invalidation n-gram extraction";
 }
 
+TEST_F(BinlogEventProcessorTest, AlterTableClearsTableCacheWithoutClearingData) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs[table_config_.name] = cache::NgramConfig{
+      .ngram_size = index_->GetNgramSize(),
+      .kanji_ngram_size = index_->GetKanjiNgramSize(),
+      .cross_boundary_ngrams = index_->GetCrossBoundaryNgrams(),
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  BinlogEvent insert_event = BinlogEvent::CreateInsert(table_config_.name, "pk1", "alpha beta");
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                 nullptr, &cache_manager));
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = table_config_.name;
+  query.search_text = "alpha";
+  query.limit = 100;
+  ASSERT_TRUE(cache_manager.Insert(query, {1}, {"al", "lp", "ph", "ha"}, 15.0, index_->GetNgramSize(),
+                                   index_->GetKanjiNgramSize(), index_->GetCrossBoundaryNgrams()));
+  ASSERT_TRUE(cache_manager.Lookup(query).has_value());
+
+  BinlogEvent alter_event = BinlogEvent::CreateDDL(table_config_.name, "ALTER TABLE test_table ADD COLUMN status INT");
+  EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(alter_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                 nullptr, &cache_manager));
+
+  EXPECT_EQ(doc_store_->Size(), 1);
+  EXPECT_EQ(index_->SearchAnd({"al"}).size(), 1);
+  EXPECT_FALSE(cache_manager.Lookup(query).has_value());
+}
+
 /**
  * @brief Test DDLType classification via CreateDDL factory
  */

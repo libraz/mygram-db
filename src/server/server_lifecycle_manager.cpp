@@ -47,7 +47,8 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
     ,
     SyncOperationManager* sync_manager
 #endif
-) {
+    ,
+    RateLimiter* rate_limiter) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -64,15 +65,16 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
 #endif
 
   // Constructor is private, so we use unique_ptr with raw new
-  auto manager = std::unique_ptr<ServerLifecycleManager>(new ServerLifecycleManager(
-      config, table_contexts, dump_dir, full_config, stats, dump_load_in_progress, dump_save_in_progress,
-      optimization_in_progress, replication_paused_for_dump, mysql_reconnecting, replication_pause_counter,
-      binlog_reader
+  auto manager = std::unique_ptr<ServerLifecycleManager>(
+      new ServerLifecycleManager(config, table_contexts, dump_dir, full_config, stats, dump_load_in_progress,
+                                 dump_save_in_progress, optimization_in_progress, replication_paused_for_dump,
+                                 mysql_reconnecting, replication_pause_counter, binlog_reader
 #ifdef USE_MYSQL
-      ,
-      sync_manager
+                                 ,
+                                 sync_manager
 #endif
-      ));
+                                 ,
+                                 rate_limiter));
   return manager;
 }
 
@@ -87,7 +89,8 @@ ServerLifecycleManager::ServerLifecycleManager(
     ,
     SyncOperationManager* sync_manager
 #endif
-    )
+    ,
+    RateLimiter* rate_limiter)
     : config_(config),
       table_contexts_(table_contexts),
       dump_dir_(dump_dir),
@@ -104,7 +107,8 @@ ServerLifecycleManager::ServerLifecycleManager(
       ,
       sync_manager_(sync_manager)
 #endif
-{
+      ,
+      rate_limiter_(rate_limiter) {
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::Initialize() {
@@ -206,6 +210,12 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
       return MakeUnexpected(dispatcher_result.error());
     }
     components.dispatcher = std::move(*dispatcher_result);
+    if (components.variable_manager != nullptr) {
+      auto* dispatcher = components.dispatcher.get();
+      components.variable_manager->SetApiConfigCallback([dispatcher](int default_limit, int max_query_length) {
+        dispatcher->UpdateApiConfig(default_limit, max_query_length);
+      });
+    }
     mygram::utils::StructuredLog()
         .Event("server_component_initialized")
         .Field("component", "RequestDispatcher")
@@ -301,6 +311,7 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
 #endif
       .cache_manager = cache_manager,
       .variable_manager = variable_manager,
+      .rate_limiter = rate_limiter_,
   });
   return handler_context;
 }
@@ -474,9 +485,9 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
     return MakeUnexpected(MakeError(ErrorCode::kInternalError, "TableCatalog must not be null for SnapshotScheduler"));
   }
 
-  auto scheduler = std::make_unique<SnapshotScheduler>(full_config_->dump, table_catalog, full_config_, dump_dir_,
-                                                       binlog_reader_, dump_save_in_progress_,
-                                                       replication_paused_for_dump_, &replication_pause_counter_);
+  auto scheduler = std::make_unique<SnapshotScheduler>(
+      full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_, dump_save_in_progress_,
+      replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_);
 
   // Start the scheduler
   scheduler->Start();

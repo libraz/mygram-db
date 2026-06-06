@@ -128,3 +128,19 @@ TEST(ParseNumericTest, DoubleTrailingChars) {
 TEST(ParseNumericTest, DoubleEmpty) {
   EXPECT_FALSE(ParseNumeric<double>("").has_value());
 }
+
+TEST(ParseNumericTest, DoubleRejectsWhitespace) {
+  EXPECT_FALSE(ParseNumeric<double>(" 3.14").has_value());
+  EXPECT_FALSE(ParseNumeric<double>("3.14 ").has_value());
+  EXPECT_FALSE(ParseNumeric<double>("3. 14").has_value());
+}
+
+TEST(ParseNumericTest, DoubleRejectsLeadingPlus) {
+  EXPECT_FALSE(ParseNumeric<double>("+3.14").has_value());
+}
+
+TEST(ParseNumericTest, DoubleRejectsNonFiniteValues) {
+  EXPECT_FALSE(ParseNumeric<double>("inf").has_value());
+  EXPECT_FALSE(ParseNumeric<double>("-inf").has_value());
+  EXPECT_FALSE(ParseNumeric<double>("nan").has_value());
+}

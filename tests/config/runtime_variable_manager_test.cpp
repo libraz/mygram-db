@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <thread>
+#include <vector>
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
@@ -136,6 +137,116 @@ TEST(RuntimeVariableManagerTest, GetImmutableVariables) {
   auto database_result = manager->GetVariable("mysql.database");
   ASSERT_TRUE(database_result);
   EXPECT_EQ(*database_result, "test_db");
+}
+
+/**
+ * @brief Test GetVariable covers immutable variables exposed by SHOW VARIABLES.
+ */
+TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
+  Config config = CreateTestConfig();
+  config.logging.file = "/var/log/mygramdb.log";
+  config.api.http.enable = true;
+  config.api.http.bind = "0.0.0.0";
+  config.api.http.port = 18080;
+  config.api.http.enable_cors = true;
+  config.api.http.cors_allow_origin = "https://example.test";
+  config.api.http.read_timeout_sec = 7;
+  config.api.http.write_timeout_sec = 8;
+  config.api.http.max_body_bytes = 9 * mygram::constants::kBytesPerMegabyte;
+  config.api.unix_socket.path = "/tmp/mygramdb.sock";
+  config.cache.max_memory_bytes = 64 * mygram::constants::kBytesPerMegabyte;
+  config.cache.invalidation_strategy = "table";
+  config.cache.compression_enabled = false;
+  config.cache.eviction_batch_size = 12;
+  config.cache.invalidation.batch_size = 345;
+  config.cache.invalidation.max_delay_ms = 67;
+  config.memory.arena_chunk_mb = 128;
+  config.memory.roaring_threshold = 0.25;
+  config.memory.minute_epoch = false;
+  config.memory.normalize.nfkc = false;
+  config.memory.normalize.width = "wide";
+  config.memory.normalize.lower = true;
+  config.replication.enable = false;
+  config.replication.auto_initial_snapshot = true;
+  config.replication.server_id = 12345;
+  config.replication.start_from = "latest";
+  config.replication.queue_size = 222;
+  config.replication.reconnect_backoff_min_ms = 333;
+  config.replication.reconnect_backoff_max_ms = 444;
+  config.build.mode = "full_scan";
+  config.build.batch_size = 555;
+  config.build.parallelism = 6;
+  config.build.throttle_ms = 77;
+  config.dump.dir = "/tmp/dumps";
+  config.dump.default_filename = "snapshot.dmp";
+  config.dump.interval_sec = 888;
+  config.dump.retain = 9;
+  config.network.allow_cidrs = {"127.0.0.1/32", "10.0.0.0/8"};
+  config.bm25.enable = true;
+  config.bm25.k1 = 1.5;
+  config.bm25.b = 0.6;
+
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  const std::vector<std::pair<std::string, std::string>> expected = {
+      {"logging.file", "/var/log/mygramdb.log"},
+      {"api.http.enable", "true"},
+      {"api.http.bind", "0.0.0.0"},
+      {"api.http.port", "18080"},
+      {"api.http.enable_cors", "true"},
+      {"api.http.cors_allow_origin", "https://example.test"},
+      {"api.http.read_timeout_sec", "7"},
+      {"api.http.write_timeout_sec", "8"},
+      {"api.http.max_body_bytes", std::to_string(9 * mygram::constants::kBytesPerMegabyte)},
+      {"api.unix_socket.path", "/tmp/mygramdb.sock"},
+      {"cache.max_memory_mb", "64"},
+      {"cache.max_memory_bytes", std::to_string(64 * mygram::constants::kBytesPerMegabyte)},
+      {"cache.invalidation_strategy", "table"},
+      {"cache.compression_enabled", "false"},
+      {"cache.eviction_batch_size", "12"},
+      {"cache.invalidation.batch_size", "345"},
+      {"cache.invalidation.max_delay_ms", "67"},
+      {"memory.arena_chunk_mb", "128"},
+      {"memory.minute_epoch", "false"},
+      {"memory.normalize.nfkc", "false"},
+      {"memory.normalize.width", "wide"},
+      {"memory.normalize.lower", "true"},
+      {"replication.enable", "false"},
+      {"replication.auto_initial_snapshot", "true"},
+      {"replication.server_id", "12345"},
+      {"replication.start_from", "latest"},
+      {"replication.queue_size", "222"},
+      {"replication.reconnect_backoff_min_ms", "333"},
+      {"replication.reconnect_backoff_max_ms", "444"},
+      {"build.mode", "full_scan"},
+      {"build.batch_size", "555"},
+      {"build.parallelism", "6"},
+      {"build.throttle_ms", "77"},
+      {"dump.dir", "/tmp/dumps"},
+      {"dump.default_filename", "snapshot.dmp"},
+      {"dump.interval_sec", "888"},
+      {"dump.retain", "9"},
+      {"network.allow_cidrs", "127.0.0.1/32,10.0.0.0/8"},
+      {"bm25.enable", "true"},
+  };
+
+  for (const auto& [name, value] : expected) {
+    auto result = manager->GetVariable(name);
+    ASSERT_TRUE(result) << name << " should be readable";
+    EXPECT_EQ(*result, value) << name;
+  }
+
+  auto roaring = manager->GetVariable("memory.roaring_threshold");
+  ASSERT_TRUE(roaring);
+  EXPECT_DOUBLE_EQ(std::stod(*roaring), 0.25);
+
+  auto bm25_k1 = manager->GetVariable("bm25.k1");
+  ASSERT_TRUE(bm25_k1);
+  EXPECT_DOUBLE_EQ(std::stod(*bm25_k1), 1.5);
+
+  auto bm25_b = manager->GetVariable("bm25.b");
+  ASSERT_TRUE(bm25_b);
+  EXPECT_DOUBLE_EQ(std::stod(*bm25_b), 0.6);
 }
 
 /**
@@ -761,6 +872,32 @@ TEST(RuntimeVariableManagerTest, SetApiMaxQueryLengthValid) {
     ASSERT_TRUE(get_result);
     EXPECT_EQ(*get_result, std::to_string(length));
   }
+}
+
+TEST(RuntimeVariableManagerTest, ApiConfigCallbackReceivesRuntimeValues) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  int callback_default_limit = 0;
+  int callback_max_query_length = 0;
+  int callback_count = 0;
+  manager->SetApiConfigCallback([&](int default_limit, int max_query_length) {
+    callback_default_limit = default_limit;
+    callback_max_query_length = max_query_length;
+    ++callback_count;
+  });
+
+  auto limit_result = manager->SetVariable("api.default_limit", "50");
+  ASSERT_TRUE(limit_result) << limit_result.error().to_string();
+  EXPECT_EQ(callback_count, 1);
+  EXPECT_EQ(callback_default_limit, 50);
+  EXPECT_EQ(callback_max_query_length, config.api.max_query_length);
+
+  auto length_result = manager->SetVariable("api.max_query_length", "512");
+  ASSERT_TRUE(length_result) << length_result.error().to_string();
+  EXPECT_EQ(callback_count, 2);
+  EXPECT_EQ(callback_default_limit, 50);
+  EXPECT_EQ(callback_max_query_length, 512);
 }
 
 /**

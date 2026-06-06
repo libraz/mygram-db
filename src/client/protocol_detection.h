@@ -119,6 +119,13 @@ inline bool IsResponseComplete(std::string_view response, ResponseCompletionStat
     return EndsWith(response, kEndMarker);
   }
 
+  // SYNC_STATUS: first line is exactly "OK SYNC_STATUS"
+  constexpr std::string_view kOkSyncStatusPrefix = "OK SYNC_STATUS";
+  if (first_crlf == kOkSyncStatusPrefix.size() &&
+      response.compare(0, kOkSyncStatusPrefix.size(), kOkSyncStatusPrefix) == 0) {
+    return EndsWith(response, kEndMarker);
+  }
+
   // CONFIG: first line starts with "+OK"
   if (first_crlf >= proto::kPlusOkPrefix.size() &&
       response.compare(0, proto::kPlusOkPrefix.size(), proto::kPlusOkPrefix) == 0) {

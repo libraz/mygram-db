@@ -276,7 +276,7 @@ class QueryCache {
    *
    * Identical to Erase() except the eviction callback is suppressed. Used by
    * InvalidationQueue, which performs its own InvalidationManager cleanup and
-   * must not double-unregister via the eviction callback (CR-6).
+   * must not double-unregister via the eviction callback.
    *
    * Callers that take this path are responsible for any external bookkeeping
    * that the eviction callback would otherwise have performed.
@@ -366,7 +366,7 @@ class QueryCache {
    * If set, bulk eviction paths (Clear, ClearTable, EvictForSpace, RefreshLRU)
    * call this once with all evicted keys INSTEAD OF calling the per-key
    * EvictionCallback. This lets observers (e.g. InvalidationManager) take a
-   * single mutex acquisition rather than one per key (H-M7).
+   * single mutex acquisition rather than one per key.
    *
    * Per-key paths (Erase) continue to use the per-key EvictionCallback. If
    * BatchEvictionCallback is unset on a bulk path, the bulk path falls back to
@@ -472,7 +472,7 @@ class QueryCache {
    * @param required_bytes Bytes needed for new entry
    * @param[out] evicted_keys If non-null, removed keys are appended here so the
    *             caller can fire eviction_callback_ AFTER releasing mutex_
-   *             (H-M3 lock-order safety).
+   *             (lock-order safety).
    * @return true if enough space was freed
    * @pre Caller must hold exclusive lock on mutex_
    */
@@ -484,7 +484,7 @@ class QueryCache {
    * @param reason Why the entry is being removed
    * @param[out] evicted_keys If non-null, the removed key is appended here so
    *             that the caller can invoke eviction_callback_ AFTER releasing
-   *             the lock (H-M3: avoids QueryCache::mutex_ ->
+   *             the lock (avoids QueryCache::mutex_ ->
    *             InvalidationManager::mutex_ acquisition order while a reverse
    *             code path acquires the locks in the opposite order).
    * @pre Caller must hold exclusive lock on mutex_
@@ -508,7 +508,7 @@ class QueryCache {
    * MUST be called WITHOUT holding mutex_. The callback typically acquires
    * InvalidationManager::mutex_ which is a foreign lock; calling it while
    * holding our shared/unique_lock risks lock-order inversion deadlocks
-   * with InvalidateAffectedEntries (H-M3).
+   * with InvalidateAffectedEntries.
    *
    * @note Safe to call with an empty vector (no-op).
    */

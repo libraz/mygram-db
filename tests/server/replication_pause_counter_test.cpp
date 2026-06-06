@@ -163,3 +163,16 @@ TEST_F(ReplicationPauseScopeTest, NewFirstPauserResetsPreviousDrainedGtid) {
   EXPECT_EQ(waiter.get(), "uuid:2");
   EXPECT_TRUE(next.Release());
 }
+
+TEST_F(ReplicationPauseScopeTest, ReleaseWithoutPublishWakesDrainedGtidWaiter) {
+  rp::Scope first(counter_);
+  ASSERT_TRUE(first.Acquire());
+
+  auto waiter = std::async(std::launch::async, [this]() { return counter_.WaitForDrainedGTID(); });
+  EXPECT_EQ(waiter.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout)
+      << "waiter should block while pause epoch is active and no GTID is published";
+
+  EXPECT_TRUE(first.Release());
+  EXPECT_EQ(waiter.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_EQ(waiter.get(), "");
+}

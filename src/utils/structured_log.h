@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "utils/error.h"
@@ -133,9 +134,12 @@ class StructuredLog {
   }
 
   /**
-   * @brief Add integer field
+   * @brief Add signed integer field
    */
-  StructuredLog& Field(std::string_view key, int64_t value) {
+  template <typename T,
+            typename std::enable_if_t<
+                std::is_integral_v<T> && std::is_signed_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>, int> = 0>
+  StructuredLog& Field(std::string_view key, T value) {
     std::string val_str = std::to_string(value);
     if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, val_str, false));
@@ -148,7 +152,10 @@ class StructuredLog {
   /**
    * @brief Add unsigned integer field
    */
-  StructuredLog& Field(std::string_view key, uint64_t value) {
+  template <typename T,
+            typename std::enable_if_t<
+                std::is_integral_v<T> && std::is_unsigned_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>, int> = 0>
+  StructuredLog& Field(std::string_view key, T value) {
     std::string val_str = std::to_string(value);
     if (format_snapshot_ == LogFormat::JSON) {
       fields_.push_back(MakeJSONField(key, val_str, false));
@@ -388,6 +395,24 @@ class StructuredLog {
     return result;
   }
 
+ public:
+  static std::string TruncateUtf8Prefix(std::string_view value, size_t max_bytes) {
+    if (value.size() <= max_bytes) {
+      return std::string(value);
+    }
+
+    size_t length = max_bytes;
+    while (length > 0) {
+      const auto byte = static_cast<unsigned char>(value[length]);
+      if ((byte & 0xC0u) != 0x80u) {
+        break;
+      }
+      --length;
+    }
+    return std::string(value.substr(0, length));
+  }
+
+ private:
   /**
    * @brief Escape text for text format (escape quotes and backslashes)
    */
@@ -476,7 +501,7 @@ inline void LogMySQLConnectionError(const std::string& host, int port, const std
 inline void LogMySQLQueryError(const std::string& query, const std::string& error_msg) {
   StructuredLog()
       .Event("mysql_query_error")
-      .Field("query", query.substr(0, kMaxQueryLogLength))
+      .Field("query", StructuredLog::TruncateUtf8Prefix(query, kMaxQueryLogLength))
       .Field("error", error_msg)
       .Error();
 }
@@ -513,7 +538,7 @@ inline void LogStorageError(const std::string& operation, const std::string& fil
 inline void LogQueryParseError(const std::string& query, const std::string& error_msg, size_t error_position = 0) {
   StructuredLog()
       .Event("query_parse_error")
-      .Field("query", query.substr(0, kMaxQueryLogLength))
+      .Field("query", StructuredLog::TruncateUtf8Prefix(query, kMaxQueryLogLength))
       .Field("error", error_msg)
       .Field("position", static_cast<int64_t>(error_position))
       .Error();

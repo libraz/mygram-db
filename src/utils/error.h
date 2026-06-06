@@ -175,6 +175,7 @@ enum class ErrorCode : std::uint16_t {
   kCacheDisabled = 8001,             ///< Cache is disabled
   kCacheCompressionFailed = 8002,    ///< Cache compression failed
   kCacheDecompressionFailed = 8003,  ///< Cache decompression failed
+  kCacheWorkerStartFailed = 8004,    ///< Cache worker thread failed to start
 };
 
 /**
@@ -445,6 +446,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Cache compression failed";
     case ErrorCode::kCacheDecompressionFailed:
       return "Cache decompression failed";
+    case ErrorCode::kCacheWorkerStartFailed:
+      return "Cache worker start failed";
 
     default:
       return "Unknown error code";

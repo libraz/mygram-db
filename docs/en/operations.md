@@ -1,4 +1,4 @@
-# Runtime Variables & MySQL Failover - Operations Guide
+#Runtime Variables& MySQL Failover - Operations Guide
 
 **Date**: 2025-11-22
 
@@ -29,16 +29,13 @@ Runtime variables allow you to:
 -- Show all variables
 SHOW VARIABLES;
 
--- Show specific pattern
-SHOW VARIABLES LIKE 'mysql%';
+--Show specific pattern SHOW VARIABLES LIKE 'mysql%';
 SHOW VARIABLES LIKE 'cache%';
 
--- Set single variable
-SET logging.level = 'debug';
+--Set single variable SET logging.level = 'debug';
 SET mysql.host = '192.168.1.100';
 
--- Set multiple variables
-SET api.default_limit = 200, cache.enabled = true;
+--Set multiple variables SET api.default_limit = 200, cache.enabled = true;
 ```
 
 ### Mutable vs Immutable Variables
@@ -76,23 +73,19 @@ SET api.default_limit = 200, cache.enabled = true;
 -- Increase verbosity for debugging
 SET logging.level = 'debug';
 
--- Verify change
-SHOW VARIABLES LIKE 'logging%';
+--Verify change SHOW VARIABLES LIKE 'logging%';
 
--- Return to normal
-SET logging.level = 'info';
+--Return to normal SET logging.level = 'info';
 ```
 
-#### Disable Cache During Maintenance
+    ####Disable Cache During Maintenance
 
-```sql
--- Disable cache before maintenance
-SET cache.enabled = false;
+```sql-- Disable cache before maintenance SET cache.enabled = false;
 
--- Perform maintenance operations...
+--Perform maintenance operations...
 
--- Re-enable cache
-SET cache.enabled = true;
+    --Re -
+    enable cache SET cache.enabled = true;
 ```
 
 #### Adjust API Limits
@@ -102,17 +95,14 @@ SET cache.enabled = true;
 SET api.default_limit = 1000;
 SET api.max_query_length = 512;
 
--- Check current values
-SHOW VARIABLES LIKE 'api%';
+--Check current values SHOW VARIABLES LIKE 'api%';
 ```
 
-### Validation and Error Handling
+    ## #Validation and Error Handling
 
-SET commands validate values before applying:
+        SET commands validate values before applying :
 
-```sql
--- Type mismatch error
-SET api.default_limit = 'invalid';
+```sql-- Type mismatch error SET api.default_limit = 'invalid';
 ERROR: Invalid value for api.default_limit: must be integer
 
 -- Out of range error
@@ -121,102 +111,104 @@ ERROR: Invalid value for api.default_limit: must be between 5 and 1000
 
 -- Unknown variable error
 SET unknown.variable = 'value';
-ERROR: Unknown variable: unknown.variable
+ERROR : Unknown variable : unknown
+                               .variable
 
--- Immutable variable error
-SET mysql.database = 'newdb';
-ERROR: Variable mysql.database is immutable (requires restart)
+                           -- Immutable variable error SET mysql.database = 'newdb';
+ERROR : Variable mysql.database is immutable(requires restart)
 ```
 
-Variables are validated **before** being applied, ensuring the server remains in a consistent state even if invalid values are provided.
+        Variables are validated** before** being applied,
+    ensuring the server remains in a consistent state even if invalid values are provided.
 
-### Monitoring Variable Changes
+            ## #Monitoring Variable Changes
 
-Monitor variable changes using server logs:
+            Monitor variable changes using server logs :
 
 ```bash
-# Watch for variable changes
-tail -f /var/log/mygramdb/server.log | grep -i "variable"
+#Watch for variable changes
+    tail - f / var / log / mygramdb / server.log
+        | grep -
+              i "variable"
 
-# Check current configuration
-mygramclient -c "SHOW VARIABLES;"
+#Check current configuration
+              mygramclient
+              -
+              c "SHOW VARIABLES;"
 ```
 
-## 2. MySQL Failover with Runtime Variables
+              ##2. MySQL Failover with Runtime Variables
 
-MygramDB supports zero-downtime MySQL failover using SET commands. When switching to a new MySQL server, the GTID position is preserved.
+              MygramDB supports zero
+              - downtime MySQL failover using SET commands.When switching to a new MySQL server,
+    the GTID position is preserved.
 
-### Failover Workflow
+    ## #Failover Workflow
 
-```sql
--- 1. Check current MySQL connection
-SHOW VARIABLES LIKE 'mysql%';
+```sql-- 1. Check current MySQL connection SHOW VARIABLES LIKE 'mysql%';
 
--- 2. Switch to new MySQL server (replica promoted to primary)
-SET mysql.host = '192.168.1.101', mysql.port = 3306;
+--2. Switch to new MySQL server(replica promoted to primary) SET mysql.host = '192.168.1.101', mysql.port = 3306;
 
--- 3. Verify reconnection succeeded
-SHOW VARIABLES LIKE 'mysql%';
+--3. Verify reconnection succeeded SHOW VARIABLES LIKE 'mysql%';
 ```
 
-### How It Works
+    ## #How It Works
 
-When you execute `SET mysql.host/port`:
+        When you execute `SET mysql.host /
+    port`:
 
-1. **Save GTID Position**: Current GTID position is saved
-2. **Stop Binlog Reader**: Gracefully stop reading from old server
-3. **Close Old Connection**: Close connection to old MySQL server
-4. **Create New Connection**: Connect to new MySQL server
-5. **Validate New Server**: Check GTID mode, binlog format, table existence
-6. **Resume from GTID**: Restart binlog reader from saved GTID position
+    1. * *Save GTID Position** : Current GTID position is saved 2. *
+    *Stop Binlog Reader** : Gracefully stop reading from old server 3. *
+    *Close Old Connection** : Close connection to old MySQL server 4. *
+    *Create New Connection** : Connect to new MySQL server 5. * *Validate New Server** : Check GTID mode,
+    binlog format,
+    table existence 6. * *Resume from GTID** : Restart binlog reader from saved GTID position
 
-### Requirements
+                                               ## #Requirements
 
-The new MySQL server must:
-- Have GTID mode enabled (`gtid_mode=ON`)
-- Use ROW binlog format (`binlog_format=ROW`)
-- Contain the saved GTID position in its GTID set
-- Have all required tables defined in configuration
+                                               The new MySQL server must : -Have GTID mode enabled(`gtid_mode = ON`) -
+        Use ROW binlog format(`binlog_format = ROW`) - Contain the saved GTID position in its GTID set -
+        Have all required tables defined in configuration
 
-### Example: Planned Failover
+        ## #Example : Planned Failover
 
-```sql
--- Before failover: connected to mysql-primary-1
-SHOW VARIABLES LIKE 'mysql.host';
--- Output: mysql-primary-1.example.com
+```sql-- Before failover : connected to mysql
+                            -
+                            primary - 1 SHOW VARIABLES LIKE 'mysql.host';
+--Output : mysql - primary -
+    1.example.com
 
--- Promote replica to new primary
--- (Done externally via MySQL replication management)
+    --Promote replica to new primary--(Done externally via MySQL replication management)
 
--- Switch MygramDB to new primary
-SET mysql.host = 'mysql-primary-2.example.com';
+        --Switch MygramDB to new primary SET mysql.host = 'mysql-primary-2.example.com';
 
--- Verify failover
-SHOW VARIABLES LIKE 'mysql.host';
--- Output: mysql-primary-2.example.com
+--Verify failover SHOW VARIABLES LIKE 'mysql.host';
+--Output : mysql - primary -
+    2.example.com
 ```
 
-Server logs will show:
+    Server logs will show :
 
-```log
-[info] Reconnecting to MySQL: mysql-primary-2.example.com:3306
-[info] Stopping binlog reader...
-[info] Binlog reader stopped. Processed 12345 events
-[info] Creating new MySQL connection: mysql-primary-2.example.com:3306
-[info] Connection validated successfully
-[info] Binlog reader started from GTID: <saved-gtid>
+```log[info] Reconnecting to MySQL
+    : mysql -
+      primary -
+      2.example.com : 3306 [info] Stopping binlog reader...[info] Binlog reader
+          stopped.Processed 12345 events[info] Creating new MySQL connection : mysql -
+      primary -
+      2.example.com : 3306 [info] Connection validated successfully[info] Binlog reader started from GTID
+    : <saved - gtid>
 ```
 
-### Error Handling
+      ## #Error Handling
 
-If failover fails, the server stops replication and logs detailed errors:
+          If failover fails,
+    the server stops replication and logs detailed errors :
 
-```log
-[error] Failed to reconnect to new MySQL server: Connection refused
-[error] Binlog replication stopped. Manual intervention required.
+```log[error] Failed to reconnect to new MySQL server
+    : Connection refused[error] Binlog replication stopped.Manual intervention required.
 ```
 
-In this case:
+      In this case:
 1. Check new MySQL server is accessible
 2. Verify network connectivity
 3. Check MySQL credentials
@@ -302,13 +294,13 @@ When connecting or reconnecting to MySQL, the server performs:
 #### Structured Log Queries
 
 ```bash
-# Detect failover events
+#Detect failover events
 grep 'mysql_failover_detected' /var/log/mygramdb/server.log
 
-# Check validation failures
+#Check validation failures
 grep 'connection_validation_failed' /var/log/mygramdb/server.log
 
-# Monitor server UUID changes
+#Monitor server UUID changes
 grep 'Server UUID changed' /var/log/mygramdb/server.log
 ```
 
@@ -316,37 +308,35 @@ grep 'Server UUID changed' /var/log/mygramdb/server.log
 
 ```json
 {
-  "event": "mysql_failover_detected",
-  "old_uuid": "a1b2c3d4-e5f6-1234-5678-90abcdef1234",
-  "new_uuid": "e5f6g7h8-i9j0-5678-9012-34567890abcd",
-  "timestamp": "2025-11-17T10:30:45Z"
+  "event" : "mysql_failover_detected",
+            "old_uuid" : "a1b2c3d4-e5f6-1234-5678-90abcdef1234",
+                         "new_uuid" : "e5f6g7h8-i9j0-5678-9012-34567890abcd",
+                                      "timestamp" : "2025-11-17T10:30:45Z"
 }
 ```
 
-### Operational Procedures
+    ## #Operational Procedures
 
-#### Planned MySQL Failover
+    ####Planned MySQL Failover
 
-1. **Before Failover**:
-   - Ensure new master has GTID enabled
-   - Verify all required tables exist on new master
-   - Check replication lag
+    1. ** Before Failover** : -Ensure new master has GTID enabled -
+                              Verify all required tables exist on new master -
+                              Check replication lag
 
-2. **During Failover**:
-   - Use SET command to switch MySQL server
-   - `SET mysql.host = 'new-primary.example.com';`
+                              2. ** During Failover** : -Use SET command to switch MySQL server - `SET mysql.host =
+    'new-primary.example.com';`
    - Monitor logs for failover detection
 
 3. **After Failover**:
    ```bash
-   # Verify connection to new master
+#Verify connection to new master
    grep "Connection validated successfully" /var/log/mygramdb/server.log | tail -1
 
-   # Check for failover warning
+#Check for failover warning
    grep "mysql_failover_detected" /var/log/mygramdb/server.log | tail -1
 
-   # Verify replication continues
-   # Use mygramdb health endpoint
+#Verify replication continues
+#Use mygramdb health endpoint
    curl http://localhost:8080/health/detail
    ```
 
@@ -354,10 +344,10 @@ grep 'Server UUID changed' /var/log/mygramdb/server.log
 
 1. **Detect Issue**:
    ```bash
-   # Check if replication stopped
+#Check if replication stopped
    grep "Binlog reader stopped" /var/log/mygramdb/server.log | tail -1
 
-   # Check validation failures
+#Check validation failures
    grep "validation_failed" /var/log/mygramdb/server.log | tail -5
    ```
 
@@ -371,137 +361,147 @@ grep 'Server UUID changed' /var/log/mygramdb/server.log
    -- If wrong server, use SET to switch to correct server
    SET mysql.host = 'correct-server.example.com';
 
-   -- Verify connection
-   SHOW VARIABLES LIKE 'mysql%';
-   ```
-
-   ```bash
-   # If validation failed, check logs and restart if needed
-   systemctl restart mygramdb
-   ```
-
-## 4. Health Monitoring Integration
-
-### Health Check Endpoints
-
-Use the health endpoint to monitor replication status:
-
-```bash
-# Basic health check
-curl http://localhost:8080/health/live
-# Returns: 200 OK (server is running)
-
-# Readiness check
-curl http://localhost:8080/health/ready
-# Returns: 200 if ready, 503 if loading
-
-# Detailed health status
-curl http://localhost:8080/health/detail
+--Verify connection SHOW VARIABLES LIKE 'mysql%';
 ```
 
-**Detailed Health Response Example**:
+   ```bash
+#If validation failed, check logs and restart if needed
+    systemctl restart mygramdb
+   ```
 
-```json
-{
-  "status": "healthy",
-  "uptime_seconds": 3600,
-  "binlog_reader": {
-    "running": true,
-    "current_gtid": "a1b2c3d4-e5f6-1234-5678-90abcdef1234:1-12345",
-    "processed_events": 12345,
-    "queue_size": 42
-  },
-  "mysql_connection": {
-    "connected": true,
-    "server_uuid": "a1b2c3d4-e5f6-1234-5678-90abcdef1234"
+    ##4. Health Monitoring Integration
+
+    ## #Health Check Endpoints
+
+        Use the health endpoint to monitor replication status :
+
+```bash
+#Basic health check
+            curl http :  // localhost:8080/health/live
+#Returns : 200 OK(server is running)
+
+#Readiness check
+                         curl http :  // localhost:8080/health/ready
+#Returns : 200 if ready, 503 if loading
+
+#Detailed health status
+                                      curl http :  // localhost:8080/health/detail
+#Returns : 200 with status = healthy or status = degraded.Use / health / ready for traffic gating.
+```
+
+                                                       ** Detailed Health Response Example** :
+
+```json {
+  "status" : "healthy",
+             "uptime_seconds" : 3600,
+             "binlog_reader" : {
+               "running" : true,
+               "current_gtid" : "a1b2c3d4-e5f6-1234-5678-90abcdef1234:1-12345",
+               "processed_events" : 12345,
+               "queue_size" : 42
+             },
+                               "mysql_connection" : {
+    "connected" : true, "server_uuid" : "a1b2c3d4-e5f6-1234-5678-90abcdef1234"
   }
 }
 ```
 
-### Alerting Rules
+        ## #Alerting Rules
 
-Recommended monitoring alerts:
+            Recommended monitoring alerts :
 
-1. **Failover Detected** (INFO)
-   - Trigger: `event:mysql_failover_detected`
-   - Action: Notify operator, verify failover was intentional
+        1. *
+        *Failover Detected**(INFO)-Trigger : `event : mysql_failover_detected` -
+    Action : Notify operator,
+    verify failover was intentional
 
-2. **Validation Failed** (CRITICAL)
-   - Trigger: `event:connection_validation_failed`
-   - Action: Page on-call, replication stopped
+        2. ** Validation Failed **(CRITICAL) -
+        Trigger : `event : connection_validation_failed` - Action : Page on - call,
+    replication stopped
 
-3. **Replication Stopped** (CRITICAL)
-   - Trigger: `binlog_reader.running = false` in health endpoint
-   - Action: Page on-call, investigate immediately
+        3. *
+        *Replication Stopped**(CRITICAL)-Trigger
+    : `binlog_reader.running = false` in health endpoint - Action : Page on - call,
+      investigate immediately
 
-## 5. Testing & Validation
+          ##5. Testing& Validation
 
-### Testing Runtime Variables
+          ## #Testing Runtime Variables
 
 ```bash
 # 1. Start server
-./bin/mygramdb --config config.yaml
+              ./
+          bin /
+          mygramdb-- config config
+              .yaml
 
 # 2. Connect with client
-mygramclient
+          mygramclient
 
 # 3. Test variable changes
-SET logging.level = 'debug';
+          SET logging.level = 'debug';
 
 # 4. Verify change applied
 SHOW VARIABLES LIKE 'logging%';
 
 # 5. Check logs
-tail -f /var/log/mygramdb/server.log
+tail - f / var / log / mygramdb /
+           server
+               .log
 ```
 
-### Testing Failover Detection
+           ## #Testing Failover Detection
 
-**Unit Tests** (No MySQL Required):
+               ** Unit Tests**(No MySQL Required)
+    :
 
 ```bash
-# Run validator unit tests
-cd build
-./bin/connection_validator_test --gtest_filter="ConnectionValidatorUnitTest.*"
+#Run validator unit tests
+      cd build./
+           bin / connection_validator_test-- gtest_filter =
+    "ConnectionValidatorUnitTest.*"
 ```
 
-**Integration Tests** (Requires MySQL with GTID):
+    * *Integration Tests *
+    *(Requires MySQL with GTID)
+    :
 
 ```bash
-# Set environment
-export ENABLE_MYSQL_INTEGRATION_TESTS=1
-export MYSQL_HOST=127.0.0.1
-export MYSQL_USER=root
-export MYSQL_PASSWORD=test
-export MYSQL_DATABASE=test
+#Set environment
+      export ENABLE_MYSQL_INTEGRATION_TESTS = 1 export MYSQL_HOST = 127.0.0.1 export MYSQL_USER =
+        root export MYSQL_PASSWORD = test export MYSQL_DATABASE = test
 
-# Run integration tests
-ctest -R ConnectionValidatorIntegrationTest -V
+#Run integration tests
+                                                                  ctest
+                                                                  - R ConnectionValidatorIntegrationTest -
+                                                                  V
 ```
 
-### Manual Failover Simulation
+                                                                      ## #Manual Failover Simulation
 
 ```bash
-# 1. Start mygramdb connected to mysql-server-1
-./bin/mygramdb --config config.yaml
+# 1. Start mygramdb connected to mysql - server - 1
+                                                                          ./
+                                                                      bin /
+                                                                      mygramdb-- config config
+                                                                          .yaml
 
 # 2. Connect with client
-mygramclient
+                                                                      mygramclient
 
-# 3. Switch to mysql-server-2
-SET mysql.host = 'mysql-server-2.example.com';
+# 3. Switch to mysql - server - 2
+                                                                      SET mysql.host = 'mysql-server-2.example.com';
 
 # 4. Check logs for failover detection
-tail -100 /var/log/mygramdb/server.log | grep -E "(failover|UUID changed|Reconnecting)"
+tail - 100 / var / log / mygramdb / server.log | grep - E "(failover|UUID changed|Reconnecting)"
 ```
 
-## 6. Troubleshooting
+                                                        ##6. Troubleshooting
 
-### Issue: SET Variable Fails
+                                                        ## #Issue : SET Variable Fails
 
-**Symptoms**:
-```sql
-SET mysql.host = 'new-host';
+                                                                        ** Symptoms** :
+```sql SET mysql.host = 'new-host';
 ERROR: Failed to reconnect to MySQL server
 ```
 
@@ -525,14 +525,10 @@ ERROR: Failed to reconnect to MySQL server
 2. Check tables exist:
    ```sql
    SHOW TABLES FROM myapp;
-   ```
-3. Verify GTID mode:
-   ```sql
-   SHOW VARIABLES LIKE 'gtid_mode';
-   ```
-4. Check server UUID:
-   ```sql
-   SELECT @@server_uuid;
+``` 3. Verify GTID mode :
+   ```sql SHOW VARIABLES LIKE 'gtid_mode';
+``` 4. Check server UUID :
+   ```sql SELECT @ @server_uuid;
    ```
 
 ### Issue: Failover Warning But Replication Works
@@ -611,6 +607,7 @@ ERROR: Failed to reconnect to MySQL server
 2. **Structured Logs**: Use JSON parsing for alerts
 3. **Health Checks**: Monitor `/health/detail` endpoint every 30s
 4. **Metrics**: Track GTID lag, event processing rate
+5. **Process Supervision**: Run MygramDB under systemd, Kubernetes, or supervisord with a restart policy. `/health/detail` reports known server, replication, and cache state, but it is not a full background-thread supervisor; alert on process exit and error logs as well.
 
 ### Failover Procedures
 
@@ -682,83 +679,93 @@ rate_limiting:
 -- Change logging level
 SET logging.level = 'debug';
 
--- Switch MySQL server
-SET mysql.host = 'new-primary.example.com';
+   --Switch MySQL server SET mysql.host = 'new-primary.example.com';
 
--- Disable cache
-SET cache.enabled = false;
+   --Disable cache SET cache.enabled = false;
 
--- Show all variables
-SHOW VARIABLES;
+   --Show all variables SHOW VARIABLES;
 
--- Show specific variables
-SHOW VARIABLES LIKE 'mysql%';
-```
+   --Show specific variables SHOW VARIABLES LIKE 'mysql%';
+   ```
 
 ```bash
-# Check process status
-ps aux | grep mygramdb
+#Check process status
+           ps aux |
+       grep mygramdb
 
-# Monitor logs
-tail -f /var/log/mygramdb/server.log
+#Monitor logs
+               tail -
+           f / var / log / mygramdb /
+               server
+                   .log
 
-# Health check
-curl http://localhost:8080/health/detail
+#Health check
+                       curl http :  // localhost:8080/health/detail
 
-# Run validator tests
-./bin/connection_validator_test
+#Run validator tests
+                   ./
+               bin /
+               connection_validator_test
 ```
 
-### Log Events
+               ## #Log Events
 
-| Event | Severity | Meaning |
-|-------|----------|---------|
-| `mysql_failover_detected` | WARNING | Server UUID changed during reconnection |
-| `connection_validation_failed` | ERROR | Validation failed, replication stopped |
-| Variable change logs | INFO | Runtime variable modified via SET |
-| `Connection validated successfully` | INFO | Validation passed |
+       | Event | Severity | Meaning | | -- -- -- - | -- -- -- -- -- | -- -- -- -- - | | `mysql_failover_detected` |
+       WARNING | Server UUID changed during reconnection | | `connection_validation_failed` | ERROR | Validation failed,
+       replication stopped | | Variable change logs | INFO | Runtime variable modified via SET |
+           | `Connection validated successfully` | INFO | Validation passed |
 
-### Error Codes
+           ## #Error Codes
 
-| Error | Code | Action |
-|-------|------|--------|
-| GTID mode disabled | `gtid_disabled` | Enable GTID on MySQL |
-| Missing tables | `table_validation_failed` | Check schema |
-| Server UUID changed | `failover_detected` | Verify failover |
-| Connection lost | `connection_failed` | Check network |
+           | Error | Code | Action | | -- -- -- - | -- -- -- | -- -- -- -- | | GTID mode disabled | `gtid_disabled` |
+           Enable GTID on MySQL | | Missing tables | `table_validation_failed` | Check schema | |
+           Server UUID changed | `failover_detected` | Verify failover | | Connection lost | `connection_failed` |
+           Check network |
 
-## 10. Log Rotation with SIGUSR1
+           ##10. Log Rotation with SIGUSR1
 
-MygramDB supports zero-downtime log rotation using the SIGUSR1 signal, similar to nginx. This allows seamless log file rotation without restarting the server.
+                   MygramDB supports zero -
+               downtime log rotation using the SIGUSR1 signal,
+       similar to nginx.This allows seamless log file rotation without restarting the server.
 
-### How It Works
+           ## #How It Works
 
-1. **Rename the current log file** (by logrotate or manually)
-2. **Send SIGUSR1 signal** to the MygramDB process
-3. **MygramDB reopens the log file** with the original path, creating a new file
+           1. *
+           *Rename the current log file**(by logrotate or manually)2. *
+           *Send SIGUSR1 signal** to the MygramDB process 3. * *MygramDB reopens the log file** with the original path,
+       creating a new file
 
-The process continues logging to the new file immediately, while the old file (now renamed) can be compressed or archived.
+       The process continues logging to the new file immediately,
+       while the old file(now renamed) can be compressed or archived.
 
-### Manual Rotation
+                                                                    ## #Manual Rotation
 
 ```bash
 # 1. Rename the current log file
-mv /var/log/mygramdb/app.log /var/log/mygramdb/app.log.1
+                                                                    mv
+                                                                    / var / log / mygramdb / app.log / var / log
+                                                                    / mygramdb /
+                                                                    app.log .1
 
 # 2. Send SIGUSR1 to reopen log file
-kill -USR1 $(pidof mygramdb)
+                                                                    kill
+                                                                -
+                                                                USR1 $(pidof mygramdb)
 # or
-kill -USR1 $(cat /var/run/mygramdb.pid)
+                                                                    kill
+                                                                -
+                                                                USR1 $(cat / var / run / mygramdb.pid)
 
 # 3. MygramDB creates new app.log and continues logging
 ```
 
-### logrotate Configuration
+                                                                    ## #logrotate Configuration
 
-Create `/etc/logrotate.d/mygramdb`:
+                                                                    Create `/
+                                                                    etc / logrotate.d /
+                                                                    mygramdb`:
 
-```conf
-/var/log/mygramdb/*.log {
+```conf / var / log / mygramdb/*.log {
     daily
     rotate 7
     compress

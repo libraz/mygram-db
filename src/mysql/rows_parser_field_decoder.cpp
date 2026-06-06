@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 #include "mysql/binlog_util.h"
@@ -48,6 +49,13 @@ Expected<void, Error> RequireBytes(const unsigned char* data, const unsigned cha
     return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
   }
   return {};
+}
+
+template <typename T>
+std::string FormatFloatingPoint(T value) {
+  std::ostringstream oss;
+  oss << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+  return oss.str();
 }
 
 Expected<size_t, Error> DecimalBinarySize(uint8_t precision, uint8_t scale) {
@@ -138,7 +146,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       }
       float val = 0;
       memcpy(&val, data, sizeof(float));
-      return std::to_string(val);
+      return FormatFloatingPoint(val);
     }
     case 5: {  // MYSQL_TYPE_DOUBLE
       if (auto available = RequireBytes(data, end, 8); !available) {
@@ -146,7 +154,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       }
       double val = 0;
       memcpy(&val, data, sizeof(double));
-      return std::to_string(val);
+      return FormatFloatingPoint(val);
     }
 
     // YEAR type

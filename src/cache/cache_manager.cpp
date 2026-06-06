@@ -22,7 +22,7 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
     // Set eviction callback to clean up invalidation metadata. Per-key path
     // is used by Erase(); bulk paths (Clear/ClearTable/EvictForSpace/RefreshLRU)
     // route through the batch callback below to amortize the
-    // InvalidationManager::mutex_ acquisition (H-M7).
+    // InvalidationManager::mutex_ acquisition.
     query_cache_->SetEvictionCallback([this](const CacheKey& key) {
       if (invalidation_mgr_) {
         invalidation_mgr_->UnregisterCacheEntry(key);
@@ -74,8 +74,9 @@ std::optional<CacheKey> CacheManager::ResolveCacheKey(const query::Query& query)
     return std::nullopt;
   }
 
-  // Use precomputed cache key if available (performance optimization)
-  if (query.cache_key.has_value()) {
+  // Trust only table/index-aware canonical keys produced by search_pipeline.
+  // Parser/default keys lack primary-key and normalization context.
+  if (query.cache_key.has_value() && query.cache_key_is_canonical) {
     CacheKey key;
     key.hash_high = query.cache_key.value().first;
     key.hash_low = query.cache_key.value().second;
@@ -124,6 +125,14 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
                           const std::vector<std::string>& ngrams, double query_cost_ms, int ngram_size,
                           int kanji_ngram_size, bool cross_boundary_ngrams) {
+  return InsertIfVersion(query, result, ngrams, query_cost_ms, CaptureDataVersion(), ngram_size, kanji_ngram_size,
+                         cross_boundary_ngrams);
+}
+
+bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<DocId>& result,
+                                   const std::vector<std::string>& ngrams, double query_cost_ms,
+                                   uint64_t expected_data_version, int ngram_size, int kanji_ngram_size,
+                                   bool cross_boundary_ngrams) {
   if (!enabled_ || !query_cache_ || !invalidation_mgr_) {
     return false;
   }
@@ -166,6 +175,9 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
   if (!enabled_.load(std::memory_order_acquire)) {
     return false;
   }
+  if (data_version_.load(std::memory_order_acquire) != expected_data_version) {
+    return false;
+  }
 
   // Insert into cache
   const bool inserted = query_cache_->Insert(key, result, metadata, query_cost_ms);
@@ -184,6 +196,8 @@ void CacheManager::Invalidate(const std::string& table_name, const std::string& 
     return;
   }
 
+  data_version_.fetch_add(1, std::memory_order_acq_rel);
+
   // Enqueue for asynchronous invalidation
   invalidation_queue_->Enqueue(table_name, old_text, new_text, filter_columns_changed);
 }
@@ -197,6 +211,7 @@ void CacheManager::Clear() {
   // between query_cache_->Clear() and invalidation_mgr_->Clear() that would
   // leave behind phantom metadata. See serialize_mutex_ doc in cache_manager.h.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  data_version_.fetch_add(1, std::memory_order_acq_rel);
 
   if (query_cache_) {
     // QueryCache::Clear() invokes eviction_callback_ for every entry, which
@@ -221,6 +236,7 @@ void CacheManager::ClearTable(const std::string& table_name) {
   // Serialize with Insert; same rationale as Clear(). See serialize_mutex_
   // doc in cache_manager.h.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  data_version_.fetch_add(1, std::memory_order_acq_rel);
 
   if (query_cache_) {
     query_cache_->ClearTable(table_name);
@@ -251,13 +267,13 @@ bool CacheManager::Enable() {
     return false;
   }
 
-  // H-C2 (Enable order): start the invalidation queue BEFORE flipping
+  // Enable order: start the invalidation queue BEFORE flipping
   // enabled_ to true. Otherwise an Invalidate() observing enabled_ == true
   // would call invalidation_queue_->Enqueue while running_ is still false;
   // Enqueue would either fall through to its synchronous fallback (an
   // inconsistency vs. the async contract) or, worse, observe a stale
   // stopped_ == true (set by the previous Stop() and reset by Start()) and
-  // silently drop the event entirely (H-M5).
+  // silently drop the event entirely.
   //
   // Symmetric with Disable(), which stops the queue first and then flips
   // enabled_ to false.
@@ -271,7 +287,7 @@ bool CacheManager::Enable() {
 }
 
 void CacheManager::Disable() {
-  // CR-7 (Disable race): flip enabled_ to false BEFORE Clear() so that any
+  // Disable race: flip enabled_ to false BEFORE Clear() so that any
   // concurrent Insert observing the post-flip state short-circuits at the
   // enabled_ check and never inserts after Clear() has finished. The previous
   // ordering (Clear() then enabled_ = false) left a window where Insert and
@@ -302,6 +318,7 @@ void CacheManager::Disable() {
   // re-checks enabled_ after acquiring the same mutex, so a caller that was
   // queued behind this Clear exits without adding post-disable metadata.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  data_version_.fetch_add(1, std::memory_order_acq_rel);
   if (query_cache_) {
     query_cache_->Clear();
   }

@@ -138,14 +138,14 @@ Content-Type: application/json
 }
 ```
 
-### GET /{table}/{id}
+### GET /{table}/{primary_key}
 
-Get a single document by its document ID.
+Get a single document by its primary key. The response includes the internal `doc_id`.
 
 **Request:**
 
 ```http
-GET /threads/12345 HTTP/1.1
+GET /threads/thread_12345 HTTP/1.1
 ```
 
 **Response (200 OK):**
@@ -399,6 +399,18 @@ GET /health HTTP/1.1
 }
 ```
 
+### GET /health/live
+
+Liveness probe. Returns `200 OK` while the HTTP server process is running, even if the node is still loading or replication is degraded.
+
+### GET /health/ready
+
+Readiness probe for traffic gating. Returns `200 OK` only when the node can accept search traffic. Returns `503 Service Unavailable` while a dump load is in progress or when configured replication is unavailable.
+
+### GET /health/detail
+
+Detailed monitoring snapshot. Returns `200 OK` with `"status": "healthy"` or `"status": "degraded"`; use `/health/ready` rather than this endpoint for load balancer readiness decisions.
+
 ### GET /config
 
 Current server configuration summary (sensitive values are omitted).
@@ -494,7 +506,7 @@ curl -X POST http://localhost:8080/threads/search \
 **Get document:**
 
 ```bash
-curl http://localhost:8080/threads/12345
+curl http://localhost:8080/threads/thread_12345
 ```
 
 **Health check:**

@@ -115,6 +115,19 @@ std::string SanitizePrimaryKeyForResponse(std::string_view primary_key) {
   return sanitized;
 }
 
+std::string SanitizeDelimitedFieldForResponse(std::string_view value) {
+  std::string sanitized;
+  sanitized.reserve(value.size());
+  for (unsigned char ch : value) {
+    if (ch == '\r' || ch == '\n' || ch == '\t' || std::iscntrl(ch) != 0) {
+      sanitized += ' ';
+    } else {
+      sanitized += static_cast<char>(ch);
+    }
+  }
+  return sanitized;
+}
+
 /**
  * @brief Write the cache section of a debug block into `oss`.
  *
@@ -322,7 +335,7 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
     response += SanitizePrimaryKeyForResponse(primary_keys[i]);
     response += '\t';
     if (i < snippets.size()) {
-      response += snippets[i];
+      response += SanitizeDelimitedFieldForResponse(snippets[i]);
     }
   }
 
@@ -372,17 +385,7 @@ std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<s
   response += "\r\n";
 
   for (const auto& [value, count] : value_counts) {
-    // Escape tabs to prevent protocol ambiguity (tab is the field separator).
-    // Uses find+append to avoid per-character string::operator+= overhead
-    // (reviewed: this is more efficient than char-by-char when tabs are rare).
-    if (value.find('\t') == std::string::npos) {
-      response += value;
-    } else {
-      response.reserve(response.size() + value.size());
-      for (char ch : value) {
-        response += (ch == '\t') ? ' ' : ch;
-      }
-    }
+    response += SanitizeDelimitedFieldForResponse(value);
     response += '\t';
     response += std::to_string(count);
     response += "\r\n";
@@ -404,7 +407,7 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
   }
 
   std::ostringstream oss;
-  oss << protocol::kOkDocWithSpacePrefix << doc->primary_key;
+  oss << protocol::kOkDocWithSpacePrefix << SanitizePrimaryKeyForResponse(doc->primary_key);
 
   // Add filters
   // Default precision for floating point values in response
@@ -490,6 +493,12 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
   }
   if (cmd_stats.cmd_config > 0) {
     oss << "cmd_config: " << cmd_stats.cmd_config << "\r\n";
+  }
+  if (cmd_stats.cmd_other > 0) {
+    oss << "cmd_other: " << cmd_stats.cmd_other << "\r\n";
+  }
+  if (cmd_stats.cmd_unknown > 0) {
+    oss << "cmd_unknown: " << cmd_stats.cmd_unknown << "\r\n";
   }
   oss << "\r\n";
 
@@ -747,6 +756,12 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   }
   if (cmd_stats.cmd_config > 0) {
     oss << "mygramdb_command_total{command=\"config\"} " << cmd_stats.cmd_config << "\n";
+  }
+  if (cmd_stats.cmd_other > 0) {
+    oss << "mygramdb_command_total{command=\"other\"} " << cmd_stats.cmd_other << "\n";
+  }
+  if (cmd_stats.cmd_unknown > 0) {
+    oss << "mygramdb_command_total{command=\"unknown\"} " << cmd_stats.cmd_unknown << "\n";
   }
   oss << "\n";
 
@@ -1048,7 +1063,14 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
 
 std::string ResponseFormatter::FormatError(std::string_view message) {
   std::string result(protocol::kErrorPrefix);
-  result += message;
+  result.reserve(protocol::kErrorPrefix.size() + message.size());
+  for (unsigned char ch : message) {
+    if (ch == '\r' || ch == '\n' || ch == '\t' || std::iscntrl(ch) != 0) {
+      result += ' ';
+    } else {
+      result += static_cast<char>(ch);
+    }
+  }
   return result;
 }
 

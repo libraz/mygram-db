@@ -1613,6 +1613,10 @@ TEST(IsResponseCompleteTest, SingleLineResponseComplete) {
   EXPECT_TRUE(IsResponseComplete("ERROR Table not found\r\n"));
 }
 
+TEST(IsResponseCompleteTest, SingleLineConfigVerifyErrorComplete) {
+  EXPECT_TRUE(IsResponseComplete("ERROR Configuration validation failed: missing required table name\r\n"));
+}
+
 /**
  * @brief Test incomplete response (no CRLF at end)
  */
@@ -1677,6 +1681,13 @@ TEST(IsResponseCompleteTest, ReplicationRequiresEndMarker) {
   // REPLICATION_STOPPED is a single-line response (different prefix)
   EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STOPPED\r\n"));
   EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STARTED\r\n"));
+}
+
+TEST(IsResponseCompleteTest, SyncStatusRequiresEndMarker) {
+  EXPECT_FALSE(IsResponseComplete("OK SYNC_STATUS\r\n"));
+  EXPECT_FALSE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\nEND\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\ntable=users status=RUNNING\r\nEND\r\n"));
 }
 
 /**

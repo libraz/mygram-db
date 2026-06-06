@@ -19,6 +19,7 @@
 #include <chrono>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <thread>
 
 #include "config/config.h"
@@ -85,6 +86,21 @@ size_t ParseTcpCount(const std::string& response, const std::string& verb) {
     return 0;
   }
   return std::stoul(response.substr(pos + prefix.size()));
+}
+
+std::vector<std::string> ParseTcpSearchPrimaryKeys(const std::string& response) {
+  std::istringstream iss(response);
+  std::string ok;
+  std::string results;
+  size_t count = 0;
+  iss >> ok >> results >> count;
+
+  std::vector<std::string> primary_keys;
+  std::string pk;
+  while (iss >> pk) {
+    primary_keys.push_back(pk);
+  }
+  return primary_keys;
 }
 
 }  // namespace
@@ -187,6 +203,40 @@ TEST_F(HttpTcpConsistencyTest, SearchHitCountMatches) {
   EXPECT_EQ(tcp_count, http_count) << "TCP count " << tcp_count << " != HTTP count " << http_count
                                    << "; tcp_response=" << tcp_response << " http_body=" << http_res->body;
   EXPECT_GT(tcp_count, 0u);
+}
+
+TEST_F(HttpTcpConsistencyTest, SearchDefaultOrderAndLimitMatches) {
+  auto tcp_response = SendTcpRequest(tcp_port_, "SEARCH articles machine LIMIT 1");
+  ASSERT_FALSE(tcp_response.empty()) << "TCP server returned empty response";
+  auto tcp_primary_keys = ParseTcpSearchPrimaryKeys(tcp_response);
+  ASSERT_EQ(tcp_primary_keys.size(), 1U) << "tcp_response=" << tcp_response;
+
+  httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
+  json req_body;
+  req_body["q"] = "machine";
+  req_body["limit"] = 1;
+  auto http_res = http_client.Post("/articles/search", req_body.dump(), "application/json");
+  ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
+  ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
+
+  json http_body = json::parse(http_res->body);
+  ASSERT_EQ(http_body["results"].size(), 1U);
+  EXPECT_EQ(http_body["results"][0]["primary_key"].get<std::string>(), tcp_primary_keys[0])
+      << "tcp_response=" << tcp_response << " http_body=" << http_res->body;
+}
+
+TEST_F(HttpTcpConsistencyTest, GetByPrimaryKeyMatches) {
+  auto tcp_response = SendTcpRequest(tcp_port_, "GET articles doc_1");
+  ASSERT_FALSE(tcp_response.empty()) << "TCP server returned empty response";
+  EXPECT_EQ(tcp_response.rfind("OK DOC doc_1", 0), 0U) << "tcp_response=" << tcp_response;
+
+  httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
+  auto http_res = http_client.Get("/articles/doc_1");
+  ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
+  ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
+
+  json http_body = json::parse(http_res->body);
+  EXPECT_EQ(http_body["primary_key"].get<std::string>(), "doc_1") << "http_body=" << http_res->body;
 }
 
 TEST_F(HttpTcpConsistencyTest, CountMatches) {

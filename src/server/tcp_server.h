@@ -160,6 +160,11 @@ class TcpServer {
   config::RuntimeVariableManager* GetVariableManager() { return variable_manager_.get(); }
 
   /**
+   * @brief Get request dispatcher pointer (for runtime API config callback)
+   */
+  RequestDispatcher* GetDispatcher() { return dispatcher_.get(); }
+
+  /**
    * @brief Get rate limiter pointer (for ServerOrchestrator to set callbacks)
    */
   RateLimiter* GetRateLimiter() { return rate_limiter_.get(); }

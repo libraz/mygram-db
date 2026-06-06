@@ -147,6 +147,14 @@ TEST(ResponseFormatterGetTest, NoFilters) {
   EXPECT_EQ(response, "OK DOC pk8");
 }
 
+TEST(ResponseFormatterGetTest, SanitizesPrimaryKeyControlCharacters) {
+  storage::Document doc;
+  doc.primary_key = "pk with\ncontrol\rchars\t";
+
+  auto response = ResponseFormatter::FormatGetResponse(doc);
+  EXPECT_EQ(response, "OK DOC pk_with_control_chars_");
+}
+
 /**
  * @brief Test GET response for document not found
  */

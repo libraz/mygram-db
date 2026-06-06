@@ -9,10 +9,17 @@
 #include <spdlog/sinks/stdout_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <unordered_map>
+
+#include "app/configuration_manager.h"
+#include "app/server_orchestrator.h"
+#include "mysql/null_binlog_reader.h"
 
 namespace {
 
@@ -174,6 +181,95 @@ TEST_F(DumpDirectoryValidationTest, RunLogsStartupAfterApplyingLoggingConfig) {
   ASSERT_TRUE(log_file.is_open());
   std::string log_contents((std::istreambuf_iterator<char>(log_file)), std::istreambuf_iterator<char>());
   EXPECT_NE(log_contents.find("application_starting"), std::string::npos);
+
+  spdlog::drop_all();
+  auto console_sink = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+  auto logger = std::make_shared<spdlog::logger>("default", console_sink);
+  spdlog::set_default_logger(logger);
+}
+
+TEST(ServerOrchestratorReplicationTest, EmptyGtidStillStartsConfiguredBinlogReader) {
+  mygramdb::mysql::NullBinlogReader reader;
+
+  EXPECT_TRUE(mygramdb::app::ShouldStartBinlogReaderOnServerStart(&reader, ""));
+  EXPECT_TRUE(mygramdb::app::ShouldStartBinlogReaderOnServerStart(&reader, "uuid:1-10"));
+  EXPECT_FALSE(mygramdb::app::ShouldStartBinlogReaderOnServerStart(nullptr, ""));
+}
+
+TEST(ServerOrchestratorReplicationTest, CollectRequiredTableNamesUsesConfiguredNames) {
+  std::unordered_map<std::string, std::unique_ptr<mygramdb::server::TableContext>> tables;
+
+  auto articles = std::make_unique<mygramdb::server::TableContext>();
+  articles->name = "articles_map_key";
+  articles->config.name = "articles";
+  tables.emplace("articles_map_key", std::move(articles));
+
+  auto comments = std::make_unique<mygramdb::server::TableContext>();
+  comments->name = "comments";
+  comments->config.name = "comments";
+  tables.emplace("comments", std::move(comments));
+
+  auto required_tables = mygramdb::app::CollectRequiredTableNames(tables);
+  std::sort(required_tables.begin(), required_tables.end());
+
+  ASSERT_EQ(required_tables.size(), 2u);
+  EXPECT_EQ(required_tables[0], "articles");
+  EXPECT_EQ(required_tables[1], "comments");
+}
+
+TEST_F(DumpDirectoryValidationTest, ReopenLogFileSwapsDefaultLoggerForRotatedFile) {
+  std::filesystem::path log_path = base_dir_ / "mygramdb.log";
+  std::filesystem::path rotated_path = base_dir_ / "mygramdb.log.1";
+  std::filesystem::path config_path = base_dir_ / "config.yaml";
+
+  std::ofstream config(config_path);
+  config << "mysql:\n"
+         << "  host: \"127.0.0.1\"\n"
+         << "  port: 3306\n"
+         << "  user: \"test\"\n"
+         << "  password: \"test\"\n"
+         << "  database: \"test\"\n"
+         << "tables:\n"
+         << "  - name: \"test_table\"\n"
+         << "    primary_key: \"id\"\n"
+         << "    text_source:\n"
+         << "      column: \"content\"\n"
+         << "replication:\n"
+         << "  enable: false\n"
+         << "  server_id: 12345\n"
+         << "dump:\n"
+         << "  dir: \"" << base_dir_.string() << "\"\n"
+         << "logging:\n"
+         << "  level: \"info\"\n"
+         << "  format: \"text\"\n"
+         << "  file: \"" << log_path.string() << "\"\n";
+  config.close();
+
+  auto manager = mygramdb::app::ConfigurationManager::Create(config_path.string());
+  ASSERT_TRUE(manager.has_value()) << manager.error().to_string();
+  ASSERT_TRUE((*manager)->ApplyLoggingConfig().has_value());
+
+  spdlog::info("before_rotate_marker");
+  spdlog::default_logger()->flush();
+  std::filesystem::rename(log_path, rotated_path);
+
+  auto reopen = (*manager)->ReopenLogFile();
+  ASSERT_TRUE(reopen.has_value()) << reopen.error().to_string();
+
+  spdlog::info("after_rotate_marker");
+  spdlog::default_logger()->flush();
+
+  std::ifstream rotated(rotated_path);
+  ASSERT_TRUE(rotated.is_open());
+  const std::string rotated_contents((std::istreambuf_iterator<char>(rotated)), std::istreambuf_iterator<char>());
+
+  std::ifstream reopened(log_path);
+  ASSERT_TRUE(reopened.is_open());
+  const std::string reopened_contents((std::istreambuf_iterator<char>(reopened)), std::istreambuf_iterator<char>());
+
+  EXPECT_NE(rotated_contents.find("before_rotate_marker"), std::string::npos);
+  EXPECT_EQ(rotated_contents.find("after_rotate_marker"), std::string::npos);
+  EXPECT_NE(reopened_contents.find("after_rotate_marker"), std::string::npos);
 
   spdlog::drop_all();
   auto console_sink = std::make_shared<spdlog::sinks::stdout_sink_mt>();

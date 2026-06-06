@@ -146,6 +146,9 @@ void WriteManualV2Dump(const std::string& filepath, const Config& config,
   ASSERT_TRUE(WriteBinary(out, version));
 
   HeaderV2 header;
+  header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + 4 + header.gtid.size());
+  header.flags = dump_format::flags_v2::kWithCRC;
+  header.dump_timestamp = 1700000000;
   header.section_count = static_cast<uint32_t>(1 + table_sections.size());
   ASSERT_TRUE(WriteHeaderV2(out, header).has_value());
 
@@ -156,6 +159,24 @@ void WriteManualV2Dump(const std::string& filepath, const Config& config,
     ASSERT_TRUE(WriteSectionEnvelope(out, dump_format::SectionType::kTableData, table_section).has_value());
   }
   ASSERT_TRUE(out.good());
+  out.close();
+
+  std::ifstream in(filepath, std::ios::binary);
+  ASSERT_TRUE(in);
+  std::vector<char> file_data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  in.close();
+
+  auto total_size = static_cast<uint64_t>(file_data.size());
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderTotalFileSizeOffset)], &total_size, sizeof(total_size));
+  std::memset(&file_data[static_cast<size_t>(kV2HeaderFileCRC32Offset)], 0, sizeof(uint32_t));
+  auto crc = static_cast<uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_data.size())));
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderFileCRC32Offset)], &crc, sizeof(crc));
+
+  std::ofstream patched(filepath, std::ios::binary | std::ios::trunc);
+  ASSERT_TRUE(patched);
+  patched.write(file_data.data(), static_cast<std::streamsize>(file_data.size()));
+  ASSERT_TRUE(patched.good());
 }
 
 /// RAII guard that cleans up a temp file on construction and destruction.
@@ -533,6 +554,74 @@ TEST(DumpFormatV2Test, DispatchReadsV1File) {
   cleanup();
 }
 
+TEST(DumpFormatV2Test, V1LoadFailsWhenConfiguredTableIsMissingFromDump) {
+  auto filepath = TempFilePath("v1_missing_configured_table");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index source_index;
+  DocumentStore source_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> write_contexts;
+  write_contexts["articles"] = {&source_index, &source_store};
+  ASSERT_TRUE(dump_v1::WriteDumpV1(filepath, "V1_GTID:1", cfg, write_contexts).has_value());
+
+  Index read_articles_index;
+  DocumentStore read_articles_store;
+  Index read_comments_index;
+  DocumentStore read_comments_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&read_articles_index, &read_articles_store};
+  read_contexts["comments"] = {&read_comments_index, &read_comments_store};
+
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = dump_v1::ReadDumpV1(filepath, read_gtid, read_config, read_contexts);
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_NE(read_result.error().message().find("missing=comments"), std::string::npos);
+}
+
+TEST(DumpFormatV2Test, V1LoadFailsWhenDumpContainsUnexpectedTableAndLeavesExistingUnchanged) {
+  auto filepath = TempFilePath("v1_unexpected_dump_table");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  TableConfig comments = cfg.tables[0];
+  comments.name = "comments";
+  cfg.tables.push_back(comments);
+
+  Index source_articles_index(2, 1);
+  ASSERT_TRUE(source_articles_index.AddDocument(1, "new article text"));
+  DocumentStore source_articles_store;
+  ASSERT_TRUE(source_articles_store.AddDocument("new-article", {}, "new article text").has_value());
+  Index source_comments_index(2, 1);
+  ASSERT_TRUE(source_comments_index.AddDocument(1, "new comment text"));
+  DocumentStore source_comments_store;
+  ASSERT_TRUE(source_comments_store.AddDocument("new-comment", {}, "new comment text").has_value());
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> write_contexts;
+  write_contexts["articles"] = {&source_articles_index, &source_articles_store};
+  write_contexts["comments"] = {&source_comments_index, &source_comments_store};
+  ASSERT_TRUE(dump_v1::WriteDumpV1(filepath, "V1_GTID:1", cfg, write_contexts).has_value());
+
+  DocumentStore existing_articles_store;
+  auto old_doc_id = existing_articles_store.AddDocument("old-article", {}, "old article text");
+  ASSERT_TRUE(old_doc_id.has_value()) << old_doc_id.error().message();
+  Index existing_articles_index(2, 1);
+  ASSERT_TRUE(existing_articles_index.AddDocument(*old_doc_id, "old article text"));
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&existing_articles_index, &existing_articles_store};
+
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = dump_v1::ReadDumpV1(filepath, read_gtid, read_config, read_contexts);
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_NE(read_result.error().message().find("unexpected=comments"), std::string::npos);
+  EXPECT_EQ(existing_articles_store.GetPrimaryKey(*old_doc_id), std::optional<std::string>("old-article"));
+  EXPECT_EQ(existing_articles_index.Count("ol"), 1u);
+  EXPECT_EQ(existing_articles_index.Count("ne"), 0u);
+}
+
 TEST(DumpFormatV2Test, DispatchReadsV2File) {
   auto filepath = TempFilePath("v2_dispatch");
   auto cleanup = [&]() { CleanupFile(filepath); };
@@ -673,6 +762,72 @@ TEST(DumpFormatV2Test, FileCRCCorruptionDetected) {
   EXPECT_EQ(error.type, dump_format::CRCErrorType::FileCRC);
 
   cleanup();
+}
+
+TEST(DumpFormatV2Test, ReadRejectsZeroTotalFileSizeHeader) {
+  auto filepath = TempFilePath("zero_total_file_size");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index idx;
+  DocumentStore ds;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts;
+  contexts["articles"] = {&idx, &ds};
+  ASSERT_TRUE(WriteDumpV2(filepath, "GTID:1", cfg, contexts).has_value());
+
+  {
+    std::fstream fs(filepath, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(fs.good());
+    fs.seekp(kV2HeaderTotalFileSizeOffset);
+    uint64_t zero = 0;
+    ASSERT_TRUE(WriteBinary(fs, zero));
+  }
+
+  std::string read_gtid;
+  Config read_config;
+  Index read_idx;
+  DocumentStore read_ds;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&read_idx, &read_ds};
+  dump_format::IntegrityError error;
+
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts, nullptr, nullptr, &error);
+  EXPECT_FALSE(read_result.has_value());
+  EXPECT_EQ(error.type, dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(error.message.find("total_file_size is zero"), std::string::npos);
+}
+
+TEST(DumpFormatV2Test, ReadRejectsZeroFileCrcWhenCrcFlagSet) {
+  auto filepath = TempFilePath("zero_file_crc");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index idx;
+  DocumentStore ds;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts;
+  contexts["articles"] = {&idx, &ds};
+  ASSERT_TRUE(WriteDumpV2(filepath, "GTID:1", cfg, contexts).has_value());
+
+  {
+    std::fstream fs(filepath, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(fs.good());
+    fs.seekp(kV2HeaderFileCRC32Offset);
+    uint32_t zero = 0;
+    ASSERT_TRUE(WriteBinary(fs, zero));
+  }
+
+  std::string read_gtid;
+  Config read_config;
+  Index read_idx;
+  DocumentStore read_ds;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&read_idx, &read_ds};
+  dump_format::IntegrityError error;
+
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts, nullptr, nullptr, &error);
+  EXPECT_FALSE(read_result.has_value());
+  EXPECT_EQ(error.type, dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(error.message.find("file_crc32 is zero"), std::string::npos);
 }
 
 TEST(DumpFormatV2Test, SectionCRCCorruptionDetected) {

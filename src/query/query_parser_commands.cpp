@@ -8,8 +8,6 @@
 #include <string>
 #include <vector>
 
-#include "cache/cache_key.h"
-#include "query/query_normalizer.h"
 #include "query/query_parser.h"
 #include "query/query_parser_internal.h"
 #include "utils/string_utils.h"
@@ -290,14 +288,6 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     }
   }
 
-  // Precompute cache key for performance optimization
-  // This avoids recomputing normalization and MD5 hash on every cache lookup
-  const std::string normalized = cache::QueryNormalizer::Normalize(query);
-  if (!normalized.empty()) {
-    const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
-    query.cache_key = std::make_pair(key.hash_high, key.hash_low);
-  }
-
   return query;
 }
 
@@ -378,14 +368,6 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
       query.type = QueryType::UNKNOWN;
       return MakeUnexpected(result.error());
     }
-  }
-
-  // Precompute cache key for performance optimization
-  // This avoids recomputing normalization and MD5 hash on every cache lookup
-  const std::string normalized = cache::QueryNormalizer::Normalize(query);
-  if (!normalized.empty()) {
-    const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
-    query.cache_key = std::make_pair(key.hash_high, key.hash_low);
   }
 
   return query;

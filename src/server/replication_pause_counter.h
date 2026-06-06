@@ -40,7 +40,11 @@ class Counter {
       count_.fetch_add(1, std::memory_order_acq_rel);
       return false;
     }
-    return prev == 1;
+    const bool last_releaser = prev == 1;
+    if (last_releaser) {
+      drain_cv_.notify_all();
+    }
+    return last_releaser;
   }
 
   bool IsPaused() const noexcept { return count_.load(std::memory_order_acquire) > 0; }

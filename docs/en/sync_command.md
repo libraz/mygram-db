@@ -274,7 +274,8 @@ INFO: TCP server stopped
 
 **Solution:**
 - Check available system memory
-- Increase memory limits in configuration
+- Reduce process RSS or provision more memory; `memory.hard_limit_mb` is
+  reserved and does not enforce a process memory limit today
 - Reduce batch size in build configuration
 
 ### SYNC Fails During Execution

@@ -240,6 +240,21 @@ TEST_F(StructuredLogTest, LongQueryTruncation) {
   EXPECT_NE(output.find(std::string(200, 'A')), std::string::npos);
 }
 
+TEST_F(StructuredLogTest, QueryTruncationDoesNotSplitUtf8) {
+  std::string query(199, 'A');
+  query += "\xE3\x81\x82";
+  query += "B";
+
+  const std::string truncated = StructuredLog::TruncateUtf8Prefix(query, kMaxQueryLogLength);
+  EXPECT_EQ(truncated, std::string(199, 'A'));
+
+  LogQueryParseError(query, "Query too long");
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("\"query\":\"" + std::string(199, 'A') + "\""), std::string::npos);
+  EXPECT_EQ(output.find("\xE3"), std::string::npos);
+}
+
 /**
  * @brief Test chaining multiple fields
  */
@@ -259,6 +274,26 @@ TEST_F(StructuredLogTest, MultipleFieldTypes) {
   EXPECT_NE(output.find("\"bool_field\":true"), std::string::npos);
   EXPECT_NE(output.find("\"double_field\":"), std::string::npos);
   EXPECT_NE(output.find("\"message\":\"Mixed types test\""), std::string::npos);
+}
+
+TEST_F(StructuredLogTest, IntegralFieldOverloadsAcceptCommonTypes) {
+  const int int_value = -7;
+  const uint32_t uint32_value = 42;
+  const size_t size_value = 123;
+
+  StructuredLog()
+      .Event("integer_event")
+      .Field("int_value", int_value)
+      .Field("uint32_value", uint32_value)
+      .Field("size_value", size_value)
+      .Field("bool_value", true)
+      .Info();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("\"int_value\":-7"), std::string::npos);
+  EXPECT_NE(output.find("\"uint32_value\":42"), std::string::npos);
+  EXPECT_NE(output.find("\"size_value\":123"), std::string::npos);
+  EXPECT_NE(output.find("\"bool_value\":true"), std::string::npos);
 }
 
 /**

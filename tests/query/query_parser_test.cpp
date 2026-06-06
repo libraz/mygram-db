@@ -23,6 +23,8 @@ TEST(QueryParserTest, SearchBasic) {
   EXPECT_EQ(query->search_text, "hello");
   EXPECT_EQ(query->limit, 100);  // Default
   EXPECT_EQ(query->offset, 0);   // Default
+  EXPECT_FALSE(query->cache_key.has_value());
+  EXPECT_FALSE(query->cache_key_is_canonical);
   EXPECT_TRUE(query->IsValid());
 }
 
@@ -165,6 +167,8 @@ TEST(QueryParserTest, CountBasic) {
   EXPECT_EQ(query->type, QueryType::COUNT);
   EXPECT_EQ(query->table, "articles");
   EXPECT_EQ(query->search_text, "hello");
+  EXPECT_FALSE(query->cache_key.has_value());
+  EXPECT_FALSE(query->cache_key_is_canonical);
   EXPECT_TRUE(query->IsValid());
 }
 
@@ -414,6 +418,23 @@ TEST(QueryParserTest, InvalidFilterOperator) {
 
   EXPECT_FALSE(query);
   EXPECT_NE(query.error().message().find("operator"), std::string::npos);
+}
+
+TEST(QueryParserTest, InvalidCompoundFilterRejectsOperatorPrefixedValue) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello FILTER price=>5");
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidFilter);
+}
+
+TEST(QueryParserTest, InvalidFilterRejectsOperatorPrefixedValue) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello FILTER price = >5");
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidFilter);
+  EXPECT_NE(query.error().message().find("operator character"), std::string::npos);
 }
 
 /**
@@ -2010,15 +2031,33 @@ TEST(QueryParserTest, DuplicateLimitUsesLast) {
 }
 
 /**
- * @test Duplicate OFFSET should use last value
+ * @test Duplicate OFFSET should be rejected
  */
-TEST(QueryParserTest, DuplicateOffsetUsesLast) {
+TEST(QueryParserTest, DuplicateOffsetRejected) {
   QueryParser parser;
 
   auto query = parser.Parse("SEARCH articles hello OFFSET 10 OFFSET 20");
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->offset, 20);
-  EXPECT_TRUE(query->IsValid());
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidOffset);
+  EXPECT_NE(query.error().message().find("more than once"), std::string::npos);
+}
+
+TEST(QueryParserTest, LimitOffsetCountWithExplicitOffsetRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello LIMIT 10,50 OFFSET 20");
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidOffset);
+  EXPECT_NE(query.error().message().find("more than once"), std::string::npos);
+}
+
+TEST(QueryParserTest, ExplicitOffsetWithLimitOffsetCountRejected) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SEARCH articles hello OFFSET 20 LIMIT 10,50");
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidOffset);
+  EXPECT_NE(query.error().message().find("more than once"), std::string::npos);
 }
 
 /**

@@ -22,6 +22,7 @@ TEST(ErrorCodeTest, ErrorCodeValues) {
   EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkBindFailed), 6000);
   EXPECT_EQ(static_cast<int>(ErrorCode::kClientNotConnected), 7000);
   EXPECT_EQ(static_cast<int>(ErrorCode::kCacheMiss), 8000);
+  EXPECT_EQ(static_cast<int>(ErrorCode::kCacheWorkerStartFailed), 8004);
 }
 
 TEST(ErrorCodeTest, ErrorCodeToString) {
@@ -36,6 +37,7 @@ TEST(ErrorCodeTest, ErrorCodeToString) {
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkBindFailed), "Bind failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientNotConnected), "Not connected");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheMiss), "Cache miss");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheWorkerStartFailed), "Cache worker start failed");
 }
 
 // ========== Test Error class ==========
@@ -211,10 +213,12 @@ TEST(ErrorTest, CacheErrorCodes) {
   Error cache_miss(ErrorCode::kCacheMiss);
   Error cache_disabled(ErrorCode::kCacheDisabled);
   Error compression_failed(ErrorCode::kCacheCompressionFailed);
+  Error worker_start_failed(ErrorCode::kCacheWorkerStartFailed);
 
   EXPECT_EQ(cache_miss.message(), "Cache miss");
   EXPECT_EQ(cache_disabled.message(), "Cache disabled");
   EXPECT_EQ(compression_failed.message(), "Cache compression failed");
+  EXPECT_EQ(worker_start_failed.message(), "Cache worker start failed");
 }
 
 // ========== Test error propagation patterns ==========

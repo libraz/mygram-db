@@ -105,7 +105,7 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   if (process_immediately) {
     // Process outside lock to prevent deadlock from nested lock acquisition.
     //
-    // CR-6 (single-source unregister): we used to call
+    // Single-source unregister: we used to call
     // invalidation_mgr_->UnregisterCacheEntry(key) here directly *and* rely on
     // QueryCache::Erase to fire eviction_callback_, which in CacheManager is
     // wired to call UnregisterCacheEntry as well. The double-unregister was
@@ -146,7 +146,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InvalidationQueue::Start() {
     return {};  // Already running
   }
 
-  // H-M5: reset stopped_ on every successful Start() so that a Stop()/Start()
+  // reset stopped_ on every successful Start() so that a Stop()/Start()
   // cycle (e.g. CacheManager::Disable() followed by Enable()) does not leave
   // stopped_ permanently set, which would cause every subsequent Enqueue to
   // be silently dropped at the early-out below in Enqueue.
@@ -163,7 +163,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InvalidationQueue::Start() {
     running_.store(false, std::memory_order_release);
     stopped_.store(true, std::memory_order_release);
     return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kCacheWorkerStartFailed,
                                  std::string("Failed to start invalidation queue worker: ") + e.what()));
   }
 
@@ -269,7 +269,7 @@ void InvalidationQueue::ProcessBatch() {
 
   // Erase entries from cache and clean up their metadata.
   //
-  // CR-6 (single-source unregister): UnregisterCacheEntry must fire exactly
+  // Single-source unregister: UnregisterCacheEntry must fire exactly
   // once per affected key. Previously this loop called both
   // invalidation_mgr_->UnregisterCacheEntry(key) AND cache_->Erase(key); when
   // CacheManager installs an eviction callback that also calls

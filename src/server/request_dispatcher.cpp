@@ -7,6 +7,7 @@
 #include "server/request_dispatcher.h"
 
 #include "server/handlers/command_handler.h"
+#include "server/rate_limiter.h"
 #include "server/response_formatter.h"
 #include "server/table_catalog.h"
 #include "utils/structured_log.h"
@@ -15,7 +16,7 @@ namespace mygramdb::server {
 
 RequestDispatcher::RequestDispatcher(HandlerContext& ctx, const ServerConfig& config)
     : ctx_(ctx),
-      config_(config),
+      default_limit_(config.default_limit),
       max_query_length_(config.max_query_length <= 0 ? 0 : static_cast<size_t>(config.max_query_length)) {}
 
 void RequestDispatcher::RegisterHandler(query::QueryType type, CommandHandler* handler) {
@@ -28,6 +29,12 @@ bool RequestDispatcher::HasHandler(query::QueryType type) const {
 }
 
 std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionContext& conn_ctx) {
+  if (ctx_.rate_limiter != nullptr && !conn_ctx.client_ip.empty() &&
+      !ctx_.rate_limiter->AllowRequest(conn_ctx.client_ip)) {
+    mygram::utils::StructuredLog().Event("rate_limit_exceeded").Field("client_ip", conn_ctx.client_ip).Warn();
+    return ResponseFormatter::FormatError("Rate limit exceeded");
+  }
+
   // Untrusted client input may contain log-injection sequences. Truncation also
   // bounds log volume on long requests. The full byte length is preserved in a
   // separate numeric field so log consumers can detect truncation and never
@@ -44,7 +51,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
 
   // Create a thread-local parser for this request
   query::QueryParser parser;
-  parser.SetMaxQueryLength(max_query_length_);
+  parser.SetMaxQueryLength(max_query_length_.load(std::memory_order_acquire));
 
   // Parse query
   auto query = parser.Parse(request);
@@ -55,7 +62,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
 
   // Apply configured default LIMIT if not explicitly specified
   if (!query->limit_explicit && (query->type == query::QueryType::SEARCH)) {
-    query->limit = static_cast<uint32_t>(config_.default_limit);
+    query->limit = static_cast<uint32_t>(default_limit_.load(std::memory_order_acquire));
   }
 
   // Increment command statistics. IncrementRequests bumps total_requests in
@@ -82,6 +89,11 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
   // so they must not throw. Wrapping in try/catch here would violate the
   // project's "no exceptions" policy and silently mask handler bugs.
   return handler_iter->second->Handle(*query, conn_ctx);
+}
+
+void RequestDispatcher::UpdateApiConfig(int default_limit, int max_query_length) {
+  default_limit_.store(default_limit, std::memory_order_release);
+  max_query_length_.store(max_query_length <= 0 ? 0 : static_cast<size_t>(max_query_length), std::memory_order_release);
 }
 
 }  // namespace mygramdb::server

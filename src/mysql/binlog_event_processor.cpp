@@ -354,6 +354,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Field("type", "schema_change_warning")
               .Field("message", "Schema change may cause data inconsistency. Consider rebuilding from snapshot.")
               .Warn();
+          if (cache_manager != nullptr) {
+            cache_manager->ClearTable(event.table_name);
+          }
           // Note: We cannot automatically detect what changed (column type, name, etc.)
           // Users should manually rebuild if text column type or PK changed
           break;

@@ -34,13 +34,15 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
                                      const config::Config* full_config, std::string dump_dir,
                                      mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
                                      std::atomic<bool>& replication_paused_for_dump,
-                                     replication_pause::Counter* replication_pause_counter)
+                                     replication_pause::Counter* replication_pause_counter,
+                                     std::atomic<bool>* dump_load_in_progress)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
       binlog_reader_(binlog_reader),
       dump_save_in_progress_(dump_save_in_progress),
+      dump_load_in_progress_(dump_load_in_progress),
       replication_paused_for_dump_(replication_paused_for_dump),
       replication_pause_counter_(replication_pause_counter != nullptr ? replication_pause_counter
                                                                       : &local_replication_pause_counter_) {
@@ -174,6 +176,10 @@ void SnapshotScheduler::TakeSnapshot() {
           .Event("auto_snapshot_skipped")
           .Field("reason", "another DUMP operation is in progress")
           .Info();
+      return;
+    }
+    if (dump_load_in_progress_ != nullptr && dump_load_in_progress_->load(std::memory_order_acquire)) {
+      mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "DUMP LOAD is in progress").Info();
       return;
     }
 

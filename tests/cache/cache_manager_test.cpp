@@ -77,6 +77,33 @@ TEST(CacheManagerTest, BasicWorkflow) {
   EXPECT_FALSE(cached.has_value());
 }
 
+TEST(CacheManagerTest, InsertIfVersionRejectsStaleResultAfterInvalidate) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+
+  CacheManager mgr(config, std::move(ngram_configs));
+
+  auto query = CreateQuery("posts", "golang");
+  std::vector<DocId> result = {1, 2, 3};
+  std::vector<std::string> ngrams = {"ang", "gol", "lan", "ola"};
+
+  const uint64_t version_before_mutation = mgr.CaptureDataVersion();
+  mgr.Invalidate("posts", "", "unrelated mutation text");
+
+  EXPECT_FALSE(mgr.InsertIfVersion(query, result, ngrams, 15.0, version_before_mutation));
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+
+  const uint64_t current_version = mgr.CaptureDataVersion();
+  EXPECT_TRUE(mgr.InsertIfVersion(query, result, ngrams, 15.0, current_version));
+
+  auto cached = mgr.Lookup(query);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(result, cached.value());
+}
+
 /**
  * @brief Test precise invalidation - only affected queries invalidated
  */
@@ -728,15 +755,7 @@ TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {
   SUCCEED();
 }
 
-/**
- * @brief Test that Insert uses precomputed cache_key when available
- *
- * Regression test: Insert() was always recomputing the cache key via
- * QueryNormalizer::Normalize, ignoring query.cache_key. This caused
- * Lookup (which uses the precomputed key) to miss entries inserted
- * with a precomputed cache_key.
- */
-TEST(CacheManagerTest, InsertUsesPrecomputedCacheKey) {
+TEST(CacheManagerTest, IgnoresNonCanonicalPrecomputedCacheKey) {
   config::CacheConfig config;
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
@@ -745,20 +764,24 @@ TEST(CacheManagerTest, InsertUsesPrecomputedCacheKey) {
 
   CacheManager mgr(config, std::move(ngram_configs));
 
-  // Create a query with a precomputed cache_key
+  // Simulate a stale parser/default precomputed key. It must not override the
+  // canonical normalized key unless explicitly marked canonical.
   auto query = CreateQuery("posts", "test");
   query.cache_key = std::make_pair(uint64_t{12345}, uint64_t{67890});
 
-  // Insert with this query
   std::vector<DocId> results = {1, 2, 3};
   std::vector<std::string> ngrams = {"tes", "est"};
   bool inserted = mgr.Insert(query, results, ngrams, 15.0, 3, 2, true);
   ASSERT_TRUE(inserted);
 
-  // Lookup with same query (same cache_key) should find the entry
   auto lookup = mgr.Lookup(query);
-  ASSERT_TRUE(lookup.has_value()) << "Lookup should find entry inserted with same precomputed cache_key";
+  ASSERT_TRUE(lookup.has_value()) << "Lookup should use the normalized key, not the stale precomputed key";
   EXPECT_EQ(lookup.value().size(), 3u);
+
+  query::Query canonical_query = query;
+  canonical_query.cache_key_is_canonical = true;
+  auto canonical_lookup = mgr.Lookup(canonical_query);
+  EXPECT_FALSE(canonical_lookup.has_value()) << "Canonical-marked stale keys should be trusted and miss";
 }
 
 // =============================================================================

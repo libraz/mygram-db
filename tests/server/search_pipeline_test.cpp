@@ -267,6 +267,34 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheWithNullManagerIsNoop) {
   InsertToCache(nullptr, query, doc_ids_, term_infos, 1.0, 2, 0, false);
 }
 
+TEST_F(SearchPipelineFilterTest, InsertToCacheWithStaleDataVersionDoesNotInsert) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.limit = 100;
+
+  std::vector<SearchTermInfo> term_infos = {{{"al", "lp", "ph", "ha"}, 4, 0, "alpha"}};
+  const auto stale_version = cache_manager.CaptureDataVersion();
+  cache_manager.Invalidate("test", "", "unrelated mutation");
+
+  InsertToCache(&cache_manager, query, doc_ids_, term_infos, 1.0, 2, 0, false, stale_version);
+  EXPECT_FALSE(cache_manager.Lookup(query).has_value());
+}
+
 TEST(SearchPipelineCacheTest, MergeSortedTermNgramsForCacheUsesKWaySortedUniqueMerge) {
   std::vector<SearchTermInfo> term_infos = {
       {{"aa", "cc", "ee"}, 10},
@@ -722,8 +750,7 @@ TEST_F(SearchPipelineFilterParityTest, MixedEqAndRangeFiltersBitmapMatchesFallba
 class FullPipelineTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Create index with ngram_size=1 (matching HTTP server test pattern)
-    index_ = std::make_unique<index::Index>(1);
+    index_ = std::make_unique<index::Index>(2);
     doc_store_ = std::make_unique<storage::DocumentStore>();
 
     // Add documents
@@ -748,7 +775,7 @@ class FullPipelineTest : public ::testing::Test {
     FullPipelineParams params;
     params.current_index = index_.get();
     params.current_doc_store = doc_store_.get();
-    params.ngram_size = 1;
+    params.ngram_size = 2;
     params.kanji_ngram_size = 0;
     params.cross_boundary_ngrams = false;
     params.filter_threshold = 1000;
@@ -794,6 +821,49 @@ TEST_F(FullPipelineTest, SearchWithFilters) {
   EXPECT_TRUE(output.success);
   // Both learning docs have status=1
   EXPECT_EQ(output.results.size(), 2);
+}
+
+TEST_F(FullPipelineTest, BooleanTopLevelOrReturnsUnion) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "basics OR cats";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[2]}));
+}
+
+TEST_F(FullPipelineTest, BooleanParenthesizedOrAndLegacyAndClause) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "(basics OR cats)";
+  query.and_terms = {"old"};
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[2]}));
+}
+
+TEST_F(FullPipelineTest, BooleanTopLevelOrWithPostfixNot) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "basics OR cats NOT old";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0]}));
 }
 
 TEST_F(FullPipelineTest, SearchWithNotTerms) {

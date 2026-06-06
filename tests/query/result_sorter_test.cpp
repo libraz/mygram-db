@@ -128,6 +128,48 @@ TEST_F(ResultSorterTest, SortByFilterColumn) {
   EXPECT_EQ(std::get<int32_t>(score3.value()), 50);
 }
 
+TEST_F(ResultSorterTest, SortByFilterColumnUsesDocIdTieBreaker) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("doc1", {{"score", int32_t(10)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("doc2", {{"score", int32_t(10)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("doc3", {{"score", int32_t(10)}}));
+  std::reverse(doc_ids.begin(), doc_ids.end());
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.offset = 0;
+  query.order_by = OrderByClause{"score", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(result.value(), (std::vector<DocId>{1, 2, 3}));
+}
+
+TEST_F(ResultSorterTest, SchwartzianSortUsesDocIdTieBreaker) {
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 150; ++i) {
+    doc_ids.push_back(*doc_store_.AddDocument("doc" + std::to_string(i), {{"score", int32_t(10)}}));
+  }
+  std::reverse(doc_ids.begin(), doc_ids.end());
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 150;
+  query.offset = 0;
+  query.order_by = OrderByClause{"score", SortOrder::DESC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(result->size(), 150u);
+  EXPECT_EQ(result->front(), 150u);
+  EXPECT_EQ(result->back(), 1u);
+}
+
 // Test LIMIT
 TEST_F(ResultSorterTest, ApplyLimit) {
   // Add 10 documents

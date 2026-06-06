@@ -288,7 +288,7 @@ graph TB
 - **API**: RESTful JSON
 - **Endpoints**:
   - `POST /{table}/search`: Search query
-  - `GET /{table}/:id`: Get document by ID
+  - `GET /{table}/:primary_key`: Get document by primary key
   - `GET /info`: Server information
   - `GET /health`: Health check
 - **Features**: CORS support, Kubernetes-ready health checks

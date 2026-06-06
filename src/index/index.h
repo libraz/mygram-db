@@ -167,10 +167,18 @@ class Index {
   [[nodiscard]] std::vector<DocId> SearchByThreshold(const std::vector<std::string>& terms, size_t threshold) const;
 
   /**
-   * @brief Count documents containing term
+   * @brief Return the posting-list cardinality for a normalized n-gram term
    *
-   * @param term Search term
-   * @return Document count
+   * This is a term-level API: it does not parse a search query and does not
+   * count full query results.
+   *
+   * @param term Normalized n-gram term
+   * @return Number of documents in the term posting list
+   */
+  [[nodiscard]] uint64_t PostingSize(std::string_view term) const;
+
+  /**
+   * @brief Compatibility alias for PostingSize(term)
    */
   [[nodiscard]] uint64_t Count(std::string_view term) const;
 
@@ -227,6 +235,14 @@ class Index {
    * @brief Clear all data from index
    */
   void Clear();
+
+  /**
+   * @brief Replace postings with data from a validated loaded index.
+   *
+   * Used by dump loading to commit pre-validated table data without
+   * deserializing again during the apply phase.
+   */
+  void ReplaceWithLoaded(Index& loaded);
 
   /**
    * @brief Serialize index to file

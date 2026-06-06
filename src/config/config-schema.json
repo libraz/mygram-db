@@ -52,9 +52,9 @@
         },
         "binlog_row_image": {
           "type": "string",
-          "description": "Row image format",
+          "description": "Row image format. MygramDB requires FULL because replication row parsing depends on complete before/after images.",
           "default": "FULL",
-          "enum": ["FULL", "MINIMAL", "NOBLOB"]
+          "enum": ["FULL"]
         },
         "connect_timeout_ms": {
           "type": "integer",
@@ -347,14 +347,14 @@
         },
         "parallelism": {
           "type": "integer",
-          "description": "Number of parallel build threads",
+          "description": "Reserved / not yet enforced: number of parallel build threads",
           "default": 2,
           "minimum": 1,
           "maximum": 64
         },
         "throttle_ms": {
           "type": "integer",
-          "description": "Throttle delay between batches in milliseconds",
+          "description": "Reserved / not yet enforced: throttle delay between batches in milliseconds",
           "default": 0,
           "minimum": 0,
           "maximum": 10000
@@ -396,14 +396,14 @@
         },
         "reconnect_backoff_min_ms": {
           "type": "integer",
-          "description": "Minimum reconnect backoff delay",
+          "description": "Reserved / not yet enforced: minimum reconnect backoff delay",
           "default": 500,
           "minimum": 100,
           "maximum": 60000
         },
         "reconnect_backoff_max_ms": {
           "type": "integer",
-          "description": "Maximum reconnect backoff delay",
+          "description": "Reserved / not yet enforced: maximum reconnect backoff delay",
           "default": 10000,
           "minimum": 1000,
           "maximum": 600000
@@ -427,19 +427,19 @@
       "properties": {
         "hard_limit_mb": {
           "type": "integer",
-          "description": "Hard memory limit in MB",
+          "description": "Reserved / not yet enforced: hard memory limit in MB",
           "default": 8192,
           "minimum": 256
         },
         "soft_target_mb": {
           "type": "integer",
-          "description": "Soft memory target in MB",
+          "description": "Reserved / not yet enforced: soft memory target in MB",
           "default": 4096,
           "minimum": 128
         },
         "arena_chunk_mb": {
           "type": "integer",
-          "description": "Arena chunk size in MB",
+          "description": "Reserved / not yet enforced: arena chunk size in MB",
           "default": 64,
           "minimum": 1,
           "maximum": 1024
@@ -812,7 +812,7 @@
         },
         "invalidation_strategy": {
           "type": "string",
-          "description": "Invalidation strategy",
+          "description": "Reserved / not yet enforced: only ngram invalidation is currently used",
           "default": "ngram",
           "enum": ["ngram", "table"]
         },
@@ -823,7 +823,7 @@
         },
         "eviction_batch_size": {
           "type": "integer",
-          "description": "Number of entries to evict at once",
+          "description": "Reserved / not yet enforced: number of entries to evict at once",
           "default": 10,
           "minimum": 1
         },

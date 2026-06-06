@@ -288,7 +288,7 @@ graph TB
 - **API**: RESTful JSON
 - **エンドポイント**:
   - `POST /{table}/search`: 検索クエリ
-  - `GET /{table}/:id`: IDでドキュメント取得
+  - `GET /{table}/:primary_key`: プライマリキーでドキュメント取得
   - `GET /info`: サーバー情報
   - `GET /health`: ヘルスチェック
 - **機能**: CORSサポート、Kubernetes対応ヘルスチェック

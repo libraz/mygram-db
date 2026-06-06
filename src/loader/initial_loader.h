@@ -122,15 +122,16 @@ class InitialLoader {
    *
    * Validates batch consistency, adds documents to the document store,
    * assigns doc IDs, and indexes the batch. On error, rolls back the
-   * MySQL transaction.
+   * MySQL transaction only when this loader owns it.
    *
    * @param doc_batch Documents to store (cleared on success)
    * @param index_batch Corresponding index entries (cleared on success)
+   * @param manage_transaction Whether this loader owns the MySQL transaction
    * @return Expected<void, Error> on success or error
    */
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> FlushBatch(
       std::vector<storage::DocumentStore::DocumentItem>& doc_batch,
-      std::vector<index::Index::DocumentItem>& index_batch);
+      std::vector<index::Index::DocumentItem>& index_batch, bool manage_transaction);
 
   /**
    * @brief Build SELECT query for initial load

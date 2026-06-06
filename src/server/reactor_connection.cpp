@@ -28,6 +28,7 @@
 #include "server/request_dispatcher.h"
 #include "server/server_stats.h"
 #include "server/thread_pool.h"
+#include "utils/network_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
@@ -83,6 +84,10 @@ ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatch
   created_at_.store(now, std::memory_order_relaxed);
   last_active_.store(now, std::memory_order_relaxed);
   conn_ctx_.client_fd = fd_;
+  std::string client_ip = mygram::utils::GetPeerIP(fd_);
+  if (client_ip != "unknown") {
+    conn_ctx_.client_ip = std::move(client_ip);
+  }
   read_buf_.reserve(kDefaultReadBufferBytes);
 }
 

@@ -227,9 +227,11 @@ bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentS
 /// @param ngram_size N-gram size used for this query
 /// @param kanji_ngram_size Kanji n-gram size used for this query
 /// @param cross_boundary Cross-boundary setting used for this query
+/// @param data_version Cache data version captured after the cache miss
 void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query,
                    const std::vector<storage::DocId>& results, const std::vector<SearchTermInfo>& term_infos,
-                   double query_time_ms, int ngram_size, int kanji_ngram_size, bool cross_boundary);
+                   double query_time_ms, int ngram_size, int kanji_ngram_size, bool cross_boundary,
+                   std::optional<uint64_t> data_version = std::nullopt);
 
 /// @brief A synonym group: original term + all its synonyms, each with their own n-grams
 struct SynonymTermGroup {

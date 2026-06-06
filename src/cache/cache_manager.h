@@ -91,6 +91,18 @@ class CacheManager {
               double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true);
 
   /**
+   * @brief Capture the current data-change generation for guarded cache inserts
+   */
+  [[nodiscard]] uint64_t CaptureDataVersion() const { return data_version_.load(std::memory_order_acquire); }
+
+  /**
+   * @brief Insert only if no data invalidation/clear occurred since expected_data_version was captured
+   */
+  bool InsertIfVersion(const query::Query& query, const std::vector<DocId>& result,
+                       const std::vector<std::string>& ngrams, double query_cost_ms, uint64_t expected_data_version,
+                       int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true);
+
+  /**
    * @brief Invalidate cache entries affected by data modification
    * @param table_name Table that was modified
    * @param old_text Previous text content (empty if INSERT)
@@ -181,6 +193,7 @@ class CacheManager {
 
   std::atomic<bool> enabled_;
   std::atomic<int> ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
+  std::atomic<uint64_t> data_version_{0};
 
   /// Serializes the *combined* (QueryCache + InvalidationManager) mutating
   /// operations Insert/Clear/ClearTable. Each component already owns an

@@ -138,14 +138,14 @@ Content-Type: application/json
 }
 ```
 
-### GET /{table}/{id}
+### GET /{table}/{primary_key}
 
-ドキュメントIDで単一のドキュメントを取得。
+プライマリキーで単一のドキュメントを取得。レスポンスには内部 `doc_id` も含まれます。
 
 **リクエスト:**
 
 ```http
-GET /threads/12345 HTTP/1.1
+GET /threads/thread_12345 HTTP/1.1
 ```
 
 **レスポンス (200 OK):**
@@ -399,6 +399,18 @@ GET /health HTTP/1.1
 }
 ```
 
+### GET /health/live
+
+ライブネスプローブです。HTTPサーバープロセスが稼働していれば、ロード中またはレプリケーションが degraded の場合でも `200 OK` を返します。
+
+### GET /health/ready
+
+トラフィック制御用のレディネスプローブです。検索トラフィックを受け付けられる場合のみ `200 OK` を返します。DUMP LOAD 中、または設定済みレプリケーションが利用不可の場合は `503 Service Unavailable` を返します。
+
+### GET /health/detail
+
+詳細な監視スナップショットです。`"status": "healthy"` または `"status": "degraded"` を含む `200 OK` を返します。ロードバランサーのレディネス判定にはこのエンドポイントではなく `/health/ready` を使用してください。
+
 ### GET /config
 
 現在のサーバー設定サマリ（機密値は返却されません）。
@@ -494,7 +506,7 @@ curl -X POST http://localhost:8080/threads/search \
 **ドキュメント取得:**
 
 ```bash
-curl http://localhost:8080/threads/12345
+curl http://localhost:8080/threads/thread_12345
 ```
 
 **ヘルスチェック:**

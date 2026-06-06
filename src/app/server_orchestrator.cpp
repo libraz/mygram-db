@@ -16,6 +16,7 @@
 #include "loader/initial_loader.h"
 #include "query/synonym_dictionary.h"
 #include "server/http_server.h"
+#include "server/request_dispatcher.h"
 #include "server/tcp_server.h"
 #include "utils/constants.h"
 #include "utils/string_utils.h"
@@ -41,6 +42,21 @@ ServerOrchestrator::~ServerOrchestrator() {
   if (started_) {
     Stop();
   }
+}
+
+bool ShouldStartBinlogReaderOnServerStart(const mysql::IBinlogReader* binlog_reader, std::string_view start_gtid) {
+  (void)start_gtid;
+  return binlog_reader != nullptr;
+}
+
+std::vector<std::string> CollectRequiredTableNames(
+    const std::unordered_map<std::string, std::unique_ptr<server::TableContext>>& table_contexts) {
+  std::vector<std::string> required_tables;
+  required_tables.reserve(table_contexts.size());
+  for (const auto& [name, ctx] : table_contexts) {
+    required_tables.push_back(ctx != nullptr && !ctx->config.name.empty() ? ctx->config.name : name);
+  }
+  return required_tables;
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initialize() {
@@ -99,8 +115,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
 #ifdef USE_MYSQL
   bool binlog_started = false;
 
-  // Start BinlogReader (if GTID available and replication enabled)
-  if (binlog_reader_ && !snapshot_gtid_.empty()) {
+  // Start BinlogReader when replication is configured. An empty GTID is a
+  // valid start position for a fresh MySQL instance; gating on non-empty GTID
+  // leaves replication permanently stopped and readiness stuck at 503.
+  if (ShouldStartBinlogReaderOnServerStart(binlog_reader_.get(), snapshot_gtid_)) {
     auto start_result = binlog_reader_->Start();
     if (!start_result) {
       return mygram::utils::MakeUnexpected(start_result.error());
@@ -605,8 +623,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     if (variable_manager != nullptr) {
       // Create reconnection handler (use shared_ptr so it can be captured in std::function)
       // Pass the mysql_reconnecting flag to block manual REPLICATION START during reconnection
+      auto required_tables = CollectRequiredTableNames(table_contexts_);
       auto reconnection_handler = std::make_shared<MysqlReconnectionHandler>(
-          mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag());
+          mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag(),
+          std::move(required_tables));
 
       // Set callback that captures the reconnection handler
       variable_manager->SetMysqlReconnectCallback([handler = reconnection_handler](const std::string& host, int port) {
@@ -652,6 +672,23 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
         .Field("bind", http_config.bind)
         .Field("port", static_cast<uint64_t>(http_config.port))
         .Info();
+  }
+
+  {
+    auto* variable_manager = tcp_server_->GetVariableManager();
+    if (variable_manager != nullptr) {
+      auto* dispatcher = tcp_server_->GetDispatcher();
+      auto* http_server = http_server_.get();
+      variable_manager->SetApiConfigCallback([dispatcher, http_server](int default_limit, int max_query_length) {
+        if (dispatcher != nullptr) {
+          dispatcher->UpdateApiConfig(default_limit, max_query_length);
+        }
+        if (http_server != nullptr) {
+          http_server->UpdateApiConfig(default_limit, max_query_length);
+        }
+      });
+      mygram::utils::StructuredLog().Event("api_config_callback_registered").Info();
+    }
   }
 
   return {};

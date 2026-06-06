@@ -244,6 +244,19 @@ void BinlogReader::ReaderThreadFunc() {
           if (!reconnect_result) {
             mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(), 1);
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
+          } else if (!ValidateConnection()) {
+            mygram::utils::StructuredLog()
+                .Event("binlog_error")
+                .Field("type", "connection_validation_failed")
+                .Field("context", "after_idle_timeout_reconnect")
+                .Field("error", GetLastError())
+                .Error();
+            should_stop_.store(true, std::memory_order_release);
+          } else {
+            mygram::utils::StructuredLog()
+                .Event("binlog_debug")
+                .Field("action", "connection_validated_after_idle_timeout_reconnect")
+                .Debug();
           }
           idle_timeout_reconnect = true;
           // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop

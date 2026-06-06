@@ -121,7 +121,7 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
     // that have filter conditions. Queries with filters may return different
     // results regardless of whether text also changed.
     //
-    // H-M2: use the table_to_cache_keys_ reverse index to walk only the keys
+    // use the table_to_cache_keys_ reverse index to walk only the keys
     // belonging to @p table_name (O(k) where k = entries in this table)
     // instead of scanning every entry across every table (O(N)). For each
     // table-local key, dereference cache_metadata_ to confirm has_filters.
@@ -218,7 +218,7 @@ void InvalidationManager::UnregisterCacheEntries(const std::vector<CacheKey>& ke
   if (keys.empty()) {
     return;
   }
-  // Single lock acquisition for the whole batch (H-M7). UnregisterCacheEntryUnlocked
+  // Single lock acquisition for the whole batch. UnregisterCacheEntryUnlocked
   // is idempotent on missing keys, so callers do not need to deduplicate.
   std::unique_lock lock(mutex_);
   for (const auto& key : keys) {

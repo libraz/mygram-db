@@ -10,6 +10,8 @@
 #include <charconv>
 #include <optional>
 #include <shared_mutex>
+#include <sstream>
+#include <vector>
 
 #include "cache/cache_manager.h"
 #include "utils/structured_log.h"
@@ -24,6 +26,17 @@ using mygram::utils::MakeUnexpected;
 
 namespace {
 constexpr int kMaxPortNumber = 65535;  // Maximum valid TCP/UDP port number
+
+std::string JoinStrings(const std::vector<std::string>& values, const std::string& delimiter) {
+  std::ostringstream oss;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      oss << delimiter;
+    }
+    oss << values[i];
+  }
+  return oss.str();
+}
 }  // namespace
 
 // Mutable variables (can be changed at runtime)
@@ -72,6 +85,10 @@ static const std::map<std::string, bool> kVariableMutability = {
     {"api.http.port", false},                   // Immutable
     {"api.http.enable_cors", false},            // Immutable
     {"api.http.cors_allow_origin", false},      // Immutable
+    {"api.http.read_timeout_sec", false},       // Immutable
+    {"api.http.write_timeout_sec", false},      // Immutable
+    {"api.http.max_body_bytes", false},         // Immutable
+    {"api.unix_socket.path", false},            // Immutable
 
     // Rate limiting
     {"api.rate_limiting.enable", true},
@@ -83,6 +100,7 @@ static const std::map<std::string, bool> kVariableMutability = {
     {"cache.enabled", true},
     {"cache.min_query_cost_ms", true},
     {"cache.ttl_seconds", true},
+    {"cache.max_memory_mb", false},              // Immutable (operator-facing alias)
     {"cache.max_memory_bytes", false},           // Immutable (memory allocation)
     {"cache.invalidation_strategy", false},      // Immutable (architecture change)
     {"cache.compression_enabled", false},        // Immutable
@@ -124,6 +142,11 @@ static const std::map<std::string, bool> kVariableMutability = {
 
     // Network (immutable - security critical)
     {"network.allow_cidrs", false},
+
+    // BM25 (immutable - ranking model configuration)
+    {"bm25.enable", false},
+    {"bm25.k1", false},
+    {"bm25.b", false},
 
     // Tables (all immutable - requires index rebuild)
     // Note: table.* variables are not listed here (checked dynamically)
@@ -381,6 +404,11 @@ void RuntimeVariableManager::SetRateLimiterCallback(std::function<void(bool, siz
   rate_limiter_callback_ = std::move(callback);
 }
 
+void RuntimeVariableManager::SetApiConfigCallback(std::function<void(int, int)> callback) {
+  std::unique_lock lock(mutex_);
+  api_config_callback_ = std::move(callback);
+}
+
 // ========== Apply functions ==========
 
 Expected<void, Error> RuntimeVariableManager::ApplyLoggingLevel(const std::string& value) {
@@ -506,10 +534,19 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
                                                                      std::to_string(defaults::kMaxLimit) + ")"));
   }
 
-  std::unique_lock lock(mutex_);
-  base_config_.api.default_limit = value;
-  runtime_values_["api.default_limit"] = std::to_string(value);
+  int max_query_length = 0;
+  std::function<void(int, int)> callback_copy;
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.api.default_limit = value;
+    runtime_values_["api.default_limit"] = std::to_string(value);
+    max_query_length = base_config_.api.max_query_length;
+    callback_copy = api_config_callback_;
+  }
 
+  if (callback_copy) {
+    callback_copy(value, max_query_length);
+  }
   return {};
 }
 
@@ -518,10 +555,19 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiMaxQueryLength(int value) 
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.max_query_length must be >= 0"));
   }
 
-  std::unique_lock lock(mutex_);
-  base_config_.api.max_query_length = value;
-  runtime_values_["api.max_query_length"] = std::to_string(value);
+  int default_limit = 0;
+  std::function<void(int, int)> callback_copy;
+  {
+    std::unique_lock lock(mutex_);
+    base_config_.api.max_query_length = value;
+    runtime_values_["api.max_query_length"] = std::to_string(value);
+    default_limit = base_config_.api.default_limit;
+    callback_copy = api_config_callback_;
+  }
 
+  if (callback_copy) {
+    callback_copy(default_limit, value);
+  }
   return {};
 }
 
@@ -678,6 +724,10 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   }
 
   // Check base config for immutable variables
+  if (variable_name == "logging.file") {
+    return base_config_.logging.file;
+  }
+
   if (variable_name == "mysql.user") {
     return base_config_.mysql.user;
   }
@@ -770,16 +820,49 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   if (variable_name == "api.http.port") {
     return std::to_string(base_config_.api.http.port);
   }
+  if (variable_name == "api.http.enable_cors") {
+    return base_config_.api.http.enable_cors ? "true" : "false";
+  }
+  if (variable_name == "api.http.cors_allow_origin") {
+    return base_config_.api.http.cors_allow_origin;
+  }
+  if (variable_name == "api.http.read_timeout_sec") {
+    return std::to_string(base_config_.api.http.read_timeout_sec);
+  }
+  if (variable_name == "api.http.write_timeout_sec") {
+    return std::to_string(base_config_.api.http.write_timeout_sec);
+  }
+  if (variable_name == "api.http.max_body_bytes") {
+    return std::to_string(base_config_.api.http.max_body_bytes);
+  }
+  if (variable_name == "api.unix_socket.path") {
+    return base_config_.api.unix_socket.path;
+  }
   if (variable_name == "api.rate_limiting.max_clients") {
     return std::to_string(base_config_.api.rate_limiting.max_clients);
   }
 
   // Cache immutable variables
+  if (variable_name == "cache.max_memory_mb") {
+    return std::to_string(base_config_.cache.max_memory_bytes / mygram::constants::kBytesPerMegabyte);
+  }
   if (variable_name == "cache.max_memory_bytes") {
     return std::to_string(base_config_.cache.max_memory_bytes);
   }
   if (variable_name == "cache.invalidation_strategy") {
     return base_config_.cache.invalidation_strategy;
+  }
+  if (variable_name == "cache.compression_enabled") {
+    return base_config_.cache.compression_enabled ? "true" : "false";
+  }
+  if (variable_name == "cache.eviction_batch_size") {
+    return std::to_string(base_config_.cache.eviction_batch_size);
+  }
+  if (variable_name == "cache.invalidation.batch_size") {
+    return std::to_string(base_config_.cache.invalidation.batch_size);
+  }
+  if (variable_name == "cache.invalidation.max_delay_ms") {
+    return std::to_string(base_config_.cache.invalidation.max_delay_ms);
   }
 
   // Memory config
@@ -789,11 +872,94 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   if (variable_name == "memory.soft_target_mb") {
     return std::to_string(base_config_.memory.soft_target_mb);
   }
+  if (variable_name == "memory.arena_chunk_mb") {
+    return std::to_string(base_config_.memory.arena_chunk_mb);
+  }
+  if (variable_name == "memory.roaring_threshold") {
+    return std::to_string(base_config_.memory.roaring_threshold);
+  }
+  if (variable_name == "memory.minute_epoch") {
+    return base_config_.memory.minute_epoch ? "true" : "false";
+  }
+  if (variable_name == "memory.normalize.nfkc") {
+    return base_config_.memory.normalize.nfkc ? "true" : "false";
+  }
+  if (variable_name == "memory.normalize.width") {
+    return base_config_.memory.normalize.width;
+  }
+  if (variable_name == "memory.normalize.lower") {
+    return base_config_.memory.normalize.lower ? "true" : "false";
+  }
   if (variable_name == "memory.verify_text") {
     return base_config_.memory.verify_text;
   }
 
-  // Add more as needed...
+  // Replication config
+  if (variable_name == "replication.enable") {
+    return base_config_.replication.enable ? "true" : "false";
+  }
+  if (variable_name == "replication.auto_initial_snapshot") {
+    return base_config_.replication.auto_initial_snapshot ? "true" : "false";
+  }
+  if (variable_name == "replication.server_id") {
+    return std::to_string(base_config_.replication.server_id);
+  }
+  if (variable_name == "replication.start_from") {
+    return base_config_.replication.start_from;
+  }
+  if (variable_name == "replication.queue_size") {
+    return std::to_string(base_config_.replication.queue_size);
+  }
+  if (variable_name == "replication.reconnect_backoff_min_ms") {
+    return std::to_string(base_config_.replication.reconnect_backoff_min_ms);
+  }
+  if (variable_name == "replication.reconnect_backoff_max_ms") {
+    return std::to_string(base_config_.replication.reconnect_backoff_max_ms);
+  }
+
+  // Build config
+  if (variable_name == "build.mode") {
+    return base_config_.build.mode;
+  }
+  if (variable_name == "build.batch_size") {
+    return std::to_string(base_config_.build.batch_size);
+  }
+  if (variable_name == "build.parallelism") {
+    return std::to_string(base_config_.build.parallelism);
+  }
+  if (variable_name == "build.throttle_ms") {
+    return std::to_string(base_config_.build.throttle_ms);
+  }
+
+  // Dump config
+  if (variable_name == "dump.dir") {
+    return base_config_.dump.dir;
+  }
+  if (variable_name == "dump.default_filename") {
+    return base_config_.dump.default_filename;
+  }
+  if (variable_name == "dump.interval_sec") {
+    return std::to_string(base_config_.dump.interval_sec);
+  }
+  if (variable_name == "dump.retain") {
+    return std::to_string(base_config_.dump.retain);
+  }
+
+  // Network config
+  if (variable_name == "network.allow_cidrs") {
+    return JoinStrings(base_config_.network.allow_cidrs, ",");
+  }
+
+  // BM25 config
+  if (variable_name == "bm25.enable") {
+    return base_config_.bm25.enable ? "true" : "false";
+  }
+  if (variable_name == "bm25.k1") {
+    return std::to_string(base_config_.bm25.k1);
+  }
+  if (variable_name == "bm25.b") {
+    return std::to_string(base_config_.bm25.b);
+  }
 
   return std::nullopt;  // Unknown variable
 }

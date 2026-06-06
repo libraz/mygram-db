@@ -302,12 +302,14 @@ binlog_format = ROW
 
 **解決策:**
 - 設定の `replication.queue_size` を増やす
-- 高速処理のため `build.parallelism` を増やす
+- MygramDBレプリカを追加するか、上流の書き込み負荷を下げる。`build.parallelism`は
+  予約済み / 現在は未強制です。
 - MygramDB レプリカを追加
 
 ### "Lost connection to MySQL server during query"
 
-MygramDB は指数バックオフで自動的に再接続します：
+MygramDBは組み込みの再試行スケジュールで自動的に再接続します。以下の
+バックオフ項目は将来互換のため受け付けられますが、現在は強制されません：
 
 ```yaml
 replication:
@@ -353,8 +355,8 @@ replication:
   server_id: 0                    # 0 = 自動生成
   start_from: "snapshot"          # snapshot|latest|gtid=<UUID:txn>
   queue_size: 10000
-  reconnect_backoff_min_ms: 500
-  reconnect_backoff_max_ms: 10000
+  reconnect_backoff_min_ms: 500   # 予約済み / 現在は未強制
+  reconnect_backoff_max_ms: 10000 # 予約済み / 現在は未強制
 ```
 
 ## 関連項目

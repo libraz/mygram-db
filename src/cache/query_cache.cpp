@@ -43,7 +43,7 @@ QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int tt
   // Lower the load factor and pre-reserve buckets to minimize cache_map_
   // rehashing under the steady-state working set. Rehash cost aside, this is
   // also a defense-in-depth measure for the iterator-stability contract used
-  // by Lookup/MarkInvalidated (see CR-5 note in LookupInternal): the
+  // by Lookup/MarkInvalidated (see iterator-validity note in LookupInternal): the
   // shared_mutex contract already serializes Insert against in-flight Lookups,
   // but keeping rehash rare also keeps invalidation checks cheap.
   //
@@ -98,7 +98,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
 
   // Shared lock for read.
   //
-  // CR-5 (iterator validity): this lookup holds a shared_lock for the entire
+  // Iterator validity: this lookup holds a shared_lock for the entire
   // duration of any iterator dereference of `iter` below. Insert()/Erase() and
   // Clear() take a unique_lock, which the std::shared_mutex contract
   // serializes after all readers; cache_map_ rehash therefore cannot occur
@@ -107,7 +107,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
   // rarely rehash even in isolation.
   //
   // If you change this function to release `lock` before using `iter`, you
-  // reintroduce the CR-5 use-after-free — copy the values you need out of
+  // reintroduce the iterator-validity use-after-free — copy the values you need out of
   // the entry first, then release the lock.
   std::shared_lock lock(mutex_);
 
@@ -275,7 +275,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
   const size_t original_count = result.size();  // Number of DocId elements, not bytes
   const size_t compressed_size = temp_entry.compressed->size();
-  // H-M1: account for std::unordered_map node overhead in the per-entry total.
+  // account for std::unordered_map node overhead in the per-entry total.
   // MemoryUsage() returns the heap footprint of the entry's payload but does
   // not include the map node header that emplace() will allocate.
   const size_t entry_memory = temp_entry.MemoryUsage() + kHashMapNodeOverhead;
@@ -289,7 +289,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
   // Collect keys evicted to make room; eviction_callback_ must fire after we
   // release mutex_ to avoid lock-order inversion with InvalidationManager
-  // (H-M3).
+  //.
   std::vector<CacheKey> evicted_keys;
 
   {
@@ -338,7 +338,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     stats_.current_memory_bytes = total_memory_bytes_;
   }
 
-  // Fire eviction callbacks AFTER releasing mutex_. This is the H-M3 mitigation:
+  // Fire eviction callbacks AFTER releasing mutex_ to avoid lock-order inversion:
   // eviction_callback_ acquires InvalidationManager::mutex_, while
   // InvalidateAffectedEntries acquires the locks in the opposite order.
   // Calling the callback under our unique_lock would establish the inverse
@@ -384,7 +384,7 @@ bool QueryCache::Erase(const CacheKey& key) {
       return false;
     }
 
-    // H-M3: defer eviction callback until after we release mutex_. The
+    // defer eviction callback until after we release mutex_. The
     // callback typically takes InvalidationManager::mutex_, and the reverse
     // order is taken by InvalidateAffectedEntries -> MarkInvalidated; firing
     // the callback while holding our unique_lock would risk deadlock.
@@ -394,7 +394,7 @@ bool QueryCache::Erase(const CacheKey& key) {
     lru_list_.erase(iter->second.second);
 
     // Update memory tracking. Mirror Insert() by including the map node
-    // overhead (H-M1) in the per-entry decrement so total_memory_bytes_
+    // overhead in the per-entry decrement so total_memory_bytes_
     // stays in sync.
     const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
     total_memory_bytes_ -= entry_memory;
@@ -407,7 +407,7 @@ bool QueryCache::Erase(const CacheKey& key) {
     cache_map_.erase(iter);
   }
 
-  // CR-6: callers that want to suppress this callback (the InvalidationQueue
+  // callers that want to suppress this callback (the InvalidationQueue
   // cleanup path performs its own UnregisterCacheEntry and must not
   // double-unregister) should use EraseWithoutCallback() instead.
   if (fire_callback) {
@@ -425,7 +425,7 @@ bool QueryCache::EraseWithoutCallback(const CacheKey& key) {
     return false;
   }
 
-  // CR-6: deliberately does NOT invoke eviction_callback_. The
+  // deliberately does NOT invoke eviction_callback_. The
   // InvalidationQueue cleanup path performs its own InvalidationManager
   // unregister and must not double-unregister via the callback, which would
   // otherwise race with concurrent Insert and corrupt the reverse indexes
@@ -435,7 +435,7 @@ bool QueryCache::EraseWithoutCallback(const CacheKey& key) {
   lru_list_.erase(iter->second.second);
 
   // Update memory tracking. Symmetric with Insert(): include kHashMapNodeOverhead
-  // so total_memory_bytes_ stays in sync (H-M1).
+  // so total_memory_bytes_ stays in sync.
   const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
   total_memory_bytes_ -= entry_memory;
   stats_.current_entries--;
@@ -450,7 +450,7 @@ bool QueryCache::EraseWithoutCallback(const CacheKey& key) {
 }
 
 void QueryCache::Clear() {
-  // H-M3 + H-M7: collect keys under the lock and fire eviction callbacks AFTER
+  // collect keys under the lock and fire eviction callbacks AFTER
   // releasing the lock. This:
   //   (1) avoids QueryCache::mutex_ -> InvalidationManager::mutex_ acquisition
   //       order while InvalidateAffectedEntries takes them in reverse, and
@@ -487,7 +487,7 @@ void QueryCache::Clear() {
 }
 
 void QueryCache::ClearTable(const std::string& table) {
-  // H-M3 + H-M7: collect evicted keys under the lock, fire callbacks after.
+  // collect evicted keys under the lock, fire callbacks after.
   std::vector<CacheKey> evicted_keys;
   {
     std::unique_lock lock(mutex_);
@@ -561,7 +561,7 @@ bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheKey>* evi
 
     auto iter = cache_map_.find(lru_key);
     if (iter == cache_map_.end()) {
-      // H-M6: stale LRU entry — present in lru_list_ but missing from cache_map_.
+      // stale LRU entry — present in lru_list_ but missing from cache_map_.
       // This violates the cache_map_ <-> lru_list_ invariant maintained by
       // Insert/RemoveEntryLocked/Erase paths. EvictForSpace is defensive and
       // simply pops the dangling key, but if this happens repeatedly it
@@ -593,7 +593,7 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
                                    std::vector<CacheKey>* evicted_keys) {
   const CacheKey& key = iter->first;
 
-  // H-M3: do NOT invoke eviction_callback_ here. The callback typically takes
+  // do NOT invoke eviction_callback_ here. The callback typically takes
   // InvalidationManager::mutex_ and we hold QueryCache::mutex_ — calling it
   // inline establishes the inverse of the (IM.mutex_ -> QueryCache.mutex_)
   // ordering used by InvalidationManager::InvalidateAffectedEntries and risks
@@ -610,7 +610,7 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
   // immediately so GetStatistics() never returns a value that is stale (higher
   // than reality) between RemoveEntryLocked and the next RefreshLRU resync.
   // Symmetric with Insert: include kHashMapNodeOverhead so total_memory_bytes_
-  // tracks the same accounting unit (H-M1).
+  // tracks the same accounting unit.
   const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
   total_memory_bytes_ -= entry_memory;
   stats_.current_entries--;
@@ -682,7 +682,7 @@ void QueryCache::RefreshLRU() {
     decomp_failed_keys.swap(pending_decompression_keys_);
   }
 
-  // H-M3 + H-M7: collect evicted keys under the main lock and fire the
+  // collect evicted keys under the main lock and fire the
   // eviction callback after we release it.
   std::vector<CacheKey> evicted_keys;
   {
@@ -756,7 +756,7 @@ void QueryCache::FireEvictionCallbacks(const std::vector<CacheKey>& keys) {
     return;
   }
 
-  // Prefer the batch callback when wired up (H-M7): it lets observers acquire
+  // Prefer the batch callback when wired up: it lets observers acquire
   // their own mutex once instead of N times. Falls back to the per-key callback
   // for backward compatibility with callers that only set EvictionCallback.
   if (batch_eviction_callback_) {

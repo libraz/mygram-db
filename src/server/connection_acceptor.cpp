@@ -584,7 +584,7 @@ void ConnectionAcceptor::AcceptLoop() {
           .Field(log_fields::kFieldFd, static_cast<int64_t>(client_fd))
           .Warn();
       static constexpr std::string_view kBusyResponse =
-          "ERR SERVER_BUSY Server is too busy, please try again later\r\n";
+          "ERROR SERVER_BUSY Server is too busy, please try again later\r\n";
       // Best-effort BUSY notification: the fd is closed immediately after, so a
       // partial write or a peer that has already closed (EPIPE/ECONNRESET) is
       // acceptable. MSG_NOSIGNAL prevents SIGPIPE on Linux when the peer is gone;

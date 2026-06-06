@@ -1082,8 +1082,7 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
 // ----------------------------------------------------------------------------
 //
 // This test configures a hard cap (capacity=2, refill_rate=0), opens three
-// connections from 127.0.0.1, and expects the third to be closed without a
-// response.
+// connections from 127.0.0.1, and expects only two requests to receive INFO.
 TEST_F(ReactorIntegrationTest, RateLimitEnforcedInReactorMode) {
   config::Config full_config;
   full_config.api.rate_limiting.enable = true;
@@ -1123,14 +1122,52 @@ TEST_F(ReactorIntegrationTest, RateLimitEnforcedInReactorMode) {
   EXPECT_FALSE(r0.empty()) << "connection 0 should get a response";
   EXPECT_FALSE(r1.empty()) << "connection 1 should get a response";
 
-  // Third connection: bucket is empty. Rate limiter must reject. The server
-  // may accept the TCP SYN (so connect() succeeds) but must close the fd
-  // without sending a response.
+  // Third connection: bucket is empty. Rate limiter must reject before INFO
+  // dispatch. RecvMultilineResponse returns empty for the single-line ERROR.
   const std::string r2 = open_and_info(2);
   EXPECT_TRUE(r2.empty()) << "Rate limiter did not enforce the per-IP cap under reactor mode: "
                              "expected connection 2 to be closed without a response, but got: "
                           << r2;
 
+  server->Stop();
+}
+
+TEST_F(ReactorIntegrationTest, RateLimitConsumesTokensAcrossCommandsOnOneTcpConnection) {
+  config::Config full_config;
+  full_config.api.rate_limiting.enable = true;
+  full_config.api.rate_limiting.capacity = 2;
+  full_config.api.rate_limiting.refill_rate = 0;
+  full_config.api.rate_limiting.max_clients = 64;
+
+  ServerConfig cfg;
+  cfg.host = "127.0.0.1";
+  cfg.port = 0;
+  cfg.worker_threads = 4;
+  cfg.max_connections = 64;
+  cfg.allow_cidrs = {"127.0.0.1/32"};
+
+  auto server = std::make_unique<TcpServer>(cfg, table_contexts_, "./dumps", &full_config);
+  ASSERT_TRUE(server->Start()) << "TcpServer::Start failed";
+  const uint16_t port = server->GetPort();
+
+  int s = Connect(port);
+  ASSERT_GE(s, 0);
+
+  ASSERT_TRUE(SendLine(s, "INFO"));
+  std::string r0 = RecvMultilineResponse(s, /*timeout_ms=*/2000);
+  ASSERT_FALSE(r0.empty()) << "first INFO should consume token 1 and respond";
+  EXPECT_EQ(r0.substr(0, 7), "OK INFO");
+
+  ASSERT_TRUE(SendLine(s, "INFO"));
+  std::string r1 = RecvMultilineResponse(s, /*timeout_ms=*/2000);
+  ASSERT_FALSE(r1.empty()) << "second INFO should consume token 2 and respond";
+  EXPECT_EQ(r1.substr(0, 7), "OK INFO");
+
+  ASSERT_TRUE(SendLine(s, "INFO"));
+  std::string r2 = RecvLine(s, /*timeout_ms=*/2000);
+  EXPECT_EQ(r2, "ERROR Rate limit exceeded") << "third command on the same TCP connection must be rate limited";
+
+  close(s);
   server->Stop();
 }
 

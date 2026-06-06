@@ -106,7 +106,7 @@ struct TableContext;
  *
  * Provides RESTful JSON API:
  * - POST /{table}/search - Full-text search
- * - GET /{table}/:id - Get document by ID
+ * - GET /{table}/:primary_key - Get document by primary key
  * - GET /info - Server information
  * - GET /health - Health check
  */
@@ -162,6 +162,11 @@ class HttpServer {
   int GetPort() const { return config_.port; }
 
   /**
+   * @brief Update API query limits after runtime SET.
+   */
+  void UpdateApiConfig(int default_limit, int max_query_length);
+
+  /**
    * @brief Get total requests handled.
    *
    * Reads through the *effective* stats source: when a `tcp_stats` pointer was
@@ -196,7 +201,8 @@ class HttpServer {
   // StatisticsService. The HTTP handler's table lookup frequency is low
   // enough that the difference is negligible (reviewed: D3 false positive).
   std::unordered_map<std::string, TableContext*> table_contexts_;
-  size_t max_query_length_{0};  // Configured max query length limit
+  std::atomic<int> default_limit_{config::defaults::kDefaultLimit};
+  std::atomic<size_t> max_query_length_{0};  // Configured max query length limit
 
   // running_ is the canonical lifecycle gate for HttpServer.
   //
@@ -329,7 +335,7 @@ class HttpServer {
   void HandleCount(const httplib::Request& req, httplib::Response& res);
 
   /**
-   * @brief Handle GET /{table}/:id
+   * @brief Handle GET /{table}/:primary_key
    */
   void HandleGet(const httplib::Request& req, httplib::Response& res);
 
@@ -381,6 +387,11 @@ class HttpServer {
    * cross-protocol totals. Otherwise the HTTP-only `stats_` is used.
    */
   void RecordRequest() { (tcp_stats_ != nullptr ? tcp_stats_ : &stats_)->IncrementRequests(); }
+
+  /**
+   * @brief Increment a command counter on the effective stats instance.
+   */
+  void RecordCommand(query::QueryType type) { GetEffectiveStats().IncrementCommand(type); }
 
   /**
    * @brief Resolve the effective stats source (shared TCP stats or local).

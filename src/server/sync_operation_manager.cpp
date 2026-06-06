@@ -274,22 +274,15 @@ std::string SyncOperationManager::GetSyncStatus() {
   }
 
   if (!any_active) {
-    // Wrap the historical "status=IDLE message=..." payload with the standard
-    // OK protocol prefix produced by FormatStatus. Existing CLI clients that
-    // parse the body suffix continue to work; what changes is that all
-    // SyncStatus replies now share the same OK framing as the active-sync
-    // path produced by SendResponse upstream.
     return ResponseFormatter::FormatStatus(R"(SYNC_STATUS)"
                                            "\r\n"
-                                           R"(status=IDLE message="No sync operation performed")");
+                                           R"(status=IDLE message="No sync operation performed")"
+                                           "\r\n"
+                                           "END");
   }
 
-  std::string result = oss.str();
-  // Strip trailing CRLF if present (SendResponse will add CRLF)
-  while (result.size() >= 2 && result[result.size() - 2] == '\r' && result[result.size() - 1] == '\n') {
-    result.erase(result.size() - 2);
-  }
-  return result;
+  oss << "END";
+  return ResponseFormatter::FormatStatus(oss.str());
 }
 
 std::string SyncOperationManager::StopSync(const std::string& table_name) {

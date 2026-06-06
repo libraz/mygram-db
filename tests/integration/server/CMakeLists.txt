@@ -137,7 +137,7 @@ gtest_discover_tests(verify_text_integration_test
 #
 # Reactor-mode invariant checks:
 #   T1 — 128 persistent clients + late client served promptly
-#   T2 — 256 clients × 10 INFO requests, no ERR SERVER_BUSY
+#   T2 — 256 clients × 10 INFO requests, no ERROR SERVER_BUSY
 add_executable(reactor_starvation_regression_test
   reactor_starvation_regression_test.cpp
 )

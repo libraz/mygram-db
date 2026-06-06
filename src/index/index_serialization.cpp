@@ -33,10 +33,11 @@ using mygram::utils::MakeUnexpected;
 
 namespace {
 
-// Current serialization format version (writes V2 with CRC32 trailer)
+// Current serialization format version (writes V3 with full n-gram config and CRC32 trailer)
 constexpr uint32_t kFormatVersionV1 = 1;
 constexpr uint32_t kFormatVersionV2 = 2;
-constexpr uint32_t kCurrentFormatVersion = kFormatVersionV2;
+constexpr uint32_t kFormatVersionV3 = 3;
+constexpr uint32_t kCurrentFormatVersion = kFormatVersionV3;
 
 // Size of the CRC32 checksum trailer (4 bytes)
 constexpr size_t kCRC32Size = 4;
@@ -107,8 +108,9 @@ Expected<void, Error> Index::SaveToFile(const std::string& filepath) const {
 
 Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
   try {
-    // V2 format:
-    // [4 bytes: magic "MGIX"] [4 bytes: version=2] [4 bytes: ngram_size]
+    // V3 format:
+    // [4 bytes: magic "MGIX"] [4 bytes: version=3] [4 bytes: ngram_size]
+    // [4 bytes: kanji_ngram_size] [1 byte: cross_boundary_ngrams]
     // [8 bytes: term_count] [terms and posting lists...]
     // [4 bytes: CRC32 of all preceding data]
     //
@@ -138,6 +140,9 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
 
     // Write ngram_size
     crc_write_binary(static_cast<uint32_t>(ngram_size_));
+    crc_write_binary(static_cast<uint32_t>(kanji_ngram_size_));
+    const uint8_t cross_boundary = cross_boundary_ngrams_ ? 1 : 0;
+    crc_write(&cross_boundary, sizeof(cross_boundary));
 
     // RCU snapshot: Take short shared_lock to copy term->PostingList pairs, then
     // serialize lock-free. This allows searches to proceed during serialization.
@@ -261,11 +266,13 @@ Expected<void, Error> Index::LoadFromStream(std::istream& input_stream) {
 
 Expected<void, Error> Index::LoadFromData(std::string all_data) {
   try {
-    // Minimum size: magic(4) + version(4) + ngram(4) + term_count(8) = 20 bytes
+    // Minimum V1/V2 size: magic(4) + version(4) + ngram(4) + term_count(8) = 20 bytes
     // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
     // 20: minimum header size (magic + version + ngram_size + term_count)
-    constexpr size_t kMinHeaderSize = 20;
-    if (all_data.size() < kMinHeaderSize) {
+    constexpr size_t kMinLegacyHeaderSize = 20;
+    // 25: V3 adds kanji_ngram_size(4) + cross_boundary_ngrams(1)
+    constexpr size_t kMinV3HeaderSize = 25;
+    if (all_data.size() < kMinLegacyHeaderSize) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
           .Field("type", "invalid_format")
@@ -292,7 +299,7 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
     std::memcpy(&version, all_data.data() + 4, sizeof(version));
     version = mygram::utils::FromLittleEndian(version);
 
-    if (version != kFormatVersionV1 && version != kFormatVersionV2) {
+    if (version != kFormatVersionV1 && version != kFormatVersionV2 && version != kFormatVersionV3) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
           .Field("type", "unsupported_version")
@@ -305,8 +312,9 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
 
     // For V2, verify CRC32 checksum before deserializing any data
     size_t data_size = all_data.size();
-    if (version == kFormatVersionV2) {
-      if (data_size < kMinHeaderSize + kCRC32Size) {
+    if (version == kFormatVersionV2 || version == kFormatVersionV3) {
+      const size_t min_header_size = (version == kFormatVersionV3) ? kMinV3HeaderSize : kMinLegacyHeaderSize;
+      if (data_size < min_header_size + kCRC32Size) {
         mygram::utils::StructuredLog()
             .Event("index_io_error")
             .Field("type", "invalid_format")
@@ -361,6 +369,41 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
       return MakeUnexpected(MakeError(
           ErrorCode::kStorageVersionMismatch,
           "Index ngram_size mismatch: stream=" + std::to_string(ngram) + " current=" + std::to_string(ngram_size_)));
+    }
+
+    if (version == kFormatVersionV3) {
+      uint32_t kanji_ngram = 0;
+      std::memcpy(&kanji_ngram, all_data.data() + pos, sizeof(kanji_ngram));
+      kanji_ngram = mygram::utils::FromLittleEndian(kanji_ngram);
+      pos += sizeof(kanji_ngram);
+
+      uint8_t cross_boundary = 0;
+      std::memcpy(&cross_boundary, all_data.data() + pos, sizeof(cross_boundary));
+      pos += sizeof(cross_boundary);
+
+      if (static_cast<int>(kanji_ngram) != kanji_ngram_size_) {
+        mygram::utils::StructuredLog()
+            .Event("index_ngram_mismatch")
+            .Field("stream_kanji_ngram", static_cast<uint64_t>(kanji_ngram))
+            .Field("current_kanji_ngram", static_cast<uint64_t>(kanji_ngram_size_))
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch,
+                                        "Index kanji_ngram_size mismatch: stream=" + std::to_string(kanji_ngram) +
+                                            " current=" + std::to_string(kanji_ngram_size_)));
+      }
+
+      const bool stream_cross_boundary = cross_boundary != 0;
+      if (stream_cross_boundary != cross_boundary_ngrams_) {
+        mygram::utils::StructuredLog()
+            .Event("index_ngram_mismatch")
+            .Field("stream_cross_boundary_ngrams", stream_cross_boundary)
+            .Field("current_cross_boundary_ngrams", cross_boundary_ngrams_)
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch,
+                                        std::string("Index cross_boundary_ngrams mismatch: stream=") +
+                                            (stream_cross_boundary ? "true" : "false") +
+                                            " current=" + (cross_boundary_ngrams_ ? "true" : "false")));
+      }
     }
 
     // Read term count

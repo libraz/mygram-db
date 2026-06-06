@@ -214,6 +214,31 @@ TEST_F(SnapshotSchedulerTest, DisabledWithNegativeInterval) {
   EXPECT_FALSE(scheduler.IsRunning());
 }
 
+TEST_F(SnapshotSchedulerTest, AutoSnapshotSkipsWhileDumpLoadInProgress) {
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+  std::atomic<bool> dump_load_in_progress{true};
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_, nullptr, &dump_load_in_progress);
+
+  auto result = scheduler.Start();
+  ASSERT_TRUE(result.has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+  scheduler.Stop();
+
+  size_t snapshot_count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().filename().string().rfind("auto_", 0) == 0 && entry.path().extension() == ".dmp") {
+      ++snapshot_count;
+    }
+  }
+  EXPECT_EQ(snapshot_count, 0U);
+  EXPECT_FALSE(dump_save_in_progress_.load(std::memory_order_acquire))
+      << "skipped auto snapshot must release the dump-save guard";
+}
+
 // ===========================================================================
 // Cleanup tests
 // ===========================================================================

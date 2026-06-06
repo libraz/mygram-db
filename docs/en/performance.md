@@ -160,14 +160,14 @@ With `verify_text=all`, MygramDB verifies every candidate against the original t
 
 ```yaml
 memory:
-  hard_limit_mb: 16384      # Maximum memory allowed
-  soft_target_mb: 8192      # Target memory usage
+  hard_limit_mb: 16384      # Reserved / not yet enforced
+  soft_target_mb: 8192      # Reserved / not yet enforced
   roaring_threshold: 0.18   # Delta→Roaring conversion threshold
 ```
 
 **Recommendations:**
-- Set `hard_limit_mb` to 60-70% of available RAM
-- Set `soft_target_mb` to 50% of `hard_limit_mb`
+- Treat `hard_limit_mb` and `soft_target_mb` as reserved compatibility
+  fields; they do not enforce process memory limits today
 - Leave `roaring_threshold` at default (0.18) unless memory is tight
 
 ### 4. Use Filters for Selective Queries
@@ -278,7 +278,8 @@ Schedule regular snapshots:
    ```
    INFO
    ```
-   Look at `index_size` - if close to `hard_limit_mb`, increase memory.
+   Look at `index_size` and process RSS; `hard_limit_mb` is reserved and does
+   not enforce a process memory limit today.
 
 3. **Enable debug mode:**
    ```

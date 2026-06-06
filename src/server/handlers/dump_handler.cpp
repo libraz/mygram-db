@@ -514,6 +514,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     first_pauser = pause_scope.Acquire();
     if (first_pauser) {
       ctx_.binlog_reader->Stop();
+      ctx_.replication_pause_counter->PublishDrainedGTID(ctx_.binlog_reader->GetCurrentGTID());
       ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
     }
     mygram::utils::StructuredLog()

@@ -71,6 +71,9 @@ gtid: 3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10
 - Loading a snapshot **replaces** all current data
 - The database will resume replication from the GTID stored in the snapshot
 - All tables must be configured in the current config file
+- MygramDB does **not** automatically load dump files on startup. To restore
+  from a dump after a restart, start MygramDB, run `DUMP VERIFY`, then run
+  `DUMP LOAD`.
 
 ### DUMP VERIFY - Check Integrity
 
@@ -222,6 +225,8 @@ dump:
 - Old auto-saved files are automatically cleaned up based on `retain` count
 - Manual snapshots (via `DUMP SAVE`) are not affected by auto-cleanup
 - Directory permissions are verified on startup
+- Auto-saved snapshots are backup files only; they are not automatically
+  restored when the server starts.
 
 ### Manual Backups
 
@@ -332,7 +337,11 @@ dump:
 
 ## Replication Recovery
 
-When loading a snapshot, MygramDB automatically resumes replication:
+Recovery from a dump is operator-driven. MygramDB does not scan
+`dump.dir` or load the newest dump during startup. Start the server first,
+verify the intended dump file, and then run `DUMP LOAD`.
+
+When `DUMP LOAD` completes, MygramDB automatically resumes replication:
 
 1. **GTID Extraction**: Reads replication position from snapshot
 2. **BinlogReader Resume**: Continues from the stored GTID
@@ -343,11 +352,13 @@ When loading a snapshot, MygramDB automatically resumes replication:
 
 ```
 # 1. Server crashes at GTID 1-100
-# 2. Load snapshot from GTID 1-80
+# 2. Restart MygramDB
+# 3. Verify and load snapshot from GTID 1-80
+DUMP VERIFY mygramdb.dmp
 DUMP LOAD mygramdb.dmp
 
-# 3. MygramDB automatically processes transactions 81-100
-# 4. Resumes real-time replication from 101+
+# 4. MygramDB automatically processes transactions 81-100
+# 5. Resumes real-time replication from 101+
 ```
 
 ## Troubleshooting

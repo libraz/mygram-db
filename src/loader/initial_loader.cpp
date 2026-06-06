@@ -66,6 +66,20 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
+  auto rollback_if_managed = [&]() {
+    if (!manage_transaction) {
+      return;
+    }
+    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", rollback_result.error().message())
+          .Warn();
+    }
+  };
+
   // Debug: log doc_store instance address to verify same instance is used by replication
   // This helps diagnose replication using a different instance than SYNC populated.
   mygram::utils::StructuredLog()
@@ -176,14 +190,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
         .Field("type", "gtid_empty")
         .Field("error", error_msg)
         .Error();
-    auto rollback_result_gtid = connection_.ExecuteUpdate("ROLLBACK");
-    if (!rollback_result_gtid) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result_gtid.error().message())
-          .Warn();
-    }
+    rollback_if_managed();
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -193,14 +200,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   std::string query = BuildSelectQuery();
   if (query.empty()) {
     std::string error_msg = "Invalid required filter value in initial load query";
-    auto rollback_result_query = connection_.ExecuteUpdate("ROLLBACK");
-    if (!rollback_result_query) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result_query.error().message())
-          .Warn();
-    }
+    rollback_if_managed();
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
   mygram::utils::StructuredLog().Event("initial_load_query").Field("query", query).Info();
@@ -211,14 +211,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   auto result_exp = connection_.Execute(query);
   if (!result_exp) {
     std::string error_msg = "Failed to execute SELECT query: " + result_exp.error().message();
-    auto rollback_result_query = connection_.ExecuteUpdate("ROLLBACK");  // Clean up transaction
-    if (!rollback_result_query) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result_query.error().message())
-          .Warn();
-    }
+    rollback_if_managed();
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -271,14 +264,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
           .Field("error", error_msg)
           .Error();
       // result automatically freed by MySQLResult destructor
-      auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-      if (!rollback_result) {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "rollback")
-            .Field("error", rollback_result.error().message())
-            .Warn();
-      }
+      rollback_if_managed();
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -305,7 +291,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 
     // Process batch when full
     if (doc_batch.size() >= batch_size) {
-      auto flush_result = FlushBatch(doc_batch, index_batch);
+      auto flush_result = FlushBatch(doc_batch, index_batch, manage_transaction);
       if (!flush_result) {
         return MakeUnexpected(flush_result.error());
       }
@@ -329,7 +315,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 
   // Process remaining rows in batch
   if (!doc_batch.empty() && !index_batch.empty() && !cancelled_) {
-    auto flush_result = FlushBatch(doc_batch, index_batch);
+    auto flush_result = FlushBatch(doc_batch, index_batch, manage_transaction);
     if (!flush_result) {
       return MakeUnexpected(flush_result.error());
     }
@@ -339,14 +325,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 
   // Check cancellation before committing to avoid unnecessary COMMIT
   if (cancelled_) {
-    auto rollback_result_cancel = connection_.ExecuteUpdate("ROLLBACK");
-    if (!rollback_result_cancel) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result_cancel.error().message())
-          .Warn();
-    }
+    rollback_if_managed();
     std::string error_msg = "Load cancelled";
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
@@ -386,10 +365,24 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
-    std::vector<storage::DocumentStore::DocumentItem>& doc_batch,
-    std::vector<index::Index::DocumentItem>& index_batch) {
+    std::vector<storage::DocumentStore::DocumentItem>& doc_batch, std::vector<index::Index::DocumentItem>& index_batch,
+    bool manage_transaction) {
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
+
+  auto rollback_if_managed = [&]() {
+    if (!manage_transaction) {
+      return;
+    }
+    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
+    if (!rollback_result) {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "rollback")
+          .Field("error", rollback_result.error().message())
+          .Warn();
+    }
+  };
 
   // Verify batch sizes match (defensive check)
   if (doc_batch.size() != index_batch.size()) {
@@ -402,14 +395,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
         .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
         .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
         .Error();
-    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-    if (!rollback_result) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result.error().message())
-          .Warn();
-    }
+    rollback_if_managed();
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -417,14 +403,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
   std::unordered_set<storage::DocId> existing_doc_ids;
   auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch, &existing_doc_ids);
   if (!doc_ids_result) {
-    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-    if (!rollback_result) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result.error().message())
-          .Warn();
-    }
+    rollback_if_managed();
     return MakeUnexpected(doc_ids_result.error());
   }
   std::vector<storage::DocId> doc_ids = *doc_ids_result;
@@ -440,14 +419,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
         .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
         .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
         .Error();
-    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-    if (!rollback_result) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result.error().message())
-          .Warn();
-    }
+    rollback_if_managed();
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 

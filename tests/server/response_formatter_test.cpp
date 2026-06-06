@@ -197,6 +197,26 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithHighlightsTerminatesMultil
   EXPECT_EQ(response, "OK RESULTS 1\r\npk1\thello <em>world</em>\r\n");
 }
 
+TEST_F(ResponseFormatterTest, FormatSearchResponseWithHighlightsSanitizesLineDelimiters) {
+  auto doc_id1 = table_context_.doc_store->AddDocument("pk1");
+
+  std::vector<index::DocId> results = {*doc_id1};
+  std::vector<std::string> snippets = {"line1\r\nline2\tline3"};
+
+  std::string response =
+      ResponseFormatter::FormatSearchResponseWithHighlights(results, 1, table_context_.doc_store.get(), snippets);
+
+  EXPECT_EQ(response, "OK RESULTS 1\r\npk1\tline1  line2 line3\r\n");
+}
+
+TEST_F(ResponseFormatterTest, FormatFacetResponseSanitizesLineDelimiters) {
+  std::vector<std::pair<std::string, uint64_t>> value_counts = {{"value\r\nnext\tpart", 3}};
+
+  std::string response = ResponseFormatter::FormatFacetResponse(value_counts);
+
+  EXPECT_EQ(response, "OK FACET 1\r\nvalue  next part\t3\r\n");
+}
+
 /**
  * @brief Test SEARCH response with pagination (total > returned)
  */
@@ -405,6 +425,17 @@ TEST_F(ResponseFormatterTest, FormatErrorWithSpecialCharacters) {
   EXPECT_TRUE(response.find("quoted") != std::string::npos);
 }
 
+TEST_F(ResponseFormatterTest, FormatErrorSanitizesLineBreaksForSingleLineProtocol) {
+  std::string response = ResponseFormatter::FormatError("Configuration validation failed:\r\n  missing table\tname");
+
+  EXPECT_TRUE(response.find("ERROR") == 0);
+  EXPECT_EQ(response.find('\r'), std::string::npos);
+  EXPECT_EQ(response.find('\n'), std::string::npos);
+  EXPECT_EQ(response.find('\t'), std::string::npos);
+  EXPECT_NE(response.find("Configuration validation failed:"), std::string::npos);
+  EXPECT_NE(response.find("missing table name"), std::string::npos);
+}
+
 /**
  * @brief Test error response with empty message
  */
@@ -463,6 +494,22 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetrics) {
   // Should contain Prometheus format metrics
   EXPECT_TRUE(response.find("#") != std::string::npos);  // Prometheus comments
   EXPECT_TRUE(response.find("mygramdb_") != std::string::npos || response.find("mygram_") != std::string::npos);
+}
+
+TEST_F(ResponseFormatterTest, FormatInfoAndPrometheusExposeOtherAndUnknownCommandCounters) {
+  ServerStats stats;
+  stats.IncrementCommand(query::QueryType::FACET);
+  stats.IncrementCommand(query::QueryType::UNKNOWN);
+
+  auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+
+  std::string info = ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, nullptr);
+  EXPECT_NE(info.find("cmd_other: 1"), std::string::npos) << info;
+  EXPECT_NE(info.find("cmd_unknown: 1"), std::string::npos) << info;
+
+  std::string prometheus = ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, nullptr);
+  EXPECT_NE(prometheus.find("mygramdb_command_total{command=\"other\"} 1"), std::string::npos) << prometheus;
+  EXPECT_NE(prometheus.find("mygramdb_command_total{command=\"unknown\"} 1"), std::string::npos) << prometheus;
 }
 
 TEST_F(ResponseFormatterTest, FormatPrometheusMetricsEscapesTableLabelValues) {

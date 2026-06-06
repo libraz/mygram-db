@@ -364,6 +364,25 @@ TEST_F(PostingListTest, AddBatch) {
   }
 }
 
+TEST_F(PostingListTest, AddBatchDeduplicatesInputDelta) {
+  PostingList posting(0.5);
+
+  posting.Add(1);
+  posting.AddBatch({1, 2, 2, 3, 3, 3, 5});
+
+  EXPECT_EQ(posting.Size(), 4u);
+  EXPECT_EQ(posting.GetAll(), (std::vector<DocId>{1, 2, 3, 5}));
+}
+
+TEST_F(PostingListTest, AddBatchDeduplicatesInputRoaring) {
+  PostingList posting(0.01);
+  posting.AddBatch({1, 2, 2, 3, 3, 3, 5});
+  posting.Optimize(10);
+
+  EXPECT_EQ(posting.Size(), 4u);
+  EXPECT_EQ(posting.GetAll(), (std::vector<DocId>{1, 2, 3, 5}));
+}
+
 /**
  * @brief Test that Contains() works correctly after multiple Add/Remove operations
  */

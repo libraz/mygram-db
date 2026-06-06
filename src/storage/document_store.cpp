@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <memory>
+#include <mutex>
 
 #include "storage/filter_index.h"
 #include "utils/structured_log.h"
@@ -275,6 +276,23 @@ void DocumentStore::Clear() {
 
   next_doc_id_ = 1;
   mygram::utils::StructuredLog().Event("document_store_cleared").Info();
+}
+
+void DocumentStore::ReplaceWithLoaded(DocumentStore& loaded) {
+  if (this == &loaded) {
+    return;
+  }
+
+  std::unique_lock<std::shared_mutex> target_lock(mutex_, std::defer_lock);
+  std::unique_lock<std::shared_mutex> loaded_lock(loaded.mutex_, std::defer_lock);
+  std::lock(target_lock, loaded_lock);
+
+  doc_id_to_pk_ = std::move(loaded.doc_id_to_pk_);
+  pk_to_doc_id_ = std::move(loaded.pk_to_doc_id_);
+  doc_filters_ = std::move(loaded.doc_filters_);
+  doc_texts_ = std::move(loaded.doc_texts_);
+  filter_index_ = std::move(loaded.filter_index_);
+  next_doc_id_ = loaded.next_doc_id_;
 }
 
 void DocumentStore::Compact() {

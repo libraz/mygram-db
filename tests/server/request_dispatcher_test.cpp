@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "index/index.h"
 #include "server/handlers/command_handler.h"
 #include "server/handlers/search_handler.h"
+#include "server/rate_limiter.h"
 #include "server/response_formatter.h"
 #include "server/server_stats.h"
 #include "server/table_catalog.h"
@@ -27,6 +29,18 @@ using namespace mygramdb::server;
 using namespace mygramdb::query;
 using namespace mygramdb::index;
 using namespace mygramdb::storage;
+
+class RecordingHandler : public CommandHandler {
+ public:
+  explicit RecordingHandler(HandlerContext& ctx) : CommandHandler(ctx) {}
+
+  std::string Handle(const Query& query, ConnectionContext& /*conn_ctx*/) override {
+    last_query = query;
+    return ResponseFormatter::FormatStatus("RECORDED");
+  }
+
+  std::optional<Query> last_query;
+};
 
 /**
  * @brief Test fixture for RequestDispatcher tests
@@ -435,6 +449,55 @@ TEST_F(RequestDispatcherTest, DispatchQueryTooLong) {
 
   EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
   EXPECT_TRUE(response.find("too long") != std::string::npos || response.find("exceeds") != std::string::npos);
+}
+
+TEST_F(RequestDispatcherTest, RuntimeApiConfigUpdateAffectsParsingAndDefaultLimit) {
+  ServerConfig config;
+  config.default_limit = 100;
+  config.max_query_length = 10000;
+  RequestDispatcher dispatcher(*ctx_, config);
+  RecordingHandler recording_handler(*ctx_);
+  dispatcher.RegisterHandler(QueryType::SEARCH, &recording_handler);
+
+  ConnectionContext conn_ctx;
+  conn_ctx.debug_mode = false;
+
+  std::string response = dispatcher.Dispatch("SEARCH posts hello", conn_ctx);
+  ASSERT_EQ(response, "OK RECORDED");
+  ASSERT_TRUE(recording_handler.last_query.has_value());
+  EXPECT_EQ(recording_handler.last_query->limit, 100U);
+
+  dispatcher.UpdateApiConfig(5, 20);
+  response = dispatcher.Dispatch("SEARCH posts hello", conn_ctx);
+  ASSERT_EQ(response, "OK RECORDED");
+  ASSERT_TRUE(recording_handler.last_query.has_value());
+  EXPECT_EQ(recording_handler.last_query->limit, 5U);
+
+  response = dispatcher.Dispatch("SEARCH posts " + std::string(25, 'a'), conn_ctx);
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_NE(response.find("exceeds maximum allowed length of 20"), std::string::npos) << "Response: " << response;
+}
+
+TEST_F(RequestDispatcherTest, RateLimiterConsumesTokenPerTcpRequest) {
+  RateLimiter limiter(/*capacity=*/2, /*refill_rate=*/0, /*max_clients=*/16);
+  ctx_->rate_limiter = &limiter;
+
+  ServerConfig config;
+  config.default_limit = 100;
+  config.max_query_length = 10000;
+  RequestDispatcher dispatcher(*ctx_, config);
+  RecordingHandler recording_handler(*ctx_);
+  dispatcher.RegisterHandler(QueryType::SEARCH, &recording_handler);
+
+  ConnectionContext conn_ctx;
+  conn_ctx.client_ip = "192.0.2.10";
+
+  EXPECT_EQ(dispatcher.Dispatch("SEARCH posts hello", conn_ctx), "OK RECORDED");
+  EXPECT_EQ(dispatcher.Dispatch("SEARCH posts hello", conn_ctx), "OK RECORDED");
+
+  const std::string limited = dispatcher.Dispatch("SEARCH posts hello", conn_ctx);
+  EXPECT_TRUE(limited.find("ERROR") == 0) << limited;
+  EXPECT_NE(limited.find("Rate limit exceeded"), std::string::npos) << limited;
 }
 
 /**

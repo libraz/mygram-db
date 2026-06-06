@@ -152,14 +152,14 @@ tables:
 
 ```yaml
 memory:
-  hard_limit_mb: 16384      # 許可される最大メモリ
-  soft_target_mb: 8192      # 目標メモリ使用量
+  hard_limit_mb: 16384      # 予約済み / 現在は未強制
+  soft_target_mb: 8192      # 予約済み / 現在は未強制
   roaring_threshold: 0.18   # Delta→Roaring 変換閾値
 ```
 
 **推奨事項:**
-- `hard_limit_mb` を利用可能なRAMの60-70%に設定
-- `soft_target_mb` を `hard_limit_mb` の50%に設定
+- `hard_limit_mb`と`soft_target_mb`は互換性のための予約フィールドとして
+  扱ってください。現時点ではプロセスメモリ上限を強制しません
 - `roaring_threshold` はメモリが逼迫していない限りデフォルト（0.18）のまま
 
 ### 3. フィルターを使用して選択的クエリ
@@ -270,7 +270,8 @@ DUMP SAVE /path/to/snapshot.dmp
    ```
    INFO
    ```
-   `index_size` を確認 - `hard_limit_mb` に近い場合、メモリを増やす。
+   `index_size`とプロセスRSSを確認してください。`hard_limit_mb`は予約済みで、
+   現時点ではプロセスメモリ上限を強制しません。
 
 3. **デバッグモードを有効化:**
    ```

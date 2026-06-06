@@ -16,6 +16,7 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mysql/binlog_reader_interface.h"
 #include "query/query_parser.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"  // For TableContext definition
@@ -59,6 +60,28 @@ uint16_t FindAvailableLoopbackPort() {
 std::string LoopbackUrl(uint16_t port) {
   return "http://127.0.0.1:" + std::to_string(port);
 }
+
+class MockBinlogReader final : public mysql::IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+    running = true;
+    return {};
+  }
+
+  void Stop() override { running = false; }
+  bool IsRunning() const override { return running; }
+  std::string GetCurrentGTID() const override { return current_gtid; }
+  void SetCurrentGTID(const std::string& gtid) override { current_gtid = gtid; }
+  std::string GetLastError() const override { return last_error; }
+  uint64_t GetProcessedEvents() const override { return processed_events; }
+  size_t GetQueueSize() const override { return queue_size; }
+
+  bool running = false;
+  std::string current_gtid = "uuid:1-42";
+  std::string last_error;
+  uint64_t processed_events = 123;
+  size_t queue_size = 7;
+};
 
 }  // namespace
 
@@ -261,6 +284,41 @@ TEST_F(HttpServerTest, ReplicationStatusNotConfigured) {
   EXPECT_TRUE(body.contains("error"));
 }
 
+#ifdef USE_MYSQL
+TEST_F(HttpServerTest, ReplicationStatusIncludesTcpParityFields) {
+  MockBinlogReader reader;
+  reader.running = false;
+  reader.current_gtid = "uuid:1-100";
+  reader.processed_events = 321;
+  reader.queue_size = 11;
+
+  uint16_t replication_port = FindAvailableLoopbackPort();
+  ASSERT_GT(replication_port, 0);
+  HttpServerConfig replication_config;
+  replication_config.bind = "127.0.0.1";
+  replication_config.port = replication_port;
+  replication_config.allow_cidrs = {"127.0.0.1/32"};
+
+  auto server = std::make_unique<HttpServer>(replication_config, table_contexts_, config_.get(), &reader);
+  ASSERT_TRUE(server->Start());
+
+  httplib::Client client(LoopbackUrl(replication_port));
+  auto res = client.Get("/replication/status");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["enabled"], false);
+  EXPECT_EQ(body["status"], "stopped");
+  EXPECT_EQ(body["current_gtid"], "uuid:1-100");
+  EXPECT_EQ(body["processed_events"], 321);
+  EXPECT_EQ(body["queue_size"], 11);
+
+  server->Stop();
+}
+#endif
+
 /**
  * @brief Multi-table HTTP server test fixture
  */
@@ -394,7 +452,7 @@ TEST_F(HttpServerMultiTableTest, GetDocumentFromDifferentTables) {
   httplib::Client client(LoopbackUrl(port_));
 
   // Get from table1
-  auto res1 = client.Get("/table1/1");
+  auto res1 = client.Get("/table1/tech_1");
   ASSERT_TRUE(res1);
   EXPECT_EQ(res1->status, 200);
 
@@ -403,7 +461,7 @@ TEST_F(HttpServerMultiTableTest, GetDocumentFromDifferentTables) {
   EXPECT_EQ(body1["filters"]["category"], "tech");
 
   // Get from table2
-  auto res2 = client.Get("/table2/1");
+  auto res2 = client.Get("/table2/news_1");
   ASSERT_TRUE(res2);
   EXPECT_EQ(res2->status, 200);
 
@@ -1119,6 +1177,19 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
   uint64_t after = http_server.GetTotalRequests();
   EXPECT_GE(after - baseline, 3U) << "info + search + count must each call RecordRequest()";
 
+  auto stats = http_server.GetStats().GetStatistics();
+  EXPECT_GE(stats.cmd_info, 1U);
+  EXPECT_GE(stats.cmd_search, 1U);
+  EXPECT_GE(stats.cmd_count, 1U);
+  EXPECT_GE(stats.total_commands_processed, 3U);
+
+  auto metrics = client.Get("/metrics");
+  ASSERT_TRUE(metrics);
+  EXPECT_EQ(metrics->status, 200);
+  EXPECT_NE(metrics->body.find("mygramdb_command_total{command=\"info\"}"), std::string::npos);
+  EXPECT_NE(metrics->body.find("mygramdb_command_total{command=\"search\"}"), std::string::npos);
+  EXPECT_NE(metrics->body.find("mygramdb_command_total{command=\"count\"}"), std::string::npos);
+
   http_server.Stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
@@ -1181,6 +1252,10 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
 
   EXPECT_GE(tcp_after - tcp_baseline, 3U)
       << "All HTTP handlers must increment tcp_stats when provided (info + search + count)";
+  auto stats = tcp_stats.GetStatistics();
+  EXPECT_GE(stats.cmd_info, 1U);
+  EXPECT_GE(stats.cmd_search, 1U);
+  EXPECT_GE(stats.cmd_count, 1U);
   // Effective stats reconciliation: GetTotalRequests() must reflect the same
   // counter that RecordRequest() incremented. With tcp_stats injected, that
   // is tcp_stats; the formerly-dead local stats_ is no longer exposed via

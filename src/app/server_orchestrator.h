@@ -9,9 +9,12 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include "config/config.h"
+#include "mysql/binlog_reader_interface.h"
 #include "server/server_types.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -35,6 +38,21 @@ using mygram::utils::Error;
 using mygram::utils::Expected;
 
 class SignalManager;
+
+/**
+ * @brief Decide whether server startup should invoke BinlogReader::Start().
+ *
+ * Empty GTID is a valid replication start position for a fresh MySQL instance,
+ * so this gate must depend only on whether a reader was configured.
+ */
+[[nodiscard]] bool ShouldStartBinlogReaderOnServerStart(const mysql::IBinlogReader* binlog_reader,
+                                                        std::string_view start_gtid);
+
+/**
+ * @brief Collect configured table names for MySQL reconnection validation.
+ */
+[[nodiscard]] std::vector<std::string> CollectRequiredTableNames(
+    const std::unordered_map<std::string, std::unique_ptr<server::TableContext>>& table_contexts);
 
 /**
  * @brief Orchestrates server component lifecycle

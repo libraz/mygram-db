@@ -42,6 +42,19 @@ constexpr size_t kFromCharsBufferSize = 21;
 // Partial sort threshold: use partial_sort when needed elements < 50% of total
 constexpr double kPartialSortThreshold = 0.5;
 
+bool CompareDocIdTie(DocId lhs, DocId rhs, bool ascending) {
+  return ascending ? (lhs < rhs) : (lhs > rhs);
+}
+
+template <typename SortEntryLike>
+bool CompareSortEntries(const SortEntryLike& lhs, const SortEntryLike& rhs, bool ascending) {
+  int cmp = lhs.sort_key.compare(rhs.sort_key);
+  if (cmp != 0) {
+    return ascending ? (cmp < 0) : (cmp > 0);
+  }
+  return CompareDocIdTie(lhs.doc_id, rhs.doc_id, ascending);
+}
+
 /**
  * @brief Convert uint64_t to zero-padded string using std::to_chars (locale-independent)
  *
@@ -328,8 +341,7 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   // Step 2: Sort by pre-computed keys (O(N log N) string comparisons, no lock acquisitions)
   bool ascending = (order_by.order == SortOrder::ASC);
   std::sort(entries.begin(), entries.end(), [ascending](const SortEntry& lhs, const SortEntry& rhs) {
-    int cmp = lhs.sort_key.compare(rhs.sort_key);
-    return ascending ? (cmp < 0) : (cmp > 0);
+    return CompareSortEntries(lhs, rhs, ascending);
   });
 
   // Step 3: Extract sorted DocIDs (O(N))
@@ -381,11 +393,9 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
 
   // Step 2: partial_sort by pre-computed keys (O(N log K), no lock acquisitions)
   bool ascending = (order_by.order == SortOrder::ASC);
-  std::partial_sort(entries.begin(), entries.begin() + static_cast<std::ptrdiff_t>(top_k), entries.end(),
-                    [ascending](const SortEntry& lhs, const SortEntry& rhs) {
-                      int cmp = lhs.sort_key.compare(rhs.sort_key);
-                      return ascending ? (cmp < 0) : (cmp > 0);
-                    });
+  std::partial_sort(
+      entries.begin(), entries.begin() + static_cast<std::ptrdiff_t>(top_k), entries.end(),
+      [ascending](const SortEntry& lhs, const SortEntry& rhs) { return CompareSortEntries(lhs, rhs, ascending); });
 
   // Step 3: Extract top K sorted DocIDs
   std::vector<DocId> sorted_results;
@@ -409,8 +419,7 @@ std::vector<DocId> ResultSorter::SortWithBatchedSchwartzianTransformPartial(cons
   top_k = std::min(top_k, results.size());
   const bool ascending = (order_by.order == SortOrder::ASC);
   const auto entry_less = [ascending](const SortEntry& lhs, const SortEntry& rhs) {
-    int cmp = lhs.sort_key.compare(rhs.sort_key);
-    return ascending ? (cmp < 0) : (cmp > 0);
+    return CompareSortEntries(lhs, rhs, ascending);
   };
 
   std::vector<SortEntry> top_entries;
@@ -484,6 +493,9 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
         auto [ptr_rhs, ec_rhs] = std::from_chars(str_rhs.data(), str_rhs.data() + str_rhs.size(), num_rhs);
         if (ec_lhs == std::errc{} && ptr_lhs == str_lhs.data() + str_lhs.size() && ec_rhs == std::errc{} &&
             ptr_rhs == str_rhs.data() + str_rhs.size()) {
+          if (num_lhs == num_rhs) {
+            return CompareDocIdTie(lhs, rhs, ascending_);
+          }
           return ascending_ ? (num_lhs < num_rhs) : (num_lhs > num_rhs);
         }
         // Parse failure (non-numeric or overflow): fall through to string comparison
@@ -491,6 +503,9 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
 
       // String comparison for non-numeric primary keys
       int cmp = str_lhs.compare(str_rhs);
+      if (cmp == 0) {
+        return CompareDocIdTie(lhs, rhs, ascending_);
+      }
       return ascending_ ? (cmp < 0) : (cmp > 0);
     }
 
@@ -505,6 +520,9 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
 
   // String comparison
   int cmp = key_lhs.compare(key_rhs);
+  if (cmp == 0) {
+    return CompareDocIdTie(lhs, rhs, ascending_);
+  }
   return ascending_ ? (cmp < 0) : (cmp > 0);
 }
 
@@ -687,17 +705,21 @@ std::vector<DocId> ResultSorter::SortByScore(const std::vector<DocId>& results, 
   // Build index-score pairs
   struct ScoreEntry {
     size_t index;
+    DocId doc_id;
     double score;
   };
 
   std::vector<ScoreEntry> entries;
   entries.reserve(results.size());
   for (size_t i = 0; i < results.size(); ++i) {
-    entries.push_back({i, scores[i]});
+    entries.push_back({i, results[i], scores[i]});
   }
 
   bool descending = (order == SortOrder::DESC);
   auto comparator = [descending](const ScoreEntry& lhs, const ScoreEntry& rhs) {
+    if (lhs.score == rhs.score) {
+      return descending ? (lhs.doc_id > rhs.doc_id) : (lhs.doc_id < rhs.doc_id);
+    }
     return descending ? (lhs.score > rhs.score) : (lhs.score < rhs.score);
   };
 

@@ -56,6 +56,7 @@ TEST_F(CliConfigTest, DefaultValues) {
   EXPECT_EQ(config.host, "127.0.0.1");
   EXPECT_EQ(config.port, 11016);
   EXPECT_TRUE(config.interactive);
+  EXPECT_FALSE(config.wait_ready);
   EXPECT_EQ(config.retry_count, 0);
   EXPECT_EQ(config.retry_interval, 3);
   EXPECT_TRUE(config.socket_path.empty());
@@ -69,7 +70,9 @@ TEST_F(CliConfigTest, SocketPathOverride) {
 
 TEST_F(CliConfigTest, WaitReadyRetrySetsMaxRetries) {
   Config config;
+  config.wait_ready = true;
   config.retry_count = kMaxWaitReadyRetries;
+  EXPECT_TRUE(config.wait_ready);
   EXPECT_EQ(config.retry_count, 100);
 }
 
@@ -92,6 +95,14 @@ TEST_F(CliConstantsTest, PrefixLengthsMatchProtocol) {
 
 TEST_F(CliConstantsTest, MaxWaitReadyRetries) {
   EXPECT_EQ(kMaxWaitReadyRetries, 100);
+}
+
+TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
+  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("ERROR Server is loading, please try again later"));
+  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("(error) status not_ready"));
+  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("ERROR Replication is not running"));
+  EXPECT_FALSE(MygramClient::IsWaitReadyRetryableResponse("OK INFO\r\nstatus: ready\r\nEND"));
+  EXPECT_FALSE(MygramClient::IsWaitReadyRetryableResponse("ERROR Unknown table"));
 }
 
 // =============================================================================
@@ -563,6 +574,28 @@ TEST_F(CliPrintResponseTest, EmptyResponseDoesNotCrash) {
 }
 
 // =============================================================================
+// Single-command exit status
+// =============================================================================
+
+class CliSingleCommandExitStatusTest : public ::testing::Test {};
+
+TEST_F(CliSingleCommandExitStatusTest, SuccessResponsesExitZero) {
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("OK COUNT 1"), 0);
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("+OK Variable 'foo' set to 'bar'"), 0);
+}
+
+TEST_F(CliSingleCommandExitStatusTest, ServerErrorsExitNonZero) {
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("ERROR Unknown table"), 1);
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("ERROR SERVER_BUSY Server is too busy"), 1);
+}
+
+TEST_F(CliSingleCommandExitStatusTest, ClientErrorsExitNonZero) {
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("(error) Not connected"), 1);
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("(error) SERVER_DISCONNECTED: Server closed"), 1);
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("(error) SERVER_TIMEOUT: Server did not respond"), 1);
+}
+
+// =============================================================================
 // Argument parsing simulation
 // =============================================================================
 
@@ -713,6 +746,7 @@ TEST_F(CliArgumentParsingTest, WaitReadyFlag) {
 
   ParseResult result = ParseArguments(2, argv);
   EXPECT_FALSE(result.exit_now);
+  EXPECT_TRUE(result.config.wait_ready);
   EXPECT_EQ(result.config.retry_count, kMaxWaitReadyRetries);
 }
 

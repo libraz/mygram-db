@@ -72,3 +72,24 @@ TEST(PostingListSerializationTest, RoundTripLargeList) {
     EXPECT_TRUE(pl2.Contains(i * 3));
   }
 }
+
+TEST(PostingListSerializationTest, RejectsInternallyInvalidRoaringBitmap) {
+  PostingList pl(0.01);
+  for (uint32_t i = 0; i < 200; i++) {
+    pl.Add(i * 3);
+  }
+  pl.Optimize(600);
+
+  std::vector<uint8_t> buffer;
+  ASSERT_TRUE(pl.Serialize(buffer));
+  ASSERT_EQ(buffer[0], static_cast<uint8_t>(PostingStrategy::kRoaringBitmap));
+
+  constexpr size_t kHeaderSize = 5;
+  ASSERT_GT(buffer.size(), kHeaderSize + 16);
+  buffer[kHeaderSize + 16] = 3;
+
+  PostingList deserialized(0.01);
+  size_t offset = 0;
+  EXPECT_FALSE(deserialized.Deserialize(buffer, offset));
+  EXPECT_EQ(deserialized.Size(), 0u);
+}

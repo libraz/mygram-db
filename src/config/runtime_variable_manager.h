@@ -157,6 +157,12 @@ class RuntimeVariableManager {
    */
   void SetRateLimiterCallback(std::function<void(bool enabled, size_t capacity, size_t refill_rate)> callback);
 
+  /**
+   * @brief Set API query-limit callback
+   * @param callback Function to call when api.default_limit or api.max_query_length changes
+   */
+  void SetApiConfigCallback(std::function<void(int default_limit, int max_query_length)> callback);
+
  private:
   RuntimeVariableManager() = default;
 
@@ -174,6 +180,7 @@ class RuntimeVariableManager {
       mysql_reconnect_callback_;
   std::function<mygram::utils::Expected<void, mygram::utils::Error>(bool enabled)> cache_toggle_callback_;
   std::function<void(bool enabled, size_t capacity, size_t refill_rate)> rate_limiter_callback_;
+  std::function<void(int default_limit, int max_query_length)> api_config_callback_;
   // Non-owning pointer for cache configuration updates.
   // Thread-safe: always accessed under mutex_ (SetCacheManager acquires unique_lock,
   // ApplyCache* methods acquire shared_lock). Set during initialization before

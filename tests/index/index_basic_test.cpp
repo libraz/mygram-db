@@ -32,6 +32,18 @@ TEST(IndexTest, AddDocument) {
   EXPECT_EQ(index.Count("c"), 1);
 }
 
+TEST(IndexTest, PostingSizeCountsNormalizedTermPostingCardinality) {
+  Index index(1);
+
+  index.AddDocument(1, NormalizeText("ab", true, "keep", false));
+  index.AddDocument(2, NormalizeText("bc", true, "keep", false));
+
+  EXPECT_EQ(index.PostingSize("a"), 1);
+  EXPECT_EQ(index.PostingSize("b"), 2);
+  EXPECT_EQ(index.PostingSize("z"), 0);
+  EXPECT_EQ(index.Count("b"), index.PostingSize("b"));
+}
+
 /**
  * @brief Test Japanese document addition
  */

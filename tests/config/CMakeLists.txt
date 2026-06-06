@@ -6,6 +6,9 @@ target_link_libraries(config_test PRIVATE
   mygramdb_config
   GTest::gtest_main
 )
+target_compile_definitions(config_test PRIVATE
+  MYGRAMDB_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid config file I/O conflicts
 gtest_discover_tests(config_test

@@ -190,6 +190,72 @@ TEST(ExpectedVoidTest, AssignmentBetweenSuccessAndError) {
   EXPECT_TRUE(failure.has_value());
 }
 
+TEST(ExpectedVoidTest, TransformToValue) {
+  Expected<void, Error> success;
+  auto transformed = success.transform([] { return 42; });
+  ASSERT_TRUE(transformed.has_value());
+  EXPECT_EQ(*transformed, 42);
+
+  Expected<void, Error> failure(MakeUnexpected(MakeError(ErrorCode::kTimeout)));
+  auto failed_transform = failure.transform([] { return 42; });
+  ASSERT_FALSE(failed_transform.has_value());
+  EXPECT_EQ(failed_transform.error().code(), ErrorCode::kTimeout);
+}
+
+TEST(ExpectedVoidTest, TransformToVoid) {
+  Expected<void, Error> success;
+  bool called = false;
+  auto transformed = success.transform([&] { called = true; });
+  EXPECT_TRUE(transformed.has_value());
+  EXPECT_TRUE(called);
+
+  Expected<void, Error> failure(MakeUnexpected(MakeError(ErrorCode::kTimeout)));
+  called = false;
+  auto failed_transform = failure.transform([&] { called = true; });
+  EXPECT_FALSE(failed_transform.has_value());
+  EXPECT_FALSE(called);
+  EXPECT_EQ(failed_transform.error().code(), ErrorCode::kTimeout);
+}
+
+TEST(ExpectedVoidTest, AndThen) {
+  Expected<void, Error> success;
+  auto chained = success.and_then([] { return Expected<int, Error>(7); });
+  ASSERT_TRUE(chained.has_value());
+  EXPECT_EQ(*chained, 7);
+
+  Expected<void, Error> failure(MakeUnexpected(MakeError(ErrorCode::kInvalidArgument)));
+  auto failed_chain = failure.and_then([] { return Expected<int, Error>(7); });
+  EXPECT_FALSE(failed_chain.has_value());
+  EXPECT_EQ(failed_chain.error().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(ExpectedVoidTest, TransformError) {
+  Expected<void, Error> success;
+  auto still_success = success.transform_error([](const Error&) { return std::string("unused"); });
+  EXPECT_TRUE(still_success.has_value());
+
+  Expected<void, Error> failure(MakeUnexpected(MakeError(ErrorCode::kTimeout, "Timed out")));
+  auto transformed = failure.transform_error([](const Error& err) { return err.message(); });
+  ASSERT_FALSE(transformed.has_value());
+  EXPECT_EQ(transformed.error(), "Timed out");
+}
+
+TEST(ExpectedVoidTest, OrElse) {
+  Expected<void, Error> success;
+  auto still_success = success.or_else(
+      [](const Error&) { return Expected<void, Error>(MakeUnexpected(MakeError(ErrorCode::kUnknown))); });
+  EXPECT_TRUE(still_success.has_value());
+
+  Expected<void, Error> failure(MakeUnexpected(MakeError(ErrorCode::kNotFound)));
+  auto recovered = failure.or_else([](const Error& err) {
+    if (err.code() == ErrorCode::kNotFound) {
+      return Expected<void, Error>();
+    }
+    return Expected<void, Error>(MakeUnexpected(err));
+  });
+  EXPECT_TRUE(recovered.has_value());
+}
+
 // ========== Test monadic operations ==========
 
 TEST(ExpectedTest, Transform) {

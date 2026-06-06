@@ -285,6 +285,11 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
   if (json_obj.contains("binlog_row_image")) {
     config.binlog_row_image = json_obj["binlog_row_image"].get<std::string>();
   }
+  if (config.binlog_row_image != "FULL") {
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                    "mysql.binlog_row_image must be FULL. MygramDB replication requires complete row "
+                                    "images; MINIMAL and NOBLOB are not supported."));
+  }
   if (json_obj.contains("connect_timeout_ms")) {
     config.connect_timeout_ms = json_obj["connect_timeout_ms"].get<int>();
   }
@@ -718,6 +723,15 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
           err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1";
           return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
         }
+      }
+
+      if (config.replication.auto_initial_snapshot && config.tables.size() > 1 && start != "snapshot") {
+        std::stringstream err_msg;
+        err_msg << "Replication configuration error: multi-table auto_initial_snapshot requires start_from: snapshot\n";
+        err_msg << "  start_from '" << start
+                << "' would ignore the shared consistent snapshot GTID and can skip binlog events.\n";
+        err_msg << "  Use start_from: snapshot, or disable auto_initial_snapshot and run SYNC/DUMP LOAD explicitly.";
+        return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
       }
     }
   }

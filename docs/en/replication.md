@@ -347,12 +347,15 @@ binlog_format = ROW
 
 **Solutions:**
 - Increase `replication.queue_size` in config
-- Increase `build.parallelism` for faster processing
+- Add more MygramDB replicas or reduce upstream write pressure. `build.parallelism`
+  is reserved / not yet enforced by the current snapshot loader.
 - Add more MygramDB replicas
 
 ### "Lost connection to MySQL server during query"
 
-MygramDB will automatically reconnect with exponential backoff:
+MygramDB will automatically reconnect using the built-in retry schedule.
+The backoff fields below are accepted for forward compatibility but are not
+enforced today:
 
 ```yaml
 replication:
@@ -398,8 +401,8 @@ replication:
   server_id: 0                    # 0 = auto-generate
   start_from: "snapshot"          # snapshot|latest|gtid=<UUID:txn>
   queue_size: 10000
-  reconnect_backoff_min_ms: 500
-  reconnect_backoff_max_ms: 10000
+  reconnect_backoff_min_ms: 500   # Reserved / not yet enforced
+  reconnect_backoff_max_ms: 10000 # Reserved / not yet enforced
 ```
 
 ## See Also

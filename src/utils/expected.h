@@ -635,6 +635,137 @@ class Expected<void, E> {
     return std::move(*error_);
   }
 
+  // ========== Monadic operations (C++23 compatibility) ==========
+
+  template <typename F>
+  auto and_then(F&& func) & -> decltype(func()) {
+    using U = decltype(func());
+    static_assert(std::is_same_v<typename U::error_type, E>, "Error type must be the same");
+    if (has_value_) {
+      return std::forward<F>(func)();
+    }
+    return U(MakeUnexpected(*error_));
+  }
+
+  template <typename F>
+  auto and_then(F&& func) const& -> decltype(func()) {
+    using U = decltype(func());
+    static_assert(std::is_same_v<typename U::error_type, E>, "Error type must be the same");
+    if (has_value_) {
+      return std::forward<F>(func)();
+    }
+    return U(MakeUnexpected(*error_));
+  }
+
+  template <typename F>
+  auto and_then(F&& func) && -> decltype(func()) {
+    using U = decltype(func());
+    static_assert(std::is_same_v<typename U::error_type, E>, "Error type must be the same");
+    if (has_value_) {
+      return std::forward<F>(func)();
+    }
+    return U(MakeUnexpected(std::move(*error_)));
+  }
+
+  template <typename F>
+  auto transform(F&& func) & {
+    using U = std::decay_t<decltype(func())>;
+    if (has_value_) {
+      if constexpr (std::is_void_v<U>) {
+        std::forward<F>(func)();
+        return Expected<void, E>();
+      } else {
+        return Expected<U, E>(std::forward<F>(func)());
+      }
+    }
+    return Expected<U, E>(MakeUnexpected(*error_));
+  }
+
+  template <typename F>
+  auto transform(F&& func) const& {
+    using U = std::decay_t<decltype(func())>;
+    if (has_value_) {
+      if constexpr (std::is_void_v<U>) {
+        std::forward<F>(func)();
+        return Expected<void, E>();
+      } else {
+        return Expected<U, E>(std::forward<F>(func)());
+      }
+    }
+    return Expected<U, E>(MakeUnexpected(*error_));
+  }
+
+  template <typename F>
+  auto transform(F&& func) && {
+    using U = std::decay_t<decltype(func())>;
+    if (has_value_) {
+      if constexpr (std::is_void_v<U>) {
+        std::forward<F>(func)();
+        return Expected<void, E>();
+      } else {
+        return Expected<U, E>(std::forward<F>(func)());
+      }
+    }
+    return Expected<U, E>(MakeUnexpected(std::move(*error_)));
+  }
+
+  template <typename F>
+  auto transform_error(F&& func) & {
+    using G = std::decay_t<decltype(func(std::declval<E&>()))>;
+    if (has_value_) {
+      return Expected<void, G>();
+    }
+    return Expected<void, G>(MakeUnexpected(std::forward<F>(func)(*error_)));
+  }
+
+  template <typename F>
+  auto transform_error(F&& func) const& {
+    using G = std::decay_t<decltype(func(std::declval<const E&>()))>;
+    if (has_value_) {
+      return Expected<void, G>();
+    }
+    return Expected<void, G>(MakeUnexpected(std::forward<F>(func)(*error_)));
+  }
+
+  template <typename F>
+  auto transform_error(F&& func) && {
+    using G = std::decay_t<decltype(func(std::declval<E&&>()))>;
+    if (has_value_) {
+      return Expected<void, G>();
+    }
+    return Expected<void, G>(MakeUnexpected(std::forward<F>(func)(std::move(*error_))));
+  }
+
+  template <typename F>
+  auto or_else(F&& func) & -> decltype(func(std::declval<E&>())) {
+    using G = decltype(func(std::declval<E&>()));
+    static_assert(std::is_same_v<typename G::value_type, void>, "Value type must be void");
+    if (has_value_) {
+      return G();
+    }
+    return std::forward<F>(func)(*error_);
+  }
+
+  template <typename F>
+  auto or_else(F&& func) const& -> decltype(func(std::declval<const E&>())) {
+    using G = decltype(func(std::declval<const E&>()));
+    static_assert(std::is_same_v<typename G::value_type, void>, "Value type must be void");
+    if (has_value_) {
+      return G();
+    }
+    return std::forward<F>(func)(*error_);
+  }
+
+  template <typename F>
+  auto or_else(F&& func) && -> decltype(func(std::declval<E&&>())) {
+    using G = decltype(func(std::declval<E&&>()));
+    static_assert(std::is_same_v<typename G::value_type, void>, "Value type must be void");
+    if (has_value_) {
+      return G();
+    }
+    return std::forward<F>(func)(std::move(*error_));
+  }
+
  private:
   bool has_value_;
   std::optional<E> error_;  // Only constructed when has_value_ is false

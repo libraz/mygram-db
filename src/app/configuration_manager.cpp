@@ -10,10 +10,25 @@
 
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
+
+namespace {
+
+std::mutex& LoggerReconfigurationMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::shared_ptr<spdlog::logger> CreateFileLogger(const std::string& path) {
+  auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path, true);
+  return std::make_shared<spdlog::logger>("mygramdb", std::move(sink));
+}
+
+}  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ConfigurationManager>, mygram::utils::Error> ConfigurationManager::Create(
     const std::string& config_file, const std::string& schema_file) {
@@ -50,6 +65,8 @@ int ConfigurationManager::PrintConfigTest() const {
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyLoggingConfig() const {
+  std::lock_guard<std::mutex> reconfigure_lock(LoggerReconfigurationMutex());
+
   // Configure log output (file or stdout) BEFORE setting level
   if (!config_.logging.file.empty()) {
     try {
@@ -60,8 +77,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
         std::filesystem::create_directories(log_dir);
       }
 
-      // Create file logger
-      auto file_logger = spdlog::basic_logger_mt("mygramdb", config_.logging.file);
+      // Create a fresh logger and publish it as the default without dropping
+      // the previous logger out from under concurrent log calls.
+      auto file_logger = CreateFileLogger(config_.logging.file);
       spdlog::set_default_logger(file_logger);
     } catch (const spdlog::spdlog_ex& ex) {
       return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
@@ -102,15 +120,15 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::Reopen
     return {};
   }
 
+  std::lock_guard<std::mutex> reconfigure_lock(LoggerReconfigurationMutex());
+
   try {
-    // Get current log level before dropping logger
+    // Get current log level before swapping logger
     auto current_level = spdlog::get_level();
 
-    // Drop existing logger
-    spdlog::drop("mygramdb");
-
-    // Create new file logger (this opens a new file descriptor)
-    auto file_logger = spdlog::basic_logger_mt("mygramdb", config_.logging.file);
+    // Create a new file logger and swap it into the default logger slot.
+    // The old default logger remains alive until existing shared owners finish.
+    auto file_logger = CreateFileLogger(config_.logging.file);
     spdlog::set_default_logger(file_logger);
 
     // Restore log level

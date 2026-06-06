@@ -349,6 +349,15 @@ class DocumentStore {
   void Clear();
 
   /**
+   * @brief Replace documents with data from a validated loaded store.
+   *
+   * Used by dump loading to commit pre-validated table data without
+   * deserializing again during the apply phase. The target store_texts setting
+   * is preserved.
+   */
+  void ReplaceWithLoaded(DocumentStore& loaded);
+
+  /**
    * @brief Compact internal data structures to reclaim memory
    *
    * After many insertions and deletions, the internal hash maps may

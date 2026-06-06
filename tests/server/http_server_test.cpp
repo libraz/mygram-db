@@ -296,7 +296,7 @@ TEST_F(HttpServerStartupTest, RejectsBodyExceedingMaxSize) {
 }
 
 /**
- * @brief Regression: GET /{table}/:id must apply the same table-name
+ * @brief Regression: GET /{table}/:primary_key must apply the same table-name
  *        whitelist as SEARCH/COUNT.
  *
  * Pre-fix, HandleGet only checked table_contexts_.find() for the URL-bound

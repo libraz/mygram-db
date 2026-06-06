@@ -157,7 +157,7 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   EXPECT_EQ(multi_body["limit"], 2);
   EXPECT_EQ(multi_body["offset"], 0);
   ASSERT_EQ(multi_body["results"].size(), 2);
-  EXPECT_EQ(multi_body["results"][0]["doc_id"], doc_id1.value());
+  EXPECT_EQ(multi_body["results"][0]["doc_id"], doc_id3.value());
   EXPECT_EQ(multi_body["results"][1]["doc_id"], doc_id2.value());
 
   // Offset should advance into the result set and preserve ordering
@@ -173,7 +173,7 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   EXPECT_EQ(paged_body["offset"], 1);
   ASSERT_EQ(paged_body["results"].size(), 2);
   EXPECT_EQ(paged_body["results"][0]["doc_id"], doc_id2.value());
-  EXPECT_EQ(paged_body["results"][1]["doc_id"], doc_id3.value());
+  EXPECT_EQ(paged_body["results"][1]["doc_id"], doc_id1.value());
 }
 
 TEST_F(HttpServerTest, SearchWithFilters) {
@@ -752,9 +752,30 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
     EXPECT_EQ(body["count"].get<int>(), 150);
   }
 
-  // Test 3: Verify consistency - TCP and HTTP both use same default_limit
-  // (We've already verified HTTP uses 20 in Test 1 and Test 2)
-  // The important thing is that the config value is respected
+  // Test 3: Runtime API config updates affect subsequent HTTP requests.
+  http_server.UpdateApiConfig(5, 15);
+  {
+    json request_body;
+    request_body["q"] = "test";
+
+    auto res = http_client.Post("/test/search", request_body.dump(), "application/json");
+    ASSERT_TRUE(res) << "HTTP search request failed";
+    EXPECT_EQ(res->status, 200);
+
+    auto body = json::parse(res->body);
+    EXPECT_EQ(body["limit"].get<int>(), 5) << "Runtime api.default_limit must affect HTTP search";
+    EXPECT_EQ(body["results"].size(), 5) << "Should return only 5 results after runtime default_limit update";
+    EXPECT_EQ(body["count"].get<int>(), 150);
+  }
+  {
+    json request_body;
+    request_body["q"] = std::string(20, 'a');
+
+    auto res = http_client.Post("/test/search", request_body.dump(), "application/json");
+    ASSERT_TRUE(res) << "HTTP search request failed";
+    EXPECT_EQ(res->status, 400);
+    EXPECT_NE(res->body.find("exceeds maximum allowed length of 15"), std::string::npos) << res->body;
+  }
 
   http_server.Stop();
   tcp_server.Stop();

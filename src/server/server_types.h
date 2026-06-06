@@ -47,6 +47,7 @@ namespace mygramdb::server {
 // Forward declarations
 class TableCatalog;
 class SyncOperationManager;
+class RateLimiter;
 
 // Default constants
 constexpr uint16_t kDefaultPort = static_cast<uint16_t>(config::defaults::kTcpPort);  // MygramDB TCP port
@@ -122,6 +123,7 @@ struct ServerConfig {
  */
 struct ConnectionContext {
   int client_fd = -1;
+  std::string client_ip;
   // Atomic because the event-loop thread reads this flag while the drain-task
   // thread (command handler) may write it concurrently (see ReactorConnection).
   std::atomic<bool> debug_mode{false};
@@ -400,6 +402,7 @@ struct HandlerContext {
 #endif
   cache::CacheManager* cache_manager = nullptr;
   config::RuntimeVariableManager* variable_manager = nullptr;
+  RateLimiter* rate_limiter = nullptr;
   DumpProgress* dump_progress = nullptr;  // Progress tracking for async dump operations
 
   /// Optional pointer to the server's shutdown flag. When non-null and true,

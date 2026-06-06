@@ -106,8 +106,7 @@ class InvalidationManager {
    * Equivalent to calling UnregisterCacheEntry() for every key in @p keys, but
    * with O(1) lock acquires instead of O(N). Used by QueryCache bulk-eviction
    * paths (Clear, ClearTable, EvictForSpace, RefreshLRU) to amortize lock
-   * overhead and avoid pathological contention when emptying a full cache
-   * (H-M7).
+   * overhead and avoid pathological contention when emptying a full cache.
    *
    * Missing keys are silently ignored — the call is idempotent on a per-key
    * basis, matching the single-key API.

@@ -293,9 +293,11 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
 
   // NFKC normalization
   if (nfkc) {
+    status = U_ZERO_ERROR;
     const icu::Normalizer2* normalizer = icu::Normalizer2::getNFKCInstance(status);
     if (U_SUCCESS(status)) {
       icu::UnicodeString normalized;
+      status = U_ZERO_ERROR;
       normalizer->normalize(ustr, normalized, status);
       if (U_SUCCESS(status)) {
         ustr = normalized;
@@ -306,6 +308,7 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
   // Width conversion
   if (width == "narrow") {
     // Full-width to half-width conversion
+    status = U_ZERO_ERROR;
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Fullwidth-Halfwidth", UTRANS_FORWARD, status));
     if ((U_SUCCESS(status)) && trans != nullptr) {
@@ -313,6 +316,7 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
     }
   } else if (width == "wide") {
     // Half-width to full-width conversion
+    status = U_ZERO_ERROR;
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Halfwidth-Fullwidth", UTRANS_FORWARD, status));
     if ((U_SUCCESS(status)) && trans != nullptr) {

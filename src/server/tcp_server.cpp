@@ -93,8 +93,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   shutdown_in_progress_.store(false, std::memory_order_release);
 
-  // Create rate limiter (if configured). The reactor_handler lambda below
-  // enforces the token bucket per peer IP on every accept.
+  // Create rate limiter (if configured). RequestDispatcher enforces the
+  // token bucket per peer IP for every TCP command frame.
   //
   // Held as shared_ptr so HttpServer can co-own the same instance via
   // GetSharedRateLimiter() (Fix N-4): a client's quota MUST apply across
@@ -120,15 +120,17 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   // Initialize all server components via ServerLifecycleManager
   // This centralizes component creation and dependency ordering
-  auto lifecycle_manager_result =
-      ServerLifecycleManager::Create(config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_,
-                                     dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_,
-                                     mysql_reconnecting_, replication_pause_counter_, binlog_reader_
 #ifdef USE_MYSQL
-                                     ,
-                                     sync_manager_.get()
+  auto lifecycle_manager_result = ServerLifecycleManager::Create(
+      config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
+      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
+      binlog_reader_, sync_manager_.get(), rate_limiter_.get());
+#else
+  auto lifecycle_manager_result = ServerLifecycleManager::Create(
+      config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
+      optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
+      binlog_reader_, rate_limiter_.get());
 #endif
-      );
   if (!lifecycle_manager_result) {
     return MakeUnexpected(lifecycle_manager_result.error());
   }
@@ -222,14 +224,6 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   // Install the acceptor reactor handler.
   //
-  // Rate-limit policy:
-  //  - TCP acceptor (unix_socket_path empty) + rate_limiter_ set: enforce per
-  //    peer-IP token bucket inside the accept handler.
-  //  - UDS acceptor (unix_socket_path non-empty): local, trusted, bypass the
-  //    AllowRequest() call entirely.
-  const bool apply_rate_limit = (rate_limiter_ != nullptr) && config_.unix_socket_path.empty();
-  RateLimiter* rate_limiter_ptr = apply_rate_limit ? rate_limiter_.get() : nullptr;
-
   {
     IoReactor* reactor_ptr = reactor_.get();
     RequestDispatcher* dispatcher_ptr = dispatcher_.get();
@@ -239,19 +233,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
                                        ? static_cast<size_t>(config_.max_write_queue_bytes)
                                        : ReactorConnection::kDefaultMaxWriteQueueBytes;
     acceptor_->SetReactorHandler(
-        [reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, rate_limiter_ptr, max_write_bytes](int client_fd) -> bool {
-          // Rate limit check (TCP only; rate_limiter_ptr is null on UDS acceptors).
-          // Extract the peer IP via getpeername() and call AllowRequest(). On
-          // rejection we return false so the acceptor emits SERVER_BUSY + closes
-          // the fd (see ConnectionAcceptor::AcceptLoop).
-          if (rate_limiter_ptr != nullptr) {
-            std::string client_ip = mygram::utils::GetPeerIP(client_fd);
-            if (!rate_limiter_ptr->AllowRequest(client_ip)) {
-              mygram::utils::StructuredLog().Event("rate_limit_exceeded").Field("client_ip", client_ip).Warn();
-              return false;
-            }
-          }
-
+        [reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes](int client_fd) -> bool {
           auto conn =
               ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes);
           auto reg = reactor_ptr->Register(conn);

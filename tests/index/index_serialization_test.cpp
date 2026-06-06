@@ -158,3 +158,33 @@ TEST(IndexSerializationTest, LoadFromStreamRejectsNgramSizeMismatch) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
 }
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsKanjiNgramSizeMismatch) {
+  Index source(2, 1);
+  source.AddDocument(1, "漢字mixed");
+
+  std::ostringstream serialized;
+  ASSERT_TRUE(source.SaveToStream(serialized).has_value());
+
+  Index target(2, 2);
+  std::istringstream input(serialized.str());
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsCrossBoundaryMismatch) {
+  Index source(2, 1, kDefaultRoaringThreshold, true);
+  source.AddDocument(1, "漢字mixed");
+
+  std::ostringstream serialized;
+  ASSERT_TRUE(source.SaveToStream(serialized).has_value());
+
+  Index target(2, 1, kDefaultRoaringThreshold, false);
+  std::istringstream input(serialized.str());
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}

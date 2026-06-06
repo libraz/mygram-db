@@ -47,7 +47,7 @@ class ConnectionAcceptor {
    * Invoked **inline** on the accept thread for each accepted connection when
    * `SetReactorHandler` has been installed. The handler must take ownership of
    * `client_fd` and return true, or return false to reject the connection
-   * (the acceptor will then emit `ERR SERVER_BUSY` and close the fd).
+   * (the acceptor will then emit `ERROR SERVER_BUSY` and close the fd).
    *
    * No thread pool hop: the reactor's `IoReactor::Register` is cheap (map
    * insert + one epoll_ctl/kevent) and latency-sensitive, so bouncing through

@@ -413,8 +413,11 @@ std::unique_ptr<QueryNode> QueryASTParser::ParseAndExpr() {
     return nullptr;
   }
 
-  while (Match(TokenType::AND)) {
-    Advance();
+  while (Match(TokenType::AND) || Match(TokenType::NOT)) {
+    const bool implicit_and_before_not = Match(TokenType::NOT);
+    if (!implicit_and_before_not) {
+      Advance();
+    }
 
     auto right = ParseNotExpr();
     if (!right || !error_.empty()) {

@@ -12,9 +12,11 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <thread>
 #include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 #include "storage/dump_format_v1_internal.h"
@@ -246,6 +248,88 @@ bool ReadExactString(std::istream& input_stream, uint64_t length, std::string& o
 bool SkipExact(std::istream& input_stream, uint64_t length) {
   input_stream.seekg(static_cast<std::streamoff>(length), std::ios::cur);
   return !input_stream.fail() && !input_stream.bad();
+}
+
+struct PendingTableLoad {
+  std::string table_name;
+  index::Index* index = nullptr;
+  DocumentStore* doc_store = nullptr;
+  std::unique_ptr<index::Index> loaded_index;
+  std::unique_ptr<DocumentStore> loaded_doc_store;
+};
+
+Expected<void, Error> LoadPendingTableData(PendingTableLoad& pending, const std::string& index_data,
+                                           const std::string& doc_data) {
+  auto loaded_index = std::make_unique<index::Index>(
+      pending.index->GetNgramSize(), pending.index->GetKanjiNgramSize(), index::kDefaultRoaringThreshold,
+      pending.index->GetCrossBoundaryNgrams(), pending.index->GetNormalizeNfkc(), pending.index->GetNormalizeWidth(),
+      pending.index->GetNormalizeLower());
+  std::istringstream index_stream(index_data);
+  if (auto index_result = loaded_index->LoadFromStream(index_stream); !index_result) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "LoadFromStream failed for index", index_result.error().message()));
+  }
+
+  auto loaded_doc_store = std::make_unique<DocumentStore>();
+  std::istringstream doc_stream(doc_data);
+  if (auto result = loaded_doc_store->LoadFromStream(doc_stream, nullptr); !result) {
+    return result;
+  }
+
+  pending.loaded_index = std::move(loaded_index);
+  pending.loaded_doc_store = std::move(loaded_doc_store);
+  return {};
+}
+
+Expected<void, Error> ApplyPendingTableLoads(const std::vector<PendingTableLoad>& pending_loads) {
+  for (const auto& pending : pending_loads) {
+    pending.index->ReplaceWithLoaded(*pending.loaded_index);
+    pending.doc_store->ReplaceWithLoaded(*pending.loaded_doc_store);
+    StructuredLog().Event("dump_table_loaded").Field("table", pending.table_name).Info();
+  }
+  return {};
+}
+
+Expected<void, Error> ValidateDumpTableSet(
+    const std::unordered_set<std::string>& dump_tables,
+    const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts) {
+  std::vector<std::string> missing_tables;
+  std::vector<std::string> unexpected_tables;
+
+  for (const auto& [table_name, unused_context] : table_contexts) {
+    if (dump_tables.count(table_name) == 0) {
+      missing_tables.push_back(table_name);
+    }
+  }
+  for (const auto& table_name : dump_tables) {
+    if (table_contexts.count(table_name) == 0) {
+      unexpected_tables.push_back(table_name);
+    }
+  }
+  if (missing_tables.empty() && unexpected_tables.empty()) {
+    return {};
+  }
+
+  auto join_names = [](const std::vector<std::string>& names) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < names.size(); ++i) {
+      if (i > 0) {
+        oss << ",";
+      }
+      oss << names[i];
+    }
+    return oss.str();
+  };
+
+  std::ostringstream message;
+  message << "Dump table set does not match configured tables";
+  if (!missing_tables.empty()) {
+    message << "; missing=" << join_names(missing_tables);
+  }
+  if (!unexpected_tables.empty()) {
+    message << "; unexpected=" << join_names(unexpected_tables);
+  }
+  return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, message.str()));
 }
 
 }  // namespace
@@ -1565,11 +1649,15 @@ Expected<void, Error> ReadDumpV1(
       return mem_info ? mem_info->total_physical_bytes : 64ULL * 1024 * 1024 * 1024;
     }();
 
+    std::unordered_set<std::string> dump_tables;
+    std::vector<PendingTableLoad> pending_table_loads;
+
     for (uint32_t i = 0; i < table_count; ++i) {
       std::string table_name;
       if (!ReadString(ifs, table_name, kMaxIdentifierLength)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
       }
+      dump_tables.insert(table_name);
 
       // Read table statistics
       uint32_t table_stats_len = 0;
@@ -1642,8 +1730,10 @@ Expected<void, Error> ReadDumpV1(
       }
 
       auto& ctx_pair = table_contexts[table_name];
-      index::Index* index = ctx_pair.first;
-      DocumentStore* doc_store = ctx_pair.second;
+      PendingTableLoad pending;
+      pending.table_name = table_name;
+      pending.index = ctx_pair.first;
+      pending.doc_store = ctx_pair.second;
 
       // Read index data
       uint64_t index_len = 0;
@@ -1654,24 +1744,10 @@ Expected<void, Error> ReadDumpV1(
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Index data length exceeds physical memory"));
       }
 
+      std::string index_data;
       if (index_len > 0) {
-        // Standard mode: load index from dump
-        std::string index_data;
         if (!ReadExactString(ifs, index_len, index_data)) {
           LogStorageError("read_index_section", filepath, "Index section is truncated");
-          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
-        }
-
-        // Load index directly from stringstream
-        std::istringstream index_stream(index_data);
-        if (auto index_result = index->LoadFromStream(index_stream); !index_result) {
-          StructuredLog()
-              .Event("storage_error")
-              .Field("operation", "load_index")
-              .Field("filepath", filepath)
-              .Field("table", table_name)
-              .Field("error", index_result.error().message())
-              .Error();
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
         }
       } else {
@@ -1699,20 +1775,19 @@ Expected<void, Error> ReadDumpV1(
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
       }
 
-      // Load document store directly from stringstream
-      std::istringstream doc_stream(doc_data);
-      if (auto result = doc_store->LoadFromStream(doc_stream, nullptr); !result) {
-        StructuredLog()
-            .Event("storage_error")
-            .Field("operation", "load_documents")
-            .Field("filepath", filepath)
-            .Field("table", table_name)
-            .Field("error", result.error().message())
-            .Error();
+      if (auto result = LoadPendingTableData(pending, index_data, doc_data); !result) {
         return result;
       }
 
-      StructuredLog().Event("dump_table_loaded").Field("table", table_name).Info();
+      pending_table_loads.push_back(std::move(pending));
+    }
+
+    if (auto result = ValidateDumpTableSet(dump_tables, table_contexts); !result) {
+      return result;
+    }
+
+    if (auto result = ApplyPendingTableLoads(pending_table_loads); !result) {
+      return result;
     }
 
     return {};

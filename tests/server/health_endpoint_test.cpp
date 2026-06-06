@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <thread>
 
+#include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "mysql/binlog_reader_interface.h"
@@ -69,7 +70,11 @@ class HealthEndpointTest : public ::testing::Test {
 
     // Create server with loading flag
     loading_ = false;
-    server_ = std::make_unique<HttpServer>(http_config, table_contexts_, nullptr, &binlog_reader_, nullptr, &loading_);
+    config::CacheConfig cache_config;
+    cache_config.enabled = false;
+    cache_manager_ = std::make_unique<cache::CacheManager>(cache_config, cache::NgramConfigMap{});
+    server_ = std::make_unique<HttpServer>(http_config, table_contexts_, nullptr, &binlog_reader_, cache_manager_.get(),
+                                           &loading_);
 
     // Start server
     ASSERT_TRUE(server_->Start());
@@ -108,6 +113,7 @@ class HealthEndpointTest : public ::testing::Test {
 
   TableContext table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<HttpServer> server_;
   HealthFakeBinlogReader binlog_reader_;
   std::atomic<bool> loading_;
@@ -382,6 +388,21 @@ TEST_F(HealthEndpointTest, HealthChecksAreNotCountedInTotalRequests) {
 
   const uint64_t after = server_->GetTotalRequests();
   EXPECT_EQ(after, before) << "Health probes must not bump total_requests; observed delta=" << (after - before);
+}
+
+TEST_F(HealthEndpointTest, DetailedHealthReportsDisabledCache) {
+  httplib::Client client(base_url_);
+  client.set_connection_timeout(5);
+  auto res = client.Get("/health/detail");
+
+  ASSERT_TRUE(res) << "Request failed";
+  ASSERT_EQ(res->status, 200);
+  auto response = json::parse(res->body);
+  auto& components = response["components"];
+  ASSERT_TRUE(components.contains("cache"));
+  EXPECT_EQ(components["cache"]["status"], "disabled");
+  EXPECT_FALSE(components["cache"]["enabled"]);
+  EXPECT_DOUBLE_EQ(components["cache"]["hit_rate"].get<double>(), 0.0);
 }
 
 }  // namespace mygramdb::server

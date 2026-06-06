@@ -350,7 +350,7 @@ TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   EXPECT_TRUE(body["error"].get<std::string>().find("loading") != std::string::npos);
 
   // Test GET during loading - should also return 503
-  res = client.Get("/test/1");
+  res = client.Get("/test/article_1");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 503);
   body = json::parse(res->body);

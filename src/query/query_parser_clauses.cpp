@@ -23,6 +23,26 @@ using mygram::utils::ErrorCode;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
+namespace {
+
+bool StartsWithFilterOperatorChar(const std::string& value) {
+  if (value.empty()) {
+    return false;
+  }
+  const char first = value.front();
+  return first == '=' || first == '<' || first == '>' || first == '!';
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateFilterValue(const std::string& value) {
+  if (StartsWithFilterOperatorChar(value)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kQueryInvalidFilter, "FILTER value must not start with an operator character"));
+  }
+  return {};
+}
+
+}  // namespace
+
 mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseAnd(const std::vector<std::string>& tokens,
                                                                           size_t& pos, Query& query) {
   // AND <term>
@@ -111,6 +131,9 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
 
     if (!value_part.empty()) {
       filter.value = value_part;
+      if (auto result = ValidateFilterValue(filter.value); !result) {
+        return false;
+      }
       ++pos;
       return true;
     }
@@ -121,6 +144,9 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
     }
 
     filter.value = tokens[pos + 1];
+    if (StartsWithFilterOperatorChar(filter.value)) {
+      return false;
+    }
     pos += 2;
     return true;
   };
@@ -144,6 +170,9 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
   filter.op = filter_op.value();
 
   filter.value = tokens[pos++];
+  if (auto result = ValidateFilterValue(filter.value); !result) {
+    return result;
+  }
 
   return {};
 }
@@ -162,6 +191,11 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseLimit(cons
   // Check for comma-separated format: LIMIT offset,count
   size_t comma_pos = limit_str.find(',');
   if (comma_pos != std::string::npos) {
+    if (query.offset_explicit) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kQueryInvalidOffset, "OFFSET specified more than once (LIMIT offset,count + OFFSET)"));
+    }
+
     // Parse LIMIT offset,count
     std::string offset_str = limit_str.substr(0, comma_pos);
     std::string count_str = limit_str.substr(comma_pos + 1);
@@ -239,6 +273,10 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseOffset(con
   }
 
   const std::string& offset_str = tokens[pos++];
+
+  if (query.offset_explicit) {
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidOffset, "OFFSET specified more than once"));
+  }
 
   // Reject negative values
   if (!offset_str.empty() && offset_str[0] == '-') {

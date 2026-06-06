@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <mutex>
 #include <queue>
 #include <tuple>
 
@@ -523,10 +524,14 @@ std::vector<DocId> Index::SearchByThreshold(const std::vector<std::string>& term
   return result;
 }
 
-uint64_t Index::Count(std::string_view term) const {
+uint64_t Index::PostingSize(std::string_view term) const {
   // RCU pattern: Take snapshot under short lock, then access without lock
   auto snapshot = TakePostingSnapshot(term);
   return (snapshot != nullptr) ? snapshot->Size() : 0;
+}
+
+uint64_t Index::Count(std::string_view term) const {
+  return PostingSize(term);
 }
 
 size_t Index::MemoryUsage() const {
@@ -579,6 +584,18 @@ void Index::Clear() {
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
   term_postings_.clear();
   mygram::utils::StructuredLog().Event("index_cleared").Info();
+}
+
+void Index::ReplaceWithLoaded(Index& loaded) {
+  if (this == &loaded) {
+    return;
+  }
+
+  std::unique_lock<std::shared_mutex> target_lock(postings_mutex_, std::defer_lock);
+  std::unique_lock<std::shared_mutex> loaded_lock(loaded.postings_mutex_, std::defer_lock);
+  std::lock(target_lock, loaded_lock);
+  term_postings_ = std::move(loaded.term_postings_);
+  load_generation_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 PostingList* Index::GetOrCreatePostingList(std::string_view term) {

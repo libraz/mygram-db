@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <unordered_map>
 
@@ -77,10 +78,15 @@ class RequestDispatcher {
    */
   std::string Dispatch(const std::string& request, ConnectionContext& conn_ctx);
 
+  /**
+   * @brief Update API query limits after runtime SET.
+   */
+  void UpdateApiConfig(int default_limit, int max_query_length);
+
  private:
   HandlerContext& ctx_;
-  ServerConfig config_;
-  size_t max_query_length_;
+  std::atomic<int> default_limit_;
+  std::atomic<size_t> max_query_length_;
   std::unordered_map<query::QueryType, CommandHandler*> handlers_;
 };
 

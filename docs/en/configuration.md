@@ -314,8 +314,8 @@ tables:
 build:
   mode: "select_snapshot"           # Build mode (currently only select_snapshot)
   batch_size: 5000                  # Rows per batch during snapshot
-  parallelism: 2                    # Number of parallel build threads
-  throttle_ms: 0                    # Throttle delay between batches (ms)
+  parallelism: 2                    # Reserved / not yet enforced
+  throttle_ms: 0                    # Reserved / not yet enforced
 ```
 
 #### Parameters
@@ -324,14 +324,14 @@ build:
 |-----------|------|---------|-------------|------------|
 | `mode` | string | `select_snapshot` | Build mode (currently only `select_snapshot`) | ❌ No |
 | `batch_size` | integer | `5000` | Number of rows to process per batch during snapshot | ❌ No |
-| `parallelism` | integer | `2` | Number of parallel build threads | ❌ No |
-| `throttle_ms` | integer | `0` | Throttle delay between batches in milliseconds (0 = no throttle) | ❌ No |
+| `parallelism` | integer | `2` | Reserved / not yet enforced | ❌ No |
+| `throttle_ms` | integer | `0` | Reserved / not yet enforced | ❌ No |
 
 **Performance Tuning**:
 - **Larger `batch_size` (10000+)**: Faster initial snapshot, higher memory usage
 - **Smaller `batch_size` (1000-2000)**: Slower snapshot, lower memory usage
-- **Higher `parallelism`**: Faster on multi-core systems, higher memory usage
-- **Non-zero `throttle_ms`**: Reduces MySQL load during snapshot (useful for production databases)
+- `parallelism` and `throttle_ms` are accepted for forward compatibility but
+  are not enforced by the current snapshot loader.
 
 ---
 
@@ -344,8 +344,8 @@ replication:
   server_id: 12345                  # MySQL server ID (must be unique)
   start_from: "snapshot"            # Replication start position
   queue_size: 10000                 # Binlog event queue size
-  reconnect_backoff_min_ms: 500     # Minimum reconnect backoff delay
-  reconnect_backoff_max_ms: 10000   # Maximum reconnect backoff delay
+  reconnect_backoff_min_ms: 500     # Reserved / not yet enforced
+  reconnect_backoff_max_ms: 10000   # Reserved / not yet enforced
 ```
 
 #### Parameters
@@ -357,8 +357,8 @@ replication:
 | `server_id` | integer | *required* | MySQL server ID (must be non-zero and unique in replication topology) | ❌ No |
 | `start_from` | string | `snapshot` | Replication start position: `snapshot`, `latest`, or `gtid=<UUID:txn>` | ❌ No |
 | `queue_size` | integer | `10000` | Binlog event queue size (buffer between reader and processor) | ❌ No |
-| `reconnect_backoff_min_ms` | integer | `500` | Minimum reconnect backoff delay in milliseconds | ❌ No |
-| `reconnect_backoff_max_ms` | integer | `10000` | Maximum reconnect backoff delay in milliseconds | ❌ No |
+| `reconnect_backoff_min_ms` | integer | `500` | Reserved / not yet enforced; reconnect delay currently uses the built-in schedule | ❌ No |
+| `reconnect_backoff_max_ms` | integer | `10000` | Reserved / not yet enforced; reconnect delay currently uses the built-in schedule | ❌ No |
 
 #### Replication Start Position
 
@@ -367,6 +367,11 @@ replication:
 | `snapshot` | Start from snapshot GTID (recommended) | Ensures consistency with snapshot data |
 | `latest` | Start from current GTID (only new changes) | Skip historical data, only track new changes |
 | `gtid=<UUID:txn>` | Start from specific GTID | Resume from known position |
+
+When `auto_initial_snapshot: true` is used with multiple configured tables,
+`start_from` must be `snapshot`. `latest` and `gtid=...` would ignore the
+shared consistent snapshot GTID and can skip binlog events between the
+snapshot and the selected start position.
 
 **Example**:
 ```yaml
@@ -390,9 +395,9 @@ echo $((RANDOM * RANDOM))
 
 ```yaml
 memory:
-  hard_limit_mb: 8192               # Hard memory limit in MB
-  soft_target_mb: 4096              # Soft memory target in MB
-  arena_chunk_mb: 64                # Arena chunk size in MB
+  hard_limit_mb: 8192               # Reserved / not yet enforced
+  soft_target_mb: 4096              # Reserved / not yet enforced
+  arena_chunk_mb: 64                # Reserved / not yet enforced
   roaring_threshold: 0.18           # Roaring bitmap threshold (density)
   minute_epoch: true                # Use minute-precision epoch
 
@@ -410,9 +415,9 @@ memory:
 
 | Parameter | Type | Default | Description | Hot Reload |
 |-----------|------|---------|-------------|------------|
-| `hard_limit_mb` | integer | `8192` | Hard memory limit in MB (OOM protection) | ❌ No |
-| `soft_target_mb` | integer | `4096` | Soft memory target in MB (eviction trigger) | ❌ No |
-| `arena_chunk_mb` | integer | `64` | Arena chunk size in MB (memory allocator) | ❌ No |
+| `hard_limit_mb` | integer | `8192` | Reserved / not yet enforced; not an OOM protection limit today | ❌ No |
+| `soft_target_mb` | integer | `4096` | Reserved / not yet enforced; not an eviction trigger today | ❌ No |
+| `arena_chunk_mb` | integer | `64` | Reserved / not yet enforced; allocator chunk size is not configurable today | ❌ No |
 | `roaring_threshold` | float | `0.18` | Posting list density threshold for Roaring bitmap (0.0-1.0) | ❌ No |
 | `minute_epoch` | boolean | `true` | Use minute-precision epoch for timestamps | ❌ No |
 | `normalize.nfkc` | boolean | `true` | Apply NFKC normalization (Unicode compatibility) | ❌ No |
@@ -478,6 +483,8 @@ dump:
 - Filenames: `auto_YYYYMMDD_HHMMSS.dmp`
 - Older auto-saved files are cleaned up (keeps latest `retain` files)
 - Manual dumps (via `DUMP SAVE`) are **not affected** by cleanup
+- Auto-saved dump files are not loaded automatically on startup. Use
+  `DUMP VERIFY` and `DUMP LOAD` explicitly when restoring after a restart.
 
 **Recommended Values**:
 - **Development**: `0` (disabled)
@@ -539,7 +546,7 @@ api:
 
 **HTTP Endpoints**:
 - `POST /{table}/search`: Search query
-- `GET /{table}/:id`: Get document by primary key
+- `GET /{table}/:primary_key`: Get document by primary key
 - `GET /info`: Server information
 - `GET /health`: Health check (Kubernetes-ready)
 
@@ -677,11 +684,11 @@ cache:
   max_memory_mb: 32                 # Maximum cache memory in MB
   min_query_cost_ms: 10.0           # Minimum query cost to cache (ms)
   ttl_seconds: 3600                 # Cache entry TTL (0 = no TTL)
-  invalidation_strategy: "ngram"    # Invalidation strategy
+  invalidation_strategy: "ngram"    # "table" is reserved / not yet enforced
 
   # Advanced tuning
   compression_enabled: true         # Enable LZ4 compression
-  eviction_batch_size: 10           # Eviction batch size
+  eviction_batch_size: 10           # Reserved / not yet enforced
 
   # Invalidation queue
   invalidation:
@@ -697,9 +704,9 @@ cache:
 | `max_memory_mb` | integer | `32` | Maximum cache memory in MB | ⚠️ Partial |
 | `min_query_cost_ms` | float | `10.0` | Minimum query cost to cache in milliseconds | ⚠️ Partial |
 | `ttl_seconds` | integer | `3600` | Cache entry TTL in seconds (0 = no TTL) | ⚠️ Partial |
-| `invalidation_strategy` | string | `ngram` | Invalidation strategy: `ngram`, `table` | ⚠️ Partial |
+| `invalidation_strategy` | string | `ngram` | `ngram` is currently enforced; `table` is accepted but reserved / not yet enforced | ⚠️ Partial |
 | `compression_enabled` | boolean | `true` | Enable LZ4 compression for cached results | ⚠️ Partial |
-| `eviction_batch_size` | integer | `10` | Number of entries to evict at once | ⚠️ Partial |
+| `eviction_batch_size` | integer | `10` | Reserved / not yet enforced; eviction currently removes entries one at a time | ⚠️ Partial |
 | `invalidation.batch_size` | integer | `1000` | Process invalidation after N unique (table, ngram) pairs | ⚠️ Partial |
 | `invalidation.max_delay_ms` | integer | `100` | Maximum delay before processing invalidation | ⚠️ Partial |
 
@@ -711,9 +718,8 @@ cache:
 - **Use case**: Production environments
 
 **`table`**:
-- **Aggressive**: Invalidates entire table cache on any change
-- **Simple**: No n-gram tracking overhead
-- **Use case**: Very high write rate, small cache
+- Reserved / not yet enforced. The value is accepted for forward
+  compatibility, but current invalidation still uses the `ngram` path.
 
 #### Cache Tuning
 
@@ -910,8 +916,8 @@ Output format (MySQL-compatible table):
 ### Performance
 
 1. **Memory**:
-   - ✅ Set `memory.hard_limit_mb` to 50-70% of system RAM
-   - ✅ Set `memory.soft_target_mb` to 50% of `hard_limit_mb`
+   - ✅ Monitor process RSS externally; `memory.hard_limit_mb` and
+     `memory.soft_target_mb` are reserved / not yet enforced
 
 2. **Cache**:
    - ✅ Enable cache (`cache.enabled: true`)
@@ -944,8 +950,9 @@ Output format (MySQL-compatible table):
 ### High Availability
 
 1. **Dump Persistence**:
-   - ✅ Enable auto-save for fast restarts
+   - ✅ Enable auto-save for faster manual restore after restarts
    - ✅ Backup dump files to S3/GCS
+   - ✅ Run `DUMP VERIFY` and `DUMP LOAD` explicitly when restoring
 
 2. **Replication**:
    - ✅ Use `start_from: "snapshot"` for consistency

@@ -105,6 +105,7 @@ class ServerLifecycleManager {
    * @param binlog_reader Optional BinlogReader for replication
    * @param sync_manager SyncOperationManager for SYNC operations (MySQL only, MUST be non-null when USE_MYSQL is
    * defined)
+   * @param rate_limiter Optional shared RateLimiter for request-rate enforcement
    *
    * @return Expected with unique_ptr to ServerLifecycleManager, or Error if sync_manager is nullptr when USE_MYSQL is
    * defined
@@ -120,7 +121,8 @@ class ServerLifecycleManager {
       ,
       SyncOperationManager* sync_manager
 #endif
-  );
+      ,
+      RateLimiter* rate_limiter = nullptr);
 
   ~ServerLifecycleManager() = default;
 
@@ -161,7 +163,8 @@ class ServerLifecycleManager {
                          ,
                          SyncOperationManager* sync_manager
 #endif
-  );
+                         ,
+                         RateLimiter* rate_limiter);
 
   // Configuration (const references)
   const ServerConfig& config_;
@@ -182,6 +185,7 @@ class ServerLifecycleManager {
 #ifdef USE_MYSQL
   SyncOperationManager* sync_manager_;  // Non-owning pointer for passing to SyncHandler
 #endif
+  RateLimiter* rate_limiter_;
 
   // Initialization steps (each returns Expected<unique_ptr<T>, Error>)
   mygram::utils::Expected<std::unique_ptr<ThreadPool>, mygram::utils::Error> InitThreadPool() const;

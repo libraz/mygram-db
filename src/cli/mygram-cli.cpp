@@ -57,6 +57,8 @@ constexpr size_t kOkLoadedPrefixLength = proto::kOkLoadedPrefixLen;
 
 // CLI behavior constants
 constexpr int kMaxWaitReadyRetries = 100;  // ~5 minutes at 3s interval
+constexpr int kExitSuccess = 0;
+constexpr int kExitFailure = 1;
 constexpr uint16_t kDefaultPort = static_cast<uint16_t>(mygramdb::config::defaults::kTcpPort);
 constexpr uint32_t kInteractiveTimeoutMs = 30000;  // 30 seconds for interactive sessions
 constexpr int kMinTcpPort = 1;
@@ -376,6 +378,7 @@ struct Config {
   std::string host = "127.0.0.1";
   uint16_t port = kDefaultPort;
   bool interactive = true;
+  bool wait_ready = false;
   int retry_count = 0;     // Number of retries (0 = no retry)
   int retry_interval = 3;  // Seconds between retries
   std::string socket_path;
@@ -613,9 +616,23 @@ class MygramClient {
     }
   }
 
-  void RunSingleCommand(const std::string& command) const {
-    std::string response = SendCommand(command);
+  [[nodiscard]] int RunSingleCommand(const std::string& command) const {
+    std::string response;
+    const int max_attempts = config_.wait_ready ? (1 + config_.retry_count) : 1;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+      if (attempt > 0) {
+        std::cerr << "Server is not ready; retrying in " << config_.retry_interval << " seconds... (attempt "
+                  << (attempt + 1) << "/" << max_attempts << ")\n";
+        sleep(static_cast<unsigned int>(config_.retry_interval));
+      }
+
+      response = SendCommand(command);
+      if (!IsWaitReadyRetryableResponse(response)) {
+        break;
+      }
+    }
     PrintResponse(response);
+    return ExitCodeForSingleCommandResponse(response);
   }
 
   /**
@@ -723,6 +740,30 @@ class MygramClient {
     // Fallback: print as-is, but normalize CRLF so multi-line responses we
     // forgot to handle still display readably.
     std::cout << NormalizeCrlf(response) << '\n';
+  }
+
+  [[nodiscard]] static int ExitCodeForSingleCommandResponse(std::string_view response) {
+    const bool server_error = response.size() >= proto::kErrorPrefix.size() &&
+                              response.compare(0, proto::kErrorPrefix.size(), proto::kErrorPrefix) == 0;
+    const bool client_error = response.rfind("(error)", 0) == 0;
+    const bool disconnected = response.find("SERVER_DISCONNECTED") != std::string_view::npos ||
+                              response.find("SERVER_TIMEOUT") != std::string_view::npos;
+    const bool failure = server_error || client_error || disconnected;
+    return failure ? kExitFailure : kExitSuccess;
+  }
+
+  [[nodiscard]] static bool IsWaitReadyRetryableResponse(std::string_view response) {
+    std::string upper_response = ToUpper(std::string(response));
+    const bool error_response =
+        StartsWith(upper_response, proto::kErrorPrefix) || upper_response.rfind("(ERROR)", 0) == 0;
+    if (!error_response) {
+      return false;
+    }
+    return upper_response.find("SERVER IS LOADING") != std::string::npos ||
+           upper_response.find("NOT_READY") != std::string::npos ||
+           upper_response.find("NOT READY") != std::string::npos ||
+           upper_response.find("REPLICATION IS NOT RUNNING") != std::string::npos ||
+           upper_response.find("REPLICATION NOT RUNNING") != std::string::npos;
   }
 
  private:
@@ -924,7 +965,7 @@ void PrintUsage(const char* program_name) {
             << "  " << program_name << "                          # Interactive mode\n"
             << "  " << program_name << " -h localhost -p " << kDefaultPort
             << "    # Connect to specific server (hostnames supported)\n"
-            << "  " << program_name << " --retry 5 INFO           # Retry 5 times if server not ready\n"
+            << "  " << program_name << " --retry 5 INFO           # Retry connection 5 times if refused\n"
             << "  " << program_name << " --wait-ready INFO        # Wait until server is ready\n"
             << "  " << program_name << " SEARCH articles hello    # Execute single command\n"
             << "  " << program_name << " -s /tmp/mygramdb.sock INFO # Connect via Unix socket\n";
@@ -1010,6 +1051,7 @@ ParseResult ParseArguments(int argc, char* argv[]) {
       }
       result.config.retry_count = *count;
     } else if (arg == "--wait-ready") {
+      result.config.wait_ready = true;
       result.config.retry_count = kMaxWaitReadyRetries;
     } else {
       // First non-option arg starts the command
@@ -1044,7 +1086,7 @@ int main(int argc, char* argv[]) {
   if (parsed.config.interactive) {
     client.RunInteractive();
   } else {
-    client.RunSingleCommand(JoinArgsForCommand(parsed.command_args));
+    return client.RunSingleCommand(JoinArgsForCommand(parsed.command_args));
   }
   return 0;
 }

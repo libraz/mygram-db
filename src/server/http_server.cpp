@@ -529,7 +529,9 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
 
   if (full_config_ != nullptr) {
     const auto configured_limit = full_config_->api.max_query_length;
-    max_query_length_ = configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit);
+    default_limit_.store(full_config_->api.default_limit, std::memory_order_release);
+    max_query_length_.store(configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit),
+                            std::memory_order_release);
 
     // Rate limiter resolution:
     //   - If the embedder injected a shared instance (ServerLifecycleManager
@@ -590,11 +592,6 @@ void HttpServer::SetupRoutes() {
   server_->Post(R"(/([^/]+)/count)",
                 [this](const httplib::Request& req, httplib::Response& res) { HandleCount(req, res); });
 
-  // GET /{table}/:id - Get document by ID
-  // Route pattern: match any non-slash characters for table name, digits for ID
-  server_->Get(R"(/([^/]+)/(\d+))",
-               [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
-
   // GET /info - Server information
   server_->Get("/info", [this](const httplib::Request& req, httplib::Response& res) { HandleInfo(req, res); });
 
@@ -617,6 +614,12 @@ void HttpServer::SetupRoutes() {
 
   // GET /metrics - Prometheus metrics
   server_->Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) { HandleMetrics(req, res); });
+
+  // GET /{table}/{primary_key} - Get document by primary key.
+  // Register this catch-all route last so fixed endpoints such as
+  // /health/live and /replication/status are not interpreted as table/PK.
+  server_->Get(R"(/([^/]+)/([^/]+))",
+               [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
 }
 
 void HttpServer::SetupAccessControl() {
@@ -804,6 +807,11 @@ void HttpServer::Stop() {
   mygram::utils::StructuredLog().Event("http_server_stopped").Info();
 }
 
+void HttpServer::UpdateApiConfig(int default_limit, int max_query_length) {
+  default_limit_.store(default_limit, std::memory_order_release);
+  max_query_length_.store(max_query_length <= 0 ? 0 : static_cast<size_t>(max_query_length), std::memory_order_release);
+}
+
 HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name) {
   TableContextLookup result;
 
@@ -934,8 +942,9 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
   // Parse query (use per-request parser to avoid data race)
   query::QueryParser query_parser;
-  if (max_query_length_ > 0) {
-    query_parser.SetMaxQueryLength(max_query_length_);
+  const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
+  if (max_query_length > 0) {
+    query_parser.SetMaxQueryLength(max_query_length);
   }
   auto parsed_query = query_parser.Parse(query_str.str());
   if (!parsed_query) {
@@ -944,8 +953,8 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   }
 
   // Apply default limit if LIMIT was not explicitly specified in the request
-  if (apply_pagination && !parsed_query->limit_explicit && full_config_ != nullptr) {
-    parsed_query->limit = static_cast<size_t>(full_config_->api.default_limit);
+  if (apply_pagination && !parsed_query->limit_explicit) {
+    parsed_query->limit = static_cast<size_t>(default_limit_.load(std::memory_order_acquire));
   }
 
   // Apply filters from JSON payload
@@ -1000,6 +1009,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     if (!prepared) {
       return;
     }
+    RecordCommand(query::QueryType::SEARCH);
     auto* table_ctx = prepared->table_ctx;
     auto* current_doc_store = table_ctx->doc_store.get();
     auto& query_ref = prepared->query;
@@ -1021,27 +1031,13 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     auto& results = pipeline_output.results;
     size_t total_count = results.size();
 
-    // Apply ORDER BY, LIMIT, OFFSET
-    std::vector<DocId> sorted_results;
-    if (query->order_by.has_value()) {
-      auto result =
-          query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query, params.primary_key_column);
-      if (!result.has_value()) {
-        SendError(res, kHttpBadRequest, result.error().message());
-        return;
-      }
-      sorted_results = std::move(result.value());
-    } else {
-      // No ORDER BY: apply limit/offset directly (preserve DocID order)
-      size_t start_idx = std::min(static_cast<size_t>(query->offset), results.size());
-      size_t end_idx = std::min(start_idx + query->limit, results.size());
-
-      if (start_idx < results.size()) {
-        sorted_results =
-            std::vector<DocId>(results.begin() + static_cast<std::vector<DocId>::difference_type>(start_idx),
-                               results.begin() + static_cast<std::vector<DocId>::difference_type>(end_idx));
-      }
+    auto sorted_result =
+        query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query, params.primary_key_column);
+    if (!sorted_result.has_value()) {
+      SendError(res, kHttpBadRequest, sorted_result.error().message());
+      return;
     }
+    auto sorted_results = std::move(sorted_result.value());
 
     // Build JSON response
     json response;
@@ -1112,6 +1108,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     if (!prepared) {
       return;
     }
+    RecordCommand(query::QueryType::COUNT);
     auto* table_ctx = prepared->table_ctx;
     auto& query_ref = prepared->query;
     auto* query = &query_ref;
@@ -1146,6 +1143,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
 
 void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) {
   RecordRequest();
+  RecordCommand(query::QueryType::GET);
 
   try {
     // Check if server is loading
@@ -1154,10 +1152,10 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       return;
     }
 
-    // Extract table name and ID from URL. Use the shared resolution helper so
+    // Extract table name and primary key from URL. Use the shared resolution helper so
     // GET applies the same table-name whitelist and null-context guards as
     // SEARCH and COUNT.
-    std::string id_str = req.matches[2];
+    std::string primary_key = req.matches[2];
     auto lookup = ResolveHttpTableContext(req.matches[1]);
     if (lookup.table_ctx == nullptr) {
       SendError(res, lookup.status, lookup.message);
@@ -1165,21 +1163,13 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     }
     auto* current_doc_store = lookup.table_ctx->doc_store.get();
 
-    // Parse ID
-    auto doc_id = mygram::utils::ParseNumeric<uint64_t>(id_str);
+    auto doc_id = current_doc_store->GetDocId(primary_key);
     if (!doc_id.has_value()) {
-      SendError(res, kHttpBadRequest, "Invalid document ID");
-      return;
-    }
-
-    // Validate DocId range (DocId is uint32_t, stoull returns uint64_t)
-    if (*doc_id > std::numeric_limits<uint32_t>::max()) {
       SendError(res, kHttpNotFound, "Document not found");
       return;
     }
 
-    // Get document
-    auto doc = current_doc_store->GetDocument(static_cast<storage::DocId>(*doc_id));
+    auto doc = current_doc_store->GetDocument(*doc_id);
     if (!doc) {
       SendError(res, kHttpNotFound, "Document not found");
       return;
@@ -1209,6 +1199,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& res) {
   // Increment request counter on the effective stats instance
   RecordRequest();
+  RecordCommand(query::QueryType::INFO);
 
   try {
     json response;
@@ -1469,10 +1460,10 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
   if (cache_manager_ != nullptr) {
     json cache_comp;
     auto cache_stats = cache_manager_->GetStatistics();
-    cache_comp["status"] = "ok";
-    cache_comp["hit_rate"] = cache_stats.total_queries > 0 ? static_cast<double>(cache_stats.cache_hits) /
-                                                                 static_cast<double>(cache_stats.total_queries)
-                                                           : 0.0;
+    const bool cache_enabled = cache_manager_->IsEnabled();
+    cache_comp["status"] = cache_enabled ? "ok" : "disabled";
+    cache_comp["enabled"] = cache_enabled;
+    cache_comp["hit_rate"] = cache_stats.HitRate();
     cache_comp["total_hits"] = cache_stats.cache_hits;
     cache_comp["total_misses"] = cache_stats.cache_misses;
     cache_comp["current_entries"] = cache_stats.current_entries;
@@ -1504,6 +1495,7 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
 
 void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response& res) {
   RecordRequest();
+  RecordCommand(query::QueryType::CONFIG_SHOW);
 
   if (full_config_ == nullptr) {
     SendError(res, kHttpInternalServerError, "Configuration not available");
@@ -1553,6 +1545,7 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
 
 void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httplib::Response& res) {
   RecordRequest();
+  RecordCommand(query::QueryType::REPLICATION_STATUS);
 
 #ifdef USE_MYSQL
   if (binlog_reader_ == nullptr) {
@@ -1562,8 +1555,12 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
 
   try {
     json response;
-    response["enabled"] = binlog_reader_->IsRunning();
+    const bool is_running = binlog_reader_->IsRunning();
+    response["enabled"] = is_running;
+    response["status"] = is_running ? "running" : "stopped";
     response["current_gtid"] = binlog_reader_->GetCurrentGTID();
+    response["processed_events"] = binlog_reader_->GetProcessedEvents();
+    response["queue_size"] = binlog_reader_->GetQueueSize();
 
     SendJson(res, kHttpOk, response);
 

@@ -212,8 +212,8 @@ struct TableConfig {
 struct BuildConfig {
   std::string mode = "select_snapshot";
   int batch_size = defaults::kBuildBatchSize;
-  int parallelism = 2;
-  int throttle_ms = 0;
+  int parallelism = 2;  // Reserved / not yet enforced
+  int throttle_ms = 0;  // Reserved / not yet enforced
 };
 
 /**
@@ -225,17 +225,17 @@ struct ReplicationConfig {
   uint32_t server_id = 0;               // MySQL server ID for replication (must be unique, 0 = disabled)
   std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest"
   int queue_size = defaults::kReplicationQueueSize;
-  int reconnect_backoff_min_ms = defaults::kReconnectBackoffMinMs;
-  int reconnect_backoff_max_ms = defaults::kReconnectBackoffMaxMs;
+  int reconnect_backoff_min_ms = defaults::kReconnectBackoffMinMs;  // Reserved / not yet enforced
+  int reconnect_backoff_max_ms = defaults::kReconnectBackoffMaxMs;  // Reserved / not yet enforced
 };
 
 /**
  * @brief Memory configuration
  */
 struct MemoryConfig {
-  int hard_limit_mb = defaults::kMemoryHardLimitMb;
-  int soft_target_mb = defaults::kMemorySoftTargetMb;
-  int arena_chunk_mb = defaults::kMemoryArenaChunkMb;
+  int hard_limit_mb = defaults::kMemoryHardLimitMb;    // Reserved / not yet enforced
+  int soft_target_mb = defaults::kMemorySoftTargetMb;  // Reserved / not yet enforced
+  int arena_chunk_mb = defaults::kMemoryArenaChunkMb;  // Reserved / not yet enforced
   double roaring_threshold = defaults::kRoaringThreshold;
   bool minute_epoch = true;
 
@@ -392,11 +392,11 @@ struct CacheConfig {
       32 * mygram::constants::kBytesPerMegabyte;  ///< Maximum cache memory in bytes (default: 32MB)  // NOLINT
   double min_query_cost_ms = 10.0;                ///< Minimum query cost to cache (default: 10ms)  // NOLINT
   int ttl_seconds = 3600;                         ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
-  std::string invalidation_strategy = "ngram";    ///< Invalidation strategy: "ngram", "table"
+  std::string invalidation_strategy = "ngram";    ///< "table" accepted but not yet enforced
 
   // Advanced tuning
   bool compression_enabled = true;  ///< Enable LZ4 compression (default: true)
-  int eviction_batch_size = 10;     ///< Number of entries to evict at once (default: 10)  // NOLINT
+  int eviction_batch_size = 10;     ///< Reserved / not yet enforced  // NOLINT
 
   // Invalidation queue settings
   struct {

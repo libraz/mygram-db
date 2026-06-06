@@ -240,10 +240,10 @@ if(USE_ICU)
       include_directories(SYSTEM ${ICU_INCLUDE_DIRS})
     endif()
   else()
-    message(WARNING "ICU not found. Unicode normalization will use fallback implementation.")
-    message(WARNING "To install ICU:")
-    message(WARNING "  macOS:  brew install icu4c")
-    message(WARNING "  Linux:  sudo apt-get install libicu-dev")
+    message(FATAL_ERROR
+      "ICU not found. MygramDB requires ICU for Unicode normalization in production builds. "
+      "Install ICU (macOS: brew install icu4c, Linux: sudo apt-get install libicu-dev) "
+      "or configure with -DUSE_ICU=OFF for an explicit ASCII-only development build.")
   endif()
 endif()
 

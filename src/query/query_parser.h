@@ -216,9 +216,10 @@ struct Query {
   // Fuzzy search options (set when FUZZY keyword is present)
   std::optional<uint32_t> fuzzy_max_distance;
 
-  // Cache optimization: precomputed cache key (set by QueryParser)
-  // This avoids recomputing normalization and MD5 hash on every cache lookup
+  // Canonical cache key set by search_pipeline after table/index-aware
+  // normalization. Parser-created keys are intentionally not used.
   std::optional<std::pair<uint64_t, uint64_t>> cache_key;
+  bool cache_key_is_canonical = false;
 
   /**
    * @brief Check if query is valid
