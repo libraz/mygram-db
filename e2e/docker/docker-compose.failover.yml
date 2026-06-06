@@ -1,0 +1,60 @@
+services:
+  mysql-primary:
+    image: mysql:${MYSQL_VERSION:-8.4}
+    container_name: inttest_mysql_primary
+    ports:
+      - "23306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_TEST_PASSWORD:-test_root_password}
+      MYSQL_DATABASE: testdb
+      MYSQL_USER: repl_user
+      MYSQL_PASSWORD: test_password
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - inttest_mysql_primary_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+  mysql-secondary:
+    image: mysql:${MYSQL_VERSION:-8.4}
+    container_name: inttest_mysql_secondary
+    ports:
+      - "23307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_TEST_PASSWORD:-test_root_password}
+      MYSQL_DATABASE: testdb
+      MYSQL_USER: repl_user
+      MYSQL_PASSWORD: test_password
+    command:
+      - --server-id=2
+      - --log-bin=mysql-bin
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - inttest_mysql_secondary_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  inttest_mysql_primary_data:
+  inttest_mysql_secondary_data:

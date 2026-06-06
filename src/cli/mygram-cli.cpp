@@ -121,6 +121,32 @@ std::string StripTrailingEndMarker(std::string str) {
   return str;
 }
 
+std::string DecodeGetDocBodyForDisplay(std::string_view body) {
+  std::string result;
+  result.reserve(body.size());
+
+  for (size_t i = 0; i < body.size(); ++i) {
+    result += body[i];
+    if (body[i] != '=' || i + 1 >= body.size() || body[i + 1] != '"') {
+      continue;
+    }
+
+    ++i;  // Skip opening quote.
+    while (++i < body.size()) {
+      if (body[i] == '\\' && i + 1 < body.size()) {
+        result += body[++i];
+        continue;
+      }
+      if (body[i] == '"') {
+        break;
+      }
+      result += body[i];
+    }
+  }
+
+  return result;
+}
+
 /**
  * @brief Quote an argument for the wire protocol if it contains whitespace
  *        or special characters that would otherwise be split into multiple
@@ -666,7 +692,7 @@ class MygramClient {
       return;
     }
     if (StartsWith(response, proto::kOkDocPrefix)) {
-      std::cout << response.substr(proto::kOkPrefixLen) << '\n';
+      std::cout << DecodeGetDocBodyForDisplay(response.substr(proto::kOkPrefixLen)) << '\n';
       return;
     }
     if (StartsWith(response, proto::kOkSavedPrefix)) {
@@ -686,7 +712,8 @@ class MygramClient {
       return;
     }
     if (StartsWith(response, proto::kOkInfoPrefix) || StartsWith(response, proto::kOkReplicationPrefix) ||
-        StartsWith(response, proto::kOkCacheStatsPrefix) || StartsWith(response, proto::kOkDumpStatusPrefix)) {
+        StartsWith(response, proto::kOkCacheStatsPrefix) || StartsWith(response, proto::kOkDumpStatusPrefix) ||
+        StartsWith(response, proto::kOkSyncStatusPrefix)) {
       // Multi-line responses with potential trailing END marker.
       // Strip leading status line + normalize CRLF + strip END.
       // Note: CONFIG SHOW emits "+OK\r\n..." (handled below), not "OK CONFIG".
@@ -1052,7 +1079,6 @@ ParseResult ParseArguments(int argc, char* argv[]) {
       result.config.retry_count = *count;
     } else if (arg == "--wait-ready") {
       result.config.wait_ready = true;
-      result.config.retry_count = kMaxWaitReadyRetries;
     } else {
       // First non-option arg starts the command
       for (int j = i; j < argc; ++j) {
@@ -1062,6 +1088,9 @@ ParseResult ParseArguments(int argc, char* argv[]) {
       result.config.interactive = false;
       break;
     }
+  }
+  if (result.config.wait_ready && result.config.retry_count < kMaxWaitReadyRetries) {
+    result.config.retry_count = kMaxWaitReadyRetries;
   }
   return result;
 }

@@ -20,16 +20,20 @@ from lib.wait import wait_until
 DB_FLAVOR = os.environ.get("DB_FLAVOR", "mysql")  # "mysql" or "mariadb"
 MYSQL_CONTAINER = "inttest_mariadb" if DB_FLAVOR == "mariadb" else "inttest_mysql"
 MYSQL_HOST = "127.0.0.1"
-MYSQL_PORT = 23306
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "23306"))
 MYGRAMDB_HOST = "127.0.0.1"
-MYGRAMDB_TCP_PORT = 11016
-MYGRAMDB_HTTP_PORT = 20080
+MYGRAMDB_TCP_PORT = int(os.environ.get("MYGRAMDB_TCP_PORT", "11016"))
+MYGRAMDB_HTTP_PORT = int(os.environ.get("MYGRAMDB_HTTP_PORT", "20080"))
 
 PROJECT_ROOT = Path(__file__).parent.parent
 MYGRAMDB_BINARY = PROJECT_ROOT / "build" / "bin" / "mygramdb"
-MYGRAMDB_CONFIG = Path(__file__).parent / "docker" / "mygramdb-test.yaml"
-MYGRAMDB_LOG = Path("/tmp/mygramdb-e2e.log")
-MYGRAMDB_DUMP_DIR = PROJECT_ROOT / "e2e" / "results" / "dumps"
+MYGRAMDB_CONFIG = Path(
+    os.environ.get("MYGRAMDB_CONFIG", Path(__file__).parent / "docker" / "mygramdb-test.yaml")
+)
+MYGRAMDB_LOG = Path(os.environ.get("MYGRAMDB_LOG", "/tmp/mygramdb-e2e.log"))
+MYGRAMDB_DUMP_DIR = Path(
+    os.environ.get("MYGRAMDB_DUMP_DIR", PROJECT_ROOT / "e2e" / "results" / "dumps")
+)
 
 
 def _mysql_major_minor(version_str: str) -> tuple[int, int]:
@@ -84,7 +88,9 @@ def _kill_stale_process_on_port(port: int) -> None:
     try:
         result = subprocess.run(
             ["lsof", "-ti", f":{port}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.stdout.strip():
             for pid_str in result.stdout.strip().split("\n"):

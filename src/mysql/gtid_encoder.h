@@ -3,7 +3,9 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "utils/error.h"
@@ -52,6 +54,14 @@ class GtidEncoder {
    * @return true if the GTID set has valid format (each entry has UUID:intervals)
    */
   static bool IsValidGtidSet(const std::string& gtid_set);
+
+  /**
+   * @brief Merge one MySQL GTID event into an existing textual GTID set.
+   * @param current_gtid Existing textual GTID set
+   * @param next_gtid Single GTID event, including optional MySQL 8.4 tag
+   * @return Canonical textual GTID set, or nullopt when either input cannot be parsed
+   */
+  static std::optional<std::string> MergeSingleGtidIntoSet(std::string_view current_gtid, std::string_view next_gtid);
 
  private:
   struct Interval {

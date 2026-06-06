@@ -23,6 +23,10 @@
 #include "utils/hash_utils.h"
 #include "utils/string_utils.h"
 
+namespace mygramdb::storage {
+struct DumpLoadAccess;
+}  // namespace mygramdb::storage
+
 namespace mygramdb::index {
 
 // Import transparent hash utilities from common header
@@ -297,6 +301,11 @@ class Index {
    */
   [[nodiscard]] bool GetCrossBoundaryNgrams() const { return cross_boundary_ngrams_; }
 
+  /**
+   * @brief Get configured Roaring bitmap density threshold.
+   */
+  [[nodiscard]] double GetRoaringThreshold() const { return roaring_threshold_; }
+
   /** @brief Get NFKC normalization setting */
   [[nodiscard]] bool GetNormalizeNfkc() const { return normalize_nfkc_; }
 
@@ -312,6 +321,8 @@ class Index {
   }
 
  private:
+  friend struct mygramdb::storage::DumpLoadAccess;
+
   int ngram_size_;
   int kanji_ngram_size_;
   double roaring_threshold_;

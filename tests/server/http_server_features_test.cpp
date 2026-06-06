@@ -1267,6 +1267,57 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
 
+TEST(HttpServerStatsTest, GetCommandStatsCountOnlySuccessfulDocumentResponses) {
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  TableContext ctx;
+  ctx.name = "test";
+  ctx.config.ngram_size = 1;
+  ctx.index = std::make_unique<index::Index>(1);
+  ctx.doc_store = std::make_unique<storage::DocumentStore>();
+  auto doc_id = ctx.doc_store->AddDocument("doc-1", {});
+  ASSERT_TRUE(doc_id.has_value());
+  table_contexts["test"] = &ctx;
+
+  config::Config full_config;
+  full_config.api.default_limit = 100;
+  full_config.api.max_query_length = 10000;
+
+  const uint16_t port = FindAvailableLoopbackPort();
+  ASSERT_NE(port, 0);
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  HttpServer http_server(http_config, table_contexts, &full_config);
+  ASSERT_TRUE(http_server.Start());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  httplib::Client client("127.0.0.1", port);
+  client.set_read_timeout(std::chrono::seconds(5));
+
+  const auto baseline = http_server.GetStats().GetStatistics();
+
+  auto missing = client.Get("/test/missing");
+  ASSERT_TRUE(missing);
+  EXPECT_EQ(missing->status, 404);
+
+  auto after_missing = http_server.GetStats().GetStatistics();
+  EXPECT_EQ(after_missing.cmd_get, baseline.cmd_get);
+  EXPECT_GE(after_missing.total_requests, baseline.total_requests + 1);
+
+  auto found = client.Get("/test/doc-1");
+  ASSERT_TRUE(found);
+  EXPECT_EQ(found->status, 200);
+
+  auto after_found = http_server.GetStats().GetStatistics();
+  EXPECT_EQ(after_found.cmd_get, baseline.cmd_get + 1);
+
+  http_server.Stop();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
 /**
  * @test L-6: HttpServer::GetStats() must reflect the effective stats source.
  *

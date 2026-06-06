@@ -64,8 +64,8 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
       const std::string& gtid_str = *last_gtid;
       bool valid_format = true;
       for (char chr : gtid_str) {
-        if (std::isxdigit(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != ':' && chr != ',' &&
-            chr != ' ' && chr != '\n' && chr != '\r') {
+        if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != '_' && chr != ':' &&
+            chr != ',' && chr != ' ' && chr != '\n' && chr != '\r') {
           valid_format = false;
           break;
         }

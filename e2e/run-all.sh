@@ -63,7 +63,7 @@ trap cleanup EXIT
 # Run tests (MygramDB binary is started/stopped by conftest.py)
 echo "Running tests..."
 set +e
-python3 -m pytest tests/ "${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}"
+python3 -m pytest "${PYTEST_ARGS[@]:-tests/}"
 EXIT_CODE=$?
 set -e
 

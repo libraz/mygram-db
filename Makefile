@@ -12,6 +12,9 @@ PREFIX ?= /usr/local
 # clang-format command (can be overridden: make CLANG_FORMAT=clang-format-18 format)
 CLANG_FORMAT ?= clang-format
 
+# Python tool runner for e2e. Prefer rye when installed; fall back to PATH tools.
+E2E_PY_RUN := $(shell command -v rye >/dev/null 2>&1 && echo "rye run" || true)
+
 # Test options (can be overridden)
 TEST_JOBS ?= 4          # Parallel jobs for tests (make test TEST_JOBS=2)
 TEST_VERBOSE ?= 0       # Verbose output (make test TEST_VERBOSE=1)
@@ -41,7 +44,7 @@ help:
 	@echo "  make install        - Install binaries and files"
 	@echo "  make uninstall      - Uninstall binaries and files"
 	@echo "  make setup          - Set up development environment (git hooks)"
-	@echo "  make format         - Format code with clang-format"
+	@echo "  make format         - Format C++ and fix/format E2E Python"
 	@echo "  make format-check   - Check code formatting (CI)"
 	@echo "  make lint           - Check all code with clang-tidy"
 	@echo "  make lint-diff      - Check only changed files with clang-tidy (fast)"
@@ -229,6 +232,7 @@ setup:
 format:
 	@echo "Formatting code..."
 	@find src tests -type f \( -name "*.cpp" -o -name "*.h" \) ! -path "*/build/*" | xargs $(CLANG_FORMAT) -i
+	@$(MAKE) e2e-fix
 	@echo "Format complete!"
 
 # Check code formatting (CI mode - fails on formatting issues)
@@ -289,17 +293,17 @@ e2e-test-cleanup:
 # Lint e2e Python code
 e2e-lint:
 	@echo "Linting E2E Python code..."
-	cd e2e && ruff check . && mypy .
+	cd e2e && $(E2E_PY_RUN) ruff check . && $(E2E_PY_RUN) mypy .
 
 # Format e2e Python code
 e2e-format:
 	@echo "Formatting E2E Python code..."
-	cd e2e && ruff format .
+	cd e2e && $(E2E_PY_RUN) ruff format .
 
 # Fix e2e Python code
 e2e-fix:
 	@echo "Fixing E2E Python code..."
-	cd e2e && ruff check --fix . && ruff format .
+	cd e2e && $(E2E_PY_RUN) ruff check --fix . && $(E2E_PY_RUN) ruff format .
 
 # Benchmark suite: quick comparison (1, 4, 16 concurrency x 5s)
 e2e-benchmark:

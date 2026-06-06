@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "client/protocol_detection.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "server/server_types.h"
@@ -78,6 +79,18 @@ TEST_F(SyncOperationManagerApiTest, GetSyncingTablesIfAnyReturnsFalseWhenIdle) {
 // IsAnySyncing returns false on a fresh manager.
 TEST_F(SyncOperationManagerApiTest, IsAnySyncingReturnsFalseWhenIdle) {
   EXPECT_FALSE(manager_->IsAnySyncing());
+}
+
+TEST_F(SyncOperationManagerApiTest, ActiveSyncStatusUsesClientCompletableFrame) {
+  auto start_result = manager_->StartSync("users");
+  ASSERT_TRUE(start_result.has_value());
+
+  const std::string status = manager_->GetSyncStatus();
+  EXPECT_TRUE(status.rfind("OK SYNC_STATUS\r\n", 0) == 0) << status;
+  EXPECT_TRUE(client::detail::IsResponseComplete(status)) << status;
+
+  manager_->RequestShutdown();
+  EXPECT_TRUE(manager_->WaitForCompletion(/*timeout_sec=*/30));
 }
 
 /**

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <optional>
 #include <sstream>
 
 #include "utils/numeric_parse.h"
@@ -19,6 +20,157 @@ using mygram::utils::Error;
 using mygram::utils::ErrorCode;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
+
+namespace {
+
+struct MysqlGtidInterval {
+  uint64_t start = 0;
+  uint64_t end = 0;  // inclusive
+};
+
+using MysqlGtidSet = std::map<std::string, std::vector<MysqlGtidInterval>>;
+
+std::optional<MysqlGtidInterval> ParseMysqlGtidInterval(std::string_view interval) {
+  auto dash_pos = interval.find('-');
+  if (dash_pos == std::string_view::npos) {
+    auto value = mygram::utils::ParseNumeric<uint64_t>(interval);
+    if (!value.has_value()) {
+      return std::nullopt;
+    }
+    return MysqlGtidInterval{*value, *value};
+  }
+
+  auto start = mygram::utils::ParseNumeric<uint64_t>(interval.substr(0, dash_pos));
+  auto end = mygram::utils::ParseNumeric<uint64_t>(interval.substr(dash_pos + 1));
+  if (!start.has_value() || !end.has_value() || *start > *end) {
+    return std::nullopt;
+  }
+  return MysqlGtidInterval{*start, *end};
+}
+
+std::optional<std::pair<std::string, std::vector<MysqlGtidInterval>>> ParseMysqlGtidSetEntry(std::string_view entry) {
+  auto colon_pos = entry.find(':');
+  if (colon_pos == std::string_view::npos) {
+    return std::nullopt;
+  }
+
+  std::string uuid(entry.substr(0, colon_pos));
+  std::string_view intervals_text = entry.substr(colon_pos + 1);
+  if (uuid.empty() || intervals_text.empty()) {
+    return std::nullopt;
+  }
+
+  std::vector<std::string_view> parts;
+  while (!intervals_text.empty()) {
+    auto next_colon = intervals_text.find(':');
+    parts.push_back(intervals_text.substr(0, next_colon));
+    if (next_colon == std::string_view::npos) {
+      break;
+    }
+    intervals_text.remove_prefix(next_colon + 1);
+  }
+  if (parts.empty()) {
+    return std::nullopt;
+  }
+
+  std::string key = std::move(uuid);
+  size_t interval_start = 0;
+  if (!ParseMysqlGtidInterval(parts.front()).has_value()) {
+    if (parts.size() < 2 || parts.front().empty()) {
+      return std::nullopt;
+    }
+    key += ':';
+    key += parts.front();
+    interval_start = 1;
+  }
+
+  std::vector<MysqlGtidInterval> intervals;
+  for (size_t i = interval_start; i < parts.size(); ++i) {
+    auto interval = ParseMysqlGtidInterval(parts[i]);
+    if (!interval.has_value()) {
+      return std::nullopt;
+    }
+    intervals.push_back(*interval);
+  }
+
+  return std::make_pair(std::move(key), std::move(intervals));
+}
+
+void NormalizeMysqlGtidIntervals(std::vector<MysqlGtidInterval>& intervals) {
+  std::sort(intervals.begin(), intervals.end(), [](const MysqlGtidInterval& left, const MysqlGtidInterval& right) {
+    return left.start < right.start || (left.start == right.start && left.end < right.end);
+  });
+
+  std::vector<MysqlGtidInterval> merged;
+  for (const auto& interval : intervals) {
+    if (merged.empty() || merged.back().end == std::numeric_limits<uint64_t>::max() ||
+        interval.start > merged.back().end + 1) {
+      merged.push_back(interval);
+      continue;
+    }
+    merged.back().end = std::max(merged.back().end, interval.end);
+  }
+  intervals = std::move(merged);
+}
+
+std::optional<MysqlGtidSet> ParseMysqlGtidSet(std::string_view gtid_set) {
+  MysqlGtidSet parsed;
+  while (!gtid_set.empty()) {
+    auto comma_pos = gtid_set.find(',');
+    std::string_view entry = gtid_set.substr(0, comma_pos);
+    while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.front())) != 0) {
+      entry.remove_prefix(1);
+    }
+    while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.back())) != 0) {
+      entry.remove_suffix(1);
+    }
+
+    auto parsed_entry = ParseMysqlGtidSetEntry(entry);
+    if (!parsed_entry.has_value()) {
+      return std::nullopt;
+    }
+    auto& intervals = parsed[parsed_entry->first];
+    intervals.insert(intervals.end(), parsed_entry->second.begin(), parsed_entry->second.end());
+
+    if (comma_pos == std::string_view::npos) {
+      break;
+    }
+    gtid_set.remove_prefix(comma_pos + 1);
+  }
+
+  for (auto& [uuid, intervals] : parsed) {
+    (void)uuid;
+    NormalizeMysqlGtidIntervals(intervals);
+  }
+  return parsed;
+}
+
+std::string MysqlGtidSetToString(const MysqlGtidSet& gtid_set) {
+  std::ostringstream oss;
+  bool first_uuid = true;
+  for (const auto& [uuid, uuid_intervals] : gtid_set) {
+    if (!first_uuid) {
+      oss << ',';
+    }
+    first_uuid = false;
+    oss << uuid << ':';
+    bool first_interval = true;
+    for (const auto& interval : uuid_intervals) {
+      if (!first_interval) {
+        oss << ':';
+      }
+      first_interval = false;
+      if (interval.start == interval.end) {
+        oss << interval.start;
+      } else {
+        oss << interval.start << '-' << interval.end;
+      }
+    }
+  }
+  return oss.str();
+}
+
+}  // namespace
 
 mygram::utils::Expected<std::vector<uint8_t>, Error> GtidEncoder::Encode(const std::string& gtid_set) {
   if (gtid_set.empty()) {
@@ -275,6 +427,20 @@ bool GtidEncoder::IsValidGtidSet(const std::string& gtid_set) {
     }
   }
   return true;
+}
+
+std::optional<std::string> GtidEncoder::MergeSingleGtidIntoSet(std::string_view current_gtid,
+                                                               std::string_view next_gtid) {
+  auto current_set = ParseMysqlGtidSet(current_gtid);
+  auto next_entry = ParseMysqlGtidSetEntry(next_gtid);
+  if (!current_set.has_value() || !next_entry.has_value() || next_entry->second.size() != 1) {
+    return std::nullopt;
+  }
+
+  auto& intervals = (*current_set)[next_entry->first];
+  intervals.push_back(next_entry->second.front());
+  NormalizeMysqlGtidIntervals(intervals);
+  return MysqlGtidSetToString(*current_set);
 }
 
 void GtidEncoder::StoreInt64(std::vector<uint8_t>& buffer, uint64_t value) {

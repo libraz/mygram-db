@@ -198,6 +198,37 @@ TEST_F(MygramClientTest, SearchWithHighlightsReturnsSnippets) {
   EXPECT_NE(resp.results[0].snippet.find("<em>hello</em>"), std::string::npos);
 }
 
+TEST_F(MygramClientTest, CApiSearchWithHighlightsReturnsSnippets) {
+  const std::string text = mygram::utils::NormalizeText("Hello world example", true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, text));
+  index_->AddDocument(1, text);
+
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+
+  MygramSearchResultWithHighlights_C* search_result = nullptr;
+  int result = mygramclient_search_with_highlights(c_client, "test", "hello", 10, 0, &search_result);
+  ASSERT_EQ(result, 0) << "Search error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(search_result, nullptr);
+  EXPECT_EQ(search_result->total_count, 1u);
+  ASSERT_EQ(search_result->count, 1u);
+  ASSERT_NE(search_result->primary_keys, nullptr);
+  ASSERT_NE(search_result->snippets, nullptr);
+  EXPECT_STREQ(search_result->primary_keys[0], "highlight_doc");
+  EXPECT_NE(std::string(search_result->snippets[0]).find("<em>hello</em>"), std::string::npos);
+
+  mygramclient_free_search_result_with_highlights(search_result);
+  mygramclient_disconnect(c_client);
+  mygramclient_destroy(c_client);
+}
+
 /**
  * @brief Test search with AND terms
  */
@@ -692,6 +723,32 @@ TEST_F(MygramClientTest, CApiSendCommand) {
   mygramclient_free_string(response);
 
   // Cleanup
+  mygramclient_disconnect(c_client);
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiSearchEmptyResultSucceeds) {
+  AddTestDocuments();
+
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+
+  MygramSearchResult_C* search_result = nullptr;
+  int result = mygramclient_search(c_client, "test", "nomatch_empty_capi", 100, 0, &search_result);
+  ASSERT_EQ(result, 0) << "Search error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(search_result, nullptr);
+  EXPECT_EQ(search_result->count, 0u);
+  EXPECT_EQ(search_result->total_count, 0u);
+  EXPECT_EQ(search_result->primary_keys, nullptr);
+
+  mygramclient_free_search_result(search_result);
   mygramclient_disconnect(c_client);
   mygramclient_destroy(c_client);
 }

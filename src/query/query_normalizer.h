@@ -22,16 +22,16 @@ namespace mygramdb::cache {
  *
  * Normalization rules:
  * 1. Whitespace: Normalize to single spaces
- * 2. Keywords: Convert to uppercase (SEARCH, FILTER, SORT, etc.)
+ * 2. Keywords: Convert to uppercase (SEARCH, FILTER, etc.)
  * 3. Search text: Normalize whitespace, then apply the optional index text normalizer
  * 4. Clause order: Canonicalize to fixed order
  * 5. Filter order: Sort alphabetically by column name
- * 6. Default values: Include explicit defaults (SORT __pk__ DESC)
+ * 6. Presentation clauses: Exclude LIMIT/OFFSET/SORT from the key
  *
- * Note: LIMIT and OFFSET are intentionally excluded from the normalized form.
- * The cache stores full results (before pagination), and LIMIT/OFFSET are
- * applied when retrieving from cache. This allows a single cache entry to
- * serve all pagination requests for the same query.
+ * Note: LIMIT, OFFSET, and SORT are intentionally excluded from the normalized
+ * form. The cache stores full unsorted results, and presentation clauses are
+ * applied when retrieving from cache. This allows a single cache entry to serve
+ * pagination and ordering variants for the same query.
  */
 class QueryNormalizer {
  public:
@@ -70,17 +70,6 @@ class QueryNormalizer {
    * Sorts filters alphabetically by column name for consistency
    */
   static std::string NormalizeFilters(const std::vector<query::FilterCondition>& filters);
-
-  /**
-   * @brief Normalize SORT clause
-   */
-  static std::string NormalizeSortClause(const std::optional<query::OrderByClause>& sort, const std::string& table,
-                                         const std::string& primary_key_column);
-
-  /**
-   * @brief Convert filter operator to string
-   */
-  static std::string FilterOpToString(query::FilterOp filter_op);
 };
 
 }  // namespace mygramdb::cache

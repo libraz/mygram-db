@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <thread>
@@ -199,6 +200,42 @@ TEST_F(HttpServerTest, SearchWithFilters) {
   EXPECT_EQ(body["results"][0]["filters"]["series"], "Project X=Beta");
 }
 
+TEST_F(HttpServerTest, SearchReplacesInvalidUtf8InJsonResponse) {
+  std::string invalid_pk = "bad";
+  invalid_pk.push_back(static_cast<char>(0xff));
+  invalid_pk += "pk";
+
+  std::string invalid_filter = "latin";
+  invalid_filter.push_back(static_cast<char>(0xff));
+  invalid_filter += "value";
+
+  storage::FilterMap filters;
+  filters["raw"] = invalid_filter;
+  auto doc_id = doc_store_->AddDocument(invalid_pk, filters);
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(*doc_id, "invalid utf8 payload");
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "invalid";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+  EXPECT_NE(res->body.find("\xef\xbf\xbd"), std::string::npos);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["doc_id"], doc_id.value());
+  EXPECT_TRUE(body["results"][0]["primary_key"].get<std::string>().find("\xef\xbf\xbd") != std::string::npos);
+  EXPECT_TRUE(body["results"][0]["filters"]["raw"].get<std::string>().find("\xef\xbf\xbd") != std::string::npos);
+}
+
 TEST_F(HttpServerTest, SearchFilterValueWithSpacesAndEquals) {
   ASSERT_TRUE(http_server_->Start());
 
@@ -236,6 +273,39 @@ TEST_F(HttpServerTest, SearchSupportsJsonSort) {
   auto body = json::parse(res->body);
   ASSERT_EQ(body["results"].size(), 3);
   EXPECT_EQ(body["results"][0]["primary_key"], "article_3");
+}
+
+TEST_F(HttpServerTest, SearchSupportsJsonScoreSort) {
+  auto short_doc = doc_store_->AddDocument("rank_short", {});
+  auto repeat_doc = doc_store_->AddDocument("rank_repeat", {});
+  ASSERT_TRUE(short_doc.has_value());
+  ASSERT_TRUE(repeat_doc.has_value());
+  index_->AddDocument(*short_doc, "alpha");
+  index_->AddDocument(*repeat_doc, "alpha alpha alpha");
+  doc_store_->SetNormalizedText(*short_doc, "alpha");
+  doc_store_->SetNormalizedText(*repeat_doc, "alpha alpha alpha");
+  table_context_.bm25_stats.total_doc_length.store(22, std::memory_order_relaxed);
+  table_context_.bm25_stats.doc_count.store(2, std::memory_order_relaxed);
+  config_->bm25.enable = true;
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "alpha";
+  request_body["sort"] = {{"column", "_score"}, {"order", "DESC"}};
+  request_body["limit"] = 2;
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 2);
+  EXPECT_EQ(body["results"][0]["primary_key"], "rank_repeat");
+  EXPECT_EQ(body["results"][1]["primary_key"], "rank_short");
 }
 
 TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
@@ -283,6 +353,39 @@ TEST_F(HttpServerTest, SearchSupportsJsonHighlight) {
   EXPECT_NE(body["results"][0]["highlight"].get<std::string>().find("<strong>machine</strong>"), std::string::npos);
 }
 
+TEST_F(HttpServerTest, SearchHighlightUsesBooleanAstTerms) {
+  auto doc_id1 = doc_store_->GetDocId("article_1");
+  auto doc_id2 = doc_store_->GetDocId("article_2");
+  ASSERT_TRUE(doc_id1.has_value());
+  ASSERT_TRUE(doc_id2.has_value());
+  doc_store_->SetNormalizedText(*doc_id1, "machine learning");
+  doc_store_->SetNormalizedText(*doc_id2, "breaking news");
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine OR news";
+  request_body["highlight"] = {
+      {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 80}, {"max_fragments", 1}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["results"].size(), 2);
+
+  std::map<std::string, std::string> highlights;
+  for (const auto& result : body["results"]) {
+    highlights[result["primary_key"].get<std::string>()] = result["highlight"].get<std::string>();
+  }
+  EXPECT_NE(highlights["article_1"].find("<strong>machine</strong>"), std::string::npos);
+  EXPECT_NE(highlights["article_2"].find("<strong>news</strong>"), std::string::npos);
+}
+
 TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
   ASSERT_TRUE(http_server_->Start());
 
@@ -303,6 +406,24 @@ TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
   const auto error_str = body["error"].get<std::string>();
   EXPECT_NE(error_str.find("open_tag"), std::string::npos);
   EXPECT_NE(error_str.find("at most 256 bytes"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchInvalidBooleanExpressionReturnsBadRequest) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine OR";
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("Invalid boolean search expression"), std::string::npos);
 }
 
 TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
@@ -929,6 +1050,19 @@ TEST_F(HttpServerTest, CountErrorCases) {
   EXPECT_TRUE(body.contains("error"));
   error_msg = body["error"].get<std::string>();
   EXPECT_NE(error_msg.find("Invalid JSON"), std::string::npos);
+
+  // COUNT should reject ranked/search-only parameters instead of ignoring them.
+  json ranked_count_request;
+  ranked_count_request["q"] = "machine";
+  ranked_count_request["sort"] = {{"column", "_score"}, {"order", "DESC"}};
+
+  res = client.Post("/test/count", ranked_count_request.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+  body = json::parse(res->body);
+  EXPECT_TRUE(body.contains("error"));
+  error_msg = body["error"].get<std::string>();
+  EXPECT_NE(error_msg.find("not supported by COUNT"), std::string::npos);
 }
 
 // ============================================================================

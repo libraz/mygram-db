@@ -139,6 +139,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
     return mygram::utils::MakeUnexpected(tcp_start.error());
   }
 
+  RegisterRuntimeCallbacks();
+
   // Start HTTP server (if enabled)
   if (http_server_) {
     auto http_start = http_server_->Start();
@@ -225,10 +227,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     ctx->config = table_config;
 
     // Create index and document store for this table
-    ctx->index = std::make_unique<index::Index>(table_config.ngram_size, table_config.kanji_ngram_size,
-                                                index::kDefaultRoaringThreshold, table_config.cross_boundary_ngrams,
-                                                deps_.config.memory.normalize.nfkc, deps_.config.memory.normalize.width,
-                                                deps_.config.memory.normalize.lower);
+    ctx->index = std::make_unique<index::Index>(
+        table_config.ngram_size, table_config.kanji_ngram_size, deps_.config.memory.roaring_threshold,
+        table_config.cross_boundary_ngrams, deps_.config.memory.normalize.nfkc, deps_.config.memory.normalize.width,
+        deps_.config.memory.normalize.lower);
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
     // Disable normalized text storage when verify_text is off (saves memory)
@@ -616,43 +618,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "tcp_server_initialized").Debug();
 
-#ifdef USE_MYSQL
-  // Setup MySQL reconnection callback for RuntimeVariableManager
-  if (mysql_connection_ && binlog_reader_) {
-    auto* variable_manager = tcp_server_->GetVariableManager();
-    if (variable_manager != nullptr) {
-      // Create reconnection handler (use shared_ptr so it can be captured in std::function)
-      // Pass the mysql_reconnecting flag to block manual REPLICATION START during reconnection
-      auto required_tables = CollectRequiredTableNames(table_contexts_);
-      auto reconnection_handler = std::make_shared<MysqlReconnectionHandler>(
-          mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag(),
-          std::move(required_tables));
-
-      // Set callback that captures the reconnection handler
-      variable_manager->SetMysqlReconnectCallback([handler = reconnection_handler](const std::string& host, int port) {
-        return handler->Reconnect(host, port);
-      });
-
-      mygram::utils::StructuredLog().Event("mysql_reconnection_callback_registered").Info();
-    }
-  }
-#endif
-
-  // Setup rate limiter callback for RuntimeVariableManager
-  {
-    auto* variable_manager = tcp_server_->GetVariableManager();
-    auto* rate_limiter = tcp_server_->GetRateLimiter();
-    if (variable_manager != nullptr && rate_limiter != nullptr) {
-      variable_manager->SetRateLimiterCallback([rate_limiter](bool enabled, size_t capacity, size_t refill_rate) {
-        // Note: enabled parameter is currently not used by RateLimiter::UpdateParameters
-        // Future enhancement: Add enable/disable functionality to RateLimiter
-        (void)enabled;  // Suppress unused parameter warning
-        rate_limiter->UpdateParameters(capacity, refill_rate);
-      });
-      mygram::utils::StructuredLog().Event("rate_limiter_callback_registered").Info();
-    }
-  }
-
   // Initialize HTTP server (if enabled)
   if (deps_.config.api.http.enable) {
     auto http_config = server::HttpServerConfig::FromConfig(deps_.config);
@@ -660,11 +625,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 #ifdef USE_MYSQL
     http_server_ = std::make_unique<server::HttpServer>(
         http_config, table_contexts_ptrs, &deps_.config, binlog_reader_.get(), tcp_server_->GetCacheManager(),
-        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats());
+        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), nullptr,
+        tcp_server_->GetReplicationPausedForDumpFlag());
 #else
     http_server_ = std::make_unique<server::HttpServer>(
         http_config, table_contexts_ptrs, &deps_.config, nullptr, tcp_server_->GetCacheManager(),
-        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats());
+        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), nullptr,
+        tcp_server_->GetReplicationPausedForDumpFlag());
 #endif
 
     mygram::utils::StructuredLog()
@@ -674,24 +641,48 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
         .Info();
   }
 
-  {
-    auto* variable_manager = tcp_server_->GetVariableManager();
-    if (variable_manager != nullptr) {
-      auto* dispatcher = tcp_server_->GetDispatcher();
-      auto* http_server = http_server_.get();
-      variable_manager->SetApiConfigCallback([dispatcher, http_server](int default_limit, int max_query_length) {
-        if (dispatcher != nullptr) {
-          dispatcher->UpdateApiConfig(default_limit, max_query_length);
-        }
-        if (http_server != nullptr) {
-          http_server->UpdateApiConfig(default_limit, max_query_length);
-        }
-      });
-      mygram::utils::StructuredLog().Event("api_config_callback_registered").Info();
-    }
+  return {};
+}
+
+void ServerOrchestrator::RegisterRuntimeCallbacks() {
+  if (!tcp_server_) {
+    return;
   }
 
-  return {};
+  auto* variable_manager = tcp_server_->GetVariableManager();
+  if (variable_manager == nullptr) {
+    return;
+  }
+
+#ifdef USE_MYSQL
+  if (mysql_connection_ && binlog_reader_) {
+    auto required_tables = CollectRequiredTableNames(table_contexts_);
+    auto reconnection_handler =
+        std::make_shared<MysqlReconnectionHandler>(mysql_connection_.get(), binlog_reader_.get(),
+                                                   tcp_server_->GetMysqlReconnectingFlag(), std::move(required_tables));
+
+    variable_manager->SetMysqlReconnectCallback(
+        [handler = reconnection_handler](const std::string& host, int port) { return handler->Reconnect(host, port); });
+
+    mygram::utils::StructuredLog().Event("mysql_reconnection_callback_registered").Info();
+  }
+#endif
+
+  if (auto* rate_limiter = tcp_server_->GetRateLimiter(); rate_limiter != nullptr) {
+    variable_manager->SetRateLimiterCallback([rate_limiter](bool enabled, size_t capacity, size_t refill_rate) {
+      (void)enabled;
+      rate_limiter->UpdateParameters(capacity, refill_rate);
+    });
+    mygram::utils::StructuredLog().Event("rate_limiter_callback_registered").Info();
+  }
+
+  auto* http_server = http_server_.get();
+  variable_manager->AddApiConfigCallback([http_server](int default_limit, int max_query_length) {
+    if (http_server != nullptr) {
+      http_server->UpdateApiConfig(default_limit, max_query_length);
+    }
+  });
+  mygram::utils::StructuredLog().Event("api_config_callback_registered").Info();
 }
 
 }  // namespace mygramdb::app

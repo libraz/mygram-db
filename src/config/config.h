@@ -237,7 +237,7 @@ struct MemoryConfig {
   int soft_target_mb = defaults::kMemorySoftTargetMb;  // Reserved / not yet enforced
   int arena_chunk_mb = defaults::kMemoryArenaChunkMb;  // Reserved / not yet enforced
   double roaring_threshold = defaults::kRoaringThreshold;
-  bool minute_epoch = true;
+  bool minute_epoch = true;  // Reserved / not yet enforced
 
   struct {
     bool nfkc = true;
@@ -392,7 +392,7 @@ struct CacheConfig {
       32 * mygram::constants::kBytesPerMegabyte;  ///< Maximum cache memory in bytes (default: 32MB)  // NOLINT
   double min_query_cost_ms = 10.0;                ///< Minimum query cost to cache (default: 10ms)  // NOLINT
   int ttl_seconds = 3600;                         ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
-  std::string invalidation_strategy = "ngram";    ///< "table" accepted but not yet enforced
+  std::string invalidation_strategy = "ngram";    ///< "ngram" precise invalidation or "table" coarse invalidation
 
   // Advanced tuning
   bool compression_enabled = true;  ///< Enable LZ4 compression (default: true)

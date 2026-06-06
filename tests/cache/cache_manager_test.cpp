@@ -138,6 +138,37 @@ TEST(CacheManagerTest, PreciseInvalidation) {
   EXPECT_TRUE(mgr.Lookup(query2).has_value());
 }
 
+TEST(CacheManagerTest, TableInvalidationStrategyClearsOnlyModifiedTable) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.invalidation_strategy = "table";
+
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+
+  CacheManager mgr(config, std::move(ngram_configs));
+
+  auto posts_query1 = CreateQuery("posts", "golang");
+  std::vector<DocId> posts_result1 = {1, 2, 3};
+  std::vector<std::string> posts_ngrams1 = {"ang", "gol", "lan", "ola"};
+  EXPECT_TRUE(mgr.Insert(posts_query1, posts_result1, posts_ngrams1, 15.0));
+
+  auto posts_query2 = CreateQuery("posts", "python");
+  std::vector<DocId> posts_result2 = {4, 5, 6};
+  std::vector<std::string> posts_ngrams2 = {"hon", "pyt", "tho", "yth"};
+  EXPECT_TRUE(mgr.Insert(posts_query2, posts_result2, posts_ngrams2, 15.0));
+
+  auto comments_query = CreateQuery("comments", "python");
+  std::vector<DocId> comments_result = {7, 8};
+  EXPECT_TRUE(mgr.Insert(comments_query, comments_result, posts_ngrams2, 15.0));
+
+  mgr.Invalidate("posts", "", "golang tutorial");
+
+  EXPECT_FALSE(mgr.Lookup(posts_query1).has_value());
+  EXPECT_FALSE(mgr.Lookup(posts_query2).has_value());
+  EXPECT_TRUE(mgr.Lookup(comments_query).has_value());
+}
+
 /**
  * @brief Test UPDATE invalidation - both old and new text considered
  */

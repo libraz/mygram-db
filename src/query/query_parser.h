@@ -98,6 +98,24 @@ enum class FilterOp : uint8_t {
   LTE   // Less than or equal
 };
 
+inline constexpr std::string_view FilterOpToString(FilterOp op) noexcept {
+  switch (op) {
+    case FilterOp::EQ:
+      return "=";
+    case FilterOp::NE:
+      return "!=";
+    case FilterOp::GT:
+      return ">";
+    case FilterOp::GTE:
+      return ">=";
+    case FilterOp::LT:
+      return "<";
+    case FilterOp::LTE:
+      return "<=";
+  }
+  return "";
+}
+
 /**
  * @brief Filter condition
  */

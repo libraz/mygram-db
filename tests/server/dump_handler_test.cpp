@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <thread>
 
@@ -466,6 +467,25 @@ TEST_F(DumpHandlerTest, DumpStatusReplicationPaused) {
   replication_paused_for_dump_ = false;
 }
 
+TEST_F(DumpHandlerTest, DumpStatusSanitizesDelimitedProgressFields) {
+  DumpProgress progress;
+  handler_ctx_->dump_progress = &progress;
+  progress.Reset(DumpStatus::LOADING, "bad\r\nEND\r\nfile.dmp", 1);
+  progress.UpdateTable("table\r\nEND\r\nname", 0);
+  progress.Fail("failed\r\nEND\r\nnow");
+
+  query::Query query;
+  query.type = query::QueryType::DUMP_STATUS;
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("OK DUMP_STATUS") == 0) << "Response: " << response;
+  EXPECT_EQ(response.find("bad\r\nEND"), std::string::npos);
+  EXPECT_EQ(response.find("table\r\nEND"), std::string::npos);
+  EXPECT_EQ(response.find("failed\r\nEND"), std::string::npos);
+  EXPECT_EQ(response.rfind("END"), response.size() - 3);
+}
+
 // ============================================================================
 // GTID Tests (Critical for Replication)
 // ============================================================================
@@ -856,9 +876,9 @@ TEST_F(DumpHandlerTest, DumpLoadBlockedDuringOptimize) {
 }
 
 /**
- * @brief Test DUMP SAVE is allowed during OPTIMIZE (for auto-save)
+ * @brief Test DUMP SAVE is blocked during OPTIMIZE.
  */
-TEST_F(DumpHandlerTest, DumpSaveAllowedDuringOptimize) {
+TEST_F(DumpHandlerTest, DumpSaveBlockedDuringOptimize) {
   // Simulate OPTIMIZE in progress
   optimization_in_progress_ = true;
 
@@ -868,12 +888,8 @@ TEST_F(DumpHandlerTest, DumpSaveAllowedDuringOptimize) {
   save_query.filepath = test_filepath_;
   std::string save_response = handler_->Handle(save_query, conn_ctx_);
 
-  // Should be allowed (for auto-save support) — assert success specifically
-  // (previous assertion was a tautology: OR of OK/ERROR always passes)
-  EXPECT_EQ(save_response.find("OK SAVED"), 0u) << "Response: " << save_response;
-
-  // Should not contain OPTIMIZE blocking message
-  EXPECT_TRUE(save_response.find("Cannot save dump while OPTIMIZE") == std::string::npos)
+  EXPECT_TRUE(save_response.find("ERROR") == 0) << "Response: " << save_response;
+  EXPECT_TRUE(save_response.find("Cannot save dump while OPTIMIZE") != std::string::npos)
       << "Response: " << save_response;
 }
 
@@ -904,6 +920,23 @@ TEST_F(DumpHandlerTest, DumpSaveBlockedDuringDumpLoad) {
   EXPECT_TRUE(save_response2.find("Cannot save dump") != std::string::npos) << "Response: " << save_response2;
 
   // Clean up
+  dump_load_in_progress_ = false;
+}
+
+TEST_F(DumpHandlerTest, DumpSaveRechecksDumpLoadAfterAcquiringSaveFlag) {
+  handler_ctx_->after_dump_save_flag_acquired = [this]() { dump_load_in_progress_.store(true); };
+
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+
+  EXPECT_TRUE(save_response.find("ERROR") == 0) << "Response: " << save_response;
+  EXPECT_TRUE(save_response.find("DUMP LOAD is in progress") != std::string::npos) << "Response: " << save_response;
+  EXPECT_FALSE(dump_save_in_progress_.load()) << "DUMP SAVE flag must be released after post-acquire rejection";
+  EXPECT_TRUE(dump_load_in_progress_.load()) << "DUMP LOAD flag belongs to the competing operation";
+
+  handler_ctx_->after_dump_save_flag_acquired = {};
   dump_load_in_progress_ = false;
 }
 
@@ -1064,6 +1097,9 @@ class MockBinlogReader : public mysql::IBinlogReader {
     if (observed_flag_ != nullptr) {
       flag_value_at_start_ = observed_flag_->load(std::memory_order_acquire);
     }
+    if (on_start_) {
+      on_start_();
+    }
     return {};
   }
 
@@ -1072,7 +1108,12 @@ class MockBinlogReader : public mysql::IBinlogReader {
     stop_called_ = true;
   }
 
-  bool IsRunning() const override { return running_; }
+  bool IsRunning() const override {
+    if (is_running_response_index_ < is_running_responses_.size()) {
+      return is_running_responses_[is_running_response_index_++];
+    }
+    return running_;
+  }
 
   std::string GetCurrentGTID() const override { return current_gtid_; }
 
@@ -1091,6 +1132,10 @@ class MockBinlogReader : public mysql::IBinlogReader {
   // Test helpers
   void SetGtidForTest(const std::string& gtid) { current_gtid_ = gtid; }
   void SetRunningForTest(bool running) { running_ = running; }
+  void SetIsRunningResponsesForTest(std::vector<bool> responses) {
+    is_running_responses_ = std::move(responses);
+    is_running_response_index_ = 0;
+  }
   bool WasStartCalled() const { return start_called_; }
   bool WasStopCalled() const { return stop_called_; }
   bool WasSetGtidCalled() const { return set_gtid_called_; }
@@ -1109,6 +1154,8 @@ class MockBinlogReader : public mysql::IBinlogReader {
   /// Returns the value of the observed flag at the time Start() was called
   bool GetFlagValueAtStart() const { return flag_value_at_start_; }
 
+  void SetOnStart(std::function<void()> on_start) { on_start_ = std::move(on_start); }
+
  private:
   std::string current_gtid_;
   std::string last_error_;
@@ -1123,6 +1170,9 @@ class MockBinlogReader : public mysql::IBinlogReader {
   std::string last_set_gtid_;
   std::atomic<bool>* observed_flag_ = nullptr;
   bool flag_value_at_start_ = false;
+  std::function<void()> on_start_;
+  mutable std::vector<bool> is_running_responses_;
+  mutable size_t is_running_response_index_ = 0;
 };
 
 /**
@@ -1179,6 +1229,7 @@ class DumpHandlerGtidTest : public ::testing::Test {
     // Add test data
     auto doc_id = table_ctx_->doc_store->AddDocument("pk1", {{"content", "test document one"}});
     table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id), "test document one");
+    table_ctx_->doc_store->SetNormalizedText(*doc_id, "test document one");
 
     // Create test file path
     test_filepath_ = (test_dump_dir_ / ("gtid_test_" + std::to_string(getpid()) + ".dmp")).string();
@@ -1307,6 +1358,56 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRestoresGtidAndRestartsReplication) {
   EXPECT_TRUE(mock_binlog_reader_->WasStartCalled()) << "Replication should be restarted after load";
 }
 
+TEST_F(DumpHandlerGtidTest, DumpSaveDoesNotRestartReplicationStoppedAfterPauseAcquire) {
+  const std::string original_gtid = "uuid:77771";
+  mock_binlog_reader_->SetGtidForTest(original_gtid);
+  mock_binlog_reader_->SetRunningForTest(false);
+  mock_binlog_reader_->SetIsRunningResponsesForTest({true, false});
+
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Save failed: " << save_response;
+
+  EXPECT_FALSE(mock_binlog_reader_->WasStopCalled())
+      << "DUMP SAVE must not Stop() a reader already stopped by operator";
+  EXPECT_FALSE(mock_binlog_reader_->WasStartCalled())
+      << "DUMP SAVE must not restart replication when it was stopped after pause acquisition";
+  EXPECT_FALSE(replication_paused_for_dump_.load(std::memory_order_acquire));
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadDoesNotRestartReplicationStoppedAfterPauseAcquire) {
+  const std::string original_gtid = "uuid:77772";
+
+  mock_binlog_reader_->SetGtidForTest(original_gtid);
+  mock_binlog_reader_->SetRunningForTest(false);
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Save failed: " << save_response;
+
+  mock_binlog_reader_->SetGtidForTest("");
+  mock_binlog_reader_->SetRunningForTest(false);
+  mock_binlog_reader_->ResetTestFlags();
+  mock_binlog_reader_->SetIsRunningResponsesForTest({true, false});
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+  ASSERT_TRUE(load_response.find("OK LOADED") == 0) << "Load failed: " << load_response;
+
+  EXPECT_TRUE(mock_binlog_reader_->WasSetGtidCalled()) << "DUMP LOAD should still restore the dump GTID";
+  EXPECT_EQ(mock_binlog_reader_->GetLastSetGtid(), original_gtid);
+  EXPECT_FALSE(mock_binlog_reader_->WasStopCalled())
+      << "DUMP LOAD must not Stop() a reader already stopped by operator";
+  EXPECT_FALSE(mock_binlog_reader_->WasStartCalled())
+      << "DUMP LOAD must not restart replication when it was stopped after pause acquisition";
+  EXPECT_FALSE(replication_paused_for_dump_.load(std::memory_order_acquire));
+}
+
 /**
  * @brief Test that DUMP SAVE without a valid GTID fails
  */
@@ -1415,13 +1516,14 @@ TEST_F(DumpHandlerGtidTest, FreshServerDumpLoadThenManualStart) {
 }
 
 /**
- * @brief Test that server config is not overwritten by dump's stored config
+ * @brief Test that tokenizer-affecting config mismatch rejects DUMP LOAD
  *
- * The dump file stores the config at the time of save, but DUMP LOAD should
- * NOT apply this config to the running server. The server's config should
- * always come from its startup config file.
+ * The dump file stores tokenizer settings from the time of save. Loading that
+ * data under different tokenizer settings would make postings and queries
+ * disagree, so DUMP LOAD must fail loudly instead of applying dump config or
+ * silently accepting incompatible data.
  */
-TEST_F(DumpHandlerGtidTest, ConfigNotOverwrittenByDump) {
+TEST_F(DumpHandlerGtidTest, TokenizerConfigMismatchRejectsDumpLoad) {
   const std::string saved_gtid = "uuid:55555";
 
   // Setup: Save a dump with current config (ngram_size = 2)
@@ -1438,17 +1540,38 @@ TEST_F(DumpHandlerGtidTest, ConfigNotOverwrittenByDump) {
   config_->tables[0].ngram_size = new_ngram_size;
   table_ctx_->config.ngram_size = new_ngram_size;
 
-  // DUMP LOAD - should NOT change our running config
+  // DUMP LOAD should reject the incompatible dump
   query::Query load_query;
   load_query.type = query::QueryType::DUMP_LOAD;
   load_query.filepath = test_filepath_;
   std::string load_response = handler_->Handle(load_query, conn_ctx_);
-  EXPECT_TRUE(load_response.find("OK LOADED") == 0) << "Load failed: " << load_response;
+  EXPECT_TRUE(load_response.find("ERROR") == 0) << "Load should fail: " << load_response;
+  EXPECT_TRUE(load_response.find("ngram_size mismatch") != std::string::npos) << load_response;
 
   // Verify config was NOT overwritten by dump
   EXPECT_EQ(config_->tables[0].ngram_size, new_ngram_size)
       << "Config should NOT be overwritten by dump - server config takes precedence";
   EXPECT_EQ(table_ctx_->config.ngram_size, new_ngram_size) << "TableContext config should NOT be overwritten by dump";
+}
+
+TEST_F(DumpHandlerGtidTest, NormalizeConfigMismatchRejectsDumpLoad) {
+  const std::string saved_gtid = "uuid:55556";
+
+  mock_binlog_reader_->SetGtidForTest(saved_gtid);
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_dump_dir_.string() + "/normalize_config_test.dmp";
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Save failed: " << save_response;
+
+  config_->memory.normalize.lower = !config_->memory.normalize.lower;
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_dump_dir_.string() + "/normalize_config_test.dmp";
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(load_response.find("ERROR") == 0) << "Load should fail: " << load_response;
+  EXPECT_TRUE(load_response.find("memory.normalize.lower mismatch") != std::string::npos) << load_response;
 }
 
 /**
@@ -1541,6 +1664,41 @@ TEST_F(DumpHandlerGtidTest, LoadingFlagActiveDuringReplicationRestart) {
 
   // Verify flag is false after successful completion
   EXPECT_FALSE(dump_load_in_progress_);
+}
+
+TEST_F(DumpHandlerGtidTest, Bm25StatsRebuiltBeforeReplicationRestart) {
+  const std::string test_gtid = "uuid:55555";
+
+  mock_binlog_reader_->SetGtidForTest(test_gtid);
+  mock_binlog_reader_->SetRunningForTest(true);
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_dump_dir_.string() + "/bm25_order_test.dmp";
+  std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << "Save failed: " << save_response;
+
+  table_ctx_->bm25_stats.total_doc_length.store(0, std::memory_order_relaxed);
+  table_ctx_->bm25_stats.doc_count.store(0, std::memory_order_relaxed);
+
+  uint64_t total_length_at_start = 0;
+  uint64_t doc_count_at_start = 0;
+  mock_binlog_reader_->SetGtidForTest("");
+  mock_binlog_reader_->SetRunningForTest(true);
+  mock_binlog_reader_->ResetTestFlags();
+  mock_binlog_reader_->SetOnStart([this, &total_length_at_start, &doc_count_at_start]() {
+    total_length_at_start = table_ctx_->bm25_stats.total_doc_length.load(std::memory_order_relaxed);
+    doc_count_at_start = table_ctx_->bm25_stats.doc_count.load(std::memory_order_relaxed);
+  });
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_dump_dir_.string() + "/bm25_order_test.dmp";
+  std::string load_response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(load_response.find("OK LOADED") == 0) << "Load failed: " << load_response;
+
+  ASSERT_TRUE(mock_binlog_reader_->WasStartCalled());
+  EXPECT_EQ(total_length_at_start, 17u);
+  EXPECT_EQ(doc_count_at_start, 1u);
 }
 
 // ============================================================================

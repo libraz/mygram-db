@@ -46,9 +46,9 @@
         },
         "binlog_format": {
           "type": "string",
-          "description": "Binary log format",
+          "description": "Binary log format. MygramDB requires ROW because replication consumes row-level events.",
           "default": "ROW",
-          "enum": ["ROW", "STATEMENT", "MIXED"]
+          "enum": ["ROW"]
         },
         "binlog_row_image": {
           "type": "string",
@@ -453,7 +453,7 @@
         },
         "minute_epoch": {
           "type": "boolean",
-          "description": "Use minute-precision epoch",
+          "description": "Reserved / not yet enforced: minute-precision epoch",
           "default": true
         },
         "normalize": {
@@ -812,7 +812,7 @@
         },
         "invalidation_strategy": {
           "type": "string",
-          "description": "Reserved / not yet enforced: only ngram invalidation is currently used",
+          "description": "Cache invalidation strategy: ngram for precise invalidation, table for coarse table-level invalidation",
           "default": "ngram",
           "enum": ["ngram", "table"]
         },

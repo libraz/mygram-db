@@ -179,6 +179,32 @@ void WriteManualV2Dump(const std::string& filepath, const Config& config,
   ASSERT_TRUE(patched.good());
 }
 
+std::vector<char> ReadFileBytes(const std::string& filepath) {
+  std::ifstream input(filepath, std::ios::binary | std::ios::ate);
+  EXPECT_TRUE(input);
+  auto size = static_cast<size_t>(input.tellg());
+  std::vector<char> file_data(size);
+  input.seekg(0);
+  input.read(file_data.data(), static_cast<std::streamsize>(size));
+  EXPECT_TRUE(input.good());
+  return file_data;
+}
+
+void WriteFileBytes(const std::string& filepath, const std::vector<char>& file_data) {
+  std::ofstream output(filepath, std::ios::binary | std::ios::trunc);
+  EXPECT_TRUE(output);
+  output.write(file_data.data(), static_cast<std::streamsize>(file_data.size()));
+  EXPECT_TRUE(output.good());
+}
+
+void RewriteFileCrc(std::vector<char>& file_data) {
+  size_t file_crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
+  std::memset(&file_data[file_crc_offset], 0, sizeof(uint32_t));
+  auto crc = static_cast<uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_data.size())));
+  std::memcpy(&file_data[file_crc_offset], &crc, sizeof(crc));
+}
+
 /// RAII guard that cleans up a temp file on construction and destruction.
 /// Ensures cleanup even if the test fails mid-way.
 struct ScopedCleanup {
@@ -453,6 +479,62 @@ TEST(DumpFormatV2Test, FailedMultiTableLoadLeavesExistingTablesUnchanged) {
   EXPECT_EQ(existing_articles_store.GetPrimaryKey(*old_doc_id), std::optional<std::string>("old-article"));
   EXPECT_EQ(existing_articles_index.Count("ol"), 1u);
   EXPECT_EQ(existing_articles_index.Count("ne"), 0u);
+}
+
+TEST(DumpFormatV2Test, SuccessfulMultiTableLoadReplacesAllTablesTogether) {
+  auto filepath = TempFilePath("successful_multitable_atomicity");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  TableConfig comments = cfg.tables[0];
+  comments.name = "comments";
+  cfg.tables.push_back(comments);
+
+  Index source_articles_index(2, 1);
+  ASSERT_TRUE(source_articles_index.AddDocument(1, "new article text"));
+  DocumentStore source_articles_store;
+  ASSERT_TRUE(source_articles_store.AddDocument("new-article", {}, "new article text").has_value());
+  const auto articles_section = BuildTableSectionData("articles", SerializeIndex(source_articles_index),
+                                                      SerializeDocStore(source_articles_store));
+
+  Index source_comments_index(2, 1);
+  ASSERT_TRUE(source_comments_index.AddDocument(1, "new comment text"));
+  DocumentStore source_comments_store;
+  ASSERT_TRUE(source_comments_store.AddDocument("new-comment", {}, "new comment text").has_value());
+  const auto comments_section = BuildTableSectionData("comments", SerializeIndex(source_comments_index),
+                                                      SerializeDocStore(source_comments_store));
+
+  WriteManualV2Dump(filepath, cfg, {articles_section, comments_section});
+
+  DocumentStore existing_articles_store;
+  auto old_article_doc_id = existing_articles_store.AddDocument("old-article", {}, "old article text");
+  ASSERT_TRUE(old_article_doc_id.has_value()) << old_article_doc_id.error().message();
+  Index existing_articles_index(2, 1);
+  ASSERT_TRUE(existing_articles_index.AddDocument(*old_article_doc_id, "old article text"));
+
+  DocumentStore existing_comments_store;
+  auto old_comment_doc_id = existing_comments_store.AddDocument("old-comment", {}, "old comment text");
+  ASSERT_TRUE(old_comment_doc_id.has_value()) << old_comment_doc_id.error().message();
+  Index existing_comments_index(2, 1);
+  ASSERT_TRUE(existing_comments_index.AddDocument(*old_comment_doc_id, "old comment text"));
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["comments"] = {&existing_comments_index, &existing_comments_store};
+  read_contexts["articles"] = {&existing_articles_index, &existing_articles_store};
+
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+
+  ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+  EXPECT_EQ(existing_articles_store.GetDocId("old-article"), std::nullopt);
+  EXPECT_EQ(existing_comments_store.GetDocId("old-comment"), std::nullopt);
+  EXPECT_TRUE(existing_articles_store.GetDocId("new-article").has_value());
+  EXPECT_TRUE(existing_comments_store.GetDocId("new-comment").has_value());
+  EXPECT_EQ(existing_articles_index.Count("ne"), 1u);
+  EXPECT_EQ(existing_comments_index.Count("ne"), 1u);
+  EXPECT_EQ(existing_articles_index.Count("ol"), 0u);
+  EXPECT_EQ(existing_comments_index.Count("ol"), 0u);
 }
 
 TEST(DumpFormatV2Test, LoadFailsWhenConfiguredTableIsMissingFromDump) {
@@ -762,6 +844,59 @@ TEST(DumpFormatV2Test, FileCRCCorruptionDetected) {
   EXPECT_EQ(error.type, dump_format::CRCErrorType::FileCRC);
 
   cleanup();
+}
+
+TEST(DumpFormatV2Test, VerifyRejectsDeclaredSectionCountPastEndWithValidFileCrc) {
+  auto filepath = TempFilePath("verify_section_count_past_end");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index idx;
+  DocumentStore ds;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts;
+  contexts["articles"] = {&idx, &ds};
+
+  ASSERT_TRUE(WriteDumpV2(filepath, "GTID:section-count", cfg, contexts).has_value());
+
+  auto file_data = ReadFileBytes(filepath);
+  uint32_t section_count = 0;
+  std::memcpy(&section_count, &file_data[static_cast<size_t>(kV2HeaderSectionCountOffset)], sizeof(section_count));
+  ++section_count;
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderSectionCountOffset)], &section_count, sizeof(section_count));
+  RewriteFileCrc(file_data);
+  WriteFileBytes(filepath, file_data);
+
+  dump_format::IntegrityError error;
+  auto result = VerifyDumpIntegrity(filepath, error);
+  EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(error.type, dump_format::CRCErrorType::SectionCRC);
+  EXPECT_NE(error.message.find("section envelope"), std::string::npos) << error.message;
+}
+
+TEST(DumpFormatV2Test, GetDumpInfoRejectsDeclaredSectionCountPastEnd) {
+  auto filepath = TempFilePath("info_section_count_past_end");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index idx;
+  DocumentStore ds;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts;
+  contexts["articles"] = {&idx, &ds};
+
+  ASSERT_TRUE(WriteDumpV2(filepath, "GTID:section-count-info", cfg, contexts).has_value());
+
+  auto file_data = ReadFileBytes(filepath);
+  uint32_t section_count = 0;
+  std::memcpy(&section_count, &file_data[static_cast<size_t>(kV2HeaderSectionCountOffset)], sizeof(section_count));
+  ++section_count;
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderSectionCountOffset)], &section_count, sizeof(section_count));
+  RewriteFileCrc(file_data);
+  WriteFileBytes(filepath, file_data);
+
+  DumpV2Info info;
+  auto result = GetDumpInfo(filepath, info);
+  EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("section envelope"), std::string::npos) << result.error().message();
 }
 
 TEST(DumpFormatV2Test, ReadRejectsZeroTotalFileSizeHeader) {

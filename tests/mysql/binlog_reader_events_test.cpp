@@ -196,7 +196,7 @@ TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
   reader_->SetCurrentGTID("uuid:10");
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10");
   reader_->UpdateCurrentGTID("uuid:11");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:11");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10-11");
 }
 
 /**
@@ -422,11 +422,12 @@ TEST_F(BinlogReaderFixture, FilterValueSizeValidation) {
 TEST_F(BinlogReaderFixture, HandlesTaggedGTIDFormat) {
   // Standard GTID format
   reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:42");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:42");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:42,uuid:1");
 
   // Tagged GTID format (MySQL 8.4+)
   reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100");
+  EXPECT_EQ(reader_->GetCurrentGTID(),
+            "01020304-0506-0708-090a-0b0c0d0e0f10:42,01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100,uuid:1");
 }
 
 /**

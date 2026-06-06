@@ -130,7 +130,8 @@ class HttpServer {
   HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
              const config::Config* full_config = nullptr, mysql::IBinlogReader* binlog_reader = nullptr,
              cache::CacheManager* cache_manager = nullptr, std::atomic<bool>* loading = nullptr,
-             ServerStats* tcp_stats = nullptr, std::shared_ptr<RateLimiter> rate_limiter = nullptr);
+             ServerStats* tcp_stats = nullptr, std::shared_ptr<RateLimiter> rate_limiter = nullptr,
+             std::atomic<bool>* replication_paused_for_dump = nullptr);
 
   ~HttpServer();
 
@@ -246,6 +247,7 @@ class HttpServer {
   std::vector<mygram::utils::CIDR> parsed_allow_cidrs_;
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
   ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
+  std::atomic<bool>* replication_paused_for_dump_ = nullptr;
 
   /**
    * @brief Setup routes

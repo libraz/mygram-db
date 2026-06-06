@@ -591,6 +591,25 @@ TEST_F(BinlogReaderFixture, MySqlCurrentGtidTracksAllUuids) {
             "cccccccc-cccc-cccc-cccc-cccccccccccc:7");
 }
 
+TEST_F(BinlogReaderFixture, MySqlCurrentGtidPromotesSingleGtidToSet) {
+  reader_->SetCurrentGTID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:100");
+
+  reader_->UpdateCurrentGTID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:7");
+
+  EXPECT_EQ(reader_->GetCurrentGTID(),
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:7");
+}
+
+TEST_F(BinlogReaderFixture, MySqlCurrentGtidMergesTaggedGtidWithoutDroppingUuids) {
+  reader_->SetCurrentGTID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-50");
+
+  reader_->UpdateCurrentGTID("cccccccc-cccc-cccc-cccc-cccccccccccc:release_2026:7");
+
+  EXPECT_EQ(reader_->GetCurrentGTID(),
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-50,"
+            "cccccccc-cccc-cccc-cccc-cccccccccccc:release_2026:7");
+}
+
 TEST_F(BinlogReaderFixture, MariaDbCurrentGtidTracksAllDomains) {
   reader_->SetCurrentGTID("0-1-10,1-2-20");
 
@@ -629,6 +648,25 @@ TEST_F(BinlogReaderFixture, ReconnectionAlwaysUsesCurrentGtid) {
 
   // Must be "uuid1:1-500" (from current_gtid_), NOT "uuid1:1-510" (from executed_gtid_set_)
   EXPECT_EQ(gtid_for_reconnect, "uuid1:1-500");
+}
+
+TEST_F(BinlogReaderFixture, ValidationGtidUsesCurrentGtidNotExecutedSet) {
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    reader_->current_gtid_ = "uuid1:103";
+    reader_->executed_gtid_set_ = "uuid1:1-200,uuid2:1-50";
+  }
+
+  std::optional<std::string> current_gtid_for_validation;
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    if (!reader_->current_gtid_.empty()) {
+      current_gtid_for_validation = BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_);
+    }
+  }
+
+  ASSERT_TRUE(current_gtid_for_validation.has_value());
+  EXPECT_EQ(*current_gtid_for_validation, "uuid1:1-103");
 }
 
 // ===========================================================================

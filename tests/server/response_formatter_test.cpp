@@ -9,8 +9,10 @@
 
 #include "cache/cache_manager.h"
 #include "cache/cache_types.h"
+#include "client/protocol_detection.h"
 #include "config/config.h"
 #include "index/index.h"
+#include "mysql/binlog_reader_interface.h"
 #include "server/server_stats.h"
 #include "server/statistics_service.h"
 #include "server/tcp_server.h"  // For TableContext
@@ -18,6 +20,29 @@
 
 using namespace mygramdb::server;
 using namespace mygramdb;
+
+#ifdef USE_MYSQL
+class MockResponseBinlogReader final : public mysql::IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+    running = true;
+    return {};
+  }
+  void Stop() override { running = false; }
+  bool IsRunning() const override { return running; }
+  std::string GetCurrentGTID() const override { return current_gtid; }
+  void SetCurrentGTID(const std::string& gtid) override { current_gtid = gtid; }
+  std::string GetLastError() const override { return last_error; }
+  uint64_t GetProcessedEvents() const override { return processed_events; }
+  size_t GetQueueSize() const override { return queue_size; }
+
+  bool running = false;
+  std::string current_gtid = "uuid:1-10";
+  std::string last_error;
+  uint64_t processed_events = 42;
+  size_t queue_size = 9;
+};
+#endif
 
 class ResponseFormatterTest : public ::testing::Test {
  protected:
@@ -214,7 +239,15 @@ TEST_F(ResponseFormatterTest, FormatFacetResponseSanitizesLineDelimiters) {
 
   std::string response = ResponseFormatter::FormatFacetResponse(value_counts);
 
-  EXPECT_EQ(response, "OK FACET 1\r\nvalue  next part\t3\r\n");
+  EXPECT_EQ(response, "OK FACET 1\r\nvalue  next part\t3\r\n\r\n");
+}
+
+TEST_F(ResponseFormatterTest, FormatFacetResponseTerminatesTransportFrame) {
+  std::vector<std::pair<std::string, uint64_t>> value_counts = {{"alpha", 2}, {"beta", 1}};
+
+  std::string response = ResponseFormatter::FormatFacetResponse(value_counts);
+
+  EXPECT_TRUE(client::detail::IsResponseComplete(response)) << response;
 }
 
 /**
@@ -405,6 +438,23 @@ TEST_F(ResponseFormatterTest, FormatReplicationStartResponse) {
               response.find("started") != std::string::npos);
 }
 
+#ifdef USE_MYSQL
+TEST_F(ResponseFormatterTest, FormatReplicationStatusIncludesQueueSizeWhenStopped) {
+  MockResponseBinlogReader reader;
+  reader.running = false;
+  reader.current_gtid = "uuid:1-100";
+  reader.processed_events = 321;
+  reader.queue_size = 11;
+
+  std::string response = ResponseFormatter::FormatReplicationStatusResponse(&reader);
+
+  EXPECT_NE(response.find("status: stopped\r\n"), std::string::npos);
+  EXPECT_NE(response.find("current_gtid: uuid:1-100\r\n"), std::string::npos);
+  EXPECT_NE(response.find("processed_events: 321\r\n"), std::string::npos);
+  EXPECT_NE(response.find("queue_size: 11\r\n"), std::string::npos);
+}
+#endif
+
 /**
  * @brief Test error response formatting
  */
@@ -434,6 +484,15 @@ TEST_F(ResponseFormatterTest, FormatErrorSanitizesLineBreaksForSingleLineProtoco
   EXPECT_EQ(response.find('\t'), std::string::npos);
   EXPECT_NE(response.find("Configuration validation failed:"), std::string::npos);
   EXPECT_NE(response.find("missing table name"), std::string::npos);
+}
+
+TEST_F(ResponseFormatterTest, SanitizeDelimitedFieldRemovesFrameDelimiters) {
+  std::string sanitized = ResponseFormatter::SanitizeDelimitedField("bad\r\nEND\r\nvalue\tmore");
+
+  EXPECT_EQ(sanitized.find('\r'), std::string::npos);
+  EXPECT_EQ(sanitized.find('\n'), std::string::npos);
+  EXPECT_EQ(sanitized.find('\t'), std::string::npos);
+  EXPECT_NE(sanitized.find("END"), std::string::npos);
 }
 
 /**

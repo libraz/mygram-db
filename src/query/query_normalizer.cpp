@@ -59,14 +59,15 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const std::str
     result.append(NormalizeFilters(query.filters));
   }
 
-  // Add SORT clause (with default if not specified)
-  result += ' ';
-  result.append(NormalizeSortClause(query.order_by, query.table, primary_key_column));
+  if (query.fuzzy_max_distance.has_value()) {
+    result += " FUZZY ";
+    result += std::to_string(*query.fuzzy_max_distance);
+  }
 
-  // Note: LIMIT and OFFSET are intentionally excluded from cache key.
-  // The cache stores full results (before pagination), and LIMIT/OFFSET
-  // are applied when retrieving from cache. This allows a single cache
-  // entry to serve all pagination requests for the same query.
+  (void)primary_key_column;
+  // Note: LIMIT, OFFSET, and SORT are intentionally excluded from cache key.
+  // The cache stores full unsorted results, and presentation concerns are
+  // applied by the request handler after lookup.
 
   return result;
 }
@@ -163,57 +164,11 @@ std::string QueryNormalizer::NormalizeFilters(const std::vector<query::FilterCon
     result.append("FILTER ");
     result += sorted_filters[i].column;
     result += ' ';
-    result.append(FilterOpToString(sorted_filters[i].op));
+    result.append(query::FilterOpToString(sorted_filters[i].op));
     result += ' ';
     result += sorted_filters[i].value;
   }
   return result;
-}
-
-std::string QueryNormalizer::NormalizeSortClause(const std::optional<query::OrderByClause>& sort,
-                                                 const std::string& /* table */,
-                                                 const std::string& primary_key_column) {
-  std::string result("SORT ");
-
-  if (sort.has_value()) {
-    // Normalize PK column name to canonical placeholder (case-insensitive)
-    std::string sort_col_lower = mygram::utils::ToLower(sort->column);
-    std::string pk_col_lower = mygram::utils::ToLower(primary_key_column);
-    if (sort->column.empty() || sort_col_lower == pk_col_lower) {
-      result.append("__pk__");
-    } else {
-      result += sort->column;
-    }
-    result += ' ';
-    result.append(sort->order == query::SortOrder::ASC ? "ASC" : "DESC");
-  } else {
-    // Default: primary key DESC
-    result.append("__pk__ DESC");
-  }
-
-  return result;
-}
-
-// NOTE: A separate FilterOpToString exists in search_pipeline.cpp for runtime
-// filter comparison, returning string_view with "" as default. This version
-// returns "=" as default for cache-key normalization. Intentionally separate.
-std::string QueryNormalizer::FilterOpToString(query::FilterOp filter_op) {
-  switch (filter_op) {
-    case query::FilterOp::EQ:
-      return "=";
-    case query::FilterOp::NE:
-      return "!=";
-    case query::FilterOp::GT:
-      return ">";
-    case query::FilterOp::GTE:
-      return ">=";
-    case query::FilterOp::LT:
-      return "<";
-    case query::FilterOp::LTE:
-      return "<=";
-    default:
-      return "=";
-  }
 }
 
 }  // namespace mygramdb::cache

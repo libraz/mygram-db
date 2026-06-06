@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 
 #include "cache/cache_manager.h"
@@ -43,6 +44,46 @@ mygram::utils::Expected<std::string, mygram::utils::Error> ResolveDumpFilepath(c
                                                                                const std::string& dump_dir) {
   return mygram::utils::ResolveSafePath(input, dump_dir, /*allowed_extensions=*/{},
                                         /*base_dir_label=*/"dump directory");
+}
+
+const config::TableConfig* FindTableConfigByName(const config::Config& config, const std::string& table_name) {
+  for (const auto& table : config.tables) {
+    if (table.name == table_name) {
+      return &table;
+    }
+  }
+  return nullptr;
+}
+
+std::optional<std::string> FindTokenizerConfigMismatch(const config::Config& loaded_config,
+                                                       const config::Config& live_config) {
+  if (loaded_config.memory.normalize.nfkc != live_config.memory.normalize.nfkc) {
+    return "memory.normalize.nfkc mismatch between dump and running config";
+  }
+  if (loaded_config.memory.normalize.width != live_config.memory.normalize.width) {
+    return "memory.normalize.width mismatch between dump and running config";
+  }
+  if (loaded_config.memory.normalize.lower != live_config.memory.normalize.lower) {
+    return "memory.normalize.lower mismatch between dump and running config";
+  }
+
+  for (const auto& loaded_table : loaded_config.tables) {
+    const auto* live_table = FindTableConfigByName(live_config, loaded_table.name);
+    if (live_table == nullptr) {
+      continue;
+    }
+    if (loaded_table.ngram_size != live_table->ngram_size) {
+      return "table '" + loaded_table.name + "' ngram_size mismatch between dump and running config";
+    }
+    if (loaded_table.kanji_ngram_size != live_table->kanji_ngram_size) {
+      return "table '" + loaded_table.name + "' kanji_ngram_size mismatch between dump and running config";
+    }
+    if (loaded_table.cross_boundary_ngrams != live_table->cross_boundary_ngrams) {
+      return "table '" + loaded_table.name + "' cross_boundary_ngrams mismatch between dump and running config";
+    }
+  }
+
+  return std::nullopt;
 }
 
 }  // namespace
@@ -137,6 +178,21 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     return ResponseFormatter::FormatError(
         "Cannot save dump while another DUMP SAVE is in progress. "
         "Please wait for current save to complete or use DUMP STATUS to check progress.");
+  }
+  if (ctx_.after_dump_save_flag_acquired) {
+    ctx_.after_dump_save_flag_acquired();
+  }
+  if (ctx_.dump_load_in_progress.load()) {
+    flag_guard.Release();
+    return ResponseFormatter::FormatError(
+        "Cannot save dump while DUMP LOAD is in progress. "
+        "Please wait for load to complete.");
+  }
+  if (ctx_.optimization_in_progress.load()) {
+    flag_guard.Release();
+    return ResponseFormatter::FormatError(
+        "Cannot save dump while OPTIMIZE is in progress. "
+        "Please wait for optimization to complete.");
   }
 
   // Capture the current GTID once for both async/sync log paths so the
@@ -261,10 +317,18 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
     if (replication_was_running) {
       first_pauser = pause_scope.Acquire();
       if (first_pauser) {
-        ctx_.binlog_reader->Stop();
-        gtid = ctx_.binlog_reader->GetCurrentGTID();
-        ctx_.replication_pause_counter->PublishDrainedGTID(gtid);
-        ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+        if (!ctx_.binlog_reader->IsRunning()) {
+          gtid = ctx_.binlog_reader->GetCurrentGTID();
+          ctx_.replication_pause_counter->PublishDrainedGTID(gtid);
+          pause_scope.Release();
+          replication_was_running = false;
+          first_pauser = false;
+        } else {
+          ctx_.binlog_reader->Stop();
+          gtid = ctx_.binlog_reader->GetCurrentGTID();
+          ctx_.replication_pause_counter->PublishDrainedGTID(gtid);
+          ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+        }
       } else {
         gtid = ctx_.replication_pause_counter->WaitForDrainedGTID();
       }
@@ -513,10 +577,19 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   if (replication_was_running && ctx_.binlog_reader != nullptr) {
     first_pauser = pause_scope.Acquire();
     if (first_pauser) {
-      ctx_.binlog_reader->Stop();
-      ctx_.replication_pause_counter->PublishDrainedGTID(ctx_.binlog_reader->GetCurrentGTID());
-      ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+      if (!ctx_.binlog_reader->IsRunning()) {
+        ctx_.replication_pause_counter->PublishDrainedGTID(ctx_.binlog_reader->GetCurrentGTID());
+        pause_scope.Release();
+        replication_was_running = false;
+        first_pauser = false;
+      } else {
+        ctx_.binlog_reader->Stop();
+        ctx_.replication_pause_counter->PublishDrainedGTID(ctx_.binlog_reader->GetCurrentGTID());
+        ctx_.replication_paused_for_dump.store(true, std::memory_order_release);
+      }
     }
+  }
+  if (replication_was_running) {
     mygram::utils::StructuredLog()
         .Event("replication_paused")
         .Field("operation", "dump_load")
@@ -595,12 +668,38 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   storage::dump_format::IntegrityError integrity_error;
 
   // Call dump API (auto-detects V1 or V2 format)
-  auto result =
-      storage::dump_v2::ReadDump(filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error);
+  auto result = storage::dump_v2::ReadDump(
+      filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error,
+      [this](const config::Config& dump_config) -> mygram::utils::Expected<void, mygram::utils::Error> {
+        if (ctx_.full_config == nullptr) {
+          return {};
+        }
+        if (auto mismatch = FindTokenizerConfigMismatch(dump_config, *ctx_.full_config); mismatch.has_value()) {
+          mygram::utils::StructuredLog()
+              .Event("dump_load_rejected")
+              .Field("reason", "tokenizer_config_mismatch")
+              .Field("detail", *mismatch)
+              .Error();
+          return mygram::utils::MakeUnexpected(
+              mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, *mismatch));
+        }
+        return {};
+      });
 
   // The loading guard remains active through replication restart and cache
   // rebuild. It is released only after the success path completes, ensuring
   // dump_load_in_progress stays true if the load failed.
+
+  if (result && ctx_.full_config != nullptr) {
+    if (auto mismatch = FindTokenizerConfigMismatch(loaded_config, *ctx_.full_config); mismatch.has_value()) {
+      mygram::utils::StructuredLog()
+          .Event("dump_load_rejected")
+          .Field("reason", "tokenizer_config_mismatch")
+          .Field("detail", *mismatch)
+          .Error();
+      return ResponseFormatter::FormatError("Cannot load dump: " + *mismatch);
+    }
+  }
 
 #ifdef USE_MYSQL
   // Update GTID from loaded dump (if load was successful and GTID is available)
@@ -614,7 +713,37 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         .Field("source", "dump_load")
         .Info();
   }
+#endif
 
+  if (result) {
+    // Clear search cache after successful load before replication can append
+    // new mutations to the freshly loaded state.
+    if (ctx_.cache_manager != nullptr) {
+      ctx_.cache_manager->Clear();
+    }
+
+    // Rebuild BM25 corpus statistics from loaded documents while replication
+    // is still paused. This prevents binlog-applied deltas from being
+    // overwritten by the rebuild stores below.
+    for (const auto& [table_name, table_ctx] : ctx_.table_catalog->GetTables()) {
+      if (table_ctx->doc_store) {
+        auto all_doc_ids = table_ctx->doc_store->GetAllDocIds();
+        auto all_texts = table_ctx->doc_store->GetNormalizedTextBatch(all_doc_ids);
+        uint64_t total_length = 0;
+        uint64_t doc_count = 0;
+        for (const auto& text_opt : all_texts) {
+          if (text_opt.has_value() && !text_opt->empty()) {
+            total_length += mygram::utils::CountCodePoints(*text_opt);
+            ++doc_count;
+          }
+        }
+        table_ctx->bm25_stats.total_doc_length.store(total_length, std::memory_order_relaxed);
+        table_ctx->bm25_stats.doc_count.store(doc_count, std::memory_order_relaxed);
+      }
+    }
+  }
+
+#ifdef USE_MYSQL
   // Auto-restart replication after DUMP LOAD (only if it was running before).
   // The success path performs the restart explicitly and then dismisses the
   // ScopeGuard so the restart is not duplicated. Error paths fall through to
@@ -693,30 +822,6 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 #endif
 
   if (result) {
-    // Clear search cache after successful load — cached results reference old data
-    if (ctx_.cache_manager != nullptr) {
-      ctx_.cache_manager->Clear();
-    }
-
-    // Rebuild BM25 corpus statistics from loaded documents.
-    // Use batch API to minimize per-document lock acquisitions.
-    for (const auto& [table_name, table_ctx] : ctx_.table_catalog->GetTables()) {
-      if (table_ctx->doc_store) {
-        auto all_doc_ids = table_ctx->doc_store->GetAllDocIds();
-        auto all_texts = table_ctx->doc_store->GetNormalizedTextBatch(all_doc_ids);
-        uint64_t total_length = 0;
-        uint64_t doc_count = 0;
-        for (const auto& text_opt : all_texts) {
-          if (text_opt.has_value() && !text_opt->empty()) {
-            total_length += mygram::utils::CountCodePoints(*text_opt);
-            ++doc_count;
-          }
-        }
-        table_ctx->bm25_stats.total_doc_length.store(total_length, std::memory_order_relaxed);
-        table_ctx->bm25_stats.doc_count.store(doc_count, std::memory_order_relaxed);
-      }
-    }
-
     mygram::utils::StructuredLog()
         .Event("dump_load_completed")
         .Field(log_fields::kFieldFilepath, filepath)
@@ -760,7 +865,7 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
 
   if (result) {
     mygram::utils::StructuredLog().Event("dump_verify_succeeded").Field(log_fields::kFieldFilepath, filepath).Info();
-    return ResponseFormatter::FormatStatus("DUMP_VERIFIED " + filepath);
+    return ResponseFormatter::FormatStatus("DUMP_VERIFIED " + ResponseFormatter::SanitizeDelimitedField(filepath));
   }
 
   std::string error_msg = "Dump verification failed for " + filepath + ": " + result.error().message();
@@ -804,9 +909,9 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
   // DUMP LOAD to accept the basename and resolve it against the server-side
   // dump_dir.
   std::ostringstream result;
-  result << protocol::kOkDumpInfoPrefix << " " << filepath << "\r\n";
+  result << protocol::kOkDumpInfoPrefix << " " << ResponseFormatter::SanitizeDelimitedField(filepath) << "\r\n";
   result << "version: " << info.version << "\r\n";
-  result << "gtid: " << info.gtid << "\r\n";
+  result << "gtid: " << ResponseFormatter::SanitizeDelimitedField(info.gtid) << "\r\n";
   result << "tables: " << info.table_count << "\r\n";
   result << "flags: " << info.flags << "\r\n";
   result << "file_size: " << info.file_size << "\r\n";
@@ -858,12 +963,13 @@ std::string DumpHandler::HandleDumpStatus() {
 
     // Show progress details if operation in progress or recently completed/failed
     if (progress_snapshot.status != DumpStatus::IDLE) {
-      result << "filepath: " << progress_snapshot.filepath << "\r\n";
+      result << "filepath: " << ResponseFormatter::SanitizeDelimitedField(progress_snapshot.filepath) << "\r\n";
       result << "tables_processed: " << progress_snapshot.tables_processed << "\r\n";
       result << "tables_total: " << progress_snapshot.tables_total << "\r\n";
 
       if (!progress_snapshot.current_table.empty()) {
-        result << "current_table: " << progress_snapshot.current_table << "\r\n";
+        result << "current_table: " << ResponseFormatter::SanitizeDelimitedField(progress_snapshot.current_table)
+               << "\r\n";
       }
 
       // Show elapsed time
@@ -872,12 +978,13 @@ std::string DumpHandler::HandleDumpStatus() {
 
       // Show error message if failed
       if (progress_snapshot.status == DumpStatus::FAILED && !progress_snapshot.error_message.empty()) {
-        result << "error: " << progress_snapshot.error_message << "\r\n";
+        result << "error: " << ResponseFormatter::SanitizeDelimitedField(progress_snapshot.error_message) << "\r\n";
       }
 
       // Show last result filepath if completed
       if (progress_snapshot.status == DumpStatus::COMPLETED && !progress_snapshot.last_result_filepath.empty()) {
-        result << "result_filepath: " << progress_snapshot.last_result_filepath << "\r\n";
+        result << "result_filepath: "
+               << ResponseFormatter::SanitizeDelimitedField(progress_snapshot.last_result_filepath) << "\r\n";
       }
     }
   } else {

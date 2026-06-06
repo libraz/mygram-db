@@ -89,12 +89,16 @@ Expected<void, Error> AtomicFileWriter::Commit() {
   }
 
   if (fsync(file_desc) != 0) {
+    const int saved_errno = errno;
+    close(file_desc);
     StructuredLog()
-        .Event("storage_warning")
+        .Event("storage_error")
         .Field("operation", "fsync_temp_file")
         .Field("filepath", temp_filepath_)
-        .Field("errno", static_cast<int64_t>(errno))
-        .Warn();
+        .Field("errno", static_cast<int64_t>(saved_errno))
+        .Error();
+    Rollback();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to fsync temp file", temp_filepath_));
   }
   close(file_desc);
 #endif
@@ -124,12 +128,15 @@ Expected<void, Error> AtomicFileWriter::Commit() {
     int dir_file_desc = open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
     if (dir_file_desc >= 0) {
       if (fsync(dir_file_desc) != 0) {
+        const int saved_errno = errno;
+        close(dir_file_desc);
         StructuredLog()
-            .Event("storage_warning")
+            .Event("storage_error")
             .Field("operation", "fsync_directory")
             .Field("filepath", parent_dir.empty() ? "." : parent_dir.string())
-            .Field("errno", static_cast<int64_t>(errno))
-            .Warn();
+            .Field("errno", static_cast<int64_t>(saved_errno))
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to fsync output directory", filepath_));
       }
       close(dir_file_desc);
     }

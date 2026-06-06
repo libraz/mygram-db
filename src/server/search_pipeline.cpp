@@ -112,6 +112,80 @@ void CollectAstTerms(const query::QueryNode& node, std::vector<std::string>& ter
   }
 }
 
+void CollectAstScoringTerms(const query::QueryNode& node, std::vector<std::string>& terms, bool under_not = false) {
+  if (node.type == query::NodeType::NOT) {
+    for (const auto& child : node.children) {
+      if (child != nullptr) {
+        CollectAstScoringTerms(*child, terms, true);
+      }
+    }
+    return;
+  }
+
+  if (node.type == query::NodeType::TERM) {
+    if (!under_not) {
+      terms.push_back(node.term);
+    }
+    return;
+  }
+
+  for (const auto& child : node.children) {
+    if (child != nullptr) {
+      CollectAstScoringTerms(*child, terms, under_not);
+    }
+  }
+}
+
+bool ContainsEmptyPostingTerm(const std::vector<SearchTermInfo>& term_infos) {
+  return std::any_of(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& term_info) {
+    return term_info.ngrams.empty() || term_info.estimated_size == 0 ||
+           term_info.estimated_size == std::numeric_limits<size_t>::max();
+  });
+}
+
+bool BooleanAstMatchesNormalizedText(const query::QueryNode& node, const std::string& normalized_text,
+                                     index::Index* current_index) {
+  switch (node.type) {
+    case query::NodeType::TERM: {
+      const std::string normalized_term = current_index->NormalizeText(node.term);
+      return !normalized_term.empty() && normalized_text.find(normalized_term) != std::string::npos;
+    }
+    case query::NodeType::AND:
+      return std::all_of(node.children.begin(), node.children.end(), [&](const auto& child) {
+        return child != nullptr && BooleanAstMatchesNormalizedText(*child, normalized_text, current_index);
+      });
+    case query::NodeType::OR:
+      return std::any_of(node.children.begin(), node.children.end(), [&](const auto& child) {
+        return child != nullptr && BooleanAstMatchesNormalizedText(*child, normalized_text, current_index);
+      });
+    case query::NodeType::NOT:
+      if (node.children.empty() || node.children[0] == nullptr) {
+        return true;
+      }
+      return !BooleanAstMatchesNormalizedText(*node.children[0], normalized_text, current_index);
+  }
+  return false;
+}
+
+std::vector<storage::DocId> PostFilterByBooleanText(const std::vector<storage::DocId>& candidates,
+                                                    const query::QueryNode& ast, index::Index* current_index,
+                                                    storage::DocumentStore* doc_store) {
+  auto texts = doc_store->GetNormalizedTextBatch(candidates);
+
+  std::vector<storage::DocId> verified;
+  verified.reserve(candidates.size());
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    if (!texts[i].has_value()) {
+      verified.push_back(candidates[i]);
+      continue;
+    }
+    if (BooleanAstMatchesNormalizedText(ast, *texts[i], current_index)) {
+      verified.push_back(candidates[i]);
+    }
+  }
+  return verified;
+}
+
 /// Intersect accumulator with new sorted results (AND semantics).
 /// On first call (is_first=true), moves new_results into accumulator.
 /// Returns false if accumulator becomes empty (and is_first is false).
@@ -321,29 +395,6 @@ std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& re
 
 namespace {
 
-/// @brief Convert FilterOp enum to the string representation used by CompareValues.
-/// NOTE: A separate FilterOpToString exists in QueryNormalizer for cache-key
-/// normalization, with a different default ("=" vs "" here). These serve
-/// different purposes and are intentionally separate.
-inline std::string_view FilterOpToString(query::FilterOp op) {
-  switch (op) {
-    case query::FilterOp::EQ:
-      return "=";
-    case query::FilterOp::NE:
-      return "!=";
-    case query::FilterOp::GT:
-      return ">";
-    case query::FilterOp::GTE:
-      return ">=";
-    case query::FilterOp::LT:
-      return "<";
-    case query::FilterOp::LTE:
-      return "<=";
-    default:
-      return "";
-  }
-}
-
 // Reuse the shared RAII bitmap pointer from utils so this TU does not need
 // a private copy of the deleter.
 using mygram::utils::MakeEmptyRoaring;
@@ -531,7 +582,7 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
       }
 
       // Evaluate filter condition based on operator
-      auto op_str = FilterOpToString(filter_cond.op);
+      auto op_str = query::FilterOpToString(filter_cond.op);
       bool matches = std::visit(
           [&](const auto& val) -> bool {
             using T = std::decay_t<decltype(val)>;
@@ -788,7 +839,9 @@ std::vector<SynonymTermGroup> ExpandTermsWithSynonyms(const std::vector<std::str
 
 SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const query::QueryNode& ast,
                                            index::Index* current_index, storage::DocumentStore* current_doc_store,
-                                           int ngram_size, int kanji_ngram_size, bool cross_boundary) {
+                                           const config::Config* full_config,
+                                           const std::vector<std::string>& verify_terms_for_mode, int ngram_size,
+                                           int kanji_ngram_size, bool cross_boundary) {
   SearchPipelineResult result;
   result.results = ast.Evaluate(*current_index, *current_doc_store);
 
@@ -811,6 +864,12 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
   }
 
   ApplyNotAndFilters(result, query, current_index, current_doc_store, ngram_size, kanji_ngram_size, cross_boundary);
+  if (!result.results.empty() && full_config != nullptr &&
+      ShouldApplyVerifyText(full_config->memory.verify_text, verify_terms_for_mode)) {
+    result.results = PostFilterByBooleanText(result.results, ast, current_index, current_doc_store);
+    result.results = ApplyVerifyTextFilter(std::move(result.results), query.and_terms, current_index, current_doc_store,
+                                           full_config);
+  }
   return result;
 }
 
@@ -1087,24 +1146,35 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
 
   query::QueryASTParser ast_parser;
   auto boolean_ast = ast_parser.Parse(query.search_text);
-  if (!boolean_ast && ContainsBooleanSyntax(query.search_text)) {
+  const bool has_boolean_syntax = ContainsBooleanSyntax(query.search_text);
+  if (!boolean_ast && has_boolean_syntax) {
     output.success = false;
     output.error_message = "Invalid boolean search expression: " + ast_parser.GetError();
     return output;
   }
 
-  if (boolean_ast && boolean_ast->type != query::NodeType::TERM) {
+  if (boolean_ast && has_boolean_syntax) {
     output.path_taken = PipelinePath::REGULAR;
 
-    std::vector<std::string> boolean_terms;
-    CollectAstTerms(*boolean_ast, boolean_terms);
-    output.all_search_terms = boolean_terms;
+    std::vector<std::string> all_boolean_terms;
+    CollectAstTerms(*boolean_ast, all_boolean_terms);
+
+    std::vector<std::string> boolean_scoring_terms;
+    CollectAstScoringTerms(*boolean_ast, boolean_scoring_terms);
+    output.all_search_terms = boolean_scoring_terms;
     output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
     output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
                                           params.kanji_ngram_size, cross_boundary);
 
-    auto pipeline_result = ExecuteWithBooleanAst(query, *boolean_ast, params.current_index, params.current_doc_store,
-                                                 params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    std::vector<std::string> verify_terms_for_mode = all_boolean_terms;
+    verify_terms_for_mode.insert(verify_terms_for_mode.end(), query.and_terms.begin(), query.and_terms.end());
+    auto pipeline_result =
+        ExecuteWithBooleanAst(query, *boolean_ast, params.current_index, params.current_doc_store, params.full_config,
+                              verify_terms_for_mode, params.ngram_size, params.kanji_ngram_size, cross_boundary);
+
+    if (pipeline_result.results.empty() && ContainsEmptyPostingTerm(output.term_infos)) {
+      pipeline_result.empty_term_detected = true;
+    }
 
     output.empty_term_detected = pipeline_result.empty_term_detected;
     if (pipeline_result.empty_term_detected) {

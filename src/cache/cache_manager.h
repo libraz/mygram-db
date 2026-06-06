@@ -194,6 +194,7 @@ class CacheManager {
   std::atomic<bool> enabled_;
   std::atomic<int> ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
   std::atomic<uint64_t> data_version_{0};
+  bool table_invalidation_strategy_ = false;
 
   /// Serializes the *combined* (QueryCache + InvalidationManager) mutating
   /// operations Insert/Clear/ClearTable. Each component already owns an

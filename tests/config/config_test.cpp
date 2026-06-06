@@ -593,14 +593,19 @@ TEST(ConfigTest, ReservedConfigKnobsAreMarkedNotYetEnforcedInSchema) {
   expect_reserved({"properties", "memory", "properties", "hard_limit_mb"});
   expect_reserved({"properties", "memory", "properties", "soft_target_mb"});
   expect_reserved({"properties", "memory", "properties", "arena_chunk_mb"});
-  expect_reserved({"properties", "cache", "properties", "invalidation_strategy"});
+  expect_reserved({"properties", "memory", "properties", "minute_epoch"});
   expect_reserved({"properties", "cache", "properties", "eviction_batch_size"});
 }
 
-TEST(ConfigTest, BinlogRowImageSchemaAllowsOnlyFull) {
+TEST(ConfigTest, BinlogSchemaAllowsOnlyRequiredValues) {
   std::ifstream f(SourcePath("src/config/config-schema.json"));
   ASSERT_TRUE(f.is_open());
   json schema = json::parse(f);
+
+  const auto& binlog_format = schema["properties"]["mysql"]["properties"]["binlog_format"];
+  ASSERT_TRUE(binlog_format.contains("enum"));
+  ASSERT_EQ(binlog_format["enum"].size(), 1u);
+  EXPECT_EQ(binlog_format["enum"][0].get<std::string>(), "ROW");
 
   const auto& row_image = schema["properties"]["mysql"]["properties"]["binlog_row_image"];
   ASSERT_TRUE(row_image.contains("enum"));
@@ -704,6 +709,55 @@ TEST(ConfigTest, RejectsUnsupportedBinlogRowImage) {
   ASSERT_FALSE(config_result);
   EXPECT_EQ(config_result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
   EXPECT_NE(config_result.error().message().find("binlog_row_image"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsUnsupportedBinlogFormatFromJsonSchema) {
+  json j = {
+      {"mysql",
+       {{"host", "127.0.0.1"},
+        {"port", 3306},
+        {"user", "json_user"},
+        {"password", "json_pass"},
+        {"database", "json_db"},
+        {"use_gtid", true},
+        {"binlog_format", "MIXED"},
+        {"binlog_row_image", "FULL"}}},
+      {"tables",
+       {{{"name", "json_table"}, {"primary_key", "id"}, {"text_source", {{"column", "content"}}}, {"ngram_size", 2}}}}};
+
+  const auto path = TempConfigPath("test_invalid_binlog_format.json");
+  std::ofstream f(path);
+  f << j.dump(2);
+  f.close();
+
+  auto config_result = LoadConfig(path);
+  ASSERT_FALSE(config_result);
+  EXPECT_EQ(config_result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
+  EXPECT_NE(config_result.error().message().find("binlog_format"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsUnsupportedBinlogFormatFromYamlSchema) {
+  const auto path = TempConfigPath("test_invalid_binlog_format.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n"
+    << "  host: 127.0.0.1\n"
+    << "  port: 3306\n"
+    << "  user: yaml_user\n"
+    << "  password: yaml_pass\n"
+    << "  database: yaml_db\n"
+    << "  binlog_format: MIXED\n"
+    << "  binlog_row_image: FULL\n"
+    << "tables:\n"
+    << "  - name: yaml_table\n"
+    << "    primary_key: id\n"
+    << "    text_source:\n"
+    << "      column: content\n";
+  f.close();
+
+  auto config_result = LoadConfig(path);
+  ASSERT_FALSE(config_result);
+  EXPECT_EQ(config_result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
+  EXPECT_NE(config_result.error().message().find("binlog_format"), std::string::npos);
 }
 
 /**

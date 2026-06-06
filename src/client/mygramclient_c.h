@@ -48,6 +48,16 @@ typedef struct {
 } MygramSearchResult_C;
 
 /**
+ * @brief Search result with highlight snippets
+ */
+typedef struct {
+  char** primary_keys;   // Array of primary key strings
+  char** snippets;       // Array of highlight snippets, aligned with primary_keys
+  size_t count;          // Number of results
+  uint64_t total_count;  // Total matching documents (may exceed count)
+} MygramSearchResultWithHighlights_C;
+
+/**
  * @brief Document with fields
  */
 typedef struct {
@@ -122,6 +132,20 @@ int mygramclient_is_connected(const MygramClient_C* client);
  */
 int mygramclient_search(MygramClient_C* client, const char* table, const char* query, uint32_t limit, uint32_t offset,
                         MygramSearchResult_C** result);
+
+/**
+ * @brief Search for documents and return highlight snippets
+ *
+ * @param client Client handle
+ * @param table Table name
+ * @param query Search query text
+ * @param limit Maximum number of results (0 for default)
+ * @param offset Result offset for pagination
+ * @param result Output search results (caller must free with mygramclient_free_search_result_with_highlights)
+ * @return 0 on success, -1 on error
+ */
+int mygramclient_search_with_highlights(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
+                                        uint32_t offset, MygramSearchResultWithHighlights_C** result);
 
 /**
  * @brief Search for documents with AND/NOT/FILTER clauses
@@ -323,6 +347,13 @@ const char* mygramclient_get_last_error(const MygramClient_C* client);
  * @param result Search result to free
  */
 void mygramclient_free_search_result(MygramSearchResult_C* result);
+
+/**
+ * @brief Free search result with highlight snippets
+ *
+ * @param result Search result to free
+ */
+void mygramclient_free_search_result_with_highlights(MygramSearchResultWithHighlights_C* result);
 
 /**
  * @brief Free document

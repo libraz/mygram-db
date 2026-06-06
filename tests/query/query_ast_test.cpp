@@ -93,6 +93,38 @@ TEST(QueryASTTest, MultipleAnd) {
   EXPECT_EQ(left->children[1]->term, "b");
 }
 
+TEST(QueryASTTest, ImplicitAndTerms) {
+  QueryASTParser parser;
+  auto ast = parser.Parse("a b c");
+
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(ast->type, NodeType::AND);
+
+  // Should be left-associative: (a AND b) AND c
+  EXPECT_EQ(ast->children[0]->type, NodeType::AND);
+  EXPECT_EQ(ast->children[1]->type, NodeType::TERM);
+  EXPECT_EQ(ast->children[1]->term, "c");
+
+  auto left = ast->children[0].get();
+  EXPECT_EQ(left->children[0]->type, NodeType::TERM);
+  EXPECT_EQ(left->children[0]->term, "a");
+  EXPECT_EQ(left->children[1]->type, NodeType::TERM);
+  EXPECT_EQ(left->children[1]->term, "b");
+}
+
+TEST(QueryASTTest, ImplicitAndBeforeParentheses) {
+  QueryASTParser parser;
+  auto ast = parser.Parse("a (b OR c)");
+
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(ast->type, NodeType::AND);
+  EXPECT_EQ(ast->children[0]->type, NodeType::TERM);
+  EXPECT_EQ(ast->children[0]->term, "a");
+  EXPECT_EQ(ast->children[1]->type, NodeType::OR);
+  EXPECT_EQ(ast->children[1]->children[0]->term, "b");
+  EXPECT_EQ(ast->children[1]->children[1]->term, "c");
+}
+
 // ============================================================================
 // OR Operator Tests
 // ============================================================================
@@ -201,6 +233,22 @@ TEST(QueryASTTest, ComplexPrecedence) {
   EXPECT_EQ(ast->children[1]->type, NodeType::AND);
   EXPECT_EQ(ast->children[1]->children[0]->term, "c");
   EXPECT_EQ(ast->children[1]->children[1]->term, "d");
+}
+
+TEST(QueryASTTest, ImplicitAndOrPrecedence) {
+  // "a b OR c" should be "(a AND b) OR c"
+  QueryASTParser parser;
+  auto ast = parser.Parse("a b OR c");
+
+  ASSERT_NE(ast, nullptr);
+  EXPECT_EQ(ast->type, NodeType::OR);
+
+  EXPECT_EQ(ast->children[0]->type, NodeType::AND);
+  EXPECT_EQ(ast->children[0]->children[0]->term, "a");
+  EXPECT_EQ(ast->children[0]->children[1]->term, "b");
+
+  EXPECT_EQ(ast->children[1]->type, NodeType::TERM);
+  EXPECT_EQ(ast->children[1]->term, "c");
 }
 
 // ============================================================================
@@ -358,6 +406,22 @@ TEST(QueryASTTest, NotWithoutOperand) {
 
   EXPECT_EQ(ast, nullptr);
   EXPECT_NE(parser.GetError(), "");
+}
+
+TEST(QueryASTTest, RejectsMoreThanSixtyFourTerms) {
+  std::string query;
+  for (int i = 0; i < 65; ++i) {
+    if (!query.empty()) {
+      query += " OR ";
+    }
+    query += "term" + std::to_string(i);
+  }
+
+  QueryASTParser parser;
+  auto ast = parser.Parse(query);
+
+  EXPECT_EQ(ast, nullptr);
+  EXPECT_NE(parser.GetError().find("Too many boolean search terms"), std::string::npos);
 }
 
 TEST(QueryASTTest, TrailingOperator) {

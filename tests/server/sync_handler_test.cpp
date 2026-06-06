@@ -408,7 +408,7 @@ TEST(SyncOperationManagerStatusFormatTest, SyncStatusIdleResponseIsFormatStatus)
   EXPECT_NE(idle.find(R"(message="No sync operation performed")"), std::string::npos)
       << "IDLE SYNC_STATUS body must preserve the historical message text, got: " << idle;
   ASSERT_GE(idle.size(), 5U);
-  EXPECT_EQ(idle.substr(idle.size() - 5), "\r\nEND") << "SYNC_STATUS must use END framing, got: " << idle;
+  EXPECT_EQ(idle.substr(idle.size() - 7), "\r\nEND\r\n") << "SYNC_STATUS must use END framing, got: " << idle;
 }
 
 /**

@@ -470,10 +470,12 @@ def main() -> None:
 
                 for c in concurrency_levels:
                     print(f"  concurrency={c} ...", end=" ", flush=True)
-                    result = runner.run(queries, concurrency=c, duration=duration)
-                    summary = result.summary()
+                    benchmark_result = runner.run(queries, concurrency=c, duration=duration)
+                    summary = benchmark_result.summary()
                     print(
-                        f"p50={result.p50_ms:.1f}ms p99={result.p99_ms:.1f}ms qps={result.qps:.0f}"
+                        f"p50={benchmark_result.p50_ms:.1f}ms "
+                        f"p99={benchmark_result.p99_ms:.1f}ms "
+                        f"qps={benchmark_result.qps:.0f}"
                     )
                     target_results["benchmarks"].append(
                         {

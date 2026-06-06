@@ -188,3 +188,48 @@ TEST(IndexSerializationTest, LoadFromStreamRejectsCrossBoundaryMismatch) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
 }
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsNormalizeNfkcMismatch) {
+  Index source(2, 1, kDefaultRoaringThreshold, true, true, "keep", true);
+  source.AddDocument(1, "ＡＢＣ");
+
+  std::ostringstream serialized;
+  ASSERT_TRUE(source.SaveToStream(serialized).has_value());
+
+  Index target(2, 1, kDefaultRoaringThreshold, true, false, "keep", true);
+  std::istringstream input(serialized.str());
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsNormalizeWidthMismatch) {
+  Index source(2, 1, kDefaultRoaringThreshold, true, true, "fold", true);
+  source.AddDocument(1, "ＡＢＣ");
+
+  std::ostringstream serialized;
+  ASSERT_TRUE(source.SaveToStream(serialized).has_value());
+
+  Index target(2, 1, kDefaultRoaringThreshold, true, true, "keep", true);
+  std::istringstream input(serialized.str());
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsNormalizeLowerMismatch) {
+  Index source(2, 1, kDefaultRoaringThreshold, true, true, "keep", true);
+  source.AddDocument(1, "ABC");
+
+  std::ostringstream serialized;
+  ASSERT_TRUE(source.SaveToStream(serialized).has_value());
+
+  Index target(2, 1, kDefaultRoaringThreshold, true, true, "keep", false);
+  std::istringstream input(serialized.str());
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}

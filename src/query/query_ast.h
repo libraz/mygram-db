@@ -45,7 +45,7 @@ enum class NodeType : uint8_t {
  * Grammar (BNF):
  *   query     → or_expr
  *   or_expr   → and_expr (OR and_expr)*
- *   and_expr  → not_expr (AND not_expr)*
+ *   and_expr  → not_expr ((AND)? not_expr)*
  *   not_expr  → NOT not_expr | primary
  *   primary   → TERM | '(' or_expr ')'
  */
@@ -182,6 +182,7 @@ class QueryASTParser {
 
  private:
   static constexpr int kMaxRecursionDepth = 32;
+  static constexpr size_t kMaxTermCount = 64;
 
   std::vector<Token> tokens_;
   size_t pos_ = 0;
@@ -234,6 +235,11 @@ class QueryASTParser {
    * @brief Parse primary expression (term or parenthesized expression)
    */
   std::unique_ptr<QueryNode> ParsePrimary();
+
+  /**
+   * @brief Count TERM nodes in a parsed AST.
+   */
+  static size_t CountTerms(const QueryNode& node);
 
   /**
    * @brief Set error message

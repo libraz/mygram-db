@@ -47,7 +47,8 @@ inline constexpr std::string_view kOkCacheDisabled = "OK CACHE_DISABLED";
 inline constexpr std::string_view kOkDebugOn = "OK DEBUG_ON";
 inline constexpr std::string_view kOkDebugOff = "OK DEBUG_OFF";
 inline constexpr std::string_view kOkOptimizedPrefix = "OK OPTIMIZED";
-inline constexpr std::string_view kOkSyncPrefix = "OK SYNC";
+inline constexpr std::string_view kOkSyncPrefix = "OK SYNC ";
+inline constexpr std::string_view kOkSyncStatusPrefix = "OK SYNC_STATUS";
 
 constexpr size_t kOkPrefixLen = kOkPrefix.size();
 constexpr size_t kPlusOkPrefixLen = kPlusOkPrefix.size();

@@ -410,6 +410,8 @@ class DocumentStore {
   void SetNextDocId(DocId value) { next_doc_id_ = value; }
 
  private:
+  friend struct DumpLoadAccess;
+
   // Next DocID to assign
   DocId next_doc_id_ = 1;
   // DocID -> Primary Key mapping

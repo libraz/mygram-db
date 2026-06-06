@@ -219,6 +219,31 @@ TEST(QueryNormalizerTest, OffsetExcludedFromCacheKey) {
   EXPECT_EQ(normalized2, normalized3);
 }
 
+TEST(QueryNormalizerTest, FuzzyDistanceIncludedInCacheKey) {
+  query::Query exact_query;
+  exact_query.type = query::QueryType::SEARCH;
+  exact_query.table = "posts";
+  exact_query.search_text = "hello";
+
+  query::Query fuzzy_one = exact_query;
+  fuzzy_one.fuzzy_max_distance = 1;
+
+  query::Query fuzzy_two = exact_query;
+  fuzzy_two.fuzzy_max_distance = 2;
+
+  const std::string exact_key = QueryNormalizer::Normalize(exact_query);
+  const std::string fuzzy_one_key = QueryNormalizer::Normalize(fuzzy_one);
+  const std::string fuzzy_two_key = QueryNormalizer::Normalize(fuzzy_two);
+
+  EXPECT_NE(exact_key, fuzzy_one_key);
+  EXPECT_NE(exact_key, fuzzy_two_key);
+  EXPECT_NE(fuzzy_one_key, fuzzy_two_key);
+  EXPECT_NE(fuzzy_one_key.find("FUZZY 1"), std::string::npos);
+  EXPECT_NE(fuzzy_two_key.find("FUZZY 2"), std::string::npos);
+  EXPECT_EQ(fuzzy_one_key.find("FUZZY 1"), fuzzy_one_key.rfind("FUZZY 1"));
+  EXPECT_EQ(fuzzy_two_key.find("FUZZY 2"), fuzzy_two_key.rfind("FUZZY 2"));
+}
+
 /**
  * @brief Test explicit limit is also excluded from cache key
  *
@@ -248,9 +273,9 @@ TEST(QueryNormalizerTest, ExplicitLimitAlsoExcluded) {
 }
 
 /**
- * @brief Test SORT clause normalization
+ * @brief Test SORT is excluded from cache key
  */
-TEST(QueryNormalizerTest, SortClause) {
+TEST(QueryNormalizerTest, SortExcludedFromCacheKey) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -268,8 +293,8 @@ TEST(QueryNormalizerTest, SortClause) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  // Different SORT order should produce different normalized queries
-  EXPECT_NE(normalized1, normalized2);
+  // SORT is applied after cache lookup, so order variants share a cache key.
+  EXPECT_EQ(normalized1, normalized2);
 }
 
 /**
@@ -705,9 +730,9 @@ TEST(QueryNormalizerTest, SortByPKProducesSameKeyAsDefault) {
 }
 
 /**
- * @brief Sort by non-PK column should produce a different key from default
+ * @brief Sort by non-PK column should produce the same key as default
  */
-TEST(QueryNormalizerTest, SortByNonPKProducesDifferentKey) {
+TEST(QueryNormalizerTest, SortByNonPKProducesSameKeyAsDefault) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "articles";
@@ -725,25 +750,8 @@ TEST(QueryNormalizerTest, SortByNonPKProducesDifferentKey) {
   std::string normalized1 = QueryNormalizer::Normalize(query1, "article_id");
   std::string normalized2 = QueryNormalizer::Normalize(query2, "article_id");
 
-  EXPECT_NE(normalized1, normalized2) << "Default sort and non-PK sort should produce different cache keys";
-}
-
-/**
- * @brief PK column should be replaced with __pk__ placeholder in output
- */
-TEST(QueryNormalizerTest, PKPlaceholderInOutput) {
-  query::Query query;
-  query.type = query::QueryType::SEARCH;
-  query.table = "articles";
-  query.search_text = "test";
-  query.limit = 100;
-  // No sort specified (default)
-
-  std::string normalized = QueryNormalizer::Normalize(query, "article_id");
-
-  EXPECT_NE(normalized.find("__pk__"), std::string::npos) << "Normalized output should contain __pk__ placeholder";
-  EXPECT_EQ(normalized.find("article_id"), std::string::npos)
-      << "Normalized output should not contain the actual PK column name";
+  EXPECT_EQ(normalized1, normalized2)
+      << "Default sort and non-PK sort should share a cache key because sorting is post-cache";
 }
 
 // =============================================================================
@@ -753,8 +761,8 @@ TEST(QueryNormalizerTest, PKPlaceholderInOutput) {
 /**
  * @brief "SORT ID DESC" and "SORT id DESC" should produce the same cache key
  *
- * MySQL column names are case-insensitive, so different cases of the same
- * PK column name should be normalized to the same __pk__ placeholder.
+ * SORT is excluded from the cache key, so column name case variants should not
+ * partition cache entries.
  */
 TEST(QueryNormalizerTest, SortColumnCaseInsensitive) {
   query::Query query1;
@@ -786,8 +794,7 @@ TEST(QueryNormalizerTest, SortColumnCaseInsensitive) {
   EXPECT_EQ(normalized1, normalized2) << "ID vs id should produce same cache key";
   EXPECT_EQ(normalized2, normalized3) << "id vs Id should produce same cache key";
 
-  // Should use __pk__ placeholder
-  EXPECT_NE(normalized1.find("__pk__"), std::string::npos) << "Should normalize PK column name to __pk__ placeholder";
+  EXPECT_EQ(normalized1.find("SORT"), std::string::npos) << "SORT should be excluded from the cache key";
 }
 
 // =============================================================================

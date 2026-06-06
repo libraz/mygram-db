@@ -10,7 +10,9 @@
 namespace mygramdb::cache {
 
 CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs)
-    : enabled_(cache_config.enabled), ttl_seconds_(cache_config.ttl_seconds) {
+    : enabled_(cache_config.enabled),
+      ttl_seconds_(cache_config.ttl_seconds),
+      table_invalidation_strategy_(cache_config.invalidation_strategy == "table") {
   if (enabled_) {
     // Create query cache with TTL support
     query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms,
@@ -192,7 +194,16 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
 
 void CacheManager::Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text,
                               bool filter_columns_changed) {
-  if (!enabled_ || !invalidation_queue_) {
+  if (!enabled_) {
+    return;
+  }
+
+  if (table_invalidation_strategy_) {
+    ClearTable(table_name);
+    return;
+  }
+
+  if (!invalidation_queue_) {
     return;
   }
 

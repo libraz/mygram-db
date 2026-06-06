@@ -238,6 +238,15 @@ TEST(QueryParserTest, FilterOperators) {
   EXPECT_EQ(query6->filters[0].op, FilterOp::LTE);
 }
 
+TEST(QueryParserTest, FilterOpToStringUsesCanonicalOperators) {
+  EXPECT_EQ(FilterOpToString(FilterOp::EQ), "=");
+  EXPECT_EQ(FilterOpToString(FilterOp::NE), "!=");
+  EXPECT_EQ(FilterOpToString(FilterOp::GT), ">");
+  EXPECT_EQ(FilterOpToString(FilterOp::GTE), ">=");
+  EXPECT_EQ(FilterOpToString(FilterOp::LT), "<");
+  EXPECT_EQ(FilterOpToString(FilterOp::LTE), "<=");
+}
+
 TEST(QueryParserTest, FilterWithoutSpacesEquals) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles hello FILTER status=1");

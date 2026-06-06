@@ -398,6 +398,7 @@ std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<s
     }
   }
 
+  response += "\r\n";
   return response;
 }
 
@@ -675,10 +676,7 @@ std::string ResponseFormatter::FormatReplicationStatusResponse(mysql::IBinlogRea
     oss << "status: " << (is_running ? "running" : "stopped") << "\r\n";
     oss << "current_gtid: " << binlog_reader->GetCurrentGTID() << "\r\n";
     oss << "processed_events: " << binlog_reader->GetProcessedEvents() << "\r\n";
-
-    if (is_running) {
-      oss << "queue_size: " << binlog_reader->GetQueueSize() << "\r\n";
-    }
+    oss << "queue_size: " << binlog_reader->GetQueueSize() << "\r\n";
   } else {
     oss << "status: not_configured\r\n";
   }
@@ -1092,6 +1090,10 @@ std::string ResponseFormatter::FormatStatus(std::string_view body) {
   result.append(protocol::kOkPrefix);
   result += body;
   return result;
+}
+
+std::string ResponseFormatter::SanitizeDelimitedField(std::string_view value) {
+  return SanitizeDelimitedFieldForResponse(value);
 }
 
 }  // namespace mygramdb::server

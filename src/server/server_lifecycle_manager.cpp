@@ -212,7 +212,7 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
     components.dispatcher = std::move(*dispatcher_result);
     if (components.variable_manager != nullptr) {
       auto* dispatcher = components.dispatcher.get();
-      components.variable_manager->SetApiConfigCallback([dispatcher](int default_limit, int max_query_length) {
+      components.variable_manager->AddApiConfigCallback([dispatcher](int default_limit, int max_query_length) {
         dispatcher->UpdateApiConfig(default_limit, max_query_length);
       });
     }
@@ -490,7 +490,10 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
       replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_);
 
   // Start the scheduler
-  scheduler->Start();
+  auto start_result = scheduler->Start();
+  if (!start_result) {
+    return MakeUnexpected(start_result.error());
+  }
 
   return scheduler;
 }

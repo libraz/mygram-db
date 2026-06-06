@@ -191,6 +191,11 @@ class ResponseFormatter {
    * @return `"OK <body>"`
    */
   static std::string FormatStatus(std::string_view body);
+
+  /**
+   * @brief Sanitize a value embedded in tab/line-delimited TCP response bodies.
+   */
+  static std::string SanitizeDelimitedField(std::string_view value);
 };
 
 }  // namespace mygramdb::server

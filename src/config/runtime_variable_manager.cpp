@@ -104,7 +104,6 @@ static const std::map<std::string, bool> kVariableMutability = {
     {"cache.max_memory_bytes", false},           // Immutable (memory allocation)
     {"cache.invalidation_strategy", false},      // Immutable (architecture change)
     {"cache.compression_enabled", false},        // Immutable
-    {"cache.eviction_batch_size", false},        // Immutable
     {"cache.invalidation.batch_size", false},    // Immutable
     {"cache.invalidation.max_delay_ms", false},  // Immutable
 
@@ -406,7 +405,18 @@ void RuntimeVariableManager::SetRateLimiterCallback(std::function<void(bool, siz
 
 void RuntimeVariableManager::SetApiConfigCallback(std::function<void(int, int)> callback) {
   std::unique_lock lock(mutex_);
-  api_config_callback_ = std::move(callback);
+  api_config_callbacks_.clear();
+  if (callback) {
+    api_config_callbacks_.push_back(std::move(callback));
+  }
+}
+
+void RuntimeVariableManager::AddApiConfigCallback(std::function<void(int, int)> callback) {
+  if (!callback) {
+    return;
+  }
+  std::unique_lock lock(mutex_);
+  api_config_callbacks_.push_back(std::move(callback));
 }
 
 // ========== Apply functions ==========
@@ -535,17 +545,17 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
   }
 
   int max_query_length = 0;
-  std::function<void(int, int)> callback_copy;
+  std::vector<std::function<void(int, int)>> callback_copies;
   {
     std::unique_lock lock(mutex_);
     base_config_.api.default_limit = value;
     runtime_values_["api.default_limit"] = std::to_string(value);
     max_query_length = base_config_.api.max_query_length;
-    callback_copy = api_config_callback_;
+    callback_copies = api_config_callbacks_;
   }
 
-  if (callback_copy) {
-    callback_copy(value, max_query_length);
+  for (const auto& callback : callback_copies) {
+    callback(value, max_query_length);
   }
   return {};
 }
@@ -556,17 +566,17 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiMaxQueryLength(int value) 
   }
 
   int default_limit = 0;
-  std::function<void(int, int)> callback_copy;
+  std::vector<std::function<void(int, int)>> callback_copies;
   {
     std::unique_lock lock(mutex_);
     base_config_.api.max_query_length = value;
     runtime_values_["api.max_query_length"] = std::to_string(value);
     default_limit = base_config_.api.default_limit;
-    callback_copy = api_config_callback_;
+    callback_copies = api_config_callbacks_;
   }
 
-  if (callback_copy) {
-    callback_copy(default_limit, value);
+  for (const auto& callback : callback_copies) {
+    callback(default_limit, value);
   }
   return {};
 }
@@ -854,9 +864,6 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   }
   if (variable_name == "cache.compression_enabled") {
     return base_config_.cache.compression_enabled ? "true" : "false";
-  }
-  if (variable_name == "cache.eviction_batch_size") {
-    return std::to_string(base_config_.cache.eviction_batch_size);
   }
   if (variable_name == "cache.invalidation.batch_size") {
     return std::to_string(base_config_.cache.invalidation.batch_size);

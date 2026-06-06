@@ -2726,7 +2726,7 @@ TEST_F(RowsParserTest, DecimalSmallValue) {
 }
 
 // =============================================================================
-// binlog_row_image=MINIMAL/NOBLOB Support
+// binlog_row_image=MINIMAL/NOBLOB Rejection
 // =============================================================================
 
 /**
@@ -2792,9 +2792,11 @@ inline std::vector<unsigned char> CreateWriteRowsEventWithBitmap(const TableMeta
  * @test MINIMAL mode - only some columns present
  *
  * Simulates binlog_row_image=MINIMAL where only the primary key and
- * modified columns are present in the event.
+ * modified columns are present in the event. MygramDB requires FULL row images
+ * because partial row images have compact NULL bitmaps that cannot be decoded
+ * by table ordinal without additional state.
  */
-TEST_F(RowsParserTest, MinimalModePartialColumns) {
+TEST_F(RowsParserTest, RejectsMinimalModePartialColumns) {
   TableMetadata table_meta;
   table_meta.table_id = 600;
   table_meta.database_name = "test_db";
@@ -2837,21 +2839,15 @@ TEST_F(RowsParserTest, MinimalModePartialColumns) {
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
-  ASSERT_TRUE(result.has_value()) << "Parser should handle MINIMAL mode";
-  ASSERT_EQ(1, result->size());
-
-  // Present columns should be parsed
-  EXPECT_EQ("42", result->front().GetColumnValue("id"));
-  EXPECT_EQ("1", result->front().GetColumnValue("status"));
-
-  // Missing column should not be in the result
-  EXPECT_EQ(result->front().FindColumnValue("name"), nullptr) << "Missing column should not appear in result";
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
+  EXPECT_NE(result.error().message().find("binlog_row_image=FULL"), std::string::npos);
 }
 
 /**
  * @test MINIMAL mode with only primary key present
  */
-TEST_F(RowsParserTest, MinimalModeOnlyPrimaryKey) {
+TEST_F(RowsParserTest, RejectsMinimalModeOnlyPrimaryKey) {
   TableMetadata table_meta;
   table_meta.table_id = 601;
   table_meta.database_name = "test_db";
@@ -2882,18 +2878,15 @@ TEST_F(RowsParserTest, MinimalModeOnlyPrimaryKey) {
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
-  ASSERT_TRUE(result.has_value());
-  ASSERT_EQ(1, result->size());
-
-  EXPECT_EQ("100", result->front().GetColumnValue("id"));
-  EXPECT_EQ("100", result->front().primary_key);
-  EXPECT_EQ(result->front().FindColumnValue("data"), nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
+  EXPECT_NE(result.error().message().find("binlog_row_image=FULL"), std::string::npos);
 }
 
 /**
- * @test All columns missing (edge case - should handle gracefully)
+ * @test All columns missing
  */
-TEST_F(RowsParserTest, NoColumnsPresent) {
+TEST_F(RowsParserTest, RejectsNoColumnsPresent) {
   TableMetadata table_meta;
   table_meta.table_id = 602;
   table_meta.database_name = "test_db";
@@ -2914,10 +2907,9 @@ TEST_F(RowsParserTest, NoColumnsPresent) {
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
-  // Should return a result with an empty row (no crash)
-  ASSERT_TRUE(result.has_value());
-  ASSERT_EQ(1, result->size());
-  EXPECT_TRUE(result->front().columns.empty());
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
+  EXPECT_NE(result.error().message().find("binlog_row_image=FULL"), std::string::npos);
 }
 
 // =============================================================================
@@ -3115,6 +3107,24 @@ TEST_F(RowsParserV2Test, V2UpdateRowsWithoutStmtEndFlag) {
   // Check after image
   EXPECT_EQ("1", result->front().second.GetColumnValue("id"));
   EXPECT_EQ("new_name", result->front().second.GetColumnValue("name"));
+}
+
+TEST_F(RowsParserV2Test, V2UpdateRowsRejectsPartialAfterImageBitmap) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildUpdateRowPair(1, "old_name", 1, "new_name");
+
+  std::vector<uint8_t> columns_before_bitmap = {0xFF};
+  std::vector<uint8_t> columns_after_bitmap = {0x01};
+
+  auto event = BinlogEventBuilder::BuildUpdateRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_before_bitmap,
+                                                     columns_after_bitmap, row_data);
+
+  auto result =
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
+  EXPECT_NE(result.error().message().find("binlog_row_image=FULL"), std::string::npos);
 }
 
 /**
@@ -3458,7 +3468,7 @@ TEST_F(ParseSingleRowTest, TruncatedFixedLengthColumnFailsBeforeDecode) {
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
 }
 
-TEST_F(ParseSingleRowTest, PartialColumnBitmapSkipsColumns) {
+TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
   // 3 columns but only column 0 and 2 present in bitmap
   TableMetadata meta;
   meta.table_id = 1;
@@ -3489,12 +3499,9 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapSkipsColumns) {
                                                           cols_present.data(), null_bitmap_size, 3,
                                                           /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
 
-  ASSERT_TRUE(result.has_value()) << result.error().message();
-  EXPECT_EQ("10", result->row.primary_key);
-  EXPECT_EQ("10", result->row.GetColumnValue("a"));
-  EXPECT_EQ("30", result->row.GetColumnValue("c"));
-  // column b should not be in the map
-  EXPECT_EQ(result->row.FindColumnValue("b"), nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
+  EXPECT_NE(result.error().message().find("binlog_row_image=FULL"), std::string::npos);
 }
 
 #endif  // USE_MYSQL

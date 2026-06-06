@@ -20,6 +20,7 @@ jobs:
     outputs:
       src: ${{ steps.filter.outputs.src }}
       tests: ${{ steps.filter.outputs.tests }}
+      e2e: ${{ steps.filter.outputs.e2e }}
       docker: ${{ steps.filter.outputs.docker }}
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +35,13 @@ jobs:
               - 'Makefile'
             tests:
               - 'tests/**'
+            e2e:
+              - 'src/**'
+              - 'CMakeLists.txt'
+              - 'third_party/**'
+              - 'Makefile'
+              - 'e2e/**'
+              - '.github/workflows/ci.yml'
             docker:
               - 'src/**'
               - 'CMakeLists.txt'
@@ -275,6 +283,64 @@ jobs:
   #       path: |
   #         build/CMakeFiles/*.log
   #         build/Testing/Temporary/
+
+  e2e-http-parity:
+    name: E2E HTTP/TCP Parity
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Cache CMake dependencies
+      uses: actions/cache@v4
+      with:
+        path: build/_deps
+        key: ${{ runner.os }}-cmake-deps-e2e-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
+        restore-keys: |
+          ${{ runner.os }}-cmake-deps-
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          build-essential \
+          libmysqlclient-dev \
+          libicu-dev \
+          libreadline-dev \
+          pkg-config
+
+    - name: Configure CMake
+      run: |
+        mkdir -p build
+        cd build
+        cmake -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTS=OFF \
+              -DUSE_ICU=ON \
+              -DUSE_MYSQL=ON \
+              -DMYGRAMDB_PORTABLE_BUILD=ON \
+              ..
+
+    - name: Build mygramdb
+      run: cmake --build build --target mygramdb -j$(nproc)
+
+    - name: Install E2E dependencies
+      run: python3 -m pip install -e e2e
+
+    - name: Run HTTP/TCP parity E2E
+      run: bash e2e/run-all.sh tests/search/test_http_parity.py
+
+    - name: Upload E2E artifacts
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2e-http-parity-artifacts
+        path: |
+          e2e/results/
+          /tmp/mygramdb-e2e.log
 
   docker-build:
     name: Docker Build Test

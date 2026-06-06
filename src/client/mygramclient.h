@@ -206,7 +206,7 @@ class MygramClient {
    *
    * @param table Table name
    * @param query Search query text
-   * @param limit Maximum number of results to return (default: 100)
+   * @param limit Maximum number of results to return (0 = server api.default_limit)
    * @param offset Result offset for pagination (default: 0)
    * @param and_terms Additional required terms
    * @param not_terms Excluded terms
@@ -216,11 +216,8 @@ class MygramClient {
    * @return Expected<SearchResponse, Error>
    */
   mygram::utils::Expected<SearchResponse, mygram::utils::Error> Search(
-      const std::string& table, const std::string& query,
-      uint32_t limit = 1000,  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
-                              // - Default result limit
-      uint32_t offset = 0, const std::vector<std::string>& and_terms = {},
-      const std::vector<std::string>& not_terms = {},
+      const std::string& table, const std::string& query, uint32_t limit = 0, uint32_t offset = 0,
+      const std::vector<std::string>& and_terms = {}, const std::vector<std::string>& not_terms = {},
       const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& sort_column = "",
       bool sort_desc = true) const;
 
@@ -231,11 +228,8 @@ class MygramClient {
    * highlight snippet. It is empty when the server returns no snippet.
    */
   mygram::utils::Expected<SearchResponse, mygram::utils::Error> SearchWithHighlights(
-      const std::string& table, const std::string& query,
-      uint32_t limit = 1000,  // NOLINT(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
-                              // - Default result limit
-      uint32_t offset = 0, const std::vector<std::string>& and_terms = {},
-      const std::vector<std::string>& not_terms = {},
+      const std::string& table, const std::string& query, uint32_t limit = 0, uint32_t offset = 0,
+      const std::vector<std::string>& and_terms = {}, const std::vector<std::string>& not_terms = {},
       const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& sort_column = "",
       bool sort_desc = true) const;
 

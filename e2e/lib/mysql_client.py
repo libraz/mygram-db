@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, cast
 
 import mysql.connector
 
@@ -31,7 +31,7 @@ class MysqlClient:
         }
 
     def _connect(self) -> mysql.connector.MySQLConnection:
-        return mysql.connector.connect(**self.config)
+        return cast(mysql.connector.MySQLConnection, mysql.connector.connect(**self.config))
 
     def ping(self) -> bool:
         """Check if MySQL is reachable."""
@@ -49,7 +49,7 @@ class MysqlClient:
         try:
             cursor = conn.cursor(dictionary=True)
             cursor.execute(sql, params)
-            results = cursor.fetchall() if cursor.description else []
+            results = cast(list[dict[str, Any]], cursor.fetchall()) if cursor.description else []
             cursor.close()
             return results
         finally:
@@ -191,7 +191,7 @@ class MysqlClient:
             cursor = conn.cursor(dictionary=True)
             start = time.perf_counter()
             cursor.execute(sql, tuple(params))
-            row = cursor.fetchone()
+            row = cast(dict[str, Any] | None, cursor.fetchone())
             elapsed = (time.perf_counter() - start) * 1000
             cursor.close()
             count = row["cnt"] if row else 0

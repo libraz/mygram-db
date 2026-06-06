@@ -412,6 +412,10 @@ struct HandlerContext {
   /// (see CR-3 / CR-10 audit, May 2026). Tests may leave this null; in that
   /// case the worker behaves as before (always attempts auto-restart).
   std::atomic<bool>* shutdown_flag = nullptr;
+
+  /// Optional diagnostic/test hook invoked by DumpHandler after DUMP SAVE has
+  /// acquired dump_save_in_progress and before it re-checks competing flags.
+  std::function<void()> after_dump_save_flag_acquired;
 };
 
 }  // namespace mygramdb::server

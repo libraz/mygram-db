@@ -138,6 +138,39 @@ Content-Type: application/json
 }
 ```
 
+### POST /{table}/count
+
+Count documents matching a full-text query and optional filters. COUNT returns only the total count; pagination,
+highlighting, fuzzy search, and `_score` sorting are search-only features and are rejected on this endpoint.
+
+**Request:**
+
+```http
+POST /threads/count HTTP/1.1
+Content-Type: application/json
+
+{
+  "q": "breaking news AND tech",
+  "filters": {
+    "status": 1
+  }
+}
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "count": 42
+}
+```
+
+### HTTP Surface Limits
+
+The HTTP API exposes search, count, document lookup, health, metrics, replication status, and redacted configuration
+inspection. FACET queries and administrative commands such as `SET`, `SHOW VARIABLES`, `SYNC`, and `DUMP` remain
+available through the TCP/CLI protocol and are not exposed as HTTP routes.
+
 ### GET /{table}/{primary_key}
 
 Get a single document by its primary key. The response includes the internal `doc_id`.

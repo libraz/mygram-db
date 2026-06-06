@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "index/posting_list.h"
 
 using namespace mygramdb::index;
@@ -89,6 +91,53 @@ TEST(PostingListSerializationTest, RejectsInternallyInvalidRoaringBitmap) {
   buffer[kHeaderSize + 16] = 3;
 
   PostingList deserialized(0.01);
+  size_t offset = 0;
+  EXPECT_FALSE(deserialized.Deserialize(buffer, offset));
+  EXPECT_EQ(deserialized.Size(), 0u);
+}
+
+TEST(PostingListSerializationTest, RejectsZeroDeltaAfterFirstEntry) {
+  std::vector<uint8_t> buffer;
+  buffer.push_back(static_cast<uint8_t>(PostingStrategy::kDeltaCompressed));
+  buffer.push_back(3);
+  buffer.push_back(0);
+  buffer.push_back(0);
+  buffer.push_back(0);
+
+  auto append_u32 = [&buffer](uint32_t value) {
+    buffer.push_back(static_cast<uint8_t>(value & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+  };
+  append_u32(10);
+  append_u32(0);
+  append_u32(5);
+
+  PostingList deserialized;
+  size_t offset = 0;
+  EXPECT_FALSE(deserialized.Deserialize(buffer, offset));
+  EXPECT_EQ(deserialized.Size(), 0u);
+}
+
+TEST(PostingListSerializationTest, RejectsDeltaCumulativeOverflow) {
+  std::vector<uint8_t> buffer;
+  buffer.push_back(static_cast<uint8_t>(PostingStrategy::kDeltaCompressed));
+  buffer.push_back(2);
+  buffer.push_back(0);
+  buffer.push_back(0);
+  buffer.push_back(0);
+
+  auto append_u32 = [&buffer](uint32_t value) {
+    buffer.push_back(static_cast<uint8_t>(value & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+  };
+  append_u32(std::numeric_limits<uint32_t>::max());
+  append_u32(1);
+
+  PostingList deserialized;
   size_t offset = 0;
   EXPECT_FALSE(deserialized.Deserialize(buffer, offset));
   EXPECT_EQ(deserialized.Size(), 0u);

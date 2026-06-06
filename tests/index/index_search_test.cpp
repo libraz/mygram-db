@@ -13,6 +13,12 @@
 using namespace mygramdb::index;
 using namespace mygram::utils;
 
+TEST(IndexTest, StoresConfiguredRoaringThreshold) {
+  Index index(/*ngram_size=*/2, /*kanji_ngram_size=*/0, /*roaring_threshold=*/0.42);
+
+  EXPECT_DOUBLE_EQ(index.GetRoaringThreshold(), 0.42);
+}
+
 TEST(IndexTest, SearchAndSingleTerm) {
   Index index(1);
 

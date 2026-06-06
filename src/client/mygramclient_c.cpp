@@ -202,6 +202,64 @@ int mygramclient_search(MygramClient_C* client, const char* table, const char* q
                                       nullptr, 1, result);  // Default sort_desc = 1 (descending)
 }
 
+int mygramclient_search_with_highlights(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
+                                        uint32_t offset, MygramSearchResultWithHighlights_C** result) {
+  if (client == nullptr || client->client == nullptr || table == nullptr || query == nullptr || result == nullptr) {
+    return -1;
+  }
+
+  auto search_result = client->client->SearchWithHighlights(table, query, limit, offset);
+  if (!search_result) {
+    client->last_error = search_result.error().to_string();
+    return -1;
+  }
+
+  const auto& resp = *search_result;
+  auto* result_c = static_cast<MygramSearchResultWithHighlights_C*>(malloc(sizeof(MygramSearchResultWithHighlights_C)));
+  if (result_c == nullptr) {
+    client->last_error = "Memory allocation failed";
+    return -1;
+  }
+
+  result_c->count = resp.results.size();
+  result_c->total_count = resp.total_count;
+  result_c->primary_keys = nullptr;
+  result_c->snippets = nullptr;
+
+  if (!resp.results.empty()) {
+    result_c->primary_keys = static_cast<char**>(malloc(sizeof(char*) * resp.results.size()));
+    result_c->snippets = static_cast<char**>(malloc(sizeof(char*) * resp.results.size()));
+    if (result_c->primary_keys == nullptr || result_c->snippets == nullptr) {
+      free(result_c->primary_keys);
+      free(result_c->snippets);
+      free(result_c);
+      client->last_error = "Memory allocation failed";
+      return -1;
+    }
+  }
+
+  for (size_t i = 0; i < resp.results.size(); ++i) {
+    result_c->primary_keys[i] = strdup_safe(resp.results[i].primary_key);
+    result_c->snippets[i] = strdup_safe(resp.results[i].snippet);
+    if (result_c->primary_keys[i] == nullptr || result_c->snippets[i] == nullptr) {
+      free(result_c->primary_keys[i]);
+      free(result_c->snippets[i]);
+      for (size_t j = 0; j < i; ++j) {
+        free(result_c->primary_keys[j]);
+        free(result_c->snippets[j]);
+      }
+      free(result_c->primary_keys);
+      free(result_c->snippets);
+      free(result_c);
+      client->last_error = "Memory allocation failed";
+      return -1;
+    }
+  }
+
+  *result = result_c;
+  return 0;
+}
+
 int mygramclient_search_advanced(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
                                  uint32_t offset, const char** and_terms, size_t and_count, const char** not_terms,
                                  size_t not_count, const char** filter_keys, const char** filter_values,
@@ -251,13 +309,16 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
 
   result_c->count = resp.results.size();
   result_c->total_count = resp.total_count;
+  result_c->primary_keys = nullptr;
 
   // Allocate array for primary keys
-  result_c->primary_keys = static_cast<char**>(malloc(sizeof(char*) * resp.results.size()));
-  if (result_c->primary_keys == nullptr) {
-    free(result_c);
-    client->last_error = "Memory allocation failed";
-    return -1;
+  if (!resp.results.empty()) {
+    result_c->primary_keys = static_cast<char**>(malloc(sizeof(char*) * resp.results.size()));
+    if (result_c->primary_keys == nullptr) {
+      free(result_c);
+      client->last_error = "Memory allocation failed";
+      return -1;
+    }
   }
 
   for (size_t i = 0; i < resp.results.size(); ++i) {
@@ -579,6 +640,16 @@ void mygramclient_free_search_result(MygramSearchResult_C* result) {
   }
 
   free_c_string_array(result->primary_keys, result->count);
+  free(result);
+}
+
+void mygramclient_free_search_result_with_highlights(MygramSearchResultWithHighlights_C* result) {
+  if (result == nullptr) {
+    return;
+  }
+
+  free_c_string_array(result->primary_keys, result->count);
+  free_c_string_array(result->snippets, result->count);
   free(result);
 }
 

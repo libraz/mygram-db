@@ -24,6 +24,7 @@
 #include "cache/cache_manager.h"
 #include "cache/cache_types.h"
 #include "config/config.h"
+#include "index/bm25_scorer.h"
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "query/synonym_dictionary.h"
@@ -837,6 +838,22 @@ TEST_F(FullPipelineTest, BooleanTopLevelOrReturnsUnion) {
   EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[2]}));
 }
 
+TEST_F(FullPipelineTest, BooleanParenthesizedSingleTermUsesAstTerms) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "(learning)";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[1]}));
+  ASSERT_EQ(output.all_search_terms.size(), 1);
+  EXPECT_EQ(output.all_search_terms[0], "learning");
+}
+
 TEST_F(FullPipelineTest, BooleanParenthesizedOrAndLegacyAndClause) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
@@ -864,6 +881,78 @@ TEST_F(FullPipelineTest, BooleanTopLevelOrWithPostfixNot) {
 
   ASSERT_TRUE(output.success) << output.error_message;
   EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0]}));
+}
+
+TEST_F(FullPipelineTest, BooleanNotTermExcludedFromScoringTerms) {
+  auto plain_doc = doc_store_->AddDocument("pk_alpha_plain", {}, "alpha");
+  auto not_text_doc = doc_store_->AddDocument("pk_alpha_not_text", {}, "alpha x x x x");
+  ASSERT_TRUE(plain_doc.has_value());
+  ASSERT_TRUE(not_text_doc.has_value());
+  index_->AddDocument(*plain_doc, "alpha");
+  index_->AddDocument(*not_text_doc, "alpha x x x x");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha AND NOT x";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  ASSERT_EQ(output.results, (std::vector<storage::DocId>{*plain_doc, *not_text_doc}));
+  ASSERT_EQ(output.all_search_terms.size(), 1);
+  EXPECT_EQ(output.all_search_terms[0], "alpha");
+
+  std::vector<std::string> normalized_terms;
+  std::vector<uint64_t> term_dfs;
+  for (const auto& term_info : output.term_infos) {
+    normalized_terms.push_back(term_info.normalized_term);
+    term_dfs.push_back(term_info.term_doc_freq);
+  }
+
+  const index::BM25Params bm25_params{1.2, 0.0};
+  const auto scored = index::BM25Scorer::ScoreDocuments(output.results, normalized_terms, term_dfs, *doc_store_,
+                                                        doc_store_->GetAllDocIds().size(), 1.0, bm25_params);
+  ASSERT_EQ(scored.size(), 2);
+  EXPECT_DOUBLE_EQ(scored[0].score, scored[1].score);
+}
+
+TEST_F(FullPipelineTest, BooleanVerifyTextHonorsOrBranches) {
+  auto false_positive = doc_store_->AddDocument("pk_false", {}, "abzzba");
+  ASSERT_TRUE(false_positive.has_value());
+  index_->AddDocument(*false_positive, "abzzba");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "abab OR cats";
+  query.limit = 100;
+
+  config::Config config;
+  config.memory.verify_text = "all";
+  auto params = MakeParams();
+  params.full_config = &config;
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[2]}));
+}
+
+TEST_F(FullPipelineTest, BooleanEmptyTermResultSkipsCache) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning AND x";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_TRUE(output.results.empty());
+  EXPECT_TRUE(output.empty_term_detected);
 }
 
 TEST_F(FullPipelineTest, SearchWithNotTerms) {
@@ -1132,6 +1221,30 @@ TEST_F(FullPipelineCacheTest, CanonicalCacheKeyOverridesParserPrecomputedKey) {
   auto second_output = ExecuteFullPipeline(second_query, params);
   ASSERT_TRUE(second_output.success);
   EXPECT_TRUE(second_output.cache_hit);
+  EXPECT_EQ(second_output.results, first_output.results);
+}
+
+TEST_F(FullPipelineCacheTest, SortClauseDoesNotPartitionCacheEntries) {
+  query::Query asc_query;
+  asc_query.type = query::QueryType::SEARCH;
+  asc_query.table = "test";
+  asc_query.search_text = "learning";
+  asc_query.order_by = query::OrderByClause{"created_at", query::SortOrder::ASC};
+  asc_query.limit = 100;
+
+  query::Query desc_query = asc_query;
+  desc_query.order_by = query::OrderByClause{"created_at", query::SortOrder::DESC};
+
+  auto params = MakeParams();
+
+  auto first_output = ExecuteFullPipeline(asc_query, params);
+  ASSERT_TRUE(first_output.success);
+  EXPECT_FALSE(first_output.cache_hit);
+
+  auto second_output = ExecuteFullPipeline(desc_query, params);
+  ASSERT_TRUE(second_output.success);
+  EXPECT_TRUE(second_output.cache_hit);
+  EXPECT_EQ(second_output.cache_miss_reason, CacheMissReason::kHit);
   EXPECT_EQ(second_output.results, first_output.results);
 }
 

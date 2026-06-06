@@ -691,3 +691,21 @@ TEST_F(GtidEncoderTest, MixedDuplicateAndUniqueUuids) {
   int64_t n_sids = ReadInt64LE(*result, 0);
   EXPECT_EQ(n_sids, 2);
 }
+
+TEST_F(GtidEncoderTest, MergeSingleGtidIntoSetCanonicalizesTextSet) {
+  auto result = GtidEncoder::MergeSingleGtidIntoSet(
+      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:10-12,aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3",
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:4");
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-4,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:10-12");
+}
+
+TEST_F(GtidEncoderTest, MergeSingleTaggedGtidIntoSetPreservesTagKey) {
+  auto result = GtidEncoder::MergeSingleGtidIntoSet(
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:tag:7",
+      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:tag:8");
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:tag:7-8");
+}

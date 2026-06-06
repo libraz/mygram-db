@@ -237,8 +237,12 @@ std::string SyncOperationManager::GetSyncStatus() {
       continue;
     }
 
+    if (!any_active) {
+      oss << "SYNC_STATUS\r\n";
+    }
     any_active = true;
-    oss << "table=" << table_name << " status=" << state.status;
+    oss << "table=" << ResponseFormatter::SanitizeDelimitedField(table_name)
+        << " status=" << ResponseFormatter::SanitizeDelimitedField(state.status);
 
     if (state.status == "IN_PROGRESS") {
       uint64_t processed = state.processed_rows.load();
@@ -261,13 +265,14 @@ std::string SyncOperationManager::GetSyncStatus() {
       oss << " rows=" << processed << " time=" << std::fixed << std::setprecision(1) << elapsed << "s";
 
       if (!state.gtid.empty()) {
-        oss << " gtid=" << state.gtid;
+        oss << " gtid=" << ResponseFormatter::SanitizeDelimitedField(state.gtid);
       }
-      oss << " replication=" << state.replication_status;
+      oss << " replication=" << ResponseFormatter::SanitizeDelimitedField(state.replication_status);
     } else if (state.status == "FAILED") {
-      oss << " rows=" << state.processed_rows.load() << " error=\"" << state.error_message << "\"";
+      oss << " rows=" << state.processed_rows.load() << " error=\""
+          << ResponseFormatter::SanitizeDelimitedField(state.error_message) << "\"";
     } else if (state.status == "CANCELLED") {
-      oss << " error=\"" << state.error_message << "\"";
+      oss << " error=\"" << ResponseFormatter::SanitizeDelimitedField(state.error_message) << "\"";
     }
 
     oss << "\r\n";
@@ -278,10 +283,10 @@ std::string SyncOperationManager::GetSyncStatus() {
                                            "\r\n"
                                            R"(status=IDLE message="No sync operation performed")"
                                            "\r\n"
-                                           "END");
+                                           "END\r\n");
   }
 
-  oss << "END";
+  oss << "END\r\n";
   return ResponseFormatter::FormatStatus(oss.str());
 }
 

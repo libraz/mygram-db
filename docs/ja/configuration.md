@@ -399,7 +399,7 @@ memory:
   soft_target_mb: 4096              # 予約済み / 現在は未強制
   arena_chunk_mb: 64                # 予約済み / 現在は未強制
   roaring_threshold: 0.18           # Roaringビットマップ閾値(密度)
-  minute_epoch: true                # 分精度エポックを使用
+  minute_epoch: true                # 予約済み / 現在は未強制
 
   # テキスト正規化
   normalize:
@@ -419,7 +419,7 @@ memory:
 | `soft_target_mb` | integer | `4096` | 予約済み / 現在は未強制。現時点では退避トリガーではありません | ❌ 不可 |
 | `arena_chunk_mb` | integer | `64` | 予約済み / 現在は未強制。現時点ではアロケータチャンクサイズは設定できません | ❌ 不可 |
 | `roaring_threshold` | float | `0.18` | Roaringビットマップのポスティングリスト密度閾値(0.0-1.0) | ❌ 不可 |
-| `minute_epoch` | boolean | `true` | タイムスタンプに分精度エポックを使用 | ❌ 不可 |
+| `minute_epoch` | boolean | `true` | 予約済み / 現在は未強制。現時点ではタイムスタンプ精度は設定できません | ❌ 不可 |
 | `normalize.nfkc` | boolean | `true` | NFKC正規化を適用(Unicode互換性) | ❌ 不可 |
 | `normalize.width` | string | `narrow` | 幅変換: `keep`、`narrow`、`wide` | ❌ 不可 |
 | `normalize.lower` | boolean | `false` | テキストを小文字に変換 | ❌ 不可 |
@@ -671,7 +671,7 @@ cache:
   max_memory_mb: 32                 # 最大キャッシュメモリ(MB)
   min_query_cost_ms: 10.0           # キャッシュする最小クエリコスト(ミリ秒)
   ttl_seconds: 3600                 # キャッシュエントリのTTL(0 = TTLなし)
-  invalidation_strategy: "ngram"    # "table"は予約済み / 現在は未強制
+  invalidation_strategy: "ngram"    # "ngram"または"table"
 
   # 詳細チューニング
   compression_enabled: true         # LZ4圧縮を有効化
@@ -691,7 +691,7 @@ cache:
 | `max_memory_mb` | integer | `32` | 最大キャッシュメモリ(MB) | ⚠️ 部分的 |
 | `min_query_cost_ms` | float | `10.0` | キャッシュする最小クエリコスト(ミリ秒) | ⚠️ 部分的 |
 | `ttl_seconds` | integer | `3600` | キャッシュエントリのTTL(秒)(0 = TTLなし) | ⚠️ 部分的 |
-| `invalidation_strategy` | string | `ngram` | `ngram`は現在有効。`table`は受け付けるが予約済み / 現在は未強制 | ⚠️ 部分的 |
+| `invalidation_strategy` | string | `ngram` | キャッシュ無効化戦略: 精密な`ngram`無効化、または粗い`table`単位の無効化 | ❌ 不可 |
 | `compression_enabled` | boolean | `true` | キャッシュされた結果のLZ4圧縮を有効化 | ⚠️ 部分的 |
 | `eviction_batch_size` | integer | `10` | 予約済み / 現在は未強制。退避は現在1件ずつ実行されます | ⚠️ 部分的 |
 | `invalidation.batch_size` | integer | `1000` | N個の一意な(table, ngram)ペア後に無効化を処理 | ⚠️ 部分的 |
@@ -705,8 +705,9 @@ cache:
 - **使用例**: 本番環境
 
 **`table`**:
-- 予約済み / 現在は未強制。将来互換のため値は受け付けられますが、
-  現在の無効化は`ngram`経路を使用します。
+- **精度**: 変更されたテーブルのキャッシュ済みクエリをすべて無効化
+- **効率**: 単純だがより積極的な無効化
+- **使用例**: トラブルシュート、または保守的なキャッシュ無効化を優先する環境
 
 #### キャッシュチューニング
 

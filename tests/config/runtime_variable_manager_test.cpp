@@ -157,7 +157,6 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
   config.cache.max_memory_bytes = 64 * mygram::constants::kBytesPerMegabyte;
   config.cache.invalidation_strategy = "table";
   config.cache.compression_enabled = false;
-  config.cache.eviction_batch_size = 12;
   config.cache.invalidation.batch_size = 345;
   config.cache.invalidation.max_delay_ms = 67;
   config.memory.arena_chunk_mb = 128;
@@ -203,7 +202,6 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
       {"cache.max_memory_bytes", std::to_string(64 * mygram::constants::kBytesPerMegabyte)},
       {"cache.invalidation_strategy", "table"},
       {"cache.compression_enabled", "false"},
-      {"cache.eviction_batch_size", "12"},
       {"cache.invalidation.batch_size", "345"},
       {"cache.invalidation.max_delay_ms", "67"},
       {"memory.arena_chunk_mb", "128"},
@@ -259,6 +257,10 @@ TEST(RuntimeVariableManagerTest, GetUnknownVariable) {
   auto result = manager->GetVariable("unknown.variable");
   EXPECT_FALSE(result);
   EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+
+  auto reserved_not_exposed = manager->GetVariable("cache.eviction_batch_size");
+  EXPECT_FALSE(reserved_not_exposed);
+  EXPECT_EQ(static_cast<int>(reserved_not_exposed.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
 }
 
 /**
@@ -898,6 +900,33 @@ TEST(RuntimeVariableManagerTest, ApiConfigCallbackReceivesRuntimeValues) {
   EXPECT_EQ(callback_count, 2);
   EXPECT_EQ(callback_default_limit, 50);
   EXPECT_EQ(callback_max_query_length, 512);
+}
+
+TEST(RuntimeVariableManagerTest, ApiConfigAddCallbackDoesNotReplaceExistingListeners) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  int dispatcher_count = 0;
+  int http_count = 0;
+  int dispatcher_default_limit = 0;
+  int http_default_limit = 0;
+
+  manager->AddApiConfigCallback([&](int default_limit, int) {
+    dispatcher_default_limit = default_limit;
+    ++dispatcher_count;
+  });
+  manager->AddApiConfigCallback([&](int default_limit, int) {
+    http_default_limit = default_limit;
+    ++http_count;
+  });
+
+  auto result = manager->SetVariable("api.default_limit", "75");
+  ASSERT_TRUE(result) << result.error().to_string();
+
+  EXPECT_EQ(dispatcher_count, 1);
+  EXPECT_EQ(http_count, 1);
+  EXPECT_EQ(dispatcher_default_limit, 75);
+  EXPECT_EQ(http_default_limit, 75);
 }
 
 /**

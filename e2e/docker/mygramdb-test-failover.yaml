@@ -31,35 +31,13 @@ tables:
     ngram_size: 2
     kanji_ngram_size: 1
 
-  - name: "products"
-    primary_key: "id"
-    text_source:
-      column: "description"
-    required_filters:
-      - name: "enabled"
-        type: "int"
-        op: "="
-        value: 1
-        bitmap_index: false
-    filters:
-      - name: "status"
-        type: "int"
-        dict_compress: false
-        bitmap_index: false
-      - name: "category"
-        type: "string"
-        dict_compress: false
-        bitmap_index: false
-    ngram_size: 2
-    kanji_ngram_size: 1
-
 build:
   batch_size: 5000
   parallelism: 2
 
 replication:
   enable: true
-  server_id: 99999
+  server_id: 99998
   start_from: "snapshot"
 
 memory:
@@ -71,17 +49,17 @@ memory:
     lower: false
 
 dump:
-  dir: "e2e/results/dumps"
+  dir: "e2e/results/dumps-failover"
   interval_sec: 0
 
 api:
   tcp:
     bind: "127.0.0.1"
-    port: 11016
+    port: 11018
   http:
     enable: true
     bind: "127.0.0.1"
-    port: 20080
+    port: 20082
 
 network:
   allow_cidrs:

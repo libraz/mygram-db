@@ -19,6 +19,7 @@
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
+#include "index/bm25_scorer.h"
 #include "query/highlighter.h"
 #include "query/query_parser.h"
 #include "query/result_sorter.h"
@@ -484,11 +485,8 @@ bool ParseFuzzyFromJson(const json& fuzzy_json, query::Query& query, std::string
   return true;
 }
 
-std::vector<std::string> BuildHighlightTerms(const query::Query& query, TableContext& table_ctx) {
-  std::vector<std::string> terms;
-  terms.push_back(query.search_text);
-  terms.insert(terms.end(), query.and_terms.begin(), query.and_terms.end());
-
+std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, TableContext& table_ctx) {
+  std::vector<std::string> terms = search_terms;
   for (auto& term : terms) {
     if (table_ctx.index != nullptr) {
       term = table_ctx.index->NormalizeText(term);
@@ -509,6 +507,61 @@ std::vector<std::string> BuildHighlightTerms(const query::Query& query, TableCon
   return terms;
 }
 
+mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortHttpResults(
+    std::vector<storage::DocId>& results, const query::Query& query, TableContext& table_ctx,
+    search_pipeline::FullPipelineOutput& pipeline_output, const config::Config* full_config,
+    const std::string& primary_key_column) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
+  if (!is_score_sort) {
+    return query::ResultSorter::SortAndPaginate(results, *table_ctx.doc_store, query, primary_key_column);
+  }
+
+  if (full_config == nullptr || !full_config->bm25.enable) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kInvalidArgument, "SORT _score requires BM25 to be enabled in configuration"));
+  }
+  if (table_ctx.index == nullptr || table_ctx.doc_store == nullptr) {
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Table is not available"));
+  }
+
+  if (pipeline_output.term_infos.empty() && !pipeline_output.all_search_terms.empty()) {
+    pipeline_output.term_infos = search_pipeline::GenerateTermInfos(
+        pipeline_output.all_search_terms, table_ctx.index.get(), table_ctx.config.ngram_size,
+        table_ctx.config.kanji_ngram_size, table_ctx.config.cross_boundary_ngrams);
+  }
+
+  std::vector<std::string> normalized_terms;
+  std::vector<uint64_t> term_dfs;
+  normalized_terms.reserve(pipeline_output.term_infos.size());
+  term_dfs.reserve(pipeline_output.term_infos.size());
+  for (size_t i = 0; i < pipeline_output.term_infos.size(); ++i) {
+    const auto& term_info = pipeline_output.term_infos[i];
+    if (!term_info.normalized_term.empty()) {
+      normalized_terms.push_back(term_info.normalized_term);
+    } else if (i < pipeline_output.all_search_terms.size()) {
+      normalized_terms.push_back(table_ctx.index->NormalizeText(pipeline_output.all_search_terms[i]));
+    }
+    term_dfs.push_back(term_info.term_doc_freq);
+  }
+
+  const auto& bm25_config = full_config->bm25;
+  const index::BM25Params bm25_params{bm25_config.k1, bm25_config.b};
+  auto scored = index::BM25Scorer::ScoreDocuments(results, normalized_terms, term_dfs, *table_ctx.doc_store,
+                                                  table_ctx.bm25_stats.doc_count.load(std::memory_order_relaxed),
+                                                  table_ctx.bm25_stats.avg_doc_length(), bm25_params);
+
+  std::vector<double> scores;
+  scores.reserve(scored.size());
+  for (const auto& scored_doc : scored) {
+    scores.push_back(scored_doc.score);
+  }
+  return query::ResultSorter::SortByScore(results, scores, query.order_by->order, query.limit, query.offset);
+}
+
 }  // namespace
 
 using storage::DocId;
@@ -516,7 +569,7 @@ using storage::DocId;
 HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
                        const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                        cache::CacheManager* cache_manager, std::atomic<bool>* loading, ServerStats* tcp_stats,
-                       std::shared_ptr<RateLimiter> rate_limiter)
+                       std::shared_ptr<RateLimiter> rate_limiter, std::atomic<bool>* replication_paused_for_dump)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
       full_config_(full_config),
@@ -524,7 +577,8 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       cache_manager_(cache_manager),
       rate_limiter_(std::move(rate_limiter)),
       loading_(loading),
-      tcp_stats_(tcp_stats) {
+      tcp_stats_(tcp_stats),
+      replication_paused_for_dump_(replication_paused_for_dump) {
   parsed_allow_cidrs_ = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
 
   if (full_config_ != nullptr) {
@@ -881,6 +935,20 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     return std::nullopt;
   }
 
+  if (!apply_pagination) {
+    static constexpr std::array<std::string_view, 5> kCountRejectedFields = {"limit", "offset", "sort", "highlight",
+                                                                             "fuzzy"};
+    for (const auto field : kCountRejectedFields) {
+      if (body.contains(std::string(field))) {
+        SendError(res, kHttpBadRequest,
+                  "Field '" + std::string(field) +
+                      "' is not supported by COUNT; use /search for ranked or paginated "
+                      "results");
+        return std::nullopt;
+      }
+    }
+  }
+
   // Validate query text for control characters (CRLF injection prevention)
   std::string query_text = body["q"].get<std::string>();
   for (char c : query_text) {
@@ -1024,7 +1092,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
     if (!pipeline_output.success) {
-      SendError(res, kHttpInternalServerError, pipeline_output.error_message);
+      SendError(res, kHttpBadRequest, pipeline_output.error_message);
       return;
     }
 
@@ -1032,7 +1100,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     size_t total_count = results.size();
 
     auto sorted_result =
-        query::ResultSorter::SortAndPaginate(results, *current_doc_store, *query, params.primary_key_column);
+        SortHttpResults(results, *query, *table_ctx, pipeline_output, full_config_, params.primary_key_column);
     if (!sorted_result.has_value()) {
       SendError(res, kHttpBadRequest, sorted_result.error().message());
       return;
@@ -1057,7 +1125,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         return;
       }
       highlight_texts = current_doc_store->GetNormalizedTextBatch(sorted_results);
-      highlight_terms = BuildHighlightTerms(*query, *table_ctx);
+      highlight_terms = BuildHighlightTerms(pipeline_output.all_search_terms, *table_ctx);
     }
     for (size_t i = 0; i < docs.size(); ++i) {
       if (docs[i]) {
@@ -1121,7 +1189,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
     if (!pipeline_output.success) {
-      SendError(res, kHttpInternalServerError, pipeline_output.error_message);
+      SendError(res, kHttpBadRequest, pipeline_output.error_message);
       return;
     }
 
@@ -1143,7 +1211,6 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
 
 void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) {
   RecordRequest();
-  RecordCommand(query::QueryType::GET);
 
   try {
     // Check if server is loading
@@ -1174,6 +1241,8 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       SendError(res, kHttpNotFound, "Document not found");
       return;
     }
+
+    RecordCommand(query::QueryType::GET);
 
     // Build JSON response
     json response;
@@ -1379,8 +1448,11 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
   // Health probe — not counted in total_requests; see HandleHealth.
   // Readiness probe: Return 200 OK if ready to accept traffic, 503 otherwise
   const bool is_loading = (loading_ != nullptr && loading_->load());
+  const bool replication_paused_for_dump =
+      replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire);
 #ifdef USE_MYSQL
-  const bool replication_unavailable = (binlog_reader_ != nullptr && !binlog_reader_->IsRunning());
+  const bool replication_unavailable =
+      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !replication_paused_for_dump);
 #else
   const bool replication_unavailable = false;
 #endif
@@ -1391,6 +1463,7 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
 #ifdef USE_MYSQL
   if (binlog_reader_ != nullptr) {
     response["replication_running"] = !replication_unavailable;
+    response["replication_paused_for_dump"] = replication_paused_for_dump;
   }
 #endif
 
@@ -1415,8 +1488,11 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
 
   // Overall status
   bool is_loading = (loading_ != nullptr && loading_->load());
+  const bool replication_paused_for_dump =
+      replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire);
 #ifdef USE_MYSQL
-  const bool replication_unavailable = (binlog_reader_ != nullptr && !binlog_reader_->IsRunning());
+  const bool replication_unavailable =
+      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !replication_paused_for_dump);
 #else
   const bool replication_unavailable = false;
 #endif
@@ -1481,8 +1557,9 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
       binlog_comp["processed_events"] = binlog_reader_->GetProcessedEvents();
       binlog_comp["queue_size"] = binlog_reader_->GetQueueSize();
     } else {
-      binlog_comp["status"] = "disconnected";
+      binlog_comp["status"] = replication_paused_for_dump ? "paused_for_dump" : "disconnected";
       binlog_comp["running"] = false;
+      binlog_comp["paused_for_dump"] = replication_paused_for_dump;
     }
     components["binlog"] = binlog_comp;
   }
@@ -1606,7 +1683,7 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
 
 void HttpServer::SendJson(httplib::Response& res, int status_code, const nlohmann::json& body) {
   res.status = status_code;
-  res.set_content(body.dump(), "application/json");
+  res.set_content(body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace), "application/json");
 }
 
 void HttpServer::SendError(httplib::Response& res, int status_code, const std::string& message) {

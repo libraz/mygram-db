@@ -161,6 +161,7 @@ class ServerOrchestrator {
   Expected<void, mygram::utils::Error> BuildSnapshots();
   Expected<void, mygram::utils::Error> InitializeBinlogReader();
   Expected<void, mygram::utils::Error> InitializeServers();
+  void RegisterRuntimeCallbacks();
 
   // Dependencies (non-owning)
   Dependencies deps_;

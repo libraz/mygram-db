@@ -52,6 +52,18 @@ bool IsV2Event(MySQLBinlogEventType event_type) {
          event_type == MySQLBinlogEventType::UPDATE_ROWS_EVENT || event_type == MySQLBinlogEventType::DELETE_ROWS_EVENT;
 }
 
+bool AllColumnsPresent(const unsigned char* columns_present, uint64_t column_count) {
+  if (columns_present == nullptr) {
+    return false;
+  }
+  for (uint64_t col_idx = 0; col_idx < column_count; ++col_idx) {
+    if (!binlog_util::bitmap_is_set(columns_present, col_idx)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -169,6 +181,17 @@ mygram::utils::Expected<internal::RowsEventHeader, mygram::utils::Error> interna
   }
   const unsigned char* columns_present = ptr;
   ptr += bitmap_size;
+  if (!AllColumnsPresent(columns_present, column_count)) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", "partial_columns_present_bitmap")
+        .Field("event_type", event_type_label)
+        .Field("required", "binlog_row_image=FULL")
+        .Error();
+    return MakeUnexpected(MakeError(
+        ErrorCode::kMySQLBinlogError,
+        std::string(event_type_label) + " event: partial columns_present bitmap requires binlog_row_image=FULL"));
+  }
 
   // Find PK and text column indices (one-time lookup)
   int pk_col_idx = -1;
@@ -204,6 +227,16 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
+
+  if (!AllColumnsPresent(columns_present, column_count)) {
+    std::string msg = std::string(event_type_label) +
+                      " event: partial columns_present bitmap requires "
+                      "binlog_row_image=FULL";
+    if (image_label[0] != '\0') {
+      msg += std::string(" (") + image_label + " image)";
+    }
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError, msg));
+  }
 
   // NULL bitmap for this row
   if (ptr + null_bitmap_size > end) {
@@ -489,6 +522,17 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
     }
     const unsigned char* columns_after = ptr;
     ptr += bitmap_size;
+    if (!AllColumnsPresent(columns_after, header->column_count)) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_error")
+          .Field("type", "partial_columns_after_image_bitmap")
+          .Field("event_type", "update_rows")
+          .Field("required", "binlog_row_image=FULL")
+          .Error();
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError,
+                                      "UPDATE_ROWS event: partial columns_after_image bitmap requires "
+                                      "binlog_row_image=FULL"));
+    }
 
     // Parse rows (each row has before and after images)
     std::vector<std::pair<RowData, RowData>> row_pairs;

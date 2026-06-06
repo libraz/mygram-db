@@ -282,6 +282,11 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
   if (json_obj.contains("binlog_format")) {
     config.binlog_format = json_obj["binlog_format"].get<std::string>();
   }
+  if (config.binlog_format != "ROW") {
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                    "mysql.binlog_format must be ROW. MygramDB replication requires row-level "
+                                    "events; STATEMENT and MIXED are not supported."));
+  }
   if (json_obj.contains("binlog_row_image")) {
     config.binlog_row_image = json_obj["binlog_row_image"].get<std::string>();
   }

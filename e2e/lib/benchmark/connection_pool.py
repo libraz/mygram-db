@@ -12,7 +12,7 @@ import time
 from abc import ABC, abstractmethod
 from queue import Empty, Queue
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
 
 import mysql.connector
 
@@ -236,7 +236,7 @@ class MysqlConnectionPool(ConnectionPool):
             self._config["unix_socket"] = unix_socket
 
     def _create_connection(self) -> MysqlConnection:
-        conn = mysql.connector.connect(**self._config)
+        conn = cast(mysql.connector.MySQLConnection, mysql.connector.connect(**self._config))
         return MysqlConnection(conn)
 
     def _close_connection(self, conn: MysqlConnection) -> None:

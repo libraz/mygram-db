@@ -74,7 +74,7 @@ class HealthEndpointTest : public ::testing::Test {
     cache_config.enabled = false;
     cache_manager_ = std::make_unique<cache::CacheManager>(cache_config, cache::NgramConfigMap{});
     server_ = std::make_unique<HttpServer>(http_config, table_contexts_, nullptr, &binlog_reader_, cache_manager_.get(),
-                                           &loading_);
+                                           &loading_, nullptr, nullptr, &replication_paused_for_dump_);
 
     // Start server
     ASSERT_TRUE(server_->Start());
@@ -117,6 +117,7 @@ class HealthEndpointTest : public ::testing::Test {
   std::unique_ptr<HttpServer> server_;
   HealthFakeBinlogReader binlog_reader_;
   std::atomic<bool> loading_;
+  std::atomic<bool> replication_paused_for_dump_{false};
   int port_{0};
   std::string base_url_;
 };
@@ -203,6 +204,23 @@ TEST_F(HealthEndpointTest, ReadinessProbeReflectsReplicationState) {
   EXPECT_FALSE(response.value("loading", true));
   EXPECT_FALSE(response.value("replication_running", true));
   EXPECT_EQ(response["reason"], "Replication is not running");
+}
+
+TEST_F(HealthEndpointTest, ReadinessRemainsReadyWhenReplicationPausedForDump) {
+  httplib::Client client(base_url_);
+  client.set_connection_timeout(5);
+
+  loading_ = false;
+  binlog_reader_.SetRunning(false);
+  replication_paused_for_dump_.store(true, std::memory_order_release);
+
+  auto res = client.Get("/health/ready");
+  ASSERT_TRUE(res) << "Request failed";
+  EXPECT_EQ(res->status, 200) << "Readiness probe should stay ready during dump-induced replication pause";
+
+  auto response = json::parse(res->body);
+  EXPECT_EQ(response["status"], "ready");
+  EXPECT_TRUE(response.value("replication_paused_for_dump", false));
 }
 
 /**

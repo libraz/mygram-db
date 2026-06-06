@@ -117,18 +117,15 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index, const s
     }
 
     case NodeType::OR: {
-      // Union of all children's results using set_union on sorted vectors
       std::vector<DocId> result;
 
       for (const auto& child : children) {
         auto child_result = child->Evaluate(index, doc_store, all_docs);
-        std::vector<DocId> merged;
-        merged.reserve(result.size() + child_result.size());
-        std::set_union(result.begin(), result.end(), child_result.begin(), child_result.end(),
-                       std::back_inserter(merged));
-        result = std::move(merged);
+        result.insert(result.end(), child_result.begin(), child_result.end());
       }
 
+      std::sort(result.begin(), result.end());
+      result.erase(std::unique(result.begin(), result.end()), result.end());
       return result;
     }
 
@@ -344,7 +341,27 @@ std::unique_ptr<QueryNode> QueryASTParser::Parse(const std::string& query_str) {
     return nullptr;
   }
 
+  const size_t term_count = CountTerms(*root);
+  if (term_count > kMaxTermCount) {
+    SetError("Too many boolean search terms (maximum: " + std::to_string(kMaxTermCount) + ")");
+    return nullptr;
+  }
+
   return root;
+}
+
+size_t QueryASTParser::CountTerms(const QueryNode& node) {
+  if (node.type == NodeType::TERM) {
+    return 1;
+  }
+
+  size_t count = 0;
+  for (const auto& child : node.children) {
+    if (child != nullptr) {
+      count += CountTerms(*child);
+    }
+  }
+  return count;
 }
 
 const Token& QueryASTParser::CurrentToken() const {
@@ -407,15 +424,15 @@ std::unique_ptr<QueryNode> QueryASTParser::ParseOrExpr() {
 }
 
 std::unique_ptr<QueryNode> QueryASTParser::ParseAndExpr() {
-  // and_expr → not_expr (AND not_expr)*
+  // and_expr → not_expr ((AND)? not_expr)*
   auto left = ParseNotExpr();
   if (!left || !error_.empty()) {
     return nullptr;
   }
 
-  while (Match(TokenType::AND) || Match(TokenType::NOT)) {
-    const bool implicit_and_before_not = Match(TokenType::NOT);
-    if (!implicit_and_before_not) {
+  while (Match(TokenType::AND) || Match(TokenType::NOT) || Match(TokenType::TERM) || Match(TokenType::LPAREN)) {
+    const bool explicit_and = Match(TokenType::AND);
+    if (explicit_and) {
       Advance();
     }
 

@@ -145,6 +145,11 @@ class TcpServer {
   std::atomic<bool>* GetDumpLoadInProgressFlag() { return &dump_load_in_progress_; }
 
   /**
+   * @brief Get replication paused-for-dump flag pointer (for HttpServer readiness)
+   */
+  std::atomic<bool>* GetReplicationPausedForDumpFlag() { return &replication_paused_for_dump_; }
+
+  /**
    * @brief Get MySQL reconnecting flag pointer (for MysqlReconnectionHandler)
    */
   std::atomic<bool>* GetMysqlReconnectingFlag() { return &mysql_reconnecting_; }

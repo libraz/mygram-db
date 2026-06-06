@@ -8,7 +8,7 @@ import re
 import socket
 import time
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -148,6 +148,68 @@ class MygramdbClient:
             return int(resp.split(")", 1)[1].strip())
         return 0
 
+    def facet(
+        self,
+        table: str,
+        column: str,
+        query: str | None = None,
+        *,
+        limit: int | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, int]:
+        """Execute a TCP FACET command and parse value counts."""
+        cmd = f"FACET {table} {column}"
+        if query:
+            cmd += f" {query}"
+        if filters:
+            for key, value in filters.items():
+                cmd += f" FILTER {key}={value}"
+        if limit is not None:
+            cmd += f" LIMIT {limit}"
+
+        resp = self.tcp_command_multiline(cmd)
+        if not resp or not resp.startswith("OK FACET"):
+            return {}
+
+        counts: dict[str, int] = {}
+        for line in resp.splitlines()[1:]:
+            if not line.strip() or "\t" not in line:
+                continue
+            value, count = line.rsplit("\t", 1)
+            with contextlib.suppress(ValueError):
+                counts[value] = int(count)
+        return counts
+
+    def tcp_command_multiline(
+        self, cmd: str, timeout: float = 30.0, terminator: bytes = b"\r\n\r\n"
+    ) -> str | None:
+        """Send a TCP command and read until a multi-line response terminator."""
+        try:
+            if self.unix_socket_path:
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            if self.unix_socket_path:
+                sock.connect(self.unix_socket_path)
+            else:
+                sock.connect((self.host, self.tcp_port))
+            sock.sendall((cmd + "\r\n").encode("utf-8"))
+
+            data = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+                if data.endswith(terminator):
+                    break
+
+            sock.close()
+            return data.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            return None
+
     def info(self) -> dict[str, Any]:
         """Execute INFO command and parse result."""
         resp = self.tcp_command("INFO")
@@ -226,6 +288,71 @@ class MygramdbClient:
         except URLError:
             return {}
 
+    def http_post(
+        self, path: str, payload: dict[str, Any], timeout: float = 10.0
+    ) -> tuple[int, dict[str, Any] | str]:
+        """HTTP POST request to MygramDB returning (status, parsed body)."""
+        url = f"http://{self.host}:{self.http_port}{path}"
+        body = json.dumps(payload).encode("utf-8")
+        req = Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+                return resp.status, self._parse_json_or_text(raw)
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            return exc.code, self._parse_json_or_text(raw)
+        except URLError as exc:
+            return 0, str(exc)
+
+    def http_search(
+        self,
+        table: str,
+        query: str,
+        *,
+        sort: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute HTTP search and normalize the result shape to match search()."""
+        payload: dict[str, Any] = {"q": query}
+        if filters:
+            payload["filters"] = filters
+        if sort:
+            payload["sort"] = self._http_sort_payload(sort)
+        if limit is not None:
+            payload["limit"] = limit
+        if offset is not None:
+            payload["offset"] = offset
+
+        status, body = self.http_post(f"/{table}/search", payload)
+        if status != 200 or not isinstance(body, dict):
+            return {"total": 0, "ids": [], "raw_response": body, "status": status}
+
+        ids = []
+        for item in body.get("results", []):
+            if isinstance(item, dict) and "doc_id" in item:
+                ids.append(item["doc_id"])
+        return {
+            "total": int(body.get("count", len(ids))),
+            "ids": ids,
+            "raw_response": body,
+            "status": status,
+        }
+
+    def http_count(
+        self, table: str, query: str, *, filters: dict[str, Any] | None = None
+    ) -> tuple[int, int]:
+        """Execute HTTP count and return (status, count)."""
+        payload: dict[str, Any] = {"q": query}
+        if filters:
+            payload["filters"] = filters
+        status, body = self.http_post(f"/{table}/count", payload)
+        if status == 200 and isinstance(body, dict):
+            return status, int(body.get("count", 0))
+        return status, 0
+
     def health_live(self) -> bool:
         """Check /health/live endpoint."""
         resp = self.http_get("/health/live")
@@ -264,6 +391,17 @@ class MygramdbClient:
         """Send REPLICATION STATUS command and return response."""
         resp = self.tcp_command("REPLICATION STATUS")
         return resp or ""
+
+    def _parse_json_or_text(self, raw: str) -> dict[str, Any] | str:
+        with contextlib.suppress(json.JSONDecodeError):
+            return json.loads(raw)
+        return raw
+
+    def _http_sort_payload(self, sort: str) -> dict[str, str]:
+        parts = sort.split()
+        column = parts[0]
+        order = parts[1].upper() if len(parts) > 1 else "DESC"
+        return {"column": column, "order": order}
 
     def _parse_search_response(self, resp: str | None) -> dict[str, Any]:
         """Parse a SEARCH response into structured data."""

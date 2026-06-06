@@ -11,12 +11,14 @@
 #include <spdlog/spdlog.h>
 #include <zlib.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <type_traits>
 #include <unordered_set>
@@ -45,6 +47,44 @@
 #define O_NOFOLLOW 0x00000100
 #endif
 #endif
+
+namespace mygramdb::storage {
+
+struct DumpLoadAccess {
+  struct LoadedTableReplacement {
+    std::string table_name;
+    index::Index* target_index = nullptr;
+    index::Index* loaded_index = nullptr;
+    DocumentStore* target_doc_store = nullptr;
+    DocumentStore* loaded_doc_store = nullptr;
+  };
+
+  static void ReplaceLoadedTables(std::vector<LoadedTableReplacement> replacements) {
+    std::sort(replacements.begin(), replacements.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.table_name < rhs.table_name; });
+
+    std::vector<std::unique_lock<std::shared_mutex>> target_locks;
+    target_locks.reserve(replacements.size() * 2);
+    for (const auto& replacement : replacements) {
+      target_locks.emplace_back(replacement.target_index->postings_mutex_);
+      target_locks.emplace_back(replacement.target_doc_store->mutex_);
+    }
+
+    for (const auto& replacement : replacements) {
+      replacement.target_index->term_postings_ = std::move(replacement.loaded_index->term_postings_);
+      replacement.target_index->load_generation_.fetch_add(1, std::memory_order_acq_rel);
+
+      replacement.target_doc_store->doc_id_to_pk_ = std::move(replacement.loaded_doc_store->doc_id_to_pk_);
+      replacement.target_doc_store->pk_to_doc_id_ = std::move(replacement.loaded_doc_store->pk_to_doc_id_);
+      replacement.target_doc_store->doc_filters_ = std::move(replacement.loaded_doc_store->doc_filters_);
+      replacement.target_doc_store->doc_texts_ = std::move(replacement.loaded_doc_store->doc_texts_);
+      replacement.target_doc_store->filter_index_ = std::move(replacement.loaded_doc_store->filter_index_);
+      replacement.target_doc_store->next_doc_id_ = replacement.loaded_doc_store->next_doc_id_;
+    }
+  }
+};
+
+}  // namespace mygramdb::storage
 
 namespace mygramdb::storage::dump_v2 {
 
@@ -115,9 +155,17 @@ Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV2& header) {
 }
 
 Expected<void, Error> ApplyPendingTableLoads(const std::vector<PendingTableLoad>& pending_loads) {
+  std::vector<DumpLoadAccess::LoadedTableReplacement> replacements;
+  replacements.reserve(pending_loads.size());
   for (const auto& pending : pending_loads) {
-    pending.index->ReplaceWithLoaded(*pending.loaded_index);
-    pending.doc_store->ReplaceWithLoaded(*pending.loaded_doc_store);
+    replacements.push_back(DumpLoadAccess::LoadedTableReplacement{pending.table_name, pending.index,
+                                                                  pending.loaded_index.get(), pending.doc_store,
+                                                                  pending.loaded_doc_store.get()});
+  }
+
+  DumpLoadAccess::ReplaceLoadedTables(std::move(replacements));
+
+  for (const auto& pending : pending_loads) {
     StructuredLog().Event("dump_v2_table_loaded").Field("table", pending.table_name).Info();
   }
 
@@ -1002,7 +1050,8 @@ Expected<void, Error> WriteDumpV2(
 Expected<void, Error> ReadDumpV2(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
-    std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error) {
+    std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
+    const DumpConfigValidationCallback& config_validator) {
   try {
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
@@ -1299,6 +1348,12 @@ Expected<void, Error> ReadDumpV2(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "V2 dump missing required Config section"));
     }
 
+    if (config_validator) {
+      if (auto result = config_validator(config); !result) {
+        return result;
+      }
+    }
+
     if (auto result = ValidateDumpTableSet(dump_tables, table_contexts); !result) {
       return result;
     }
@@ -1382,7 +1437,8 @@ Expected<void, Error> WriteDump(
 Expected<void, Error> ReadDump(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
-    std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error) {
+    std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
+    const DumpConfigValidationCallback& config_validator) {
   // Read magic + version to determine format
   std::ifstream ifs(filepath, std::ios::binary);
   if (!ifs) {
@@ -1413,10 +1469,11 @@ Expected<void, Error> ReadDump(
   }
 
   if (version == static_cast<uint32_t>(dump_format::FormatVersion::V1)) {
+    (void)config_validator;
     return dump_v1::ReadDumpV1(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error);
   }
 
-  return ReadDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error);
+  return ReadDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error, config_validator);
 }
 
 Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error) {
@@ -1478,6 +1535,7 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       integrity_error.message = result.error().message();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
+    const auto section_start = ifs2.tellg();
 
     // Verify file size
     ifs2.seekg(0, std::ios::end);
@@ -1501,6 +1559,51 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
         integrity_error.message = "CRC32 checksum mismatch";
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
       }
+    }
+
+    ifs2.clear();
+    ifs2.seekg(section_start);
+    uint32_t sections_read = 0;
+    for (uint32_t i = 0; i < header.section_count; ++i) {
+      dump_format::SectionEnvelope envelope;
+      if (auto result = ReadSectionEnvelope(ifs2, envelope); !result) {
+        integrity_error.type = dump_format::CRCErrorType::SectionCRC;
+        integrity_error.message = "Failed to read section envelope " + std::to_string(i + 1) + " of " +
+                                  std::to_string(header.section_count) + ": " + result.error().message();
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+      }
+
+      if (envelope.data_length > actual_size ||
+          static_cast<uint64_t>(ifs2.tellg()) + envelope.data_length > actual_size) {
+        integrity_error.type = dump_format::CRCErrorType::SectionCRC;
+        integrity_error.message = "Section data extends beyond end of file";
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+      }
+
+      std::string section_data(envelope.data_length, '\0');
+      if (envelope.data_length > 0) {
+        ifs2.read(section_data.data(), static_cast<std::streamsize>(envelope.data_length));
+        if (!ifs2.good()) {
+          integrity_error.type = dump_format::CRCErrorType::SectionCRC;
+          integrity_error.message = "Failed to read section data";
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+        }
+      }
+
+      uint32_t actual_crc = ComputeCRC32(section_data);
+      if (actual_crc != envelope.crc32) {
+        integrity_error.type = dump_format::CRCErrorType::SectionCRC;
+        integrity_error.message = "Section CRC32 mismatch";
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+      }
+      ++sections_read;
+    }
+
+    if (sections_read != header.section_count) {
+      integrity_error.type = dump_format::CRCErrorType::SectionCRC;
+      integrity_error.message = "Section count mismatch: expected " + std::to_string(header.section_count) +
+                                " sections, got " + std::to_string(sections_read);
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
 
     integrity_error.type = dump_format::CRCErrorType::None;
@@ -1576,10 +1679,9 @@ Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpV2Info& info)
     for (uint32_t i = 0; i < header.section_count; ++i) {
       dump_format::SectionEnvelope envelope;
       if (auto result = ReadSectionEnvelope(ifs, envelope); !result) {
-        if (ifs.eof()) {
-          break;
-        }
-        return result;
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                        "Failed to read section envelope " + std::to_string(i + 1) + " of " +
+                                            std::to_string(header.section_count) + ": " + result.error().message()));
       }
 
       info.section_types.push_back(envelope.type);
@@ -1590,7 +1692,14 @@ Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpV2Info& info)
 
       // Skip section data
       if (envelope.data_length > 0) {
+        if (envelope.data_length > info.file_size ||
+            static_cast<uint64_t>(ifs.tellg()) + envelope.data_length > info.file_size) {
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Section data extends beyond end of file"));
+        }
         ifs.seekg(static_cast<std::streamoff>(envelope.data_length), std::ios::cur);
+        if (!ifs.good()) {
+          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to skip section data"));
+        }
       }
     }
 

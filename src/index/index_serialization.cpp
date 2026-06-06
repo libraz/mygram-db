@@ -33,11 +33,12 @@ using mygram::utils::MakeUnexpected;
 
 namespace {
 
-// Current serialization format version (writes V3 with full n-gram config and CRC32 trailer)
+// Current serialization format version (writes V4 with tokenizer config and CRC32 trailer)
 constexpr uint32_t kFormatVersionV1 = 1;
 constexpr uint32_t kFormatVersionV2 = 2;
 constexpr uint32_t kFormatVersionV3 = 3;
-constexpr uint32_t kCurrentFormatVersion = kFormatVersionV3;
+constexpr uint32_t kFormatVersionV4 = 4;
+constexpr uint32_t kCurrentFormatVersion = kFormatVersionV4;
 
 // Size of the CRC32 checksum trailer (4 bytes)
 constexpr size_t kCRC32Size = 4;
@@ -108,9 +109,11 @@ Expected<void, Error> Index::SaveToFile(const std::string& filepath) const {
 
 Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
   try {
-    // V3 format:
-    // [4 bytes: magic "MGIX"] [4 bytes: version=3] [4 bytes: ngram_size]
+    // V4 format:
+    // [4 bytes: magic "MGIX"] [4 bytes: version=4] [4 bytes: ngram_size]
     // [4 bytes: kanji_ngram_size] [1 byte: cross_boundary_ngrams]
+    // [1 byte: normalize_nfkc] [4 bytes: normalize_width_len] [normalize_width bytes]
+    // [1 byte: normalize_lower]
     // [8 bytes: term_count] [terms and posting lists...]
     // [4 bytes: CRC32 of all preceding data]
     //
@@ -143,6 +146,14 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
     crc_write_binary(static_cast<uint32_t>(kanji_ngram_size_));
     const uint8_t cross_boundary = cross_boundary_ngrams_ ? 1 : 0;
     crc_write(&cross_boundary, sizeof(cross_boundary));
+    const uint8_t normalize_nfkc = normalize_nfkc_ ? 1 : 0;
+    crc_write(&normalize_nfkc, sizeof(normalize_nfkc));
+    crc_write_binary(static_cast<uint32_t>(normalize_width_.size()));
+    if (!normalize_width_.empty()) {
+      crc_write(normalize_width_.data(), normalize_width_.size());
+    }
+    const uint8_t normalize_lower = normalize_lower_ ? 1 : 0;
+    crc_write(&normalize_lower, sizeof(normalize_lower));
 
     // RCU snapshot: Take short shared_lock to copy term->PostingList pairs, then
     // serialize lock-free. This allows searches to proceed during serialization.
@@ -272,6 +283,8 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
     constexpr size_t kMinLegacyHeaderSize = 20;
     // 25: V3 adds kanji_ngram_size(4) + cross_boundary_ngrams(1)
     constexpr size_t kMinV3HeaderSize = 25;
+    // 31: V4 adds normalize_nfkc(1) + normalize_width_len(4) + normalize_lower(1)
+    constexpr size_t kMinV4HeaderSize = 31;
     if (all_data.size() < kMinLegacyHeaderSize) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
@@ -299,7 +312,8 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
     std::memcpy(&version, all_data.data() + 4, sizeof(version));
     version = mygram::utils::FromLittleEndian(version);
 
-    if (version != kFormatVersionV1 && version != kFormatVersionV2 && version != kFormatVersionV3) {
+    if (version != kFormatVersionV1 && version != kFormatVersionV2 && version != kFormatVersionV3 &&
+        version != kFormatVersionV4) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
           .Field("type", "unsupported_version")
@@ -312,8 +326,13 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
 
     // For V2, verify CRC32 checksum before deserializing any data
     size_t data_size = all_data.size();
-    if (version == kFormatVersionV2 || version == kFormatVersionV3) {
-      const size_t min_header_size = (version == kFormatVersionV3) ? kMinV3HeaderSize : kMinLegacyHeaderSize;
+    if (version == kFormatVersionV2 || version == kFormatVersionV3 || version == kFormatVersionV4) {
+      size_t min_header_size = kMinLegacyHeaderSize;
+      if (version == kFormatVersionV3) {
+        min_header_size = kMinV3HeaderSize;
+      } else if (version == kFormatVersionV4) {
+        min_header_size = kMinV4HeaderSize;
+      }
       if (data_size < min_header_size + kCRC32Size) {
         mygram::utils::StructuredLog()
             .Event("index_io_error")
@@ -371,7 +390,7 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
           "Index ngram_size mismatch: stream=" + std::to_string(ngram) + " current=" + std::to_string(ngram_size_)));
     }
 
-    if (version == kFormatVersionV3) {
+    if (version == kFormatVersionV3 || version == kFormatVersionV4) {
       uint32_t kanji_ngram = 0;
       std::memcpy(&kanji_ngram, all_data.data() + pos, sizeof(kanji_ngram));
       kanji_ngram = mygram::utils::FromLittleEndian(kanji_ngram);
@@ -403,6 +422,45 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
                                         std::string("Index cross_boundary_ngrams mismatch: stream=") +
                                             (stream_cross_boundary ? "true" : "false") +
                                             " current=" + (cross_boundary_ngrams_ ? "true" : "false")));
+      }
+
+      if (version == kFormatVersionV4) {
+        uint8_t stream_normalize_nfkc = 0;
+        std::memcpy(&stream_normalize_nfkc, all_data.data() + pos, sizeof(stream_normalize_nfkc));
+        pos += sizeof(stream_normalize_nfkc);
+
+        uint32_t normalize_width_len = 0;
+        std::memcpy(&normalize_width_len, all_data.data() + pos, sizeof(normalize_width_len));
+        normalize_width_len = mygram::utils::FromLittleEndian(normalize_width_len);
+        pos += sizeof(normalize_width_len);
+
+        if (normalize_width_len > data_size - pos - sizeof(uint8_t)) {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageInvalidFormat, "Index normalize_width length exceeds payload size"));
+        }
+
+        std::string stream_normalize_width(all_data.data() + pos, normalize_width_len);
+        pos += normalize_width_len;
+
+        uint8_t stream_normalize_lower = 0;
+        std::memcpy(&stream_normalize_lower, all_data.data() + pos, sizeof(stream_normalize_lower));
+        pos += sizeof(stream_normalize_lower);
+
+        const bool nfkc = stream_normalize_nfkc != 0;
+        const bool lower = stream_normalize_lower != 0;
+        if (nfkc != normalize_nfkc_ || stream_normalize_width != normalize_width_ || lower != normalize_lower_) {
+          mygram::utils::StructuredLog()
+              .Event("index_normalization_mismatch")
+              .Field("stream_normalize_nfkc", nfkc)
+              .Field("current_normalize_nfkc", normalize_nfkc_)
+              .Field("stream_normalize_width", stream_normalize_width)
+              .Field("current_normalize_width", normalize_width_)
+              .Field("stream_normalize_lower", lower)
+              .Field("current_normalize_lower", normalize_lower_)
+              .Error();
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageVersionMismatch, "Index normalization configuration mismatch"));
+        }
       }
     }
 

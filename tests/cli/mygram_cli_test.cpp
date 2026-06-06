@@ -321,6 +321,16 @@ TEST_F(CliPrintResponseTest, DocResponseStripsOkPrefix) {
   EXPECT_EQ(output.find("OK "), std::string::npos);
 }
 
+TEST_F(CliPrintResponseTest, DocResponseUnescapesQuotedStringFilterValues) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse(R"(OK DOC 42 display_name="Alice Smith" label="a \"quoted\" path\\name")");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find(R"(DOC 42 display_name=Alice Smith label=a "quoted" path\name)"), std::string::npos);
+  EXPECT_EQ(output.find(R"(display_name="Alice Smith")"), std::string::npos);
+  EXPECT_EQ(output.find(R"(\")"), std::string::npos);
+}
+
 // =============================================================================
 // PrintResponse — INFO / REPLICATION (multi-line, CRLF normalization,
 // trailing-END stripping)
@@ -440,6 +450,18 @@ TEST_F(CliPrintResponseTest, SyncStartedShortForm) {
 
   EXPECT_NE(output.find("SYNC STARTED"), std::string::npos);
   EXPECT_NE(output.find("table=foo"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, SyncStatusMultiLineStripsStatusAndEnd) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK SYNC_STATUS\r\nstatus=IDLE\r\nactive_jobs=0\r\nEND");
+  std::string output = capture.GetOutput();
+
+  EXPECT_EQ(output.find('\r'), std::string::npos);
+  EXPECT_EQ(output.find("OK SYNC_STATUS"), std::string::npos);
+  EXPECT_EQ(output.find("END"), std::string::npos);
+  EXPECT_NE(output.find("status=IDLE"), std::string::npos);
+  EXPECT_NE(output.find("active_jobs=0"), std::string::npos);
 }
 
 TEST_F(CliPrintResponseTest, DumpStartedShortForm) {
@@ -748,6 +770,25 @@ TEST_F(CliArgumentParsingTest, WaitReadyFlag) {
   EXPECT_FALSE(result.exit_now);
   EXPECT_TRUE(result.config.wait_ready);
   EXPECT_EQ(result.config.retry_count, kMaxWaitReadyRetries);
+}
+
+TEST_F(CliArgumentParsingTest, WaitReadyRetryFloorIsIndependentOfArgumentOrder) {
+  char arg0[] = "mygram-cli";
+  char wait_ready[] = "--wait-ready";
+  char retry[] = "--retry";
+  char retry_count[] = "5";
+
+  char* wait_then_retry[] = {arg0, wait_ready, retry, retry_count};
+  ParseResult result1 = ParseArguments(4, wait_then_retry);
+  EXPECT_FALSE(result1.exit_now);
+  EXPECT_TRUE(result1.config.wait_ready);
+  EXPECT_EQ(result1.config.retry_count, kMaxWaitReadyRetries);
+
+  char* retry_then_wait[] = {arg0, retry, retry_count, wait_ready};
+  ParseResult result2 = ParseArguments(4, retry_then_wait);
+  EXPECT_FALSE(result2.exit_now);
+  EXPECT_TRUE(result2.config.wait_ready);
+  EXPECT_EQ(result2.config.retry_count, kMaxWaitReadyRetries);
 }
 
 TEST_F(CliArgumentParsingTest, SingleCommandModeSetsInteractiveFalse) {

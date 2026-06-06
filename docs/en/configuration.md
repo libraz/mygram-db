@@ -399,7 +399,7 @@ memory:
   soft_target_mb: 4096              # Reserved / not yet enforced
   arena_chunk_mb: 64                # Reserved / not yet enforced
   roaring_threshold: 0.18           # Roaring bitmap threshold (density)
-  minute_epoch: true                # Use minute-precision epoch
+  minute_epoch: true                # Reserved / not yet enforced
 
   # Text Normalization
   normalize:
@@ -419,7 +419,7 @@ memory:
 | `soft_target_mb` | integer | `4096` | Reserved / not yet enforced; not an eviction trigger today | ❌ No |
 | `arena_chunk_mb` | integer | `64` | Reserved / not yet enforced; allocator chunk size is not configurable today | ❌ No |
 | `roaring_threshold` | float | `0.18` | Posting list density threshold for Roaring bitmap (0.0-1.0) | ❌ No |
-| `minute_epoch` | boolean | `true` | Use minute-precision epoch for timestamps | ❌ No |
+| `minute_epoch` | boolean | `true` | Reserved / not yet enforced; timestamp precision is not configurable today | ❌ No |
 | `normalize.nfkc` | boolean | `true` | Apply NFKC normalization (Unicode compatibility) | ❌ No |
 | `normalize.width` | string | `narrow` | Width conversion: `keep`, `narrow`, `wide` | ❌ No |
 | `normalize.lower` | boolean | `false` | Convert text to lowercase | ❌ No |
@@ -684,7 +684,7 @@ cache:
   max_memory_mb: 32                 # Maximum cache memory in MB
   min_query_cost_ms: 10.0           # Minimum query cost to cache (ms)
   ttl_seconds: 3600                 # Cache entry TTL (0 = no TTL)
-  invalidation_strategy: "ngram"    # "table" is reserved / not yet enforced
+  invalidation_strategy: "ngram"    # "ngram" or "table"
 
   # Advanced tuning
   compression_enabled: true         # Enable LZ4 compression
@@ -704,7 +704,7 @@ cache:
 | `max_memory_mb` | integer | `32` | Maximum cache memory in MB | ⚠️ Partial |
 | `min_query_cost_ms` | float | `10.0` | Minimum query cost to cache in milliseconds | ⚠️ Partial |
 | `ttl_seconds` | integer | `3600` | Cache entry TTL in seconds (0 = no TTL) | ⚠️ Partial |
-| `invalidation_strategy` | string | `ngram` | `ngram` is currently enforced; `table` is accepted but reserved / not yet enforced | ⚠️ Partial |
+| `invalidation_strategy` | string | `ngram` | Cache invalidation strategy: precise `ngram` invalidation or coarse `table` invalidation | ❌ No |
 | `compression_enabled` | boolean | `true` | Enable LZ4 compression for cached results | ⚠️ Partial |
 | `eviction_batch_size` | integer | `10` | Reserved / not yet enforced; eviction currently removes entries one at a time | ⚠️ Partial |
 | `invalidation.batch_size` | integer | `1000` | Process invalidation after N unique (table, ngram) pairs | ⚠️ Partial |
@@ -718,8 +718,9 @@ cache:
 - **Use case**: Production environments
 
 **`table`**:
-- Reserved / not yet enforced. The value is accepted for forward
-  compatibility, but current invalidation still uses the `ngram` path.
+- **Precision**: Invalidates all cached queries for the modified table
+- **Efficiency**: Simpler but more aggressive invalidation
+- **Use case**: Troubleshooting or deployments that prefer conservative cache invalidation
 
 #### Cache Tuning
 

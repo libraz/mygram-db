@@ -88,6 +88,24 @@ inline const char* GetDeserializationPointer(const std::vector<uint8_t>& buffer,
       buffer.data() + offset);           // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 }
 
+bool IsValidDeltaEncoding(const std::vector<uint32_t>& encoded) {
+  if (encoded.empty()) {
+    return true;
+  }
+
+  uint64_t cumulative = encoded.front();
+  for (size_t i = 1; i < encoded.size(); ++i) {
+    if (encoded[i] == 0) {
+      return false;
+    }
+    cumulative += encoded[i];
+    if (cumulative > std::numeric_limits<DocId>::max()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 PostingList::PostingList(double roaring_threshold) : roaring_threshold_(roaring_threshold) {}
@@ -800,14 +818,19 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
       return false;
     }
 
-    delta_compressed_.clear();
-    delta_compressed_.reserve(size);
+    std::vector<uint32_t> decoded_delta;
+    decoded_delta.reserve(size);
 
     for (uint32_t i = 0; i < size; ++i) {
       uint32_t val = ReadUint32LE(buffer, offset);
-      delta_compressed_.push_back(val);
+      decoded_delta.push_back(val);
     }
 
+    if (!IsValidDeltaEncoding(decoded_delta)) {
+      return false;
+    }
+
+    delta_compressed_ = std::move(decoded_delta);
     RecomputeLastDocId();
 
     doc_count_.store(delta_compressed_.size(), std::memory_order_relaxed);

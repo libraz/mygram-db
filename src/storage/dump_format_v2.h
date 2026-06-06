@@ -78,6 +78,7 @@ using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
 using DumpTableProgressCallback = std::function<void(const std::string& table_name, size_t tables_processed)>;
+using DumpConfigValidationCallback = std::function<Expected<void, Error>(const config::Config& loaded_config)>;
 
 // Reuse string limits from V1
 using dump_v1::kMaxConfigSectionLength;
@@ -216,7 +217,7 @@ Expected<void, Error> ReadDumpV2(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    dump_format::IntegrityError* integrity_error = nullptr);
+    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {});
 
 // ============================================================================
 // Version dispatch functions
@@ -244,7 +245,7 @@ Expected<void, Error> ReadDump(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    dump_format::IntegrityError* integrity_error = nullptr);
+    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {});
 
 /**
  * @brief Verify dump file integrity (auto-detects V1 or V2 format)
