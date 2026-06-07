@@ -359,11 +359,15 @@ endif()
 add_subdirectory(third_party)
 
 # Suppress warnings from third-party libraries
+# roaring/spdlog also need PIC because they are linked (via mygramdb_utils)
+# into the shared client library (libmygramclient.so).
 if(TARGET roaring)
   target_compile_options(roaring PRIVATE -w)
+  set_target_properties(roaring PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 if(TARGET spdlog)
   target_compile_options(spdlog PRIVATE -w)
+  set_target_properties(spdlog PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 if(TARGET yaml-cpp)
   target_compile_options(yaml-cpp PRIVATE -w)

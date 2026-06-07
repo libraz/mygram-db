@@ -11,6 +11,12 @@ add_library(mygramdb_utils STATIC
   periodic_worker.cpp
 )
 
+# PIC is required because this static library is linked into the shared
+# client library (libmygramclient.so).
+set_target_properties(mygramdb_utils PROPERTIES
+  POSITION_INDEPENDENT_CODE ON
+)
+
 target_include_directories(mygramdb_utils PUBLIC
   ${CMAKE_SOURCE_DIR}/src
 )
