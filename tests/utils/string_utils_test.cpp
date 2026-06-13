@@ -145,6 +145,17 @@ TEST(StringUtilsTest, NormalizeTextLowercase) {
   EXPECT_EQ(normalized, "ABC");
 }
 
+TEST(StringUtilsTest, NormalizeTextInvalidUtf8FailsClosedAndIncrementsCounter) {
+  ResetTextNormalizationFailureCountForTesting();
+
+  const std::string invalid_utf8 = std::string("abc") + static_cast<char>(0xC0) + static_cast<char>(0xAF);
+  EXPECT_EQ(NormalizeText(invalid_utf8, true, "keep", true), "");
+  EXPECT_EQ(GetTextNormalizationFailureCount(), 1u);
+
+  EXPECT_EQ(NormalizeText("ABC", true, "keep", true), "abc");
+  EXPECT_EQ(GetTextNormalizationFailureCount(), 1u);
+}
+
 #ifdef USE_ICU
 /**
  * @brief Test NFKC normalization with ICU

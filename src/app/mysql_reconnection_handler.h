@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,6 +18,10 @@ namespace mygramdb::mysql {
 class Connection;
 class BinlogReader;
 }  // namespace mygramdb::mysql
+
+namespace mygramdb::server::replication_pause {
+class Counter;
+}
 #endif
 
 namespace mygramdb::app {
@@ -57,7 +62,10 @@ class MysqlReconnectionHandler {
    */
   MysqlReconnectionHandler(mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader,
                            std::atomic<bool>* reconnecting_flag = nullptr,
-                           std::vector<std::string> required_tables = {});
+                           std::vector<std::string> required_tables = {},
+                           std::atomic<bool>* dump_save_in_progress = nullptr,
+                           std::atomic<bool>* replication_paused_for_dump = nullptr,
+                           server::replication_pause::Counter* replication_pause_counter = nullptr);
 #else
   MysqlReconnectionHandler() = default;
 #endif
@@ -96,6 +104,9 @@ class MysqlReconnectionHandler {
   mysql::BinlogReader* binlog_reader_;
   std::atomic<bool>* reconnecting_flag_;      // Flag to set during reconnection (non-owning)
   std::vector<std::string> required_tables_;  // Tables to validate after reconnection
+  std::atomic<bool>* dump_save_in_progress_;
+  std::atomic<bool>* replication_paused_for_dump_;
+  server::replication_pause::Counter* replication_pause_counter_;
 #endif
 
   /**

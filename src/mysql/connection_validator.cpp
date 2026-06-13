@@ -245,13 +245,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTa
 
 mygram::utils::Expected<std::string, mygram::utils::Error> ConnectionValidator::CheckServerUUID(
     Connection& conn, const std::optional<std::string>& expected_uuid, std::vector<std::string>& warnings) {
-  auto uuid_opt = conn.GetServerUUID();
-  if (!uuid_opt) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLQueryFailed, "Failed to retrieve server UUID"));
+  auto uuid_result = conn.GetServerUUID();
+  if (!uuid_result) {
+    return mygram::utils::MakeUnexpected(uuid_result.error());
   }
 
-  std::string actual_uuid = *uuid_opt;
+  std::string actual_uuid = *uuid_result;
 
   // Check if UUID matches expected (failover detection)
   if (expected_uuid && *expected_uuid != actual_uuid) {

@@ -28,7 +28,7 @@ DUMP_DIR="$SCRIPT_DIR/results/dumps-mariadb"
 # Configurable via environment variables
 MARIADB_VERSION="${MARIADB_VERSION:-11.4}"
 MARIADB_HOST="127.0.0.1"
-MARIADB_PORT=13307
+MARIADB_PORT=13306
 MARIADB_USER="root"
 MARIADB_PASS="test_root_password"
 MARIADB_DB="testdb"

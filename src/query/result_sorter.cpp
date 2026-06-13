@@ -25,12 +25,10 @@ using internal::EqualsIgnoreCase;
 namespace {
 
 // Format widths for zero-padded strings
-constexpr int kDocIdWidth = 10;
 constexpr int kNumericWidth = 20;
 constexpr int kDoubleWidth = 20;
 
 // Buffer sizes for string formatting (width + null terminator + safety margin)
-constexpr size_t kDocIdBufferSize = kDocIdWidth + 2;  // Ensure enough space for width + null
 constexpr size_t kNumericBufferSize = 32;
 
 // Buffer size for std::to_chars: max uint64_t is 20 digits + null terminator
@@ -253,7 +251,7 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
     // Fallback: use DocID itself (numeric)
     // Pre-pad to avoid repeated string allocation in comparator
     // Using std::to_chars (locale-independent, no lock contention)
-    return ToZeroPaddedString(doc_id, kDocIdWidth);
+    return ToZeroPaddedString(doc_id, kNumericWidth);
   }
 
   // Ordering by filter column
@@ -288,7 +286,7 @@ void ResultSorter::PrecomputeSortKeys(const std::vector<DocId>& results, const s
           sort_key = pk_str;
         }
       } else {
-        sort_key = ToZeroPaddedString(results[i], kDocIdWidth);
+        sort_key = ToZeroPaddedString(results[i], kNumericWidth);
       }
       entries.push_back({results[i], std::move(sort_key)});
     }

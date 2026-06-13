@@ -100,12 +100,14 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // GetSharedRateLimiter() (Fix N-4): a client's quota MUST apply across
   // protocols. Two independent limiters give the client effectively 2x the
   // configured limit, which silently defeats DoS protection.
-  if (full_config_ != nullptr && full_config_->api.rate_limiting.enable) {
+  if (full_config_ != nullptr) {
     rate_limiter_ = std::make_shared<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
                                                   static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
-                                                  static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
+                                                  static_cast<size_t>(full_config_->api.rate_limiting.max_clients),
+                                                  full_config_->api.rate_limiting.enable);
     mygram::utils::StructuredLog()
         .Event("rate_limiter_initialized")
+        .Field("enabled", full_config_->api.rate_limiting.enable)
         .Field("capacity", static_cast<uint64_t>(full_config_->api.rate_limiting.capacity))
         .Field("refill_rate", static_cast<uint64_t>(full_config_->api.rate_limiting.refill_rate))
         .Field("max_clients", static_cast<uint64_t>(full_config_->api.rate_limiting.max_clients))
@@ -115,7 +117,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 #ifdef USE_MYSQL
   // Create SYNC operation manager (if MySQL enabled) - needed before ServerLifecycleManager
   // Note: Must be created before lifecycle manager because SyncHandler needs it
-  sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, full_config_, binlog_reader_);
+  sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, full_config_, binlog_reader_,
+                                                         &replication_pause_counter_);
 #endif
 
   // Initialize all server components via ServerLifecycleManager
@@ -246,6 +249,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
             stats_ptr->IncrementTotalConnections();
             return true;
           }
+          (void)conn->ReleaseFd();
           return false;
         });
   }
@@ -295,7 +299,7 @@ void TcpServer::Stop() {
   //       cleanly before binlog_reader_ is torn down.
   //   (b) sync_manager_ also calls binlog_reader_->Stop() / GetCurrentGTID
   //       inside BuildSnapshotAsync; RequestShutdown signals cancellation
-  //       and WaitForCompletion joins each sync thread.
+  //       and a successful WaitForCompletion joins completed sync threads.
   //   (c) snapshot_scheduler_ wakes its loop and joins, including any
   //       in-flight TakeSnapshot that touches binlog_reader_.
   //

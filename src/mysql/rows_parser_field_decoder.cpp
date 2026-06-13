@@ -40,6 +40,31 @@ uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision) {
   return static_cast<uint32_t>(std::abs(frac)) * kMultipliers[precision];
 }
 
+int32_t ReadSignedBigEndian(const unsigned char* data, int bytes) {
+  int32_t value = 0;
+  for (int i = 0; i < bytes; i++) {
+    value = (value << 8) | data[i];
+  }
+  const int bits = bytes * 8;
+  const int32_t sign_bit = 1 << (bits - 1);
+  if ((value & sign_bit) != 0) {
+    value -= (1 << bits);
+  }
+  return value;
+}
+
+bool IsValidDateComponents(uint64_t year, uint64_t month, uint64_t day) {
+  return year <= 9999 && month <= 12 && day <= 31;
+}
+
+bool IsValidClockComponents(uint64_t hour, uint64_t minute, uint64_t second) {
+  return hour <= 23 && minute <= 59 && second <= 59;
+}
+
+bool IsValidTimeComponents(uint64_t hour, uint64_t minute, uint64_t second) {
+  return hour <= 838 && minute <= 59 && second <= 59;
+}
+
 bool HasBytes(const unsigned char* data, const unsigned char* end, size_t bytes) {
   return data <= end && static_cast<size_t>(end - data) >= bytes;
 }
@@ -393,6 +418,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       unsigned int day = val & 0x1F;
       unsigned int month = (val >> 5) & 0x0F;
       unsigned int year = (val >> 9);
+      if (!IsValidDateComponents(year, month, day)) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DATE component value"));
+      }
       std::ostringstream oss;
       oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day;
       return oss.str();
@@ -460,6 +488,10 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       uint64_t month = val % 100;
       uint64_t year = val / 100;
 
+      if (!IsValidDateComponents(year, month, day) || !IsValidClockComponents(hour, minute, second)) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DATETIME component value"));
+      }
+
       std::ostringstream oss;
       oss << std::setfill('0') << std::setw(4) << year << '-' << std::setw(2) << month << '-' << std::setw(2) << day
           << ' ' << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2) << second;
@@ -522,8 +554,11 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       int64_t minute = (hms >> 6) & 0x3F;
       int64_t hour = hms >> 12;
 
-      if (year < 0 || month < 0 || month > 12 || day < 0 || day > 31 || hour < 0 || hour > 23 || minute < 0 ||
-          minute > 59 || second < 0 || second > 59) {
+      if (year < 0 || month < 0 || day < 0 || hour < 0 || minute < 0 || second < 0 ||
+          !IsValidDateComponents(static_cast<uint64_t>(year), static_cast<uint64_t>(month),
+                                 static_cast<uint64_t>(day)) ||
+          !IsValidClockComponents(static_cast<uint64_t>(hour), static_cast<uint64_t>(minute),
+                                  static_cast<uint64_t>(second))) {
         return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DATETIME2 component value"));
       }
 
@@ -560,6 +595,10 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       unsigned int second = val % 100;
       unsigned int minute = (val / 100) % 100;
       unsigned int hour = val / 10000;
+
+      if (!IsValidTimeComponents(hour, minute, second)) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid TIME component value"));
+      }
 
       std::ostringstream oss;
       oss << std::setfill('0') << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2)
@@ -598,12 +637,16 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       }
 
       // Extract time parts per MySQL format:
-      // hour = hms >> 12 (10 bits)
+      // hour = hms >> 12
       // minute = (hms >> 6) & 0x3F (6 bits)
       // second = hms & 0x3F (6 bits)
-      unsigned int hour = (intpart >> 12) & 0x3FF;
+      unsigned int hour = intpart >> 12;
       unsigned int minute = (intpart >> 6) & 0x3F;
       unsigned int second = intpart & 0x3F;
+
+      if (!IsValidTimeComponents(hour, minute, second)) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid TIME2 component value"));
+      }
 
       std::ostringstream oss;
       if (negative) {
@@ -615,9 +658,11 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       // Process fractional seconds if present
       if (metadata > 0) {
         int frac_bytes = (metadata + 1) / 2;
-        int32_t frac = 0;
-        for (int i = 0; i < frac_bytes; i++) {
-          frac = (frac << 8) | data[3 + i];
+        int32_t frac = negative ? ReadSignedBigEndian(data + 3, frac_bytes) : 0;
+        if (!negative) {
+          for (int i = 0; i < frac_bytes; i++) {
+            frac = (frac << 8) | data[3 + i];
+          }
         }
 
         uint32_t usec = FractionalToMicroseconds(frac, metadata);

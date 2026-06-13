@@ -234,11 +234,10 @@ TEST_F(SyncOperationManagerDeadlockTest, GetSyncStatusUsesCRLFLineEndings) {
     }
   }
 
-  // Verify response does not end with trailing CRLF (SendResponse adds it)
-  if (status.size() >= 2) {
-    EXPECT_FALSE(status[status.size() - 2] == '\r' && status[status.size() - 1] == '\n')
-        << "Response should not end with CRLF (SendResponse adds it)";
-  }
+  // SYNC_STATUS is a client-framed multi-line response and must remain
+  // complete when consumed outside TcpServer::SendResponse.
+  EXPECT_TRUE(status.size() >= 7 && status.substr(status.size() - 7) == "\r\nEND\r\n")
+      << "SYNC_STATUS must end with END framing";
 
   manager.reset();
 }
@@ -292,7 +291,8 @@ TEST_F(SyncOperationManagerDeadlockTest, StartSyncDoesNotDeadlockWhenJoiningPrev
 
   // Wait for the first sync to fully finish so the previous thread is
   // joinable when we invoke StartSync again. WaitForCompletion returns once
-  // syncing_tables_ is empty (set by the SyncGuard at thread exit).
+  // syncing_tables_ is empty (set by the SyncGuard at thread exit) and joins
+  // the completed worker before returning.
   ASSERT_TRUE(manager->WaitForCompletion(10)) << "First sync did not complete in time";
 
   // Run the second StartSync on a worker thread guarded by a condition

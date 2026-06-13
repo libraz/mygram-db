@@ -9,6 +9,7 @@
 
 #include "mysql/binlog_event_parser.h"
 #include "mysql/binlog_filter_evaluator.h"
+#include "utils/constants.h"
 
 using namespace binlog_test;
 
@@ -197,6 +198,73 @@ TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10");
   reader_->UpdateCurrentGTID("uuid:11");
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10-11");
+}
+
+TEST_F(BinlogReaderFixture, EmptyParseForMonitoredRowsEventIsFailure) {
+  constexpr uint64_t kTableId = 7;
+  std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
+  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  for (int i = 0; i < 6; ++i) {
+    event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((kTableId >> (i * 8)) & 0xFF);
+  }
+
+  TableMetadata metadata;
+  metadata.table_id = kTableId;
+  metadata.database_name = "app";
+  metadata.table_name = table_config_.name;
+  reader_->table_metadata_cache_.Add(kTableId, metadata);
+
+  EXPECT_TRUE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+}
+
+TEST_F(BinlogReaderFixture, EmptyParseForUnmonitoredRowsEventIsSkipped) {
+  constexpr uint64_t kTableId = 8;
+  std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
+  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  for (int i = 0; i < 6; ++i) {
+    event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((kTableId >> (i * 8)) & 0xFF);
+  }
+
+  TableMetadata metadata;
+  metadata.table_id = kTableId;
+  metadata.database_name = "app";
+  metadata.table_name = "unmonitored";
+  reader_->table_metadata_cache_.Add(kTableId, metadata);
+
+  EXPECT_FALSE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+}
+
+TEST_F(BinlogReaderFixture, EmptyParseForSameTableDifferentDatabaseIsSkipped) {
+  table_config_.database = "app";
+  ResetReader();
+
+  constexpr uint64_t kTableId = 9;
+  std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
+  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  for (int i = 0; i < 6; ++i) {
+    event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((kTableId >> (i * 8)) & 0xFF);
+  }
+
+  TableMetadata metadata;
+  metadata.table_id = kTableId;
+  metadata.database_name = "analytics";
+  metadata.table_name = table_config_.name;
+  reader_->table_metadata_cache_.Add(kTableId, metadata);
+
+  EXPECT_FALSE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+}
+
+TEST_F(BinlogReaderFixture, EmptyParseForMalformedRowsEventIsFailure) {
+  std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen, 0);
+  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+
+  EXPECT_TRUE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+  EXPECT_FALSE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::ROTATE_EVENT, event.data(), event.size()));
 }
 
 /**

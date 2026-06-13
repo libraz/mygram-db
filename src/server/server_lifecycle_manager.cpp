@@ -273,8 +273,7 @@ ServerLifecycleManager::InitTableCatalog() {
 
 mygram::utils::Expected<std::unique_ptr<cache::CacheManager>, mygram::utils::Error>
 ServerLifecycleManager::InitCacheManager() {
-  // Cache manager is optional (depends on config)
-  if (full_config_ == nullptr || !full_config_->cache.enabled) {
+  if (full_config_ == nullptr) {
     return std::unique_ptr<cache::CacheManager>(nullptr);
   }
 
@@ -402,12 +401,7 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
   //     backward compatibility; the dispatcher rejects them with a normal
   //     "Unknown query type" so users migrate to DUMP SAVE / DUMP LOAD.
   //   - SYNC family entries are required only when USE_MYSQL is defined.
-#ifdef USE_MYSQL
-  constexpr size_t kRequiredQueryTypeCount = 28;
-#else
-  constexpr size_t kRequiredQueryTypeCount = 25;
-#endif
-  static constexpr std::array<query::QueryType, kRequiredQueryTypeCount> kRequiredQueryTypes{{
+  static constexpr std::array kRequiredQueryTypes{
       query::QueryType::SEARCH,
       query::QueryType::COUNT,
       query::QueryType::FACET,
@@ -438,7 +432,7 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
       query::QueryType::SYNC_STATUS,
       query::QueryType::SYNC_STOP,
 #endif
-  }};
+  };
   for (const auto qt : kRequiredQueryTypes) {
     if (!dispatcher->HasHandler(qt)) {
       return MakeUnexpected(
@@ -487,7 +481,7 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
 
   auto scheduler = std::make_unique<SnapshotScheduler>(
       full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_, dump_save_in_progress_,
-      replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_);
+      replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_, sync_manager_);
 
   // Start the scheduler
   auto start_result = scheduler->Start();

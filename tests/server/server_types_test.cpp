@@ -122,4 +122,29 @@ TEST(ServerConfigTest, FromConfigEmptyUnixSocketMeansTcpMode) {
   EXPECT_TRUE(sc.unix_socket_path.empty());
 }
 
+TEST(BM25StatsTest, RemoveDocumentSaturatesDocCountAndTotalLength) {
+  BM25Stats stats;
+
+  stats.AddDocument(10);
+  stats.RemoveDocument(30);
+  stats.RemoveDocument(1);
+
+  EXPECT_EQ(stats.total_doc_length.load(std::memory_order_relaxed), 0u);
+  EXPECT_EQ(stats.doc_count.load(std::memory_order_relaxed), 0u);
+  EXPECT_EQ(stats.avg_doc_length(), 0.0);
+}
+
+TEST(BM25StatsTest, RemoveDocumentSaturatesPartialUnderflowOnly) {
+  BM25Stats stats;
+
+  stats.AddDocument(10);
+  stats.AddDocument(20);
+  stats.RemoveDocument(15);
+  stats.RemoveDocument(30);
+
+  EXPECT_EQ(stats.total_doc_length.load(std::memory_order_relaxed), 0u);
+  EXPECT_EQ(stats.doc_count.load(std::memory_order_relaxed), 0u);
+  EXPECT_EQ(stats.avg_doc_length(), 0.0);
+}
+
 }  // namespace mygramdb::server

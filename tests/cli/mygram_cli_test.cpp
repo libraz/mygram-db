@@ -171,6 +171,22 @@ TEST_F(CliStringHelperTest, JoinArgsForCommand) {
   EXPECT_EQ(JoinArgsForCommand({"INFO"}), "INFO");
 }
 
+TEST_F(CliStringHelperTest, HelpMatchesImplementedRuntimeSyntax) {
+  StdoutCapture capture;
+  MygramClient::PrintHelp();
+
+  std::string output = capture.GetOutput();
+  EXPECT_NE(output.find("SET <variable> = <value>"), std::string::npos);
+  EXPECT_NE(output.find("SHOW VARIABLES [LIKE <pattern>]"), std::string::npos);
+  EXPECT_NE(output.find("SEARCH <db.table> <text>"), std::string::npos);
+  EXPECT_NE(output.find("COUNT <db.table> <text>"), std::string::npos);
+  EXPECT_NE(output.find("GET <db.table> <primary_key>"), std::string::npos);
+  EXPECT_NE(output.find("SYNC <db.table>|STOP [db.table]|STATUS"), std::string::npos);
+  EXPECT_NE(output.find("FACET <db.table> <column> [text]"), std::string::npos);
+  EXPECT_EQ(output.find("SYNC START"), std::string::npos);
+  EXPECT_EQ(output.find("FACET <db.table> <column> [WHERE"), std::string::npos);
+}
+
 // =============================================================================
 // Port parsing (closes the gap where the old code silently truncated)
 // =============================================================================
@@ -822,6 +838,7 @@ TEST_F(CliArgumentParsingTest, HelpFlagExits) {
   EXPECT_NE(output.find("-p PORT"), std::string::npos);
   EXPECT_NE(output.find("--retry"), std::string::npos);
   EXPECT_NE(output.find("--wait-ready"), std::string::npos);
+  EXPECT_NE(output.find("SEARCH app.articles hello"), std::string::npos);
 }
 
 TEST_F(CliArgumentParsingTest, VersionFlagExits) {

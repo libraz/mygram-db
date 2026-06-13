@@ -118,6 +118,15 @@ class RuntimeVariableManager {
   std::map<std::string, VariableInfo> GetAllVariables(const std::string& prefix = "") const;
 
   /**
+   * @brief Return a Config snapshot reflecting current runtime values.
+   *
+   * Immutable fields come from the startup config; mutable runtime fields are
+   * projected onto the snapshot so CONFIG SHOW and SHOW VARIABLES share the
+   * same truth source.
+   */
+  Config GetCurrentConfig() const;
+
+  /**
    * @brief Check if variable is mutable
    * @param variable_name Dot-separated name
    * @return True if variable can be changed at runtime

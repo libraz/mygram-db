@@ -612,6 +612,10 @@ class DateTimeParsingTest : public RowsParserTest {
     if (precision > 0) {
       int frac_bytes = (precision + 1) / 2;
       uint32_t frac = ScaleMicrosecondsForStoredFraction(precision, microseconds);
+      if (negative) {
+        const uint32_t mask = (1u << (frac_bytes * 8)) - 1;
+        frac = static_cast<uint32_t>(-static_cast<int32_t>(frac)) & mask;
+      }
       for (int i = frac_bytes - 1; i >= 0; i--) {
         result.push_back((frac >> (i * 8)) & 0xFF);
       }
@@ -675,6 +679,17 @@ class DateTimeParsingTest : public RowsParserTest {
     result.push_back((val >> 8) & 0xFF);
     result.push_back((val >> 16) & 0xFF);
 
+    return result;
+  }
+
+  std::vector<unsigned char> EncodeDatetime(unsigned int year, unsigned int month, unsigned int day, unsigned int hour,
+                                            unsigned int minute, unsigned int second) {
+    std::vector<unsigned char> result;
+    uint64_t val =
+        (((((static_cast<uint64_t>(year) * 100 + month) * 100 + day) * 100 + hour) * 100 + minute) * 100) + second;
+    for (int i = 0; i < 8; i++) {
+      result.push_back((val >> (i * 8)) & 0xFF);
+    }
     return result;
   }
 
@@ -920,6 +935,18 @@ TEST_F(DateTimeParsingTest, Time2WithMicroseconds) {
   EXPECT_EQ("10:20:30.654321", result->front().GetColumnValue("dt_col"));
 }
 
+TEST_F(DateTimeParsingTest, Time2NegativeWithMicrosecondsUsesSignedFraction) {
+  auto time_bytes = EncodeTime2(10, 20, 30, true, 6, 654321);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 6);
+  auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
+
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ("-10:20:30.654321", result->front().GetColumnValue("dt_col"));
+}
+
 TEST_F(DateTimeParsingTest, Time2Precision5UsesMySQLStoredByteScale) {
   auto time_bytes = EncodeTime2(10, 20, 30);
   time_bytes.push_back(0x01);
@@ -951,6 +978,21 @@ TEST_F(DateTimeParsingTest, Time2MaxHour) {
   EXPECT_EQ("838:59:59", result->front().GetColumnValue("dt_col"));
 }
 
+TEST_F(DateTimeParsingTest, Time2RejectsOutOfRangeHourWithoutMasking) {
+  constexpr int32_t kTimefIntOfs = 0x800000;
+  uint32_t packed = static_cast<uint32_t>(kTimefIntOfs + (1100 << 12));
+  std::vector<unsigned char> time_bytes = {static_cast<unsigned char>((packed >> 16) & 0xFF),
+                                           static_cast<unsigned char>((packed >> 8) & 0xFF),
+                                           static_cast<unsigned char>(packed & 0xFF)};
+
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIME2), time_bytes.data(), 0,
+                                           /*is_null=*/false, time_bytes.data() + time_bytes.size(),
+                                           /*is_unsigned=*/false);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
+}
+
 /**
  * @test TIME (old format) parsing
  */
@@ -965,6 +1007,17 @@ TEST_F(DateTimeParsingTest, TimeOldFormat) {
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("12:34:56", result->front().GetColumnValue("dt_col"));
+}
+
+TEST_F(DateTimeParsingTest, OldTimeRejectsOutOfRangeComponents) {
+  auto time_bytes = EncodeTime(12, 60, 0);
+
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIME), time_bytes.data(), 0,
+                                           /*is_null=*/false, time_bytes.data() + time_bytes.size(),
+                                           /*is_unsigned=*/false);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
 }
 
 /**
@@ -1026,6 +1079,28 @@ TEST_F(DateTimeParsingTest, DateParsing) {
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-11-25", result->front().GetColumnValue("dt_col"));
+}
+
+TEST_F(DateTimeParsingTest, DateRejectsOutOfRangeComponents) {
+  auto date_bytes = EncodeDate(2025, 13, 1);
+
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATE), date_bytes.data(), 0,
+                                           /*is_null=*/false, date_bytes.data() + date_bytes.size(),
+                                           /*is_unsigned=*/false);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
+}
+
+TEST_F(DateTimeParsingTest, OldDatetimeRejectsOutOfRangeComponents) {
+  auto datetime_bytes = EncodeDatetime(2025, 13, 1, 12, 0, 0);
+
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME), datetime_bytes.data(), 0,
+                                           /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                           /*is_unsigned=*/false);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
 }
 
 /**

@@ -7,7 +7,6 @@
 
 #include <gtest/gtest.h>
 
-#include <cstring>
 #include <vector>
 
 #include "mysql/mariadb_gtid.h"
@@ -15,6 +14,8 @@
 
 namespace mygramdb::mysql {
 namespace {
+
+void WriteU32At(std::vector<unsigned char>& buf, size_t offset, uint32_t val);
 
 /// Build a minimal binlog event header
 /// @param type Event type code
@@ -25,25 +26,34 @@ std::vector<unsigned char> MakeEventHeader(uint8_t type, uint32_t server_id, uin
   std::vector<unsigned char> header(mygram::constants::kBinlogEventHeaderLen, 0);
   // timestamp (4 bytes) = 0
   header[4] = type;  // type_code
-  std::memcpy(header.data() + 5, &server_id, sizeof(server_id));
-  std::memcpy(header.data() + 9, &event_length, sizeof(event_length));
+  WriteU32At(header, 5, server_id);
+  WriteU32At(header, 9, event_length);
   // next_position (4 bytes) = 0
   // flags (2 bytes) = 0
   return header;
 }
 
+void WriteU32At(std::vector<unsigned char>& buf, size_t offset, uint32_t val) {
+  ASSERT_LE(offset + 4, buf.size());
+  buf[offset] = static_cast<unsigned char>(val & 0xFFu);
+  buf[offset + 1] = static_cast<unsigned char>((val >> 8) & 0xFFu);
+  buf[offset + 2] = static_cast<unsigned char>((val >> 16) & 0xFFu);
+  buf[offset + 3] = static_cast<unsigned char>((val >> 24) & 0xFFu);
+}
+
 /// Append little-endian uint32
 void AppendU32(std::vector<unsigned char>& buf, uint32_t val) {
-  unsigned char bytes[4];
-  std::memcpy(bytes, &val, sizeof(val));
-  buf.insert(buf.end(), bytes, bytes + sizeof(bytes));
+  buf.push_back(static_cast<unsigned char>(val & 0xFFu));
+  buf.push_back(static_cast<unsigned char>((val >> 8) & 0xFFu));
+  buf.push_back(static_cast<unsigned char>((val >> 16) & 0xFFu));
+  buf.push_back(static_cast<unsigned char>((val >> 24) & 0xFFu));
 }
 
 /// Append little-endian uint64
 void AppendU64(std::vector<unsigned char>& buf, uint64_t val) {
-  unsigned char bytes[8];
-  std::memcpy(bytes, &val, sizeof(val));
-  buf.insert(buf.end(), bytes, bytes + sizeof(bytes));
+  for (size_t i = 0; i < 8; ++i) {
+    buf.push_back(static_cast<unsigned char>((val >> (i * 8)) & 0xFFu));
+  }
 }
 
 /// Append CRC32 placeholder (4 zero bytes)
@@ -86,6 +96,22 @@ TEST_F(MariaDBEventParserGTIDTest, LargeValues) {
   auto result = MariaDBEventParser::ExtractGTID(event.data(), event.size());
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result.value(), "100-200-999999999");
+}
+
+TEST_F(MariaDBEventParserGTIDTest, ReadsExplicitLittleEndianBytes) {
+  auto event = BuildGTIDEvent(0x0A0B0C0Du, 0x01020304u, 0x0102030405060708ULL);
+
+  EXPECT_EQ(event[5], 0x04);
+  EXPECT_EQ(event[6], 0x03);
+  EXPECT_EQ(event[7], 0x02);
+  EXPECT_EQ(event[8], 0x01);
+  EXPECT_EQ(event[mygram::constants::kBinlogEventHeaderLen], 0x08);
+  EXPECT_EQ(event[mygram::constants::kBinlogEventHeaderLen + 7], 0x01);
+  EXPECT_EQ(event[mygram::constants::kBinlogEventHeaderLen + 8], 0x0D);
+
+  auto result = MariaDBEventParser::ExtractGTID(event.data(), event.size());
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), "168496141-16909060-72623859790382856");
 }
 
 TEST_F(MariaDBEventParserGTIDTest, MaxDomainAndServer) {
@@ -219,7 +245,7 @@ TEST_F(MariaDBEventParserGTIDListTest, TruncatedEntries) {
   auto event = BuildGTIDListEvent(gtids);
   // Overwrite count to 2
   uint32_t fake_count = 2;
-  std::memcpy(event.data() + mygram::constants::kBinlogEventHeaderLen, &fake_count, sizeof(fake_count));
+  WriteU32At(event, mygram::constants::kBinlogEventHeaderLen, fake_count);
   auto result = MariaDBEventParser::ParseGTIDList(event.data(), event.size());
   EXPECT_FALSE(result.has_value());
 }

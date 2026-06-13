@@ -118,6 +118,8 @@ TEST(BinlogReaderDDLTest, ClassifyTruncateOnlyForTruncateTableStatement) {
   EXPECT_EQ(BinlogEvent::ClassifyDDL("truncate table `articles`"), DDLType::kTruncate);
   EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles CHANGE old_col truncate_data TEXT"), DDLType::kAlter);
   EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles DROP COLUMN truncate_data"), DDLType::kAlter);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("SET @noop = 1; DROP TABLE articles"), DDLType::kDrop);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE users ADD COLUMN x INT; DROP TABLE articles"), DDLType::kAlter);
 }
 
 /**
@@ -758,7 +760,7 @@ TEST_F(BinlogReaderFixture, WorkerThreadGtidUpdateOnlyOnSuccess) {
     commit_event.type = BinlogEventType::COMMIT;
     commit_event.gtid = popped_event->gtid;
     EXPECT_TRUE(reader_->ProcessQueuedEvent(commit_event));
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:51");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
   } else {
     // Should NOT update GTID
     EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50") << "GTID should not be updated on ProcessEvent failure";
@@ -782,7 +784,7 @@ TEST_F(BinlogReaderFixture, DmlGtidAdvancesOnlyAtCommitBoundary) {
   commit_event.type = BinlogEventType::COMMIT;
   commit_event.gtid = "uuid:51";
   ASSERT_TRUE(reader_->ProcessQueuedEvent(commit_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
 }
 
 TEST_F(BinlogReaderFixture, DdlGtidAdvancesImmediatelyAfterSuccess) {
@@ -792,7 +794,7 @@ TEST_F(BinlogReaderFixture, DdlGtidAdvancesImmediatelyAfterSuccess) {
   ddl_event.gtid = "uuid:51";
 
   ASSERT_TRUE(reader_->ProcessQueuedEvent(ddl_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
 }
 
 /**

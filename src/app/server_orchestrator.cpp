@@ -9,9 +9,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <unordered_map>
 
 #include "app/mysql_reconnection_handler.h"
 #include "app/signal_manager.h"
+#include "cache/cache_manager.h"
 #include "config/runtime_variable_manager.h"
 #include "loader/initial_loader.h"
 #include "query/synonym_dictionary.h"
@@ -19,6 +21,8 @@
 #include "server/request_dispatcher.h"
 #include "server/tcp_server.h"
 #include "utils/constants.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -26,7 +30,6 @@ namespace mygramdb::app {
 
 namespace {
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
-constexpr size_t kGtidPrefixLength = mygram::constants::kGtidPrefixLength;
 constexpr int kMillisecondsPerSecond = static_cast<int>(mygram::constants::kMillisecondsPerSecond);
 }  // namespace
 
@@ -57,6 +60,29 @@ std::vector<std::string> CollectRequiredTableNames(
     required_tables.push_back(ctx != nullptr && !ctx->config.name.empty() ? ctx->config.name : name);
   }
   return required_tables;
+}
+
+Expected<std::string, mygram::utils::Error> ResolveReplicationStartGtid(std::string_view start_from,
+                                                                        std::string_view snapshot_gtid,
+                                                                        const LatestGtidProvider& latest_provider) {
+  if (start_from == "snapshot") {
+    return std::string(snapshot_gtid);
+  }
+
+  if (start_from == "latest") {
+    if (!latest_provider) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLQueryFailed,
+                                                                    "latest GTID provider is not configured"));
+    }
+    return latest_provider();
+  }
+
+  constexpr std::string_view kGtidPrefix = "gtid=";
+  if (start_from.substr(0, kGtidPrefix.size()) == kGtidPrefix) {
+    return std::string(start_from.substr(kGtidPrefix.size()));
+  }
+
+  return std::string{};
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initialize() {
@@ -280,7 +306,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
       }
     }
 
-    table_contexts_[table_config.name] = std::move(ctx);
+    table_contexts_[config::QualifiedTableName(table_config)] = std::move(ctx);
     mygram::utils::StructuredLog()
         .Event("server_debug")
         .Field("action", "table_initialized")
@@ -399,11 +425,17 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
   };
 
   for (const auto& table_config : deps_.config.tables) {
-    auto& ctx = table_contexts_[table_config.name];
+    const auto table_key = config::QualifiedTableName(table_config);
+    auto ctx_iter = table_contexts_.find(table_key);
+    if (ctx_iter == table_contexts_.end() || ctx_iter->second == nullptr) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, "Table context not found: " + table_key));
+    }
+    auto& ctx = ctx_iter->second;
 
     mygram::utils::StructuredLog()
         .Event("snapshot_building")
-        .Field("table", table_config.name)
+        .Field("table", table_key)
         .Field("message", "This may take a while for large tables")
         .Info();
 
@@ -517,10 +549,19 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
   std::string start_gtid;
   const std::string& start_from = deps_.config.replication.start_from;
+  auto start_gtid_result =
+      ResolveReplicationStartGtid(start_from, snapshot_gtid_, [this]() { return mysql_connection_->GetLatestGTID(); });
+  if (!start_gtid_result) {
+    mygram::utils::StructuredLog()
+        .Event("latest_gtid_failed")
+        .Field("error", start_gtid_result.error().message())
+        .Error();
+    return mygram::utils::MakeUnexpected(start_gtid_result.error());
+  }
+  start_gtid = *start_gtid_result;
 
   if (start_from == "snapshot") {
     // Use GTID captured during snapshot build
-    start_gtid = snapshot_gtid_;
     if (start_gtid.empty()) {
       mygram::utils::StructuredLog()
           .Event("snapshot_gtid_unavailable")
@@ -534,22 +575,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
           .Debug();
     }
   } else if (start_from == "latest") {
-    // Get current GTID from MySQL
-    auto latest_gtid = mysql_connection_->GetLatestGTID();
-    if (latest_gtid) {
-      start_gtid = latest_gtid.value();
-      mygram::utils::StructuredLog()
-          .Event("server_debug")
-          .Field("action", "replication_from_latest_gtid")
-          .Field("gtid", start_gtid)
-          .Debug();
-    } else {
-      mygram::utils::StructuredLog().Event("latest_gtid_failed").Field("fallback", "starting from empty").Warn();
-      start_gtid = "";
-    }
+    mygram::utils::StructuredLog()
+        .Event("server_debug")
+        .Field("action", "replication_from_latest_gtid")
+        .Field("gtid", start_gtid)
+        .Debug();
   } else if (start_from.find("gtid=") == 0) {
     // Extract GTID from "gtid=<UUID:txn>" format
-    start_gtid = start_from.substr(kGtidPrefixLength);
     mygram::utils::StructuredLog()
         .Event("server_debug")
         .Field("action", "replication_from_specified_gtid")
@@ -558,10 +590,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   }
 
   // Prepare table_contexts map for BinlogReader
-  std::unordered_map<std::string, server::TableContext*> table_contexts_ptrs;
-  for (auto& [name, ctx] : table_contexts_) {
-    table_contexts_ptrs[name] = ctx.get();
-  }
+  auto table_contexts_ptrs = BuildTableContextPointerMap();
 
   // Create binlog reader
   mysql::BinlogReader::Config binlog_config;
@@ -595,10 +624,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   }
 
   // Prepare table_contexts map for servers
-  std::unordered_map<std::string, server::TableContext*> table_contexts_ptrs;
-  for (auto& [name, ctx] : table_contexts_) {
-    table_contexts_ptrs[name] = ctx.get();
-  }
+  auto table_contexts_ptrs = BuildTableContextPointerMap();
 
   // Initialize TCP server
   auto server_config = server::ServerConfig::FromConfig(deps_.config);
@@ -644,6 +670,17 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   return {};
 }
 
+std::unordered_map<std::string, server::TableContext*> ServerOrchestrator::BuildTableContextPointerMap() {
+  std::unordered_map<std::string, server::TableContext*> result;
+  for (auto& [key, ctx] : table_contexts_) {
+    if (ctx == nullptr) {
+      continue;
+    }
+    result[key] = ctx.get();
+  }
+  return result;
+}
+
 void ServerOrchestrator::RegisterRuntimeCallbacks() {
   if (!tcp_server_) {
     return;
@@ -657,9 +694,10 @@ void ServerOrchestrator::RegisterRuntimeCallbacks() {
 #ifdef USE_MYSQL
   if (mysql_connection_ && binlog_reader_) {
     auto required_tables = CollectRequiredTableNames(table_contexts_);
-    auto reconnection_handler =
-        std::make_shared<MysqlReconnectionHandler>(mysql_connection_.get(), binlog_reader_.get(),
-                                                   tcp_server_->GetMysqlReconnectingFlag(), std::move(required_tables));
+    auto reconnection_handler = std::make_shared<MysqlReconnectionHandler>(
+        mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag(),
+        std::move(required_tables), tcp_server_->GetDumpSaveInProgressFlag(),
+        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetReplicationPauseCounter());
 
     variable_manager->SetMysqlReconnectCallback(
         [handler = reconnection_handler](const std::string& host, int port) { return handler->Reconnect(host, port); });
@@ -670,10 +708,25 @@ void ServerOrchestrator::RegisterRuntimeCallbacks() {
 
   if (auto* rate_limiter = tcp_server_->GetRateLimiter(); rate_limiter != nullptr) {
     variable_manager->SetRateLimiterCallback([rate_limiter](bool enabled, size_t capacity, size_t refill_rate) {
-      (void)enabled;
       rate_limiter->UpdateParameters(capacity, refill_rate);
+      rate_limiter->SetEnabled(enabled);
     });
     mygram::utils::StructuredLog().Event("rate_limiter_callback_registered").Info();
+  }
+
+  if (auto* cache_manager = tcp_server_->GetCacheManager(); cache_manager != nullptr) {
+    variable_manager->SetCacheToggleCallback([cache_manager](bool enabled) -> mygram::utils::Expected<void, Error> {
+      if (enabled) {
+        if (!cache_manager->Enable()) {
+          return mygram::utils::MakeUnexpected(
+              mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument, "Cache cannot be enabled"));
+        }
+      } else {
+        cache_manager->Disable();
+      }
+      return {};
+    });
+    mygram::utils::StructuredLog().Event("cache_toggle_callback_registered").Info();
   }
 
   auto* http_server = http_server_.get();

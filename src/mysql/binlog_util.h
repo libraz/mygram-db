@@ -63,35 +63,6 @@ inline uint64_t uint8korr(const unsigned char* ptr) {
  * - If first byte == 254: value is next 8 bytes
  * - If first byte == 251: NULL (returns 0)
  */
-inline uint64_t read_packed_integer(const unsigned char** ptr) {
-  const unsigned char* pos = *ptr;
-
-  if (*pos < 251) {
-    (*ptr)++;
-    return (uint64_t)*pos;
-  }
-
-  if (*pos == 251) {
-    // NULL value
-    (*ptr)++;
-    return 0;
-  }
-
-  if (*pos == 252) {
-    (*ptr) += 3;
-    return (uint64_t)uint2korr(pos + 1);
-  }
-
-  if (*pos == 253) {
-    (*ptr) += 4;
-    return (uint64_t)uint3korr(pos + 1);
-  }
-
-  // Must be 254
-  (*ptr) += 9;
-  return (uint64_t)uint8korr(pos + 1);
-}
-
 inline bool read_packed_integer(const unsigned char** ptr, const unsigned char* end, uint64_t* value) {
   if (ptr == nullptr || *ptr == nullptr || value == nullptr || *ptr >= end) {
     return false;

@@ -67,7 +67,7 @@ inline RoaringBitmapPtr MakeEmptyRoaring() {
  */
 inline RoaringBitmapPtr MakeRoaringFromVector(const std::vector<uint32_t>& doc_ids) {
   RoaringBitmapPtr bm = MakeEmptyRoaring();
-  if (!doc_ids.empty()) {
+  if (bm != nullptr && !doc_ids.empty()) {
     roaring_bitmap_add_many(bm.get(), doc_ids.size(), doc_ids.data());
   }
   return bm;

@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -25,6 +26,7 @@ namespace mygramdb::server {
 
 // Forward declarations
 class TableCatalog;
+class SyncOperationManager;
 
 /**
  * @brief Background snapshot scheduler
@@ -61,7 +63,8 @@ class SnapshotScheduler {
                     std::string dump_dir, mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
                     std::atomic<bool>& replication_paused_for_dump,
                     replication_pause::Counter* replication_pause_counter = nullptr,
-                    std::atomic<bool>* dump_load_in_progress = nullptr);
+                    std::atomic<bool>* dump_load_in_progress = nullptr, SyncOperationManager* sync_manager = nullptr,
+                    std::function<bool()> sync_in_progress_checker = {});
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -136,6 +139,8 @@ class SnapshotScheduler {
   std::atomic<bool>& replication_paused_for_dump_;
   replication_pause::Counter local_replication_pause_counter_;
   replication_pause::Counter* replication_pause_counter_;
+  SyncOperationManager* sync_manager_;
+  std::function<bool()> sync_in_progress_checker_;
 };
 
 }  // namespace mygramdb::server

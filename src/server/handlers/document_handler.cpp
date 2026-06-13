@@ -14,6 +14,9 @@ std::string DocumentHandler::Handle(const query::Query& query, ConnectionContext
   if (auto err = CheckNotLoading(); !err.empty()) {
     return err;
   }
+  if (auto err = CheckTableNotSyncing(query.table); !err.empty()) {
+    return err;
+  }
 
   // Get table context
   auto table_ctx = GetTableContext(query.table);

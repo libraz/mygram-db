@@ -128,6 +128,11 @@
             "description": "Table name in MySQL database",
             "minLength": 1
           },
+          "database": {
+            "type": "string",
+            "description": "Database/schema containing this table. Defaults to mysql.database",
+            "minLength": 1
+          },
           "primary_key": {
             "type": "string",
             "description": "Primary key column name",

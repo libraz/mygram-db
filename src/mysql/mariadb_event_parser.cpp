@@ -7,8 +7,6 @@
 
 #ifdef USE_MYSQL
 
-#include <cstring>
-
 #include "utils/constants.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -24,6 +22,19 @@ static constexpr size_t kGtidListEntrySize = 16;
 /// Mask for extracting entry count from GTID_LIST count_and_flags field (lower 28 bits)
 static constexpr uint32_t kGtidListCountMask = 0x0FFFFFFFu;
 
+uint32_t ReadLittleEndian32(const unsigned char* ptr) {
+  return static_cast<uint32_t>(ptr[0]) | (static_cast<uint32_t>(ptr[1]) << 8) | (static_cast<uint32_t>(ptr[2]) << 16) |
+         (static_cast<uint32_t>(ptr[3]) << 24);
+}
+
+uint64_t ReadLittleEndian64(const unsigned char* ptr) {
+  uint64_t value = 0;
+  for (size_t i = 0; i < 8; ++i) {
+    value |= static_cast<uint64_t>(ptr[i]) << (i * 8);
+  }
+  return value;
+}
+
 std::optional<std::string> MariaDBEventParser::ExtractGTID(const unsigned char* buffer, size_t length) {
   // Need at least header + seq_no(8) + domain_id(4) + flags(1)
   if (buffer == nullptr || length < mygram::constants::kBinlogEventHeaderLen + kMariaDBGtidEventMinPostHeader) {
@@ -31,19 +42,16 @@ std::optional<std::string> MariaDBEventParser::ExtractGTID(const unsigned char* 
   }
 
   // Extract server_id from event header (bytes 5-8, little-endian)
-  uint32_t server_id = 0;
-  std::memcpy(&server_id, buffer + 5, sizeof(server_id));
+  uint32_t server_id = ReadLittleEndian32(buffer + 5);
 
   // Post-header starts after 19-byte event header
   const unsigned char* post_header = buffer + mygram::constants::kBinlogEventHeaderLen;
 
   // seq_no: 8 bytes at offset 0 (little-endian uint64)
-  uint64_t seq_no = 0;
-  std::memcpy(&seq_no, post_header, sizeof(seq_no));
+  uint64_t seq_no = ReadLittleEndian64(post_header);
 
   // domain_id: 4 bytes at offset 8 (little-endian uint32)
-  uint32_t domain_id = 0;
-  std::memcpy(&domain_id, post_header + 8, sizeof(domain_id));
+  uint32_t domain_id = ReadLittleEndian32(post_header + 8);
 
   // Construct "domain-server-seq" format
   MariaDBGTID gtid;
@@ -62,8 +70,7 @@ std::optional<std::vector<MariaDBGTID>> MariaDBEventParser::ParseGTIDList(const 
   const unsigned char* post_header = buffer + mygram::constants::kBinlogEventHeaderLen;
 
   // count_and_flags: 4 bytes (lower 28 bits = count)
-  uint32_t count_and_flags = 0;
-  std::memcpy(&count_and_flags, post_header, sizeof(count_and_flags));
+  uint32_t count_and_flags = ReadLittleEndian32(post_header);
   uint32_t count = count_and_flags & kGtidListCountMask;
 
   // Validate we have enough data for all entries
@@ -79,9 +86,9 @@ std::optional<std::vector<MariaDBGTID>> MariaDBEventParser::ParseGTIDList(const 
   const unsigned char* entry_ptr = buffer + entries_offset;
   for (uint32_t i = 0; i < count; ++i) {
     MariaDBGTID gtid;
-    std::memcpy(&gtid.domain_id, entry_ptr, sizeof(gtid.domain_id));
-    std::memcpy(&gtid.server_id, entry_ptr + 4, sizeof(gtid.server_id));
-    std::memcpy(&gtid.sequence_no, entry_ptr + 8, sizeof(gtid.sequence_no));
+    gtid.domain_id = ReadLittleEndian32(entry_ptr);
+    gtid.server_id = ReadLittleEndian32(entry_ptr + 4);
+    gtid.sequence_no = ReadLittleEndian64(entry_ptr + 8);
     result.push_back(gtid);
     entry_ptr += kGtidListEntrySize;
   }

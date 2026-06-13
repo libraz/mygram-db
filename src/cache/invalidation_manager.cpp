@@ -34,6 +34,7 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
   inv_meta.kanji_ngram_size = metadata.kanji_ngram_size;
   inv_meta.cross_boundary_ngrams = metadata.cross_boundary_ngrams;
   inv_meta.has_filters = !metadata.filters.empty();
+  inv_meta.has_not_terms = metadata.has_not_terms;
   cache_metadata_[key] = std::move(inv_meta);
 
   const auto& stored_meta = cache_metadata_[key];
@@ -131,6 +132,18 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
         for (const auto& cache_key : tk_it->second) {
           auto meta_it = cache_metadata_.find(cache_key);
           if (meta_it != cache_metadata_.end() && meta_it->second.has_filters) {
+            affected_keys.insert(cache_key);
+          }
+        }
+      }
+    }
+
+    if (old_text != new_text) {
+      auto tk_it = table_to_cache_keys_.find(table_name);
+      if (tk_it != table_to_cache_keys_.end()) {
+        for (const auto& cache_key : tk_it->second) {
+          auto meta_it = cache_metadata_.find(cache_key);
+          if (meta_it != cache_metadata_.end() && meta_it->second.has_not_terms) {
             affected_keys.insert(cache_key);
           }
         }

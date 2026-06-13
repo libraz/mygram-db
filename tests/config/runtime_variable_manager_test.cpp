@@ -1414,3 +1414,75 @@ TEST(RuntimeVariableManagerTest, SetVariableImmediatelyVisibleToGet) {
   ASSERT_TRUE(after);
   EXPECT_EQ(*after, "50") << "SetVariable change should be immediately visible to GetVariable";
 }
+
+TEST(RuntimeVariableManagerTest, GetCurrentConfigReflectsMutableRuntimeValues) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  manager->SetMysqlReconnectCallback(
+      [](const std::string&, int) -> Expected<void, Error> { return Expected<void, Error>{}; });
+
+  ASSERT_TRUE(manager->SetVariable("mysql.host", "192.0.2.10"));
+  ASSERT_TRUE(manager->SetVariable("mysql.port", "3307"));
+  ASSERT_TRUE(manager->SetVariable("api.default_limit", "50"));
+  ASSERT_TRUE(manager->SetVariable("api.max_query_length", "512"));
+  ASSERT_TRUE(manager->SetVariable("api.rate_limiting.enable", "false"));
+  ASSERT_TRUE(manager->SetVariable("cache.enabled", "false"));
+  ASSERT_TRUE(manager->SetVariable("logging.level", "debug"));
+  ASSERT_TRUE(manager->SetVariable("logging.format", "text"));
+
+  Config snapshot = manager->GetCurrentConfig();
+  EXPECT_EQ(snapshot.mysql.host, "192.0.2.10");
+  EXPECT_EQ(snapshot.mysql.port, 3307);
+  EXPECT_EQ(snapshot.api.default_limit, 50);
+  EXPECT_EQ(snapshot.api.max_query_length, 512);
+  EXPECT_FALSE(snapshot.api.rate_limiting.enable);
+  EXPECT_FALSE(snapshot.cache.enabled);
+  EXPECT_EQ(snapshot.logging.level, "debug");
+  EXPECT_EQ(snapshot.logging.format, "text");
+}
+
+TEST(RuntimeVariableManagerTest, SetApiMaxQueryLengthRejectsValuesAboveSchemaMaximum) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto result = manager->SetVariable("api.max_query_length", "4097");
+
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("4096"), std::string::npos);
+  auto current = manager->GetVariable("api.max_query_length");
+  ASSERT_TRUE(current);
+  EXPECT_EQ(*current, "128");
+}
+
+TEST(RuntimeVariableManagerTest, ParseDoubleRejectsTrailingLocaleDependentComma) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto result = manager->SetVariable("cache.min_query_cost_ms", "10,5");
+
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("Invalid double value"), std::string::npos);
+  auto current = manager->GetVariable("cache.min_query_cost_ms");
+  ASSERT_TRUE(current);
+  EXPECT_EQ(std::stod(*current), 10.0);
+}
+
+TEST(RuntimeVariableManagerTest, CacheEnabledDirectlyTogglesInjectedCacheManager) {
+  Config config = CreateTestConfig();
+  config.cache.enabled = false;
+  mygramdb::cache::NgramConfigMap ngram_configs;
+  mygramdb::cache::CacheManager cache_manager(config.cache, std::move(ngram_configs));
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+  manager->SetCacheManager(&cache_manager);
+
+  EXPECT_FALSE(cache_manager.IsEnabled());
+
+  ASSERT_TRUE(manager->SetVariable("cache.enabled", "true"));
+  EXPECT_TRUE(cache_manager.IsEnabled());
+  EXPECT_TRUE(manager->GetCurrentConfig().cache.enabled);
+
+  ASSERT_TRUE(manager->SetVariable("cache.enabled", "false"));
+  EXPECT_FALSE(cache_manager.IsEnabled());
+  EXPECT_FALSE(manager->GetCurrentConfig().cache.enabled);
+}

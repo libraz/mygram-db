@@ -17,6 +17,7 @@
 #include "mysql/binlog_reader_interface.h"
 #include "server/log_field_names.h"
 #include "server/replication_pause_counter.h"
+#include "server/sync_operation_manager.h"
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
@@ -35,7 +36,8 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
                                      mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
                                      std::atomic<bool>& replication_paused_for_dump,
                                      replication_pause::Counter* replication_pause_counter,
-                                     std::atomic<bool>* dump_load_in_progress)
+                                     std::atomic<bool>* dump_load_in_progress, SyncOperationManager* sync_manager,
+                                     std::function<bool()> sync_in_progress_checker)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
@@ -45,7 +47,9 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
       dump_load_in_progress_(dump_load_in_progress),
       replication_paused_for_dump_(replication_paused_for_dump),
       replication_pause_counter_(replication_pause_counter != nullptr ? replication_pause_counter
-                                                                      : &local_replication_pause_counter_) {
+                                                                      : &local_replication_pause_counter_),
+      sync_manager_(sync_manager),
+      sync_in_progress_checker_(std::move(sync_in_progress_checker)) {
   // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
   // which is the only production caller. Tests must also provide a non-null catalog.
 }
@@ -180,6 +184,13 @@ void SnapshotScheduler::TakeSnapshot() {
     }
     if (dump_load_in_progress_ != nullptr && dump_load_in_progress_->load(std::memory_order_acquire)) {
       mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "DUMP LOAD is in progress").Info();
+      return;
+    }
+    const bool sync_in_progress = sync_in_progress_checker_  ? sync_in_progress_checker_()
+                                  : sync_manager_ != nullptr ? sync_manager_->IsAnySyncing()
+                                                             : false;
+    if (sync_in_progress) {
+      mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "SYNC is in progress").Info();
       return;
     }
 

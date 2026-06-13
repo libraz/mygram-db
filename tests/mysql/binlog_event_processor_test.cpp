@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -1125,6 +1126,39 @@ TEST_F(BinlogEventProcessorTest, DDLTypeUsedInProcessing) {
   // Data should still be present after ALTER
   EXPECT_EQ(doc_store_->Size(), 1);
   EXPECT_EQ(index_->SearchAnd({"al"}).size(), 1);
+}
+
+TEST_F(BinlogEventProcessorTest, ConcurrentApplyAndSearchIsTsanClean) {
+  std::atomic<bool> stop{false};
+  std::atomic<bool> writer_ok{true};
+
+  std::thread reader([&]() {
+    while (!stop.load(std::memory_order_acquire)) {
+      auto results = index_->SearchAnd({"do"});
+      for (storage::DocId doc_id : results) {
+        (void)doc_store_->GetNormalizedText(doc_id);
+      }
+    }
+  });
+
+  std::thread writer([&]() {
+    for (int i = 0; i < 200; ++i) {
+      BinlogEvent event;
+      event.type = BinlogEventType::INSERT;
+      event.table_name = "test_table";
+      event.primary_key = "pk" + std::to_string(i);
+      event.text = "document " + std::to_string(i);
+      if (!BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr)) {
+        writer_ok.store(false, std::memory_order_release);
+        break;
+      }
+    }
+    stop.store(true, std::memory_order_release);
+  });
+
+  writer.join();
+  reader.join();
+  EXPECT_TRUE(writer_ok.load(std::memory_order_acquire));
 }
 
 }  // namespace mygramdb::mysql

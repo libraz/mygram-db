@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "config/config.h"
+#include "server/replication_pause_counter.h"
 #include "server/server_types.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -92,6 +93,7 @@ class SyncOperationManager {
    */
   SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
                        const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
+                       replication_pause::Counter* replication_pause_counter = nullptr,
                        cache::CacheManager* cache_manager = nullptr);
 
   ~SyncOperationManager();
@@ -140,6 +142,10 @@ class SyncOperationManager {
 
   /**
    * @brief Wait for all sync operations to complete (with timeout)
+   *
+   * On success this also joins completed sync worker threads before returning,
+   * so callers may safely tear down collaborators touched by BuildSnapshotAsync.
+   *
    * @param timeout_sec Timeout in seconds
    * @return True if all syncs completed before timeout
    */
@@ -185,10 +191,36 @@ class SyncOperationManager {
    */
   void SetCacheManager(cache::CacheManager* cache_manager);
 
+#ifdef MYGRAMDB_SYNC_TEST_HOOKS
+  void MarkSyncingTableForTest(const std::string& table_name) {
+    {
+      std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+      syncing_tables_.insert(table_name);
+    }
+    syncing_tables_cv_.notify_all();
+  }
+
+  void ClearSyncingTableForTest(const std::string& table_name) {
+    {
+      std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+      syncing_tables_.erase(table_name);
+    }
+    syncing_tables_cv_.notify_all();
+  }
+
+  mygram::utils::Expected<void, mygram::utils::Error> RestartReplicationFromGtidForTest(mysql::IBinlogReader* reader,
+                                                                                        const std::string& gtid,
+                                                                                        const std::string& table_name,
+                                                                                        const std::string& reason) {
+    return RestartReplicationFromGtid(reader, gtid, table_name, reason);
+  }
+#endif
+
  private:
   const std::unordered_map<std::string, TableContext*>& table_contexts_;
   const config::Config* full_config_;
   mysql::IBinlogReader* binlog_reader_;
+  replication_pause::Counter* replication_pause_counter_;
   std::atomic<cache::CacheManager*> cache_manager_{nullptr};
 
   // State tracking
@@ -200,6 +232,7 @@ class SyncOperationManager {
   //   StartSync:           sync_mutex_ (holds), then syncing_tables_mutex_
   //   StopSync (specific): sync_mutex_ (holds) -> syncing_tables_mutex_ -> loaders_mutex_
   //   StopSync (all):      Each lock acquired and released independently (not nested)
+  //   WaitForCompletion:   syncing_tables_mutex_ alone for waiting; then sync_mutex_ -> syncing_tables_mutex_
   //   BuildSnapshotAsync:  sync_mutex_ alone (via update_state); syncing_tables_mutex_ alone (via SyncGuard)
   //   RequestShutdown:     loaders_mutex_ alone
   //   Destructor:          sync_mutex_ alone, then thread join
@@ -242,15 +275,18 @@ class SyncOperationManager {
    *
    * Used to restore replication after SYNC cancellation, failure, or exception.
    * The reader is stopped before calling this method. On success, replication
-   * resumes from the given GTID. On failure, a warning is logged.
+   * resumes from the given GTID. On failure, returns the Start() error after
+   * logging it.
    *
    * @param reader Binlog reader to restart (must not be nullptr)
    * @param gtid GTID position to resume from
    * @param table_name Table name for logging context
    * @param reason Reason for restart (e.g., "sync_cancelled", "sync_failed")
    */
-  void RestartReplicationFromGtid(mysql::IBinlogReader* reader, const std::string& gtid, const std::string& table_name,
-                                  const std::string& reason);
+  mygram::utils::Expected<void, mygram::utils::Error> RestartReplicationFromGtid(mysql::IBinlogReader* reader,
+                                                                                 const std::string& gtid,
+                                                                                 const std::string& table_name,
+                                                                                 const std::string& reason);
 };
 
 }  // namespace mygramdb::server

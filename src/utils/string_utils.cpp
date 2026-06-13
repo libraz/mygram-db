@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 
 #include "utils/constants.h"
+#include "utils/structured_log.h"
 
 #ifdef USE_ICU
 #include <unicode/brkiter.h>
@@ -61,6 +63,18 @@ constexpr uint32_t kSurrogateEnd = 0xDFFF;
 constexpr uint32_t kMinTwoByteCodepoint = 0x80;
 constexpr uint32_t kMinThreeByteCodepoint = 0x800;
 constexpr uint32_t kMinFourByteCodepoint = 0x10000;
+
+std::atomic<uint64_t> g_text_normalization_failures{0};
+
+void RecordTextNormalizationFailure(std::string_view reason, std::string_view status, size_t input_size) {
+  g_text_normalization_failures.fetch_add(1, std::memory_order_relaxed);
+  StructuredLog()
+      .Event("text_normalization_failed")
+      .Field("reason", reason)
+      .Field("icu_status", status)
+      .Field("input_size", input_size)
+      .Warn();
+}
 
 /**
  * @brief Try to parse a single UTF-8 character from a byte sequence.
@@ -283,6 +297,14 @@ std::string CodepointsToUtf8(const std::vector<uint32_t>& codepoints) {
   return CodepointsToUtf8(codepoints.data(), codepoints.data() + codepoints.size());
 }
 
+uint64_t GetTextNormalizationFailureCount() {
+  return g_text_normalization_failures.load(std::memory_order_relaxed);
+}
+
+void ResetTextNormalizationFailureCountForTesting() {
+  g_text_normalization_failures.store(0, std::memory_order_relaxed);
+}
+
 #ifdef USE_ICU
 std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view width, bool lower) {
   UErrorCode status = U_ZERO_ERROR;
@@ -295,14 +317,19 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
   if (nfkc) {
     status = U_ZERO_ERROR;
     const icu::Normalizer2* normalizer = icu::Normalizer2::getNFKCInstance(status);
-    if (U_SUCCESS(status)) {
-      icu::UnicodeString normalized;
-      status = U_ZERO_ERROR;
-      normalizer->normalize(ustr, normalized, status);
-      if (U_SUCCESS(status)) {
-        ustr = normalized;
-      }
+    if (U_FAILURE(status) || normalizer == nullptr) {
+      RecordTextNormalizationFailure("nfkc_instance", u_errorName(status), text.size());
+      return {};
     }
+
+    icu::UnicodeString normalized;
+    status = U_ZERO_ERROR;
+    normalizer->normalize(ustr, normalized, status);
+    if (U_FAILURE(status)) {
+      RecordTextNormalizationFailure("nfkc_normalize", u_errorName(status), text.size());
+      return {};
+    }
+    ustr = normalized;
   }
 
   // Width conversion
@@ -311,17 +338,21 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
     status = U_ZERO_ERROR;
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Fullwidth-Halfwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status)) && trans != nullptr) {
-      trans->transliterate(ustr);
+    if (U_FAILURE(status) || trans == nullptr) {
+      RecordTextNormalizationFailure("width_narrow", u_errorName(status), text.size());
+      return {};
     }
+    trans->transliterate(ustr);
   } else if (width == "wide") {
     // Half-width to full-width conversion
     status = U_ZERO_ERROR;
     std::unique_ptr<icu::Transliterator> trans(
         icu::Transliterator::createInstance("Halfwidth-Fullwidth", UTRANS_FORWARD, status));
-    if ((U_SUCCESS(status)) && trans != nullptr) {
-      trans->transliterate(ustr);
+    if (U_FAILURE(status) || trans == nullptr) {
+      RecordTextNormalizationFailure("width_wide", u_errorName(status), text.size());
+      return {};
     }
+    trans->transliterate(ustr);
   }
 
   // Lowercase conversion
@@ -337,6 +368,11 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
 #endif
 
 std::string NormalizeText(std::string_view text, bool nfkc, std::string_view width, bool lower) {
+  if (!IsValidUtf8(text)) {
+    RecordTextNormalizationFailure("invalid_utf8", "U_INVALID_CHAR_FOUND", text.size());
+    return {};
+  }
+
 #ifdef USE_ICU
   return NormalizeTextICU(text, nfkc, width, lower);
 #else

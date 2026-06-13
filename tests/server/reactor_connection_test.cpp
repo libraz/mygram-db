@@ -214,6 +214,21 @@ TEST_F(ReactorConnectionNoDispatcherTest, OnReadableParsesSingleFrameCountBefore
   EXPECT_TRUE(conn_->IsClosing());
 }
 
+TEST_F(ReactorConnectionNoDispatcherTest, OnReadableSkipsManyLoneCRsLinearly) {
+  std::string input;
+  input.reserve(8192);
+  for (size_t i = 0; i < 2048; ++i) {
+    input += 'x';
+    input += '\r';
+  }
+  input += "INFO\r\n";
+
+  WriteAll(peer_fd_, input);
+  EXPECT_FALSE(conn_->OnReadable());
+  EXPECT_TRUE(conn_->IsClosing());
+  EXPECT_EQ(conn_->PendingFrameCountForTest(), 1u);
+}
+
 // ---------------------------------------------------------------------------
 // Test 4: OnReadableParsesMultipleFramesPerRead
 // (Use real dispatcher; drain may run immediately but ordering is preserved)
@@ -392,6 +407,29 @@ TEST_F(ReactorConnectionNoDispatcherTest, FdClosedOnDestruction) {
   pfd.events = POLLIN | POLLHUP;
   int rc = ::poll(&pfd, 1, 1000);
   ASSERT_GT(rc, 0) << "poll timed out waiting for EOF";
+
+  char tmp[4];
+  ssize_t n = ::recv(peer_fd_, tmp, sizeof(tmp), 0);
+  EXPECT_EQ(n, 0) << "Expected EOF (0), got " << n;
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, ReleaseFdPreventsCloseOnDestruction) {
+  const int released_fd = conn_->ReleaseFd();
+  ASSERT_EQ(released_fd, rc_fd_);
+  rc_fd_ = -1;
+
+  conn_.reset();
+
+  struct pollfd pfd {};
+  pfd.fd = peer_fd_;
+  pfd.events = POLLIN | POLLHUP;
+  int rc = ::poll(&pfd, 1, 50);
+  EXPECT_EQ(rc, 0) << "released fd should remain open after ReactorConnection destruction";
+
+  ASSERT_EQ(::close(released_fd), 0);
+
+  rc = ::poll(&pfd, 1, 1000);
+  ASSERT_GT(rc, 0) << "poll timed out waiting for EOF after closing released fd";
 
   char tmp[4];
   ssize_t n = ::recv(peer_fd_, tmp, sizeof(tmp), 0);

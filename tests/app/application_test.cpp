@@ -18,8 +18,12 @@
 #include <unordered_map>
 
 #include "app/configuration_manager.h"
+#include "app/mysql_reconnection_handler.h"
 #include "app/server_orchestrator.h"
 #include "mysql/null_binlog_reader.h"
+#include "server/replication_pause_counter.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace {
 
@@ -216,6 +220,85 @@ TEST(ServerOrchestratorReplicationTest, CollectRequiredTableNamesUsesConfiguredN
   EXPECT_EQ(required_tables[0], "articles");
   EXPECT_EQ(required_tables[1], "comments");
 }
+
+TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidUsesLatestProvider) {
+  auto result = mygramdb::app::ResolveReplicationStartGtid("latest", "snapshot-gtid", []() {
+    return mygram::utils::Expected<std::string, mygram::utils::Error>("uuid:1-10");
+  });
+
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(*result, "uuid:1-10");
+}
+
+TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidAllowsEmptyLatestGtid) {
+  auto result = mygramdb::app::ResolveReplicationStartGtid(
+      "latest", "snapshot-gtid", []() { return mygram::utils::Expected<std::string, mygram::utils::Error>(""); });
+
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(*result, "");
+}
+
+TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidPropagatesLatestQueryError) {
+  auto result = mygramdb::app::ResolveReplicationStartGtid("latest", "snapshot-gtid", []() {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLQueryFailed, "SHOW BINARY LOG STATUS failed"));
+  });
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLQueryFailed);
+  EXPECT_NE(result.error().message().find("SHOW BINARY LOG STATUS failed"), std::string::npos);
+}
+
+TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidKeepsSnapshotAndExplicitGtid) {
+  bool latest_called = false;
+  auto latest_provider = [&latest_called]() {
+    latest_called = true;
+    return mygram::utils::Expected<std::string, mygram::utils::Error>("latest");
+  };
+
+  auto snapshot_result = mygramdb::app::ResolveReplicationStartGtid("snapshot", "snapshot-gtid", latest_provider);
+  ASSERT_TRUE(snapshot_result) << snapshot_result.error().to_string();
+  EXPECT_EQ(*snapshot_result, "snapshot-gtid");
+
+  auto explicit_result = mygramdb::app::ResolveReplicationStartGtid("gtid=uuid:7", "snapshot-gtid", latest_provider);
+  ASSERT_TRUE(explicit_result) << explicit_result.error().to_string();
+  EXPECT_EQ(*explicit_result, "uuid:7");
+  EXPECT_FALSE(latest_called);
+}
+
+#ifdef USE_MYSQL
+TEST(MysqlReconnectionHandlerTest, RejectsBeforeTouchingConnectionDuringDumpSave) {
+  std::atomic<bool> reconnecting{false};
+  std::atomic<bool> dump_save_in_progress{true};
+  std::atomic<bool> replication_paused_for_dump{false};
+  mygramdb::server::replication_pause::Counter pause_counter;
+
+  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
+                                                  &replication_paused_for_dump, &pause_counter);
+
+  auto result = handler.Reconnect("127.0.0.2", 3307);
+
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("DUMP SAVE is in progress"), std::string::npos);
+  EXPECT_FALSE(reconnecting.load(std::memory_order_acquire));
+}
+
+TEST(MysqlReconnectionHandlerTest, RejectsBeforeTouchingConnectionWhileReplicationPaused) {
+  std::atomic<bool> reconnecting{false};
+  std::atomic<bool> dump_save_in_progress{false};
+  std::atomic<bool> replication_paused_for_dump{true};
+  mygramdb::server::replication_pause::Counter pause_counter;
+
+  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
+                                                  &replication_paused_for_dump, &pause_counter);
+
+  auto result = handler.Reconnect("127.0.0.2", 3307);
+
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("replication is paused for DUMP/SNAPSHOT"), std::string::npos);
+  EXPECT_FALSE(reconnecting.load(std::memory_order_acquire));
+}
+#endif
 
 TEST_F(DumpDirectoryValidationTest, ReopenLogFileSwapsDefaultLoggerForRotatedFile) {
   std::filesystem::path log_path = base_dir_ / "mygramdb.log";

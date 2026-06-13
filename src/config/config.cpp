@@ -365,7 +365,9 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
     return MakeUnexpected(MakeError(ErrorCode::kConfigMissingRequired,
                                     "Required filter error: 'type' field is required for filter '" + config.name +
                                         "'\n"
-                                        "  Valid types: int, string, datetime, bool, float\n"
+                                        "  Valid types: tinyint, tinyint_unsigned, smallint, smallint_unsigned, int, "
+                                        "int_unsigned, bigint, bigint_unsigned, float, double, string, varchar, text, "
+                                        "datetime, date, timestamp, time\n"
                                         "  Example:\n"
                                         "    required_filters:\n"
                                         "      - name: status\n"
@@ -494,6 +496,9 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
   }
   config.name = json_obj["name"].get<std::string>();
 
+  if (json_obj.contains("database")) {
+    config.database = json_obj["database"].get<std::string>();
+  }
   if (json_obj.contains("primary_key")) {
     config.primary_key = json_obj["primary_key"].get<std::string>();
   }
@@ -629,6 +634,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         return MakeUnexpected(table_result.error());
       }
       auto& table = *table_result;
+      if (table.database.empty()) {
+        table.database = config.mysql.database;
+      }
       // Apply global ngram_size if not set per-table
       if (!table_json.contains("ngram_size")) {
         table.ngram_size = global_ngram_size;
@@ -637,6 +645,16 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         }
       }
       config.tables.push_back(std::move(table));
+    }
+
+    std::set<std::string> table_keys;
+    for (const auto& table : config.tables) {
+      const auto key = QualifiedTableName(table);
+      if (!table_keys.insert(key).second) {
+        return MakeUnexpected(MakeError(
+            ErrorCode::kConfigValidationError,
+            "Configuration error: duplicate table identity '" + key + "'. Table identity is (database, name)."));
+      }
     }
   }
 

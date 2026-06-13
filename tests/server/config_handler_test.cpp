@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "config/config.h"
+#include "config/runtime_variable_manager.h"
 #include "query/query_parser.h"
 #include "server/handlers/admin_handler.h"
 #include "server/server_types.h"
@@ -49,6 +50,11 @@ class ConfigHandlerTest : public ::testing::Test {
     test_config_.replication.enable = true;
     test_config_.replication.server_id = 12345;
 
+    auto variable_manager_result = config::RuntimeVariableManager::Create(test_config_);
+    ASSERT_TRUE(variable_manager_result) << variable_manager_result.error().message();
+    variable_manager_ = std::move(*variable_manager_result);
+    ctx_.variable_manager = variable_manager_.get();
+
     // Create handler
     handler_ = std::make_unique<AdminHandler>(ctx_);
   }
@@ -63,6 +69,7 @@ class ConfigHandlerTest : public ::testing::Test {
   std::atomic<bool> mysql_reconnecting_{false};
 #ifdef USE_MYSQL
 #endif
+  std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
   HandlerContext ctx_;
   std::unique_ptr<AdminHandler> handler_;
   ConnectionContext conn_ctx_;
@@ -171,6 +178,29 @@ TEST_F(ConfigHandlerTest, ConfigShowSpecificProperty) {
 
   EXPECT_TRUE(response.find("+OK") != std::string::npos);
   EXPECT_TRUE(response.find("3306") != std::string::npos);
+}
+
+TEST_F(ConfigHandlerTest, ConfigShowUsesRuntimeVariableManagerCurrentValues) {
+  ASSERT_TRUE(variable_manager_->SetVariable("api.default_limit", "50"));
+  ASSERT_TRUE(variable_manager_->SetVariable("api.max_query_length", "512"));
+  ASSERT_TRUE(variable_manager_->SetVariable("cache.enabled", "false"));
+
+  query::Query query;
+  query.type = query::QueryType::CONFIG_SHOW;
+  query.filepath = "api.default_limit";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("+OK") != std::string::npos);
+  EXPECT_TRUE(response.find("50") != std::string::npos) << response;
+  EXPECT_TRUE(response.find("100") == std::string::npos) << response;
+
+  query.filepath = "api.max_query_length";
+  response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("512") != std::string::npos) << response;
+
+  query.filepath = "cache.enabled";
+  response = handler_->Handle(query, conn_ctx_);
+  EXPECT_TRUE(response.find("false") != std::string::npos) << response;
 }
 
 TEST_F(ConfigHandlerTest, ConfigShowInvalidPath) {

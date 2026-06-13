@@ -23,16 +23,18 @@ api:
 
 ## API エンドポイント
 
-すべてのレスポンスは `Content-Type: application/json` のJSON形式です。
+すべてのレスポンスは `Content-Type: application/json` のJSON形式です。テーブルルートは
+`/tables/{database}/{table}` の DB 修飾形式を使用します。たとえば `app_db` データベースの
+`articles` テーブルは `/tables/app_db/articles` と指定します。
 
-### POST /{table}/search
+### POST /tables/{database}/{table}/search
 
 フィルタとページネーションを使用した全文検索。
 
 **リクエスト:**
 
 ```http
-POST /threads/search HTTP/1.1
+POST /tables/app_db/threads/search HTTP/1.1
 Content-Type: application/json
 
 {
@@ -122,7 +124,7 @@ Content-Type: application/json
 **ハイライト付き検索の例:**
 
 ```http
-POST /articles/search HTTP/1.1
+POST /tables/app_db/articles/search HTTP/1.1
 Content-Type: application/json
 
 {
@@ -138,14 +140,14 @@ Content-Type: application/json
 }
 ```
 
-### GET /{table}/{primary_key}
+### GET /tables/{database}/{table}/{primary_key}
 
 プライマリキーで単一のドキュメントを取得。レスポンスには内部 `doc_id` も含まれます。
 
 **リクエスト:**
 
 ```http
-GET /threads/thread_12345 HTTP/1.1
+GET /tables/app_db/threads/thread_12345 HTTP/1.1
 ```
 
 **レスポンス (200 OK):**

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <string_view>
 
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_filter_evaluator.h"
@@ -23,6 +24,7 @@
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
 #include "utils/sql_utils.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -58,6 +60,10 @@ size_t PackedIntegerSize(uint8_t first_byte) {
   return 9;
 }
 
+bool IsCommitStatement(std::string_view query) {
+  return mygram::utils::ToUpper(mygram::utils::TrimAsciiWhitespaceView(query)) == "COMMIT";
+}
+
 // ============================================================================
 // ROWS_EVENT common helper structures and functions
 // ============================================================================
@@ -74,6 +80,11 @@ struct RowsEventContext {
   const config::TableConfig* current_config = nullptr;
   std::string text_column;
   bool use_concat = false;
+};
+
+struct QueryEventData {
+  std::string database;
+  std::string query;
 };
 
 /**
@@ -138,6 +149,21 @@ std::optional<RowsEventContext> InitRowsEventContext(
     ctx.current_config = &table_iter->second->config;
   } else {
     ctx.current_config = table_config;
+  }
+
+  if (ctx.current_config == nullptr) {
+    return std::nullopt;
+  }
+
+  if (!ctx.current_config->database.empty() && ctx.table_meta->database_name != ctx.current_config->database) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "database_not_monitored_" + event_type_name)
+        .Field("database", ctx.table_meta->database_name)
+        .Field("table", ctx.table_meta->table_name)
+        .Field("target_database", ctx.current_config->database)
+        .Debug();
+    return std::nullopt;
   }
 
   // Determine text column(s)
@@ -210,6 +236,18 @@ std::string FormatUUID(const unsigned char* bytes) {
 }
 
 }  // namespace
+
+std::optional<QueryEventData> ExtractQueryEventData(const unsigned char* buffer, unsigned long length);
+
+struct MatchedConfiguredDDL {
+  DDLType ddl_type = DDLType::kUnknown;
+};
+
+std::optional<MatchedConfiguredDDL> FindTableAffectingConfiguredDDL(const std::string& query,
+                                                                    const std::string& event_database,
+                                                                    const config::TableConfig& table_config);
+bool IsTableAffectingConfiguredDDL(const std::string& query, const std::string& event_database,
+                                   const config::TableConfig& table_config);
 
 std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
     const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
@@ -402,28 +440,41 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
     case MySQLBinlogEventType::QUERY_EVENT: {
       // DDL statements (CREATE, ALTER, DROP, TRUNCATE, etc.)
-      auto query_opt = ExtractQueryString(buffer, length);
-      if (!query_opt) {
+      auto query_data_opt = ExtractQueryEventData(buffer, length);
+      if (!query_data_opt) {
         return {};
       }
 
-      std::string query = query_opt.value();
-      mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "query_event").Field("query", query).Debug();
+      const QueryEventData& query_data = *query_data_opt;
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "query_event")
+          .Field("database", query_data.database)
+          .Field("query", query_data.query)
+          .Debug();
 
-      // Classify DDL type once for all events
-      DDLType classified_ddl_type = BinlogEvent::ClassifyDDL(query);
+      if (!current_gtid.empty() && IsCommitStatement(query_data.query)) {
+        BinlogEvent event;
+        event.type = BinlogEventType::COMMIT;
+        event.gtid = current_gtid;
+        return {event};
+      }
 
       // Check if this affects any of our target tables
       if (multi_table_mode) {
         // Multi-table mode: check all registered tables
         std::vector<BinlogEvent> events;
         for (const auto& [table_name, ctx] : table_contexts) {
-          if (IsTableAffectingDDL(query, table_name)) {
+          std::optional<MatchedConfiguredDDL> ddl_match;
+          if (ctx != nullptr) {
+            ddl_match = FindTableAffectingConfiguredDDL(query_data.query, query_data.database, ctx->config);
+          }
+          if (ddl_match) {
             BinlogEvent event;
             event.type = BinlogEventType::DDL;
-            event.ddl_type = classified_ddl_type;
+            event.ddl_type = ddl_match->ddl_type;
             event.table_name = table_name;
-            event.text = query;  // Store the DDL query
+            event.text = query_data.query;  // Store the DDL query
             event.gtid = current_gtid;
             events.push_back(std::move(event));
           }
@@ -433,12 +484,16 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         }
       } else {
         // Single-table mode: check only our configured table
-        if (table_config != nullptr && IsTableAffectingDDL(query, table_config->name)) {
+        std::optional<MatchedConfiguredDDL> ddl_match;
+        if (table_config != nullptr) {
+          ddl_match = FindTableAffectingConfiguredDDL(query_data.query, query_data.database, *table_config);
+        }
+        if (ddl_match) {
           BinlogEvent event;
           event.type = BinlogEventType::DDL;
-          event.ddl_type = classified_ddl_type;
+          event.ddl_type = ddl_match->ddl_type;
           event.table_name = table_config->name;
-          event.text = query;  // Store the DDL query
+          event.text = query_data.query;  // Store the DDL query
           event.gtid = current_gtid;
           return {event};  // Return as vector with single element
         }
@@ -803,7 +858,10 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
     return {};
   }
   const unsigned char* ptr_before_packed = ptr;
-  uint64_t column_count = binlog_util::read_packed_integer(&ptr);
+  uint64_t column_count = 0;
+  if (!binlog_util::read_packed_integer(&ptr, ptr + remaining, &column_count)) {
+    return {};
+  }
 
   // SECURITY: Update remaining bytes after reading packed integer
   size_t packed_int_size = ptr - ptr_before_packed;
@@ -859,7 +917,10 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
       return {};
     }
     const unsigned char* ptr_before_meta_len = ptr;
-    uint64_t metadata_len = binlog_util::read_packed_integer(&ptr);
+    uint64_t metadata_len = 0;
+    if (!binlog_util::read_packed_integer(&ptr, ptr + remaining, &metadata_len)) {
+      return {};
+    }
     size_t meta_len_size = ptr - ptr_before_meta_len;
 
     // SECURITY: Update remaining and validate metadata length
@@ -1016,7 +1077,7 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
   return metadata;
 }
 
-std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned char* buffer, unsigned long length) {
+std::optional<QueryEventData> ExtractQueryEventData(const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < mygram::constants::kBinlogEventHeaderLen) {
     // Minimum: header bytes
     return {};
@@ -1075,10 +1136,11 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   pos += status_vars_len;
   remaining -= status_vars_len;
 
-  // Skip db_name (null-terminated)
+  // Extract db_name (null-terminated)
   if (remaining < static_cast<size_t>(db_len) + 1) {  // +1 for null terminator
     return {};
   }
+  std::string database(reinterpret_cast<const char*>(pos), db_len);
   pos += db_len + 1;
   remaining -= (db_len + 1);
 
@@ -1088,7 +1150,15 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
   }
 
   std::string query(reinterpret_cast<const char*>(pos), remaining);
-  return query;
+  return QueryEventData{std::move(database), std::move(query)};
+}
+
+std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned char* buffer, unsigned long length) {
+  auto data = ExtractQueryEventData(buffer, length);
+  if (!data) {
+    return std::nullopt;
+  }
+  return data->query;
 }
 
 /**
@@ -1228,6 +1298,259 @@ bool IsSingleStatementAffectingTable(const std::string& query_upper, const std::
   }
 
   return false;
+}
+
+std::string ToUpperAscii(std::string_view input) {
+  std::string result;
+  result.reserve(input.size());
+  for (char chr : input) {
+    result += static_cast<char>(std::toupper(static_cast<unsigned char>(chr)));
+  }
+  return result;
+}
+
+bool ReadSqlIdentifier(const std::string& str, size_t& pos, std::string& identifier) {
+  identifier.clear();
+  if (pos >= str.size()) {
+    return false;
+  }
+
+  if (str[pos] == '`') {
+    ++pos;
+    while (pos < str.size() && str[pos] != '`') {
+      identifier += str[pos++];
+    }
+    if (pos >= str.size() || str[pos] != '`') {
+      return false;
+    }
+    ++pos;
+    return !identifier.empty();
+  }
+
+  while (pos < str.size()) {
+    char chr = str[pos];
+    if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_') {
+      break;
+    }
+    identifier += chr;
+    ++pos;
+  }
+  return !identifier.empty();
+}
+
+bool MatchConfiguredTableReference(const std::string& statement_upper, size_t& pos, const std::string& event_db_upper,
+                                   const std::string& target_db_upper, const std::string& table_upper) {
+  size_t saved_pos = pos;
+  std::string first;
+  if (!ReadSqlIdentifier(statement_upper, pos, first)) {
+    pos = saved_pos;
+    return false;
+  }
+
+  std::string db_name;
+  std::string table_name = first;
+  if (pos < statement_upper.size() && statement_upper[pos] == '.') {
+    ++pos;
+    std::string second;
+    if (!ReadSqlIdentifier(statement_upper, pos, second)) {
+      pos = saved_pos;
+      return false;
+    }
+    db_name = first;
+    table_name = second;
+  }
+
+  if (table_name != table_upper) {
+    pos = saved_pos;
+    return false;
+  }
+
+  if (!db_name.empty()) {
+    if (!target_db_upper.empty() && db_name != target_db_upper) {
+      pos = saved_pos;
+      return false;
+    }
+  } else if (!target_db_upper.empty() && event_db_upper != target_db_upper) {
+    pos = saved_pos;
+    return false;
+  }
+
+  if (pos < statement_upper.size()) {
+    char next_char = statement_upper[pos];
+    if (std::isalnum(static_cast<unsigned char>(next_char)) != 0 || next_char == '_') {
+      pos = saved_pos;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool IsSingleStatementAffectingConfiguredTable(const std::string& query_upper, const std::string& event_db_upper,
+                                               const config::TableConfig& table_config) {
+  const std::string table_upper = ToUpperAscii(table_config.name);
+  const std::string target_db_upper = ToUpperAscii(table_config.database);
+  size_t pos = 0;
+
+  if (!mygram::utils::SkipWhitespace(query_upper, pos) || query_upper.empty()) {
+    return false;
+  }
+
+  size_t saved_start = pos;
+  if (mygram::utils::MatchKeyword(query_upper, pos, "TRUNCATE")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      return mygram::utils::SkipWhitespace(query_upper, pos) &&
+             MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper);
+    }
+  }
+
+  pos = saved_start;
+  if (mygram::utils::MatchKeyword(query_upper, pos, "DROP")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE") &&
+        mygram::utils::SkipWhitespace(query_upper, pos)) {
+      size_t saved_pos = pos;
+      if (mygram::utils::MatchKeyword(query_upper, pos, "IF")) {
+        if (mygram::utils::SkipWhitespace(query_upper, pos) &&
+            mygram::utils::MatchKeyword(query_upper, pos, "EXISTS")) {
+          mygram::utils::SkipWhitespace(query_upper, pos);
+        } else {
+          pos = saved_pos;
+        }
+      }
+      return MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper);
+    }
+  }
+
+  pos = saved_start;
+  if (mygram::utils::MatchKeyword(query_upper, pos, "ALTER")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      return mygram::utils::SkipWhitespace(query_upper, pos) &&
+             MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper);
+    }
+  }
+
+  pos = saved_start;
+  if (mygram::utils::MatchKeyword(query_upper, pos, "RENAME")) {
+    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
+      while (mygram::utils::SkipWhitespace(query_upper, pos)) {
+        if (MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper)) {
+          return true;
+        }
+
+        size_t saved_pos = pos;
+        std::string ignored;
+        if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
+          pos = saved_pos;
+          break;
+        }
+        if (pos < query_upper.size() && query_upper[pos] == '.') {
+          ++pos;
+          if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
+            break;
+          }
+        }
+
+        mygram::utils::SkipWhitespace(query_upper, pos);
+        if (!mygram::utils::MatchKeyword(query_upper, pos, "TO") || !mygram::utils::SkipWhitespace(query_upper, pos)) {
+          break;
+        }
+        if (MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper)) {
+          return true;
+        }
+
+        saved_pos = pos;
+        if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
+          pos = saved_pos;
+          break;
+        }
+        if (pos < query_upper.size() && query_upper[pos] == '.') {
+          ++pos;
+          if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
+            break;
+          }
+        }
+
+        mygram::utils::SkipWhitespace(query_upper, pos);
+        if (pos >= query_upper.size() || query_upper[pos] != ',') {
+          break;
+        }
+        ++pos;
+      }
+    }
+  }
+
+  return false;
+}
+
+DDLType ClassifySingleDDLStatement(const std::string& statement_upper) {
+  size_t pos = 0;
+  if (!mygram::utils::SkipWhitespace(statement_upper, pos)) {
+    return DDLType::kUnknown;
+  }
+
+  size_t saved_pos = pos;
+  if (mygram::utils::MatchKeyword(statement_upper, pos, "TRUNCATE")) {
+    if (mygram::utils::SkipWhitespace(statement_upper, pos) &&
+        mygram::utils::MatchKeyword(statement_upper, pos, "TABLE")) {
+      return DDLType::kTruncate;
+    }
+  }
+
+  pos = saved_pos;
+  if (mygram::utils::MatchKeyword(statement_upper, pos, "DROP")) {
+    if (mygram::utils::SkipWhitespace(statement_upper, pos) &&
+        mygram::utils::MatchKeyword(statement_upper, pos, "TABLE")) {
+      return DDLType::kDrop;
+    }
+  }
+
+  pos = saved_pos;
+  if (mygram::utils::MatchKeyword(statement_upper, pos, "ALTER")) {
+    if (mygram::utils::SkipWhitespace(statement_upper, pos) &&
+        mygram::utils::MatchKeyword(statement_upper, pos, "TABLE")) {
+      return DDLType::kAlter;
+    }
+  }
+
+  pos = saved_pos;
+  if (mygram::utils::MatchKeyword(statement_upper, pos, "RENAME")) {
+    if (mygram::utils::SkipWhitespace(statement_upper, pos) &&
+        mygram::utils::MatchKeyword(statement_upper, pos, "TABLE")) {
+      return DDLType::kRename;
+    }
+  }
+
+  return DDLType::kUnknown;
+}
+
+std::optional<MatchedConfiguredDDL> FindTableAffectingConfiguredDDL(const std::string& query,
+                                                                    const std::string& event_database,
+                                                                    const config::TableConfig& table_config) {
+  std::string clean_query = mygram::utils::StripSQLComments(query);
+  clean_query = mygram::utils::NormalizeWhitespace(clean_query);
+  const std::string query_upper = ToUpperAscii(clean_query);
+  const std::string event_db_upper = ToUpperAscii(event_database);
+
+  size_t start = 0;
+  while (start < query_upper.size()) {
+    size_t end = query_upper.find(';', start);
+    std::string statement =
+        (end == std::string::npos) ? query_upper.substr(start) : query_upper.substr(start, end - start);
+    if (IsSingleStatementAffectingConfiguredTable(statement, event_db_upper, table_config)) {
+      return MatchedConfiguredDDL{ClassifySingleDDLStatement(statement)};
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+
+  return std::nullopt;
+}
+
+bool IsTableAffectingConfiguredDDL(const std::string& query, const std::string& event_database,
+                                   const config::TableConfig& table_config) {
+  return FindTableAffectingConfiguredDDL(query, event_database, table_config).has_value();
 }
 
 bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std::string& table_name) {

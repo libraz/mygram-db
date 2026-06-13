@@ -30,9 +30,11 @@
 #include "server/statistics_service.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
+#include "storage/filter_index.h"
 #include "utils/memory_utils.h"
 #include "utils/network_utils.h"
 #include "utils/numeric_parse.h"
+#include "utils/roaring_bitmap_ptr.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 #include "version.h"
@@ -186,6 +188,33 @@ bool IsValidTableName(std::string_view table) {
     }
   }
   return true;
+}
+
+bool IsQualifiedTableRoute(const httplib::Request& req) {
+  return req.matches.size() >= 4 && req.matches[1] == "tables";
+}
+
+bool RequiresQualifiedTableReferences(const config::Config* full_config) {
+  return full_config != nullptr && !full_config->tables.empty();
+}
+
+bool IsDatabaseQualifiedTableName(std::string_view table_name) {
+  const auto separator = table_name.find('.');
+  return separator != std::string_view::npos && separator != 0 && separator + 1 < table_name.size();
+}
+
+std::string ExtractRouteTableKey(const httplib::Request& req) {
+  if (IsQualifiedTableRoute(req)) {
+    return config::QualifiedTableName(req.matches[2], req.matches[3]);
+  }
+  return req.matches[1];
+}
+
+std::string ExtractRoutePrimaryKey(const httplib::Request& req) {
+  if (IsQualifiedTableRoute(req)) {
+    return req.matches[4];
+  }
+  return req.matches[2];
 }
 
 /**
@@ -486,25 +515,7 @@ bool ParseFuzzyFromJson(const json& fuzzy_json, query::Query& query, std::string
 }
 
 std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, TableContext& table_ctx) {
-  std::vector<std::string> terms = search_terms;
-  for (auto& term : terms) {
-    if (table_ctx.index != nullptr) {
-      term = table_ctx.index->NormalizeText(term);
-    }
-  }
-
-  if (table_ctx.synonym_dict && !table_ctx.synonym_dict->IsEmpty()) {
-    std::vector<std::string> expanded;
-    for (const auto& term : terms) {
-      auto synonyms = table_ctx.synonym_dict->Expand(term);
-      expanded.insert(expanded.end(), std::make_move_iterator(synonyms.begin()),
-                      std::make_move_iterator(synonyms.end()));
-    }
-    mygram::utils::DeduplicateSorted(expanded);
-    terms = std::move(expanded);
-  }
-
-  return terms;
+  return search_pipeline::BuildHighlightTerms(search_terms, table_ctx.index.get(), table_ctx.synonym_dict.get());
 }
 
 mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortHttpResults(
@@ -637,6 +648,18 @@ HttpServer::~HttpServer() {
 }
 
 void HttpServer::SetupRoutes() {
+  // POST /tables/{database}/{table}/search - DB-qualified full-text search
+  server_->Post(R"(/(tables)/([^/]+)/([^/]+)/search)",
+                [this](const httplib::Request& req, httplib::Response& res) { HandleSearch(req, res); });
+
+  // POST /tables/{database}/{table}/count - DB-qualified count
+  server_->Post(R"(/(tables)/([^/]+)/([^/]+)/count)",
+                [this](const httplib::Request& req, httplib::Response& res) { HandleCount(req, res); });
+
+  // POST /tables/{database}/{table}/facet - DB-qualified facet
+  server_->Post(R"(/(tables)/([^/]+)/([^/]+)/facet)",
+                [this](const httplib::Request& req, httplib::Response& res) { HandleFacet(req, res); });
+
   // POST /{table}/search - Full-text search
   // Route pattern: match any non-slash characters to support table names with dashes, dots, or unicode
   server_->Post(R"(/([^/]+)/search)",
@@ -645,6 +668,10 @@ void HttpServer::SetupRoutes() {
   // POST /{table}/count - Count matching documents
   server_->Post(R"(/([^/]+)/count)",
                 [this](const httplib::Request& req, httplib::Response& res) { HandleCount(req, res); });
+
+  // POST /{table}/facet - Facet value counts
+  server_->Post(R"(/([^/]+)/facet)",
+                [this](const httplib::Request& req, httplib::Response& res) { HandleFacet(req, res); });
 
   // GET /info - Server information
   server_->Get("/info", [this](const httplib::Request& req, httplib::Response& res) { HandleInfo(req, res); });
@@ -672,6 +699,8 @@ void HttpServer::SetupRoutes() {
   // GET /{table}/{primary_key} - Get document by primary key.
   // Register this catch-all route last so fixed endpoints such as
   // /health/live and /replication/status are not interpreted as table/PK.
+  server_->Get(R"(/(tables)/([^/]+)/([^/]+)/([^/]+))",
+               [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
   server_->Get(R"(/([^/]+)/([^/]+))",
                [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
 }
@@ -866,13 +895,27 @@ void HttpServer::UpdateApiConfig(int default_limit, int max_query_length) {
   max_query_length_.store(max_query_length <= 0 ? 0 : static_cast<size_t>(max_query_length), std::memory_order_release);
 }
 
-HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name) {
+HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name,
+                                                                   bool database_qualified_route) {
   TableContextLookup result;
 
   if (!IsValidTableName(table_name)) {
     result.status = kHttpBadRequest;
     result.message = "Invalid table name (allowed characters: letters, digits, '_', '-', '.')";
     return result;
+  }
+
+  if (RequiresQualifiedTableReferences(full_config_)) {
+    if (!database_qualified_route) {
+      result.status = kHttpBadRequest;
+      result.message = "Bare HTTP table routes are not supported; use /tables/{database}/{table}/...";
+      return result;
+    }
+    if (!IsDatabaseQualifiedTableName(table_name)) {
+      result.status = kHttpBadRequest;
+      result.message = "Bare table names are not supported; use <database>.<table>: " + table_name;
+      return result;
+    }
   }
 
   auto table_iter = table_contexts_.find(table_name);
@@ -906,8 +949,8 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   // Validate the URL-bound table name and resolve its context. Errors are
   // surfaced with the precise HTTP status code computed by the helper so
   // callers do not need to know the underlying reason.
-  std::string table = req.matches[1];
-  auto lookup = ResolveHttpTableContext(table);
+  std::string table = ExtractRouteTableKey(req);
+  auto lookup = ResolveHttpTableContext(table, IsQualifiedTableRoute(req));
   if (lookup.table_ctx == nullptr) {
     SendError(res, lookup.status, lookup.message);
     return std::nullopt;
@@ -1069,6 +1112,131 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   return prepared;
 }
 
+std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(const httplib::Request& req,
+                                                                               httplib::Response& res) {
+  if (loading_ != nullptr && loading_->load()) {
+    SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+    return std::nullopt;
+  }
+
+  std::string table = ExtractRouteTableKey(req);
+  auto lookup = ResolveHttpTableContext(table, IsQualifiedTableRoute(req));
+  if (lookup.table_ctx == nullptr) {
+    SendError(res, lookup.status, lookup.message);
+    return std::nullopt;
+  }
+  auto* table_ctx = lookup.table_ctx;
+
+  json body;
+  try {
+    body = json::parse(req.body);
+  } catch (const json::parse_error& e) {
+    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
+    return std::nullopt;
+  }
+
+  if (!body.contains("column")) {
+    SendError(res, kHttpBadRequest, "Missing required field: column");
+    return std::nullopt;
+  }
+  if (!body["column"].is_string()) {
+    SendError(res, kHttpBadRequest, "Field 'column' must be a string");
+    return std::nullopt;
+  }
+
+  if (body.contains("q") && !body["q"].is_string()) {
+    SendError(res, kHttpBadRequest, "Field 'q' must be a string");
+    return std::nullopt;
+  }
+
+  static constexpr std::array<std::string_view, 4> kFacetRejectedFields = {"offset", "sort", "highlight", "fuzzy"};
+  for (const auto field : kFacetRejectedFields) {
+    if (body.contains(std::string(field))) {
+      SendError(res, kHttpBadRequest, "Field '" + std::string(field) + "' is not supported by FACET");
+      return std::nullopt;
+    }
+  }
+
+  const std::string column = body["column"].get<std::string>();
+  if (column.empty()) {
+    SendError(res, kHttpBadRequest, "Field 'column' must be non-empty");
+    return std::nullopt;
+  }
+  for (unsigned char c : column) {
+    if (std::iscntrl(c) != 0 || std::isspace(c) != 0) {
+      SendError(res, kHttpBadRequest, "Field 'column' must not contain whitespace or control characters");
+      return std::nullopt;
+    }
+  }
+
+  std::ostringstream query_str;
+  query_str << "FACET " << table << " " << column;
+
+  if (body.contains("q")) {
+    std::string query_text = body["q"].get<std::string>();
+    for (char c : query_text) {
+      if (c == '\r' || c == '\n' || c == '\0') {
+        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+        return std::nullopt;
+      }
+    }
+
+    if (!query_text.empty()) {
+      std::string offending;
+      if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
+        SendError(res, kHttpBadRequest,
+                  "Reserved keyword '" + offending +
+                      "' is not allowed in 'q'. Use the dedicated JSON fields (filters) instead.");
+        return std::nullopt;
+      }
+      query_str << " " << query_text;
+    }
+  }
+
+  if (body.contains("limit")) {
+    if (!body["limit"].is_number_integer()) {
+      SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
+      return std::nullopt;
+    }
+    const int64_t limit = body["limit"].get<int64_t>();
+    if (limit <= 0 || limit > config::defaults::kMaxLimit) {
+      SendError(res, kHttpBadRequest,
+                "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
+      return std::nullopt;
+    }
+    query_str << " LIMIT " << limit;
+  }
+
+  query::QueryParser query_parser;
+  const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
+  if (max_query_length > 0) {
+    query_parser.SetMaxQueryLength(max_query_length);
+  }
+  auto parsed_query = query_parser.Parse(query_str.str());
+  if (!parsed_query) {
+    SendError(res, kHttpBadRequest, "Invalid query: " + parsed_query.error().message());
+    return std::nullopt;
+  }
+
+  if (body.contains("filters") && !body["filters"].is_object()) {
+    SendError(res, kHttpBadRequest, "Field 'filters' must be an object");
+    return std::nullopt;
+  }
+  if (body.contains("filters")) {
+    std::string filter_error;
+    if (!ParseFiltersFromJson(body["filters"], *parsed_query, filter_error)) {
+      SendError(res, kHttpBadRequest, filter_error);
+      return std::nullopt;
+    }
+  }
+
+  PreparedHttpQuery prepared;
+  prepared.table_ctx = table_ctx;
+  prepared.body = std::move(body);
+  prepared.query = std::move(*parsed_query);
+  return prepared;
+}
+
 void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& res) {
   RecordRequest();
 
@@ -1098,6 +1266,12 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     auto& results = pipeline_output.results;
     size_t total_count = results.size();
+    auto topn =
+        search_pipeline::ApplySearchTopNOptimization(*query, params.current_index, pipeline_output.term_infos,
+                                                     pipeline_output.cache_hit, params.primary_key_column, results);
+    if (topn.applicable) {
+      total_count = topn.total_results;
+    }
 
     auto sorted_result =
         SortHttpResults(results, *query, *table_ctx, pipeline_output, full_config_, params.primary_key_column);
@@ -1209,6 +1383,99 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
   }
 }
 
+void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res) {
+  RecordRequest();
+
+  try {
+    auto prepared = PrepareHttpFacetQuery(req, res);
+    if (!prepared) {
+      return;
+    }
+    RecordCommand(query::QueryType::FACET);
+
+    auto* table_ctx = prepared->table_ctx;
+    auto& query_ref = prepared->query;
+    auto* query = &query_ref;
+    auto* current_doc_store = table_ctx->doc_store.get();
+    auto* current_index = table_ctx->index.get();
+
+    auto filter_index = current_doc_store->GetFilterIndex();
+    if (!filter_index) {
+      SendError(res, kHttpInternalServerError, "Filter index not available");
+      return;
+    }
+
+    std::vector<std::pair<std::string, uint64_t>> value_counts;
+    const bool has_search = !query->search_text.empty() || !query->and_terms.empty();
+    const bool has_not = !query->not_terms.empty();
+    const bool has_filters = !query->filters.empty();
+
+    if (has_search || has_not || has_filters) {
+      std::vector<storage::DocId> results;
+      if (has_search) {
+        auto params = search_pipeline::BuildPipelineParamsFromContext(*table_ctx, full_config_, cache_manager_,
+                                                                      SearchHandler::GetFilterThreshold(),
+                                                                      /*attach_bm25_stats=*/true);
+        auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
+        if (!pipeline_output.success) {
+          SendError(res, kHttpBadRequest, pipeline_output.error_message);
+          return;
+        }
+        results = std::move(pipeline_output.results);
+      } else {
+        results = current_doc_store->GetAllDocIds();
+
+        if (has_not) {
+          results = search_pipeline::ApplyNotFilter(results, query->not_terms, current_index,
+                                                    table_ctx->config.ngram_size, table_ctx->config.kanji_ngram_size,
+                                                    table_ctx->config.cross_boundary_ngrams);
+        }
+
+        if (has_filters) {
+          results = search_pipeline::ApplyFiltersWithBitmap(results, query->filters, current_doc_store);
+        }
+      }
+
+      if (!results.empty()) {
+        auto result_bitmap = mygram::utils::MakeRoaringFromVector(results);
+        if (result_bitmap == nullptr) {
+          SendError(res, kHttpInternalServerError, "Failed to allocate result bitmap");
+          return;
+        }
+        value_counts = filter_index->GetColumnValueCountsFiltered(query->facet_column, result_bitmap.get());
+      }
+    } else {
+      value_counts = filter_index->GetColumnValueCounts(query->facet_column);
+    }
+
+    if (query->limit_explicit && value_counts.size() > query->limit) {
+      value_counts.resize(query->limit);
+    }
+
+    json facets = json::array();
+    for (auto& [serialized, count] : value_counts) {
+      facets.push_back({
+          {"value", storage::FilterIndex::DeserializeToDisplayString(serialized)},
+          {"count", count},
+      });
+    }
+
+    json response;
+    response["column"] = query->facet_column;
+    response["count"] = facets.size();
+    response["facets"] = std::move(facets);
+
+    SendJson(res, kHttpOk, response);
+  } catch (const std::exception& e) {
+    mygram::utils::StructuredLog()
+        .Event("http_handler_error")
+        .Field("handler", "facet")
+        .Field("error", e.what())
+        .Error();
+    SendError(res, kHttpInternalServerError, "Internal server error");
+  }
+}
+
 void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) {
   RecordRequest();
 
@@ -1222,13 +1489,15 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     // Extract table name and primary key from URL. Use the shared resolution helper so
     // GET applies the same table-name whitelist and null-context guards as
     // SEARCH and COUNT.
-    std::string primary_key = req.matches[2];
-    auto lookup = ResolveHttpTableContext(req.matches[1]);
+    std::string primary_key = ExtractRoutePrimaryKey(req);
+    auto lookup = ResolveHttpTableContext(ExtractRouteTableKey(req), IsQualifiedTableRoute(req));
     if (lookup.table_ctx == nullptr) {
       SendError(res, lookup.status, lookup.message);
       return;
     }
     auto* current_doc_store = lookup.table_ctx->doc_store.get();
+
+    RecordCommand(query::QueryType::GET);
 
     auto doc_id = current_doc_store->GetDocId(primary_key);
     if (!doc_id.has_value()) {
@@ -1241,8 +1510,6 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       SendError(res, kHttpNotFound, "Document not found");
       return;
     }
-
-    RecordCommand(query::QueryType::GET);
 
     // Build JSON response
     json response;

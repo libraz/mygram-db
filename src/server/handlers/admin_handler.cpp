@@ -11,6 +11,7 @@
 #include <filesystem>
 
 #include "config/config_help.h"
+#include "config/runtime_variable_manager.h"
 #include "server/statistics_service.h"
 #include "server/table_catalog.h"
 #include "utils/safe_path.h"
@@ -99,7 +100,9 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
     return ResponseFormatter::FormatError("Server configuration is not available");
   }
 
-  auto format_result = config::FormatConfigForDisplay(*ctx_.full_config, path);
+  config::Config display_config =
+      ctx_.variable_manager != nullptr ? ctx_.variable_manager->GetCurrentConfig() : *ctx_.full_config;
+  auto format_result = config::FormatConfigForDisplay(display_config, path);
   if (!format_result) {
     mygram::utils::StructuredLog().Event("config_show_failed").FieldError(format_result.error()).Error();
     return ResponseFormatter::FormatError(std::string("CONFIG SHOW failed: ") + format_result.error().message());

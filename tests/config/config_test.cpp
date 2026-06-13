@@ -326,6 +326,68 @@ TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
   EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 1);
 }
 
+TEST(ConfigTest, TableDatabaseDefaultsToMysqlDatabaseAndCanOverride) {
+  json config_json = {
+      {"mysql", {{"user", "root"}, {"database", "app_db"}}},
+      {"tables", json::array({
+                     {{"name", "articles"}, {"text_source", {{"column", "body"}}}},
+                     {{"name", "archive"}, {"database", "archive_db"}, {"text_source", {{"column", "body"}}}},
+                 })}};
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  ASSERT_EQ(config_result->tables.size(), 2);
+  EXPECT_EQ(config_result->tables[0].database, "app_db");
+  EXPECT_EQ(config_result->tables[1].database, "archive_db");
+}
+
+TEST(ConfigTest, DuplicateQualifiedTableIdentityIsRejected) {
+  std::ofstream file("duplicate_qualified_tables.yaml");
+  file << "mysql:\n"
+       << "  host: 127.0.0.1\n"
+       << "  user: test\n"
+       << "  database: app_db\n"
+       << "tables:\n"
+       << "  - name: articles\n"
+       << "    database: archive_db\n"
+       << "    text_source:\n"
+       << "      column: body\n"
+       << "  - name: articles\n"
+       << "    database: archive_db\n"
+       << "    text_source:\n"
+       << "      column: body\n";
+  file.close();
+
+  auto result = LoadConfig("duplicate_qualified_tables.yaml");
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
+  EXPECT_NE(result.error().message().find("duplicate table identity 'archive_db.articles'"), std::string::npos);
+}
+
+TEST(ConfigTest, SameTableNameInDifferentDatabasesIsAccepted) {
+  std::ofstream file("same_table_name_different_databases.yaml");
+  file << "mysql:\n"
+       << "  host: 127.0.0.1\n"
+       << "  user: test\n"
+       << "  database: app_db\n"
+       << "tables:\n"
+       << "  - name: articles\n"
+       << "    database: archive_db\n"
+       << "    text_source:\n"
+       << "      column: body\n"
+       << "  - name: articles\n"
+       << "    database: live_db\n"
+       << "    text_source:\n"
+       << "      column: body\n";
+  file.close();
+
+  auto result = LoadConfig("same_table_name_different_databases.yaml");
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_EQ(result->tables.size(), 2);
+  EXPECT_EQ(QualifiedTableName(result->tables[0]), "archive_db.articles");
+  EXPECT_EQ(QualifiedTableName(result->tables[1]), "live_db.articles");
+}
+
 /**
  * @brief Regression test for H-N8: api.http.read_timeout_sec /
  *        write_timeout_sec must propagate from YAML into Config.

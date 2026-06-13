@@ -178,9 +178,9 @@ class Connection {
 
   /**
    * @brief Get server UUID
-   * @return Server UUID string
+   * @return Server UUID string, or Error on query failure / malformed result
    */
-  std::optional<std::string> GetServerUUID();
+  mygram::utils::Expected<std::string, mygram::utils::Error> GetServerUUID();
 
   /**
    * @brief Check if GTID mode is enabled on the server
@@ -194,9 +194,10 @@ class Connection {
    * Returns the latest GTID position in the binlog.
    * This is useful for starting replication from the current position.
    *
-   * @return Latest GTID string, or nullopt if not available
+   * @return Latest GTID string, empty string if no GTID is available yet,
+   *         or Error on query failure / malformed result
    */
-  std::optional<std::string> GetLatestGTID();
+  mygram::utils::Expected<std::string, mygram::utils::Error> GetLatestGTID();
 
   /**
    * @brief Validate that specified column is unique in the table

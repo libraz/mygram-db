@@ -69,6 +69,23 @@ TEST_F(TokenBucketTest, TokenRefill) {
   EXPECT_LE(consumed, 6);
 }
 
+TEST_F(TokenBucketTest, SubMillisecondRefillRemainderAccumulates) {
+  TokenBucket bucket(10, 1000);  // 1000 tokens/sec = 1 token/ms
+
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_TRUE(bucket.TryConsume());
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    bucket.RewindLastRefillForTesting(std::chrono::microseconds(1500));
+    ASSERT_TRUE(bucket.TryConsume());
+  }
+
+  EXPECT_TRUE(bucket.TryConsume()) << "four 0.5ms remainders should accumulate two extra tokens";
+  EXPECT_TRUE(bucket.TryConsume()) << "four 0.5ms remainders should accumulate two extra tokens";
+  EXPECT_FALSE(bucket.TryConsume());
+}
+
 /**
  * @brief Test multi-token consumption
  */
@@ -669,4 +686,21 @@ TEST_F(RateLimiterTest, AllowRequestNoLongerPerformsInlineCleanup) {
 
   EXPECT_EQ(0U, limiter.GetTrackedClientCount())
       << "Sweeper must drop ephemeral buckets independently of request traffic";
+}
+
+TEST_F(RateLimiterTest, SetEnabledControlsEnforcementAtRuntime) {
+  RateLimiter limiter(/*capacity=*/1, /*refill_rate=*/1, /*max_clients=*/100, /*enabled=*/false);
+
+  EXPECT_FALSE(limiter.IsEnabled());
+  EXPECT_TRUE(limiter.AllowRequest("clientA"));
+  EXPECT_TRUE(limiter.AllowRequest("clientA")) << "Disabled limiter must allow requests beyond capacity";
+
+  limiter.SetEnabled(true);
+  EXPECT_TRUE(limiter.IsEnabled());
+  EXPECT_TRUE(limiter.AllowRequest("clientA"));
+  EXPECT_FALSE(limiter.AllowRequest("clientA")) << "Enabled limiter must enforce token capacity";
+
+  limiter.SetEnabled(false);
+  EXPECT_FALSE(limiter.IsEnabled());
+  EXPECT_TRUE(limiter.AllowRequest("clientA"));
 }

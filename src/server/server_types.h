@@ -134,6 +134,8 @@ struct ConnectionContext {
  *
  * Maintains running totals for average document length computation.
  * Uses relaxed atomics since slight inconsistency is acceptable for BM25 quality.
+ * Removals are saturated so duplicate/out-of-order remove observations cannot
+ * underflow corpus totals into extremely large average lengths.
  */
 struct BM25Stats {
   std::atomic<uint64_t> total_doc_length{0};  ///< Sum of all doc lengths (code points)
@@ -175,8 +177,19 @@ struct BM25Stats {
 
   /// Remove a document with given length
   void RemoveDocument(uint32_t doc_length) {
-    total_doc_length.fetch_sub(doc_length, std::memory_order_relaxed);
-    doc_count.fetch_sub(1, std::memory_order_relaxed);
+    SaturatingSubtract(total_doc_length, doc_length);
+    SaturatingSubtract(doc_count, 1);
+  }
+
+ private:
+  static void SaturatingSubtract(std::atomic<uint64_t>& value, uint64_t amount) {
+    auto current = value.load(std::memory_order_relaxed);
+    while (current != 0) {
+      const auto next = current > amount ? current - amount : 0;
+      if (value.compare_exchange_weak(current, next, std::memory_order_relaxed, std::memory_order_relaxed)) {
+        return;
+      }
+    }
   }
 };
 

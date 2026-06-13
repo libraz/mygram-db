@@ -67,10 +67,16 @@ for target in "${TARGETS[@]}"; do
         export MARIADB_VERSION="$version"
         export DB_FLAVOR="mariadb"
         export MYSQL_VERSION="$version"
+        export MYSQL_PORT=13306
+        export MYGRAMDB_CONFIG="$SCRIPT_DIR/docker/mygramdb-test-mariadb.yaml"
+        export MYGRAMDB_DUMP_DIR="$SCRIPT_DIR/results/dumps-mariadb"
     else
         compose_file="docker/docker-compose.yml"
         export MYSQL_VERSION="$version"
         export DB_FLAVOR="mysql"
+        export MYSQL_PORT=23306
+        export MYGRAMDB_CONFIG="$SCRIPT_DIR/docker/mygramdb-test.yaml"
+        export MYGRAMDB_DUMP_DIR="$SCRIPT_DIR/results/dumps"
         unset MARIADB_VERSION 2>/dev/null || true
     fi
 

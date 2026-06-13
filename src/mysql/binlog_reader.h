@@ -20,6 +20,7 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mysql/binlog_event_types.h"
 #include "mysql/binlog_reader_interface.h"
 #include "mysql/binlog_stream.h"
 #include "mysql/connection.h"
@@ -199,37 +200,52 @@ struct BinlogEvent {
     for (char c : query) {
       upper += static_cast<char>(::toupper(static_cast<unsigned char>(c)));
     }
-    std::vector<std::string> tokens;
+    std::vector<std::string> statement_tokens;
     std::string token;
+    auto classify_statement = [&statement_tokens]() {
+      if (statement_tokens.empty()) {
+        return DDLType::kUnknown;
+      }
+      const std::string& first = statement_tokens[0];
+      const std::string second = (statement_tokens.size() > 1) ? statement_tokens[1] : "";
+      if (first == "TRUNCATE" && (second.empty() || second == "TABLE")) {
+        return DDLType::kTruncate;
+      }
+      if (first == "ALTER" && second == "TABLE") {
+        return DDLType::kAlter;
+      }
+      if (first == "DROP" && second == "TABLE") {
+        return DDLType::kDrop;
+      }
+      if (first == "RENAME" && second == "TABLE") {
+        return DDLType::kRename;
+      }
+      return DDLType::kUnknown;
+    };
+
     for (char c : upper) {
       if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
         token += c;
-      } else if (!token.empty()) {
-        tokens.push_back(std::move(token));
+        continue;
+      }
+      if (!token.empty()) {
+        statement_tokens.push_back(std::move(token));
         token.clear();
+      }
+      if (c == ';') {
+        DDLType type = classify_statement();
+        if (type != DDLType::kUnknown) {
+          return type;
+        }
+        statement_tokens.clear();
       }
     }
     if (!token.empty()) {
-      tokens.push_back(std::move(token));
+      statement_tokens.push_back(std::move(token));
     }
-
-    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-      if (tokens[i] == "TRUNCATE" && tokens[i + 1] == "TABLE") {
-        return DDLType::kTruncate;
-      }
-    }
-    if (tokens.size() == 1 && tokens[0] == "TRUNCATE") {
-      return DDLType::kTruncate;
-    }
-    // Check ALTER before DROP to avoid matching "ALTER TABLE ... DROP COLUMN"
-    if (upper.find("ALTER") != std::string::npos) {
-      return DDLType::kAlter;
-    }
-    if (upper.find("DROP") != std::string::npos) {
-      return DDLType::kDrop;
-    }
-    if (upper.find("RENAME") != std::string::npos) {
-      return DDLType::kRename;
+    DDLType type = classify_statement();
+    if (type != DDLType::kUnknown) {
+      return type;
     }
     return DDLType::kUnknown;
   }
@@ -496,6 +512,12 @@ class BinlogReader final : public IBinlogReader {
    * @return false when processing failed and reconnect is required
    */
   bool ProcessQueuedEvent(const BinlogEvent& event);
+
+  /**
+   * @brief Return true when an empty parse result means a monitored row event failed to decode.
+   */
+  [[nodiscard]] bool IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_type, const unsigned char* buffer,
+                                                      unsigned long length) const;
 
   /**
    * @brief Push event to queue (blocking if full)

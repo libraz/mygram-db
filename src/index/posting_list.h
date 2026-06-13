@@ -202,6 +202,22 @@ class PostingList {
    */
   [[nodiscard]] size_t MemoryUsageApprox() const;
 
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  enum class TestRoaringFault : uint8_t {
+    kCreate,
+    kAnd,
+    kOr,
+  };
+
+  /**
+   * @brief Test hook: make the next selected Roaring operation fail.
+   *
+   * This is intentionally one-shot so tests cannot leak the fault into later
+   * cases. Production code never calls this method.
+   */
+  static void FailNextRoaringOperationForTest(TestRoaringFault fault);
+#endif
+
  private:
   std::atomic<PostingStrategy> strategy_{PostingStrategy::kDeltaCompressed};
   double roaring_threshold_;

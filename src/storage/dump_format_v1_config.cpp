@@ -18,6 +18,8 @@ using internal::WriteString;
 
 namespace {
 
+constexpr uint32_t kTableConfigIncludesDatabaseFlag = 0x80000000U;
+
 /**
  * @brief Serialize FilterConfig to stream
  */
@@ -109,8 +111,12 @@ bool DeserializeRequiredFilterConfig(std::istream& input_stream, config::Require
 /**
  * @brief Serialize TableConfig to stream
  */
-bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig& table) {
+bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig& table,
+                          bool include_database = false) {
   if (!WriteString(output_stream, table.name)) {
+    return false;
+  }
+  if (include_database && !WriteString(output_stream, table.database)) {
     return false;
   }
   if (!WriteString(output_stream, table.primary_key)) {
@@ -187,8 +193,11 @@ bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig
 /**
  * @brief Deserialize TableConfig from stream
  */
-bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& table) {
+bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& table, bool includes_database = false) {
   if (!ReadString(input_stream, table.name, kMaxIdentifierLength)) {
+    return false;
+  }
+  if (includes_database && !ReadString(input_stream, table.database, kMaxIdentifierLength)) {
     return false;
   }
   if (!ReadString(input_stream, table.primary_key, kMaxIdentifierLength)) {
@@ -338,11 +347,12 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
 
   // Tables
   auto table_count = static_cast<uint32_t>(config.tables.size());
+  table_count |= kTableConfigIncludesDatabaseFlag;
   if (!WriteBinary(output_stream, table_count)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write table_count"));
   }
   for (const auto& table : config.tables) {
-    if (!SerializeTableConfig(output_stream, table)) {
+    if (!SerializeTableConfig(output_stream, table, /*include_database=*/true)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write table config"));
     }
   }
@@ -514,14 +524,19 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   if (!ReadBinary(input_stream, table_count)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read table_count"));
   }
+  const bool table_configs_include_database = (table_count & kTableConfigIncludesDatabaseFlag) != 0;
+  table_count &= ~kTableConfigIncludesDatabaseFlag;
   if (table_count > kMaxTableCount) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
                                     "Table count exceeds maximum allowed: " + std::to_string(table_count)));
   }
   config.tables.resize(table_count);
   for (uint32_t i = 0; i < table_count; ++i) {
-    if (!DeserializeTableConfig(input_stream, config.tables[i])) {
+    if (!DeserializeTableConfig(input_stream, config.tables[i], table_configs_include_database)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read table config"));
+    }
+    if (config.tables[i].database.empty()) {
+      config.tables[i].database = config.mysql.database;
     }
   }
 

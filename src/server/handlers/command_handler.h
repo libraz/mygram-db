@@ -99,6 +99,15 @@ class CommandHandler {
    * @return Empty string when ready, or a formatted ERROR response otherwise.
    */
   std::string CheckNotLoading() const;
+
+  /**
+   * @brief Check whether the requested table is currently being rebuilt by SYNC.
+   *
+   * Returns an empty string if the table is ready, or a pre-formatted ERROR
+   * response otherwise. This avoids silently serving empty or partial
+   * index/doc_store state while SYNC has cleared and is rebuilding the table.
+   */
+  std::string CheckTableNotSyncing(const std::string& table_name) const;
 };
 
 }  // namespace mygramdb::server

@@ -481,19 +481,26 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::SetGTIDNext(cons
   return ExecuteUpdate(query);
 }
 
-std::optional<std::string> Connection::GetServerUUID() {
+mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetServerUUID() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   const char* query = (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.server_id" : "SELECT @@GLOBAL.server_uuid";
   auto result = Execute(query);
   if (!result) {
-    return std::nullopt;
+    return MakeUnexpected(result.error());
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if ((row == nullptr) || (row[0] == nullptr)) {
-    return std::nullopt;
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to fetch server UUID result"));
   }
 
   std::string uuid(row[0]);
+  if (uuid.empty()) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Server UUID result is empty"));
+  }
   // result is automatically freed by MySQLResult destructor
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_server_uuid").Field("uuid", uuid).Debug();
@@ -544,7 +551,11 @@ mygram::utils::Expected<bool, mygram::utils::Error> Connection::IsGTIDModeEnable
   return mode == "ON";
 }
 
-std::optional<std::string> Connection::GetLatestGTID() {
+mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetLatestGTID() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   if (flavor_ == ServerFlavor::kMariaDB) {
     auto result = Execute("SELECT @@GLOBAL.gtid_binlog_pos");
     if (!result) {
@@ -552,13 +563,13 @@ std::optional<std::string> Connection::GetLatestGTID() {
           .Event("mysql_error")
           .Field("operation", "get_latest_gtid")
           .Field("flavor", "MariaDB")
-          .Field("error", "Failed to query @@gtid_binlog_pos")
+          .Field("error", result.error().message())
           .Error();
-      return std::nullopt;
+      return MakeUnexpected(result.error());
     }
     MYSQL_ROW row = mysql_fetch_row(result->get());
     if ((row == nullptr) || (row[0] == nullptr)) {
-      return std::nullopt;
+      return std::string{};
     }
     std::string gtid_set(row[0]);
     if (gtid_set.empty()) {
@@ -568,7 +579,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
           .Field("flavor", "MariaDB")
           .Field("error", "gtid_binlog_pos is empty")
           .Warn();
-      return std::nullopt;
+      return std::string{};
     }
     mygram::utils::StructuredLog().Event("mysql_latest_gtid").Field("gtid_set", gtid_set).Info();
     return gtid_set;
@@ -587,9 +598,9 @@ std::optional<std::string> Connection::GetLatestGTID() {
     mygram::utils::StructuredLog()
         .Event("mysql_error")
         .Field("operation", "get_latest_gtid")
-        .Field("error", "Failed to execute SHOW BINARY LOG STATUS / SHOW MASTER STATUS")
+        .Field("error", result_exp.error().message())
         .Error();
-    return std::nullopt;
+    return MakeUnexpected(result_exp.error());
   }
 
   MySQLResult& result = *result_exp;
@@ -613,13 +624,14 @@ std::optional<std::string> Connection::GetLatestGTID() {
         .Field("operation", "get_latest_gtid")
         .Field("error", "Executed_Gtid_Set column not found in SHOW BINARY LOG STATUS")
         .Warn();
-    return std::nullopt;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLQueryFailed, "Executed_Gtid_Set column not found in binary log status result"));
   }
 
   // Fetch the row
   MYSQL_ROW row = mysql_fetch_row(result.get());
   if ((row == nullptr) || (row[gtid_column_index] == nullptr)) {
-    return std::nullopt;
+    return std::string{};
   }
 
   std::string gtid_set(row[gtid_column_index]);
@@ -634,7 +646,7 @@ std::optional<std::string> Connection::GetLatestGTID() {
         .Field("operation", "get_latest_gtid")
         .Field("error", "Executed_Gtid_Set is empty")
         .Warn();
-    return std::nullopt;
+    return std::string{};
   }
 
   mygram::utils::StructuredLog().Event("mysql_latest_gtid").Field("gtid_set", gtid_set).Info();

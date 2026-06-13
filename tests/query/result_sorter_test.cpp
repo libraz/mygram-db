@@ -908,6 +908,56 @@ TEST_F(ResultSorterTest, SchwartzianTransformWithMissingPrimaryKeys) {
   }
 }
 
+TEST_F(ResultSorterTest, SchwartzianTransformMissingPrimaryKeyUsesNumericKeyWidth) {
+  std::vector<DocId> doc_ids;
+  constexpr DocId missing_doc_id = 50000;
+
+  for (uint64_t i = 0; i < 100; ++i) {
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(10000000000ULL + i)));
+  }
+  doc_ids.push_back(missing_doc_id);
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = static_cast<uint32_t>(doc_ids.size());
+  query.offset = 0;
+  query.order_by = OrderByClause{"", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 101);
+  EXPECT_EQ(sorted.front(), missing_doc_id);
+}
+
+TEST_F(ResultSorterTest, SchwartzianPartialSortMissingPrimaryKeyUsesNumericKeyWidth) {
+  std::vector<DocId> doc_ids;
+  constexpr DocId missing_doc_id = 50000;
+
+  for (uint64_t i = 0; i < 100; ++i) {
+    doc_ids.push_back(*doc_store_.AddDocument(std::to_string(10000000000ULL + i)));
+  }
+  doc_ids.push_back(missing_doc_id);
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 1;
+  query.offset = 0;
+  query.order_by = OrderByClause{"", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 1);
+  EXPECT_EQ(sorted.front(), missing_doc_id);
+}
+
 // =============================================================================
 // Negative floating-point sort key tests
 // =============================================================================

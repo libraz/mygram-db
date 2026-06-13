@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "cache/cache_types.h"
@@ -94,6 +95,7 @@ class CacheManager {
    * @brief Capture the current data-change generation for guarded cache inserts
    */
   [[nodiscard]] uint64_t CaptureDataVersion() const { return data_version_.load(std::memory_order_acquire); }
+  [[nodiscard]] uint64_t CaptureDataVersion(const std::string& table_name) const;
 
   /**
    * @brief Insert only if no data invalidation/clear occurred since expected_data_version was captured
@@ -194,6 +196,7 @@ class CacheManager {
   std::atomic<bool> enabled_;
   std::atomic<int> ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
   std::atomic<uint64_t> data_version_{0};
+  std::unordered_map<std::string, uint64_t> table_data_versions_;
   bool table_invalidation_strategy_ = false;
 
   /// Serializes the *combined* (QueryCache + InvalidationManager) mutating

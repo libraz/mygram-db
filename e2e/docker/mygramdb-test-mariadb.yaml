@@ -1,6 +1,6 @@
 mysql:
   host: "127.0.0.1"
-  port: 13307
+  port: 13306
   user: "repl_user"
   password: "test_password"
   database: "testdb"

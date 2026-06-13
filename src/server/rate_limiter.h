@@ -57,6 +57,11 @@ class TokenBucket {
    */
   void Reset();
 
+  /**
+   * @brief Move the internal refill timestamp into the past for deterministic tests.
+   */
+  void RewindLastRefillForTesting(std::chrono::microseconds delta);
+
  private:
   /**
    * @brief Refill tokens based on elapsed time
@@ -97,8 +102,11 @@ class RateLimiter {
    *        which converts implicitly.
    * @param inactivity_timeout Client inactivity timeout in seconds
    */
-  RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients = kDefaultMaxClients,
+  RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients = kDefaultMaxClients, bool enabled = true,
               std::chrono::milliseconds cleanup_interval = kDefaultCleanupInterval,
+              uint32_t inactivity_timeout_sec = kDefaultInactivityTimeout);
+
+  RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients, std::chrono::milliseconds cleanup_interval,
               uint32_t inactivity_timeout_sec = kDefaultInactivityTimeout);
 
   /**
@@ -128,6 +136,16 @@ class RateLimiter {
    * Existing client buckets are not affected.
    */
   void UpdateParameters(size_t capacity, size_t refill_rate);
+
+  /**
+   * @brief Enable or disable enforcement at runtime.
+   *
+   * Disabled rate limiters allow all requests while preserving the object for
+   * future SET api.rate_limiting.enable=true calls.
+   */
+  void SetEnabled(bool enabled);
+
+  [[nodiscard]] bool IsEnabled() const { return enabled_.load(std::memory_order_acquire); }
 
   /**
    * @brief Get statistics for monitoring
@@ -166,6 +184,7 @@ class RateLimiter {
   size_t capacity_;                             ///< Token bucket capacity
   size_t refill_rate_;                          ///< Refill rate (tokens/sec)
   size_t max_clients_;                          ///< Maximum tracked clients
+  std::atomic<bool> enabled_{true};             ///< Runtime enforcement gate
   std::chrono::milliseconds cleanup_interval_;  ///< Cleanup check interval (time)
   std::chrono::seconds inactivity_timeout_;     ///< Client inactivity timeout
 

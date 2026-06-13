@@ -10,8 +10,10 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -26,6 +28,56 @@
 
 using namespace mygramdb::server;
 using namespace mygramdb;
+
+namespace {
+
+std::string ShellQuote(const std::string& value) {
+  std::string quoted = "'";
+  for (char c : value) {
+    if (c == '\'') {
+      quoted += "'\\''";
+    } else {
+      quoted += c;
+    }
+  }
+  quoted += "'";
+  return quoted;
+}
+
+struct CommandResult {
+  int exit_code = -1;
+  std::string output;
+};
+
+CommandResult RunCommandCapture(const std::string& command) {
+  CommandResult result;
+  FILE* pipe = popen((command + " 2>&1").c_str(), "r");
+  if (pipe == nullptr) {
+    result.output = "popen failed";
+    return result;
+  }
+
+  std::array<char, 4096> buffer{};
+  while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+    result.output += buffer.data();
+  }
+
+  const int status = pclose(pipe);
+  if (WIFEXITED(status)) {
+    result.exit_code = WEXITSTATUS(status);
+  }
+  return result;
+}
+
+std::string MygramCliBinaryPath() {
+#ifdef MYGRAM_CLI_BINARY_PATH
+  return MYGRAM_CLI_BINARY_PATH;
+#else
+  return "./bin/mygram-cli";
+#endif
+}
+
+}  // namespace
 
 /**
  * @brief Test fixture for TCP server tests
@@ -224,6 +276,143 @@ TEST_F(TcpServerTest, SearchWithDocuments) {
   EXPECT_EQ(response, "OK RESULTS 2 2 1");
 
   close(sock);
+}
+
+TEST_F(TcpServerTest, SearchWithDatabaseQualifiedTableName) {
+  table_context_.config.name = "test";
+  table_context_.config.database = "testdb";
+  table_contexts_.clear();
+  table_contexts_["testdb.test"] = &table_context_;
+  mygramdb::config::Config full_config;
+  full_config.tables.push_back(table_context_.config);
+  server_ = std::make_unique<TcpServer>(config_, table_contexts_, "./dumps", &full_config);
+
+  auto doc_id = doc_store_->AddDocument("1", {});
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(static_cast<index::DocId>(*doc_id), "hello world");
+
+  StartServerOrSkip();
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  std::string response = SendRequest(sock, "SEARCH testdb.test hello");
+  EXPECT_EQ(response, "OK RESULTS 1 1");
+
+  close(sock);
+
+  sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  response = SendRequest(sock, "SEARCH test hello");
+  EXPECT_NE(response.find("Bare table names are not supported"), std::string::npos);
+
+  close(sock);
+  server_->Stop();
+}
+
+TEST_F(TcpServerTest, CrossDatabaseSameTableNameSearchAndGetRemainIndependent) {
+  server_->Stop();
+
+  TableContext live_context;
+  live_context.name = "articles";
+  live_context.config.name = "articles";
+  live_context.config.database = "db1";
+  live_context.config.ngram_size = 1;
+  live_context.index = std::make_unique<index::Index>(1);
+  live_context.doc_store = std::make_unique<storage::DocumentStore>();
+
+  TableContext archive_context;
+  archive_context.name = "articles";
+  archive_context.config.name = "articles";
+  archive_context.config.database = "db2";
+  archive_context.config.ngram_size = 1;
+  archive_context.index = std::make_unique<index::Index>(1);
+  archive_context.doc_store = std::make_unique<storage::DocumentStore>();
+
+  storage::FilterMap live_filters;
+  live_filters["source"] = std::string("live");
+  auto live_doc_id = live_context.doc_store->AddDocument("live_1", live_filters);
+  ASSERT_TRUE(live_doc_id.has_value());
+  live_context.index->AddDocument(static_cast<index::DocId>(*live_doc_id), "current article");
+
+  storage::FilterMap archive_filters;
+  archive_filters["source"] = std::string("archive");
+  auto archive_doc_id = archive_context.doc_store->AddDocument("archive_1", archive_filters);
+  ASSERT_TRUE(archive_doc_id.has_value());
+  archive_context.index->AddDocument(static_cast<index::DocId>(*archive_doc_id), "archived article");
+
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  table_contexts["db1.articles"] = &live_context;
+  table_contexts["db2.articles"] = &archive_context;
+
+  mygramdb::config::Config full_config;
+  full_config.tables.push_back(live_context.config);
+  full_config.tables.push_back(archive_context.config);
+
+  server_ = std::make_unique<TcpServer>(config_, table_contexts, "./dumps", &full_config);
+  StartServerOrSkip();
+  uint16_t port = server_->GetPort();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  int sock = CreateClientSocket(port);
+  ASSERT_GE(sock, 0);
+
+  std::string response = SendRequest(sock, "SEARCH db1.articles current");
+  EXPECT_EQ(response, "OK RESULTS 1 live_1");
+
+  response = SendRequest(sock, "SEARCH db2.articles archived");
+  EXPECT_EQ(response, "OK RESULTS 1 archive_1");
+
+  response = SendRequest(sock, "SEARCH db2.articles current");
+  EXPECT_EQ(response, "OK RESULTS 0");
+
+  response = SendRequest(sock, "GET db1.articles live_1");
+  EXPECT_TRUE(response.find("OK DOC live_1") == 0);
+  EXPECT_NE(response.find("source=live"), std::string::npos);
+
+  response = SendRequest(sock, "GET db2.articles archive_1");
+  EXPECT_TRUE(response.find("OK DOC archive_1") == 0);
+  EXPECT_NE(response.find("source=archive"), std::string::npos);
+
+  close(sock);
+  server_->Stop();
+}
+
+TEST_F(TcpServerTest, CliSingleCommandUsesDatabaseQualifiedTableName) {
+  table_context_.config.name = "test";
+  table_context_.config.database = "testdb";
+  table_contexts_.clear();
+  table_contexts_["testdb.test"] = &table_context_;
+  mygramdb::config::Config full_config;
+  full_config.tables.push_back(table_context_.config);
+  server_ = std::make_unique<TcpServer>(config_, table_contexts_, "./dumps", &full_config);
+
+  auto doc_id = doc_store_->AddDocument("cli_1", {});
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(static_cast<index::DocId>(*doc_id), "hello cli");
+
+  StartServerOrSkip();
+  const uint16_t port = server_->GetPort();
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  const std::string cli = ShellQuote(MygramCliBinaryPath());
+  const std::string base_command = cli + " -h 127.0.0.1 -p " + std::to_string(port);
+
+  auto qualified = RunCommandCapture(base_command + " SEARCH testdb.test hello");
+  EXPECT_EQ(qualified.exit_code, 0) << qualified.output;
+  EXPECT_NE(qualified.output.find("(1 results, showing 1)"), std::string::npos) << qualified.output;
+  EXPECT_NE(qualified.output.find("cli_1"), std::string::npos) << qualified.output;
+
+  auto bare = RunCommandCapture(base_command + " SEARCH test hello");
+  EXPECT_NE(bare.exit_code, 0) << bare.output;
+  EXPECT_NE(bare.output.find("Bare table names are not supported"), std::string::npos) << bare.output;
+
+  server_->Stop();
 }
 
 /**

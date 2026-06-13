@@ -44,6 +44,7 @@ struct InvalidationMetadata {
   int kanji_ngram_size = 0;           ///< Kanji N-gram size used when entry was created
   bool cross_boundary_ngrams = true;  ///< Cross-boundary setting used when entry was created
   bool has_filters = false;           ///< Whether the cached query used filter conditions
+  bool has_not_terms = false;         ///< Whether the cached query used NOT terms
 };
 
 class InvalidationManager {

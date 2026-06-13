@@ -301,7 +301,7 @@ class HttpServer {
    * @return `TableContextLookup` whose `table_ctx` is non-null on success and
    *         whose `status` / `message` describe the error otherwise.
    */
-  TableContextLookup ResolveHttpTableContext(const std::string& table_name);
+  TableContextLookup ResolveHttpTableContext(const std::string& table_name, bool database_qualified_route);
 
   /**
    * @brief Run the shared HandleSearch/HandleCount preamble.
@@ -327,6 +327,11 @@ class HttpServer {
                                                           const std::string& command, bool apply_pagination);
 
   /**
+   * @brief Run the shared preamble for POST /{table}/facet.
+   */
+  std::optional<PreparedHttpQuery> PrepareHttpFacetQuery(const httplib::Request& req, httplib::Response& res);
+
+  /**
    * @brief Handle POST /{table}/search
    */
   void HandleSearch(const httplib::Request& req, httplib::Response& res);
@@ -335,6 +340,11 @@ class HttpServer {
    * @brief Handle POST /{table}/count
    */
   void HandleCount(const httplib::Request& req, httplib::Response& res);
+
+  /**
+   * @brief Handle POST /{table}/facet
+   */
+  void HandleFacet(const httplib::Request& req, httplib::Response& res);
 
   /**
    * @brief Handle GET /{table}/:primary_key

@@ -48,6 +48,13 @@ TEST_F(HighlighterTest, FindMatchPositions_OverlappingMatches) {
   EXPECT_EQ(positions[0].second, 2);
 }
 
+TEST_F(HighlighterTest, FindMatchPositions_OverlappingSameStartKeepsLongest) {
+  auto positions = Highlighter::FindMatchPositions("hello world", {"he", "hello"});
+  ASSERT_EQ(positions.size(), 1);
+  EXPECT_EQ(positions[0].first, 0);
+  EXPECT_EQ(positions[0].second, 5);
+}
+
 TEST_F(HighlighterTest, FindMatchPositions_UTF8) {
   // Japanese text: "東京タワー" (5 code points)
   auto positions = Highlighter::FindMatchPositions("東京タワー", {"東京"});

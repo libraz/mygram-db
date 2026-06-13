@@ -19,6 +19,8 @@
 
 using namespace mygramdb::storage::dump_v1;
 using mygram::utils::WriteBinary;
+using mygramdb::config::Config;
+using mygramdb::config::TableConfig;
 
 /**
  * @brief Test that header_size is non-zero after write
@@ -82,6 +84,36 @@ TEST(DumpFormatV1Test, HeaderSizeWithEmptyGtid) {
   EXPECT_EQ(read_header.header_size, expected_size);
 }
 
+TEST(DumpFormatV1Test, ConfigRoundTripPreservesPerTableDatabase) {
+  Config write_config;
+  write_config.mysql.database = "default_db";
+
+  TableConfig live;
+  live.name = "articles";
+  live.database = "live_db";
+  live.text_source.column = "body";
+  write_config.tables.push_back(live);
+
+  TableConfig archive = live;
+  archive.database = "archive_db";
+  write_config.tables.push_back(archive);
+
+  std::ostringstream output;
+  auto write_result = SerializeConfig(output, write_config);
+  ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+  Config read_config;
+  std::istringstream input(output.str());
+  auto read_result = DeserializeConfig(input, read_config);
+  ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+
+  ASSERT_EQ(read_config.tables.size(), 2u);
+  EXPECT_EQ(read_config.tables[0].name, "articles");
+  EXPECT_EQ(read_config.tables[0].database, "live_db");
+  EXPECT_EQ(read_config.tables[1].name, "articles");
+  EXPECT_EQ(read_config.tables[1].database, "archive_db");
+}
+
 // ============================================================================
 // Config section bounds check (#6)
 // ============================================================================
@@ -118,6 +150,15 @@ std::string TestTempFilePath(const std::string& name) {
 /// Clean up a test file
 void CleanupTestFile(const std::string& path) {
   std::filesystem::remove(path);
+}
+
+void WriteMinimalDumpV1(const std::string& filepath) {
+  mygramdb::config::Config config;
+  config.mysql.database = "testdb";
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+
+  auto result = WriteDumpV1(filepath, "GTID:1", config, contexts);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
 }
 
 }  // namespace
@@ -183,6 +224,70 @@ TEST(DumpFormatV1Test, VerifyDumpIntegrityInvalidMagic) {
   auto result = VerifyDumpIntegrity(filepath, error);
   EXPECT_FALSE(result.has_value());
   EXPECT_EQ(error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+
+  CleanupTestFile(filepath);
+}
+
+TEST(DumpFormatV1Test, RejectsZeroTotalFileSizeHeader) {
+  auto filepath = TestTempFilePath("zero_total_file_size");
+  CleanupTestFile(filepath);
+  WriteMinimalDumpV1(filepath);
+
+  {
+    std::fstream fs(filepath, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(fs.good());
+    fs.seekp(kHeaderTotalFileSizeOffset);
+    uint64_t zero = 0;
+    ASSERT_TRUE(WriteBinary(fs, zero));
+  }
+
+  mygramdb::storage::dump_format::IntegrityError verify_error;
+  auto verify_result = VerifyDumpIntegrity(filepath, verify_error);
+  EXPECT_FALSE(verify_result.has_value());
+  EXPECT_EQ(verify_error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(verify_error.message.find("total_file_size is zero"), std::string::npos);
+
+  std::string gtid = "unchanged";
+  mygramdb::config::Config config;
+  mygramdb::storage::dump_format::IntegrityError read_error;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+  auto read_result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, &read_error);
+  EXPECT_FALSE(read_result.has_value());
+  EXPECT_EQ(read_error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(read_error.message.find("total_file_size is zero"), std::string::npos);
+  EXPECT_EQ(gtid, "unchanged");
+
+  CleanupTestFile(filepath);
+}
+
+TEST(DumpFormatV1Test, RejectsZeroFileCrcHeader) {
+  auto filepath = TestTempFilePath("zero_file_crc");
+  CleanupTestFile(filepath);
+  WriteMinimalDumpV1(filepath);
+
+  {
+    std::fstream fs(filepath, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(fs.good());
+    fs.seekp(kHeaderFileCRC32Offset);
+    uint32_t zero = 0;
+    ASSERT_TRUE(WriteBinary(fs, zero));
+  }
+
+  mygramdb::storage::dump_format::IntegrityError verify_error;
+  auto verify_result = VerifyDumpIntegrity(filepath, verify_error);
+  EXPECT_FALSE(verify_result.has_value());
+  EXPECT_EQ(verify_error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(verify_error.message.find("file_crc32 is zero"), std::string::npos);
+
+  std::string gtid = "unchanged";
+  mygramdb::config::Config config;
+  mygramdb::storage::dump_format::IntegrityError read_error;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+  auto read_result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, &read_error);
+  EXPECT_FALSE(read_result.has_value());
+  EXPECT_EQ(read_error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(read_error.message.find("file_crc32 is zero"), std::string::npos);
+  EXPECT_EQ(gtid, "unchanged");
 
   CleanupTestFile(filepath);
 }
@@ -306,6 +411,38 @@ TEST(DumpFormatV1Test, ReadDumpTruncatedFileReturnsReadError) {
   CleanupTestFile(filepath);
 }
 
+TEST(DumpFormatV1Test, ReadDumpDoesNotPublishGtidOnCrcFailure) {
+  auto filepath = TestTempFilePath("crc_failure_gtid");
+  CleanupTestFile(filepath);
+  WriteMinimalDumpV1(filepath);
+
+  {
+    std::fstream fs(filepath, std::ios::in | std::ios::out | std::ios::binary);
+    ASSERT_TRUE(fs.good());
+    fs.seekg(0, std::ios::end);
+    const auto file_size = fs.tellg();
+    ASSERT_GT(file_size, std::streampos{kHeaderFileCRC32Offset + static_cast<std::streamoff>(sizeof(uint32_t))});
+    fs.seekg(file_size - std::streamoff{1});
+    char byte = '\0';
+    fs.read(&byte, 1);
+    ASSERT_TRUE(fs.good());
+    fs.seekp(file_size - std::streamoff{1});
+    byte ^= 0x01;
+    fs.write(&byte, 1);
+    ASSERT_TRUE(fs.good());
+  }
+
+  std::string gtid = "unchanged";
+  mygramdb::config::Config config;
+  std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
+  auto result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, nullptr);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_EQ(gtid, "unchanged");
+
+  CleanupTestFile(filepath);
+}
+
 TEST(DumpFormatV1Test, ReadDumpRejectsTruncatedDeclaredConfigSection) {
   auto filepath = TestTempFilePath("truncated_config_section");
   CleanupTestFile(filepath);
@@ -323,6 +460,7 @@ TEST(DumpFormatV1Test, ReadDumpRejectsTruncatedDeclaredConfigSection) {
     header.dump_timestamp = 1;
     header.total_file_size = 0;
     header.file_crc32 = 0;
+    header.gtid = "GTID:truncated-config";
     ASSERT_TRUE(WriteHeaderV1(ofs, header).has_value());
 
     uint32_t config_len = 4;
@@ -330,12 +468,13 @@ TEST(DumpFormatV1Test, ReadDumpRejectsTruncatedDeclaredConfigSection) {
     ofs.write("xx", 2);
   }
 
-  std::string gtid;
+  std::string gtid = "unchanged";
   mygramdb::config::Config config;
   std::unordered_map<std::string, std::pair<mygramdb::index::Index*, mygramdb::storage::DocumentStore*>> contexts;
   auto result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, nullptr);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_EQ(gtid, "unchanged");
 
   CleanupTestFile(filepath);
 }

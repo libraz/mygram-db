@@ -70,6 +70,7 @@ nlohmann::json ConfigToJson(const Config& config) {
   for (const auto& table : config.tables) {
     nlohmann::json table_json = {
         {"name", table.name},
+        {"database", table.database},
         {"primary_key", table.primary_key},
         {"ngram_size", table.ngram_size},
         {"kanji_ngram_size", table.kanji_ngram_size},

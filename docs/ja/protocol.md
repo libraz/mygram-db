@@ -20,6 +20,9 @@ telnet localhost 11016
 
 コマンドはテキストベースで、1行に1コマンドです。レスポンスは改行で終了します。
 
+テーブル参照は DB 修飾形式 `<database>.<table>` を使用します。たとえば `app_db` データベースの
+`articles` テーブルは `app_db.articles` と指定します。
+
 ---
 
 ## SEARCH コマンド
@@ -29,19 +32,19 @@ telnet localhost 11016
 ### 構文
 
 ```
-SEARCH <table> <text> [OPTIONS]
+SEARCH <db.table> <text> [OPTIONS]
 ```
 
 ### 基本例
 
 シンプルな検索：
 ```
-SEARCH articles hello
+SEARCH app_db.articles hello
 ```
 
 フィルタとページネーション付き：
 ```
-SEARCH articles tech FILTER status = 1 LIMIT 10
+SEARCH app_db.articles tech FILTER status = 1 LIMIT 10
 ```
 
 ### レスポンス
@@ -61,13 +64,13 @@ OK RESULTS <total_count> <id1> <id2> <id3> ...
 ### 構文
 
 ```
-COUNT <table> <text> [OPTIONS]
+COUNT <db.table> <text> [OPTIONS]
 ```
 
 ### 例
 
 ```
-COUNT articles tech AND AI FILTER status = 1
+COUNT app_db.articles tech AND AI FILTER status = 1
 ```
 
 ### レスポンス
@@ -87,13 +90,13 @@ OK COUNT <number>
 ### 構文
 
 ```
-GET <table> <primary_key>
+GET <db.table> <primary_key>
 ```
 
 ### 例
 
 ```
-GET articles 12345
+GET app_db.articles 12345
 ```
 
 ### レスポンス

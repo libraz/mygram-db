@@ -126,6 +126,11 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       integrity_error.message = "Failed to read V1 header: " + header_result.error().message();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
+    if (auto header_result = ValidateHeaderIntegrityFields(header); !header_result) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = header_result.error().message();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+    }
 
     // Verify file size if specified
     if (header.total_file_size > 0) {

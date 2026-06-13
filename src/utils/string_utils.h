@@ -31,6 +31,12 @@ namespace mygramdb::utils {
 std::string NormalizeText(std::string_view text, bool nfkc = true, std::string_view width = "narrow",
                           bool lower = false);
 
+/// @brief Number of text normalization failures observed in this process.
+uint64_t GetTextNormalizationFailureCount();
+
+/// @brief Reset normalization failure counter. Intended for tests.
+void ResetTextNormalizationFailureCountForTesting();
+
 #ifdef USE_ICU
 /**
  * @brief Normalize text using ICU

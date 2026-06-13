@@ -130,8 +130,10 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_AllRequiredComponentsCreat
   EXPECT_NE(components.sync_handler, nullptr);
 #endif
 
-  // Optional components (disabled by default in SetUp)
-  EXPECT_EQ(components.cache_manager, nullptr);
+  // CacheManager is always constructed when full_config is present; disabled
+  // config keeps it inactive while still wiring runtime SET support.
+  ASSERT_NE(components.cache_manager, nullptr);
+  EXPECT_FALSE(components.cache_manager->IsEnabled());
   EXPECT_EQ(components.scheduler, nullptr);
 
   // Cleanup: Stop acceptor before destroying
@@ -152,7 +154,8 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithoutOptionalComponents)
   ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
 
   // Optional components should be null
-  EXPECT_EQ(result->cache_manager, nullptr);
+  ASSERT_NE(result->cache_manager, nullptr);
+  EXPECT_FALSE(result->cache_manager->IsEnabled());
   EXPECT_EQ(result->scheduler, nullptr);
 
   // Required components should exist
@@ -217,8 +220,9 @@ TEST_F(ServerLifecycleManagerTest, Initialize_HandlerContextHasCorrectDependenci
   EXPECT_EQ(&handler_context->stats, &stats_);
   EXPECT_EQ(handler_context->full_config, &full_config_);
 
-  // With cache disabled, cache_manager should be nullptr
-  EXPECT_EQ(handler_context->cache_manager, nullptr);
+  // With cache disabled, cache_manager remains wired but inactive.
+  ASSERT_NE(handler_context->cache_manager, nullptr);
+  EXPECT_FALSE(handler_context->cache_manager->IsEnabled());
 
   // Verify atomic references point to our test data
   EXPECT_EQ(&handler_context->dump_load_in_progress, &dump_load_in_progress_);

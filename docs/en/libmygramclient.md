@@ -61,8 +61,8 @@ int main() {
         return 1;
     }
 
-    // Search
-    auto result = client.Search("articles", "hello world", 100);
+    // Search. Table names are database-qualified: <database>.<table>.
+    auto result = client.Search("app_db.articles", "hello world", 100);
     if (auto* err = std::get_if<Error>(&result)) {
         std::cerr << "Search failed: " << err->message << std::endl;
         return 1;
@@ -96,7 +96,7 @@ std::vector<std::pair<std::string, std::string>> filters = {
 };
 
 auto result = client.Search(
-    "articles",           // table
+    "app_db.articles",    // database-qualified table
     "technology",         // query
     50,                   // limit
     0,                    // offset
@@ -111,7 +111,7 @@ auto result = client.Search(
 ### Count Query
 
 ```cpp
-auto result = client.Count("articles", "hello");
+auto result = client.Count("app_db.articles", "hello");
 if (auto* resp = std::get_if<CountResponse>(&result)) {
     std::cout << "Total matches: " << resp->count << "\n";
 }
@@ -120,7 +120,7 @@ if (auto* resp = std::get_if<CountResponse>(&result)) {
 ### Get Document
 
 ```cpp
-auto result = client.Get("articles", "12345");
+auto result = client.Get("app_db.articles", "12345");
 if (auto* doc = std::get_if<Document>(&result)) {
     std::cout << "Primary key: " << doc->primary_key << "\n";
     for (const auto& [key, value] : doc->fields) {
@@ -146,7 +146,7 @@ if (auto* info = std::get_if<ServerInfo>(&result)) {
 // Enable debug mode
 client.EnableDebug();
 
-auto result = client.Search("articles", "hello", 10);
+auto result = client.Search("app_db.articles", "hello", 10);
 if (auto* resp = std::get_if<SearchResponse>(&result)) {
     if (resp->debug) {
         std::cout << "Query time: " << resp->debug->query_time_ms << "ms\n";
@@ -228,7 +228,7 @@ if (result.index() == 0) {
     // query = "golang AND NOT old"
 
     // Use with MygramClient
-    auto search_result = client.Search("articles", query, 100);
+    auto search_result = client.Search("app_db.articles", query, 100);
 }
 ```
 
@@ -305,7 +305,7 @@ int main() {
 
     // Search
     MygramSearchResult_C* result = NULL;
-    if (mygramclient_search(client, "articles", "hello", 100, 0, &result) == 0) {
+    if (mygramclient_search(client, "app_db.articles", "hello", 100, 0, &result) == 0) {
         printf("Found %llu results (showing %zu):\n",
                result->total_count, result->count);
         for (size_t i = 0; i < result->count; i++) {
@@ -342,7 +342,7 @@ const char* filter_values[] = {"active", "tech"};
 MygramSearchResult_C* result = NULL;
 int ret = mygramclient_search_advanced(
     client,
-    "articles",           // table
+    "app_db.articles",    // database-qualified table
     "technology",         // query
     50,                   // limit
     0,                    // offset

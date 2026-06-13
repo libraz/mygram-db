@@ -338,6 +338,28 @@ struct FullPipelineOutput {
   std::string error_message;                        ///< Error message (when success is false)
 };
 
+/// @brief Metadata describing SEARCH GetTopN optimization selection.
+struct TopNOptimizationResult {
+  bool considered = false;       ///< The query had enough metadata to evaluate the optimization
+  bool applicable = false;       ///< Query shape matched the single-term primary-key TopN path
+  bool optimized = false;        ///< Results were replaced by Index::SearchAnd(..., limit, reverse)
+  bool reused_existing = false;  ///< Existing full result set was intentionally reused
+  bool no_results = false;       ///< Applicable but the full result set was empty
+  bool reverse = true;           ///< True for descending primary-key order
+  bool single_ngram = false;     ///< True when the optimized term has exactly one n-gram
+  size_t total_results = 0;      ///< Full result count before any TopN replacement
+};
+
+/// @brief Apply the SEARCH GetTopN optimization shared by TCP and HTTP handlers.
+TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, index::Index* current_index,
+                                                   const std::vector<SearchTermInfo>& term_infos, bool cache_hit,
+                                                   const std::string& primary_key_column,
+                                                   std::vector<storage::DocId>& results);
+
+/// @brief Build normalized terms used by highlight generation.
+std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, index::Index* current_index,
+                                             const query::SynonymDictionary* synonym_dict);
+
 /// @brief Execute the full search pipeline: cache lookup, synonym/fuzzy expansion, search, cache insert
 ///
 /// This is the unified entry point for both TCP and HTTP search handlers.

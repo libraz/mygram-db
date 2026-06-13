@@ -57,6 +57,8 @@ class HttpServerTest : public ::testing::Test {
 
     // Create table context
     table_context_.name = "test";
+    table_context_.config.name = "test";
+    table_context_.config.database = "testdb";
     table_context_.config.ngram_size = 1;
     table_context_.index = std::move(index);
     table_context_.doc_store = std::move(doc_store);
@@ -66,6 +68,7 @@ class HttpServerTest : public ::testing::Test {
     doc_store_ = table_context_.doc_store.get();
 
     table_contexts_["test"] = &table_context_;
+    table_contexts_["testdb.test"] = &table_context_;
 
     // Create config
     config_ = std::make_unique<config::Config>();
@@ -175,6 +178,56 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   ASSERT_EQ(paged_body["results"].size(), 2);
   EXPECT_EQ(paged_body["results"][0]["doc_id"], doc_id2.value());
   EXPECT_EQ(paged_body["results"][1]["doc_id"], doc_id1.value());
+}
+
+TEST_F(HttpServerTest, DbQualifiedTableRoutesResolveWithoutTopLevelCollision) {
+  config_->tables.clear();
+  config_->tables.push_back(table_context_.config);
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json search_body;
+  search_body["q"] = "machine";
+  auto search_res = client.Post("/tables/testdb/test/search", search_body.dump(), "application/json");
+  ASSERT_TRUE(search_res);
+  ASSERT_EQ(search_res->status, 200) << search_res->body;
+  auto search_json = json::parse(search_res->body);
+  EXPECT_EQ(search_json["count"], 1);
+  ASSERT_EQ(search_json["results"].size(), 1);
+  EXPECT_EQ(search_json["results"][0]["primary_key"], "article_1");
+
+  json count_body;
+  count_body["q"] = "machine";
+  auto count_res = client.Post("/tables/testdb/test/count", count_body.dump(), "application/json");
+  ASSERT_TRUE(count_res);
+  ASSERT_EQ(count_res->status, 200) << count_res->body;
+  EXPECT_EQ(json::parse(count_res->body)["count"], 1);
+
+  auto get_res = client.Get("/tables/testdb/test/article_1");
+  ASSERT_TRUE(get_res);
+  ASSERT_EQ(get_res->status, 200) << get_res->body;
+  EXPECT_EQ(json::parse(get_res->body)["primary_key"], "article_1");
+
+  auto legacy_res = client.Post("/test/search", search_body.dump(), "application/json");
+  ASSERT_TRUE(legacy_res);
+  EXPECT_EQ(legacy_res->status, 400);
+  EXPECT_NE(json::parse(legacy_res->body)["error"].get<std::string>().find("Bare HTTP table routes"),
+            std::string::npos);
+}
+
+TEST_F(HttpServerTest, GetNotFoundIncrementsCommandStats) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  uint64_t before = http_server_->GetStats().GetCommandCount(query::QueryType::GET);
+  auto res = client.Get("/test/missing_article");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 404);
+  EXPECT_EQ(http_server_->GetStats().GetCommandCount(query::QueryType::GET), before + 1);
 }
 
 TEST_F(HttpServerTest, SearchWithFilters) {
@@ -384,6 +437,40 @@ TEST_F(HttpServerTest, SearchHighlightUsesBooleanAstTerms) {
   }
   EXPECT_NE(highlights["article_1"].find("<strong>machine</strong>"), std::string::npos);
   EXPECT_NE(highlights["article_2"].find("<strong>news</strong>"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchHighlightExpandsMultiWordNgramAndTerms) {
+  storage::FilterMap filters;
+  filters["category"] = std::string("tech");
+  const std::string text = "machine advanced learning";
+  auto doc_id = doc_store_->AddDocument("article_split_phrase", filters, text);
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(*doc_id, text);
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine learning";
+  request_body["limit"] = 10;
+  request_body["highlight"] = {
+      {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 80}, {"max_fragments", 1}};
+
+  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  std::map<std::string, std::string> highlights;
+  for (const auto& result : body["results"]) {
+    highlights[result["primary_key"].get<std::string>()] = result["highlight"].get<std::string>();
+  }
+
+  ASSERT_NE(highlights.find("article_split_phrase"), highlights.end()) << res->body;
+  EXPECT_NE(highlights["article_split_phrase"].find("<strong>machine</strong>"), std::string::npos);
+  EXPECT_NE(highlights["article_split_phrase"].find("<strong>learning</strong>"), std::string::npos);
 }
 
 TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {

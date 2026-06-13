@@ -390,8 +390,8 @@ TEST(QueryNormalizerTest, SearchAndNotTermsUseIndexTextNormalizerWhenProvided) {
   query2.and_terms = {"world", "cafe"};
   query2.not_terms = {"noise"};
 
-  std::string normalized1 = QueryNormalizer::Normalize(query1, "id", text_normalizer);
-  std::string normalized2 = QueryNormalizer::Normalize(query2, "id", text_normalizer);
+  std::string normalized1 = QueryNormalizer::Normalize(query1, text_normalizer);
+  std::string normalized2 = QueryNormalizer::Normalize(query2, text_normalizer);
 
   EXPECT_EQ(normalized1, normalized2);
   EXPECT_NE(normalized1.find("hello"), std::string::npos);
@@ -723,8 +723,8 @@ TEST(QueryNormalizerTest, SortByPKProducesSameKeyAsDefault) {
   query2.order_by = query::OrderByClause{"article_id", query::SortOrder::DESC};
   query2.limit = 100;
 
-  std::string normalized1 = QueryNormalizer::Normalize(query1, "article_id");
-  std::string normalized2 = QueryNormalizer::Normalize(query2, "article_id");
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
 
   EXPECT_EQ(normalized1, normalized2) << "Default sort and explicit PK sort should produce the same cache key";
 }
@@ -747,8 +747,8 @@ TEST(QueryNormalizerTest, SortByNonPKProducesSameKeyAsDefault) {
   query2.order_by = query::OrderByClause{"created_at", query::SortOrder::DESC};
   query2.limit = 100;
 
-  std::string normalized1 = QueryNormalizer::Normalize(query1, "article_id");
-  std::string normalized2 = QueryNormalizer::Normalize(query2, "article_id");
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
 
   EXPECT_EQ(normalized1, normalized2)
       << "Default sort and non-PK sort should share a cache key because sorting is post-cache";
@@ -786,9 +786,9 @@ TEST(QueryNormalizerTest, SortColumnCaseInsensitive) {
   query3.order_by = query::OrderByClause{"Id", query::SortOrder::DESC};
   query3.limit = 100;
 
-  std::string normalized1 = QueryNormalizer::Normalize(query1, "id");
-  std::string normalized2 = QueryNormalizer::Normalize(query2, "id");
-  std::string normalized3 = QueryNormalizer::Normalize(query3, "id");
+  std::string normalized1 = QueryNormalizer::Normalize(query1);
+  std::string normalized2 = QueryNormalizer::Normalize(query2);
+  std::string normalized3 = QueryNormalizer::Normalize(query3);
 
   // All case variants should produce the same cache key
   EXPECT_EQ(normalized1, normalized2) << "ID vs id should produce same cache key";

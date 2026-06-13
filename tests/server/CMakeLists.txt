@@ -78,6 +78,11 @@ target_link_libraries(tcp_server_search_test
   GTest::gtest_main
 )
 
+add_dependencies(tcp_server_search_test mygram-cli)
+target_compile_definitions(tcp_server_search_test PRIVATE
+  MYGRAM_CLI_BINARY_PATH="$<TARGET_FILE:mygram-cli>"
+)
+
 gtest_discover_tests(tcp_server_search_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
@@ -419,6 +424,7 @@ target_link_libraries(sync_cancel_replication_test
   mygramdb_server
   GTest::gtest_main
 )
+target_compile_definitions(sync_cancel_replication_test PRIVATE MYGRAMDB_SYNC_TEST_HOOKS)
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid threading conflicts
 gtest_discover_tests(sync_cancel_replication_test
@@ -724,6 +730,7 @@ target_link_libraries(command_handler_test
   mygramdb_server
   GTest::gtest_main
 )
+target_compile_definitions(command_handler_test PRIVATE MYGRAMDB_SYNC_TEST_HOOKS)
 
 gtest_discover_tests(command_handler_test
   DISCOVERY_MODE POST_BUILD

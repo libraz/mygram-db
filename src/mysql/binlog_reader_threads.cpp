@@ -40,6 +40,29 @@ static constexpr int kLogSampleInterval = 100;
 /// Polling interval when no binlog data is available (milliseconds)
 static constexpr int kNoDataPollIntervalMs = 10;
 
+bool IsRowsEventType(MySQLBinlogEventType event_type) {
+  switch (event_type) {
+    case MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1:
+    case MySQLBinlogEventType::OBSOLETE_UPDATE_ROWS_EVENT_V1:
+    case MySQLBinlogEventType::OBSOLETE_DELETE_ROWS_EVENT_V1:
+    case MySQLBinlogEventType::WRITE_ROWS_EVENT:
+    case MySQLBinlogEventType::UPDATE_ROWS_EVENT:
+    case MySQLBinlogEventType::DELETE_ROWS_EVENT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+uint64_t ExtractRowsEventTableId(const unsigned char* buffer) {
+  uint64_t table_id = 0;
+  const unsigned char* post_header = buffer + mygram::constants::kBinlogEventHeaderLen;
+  for (int i = 0; i < 6; ++i) {
+    table_id |= static_cast<uint64_t>(post_header[i]) << (i * 8);
+  }
+  return table_id;
+}
+
 void BinlogReader::ReaderThreadFunc() {
   mygram::utils::StructuredLog().Event("binlog_reader_thread_started").Info();
 
@@ -351,9 +374,11 @@ void BinlogReader::ReaderThreadFunc() {
         }
       }
 
+      MySQLBinlogEventType event_type = MySQLBinlogEventType::UNKNOWN_EVENT;
+
       // Check for GTID events first (need to update current_gtid)
       if (event_length >= mygram::constants::kBinlogEventHeaderLen) {
-        auto event_type = static_cast<MySQLBinlogEventType>(event_buffer[4]);
+        event_type = static_cast<MySQLBinlogEventType>(event_buffer[4]);
 
         if (event_type == MySQLBinlogEventType::GTID_LOG_EVENT) {
           auto gtid_opt = BinlogEventParser::ExtractGTID(event_buffer, event_length);
@@ -552,6 +577,19 @@ void BinlogReader::ReaderThreadFunc() {
 
           PushEvent(std::make_unique<BinlogEvent>(std::move(event)));
         }
+      } else if (IsMonitoredRowsEventParseFailure(event_type, event_buffer, event_length)) {
+        SetLastError("Failed to parse monitored ROWS_EVENT from binlog; reconnecting from last processed GTID");
+        mygram::utils::StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "rows_event_parse_failed")
+            .Field("event_type", GetEventTypeName(event_type))
+            .Field("reader_gtid", reader_last_gtid)
+            .Field("current_gtid", GetCurrentGTID())
+            .Error();
+        processing_failure_reconnect_requested_.store(true, std::memory_order_release);
+        connection_lost = true;
+        binlog_stream_->Close(*binlog_connection_);
+        break;
       } else {
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "event_skipped").Debug();
       }
@@ -641,6 +679,28 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
     pending_commit_gtid_ = event.gtid;
   }
   return true;
+}
+
+bool BinlogReader::IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_type, const unsigned char* buffer,
+                                                    unsigned long length) const {
+  if (!IsRowsEventType(event_type)) {
+    return false;
+  }
+  if (buffer == nullptr || length < mygram::constants::kBinlogEventHeaderLen + 6) {
+    return true;
+  }
+
+  const uint64_t table_id = ExtractRowsEventTableId(buffer);
+  const TableMetadata* metadata = table_metadata_cache_.Get(table_id);
+  if (metadata == nullptr) {
+    return false;
+  }
+  auto table_iter = table_contexts_.find(metadata->table_name);
+  if (table_iter == table_contexts_.end() || table_iter->second == nullptr) {
+    return false;
+  }
+  const config::TableConfig& table_config = table_iter->second->config;
+  return table_config.database.empty() || metadata->database_name == table_config.database;
 }
 
 void BinlogReader::PushEvent(std::unique_ptr<BinlogEvent> event) {

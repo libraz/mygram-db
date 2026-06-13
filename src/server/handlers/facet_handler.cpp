@@ -25,6 +25,9 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   if (auto err = CheckNotLoading(); !err.empty()) {
     return err;
   }
+  if (auto err = CheckTableNotSyncing(query.table); !err.empty()) {
+    return err;
+  }
 
   // Get table context
   auto table_ctx = GetTableContext(query.table);
@@ -130,6 +133,9 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
       // duplication once the pipeline exposes its working bitmap via the
       // output struct.
       auto result_bitmap = mygram::utils::MakeRoaringFromVector(results);
+      if (result_bitmap == nullptr) {
+        return ResponseFormatter::FormatError("Failed to allocate result bitmap");
+      }
 
       // Free the results vector before bitmap operations (reduce peak memory)
       results.clear();

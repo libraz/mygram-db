@@ -76,6 +76,8 @@ class VariableHandlerTest : public ::testing::Test {
     dump_load_in_progress_ = false;
     dump_save_in_progress_ = false;
     optimization_in_progress_ = false;
+    replication_paused_for_dump_ = false;
+    mysql_reconnecting_ = false;
   }
 
   std::unordered_map<std::string, TableContext*> table_contexts_;
@@ -279,6 +281,46 @@ TEST_F(VariableHandlerTest, SetMysqlPortAllowedWhenSyncManagerNull) {
   // Should not contain SYNC blocking message
   EXPECT_TRUE(response.find("SYNC is in progress") == std::string::npos) << "Response: " << response;
   // May succeed or fail for other reasons, but not blocked by SYNC
+}
+
+TEST_F(VariableHandlerTest, SetMysqlVariableRejectedDuringDumpSave) {
+  dump_save_in_progress_.store(true);
+
+  query::Query query;
+  query.type = query::QueryType::SET;
+  query.variable_assignments.push_back({"mysql.host", "newhost"});
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("DUMP SAVE is in progress") != std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, SetMysqlVariableRejectedDuringDumpLoad) {
+  dump_load_in_progress_.store(true);
+
+  query::Query query;
+  query.type = query::QueryType::SET;
+  query.variable_assignments.push_back({"mysql.host", "newhost"});
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("DUMP LOAD is in progress") != std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, SetMysqlVariableRejectedWhileReplicationPausedForDump) {
+  replication_paused_for_dump_.store(true);
+
+  query::Query query;
+  query.type = query::QueryType::SET;
+  query.variable_assignments.push_back({"mysql.host", "newhost"});
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("replication is paused for DUMP/SNAPSHOT") != std::string::npos)
+      << "Response: " << response;
 }
 
 TEST_F(VariableHandlerTest, SetNonMysqlVariablesAlwaysAllowed) {

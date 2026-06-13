@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Change
+
+- **Table identity is now database-qualified** — Table references are moving from bare table names such as `articles` to `(database, name)` identities written as `app_db.articles`. This is an intentional early-stage SemVer exception planned for v1.7.0.
+- **HTTP table routes are database-qualified** — Use `POST /tables/{database}/{table}/search`, `POST /tables/{database}/{table}/count`, `POST /tables/{database}/{table}/facet`, and `GET /tables/{database}/{table}/{primary_key}`. Legacy bare routes such as `POST /articles/search` are deprecated and will not be kept as a compatibility contract.
+- **TCP, CLI, C++, and C API table arguments are database-qualified** — Rewrite commands and client calls from `SEARCH articles hello`, `client.Search("articles", ...)`, or `mygramclient_search(client, "articles", ...)` to `SEARCH app_db.articles hello`, `client.Search("app_db.articles", ...)`, and `mygramclient_search(client, "app_db.articles", ...)`.
+- **Dump metadata preserves per-table databases** — New V1/V2 dump paths retain table-level database names so `live_db.articles` and `archive_db.articles` can round-trip without one table overwriting the other.
+
+Migration checklist:
+
+1. For every configured table, identify the effective database: `tables[*].database` when set, otherwise `mysql.database`.
+2. Replace every TCP/CLI/C++/C API table argument with `<database>.<table>`.
+3. Replace HTTP table routes from `/{table}/...` to `/tables/{database}/{table}/...`.
+4. Keep old dumps for rollback, then create a fresh dump after upgrading so restored metadata includes qualified table identities.
+
 ## [1.6.1] - 2026-05-07
 
 ### Added

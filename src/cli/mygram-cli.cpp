@@ -203,8 +203,8 @@ std::string JoinArgsForCommand(const std::vector<std::string>& args) {
 #ifdef USE_READLINE
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
-const char* command_list[] = {"SEARCH", "COUNT", "GET",  "INFO",     "CONFIG", "FACET", "REPLICATION", "DEBUG",
-                              "CACHE",  "DUMP",  "SYNC", "OPTIMIZE", "quit",   "exit",  "help",        nullptr};
+const char* command_list[] = {"SEARCH", "COUNT", "GET",  "INFO", "CONFIG",   "FACET", "SET",  "SHOW", "REPLICATION",
+                              "DEBUG",  "CACHE", "DUMP", "SYNC", "OPTIMIZE", "quit",  "exit", "help", nullptr};
 
 char* CommandGenerator(const char* text, int state) {
   static int list_index;
@@ -344,6 +344,18 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
     return nullptr;
   }
 
+  if (command == "SHOW") {
+    if (token_count == 1) {
+      current_keywords = {"VARIABLES"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    if (token_count == 2 && tokens[1] == "VARIABLES") {
+      current_keywords = {"LIKE"};
+      return rl_completion_matches(text, KeywordGeneratorWrapper);
+    }
+    return nullptr;
+  }
+
   if (command == "REPLICATION") {
     if (token_count == 1) {
       current_keywords = {"STATUS", "STOP", "START"};
@@ -386,7 +398,10 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
 
   if (command == "SYNC") {
     if (token_count == 1) {
-      current_keywords = {"START", "STOP", "STATUS"};
+      current_keywords = {"STOP", "STATUS"};
+      if (!available_tables.empty()) {
+        current_keywords.insert(current_keywords.end(), available_tables.begin(), available_tables.end());
+      }
       return rl_completion_matches(text, KeywordGeneratorWrapper);
     }
     return nullptr;
@@ -849,25 +864,28 @@ class MygramClient {
 
   static void PrintHelp() {
     std::cout << "Available commands:\n"
-              << "  SEARCH <table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
+              << "  SEARCH <db.table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
               << "         [SORT [BY] <col>|ASC|DESC] [LIMIT <n>] [OFFSET <n>]\n"
-              << "  COUNT <table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
-              << "  GET <table> <primary_key>\n"
+              << "  COUNT <db.table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
+              << "  GET <db.table> <primary_key>\n"
               << "  INFO              - Show server statistics\n"
               << "  CONFIG            - Show current configuration\n"
-              << "  FACET <table> <column> [WHERE <text>]   - Compute facet counts\n"
+              << "  SET <variable> = <value> [, ...]         - Change runtime variables\n"
+              << "  SHOW VARIABLES [LIKE <pattern>]         - Show runtime variables\n"
+              << "  FACET <db.table> <column> [text] [FILTER <col=val>...] [LIMIT <n>]\n"
+              << "                    - Compute facet counts\n"
               << "  REPLICATION STATUS|STOP|START\n"
               << "  DEBUG ON|OFF      - Toggle per-connection debug output\n"
-              << "  OPTIMIZE [table]  - Compact posting lists for one or all tables\n"
+              << "  OPTIMIZE [db.table]  - Compact posting lists for one or all tables\n"
               << "  CACHE STATS|CLEAR|ENABLE|DISABLE\n"
               << "  DUMP SAVE|LOAD|VERIFY|INFO|STATUS\n"
-              << "  SYNC START|STOP|STATUS\n"
+              << "  SYNC <db.table>|STOP [db.table]|STATUS\n"
               << '\n'
               << "Query syntax examples:\n"
-              << "  SEARCH threads golang                          # Simple search\n"
-              << "  SEARCH threads (golang OR python) AND tutorial # Boolean query\n"
-              << "  SEARCH threads golang SORT DESC LIMIT 10       # With sorting\n"
-              << "  SEARCH threads golang SORT BY created_at ASC   # Sort by column\n"
+              << "  SEARCH app.threads golang                          # Simple search\n"
+              << "  SEARCH app.threads (golang OR python) AND tutorial # Boolean query\n"
+              << "  SEARCH app.threads golang SORT DESC LIMIT 10       # With sorting\n"
+              << "  SEARCH app.threads golang SORT BY created_at ASC   # Sort by column\n"
               << '\n'
               << "Other commands:\n"
               << "  quit/exit - Exit the client\n"
@@ -994,7 +1012,7 @@ void PrintUsage(const char* program_name) {
             << "    # Connect to specific server (hostnames supported)\n"
             << "  " << program_name << " --retry 5 INFO           # Retry connection 5 times if refused\n"
             << "  " << program_name << " --wait-ready INFO        # Wait until server is ready\n"
-            << "  " << program_name << " SEARCH articles hello    # Execute single command\n"
+            << "  " << program_name << " SEARCH app.articles hello # Execute single command\n"
             << "  " << program_name << " -s /tmp/mygramdb.sock INFO # Connect via Unix socket\n";
 }
 

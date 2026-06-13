@@ -188,6 +188,9 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   if (auto err = CheckNotLoading(); !err.empty()) {
     return err;
   }
+  if (auto err = CheckTableNotSyncing(query.table); !err.empty()) {
+    return err;
+  }
 
   // Resolve the table context required by both the search and any debug
   // bookkeeping that follows.
@@ -264,28 +267,9 @@ std::vector<std::string> SearchHandler::GenerateHighlightSnippets(
 
   const auto& hl_opts = query.highlight.value();
 
-  std::vector<std::string> normalized_terms;
-  normalized_terms.reserve(output.all_search_terms.size());
-  for (const auto& term : output.all_search_terms) {
-    if (output.current_index != nullptr) {
-      normalized_terms.push_back(output.current_index->NormalizeText(term));
-    } else {
-      normalized_terms.push_back(term);
-    }
-  }
-
-  if (output.table_context != nullptr && output.table_context->synonym_dict &&
-      !output.table_context->synonym_dict->IsEmpty()) {
-    auto* syn_dict = output.table_context->synonym_dict.get();
-    std::vector<std::string> expanded;
-    for (const auto& normalized_term : normalized_terms) {
-      auto synonyms = syn_dict->Expand(normalized_term);
-      expanded.insert(expanded.end(), std::make_move_iterator(synonyms.begin()),
-                      std::make_move_iterator(synonyms.end()));
-    }
-    mygram::utils::DeduplicateSorted(expanded);
-    normalized_terms = std::move(expanded);
-  }
+  const auto* synonym_dict = output.table_context != nullptr ? output.table_context->synonym_dict.get() : nullptr;
+  auto normalized_terms =
+      search_pipeline::BuildHighlightTerms(output.all_search_terms, output.current_index, synonym_dict);
 
   auto batch_texts = output.current_doc_store->GetNormalizedTextBatch(paginated_results);
   std::vector<std::string> snippets;
@@ -327,10 +311,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
   const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
 
-  // For cache hits, skip the SEARCH-specific optimization path
-  if (!is_cache_hit && output.current_index != nullptr && !output.term_infos.empty() &&
-      output.term_infos[0].estimated_size > 0) {
-    // Determine ORDER BY clause (default: primary key DESC)
+  if (conn_ctx.debug_mode) {
     query::OrderByClause order_by;
     bool order_by_implicit = false;
     if (query.order_by.has_value()) {
@@ -341,64 +322,35 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       order_by_implicit = true;
     }
 
-    auto equals_ignore_case = [](const std::string& lhs, const std::string& rhs) {
-      return lhs.size() == rhs.size() &&
-             std::equal(lhs.begin(), lhs.end(), rhs.begin(),
-                        [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); });
-    };
-    bool is_primary_key_order = order_by.IsPrimaryKey() || equals_ignore_case(order_by.column, primary_key_column);
-
-    if (conn_ctx.debug_mode) {
-      std::string order_str = order_by.column.empty() ? primary_key_column : order_by.column;
-      order_str += (order_by.order == query::SortOrder::ASC) ? " ASC" : " DESC";
-      if (order_by_implicit) {
-        order_str += " (default)";
-      }
-      output.debug_info.order_by_applied = order_str;
-      output.debug_info.limit_applied = query.limit;
-      output.debug_info.offset_applied = query.offset;
-      output.debug_info.limit_explicit = query.limit_explicit;
-      output.debug_info.offset_explicit = query.offset_explicit;
+    std::string order_str = order_by.column.empty() ? primary_key_column : order_by.column;
+    order_str += (order_by.order == query::SortOrder::ASC) ? " ASC" : " DESC";
+    if (order_by_implicit) {
+      order_str += " (default)";
     }
+    output.debug_info.order_by_applied = order_str;
+    output.debug_info.limit_applied = query.limit;
+    output.debug_info.offset_applied = query.offset;
+    output.debug_info.limit_explicit = query.limit_explicit;
+    output.debug_info.offset_explicit = query.offset_explicit;
+  }
 
-    // Check optimization conditions for single-term queries
-    // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    constexpr uint32_t kMaxOffsetForOptimization = 10000;
-    // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    bool can_optimize = output.term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() &&
-                        query.limit > 0 && query.offset <= kMaxOffsetForOptimization && is_primary_key_order &&
-                        !is_score_sort;
-
-    if (can_optimize) {
-      // The pipeline already fetched all results; we can apply GetTopN optimization
-      total_results = output.results.size();
-
-      if (total_results > 0) {
-        // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-        constexpr double kReuseThreshold = 0.5;
-        // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-        size_t index_limit = query.offset + query.limit;
-        bool should_reuse = (static_cast<double>(index_limit) / static_cast<double>(total_results)) > kReuseThreshold;
-
-        if (!should_reuse) {
-          // Result set is large: use GetTopN optimization
-          bool reverse = (order_by.order == query::SortOrder::DESC);
-          output.results = output.current_index->SearchAnd(output.term_infos[0].ngrams, index_limit, reverse);
-          if (conn_ctx.debug_mode) {
-            output.debug_info.total_candidates = output.results.size();
-            output.debug_info.after_intersection = output.results.size();
-            std::string direction = reverse ? "DESC" : "ASC";
-            if (output.term_infos[0].ngrams.size() == 1) {
-              output.debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
-            } else {
-              output.debug_info.optimization_used =
-                  "Index GetTopN (streaming intersection + " + direction + " + limit)";
-            }
-          }
-        } else if (conn_ctx.debug_mode) {
-          output.debug_info.optimization_used = "reuse-fetch (small result set)";
+  auto topn = search_pipeline::ApplySearchTopNOptimization(query, output.current_index, output.term_infos, is_cache_hit,
+                                                           primary_key_column, output.results);
+  if (topn.applicable) {
+    total_results = topn.total_results;
+    if (conn_ctx.debug_mode) {
+      if (topn.optimized) {
+        output.debug_info.total_candidates = output.results.size();
+        output.debug_info.after_intersection = output.results.size();
+        std::string direction = topn.reverse ? "DESC" : "ASC";
+        if (topn.single_ngram) {
+          output.debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
+        } else {
+          output.debug_info.optimization_used = "Index GetTopN (streaming intersection + " + direction + " + limit)";
         }
-      } else if (conn_ctx.debug_mode) {
+      } else if (topn.reused_existing) {
+        output.debug_info.optimization_used = "reuse-fetch (small result set)";
+      } else if (topn.no_results) {
         output.debug_info.optimization_used = "no results (optimization skipped)";
       }
     }

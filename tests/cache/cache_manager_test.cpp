@@ -104,6 +104,29 @@ TEST(CacheManagerTest, InsertIfVersionRejectsStaleResultAfterInvalidate) {
   EXPECT_EQ(result, cached.value());
 }
 
+TEST(CacheManagerTest, InsertIfVersionAllowsUnrelatedTableInvalidation) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+
+  auto ngram_configs = CreateTestNgramConfigs(3, 2);
+
+  CacheManager mgr(config, std::move(ngram_configs));
+
+  auto query = CreateQuery("posts", "golang");
+  std::vector<DocId> result = {1, 2, 3};
+  std::vector<std::string> ngrams = {"ang", "gol", "lan", "ola"};
+
+  const uint64_t posts_version = mgr.CaptureDataVersion("posts");
+  mgr.Invalidate("comments", "", "unrelated comment mutation");
+
+  EXPECT_TRUE(mgr.InsertIfVersion(query, result, ngrams, 15.0, posts_version, 3, 2, true));
+
+  auto cached = mgr.Lookup(query);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(result, cached.value());
+}
+
 /**
  * @brief Test precise invalidation - only affected queries invalidated
  */
@@ -489,15 +512,18 @@ TEST(CacheManagerTest, EnableWhenDisabledAtStartup) {
   // Initially disabled
   EXPECT_FALSE(mgr.IsEnabled());
 
-  // Try to enable - should fail because cache was not initialized
-  EXPECT_FALSE(mgr.Enable());
+  // Enable should initialize runtime use even when startup config was disabled.
+  EXPECT_TRUE(mgr.Enable());
 
-  // Should still be disabled
-  EXPECT_FALSE(mgr.IsEnabled());
+  EXPECT_TRUE(mgr.IsEnabled());
 
-  // Lookup should fail
   auto query = CreateQuery("posts", "test");
-  EXPECT_FALSE(mgr.Lookup(query).has_value());
+  std::vector<std::string> ngrams = {"est", "tes"};
+  EXPECT_TRUE(mgr.Insert(query, {1, 2, 3}, ngrams, 25.0));
+
+  auto result = mgr.Lookup(query);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), std::vector<DocId>({1, 2, 3}));
 }
 
 /**

@@ -474,6 +474,9 @@ TEST_F(DumpCommandsTest, CredentialsNotLoadedFromDump) {
   EXPECT_EQ(loaded_config.mysql.host, "127.0.0.1");
   EXPECT_EQ(loaded_config.mysql.port, 3306);
   EXPECT_EQ(loaded_config.mysql.database, "test");
+  ASSERT_EQ(loaded_config.tables.size(), 2u);
+  EXPECT_EQ(loaded_config.tables[0].database, "test");
+  EXPECT_EQ(loaded_config.tables[1].database, "test");
 }
 
 // Test dump file permissions (Unix only)

@@ -17,7 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -273,11 +275,12 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheWithStaleDataVersionDoesNotInsert)
   cache_config.enabled = true;
   cache_config.max_memory_bytes = 10 * 1024 * 1024;
   cache_config.min_query_cost_ms = 0.0;
+  cache_config.invalidation.max_delay_ms = 1;
 
   cache::NgramConfigMap ngram_configs;
   ngram_configs["test"] = cache::NgramConfig{
       .ngram_size = 2,
-      .kanji_ngram_size = 0,
+      .kanji_ngram_size = 2,
       .cross_boundary_ngrams = false,
   };
   cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
@@ -986,6 +989,79 @@ TEST_F(FullPipelineTest, SearchWithNotTerms) {
   EXPECT_LE(output.results.size(), 2);
 }
 
+TEST_F(FullPipelineTest, NotFilterDoesNotPoolNgramsAcrossTerms) {
+  auto plain_doc = doc_store_->AddDocument("pk_plain", {}, "alpha plain");
+  auto dog_doc = doc_store_->AddDocument("pk_dog", {}, "alpha dog");
+  auto dolphin_doc = doc_store_->AddDocument("pk_dolphin", {}, "alpha dolphin");
+  auto fog_doc = doc_store_->AddDocument("pk_fog", {}, "alpha fog");
+  ASSERT_TRUE(plain_doc.has_value());
+  ASSERT_TRUE(dog_doc.has_value());
+  ASSERT_TRUE(dolphin_doc.has_value());
+  ASSERT_TRUE(fog_doc.has_value());
+
+  index_->AddDocument(*plain_doc, "alpha plain");
+  index_->AddDocument(*dog_doc, "alpha dog");
+  index_->AddDocument(*dolphin_doc, "alpha dolphin");
+  index_->AddDocument(*fog_doc, "alpha fog");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.not_terms = {"dolphin", "fog"};
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *plain_doc), output.results.end());
+  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *dog_doc), output.results.end());
+  EXPECT_EQ(std::find(output.results.begin(), output.results.end(), *dolphin_doc), output.results.end());
+  EXPECT_EQ(std::find(output.results.begin(), output.results.end(), *fog_doc), output.results.end());
+}
+
+TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  auto article_doc = doc_store_->AddDocument("pk_article", {}, "article cat");
+  ASSERT_TRUE(article_doc.has_value());
+  index_->AddDocument(*article_doc, "article cat");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "article";
+  query.not_terms = {"do"};
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.cache_manager = &cache_manager;
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  ASSERT_FALSE(output.cache_hit);
+  ASSERT_TRUE(cache_manager.Lookup(query).has_value());
+
+  cache_manager.Invalidate("test", "article cat", "article do");
+
+  for (int i = 0; i < 50 && cache_manager.Lookup(query).has_value(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_FALSE(cache_manager.Lookup(query).has_value());
+}
+
 TEST_F(FullPipelineTest, SearchWithAndTerms) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
@@ -1057,6 +1133,45 @@ TEST_F(FullPipelineTest, NoMatchReturnsEmpty) {
 
   EXPECT_TRUE(output.success);
   EXPECT_TRUE(output.results.empty());
+}
+
+TEST_F(FullPipelineTest, ShortTermFallsBackToSubstringSearch) {
+  auto single_char_doc = doc_store_->AddDocument("pk_single_char", {}, "a marker");
+  ASSERT_TRUE(single_char_doc.has_value());
+  index_->AddDocument(*single_char_doc, "a marker");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "a";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_FALSE(output.empty_term_detected);
+  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *single_char_doc), output.results.end());
+}
+
+TEST_F(FullPipelineTest, ShortAndTermFallsBackToSubstringSearch) {
+  auto target_doc = doc_store_->AddDocument("pk_short_and", {}, "learning x");
+  ASSERT_TRUE(target_doc.has_value());
+  index_->AddDocument(*target_doc, "learning x");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.and_terms = {"x"};
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_FALSE(output.empty_term_detected);
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{*target_doc}));
 }
 
 TEST_F(FullPipelineTest, VerifyTextFilterApplied) {

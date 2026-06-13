@@ -12,8 +12,7 @@
 
 namespace mygramdb::cache {
 
-std::string QueryNormalizer::Normalize(const query::Query& query, const std::string& primary_key_column,
-                                       const TextNormalizer& text_normalizer) {
+std::string QueryNormalizer::Normalize(const query::Query& query, const TextNormalizer& text_normalizer) {
   std::string result;
   result.reserve(128);  // Pre-allocate to reduce reallocations
 
@@ -64,7 +63,6 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const std::str
     result += std::to_string(*query.fuzzy_max_distance);
   }
 
-  (void)primary_key_column;
   // Note: LIMIT, OFFSET, and SORT are intentionally excluded from cache key.
   // The cache stores full unsorted results, and presentation concerns are
   // applied by the request handler after lookup.

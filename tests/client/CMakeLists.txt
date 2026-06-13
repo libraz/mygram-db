@@ -32,3 +32,17 @@ gtest_discover_tests(search_expression_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME MygramClientCtypesSmokeTest
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/ctypes_smoke_test.py
+      $<TARGET_FILE:mygramclient_shared>
+  )
+  set_tests_properties(MygramClientCtypesSmokeTest PROPERTIES
+    DEPENDS mygramclient_shared
+    RESOURCE_LOCK client_server_connection
+  )
+endif()

@@ -7,6 +7,10 @@
 
 #include <spdlog/spdlog.h>
 
+#include <optional>
+
+#include "server/replication_pause_counter.h"
+#include "utils/fd_guard.h"
 #include "utils/structured_log.h"
 
 #ifdef USE_MYSQL
@@ -25,16 +29,28 @@ using mygram::utils::MakeUnexpected;
 
 #ifdef USE_MYSQL
 
-MysqlReconnectionHandler::MysqlReconnectionHandler(mysql::Connection* mysql_connection,
-                                                   mysql::BinlogReader* binlog_reader,
-                                                   std::atomic<bool>* reconnecting_flag,
-                                                   std::vector<std::string> required_tables)
+MysqlReconnectionHandler::MysqlReconnectionHandler(
+    mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader, std::atomic<bool>* reconnecting_flag,
+    std::vector<std::string> required_tables, std::atomic<bool>* dump_save_in_progress,
+    std::atomic<bool>* replication_paused_for_dump, server::replication_pause::Counter* replication_pause_counter)
     : mysql_connection_(mysql_connection),
       binlog_reader_(binlog_reader),
       reconnecting_flag_(reconnecting_flag),
-      required_tables_(std::move(required_tables)) {}
+      required_tables_(std::move(required_tables)),
+      dump_save_in_progress_(dump_save_in_progress),
+      replication_paused_for_dump_(replication_paused_for_dump),
+      replication_pause_counter_(replication_pause_counter) {}
 
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new_host, int new_port) {
+  if (dump_save_in_progress_ != nullptr && dump_save_in_progress_->load(std::memory_order_acquire)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLReplicationError, "Cannot reconnect MySQL while DUMP SAVE is in progress"));
+  }
+  if (replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire)) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError,
+                                    "Cannot reconnect MySQL while replication is paused for DUMP/SNAPSHOT"));
+  }
+
   // RAII guard to ensure reconnecting flag is always cleared on exit
   struct ReconnectingGuard {
     std::atomic<bool>* flag;
@@ -67,9 +83,32 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   }
 
   // Step 2: Stop BinlogReader (graceful shutdown)
+  std::optional<server::replication_pause::Scope> pause_scope;
+  bool replication_pause_acquired = false;
+  if (binlog_reader_ != nullptr && binlog_reader_->IsRunning() && replication_pause_counter_ != nullptr) {
+    pause_scope.emplace(*replication_pause_counter_);
+    replication_pause_acquired = pause_scope->Acquire();
+    if (!replication_pause_acquired) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError,
+                                      "Cannot reconnect MySQL while another replication pause is active"));
+    }
+  }
+
+  auto release_pause = mygram::utils::ScopeGuard([this, &pause_scope, &replication_pause_acquired]() {
+    if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
+      replication_paused_for_dump_->store(false, std::memory_order_release);
+    }
+    if (pause_scope.has_value() && pause_scope->held()) {
+      pause_scope->Release();
+    }
+  });
+
   if (binlog_reader_ != nullptr && binlog_reader_->IsRunning()) {
     mygram::utils::StructuredLog().Event("mysql_reconnection_stopping_binlog").Info();
     binlog_reader_->Stop();
+    if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
+      replication_paused_for_dump_->store(true, std::memory_order_release);
+    }
     mygram::utils::StructuredLog().Event("mysql_reconnection_binlog_stopped").Info();
   }
 
@@ -149,6 +188,13 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
 
     mygram::utils::StructuredLog().Event("mysql_reconnection_binlog_restarted").Info();
   }
+  if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
+    replication_paused_for_dump_->store(false, std::memory_order_release);
+  }
+  if (pause_scope.has_value() && pause_scope->held()) {
+    pause_scope->Release();
+  }
+  release_pause.Release();
 
   mygram::utils::StructuredLog()
       .Event("mysql_reconnection_success")

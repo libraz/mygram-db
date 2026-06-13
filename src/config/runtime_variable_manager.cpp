@@ -26,6 +26,7 @@ using mygram::utils::MakeUnexpected;
 
 namespace {
 constexpr int kMaxPortNumber = 65535;  // Maximum valid TCP/UDP port number
+constexpr int kMaxRuntimeQueryLength = 4096;
 
 std::string JoinStrings(const std::vector<std::string>& values, const std::string& delimiter) {
   std::ostringstream oss;
@@ -207,12 +208,14 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
       std::unique_lock lock(mutex_);
       old_value = runtime_values_[variable_name];
       runtime_values_[variable_name] = value;
+      base_config_.logging.level = value;
     }
     auto result = ApplyLoggingLevel(value);
     if (!result) {
       // Rollback on validation failure
       std::unique_lock lock(mutex_);
       runtime_values_[variable_name] = old_value;
+      base_config_.logging.level = old_value;
       return result;
     }
   } else if (variable_name == "logging.format") {
@@ -221,12 +224,14 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
       std::unique_lock lock(mutex_);
       old_value = runtime_values_[variable_name];
       runtime_values_[variable_name] = value;
+      base_config_.logging.format = value;
     }
     auto result = ApplyLoggingFormat(value);
     if (!result) {
       // Rollback on validation failure
       std::unique_lock lock(mutex_);
       runtime_values_[variable_name] = old_value;
+      base_config_.logging.format = old_value;
       return result;
     }
   } else if (variable_name == "mysql.host") {
@@ -364,12 +369,18 @@ std::map<std::string, VariableInfo> RuntimeVariableManager::GetAllVariables(cons
     }
 
     result[table_prefix + "name"] = {table.name, false};
+    result[table_prefix + "database"] = {table.database, false};
     result[table_prefix + "primary_key"] = {table.primary_key, false};
     result[table_prefix + "ngram_size"] = {std::to_string(table.ngram_size), false};
     // Add more table fields as needed
   }
 
   return result;
+}
+
+Config RuntimeVariableManager::GetCurrentConfig() const {
+  std::shared_lock lock(mutex_);
+  return base_config_;
 }
 
 bool RuntimeVariableManager::IsMutable(const std::string& variable_name) {
@@ -485,6 +496,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlHost(const std::string& 
     current_port = *port_result;
     old_host = runtime_values_["mysql.host"];
     runtime_values_["mysql.host"] = value;
+    base_config_.mysql.host = value;
     callback_copy = mysql_reconnect_callback_;
   }
 
@@ -495,6 +507,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlHost(const std::string& 
       // Rollback: restore previous value
       std::unique_lock lock(mutex_);
       runtime_values_["mysql.host"] = old_host;
+      base_config_.mysql.host = old_host;
       return result;
     }
   }
@@ -520,6 +533,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlPort(int value) {
     current_host = host_iter->second;
     old_port_str = runtime_values_["mysql.port"];
     runtime_values_["mysql.port"] = std::to_string(value);
+    base_config_.mysql.port = value;
     callback_copy = mysql_reconnect_callback_;
   }
 
@@ -530,6 +544,10 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlPort(int value) {
       // Rollback
       std::unique_lock lock(mutex_);
       runtime_values_["mysql.port"] = old_port_str;
+      auto old_port = ParseInt(old_port_str);
+      if (old_port) {
+        base_config_.mysql.port = *old_port;
+      }
       return result;
     }
   }
@@ -561,8 +579,10 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyApiMaxQueryLength(int value) {
-  if (value < 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.max_query_length must be >= 0"));
+  if (value < 0 || value > kMaxRuntimeQueryLength) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kInvalidArgument,
+        "api.max_query_length must be between 0 and " + std::to_string(kMaxRuntimeQueryLength) + " (0 = unlimited)"));
   }
 
   int default_limit = 0;
@@ -658,11 +678,13 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingRefillRate(int va
 Expected<void, Error> RuntimeVariableManager::ApplyCacheEnabled(bool value) {
   // Lock → update config + runtime_values_ → capture callback → unlock → call callback
   std::function<Expected<void, Error>(bool)> callback_copy;
+  cache::CacheManager* cache_mgr = nullptr;
   {
     std::unique_lock lock(mutex_);
     base_config_.cache.enabled = value;
     runtime_values_["cache.enabled"] = value ? "true" : "false";
     callback_copy = cache_toggle_callback_;
+    cache_mgr = cache_manager_;
   }
 
   // Trigger cache toggle callback outside lock
@@ -674,6 +696,17 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheEnabled(bool value) {
       base_config_.cache.enabled = !value;
       runtime_values_["cache.enabled"] = !value ? "true" : "false";
       return result;
+    }
+  } else if (cache_mgr != nullptr) {
+    if (value) {
+      if (!cache_mgr->Enable()) {
+        std::unique_lock lock(mutex_);
+        base_config_.cache.enabled = false;
+        runtime_values_["cache.enabled"] = "false";
+        return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Cache cannot be enabled"));
+      }
+    } else {
+      cache_mgr->Disable();
     }
   }
 
@@ -1008,16 +1041,18 @@ Expected<int, Error> RuntimeVariableManager::ParseInt(const std::string& value) 
 }
 
 Expected<double, Error> RuntimeVariableManager::ParseDouble(const std::string& value) {
-  try {
-    size_t pos = 0;
-    double result = std::stod(value, &pos);
-    if (pos != value.size()) {
-      return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid double value: " + value));
-    }
-    return result;
-  } catch (const std::exception& e) {
+  double result = 0.0;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+  if (ec != std::errc{}) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid double value: " + value));
   }
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  if (ptr != value.data() + value.size()) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kInvalidArgument, "Invalid double value (trailing characters): " + value));
+  }
+  return result;
 }
 
 }  // namespace mygramdb::config

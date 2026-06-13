@@ -436,9 +436,10 @@ class DocumentStore {
   std::atomic<bool> store_texts_{true};
 
   // Bitmap-based filter index for fast EQ/NE filter evaluation
-  // Uses shared_ptr for safe concurrent access: readers take a snapshot copy,
-  // writers replace the pointer under unique_lock. Old index stays alive until
-  // all reader snapshots are released.
+  // Uses shared_ptr so readers can hold a lifetime-safe snapshot while Clear()
+  // or LoadFrom() swaps in a new index. Per-document writes mutate the current
+  // FilterIndex under mutex_, and FilterIndex provides its own internal
+  // synchronization for bitmap-level readers.
   std::shared_ptr<FilterIndex> filter_index_;
 
   // Mutex for thread-safe access (shared for reads, exclusive for writes)

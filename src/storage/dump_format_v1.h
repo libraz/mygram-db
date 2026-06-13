@@ -22,12 +22,10 @@
  * ├─────────────────────────────────────────────────────────────┤
  * │ Config Section                                              │
  * │   - Length (4 bytes)                                        │
- * │   - CRC32 (4 bytes)                                         │
  * │   - Serialized Configuration                               │
  * ├─────────────────────────────────────────────────────────────┤
  * │ Statistics Section (optional, if kWithStatistics)          │
  * │   - Length (4 bytes)                                        │
- * │   - CRC32 (4 bytes)                                         │
  * │   - Dump Statistics                                         │
  * ├─────────────────────────────────────────────────────────────┤
  * │ Table Data Section                                          │
@@ -36,14 +34,14 @@
  * │   │ For each table:                                       ││
  * │   │   - Table Name (length-prefixed string)               ││
  * │   │   - Table Statistics (optional, if kWithStatistics)  ││
- * │   │   - Index Data (length + CRC32 + data)               ││
- * │   │   - DocStore Data (length + CRC32 + data)            ││
+ * │   │   - Index Data (length + data)                       ││
+ * │   │   - DocStore Data (length + data)                    ││
  * │   └───────────────────────────────────────────────────────┘│
  * └─────────────────────────────────────────────────────────────┘
  *
  * All multi-byte integers are stored in little-endian format.
  * All strings are UTF-8 encoded with length-prefix (uint32_t).
- * CRC32 checksums use zlib implementation (polynomial: 0xEDB88320).
+ * File-level CRC32 uses zlib implementation (polynomial: 0xEDB88320).
  *
  * Snapshot consistency contract:
  * WriteDumpV1 serializes each table's Index and DocumentStore as separate
@@ -56,6 +54,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <string>
@@ -75,6 +74,8 @@ using mygram::utils::Error;
 using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
+
+using DumpConfigValidationCallback = std::function<Expected<void, Error>(const config::Config& loaded_config)>;
 
 /// @name Field-type-specific maximum string lengths for dump deserialization
 /// These limits prevent OOM attacks from malicious dump files that specify
@@ -205,6 +206,13 @@ Expected<void, Error> WriteHeaderV1(std::ostream& output_stream, const HeaderV1&
 Expected<void, Error> ReadHeaderV1(std::istream& input_stream, HeaderV1& header);
 
 /**
+ * @brief Validate V1 header fields required for dump integrity checks
+ * @param header Header to validate
+ * @return Expected<void, Error> Success or validation error
+ */
+Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV1& header);
+
+/**
  * @brief Write complete dump to file (Version 1 format)
  *
  * Creates a dump file containing the complete database state. The write process
@@ -217,12 +225,7 @@ Expected<void, Error> ReadHeaderV1(std::istream& input_stream, HeaderV1& header)
  * - Statistics section (if stats provided)
  * - Table data (index + document store for each table)
  *
- * CRC32 checksums are calculated for:
- * - Entire file (file_crc32 in header)
- * - Config section
- * - Statistics section
- * - Each table's index data
- * - Each table's document store data
+ * A file-level CRC32 is stored in the V1 header.
  *
  * Write process:
  * 1. Write fixed header (magic + version)
@@ -259,26 +262,26 @@ Expected<void, Error> WriteDumpV1(
  * @brief Read complete dump from file (Version 1 format)
  *
  * Loads a dump file and restores the complete database state. All data is
- * validated using CRC32 checksums to ensure integrity.
+ * validated using file-level CRC32 to ensure integrity.
  *
  * Load process:
  * 1. Read and validate fixed header (magic + version)
  * 2. Validate file size against header.total_file_size
  * 3. Calculate and verify file-level CRC32
- * 4. Read and deserialize config section (verify CRC32)
- * 5. Read statistics section if present (verify CRC32)
+ * 4. Read and deserialize config section
+ * 5. Read statistics section if present
  * 6. For each table:
  *    - Read table name
- *    - Read table statistics if present (verify CRC32)
- *    - Load index data (verify CRC32)
- *    - Load document store data (verify CRC32)
+ *    - Read table statistics if present
+ *    - Load index data
+ *    - Load document store data
  * 7. Populate table_contexts with loaded data
  * 8. Return GTID for replication resume
  *
  * Error handling:
  * - Version mismatch: Returns false if version is unsupported
  * - File truncation: Detected via file size check
- * - CRC mismatch: Detected at file and section levels
+ * - CRC mismatch: Detected at file level
  * - All errors are logged via spdlog and optionally returned in integrity_error
  *
  * @param filepath Input file path (e.g., "/var/lib/mygramdb/dumps/mygramdb.dmp")
@@ -290,6 +293,7 @@ Expected<void, Error> WriteDumpV1(
  * @param stats Optional output for dump-level statistics
  * @param table_stats Optional output for per-table statistics map
  * @param integrity_error Optional output for detailed integrity error information
+ * @param config_validator Optional callback to validate loaded config before applying table data
  * @return Expected<void, Error> Success or error with details (context: filepath, section)
  *
  * @note table_contexts MUST contain pre-allocated Index and DocumentStore objects
@@ -301,7 +305,7 @@ Expected<void, Error> ReadDumpV1(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    dump_format::IntegrityError* integrity_error = nullptr);
+    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {});
 
 /**
  * @brief Verify dump file integrity without loading
@@ -317,7 +321,7 @@ Expected<void, Error> ReadDumpV1(
  * 5. File-level CRC32 matches calculated checksum
  *
  * This function does NOT verify:
- * - Individual section CRC32s (config, stats, index, docstore)
+ * - Per-section CRC32s (V1 has only file-level CRC)
  * - Data deserialization correctness
  * - Configuration validity
  *

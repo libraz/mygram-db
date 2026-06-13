@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <unordered_map>
 
 #include "binlog_event_builder.h"
 #include "mysql/binlog_event_parser.h"
@@ -715,6 +716,82 @@ TEST(BinlogParsingSecurityTest, MetadataBoundsChecking) {
   EXPECT_FALSE(oversized_metadata.has_value());
 }
 
+TEST(BinlogParsingTest, QueryEventDdlIgnoresSameTableFromDifferentDatabase) {
+  server::TableContext ctx;
+  ctx.name = "articles";
+  ctx.config.name = "articles";
+  ctx.config.database = "app";
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("articles", &ctx);
+  TableMetadataCache metadata_cache;
+
+  auto other_db_event = BuildQueryEvent("analytics", "TRUNCATE TABLE articles");
+  auto other_db_events = BinlogEventParser::ParseBinlogEvent(other_db_event.data(), other_db_event.size(), "uuid:1",
+                                                             metadata_cache, table_contexts, nullptr, true);
+  EXPECT_TRUE(other_db_events.empty());
+
+  auto target_db_event = BuildQueryEvent("app", "TRUNCATE TABLE articles");
+  auto target_db_events = BinlogEventParser::ParseBinlogEvent(target_db_event.data(), target_db_event.size(), "uuid:1",
+                                                              metadata_cache, table_contexts, nullptr, true);
+  ASSERT_EQ(target_db_events.size(), 1u);
+  EXPECT_EQ(target_db_events[0].type, BinlogEventType::DDL);
+  EXPECT_EQ(target_db_events[0].table_name, "articles");
+}
+
+TEST(BinlogParsingTest, QueryEventDdlHonorsSchemaQualifiedTableNames) {
+  server::TableContext ctx;
+  ctx.name = "articles";
+  ctx.config.name = "articles";
+  ctx.config.database = "app";
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("articles", &ctx);
+  TableMetadataCache metadata_cache;
+
+  auto qualified_target_event = BuildQueryEvent("analytics", "DROP TABLE app.articles");
+  auto qualified_target_events =
+      BinlogEventParser::ParseBinlogEvent(qualified_target_event.data(), qualified_target_event.size(), "uuid:1",
+                                          metadata_cache, table_contexts, nullptr, true);
+  ASSERT_EQ(qualified_target_events.size(), 1u);
+  EXPECT_EQ(qualified_target_events[0].table_name, "articles");
+
+  auto qualified_other_event = BuildQueryEvent("app", "DROP TABLE analytics.articles");
+  auto qualified_other_events =
+      BinlogEventParser::ParseBinlogEvent(qualified_other_event.data(), qualified_other_event.size(), "uuid:2",
+                                          metadata_cache, table_contexts, nullptr, true);
+  EXPECT_TRUE(qualified_other_events.empty());
+}
+
+TEST(BinlogParsingTest, QueryEventMultiStatementClassifiesMatchingDdlStatement) {
+  server::TableContext articles_ctx;
+  articles_ctx.name = "articles";
+  articles_ctx.config.name = "articles";
+  articles_ctx.config.database = "app";
+
+  server::TableContext users_ctx;
+  users_ctx.name = "users";
+  users_ctx.config.name = "users";
+  users_ctx.config.database = "app";
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("articles", &articles_ctx);
+  table_contexts.emplace("users", &users_ctx);
+  TableMetadataCache metadata_cache;
+
+  auto event = BuildQueryEvent("app", "ALTER TABLE users ADD COLUMN stale INT; DROP TABLE articles");
+  auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:3", metadata_cache,
+                                                    table_contexts, nullptr, true);
+
+  ASSERT_EQ(events.size(), 2u);
+  std::unordered_map<std::string, DDLType> types_by_table;
+  for (const auto& parsed_event : events) {
+    types_by_table.emplace(parsed_event.table_name, parsed_event.ddl_type);
+  }
+  EXPECT_EQ(types_by_table["users"], DDLType::kAlter);
+  EXPECT_EQ(types_by_table["articles"], DDLType::kDrop);
+}
+
 /**
  * @brief Test IsTableAffectingDDL with TRUNCATE TABLE statements
  */
@@ -1380,6 +1457,30 @@ TEST(BinlogParsingTest, XidEventProducesCommitMarkerWithCurrentGtid) {
   ASSERT_EQ(events.size(), 1);
   EXPECT_EQ(events[0].type, BinlogEventType::COMMIT);
   EXPECT_EQ(events[0].gtid, "uuid:11");
+}
+
+TEST(BinlogParsingTest, QueryCommitEventProducesCommitMarkerWithCurrentGtid) {
+  auto event = BuildQueryEvent("testdb", "  commit  ");
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:12", cache, table_contexts, nullptr, true);
+
+  ASSERT_EQ(events.size(), 1);
+  EXPECT_EQ(events[0].type, BinlogEventType::COMMIT);
+  EXPECT_EQ(events[0].gtid, "uuid:12");
+}
+
+TEST(BinlogParsingTest, QueryCommitEventWithoutGtidIsIgnored) {
+  auto event = BuildQueryEvent("testdb", "COMMIT");
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  auto events =
+      BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "", cache, table_contexts, nullptr, true);
+
+  EXPECT_TRUE(events.empty());
 }
 
 /**

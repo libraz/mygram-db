@@ -16,6 +16,16 @@
 #include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
+
+// Apply/search consistency contract:
+// BinlogEventProcessor mutates DocumentStore and Index as a two-step per-table
+// apply. The caller serializes events for a table. Concurrent search paths may
+// observe the narrow midpoint between DocumentStore and Index updates; they
+// must treat missing store/index material as a transient miss rather than
+// undefined state. The next request observes the completed apply. This
+// eventual-consistency contract avoids holding a global table lock across every
+// search while preserving memory safety under ThreadSanitizer.
+
 namespace {
 
 std::string NormalizeForCacheInvalidation(const std::string& text, index::Index& index) {

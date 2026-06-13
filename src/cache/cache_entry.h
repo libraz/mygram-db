@@ -52,6 +52,7 @@ struct CacheMetadata {
   int ngram_size = 0;                                   ///< N-gram size used for this query's ngrams
   int kanji_ngram_size = 0;                             ///< Kanji N-gram size used for this query's ngrams
   bool cross_boundary_ngrams = true;                    ///< Cross-boundary setting used for this query's ngrams
+  bool has_not_terms = false;                           ///< Query has NOT terms requiring broad text invalidation
   std::chrono::steady_clock::time_point created_at;     ///< Creation time
   std::chrono::steady_clock::time_point last_accessed;  ///< Last access time
   std::atomic<uint32_t> access_count{0};                ///< Number of times accessed (atomic for lock-free update)
@@ -72,6 +73,7 @@ struct CacheMetadata {
         ngram_size(other.ngram_size),
         kanji_ngram_size(other.kanji_ngram_size),
         cross_boundary_ngrams(other.cross_boundary_ngrams),
+        has_not_terms(other.has_not_terms),
         created_at(other.created_at),
         last_accessed(other.last_accessed),
         access_count(other.access_count.load()),
@@ -86,6 +88,7 @@ struct CacheMetadata {
         ngram_size(other.ngram_size),
         kanji_ngram_size(other.kanji_ngram_size),
         cross_boundary_ngrams(other.cross_boundary_ngrams),
+        has_not_terms(other.has_not_terms),
         created_at(other.created_at),
         last_accessed(other.last_accessed),
         access_count(other.access_count.load()),
@@ -101,6 +104,7 @@ struct CacheMetadata {
       ngram_size = other.ngram_size;
       kanji_ngram_size = other.kanji_ngram_size;
       cross_boundary_ngrams = other.cross_boundary_ngrams;
+      has_not_terms = other.has_not_terms;
       created_at = other.created_at;
       last_accessed = other.last_accessed;
       access_count.store(other.access_count.load());
@@ -119,6 +123,7 @@ struct CacheMetadata {
       ngram_size = other.ngram_size;
       kanji_ngram_size = other.kanji_ngram_size;
       cross_boundary_ngrams = other.cross_boundary_ngrams;
+      has_not_terms = other.has_not_terms;
       created_at = other.created_at;
       last_accessed = other.last_accessed;
       access_count.store(other.access_count.load());

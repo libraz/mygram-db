@@ -169,6 +169,24 @@ TEST(ConfigErrorHandlingTest, LoadConfigAcceptsBigintUnsignedFilterTypes) {
   std::filesystem::remove(config_path);
 }
 
+TEST(ConfigErrorHandlingTest, RequiredFilterMissingTypeListsSchemaTypes) {
+  json config_json = {
+      {"mysql", {{"host", "127.0.0.1"}, {"user", "test"}, {"password", "test"}, {"database", "test"}}},
+      {"tables",
+       json::array({{{"name", "test_table"},
+                     {"primary_key", "id"},
+                     {"text_source", {{"column", "content"}}},
+                     {"required_filters", json::array({{{"name", "created_at"}, {"op", "IS NOT NULL"}}})}}})}};
+
+  auto result = internal::ParseConfigFromJson(config_json);
+
+  ASSERT_FALSE(result.has_value());
+  const std::string message = result.error().message();
+  EXPECT_NE(message.find("time"), std::string::npos);
+  EXPECT_EQ(message.find("bool"), std::string::npos);
+  EXPECT_NE(message.find("bigint_unsigned"), std::string::npos);
+}
+
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesInvalidServerId) {
   json config_json = {{"replication", {{"enable", true}, {"server_id", 0}, {"start_from", "snapshot"}}}};
 

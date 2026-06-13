@@ -7,7 +7,6 @@
 
 #include <algorithm>
 
-#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
@@ -46,14 +45,17 @@ void TokenBucket::Reset() {
   last_refill_ = std::chrono::steady_clock::now();
 }
 
+void TokenBucket::RewindLastRefillForTesting(std::chrono::microseconds delta) {
+  last_refill_ -= delta;
+}
+
 void TokenBucket::Refill() {
   auto now = std::chrono::steady_clock::now();
-  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_refill_).count();
+  std::chrono::duration<double> elapsed = now - last_refill_;
 
-  if (elapsed > 0) {
+  if (elapsed.count() > 0) {
     // Add tokens based on elapsed time
-    double tokens_to_add = (static_cast<double>(refill_rate_) * static_cast<double>(elapsed)) /
-                           static_cast<double>(mygram::constants::kMillisecondsPerSecond);
+    double tokens_to_add = static_cast<double>(refill_rate_) * elapsed.count();
     tokens_ = std::min(static_cast<double>(capacity_), tokens_ + tokens_to_add);
     last_refill_ = now;
   }
@@ -63,11 +65,12 @@ void TokenBucket::Refill() {
 // RateLimiter implementation
 //
 
-RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients,
+RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients, bool enabled,
                          std::chrono::milliseconds cleanup_interval, uint32_t inactivity_timeout_sec)
     : capacity_(capacity),
       refill_rate_(refill_rate),
       max_clients_(max_clients),
+      enabled_(enabled),
       cleanup_interval_(cleanup_interval),
       inactivity_timeout_(inactivity_timeout_sec) {
   mygram::utils::StructuredLog()
@@ -90,11 +93,20 @@ RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients
   (void)sweeper_.Start([this] { SweepExpiredBuckets(); }, cleanup_interval_);
 }
 
+RateLimiter::RateLimiter(size_t capacity, size_t refill_rate, size_t max_clients,
+                         std::chrono::milliseconds cleanup_interval, uint32_t inactivity_timeout_sec)
+    : RateLimiter(capacity, refill_rate, max_clients, true, cleanup_interval, inactivity_timeout_sec) {}
+
 RateLimiter::~RateLimiter() {
   sweeper_.Stop();
 }
 
 bool RateLimiter::AllowRequest(const std::string& client_ip) {
+  if (!enabled_.load(std::memory_order_acquire)) {
+    allowed_requests_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Update statistics
@@ -228,6 +240,13 @@ void RateLimiter::UpdateParameters(size_t capacity, size_t refill_rate) {
   refill_rate_ = refill_rate;
   // Existing client buckets keep their old parameters
   // New clients will use the updated parameters
+}
+
+void RateLimiter::SetEnabled(bool enabled) {
+  enabled_.store(enabled, std::memory_order_release);
+  if (!enabled) {
+    Clear();
+  }
 }
 
 }  // namespace mygramdb::server

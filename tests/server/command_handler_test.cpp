@@ -23,6 +23,7 @@
 #include "server/handlers/search_handler.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
+#include "server/sync_operation_manager.h"
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
 
@@ -49,6 +50,14 @@ class CommandHandlerLoadingTest : public ::testing::Test {
     table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id), "hello world");
 
     config_ = std::make_unique<config::Config>();
+#ifdef USE_MYSQL
+    config_->mysql.host = "localhost";
+    config_->mysql.port = 3306;
+    config_->mysql.user = "test";
+    config_->mysql.password = "test";
+    config_->mysql.database = "testdb";
+    sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, config_.get(), nullptr);
+#endif
     stats_ = std::make_unique<ServerStats>();
     table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
 
@@ -63,14 +72,25 @@ class CommandHandlerLoadingTest : public ::testing::Test {
         .replication_paused_for_dump = replication_paused_for_dump_,
         .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
-        .sync_manager = nullptr,
+        .sync_manager = sync_manager_.get(),
 #endif
     });
+  }
+
+  void TearDown() override {
+#ifdef USE_MYSQL
+    if (sync_manager_ != nullptr) {
+      sync_manager_->ClearSyncingTableForTest("articles");
+    }
+#endif
   }
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
+#ifdef USE_MYSQL
+  std::unique_ptr<SyncOperationManager> sync_manager_;
+#endif
   std::unique_ptr<ServerStats> stats_;
   std::unique_ptr<TableCatalog> table_catalog_;
   std::atomic<bool> dump_load_in_progress_{false};
@@ -137,6 +157,64 @@ TEST_F(CommandHandlerLoadingTest, FacetHandlerReturnsLoadingErrorWhenDumpLoadInP
 
   EXPECT_EQ(response, kLoadingError);
 }
+
+#ifdef USE_MYSQL
+TEST_F(CommandHandlerLoadingTest, SearchHandlerReturnsNotReadyWhenTableIsSyncing) {
+  sync_manager_->MarkSyncingTableForTest("articles");
+
+  query::QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello");
+  ASSERT_TRUE(query.has_value()) << query.error().message();
+
+  SearchHandler handler(*handler_ctx_);
+  std::string response = handler.Handle(*query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("synchronizing"), std::string::npos) << response;
+}
+
+TEST_F(CommandHandlerLoadingTest, CountHandlerReturnsNotReadyWhenTableIsSyncing) {
+  sync_manager_->MarkSyncingTableForTest("articles");
+
+  query::QueryParser parser;
+  auto query = parser.Parse("COUNT articles hello");
+  ASSERT_TRUE(query.has_value()) << query.error().message();
+
+  SearchHandler handler(*handler_ctx_);
+  std::string response = handler.Handle(*query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("synchronizing"), std::string::npos) << response;
+}
+
+TEST_F(CommandHandlerLoadingTest, DocumentHandlerReturnsNotReadyWhenTableIsSyncing) {
+  sync_manager_->MarkSyncingTableForTest("articles");
+
+  query::QueryParser parser;
+  auto query = parser.Parse("GET articles doc-1");
+  ASSERT_TRUE(query.has_value()) << query.error().message();
+
+  DocumentHandler handler(*handler_ctx_);
+  std::string response = handler.Handle(*query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("synchronizing"), std::string::npos) << response;
+}
+
+TEST_F(CommandHandlerLoadingTest, FacetHandlerReturnsNotReadyWhenTableIsSyncing) {
+  sync_manager_->MarkSyncingTableForTest("articles");
+
+  query::QueryParser parser;
+  auto query = parser.Parse("FACET articles category");
+  ASSERT_TRUE(query.has_value()) << query.error().message();
+
+  FacetHandler handler(*handler_ctx_);
+  std::string response = handler.Handle(*query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("synchronizing"), std::string::npos) << response;
+}
+#endif
 
 // Sanity check: when the flag is clear, none of the handlers emit the
 // loading-error response. They may still produce other ERRORs (e.g. an empty

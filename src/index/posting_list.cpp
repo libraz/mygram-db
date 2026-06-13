@@ -6,6 +6,7 @@
 #include "index/posting_list.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdlib>
 #include <limits>
@@ -18,6 +19,39 @@ namespace mygramdb::index {
 constexpr double kHysteresisFactor = 0.5;
 
 namespace {
+
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+std::atomic<bool> g_fail_next_roaring_create{false};
+std::atomic<bool> g_fail_next_roaring_and{false};
+std::atomic<bool> g_fail_next_roaring_or{false};
+#endif
+
+roaring_bitmap_t* CreateRoaringBitmap() {
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  if (g_fail_next_roaring_create.exchange(false, std::memory_order_acq_rel)) {
+    return nullptr;
+  }
+#endif
+  return roaring_bitmap_create();
+}
+
+roaring_bitmap_t* AndRoaringBitmaps(const roaring_bitmap_t* lhs, const roaring_bitmap_t* rhs) {
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  if (g_fail_next_roaring_and.exchange(false, std::memory_order_acq_rel)) {
+    return nullptr;
+  }
+#endif
+  return roaring_bitmap_and(lhs, rhs);
+}
+
+roaring_bitmap_t* OrRoaringBitmaps(const roaring_bitmap_t* lhs, const roaring_bitmap_t* rhs) {
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  if (g_fail_next_roaring_or.exchange(false, std::memory_order_acq_rel)) {
+    return nullptr;
+  }
+#endif
+  return roaring_bitmap_or(lhs, rhs);
+}
 
 /**
  * @brief Write a uint32_t in little-endian byte order to a buffer
@@ -110,6 +144,22 @@ bool IsValidDeltaEncoding(const std::vector<uint32_t>& encoded) {
 
 PostingList::PostingList(double roaring_threshold) : roaring_threshold_(roaring_threshold) {}
 
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+void PostingList::FailNextRoaringOperationForTest(TestRoaringFault fault) {
+  switch (fault) {
+    case TestRoaringFault::kCreate:
+      g_fail_next_roaring_create.store(true, std::memory_order_release);
+      break;
+    case TestRoaringFault::kAnd:
+      g_fail_next_roaring_and.store(true, std::memory_order_release);
+      break;
+    case TestRoaringFault::kOr:
+      g_fail_next_roaring_or.store(true, std::memory_order_release);
+      break;
+  }
+}
+#endif
+
 PostingList::~PostingList() {
   if (roaring_bitmap_ != nullptr) {
     roaring_bitmap_free(roaring_bitmap_);
@@ -193,13 +243,13 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
     return;
   }
 
-  assert(std::is_sorted(doc_ids.begin(), doc_ids.end()));
-
   const std::vector<DocId>* normalized_doc_ids = &doc_ids;
   std::vector<DocId> deduped_doc_ids;
-  if (std::adjacent_find(doc_ids.begin(), doc_ids.end()) != doc_ids.end()) {
-    deduped_doc_ids.reserve(doc_ids.size());
-    std::unique_copy(doc_ids.begin(), doc_ids.end(), std::back_inserter(deduped_doc_ids));
+  if (!std::is_sorted(doc_ids.begin(), doc_ids.end()) ||
+      std::adjacent_find(doc_ids.begin(), doc_ids.end()) != doc_ids.end()) {
+    deduped_doc_ids = doc_ids;
+    std::sort(deduped_doc_ids.begin(), deduped_doc_ids.end());
+    deduped_doc_ids.erase(std::unique(deduped_doc_ids.begin(), deduped_doc_ids.end()), deduped_doc_ids.end());
     normalized_doc_ids = &deduped_doc_ids;
   }
 
@@ -453,14 +503,32 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
   std::lock(lock1, lock2);                                // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
+  auto get_docs_locked = [](const PostingList& list) {
+    std::vector<DocId> docs;
+    if (list.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+      docs = DecodeDelta(list.delta_compressed_);
+    } else {
+      uint64_t size = roaring_bitmap_get_cardinality(list.roaring_bitmap_);
+      docs.resize(size);
+      roaring_bitmap_to_uint32_array(list.roaring_bitmap_, docs.data());
+    }
+    return docs;
+  };
 
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap &&
       other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap AND
-    roaring_bitmap_t* intersected = roaring_bitmap_and(roaring_bitmap_, other.roaring_bitmap_);
+    roaring_bitmap_t* intersected = AndRoaringBitmaps(roaring_bitmap_, other.roaring_bitmap_);
     if (intersected == nullptr) {
-      // OOM: return empty list with delta strategy (safe fallback)
-      result->doc_count_.store(0, std::memory_order_relaxed);
+      std::vector<DocId> docs1 = get_docs_locked(*this);
+      std::vector<DocId> docs2 = get_docs_locked(other);
+      std::vector<DocId> intersection;
+      std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(intersection));
+      result->delta_compressed_ = EncodeDelta(intersection);
+      result->doc_count_.store(intersection.size(), std::memory_order_relaxed);
+      if (!intersection.empty()) {
+        result->last_doc_id_ = intersection.back();
+      }
       return result;
     }
     result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
@@ -473,23 +541,8 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
   } else {
     // At least one is delta: fall back to sorted array intersection
     // Note: GetAll() would try to acquire the lock again, so we inline the logic
-    std::vector<DocId> docs1;
-    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
-      docs1 = DecodeDelta(delta_compressed_);
-    } else {
-      uint64_t size1 = roaring_bitmap_get_cardinality(roaring_bitmap_);
-      docs1.resize(size1);
-      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs1.data());
-    }
-
-    std::vector<DocId> docs2;
-    if (other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
-      docs2 = DecodeDelta(other.delta_compressed_);
-    } else {
-      uint64_t size2 = roaring_bitmap_get_cardinality(other.roaring_bitmap_);
-      docs2.resize(size2);
-      roaring_bitmap_to_uint32_array(other.roaring_bitmap_, docs2.data());
-    }
+    std::vector<DocId> docs1 = get_docs_locked(*this);
+    std::vector<DocId> docs2 = get_docs_locked(other);
 
     std::vector<DocId> intersection;
     std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(intersection));
@@ -530,14 +583,32 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
   std::lock(lock1, lock2);                                // Deadlock-safe acquisition
 
   auto result = std::make_unique<PostingList>(roaring_threshold_);
+  auto get_docs_locked = [](const PostingList& list) {
+    std::vector<DocId> docs;
+    if (list.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
+      docs = DecodeDelta(list.delta_compressed_);
+    } else {
+      uint64_t size = roaring_bitmap_get_cardinality(list.roaring_bitmap_);
+      docs.resize(size);
+      roaring_bitmap_to_uint32_array(list.roaring_bitmap_, docs.data());
+    }
+    return docs;
+  };
 
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap &&
       other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap OR
-    roaring_bitmap_t* united = roaring_bitmap_or(roaring_bitmap_, other.roaring_bitmap_);
+    roaring_bitmap_t* united = OrRoaringBitmaps(roaring_bitmap_, other.roaring_bitmap_);
     if (united == nullptr) {
-      // OOM: return empty list with delta strategy (safe fallback)
-      result->doc_count_.store(0, std::memory_order_relaxed);
+      std::vector<DocId> docs1 = get_docs_locked(*this);
+      std::vector<DocId> docs2 = get_docs_locked(other);
+      std::vector<DocId> union_result;
+      std::set_union(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(union_result));
+      result->delta_compressed_ = EncodeDelta(union_result);
+      result->doc_count_.store(union_result.size(), std::memory_order_relaxed);
+      if (!union_result.empty()) {
+        result->last_doc_id_ = union_result.back();
+      }
       return result;
     }
     result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
@@ -550,23 +621,8 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
   } else {
     // At least one is delta: fall back to sorted array union
     // Note: GetAll() would try to acquire the lock again, so we inline the logic
-    std::vector<DocId> docs1;
-    if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
-      docs1 = DecodeDelta(delta_compressed_);
-    } else {
-      uint64_t size1 = roaring_bitmap_get_cardinality(roaring_bitmap_);
-      docs1.resize(size1);
-      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs1.data());
-    }
-
-    std::vector<DocId> docs2;
-    if (other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kDeltaCompressed) {
-      docs2 = DecodeDelta(other.delta_compressed_);
-    } else {
-      uint64_t size2 = roaring_bitmap_get_cardinality(other.roaring_bitmap_);
-      docs2.resize(size2);
-      roaring_bitmap_to_uint32_array(other.roaring_bitmap_, docs2.data());
-    }
+    std::vector<DocId> docs1 = get_docs_locked(*this);
+    std::vector<DocId> docs2 = get_docs_locked(other);
 
     std::vector<DocId> union_result;
     std::set_union(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(union_result));
@@ -652,7 +708,7 @@ void PostingList::ConvertToRoaring() {
   }
 
   auto docs = DecodeDelta(delta_compressed_);
-  roaring_bitmap_ = roaring_bitmap_create();
+  roaring_bitmap_ = CreateRoaringBitmap();
   if (roaring_bitmap_ == nullptr) {
     // OOM: keep delta-compressed strategy, log error
     mygram::utils::StructuredLog()
@@ -701,20 +757,26 @@ std::vector<uint32_t> PostingList::EncodeDelta(const std::vector<DocId>& doc_ids
     return {};
   }
 
-  // Debug assertion: input must be strictly sorted (no duplicates)
-  assert(std::is_sorted(doc_ids.begin(), doc_ids.end()) && "EncodeDelta: input must be sorted");
-  assert(std::adjacent_find(doc_ids.begin(), doc_ids.end()) == doc_ids.end() &&
-         "EncodeDelta: input must not contain duplicates");
+  const std::vector<DocId>* normalized_doc_ids = &doc_ids;
+  std::vector<DocId> sorted_unique_doc_ids;
+  if (!std::is_sorted(doc_ids.begin(), doc_ids.end()) ||
+      std::adjacent_find(doc_ids.begin(), doc_ids.end()) != doc_ids.end()) {
+    sorted_unique_doc_ids = doc_ids;
+    std::sort(sorted_unique_doc_ids.begin(), sorted_unique_doc_ids.end());
+    sorted_unique_doc_ids.erase(std::unique(sorted_unique_doc_ids.begin(), sorted_unique_doc_ids.end()),
+                                sorted_unique_doc_ids.end());
+    normalized_doc_ids = &sorted_unique_doc_ids;
+  }
 
   std::vector<uint32_t> encoded;
-  encoded.reserve(doc_ids.size());
+  encoded.reserve(normalized_doc_ids->size());
 
   // First value as-is
-  encoded.push_back(doc_ids[0]);
+  encoded.push_back((*normalized_doc_ids)[0]);
 
   // Rest as deltas
-  for (size_t i = 1; i < doc_ids.size(); ++i) {
-    encoded.push_back(doc_ids[i] - doc_ids[i - 1]);
+  for (size_t i = 1; i < normalized_doc_ids->size(); ++i) {
+    encoded.push_back((*normalized_doc_ids)[i] - (*normalized_doc_ids)[i - 1]);
   }
 
   return encoded;

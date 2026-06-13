@@ -130,8 +130,14 @@ std::vector<std::pair<uint32_t, uint32_t>> Highlighter::FindMatchPositions(
     }
   }
 
-  // Sort by start position, then by end position (longer match first)
-  std::sort(positions.begin(), positions.end());
+  // Sort by start position, then by end position descending so identical
+  // starts keep the longest match during overlap removal.
+  std::sort(positions.begin(), positions.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.first != rhs.first) {
+      return lhs.first < rhs.first;
+    }
+    return lhs.second > rhs.second;
+  });
 
   // Remove overlapping matches (keep the first one)
   std::vector<std::pair<uint32_t, uint32_t>> deduped;

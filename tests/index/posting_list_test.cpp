@@ -61,6 +61,19 @@ TEST_F(PostingListTest, SizeLargeDataset) {
   EXPECT_EQ(posting.Size(), 50);
 }
 
+TEST_F(PostingListTest, AddBatchSortsAndDeduplicatesInput) {
+  PostingList posting(0.5);
+
+  posting.AddBatch({30, 10, 20, 10, 30});
+
+  EXPECT_EQ(posting.Size(), 3);
+  EXPECT_EQ(posting.GetAll(), (std::vector<DocId>{10, 20, 30}));
+
+  posting.AddBatch({25, 20, 40, 25});
+  EXPECT_EQ(posting.Size(), 5);
+  EXPECT_EQ(posting.GetAll(), (std::vector<DocId>{10, 20, 25, 30, 40}));
+}
+
 /**
  * @brief Test SizeApprox returns the same value as Size after Add operations
  *
@@ -113,6 +126,64 @@ TEST_F(PostingListTest, SizeApproxAfterRoaringConversion) {
   posting.Remove(25);
   EXPECT_EQ(posting.SizeApprox(), 49);
   EXPECT_EQ(posting.SizeApprox(), posting.Size());
+}
+
+TEST_F(PostingListTest, RoaringCreateFailureKeepsDeltaData) {
+  PostingList posting(0.01);
+  std::vector<DocId> ids;
+  for (DocId id = 1; id <= 50; ++id) {
+    ids.push_back(id);
+  }
+  posting.AddBatch(ids);
+
+  PostingList::FailNextRoaringOperationForTest(PostingList::TestRoaringFault::kCreate);
+  posting.Optimize(50);
+
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(posting.Size(), 50);
+  EXPECT_EQ(posting.GetAll(), ids);
+
+  posting.Optimize(50);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  EXPECT_EQ(posting.GetAll(), ids);
+}
+
+TEST_F(PostingListTest, RoaringIntersectFailureFallsBackToExactDeltaResult) {
+  PostingList left(0.01);
+  PostingList right(0.01);
+  left.AddBatch({1, 2, 3, 4, 5, 6});
+  right.AddBatch({4, 5, 6, 7, 8});
+  left.Optimize(8);
+  right.Optimize(8);
+  ASSERT_EQ(left.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  ASSERT_EQ(right.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  PostingList::FailNextRoaringOperationForTest(PostingList::TestRoaringFault::kAnd);
+  auto result = left.Intersect(right);
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(result->GetAll(), (std::vector<DocId>{4, 5, 6}));
+  EXPECT_EQ(result->Size(), 3);
+}
+
+TEST_F(PostingListTest, RoaringUnionFailureFallsBackToExactDeltaResult) {
+  PostingList left(0.01);
+  PostingList right(0.01);
+  left.AddBatch({1, 2, 3, 4, 5, 6});
+  right.AddBatch({4, 5, 6, 7, 8});
+  left.Optimize(8);
+  right.Optimize(8);
+  ASSERT_EQ(left.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  ASSERT_EQ(right.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  PostingList::FailNextRoaringOperationForTest(PostingList::TestRoaringFault::kOr);
+  auto result = left.Union(right);
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(result->GetAll(), (std::vector<DocId>{1, 2, 3, 4, 5, 6, 7, 8}));
+  EXPECT_EQ(result->Size(), 8);
 }
 
 /**

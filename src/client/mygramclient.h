@@ -81,6 +81,21 @@ struct CountResponse {
 };
 
 /**
+ * @brief Single facet value/count pair
+ */
+struct FacetValue {
+  std::string value;   // Facet display value
+  uint64_t count = 0;  // Number of matching documents for the value
+};
+
+/**
+ * @brief Facet query response
+ */
+struct FacetResponse {
+  std::vector<FacetValue> facets;  // Facet value counts
+};
+
+/**
  * @brief Server information
  */
 struct ServerInfo {
@@ -234,6 +249,26 @@ class MygramClient {
       bool sort_desc = true) const;
 
   /**
+   * @brief Search using a pre-built QueryAST expression without decomposing it
+   *
+   * Use this with ConvertSearchExpression() output when boolean OR/grouping
+   * semantics must be preserved. The full expression is sent as one SEARCH
+   * text token so the server's AST parser can interpret it.
+   */
+  mygram::utils::Expected<SearchResponse, mygram::utils::Error> SearchRaw(const std::string& table,
+                                                                          const std::string& raw_query,
+                                                                          uint32_t limit = 0,
+                                                                          uint32_t offset = 0) const;
+
+  /**
+   * @brief SearchRaw variant that returns highlighted snippets
+   */
+  mygram::utils::Expected<SearchResponse, mygram::utils::Error> SearchRawWithHighlights(const std::string& table,
+                                                                                        const std::string& raw_query,
+                                                                                        uint32_t limit = 0,
+                                                                                        uint32_t offset = 0) const;
+
+  /**
    * @brief Count matching documents
    *
    * @param table Table name
@@ -246,6 +281,23 @@ class MygramClient {
   mygram::utils::Expected<CountResponse, mygram::utils::Error> Count(
       const std::string& table, const std::string& query, const std::vector<std::string>& and_terms = {},
       const std::vector<std::string>& not_terms = {},
+      const std::vector<std::pair<std::string, std::string>>& filters = {}) const;
+
+  /**
+   * @brief Count matching documents by facet column value
+   *
+   * @param table Table name
+   * @param column Facet column name
+   * @param query Optional search query text
+   * @param limit Maximum number of facet values to return (0 = server default/no explicit limit)
+   * @param and_terms Additional required terms
+   * @param not_terms Excluded terms
+   * @param filters Filter conditions (key=value pairs)
+   * @return Expected<FacetResponse, Error>
+   */
+  mygram::utils::Expected<FacetResponse, mygram::utils::Error> Facet(
+      const std::string& table, const std::string& column, const std::string& query = "", uint32_t limit = 0,
+      const std::vector<std::string>& and_terms = {}, const std::vector<std::string>& not_terms = {},
       const std::vector<std::pair<std::string, std::string>>& filters = {}) const;
 
   /**
@@ -269,6 +321,21 @@ class MygramClient {
    * @return Expected<std::string, Error>
    */
   mygram::utils::Expected<std::string, mygram::utils::Error> GetConfig() const;
+
+  mygram::utils::Expected<void, mygram::utils::Error> SetVariable(const std::string& name,
+                                                                  const std::string& value) const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> ShowVariables(const std::string& like_pattern = "") const;
+  mygram::utils::Expected<void, mygram::utils::Error> CacheClear(const std::string& table = "") const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> CacheStats() const;
+  mygram::utils::Expected<void, mygram::utils::Error> CacheEnable() const;
+  mygram::utils::Expected<void, mygram::utils::Error> CacheDisable() const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> Optimize(const std::string& table = "") const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> Sync(const std::string& table) const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> SyncStatus() const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> SyncStop(const std::string& table = "") const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> DumpInfo(const std::string& filepath) const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> DumpStatus() const;
+  mygram::utils::Expected<std::string, mygram::utils::Error> DumpVerify(const std::string& filepath) const;
 
   /**
    * @brief Save snapshot to disk

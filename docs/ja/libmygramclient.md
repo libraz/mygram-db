@@ -63,8 +63,8 @@ int main() {
         return 1;
     }
 
-    // 検索
-    auto result = client.Search("articles", "hello world", 100);
+    // 検索。テーブル名は DB 修飾形式 <database>.<table> を使用します。
+    auto result = client.Search("app_db.articles", "hello world", 100);
     if (auto* err = std::get_if<Error>(&result)) {
         std::cerr << "検索失敗: " << err->message << std::endl;
         return 1;
@@ -98,7 +98,7 @@ std::vector<std::pair<std::string, std::string>> filters = {
 };
 
 auto result = client.Search(
-    "articles",           // テーブル名
+    "app_db.articles",    // DB 修飾テーブル名
     "technology",         // クエリ
     50,                   // 上限
     0,                    // オフセット
@@ -113,7 +113,7 @@ auto result = client.Search(
 ### COUNT クエリ
 
 ```cpp
-auto result = client.Count("articles", "hello");
+auto result = client.Count("app_db.articles", "hello");
 if (auto* resp = std::get_if<CountResponse>(&result)) {
     std::cout << "合計マッチ数: " << resp->count << "\n";
 }
@@ -122,7 +122,7 @@ if (auto* resp = std::get_if<CountResponse>(&result)) {
 ### ドキュメント取得
 
 ```cpp
-auto result = client.Get("articles", "12345");
+auto result = client.Get("app_db.articles", "12345");
 if (auto* doc = std::get_if<Document>(&result)) {
     std::cout << "プライマリキー: " << doc->primary_key << "\n";
     for (const auto& [key, value] : doc->fields) {
@@ -148,7 +148,7 @@ if (auto* info = std::get_if<ServerInfo>(&result)) {
 // デバッグモード有効化
 client.EnableDebug();
 
-auto result = client.Search("articles", "hello", 10);
+auto result = client.Search("app_db.articles", "hello", 10);
 if (auto* resp = std::get_if<SearchResponse>(&result)) {
     if (resp->debug) {
         std::cout << "クエリ時間: " << resp->debug->query_time_ms << "ms\n";
@@ -230,7 +230,7 @@ if (result.index() == 0) {
     // query = "golang AND NOT old"
 
     // MygramClientで使用
-    auto search_result = client.Search("articles", query, 100);
+    auto search_result = client.Search("app_db.articles", query, 100);
 }
 ```
 
@@ -307,7 +307,7 @@ int main() {
 
     // 検索
     MygramSearchResult_C* result = NULL;
-    if (mygramclient_search(client, "articles", "hello", 100, 0, &result) == 0) {
+    if (mygramclient_search(client, "app_db.articles", "hello", 100, 0, &result) == 0) {
         printf("%llu件の結果を発見（%zu件表示）:\n",
                result->total_count, result->count);
         for (size_t i = 0; i < result->count; i++) {
@@ -344,7 +344,7 @@ const char* filter_values[] = {"active", "tech"};
 MygramSearchResult_C* result = NULL;
 int ret = mygramclient_search_advanced(
     client,
-    "articles",           // テーブル名
+    "app_db.articles",    // DB 修飾テーブル名
     "technology",         // クエリ
     50,                   // 上限
     0,                    // オフセット

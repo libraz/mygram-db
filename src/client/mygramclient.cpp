@@ -45,6 +45,37 @@ namespace {
 constexpr int64_t kMillisecondsPerSecond = mygram::constants::kMillisecondsPerSecond;
 constexpr int64_t kMicrosecondsPerMillisecond = mygram::constants::kMicrosecondsPerMillisecond;
 constexpr std::chrono::milliseconds kDumpStatusPollInterval{100};
+constexpr unsigned char kAsciiSpace = 0x20;
+
+std::string QuoteCommandArgumentIfNeeded(const std::string& arg) {
+  bool needs_quotes = arg.empty();
+  for (char character : arg) {
+    if (std::isspace(static_cast<unsigned char>(character)) != 0 || character == '"' || character == '\\' ||
+        character == '\'') {
+      needs_quotes = true;
+      break;
+    }
+  }
+
+  if (!needs_quotes) {
+    return arg;
+  }
+
+  std::string quoted;
+  quoted.reserve(arg.size() + 2);
+  quoted += '"';
+  for (char character : arg) {
+    if (static_cast<unsigned char>(character) < kAsciiSpace) {
+      continue;
+    }
+    if (character == '"' || character == '\\') {
+      quoted += '\\';
+    }
+    quoted += character;
+  }
+  quoted += '"';
+  return quoted;
+}
 
 /**
  * @brief Check if response is an error and return appropriate Expected
@@ -727,66 +758,10 @@ class MygramClient::Impl {
     return response;
   }
 
-  Expected<SearchResponse, Error> Search(const std::string& table, const std::string& query, uint32_t limit,
-                                         uint32_t offset, const std::vector<std::string>& and_terms,
-                                         const std::vector<std::string>& not_terms,
-                                         const std::vector<std::pair<std::string, std::string>>& filters,
-                                         const std::string& sort_column, bool sort_desc, bool highlight = false) const {
-    if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-    }
-    if (!sort_column.empty()) {
-      // sort_column is an identifier sent unquoted on the wire; reject whitespace.
-      if (auto err = ValidateIdentifier(sort_column, "sort column")) {
-        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
-      }
-    }
-
-    // Build command
-    std::ostringstream cmd;
-    cmd << "SEARCH " << table << " " << EscapeQueryString(query);
-
-    for (const auto& term : and_terms) {
-      cmd << " AND " << EscapeQueryString(term);
-    }
-
-    for (const auto& term : not_terms) {
-      cmd << " NOT " << EscapeQueryString(term);
-    }
-
-    for (const auto& [key, value] : filters) {
-      cmd << " FILTER " << key << " = " << EscapeQueryString(value);
-    }
-
-    // SORT clause (replaces ORDER BY)
-    if (!sort_column.empty()) {
-      cmd << " SORT " << sort_column << (sort_desc ? " DESC" : " ASC");
-    } else if (!sort_desc) {
-      // Only add SORT ASC if explicitly requesting ascending order for primary key
-      cmd << " SORT ASC";
-    }
-    // Default is SORT DESC (primary key descending), so no need to add it explicitly
-
-    if (highlight) {
-      cmd << " HIGHLIGHT";
-    }
-
-    // LIMIT / OFFSET clauses.
-    // - When both are set, prefer the atomic MySQL-style "LIMIT offset,count" form.
-    // - When only LIMIT is set, emit "LIMIT <n>".
-    // - When only OFFSET is set, emit "OFFSET <n>" so the server still skips the
-    //   first <n> results (the previous behaviour silently dropped the offset).
-    if (limit > 0 && offset > 0) {
-      cmd << " LIMIT " << offset << "," << limit;
-    } else if (limit > 0) {
-      cmd << " LIMIT " << limit;
-    } else if (offset > 0) {
-      cmd << " OFFSET " << offset;
-    }
-
+  Expected<SearchResponse, Error> ExecuteSearchCommand(const std::string& command) const {
     // Parse response: "OK RESULTS <total_count> [<id1> <id2> ...]"
     // optionally followed by "\r\n\r\n# DEBUG\r\n<key: value>...".
-    auto result = SendAndExpectPrefix(cmd.str(), proto::kOkResultsPrefix);
+    auto result = SendAndExpectPrefix(command, proto::kOkResultsPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -845,6 +820,90 @@ class MygramClient::Impl {
     return resp;
   }
 
+  static void AppendLimitOffset(std::ostringstream& cmd, uint32_t limit, uint32_t offset) {
+    // LIMIT / OFFSET clauses.
+    // - When both are set, prefer the atomic MySQL-style "LIMIT offset,count" form.
+    // - When only LIMIT is set, emit "LIMIT <n>".
+    // - When only OFFSET is set, emit "OFFSET <n>" so the server still skips the
+    //   first <n> results.
+    if (limit > 0 && offset > 0) {
+      cmd << " LIMIT " << offset << "," << limit;
+    } else if (limit > 0) {
+      cmd << " LIMIT " << limit;
+    } else if (offset > 0) {
+      cmd << " OFFSET " << offset;
+    }
+  }
+
+  Expected<SearchResponse, Error> Search(const std::string& table, const std::string& query, uint32_t limit,
+                                         uint32_t offset, const std::vector<std::string>& and_terms,
+                                         const std::vector<std::string>& not_terms,
+                                         const std::vector<std::pair<std::string, std::string>>& filters,
+                                         const std::string& sort_column, bool sort_desc, bool highlight = false) const {
+    if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    if (!sort_column.empty()) {
+      // sort_column is an identifier sent unquoted on the wire; reject whitespace.
+      if (auto err = ValidateIdentifier(sort_column, "sort column")) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+      }
+    }
+
+    // Build command
+    std::ostringstream cmd;
+    cmd << "SEARCH " << table << " " << EscapeQueryString(query);
+
+    for (const auto& term : and_terms) {
+      cmd << " AND " << EscapeQueryString(term);
+    }
+
+    for (const auto& term : not_terms) {
+      cmd << " NOT " << EscapeQueryString(term);
+    }
+
+    for (const auto& [key, value] : filters) {
+      cmd << " FILTER " << key << " = " << EscapeQueryString(value);
+    }
+
+    // SORT clause (replaces ORDER BY)
+    if (!sort_column.empty()) {
+      cmd << " SORT " << sort_column << (sort_desc ? " DESC" : " ASC");
+    } else if (!sort_desc) {
+      // Only add SORT ASC if explicitly requesting ascending order for primary key
+      cmd << " SORT ASC";
+    }
+    // Default is SORT DESC (primary key descending), so no need to add it explicitly
+
+    if (highlight) {
+      cmd << " HIGHLIGHT";
+    }
+
+    AppendLimitOffset(cmd, limit, offset);
+    return ExecuteSearchCommand(cmd.str());
+  }
+
+  Expected<SearchResponse, Error> SearchRaw(const std::string& table, const std::string& raw_query, uint32_t limit,
+                                            uint32_t offset, bool highlight = false) const {
+    if (auto err = ValidateIdentifier(table, "table name")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    if (raw_query.empty()) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "Input for raw query is empty"));
+    }
+    if (auto err = ValidateNoControlCharacters(raw_query, "raw query")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+
+    std::ostringstream cmd;
+    cmd << "SEARCH " << table << " " << EscapeQueryString(raw_query);
+    if (highlight) {
+      cmd << " HIGHLIGHT";
+    }
+    AppendLimitOffset(cmd, limit, offset);
+    return ExecuteSearchCommand(cmd.str());
+  }
+
   Expected<CountResponse, Error> Count(const std::string& table, const std::string& query,
                                        const std::vector<std::string>& and_terms,
                                        const std::vector<std::string>& not_terms,
@@ -890,6 +949,90 @@ class MygramClient::Impl {
 
     if (!debug_part.empty()) {
       resp.debug = ParseDebugInfo(debug_part);
+    }
+
+    return resp;
+  }
+
+  Expected<FacetResponse, Error> Facet(const std::string& table, const std::string& column, const std::string& query,
+                                       uint32_t limit, const std::vector<std::string>& and_terms,
+                                       const std::vector<std::string>& not_terms,
+                                       const std::vector<std::pair<std::string, std::string>>& filters) const {
+    if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    if (auto err = ValidateIdentifier(column, "facet column")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+
+    std::ostringstream cmd;
+    cmd << "FACET " << table << " " << column;
+    if (!query.empty()) {
+      cmd << " " << EscapeQueryString(query);
+    }
+
+    for (const auto& term : and_terms) {
+      cmd << " AND " << EscapeQueryString(term);
+    }
+
+    for (const auto& term : not_terms) {
+      cmd << " NOT " << EscapeQueryString(term);
+    }
+
+    for (const auto& [key, value] : filters) {
+      cmd << " FILTER " << key << " = " << EscapeQueryString(value);
+    }
+
+    if (limit > 0) {
+      cmd << " LIMIT " << limit;
+    }
+
+    auto result = SendAndExpectPrefix(cmd.str(), proto::kOkFacetPrefix);
+    if (!result) {
+      return MakeUnexpected(result.error());
+    }
+
+    FacetResponse resp;
+    std::istringstream stream(*result);
+    std::string line;
+    if (!std::getline(stream, line)) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET response"));
+    }
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+
+    std::istringstream header(line);
+    std::string ok;
+    std::string facet;
+    uint64_t expected_count = 0;
+    header >> ok >> facet >> expected_count;
+    if (ok != "OK" || facet != "FACET") {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET response header"));
+    }
+
+    while (std::getline(stream, line)) {
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
+
+      size_t tab_pos = line.find('\t');
+      if (tab_pos == std::string::npos) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET response row"));
+      }
+
+      auto parsed_count = mygram::utils::ParseNumeric<uint64_t>(line.substr(tab_pos + 1));
+      if (!parsed_count) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET count"));
+      }
+      resp.facets.push_back({line.substr(0, tab_pos), *parsed_count});
+    }
+
+    if (resp.facets.size() != expected_count) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "FACET response count mismatch"));
     }
 
     return resp;
@@ -977,6 +1120,115 @@ class MygramClient::Impl {
     return SendAndExpectPrefix("CONFIG", std::string_view{});
   }
 
+  Expected<void, Error> SetVariable(const std::string& name, const std::string& value) const {
+    if (name.empty()) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "Variable name is empty"));
+    }
+    if (auto err = ValidateNoControlCharacters(name, "variable name")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    if (auto err = ValidateNoControlCharacters(value, "variable value")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+
+    auto result = SendAndExpectPrefix("SET " + name + " = " + QuoteCommandArgumentIfNeeded(value), std::string_view{});
+    if (!result) {
+      return MakeUnexpected(result.error());
+    }
+    return {};
+  }
+
+  Expected<std::string, Error> ShowVariables(const std::string& like_pattern) const {
+    if (auto err = ValidateNoControlCharacters(like_pattern, "LIKE pattern")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    std::string cmd = "SHOW VARIABLES";
+    if (!like_pattern.empty()) {
+      cmd += " LIKE " + QuoteCommandArgumentIfNeeded(like_pattern);
+    }
+    return SendAndExpectPrefix(cmd, std::string_view{});
+  }
+
+  Expected<void, Error> CacheClear(const std::string& table) const {
+    if (!table.empty()) {
+      if (auto err = ValidateIdentifier(table, "table name")) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+      }
+    }
+    auto result = SendAndExpectPrefix(table.empty() ? "CACHE CLEAR" : "CACHE CLEAR " + table, proto::kOkCacheCleared);
+    if (!result) {
+      return MakeUnexpected(result.error());
+    }
+    return {};
+  }
+
+  Expected<std::string, Error> CacheStats() const {
+    return SendAndExpectPrefix("CACHE STATS", proto::kOkCacheStatsPrefix);
+  }
+
+  Expected<void, Error> CacheEnable() const {
+    auto result = SendAndExpectPrefix("CACHE ENABLE", proto::kOkCacheEnabled);
+    if (!result) {
+      return MakeUnexpected(result.error());
+    }
+    return {};
+  }
+
+  Expected<void, Error> CacheDisable() const {
+    auto result = SendAndExpectPrefix("CACHE DISABLE", proto::kOkCacheDisabled);
+    if (!result) {
+      return MakeUnexpected(result.error());
+    }
+    return {};
+  }
+
+  Expected<std::string, Error> Optimize(const std::string& table) const {
+    if (!table.empty()) {
+      if (auto err = ValidateIdentifier(table, "table name")) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+      }
+    }
+    return SendAndExpectPrefix(table.empty() ? "OPTIMIZE" : "OPTIMIZE " + table, proto::kOkOptimizedPrefix);
+  }
+
+  Expected<std::string, Error> Sync(const std::string& table) const {
+    if (auto err = ValidateIdentifier(table, "table name")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    return SendAndExpectPrefix("SYNC " + table, proto::kOkSyncPrefix);
+  }
+
+  Expected<std::string, Error> SyncStatus() const {
+    return SendAndExpectPrefix("SYNC STATUS", proto::kOkSyncStatusPrefix);
+  }
+
+  Expected<std::string, Error> SyncStop(const std::string& table) const {
+    if (!table.empty()) {
+      if (auto err = ValidateIdentifier(table, "table name")) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+      }
+    }
+    return SendAndExpectPrefix(table.empty() ? "SYNC STOP" : "SYNC STOP " + table, std::string_view{});
+  }
+
+  Expected<std::string, Error> DumpInfo(const std::string& filepath) const {
+    if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    return SendAndExpectPrefix("DUMP INFO " + QuoteCommandArgumentIfNeeded(filepath), proto::kOkDumpInfoPrefix);
+  }
+
+  Expected<std::string, Error> DumpStatus() const {
+    return SendAndExpectPrefix("DUMP STATUS", proto::kOkDumpStatusPrefix);
+  }
+
+  Expected<std::string, Error> DumpVerify(const std::string& filepath) const {
+    if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    }
+    return SendAndExpectPrefix("DUMP VERIFY " + QuoteCommandArgumentIfNeeded(filepath), proto::kOkDumpVerifiedPrefix);
+  }
+
   Expected<std::string, Error> Save(const std::string& filepath) const {
     if (!filepath.empty()) {
       if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
@@ -984,7 +1236,7 @@ class MygramClient::Impl {
       }
     }
 
-    std::string cmd = filepath.empty() ? "DUMP SAVE" : "DUMP SAVE " + filepath;
+    std::string cmd = filepath.empty() ? "DUMP SAVE" : "DUMP SAVE " + QuoteCommandArgumentIfNeeded(filepath);
 
     auto result = SendAndExpectPrefix(cmd, std::string_view{});
     if (!result) {
@@ -1005,7 +1257,7 @@ class MygramClient::Impl {
     }
 
     // Parse: OK LOADED <filepath>
-    auto result = SendAndExpectPrefix("DUMP LOAD " + filepath, proto::kOkLoadedPrefix);
+    auto result = SendAndExpectPrefix("DUMP LOAD " + QuoteCommandArgumentIfNeeded(filepath), proto::kOkLoadedPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -1160,10 +1412,29 @@ mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::Sear
                        /*highlight=*/true);
 }
 
+mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::SearchRaw(const std::string& table,
+                                                                                      const std::string& raw_query,
+                                                                                      uint32_t limit,
+                                                                                      uint32_t offset) const {
+  return impl_->SearchRaw(table, raw_query, limit, offset);
+}
+
+mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::SearchRawWithHighlights(
+    const std::string& table, const std::string& raw_query, uint32_t limit, uint32_t offset) const {
+  return impl_->SearchRaw(table, raw_query, limit, offset, /*highlight=*/true);
+}
+
 mygram::utils::Expected<CountResponse, mygram::utils::Error> MygramClient::Count(
     const std::string& table, const std::string& query, const std::vector<std::string>& and_terms,
     const std::vector<std::string>& not_terms, const std::vector<std::pair<std::string, std::string>>& filters) const {
   return impl_->Count(table, query, and_terms, not_terms, filters);
+}
+
+mygram::utils::Expected<FacetResponse, mygram::utils::Error> MygramClient::Facet(
+    const std::string& table, const std::string& column, const std::string& query, uint32_t limit,
+    const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
+    const std::vector<std::pair<std::string, std::string>>& filters) const {
+  return impl_->Facet(table, column, query, limit, and_terms, not_terms, filters);
 }
 
 mygram::utils::Expected<Document, mygram::utils::Error> MygramClient::Get(const std::string& table,
@@ -1177,6 +1448,60 @@ mygram::utils::Expected<ServerInfo, mygram::utils::Error> MygramClient::Info() c
 
 mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::GetConfig() const {
   return impl_->GetConfig();
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::SetVariable(const std::string& name,
+                                                                              const std::string& value) const {
+  return impl_->SetVariable(name, value);
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::ShowVariables(
+    const std::string& like_pattern) const {
+  return impl_->ShowVariables(like_pattern);
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::CacheClear(const std::string& table) const {
+  return impl_->CacheClear(table);
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::CacheStats() const {
+  return impl_->CacheStats();
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::CacheEnable() const {
+  return impl_->CacheEnable();
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> MygramClient::CacheDisable() const {
+  return impl_->CacheDisable();
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::Optimize(const std::string& table) const {
+  return impl_->Optimize(table);
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::Sync(const std::string& table) const {
+  return impl_->Sync(table);
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::SyncStatus() const {
+  return impl_->SyncStatus();
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::SyncStop(const std::string& table) const {
+  return impl_->SyncStop(table);
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::DumpInfo(const std::string& filepath) const {
+  return impl_->DumpInfo(filepath);
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::DumpStatus() const {
+  return impl_->DumpStatus();
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::DumpVerify(const std::string& filepath) const {
+  return impl_->DumpVerify(filepath);
 }
 
 mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::Save(const std::string& filepath) const {

@@ -48,6 +48,15 @@ typedef struct {
 } MygramSearchResult_C;
 
 /**
+ * @brief Facet result
+ */
+typedef struct {
+  char** values;     // Array of facet values
+  uint64_t* counts;  // Array of facet counts, aligned with values
+  size_t count;      // Number of facet values
+} MygramFacetResult_C;
+
+/**
  * @brief Search result with highlight snippets
  */
 typedef struct {
@@ -148,6 +157,33 @@ int mygramclient_search_with_highlights(MygramClient_C* client, const char* tabl
                                         uint32_t offset, MygramSearchResultWithHighlights_C** result);
 
 /**
+ * @brief Search for documents with AND/NOT/FILTER clauses and return highlight snippets
+ *
+ * @param client Client handle
+ * @param table Table name
+ * @param query Search query text
+ * @param limit Maximum number of results (0 for default)
+ * @param offset Result offset for pagination
+ * @param and_terms Array of AND terms (can be NULL)
+ * @param and_count Number of AND terms
+ * @param not_terms Array of NOT terms (can be NULL)
+ * @param not_count Number of NOT terms
+ * @param filter_keys Array of filter keys (can be NULL)
+ * @param filter_values Array of filter values (can be NULL)
+ * @param filter_count Number of filters
+ * @param sort_column Column name for SORT clause (can be NULL for primary key)
+ * @param sort_desc Sort descending (0 = ascending, 1 = descending, default 1)
+ * @param result Output search results (caller must free with mygramclient_free_search_result_with_highlights)
+ * @return 0 on success, -1 on error
+ */
+int mygramclient_search_with_highlights_advanced(MygramClient_C* client, const char* table, const char* query,
+                                                 uint32_t limit, uint32_t offset, const char** and_terms,
+                                                 size_t and_count, const char** not_terms, size_t not_count,
+                                                 const char** filter_keys, const char** filter_values,
+                                                 size_t filter_count, const char* sort_column, int sort_desc,
+                                                 MygramSearchResultWithHighlights_C** result);
+
+/**
  * @brief Search for documents with AND/NOT/FILTER clauses
  *
  * @param client Client handle
@@ -205,6 +241,43 @@ int mygramclient_count_advanced(MygramClient_C* client, const char* table, const
                                 const char** filter_values, size_t filter_count, uint64_t* count);
 
 /**
+ * @brief Count matching documents by facet column value
+ *
+ * @param client Client handle
+ * @param table Table name
+ * @param column Facet column name
+ * @param query Optional search query text (can be empty)
+ * @param limit Maximum number of facet values (0 for no explicit limit)
+ * @param result Output facet values (caller must free with mygramclient_free_facet_result)
+ * @return 0 on success, -1 on error
+ */
+int mygramclient_facet(MygramClient_C* client, const char* table, const char* column, const char* query, uint32_t limit,
+                       MygramFacetResult_C** result);
+
+/**
+ * @brief Count matching documents by facet column value with AND/NOT/FILTER clauses
+ *
+ * @param client Client handle
+ * @param table Table name
+ * @param column Facet column name
+ * @param query Optional search query text (can be empty)
+ * @param limit Maximum number of facet values (0 for no explicit limit)
+ * @param and_terms Array of AND terms (can be NULL)
+ * @param and_count Number of AND terms
+ * @param not_terms Array of NOT terms (can be NULL)
+ * @param not_count Number of NOT terms
+ * @param filter_keys Array of filter keys (can be NULL)
+ * @param filter_values Array of filter values (can be NULL)
+ * @param filter_count Number of filters
+ * @param result Output facet values (caller must free with mygramclient_free_facet_result)
+ * @return 0 on success, -1 on error
+ */
+int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const char* column, const char* query,
+                                uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
+                                size_t not_count, const char** filter_keys, const char** filter_values,
+                                size_t filter_count, MygramFacetResult_C** result);
+
+/**
  * @brief Get document by primary key
  *
  * @param client Client handle
@@ -232,6 +305,20 @@ int mygramclient_info(MygramClient_C* client, MygramServerInfo_C** info);
  * @return 0 on success, -1 on error
  */
 int mygramclient_get_config(MygramClient_C* client, char** config_str);
+
+int mygramclient_set_variable(MygramClient_C* client, const char* name, const char* value);
+int mygramclient_show_variables(MygramClient_C* client, const char* like_pattern, char** response);
+int mygramclient_cache_clear(MygramClient_C* client, const char* table);
+int mygramclient_cache_stats(MygramClient_C* client, char** response);
+int mygramclient_cache_enable(MygramClient_C* client);
+int mygramclient_cache_disable(MygramClient_C* client);
+int mygramclient_optimize(MygramClient_C* client, const char* table, char** response);
+int mygramclient_sync(MygramClient_C* client, const char* table, char** response);
+int mygramclient_sync_status(MygramClient_C* client, char** response);
+int mygramclient_sync_stop(MygramClient_C* client, const char* table, char** response);
+int mygramclient_dump_info(MygramClient_C* client, const char* filepath, char** response);
+int mygramclient_dump_status(MygramClient_C* client, char** response);
+int mygramclient_dump_verify(MygramClient_C* client, const char* filepath, char** response);
 
 /**
  * @brief Save snapshot to disk
@@ -342,6 +429,17 @@ int mygramclient_send_command(MygramClient_C* client, const char* command, char*
 const char* mygramclient_get_last_error(const MygramClient_C* client);
 
 /**
+ * @brief Get last error code
+ *
+ * Returns the numeric MygramDB error code (for example, client errors use the 7000 range).
+ * Returns 1 (kUnknown) for an invalid client handle.
+ *
+ * @param client Client handle
+ * @return Last error code, or 0 after successful operations that clear the error state
+ */
+int mygramclient_get_last_error_code(const MygramClient_C* client);
+
+/**
  * @brief Free search result
  *
  * @param result Search result to free
@@ -354,6 +452,13 @@ void mygramclient_free_search_result(MygramSearchResult_C* result);
  * @param result Search result to free
  */
 void mygramclient_free_search_result_with_highlights(MygramSearchResultWithHighlights_C* result);
+
+/**
+ * @brief Free facet result
+ *
+ * @param result Facet result to free
+ */
+void mygramclient_free_facet_result(MygramFacetResult_C* result);
 
 /**
  * @brief Free document

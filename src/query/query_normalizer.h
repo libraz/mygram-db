@@ -40,12 +40,10 @@ class QueryNormalizer {
   /**
    * @brief Normalize query for cache key generation
    * @param query Parsed query object
-   * @param primary_key_column Name of the primary key column for the table
    * @param text_normalizer Optional index-compatible normalizer for search, AND, and NOT terms
    * @return Normalized query string
    */
-  static std::string Normalize(const query::Query& query, const std::string& primary_key_column = "id",
-                               const TextNormalizer& text_normalizer = nullptr);
+  static std::string Normalize(const query::Query& query, const TextNormalizer& text_normalizer = nullptr);
 
  private:
   /**

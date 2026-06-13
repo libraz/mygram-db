@@ -16,3 +16,7 @@ target_link_libraries(mygramdb_index PUBLIC
   spdlog::spdlog
   absl::flat_hash_map
 )
+
+if(BUILD_TESTS)
+  target_compile_definitions(mygramdb_index PUBLIC MYGRAMDB_INDEX_TEST_HOOKS)
+endif()

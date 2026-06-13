@@ -1,5 +1,5 @@
-# MariaDB test container — uses the same port (13306) and DB name as MySQL
-# so that mygramdb-test.yaml works unchanged.
+# MariaDB test container. Uses a distinct host port from MySQL so matrix
+# runs can switch flavors by changing MYSQL_PORT and MYGRAMDB_CONFIG.
 services:
   mariadb:
     image: mariadb:${MARIADB_VERSION:-11.4}

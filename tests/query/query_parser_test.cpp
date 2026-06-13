@@ -28,6 +28,56 @@ TEST(QueryParserTest, SearchBasic) {
   EXPECT_TRUE(query->IsValid());
 }
 
+TEST(QueryParserTest, SearchAcceptsDatabaseQualifiedTableName) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH app_db.articles hello");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SEARCH);
+  EXPECT_EQ(query->table, "app_db.articles");
+  EXPECT_EQ(query->search_text, "hello");
+  EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, TableCommandsAcceptDatabaseQualifiedTableName) {
+  QueryParser parser;
+
+  auto count = parser.Parse("COUNT app_db.articles hello");
+  ASSERT_TRUE(count);
+  EXPECT_EQ(count->type, QueryType::COUNT);
+  EXPECT_EQ(count->table, "app_db.articles");
+
+  auto get = parser.Parse("GET app_db.articles pk1");
+  ASSERT_TRUE(get);
+  EXPECT_EQ(get->type, QueryType::GET);
+  EXPECT_EQ(get->table, "app_db.articles");
+
+  auto facet = parser.Parse("FACET app_db.articles status hello");
+  ASSERT_TRUE(facet);
+  EXPECT_EQ(facet->type, QueryType::FACET);
+  EXPECT_EQ(facet->table, "app_db.articles");
+
+  auto cache_clear = parser.Parse("CACHE CLEAR app_db.articles");
+  ASSERT_TRUE(cache_clear);
+  EXPECT_EQ(cache_clear->type, QueryType::CACHE_CLEAR);
+  EXPECT_EQ(cache_clear->table, "app_db.articles");
+
+  auto optimize = parser.Parse("OPTIMIZE app_db.articles");
+  ASSERT_TRUE(optimize);
+  EXPECT_EQ(optimize->type, QueryType::OPTIMIZE);
+  EXPECT_EQ(optimize->table, "app_db.articles");
+
+  auto sync = parser.Parse("SYNC app_db.articles");
+  ASSERT_TRUE(sync);
+  EXPECT_EQ(sync->type, QueryType::SYNC);
+  EXPECT_EQ(sync->table, "app_db.articles");
+
+  auto sync_stop = parser.Parse("SYNC STOP app_db.articles");
+  ASSERT_TRUE(sync_stop);
+  EXPECT_EQ(sync_stop->type, QueryType::SYNC_STOP);
+  EXPECT_EQ(sync_stop->table, "app_db.articles");
+}
+
 /**
  * @brief Test SEARCH with LIMIT
  */
@@ -2824,6 +2874,24 @@ TEST(QueryParserFacetTest, FacetWithAndNot) {
   EXPECT_EQ(result->and_terms[0], "world");
   EXPECT_EQ(result->not_terms.size(), 1);
   EXPECT_EQ(result->not_terms[0], "bad");
+}
+
+TEST(QueryParserFacetTest, FacetWithTopLevelOrKeepsBooleanExpressionInSearchText) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t column hello OR world FILTER status = active");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->search_text, "hello OR world");
+  ASSERT_EQ(result->filters.size(), 1);
+  EXPECT_EQ(result->filters[0].column, "status");
+  EXPECT_EQ(result->filters[0].value, "active");
+}
+
+TEST(QueryParserFacetTest, FacetOrderByReturnsSortHint) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t column hello ORDER BY created_at");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Use SORT instead"), std::string::npos);
 }
 
 // DESIGN-2: facet_column length validation

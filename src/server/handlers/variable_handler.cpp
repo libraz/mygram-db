@@ -6,6 +6,7 @@
 #include "server/handlers/variable_handler.h"
 
 #include <algorithm>
+#include <atomic>
 #include <iomanip>
 #include <sstream>
 #include <vector>
@@ -27,6 +28,11 @@ constexpr size_t kMinValueColumnWidth = 15;
 constexpr size_t kMutableColumnWidth = 7;  // "Mutable" or "YES"/"NO"
 constexpr size_t kColumnPadding = 2;       // Spaces before and after content
 constexpr size_t kBorderWidth = 9;         // Width of "Mutable" column with borders
+
+std::string MysqlVariableBlockedByOperationMessage(const std::string& variable_name, const std::string& operation) {
+  return "Cannot change '" + variable_name + "' while " + operation + " is in progress. Please wait for " + operation +
+         " to complete.";
+}
 }  // namespace
 
 std::string VariableHandler::Handle(const Query& query, ConnectionContext& /*conn_ctx*/) {
@@ -55,10 +61,19 @@ std::string VariableHandler::HandleSet(const Query& query) {
   // host/port.
   for (const auto& [variable_name, value] : query.variable_assignments) {
     if (variable_name.rfind("mysql.", 0) == 0) {
+      if (ctx_.dump_save_in_progress.load(std::memory_order_acquire)) {
+        return ResponseFormatter::FormatError(MysqlVariableBlockedByOperationMessage(variable_name, "DUMP SAVE"));
+      }
+      if (ctx_.dump_load_in_progress.load(std::memory_order_acquire)) {
+        return ResponseFormatter::FormatError(MysqlVariableBlockedByOperationMessage(variable_name, "DUMP LOAD"));
+      }
+      if (ctx_.replication_paused_for_dump.load(std::memory_order_acquire)) {
+        return ResponseFormatter::FormatError(
+            "Cannot change '" + variable_name +
+            "' while replication is paused for DUMP/SNAPSHOT. Please wait for the operation to complete.");
+      }
       if (ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing()) {
-        return ResponseFormatter::FormatError("Cannot change '" + variable_name +
-                                              "' while SYNC is in progress. "
-                                              "Please wait for SYNC to complete.");
+        return ResponseFormatter::FormatError(MysqlVariableBlockedByOperationMessage(variable_name, "SYNC"));
       }
     }
   }

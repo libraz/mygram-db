@@ -7,6 +7,7 @@
 #define MYGRAMDB_APP_SERVER_ORCHESTRATOR_H_
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -53,6 +54,18 @@ class SignalManager;
  */
 [[nodiscard]] std::vector<std::string> CollectRequiredTableNames(
     const std::unordered_map<std::string, std::unique_ptr<server::TableContext>>& table_contexts);
+
+using LatestGtidProvider = std::function<Expected<std::string, mygram::utils::Error>()>;
+
+/**
+ * @brief Resolve the configured replication start GTID.
+ *
+ * Query failures for `replication.start_from=latest` are fatal; an empty
+ * returned GTID remains a valid start position for fresh servers.
+ */
+Expected<std::string, mygram::utils::Error> ResolveReplicationStartGtid(std::string_view start_from,
+                                                                        std::string_view snapshot_gtid,
+                                                                        const LatestGtidProvider& latest_provider);
 
 /**
  * @brief Orchestrates server component lifecycle
@@ -162,6 +175,7 @@ class ServerOrchestrator {
   Expected<void, mygram::utils::Error> InitializeBinlogReader();
   Expected<void, mygram::utils::Error> InitializeServers();
   void RegisterRuntimeCallbacks();
+  std::unordered_map<std::string, server::TableContext*> BuildTableContextPointerMap();
 
   // Dependencies (non-owning)
   Dependencies deps_;

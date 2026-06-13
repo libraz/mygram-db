@@ -13,38 +13,39 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
     : enabled_(cache_config.enabled),
       ttl_seconds_(cache_config.ttl_seconds),
       table_invalidation_strategy_(cache_config.invalidation_strategy == "table") {
+  // Create the cache internals even when runtime enforcement starts disabled.
+  // That lets SET cache.enabled=true enable caching without a server restart.
+  query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms,
+                                              ttl_seconds_, cache_config.compression_enabled);
+
+  // Create invalidation manager
+  invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
+
+  // Set eviction callback to clean up invalidation metadata. Per-key path
+  // is used by Erase(); bulk paths (Clear/ClearTable/EvictForSpace/RefreshLRU)
+  // route through the batch callback below to amortize the
+  // InvalidationManager::mutex_ acquisition.
+  query_cache_->SetEvictionCallback([this](const CacheKey& key) {
+    if (invalidation_mgr_) {
+      invalidation_mgr_->UnregisterCacheEntry(key);
+    }
+  });
+
+  // Batch eviction callback: takes InvalidationManager::mutex_ exactly once
+  // for the whole batch instead of once per key. Bound to the same
+  // invalidation_mgr_ as the per-key callback.
+  query_cache_->SetBatchEvictionCallback([this](const std::vector<CacheKey>& keys) {
+    if (invalidation_mgr_) {
+      invalidation_mgr_->UnregisterCacheEntries(keys);
+    }
+  });
+
+  // Create invalidation queue with per-table ngram settings
+  invalidation_queue_ =
+      std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(), std::move(ngram_configs));
+  invalidation_queue_->SetBatchSize(cache_config.invalidation.batch_size);
+  invalidation_queue_->SetMaxDelay(cache_config.invalidation.max_delay_ms);
   if (enabled_) {
-    // Create query cache with TTL support
-    query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms,
-                                                ttl_seconds_, cache_config.compression_enabled);
-
-    // Create invalidation manager
-    invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
-
-    // Set eviction callback to clean up invalidation metadata. Per-key path
-    // is used by Erase(); bulk paths (Clear/ClearTable/EvictForSpace/RefreshLRU)
-    // route through the batch callback below to amortize the
-    // InvalidationManager::mutex_ acquisition.
-    query_cache_->SetEvictionCallback([this](const CacheKey& key) {
-      if (invalidation_mgr_) {
-        invalidation_mgr_->UnregisterCacheEntry(key);
-      }
-    });
-
-    // Batch eviction callback: takes InvalidationManager::mutex_ exactly once
-    // for the whole batch instead of once per key. Bound to the same
-    // invalidation_mgr_ as the per-key callback.
-    query_cache_->SetBatchEvictionCallback([this](const std::vector<CacheKey>& keys) {
-      if (invalidation_mgr_) {
-        invalidation_mgr_->UnregisterCacheEntries(keys);
-      }
-    });
-
-    // Create invalidation queue with per-table ngram settings
-    invalidation_queue_ =
-        std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(), std::move(ngram_configs));
-    invalidation_queue_->SetBatchSize(cache_config.invalidation.batch_size);
-    invalidation_queue_->SetMaxDelay(cache_config.invalidation.max_delay_ms);
     invalidation_queue_->Start();
   }
 }
@@ -127,8 +128,17 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
                           const std::vector<std::string>& ngrams, double query_cost_ms, int ngram_size,
                           int kanji_ngram_size, bool cross_boundary_ngrams) {
-  return InsertIfVersion(query, result, ngrams, query_cost_ms, CaptureDataVersion(), ngram_size, kanji_ngram_size,
-                         cross_boundary_ngrams);
+  return InsertIfVersion(query, result, ngrams, query_cost_ms, CaptureDataVersion(query.table), ngram_size,
+                         kanji_ngram_size, cross_boundary_ngrams);
+}
+
+uint64_t CacheManager::CaptureDataVersion(const std::string& table_name) const {
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  auto it = table_data_versions_.find(table_name);
+  if (it == table_data_versions_.end()) {
+    return 0;
+  }
+  return it->second;
 }
 
 bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<DocId>& result,
@@ -168,6 +178,7 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   metadata.ngram_size = ngram_size;
   metadata.kanji_ngram_size = kanji_ngram_size;
   metadata.cross_boundary_ngrams = cross_boundary_ngrams;
+  metadata.has_not_terms = !query.not_terms.empty();
   metadata.access_count = 0;
 
   // Serialize Insert with Clear/ClearTable so that we never end up with a key
@@ -177,7 +188,9 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   if (!enabled_.load(std::memory_order_acquire)) {
     return false;
   }
-  if (data_version_.load(std::memory_order_acquire) != expected_data_version) {
+  const auto table_version_it = table_data_versions_.find(query.table);
+  const uint64_t current_table_version = table_version_it == table_data_versions_.end() ? 0 : table_version_it->second;
+  if (current_table_version != expected_data_version) {
     return false;
   }
 
@@ -208,6 +221,10 @@ void CacheManager::Invalidate(const std::string& table_name, const std::string& 
   }
 
   data_version_.fetch_add(1, std::memory_order_acq_rel);
+  {
+    std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+    ++table_data_versions_[table_name];
+  }
 
   // Enqueue for asynchronous invalidation
   invalidation_queue_->Enqueue(table_name, old_text, new_text, filter_columns_changed);
@@ -223,6 +240,7 @@ void CacheManager::Clear() {
   // leave behind phantom metadata. See serialize_mutex_ doc in cache_manager.h.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
   data_version_.fetch_add(1, std::memory_order_acq_rel);
+  table_data_versions_.clear();
 
   if (query_cache_) {
     // QueryCache::Clear() invokes eviction_callback_ for every entry, which
@@ -248,6 +266,7 @@ void CacheManager::ClearTable(const std::string& table_name) {
   // doc in cache_manager.h.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
   data_version_.fetch_add(1, std::memory_order_acq_rel);
+  ++table_data_versions_[table_name];
 
   if (query_cache_) {
     query_cache_->ClearTable(table_name);
@@ -330,6 +349,7 @@ void CacheManager::Disable() {
   // queued behind this Clear exits without adding post-disable metadata.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
   data_version_.fetch_add(1, std::memory_order_acq_rel);
+  table_data_versions_.clear();
   if (query_cache_) {
     query_cache_->Clear();
   }

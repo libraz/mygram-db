@@ -98,6 +98,13 @@ ReactorConnection::~ReactorConnection() {
   }
 }
 
+int ReactorConnection::ReleaseFd() noexcept {
+  const int released_fd = fd_;
+  fd_ = -1;
+  closed_ = true;
+  return released_fd;
+}
+
 bool ReactorConnection::OnReadable() {
   // Refresh idle-timer baseline. Any inbound event counts as activity for
   // the reaper, even if recv() ultimately returns 0 (peer half-close): the

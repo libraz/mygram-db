@@ -195,6 +195,7 @@ struct SynonymConfig {
  */
 struct TableConfig {
   std::string name;
+  std::string database;
   std::string primary_key = "id";
   TextSourceConfig text_source;
   std::vector<RequiredFilterConfig> required_filters;  // Data existence conditions
@@ -205,6 +206,14 @@ struct TableConfig {
   PostingConfig posting;
   SynonymConfig synonyms;
 };
+
+inline std::string QualifiedTableName(const std::string& database, const std::string& table) {
+  return database.empty() ? table : database + "." + table;
+}
+
+inline std::string QualifiedTableName(const TableConfig& table) {
+  return QualifiedTableName(table.database, table.name);
+}
 
 /**
  * @brief Build configuration

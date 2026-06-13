@@ -363,7 +363,76 @@ TEST(DumpFormatV2Test, FullDumpRoundTrip) {
   EXPECT_EQ(read_config.mysql.database, write_config.mysql.database);
   EXPECT_EQ(read_config.tables.size(), 1u);
   EXPECT_EQ(read_config.tables[0].name, "articles");
+  EXPECT_EQ(read_config.tables[0].database, write_config.mysql.database);
   EXPECT_EQ(read_config.api.max_query_length, write_config.api.max_query_length);
+}
+
+TEST(DumpFormatV2Test, CrossDatabaseSameTableNameRoundTripUsesQualifiedKeys) {
+  auto filepath = TempFilePath("cross_database_same_table_roundtrip");
+  ScopedCleanup cleanup(filepath);
+
+  Config write_config = MakeTestConfig();
+  write_config.mysql.database = "default_db";
+  write_config.tables.clear();
+
+  TableConfig live;
+  live.name = "articles";
+  live.database = "live_db";
+  live.primary_key = "id";
+  live.text_source.column = "body";
+  live.ngram_size = 2;
+  live.kanji_ngram_size = 1;
+  write_config.tables.push_back(live);
+
+  TableConfig archive = live;
+  archive.database = "archive_db";
+  write_config.tables.push_back(archive);
+
+  Index live_index(2, 1);
+  DocumentStore live_store;
+  auto live_doc_id = live_store.AddDocument("live-1", {}, "lively text");
+  ASSERT_TRUE(live_doc_id.has_value()) << live_doc_id.error().message();
+  ASSERT_TRUE(live_index.AddDocument(*live_doc_id, "lively text"));
+
+  Index archive_index(2, 1);
+  DocumentStore archive_store;
+  auto archive_doc_id = archive_store.AddDocument("archive-1", {}, "zzzz record");
+  ASSERT_TRUE(archive_doc_id.has_value()) << archive_doc_id.error().message();
+  ASSERT_TRUE(archive_index.AddDocument(*archive_doc_id, "zzzz record"));
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> write_contexts;
+  write_contexts["live_db.articles"] = {&live_index, &live_store};
+  write_contexts["archive_db.articles"] = {&archive_index, &archive_store};
+
+  auto write_result = WriteDumpV2(filepath, "GTID:cross-db", write_config, write_contexts);
+  ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+  Index read_live_index(2, 1);
+  DocumentStore read_live_store;
+  Index read_archive_index(2, 1);
+  DocumentStore read_archive_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["live_db.articles"] = {&read_live_index, &read_live_store};
+  read_contexts["archive_db.articles"] = {&read_archive_index, &read_archive_store};
+
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+  ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+
+  EXPECT_EQ(read_gtid, "GTID:cross-db");
+  ASSERT_EQ(read_config.tables.size(), 2u);
+  EXPECT_EQ(read_config.tables[0].database, "live_db");
+  EXPECT_EQ(read_config.tables[1].database, "archive_db");
+
+  EXPECT_TRUE(read_live_store.GetDocId("live-1").has_value());
+  EXPECT_EQ(read_live_store.GetDocId("archive-1"), std::nullopt);
+  EXPECT_TRUE(read_archive_store.GetDocId("archive-1").has_value());
+  EXPECT_EQ(read_archive_store.GetDocId("live-1"), std::nullopt);
+  EXPECT_EQ(read_live_index.Count("li"), 1u);
+  EXPECT_EQ(read_live_index.Count("zz"), 0u);
+  EXPECT_EQ(read_archive_index.Count("zz"), 1u);
+  EXPECT_EQ(read_archive_index.Count("li"), 0u);
 }
 
 TEST(DumpFormatV2Test, FullDumpWithStatistics) {
@@ -702,6 +771,47 @@ TEST(DumpFormatV2Test, V1LoadFailsWhenDumpContainsUnexpectedTableAndLeavesExisti
   EXPECT_EQ(existing_articles_store.GetPrimaryKey(*old_doc_id), std::optional<std::string>("old-article"));
   EXPECT_EQ(existing_articles_index.Count("ol"), 1u);
   EXPECT_EQ(existing_articles_index.Count("ne"), 0u);
+}
+
+TEST(DumpFormatV2Test, DispatchV1RunsConfigValidatorBeforeApplyingTables) {
+  auto filepath = TempFilePath("v1_config_validator");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index source_index(2, 1);
+  ASSERT_TRUE(source_index.AddDocument(1, "new article text"));
+  DocumentStore source_store;
+  ASSERT_TRUE(source_store.AddDocument("new-article", {}, "new article text").has_value());
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> write_contexts;
+  write_contexts["articles"] = {&source_index, &source_store};
+  ASSERT_TRUE(dump_v1::WriteDumpV1(filepath, "V1_GTID:1", cfg, write_contexts).has_value());
+
+  DocumentStore existing_store;
+  auto old_doc_id = existing_store.AddDocument("old-article", {}, "old article text");
+  ASSERT_TRUE(old_doc_id.has_value()) << old_doc_id.error().message();
+  Index existing_index(2, 1);
+  ASSERT_TRUE(existing_index.AddDocument(*old_doc_id, "old article text"));
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&existing_index, &existing_store};
+
+  bool validator_called = false;
+  std::string read_gtid;
+  Config read_config;
+  auto read_result = ReadDump(
+      filepath, read_gtid, read_config, read_contexts, nullptr, nullptr, nullptr, [&](const Config& loaded_config) {
+        validator_called = true;
+        EXPECT_EQ(loaded_config.tables.size(), 1u);
+        return mygram::utils::MakeUnexpected(
+            mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageDumpReadError, "validator rejected"));
+      });
+
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_TRUE(validator_called);
+  EXPECT_EQ(existing_store.GetPrimaryKey(*old_doc_id), std::optional<std::string>("old-article"));
+  EXPECT_EQ(existing_index.Count("ol"), 1u);
+  EXPECT_EQ(existing_index.Count("ne"), 0u);
 }
 
 TEST(DumpFormatV2Test, DispatchReadsV2File) {

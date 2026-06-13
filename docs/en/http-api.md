@@ -23,16 +23,18 @@ api:
 
 ## API Endpoints
 
-All responses are in JSON format with `Content-Type: application/json`.
+All responses are in JSON format with `Content-Type: application/json`. Table routes use the database-qualified
+path prefix `/tables/{database}/{table}`; for example, table `articles` in database `app_db` is addressed as
+`/tables/app_db/articles`.
 
-### POST /{table}/search
+### POST /tables/{database}/{table}/search
 
 Full-text search with filters and pagination.
 
 **Request:**
 
 ```http
-POST /threads/search HTTP/1.1
+POST /tables/app_db/threads/search HTTP/1.1
 Content-Type: application/json
 
 {
@@ -122,7 +124,7 @@ Content-Type: application/json
 **Search with Highlighting Example:**
 
 ```http
-POST /articles/search HTTP/1.1
+POST /tables/app_db/articles/search HTTP/1.1
 Content-Type: application/json
 
 {
@@ -138,7 +140,7 @@ Content-Type: application/json
 }
 ```
 
-### POST /{table}/count
+### POST /tables/{database}/{table}/count
 
 Count documents matching a full-text query and optional filters. COUNT returns only the total count; pagination,
 highlighting, fuzzy search, and `_score` sorting are search-only features and are rejected on this endpoint.
@@ -146,7 +148,7 @@ highlighting, fuzzy search, and `_score` sorting are search-only features and ar
 **Request:**
 
 ```http
-POST /threads/count HTTP/1.1
+POST /tables/app_db/threads/count HTTP/1.1
 Content-Type: application/json
 
 {
@@ -165,20 +167,24 @@ Content-Type: application/json
 }
 ```
 
+### POST /tables/{database}/{table}/facet
+
+Return facet buckets for a column, optionally scoped by a query and filters.
+
 ### HTTP Surface Limits
 
 The HTTP API exposes search, count, document lookup, health, metrics, replication status, and redacted configuration
-inspection. FACET queries and administrative commands such as `SET`, `SHOW VARIABLES`, `SYNC`, and `DUMP` remain
-available through the TCP/CLI protocol and are not exposed as HTTP routes.
+inspection. Administrative commands such as `SET`, `SHOW VARIABLES`, `SYNC`, and `DUMP` remain available through the
+TCP/CLI protocol and are not exposed as HTTP routes.
 
-### GET /{table}/{primary_key}
+### GET /tables/{database}/{table}/{primary_key}
 
 Get a single document by its primary key. The response includes the internal `doc_id`.
 
 **Request:**
 
 ```http
-GET /threads/thread_12345 HTTP/1.1
+GET /tables/app_db/threads/thread_12345 HTTP/1.1
 ```
 
 **Response (200 OK):**

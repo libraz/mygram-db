@@ -49,7 +49,7 @@ static bool IsNonExpressionClauseKeyword(const std::string& token) {
  */
 static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextTokens(
     const std::vector<std::string>& tokens, size_t start_pos, Query& query, const std::string& command_name,
-    std::string& error_msg) {
+    std::string& error_msg, bool require_search_text = true) {
   // Check for comma-separated table names (SQL-style multi-table syntax)
   if (query.table.find(',') != std::string::npos || (tokens.size() > start_pos && tokens[start_pos] == ",")) {
     error_msg =
@@ -132,6 +132,10 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
 
     search_tokens.push_back(token);
     pos++;
+  }
+
+  if (search_tokens.empty() && !require_search_text) {
+    return pos;
   }
 
   if (search_tokens.empty()) {
@@ -418,33 +422,12 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  // Optional: search text (accumulate multiple tokens until a clause keyword)
-  {
-    std::vector<std::string> search_tokens;
-    while (pos < tokens.size()) {
-      std::string upper = ToUpper(tokens[pos]);
-      if (IsClauseKeyword(upper)) {
-        break;
-      }
-      if (EqualsIgnoreCase(tokens[pos], "ORDER")) {
-        break;
-      }
-      search_tokens.push_back(tokens[pos]);
-      pos++;
-    }
-    if (!search_tokens.empty()) {
-      query.search_text = search_tokens[0];
-      for (size_t i = 1; i < search_tokens.size(); ++i) {
-        const std::string& token = search_tokens[i];
-        bool prev_ends_with_open_paren = !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';
-        bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
-        if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
-          query.search_text += " ";
-        }
-        query.search_text += token;
-      }
-    }
+  auto search_result = ParseSearchTextTokens(tokens, pos, query, "FACET", error_, false);
+  if (!search_result.has_value()) {
+    SetError(error_);
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
+  pos = search_result.value();
 
   // Parse optional clauses (AND, NOT, FILTER, LIMIT, OFFSET)
   while (pos < tokens.size()) {

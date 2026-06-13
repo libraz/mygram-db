@@ -35,8 +35,9 @@
  *     call `reactor_->ArmWrite/DisarmWrite` while the mutex is held. The
  *     reverse is never done (no IoReactor method acquires `write_mutex_`).
  *   - `closing_` and `drain_scheduled_` are atomics.
- *   - `fd_` is immutable after construction; the destructor closes it
- *     exactly once via `closed_` guard.
+ *   - `fd_` is owned by this object after construction unless `ReleaseFd()`
+ *     is called before reactor registration succeeds. The destructor closes
+ *     owned fds exactly once via `closed_` guard.
  *   - `reactor_`, `dispatcher_`, `thread_pool_` are set once at construction
  *     and read-only thereafter.
  */
@@ -134,6 +135,15 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   /// Returns the raw client fd. The reactor still owns close(2).
   [[nodiscard]] int Fd() const { return fd_; }
+
+  /**
+   * @brief Release socket ownership without closing it.
+   *
+   * Used only when reactor registration fails before IoReactor has accepted
+   * ownership. The acceptor then remains the sole closer and may send a
+   * best-effort SERVER_BUSY response before close(2).
+   */
+  [[nodiscard]] int ReleaseFd() noexcept;
 
   // ---- Reactor event callbacks (event-loop thread) --------------------
 

@@ -8,12 +8,14 @@
 #include <roaring/roaring.h>
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <limits>
 #include <memory>
 #include <queue>
+#include <sstream>
 
 #include "cache/cache_key.h"
 #include "cache/cache_manager.h"
@@ -206,6 +208,48 @@ bool IntersectSorted(std::vector<storage::DocId>& accumulator, std::vector<stora
   return !accumulator.empty();
 }
 
+std::vector<storage::DocId> SearchNormalizedSubstring(const std::string& normalized_term,
+                                                      storage::DocumentStore* doc_store) {
+  if (normalized_term.empty() || doc_store == nullptr) {
+    return {};
+  }
+
+  auto candidates = doc_store->GetAllDocIds();
+  auto texts = doc_store->GetNormalizedTextBatch(candidates);
+
+  std::vector<storage::DocId> matches;
+  matches.reserve(candidates.size());
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    if (texts[i].has_value() && texts[i]->find(normalized_term) != std::string::npos) {
+      matches.push_back(candidates[i]);
+    }
+  }
+  return matches;
+}
+
+std::vector<storage::DocId> SearchTermDocuments(const SearchTermInfo& term_info, index::Index* current_index,
+                                                storage::DocumentStore* current_doc_store) {
+  if (term_info.ngrams.empty()) {
+    return SearchNormalizedSubstring(term_info.normalized_term, current_doc_store);
+  }
+  return current_index->SearchAnd(term_info.ngrams);
+}
+
+std::vector<SearchTermInfo> BuildCacheTermInfos(const std::vector<SearchTermInfo>& term_infos,
+                                                const query::Query& query, index::Index* current_index, int ngram_size,
+                                                int kanji_ngram_size, bool cross_boundary_ngrams) {
+  if (query.not_terms.empty()) {
+    return term_infos;
+  }
+
+  std::vector<SearchTermInfo> cache_term_infos = term_infos;
+  auto not_term_infos =
+      GenerateTermInfos(query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  cache_term_infos.insert(cache_term_infos.end(), std::make_move_iterator(not_term_infos.begin()),
+                          std::make_move_iterator(not_term_infos.end()));
+  return cache_term_infos;
+}
+
 /// Apply NOT filter and column filters (shared by all Execute* functions)
 void ApplyNotAndFilters(SearchPipelineResult& result, const query::Query& query, index::Index* current_index,
                         storage::DocumentStore* current_doc_store, int ngram_size, int kanji_ngram_size,
@@ -226,8 +270,7 @@ query::Query WithCanonicalCacheKey(const query::Query& query, const FullPipeline
   auto text_normalizer = [&params](std::string_view text) {
     return params.current_index != nullptr ? params.current_index->NormalizeText(text) : std::string(text);
   };
-  const std::string normalized =
-      cache::QueryNormalizer::Normalize(cache_query, params.primary_key_column, text_normalizer);
+  const std::string normalized = cache::QueryNormalizer::Normalize(cache_query, text_normalizer);
   if (!normalized.empty()) {
     const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
     cache_query.cache_key = std::make_pair(key.hash_high, key.hash_low);
@@ -272,6 +315,101 @@ std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& se
   }
 
   return term_infos;
+}
+
+TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, index::Index* current_index,
+                                                   const std::vector<SearchTermInfo>& term_infos, bool cache_hit,
+                                                   const std::string& primary_key_column,
+                                                   std::vector<storage::DocId>& results) {
+  TopNOptimizationResult result;
+  if (cache_hit || current_index == nullptr || term_infos.empty() || term_infos[0].estimated_size == 0) {
+    return result;
+  }
+
+  result.considered = true;
+
+  query::OrderByClause order_by;
+  if (query.order_by.has_value()) {
+    order_by = query.order_by.value();
+  } else {
+    order_by.column = "";
+    order_by.order = query::SortOrder::DESC;
+  }
+
+  auto equals_ignore_case = [](const std::string& lhs, const std::string& rhs) {
+    return lhs.size() == rhs.size() &&
+           std::equal(lhs.begin(), lhs.end(), rhs.begin(),
+                      [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); });
+  };
+
+  const bool is_primary_key_order = order_by.IsPrimaryKey() || equals_ignore_case(order_by.column, primary_key_column);
+  const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
+
+  // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+  constexpr uint32_t kMaxOffsetForOptimization = 10000;
+  constexpr double kReuseThreshold = 0.5;
+  // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+
+  result.applicable = term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() && query.limit > 0 &&
+                      query.offset <= kMaxOffsetForOptimization && is_primary_key_order && !is_score_sort;
+  if (!result.applicable) {
+    return result;
+  }
+
+  result.total_results = results.size();
+  result.reverse = order_by.order == query::SortOrder::DESC;
+  result.single_ngram = term_infos[0].ngrams.size() == 1;
+  if (result.total_results == 0) {
+    result.no_results = true;
+    return result;
+  }
+
+  const size_t index_limit = query.offset + query.limit;
+  const bool should_reuse =
+      (static_cast<double>(index_limit) / static_cast<double>(result.total_results)) > kReuseThreshold;
+  if (should_reuse) {
+    result.reused_existing = true;
+    return result;
+  }
+
+  results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, result.reverse);
+  result.optimized = true;
+  return result;
+}
+
+std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, index::Index* current_index,
+                                             const query::SynonymDictionary* synonym_dict) {
+  std::vector<std::string> terms;
+  terms.reserve(search_terms.size());
+
+  for (const auto& term : search_terms) {
+    std::string normalized = current_index != nullptr ? current_index->NormalizeText(term) : term;
+    if (normalized.empty()) {
+      continue;
+    }
+    terms.push_back(normalized);
+
+    std::istringstream pieces(normalized);
+    std::string piece;
+    while (pieces >> piece) {
+      if (piece != normalized) {
+        terms.push_back(piece);
+      }
+    }
+  }
+
+  if (synonym_dict != nullptr && !synonym_dict->IsEmpty()) {
+    std::vector<std::string> expanded;
+    for (const auto& term : terms) {
+      auto synonyms = synonym_dict->Expand(term);
+      expanded.insert(expanded.end(), std::make_move_iterator(synonyms.begin()),
+                      std::make_move_iterator(synonyms.end()));
+    }
+    terms = std::move(expanded);
+  }
+
+  mygram::utils::DeduplicateSorted(terms);
+  return terms;
 }
 
 std::vector<std::string> MergeSortedTermNgramsForCache(const std::vector<SearchTermInfo>& term_infos) {
@@ -332,7 +470,8 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
   // If any term has zero or max estimated size, the intersection result
   // is guaranteed to be empty, so skip the expensive search.
   for (const auto& ti : term_infos) {
-    if (ti.estimated_size == 0 || ti.estimated_size == std::numeric_limits<size_t>::max()) {
+    if ((ti.estimated_size == 0 || ti.estimated_size == std::numeric_limits<size_t>::max()) &&
+        (!ti.ngrams.empty() || ti.normalized_term.empty())) {
       result.empty_term_detected = true;
       return result;
     }
@@ -340,8 +479,18 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 
   // Perform intersection (AND of all terms)
   if (!term_infos.empty()) {
-    result.results = current_index->SearchAnd(term_infos[0].ngrams);
+    result.results = SearchTermDocuments(term_infos[0], current_index, current_doc_store);
     for (size_t i = 1; i < term_infos.size() && !result.results.empty(); ++i) {
+      if (term_infos[i].ngrams.empty()) {
+        auto and_results = SearchTermDocuments(term_infos[i], current_index, current_doc_store);
+        std::vector<storage::DocId> intersection;
+        intersection.reserve(std::min(result.results.size(), and_results.size()));
+        std::set_intersection(result.results.begin(), result.results.end(), and_results.begin(), and_results.end(),
+                              std::back_inserter(intersection));
+        result.results = std::move(intersection);
+        continue;
+      }
+
       // Use filter approach when candidate set is small enough
       if (result.results.size() <= filter_threshold) {
         result.results = current_index->FilterByNgrams(result.results, term_infos[i].ngrams);
@@ -377,20 +526,38 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
                                            const std::vector<std::string>& not_terms, index::Index* current_index,
                                            int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
-  // Generate NOT term n-grams
-  std::vector<std::string> not_ngrams;
-  // Reserve estimated capacity to avoid reallocation during NOT n-gram collection
-  not_ngrams.reserve(not_terms.size() * static_cast<size_t>(ngram_size));
+  if (results.empty() || not_terms.empty()) {
+    return results;
+  }
+
+  std::vector<storage::DocId> excluded_docs;
+  std::vector<storage::DocId> temp;
+
   for (const auto& not_term : not_terms) {
     std::string norm_not = current_index->NormalizeText(not_term);
     auto ngrams = mygram::utils::GenerateQueryNgrams(norm_not, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
-    not_ngrams.insert(not_ngrams.end(), std::make_move_iterator(ngrams.begin()), std::make_move_iterator(ngrams.end()));
+    mygram::utils::DeduplicateSorted(ngrams);
+    if (ngrams.empty()) {
+      continue;
+    }
+
+    auto term_docs = current_index->SearchAnd(ngrams);
+    temp.clear();
+    temp.reserve(excluded_docs.size() + term_docs.size());
+    std::set_union(excluded_docs.begin(), excluded_docs.end(), term_docs.begin(), term_docs.end(),
+                   std::back_inserter(temp));
+    excluded_docs.swap(temp);
   }
 
-  // Deduplicate n-grams to avoid redundant PostingList lookups in SearchNot
-  mygram::utils::DeduplicateSorted(not_ngrams);
+  if (excluded_docs.empty()) {
+    return results;
+  }
 
-  return current_index->SearchNot(results, not_ngrams);
+  std::vector<storage::DocId> filtered;
+  filtered.reserve(results.size());
+  std::set_difference(results.begin(), results.end(), excluded_docs.begin(), excluded_docs.end(),
+                      std::back_inserter(filtered));
+  return filtered;
 }
 
 namespace {
@@ -468,6 +635,9 @@ bool AllFiltersHaveBitmapSupport(const std::vector<query::FilterCondition>& filt
 RoaringBitmapPtr BuildTypeUnionBitmap(const storage::FilterIndex* filter_index, const std::string& column,
                                       const std::string& value) {
   RoaringBitmapPtr union_bm = MakeEmptyRoaring();
+  if (union_bm == nullptr) {
+    return nullptr;
+  }
 
   auto try_add = [&](const storage::FilterValue& fv) {
     std::string key = storage::FilterIndex::SerializeFilterValue(fv);
@@ -545,6 +715,11 @@ RoaringBitmapPtr BuildTypeUnionBitmap(const storage::FilterIndex* filter_index, 
 std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& results,
                                          const std::vector<query::FilterCondition>& filters,
                                          storage::DocumentStore* doc_store) {
+  // Eventual-consistency contract with BinlogEventProcessor: binlog apply
+  // updates DocumentStore and Index in two steps. A concurrent search can see
+  // a doc id whose store/filter row has not reached the same phase yet, or has
+  // just been removed from one side. Treat that as a transient non-match; do
+  // not crash, and do not assume a cross-store snapshot lock.
   std::vector<storage::DocId> filtered_results;
   filtered_results.reserve(results.size());
 
@@ -648,13 +823,22 @@ std::vector<storage::DocId> ApplyFiltersWithBitmap(const std::vector<storage::Do
 
   // Convert results vector to a temporary Roaring bitmap
   RoaringBitmapPtr result_bm = MakeRoaringFromVector(results);
+  if (result_bm == nullptr) {
+    return ApplyFilters(results, filters, doc_store);
+  }
 
   for (const auto& filter : filters) {
     if (filter.op == query::FilterOp::EQ) {
       RoaringBitmapPtr match_bm = BuildTypeUnionBitmap(filter_index.get(), filter.column, filter.value);
+      if (match_bm == nullptr) {
+        return ApplyFilters(results, filters, doc_store);
+      }
       roaring_bitmap_and_inplace(result_bm.get(), match_bm.get());
     } else if (filter.op == query::FilterOp::NE) {
       RoaringBitmapPtr exclude_bm = BuildTypeUnionBitmap(filter_index.get(), filter.column, filter.value);
+      if (exclude_bm == nullptr) {
+        return ApplyFilters(results, filters, doc_store);
+      }
       roaring_bitmap_andnot_inplace(result_bm.get(), exclude_bm.get());
     }
   }
@@ -1130,7 +1314,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   }
   const std::optional<uint64_t> cache_data_version =
       (params.cache_manager != nullptr && params.cache_manager->IsEnabled())
-          ? std::optional<uint64_t>{params.cache_manager->CaptureDataVersion()}
+          ? std::optional<uint64_t>{params.cache_manager->CaptureDataVersion(query.table)}
           : std::nullopt;
 
   // Start timing
@@ -1187,7 +1371,11 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
 
     if (!output.empty_term_detected) {
-      InsertToCache(params.cache_manager, cache_query, output.results, output.term_infos, output.query_time_ms,
+      auto cache_term_infos = GenerateTermInfos(all_boolean_terms, params.current_index, params.ngram_size,
+                                                params.kanji_ngram_size, cross_boundary);
+      cache_term_infos = BuildCacheTermInfos(cache_term_infos, query, params.current_index, params.ngram_size,
+                                             params.kanji_ngram_size, cross_boundary);
+      InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
                     params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
     }
     return output;
@@ -1218,7 +1406,9 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     // list during one query may not be missing for the next, and a cached
     // empty entry would mask future legitimate results until invalidated.
     if (!output.empty_term_detected) {
-      InsertToCache(params.cache_manager, cache_query, output.results, output.term_infos, output.query_time_ms,
+      auto cache_term_infos = BuildCacheTermInfos(output.term_infos, query, params.current_index, params.ngram_size,
+                                                  params.kanji_ngram_size, cross_boundary);
+      InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
                     params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
     }
     return output;
@@ -1253,6 +1443,8 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
           all_term_infos.push_back(variant);
         }
       }
+      all_term_infos = BuildCacheTermInfos(all_term_infos, query, params.current_index, params.ngram_size,
+                                           params.kanji_ngram_size, cross_boundary);
       InsertToCache(params.cache_manager, cache_query, output.results, all_term_infos, output.query_time_ms,
                     params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
     }
@@ -1288,7 +1480,9 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   // Store in cache if enabled. Skip on early-exit (empty posting list); see
   // the fuzzy path for the rationale.
   if (!output.empty_term_detected) {
-    InsertToCache(params.cache_manager, cache_query, output.results, output.term_infos, output.query_time_ms,
+    auto cache_term_infos = BuildCacheTermInfos(output.term_infos, query, params.current_index, params.ngram_size,
+                                                params.kanji_ngram_size, cross_boundary);
+    InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
                   params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
   }
 

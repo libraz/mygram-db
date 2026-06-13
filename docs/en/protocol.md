@@ -20,6 +20,9 @@ Or use the CLI client:
 
 Commands are text-based, one command per line. Responses are terminated with newline.
 
+Table references use the database-qualified form `<database>.<table>`. For example, a table named
+`articles` in database `app_db` is addressed as `app_db.articles`.
+
 ---
 
 ## SEARCH Command
@@ -29,19 +32,19 @@ Search for documents containing specified text.
 ### Syntax
 
 ```
-SEARCH <table> <text> [OPTIONS]
+SEARCH <db.table> <text> [OPTIONS]
 ```
 
 ### Basic Examples
 
 Simple search:
 ```
-SEARCH articles hello
+SEARCH app_db.articles hello
 ```
 
 With filters and pagination:
 ```
-SEARCH articles tech FILTER status = 1 LIMIT 10
+SEARCH app_db.articles tech FILTER status = 1 LIMIT 10
 ```
 
 ### Response
@@ -61,13 +64,13 @@ Count documents matching search criteria (without returning IDs).
 ### Syntax
 
 ```
-COUNT <table> <text> [OPTIONS]
+COUNT <db.table> <text> [OPTIONS]
 ```
 
 ### Example
 
 ```
-COUNT articles tech AND AI FILTER status = 1
+COUNT app_db.articles tech AND AI FILTER status = 1
 ```
 
 ### Response
@@ -87,13 +90,13 @@ Retrieve a document by primary key.
 ### Syntax
 
 ```
-GET <table> <primary_key>
+GET <db.table> <primary_key>
 ```
 
 ### Example
 
 ```
-GET articles 12345
+GET app_db.articles 12345
 ```
 
 ### Response
