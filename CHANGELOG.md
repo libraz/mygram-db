@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-06-15
+
 ### Added
 
 - **Database-qualified table identity** — Tables now carry a `(database, name)` identity written as `app_db.articles`. The effective database is `tables[*].database` when set, otherwise `mysql.database`. A single instance can index same-named tables from different databases (e.g. `live_db.articles` and `archive_db.articles`).
@@ -30,6 +32,8 @@ Migration:
 2. Single-database TCP/CLI/client-library users: no change required — bare table names keep working.
 3. Multi-database users: qualify every table reference as `<database>.<table>`.
 4. Keep old dumps for rollback, then create a fresh dump after upgrading so restored metadata includes qualified table identities.
+
+**Detailed Release Notes**: [docs/releases/v1.7.0.md](docs/releases/v1.7.0.md)
 
 ## [1.6.1] - 2026-05-07
 
@@ -674,7 +678,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/libraz/mygram-db/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/libraz/mygram-db/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/libraz/mygram-db/compare/v1.5.4...v1.6.0
 [1.5.4]: https://github.com/libraz/mygram-db/compare/v1.5.3...v1.5.4
