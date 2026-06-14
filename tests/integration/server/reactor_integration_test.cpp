@@ -755,7 +755,11 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
     }
     // We don't assert a specific response here — just that the connection is
     // handled without crashing (recv returns something or EOF).
-    std::string resp = RecvLine(s, 5000);
+    //
+    // Generous timeout: under coverage-instrumented, contended CI the server's
+    // parse/close of a ~900 KB frame can take several seconds. A tight budget
+    // here was a source of spurious timeouts on the coverage runner.
+    std::string resp = RecvLine(s, 30000);
     // Acceptable: error response or connection closed; NOT a crash.
     (void)resp;
     close(s);
@@ -790,7 +794,11 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
     if (!got_epipe) {
       char buf[256];
       struct timeval tv {};
-      tv.tv_sec = 3;
+      // Generous per-recv timeout: on the coverage-instrumented CI runner the
+      // server may take several seconds to push its error response and close
+      // the over-cap connection. A 3 s budget was a source of spurious
+      // timeouts there.
+      tv.tv_sec = 10;
       setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
       bool observed_close = false;
       for (int i = 0; i < 16; ++i) {
@@ -812,7 +820,9 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
   int s3 = Connect(port);
   ASSERT_GE(s3, 0);
   ASSERT_TRUE(SendLine(s3, "INFO"));
-  EXPECT_EQ(RecvLine(s3).substr(0, 7), "OK INFO");
+  // Generous timeout: the server may still be draining the prior large frames
+  // when this follow-up INFO arrives on the contended coverage runner.
+  EXPECT_EQ(RecvLine(s3, 30000).substr(0, 7), "OK INFO");
   close(s3);
 
   server->Stop();
