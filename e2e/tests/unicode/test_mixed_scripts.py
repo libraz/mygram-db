@@ -28,7 +28,7 @@ class TestMixedScripts:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", "Hello"),
+            lambda: mygramdb.count("testdb.articles", "Hello"),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -37,7 +37,7 @@ class TestMixedScripts:
 
         # Japanese part should also be searchable (same document, already indexed)
         wait_until_gte(
-            lambda: mygramdb.count("articles", "\u4e16\u754c"),
+            lambda: mygramdb.count("testdb.articles", "\u4e16\u754c"),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -67,7 +67,7 @@ class TestMixedScripts:
         time.sleep(3)
 
         # Search for text adjacent to emoji
-        result = mygramdb.search("articles", "Party", limit=10)
+        result = mygramdb.search("testdb.articles", "Party", limit=10)
         assert isinstance(result, dict)
 
     def test_accented_characters(self, mysql, mygramdb, seed_data):
@@ -86,7 +86,7 @@ class TestMixedScripts:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", "caf\u00e9"),
+            lambda: mygramdb.count("testdb.articles", "caf\u00e9"),
             minimum=1,
             timeout=10,
             interval=0.5,

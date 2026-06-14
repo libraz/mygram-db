@@ -89,7 +89,7 @@ def _reseed_table(mysql, mygramdb, table, count=50):
         mysql.execute(CREATE_PRODUCTS_SQL)
         rows = gen.generate_products(count=count)
     mysql.insert_rows(table, rows)
-    mygramdb.sync(table, timeout=60)
+    mygramdb.sync(f"testdb.{table}", timeout=60)
     _ensure_replication_running(mygramdb)
 
 
@@ -128,20 +128,20 @@ class TestMultiTableSearch:
         )
 
         # Sync both tables (sequential to avoid SYNC STATUS race)
-        mygramdb.sync("articles", timeout=30)
+        mygramdb.sync("testdb.articles", timeout=30)
         time.sleep(1)
-        mygramdb.sync("products", timeout=30)
+        mygramdb.sync("testdb.products", timeout=30)
         time.sleep(1)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", art_marker),
+            lambda: mygramdb.count("testdb.articles", art_marker),
             minimum=1,
             timeout=15,
             interval=0.5,
             description="articles searchable",
         )
         wait_until_gte(
-            lambda: mygramdb.count("products", prod_marker),
+            lambda: mygramdb.count("testdb.products", prod_marker),
             minimum=1,
             timeout=15,
             interval=0.5,
@@ -179,24 +179,24 @@ class TestMultiTableSearch:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", article_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", article_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"articles SEARCH to find {article_marker}",
         )
         wait_until(
-            lambda: mygramdb.search("products", product_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.products", product_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"products SEARCH to find {product_marker}",
         )
 
         # Cross-check: article marker NOT in products, product marker NOT in articles
-        cross_a = mygramdb.search("products", article_marker, limit=10)
+        cross_a = mygramdb.search("testdb.products", article_marker, limit=10)
         assert cross_a["total"] == 0, (
             f"Article-only marker found in products SEARCH: total={cross_a['total']}"
         )
-        cross_p = mygramdb.search("articles", product_marker, limit=10)
+        cross_p = mygramdb.search("testdb.articles", product_marker, limit=10)
         assert cross_p["total"] == 0, (
             f"Product-only marker found in articles SEARCH: total={cross_p['total']}"
         )
@@ -231,21 +231,21 @@ class TestMultiTableSearch:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"articles to find {marker}",
         )
         wait_until(
-            lambda: mygramdb.search("products", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.products", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"products to find {marker}",
         )
 
         # Filter status=1 should match in articles, not in products
-        art_s1 = mygramdb.search("articles", marker, filters={"status": 1}, limit=10)
-        prod_s1 = mygramdb.search("products", marker, filters={"status": 1}, limit=10)
+        art_s1 = mygramdb.search("testdb.articles", marker, filters={"status": 1}, limit=10)
+        prod_s1 = mygramdb.search("testdb.products", marker, filters={"status": 1}, limit=10)
         assert art_s1["total"] >= 1
         assert prod_s1["total"] == 0, (
             f"Product with status=2 should not match status=1 filter, got {prod_s1['total']}"
@@ -287,8 +287,8 @@ class TestMultiTableReplication:
 
         wait_until(
             lambda: (
-                mygramdb.search("articles", art_marker, limit=10)["total"] >= 1
-                and mygramdb.search("products", prod_marker, limit=10)["total"] >= 1
+                mygramdb.search("testdb.articles", art_marker, limit=10)["total"] >= 1
+                and mygramdb.search("testdb.products", prod_marker, limit=10)["total"] >= 1
             ),
             timeout=20,
             interval=0.5,
@@ -327,8 +327,8 @@ class TestMultiTableReplication:
 
         wait_until(
             lambda: (
-                mygramdb.search("articles", shared_marker, limit=10)["total"] >= 1
-                and mygramdb.search("products", shared_marker, limit=10)["total"] >= 1
+                mygramdb.search("testdb.articles", shared_marker, limit=10)["total"] >= 1
+                and mygramdb.search("testdb.products", shared_marker, limit=10)["total"] >= 1
             ),
             timeout=20,
             interval=0.5,
@@ -343,14 +343,14 @@ class TestMultiTableReplication:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", new_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", new_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description="articles UPDATE reflected",
         )
 
         # Products must still have the original marker
-        prod_result = mygramdb.search("products", shared_marker, limit=10)
+        prod_result = mygramdb.search("testdb.products", shared_marker, limit=10)
         assert prod_result["total"] >= 1, (
             f"Products should still have '{shared_marker}' after articles UPDATE, "
             f"got total={prod_result['total']}"
@@ -387,8 +387,8 @@ class TestMultiTableReplication:
 
         wait_until(
             lambda: (
-                mygramdb.search("articles", shared_marker, limit=10)["total"] >= 1
-                and mygramdb.search("products", shared_marker, limit=10)["total"] >= 1
+                mygramdb.search("testdb.articles", shared_marker, limit=10)["total"] >= 1
+                and mygramdb.search("testdb.products", shared_marker, limit=10)["total"] >= 1
             ),
             timeout=20,
             interval=0.5,
@@ -399,14 +399,14 @@ class TestMultiTableReplication:
         mysql.delete("articles", f"content LIKE '%{shared_marker}%'")
 
         wait_until(
-            lambda: mygramdb.search("articles", shared_marker, limit=10)["total"] == 0,
+            lambda: mygramdb.search("testdb.articles", shared_marker, limit=10)["total"] == 0,
             timeout=20,
             interval=0.5,
             description="articles DELETE reflected",
         )
 
         # Products must still be intact
-        prod_result = mygramdb.search("products", shared_marker, limit=10)
+        prod_result = mygramdb.search("testdb.products", shared_marker, limit=10)
         assert prod_result["total"] >= 1, (
             f"Products should still have '{shared_marker}' after articles DELETE, "
             f"got total={prod_result['total']}"
@@ -434,7 +434,7 @@ class TestMultiTableDDL:
         )
 
         wait_until(
-            lambda: mygramdb.search("products", prod_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.products", prod_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"products to find {prod_marker}",
@@ -445,7 +445,7 @@ class TestMultiTableDDL:
             time.sleep(3)
 
             # Products SEARCH must still work
-            result = mygramdb.search("products", prod_marker, limit=10)
+            result = mygramdb.search("testdb.products", prod_marker, limit=10)
             assert result["total"] >= 1, (
                 f"Products SEARCH should still work after DROP articles, "
                 f"got total={result['total']}"
@@ -489,8 +489,8 @@ class TestMultiTableDDL:
 
         wait_until(
             lambda: (
-                mygramdb.search("articles", art_marker, limit=10)["total"] >= 1
-                and mygramdb.search("products", prod_marker, limit=10)["total"] >= 1
+                mygramdb.search("testdb.articles", art_marker, limit=10)["total"] >= 1
+                and mygramdb.search("testdb.products", prod_marker, limit=10)["total"] >= 1
             ),
             timeout=20,
             interval=0.5,
@@ -502,13 +502,13 @@ class TestMultiTableDDL:
             time.sleep(3)
 
             # Articles should be empty
-            art_result = mygramdb.search("articles", art_marker, limit=10)
+            art_result = mygramdb.search("testdb.articles", art_marker, limit=10)
             assert art_result["total"] == 0, (
                 f"Articles should be empty after TRUNCATE, got total={art_result['total']}"
             )
 
             # Products must be intact
-            prod_result = mygramdb.search("products", prod_marker, limit=10)
+            prod_result = mygramdb.search("testdb.products", prod_marker, limit=10)
             assert prod_result["total"] >= 1, (
                 f"Products should be intact after articles TRUNCATE, "
                 f"got total={prod_result['total']}"
@@ -531,7 +531,7 @@ class TestMultiTableDDL:
 
             # Wait for SYNC to complete and verify data is searchable
             wait_until(
-                lambda: mygramdb.search("articles", "test", limit=10)["total"] >= 1,
+                lambda: mygramdb.search("testdb.articles", "test", limit=10)["total"] >= 1,
                 timeout=60,
                 interval=1,
                 description="articles SEARCH to work after recreate+sync",
@@ -559,7 +559,7 @@ class TestMultiTableDDL:
             # If replication doesn't recover in time, fall back to SYNC
             try:
                 wait_until(
-                    lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+                    lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
                     timeout=30,
                     interval=1,
                     description=f"articles SEARCH to find {marker} via replication",
@@ -567,9 +567,9 @@ class TestMultiTableDDL:
             except Exception:
                 # Replication may not have recovered yet (known DDL issue)
                 # Verify via SYNC instead
-                mygramdb.sync("articles", timeout=60)
+                mygramdb.sync("testdb.articles", timeout=60)
                 wait_until(
-                    lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+                    lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
                     timeout=30,
                     interval=1,
                     description=f"articles SEARCH to find {marker} via SYNC fallback",
@@ -579,7 +579,7 @@ class TestMultiTableDDL:
             raise
 
     def test_sync_one_table_no_impact_on_other(self, mysql, mygramdb, seed_data):
-        """SYNC articles should not affect products SEARCH results."""
+        """SYNC testdb.articles should not affect products SEARCH results."""
         prod_marker = f"synciso_{uuid.uuid4().hex[:8]}"
 
         mysql.insert_rows(
@@ -596,20 +596,20 @@ class TestMultiTableDDL:
         )
 
         wait_until(
-            lambda: mygramdb.search("products", prod_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.products", prod_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"products to find {prod_marker}",
         )
 
         # Record products state before sync
-        before = mygramdb.search("products", prod_marker, limit=10)
+        before = mygramdb.search("testdb.products", prod_marker, limit=10)
 
-        # SYNC articles (full rebuild)
-        mygramdb.sync("articles", timeout=60)
+        # SYNC testdb.articles (full rebuild)
+        mygramdb.sync("testdb.articles", timeout=60)
 
         # Products must be unchanged
-        after = mygramdb.search("products", prod_marker, limit=10)
+        after = mygramdb.search("testdb.products", prod_marker, limit=10)
         assert after["total"] == before["total"], (
             f"Products SEARCH changed after articles SYNC: "
             f"before={before['total']}, after={after['total']}"

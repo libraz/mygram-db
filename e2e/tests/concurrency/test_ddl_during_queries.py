@@ -38,11 +38,11 @@ class TestDDLDuringQueries:
             for i in range(20)
         ]
         mysql.insert_rows("articles", rows)
-        mygramdb.sync("articles", timeout=30)
+        mygramdb.sync("testdb.articles", timeout=30)
         time.sleep(2)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=15,
             timeout=30,
             interval=0.5,
@@ -56,7 +56,7 @@ class TestDDLDuringQueries:
         def _searcher():
             while not stop_event.is_set():
                 try:
-                    c = mygramdb.count("articles", marker)
+                    c = mygramdb.count("testdb.articles", marker)
                     search_counts.append(c)
                 except Exception as e:
                     errors.append(str(e))
@@ -70,7 +70,7 @@ class TestDDLDuringQueries:
 
         # Truncate and re-seed (to keep other tests working)
         mysql.truncate("articles")
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
         time.sleep(3)
 
         stop_event.set()
@@ -80,11 +80,11 @@ class TestDDLDuringQueries:
         gen2 = DataGenerator(seed=42)
         new_rows = gen2.generate_articles(count=100)
         mysql.insert_rows("articles", new_rows)
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
 
         # Verify search count converged toward 0 for our marker
         assert mygramdb.ping(), "Server unresponsive after truncate"
-        final_count = mygramdb.count("articles", marker)
+        final_count = mygramdb.count("testdb.articles", marker)
         assert final_count == 0, f"Expected 0 after truncate, got {final_count}"
 
     def test_add_column_during_search(self, mysql, mygramdb, seed_data):
@@ -96,7 +96,7 @@ class TestDDLDuringQueries:
         def _searcher():
             while not stop_event.is_set():
                 try:
-                    mygramdb.tcp_command("SEARCH articles test")
+                    mygramdb.tcp_command("SEARCH testdb.articles test")
                 except Exception as e:
                     errors.append(str(e))
                 time.sleep(0.1)
@@ -110,7 +110,7 @@ class TestDDLDuringQueries:
         with contextlib.suppress(Exception):
             mysql.execute(f"ALTER TABLE articles ADD COLUMN {col_name} VARCHAR(50) DEFAULT NULL")
 
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
         time.sleep(2)
 
         stop_event.set()
@@ -139,10 +139,10 @@ class TestDDLDuringQueries:
             for i in range(50)
         ]
         mysql.insert_rows("articles", rows)
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=40,
             timeout=15,
             interval=0.5,
@@ -156,7 +156,7 @@ class TestDDLDuringQueries:
         def _searcher():
             while not stop_event.is_set():
                 try:
-                    c = mygramdb.count("articles", marker)
+                    c = mygramdb.count("testdb.articles", marker)
                     search_counts.append(c)
                 except Exception as e:
                     errors.append(str(e))
@@ -169,7 +169,7 @@ class TestDDLDuringQueries:
 
         # Delete 80% of our test rows
         mysql.delete("articles", f"content LIKE '%{marker}%' ORDER BY id LIMIT 40")
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
         time.sleep(3)
 
         stop_event.set()
@@ -178,5 +178,5 @@ class TestDDLDuringQueries:
         assert mygramdb.ping(), "Server unresponsive after bulk delete"
 
         # Final count should reflect deletions
-        final_count = mygramdb.count("articles", marker)
+        final_count = mygramdb.count("testdb.articles", marker)
         assert final_count <= 15, f"Expected <=15 results after deleting 40/50, got {final_count}"

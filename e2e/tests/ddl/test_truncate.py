@@ -29,7 +29,7 @@ class TestTruncate:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -41,9 +41,9 @@ class TestTruncate:
 
         # Wait for articles search to return no results
         def _articles_cleared() -> bool:
-            mygramdb.count("articles", "truncate_test_marker")
+            mygramdb.count("testdb.articles", "truncate_test_marker")
             # Also verify a broad search returns nothing for articles
-            result = mygramdb.search("articles", "test", limit=1)
+            result = mygramdb.search("testdb.articles", "test", limit=1)
             return result["total"] == 0
 
         wait_until(
@@ -61,7 +61,7 @@ class TestTruncate:
         mysql.insert_rows("articles", rows)
 
         def _get_doc_count() -> int:
-            return mygramdb.count("articles", "test")
+            return mygramdb.count("testdb.articles", "test")
 
         wait_until_gte(
             _get_doc_count,

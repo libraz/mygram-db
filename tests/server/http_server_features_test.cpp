@@ -1267,7 +1267,7 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
 
-TEST(HttpServerStatsTest, GetCommandStatsCountOnlySuccessfulDocumentResponses) {
+TEST(HttpServerStatsTest, GetCommandStatsCountRoutedRequests) {
   std::unordered_map<std::string, TableContext*> table_contexts;
   TableContext ctx;
   ctx.name = "test";
@@ -1299,12 +1299,15 @@ TEST(HttpServerStatsTest, GetCommandStatsCountOnlySuccessfulDocumentResponses) {
 
   const auto baseline = http_server.GetStats().GetStatistics();
 
+  // A routed GET counts the command once the table/route resolves, regardless
+  // of whether the document is found. A 404 (missing document) still reaches a
+  // valid table route, so it increments cmd_get just like SEARCH/COUNT/FACET.
   auto missing = client.Get("/test/missing");
   ASSERT_TRUE(missing);
   EXPECT_EQ(missing->status, 404);
 
   auto after_missing = http_server.GetStats().GetStatistics();
-  EXPECT_EQ(after_missing.cmd_get, baseline.cmd_get);
+  EXPECT_EQ(after_missing.cmd_get, baseline.cmd_get + 1);
   EXPECT_GE(after_missing.total_requests, baseline.total_requests + 1);
 
   auto found = client.Get("/test/doc-1");
@@ -1312,7 +1315,7 @@ TEST(HttpServerStatsTest, GetCommandStatsCountOnlySuccessfulDocumentResponses) {
   EXPECT_EQ(found->status, 200);
 
   auto after_found = http_server.GetStats().GetStatistics();
-  EXPECT_EQ(after_found.cmd_get, baseline.cmd_get + 1);
+  EXPECT_EQ(after_found.cmd_get, baseline.cmd_get + 2);
 
   http_server.Stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));

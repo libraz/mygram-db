@@ -27,7 +27,7 @@ class TestCacheInvalidation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -36,7 +36,7 @@ class TestCacheInvalidation:
 
         # Populate cache
         mygramdb.cache_clear()
-        result1 = mygramdb.search("articles", marker, limit=100)
+        result1 = mygramdb.search("testdb.articles", marker, limit=100)
 
         # Insert another row
         mysql.insert_rows(
@@ -53,7 +53,7 @@ class TestCacheInvalidation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=result1["total"] + 1,
             timeout=10,
             interval=0.5,
@@ -63,7 +63,7 @@ class TestCacheInvalidation:
     def test_cache_clear_command(self, mygramdb, seed_data):
         """CACHE CLEAR should clear all cached entries."""
         # Do a search to populate cache
-        mygramdb.search("articles", "test", limit=10)
+        mygramdb.search("testdb.articles", "test", limit=10)
 
         # Clear cache
         result = mygramdb.cache_clear()

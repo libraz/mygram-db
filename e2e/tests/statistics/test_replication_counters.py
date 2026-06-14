@@ -30,7 +30,7 @@ class TestReplicationCounters:
 
         # Wait for replication
         wait_until_gte(
-            lambda: mygramdb.count("articles", "replication_counter_marker"),
+            lambda: mygramdb.count("testdb.articles", "replication_counter_marker"),
             minimum=n,
             timeout=10,
             interval=0.5,

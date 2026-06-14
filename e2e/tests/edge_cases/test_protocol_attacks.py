@@ -75,7 +75,7 @@ class TestProtocolAttacks:
     def test_oversized_single_line_command(self, mygramdb, seed_data):
         """Very long single-line command — should return error."""
         long_query = "a" * 200_000
-        cmd = f"SEARCH articles {long_query}\r\n"
+        cmd = f"SEARCH testdb.articles {long_query}\r\n"
         resp = raw_tcp_exchange(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT, cmd.encode("utf-8"), timeout=10.0)
         decoded = resp.decode("utf-8", errors="ignore").upper()
         # Expect error about request size or query length
@@ -137,9 +137,9 @@ class TestProtocolAttacks:
 
     def test_crlf_in_query_term(self, mygramdb, seed_data):
         """\\r\\n embedded in query term — should split into two separate commands."""
-        data = b"SEARCH articles te\r\nst\r\n"
+        data = b"SEARCH testdb.articles te\r\nst\r\n"
         resp = raw_tcp_exchange(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT, data, timeout=5.0)
         resp.decode("utf-8", errors="ignore")
-        # "SEARCH articles te" is one (invalid) command, "st" is another
+        # "SEARCH testdb.articles te" is one (invalid) command, "st" is another
         # Both may return errors, but server should not crash
         assert mygramdb.ping(), "Server unresponsive after CRLF in query"

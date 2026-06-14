@@ -83,10 +83,10 @@ class TestDumpRoundtrip:
         )
 
         # Sync to ensure marker data is in the index
-        mygramdb.sync("articles", timeout=30)
+        mygramdb.sync("testdb.articles", timeout=30)
         time.sleep(1)
 
-        count_before = mygramdb.count("articles", marker)
+        count_before = mygramdb.count("testdb.articles", marker)
         assert count_before >= 1, f"Marker should exist after sync, got {count_before}"
 
         # Save dump (async, writes to file then resumes replication)
@@ -106,9 +106,9 @@ class TestDumpRoundtrip:
         )
 
         # After dump load, sync to ensure index is rebuilt
-        mygramdb.sync("articles", timeout=30)
+        mygramdb.sync("testdb.articles", timeout=30)
         time.sleep(2)
 
         # Search should still work
-        count = mygramdb.count("articles", marker)
+        count = mygramdb.count("testdb.articles", marker)
         assert count >= 1, f"Search should work after DUMP LOAD, got {count}"

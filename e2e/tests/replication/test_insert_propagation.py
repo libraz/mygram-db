@@ -15,7 +15,7 @@ class TestInsertPropagation:
     def test_single_insert(self, mysql, mygramdb, seed_data):
         """Single INSERT should be reflected in MygramDB."""
         marker = f"prop_{uuid.uuid4().hex[:8]}"
-        before_count = mygramdb.count("articles", marker)
+        before_count = mygramdb.count("testdb.articles", marker)
 
         mysql.insert_rows(
             "articles",
@@ -31,7 +31,7 @@ class TestInsertPropagation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=before_count + 1,
             timeout=20,
             interval=0.5,
@@ -54,7 +54,7 @@ class TestInsertPropagation:
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=10,
             timeout=20,
             interval=0.5,

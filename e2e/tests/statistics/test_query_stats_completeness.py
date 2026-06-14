@@ -60,9 +60,9 @@ class TestQueryStatsCompleteness:
             if i % 3 == 0:
                 mygramdb.info()
             elif i % 3 == 1:
-                mygramdb.search("articles", "test", limit=1)
+                mygramdb.search("testdb.articles", "test", limit=1)
             else:
-                mygramdb.count("articles", "test")
+                mygramdb.count("testdb.articles", "test")
 
         info_after = mygramdb.info()
         after_total = info_after.get("total_commands_processed", 0)
@@ -97,7 +97,7 @@ class TestQueryStatsCompleteness:
 
         n = 8
         for _ in range(n):
-            mygramdb.search("articles", "test", limit=1)
+            mygramdb.search("testdb.articles", "test", limit=1)
 
         info_after = mygramdb.info()
         after_reqs = info_after.get("total_requests", info_after.get("total_commands_processed", 0))
@@ -108,7 +108,7 @@ class TestQueryStatsCompleteness:
     def test_cache_invalidation_on_insert(self, mysql, mygramdb, seed_data, clear_cache):
         """Cache invalidation counter should increase on INSERT."""
         # Prime the cache
-        mygramdb.search("articles", "test", limit=10)
+        mygramdb.search("testdb.articles", "test", limit=10)
         time.sleep(0.5)
 
         before = MetricsSnapshot.capture(mygramdb)
@@ -128,7 +128,7 @@ class TestQueryStatsCompleteness:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -162,7 +162,7 @@ class TestQueryStatsCompleteness:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -170,7 +170,7 @@ class TestQueryStatsCompleteness:
         )
 
         # Prime cache
-        mygramdb.search("articles", marker, limit=10)
+        mygramdb.search("testdb.articles", marker, limit=10)
         time.sleep(0.5)
 
         before = MetricsSnapshot.capture(mygramdb)
@@ -209,7 +209,7 @@ class TestQueryStatsCompleteness:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -217,7 +217,7 @@ class TestQueryStatsCompleteness:
         )
 
         # Prime cache
-        mygramdb.search("articles", marker, limit=10)
+        mygramdb.search("testdb.articles", marker, limit=10)
         time.sleep(0.5)
 
         before = MetricsSnapshot.capture(mygramdb)
@@ -241,7 +241,7 @@ class TestQueryStatsCompleteness:
         """Cache hit rate should be between 0.0 and 1.0."""
         # Execute some searches to populate cache
         for _ in range(5):
-            mygramdb.search("articles", "test", limit=10)
+            mygramdb.search("testdb.articles", "test", limit=10)
 
         snapshot = MetricsSnapshot.capture(mygramdb)
 
@@ -257,7 +257,7 @@ class TestQueryStatsCompleteness:
         """Cache memory bytes should be non-negative after searches."""
         # Execute searches to populate cache
         for _ in range(3):
-            mygramdb.search("articles", "test", limit=10)
+            mygramdb.search("testdb.articles", "test", limit=10)
 
         snapshot = MetricsSnapshot.capture(mygramdb)
 

@@ -42,7 +42,7 @@ class TestReconnectPropagation:
 
         # The row should be found within 20 seconds
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -74,7 +74,7 @@ class TestReconnectPropagation:
 
         # All 5 rows should be found
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=5,
             timeout=20,
             interval=0.5,

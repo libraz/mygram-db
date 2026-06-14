@@ -90,7 +90,7 @@ class TestMySQLFailover:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", primary_marker),
+            lambda: mygramdb.count("testdb.articles", primary_marker),
             minimum=1,
             timeout=15,
             interval=0.5,
@@ -145,7 +145,7 @@ class TestMySQLFailover:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", secondary_marker),
+            lambda: mygramdb.count("testdb.articles", secondary_marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -155,4 +155,4 @@ class TestMySQLFailover:
         final_gtid = _replication_status_value(mygramdb, "current_gtid")
         assert primary_uuid in final_gtid
         assert secondary_uuid in final_gtid
-        assert mygramdb.count("articles", primary_marker) >= 1
+        assert mygramdb.count("testdb.articles", primary_marker) >= 1

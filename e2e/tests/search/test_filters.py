@@ -34,7 +34,7 @@ class TestFilters:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=2,
             timeout=10,
             interval=0.5,
@@ -42,11 +42,11 @@ class TestFilters:
         )
 
         # Search without filter
-        all_results = mygramdb.count("articles", marker)
+        all_results = mygramdb.count("testdb.articles", marker)
         assert all_results >= 2
 
         # Search with status filter (if supported)
-        filtered = mygramdb.search("articles", marker, filters={"status": 1}, limit=100)
+        filtered = mygramdb.search("testdb.articles", marker, filters={"status": 1}, limit=100)
         # Filtered results should be <= total
         assert filtered["total"] <= all_results
 
@@ -74,12 +74,12 @@ class TestFilters:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=2,
             timeout=10,
             interval=0.5,
             description="category filter test data",
         )
 
-        all_count = mygramdb.count("articles", marker)
+        all_count = mygramdb.count("testdb.articles", marker)
         assert all_count >= 2

@@ -185,12 +185,12 @@ def seed_data(mysql: MysqlClient, mygramdb: MygramdbClient) -> None:
     # Seed articles
     rows = gen.generate_articles(count=100)
     mysql.insert_rows("articles", rows)
-    mygramdb.sync("articles")
+    mygramdb.sync("testdb.articles")
 
     # Seed products
     product_rows = gen.generate_products(count=50)
     mysql.insert_rows("products", product_rows)
-    mygramdb.sync("products")
+    mygramdb.sync("testdb.products")
 
     def _doc_count() -> bool:
         info = mygramdb.info()
@@ -244,4 +244,4 @@ def ensure_replication(mygramdb: MygramdbClient) -> None:
 
     # REPLICATION START failed (likely stale MySQL connection after restart).
     # SYNC creates a fresh connection and restarts replication.
-    mygramdb.sync("articles", timeout=30)
+    mygramdb.sync("testdb.articles", timeout=30)

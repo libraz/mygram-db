@@ -27,7 +27,7 @@ class TestCacheHitMiss:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -38,9 +38,9 @@ class TestCacheHitMiss:
         mygramdb.cache_clear()
 
         # First search - cache miss
-        result1 = mygramdb.search("articles", marker, limit=10)
+        result1 = mygramdb.search("testdb.articles", marker, limit=10)
         # Second search - should be cache hit
-        result2 = mygramdb.search("articles", marker, limit=10)
+        result2 = mygramdb.search("testdb.articles", marker, limit=10)
 
         # Both should return the same results
         assert result1["total"] == result2["total"]

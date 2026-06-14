@@ -69,7 +69,7 @@ class TestVectorPropagation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", check_marker),
+            lambda: mygramdb.count("testdb.articles", check_marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -112,7 +112,7 @@ class TestVectorPropagation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", check_marker),
+            lambda: mygramdb.count("testdb.articles", check_marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -150,7 +150,7 @@ class TestVectorPropagation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", check_marker),
+            lambda: mygramdb.count("testdb.articles", check_marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -188,7 +188,7 @@ class TestVectorPropagation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", check_marker),
+            lambda: mygramdb.count("testdb.articles", check_marker),
             minimum=1,
             timeout=20,
             interval=0.5,

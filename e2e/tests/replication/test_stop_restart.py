@@ -74,7 +74,7 @@ class TestStopRestart:
 
             # Data should NOT appear while replication is stopped
             time.sleep(2)
-            count_while_stopped = mygramdb.count("articles", marker)
+            count_while_stopped = mygramdb.count("testdb.articles", marker)
             assert count_while_stopped == 0, (
                 f"Data should not appear while replication stopped, got {count_while_stopped}"
             )
@@ -84,7 +84,7 @@ class TestStopRestart:
 
             # All rows should appear
             wait_until_gte(
-                lambda: mygramdb.count("articles", marker),
+                lambda: mygramdb.count("testdb.articles", marker),
                 minimum=n,
                 timeout=20,
                 interval=0.5,
@@ -111,7 +111,7 @@ class TestStopRestart:
         mysql.insert_rows("articles", seed_rows)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=5,
             timeout=10,
             interval=0.5,
@@ -157,7 +157,7 @@ class TestStopRestart:
             # Should have: 5 original - 1 deleted + 3 new = 7 total with marker
             # But some searches may match differently, so check for new inserts
             wait_until_gte(
-                lambda: mygramdb.count("articles", f"stopmix new {marker}"),
+                lambda: mygramdb.count("testdb.articles", f"stopmix new {marker}"),
                 minimum=3,
                 timeout=20,
                 interval=0.5,
@@ -218,7 +218,7 @@ class TestStopRestart:
             )
 
             wait_until_gte(
-                lambda: mygramdb.count("articles", marker),
+                lambda: mygramdb.count("testdb.articles", marker),
                 minimum=1,
                 timeout=15,
                 interval=0.5,
@@ -271,7 +271,7 @@ class TestStopRestart:
 
             # Nothing should appear yet
             time.sleep(2)
-            count_stopped = mygramdb.count("articles", marker)
+            count_stopped = mygramdb.count("testdb.articles", marker)
             assert count_stopped == 0, f"No data should appear while stopped, got {count_stopped}"
 
             # Restart
@@ -279,7 +279,7 @@ class TestStopRestart:
 
             # All 20 rows should appear
             wait_until_gte(
-                lambda: mygramdb.count("articles", marker),
+                lambda: mygramdb.count("testdb.articles", marker),
                 minimum=n,
                 timeout=30,
                 interval=0.5,
@@ -325,7 +325,7 @@ class TestStopRestart:
 
             # INSERT should propagate
             wait_until_gte(
-                lambda: mygramdb.count("articles", marker),
+                lambda: mygramdb.count("testdb.articles", marker),
                 minimum=1,
                 timeout=20,
                 interval=0.5,

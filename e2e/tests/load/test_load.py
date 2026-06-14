@@ -106,7 +106,7 @@ class TestLoad:
             try:
                 while time.monotonic() < stop_time:
                     success, elapsed, resp = _persistent_command(
-                        sock, f"SEARCH articles {word} LIMIT 10"
+                        sock, f"SEARCH testdb.articles {word} LIMIT 10"
                     )
                     results.append((success, elapsed))
                     if not success:

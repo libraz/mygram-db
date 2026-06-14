@@ -78,6 +78,11 @@ struct RowsEventContext {
   uint64_t table_id = 0;
   const TableMetadata* table_meta = nullptr;
   const config::TableConfig* current_config = nullptr;
+  // Key under which the matched table is registered in table_contexts (the
+  // database-qualified identity in multi-table mode). Downstream consumers
+  // resolve the index/doc_store and invalidate caches by this exact key, so it
+  // must match the registration key rather than the bare binlog table name.
+  std::string table_key;
   std::string text_column;
   bool use_concat = false;
 };
@@ -137,7 +142,15 @@ std::optional<RowsEventContext> InitRowsEventContext(
 
   // Determine config based on mode
   if (multi_table_mode) {
-    auto table_iter = table_contexts.find(ctx.table_meta->table_name);
+    // Table contexts are keyed by the database-qualified identity
+    // (e.g. "testdb.articles"). Look up by the qualified key derived from the
+    // binlog event's database and table names, falling back to the bare table
+    // name for configurations whose effective database is empty.
+    auto table_iter =
+        table_contexts.find(config::QualifiedTableName(ctx.table_meta->database_name, ctx.table_meta->table_name));
+    if (table_iter == table_contexts.end()) {
+      table_iter = table_contexts.find(ctx.table_meta->table_name);
+    }
     if (table_iter == table_contexts.end()) {
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
@@ -147,8 +160,10 @@ std::optional<RowsEventContext> InitRowsEventContext(
       return std::nullopt;
     }
     ctx.current_config = &table_iter->second->config;
+    ctx.table_key = table_iter->first;
   } else {
     ctx.current_config = table_config;
+    ctx.table_key = table_config != nullptr ? table_config->name : ctx.table_meta->table_name;
   }
 
   if (ctx.current_config == nullptr) {
@@ -314,7 +329,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       for (const auto& row : *rows_result) {
         BinlogEvent event;
         event.type = BinlogEventType::INSERT;
-        event.table_name = ctx.table_meta->table_name;
+        event.table_name = ctx.table_key;
         event.primary_key = row.primary_key;
         event.text = GetRowText(row, ctx);
         event.gtid = current_gtid;
@@ -367,7 +382,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
         BinlogEvent event;
         event.type = BinlogEventType::UPDATE;
-        event.table_name = ctx.table_meta->table_name;
+        event.table_name = ctx.table_key;
         event.primary_key = after_row.primary_key;
         event.text = GetRowText(after_row, ctx);       // New text (after image)
         event.old_text = GetRowText(before_row, ctx);  // Old text (before image) for index update
@@ -418,7 +433,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       for (const auto& row : *rows_result) {
         BinlogEvent event;
         event.type = BinlogEventType::DELETE;
-        event.table_name = ctx.table_meta->table_name;
+        event.table_name = ctx.table_key;
         event.primary_key = row.primary_key;
         event.text = GetRowText(row, ctx);
         event.gtid = current_gtid;

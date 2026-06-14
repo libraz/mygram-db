@@ -32,7 +32,7 @@ class TestReplicationResilience:
                 continue
             time.sleep(1)
         # Last resort: sync to re-establish replication
-        mygramdb.sync("articles", timeout=30)
+        mygramdb.sync("testdb.articles", timeout=30)
 
     def test_stop_during_active_writes(self, mysql, mygramdb, seed_data):
         """STOP during active MySQL writes should not lose data after START."""
@@ -82,7 +82,7 @@ class TestReplicationResilience:
 
             # All rows should eventually appear
             wait_until_gte(
-                lambda: mygramdb.count("articles", marker),
+                lambda: mygramdb.count("testdb.articles", marker),
                 minimum=n,
                 timeout=30,
                 interval=0.5,

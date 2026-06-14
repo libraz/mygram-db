@@ -17,9 +17,9 @@ class TestCacheCounters:
         before = MetricsSnapshot.capture(mygramdb)
 
         # First search - should be a miss
-        mygramdb.search("articles", "cache_counter_test", limit=10)
+        mygramdb.search("testdb.articles", "cache_counter_test", limit=10)
         # Second search - should be a hit (same query)
-        mygramdb.search("articles", "cache_counter_test", limit=10)
+        mygramdb.search("testdb.articles", "cache_counter_test", limit=10)
 
         after = MetricsSnapshot.capture(mygramdb)
         diff = MetricsSnapshot.diff(before, after)

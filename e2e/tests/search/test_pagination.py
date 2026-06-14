@@ -26,14 +26,14 @@ class TestPagination:
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=20,
             timeout=10,
             interval=0.5,
             description="pagination test data",
         )
 
-        result = mygramdb.search("articles", marker, limit=5)
+        result = mygramdb.search("testdb.articles", marker, limit=5)
         assert len(result["ids"]) <= 5
 
     def test_offset(self, mysql, mygramdb, seed_data):
@@ -52,15 +52,15 @@ class TestPagination:
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=20,
             timeout=10,
             interval=0.5,
             description="offset test data",
         )
 
-        page1 = mygramdb.search("articles", marker, limit=5, offset=0, sort="id ASC")
-        page2 = mygramdb.search("articles", marker, limit=5, offset=5, sort="id ASC")
+        page1 = mygramdb.search("testdb.articles", marker, limit=5, offset=0, sort="id ASC")
+        page2 = mygramdb.search("testdb.articles", marker, limit=5, offset=5, sort="id ASC")
 
         # Pages should not overlap (if sort is deterministic)
         if page1["ids"] and page2["ids"]:

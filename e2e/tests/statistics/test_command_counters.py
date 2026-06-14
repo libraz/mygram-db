@@ -16,7 +16,7 @@ class TestCommandCounters:
 
         m = 5
         for _ in range(m):
-            mygramdb.search("articles", "test", limit=10)
+            mygramdb.search("testdb.articles", "test", limit=10)
 
         after = MetricsSnapshot.capture(mygramdb)
         diff = MetricsSnapshot.diff(before, after)
@@ -35,7 +35,7 @@ class TestCommandCounters:
 
         m = 3
         for _ in range(m):
-            mygramdb.count("articles", "test")
+            mygramdb.count("testdb.articles", "test")
 
         after = MetricsSnapshot.capture(mygramdb)
         diff = MetricsSnapshot.diff(before, after)

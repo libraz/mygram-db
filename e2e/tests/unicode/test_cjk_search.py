@@ -26,7 +26,7 @@ class TestCJKSearch:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", "東京"),
+            lambda: mygramdb.count("testdb.articles", "東京"),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -49,7 +49,7 @@ class TestCJKSearch:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", "北京"),
+            lambda: mygramdb.count("testdb.articles", "北京"),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -75,7 +75,7 @@ class TestCJKSearch:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", "全文検索"),
+            lambda: mygramdb.count("testdb.articles", "全文検索"),
             minimum=1,
             timeout=10,
             interval=0.5,

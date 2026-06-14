@@ -68,7 +68,7 @@ def _verify_replication_works(mysql, mygramdb, timeout=15):
     )
     try:
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=timeout,
             interval=0.5,
@@ -89,10 +89,10 @@ def _recreate_articles_table(mysql, mygramdb):
     rows = gen.generate_articles(count=100)
     mysql.insert_rows("articles", rows)
 
-    mygramdb.sync("articles", timeout=60)
+    mygramdb.sync("testdb.articles", timeout=60)
 
     def _has_docs() -> bool:
-        count = mygramdb.count("articles", "test")
+        count = mygramdb.count("testdb.articles", "test")
         return count >= 30
 
     wait_until(
@@ -193,7 +193,7 @@ class TestDDLEdgeCases:
                 )
 
             wait_until_gte(
-                lambda: mygramdb.count("articles", marker),
+                lambda: mygramdb.count("testdb.articles", marker),
                 minimum=6,
                 timeout=45,
                 interval=0.5,
@@ -237,7 +237,7 @@ class TestDDLEdgeCases:
             )
 
             wait_until_gte(
-                lambda: mygramdb.count("articles", marker),
+                lambda: mygramdb.count("testdb.articles", marker),
                 minimum=1,
                 timeout=30,
                 interval=0.5,
@@ -262,7 +262,7 @@ class TestDDLEdgeCases:
             mysql.execute("DROP TABLE articles")
 
             def _articles_cleared() -> bool:
-                result = mygramdb.search("articles", "test", limit=1)
+                result = mygramdb.search("testdb.articles", "test", limit=1)
                 return result["total"] == 0
 
             wait_until(

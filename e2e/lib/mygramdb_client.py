@@ -124,6 +124,9 @@ class MygramdbClient:
                 cmd += f" LIMIT {limit}"
 
         resp = self.tcp_command(cmd)
+        # A mid-sync rejection must not be parsed as an empty result set.
+        if self._is_synchronizing_response(resp):
+            raise RuntimeError(f"SEARCH rejected while table synchronizing: {resp}")
         return self._parse_search_response(resp)
 
     def count(self, table: str, query: str, *, filters: dict[str, Any] | None = None) -> int:
@@ -135,6 +138,11 @@ class MygramdbClient:
         resp = self.tcp_command(cmd)
         if not resp:
             return 0
+        # A mid-sync rejection ("ERROR ... is synchronizing ...") must not be
+        # silently coerced to 0; surface it so polling callers retry instead of
+        # treating the transient window as a real empty result.
+        if self._is_synchronizing_response(resp):
+            raise RuntimeError(f"COUNT rejected while table synchronizing: {resp}")
         # Handle "OK COUNT N" format
         if resp.startswith("OK COUNT "):
             parts = resp.split()
@@ -232,30 +240,128 @@ class MygramdbClient:
                         result[key] = value
         return result
 
-    def sync(self, table: str | None = None, timeout: float = 30.0) -> bool:
-        """Execute SYNC and wait for completion.
+    def _sync_status_line(self, table: str | None) -> str | None:
+        """Return the SYNC STATUS line for ``table`` (or the first line).
 
-        Sends the SYNC command, then polls SYNC STATUS until the operation
-        reaches COMPLETED or FAILED state, or the timeout expires.
+        ``SYNC STATUS`` is a multi-line response terminated by ``END``; each
+        monitored table gets its own ``table=<name> status=<...>`` line. The
+        whole-response read used elsewhere can stop at the first line, so this
+        uses a multi-line read and isolates the line for the requested table.
+        Returns None if the response could not be read.
         """
+        resp = self.tcp_command_multiline("SYNC STATUS", timeout=5.0, terminator=b"END\r\n")
+        if resp is None:
+            return None
+        if table is None:
+            return resp
+        for line in resp.splitlines():
+            if f"table={table} " in line or line.strip().endswith(f"table={table}"):
+                return line
+        # Requested table not present in the status report yet.
+        return ""
+
+    def _is_synchronizing_response(self, resp: str | None) -> bool:
+        """True if ``resp`` is a server "table is synchronizing" rejection."""
+        return resp is not None and "synchronizing" in resp.lower()
+
+    @staticmethod
+    def _normalize_completed_marker(line: str) -> str:
+        """Drop volatile fields from a COMPLETED status line for comparison.
+
+        A COMPLETED line carries ``time=<elapsed>s`` (and ``rate=``) which are
+        recomputed on every poll, so they change even when no new sync has run.
+        Stripping them leaves stable fields (``rows=``, ``gtid=``) that only
+        advance when a genuinely new sync completes.
+        """
+        kept = [tok for tok in line.split() if not tok.startswith(("time=", "rate="))]
+        return " ".join(kept)
+
+    def _table_is_queryable(self, table: str | None) -> bool:
+        """Probe whether ``table`` is queryable (not mid-sync rebuild).
+
+        After SYNC publishes COMPLETED the table can briefly remain in the
+        server's "synchronizing" set (the index is swapped but the sync guard
+        has not yet released it), during which COUNT/SEARCH return an
+        ``ERROR ... is synchronizing`` response. A trivial COUNT probe detects
+        that window without depending on any seeded data.
+        """
+        if table is None:
+            return True
+        resp = self.tcp_command(f"COUNT {table} _readiness_probe_", timeout=5.0)
+        if resp is None:
+            return False
+        return not self._is_synchronizing_response(resp)
+
+    def sync(self, table: str | None = None, timeout: float = 30.0) -> bool:
+        """Execute SYNC and wait for the issued sync to fully complete.
+
+        Sends the SYNC command, then polls SYNC STATUS until the operation it
+        issued reaches COMPLETED, and finally confirms the table is queryable
+        again before returning.
+
+        SYNC STATUS does not expose a sync generation/sequence number, so a bare
+        "COMPLETED" can belong to a *previous* sync of the same table. To avoid
+        accepting a stale completion, this requires observing a fresh active
+        state (STARTING/IN_PROGRESS) for the target table -- or an advance of the
+        COMPLETED marker (rows/time/gtid) -- before honouring COMPLETED. After
+        completion it probes the table until the "synchronizing" window clears,
+        because COMPLETED is published slightly before the table leaves the
+        server's syncing set.
+        """
+        # Capture the target table's status line *before* issuing SYNC so a
+        # pre-existing COMPLETED can be distinguished from a fresh one. Compare
+        # on the volatile-field-stripped marker so the ever-advancing time=
+        # field does not make a stale completion look fresh.
+        pre_line = self._sync_status_line(table)
+        pre_completed_marker = (
+            self._normalize_completed_marker(pre_line)
+            if (pre_line and "COMPLETED" in pre_line)
+            else None
+        )
+
         cmd = f"SYNC {table}" if table else "SYNC"
         resp = self.tcp_command(cmd, timeout=timeout)
         if resp is None or "OK" not in resp:
             return False
 
-        # Poll SYNC STATUS until completion
         deadline = time.monotonic() + timeout
+        observed_active = False
         while time.monotonic() < deadline:
-            status_resp = self.tcp_command("SYNC STATUS", timeout=5.0)
-            if status_resp is None:
-                time.sleep(0.5)
+            line = self._sync_status_line(table)
+            if line is None:
+                time.sleep(0.25)
                 continue
-            if "COMPLETED" in status_resp:
-                return True
-            if "FAILED" in status_resp or "CANCELLED" in status_resp:
+
+            if "FAILED" in line or "CANCELLED" in line:
                 return False
-            # Still IN_PROGRESS or STARTING
-            time.sleep(0.5)
+
+            if "STARTING" in line or "IN_PROGRESS" in line:
+                # Our sync is running; once we have seen this, a subsequent
+                # COMPLETED is guaranteed to be the one we issued.
+                observed_active = True
+                time.sleep(0.25)
+                continue
+
+            if "COMPLETED" in line:
+                is_fresh = (
+                    observed_active
+                    or pre_completed_marker is None
+                    or self._normalize_completed_marker(line) != pre_completed_marker
+                )
+                if not is_fresh:
+                    # Stale COMPLETED from a prior sync; keep polling until this
+                    # sync transitions (or its marker advances).
+                    time.sleep(0.25)
+                    continue
+                # Completed for this request: wait out the synchronizing window
+                # so the index is actually queryable before returning.
+                while time.monotonic() < deadline:
+                    if self._table_is_queryable(table):
+                        return True
+                    time.sleep(0.25)
+                return False
+
+            time.sleep(0.25)
 
         return False
 
@@ -326,7 +432,7 @@ class MygramdbClient:
         if offset is not None:
             payload["offset"] = offset
 
-        status, body = self.http_post(f"/{table}/search", payload)
+        status, body = self.http_post(f"{self._http_table_path(table)}/search", payload)
         if status != 200 or not isinstance(body, dict):
             return {"total": 0, "ids": [], "raw_response": body, "status": status}
 
@@ -348,7 +454,7 @@ class MygramdbClient:
         payload: dict[str, Any] = {"q": query}
         if filters:
             payload["filters"] = filters
-        status, body = self.http_post(f"/{table}/count", payload)
+        status, body = self.http_post(f"{self._http_table_path(table)}/count", payload)
         if status == 200 and isinstance(body, dict):
             return status, int(body.get("count", 0))
         return status, 0
@@ -391,6 +497,21 @@ class MygramdbClient:
         """Send REPLICATION STATUS command and return response."""
         resp = self.tcp_command("REPLICATION STATUS")
         return resp or ""
+
+    @staticmethod
+    def _http_table_path(table: str) -> str:
+        """Build the database-qualified HTTP route prefix for a table.
+
+        Callers pass a qualified ``<database>.<table>`` name (consistent with
+        the TCP API). The server exposes table routes under
+        ``/tables/{database}/{table}/...`` and rejects bare names, so split on
+        the first ``.`` to form the path. If no ``.`` is present the name is
+        emitted as-is (the server will reject it, surfacing the error).
+        """
+        database, sep, rest = table.partition(".")
+        if not sep:
+            return f"/{table}"
+        return f"/tables/{database}/{rest}"
 
     def _parse_json_or_text(self, raw: str) -> dict[str, Any] | str:
         with contextlib.suppress(json.JSONDecodeError):

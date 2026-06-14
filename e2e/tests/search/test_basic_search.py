@@ -13,7 +13,7 @@ class TestBasicSearch:
     def test_single_word_search(self, mygramdb, seed_data):
         """Single word search should return results."""
         # Search for a common word that should exist in seed data
-        result = mygramdb.search("articles", "test", limit=10)
+        result = mygramdb.search("testdb.articles", "test", limit=10)
         # Seed data may or may not contain "test", but search should not error
         assert isinstance(result, dict)
         assert "ids" in result
@@ -37,14 +37,14 @@ class TestBasicSearch:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
             description="search test data",
         )
 
-        result = mygramdb.search("articles", marker, limit=10)
+        result = mygramdb.search("testdb.articles", marker, limit=10)
         assert result["total"] >= 1
         assert len(result["ids"]) >= 1
 
@@ -66,19 +66,19 @@ class TestBasicSearch:
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=5,
             timeout=10,
             interval=0.5,
             description="count match test data",
         )
 
-        count = mygramdb.count("articles", marker)
-        search = mygramdb.search("articles", marker, limit=100)
+        count = mygramdb.count("testdb.articles", marker)
+        search = mygramdb.search("testdb.articles", marker, limit=100)
         assert count == search["total"], f"COUNT ({count}) != SEARCH total ({search['total']})"
 
     def test_empty_result(self, mygramdb, seed_data):
         """Search for non-existent term should return empty."""
-        result = mygramdb.search("articles", "zzzznonexistentterm99999xyz", limit=10)
+        result = mygramdb.search("testdb.articles", "zzzznonexistentterm99999xyz", limit=10)
         assert result["total"] == 0
         assert len(result["ids"]) == 0

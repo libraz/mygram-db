@@ -43,6 +43,7 @@ class FacetHandlerTest : public ::testing::Test {
     table_ctx_ = std::make_unique<TableContext>();
     table_ctx_->name = "articles";
     table_ctx_->config.name = "articles";
+    table_ctx_->config.database = "app_db";
     table_ctx_->config.primary_key = "id";
     table_ctx_->config.ngram_size = 2;
     table_ctx_->config.kanji_ngram_size = 2;
@@ -53,12 +54,13 @@ class FacetHandlerTest : public ::testing::Test {
     // that needs it so other tests run with no synonyms (cleaner baseline).
     table_ctx_->synonym_dict = std::make_unique<query::SynonymDictionary>();
 
-    table_contexts_["articles"] = table_ctx_.get();
+    table_contexts_["app_db.articles"] = table_ctx_.get();
 
     config_ = std::make_unique<config::Config>();
     config_->cache.enabled = true;
     config::TableConfig table_cfg;
     table_cfg.name = "articles";
+    table_cfg.database = "app_db";
     table_cfg.primary_key = "id";
     table_cfg.ngram_size = 2;
     config_->tables.push_back(table_cfg);
@@ -66,7 +68,7 @@ class FacetHandlerTest : public ::testing::Test {
     // Cache manager wired identically to production: per-table N-gram config
     // is required so cache invalidation can produce the right keys.
     cache::NgramConfigMap ngram_configs;
-    ngram_configs["articles"] = cache::NgramConfig{2, 2, false};
+    ngram_configs["app_db.articles"] = cache::NgramConfig{2, 2, false};
     cache_manager_ = std::make_unique<cache::CacheManager>(config_->cache, std::move(ngram_configs));
 
     stats_ = std::make_unique<ServerStats>();
@@ -154,7 +156,7 @@ TEST_F(FacetHandlerTest, FacetSearchUsesSynonymExpansion) {
 
   query::Query query;
   query.type = query::QueryType::FACET;
-  query.table = "articles";
+  query.table = "app_db.articles";
   query.facet_column = "category";
   query.search_text = "automobile";
 
@@ -180,7 +182,7 @@ TEST_F(FacetHandlerTest, FacetSearchWithoutSynonymStillWorks) {
 
   query::Query query;
   query.type = query::QueryType::FACET;
-  query.table = "articles";
+  query.table = "app_db.articles";
   query.facet_column = "category";
   query.search_text = "car";
 
@@ -205,7 +207,7 @@ TEST_F(FacetHandlerTest, FacetWithoutSearchAggregatesAllDocs) {
 
   query::Query query;
   query.type = query::QueryType::FACET;
-  query.table = "articles";
+  query.table = "app_db.articles";
   query.facet_column = "category";
   // No search_text, no and_terms, no filters — facet over all docs.
 

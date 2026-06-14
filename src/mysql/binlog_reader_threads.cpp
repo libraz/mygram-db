@@ -456,7 +456,13 @@ void BinlogReader::ReaderThreadFunc() {
                 .Field("table_id", metadata_opt->table_id)
                 .Debug();
 
-            const bool is_monitored_table = table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
+            // Table contexts are keyed by the database-qualified identity
+            // (e.g. "testdb.articles"). Match on the qualified key first and
+            // fall back to the bare table name for empty-database configs.
+            const bool is_monitored_table =
+                table_contexts_.find(config::QualifiedTableName(metadata_opt->database_name,
+                                                                metadata_opt->table_name)) != table_contexts_.end() ||
+                table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
 
             if (is_monitored_table) {
               if (!FetchColumnNames(metadata_opt.value())) {
@@ -695,7 +701,13 @@ bool BinlogReader::IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_t
   if (metadata == nullptr) {
     return false;
   }
-  auto table_iter = table_contexts_.find(metadata->table_name);
+  // Table contexts are keyed by the database-qualified identity
+  // (e.g. "testdb.articles"). Match on the qualified key first and fall back to
+  // the bare table name for empty-database configs.
+  auto table_iter = table_contexts_.find(config::QualifiedTableName(metadata->database_name, metadata->table_name));
+  if (table_iter == table_contexts_.end()) {
+    table_iter = table_contexts_.find(metadata->table_name);
+  }
   if (table_iter == table_contexts_.end() || table_iter->second == nullptr) {
     return false;
   }

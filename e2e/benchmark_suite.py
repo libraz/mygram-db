@@ -81,7 +81,7 @@ def _ensure_data(
     mysql.insert_rows("articles", rows)
 
     # Wait for MygramDB replication
-    mygramdb.sync("articles")
+    mygramdb.sync("testdb.articles")
 
     def _get_doc_count() -> int:
         info = mygramdb.info()

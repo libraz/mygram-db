@@ -30,7 +30,7 @@ class TestDeletePropagation:
 
         # Wait for insert
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -42,7 +42,7 @@ class TestDeletePropagation:
 
         # Wait for delete to propagate
         wait_until(
-            lambda: mygramdb.count("articles", marker) == 0,
+            lambda: mygramdb.count("testdb.articles", marker) == 0,
             timeout=20,
             interval=0.5,
             description="DELETE propagation",
@@ -66,7 +66,7 @@ class TestDeletePropagation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -86,4 +86,4 @@ class TestDeletePropagation:
         time.sleep(3)
         # Soft delete behavior depends on MygramDB configuration
         # Just verify no crash
-        mygramdb.count("articles", marker)
+        mygramdb.count("testdb.articles", marker)

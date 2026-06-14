@@ -66,7 +66,7 @@ class TestEmptyAndSmall:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,

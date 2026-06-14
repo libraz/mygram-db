@@ -34,7 +34,7 @@ class TestBatchOperations:
         # Due to n-gram tokenization, COUNT may not match all 1000 rows
         # exactly, so we accept >= 950 (95% propagation).
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=950,
             timeout=90,
             interval=1,
@@ -66,5 +66,5 @@ class TestBatchOperations:
         time.sleep(5)
 
         # Should have 0 documents with this marker
-        count = mygramdb.count("articles", marker)
+        count = mygramdb.count("testdb.articles", marker)
         assert count == 0, f"Expected 0 documents after insert+delete, got {count}"

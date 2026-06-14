@@ -37,7 +37,7 @@ class TestCrossVerify:
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=20,
             timeout=10,
             interval=0.5,
@@ -45,7 +45,7 @@ class TestCrossVerify:
         )
 
         # Both should find the same count for exact marker
-        mygramdb_count = mygramdb.count("articles", marker)
+        mygramdb_count = mygramdb.count("testdb.articles", marker)
         mysql_results = mysql.fulltext_search("articles", "content", marker, where="enabled = 1")
         mysql_count = len(mysql_results)
 

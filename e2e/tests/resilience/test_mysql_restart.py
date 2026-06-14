@@ -69,7 +69,7 @@ class TestMySQLRestart:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=30,
             interval=1,
@@ -98,5 +98,5 @@ class TestMySQLRestart:
         )
 
         # Data should still be searchable
-        count = mygramdb.count("articles", marker)
+        count = mygramdb.count("testdb.articles", marker)
         assert count >= 1, "Data should be preserved after MySQL restart"

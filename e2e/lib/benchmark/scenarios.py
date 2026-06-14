@@ -39,14 +39,14 @@ def build_mygramdb_command(scenario: Scenario, query: str) -> str:
         return "INFO"
 
     if scenario.query_type == "count":
-        parts = ["COUNT", "articles", query]
+        parts = ["COUNT", "testdb.articles", query]
         if scenario.filters:
             for key, val in scenario.filters.items():
                 parts.extend(["FILTER", key, "=", val])
         return " ".join(parts)
 
     # search
-    parts = ["SEARCH", "articles", query]
+    parts = ["SEARCH", "testdb.articles", query]
     if scenario.filters:
         for key, val in scenario.filters.items():
             parts.extend(["FILTER", key, "=", val])

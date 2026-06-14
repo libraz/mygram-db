@@ -57,5 +57,5 @@ class TestRapidMutations:
 
         time.sleep(5)
         # Index should be clean
-        count = mygramdb.count("articles", "churn_cycle_marker")
+        count = mygramdb.count("testdb.articles", "churn_cycle_marker")
         assert count == 0, f"Expected 0 churned docs, got {count}"

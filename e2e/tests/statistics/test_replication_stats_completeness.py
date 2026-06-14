@@ -31,7 +31,7 @@ class TestReplicationStatsCompleteness:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -83,7 +83,7 @@ class TestReplicationStatsCompleteness:
         mysql.update("articles", "enabled = 1", f"content LIKE '%{marker}%'")
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -118,7 +118,7 @@ class TestReplicationStatsCompleteness:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -199,7 +199,7 @@ class TestReplicationStatsCompleteness:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -343,7 +343,7 @@ class TestReplicationStatsCompleteness:
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=5,
             timeout=15,
             interval=0.5,

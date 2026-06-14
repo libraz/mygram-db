@@ -15,7 +15,7 @@ class TestMemoryRelease:
     def test_truncate_releases_memory(self, mysql, mygramdb, seed_data):
         """TRUNCATE should release memory."""
         # Ensure replication is caught up before measuring
-        mygramdb.sync("articles")
+        mygramdb.sync("testdb.articles")
 
         # Get memory before
         mygramdb.health_detail()
@@ -24,7 +24,7 @@ class TestMemoryRelease:
         mysql.truncate("articles")
 
         def _index_cleared() -> bool:
-            result = mygramdb.search("articles", "test", limit=1)
+            result = mygramdb.search("testdb.articles", "test", limit=1)
             return result["total"] == 0
 
         wait_until(
@@ -49,7 +49,7 @@ class TestMemoryRelease:
         mysql.insert_rows("articles", rows)
 
         def _reseeded() -> bool:
-            count = mygramdb.count("articles", "test")
+            count = mygramdb.count("testdb.articles", "test")
             return count >= 30
 
         wait_until(

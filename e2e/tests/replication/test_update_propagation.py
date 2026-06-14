@@ -32,7 +32,7 @@ class TestUpdatePropagation:
 
         # Wait for initial insert
         wait_until_gte(
-            lambda: mygramdb.count("articles", old_marker),
+            lambda: mygramdb.count("testdb.articles", old_marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -48,7 +48,7 @@ class TestUpdatePropagation:
 
         # Wait for update to propagate
         wait_until_gte(
-            lambda: mygramdb.count("articles", new_marker),
+            lambda: mygramdb.count("testdb.articles", new_marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -72,7 +72,7 @@ class TestUpdatePropagation:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=20,
             interval=0.5,
@@ -86,5 +86,5 @@ class TestUpdatePropagation:
         import time
 
         time.sleep(3)  # Wait for propagation
-        count = mygramdb.count("articles", marker)
+        count = mygramdb.count("testdb.articles", marker)
         assert count >= 1, "Document should still be searchable after status update"

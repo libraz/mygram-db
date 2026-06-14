@@ -55,7 +55,11 @@ TEST_F(ConfigSchemaExplorerTest, GetHelpForNestedProperty) {
 
 // Test GetHelp for enum property
 TEST_F(ConfigSchemaExplorerTest, GetHelpForEnumProperty) {
-  auto help = explorer().GetHelp("mysql.binlog_format");
+  // memory.verify_text is a multi-value enum: off, ascii, all.
+  // (mysql.binlog_format is now a single-value enum ["ROW"] because MygramDB
+  // replication requires row-level events, so it no longer exercises the
+  // multi-value enum extraction path.)
+  auto help = explorer().GetHelp("memory.verify_text");
 
   ASSERT_TRUE(help.has_value());
   EXPECT_EQ(help->type, "string");

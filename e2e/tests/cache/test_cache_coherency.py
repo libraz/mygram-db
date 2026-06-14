@@ -52,7 +52,7 @@ class TestCacheCoherency:
             counts = []
             while not stop_event.is_set():
                 try:
-                    c = mygramdb.count("articles", marker)
+                    c = mygramdb.count("testdb.articles", marker)
                     counts.append(c)
                 except Exception as e:
                     errors.append(f"searcher-{thread_id}: {e}")
@@ -83,8 +83,8 @@ class TestCacheCoherency:
             t.join(timeout=10)
 
         # Sync and verify final state
-        mygramdb.sync("articles", timeout=15)
-        final_count = mygramdb.count("articles", marker)
+        mygramdb.sync("testdb.articles", timeout=15)
+        final_count = mygramdb.count("testdb.articles", marker)
 
         # Final count should reflect all inserts (eventually consistent)
         assert final_count >= insert_count * 0.8, (
@@ -108,10 +108,10 @@ class TestCacheCoherency:
             for i in range(5)
         ]
         mysql.insert_rows("articles", rows)
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=5,
             timeout=15,
             interval=0.5,
@@ -119,7 +119,7 @@ class TestCacheCoherency:
         )
 
         # Cache the search result
-        result1 = mygramdb.count("articles", f"{marker} original")
+        result1 = mygramdb.count("testdb.articles", f"{marker} original")
         assert result1 >= 5
 
         # Update content via MySQL
@@ -128,11 +128,11 @@ class TestCacheCoherency:
             f"UPDATE articles SET content = REPLACE(content, '{marker}', '{new_marker}') "
             f"WHERE content LIKE '%{marker}%'"
         )
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
         time.sleep(2)  # Allow replication and cache invalidation
 
         # Search with new content
-        result2 = mygramdb.count("articles", new_marker)
+        result2 = mygramdb.count("testdb.articles", new_marker)
         assert result2 >= 3, f"Expected updated content in results, got count={result2}"
 
     def test_delete_then_search_cache_stale(self, mysql, mygramdb, seed_data, clear_cache):
@@ -150,10 +150,10 @@ class TestCacheCoherency:
             for i in range(10)
         ]
         mysql.insert_rows("articles", rows)
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=10,
             timeout=15,
             interval=0.5,
@@ -161,16 +161,16 @@ class TestCacheCoherency:
         )
 
         # Cache the result
-        initial_count = mygramdb.count("articles", marker)
+        initial_count = mygramdb.count("testdb.articles", marker)
         assert initial_count >= 10
 
         # Delete via MySQL
         mysql.delete("articles", f"content LIKE '%{marker}%'")
-        mygramdb.sync("articles", timeout=15)
+        mygramdb.sync("testdb.articles", timeout=15)
         time.sleep(2)
 
         # Eventually the count should drop
-        final_count = mygramdb.count("articles", marker)
+        final_count = mygramdb.count("testdb.articles", marker)
         assert final_count < initial_count, (
             f"Expected count to decrease after DELETE: initial={initial_count}, final={final_count}"
         )
@@ -191,7 +191,7 @@ class TestCacheCoherency:
         def _searcher(thread_id: int):
             while not stop_event.is_set():
                 try:
-                    mygramdb.tcp_command("SEARCH articles test")
+                    mygramdb.tcp_command("SEARCH testdb.articles test")
                 except Exception as e:
                     errors.append(f"searcher-{thread_id}: {e}")
                 time.sleep(0.1)

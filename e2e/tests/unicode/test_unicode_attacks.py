@@ -21,26 +21,26 @@ class TestUnicodeAttacks:
 
     def test_invalid_utf8_in_search(self, mygramdb, seed_data):
         """Invalid UTF-8 bytes (\\xff\\xfe) in search query — should not crash."""
-        data = b"SEARCH articles \xff\xfe\r\n"
+        data = b"SEARCH testdb.articles \xff\xfe\r\n"
         raw_tcp_exchange(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT, data, timeout=5.0)
         # Error or empty results — not a crash
         assert mygramdb.ping(), "Server unresponsive after invalid UTF-8"
 
     def test_overlong_utf8_encoding(self, mygramdb, seed_data):
         """Overlong UTF-8 encoding of '/' (\\xc0\\xaf) — ICU should reject."""
-        data = b"SEARCH articles \xc0\xaf\r\n"
+        data = b"SEARCH testdb.articles \xc0\xaf\r\n"
         raw_tcp_exchange(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT, data, timeout=5.0)
         assert mygramdb.ping(), "Server unresponsive after overlong UTF-8"
 
     def test_surrogate_pair_in_search(self, mygramdb, seed_data):
         """Lone surrogate half (\\xed\\xa0\\x80) — invalid in UTF-8."""
-        data = b"SEARCH articles \xed\xa0\x80\r\n"
+        data = b"SEARCH testdb.articles \xed\xa0\x80\r\n"
         raw_tcp_exchange(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT, data, timeout=5.0)
         assert mygramdb.ping(), "Server unresponsive after surrogate pair"
 
     def test_utf8_bom_in_command(self, mygramdb, seed_data):
         """UTF-8 BOM (\\xef\\xbb\\xbf) prefix before command."""
-        data = b"\xef\xbb\xbfSEARCH articles test\r\n"
+        data = b"\xef\xbb\xbfSEARCH testdb.articles test\r\n"
         raw_tcp_exchange(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT, data, timeout=5.0)
         # May parse correctly (ignoring BOM) or return error
         assert mygramdb.ping(), "Server unresponsive after BOM prefix"
@@ -48,7 +48,7 @@ class TestUnicodeAttacks:
     def test_rtl_override_in_query(self, mygramdb, seed_data):
         """RTL Override character (U+202E) in search query."""
         query = "test\u202eevil"
-        resp = mygramdb.tcp_command(f"SEARCH articles {query}")
+        resp = mygramdb.tcp_command(f"SEARCH testdb.articles {query}")
         assert resp is not None
         assert mygramdb.ping(), "Server unresponsive after RTL override"
 
@@ -56,7 +56,7 @@ class TestUnicodeAttacks:
         """Base character + 100 combining diacritical marks — ICU normalization stress."""
         # 'a' followed by 100 combining acute accents (U+0301)
         bomb = "a" + "\u0301" * 100
-        resp = mygramdb.tcp_command(f"SEARCH articles {bomb}")
+        resp = mygramdb.tcp_command(f"SEARCH testdb.articles {bomb}")
         assert resp is not None
         assert mygramdb.ping(), "Server unresponsive after combining char bomb"
 
@@ -64,12 +64,12 @@ class TestUnicodeAttacks:
         """Complex emoji ZWJ sequence (family emoji) — should not crash."""
         # Family: Man, Woman, Girl, Boy joined with ZWJ
         family = "\U0001f468\u200d\U0001f469\u200d\U0001f467\u200d\U0001f466"
-        resp = mygramdb.tcp_command(f"SEARCH articles {family}")
+        resp = mygramdb.tcp_command(f"SEARCH testdb.articles {family}")
         assert resp is not None
         assert mygramdb.ping(), "Server unresponsive after emoji ZWJ"
 
     def test_control_characters_in_query(self, mygramdb, seed_data):
         """ASCII control characters (\\x01\\x02\\x03) in query."""
-        data = b"SEARCH articles \x01\x02\x03test\r\n"
+        data = b"SEARCH testdb.articles \x01\x02\x03test\r\n"
         raw_tcp_exchange(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT, data, timeout=5.0)
         assert mygramdb.ping(), "Server unresponsive after control characters"

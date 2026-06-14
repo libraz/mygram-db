@@ -30,7 +30,7 @@ class TestSearchDuringWrites:
             """Search repeatedly during inserts."""
             try:
                 for _ in range(20):
-                    result = mygramdb.search("articles", "test", limit=10)
+                    result = mygramdb.search("testdb.articles", "test", limit=10)
                     assert isinstance(result, dict)
                     time.sleep(0.1)
             except Exception as e:

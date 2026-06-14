@@ -121,15 +121,18 @@ class VerifyTextAllTest : public ::testing::Test {
     auto doc_store = std::make_unique<storage::DocumentStore>();
 
     table_context_.name = "articles";
+    table_context_.config.name = "articles";
+    table_context_.config.database = "app_db";
     table_context_.config.ngram_size = 2;
     table_context_.index = std::move(index);
     table_context_.doc_store = std::move(doc_store);
-    table_contexts_["articles"] = &table_context_;
+    table_contexts_["app_db.articles"] = &table_context_;
 
     // Configure with verify_text="all"
     full_config_ = std::make_unique<config::Config>();
     config::TableConfig tc;
     tc.name = "articles";
+    tc.database = "app_db";
     tc.ngram_size = 2;
     full_config_->tables.push_back(tc);
     full_config_->memory.verify_text = "all";
@@ -194,7 +197,7 @@ TEST_F(VerifyTextAllTest, FiltersNgramFalsePositive) {
   AddDocumentWithText("pk_false", "ab cd bc");
 
   TcpClient client("127.0.0.1", port_);
-  std::string response = client.SendCommand("SEARCH articles abc");
+  std::string response = client.SendCommand("SEARCH app_db.articles abc");
 
   // Only pk_true should be returned (false positive filtered)
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << "Expected 1 result (false positive filtered), got: " << response;
@@ -211,7 +214,7 @@ TEST_F(VerifyTextAllTest, PreservesTrueMatches) {
   AddDocumentWithText("pk3", "goodbye world");
 
   TcpClient client("127.0.0.1", port_);
-  std::string response = client.SendCommand("SEARCH articles hello");
+  std::string response = client.SendCommand("SEARCH app_db.articles hello");
 
   EXPECT_TRUE(response.find("OK RESULTS 2") == 0) << "Expected 2 results, got: " << response;
   EXPECT_NE(response.find("pk1"), std::string::npos);
@@ -234,7 +237,7 @@ TEST_F(VerifyTextAllTest, DumpLoadPreservesVerifyTextFiltering) {
   TcpClient client("127.0.0.1", port_);
 
   // Before dump: verify_text filters false positive
-  std::string response = client.SendCommand("SEARCH articles abc");
+  std::string response = client.SendCommand("SEARCH app_db.articles abc");
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << "Pre-dump: " << response;
   EXPECT_NE(response.find("pk_true"), std::string::npos);
   EXPECT_EQ(response.find("pk_false"), std::string::npos);
@@ -252,7 +255,7 @@ TEST_F(VerifyTextAllTest, DumpLoadPreservesVerifyTextFiltering) {
 
   // After DUMP LOAD: verify_text should still filter false positives
   // because doc_texts_ is restored from the snapshot
-  response = client.SendCommand("SEARCH articles abc");
+  response = client.SendCommand("SEARCH app_db.articles abc");
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << "Post-dump: verify_text should still filter, got: " << response;
   EXPECT_NE(response.find("pk_true"), std::string::npos);
   EXPECT_EQ(response.find("pk_false"), std::string::npos);
@@ -269,11 +272,11 @@ TEST_F(VerifyTextAllTest, DumpLoadInvalidatesCache) {
   TcpClient client("127.0.0.1", port_);
 
   // First search populates cache
-  std::string response = client.SendCommand("SEARCH articles cached");
+  std::string response = client.SendCommand("SEARCH app_db.articles cached");
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << response;
 
   // Second search should hit cache (same result)
-  response = client.SendCommand("SEARCH articles cached");
+  response = client.SendCommand("SEARCH app_db.articles cached");
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << response;
 
   // DUMP SAVE (async) then wait for completion, then DUMP LOAD
@@ -286,7 +289,7 @@ TEST_F(VerifyTextAllTest, DumpLoadInvalidatesCache) {
 
   // Search after DUMP LOAD: cache should have been cleared
   // Result should still be correct (from fresh index, not stale cache)
-  response = client.SendCommand("SEARCH articles cached");
+  response = client.SendCommand("SEARCH app_db.articles cached");
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0)
       << "After DUMP LOAD, search should return fresh results: " << response;
 }
@@ -304,15 +307,18 @@ class VerifyTextAsciiTest : public ::testing::Test {
     auto doc_store = std::make_unique<storage::DocumentStore>();
 
     table_context_.name = "articles";
+    table_context_.config.name = "articles";
+    table_context_.config.database = "app_db";
     table_context_.config.ngram_size = 2;
     table_context_.config.kanji_ngram_size = 1;
     table_context_.index = std::move(index);
     table_context_.doc_store = std::move(doc_store);
-    table_contexts_["articles"] = &table_context_;
+    table_contexts_["app_db.articles"] = &table_context_;
 
     full_config_ = std::make_unique<config::Config>();
     config::TableConfig tc;
     tc.name = "articles";
+    tc.database = "app_db";
     tc.ngram_size = 2;
     tc.kanji_ngram_size = 1;
     full_config_->tables.push_back(tc);
@@ -357,7 +363,7 @@ TEST_F(VerifyTextAsciiTest, FiltersAsciiTermFalsePositive) {
   AddDocumentWithText("pk_false", "ab cd bc");
 
   TcpClient client("127.0.0.1", port_);
-  std::string response = client.SendCommand("SEARCH articles abc");
+  std::string response = client.SendCommand("SEARCH app_db.articles abc");
 
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0) << "Expected false positive filtered for ASCII term: " << response;
   EXPECT_NE(response.find("pk_true"), std::string::npos);
@@ -377,7 +383,7 @@ TEST_F(VerifyTextAsciiTest, SkipsNonAsciiTerms) {
   AddDocumentWithText("pk2", "深層学習の応用");
 
   TcpClient client("127.0.0.1", port_);
-  std::string response = client.SendCommand("SEARCH articles 学習");
+  std::string response = client.SendCommand("SEARCH app_db.articles 学習");
 
   // Non-ASCII terms bypass post-filtering, so all N-gram matches returned
   EXPECT_TRUE(response.find("OK RESULTS 2") == 0) << "Non-ASCII should bypass verify_text: " << response;
@@ -394,14 +400,17 @@ class VerifyTextOffTest : public ::testing::Test {
     auto doc_store = std::make_unique<storage::DocumentStore>();
 
     table_context_.name = "articles";
+    table_context_.config.name = "articles";
+    table_context_.config.database = "app_db";
     table_context_.config.ngram_size = 2;
     table_context_.index = std::move(index);
     table_context_.doc_store = std::move(doc_store);
-    table_contexts_["articles"] = &table_context_;
+    table_contexts_["app_db.articles"] = &table_context_;
 
     full_config_ = std::make_unique<config::Config>();
     config::TableConfig tc;
     tc.name = "articles";
+    tc.database = "app_db";
     tc.ngram_size = 2;
     full_config_->tables.push_back(tc);
     full_config_->memory.verify_text = "off";
@@ -446,7 +455,7 @@ TEST_F(VerifyTextOffTest, DoesNotFilterFalsePositives) {
   AddDocumentWithText("pk_false", "ab cd bc");
 
   TcpClient client("127.0.0.1", port_);
-  std::string response = client.SendCommand("SEARCH articles abc");
+  std::string response = client.SendCommand("SEARCH app_db.articles abc");
 
   // Both documents should be returned (no post-filter)
   EXPECT_TRUE(response.find("OK RESULTS 2") == 0) << "verify_text=off should not filter: " << response;
@@ -465,14 +474,17 @@ class VerifyTextDumpConsistencyTest : public ::testing::Test {
     auto doc_store = std::make_unique<storage::DocumentStore>();
 
     table_context_.name = "articles";
+    table_context_.config.name = "articles";
+    table_context_.config.database = "app_db";
     table_context_.config.ngram_size = 2;
     table_context_.index = std::move(index);
     table_context_.doc_store = std::move(doc_store);
-    table_contexts_["articles"] = &table_context_;
+    table_contexts_["app_db.articles"] = &table_context_;
 
     full_config_ = std::make_unique<config::Config>();
     config::TableConfig tc;
     tc.name = "articles";
+    tc.database = "app_db";
     tc.ngram_size = 2;
     full_config_->tables.push_back(tc);
     full_config_->memory.verify_text = "off";
@@ -527,7 +539,7 @@ TEST_F(VerifyTextDumpConsistencyTest, SearchResultsConsistentAfterDumpLoad) {
   TcpClient client("127.0.0.1", port_);
 
   // Record pre-dump results
-  std::string before = client.SendCommand("SEARCH articles hello");
+  std::string before = client.SendCommand("SEARCH app_db.articles hello");
   EXPECT_TRUE(before.find("OK RESULTS 2") == 0) << "Pre-dump: " << before;
 
   // DUMP SAVE (async) and wait for completion
@@ -540,7 +552,7 @@ TEST_F(VerifyTextDumpConsistencyTest, SearchResultsConsistentAfterDumpLoad) {
   EXPECT_TRUE(response.find("OK LOADED") == 0) << response;
 
   // Post-dump results should match
-  std::string after = client.SendCommand("SEARCH articles hello");
+  std::string after = client.SendCommand("SEARCH app_db.articles hello");
   EXPECT_TRUE(after.find("OK RESULTS 2") == 0) << "Post-dump results should match pre-dump: " << after;
   EXPECT_NE(after.find("pk1"), std::string::npos);
   EXPECT_NE(after.find("pk2"), std::string::npos);

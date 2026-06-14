@@ -52,7 +52,7 @@ class TestSearchFreshnessNocache:
         )
 
         def _search_finds_marker():
-            result = mygramdb.search("articles", marker, limit=10)
+            result = mygramdb.search("testdb.articles", marker, limit=10)
             return result["total"] >= 1 and len(result["ids"]) >= 1
 
         wait_until(
@@ -82,14 +82,14 @@ class TestSearchFreshnessNocache:
 
         # Wait for INSERT to propagate
         wait_until(
-            lambda: mygramdb.search("articles", old_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", old_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {old_marker} after INSERT",
         )
 
         # Capture the document ID
-        result_before = mygramdb.search("articles", old_marker, limit=10)
+        result_before = mygramdb.search("testdb.articles", old_marker, limit=10)
         result_before["ids"][0]
 
         # UPDATE the text column
@@ -101,14 +101,14 @@ class TestSearchFreshnessNocache:
 
         # New keyword should appear in SEARCH
         wait_until(
-            lambda: mygramdb.search("articles", new_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", new_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {new_marker} after UPDATE",
         )
 
         # Old keyword should disappear from SEARCH
-        result_old = mygramdb.search("articles", old_marker, limit=10)
+        result_old = mygramdb.search("testdb.articles", old_marker, limit=10)
         assert result_old["total"] == 0, (
             f"Old keyword '{old_marker}' should no longer match after UPDATE, "
             f"but SEARCH still returns {result_old['total']} results"
@@ -131,7 +131,7 @@ class TestSearchFreshnessNocache:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {marker} after INSERT",
@@ -142,7 +142,7 @@ class TestSearchFreshnessNocache:
 
         # Wait for deletion to propagate
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] == 0,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] == 0,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to return 0 results for {marker} after DELETE",
@@ -169,7 +169,7 @@ class TestSearchFreshnessNocache:
 
         # Wait for all rows via batch marker
         wait_until_gte(
-            lambda: mygramdb.search("articles", batch_marker, limit=100)["total"],
+            lambda: mygramdb.search("testdb.articles", batch_marker, limit=100)["total"],
             minimum=20,
             timeout=30,
             interval=1,
@@ -178,7 +178,7 @@ class TestSearchFreshnessNocache:
 
         # Spot-check individual rows are findable
         for idx in [0, 9, 19]:
-            result = mygramdb.search("articles", row_markers[idx], limit=10)
+            result = mygramdb.search("testdb.articles", row_markers[idx], limit=10)
             assert result["total"] >= 1, (
                 f"Row {idx} with marker '{row_markers[idx]}' not found in SEARCH"
             )
@@ -203,7 +203,7 @@ class TestSearchFreshnessWithCache:
         marker = f"cachefresh_{uuid.uuid4().hex[:8]}"
 
         # Prime the cache with an empty result
-        result_before = mygramdb.search("articles", marker, limit=10)
+        result_before = mygramdb.search("testdb.articles", marker, limit=10)
         assert result_before["total"] == 0
 
         # INSERT a matching row
@@ -222,7 +222,7 @@ class TestSearchFreshnessWithCache:
 
         # SEARCH should eventually return the new doc (cache must be invalidated)
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"cached SEARCH to find {marker} after INSERT",
@@ -248,14 +248,14 @@ class TestSearchFreshnessWithCache:
 
         # Wait and cache the old result
         wait_until(
-            lambda: mygramdb.search("articles", old_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", old_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {old_marker}",
         )
 
         # Issue a second SEARCH to ensure it's cached
-        cached_result = mygramdb.search("articles", old_marker, limit=10)
+        cached_result = mygramdb.search("testdb.articles", old_marker, limit=10)
         assert cached_result["total"] >= 1
 
         # UPDATE
@@ -267,7 +267,7 @@ class TestSearchFreshnessWithCache:
 
         # New keyword must appear (cache invalidated)
         wait_until(
-            lambda: mygramdb.search("articles", new_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", new_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"cached SEARCH to find {new_marker} after UPDATE",
@@ -275,7 +275,7 @@ class TestSearchFreshnessWithCache:
 
         # Old keyword must vanish (cache invalidated)
         wait_until(
-            lambda: mygramdb.search("articles", old_marker, limit=10)["total"] == 0,
+            lambda: mygramdb.search("testdb.articles", old_marker, limit=10)["total"] == 0,
             timeout=20,
             interval=0.5,
             description=f"cached SEARCH to drop {old_marker} after UPDATE",
@@ -299,21 +299,21 @@ class TestSearchFreshnessWithCache:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {marker}",
         )
 
         # Cache it
-        mygramdb.search("articles", marker, limit=10)
+        mygramdb.search("testdb.articles", marker, limit=10)
 
         # DELETE
         mysql.delete("articles", f"content LIKE '%{marker}%'")
 
         # Must vanish from cached SEARCH
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] == 0,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] == 0,
             timeout=20,
             interval=0.5,
             description=f"cached SEARCH to drop {marker} after DELETE",
@@ -337,14 +337,14 @@ class TestSearchFreshnessWithCache:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {marker}",
         )
 
         # Cache a filtered search
-        filtered = mygramdb.search("articles", marker, filters={"status": 1}, limit=10)
+        filtered = mygramdb.search("testdb.articles", marker, filters={"status": 1}, limit=10)
         assert filtered["total"] >= 1
 
         # UPDATE the filter column value
@@ -353,7 +353,8 @@ class TestSearchFreshnessWithCache:
         # Filtered search with status=1 should now return 0
         wait_until(
             lambda: (
-                mygramdb.search("articles", marker, filters={"status": 1}, limit=10)["total"] == 0
+                mygramdb.search("testdb.articles", marker, filters={"status": 1}, limit=10)["total"]
+                == 0
             ),
             timeout=20,
             interval=0.5,
@@ -361,7 +362,7 @@ class TestSearchFreshnessWithCache:
         )
 
         # Filtered search with status=99 should return 1
-        result_new = mygramdb.search("articles", marker, filters={"status": 99}, limit=10)
+        result_new = mygramdb.search("testdb.articles", marker, filters={"status": 99}, limit=10)
         assert result_new["total"] >= 1, (
             f"Expected status=99 filter to match after UPDATE, got {result_new['total']}"
         )
@@ -402,14 +403,14 @@ class TestSearchFreshnessCacheToggle:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {marker}",
         )
 
         # Cache the result
-        cached = mygramdb.search("articles", marker, limit=10)
+        cached = mygramdb.search("testdb.articles", marker, limit=10)
         assert cached["total"] >= 1
 
         # 2. Disable cache
@@ -424,7 +425,7 @@ class TestSearchFreshnessCacheToggle:
 
         # Wait for replication (search directly, no cache)
         wait_until(
-            lambda: mygramdb.search("articles", new_marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", new_marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {new_marker} with cache off",
@@ -434,13 +435,13 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.tcp_command("CACHE ENABLE")
 
         # 5. Search must return fresh data, not stale cached entry
-        result_new = mygramdb.search("articles", new_marker, limit=10)
+        result_new = mygramdb.search("testdb.articles", new_marker, limit=10)
         assert result_new["total"] >= 1, (
             f"After cache re-enable, SEARCH should find '{new_marker}' "
             f"but got total={result_new['total']}"
         )
 
-        result_old = mygramdb.search("articles", marker, limit=10)
+        result_old = mygramdb.search("testdb.articles", marker, limit=10)
         assert result_old["total"] == 0, (
             f"After cache re-enable, old keyword '{marker}' should not match "
             f"but SEARCH returned total={result_old['total']} (stale cache?)"
@@ -458,7 +459,7 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.tcp_command("CACHE ENABLE")
         mygramdb.cache_clear()
 
-        empty_result = mygramdb.search("articles", marker, limit=10)
+        empty_result = mygramdb.search("testdb.articles", marker, limit=10)
         assert empty_result["total"] == 0
 
         # 2. Disable cache
@@ -479,7 +480,7 @@ class TestSearchFreshnessCacheToggle:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {marker} with cache off",
@@ -489,7 +490,7 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.tcp_command("CACHE ENABLE")
 
         # 5. Must find the new document, not return stale empty result
-        result = mygramdb.search("articles", marker, limit=10)
+        result = mygramdb.search("testdb.articles", marker, limit=10)
         assert result["total"] >= 1, (
             f"After cache re-enable, SEARCH should find '{marker}' "
             f"but got total={result['total']} (stale empty cache entry?)"
@@ -517,14 +518,14 @@ class TestSearchFreshnessCacheToggle:
         )
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] >= 1,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to find {marker}",
         )
 
         # Cache the result (total >= 1)
-        cached = mygramdb.search("articles", marker, limit=10)
+        cached = mygramdb.search("testdb.articles", marker, limit=10)
         assert cached["total"] >= 1
 
         # 2. Disable cache
@@ -534,7 +535,7 @@ class TestSearchFreshnessCacheToggle:
         mysql.delete("articles", f"content LIKE '%{marker}%'")
 
         wait_until(
-            lambda: mygramdb.search("articles", marker, limit=10)["total"] == 0,
+            lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] == 0,
             timeout=20,
             interval=0.5,
             description=f"SEARCH to return 0 for {marker} with cache off",
@@ -544,7 +545,7 @@ class TestSearchFreshnessCacheToggle:
         mygramdb.tcp_command("CACHE ENABLE")
 
         # 5. Must return 0, not stale cached result
-        result = mygramdb.search("articles", marker, limit=10)
+        result = mygramdb.search("testdb.articles", marker, limit=10)
         assert result["total"] == 0, (
             f"After cache re-enable, SEARCH for deleted '{marker}' "
             f"should return 0 but got total={result['total']} (stale cache?)"
@@ -571,7 +572,7 @@ class TestSearchFreshnessCacheToggle:
         mysql.insert_rows("articles", rows)
 
         wait_until_gte(
-            lambda: mygramdb.search("articles", marker, limit=100)["total"],
+            lambda: mygramdb.search("testdb.articles", marker, limit=100)["total"],
             minimum=5,
             timeout=20,
             interval=0.5,
@@ -590,7 +591,7 @@ class TestSearchFreshnessCacheToggle:
         time.sleep(3)
 
         # Final state: 2 rows remaining (deleted 0, 1, 2)
-        result = mygramdb.search("articles", marker, limit=100)
+        result = mygramdb.search("testdb.articles", marker, limit=100)
         assert result["total"] == 2, (
             f"After rapid toggle + deletes, expected 2 remaining rows "
             f"but SEARCH returned total={result['total']}"

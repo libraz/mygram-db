@@ -27,7 +27,7 @@ class TestNormalization:
 
         # Search with halfwidth "Hello" should find fullwidth "Ｈｅｌｌｏ"
         wait_until_gte(
-            lambda: mygramdb.count("articles", "Hello"),
+            lambda: mygramdb.count("testdb.articles", "Hello"),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -51,7 +51,7 @@ class TestNormalization:
 
         # Search for "fi" should match "\ufb01" after NFKC normalization
         wait_until_gte(
-            lambda: mygramdb.count("articles", "first"),
+            lambda: mygramdb.count("testdb.articles", "first"),
             minimum=1,
             timeout=10,
             interval=0.5,
@@ -78,4 +78,4 @@ class TestNormalization:
 
         time.sleep(3)
         # Just verify no crash - zero-width handling is implementation-dependent
-        mygramdb.count("articles", "zero")
+        mygramdb.count("testdb.articles", "zero")

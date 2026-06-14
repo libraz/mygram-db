@@ -52,7 +52,7 @@ class TestSpecialChars:
     def test_long_query_string(self, mygramdb, seed_data):
         """Very long query string should not crash."""
         long_query = "a" * 1000
-        result = mygramdb.search("articles", long_query, limit=10)
+        result = mygramdb.search("testdb.articles", long_query, limit=10)
         # Should return empty or error, not crash
         assert isinstance(result, dict)
 
@@ -66,7 +66,7 @@ class TestSpecialChars:
             "quote'test",
         ]
         for query in special_queries:
-            result = mygramdb.search("articles", query, limit=10)
+            result = mygramdb.search("testdb.articles", query, limit=10)
             assert isinstance(result, dict), f"Failed for query: {query}"
 
     def test_concurrent_same_search(self, mygramdb, seed_data):
@@ -74,7 +74,7 @@ class TestSpecialChars:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def do_search():
-            return mygramdb.search("articles", "test", limit=10)
+            return mygramdb.search("testdb.articles", "test", limit=10)
 
         with ThreadPoolExecutor(max_workers=50) as executor:
             futures = [executor.submit(do_search) for _ in range(50)]

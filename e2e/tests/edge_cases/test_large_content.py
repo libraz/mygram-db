@@ -32,7 +32,7 @@ class TestLargeContent:
         )
 
         wait_until_gte(
-            lambda: mygramdb.count("articles", marker),
+            lambda: mygramdb.count("testdb.articles", marker),
             minimum=1,
             timeout=30,
             interval=1,
@@ -42,6 +42,6 @@ class TestLargeContent:
     def test_large_result_set(self, mysql, mygramdb, seed_data):
         """Search returning many results should work."""
         # Use seed_data which has 100 rows, search for common term
-        result = mygramdb.search("articles", "the", limit=1000)
+        result = mygramdb.search("testdb.articles", "the", limit=1000)
         assert isinstance(result, dict)
         assert "ids" in result
