@@ -215,6 +215,43 @@ inline std::string QualifiedTableName(const TableConfig& table) {
   return QualifiedTableName(table.database, table.name);
 }
 
+// Forward declaration; full definition appears after the Config struct.
+struct Config;
+
+/**
+ * @brief Count the distinct effective databases across all configured tables.
+ *
+ * Each table's `database` field is defaulted to `mysql.database` at config
+ * load time, so every table has a non-empty database. This counts how many
+ * unique database names appear across `cfg.tables`.
+ *
+ * @param cfg Application configuration.
+ * @return Number of distinct databases (0 when no tables are configured).
+ */
+size_t DistinctDatabaseCount(const Config& cfg);
+
+/**
+ * @brief Determine whether table references must be database-qualified.
+ *
+ * A configuration is "multi-database" when it spans two or more distinct
+ * databases. In that case bare table identifiers are ambiguous and callers
+ * must qualify them as `<database>.<table>`. Single-database configurations
+ * (zero or one distinct database) accept bare identifiers, which resolve to
+ * the unique `<database>.<table>` key.
+ *
+ * @param cfg Application configuration.
+ * @return true if the configuration spans two or more databases.
+ */
+bool RequiresQualifiedTableReferences(const Config& cfg);
+
+/**
+ * @brief Pointer-friendly overload of RequiresQualifiedTableReferences.
+ *
+ * @param cfg Application configuration (may be null).
+ * @return false when @p cfg is null, otherwise the value-overload result.
+ */
+bool RequiresQualifiedTableReferences(const Config* cfg);
+
 /**
  * @brief Build configuration
  */

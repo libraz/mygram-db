@@ -6,7 +6,9 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -17,6 +19,26 @@
 #include "storage/document_store.h"
 
 namespace mygramdb::server {
+
+/**
+ * @brief Resolve a (possibly bare) table identifier to a canonical map key.
+ *
+ * Tables are keyed by their qualified `database.table` identity. This shared
+ * resolver lets both the TCP catalog and the HTTP server map a user-supplied
+ * identifier onto the canonical key:
+ *   - If @p tables contains @p name exactly, it is returned unchanged (covers
+ *     already-qualified references and exact matches).
+ *   - Otherwise, if @p name contains no '.', the map is scanned for keys of
+ *     the form `<db>.<name>`. Exactly one match resolves to that key; zero or
+ *     more than one (ambiguous) yields std::nullopt.
+ *   - A qualified name that is not present yields std::nullopt.
+ *
+ * @param tables Map keyed by qualified `database.table` identity.
+ * @param name   User-supplied table identifier (bare or qualified).
+ * @return The canonical map key on success, std::nullopt otherwise.
+ */
+std::optional<std::string> ResolveTableKey(const std::unordered_map<std::string, TableContext*>& tables,
+                                           std::string_view name);
 
 /**
  * @brief Centralized table resource catalog
@@ -80,6 +102,18 @@ class TableCatalog {
    * @return true if table exists
    */
   bool TableExists(const std::string& name) const;
+
+  /**
+   * @brief Resolve a (possibly bare) table identifier to its canonical key.
+   *
+   * Applies the same bare-to-qualified resolution as GetTable() but returns
+   * the resolved qualified key instead of the context pointer. Useful where
+   * downstream bookkeeping (e.g. SYNC status) compares against qualified keys.
+   *
+   * @param name Table identifier (bare or qualified).
+   * @return The canonical qualified key, or std::nullopt if unresolved.
+   */
+  std::optional<std::string> ResolveName(const std::string& name) const;
 
   /**
    * @brief Get list of all table names

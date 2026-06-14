@@ -234,7 +234,7 @@ TEST_F(HttpTcpConsistencyTest, SearchHitCountMatches) {
   httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
   json req_body;
   req_body["q"] = "machine";
-  auto http_res = http_client.Post("/tables/app/articles/search", req_body.dump(), "application/json");
+  auto http_res = http_client.Post("/tables/app.articles/search", req_body.dump(), "application/json");
   ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
   ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
   json http_body = json::parse(http_res->body);
@@ -255,7 +255,7 @@ TEST_F(HttpTcpConsistencyTest, SearchDefaultOrderAndLimitMatches) {
   json req_body;
   req_body["q"] = "machine";
   req_body["limit"] = 1;
-  auto http_res = http_client.Post("/tables/app/articles/search", req_body.dump(), "application/json");
+  auto http_res = http_client.Post("/tables/app.articles/search", req_body.dump(), "application/json");
   ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
   ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
 
@@ -281,7 +281,7 @@ TEST_F(HttpTcpConsistencyTest, SearchLargeResultTopNOrderAndLimitMatches) {
   json req_body;
   req_body["q"] = "bulk";
   req_body["limit"] = 5;
-  auto http_res = http_client.Post("/tables/app/articles/search", req_body.dump(), "application/json");
+  auto http_res = http_client.Post("/tables/app.articles/search", req_body.dump(), "application/json");
   ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
   ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
 
@@ -300,7 +300,7 @@ TEST_F(HttpTcpConsistencyTest, GetByPrimaryKeyMatches) {
   EXPECT_EQ(tcp_response.rfind("OK DOC doc_1", 0), 0U) << "tcp_response=" << tcp_response;
 
   httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
-  auto http_res = http_client.Get("/tables/app/articles/doc_1");
+  auto http_res = http_client.Get("/tables/app.articles/doc_1");
   ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
   ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
 
@@ -316,7 +316,7 @@ TEST_F(HttpTcpConsistencyTest, CountMatches) {
   httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
   json req_body;
   req_body["q"] = "learning";
-  auto http_res = http_client.Post("/tables/app/articles/count", req_body.dump(), "application/json");
+  auto http_res = http_client.Post("/tables/app.articles/count", req_body.dump(), "application/json");
   ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
   ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
   json http_body = json::parse(http_res->body);
@@ -336,7 +336,7 @@ TEST_F(HttpTcpConsistencyTest, FacetMatches) {
   json req_body;
   req_body["column"] = "category";
   req_body["q"] = "learning";
-  auto http_res = http_client.Post("/tables/app/articles/facet", req_body.dump(), "application/json");
+  auto http_res = http_client.Post("/tables/app.articles/facet", req_body.dump(), "application/json");
   ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
   ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
 
@@ -360,7 +360,7 @@ TEST_F(HttpTcpConsistencyTest, NoMatchReturnsZeroOnBothPaths) {
   httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
   json req_body;
   req_body["q"] = "xyznotfoundabc";
-  auto http_res = http_client.Post("/tables/app/articles/search", req_body.dump(), "application/json");
+  auto http_res = http_client.Post("/tables/app.articles/search", req_body.dump(), "application/json");
   ASSERT_TRUE(http_res != nullptr);
   ASSERT_EQ(http_res->status, 200);
   json http_body = json::parse(http_res->body);

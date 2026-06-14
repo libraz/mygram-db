@@ -10,18 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Database-qualified table identity** — Tables now carry a `(database, name)` identity written as `app_db.articles`. The effective database is `tables[*].database` when set, otherwise `mysql.database`. A single instance can index same-named tables from different databases (e.g. `live_db.articles` and `archive_db.articles`).
+- **Dump metadata preserves per-table databases** — New V1/V2 dump paths retain table-level database names so multi-database identities round-trip without one table overwriting another.
+
+### Changed
+
+- **Table references accept an optional database qualifier** — TCP/CLI/C++/C API table arguments and HTTP routes accept `database.table` (e.g. `app_db.articles`). **In single-database deployments, bare names such as `articles` continue to work unchanged** — they resolve to the only configured database. A qualifier becomes **required only when the configuration spans two or more databases**, where a bare (ambiguous) name is rejected with a clear error.
+
 ### Breaking Change
 
-- **Table identity is now database-qualified** — Table references are moving from bare table names such as `articles` to `(database, name)` identities written as `app_db.articles`. This is an intentional early-stage SemVer exception planned for v1.7.0.
-- **HTTP table routes are database-qualified** — Use `POST /tables/{database}/{table}/search`, `POST /tables/{database}/{table}/count`, `POST /tables/{database}/{table}/facet`, and `GET /tables/{database}/{table}/{primary_key}`. Legacy bare routes such as `POST /articles/search` are deprecated and will not be kept as a compatibility contract.
-- **TCP, CLI, C++, and C API table arguments are database-qualified** — Rewrite commands and client calls from `SEARCH articles hello`, `client.Search("articles", ...)`, or `mygramclient_search(client, "articles", ...)` to `SEARCH app_db.articles hello`, `client.Search("app_db.articles", ...)`, and `mygramclient_search(client, "app_db.articles", ...)`.
-- **Dump metadata preserves per-table databases** — New V1/V2 dump paths retain table-level database names so `live_db.articles` and `archive_db.articles` can round-trip without one table overwriting the other.
+- **HTTP table routes restructured** — Table routes are now `POST /tables/{identity}/search`, `POST /tables/{identity}/count`, `POST /tables/{identity}/facet`, and `GET /tables/{identity}/{primary_key}`, where `{identity}` is `database.table` or, in single-database deployments, a bare `table`. The previous `/{table}/...` routes are removed; HTTP clients must move to the `/tables/...` paths. (TCP, CLI, and client-library bare-name access is unchanged for single-database deployments.)
+- **Multi-database configurations require qualified table references** — When two or more databases are configured, every TCP/CLI/C++/C API/HTTP table reference must use `database.table`.
 
-Migration checklist:
+Migration:
 
-1. For every configured table, identify the effective database: `tables[*].database` when set, otherwise `mysql.database`.
-2. Replace every TCP/CLI/C++/C API table argument with `<database>.<table>`.
-3. Replace HTTP table routes from `/{table}/...` to `/tables/{database}/{table}/...`.
+1. HTTP clients: change request paths from `/{table}/...` to `/tables/{table}/...` (single database) or `/tables/{database}.{table}/...`.
+2. Single-database TCP/CLI/client-library users: no change required — bare table names keep working.
+3. Multi-database users: qualify every table reference as `<database>.<table>`.
 4. Keep old dumps for rollback, then create a fresh dump after upgrading so restored metadata includes qualified table identities.
 
 ## [1.6.1] - 2026-05-07

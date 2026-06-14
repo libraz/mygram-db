@@ -130,7 +130,7 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   request_body["q"] = "machine";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -152,7 +152,7 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   multi_request["q"] = "e";  // Shared character present in all documents
   multi_request["limit"] = 2;
 
-  auto multi_res = client.Post("/test/search", multi_request.dump(), "application/json");
+  auto multi_res = client.Post("/tables/test/search", multi_request.dump(), "application/json");
   ASSERT_TRUE(multi_res);
   EXPECT_EQ(multi_res->status, 200);
 
@@ -167,7 +167,7 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   // Offset should advance into the result set and preserve ordering
   json paged_request = multi_request;
   paged_request["offset"] = 1;
-  auto paged_res = client.Post("/test/search", paged_request.dump(), "application/json");
+  auto paged_res = client.Post("/tables/test/search", paged_request.dump(), "application/json");
   ASSERT_TRUE(paged_res);
   EXPECT_EQ(paged_res->status, 200);
 
@@ -190,7 +190,8 @@ TEST_F(HttpServerTest, DbQualifiedTableRoutesResolveWithoutTopLevelCollision) {
 
   json search_body;
   search_body["q"] = "machine";
-  auto search_res = client.Post("/tables/testdb/test/search", search_body.dump(), "application/json");
+  // Qualified single-segment identity resolves the table.
+  auto search_res = client.Post("/tables/testdb.test/search", search_body.dump(), "application/json");
   ASSERT_TRUE(search_res);
   ASSERT_EQ(search_res->status, 200) << search_res->body;
   auto search_json = json::parse(search_res->body);
@@ -200,21 +201,21 @@ TEST_F(HttpServerTest, DbQualifiedTableRoutesResolveWithoutTopLevelCollision) {
 
   json count_body;
   count_body["q"] = "machine";
-  auto count_res = client.Post("/tables/testdb/test/count", count_body.dump(), "application/json");
+  auto count_res = client.Post("/tables/testdb.test/count", count_body.dump(), "application/json");
   ASSERT_TRUE(count_res);
   ASSERT_EQ(count_res->status, 200) << count_res->body;
   EXPECT_EQ(json::parse(count_res->body)["count"], 1);
 
-  auto get_res = client.Get("/tables/testdb/test/article_1");
+  auto get_res = client.Get("/tables/testdb.test/article_1");
   ASSERT_TRUE(get_res);
   ASSERT_EQ(get_res->status, 200) << get_res->body;
   EXPECT_EQ(json::parse(get_res->body)["primary_key"], "article_1");
 
-  auto legacy_res = client.Post("/test/search", search_body.dump(), "application/json");
-  ASSERT_TRUE(legacy_res);
-  EXPECT_EQ(legacy_res->status, 400);
-  EXPECT_NE(json::parse(legacy_res->body)["error"].get<std::string>().find("Bare HTTP table routes"),
-            std::string::npos);
+  // In a single-database config, the bare identity resolves to the same table.
+  auto bare_res = client.Post("/tables/test/search", search_body.dump(), "application/json");
+  ASSERT_TRUE(bare_res);
+  ASSERT_EQ(bare_res->status, 200) << bare_res->body;
+  EXPECT_EQ(json::parse(bare_res->body)["count"], 1);
 }
 
 TEST_F(HttpServerTest, GetNotFoundIncrementsCommandStats) {
@@ -223,7 +224,7 @@ TEST_F(HttpServerTest, GetNotFoundIncrementsCommandStats) {
   httplib::Client client("http://127.0.0.1:18080");
 
   uint64_t before = http_server_->GetStats().GetCommandCount(query::QueryType::GET);
-  auto res = client.Get("/test/missing_article");
+  auto res = client.Get("/tables/test/missing_article");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 404);
@@ -240,7 +241,7 @@ TEST_F(HttpServerTest, SearchWithFilters) {
   request_body["limit"] = 10;
   request_body["filters"] = {{"series", "Project X=Beta"}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -276,7 +277,7 @@ TEST_F(HttpServerTest, SearchReplacesInvalidUtf8InJsonResponse) {
   request_body["q"] = "invalid";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -298,7 +299,7 @@ TEST_F(HttpServerTest, SearchFilterValueWithSpacesAndEquals) {
   request_body["q"] = "machine";
   request_body["filters"] = {{"series", "Project X=Beta"}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -318,7 +319,7 @@ TEST_F(HttpServerTest, SearchSupportsJsonSort) {
   request_body["limit"] = 3;
   request_body["sort"] = {{"column", "status"}, {"order", "ASC"}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -350,7 +351,7 @@ TEST_F(HttpServerTest, SearchSupportsJsonScoreSort) {
   request_body["sort"] = {{"column", "_score"}, {"order", "DESC"}};
   request_body["limit"] = 2;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -370,7 +371,7 @@ TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
   request_body["q"] = "machime";
   request_body["fuzzy"] = 1;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -395,7 +396,7 @@ TEST_F(HttpServerTest, SearchSupportsJsonHighlight) {
   request_body["highlight"] = {
       {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 50}, {"max_fragments", 1}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -423,7 +424,7 @@ TEST_F(HttpServerTest, SearchHighlightUsesBooleanAstTerms) {
   request_body["highlight"] = {
       {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 80}, {"max_fragments", 1}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -457,7 +458,7 @@ TEST_F(HttpServerTest, SearchHighlightExpandsMultiWordNgramAndTerms) {
   request_body["highlight"] = {
       {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 80}, {"max_fragments", 1}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -483,7 +484,7 @@ TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
   // 257 bytes — one over the 256-byte cap.
   request_body["highlight"] = {{"open_tag", std::string(257, 'a')}, {"close_tag", "</strong>"}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -503,7 +504,7 @@ TEST_F(HttpServerTest, SearchInvalidBooleanExpressionReturnsBadRequest) {
   json request_body;
   request_body["q"] = "machine OR";
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -522,7 +523,7 @@ TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
   request_body["q"] = "machine";
   request_body["filters"] = json::array();
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -539,7 +540,7 @@ TEST_F(HttpServerTest, SearchMissingQuery) {
   json request_body;
   request_body["limit"] = 10;  // Missing "q" field
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -555,7 +556,7 @@ TEST_F(HttpServerTest, SearchRejectsInvalidPaginationBounds) {
   httplib::Client client("http://127.0.0.1:18080");
 
   auto expect_bad_request = [&](json request_body, const std::string& expected_error_fragment) {
-    auto res = client.Post("/test/search", request_body.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 400);
     auto body = json::parse(res->body);
@@ -594,7 +595,7 @@ TEST_F(HttpServerTest, SearchInvalidJSON) {
 
   httplib::Client client("http://127.0.0.1:18080");
 
-  auto res = client.Post("/test/search", "invalid json{", "application/json");
+  auto res = client.Post("/tables/test/search", "invalid json{", "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -616,7 +617,7 @@ TEST_F(HttpServerTest, SearchWithNumericFilters) {
   request_body["limit"] = 10;
   request_body["filters"] = {{"status", "1"}};  // int64_t filter
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -637,7 +638,7 @@ TEST_F(HttpServerTest, SearchWithNumericFilters) {
 
   // Test with status=0
   request_body["filters"] = {{"status", "0"}};
-  res = client.Post("/test/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   body = json::parse(res->body);
   EXPECT_EQ(body["count"], 1);
@@ -655,7 +656,7 @@ TEST_F(HttpServerTest, SearchWithDoubleFilters) {
   request_body["limit"] = 10;
   request_body["filters"] = {{"score", "3.14159"}};  // double filter
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -669,7 +670,7 @@ TEST_F(HttpServerTest, SearchWithDoubleFilters) {
 
   // Test with different score
   request_body["filters"] = {{"score", "1.61803"}};
-  res = client.Post("/test/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   body = json::parse(res->body);
   EXPECT_EQ(body["count"], 1);
@@ -698,7 +699,7 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
   request_body["limit"] = 10;
   request_body["filters"] = {{"published", "true"}};
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -710,7 +711,7 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
 
   // Test bool filter with "1" (alternative true representation)
   request_body["filters"] = {{"published", "1"}};
-  res = client.Post("/test/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   body = json::parse(res->body);
   EXPECT_EQ(body["count"], 1);
@@ -718,7 +719,7 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
 
   // Test bool filter with "false" (should match nothing since we use "0" internally)
   request_body["filters"] = {{"published", "0"}};
-  res = client.Post("/test/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   body = json::parse(res->body);
   EXPECT_EQ(body["count"], 1);
@@ -742,7 +743,7 @@ TEST_F(HttpServerTest, SearchRejectsSortKeywordInQ) {
   request_body["q"] = "e SORT score DESC";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 
@@ -789,14 +790,14 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
   request_body["limit"] = 10;
 
   // First request - cache miss
-  auto res1 = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res1 = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res1);
   EXPECT_EQ(res1->status, 200);
   auto body1 = json::parse(res1->body);
   EXPECT_GT(body1["count"], 0);
 
   // Second identical request - should hit cache
-  auto res2 = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res2 = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res2);
   EXPECT_EQ(res2->status, 200);
   auto body2 = json::parse(res2->body);
@@ -844,7 +845,7 @@ TEST_F(HttpServerTest, ConcurrentSearchRequestsNoDataRace) {
         request_body["q"] = (j % 2 == 0) ? "machine" : "news";
         request_body["limit"] = 10;
 
-        auto res = thread_client.Post("/test/search", request_body.dump(), "application/json");
+        auto res = thread_client.Post("/tables/test/search", request_body.dump(), "application/json");
         if (res && res->status == 200) {
           auto body = json::parse(res->body);
           if (body.contains("results")) {
@@ -926,7 +927,7 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
     request_body["q"] = "test";
     // NO "limit" field!
 
-    auto res = http_client.Post("/test/search", request_body.dump(), "application/json");
+    auto res = http_client.Post("/tables/test/search", request_body.dump(), "application/json");
     ASSERT_TRUE(res) << "HTTP search request failed";
     EXPECT_EQ(res->status, 200);
 
@@ -948,7 +949,7 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
     request_body["q"] = "test";
     request_body["limit"] = 50;  // Explicit limit
 
-    auto res = http_client.Post("/test/search", request_body.dump(), "application/json");
+    auto res = http_client.Post("/tables/test/search", request_body.dump(), "application/json");
     ASSERT_TRUE(res) << "HTTP search request failed";
     EXPECT_EQ(res->status, 200);
 
@@ -966,7 +967,7 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
     json request_body;
     request_body["q"] = "test";
 
-    auto res = http_client.Post("/test/search", request_body.dump(), "application/json");
+    auto res = http_client.Post("/tables/test/search", request_body.dump(), "application/json");
     ASSERT_TRUE(res) << "HTTP search request failed";
     EXPECT_EQ(res->status, 200);
 
@@ -979,7 +980,7 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
     json request_body;
     request_body["q"] = std::string(20, 'a');
 
-    auto res = http_client.Post("/test/search", request_body.dump(), "application/json");
+    auto res = http_client.Post("/tables/test/search", request_body.dump(), "application/json");
     ASSERT_TRUE(res) << "HTTP search request failed";
     EXPECT_EQ(res->status, 400);
     EXPECT_NE(res->body.find("exceeds maximum allowed length of 15"), std::string::npos) << res->body;
@@ -1001,7 +1002,7 @@ TEST_F(HttpServerTest, CountEndpoint) {
   json request_body;
   request_body["q"] = "machine";
 
-  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -1017,7 +1018,7 @@ TEST_F(HttpServerTest, CountEndpoint) {
   json multi_request;
   multi_request["q"] = "e";  // Present in multiple documents
 
-  res = client.Post("/test/count", multi_request.dump(), "application/json");
+  res = client.Post("/tables/test/count", multi_request.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
 
@@ -1038,7 +1039,7 @@ TEST_F(HttpServerTest, CountWithFilters) {
   request_body["q"] = "e";  // Present in all documents
   request_body["filters"]["status"] = 1;
 
-  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -1052,7 +1053,7 @@ TEST_F(HttpServerTest, CountWithFilters) {
   multi_filter_request["filters"]["status"] = 1;
   multi_filter_request["filters"]["category"] = "tech";
 
-  res = client.Post("/test/count", multi_filter_request.dump(), "application/json");
+  res = client.Post("/tables/test/count", multi_filter_request.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
 
@@ -1074,7 +1075,7 @@ TEST_F(HttpServerTest, CountWithFilterOperators) {
   request_body["filters"]["score"]["op"] = "GT";
   request_body["filters"]["score"]["value"] = 2.0;
 
-  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -1088,7 +1089,7 @@ TEST_F(HttpServerTest, CountWithFilterOperators) {
   lt_request["filters"]["score"]["op"] = "LT";
   lt_request["filters"]["score"]["value"] = 2.0;
 
-  res = client.Post("/test/count", lt_request.dump(), "application/json");
+  res = client.Post("/tables/test/count", lt_request.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
 
@@ -1108,7 +1109,7 @@ TEST_F(HttpServerTest, CountErrorCases) {
   json request_body;
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1121,7 +1122,7 @@ TEST_F(HttpServerTest, CountErrorCases) {
   json valid_request;
   valid_request["q"] = "test";
 
-  res = client.Post("/nonexistent/count", valid_request.dump(), "application/json");
+  res = client.Post("/tables/nonexistent/count", valid_request.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 404);
   body = json::parse(res->body);
@@ -1130,7 +1131,7 @@ TEST_F(HttpServerTest, CountErrorCases) {
   EXPECT_NE(error_msg.find("Table not found"), std::string::npos);
 
   // Test invalid JSON
-  res = client.Post("/test/count", "invalid json", "application/json");
+  res = client.Post("/tables/test/count", "invalid json", "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
   body = json::parse(res->body);
@@ -1143,7 +1144,7 @@ TEST_F(HttpServerTest, CountErrorCases) {
   ranked_count_request["q"] = "machine";
   ranked_count_request["sort"] = {{"column", "_score"}, {"order", "DESC"}};
 
-  res = client.Post("/test/count", ranked_count_request.dump(), "application/json");
+  res = client.Post("/tables/test/count", ranked_count_request.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
   body = json::parse(res->body);
@@ -1172,7 +1173,7 @@ TEST_F(HttpServerTest, SearchRejectsCRInQuery) {
   request_body["q"] = "test\rinjection";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1194,7 +1195,7 @@ TEST_F(HttpServerTest, SearchRejectsLFInQuery) {
   request_body["q"] = "test\ninjection";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1216,7 +1217,7 @@ TEST_F(HttpServerTest, SearchRejectsCRLFInQuery) {
   request_body["q"] = "test\r\nHTTP/1.1 200 OK\r\n";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1243,7 +1244,7 @@ TEST_F(HttpServerTest, SearchRejectsNullByteInQuery) {
   request_body["q"] = query_text;
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   // Note: The null byte may be truncated by JSON serialization.
@@ -1264,7 +1265,7 @@ TEST_F(HttpServerTest, SearchAcceptsNormalQuery) {
   request_body["q"] = "machine learning";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -1284,7 +1285,7 @@ TEST_F(HttpServerTest, CountRejectsCRLFInQuery) {
   json request_body;
   request_body["q"] = "test\r\ninjection";
 
-  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1306,7 +1307,7 @@ TEST_F(HttpServerTest, SearchRejectsIntegerQField) {
   json request_body;
   request_body["q"] = 12345;  // integer, not string
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1324,7 +1325,7 @@ TEST_F(HttpServerTest, SearchRejectsArrayQField) {
   json request_body;
   request_body["q"] = json::array({"hello", "world"});  // array, not string
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1342,7 +1343,7 @@ TEST_F(HttpServerTest, SearchRejectsNullQField) {
   json request_body;
   request_body["q"] = nullptr;  // null, not string
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1360,7 +1361,7 @@ TEST_F(HttpServerTest, SearchRejectsBooleanQField) {
   json request_body;
   request_body["q"] = true;  // boolean, not string
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1378,7 +1379,7 @@ TEST_F(HttpServerTest, CountRejectsIntegerQField) {
   json request_body;
   request_body["q"] = 42;  // integer, not string
 
-  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
@@ -1409,7 +1410,7 @@ TEST_F(HttpServerTest, SearchRejectsLimitKeywordInQ) {
   request_body["limit"] = 10;
   request_body["offset"] = 0;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 
@@ -1432,7 +1433,7 @@ TEST_F(HttpServerTest, SearchRejectsOffsetKeywordInQ) {
   request_body["q"] = "machine OFFSET 100";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 
@@ -1453,7 +1454,7 @@ TEST_F(HttpServerTest, SearchRejectsMixedCaseLimitKeywordInQ) {
   request_body["q"] = "machine Limit 5";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 }
@@ -1474,7 +1475,7 @@ TEST_F(HttpServerTest, SearchAllowsLimitKeywordInQuotedPhrase) {
   request_body["q"] = "\"machine LIMIT learning\"";  // quoted phrase
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   // Quoted phrase is a valid search input; even if no document matches the
   // exact phrase, the request itself must not be flagged as invalid.
@@ -1494,7 +1495,7 @@ TEST_F(HttpServerTest, SearchAllowsBooleanOperatorsInQ) {
   request_body["q"] = "machine AND learning";  // boolean AND
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
 }
@@ -1515,7 +1516,7 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithWhitespace) {
   request_body["q"] = "machine";
 
   // %20 -> space. The httplib router decodes percent-escapes before matching.
-  auto res = client.Post("/test%20foo/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test%20foo/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 
@@ -1535,7 +1536,7 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithSemicolon) {
   json request_body;
   request_body["q"] = "machine";
 
-  auto res = client.Post("/test%3Bdrop/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test%3Bdrop/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 }
@@ -1549,7 +1550,7 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithInvalidUtf8) {
   request_body["q"] = "machine";
 
   // %E3%81 is a truncated three-byte UTF-8 sequence.
-  auto res = client.Post("/test%E3%81/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test%E3%81/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 
@@ -1569,7 +1570,7 @@ TEST_F(HttpServerTest, CountRejectsFilterKeywordInQ) {
   json request_body;
   request_body["q"] = "e FILTER status = 1";
 
-  auto res = client.Post("/test/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 
@@ -1589,7 +1590,7 @@ TEST_F(HttpServerTest, CountRejectsTableNameWithWhitespace) {
   json request_body;
   request_body["q"] = "machine";
 
-  auto res = client.Post("/test%20foo/count", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test%20foo/count", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
 }
@@ -1612,7 +1613,7 @@ TEST_F(HttpServerTest, SearchJsonLimitOverridesAttemptedSmuggle) {
   clean_request["limit"] = 2;
   clean_request["offset"] = 0;
 
-  auto clean_res = client.Post("/test/search", clean_request.dump(), "application/json");
+  auto clean_res = client.Post("/tables/test/search", clean_request.dump(), "application/json");
   ASSERT_TRUE(clean_res);
   EXPECT_EQ(clean_res->status, 200);
   auto clean_body = json::parse(clean_res->body);
@@ -1626,7 +1627,7 @@ TEST_F(HttpServerTest, SearchJsonLimitOverridesAttemptedSmuggle) {
   smuggle_request["limit"] = 2;
   smuggle_request["offset"] = 0;
 
-  auto smuggle_res = client.Post("/test/search", smuggle_request.dump(), "application/json");
+  auto smuggle_res = client.Post("/tables/test/search", smuggle_request.dump(), "application/json");
   ASSERT_TRUE(smuggle_res);
   EXPECT_EQ(smuggle_res->status, 400);
 }

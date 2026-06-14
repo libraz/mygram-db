@@ -24,6 +24,22 @@
 
 namespace mygramdb::config {
 
+size_t DistinctDatabaseCount(const Config& cfg) {
+  std::set<std::string> databases;
+  for (const auto& table : cfg.tables) {
+    databases.insert(table.database);
+  }
+  return databases.size();
+}
+
+bool RequiresQualifiedTableReferences(const Config& cfg) {
+  return DistinctDatabaseCount(cfg) >= 2;
+}
+
+bool RequiresQualifiedTableReferences(const Config* cfg) {
+  return cfg != nullptr && RequiresQualifiedTableReferences(*cfg);
+}
+
 namespace {
 
 using json = nlohmann::json;

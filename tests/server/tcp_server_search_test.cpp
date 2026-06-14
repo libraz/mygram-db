@@ -307,8 +307,11 @@ TEST_F(TcpServerTest, SearchWithDatabaseQualifiedTableName) {
   sock = CreateClientSocket(port);
   ASSERT_GE(sock, 0);
 
+  // Single-database config: the bare name resolves to the unique testdb.test
+  // and returns the same results as the qualified form.
   response = SendRequest(sock, "SEARCH test hello");
-  EXPECT_NE(response.find("Bare table names are not supported"), std::string::npos);
+  EXPECT_EQ(response, "OK RESULTS 1 1");
+  EXPECT_EQ(response.find("Bare table names are not supported"), std::string::npos);
 
   close(sock);
   server_->Stop();
@@ -408,9 +411,13 @@ TEST_F(TcpServerTest, CliSingleCommandUsesDatabaseQualifiedTableName) {
   EXPECT_NE(qualified.output.find("(1 results, showing 1)"), std::string::npos) << qualified.output;
   EXPECT_NE(qualified.output.find("cli_1"), std::string::npos) << qualified.output;
 
+  // Single-database config: the bare name resolves to the unique testdb.test
+  // and yields the same result as the qualified form.
   auto bare = RunCommandCapture(base_command + " SEARCH test hello");
-  EXPECT_NE(bare.exit_code, 0) << bare.output;
-  EXPECT_NE(bare.output.find("Bare table names are not supported"), std::string::npos) << bare.output;
+  EXPECT_EQ(bare.exit_code, 0) << bare.output;
+  EXPECT_NE(bare.output.find("(1 results, showing 1)"), std::string::npos) << bare.output;
+  EXPECT_NE(bare.output.find("cli_1"), std::string::npos) << bare.output;
+  EXPECT_EQ(bare.output.find("Bare table names are not supported"), std::string::npos) << bare.output;
 
   server_->Stop();
 }

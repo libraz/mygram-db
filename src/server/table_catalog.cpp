@@ -9,6 +9,36 @@
 
 namespace mygramdb::server {
 
+std::optional<std::string> ResolveTableKey(const std::unordered_map<std::string, TableContext*>& tables,
+                                           std::string_view name) {
+  // Exact match covers already-qualified references and any literal key.
+  if (tables.find(std::string(name)) != tables.end()) {
+    return std::string(name);
+  }
+
+  // Qualified names that were not found exactly do not resolve further.
+  if (name.find('.') != std::string_view::npos) {
+    return std::nullopt;
+  }
+
+  // Bare name: look for a unique key of the form "<db>.<name>".
+  std::optional<std::string> resolved;
+  for (const auto& [key, _] : tables) {
+    const auto separator = key.find('.');
+    if (separator == std::string::npos) {
+      continue;
+    }
+    const std::string_view table_part(key.data() + separator + 1, key.size() - separator - 1);
+    if (table_part == name) {
+      if (resolved.has_value()) {
+        return std::nullopt;  // Ambiguous: same bare name in multiple databases.
+      }
+      resolved = key;
+    }
+  }
+  return resolved;
+}
+
 TableCatalog::TableCatalog(std::unordered_map<std::string, TableContext*> tables) : tables_(std::move(tables)) {
   mygram::utils::StructuredLog()
       .Event("table_catalog_initialized")
@@ -20,17 +50,29 @@ TableCatalog::TableCatalog(std::unordered_map<std::string, TableContext*> tables
 // See TableCatalog class-level Doxygen.
 
 TableContext* TableCatalog::GetTable(const std::string& name) {
-  auto iter = tables_.find(name);
+  auto resolved = ResolveTableKey(tables_, name);
+  if (!resolved.has_value()) {
+    return nullptr;
+  }
+  auto iter = tables_.find(*resolved);
   return iter != tables_.end() ? iter->second : nullptr;
 }
 
 const TableContext* TableCatalog::GetTable(const std::string& name) const {
-  auto iter = tables_.find(name);
+  auto resolved = ResolveTableKey(tables_, name);
+  if (!resolved.has_value()) {
+    return nullptr;
+  }
+  auto iter = tables_.find(*resolved);
   return iter != tables_.end() ? iter->second : nullptr;
 }
 
 bool TableCatalog::TableExists(const std::string& name) const {
-  return tables_.find(name) != tables_.end();
+  return ResolveTableKey(tables_, name).has_value();
+}
+
+std::optional<std::string> TableCatalog::ResolveName(const std::string& name) const {
+  return ResolveTableKey(tables_, name);
 }
 
 std::vector<std::string> TableCatalog::GetTableNames() const {

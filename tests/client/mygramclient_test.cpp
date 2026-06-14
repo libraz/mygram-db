@@ -214,9 +214,12 @@ TEST_F(MygramClientTest, SearchCountGetAndFacetAcceptDatabaseQualifiedTableName)
   EXPECT_EQ(facet->facets[0].value, "active");
   EXPECT_EQ(facet->facets[0].count, 2u);
 
+  // Single-database config: the bare name resolves to the unique testdb.test
+  // and returns the same results as the qualified form.
   auto bare_result = client_->Search("test", "hello", 100);
-  ASSERT_FALSE(bare_result);
-  EXPECT_NE(bare_result.error().message().find("Bare table names are not supported"), std::string::npos);
+  ASSERT_TRUE(bare_result) << "Search error: " << bare_result.error().message();
+  EXPECT_EQ(bare_result->total_count, result->total_count);
+  EXPECT_EQ(bare_result->results.size(), result->results.size());
 }
 
 TEST_F(MygramClientTest, CApiSearchAndCountAcceptDatabaseQualifiedTableName) {
@@ -265,11 +268,16 @@ TEST_F(MygramClientTest, CApiSearchAndCountAcceptDatabaseQualifiedTableName) {
       << "Count error: " << mygramclient_get_last_error(c_client);
   EXPECT_EQ(count, 2u);
 
+  // Single-database config: the bare name resolves to the unique testdb.test
+  // and returns the same results as the qualified form.
   MygramSearchResult_C* bare_search_result = nullptr;
-  EXPECT_NE(mygramclient_search(c_client, "test", "hello", 100, 0, &bare_search_result), 0);
-  EXPECT_EQ(bare_search_result, nullptr);
-  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("Bare table names are not supported"),
-            std::string::npos);
+  EXPECT_EQ(mygramclient_search(c_client, "test", "hello", 100, 0, &bare_search_result), 0)
+      << "Search error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(bare_search_result, nullptr);
+  EXPECT_EQ(bare_search_result->total_count, 2u);
+  EXPECT_EQ(bare_search_result->count, 2u);
+
+  mygramclient_free_search_result(bare_search_result);
 
   mygramclient_disconnect(c_client);
   mygramclient_destroy(c_client);

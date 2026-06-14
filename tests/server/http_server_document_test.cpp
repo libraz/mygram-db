@@ -112,7 +112,7 @@ TEST_F(HttpServerTest, GetDocumentEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
-  auto res = client.Get("/test/article_1");
+  auto res = client.Get("/tables/test/article_1");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -131,7 +131,7 @@ TEST_F(HttpServerTest, GetDocumentNotFound) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
-  auto res = client.Get("/test/missing_pk");
+  auto res = client.Get("/tables/test/missing_pk");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 404);
@@ -145,7 +145,7 @@ TEST_F(HttpServerTest, GetDocumentInvalidID) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
-  auto res = client.Get("/test/invalid");
+  auto res = client.Get("/tables/test/invalid");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 404);  // Route won't match non-numeric ID

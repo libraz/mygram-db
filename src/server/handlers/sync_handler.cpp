@@ -27,7 +27,11 @@ std::string SyncHandler::Handle(const query::Query& query, ConnectionContext& co
 }
 
 std::string SyncHandler::HandleSync(const query::Query& query) {
-  auto result = sync_manager_->StartSync(query.table);
+  auto resolved = ResolveTableName(query.table);
+  if (!resolved) {
+    return ResponseFormatter::FormatError(resolved.error().message());
+  }
+  auto result = sync_manager_->StartSync(*resolved);
   if (!result) {
     return ResponseFormatter::FormatError(result.error().message());
   }
@@ -39,7 +43,16 @@ std::string SyncHandler::HandleSyncStatus(const query::Query& /*query*/) {
 }
 
 std::string SyncHandler::HandleSyncStop(const query::Query& query) {
-  return sync_manager_->StopSync(query.table);
+  // SYNC STOP with an empty table stops all in-flight syncs; only resolve when
+  // a specific table was named so the stop-all path keeps working.
+  if (query.table.empty()) {
+    return sync_manager_->StopSync(query.table);
+  }
+  auto resolved = ResolveTableName(query.table);
+  if (!resolved) {
+    return ResponseFormatter::FormatError(resolved.error().message());
+  }
+  return sync_manager_->StopSync(*resolved);
 }
 
 }  // namespace mygramdb::server

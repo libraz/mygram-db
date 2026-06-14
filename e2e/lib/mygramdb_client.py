@@ -500,18 +500,14 @@ class MygramdbClient:
 
     @staticmethod
     def _http_table_path(table: str) -> str:
-        """Build the database-qualified HTTP route prefix for a table.
+        """Build the single-segment HTTP route prefix for a table.
 
-        Callers pass a qualified ``<database>.<table>`` name (consistent with
-        the TCP API). The server exposes table routes under
-        ``/tables/{database}/{table}/...`` and rejects bare names, so split on
-        the first ``.`` to form the path. If no ``.`` is present the name is
-        emitted as-is (the server will reject it, surfacing the error).
+        The server exposes table routes under ``/tables/{identity}/...`` where
+        ``{identity}`` is the qualified ``<database>.<table>`` (or a bare
+        ``table`` in single-database configurations). Callers pass the identity
+        verbatim, so it is emitted as a single path segment without splitting.
         """
-        database, sep, rest = table.partition(".")
-        if not sep:
-            return f"/{table}"
-        return f"/tables/{database}/{rest}"
+        return f"/tables/{table}"
 
     def _parse_json_or_text(self, raw: str) -> dict[str, Any] | str:
         with contextlib.suppress(json.JSONDecodeError):

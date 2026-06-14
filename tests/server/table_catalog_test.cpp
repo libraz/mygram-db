@@ -383,3 +383,69 @@ TEST_F(TableCatalogTest, TableNameWithSpecialCharacters) {
   EXPECT_TRUE(catalog.TableExists("table-with_special.chars"));
   EXPECT_NE(catalog.GetTable("table-with_special.chars"), nullptr);
 }
+
+// ===========================================================================
+// ResolveTableKey tests (bare/qualified resolution)
+// ===========================================================================
+
+class ResolveTableKeyTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    ctx_a_ = CreateTableContext("articles");
+    ctx_b_ = CreateTableContext("comments");
+    ctx_c_ = CreateTableContext("articles");  // Same bare name, different db.
+  }
+
+  std::unique_ptr<TableContext> ctx_a_;
+  std::unique_ptr<TableContext> ctx_b_;
+  std::unique_ptr<TableContext> ctx_c_;
+};
+
+TEST_F(ResolveTableKeyTest, ExactQualifiedMatch) {
+  std::unordered_map<std::string, TableContext*> tables;
+  tables["mydb.articles"] = ctx_a_.get();
+  tables["mydb.comments"] = ctx_b_.get();
+
+  auto resolved = ResolveTableKey(tables, "mydb.articles");
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(*resolved, "mydb.articles");
+}
+
+TEST_F(ResolveTableKeyTest, BareNameResolvesWhenUnique) {
+  std::unordered_map<std::string, TableContext*> tables;
+  tables["mydb.articles"] = ctx_a_.get();
+  tables["mydb.comments"] = ctx_b_.get();
+
+  auto resolved = ResolveTableKey(tables, "articles");
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(*resolved, "mydb.articles");
+}
+
+TEST_F(ResolveTableKeyTest, BareNameAmbiguousAcrossDatabases) {
+  std::unordered_map<std::string, TableContext*> tables;
+  tables["db1.articles"] = ctx_a_.get();
+  tables["db2.articles"] = ctx_c_.get();
+
+  auto resolved = ResolveTableKey(tables, "articles");
+  EXPECT_FALSE(resolved.has_value());
+}
+
+TEST_F(ResolveTableKeyTest, NotFound) {
+  std::unordered_map<std::string, TableContext*> tables;
+  tables["mydb.articles"] = ctx_a_.get();
+
+  EXPECT_FALSE(ResolveTableKey(tables, "missing").has_value());
+  EXPECT_FALSE(ResolveTableKey(tables, "mydb.missing").has_value());
+  EXPECT_FALSE(ResolveTableKey(tables, "otherdb.articles").has_value());
+}
+
+TEST_F(ResolveTableKeyTest, ExactMatchTakesPriorityOverBareScan) {
+  // A literal bare key must resolve to itself even when qualified keys exist.
+  std::unordered_map<std::string, TableContext*> tables;
+  tables["articles"] = ctx_a_.get();
+  tables["mydb.articles"] = ctx_c_.get();
+
+  auto resolved = ResolveTableKey(tables, "articles");
+  ASSERT_TRUE(resolved.has_value());
+  EXPECT_EQ(*resolved, "articles");
+}

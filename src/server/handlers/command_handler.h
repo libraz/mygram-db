@@ -82,6 +82,18 @@ class CommandHandler {
   };
 
   /**
+   * @brief Resolve a (possibly bare) table identifier to its canonical key.
+   *
+   * Applies the multi-database qualification gate (rejecting bare names when
+   * the configuration spans two or more databases) and then resolves the name
+   * to its qualified `database.table` key via the table catalog.
+   *
+   * @param table_name Table identifier (bare or qualified).
+   * @return The resolved qualified key, or an error if rejected/not found.
+   */
+  mygram::utils::Expected<std::string, mygram::utils::Error> ResolveTableName(const std::string& table_name) const;
+
+  /**
    * @brief Get table context for a query
    * @param table_name Table name
    * @return Table context result or error

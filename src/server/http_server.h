@@ -297,11 +297,15 @@ class HttpServer {
    *   3. Non-null `index` and `doc_store` — defensive against partially
    *      initialised contexts.
    *
-   * @param table_name URL-extracted table name (raw match[1]).
+   * Additionally applies the multi-database qualification gate (rejecting bare
+   * names when the configuration spans two or more databases) and resolves a
+   * bare identity to its qualified key in single-database configurations.
+   *
+   * @param table_name URL-extracted table identity (qualified or bare).
    * @return `TableContextLookup` whose `table_ctx` is non-null on success and
    *         whose `status` / `message` describe the error otherwise.
    */
-  TableContextLookup ResolveHttpTableContext(const std::string& table_name, bool database_qualified_route);
+  TableContextLookup ResolveHttpTableContext(const std::string& table_name);
 
   /**
    * @brief Run the shared HandleSearch/HandleCount preamble.

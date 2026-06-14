@@ -288,7 +288,7 @@ TEST_F(HttpServerStartupTest, RejectsBodyExceedingMaxSize) {
   std::string body = R"({"q":")" + padding + R"("})";
   ASSERT_GT(body.size(), cfg.max_body_bytes);
 
-  auto res = client.Post("/test/search", body, "application/json");
+  auto res = client.Post("/tables/test/search", body, "application/json");
   ASSERT_TRUE(res) << "POST failed at the network layer";
   EXPECT_EQ(res->status, 413) << "Expected 413 Payload Too Large for body > max_body_bytes";
 
@@ -316,7 +316,7 @@ TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
   // table-name whitelist (only [A-Za-z0-9._-] plus non-ASCII bytes are
   // allowed). The cpp-httplib route regex `[^/]+` still matches, so the
   // request reaches HandleGet, where ResolveHttpTableContext rejects it.
-  auto res = client.Get("/te$st/42");
+  auto res = client.Get("/tables/te$st/42");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400) << "Invalid table name should produce 400, got " << res->status;
 
@@ -342,7 +342,7 @@ TEST_F(HttpServerStartupTest, AcceptsBodyWithinMaxSize) {
   std::string body = R"({"q":"test"})";
   ASSERT_LE(body.size(), cfg.max_body_bytes);
 
-  auto res = client.Post("/test/search", body, "application/json");
+  auto res = client.Post("/tables/test/search", body, "application/json");
   ASSERT_TRUE(res);
   EXPECT_NE(res->status, 413) << "Body within cap should not be rejected as too large";
 

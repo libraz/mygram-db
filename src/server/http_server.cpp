@@ -28,7 +28,8 @@
 #include "server/response_formatter.h"
 #include "server/search_pipeline.h"
 #include "server/statistics_service.h"
-#include "server/tcp_server.h"  // For TableContext definition
+#include "server/table_catalog.h"  // For ResolveTableKey
+#include "server/tcp_server.h"     // For TableContext definition
 #include "storage/document_store.h"
 #include "storage/filter_index.h"
 #include "utils/memory_utils.h"
@@ -190,30 +191,19 @@ bool IsValidTableName(std::string_view table) {
   return true;
 }
 
-bool IsQualifiedTableRoute(const httplib::Request& req) {
-  return req.matches.size() >= 4 && req.matches[1] == "tables";
-}
-
-bool RequiresQualifiedTableReferences(const config::Config* full_config) {
-  return full_config != nullptr && !full_config->tables.empty();
-}
-
 bool IsDatabaseQualifiedTableName(std::string_view table_name) {
   const auto separator = table_name.find('.');
   return separator != std::string_view::npos && separator != 0 && separator + 1 < table_name.size();
 }
 
+// Routes are single-segment `/tables/{identity}/...`, where {identity} is the
+// qualified `database.table` or a bare `table` (resolved in single-db configs).
+// The identity is always match[1]; GET carries the primary key in match[2].
 std::string ExtractRouteTableKey(const httplib::Request& req) {
-  if (IsQualifiedTableRoute(req)) {
-    return config::QualifiedTableName(req.matches[2], req.matches[3]);
-  }
   return req.matches[1];
 }
 
 std::string ExtractRoutePrimaryKey(const httplib::Request& req) {
-  if (IsQualifiedTableRoute(req)) {
-    return req.matches[4];
-  }
   return req.matches[2];
 }
 
@@ -648,29 +638,19 @@ HttpServer::~HttpServer() {
 }
 
 void HttpServer::SetupRoutes() {
-  // POST /tables/{database}/{table}/search - DB-qualified full-text search
-  server_->Post(R"(/(tables)/([^/]+)/([^/]+)/search)",
+  // POST /tables/{identity}/search - Full-text search.
+  // {identity} is the qualified `database.table` or a bare `table` (resolved in
+  // single-database configurations). The pattern matches any non-slash
+  // characters to support names with dashes, dots, or unicode.
+  server_->Post(R"(/tables/([^/]+)/search)",
                 [this](const httplib::Request& req, httplib::Response& res) { HandleSearch(req, res); });
 
-  // POST /tables/{database}/{table}/count - DB-qualified count
-  server_->Post(R"(/(tables)/([^/]+)/([^/]+)/count)",
+  // POST /tables/{identity}/count - Count matching documents
+  server_->Post(R"(/tables/([^/]+)/count)",
                 [this](const httplib::Request& req, httplib::Response& res) { HandleCount(req, res); });
 
-  // POST /tables/{database}/{table}/facet - DB-qualified facet
-  server_->Post(R"(/(tables)/([^/]+)/([^/]+)/facet)",
-                [this](const httplib::Request& req, httplib::Response& res) { HandleFacet(req, res); });
-
-  // POST /{table}/search - Full-text search
-  // Route pattern: match any non-slash characters to support table names with dashes, dots, or unicode
-  server_->Post(R"(/([^/]+)/search)",
-                [this](const httplib::Request& req, httplib::Response& res) { HandleSearch(req, res); });
-
-  // POST /{table}/count - Count matching documents
-  server_->Post(R"(/([^/]+)/count)",
-                [this](const httplib::Request& req, httplib::Response& res) { HandleCount(req, res); });
-
-  // POST /{table}/facet - Facet value counts
-  server_->Post(R"(/([^/]+)/facet)",
+  // POST /tables/{identity}/facet - Facet value counts
+  server_->Post(R"(/tables/([^/]+)/facet)",
                 [this](const httplib::Request& req, httplib::Response& res) { HandleFacet(req, res); });
 
   // GET /info - Server information
@@ -696,12 +676,10 @@ void HttpServer::SetupRoutes() {
   // GET /metrics - Prometheus metrics
   server_->Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) { HandleMetrics(req, res); });
 
-  // GET /{table}/{primary_key} - Get document by primary key.
-  // Register this catch-all route last so fixed endpoints such as
-  // /health/live and /replication/status are not interpreted as table/PK.
-  server_->Get(R"(/(tables)/([^/]+)/([^/]+)/([^/]+))",
-               [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
-  server_->Get(R"(/([^/]+)/([^/]+))",
+  // GET /tables/{identity}/{primary_key} - Get document by primary key.
+  // Registered after the fixed endpoints; it lives under /tables/ so it cannot
+  // shadow /info, /health/*, /config, /metrics, or /replication/status.
+  server_->Get(R"(/tables/([^/]+)/([^/]+))",
                [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
 }
 
@@ -895,8 +873,7 @@ void HttpServer::UpdateApiConfig(int default_limit, int max_query_length) {
   max_query_length_.store(max_query_length <= 0 ? 0 : static_cast<size_t>(max_query_length), std::memory_order_release);
 }
 
-HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name,
-                                                                   bool database_qualified_route) {
+HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name) {
   TableContextLookup result;
 
   if (!IsValidTableName(table_name)) {
@@ -905,20 +882,22 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
     return result;
   }
 
-  if (RequiresQualifiedTableReferences(full_config_)) {
-    if (!database_qualified_route) {
-      result.status = kHttpBadRequest;
-      result.message = "Bare HTTP table routes are not supported; use /tables/{database}/{table}/...";
-      return result;
-    }
-    if (!IsDatabaseQualifiedTableName(table_name)) {
-      result.status = kHttpBadRequest;
-      result.message = "Bare table names are not supported; use <database>.<table>: " + table_name;
-      return result;
-    }
+  // Multi-database configurations require a qualified `database.table` identity.
+  if (config::RequiresQualifiedTableReferences(full_config_) && !IsDatabaseQualifiedTableName(table_name)) {
+    result.status = kHttpBadRequest;
+    result.message = "Bare table names are not supported; use <database>.<table>: " + table_name;
+    return result;
   }
 
-  auto table_iter = table_contexts_.find(table_name);
+  // Resolve a (possibly bare) identity to the canonical qualified key.
+  auto resolved = ResolveTableKey(table_contexts_, table_name);
+  if (!resolved.has_value()) {
+    result.status = kHttpNotFound;
+    result.message = "Table not found: " + table_name;
+    return result;
+  }
+
+  auto table_iter = table_contexts_.find(*resolved);
   if (table_iter == table_contexts_.end()) {
     result.status = kHttpNotFound;
     result.message = "Table not found: " + table_name;
@@ -950,7 +929,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   // surfaced with the precise HTTP status code computed by the helper so
   // callers do not need to know the underlying reason.
   std::string table = ExtractRouteTableKey(req);
-  auto lookup = ResolveHttpTableContext(table, IsQualifiedTableRoute(req));
+  auto lookup = ResolveHttpTableContext(table);
   if (lookup.table_ctx == nullptr) {
     SendError(res, lookup.status, lookup.message);
     return std::nullopt;
@@ -1120,7 +1099,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   }
 
   std::string table = ExtractRouteTableKey(req);
-  auto lookup = ResolveHttpTableContext(table, IsQualifiedTableRoute(req));
+  auto lookup = ResolveHttpTableContext(table);
   if (lookup.table_ctx == nullptr) {
     SendError(res, lookup.status, lookup.message);
     return std::nullopt;
@@ -1490,7 +1469,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     // GET applies the same table-name whitelist and null-context guards as
     // SEARCH and COUNT.
     std::string primary_key = ExtractRoutePrimaryKey(req);
-    auto lookup = ResolveHttpTableContext(ExtractRouteTableKey(req), IsQualifiedTableRoute(req));
+    auto lookup = ResolveHttpTableContext(ExtractRouteTableKey(req));
     if (lookup.table_ctx == nullptr) {
       SendError(res, lookup.status, lookup.message);
       return;

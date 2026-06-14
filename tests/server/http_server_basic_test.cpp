@@ -334,7 +334,7 @@ TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   request_body["q"] = "machine";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
 
@@ -342,7 +342,7 @@ TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   loading_flag.store(true);
 
   // Test search during loading - should return 503
-  res = client.Post("/test/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 503);
   auto body = json::parse(res->body);
@@ -350,7 +350,7 @@ TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   EXPECT_TRUE(body["error"].get<std::string>().find("loading") != std::string::npos);
 
   // Test GET during loading - should also return 503
-  res = client.Get("/test/article_1");
+  res = client.Get("/tables/test/article_1");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 503);
   body = json::parse(res->body);
@@ -361,7 +361,7 @@ TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   loading_flag.store(false);
 
   // Test search after loading - should succeed again
-  res = client.Post("/test/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
 

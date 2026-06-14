@@ -215,7 +215,7 @@ TEST_F(HttpServerTest, CORSPreflight) {
   ASSERT_TRUE(cors_server->Start());
 
   httplib::Client client(LoopbackUrl(cors_port));
-  auto res = client.Options("/test/search");
+  auto res = client.Options("/tables/test/search");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 204);
@@ -424,7 +424,7 @@ TEST_F(HttpServerMultiTableTest, SearchDifferentTables) {
   request1["q"] = "machine";
   request1["limit"] = 10;
 
-  auto res1 = client.Post("/table1/search", request1.dump(), "application/json");
+  auto res1 = client.Post("/tables/table1/search", request1.dump(), "application/json");
   ASSERT_TRUE(res1);
   EXPECT_EQ(res1->status, 200);
 
@@ -437,7 +437,7 @@ TEST_F(HttpServerMultiTableTest, SearchDifferentTables) {
   request2["q"] = "news";
   request2["limit"] = 10;
 
-  auto res2 = client.Post("/table2/search", request2.dump(), "application/json");
+  auto res2 = client.Post("/tables/table2/search", request2.dump(), "application/json");
   ASSERT_TRUE(res2);
   EXPECT_EQ(res2->status, 200);
 
@@ -452,7 +452,7 @@ TEST_F(HttpServerMultiTableTest, GetDocumentFromDifferentTables) {
   httplib::Client client(LoopbackUrl(port_));
 
   // Get from table1
-  auto res1 = client.Get("/table1/tech_1");
+  auto res1 = client.Get("/tables/table1/tech_1");
   ASSERT_TRUE(res1);
   EXPECT_EQ(res1->status, 200);
 
@@ -461,7 +461,7 @@ TEST_F(HttpServerMultiTableTest, GetDocumentFromDifferentTables) {
   EXPECT_EQ(body1["filters"]["category"], "tech");
 
   // Get from table2
-  auto res2 = client.Get("/table2/news_1");
+  auto res2 = client.Get("/tables/table2/news_1");
   ASSERT_TRUE(res2);
   EXPECT_EQ(res2->status, 200);
 
@@ -507,7 +507,7 @@ TEST_F(HttpServerMultiTableTest, TableIsolation) {
   request1["q"] = "machine";
   request1["limit"] = 10;
 
-  auto res1 = client.Post("/table1/search", request1.dump(), "application/json");
+  auto res1 = client.Post("/tables/table1/search", request1.dump(), "application/json");
   ASSERT_TRUE(res1);
   EXPECT_EQ(res1->status, 200);
   auto body1 = json::parse(res1->body);
@@ -518,7 +518,7 @@ TEST_F(HttpServerMultiTableTest, TableIsolation) {
   request2["q"] = "machine";
   request2["limit"] = 10;
 
-  auto res2 = client.Post("/table2/search", request2.dump(), "application/json");
+  auto res2 = client.Post("/tables/table2/search", request2.dump(), "application/json");
   ASSERT_TRUE(res2);
   EXPECT_EQ(res2->status, 200);
   auto body2 = json::parse(res2->body);
@@ -535,7 +535,7 @@ TEST_F(HttpServerMultiTableTest, InvalidTableName) {
   request["q"] = "test";
   request["limit"] = 10;
 
-  auto res = client.Post("/nonexistent/search", request.dump(), "application/json");
+  auto res = client.Post("/tables/nonexistent/search", request.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 404);
 
@@ -626,7 +626,7 @@ TEST_F(HttpServerKanjiTest, SearchWithKanjiNgramSize) {
   request_body["q"] = "学習";
   request_body["limit"] = 10;
 
-  auto res = client.Post("/test_kanji/search", request_body.dump(), "application/json");
+  auto res = client.Post("/tables/test_kanji/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -639,7 +639,7 @@ TEST_F(HttpServerKanjiTest, SearchWithKanjiNgramSize) {
 
   // Search for "機械" (machine) - should match only first document
   request_body["q"] = "機械";
-  res = client.Post("/test_kanji/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test_kanji/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   body = json::parse(res->body);
   EXPECT_EQ(body["count"], 1);
@@ -647,7 +647,7 @@ TEST_F(HttpServerKanjiTest, SearchWithKanjiNgramSize) {
 
   // Search for "深層" (deep) - should match only second document
   request_body["q"] = "深層";
-  res = client.Post("/test_kanji/search", request_body.dump(), "application/json");
+  res = client.Post("/tables/test_kanji/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   body = json::parse(res->body);
   EXPECT_EQ(body["count"], 1);
@@ -833,7 +833,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   // Test 1: Table with dash "my-table"
   json request1;
   request1["q"] = "hello";
-  auto res1 = client.Post("/my-table/search", request1.dump(), "application/json");
+  auto res1 = client.Post("/tables/my-table/search", request1.dump(), "application/json");
   ASSERT_TRUE(res1) << "Should be able to access table with dash in name";
   EXPECT_EQ(res1->status, 200);
   auto body1 = json::parse(res1->body);
@@ -842,7 +842,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   // Test 2: Table with dot "table.name"
   json request2;
   request2["q"] = "test";
-  auto res2 = client.Post("/table.name/search", request2.dump(), "application/json");
+  auto res2 = client.Post("/tables/table.name/search", request2.dump(), "application/json");
   ASSERT_TRUE(res2) << "Should be able to access table with dot in name";
   EXPECT_EQ(res2->status, 200);
   auto body2 = json::parse(res2->body);
@@ -853,7 +853,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   json request3;
   request3["q"] = "japanese";
   auto encoded_table_name = httplib::detail::encode_url("テーブル");
-  auto res3 = client.Post("/" + encoded_table_name + "/search", request3.dump(), "application/json");
+  auto res3 = client.Post("/tables/" + encoded_table_name + "/search", request3.dump(), "application/json");
   ASSERT_TRUE(res3) << "Should be able to access table with unicode name";
   EXPECT_EQ(res3->status, 200);
   auto body3 = json::parse(res3->body);
@@ -899,7 +899,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     request["filters"]["score"]["op"] = "EQ";
     request["filters"]["score"]["value"] = "50";
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -913,7 +913,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     request["filters"]["score"]["op"] = "GT";
     request["filters"]["score"]["value"] = "50";
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -927,7 +927,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     request["filters"]["score"]["op"] = "GTE";
     request["filters"]["score"]["value"] = "50";
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -941,7 +941,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     request["filters"]["score"]["op"] = "LT";
     request["filters"]["score"]["value"] = "50";
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -955,7 +955,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     request["filters"]["score"]["op"] = "LTE";
     request["filters"]["score"]["value"] = "50";
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -969,7 +969,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     request["filters"]["score"]["op"] = "NE";
     request["filters"]["score"]["value"] = "50";
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -983,7 +983,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
     request["filters"]["name"]["op"] = "GT";
     request["filters"]["name"]["value"] = "item_5";
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -1042,7 +1042,7 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
     request["filters"]["timestamp"]["op"] = "GT";
     request["filters"]["timestamp"]["value"] = std::to_string(large_timestamp1);
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -1056,7 +1056,7 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
     request["filters"]["timestamp"]["op"] = "LT";
     request["filters"]["timestamp"]["value"] = std::to_string(large_timestamp1);
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -1070,7 +1070,7 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
     request["filters"]["timestamp"]["op"] = "EQ";
     request["filters"]["timestamp"]["value"] = std::to_string(large_timestamp2);
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -1084,7 +1084,7 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
     request["filters"]["timestamp"]["op"] = "GTE";
     request["filters"]["timestamp"]["value"] = std::to_string(large_timestamp3);
 
-    auto res = client.Post("/test/search", request.dump(), "application/json");
+    auto res = client.Post("/tables/test/search", request.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 200);
     auto body = json::parse(res->body);
@@ -1165,11 +1165,11 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
 
   json search_body;
   search_body["q"] = "alpha";
-  ASSERT_TRUE(client.Post("/test/search", search_body.dump(), "application/json"));
+  ASSERT_TRUE(client.Post("/tables/test/search", search_body.dump(), "application/json"));
 
   json count_body;
   count_body["q"] = "alpha";
-  ASSERT_TRUE(client.Post("/test/count", count_body.dump(), "application/json"));
+  ASSERT_TRUE(client.Post("/tables/test/count", count_body.dump(), "application/json"));
 
   // Allow async request bookkeeping a brief moment to settle.
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1239,11 +1239,11 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
   // unification they must update tcp_stats too.
   json search_body;
   search_body["q"] = "beta";
-  ASSERT_TRUE(client.Post("/test/search", search_body.dump(), "application/json"));
+  ASSERT_TRUE(client.Post("/tables/test/search", search_body.dump(), "application/json"));
 
   json count_body;
   count_body["q"] = "beta";
-  ASSERT_TRUE(client.Post("/test/count", count_body.dump(), "application/json"));
+  ASSERT_TRUE(client.Post("/tables/test/count", count_body.dump(), "application/json"));
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -1302,7 +1302,7 @@ TEST(HttpServerStatsTest, GetCommandStatsCountRoutedRequests) {
   // A routed GET counts the command once the table/route resolves, regardless
   // of whether the document is found. A 404 (missing document) still reaches a
   // valid table route, so it increments cmd_get just like SEARCH/COUNT/FACET.
-  auto missing = client.Get("/test/missing");
+  auto missing = client.Get("/tables/test/missing");
   ASSERT_TRUE(missing);
   EXPECT_EQ(missing->status, 404);
 
@@ -1310,7 +1310,7 @@ TEST(HttpServerStatsTest, GetCommandStatsCountRoutedRequests) {
   EXPECT_EQ(after_missing.cmd_get, baseline.cmd_get + 1);
   EXPECT_GE(after_missing.total_requests, baseline.total_requests + 1);
 
-  auto found = client.Get("/test/doc-1");
+  auto found = client.Get("/tables/test/doc-1");
   ASSERT_TRUE(found);
   EXPECT_EQ(found->status, 200);
 

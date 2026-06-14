@@ -14,6 +14,7 @@
 #include <cstdlib>
 
 #include "query/query_parser.h"
+#include "server/table_catalog.h"
 #include "server/tcp_server.h"
 
 namespace mygramdb::server {
@@ -174,6 +175,79 @@ TEST_F(SyncHandlerTest, CreateWithNullSyncManagerReturnsCorrectErrorCode) {
   // Error code must be in the 4000-4999 Index/Business range.
   EXPECT_GE(static_cast<int>(result.error().code()), 4000);
   EXPECT_LT(static_cast<int>(result.error().code()), 5000);
+}
+
+/**
+ * @brief Single-database SYNC accepts a bare table name and resolves it to the
+ *        qualified `database.table` key used by the sync bookkeeping.
+ *
+ * The catalog is keyed by the qualified identity. A bare `SYNC articles`
+ * request must resolve to `appdb.articles` rather than being rejected as a
+ * missing table. Because StartSync would otherwise attempt a real MySQL
+ * connection, we only assert that resolution did NOT fail with the
+ * "Table not found" / qualification error.
+ */
+TEST_F(SyncHandlerTest, BareSyncResolvesInSingleDatabaseConfig) {
+  auto qualified_ctx = std::make_unique<TableContext>();
+  qualified_ctx->name = "articles";
+  qualified_ctx->config.name = "articles";
+  qualified_ctx->config.database = "appdb";
+  qualified_ctx->config.ngram_size = 2;
+  qualified_ctx->index = std::make_unique<index::Index>(2);
+  qualified_ctx->doc_store = std::make_unique<storage::DocumentStore>();
+
+  std::unordered_map<std::string, TableContext*> contexts;
+  contexts["appdb.articles"] = qualified_ctx.get();
+
+  config::Config cfg;
+  cfg.mysql.database = "appdb";
+  config::TableConfig tc;
+  tc.name = "articles";
+  tc.database = "appdb";
+  cfg.tables.push_back(tc);
+
+  TableCatalog catalog(contexts);
+  SyncOperationManager sync_mgr(contexts, &cfg, nullptr);
+
+  std::atomic<bool> dump_load{false};
+  std::atomic<bool> dump_save{false};
+  std::atomic<bool> optimization{false};
+  std::atomic<bool> replication_paused{false};
+  std::atomic<bool> reconnecting{false};
+
+  HandlerContext ctx{
+      .table_catalog = &catalog,
+      .stats = *stats_,
+      .full_config = &cfg,
+      .dump_dir = "/tmp/test",
+      .dump_load_in_progress = dump_load,
+      .dump_save_in_progress = dump_save,
+      .optimization_in_progress = optimization,
+      .replication_paused_for_dump = replication_paused,
+      .mysql_reconnecting = reconnecting,
+      .binlog_reader = nullptr,
+      .sync_manager = &sync_mgr,
+      .cache_manager = nullptr,
+      .variable_manager = nullptr,
+      .dump_progress = nullptr,
+  };
+
+  auto handler = SyncHandler::Create(ctx, &sync_mgr);
+  ASSERT_TRUE(handler) << handler.error().to_string();
+
+  query::QueryParser parser;
+  auto query = parser.Parse("SYNC articles");
+  ASSERT_TRUE(query);
+
+  ConnectionContext conn_ctx;
+  std::string response = (*handler)->Handle(*query, conn_ctx);
+
+  // Resolution must have produced the qualified key, so neither the
+  // qualification error nor a "not found" for the bare name appears.
+  EXPECT_EQ(response.find("Bare table names are not supported"), std::string::npos) << response;
+  EXPECT_EQ(response.find("'articles' not found"), std::string::npos) << response;
+
+  sync_mgr.RequestShutdown();
 }
 
 // ============================================================================
