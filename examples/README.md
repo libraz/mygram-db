@@ -137,8 +137,8 @@ Prometheus + Grafana dashboard for monitoring MygramDB instances.
 
 For detailed documentation on all configuration options, see:
 
-- [English Documentation](../docs/en/configuration.md)
-- [Japanese Documentation](../docs/ja/configuration.md)
+- [English Documentation](https://mygramdb.libraz.net/docs/configuration)
+- [Japanese Documentation](https://mygramdb.libraz.net/ja/docs/configuration)
 
 ## MySQL Prerequisites
 
@@ -166,4 +166,4 @@ GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
 FLUSH PRIVILEGES;
 ```
 
-See [Replication Guide](../docs/en/replication.md) for more details.
+See the [Replication Guide](https://mygramdb.libraz.net/docs/replication) for more details.

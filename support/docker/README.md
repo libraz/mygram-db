@@ -76,4 +76,4 @@ services:
 
 ## Documentation
 
-See [docs/en/docker-deployment.md](../../docs/en/docker-deployment.md) or [docs/ja/docker-deployment.md](../../docs/ja/docker-deployment.md) for detailed documentation.
+See the [Docker Deployment Guide](https://mygramdb.libraz.net/docs/docker-deployment) ([日本語](https://mygramdb.libraz.net/ja/docs/docker-deployment)) for detailed documentation.

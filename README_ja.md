@@ -1,5 +1,6 @@
 # MygramDB
 
+[![Docs](https://img.shields.io/badge/docs-mygramdb.libraz.net-2563eb)](https://mygramdb.libraz.net/ja/)
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mygram-db/ci.yml?branch=main&label=CI)](https://github.com/libraz/mygram-db/actions)
 [![Version](https://img.shields.io/github/v/release/libraz/mygram-db?label=version)](https://github.com/libraz/mygram-db/releases)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/libraz/mygram-db/pkgs/container/mygram-db)
@@ -28,7 +29,7 @@ MySQL FULLTEXT はディスク上の B-tree をスキャンするため、一般
 
 - ほとんどのクエリでサブミリ秒のレイテンシ、キャッシュウォームアップ不要
 - v1.5.0 の `verify_text` で n-gram 偽陽性を除去（MySQL と完全一致の検索結果）
-- 再現可能: `make bench-up && make bench-run`（[詳細](docs/ja/performance.md)）
+- 再現可能: `make bench-up && make bench-run`（[詳細](https://mygramdb.libraz.net/ja/docs/performance)）
 
 ## クイックスタート
 
@@ -120,7 +121,7 @@ SEARCH articles 技術 FILTER status=1 LIMIT 100
 GET articles 12345
 ```
 
-全コマンドは [プロトコルリファレンス](docs/ja/protocol.md) を参照してください。
+全コマンドは [プロトコルリファレンス](https://mygramdb.libraz.net/ja/docs/protocol) を参照してください。
 
 ## 特徴
 
@@ -171,17 +172,19 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 
 ## ドキュメント
 
+📖 **ドキュメント全体:** https://mygramdb.libraz.net/ja/
+
 - **[CHANGELOG](CHANGELOG.md)** - バージョン履歴とリリースノート
-- [Docker デプロイメントガイド](docs/ja/docker-deployment.md) - 本番環境Dockerセットアップ
-- [設定ガイド](docs/ja/configuration.md) - すべての設定オプション
-- [プロトコルリファレンス](docs/ja/protocol.md) - 完全なコマンドリファレンス
-- [HTTP API リファレンス](docs/ja/http-api.md) - REST API ドキュメント
-- [パフォーマンスガイド](docs/ja/performance.md) - ベンチマークと最適化
-- [レプリケーションガイド](docs/ja/replication.md) - MySQL レプリケーション設定
-- [運用ガイド](docs/ja/operations.md) - ランタイム変数とMySQLフェイルオーバー
-- [インストールガイド](docs/ja/installation.md) - ソースからビルド
-- [開発ガイド](docs/ja/development.md) - コントリビューションガイドライン
-- [クライアントライブラリ](docs/ja/libmygramclient.md) - C/C++ クライアントライブラリ
+- [Docker デプロイメントガイド](https://mygramdb.libraz.net/ja/docs/docker-deployment) - 本番環境Dockerセットアップ
+- [設定ガイド](https://mygramdb.libraz.net/ja/docs/configuration) - すべての設定オプション
+- [プロトコルリファレンス](https://mygramdb.libraz.net/ja/docs/protocol) - 完全なコマンドリファレンス
+- [HTTP API リファレンス](https://mygramdb.libraz.net/ja/docs/http-api) - REST API ドキュメント
+- [パフォーマンスガイド](https://mygramdb.libraz.net/ja/docs/performance) - ベンチマークと最適化
+- [レプリケーションガイド](https://mygramdb.libraz.net/ja/docs/replication) - MySQL レプリケーション設定
+- [運用ガイド](https://mygramdb.libraz.net/ja/docs/operations) - ランタイム変数とMySQLフェイルオーバー
+- [インストールガイド](https://mygramdb.libraz.net/ja/docs/installation) - ソースからビルド
+- [開発ガイド](https://mygramdb.libraz.net/ja/docs/development) - コントリビューションガイドライン
+- [クライアントライブラリ](https://mygramdb.libraz.net/ja/docs/client-library) - C/C++ クライアントライブラリ
 
 ### リリースノート
 
@@ -201,7 +204,7 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 - バイナリログ形式: ROW (`binlog_format=ROW`)
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
-詳細は [インストールガイド](docs/ja/installation.md) を参照してください。
+詳細は [インストールガイド](https://mygramdb.libraz.net/ja/docs/installation) を参照してください。
 
 ## ライセンス
 
@@ -211,7 +214,7 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 
 コントリビューションを歓迎します！ガイドラインは [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。
 
-開発環境のセットアップは [開発ガイド](docs/ja/development.md) を参照してください。
+開発環境のセットアップは [開発ガイド](https://mygramdb.libraz.net/ja/docs/development) を参照してください。
 
 ## 作者
 

@@ -46,7 +46,7 @@ If there are style issues, the maintainer will fix them. You don't need to worry
 
 ## Development Setup
 
-For detailed development environment setup, see [Development Guide](docs/en/development.md).
+For detailed development environment setup, see [Development Guide](https://mygramdb.libraz.net/docs/development).
 
 **Quick start:**
 ```bash

@@ -24,7 +24,7 @@ make docker-test-linux
 make docker-lint-linux
 ```
 
-**Details:** [Linux Testing Guide](../../docs/en/linux-testing.md)
+**Details:** [Linux Testing Guide](https://mygramdb.libraz.net/docs/linux-testing)
 
 ### Code Quality Tools
 
@@ -37,5 +37,5 @@ make lint
 
 ## Related Documentation
 
-- [Linux Testing Guide](../../docs/en/linux-testing.md) - Linux CI Testing Guide
-- [Development Guide](../../docs/en/development.md) - Development Environment Setup Guide
+- [Linux Testing Guide](https://mygramdb.libraz.net/docs/linux-testing) - Linux CI Testing Guide
+- [Development Guide](https://mygramdb.libraz.net/docs/development) - Development Environment Setup Guide

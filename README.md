@@ -1,5 +1,6 @@
 # MygramDB
 
+[![Docs](https://img.shields.io/badge/docs-mygramdb.libraz.net-2563eb)](https://mygramdb.libraz.net)
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/mygram-db/ci.yml?branch=main&label=CI)](https://github.com/libraz/mygram-db/actions)
 [![Version](https://img.shields.io/github/v/release/libraz/mygram-db?label=version)](https://github.com/libraz/mygram-db/releases)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/libraz/mygram-db/pkgs/container/mygram-db)
@@ -28,7 +29,7 @@ Benchmarked on 1.1M Wikipedia articles (EN + JA), MygramDB v1.5.0 vs MySQL 8.4 F
 
 - Sub-millisecond latency for most queries, no cache warmup needed
 - v1.5.0 `verify_text` eliminates n-gram false positives (exact match with MySQL results)
-- Reproducible: `make bench-up && make bench-run` ([details](docs/en/performance.md))
+- Reproducible: `make bench-up && make bench-run` ([details](https://mygramdb.libraz.net/docs/performance))
 
 ## Quick Start
 
@@ -127,7 +128,7 @@ SEARCH articles tech FILTER status=1 LIMIT 100
 GET articles 12345
 ```
 
-See [Protocol Reference](docs/en/protocol.md) for all commands.
+See [Protocol Reference](https://mygramdb.libraz.net/docs/protocol) for all commands.
 
 ## Features
 
@@ -178,17 +179,19 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 
 ## Documentation
 
+📖 **Full documentation:** https://mygramdb.libraz.net
+
 - **[CHANGELOG](CHANGELOG.md)** - Version history and release notes
-- [Docker Deployment Guide](docs/en/docker-deployment.md) - Production Docker setup
-- [Configuration Guide](docs/en/configuration.md) - All configuration options
-- [Protocol Reference](docs/en/protocol.md) - Complete command reference
-- [HTTP API Reference](docs/en/http-api.md) - REST API documentation
-- [Performance Guide](docs/en/performance.md) - Benchmarks and optimization
-- [Replication Guide](docs/en/replication.md) - MySQL replication setup
-- [Operations Guide](docs/en/operations.md) - Runtime variables and MySQL failover
-- [Installation Guide](docs/en/installation.md) - Build from source
-- [Development Guide](docs/en/development.md) - Contributing guidelines
-- [Client Library](docs/en/libmygramclient.md) - C/C++ client library
+- [Docker Deployment Guide](https://mygramdb.libraz.net/docs/docker-deployment) - Production Docker setup
+- [Configuration Guide](https://mygramdb.libraz.net/docs/configuration) - All configuration options
+- [Protocol Reference](https://mygramdb.libraz.net/docs/protocol) - Complete command reference
+- [HTTP API Reference](https://mygramdb.libraz.net/docs/http-api) - REST API documentation
+- [Performance Guide](https://mygramdb.libraz.net/docs/performance) - Benchmarks and optimization
+- [Replication Guide](https://mygramdb.libraz.net/docs/replication) - MySQL replication setup
+- [Operations Guide](https://mygramdb.libraz.net/docs/operations) - Runtime variables and MySQL failover
+- [Installation Guide](https://mygramdb.libraz.net/docs/installation) - Build from source
+- [Development Guide](https://mygramdb.libraz.net/docs/development) - Contributing guidelines
+- [Client Library](https://mygramdb.libraz.net/docs/client-library) - C/C++ client library
 
 ### Release Notes
 
@@ -208,7 +211,7 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - Binary log format: ROW (`binlog_format=ROW`)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
-See [Installation Guide](docs/en/installation.md) for details.
+See [Installation Guide](https://mygramdb.libraz.net/docs/installation) for details.
 
 ## License
 
@@ -218,7 +221,7 @@ See [Installation Guide](docs/en/installation.md) for details.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-For development environment setup, see [Development Guide](docs/en/development.md).
+For development environment setup, see [Development Guide](https://mygramdb.libraz.net/docs/development).
 
 ## Authors
 

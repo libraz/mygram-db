@@ -3,7 +3,7 @@
 # This is a complete example configuration file with all available options.
 # Copy this file and customize it for your environment.
 #
-# Documentation: See docs/en/configuration.md or docs/ja/configuration.md
+# Documentation: https://mygramdb.libraz.net/docs/configuration (ja: https://mygramdb.libraz.net/ja/docs/configuration)
 #
 # Note: All configuration files (YAML and JSON) are automatically validated
 # against the built-in JSON Schema at startup. Invalid settings such as
