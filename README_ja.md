@@ -60,6 +60,7 @@ docker run -d --name mygramdb \
   -e TABLE_TEXT_COLUMN=content \
   -e TABLE_NGRAM_SIZE=2 \
   -e REPLICATION_SERVER_ID=12345 \
+  -e NETWORK_ALLOW_CIDRS=0.0.0.0/0 \
   ghcr.io/libraz/mygram-db:latest
 
 # ログを確認
@@ -70,6 +71,12 @@ docker exec mygramdb mygram-cli -p 11016 SYNC articles
 
 # 検索を試す
 docker exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
+```
+
+**セキュリティ注意:** `NETWORK_ALLOW_CIDRS=0.0.0.0/0` は任意のIPアドレスからの接続を許可します。本番環境では特定のIP範囲に制限してください：
+```bash
+# 本番環境の例: アプリケーションサーバーからのみ許可
+-e NETWORK_ALLOW_CIDRS=10.0.0.0/8,172.16.0.0/12
 ```
 
 ### Docker Compose（テスト用MySQL付き）
@@ -135,7 +142,7 @@ GET articles 12345
 - **ランタイム変数**: MySQL互換のSET/SHOW VARIABLESコマンドでゼロダウンタイム設定変更
 - **MySQL フェイルオーバー**: GTID位置を保持しながらランタイムでMySQLサーバーを切り替え
 - **複数テーブル対応**: 単一インスタンスで複数テーブルのインデックス化
-- **デュアルプロトコル**: TCP（memcachedスタイル）と HTTP/REST API
+- **デュアルプロトコル**: TCP（memcachedスタイル）は検索と運用操作向け、HTTP/REST API は検索とステータス確認向け
 - **高並行性**: 10,000以上の同時接続をサポートするスレッドプール
 - **Unicode対応**: CJK/多言語テキスト用のICUベース正規化
 - **圧縮**: ハイブリッド Delta エンコーディング + Roaring ビットマップ
@@ -185,6 +192,8 @@ MygramDB は全文検索専用の読み取りレプリカとして機能し、My
 - [インストールガイド](https://mygramdb.libraz.net/ja/docs/installation) - ソースからビルド
 - [開発ガイド](https://mygramdb.libraz.net/ja/docs/development) - コントリビューションガイドライン
 - [クライアントライブラリ](https://mygramdb.libraz.net/ja/docs/client-library) - C/C++ クライアントライブラリ
+
+HTTP は現在、検索、ドキュメント取得、ヘルスチェック、メトリクス、読み取り専用のステータスエンドポイントを提供します。`SYNC`、`DUMP`、`CACHE`、`SET`、レプリケーション制御などの運用コマンドは意図的に TCP プロトコルと `mygram-cli` で提供されます。HTTP のみでデプロイする場合も、メンテナンスと初期同期のために内部向けの TCP/CLI 経路を維持する必要があります。
 
 ### リリースノート
 
