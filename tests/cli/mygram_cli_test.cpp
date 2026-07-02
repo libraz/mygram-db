@@ -101,6 +101,8 @@ TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
   EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("ERROR Server is loading, please try again later"));
   EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("(error) status not_ready"));
   EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("ERROR Replication is not running"));
+  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("(error) SERVER_DISCONNECTED: Server closed"));
+  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("(error) SERVER_TIMEOUT: Server did not respond"));
   EXPECT_FALSE(MygramClient::IsWaitReadyRetryableResponse("OK INFO\r\nstatus: ready\r\nEND"));
   EXPECT_FALSE(MygramClient::IsWaitReadyRetryableResponse("ERROR Unknown table"));
 }
@@ -345,6 +347,18 @@ TEST_F(CliPrintResponseTest, DocResponseUnescapesQuotedStringFilterValues) {
   EXPECT_NE(output.find(R"(DOC 42 display_name=Alice Smith label=a "quoted" path\name)"), std::string::npos);
   EXPECT_EQ(output.find(R"(display_name="Alice Smith")"), std::string::npos);
   EXPECT_EQ(output.find(R"(\")"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, DocResponseUnescapesServerEscapeSequences) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse(R"(OK DOC 42 text="line1\nline2" tab="a\tb" carriage="a\rb" hex="A\x21B")");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("text=line1\nline2"), std::string::npos);
+  EXPECT_NE(output.find("tab=a\tb"), std::string::npos);
+  EXPECT_NE(output.find("carriage=a\rb"), std::string::npos);
+  EXPECT_NE(output.find("hex=A!B"), std::string::npos);
+  EXPECT_EQ(output.find(R"(\x21)"), std::string::npos);
 }
 
 // =============================================================================
@@ -631,6 +645,11 @@ TEST_F(CliSingleCommandExitStatusTest, ClientErrorsExitNonZero) {
   EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("(error) Not connected"), 1);
   EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("(error) SERVER_DISCONNECTED: Server closed"), 1);
   EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("(error) SERVER_TIMEOUT: Server did not respond"), 1);
+}
+
+TEST_F(CliSingleCommandExitStatusTest, PayloadContainingDisconnectWordsStillExitsZero) {
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("OK DOC 1 note=\"SERVER_DISCONNECTED\""), 0);
+  EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("OK RESULTS 1 SERVER_TIMEOUT"), 0);
 }
 
 // =============================================================================

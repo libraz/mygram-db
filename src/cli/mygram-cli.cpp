@@ -79,6 +79,19 @@ bool StartsWith(const std::string& str, std::string_view prefix) {
   return str.size() >= prefix.size() && str.compare(0, prefix.size(), prefix) == 0;
 }
 
+int HexValue(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return ch - 'a' + 10;
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return ch - 'A' + 10;
+  }
+  return -1;
+}
+
 /**
  * @brief Replace all CRLF (\r\n) sequences with LF (\n).
  *
@@ -134,7 +147,37 @@ std::string DecodeGetDocBodyForDisplay(std::string_view body) {
     ++i;  // Skip opening quote.
     while (++i < body.size()) {
       if (body[i] == '\\' && i + 1 < body.size()) {
-        result += body[++i];
+        char escaped = body[++i];
+        switch (escaped) {
+          case 'n':
+            result += '\n';
+            break;
+          case 'r':
+            result += '\r';
+            break;
+          case 't':
+            result += '\t';
+            break;
+          case '\\':
+          case '"':
+            result += escaped;
+            break;
+          case 'x':
+            if (i + 2 < body.size()) {
+              const int high = HexValue(body[i + 1]);
+              const int low = HexValue(body[i + 2]);
+              if (high >= 0 && low >= 0) {
+                result += static_cast<char>((high << 4) | low);
+                i += 2;
+                break;
+              }
+            }
+            result += escaped;
+            break;
+          default:
+            result += escaped;
+            break;
+        }
         continue;
       }
       if (body[i] == '"') {
@@ -787,15 +830,20 @@ class MygramClient {
   [[nodiscard]] static int ExitCodeForSingleCommandResponse(std::string_view response) {
     const bool server_error = response.size() >= proto::kErrorPrefix.size() &&
                               response.compare(0, proto::kErrorPrefix.size(), proto::kErrorPrefix) == 0;
-    const bool client_error = response.rfind("(error)", 0) == 0;
-    const bool disconnected = response.find("SERVER_DISCONNECTED") != std::string_view::npos ||
-                              response.find("SERVER_TIMEOUT") != std::string_view::npos;
+    const bool client_error = response.rfind("(error) ", 0) == 0;
+    const bool error_response = server_error || client_error;
+    const bool disconnected = error_response && (response.find("SERVER_DISCONNECTED") != std::string_view::npos ||
+                                                 response.find("SERVER_TIMEOUT") != std::string_view::npos);
     const bool failure = server_error || client_error || disconnected;
     return failure ? kExitFailure : kExitSuccess;
   }
 
   [[nodiscard]] static bool IsWaitReadyRetryableResponse(std::string_view response) {
     std::string upper_response = ToUpper(std::string(response));
+    if (upper_response.find("SERVER_DISCONNECTED") != std::string::npos ||
+        upper_response.find("SERVER_TIMEOUT") != std::string::npos) {
+      return true;
+    }
     const bool error_response =
         StartsWith(upper_response, proto::kErrorPrefix) || upper_response.rfind("(ERROR)", 0) == 0;
     if (!error_response) {
