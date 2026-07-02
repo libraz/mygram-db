@@ -530,6 +530,10 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
 // ============================================================================
 
 Expected<void, Error> WriteHeaderV2(std::ostream& output_stream, const HeaderV2& header) {
+  if (header.gtid.size() > kMaxGtidLength) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    "V2 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
+  }
   if (!WriteBinary(output_stream, header.header_size)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write V2 header size"));
   }
@@ -573,7 +577,7 @@ Expected<void, Error> ReadHeaderV2(std::istream& input_stream, HeaderV2& header)
   if (!ReadBinary(input_stream, header.section_count)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read V2 section count"));
   }
-  if (!ReadString(input_stream, header.gtid, dump_v1::kMaxPathLength)) {
+  if (!ReadString(input_stream, header.gtid, kMaxGtidLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read V2 GTID"));
   }
   return {};
@@ -657,6 +661,11 @@ Expected<void, Error> WriteDumpV2(
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats,
     const DumpTableProgressCallback& table_progress_callback) {
+  if (gtid.size() > kMaxGtidLength) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    "V2 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
+  }
+
   AtomicFileWriter writer(filepath, true);
   const auto& temp_filepath = writer.GetTempPath();
 

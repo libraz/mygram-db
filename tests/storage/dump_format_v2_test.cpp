@@ -367,6 +367,52 @@ TEST(DumpFormatV2Test, FullDumpRoundTrip) {
   EXPECT_EQ(read_config.api.max_query_length, write_config.api.max_query_length);
 }
 
+TEST(DumpFormatV2Test, GtidAboveV1PathLimitRoundTrips) {
+  auto filepath = TempFilePath("large_gtid_roundtrip");
+  ScopedCleanup cleanup(filepath);
+
+  Config write_config = MakeTestConfig();
+  std::string write_gtid(dump_v1::kMaxPathLength + 1, 'g');
+
+  Index write_index;
+  DocumentStore write_doc_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> write_contexts;
+  write_contexts["articles"] = {&write_index, &write_doc_store};
+
+  auto write_result = WriteDumpV2(filepath, write_gtid, write_config, write_contexts);
+  ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+  std::string read_gtid;
+  Config read_config;
+  Index read_index;
+  DocumentStore read_doc_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  read_contexts["articles"] = {&read_index, &read_doc_store};
+
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+  ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+  EXPECT_EQ(read_gtid, write_gtid);
+}
+
+TEST(DumpFormatV2Test, RejectsGtidAboveV2LimitBeforeWriting) {
+  auto filepath = TempFilePath("too_large_gtid");
+  ScopedCleanup cleanup(filepath);
+
+  Config write_config = MakeTestConfig();
+  std::string write_gtid(kMaxGtidLength + 1, 'g');
+
+  Index write_index;
+  DocumentStore write_doc_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> write_contexts;
+  write_contexts["articles"] = {&write_index, &write_doc_store};
+
+  auto write_result = WriteDumpV2(filepath, write_gtid, write_config, write_contexts);
+  ASSERT_FALSE(write_result.has_value());
+  EXPECT_EQ(write_result.error().code(), mygram::utils::ErrorCode::kStorageDumpWriteError);
+  EXPECT_NE(write_result.error().message().find("V2 GTID length exceeds maximum"), std::string::npos);
+  EXPECT_FALSE(std::filesystem::exists(filepath));
+}
+
 TEST(DumpFormatV2Test, CrossDatabaseSameTableNameRoundTripUsesQualifiedKeys) {
   auto filepath = TempFilePath("cross_database_same_table_roundtrip");
   ScopedCleanup cleanup(filepath);

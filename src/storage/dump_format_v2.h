@@ -89,6 +89,9 @@ using dump_v1::kMaxPathLength;
 using dump_v1::kMaxStatsSectionLength;
 using dump_v1::kMaxTextContentLength;
 
+/// Maximum length for V2 replication GTID strings.
+constexpr uint32_t kMaxGtidLength = 64 * 1024;
+
 /// Maximum allowed section data length (4 GB - prevents OOM from malicious files)
 constexpr uint64_t kMaxSectionDataLength = 4ULL * 1024 * 1024 * 1024;
 
