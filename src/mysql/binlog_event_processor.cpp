@@ -38,6 +38,18 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
                                         storage::DocumentStore& doc_store, const config::TableConfig& table_config,
                                         const config::MysqlConfig& mysql_config, server::ServerStats* stats,
                                         cache::CacheManager* cache_manager, server::BM25Stats* bm25_stats) {
+  if (event.type == BinlogEventType::UPDATE && !event.old_primary_key.empty() &&
+      event.old_primary_key != event.primary_key) {
+    BinlogEvent delete_event = BinlogEvent::CreateDelete(
+        event.table_name, event.old_primary_key, event.old_text.empty() ? event.text : event.old_text, event.gtid);
+    delete_event.filters = event.filters;
+    BinlogEvent insert_event = BinlogEvent::CreateInsert(event.table_name, event.primary_key, event.text, event.gtid);
+    insert_event.filters = event.filters;
+
+    return ProcessEvent(delete_event, index, doc_store, table_config, mysql_config, stats, cache_manager, bm25_stats) &&
+           ProcessEvent(insert_event, index, doc_store, table_config, mysql_config, stats, cache_manager, bm25_stats);
+  }
+
   // Evaluate required_filters to determine if data should exist in index
   bool matches_required =
       BinlogFilterEvaluator::EvaluateRequiredFilters(event.filters, table_config, mysql_config.datetime_timezone);

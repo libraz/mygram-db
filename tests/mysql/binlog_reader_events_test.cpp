@@ -80,6 +80,28 @@ TEST_F(BinlogReaderFixture, ProcessUpdateUpdatesIndexWithTextChange) {
   EXPECT_EQ(std::get<int64_t>(stored_doc->filters["status"]), 1);
 }
 
+TEST_F(BinlogReaderFixture, ProcessUpdatePrimaryKeyChangeDeletesOldAndInsertsNew) {
+  ASSERT_TRUE(reader_->ProcessEvent(MakeEvent(BinlogEventType::INSERT, "100", 1, "hello world")));
+
+  auto old_doc_id = doc_store_.GetDocId("100");
+  ASSERT_TRUE(old_doc_id.has_value());
+  EXPECT_GT(index_.Count("he"), 0);
+
+  BinlogEvent update_event = MakeEvent(BinlogEventType::UPDATE, "200", 1, "goodbye universe");
+  update_event.old_primary_key = "100";
+  update_event.old_text = "hello world";
+
+  ASSERT_TRUE(reader_->ProcessEvent(update_event));
+
+  EXPECT_FALSE(doc_store_.GetDocId("100").has_value());
+  auto new_doc_id = doc_store_.GetDocId("200");
+  ASSERT_TRUE(new_doc_id.has_value());
+  EXPECT_NE(*new_doc_id, *old_doc_id);
+
+  EXPECT_EQ(index_.Count("he"), 0);
+  EXPECT_GT(index_.Count("go"), 0);
+}
+
 /**
  * @brief Test UPDATE handles empty old_text gracefully
  *

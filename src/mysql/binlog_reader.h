@@ -73,8 +73,9 @@ struct BinlogEvent {
   DDLType ddl_type = DDLType::kUnknown;  // DDL sub-type (only meaningful when type == DDL)
   std::string table_name;
   std::string primary_key;
-  std::string text;      // Normalized text for INSERT/UPDATE (after image for UPDATE)
-  std::string old_text;  // Before image text for UPDATE events (empty for INSERT/DELETE)
+  std::string old_primary_key;  // Before-image PK for UPDATE events that change the primary key
+  std::string text;             // Normalized text for INSERT/UPDATE (after image for UPDATE)
+  std::string old_text;         // Before image text for UPDATE events (empty for INSERT/DELETE)
   storage::FilterMap filters;
   std::string gtid;  // GTID for this event
 

@@ -384,6 +384,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         event.type = BinlogEventType::UPDATE;
         event.table_name = ctx.table_key;
         event.primary_key = after_row.primary_key;
+        event.old_primary_key = before_row.primary_key;
         event.text = GetRowText(after_row, ctx);       // New text (after image)
         event.old_text = GetRowText(before_row, ctx);  // Old text (before image) for index update
         event.gtid = current_gtid;
