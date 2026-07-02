@@ -673,8 +673,9 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
  *
  * Regression test for P0 use-after-free: QueryCache's LRU background thread
  * could fire eviction callbacks referencing already-destroyed InvalidationManager
- * during CacheManager destruction. The fix clears the eviction callback and
- * explicitly destroys QueryCache before InvalidationManager.
+ * during CacheManager destruction. The fix explicitly destroys QueryCache before
+ * InvalidationManager, letting QueryCache join its LRU worker before the
+ * callback target disappears.
  */
 TEST(CacheManagerTest, DestructorSafeWithShortTTLEntries) {
   config::CacheConfig config;

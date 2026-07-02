@@ -54,16 +54,11 @@ CacheManager::~CacheManager() {
   if (invalidation_queue_) {
     invalidation_queue_->Stop();
   }
-  // Clear eviction callbacks before destroying invalidation_mgr_ to prevent
-  // use-after-free: QueryCache's LRU thread may still fire eviction callbacks
-  // that reference invalidation_mgr_ during destruction.
-  if (query_cache_) {
-    query_cache_->SetEvictionCallback(nullptr);
-    query_cache_->SetBatchEvictionCallback(nullptr);
-  }
-  // Explicitly destroy query_cache_ first to join its LRU background thread
-  // before invalidation_mgr_ is destroyed (member destruction order is reverse
-  // declaration order, which would destroy invalidation_mgr_ first).
+  // Explicitly destroy query_cache_ first. QueryCache::~QueryCache() joins the
+  // LRU background worker before returning, so eviction callbacks can keep
+  // referencing invalidation_mgr_ until the cache is fully torn down. Do not
+  // rewrite callbacks here: QueryCache invokes them outside its mutex, and the
+  // callback setters are intentionally not synchronized.
   query_cache_.reset();
 }
 
