@@ -438,8 +438,9 @@ class MygramdbClient:
 
         ids = []
         for item in body.get("results", []):
-            if isinstance(item, dict) and "doc_id" in item:
-                ids.append(item["doc_id"])
+            if isinstance(item, dict) and "primary_key" in item:
+                with contextlib.suppress(ValueError, TypeError):
+                    ids.append(int(item["primary_key"]))
         return {
             "total": int(body.get("count", len(ids))),
             "ids": ids,
