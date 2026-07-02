@@ -481,7 +481,8 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
 
   auto scheduler = std::make_unique<SnapshotScheduler>(
       full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_, dump_save_in_progress_,
-      replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_, sync_manager_);
+      replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_, sync_manager_,
+      std::function<bool()>{}, &optimization_in_progress_);
 
   // Start the scheduler
   auto start_result = scheduler->Start();

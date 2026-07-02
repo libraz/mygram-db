@@ -58,13 +58,15 @@ class SnapshotScheduler {
    * @param dump_save_in_progress Reference to DUMP SAVE flag for mutual exclusion with manual DUMP SAVE
    * @param replication_paused_for_dump Reference to replication-paused flag, asserted while
    *        a snapshot is in progress so that manual REPLICATION START is rejected during the dump.
+   * @param optimization_in_progress Optional OPTIMIZE flag; auto snapshots skip while it is set.
    */
   SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog, const config::Config* full_config,
                     std::string dump_dir, mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
                     std::atomic<bool>& replication_paused_for_dump,
                     replication_pause::Counter* replication_pause_counter = nullptr,
                     std::atomic<bool>* dump_load_in_progress = nullptr, SyncOperationManager* sync_manager = nullptr,
-                    std::function<bool()> sync_in_progress_checker = {});
+                    std::function<bool()> sync_in_progress_checker = {},
+                    std::atomic<bool>* optimization_in_progress = nullptr);
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -131,6 +133,7 @@ class SnapshotScheduler {
   // Reference to dump_save_in_progress flag (shared with DumpHandler for mutual exclusion)
   std::atomic<bool>& dump_save_in_progress_;
   std::atomic<bool>* dump_load_in_progress_;
+  std::atomic<bool>* optimization_in_progress_;
 
   // Reference to replication-paused flag (shared with DumpHandler/TcpServer).
   // Asserted while a scheduled snapshot is in progress so that concurrent

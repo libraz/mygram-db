@@ -86,6 +86,7 @@ class SnapshotSchedulerTest : public ::testing::Test {
 
     // Initialize read_only flag for mutual exclusion testing
     dump_save_in_progress_ = false;
+    optimization_in_progress_ = false;
     replication_paused_for_dump_ = false;
   }
 
@@ -100,6 +101,7 @@ class SnapshotSchedulerTest : public ::testing::Test {
   std::unique_ptr<TableCatalog> catalog_;
   Config full_config_;
   std::atomic<bool> dump_save_in_progress_{false};        // For mutual exclusion with manual DUMP SAVE
+  std::atomic<bool> optimization_in_progress_{false};     // For mutual exclusion with OPTIMIZE
   std::atomic<bool> replication_paused_for_dump_{false};  // Asserted while a snapshot is in progress
 };
 
@@ -239,6 +241,32 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotSkipsWhileDumpLoadInProgress) {
       << "skipped auto snapshot must release the dump-save guard";
 }
 
+TEST_F(SnapshotSchedulerTest, AutoSnapshotSkipsWhileOptimizeInProgress) {
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+  optimization_in_progress_.store(true, std::memory_order_release);
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_, nullptr, nullptr, nullptr,
+                              std::function<bool()>{}, &optimization_in_progress_);
+
+  auto result = scheduler.Start();
+  ASSERT_TRUE(result.has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+  scheduler.Stop();
+
+  size_t snapshot_count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().filename().string().rfind("auto_", 0) == 0 && entry.path().extension() == ".dmp") {
+      ++snapshot_count;
+    }
+  }
+  EXPECT_EQ(snapshot_count, 0U);
+  EXPECT_FALSE(dump_save_in_progress_.load(std::memory_order_acquire))
+      << "optimize-skipped auto snapshot must release the dump-save guard";
+}
+
 TEST_F(SnapshotSchedulerTest, AutoSnapshotSkipsWhileSyncInProgress) {
   DumpConfig dump_config;
   dump_config.interval_sec = 1;
@@ -300,6 +328,35 @@ TEST_F(SnapshotSchedulerTest, CleanupRetainZeroSkipsCleanup) {
   // Files should still exist (retain=0 means no cleanup)
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "auto_20240101_120000.dmp"));
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "auto_20240102_120000.dmp"));
+}
+
+TEST_F(SnapshotSchedulerTest, CleanupRemovesOnlyOldAutoTempFiles) {
+  const auto old_auto_temp = test_dir_ / "auto_20240101_120000.dmp.tmp.123.456";
+  const auto recent_auto_temp = test_dir_ / "auto_20240102_120000.dmp.tmp.123.456";
+  const auto manual_temp = test_dir_ / "manual_backup.dmp.tmp.123.456";
+
+  std::ofstream(old_auto_temp) << "old temp";
+  std::ofstream(recent_auto_temp) << "recent temp";
+  std::ofstream(manual_temp) << "manual temp";
+
+  const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+  std::filesystem::last_write_time(old_auto_temp, old_time);
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+
+  auto result = scheduler.Start();
+  ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+  scheduler.Stop();
+
+  EXPECT_FALSE(std::filesystem::exists(old_auto_temp));
+  EXPECT_TRUE(std::filesystem::exists(recent_auto_temp));
+  EXPECT_TRUE(std::filesystem::exists(manual_temp));
 }
 
 // ===========================================================================

@@ -30,6 +30,12 @@
 namespace mygramdb::server {
 
 constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every second
+constexpr auto kOrphanTempSnapshotMaxAge = std::chrono::hours(1);
+
+bool IsAutoSnapshotTempFile(const std::filesystem::path& path) {
+  const std::string filename = path.filename().string();
+  return filename.rfind("auto_", 0) == 0 && filename.find(".dmp.tmp") != std::string::npos;
+}
 
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
                                      const config::Config* full_config, std::string dump_dir,
@@ -37,7 +43,8 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
                                      std::atomic<bool>& replication_paused_for_dump,
                                      replication_pause::Counter* replication_pause_counter,
                                      std::atomic<bool>* dump_load_in_progress, SyncOperationManager* sync_manager,
-                                     std::function<bool()> sync_in_progress_checker)
+                                     std::function<bool()> sync_in_progress_checker,
+                                     std::atomic<bool>* optimization_in_progress)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
@@ -45,6 +52,7 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
       binlog_reader_(binlog_reader),
       dump_save_in_progress_(dump_save_in_progress),
       dump_load_in_progress_(dump_load_in_progress),
+      optimization_in_progress_(optimization_in_progress),
       replication_paused_for_dump_(replication_paused_for_dump),
       replication_pause_counter_(replication_pause_counter != nullptr ? replication_pause_counter
                                                                       : &local_replication_pause_counter_),
@@ -184,6 +192,10 @@ void SnapshotScheduler::TakeSnapshot() {
     }
     if (dump_load_in_progress_ != nullptr && dump_load_in_progress_->load(std::memory_order_acquire)) {
       mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "DUMP LOAD is in progress").Info();
+      return;
+    }
+    if (optimization_in_progress_ != nullptr && optimization_in_progress_->load(std::memory_order_acquire)) {
+      mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "OPTIMIZE is in progress").Info();
       return;
     }
     const bool sync_in_progress = sync_in_progress_checker_  ? sync_in_progress_checker_()
@@ -358,12 +370,19 @@ void SnapshotScheduler::CleanupOldSnapshots() {
 
     // Collect all .dmp files with their modification times
     std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> dump_files;
+    std::vector<std::filesystem::path> old_temp_files;
+    const auto now = std::filesystem::file_time_type::clock::now();
 
     for (const auto& entry : std::filesystem::directory_iterator(dump_path)) {
       if (entry.is_regular_file() && entry.path().extension() == ".dmp") {
         // Only manage auto-saved files (starting with "auto_")
         if (entry.path().filename().string().rfind("auto_", 0) == 0) {
           dump_files.emplace_back(entry.path(), std::filesystem::last_write_time(entry));
+        }
+      } else if (entry.is_regular_file() && IsAutoSnapshotTempFile(entry.path())) {
+        const auto last_write_time = std::filesystem::last_write_time(entry);
+        if (now - last_write_time >= kOrphanTempSnapshotMaxAge) {
+          old_temp_files.push_back(entry.path());
         }
       }
     }
@@ -388,6 +407,22 @@ void SnapshotScheduler::CleanupOldSnapshots() {
             .Field(log_fields::kFieldError, ec.message())
             .Warn();
         // Continue with remaining files
+      }
+    }
+
+    for (const auto& temp_file : old_temp_files) {
+      mygram::utils::StructuredLog()
+          .Event("snapshot_removing_orphan_temp")
+          .Field(log_fields::kFieldFilepath, temp_file.string())
+          .Info();
+      std::error_code ec;
+      std::filesystem::remove(temp_file, ec);
+      if (ec) {
+        mygram::utils::StructuredLog()
+            .Event("snapshot_cleanup_error")
+            .Field(log_fields::kFieldFilepath, temp_file.string())
+            .Field(log_fields::kFieldError, ec.message())
+            .Warn();
       }
     }
 
