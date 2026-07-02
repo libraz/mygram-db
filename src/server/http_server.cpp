@@ -40,6 +40,10 @@
 #include "utils/structured_log.h"
 #include "version.h"
 
+#ifdef USE_MYSQL
+#include "server/sync_operation_manager.h"
+#endif
+
 // Fix for httplib missing NI_MAXHOST on some platforms
 #ifndef NI_MAXHOST
 #define NI_MAXHOST 1025
@@ -207,105 +211,7 @@ std::string ExtractRoutePrimaryKey(const httplib::Request& req) {
   return req.matches[2];
 }
 
-/**
- * @brief Detect QueryParser clause keywords inside a JSON-supplied query string.
- *
- * The HTTP API exposes `limit`, `offset`, and `filters` as dedicated JSON
- * fields. Allowing the same keywords to appear inside the search expression
- * (`q`) would let a caller silently override those JSON values, which is a
- * parameter pollution vulnerability (P1-9). This helper rejects such inputs by
- * scanning for the dangerous keywords as standalone tokens, ignoring contents
- * inside single- or double-quoted regions so that legitimate phrase searches
- * such as `"foo LIMIT bar"` remain valid.
- *
- * Boolean operators (`AND`, `OR`, `NOT`) are intentionally NOT rejected: they
- * are first-class search syntax with no JSON equivalent, and the existing
- * tests/clients depend on them being usable inside `q`.
- *
- * @param query_text Raw query string from the JSON `q` field.
- * @param[out] offending_keyword Set to the matched keyword (uppercase) on
- *             rejection.
- * @return true if the query is safe; false if it embeds a forbidden keyword.
- */
-bool ValidateQueryTextNoReservedClauses(std::string_view query_text, std::string& offending_keyword) {
-  static const std::array<std::string_view, 7> kForbiddenKeywords = {"LIMIT", "OFFSET",    "ORDER", "FILTER",
-                                                                     "SORT",  "HIGHLIGHT", "FUZZY"};
-
-  auto match_keyword = [&](std::string_view token) -> std::string_view {
-    for (auto kw : kForbiddenKeywords) {
-      if (token.size() != kw.size()) {
-        continue;
-      }
-      bool eq = true;
-      for (size_t i = 0; i < kw.size(); ++i) {
-        auto a = static_cast<unsigned char>(token[i]);
-        auto b = static_cast<unsigned char>(kw[i]);
-        if (std::toupper(a) != b) {
-          eq = false;
-          break;
-        }
-      }
-      if (eq) {
-        return kw;
-      }
-    }
-    return {};
-  };
-
-  size_t i = 0;
-  const size_t n = query_text.size();
-  char quote = '\0';
-
-  while (i < n) {
-    char c = query_text[i];
-
-    if (quote != '\0') {
-      // Inside quotes: skip everything until matching close (honor backslash escape).
-      if (c == '\\' && i + 1 < n) {
-        i += 2;
-        continue;
-      }
-      if (c == quote) {
-        quote = '\0';
-      }
-      ++i;
-      continue;
-    }
-
-    if (c == '"' || c == '\'') {
-      quote = c;
-      ++i;
-      continue;
-    }
-
-    // Skip ASCII whitespace.
-    auto u = static_cast<unsigned char>(c);
-    if (std::isspace(u) != 0) {
-      ++i;
-      continue;
-    }
-
-    // Collect a token of non-whitespace, non-quote characters.
-    size_t start = i;
-    while (i < n) {
-      char tc = query_text[i];
-      auto tu = static_cast<unsigned char>(tc);
-      if (std::isspace(tu) != 0 || tc == '"' || tc == '\'') {
-        break;
-      }
-      ++i;
-    }
-
-    std::string_view token = query_text.substr(start, i - start);
-    auto matched = match_keyword(token);
-    if (!matched.empty()) {
-      offending_keyword.assign(matched.begin(), matched.end());
-      return false;
-    }
-  }
-
-  return true;
-}
+bool IsSafeJsonColumnName(std::string_view column);
 
 /**
  * @brief Parse filter conditions from a JSON "filters" object into a query
@@ -322,6 +228,11 @@ bool ValidateQueryTextNoReservedClauses(std::string_view query_text, std::string
 bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::string& error_message) {
   query.filters.clear();
   for (const auto& [key, val] : filters_json.items()) {
+    if (!IsSafeJsonColumnName(key)) {
+      error_message = "Invalid filter column";
+      return false;
+    }
+
     query::FilterCondition filter;
     filter.column = key;
 
@@ -350,6 +261,12 @@ bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::st
         return false;
       }
       filter.value = std::move(str_val.value());
+    }
+
+    if (filter.value.size() > query::QueryParser::kMaxFilterValueLength) {
+      error_message =
+          "FILTER value exceeds maximum length (" + std::to_string(query::QueryParser::kMaxFilterValueLength) + ")";
+      return false;
     }
 
     query.filters.push_back(std::move(filter));
@@ -528,11 +445,20 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortH
   if (table_ctx.index == nullptr || table_ctx.doc_store == nullptr) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Table is not available"));
   }
+  if (!table_ctx.doc_store->IsStoreTextsEnabled()) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kInvalidArgument,
+                  "SORT _score requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
+                  "configuration."));
+  }
 
-  if (pipeline_output.term_infos.empty() && !pipeline_output.all_search_terms.empty()) {
+  const bool needs_term_doc_freq = std::any_of(pipeline_output.term_infos.begin(), pipeline_output.term_infos.end(),
+                                               [](const auto& term_info) { return !term_info.term_doc_freq_computed; });
+  if ((pipeline_output.term_infos.empty() || needs_term_doc_freq) && !pipeline_output.all_search_terms.empty()) {
     pipeline_output.term_infos = search_pipeline::GenerateTermInfos(
         pipeline_output.all_search_terms, table_ctx.index.get(), table_ctx.config.ngram_size,
-        table_ctx.config.kanji_ngram_size, table_ctx.config.cross_boundary_ngrams);
+        table_ctx.config.kanji_ngram_size, table_ctx.config.cross_boundary_ngrams,
+        /*compute_term_doc_freq=*/true);
   }
 
   std::vector<std::string> normalized_terms;
@@ -570,7 +496,10 @@ using storage::DocId;
 HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
                        const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                        cache::CacheManager* cache_manager, std::atomic<bool>* loading, ServerStats* tcp_stats,
-                       std::shared_ptr<RateLimiter> rate_limiter, std::atomic<bool>* replication_paused_for_dump)
+                       std::shared_ptr<RateLimiter> rate_limiter, std::atomic<bool>* replication_paused_for_dump,
+                       SyncOperationManager* sync_manager,
+                       std::function<bool(const std::string&)> table_syncing_checker,
+                       std::function<bool()> any_syncing_checker)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
       full_config_(full_config),
@@ -579,7 +508,10 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       rate_limiter_(std::move(rate_limiter)),
       loading_(loading),
       tcp_stats_(tcp_stats),
-      replication_paused_for_dump_(replication_paused_for_dump) {
+      replication_paused_for_dump_(replication_paused_for_dump),
+      sync_manager_(sync_manager),
+      table_syncing_checker_(std::move(table_syncing_checker)),
+      any_syncing_checker_(std::move(any_syncing_checker)) {
   parsed_allow_cidrs_ = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
 
   if (full_config_ != nullptr) {
@@ -760,6 +692,7 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
         .Error();
     return MakeUnexpected(error);
   }
+  std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
 
   mygram::utils::StructuredLog()
       .Event("http_server_starting")
@@ -848,10 +781,9 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
 }
 
 void HttpServer::Stop() {
-  // Use compare_exchange to prevent concurrent double-stop, matching the
-  // pattern in ConnectionAcceptor::Stop() and SnapshotScheduler::Stop().
-  bool expected = true;
-  if (!running_.compare_exchange_strong(expected, false)) {
+  std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
+  const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
+  if (!was_running && (!server_thread_ || !server_thread_->joinable())) {
     return;
   }
 
@@ -861,8 +793,14 @@ void HttpServer::Stop() {
     server_->stop();
   }
 
+  std::unique_ptr<std::thread> thread_to_join;
   if (server_thread_ && server_thread_->joinable()) {
-    server_thread_->join();
+    thread_to_join = std::move(server_thread_);
+  }
+  lifecycle_lock.unlock();
+
+  if (thread_to_join && thread_to_join->joinable()) {
+    thread_to_join->join();
   }
 
   mygram::utils::StructuredLog().Event("http_server_stopped").Info();
@@ -911,8 +849,31 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
   }
 
   result.table_ctx = table_iter->second;
+  result.table_key = *resolved;
   result.status = kHttpOk;
   return result;
+}
+
+bool HttpServer::RejectIfTableSyncing(const std::string& table_key, httplib::Response& res) const {
+  if (table_syncing_checker_ && table_syncing_checker_(table_key)) {
+    SendError(res, kHttpServiceUnavailable, "Table '" + table_key + "' is synchronizing, please try again later");
+    return true;
+  }
+#ifdef USE_MYSQL
+  if (sync_manager_ == nullptr || table_key.empty()) {
+    return false;
+  }
+  const auto syncing_tables = sync_manager_->GetSyncingTables();
+  if (syncing_tables.find(table_key) == syncing_tables.end()) {
+    return false;
+  }
+  SendError(res, kHttpServiceUnavailable, "Table '" + table_key + "' is synchronizing, please try again later");
+  return true;
+#else
+  (void)table_key;
+  (void)res;
+  return false;
+#endif
 }
 
 std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(const httplib::Request& req,
@@ -932,6 +893,9 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   auto lookup = ResolveHttpTableContext(table);
   if (lookup.table_ctx == nullptr) {
     SendError(res, lookup.status, lookup.message);
+    return std::nullopt;
+  }
+  if (RejectIfTableSyncing(lookup.table_key, res)) {
     return std::nullopt;
   }
   auto* table_ctx = lookup.table_ctx;
@@ -980,23 +944,21 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     }
   }
 
-  // Reject parser clause keywords smuggled into `q`. JSON-supplied `limit`,
-  // `offset`, and `filters` would otherwise be silently overridden by tokens
-  // such as `LIMIT 0 OFFSET 999999` embedded in the search text (P1-9).
-  {
-    std::string offending;
-    if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
-      const std::string field_hint = apply_pagination ? "(limit, offset, filters)" : "(filters)";
-      SendError(res, kHttpBadRequest,
-                "Reserved keyword '" + offending + "' is not allowed in 'q'. Use the dedicated JSON fields " +
-                    field_hint + " instead.");
-      return std::nullopt;
-    }
+  if (query_text.empty()) {
+    SendError(res, kHttpBadRequest, "Field 'q' must be non-empty");
+    return std::nullopt;
   }
 
-  // Build query string for QueryParser
-  std::ostringstream query_str;
-  query_str << command << " " << table << " " << query_text;
+  const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
+  if (max_query_length > 0 && query_text.size() > max_query_length) {
+    SendError(res, kHttpBadRequest, "Query text exceeds maximum length");
+    return std::nullopt;
+  }
+
+  query::Query parsed_query;
+  parsed_query.type = (command == "COUNT") ? query::QueryType::COUNT : query::QueryType::SEARCH;
+  parsed_query.table = lookup.table_key;
+  parsed_query.search_text = std::move(query_text);
 
   if (apply_pagination) {
     // Add limit
@@ -1011,7 +973,8 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
                   "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
         return std::nullopt;
       }
-      query_str << " LIMIT " << limit;
+      parsed_query.limit = static_cast<uint32_t>(limit);
+      parsed_query.limit_explicit = true;
     }
 
     // Add offset
@@ -1026,25 +989,14 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
                   "Invalid offset: must be between 0 and " + std::to_string(std::numeric_limits<uint32_t>::max()));
         return std::nullopt;
       }
-      query_str << " OFFSET " << offset;
+      parsed_query.offset = static_cast<uint32_t>(offset);
+      parsed_query.offset_explicit = true;
     }
   }
 
-  // Parse query (use per-request parser to avoid data race)
-  query::QueryParser query_parser;
-  const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
-  if (max_query_length > 0) {
-    query_parser.SetMaxQueryLength(max_query_length);
-  }
-  auto parsed_query = query_parser.Parse(query_str.str());
-  if (!parsed_query) {
-    SendError(res, kHttpBadRequest, "Invalid query: " + parsed_query.error().message());
-    return std::nullopt;
-  }
-
   // Apply default limit if LIMIT was not explicitly specified in the request
-  if (apply_pagination && !parsed_query->limit_explicit) {
-    parsed_query->limit = static_cast<size_t>(default_limit_.load(std::memory_order_acquire));
+  if (apply_pagination && !parsed_query.limit_explicit) {
+    parsed_query.limit = static_cast<size_t>(default_limit_.load(std::memory_order_acquire));
   }
 
   // Apply filters from JSON payload
@@ -1054,7 +1006,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   }
   if (body.contains("filters")) {
     std::string filter_error;
-    if (!ParseFiltersFromJson(body["filters"], *parsed_query, filter_error)) {
+    if (!ParseFiltersFromJson(body["filters"], parsed_query, filter_error)) {
       SendError(res, kHttpBadRequest, filter_error);
       return std::nullopt;
     }
@@ -1062,7 +1014,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
   if (body.contains("sort")) {
     std::string sort_error;
-    if (!ParseSortFromJson(body["sort"], *parsed_query, sort_error)) {
+    if (!ParseSortFromJson(body["sort"], parsed_query, sort_error)) {
       SendError(res, kHttpBadRequest, sort_error);
       return std::nullopt;
     }
@@ -1070,7 +1022,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
   if (body.contains("highlight")) {
     std::string highlight_error;
-    if (!ParseHighlightFromJson(body["highlight"], *parsed_query, highlight_error)) {
+    if (!ParseHighlightFromJson(body["highlight"], parsed_query, highlight_error)) {
       SendError(res, kHttpBadRequest, highlight_error);
       return std::nullopt;
     }
@@ -1078,7 +1030,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
   if (body.contains("fuzzy")) {
     std::string fuzzy_error;
-    if (!ParseFuzzyFromJson(body["fuzzy"], *parsed_query, fuzzy_error)) {
+    if (!ParseFuzzyFromJson(body["fuzzy"], parsed_query, fuzzy_error)) {
       SendError(res, kHttpBadRequest, fuzzy_error);
       return std::nullopt;
     }
@@ -1087,7 +1039,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   PreparedHttpQuery prepared;
   prepared.table_ctx = table_ctx;
   prepared.body = std::move(body);
-  prepared.query = std::move(*parsed_query);
+  prepared.query = std::move(parsed_query);
   return prepared;
 }
 
@@ -1102,6 +1054,9 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   auto lookup = ResolveHttpTableContext(table);
   if (lookup.table_ctx == nullptr) {
     SendError(res, lookup.status, lookup.message);
+    return std::nullopt;
+  }
+  if (RejectIfTableSyncing(lookup.table_key, res)) {
     return std::nullopt;
   }
   auto* table_ctx = lookup.table_ctx;
@@ -1136,20 +1091,16 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     }
   }
 
-  const std::string column = body["column"].get<std::string>();
-  if (column.empty()) {
-    SendError(res, kHttpBadRequest, "Field 'column' must be non-empty");
+  std::string column = body["column"].get<std::string>();
+  if (!IsSafeJsonColumnName(column)) {
+    SendError(res, kHttpBadRequest, "Invalid facet column");
     return std::nullopt;
   }
-  for (unsigned char c : column) {
-    if (std::iscntrl(c) != 0 || std::isspace(c) != 0) {
-      SendError(res, kHttpBadRequest, "Field 'column' must not contain whitespace or control characters");
-      return std::nullopt;
-    }
-  }
 
-  std::ostringstream query_str;
-  query_str << "FACET " << table << " " << column;
+  query::Query parsed_query;
+  parsed_query.type = query::QueryType::FACET;
+  parsed_query.table = lookup.table_key;
+  parsed_query.facet_column = std::move(column);
 
   if (body.contains("q")) {
     std::string query_text = body["q"].get<std::string>();
@@ -1161,14 +1112,12 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     }
 
     if (!query_text.empty()) {
-      std::string offending;
-      if (!ValidateQueryTextNoReservedClauses(query_text, offending)) {
-        SendError(res, kHttpBadRequest,
-                  "Reserved keyword '" + offending +
-                      "' is not allowed in 'q'. Use the dedicated JSON fields (filters) instead.");
+      const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
+      if (max_query_length > 0 && query_text.size() > max_query_length) {
+        SendError(res, kHttpBadRequest, "Query text exceeds maximum length");
         return std::nullopt;
       }
-      query_str << " " << query_text;
+      parsed_query.search_text = std::move(query_text);
     }
   }
 
@@ -1183,18 +1132,8 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
                 "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
       return std::nullopt;
     }
-    query_str << " LIMIT " << limit;
-  }
-
-  query::QueryParser query_parser;
-  const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
-  if (max_query_length > 0) {
-    query_parser.SetMaxQueryLength(max_query_length);
-  }
-  auto parsed_query = query_parser.Parse(query_str.str());
-  if (!parsed_query) {
-    SendError(res, kHttpBadRequest, "Invalid query: " + parsed_query.error().message());
-    return std::nullopt;
+    parsed_query.limit = static_cast<uint32_t>(limit);
+    parsed_query.limit_explicit = true;
   }
 
   if (body.contains("filters") && !body["filters"].is_object()) {
@@ -1203,7 +1142,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   }
   if (body.contains("filters")) {
     std::string filter_error;
-    if (!ParseFiltersFromJson(body["filters"], *parsed_query, filter_error)) {
+    if (!ParseFiltersFromJson(body["filters"], parsed_query, filter_error)) {
       SendError(res, kHttpBadRequest, filter_error);
       return std::nullopt;
     }
@@ -1212,7 +1151,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   PreparedHttpQuery prepared;
   prepared.table_ctx = table_ctx;
   prepared.body = std::move(body);
-  prepared.query = std::move(*parsed_query);
+  prepared.query = std::move(parsed_query);
   return prepared;
 }
 
@@ -1245,9 +1184,9 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     auto& results = pipeline_output.results;
     size_t total_count = results.size();
-    auto topn =
-        search_pipeline::ApplySearchTopNOptimization(*query, params.current_index, pipeline_output.term_infos,
-                                                     pipeline_output.cache_hit, params.primary_key_column, results);
+    auto topn = search_pipeline::ApplySearchTopNOptimization(
+        *query, params.current_index, params.current_doc_store, full_config_, pipeline_output.term_infos,
+        pipeline_output.all_search_terms, pipeline_output.cache_hit, params.primary_key_column, results);
     if (topn.applicable) {
       total_count = topn.total_results;
     }
@@ -1283,7 +1222,6 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     for (size_t i = 0; i < docs.size(); ++i) {
       if (docs[i]) {
         json doc_obj;
-        doc_obj["doc_id"] = docs[i]->doc_id;
         doc_obj["primary_key"] = docs[i]->primary_key;
 
         // Add filters
@@ -1377,6 +1315,10 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
     auto* query = &query_ref;
     auto* current_doc_store = table_ctx->doc_store.get();
     auto* current_index = table_ctx->index.get();
+    std::string facet_column = query->facet_column;
+    if (auto resolved_column = current_doc_store->ResolveFilterColumnName(facet_column)) {
+      facet_column = *resolved_column;
+    }
 
     auto filter_index = current_doc_store->GetFilterIndex();
     if (!filter_index) {
@@ -1421,10 +1363,10 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
           SendError(res, kHttpInternalServerError, "Failed to allocate result bitmap");
           return;
         }
-        value_counts = filter_index->GetColumnValueCountsFiltered(query->facet_column, result_bitmap.get());
+        value_counts = filter_index->GetColumnValueCountsFiltered(facet_column, result_bitmap.get());
       }
     } else {
-      value_counts = filter_index->GetColumnValueCounts(query->facet_column);
+      value_counts = filter_index->GetColumnValueCounts(facet_column);
     }
 
     if (query->limit_explicit && value_counts.size() > query->limit) {
@@ -1474,6 +1416,9 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
       SendError(res, lookup.status, lookup.message);
       return;
     }
+    if (RejectIfTableSyncing(lookup.table_key, res)) {
+      return;
+    }
     auto* current_doc_store = lookup.table_ctx->doc_store.get();
 
     RecordCommand(query::QueryType::GET);
@@ -1492,7 +1437,6 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 
     // Build JSON response
     json response;
-    response["doc_id"] = doc->doc_id;
     response["primary_key"] = doc->primary_key;
 
     if (!doc->filters.empty()) {
@@ -1696,13 +1640,19 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
   const bool is_loading = (loading_ != nullptr && loading_->load());
   const bool replication_paused_for_dump =
       replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire);
+  const bool sync_in_progress = any_syncing_checker_ ? any_syncing_checker_() :
+#ifdef USE_MYSQL
+                                                     sync_manager_ != nullptr && sync_manager_->IsAnySyncing();
+#else
+                                                     false;
+#endif
 #ifdef USE_MYSQL
   const bool replication_unavailable =
-      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !replication_paused_for_dump);
+      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !replication_paused_for_dump && !sync_in_progress);
 #else
   const bool replication_unavailable = false;
 #endif
-  bool is_ready = !is_loading && !replication_unavailable;
+  bool is_ready = !is_loading && !sync_in_progress && !replication_unavailable;
 
   json response;
   response["loading"] = is_loading;
@@ -1710,6 +1660,7 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
   if (binlog_reader_ != nullptr) {
     response["replication_running"] = !replication_unavailable;
     response["replication_paused_for_dump"] = replication_paused_for_dump;
+    response["sync_in_progress"] = sync_in_progress;
   }
 #endif
 
@@ -1720,7 +1671,13 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
     SendJson(res, kHttpOk, response);
   } else {
     response["status"] = "not_ready";
-    response["reason"] = is_loading ? "Server is loading" : "Replication is not running";
+    if (is_loading) {
+      response["reason"] = "Server is loading";
+    } else if (sync_in_progress) {
+      response["reason"] = "SYNC is in progress";
+    } else {
+      response["reason"] = "Replication is not running";
+    }
     response["timestamp"] =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     SendJson(res, kHttpServiceUnavailable, response);

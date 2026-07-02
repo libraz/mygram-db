@@ -42,6 +42,10 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   if (current_doc_store == nullptr) {
     return ResponseFormatter::FormatError("Document store not available");
   }
+  std::string facet_column = query.facet_column;
+  if (auto resolved_column = current_doc_store->ResolveFilterColumnName(facet_column)) {
+    facet_column = *resolved_column;
+  }
 
   auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -141,11 +145,11 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
       results.clear();
       results.shrink_to_fit();
 
-      value_counts = filter_index->GetColumnValueCountsFiltered(query.facet_column, result_bitmap.get());
+      value_counts = filter_index->GetColumnValueCountsFiltered(facet_column, result_bitmap.get());
     }
   } else {
     // Facet all documents (no search, no filters, no NOT)
-    value_counts = filter_index->GetColumnValueCounts(query.facet_column);
+    value_counts = filter_index->GetColumnValueCounts(facet_column);
   }
 
   // Apply LIMIT

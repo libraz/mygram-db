@@ -218,4 +218,22 @@ TEST_F(FacetHandlerTest, FacetWithoutSearchAggregatesAllDocs) {
   EXPECT_TRUE(response.find("vehicles") != std::string::npos) << "Response: " << response;
 }
 
+TEST_F(FacetHandlerTest, FacetColumnResolvesCaseInsensitively) {
+  AddDoc("d1", "fast car review", "vehicles");
+  AddDoc("d2", "car maintenance tips", "vehicles");
+  AddDoc("d3", "kitchen recipes", "food");
+
+  query::Query query;
+  query.type = query::QueryType::FACET;
+  query.table = "app_db.articles";
+  query.facet_column = "CATEGORY";
+  query.search_text = "car";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("OK FACET") == 0) << "Response: " << response;
+  EXPECT_TRUE(response.find("vehicles") != std::string::npos) << "Response: " << response;
+  EXPECT_TRUE(response.find("\t2") != std::string::npos) << "Response: " << response;
+}
+
 }  // namespace mygramdb::server

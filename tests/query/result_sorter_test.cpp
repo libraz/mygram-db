@@ -1271,6 +1271,30 @@ TEST_F(ResultSorterTest, SortByPrimaryKeyColumnNameCaseInsensitive) {
   EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "50");
 }
 
+TEST_F(ResultSorterTest, SortByFilterColumnNameResolvesCaseInsensitively) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("a", {{"createdAt", int64_t{30}}}));
+  doc_ids.push_back(*doc_store_.AddDocument("b", {{"createdAt", int64_t{10}}}));
+  doc_ids.push_back(*doc_store_.AddDocument("c", {{"createdAt", int64_t{20}}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.offset = 0;
+  query.order_by = OrderByClause{"createdat", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  auto sorted = result.value();
+
+  ASSERT_EQ(sorted.size(), 3);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[0]).value(), "b");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[1]).value(), "c");
+  EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[2]).value(), "a");
+}
+
 // =============================================================================
 // #6: Schwartzian Transform threshold test
 // =============================================================================

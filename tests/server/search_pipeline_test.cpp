@@ -299,6 +299,33 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheWithStaleDataVersionDoesNotInsert)
   EXPECT_FALSE(cache_manager.Lookup(query).has_value());
 }
 
+TEST_F(SearchPipelineFilterTest, InsertToCacheSkipsEmptyNgramTerms) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 2,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "a";
+  query.limit = 100;
+
+  std::vector<SearchTermInfo> term_infos = {{{}, std::numeric_limits<size_t>::max(), 0, "a"}};
+
+  InsertToCache(&cache_manager, query, doc_ids_, term_infos, 1.0, 2, 2, false);
+
+  EXPECT_FALSE(cache_manager.Lookup(query).has_value());
+}
+
 TEST(SearchPipelineCacheTest, MergeSortedTermNgramsForCacheUsesKWaySortedUniqueMerge) {
   std::vector<SearchTermInfo> term_infos = {
       {{"aa", "cc", "ee"}, 10},
@@ -317,7 +344,7 @@ TEST(SearchPipelineCacheTest, MergeSortedTermNgramsForCacheHandlesEmptyInput) {
   EXPECT_TRUE(MergeSortedTermNgramsForCache({{{}, 0}, {{}, 0}}).empty());
 }
 
-TEST(SearchPipelineBM25Test, GenerateTermInfosUsesTermIntersectionForDocumentFrequency) {
+TEST(SearchPipelineBM25Test, GenerateTermInfosSkipsDocumentFrequencyByDefault) {
   index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
   index.AddDocument(1, "abc");
   index.AddDocument(2, "abq");
@@ -329,7 +356,26 @@ TEST(SearchPipelineBM25Test, GenerateTermInfosUsesTermIntersectionForDocumentFre
   ASSERT_EQ(term_infos.size(), 1);
   EXPECT_EQ(term_infos[0].ngrams, (std::vector<std::string>{"ab", "bc"}));
   EXPECT_EQ(term_infos[0].estimated_size, 2u);
+  EXPECT_EQ(term_infos[0].term_doc_freq, 0u);
+  EXPECT_FALSE(term_infos[0].term_doc_freq_computed);
+  EXPECT_EQ(term_infos[0].normalized_term, "abc");
+}
+
+TEST(SearchPipelineBM25Test, GenerateTermInfosUsesTermIntersectionForDocumentFrequencyWhenRequested) {
+  index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
+  index.AddDocument(1, "abc");
+  index.AddDocument(2, "abq");
+  index.AddDocument(3, "xbc");
+
+  auto term_infos = GenerateTermInfos({"abc"}, &index, /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                      /* cross_boundary_ngrams= */ true,
+                                      /*compute_term_doc_freq=*/true);
+
+  ASSERT_EQ(term_infos.size(), 1);
+  EXPECT_EQ(term_infos[0].ngrams, (std::vector<std::string>{"ab", "bc"}));
+  EXPECT_EQ(term_infos[0].estimated_size, 2u);
   EXPECT_EQ(term_infos[0].term_doc_freq, 1u);
+  EXPECT_TRUE(term_infos[0].term_doc_freq_computed);
   EXPECT_EQ(term_infos[0].normalized_term, "abc");
 }
 
@@ -340,7 +386,8 @@ TEST(SearchPipelineBM25Test, TermDocumentFrequencyStaysPairedWithNormalizedTermA
   index.AddDocument(3, "common extra");
 
   auto term_infos = GenerateTermInfos({"common", "rare"}, &index, /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
-                                      /* cross_boundary_ngrams= */ true);
+                                      /* cross_boundary_ngrams= */ true,
+                                      /*compute_term_doc_freq=*/true);
   std::sort(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) {
     return lhs.estimated_size < rhs.estimated_size;
   });
@@ -348,8 +395,10 @@ TEST(SearchPipelineBM25Test, TermDocumentFrequencyStaysPairedWithNormalizedTermA
   ASSERT_EQ(term_infos.size(), 2);
   ASSERT_EQ(term_infos[0].normalized_term, "rare");
   EXPECT_EQ(term_infos[0].term_doc_freq, 1u);
+  EXPECT_TRUE(term_infos[0].term_doc_freq_computed);
   ASSERT_EQ(term_infos[1].normalized_term, "common");
   EXPECT_EQ(term_infos[1].term_doc_freq, 3u);
+  EXPECT_TRUE(term_infos[1].term_doc_freq_computed);
 }
 
 // =============================================================================
@@ -665,6 +714,19 @@ TEST_F(SearchPipelineFilterParityTest, EqStringFilterBitmapMatchesFallback) {
   EXPECT_EQ(bitmap_result.size(), 2);
 }
 
+TEST_F(SearchPipelineFilterParityTest, FilterColumnResolvesCaseInsensitively) {
+  std::vector<query::FilterCondition> filters = {{"CATEGORY", query::FilterOp::EQ, "tech"}};
+
+  auto bitmap_result = ApplyFiltersWithBitmap(doc_ids_, filters, doc_store_.get());
+  auto fallback_result = ApplyFilters(doc_ids_, filters, doc_store_.get());
+
+  ASSERT_EQ(bitmap_result.size(), fallback_result.size());
+  EXPECT_EQ(bitmap_result, fallback_result);
+  ASSERT_EQ(bitmap_result.size(), 2);
+  EXPECT_EQ(bitmap_result[0], doc_ids_[0]);
+  EXPECT_EQ(bitmap_result[1], doc_ids_[2]);
+}
+
 TEST_F(SearchPipelineFilterParityTest, MultipleEqFiltersBitmapMatchesFallback) {
   std::vector<query::FilterCondition> filters = {
       {"status", query::FilterOp::EQ, "1"},
@@ -811,6 +873,37 @@ TEST_F(FullPipelineTest, BasicSearch) {
   EXPECT_EQ(output.all_search_terms[0], "learning");
 }
 
+TEST_F(FullPipelineTest, InvalidUtf8SearchTextReturnsQueryError) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = std::string("bad\xC3\x28", 5);
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  EXPECT_FALSE(output.success);
+  EXPECT_NE(output.error_message.find("3001"), std::string::npos);
+  EXPECT_NE(output.error_message.find("Invalid UTF-8"), std::string::npos);
+  EXPECT_TRUE(output.results.empty());
+}
+
+TEST_F(FullPipelineTest, InvalidUtf8AndTermReturnsQueryError) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.and_terms = {std::string("bad\xC3\x28", 5)};
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  EXPECT_FALSE(output.success);
+  EXPECT_NE(output.error_message.find("3001"), std::string::npos);
+  EXPECT_NE(output.error_message.find("Invalid UTF-8"), std::string::npos);
+  EXPECT_TRUE(output.results.empty());
+}
+
 TEST_F(FullPipelineTest, SearchWithFilters) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
@@ -841,7 +934,19 @@ TEST_F(FullPipelineTest, BooleanTopLevelOrReturnsUnion) {
   EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[2]}));
 }
 
-TEST_F(FullPipelineTest, BooleanParenthesizedSingleTermUsesAstTerms) {
+TEST_F(FullPipelineTest, ParserQuotedBooleanPhraseDoesNotBecomeOrExpression) {
+  query::QueryParser parser;
+  auto parsed = parser.Parse(R"(SEARCH test "basics OR cats" LIMIT 100)");
+  ASSERT_TRUE(parsed) << parsed.error().message();
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(*parsed, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_TRUE(output.results.empty());
+}
+
+TEST_F(FullPipelineTest, ParenthesizedSingleTermDoesNotEnableBooleanMode) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
   query.table = "test";
@@ -852,9 +957,23 @@ TEST_F(FullPipelineTest, BooleanParenthesizedSingleTermUsesAstTerms) {
   auto output = ExecuteFullPipeline(query, params);
 
   ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[1]}));
   ASSERT_EQ(output.all_search_terms.size(), 1);
-  EXPECT_EQ(output.all_search_terms[0], "learning");
+  EXPECT_EQ(output.all_search_terms[0], "(learning)");
+}
+
+TEST_F(FullPipelineTest, LowercaseBooleanWordsDoNotEnableBooleanMode) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "basics or cats";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  ASSERT_EQ(output.all_search_terms.size(), 1);
+  EXPECT_EQ(output.all_search_terms[0], "basics or cats");
 }
 
 TEST_F(FullPipelineTest, BooleanParenthesizedOrAndLegacyAndClause) {
@@ -893,24 +1012,31 @@ TEST_F(FullPipelineTest, BooleanNotTermExcludedFromScoringTerms) {
   ASSERT_TRUE(not_text_doc.has_value());
   index_->AddDocument(*plain_doc, "alpha");
   index_->AddDocument(*not_text_doc, "alpha x x x x");
+  doc_store_->SetNormalizedText(*plain_doc, "alpha");
+  doc_store_->SetNormalizedText(*not_text_doc, "alpha x x x x");
 
   query::Query query;
   query.type = query::QueryType::SEARCH;
   query.table = "test";
   query.search_text = "alpha AND NOT x";
   query.limit = 100;
+  query.order_by = query::OrderByClause{"_score", query::SortOrder::DESC};
 
+  config::Config config;
+  config.bm25.enable = true;
   auto params = MakeParams();
+  params.full_config = &config;
   auto output = ExecuteFullPipeline(query, params);
 
   ASSERT_TRUE(output.success) << output.error_message;
-  ASSERT_EQ(output.results, (std::vector<storage::DocId>{*plain_doc, *not_text_doc}));
+  ASSERT_EQ(output.results, (std::vector<storage::DocId>{*plain_doc}));
   ASSERT_EQ(output.all_search_terms.size(), 1);
   EXPECT_EQ(output.all_search_terms[0], "alpha");
 
   std::vector<std::string> normalized_terms;
   std::vector<uint64_t> term_dfs;
   for (const auto& term_info : output.term_infos) {
+    EXPECT_TRUE(term_info.term_doc_freq_computed);
     normalized_terms.push_back(term_info.normalized_term);
     term_dfs.push_back(term_info.term_doc_freq);
   }
@@ -918,8 +1044,8 @@ TEST_F(FullPipelineTest, BooleanNotTermExcludedFromScoringTerms) {
   const index::BM25Params bm25_params{1.2, 0.0};
   const auto scored = index::BM25Scorer::ScoreDocuments(output.results, normalized_terms, term_dfs, *doc_store_,
                                                         doc_store_->GetAllDocIds().size(), 1.0, bm25_params);
-  ASSERT_EQ(scored.size(), 2);
-  EXPECT_DOUBLE_EQ(scored[0].score, scored[1].score);
+  ASSERT_EQ(scored.size(), 1);
+  EXPECT_GT(scored[0].score, 0.0);
 }
 
 TEST_F(FullPipelineTest, BooleanVerifyTextHonorsOrBranches) {
@@ -956,6 +1082,61 @@ TEST_F(FullPipelineTest, BooleanEmptyTermResultSkipsCache) {
   ASSERT_TRUE(output.success) << output.error_message;
   EXPECT_TRUE(output.results.empty());
   EXPECT_TRUE(output.empty_term_detected);
+}
+
+TEST_F(FullPipelineTest, ShortTermWithoutStoredTextReturnsExplicitError) {
+  doc_store_->SetStoreTexts(false);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "x";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_FALSE(output.success);
+  EXPECT_NE(output.error_message.find("too short for n-gram search"), std::string::npos);
+}
+
+TEST_F(FullPipelineTest, BooleanShortNotWithoutStoredTextReturnsExplicitError) {
+  doc_store_->SetStoreTexts(false);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning AND NOT x";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  EXPECT_FALSE(output.success);
+  EXPECT_NE(output.error_message.find("too short for n-gram search"), std::string::npos);
+}
+
+TEST_F(FullPipelineTest, MixedScriptBoundaryFragmentRequiresExactTextMatch) {
+  auto cjk_only = doc_store_->AddDocument("pk_kyoto", {}, "京都");
+  auto mixed_match = doc_store_->AddDocument("pk_kyo_tower", {}, "京タワー");
+  ASSERT_TRUE(cjk_only.has_value());
+  ASSERT_TRUE(mixed_match.has_value());
+  index_->AddDocument(*cjk_only, "京都");
+  index_->AddDocument(*mixed_match, "京タワー");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "京タ";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.kanji_ngram_size = 1;
+  params.cross_boundary_ngrams = false;
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{*mixed_match}));
 }
 
 TEST_F(FullPipelineTest, SearchWithNotTerms) {
@@ -1192,6 +1373,66 @@ TEST_F(FullPipelineTest, VerifyTextFilterApplied) {
   EXPECT_TRUE(output.success);
   // With verify_text=all, results should still include docs that actually contain "learning"
   EXPECT_EQ(output.results.size(), 2);
+}
+
+TEST(SearchTopNOptimizationTest, SkipsWhenVerifyTextIsRequired) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+
+  auto doc1 = doc_store.AddDocument("1", {}, "abzzba");
+  auto doc2 = doc_store.AddDocument("2", {}, "abab");
+  ASSERT_TRUE(doc1.has_value());
+  ASSERT_TRUE(doc2.has_value());
+  index.AddDocument(*doc1, "abzzba");
+  index.AddDocument(*doc2, "abab");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "abab";
+  query.limit = 1;
+
+  auto term_infos = GenerateTermInfos({query.search_text}, &index, 2, 0, false);
+  auto results = index.SearchAnd(term_infos[0].ngrams);
+
+  config::Config config;
+  config.memory.verify_text = "all";
+
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text},
+                                          /*cache_hit=*/false, "id", results);
+
+  EXPECT_TRUE(topn.considered);
+  EXPECT_FALSE(topn.applicable);
+}
+
+TEST(SearchTopNOptimizationTest, SkipsWhenPrimaryKeyDocIdOrderIsUnknown) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+
+  auto doc1 = doc_store.AddDocument("pk1", {}, "alpha");
+  auto doc2 = doc_store.AddDocument("pk2", {}, "alpha");
+  ASSERT_TRUE(doc1.has_value());
+  ASSERT_TRUE(doc2.has_value());
+  index.AddDocument(*doc1, "alpha");
+  index.AddDocument(*doc2, "alpha");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.limit = 1;
+
+  auto term_infos = GenerateTermInfos({query.search_text}, &index, 2, 0, false);
+  auto results = index.SearchAnd(term_infos[0].ngrams);
+
+  config::Config config;
+  config.memory.verify_text = "off";
+
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text},
+                                          /*cache_hit=*/false, "id", results);
+
+  EXPECT_TRUE(topn.considered);
+  EXPECT_FALSE(topn.applicable);
 }
 
 TEST_F(FullPipelineTest, FuzzySearchPath) {

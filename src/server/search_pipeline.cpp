@@ -66,6 +66,85 @@ bool ShouldApplyVerifyText(const std::string& verify_mode, const std::vector<std
   return ShouldApplyVerifyText(verify_mode, terms.begin(), terms.end());
 }
 
+bool IsCjkIdeograph(uint32_t codepoint) {
+  return (codepoint >= 0x4E00 && codepoint <= 0x9FFF) || (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||
+         (codepoint >= 0x20000 && codepoint <= 0x2A6DF) || (codepoint >= 0x2A700 && codepoint <= 0x2B73F) ||
+         (codepoint >= 0x2B740 && codepoint <= 0x2B81F) || (codepoint >= 0x2B820 && codepoint <= 0x2CEAF) ||
+         (codepoint >= 0xF900 && codepoint <= 0xFAFF);
+}
+
+bool HasUncoveredHybridFragment(std::string_view normalized_term, int ngram_size, int kanji_ngram_size,
+                                bool cross_boundary_ngrams) {
+  if (normalized_term.empty() || kanji_ngram_size <= 0) {
+    return false;
+  }
+
+  const int ascii_ngram_size = ngram_size > 0 ? ngram_size : 2;
+  if (ascii_ngram_size <= 0) {
+    return false;
+  }
+
+  auto codepoints = mygram::utils::Utf8ToCodepoints(normalized_term);
+  if (codepoints.size() < 2) {
+    return false;
+  }
+
+  bool has_cjk = false;
+  bool has_non_cjk = false;
+  for (uint32_t codepoint : codepoints) {
+    if (IsCjkIdeograph(codepoint)) {
+      has_cjk = true;
+    } else {
+      has_non_cjk = true;
+    }
+  }
+  if (!has_cjk || !has_non_cjk) {
+    return false;
+  }
+
+  std::vector<bool> covered(codepoints.size(), false);
+  for (size_t i = 0; i < codepoints.size(); ++i) {
+    const bool start_is_cjk = IsCjkIdeograph(codepoints[i]);
+    const int term_ngram_size = start_is_cjk ? kanji_ngram_size : ascii_ngram_size;
+    if (term_ngram_size <= 0 || i + static_cast<size_t>(term_ngram_size) > codepoints.size()) {
+      continue;
+    }
+
+    if (!cross_boundary_ngrams) {
+      bool boundary_crossed = false;
+      for (int j = 1; j < term_ngram_size; ++j) {
+        if (IsCjkIdeograph(codepoints[i + static_cast<size_t>(j)]) != start_is_cjk) {
+          boundary_crossed = true;
+          break;
+        }
+      }
+      if (boundary_crossed) {
+        continue;
+      }
+    }
+
+    for (int j = 0; j < term_ngram_size; ++j) {
+      covered[i + static_cast<size_t>(j)] = true;
+    }
+  }
+
+  return std::any_of(covered.begin(), covered.end(), [](bool is_covered) { return !is_covered; });
+}
+
+bool RequiresExactTextForHybridFragments(const std::vector<std::string>& terms, index::Index* current_index,
+                                         int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
+  if (current_index == nullptr) {
+    return false;
+  }
+  for (const auto& term : terms) {
+    const auto normalized = current_index->NormalizeText(term);
+    if (HasUncoveredHybridFragment(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// Overload for synonym groups: flattens normalized_terms and delegates to the
 /// template version to avoid duplicating the off/all/ascii logic.
 bool ShouldApplyVerifyTextSynonyms(const std::string& verify_mode, const std::vector<SynonymTermGroup>& groups) {
@@ -95,11 +174,32 @@ bool ContainsBooleanSyntax(const std::string& search_text) {
     return false;
   }
 
-  return std::any_of(tokens.begin(), tokens.end(), [](const query::Token& token) {
-    return token.type == query::TokenType::AND || token.type == query::TokenType::OR ||
-           token.type == query::TokenType::NOT || token.type == query::TokenType::LPAREN ||
-           token.type == query::TokenType::RPAREN;
-  });
+  auto is_upper_operator = [](const query::Token& token) {
+    return (token.type == query::TokenType::AND && token.value == "AND") ||
+           (token.type == query::TokenType::OR && token.value == "OR") ||
+           (token.type == query::TokenType::NOT && token.value == "NOT");
+  };
+  auto can_end_primary = [](const query::Token& token) {
+    return token.type == query::TokenType::TERM || token.type == query::TokenType::RPAREN;
+  };
+  auto can_start_primary = [&](const query::Token& token) {
+    return token.type == query::TokenType::TERM || token.type == query::TokenType::LPAREN || is_upper_operator(token);
+  };
+
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    if (!is_upper_operator(tokens[i])) {
+      continue;
+    }
+
+    const bool has_previous_term = i > 0 && can_end_primary(tokens[i - 1]);
+    const bool has_next_term =
+        (i + 1) < tokens.size() && tokens[i + 1].type != query::TokenType::END && can_start_primary(tokens[i + 1]);
+    if (has_previous_term || has_next_term) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 void CollectAstTerms(const query::QueryNode& node, std::vector<std::string>& terms) {
@@ -143,6 +243,24 @@ bool ContainsEmptyPostingTerm(const std::vector<SearchTermInfo>& term_infos) {
     return term_info.ngrams.empty() || term_info.estimated_size == 0 ||
            term_info.estimated_size == std::numeric_limits<size_t>::max();
   });
+}
+
+bool RequiresSubstringFallback(const std::vector<SearchTermInfo>& term_infos) {
+  return std::any_of(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& term_info) {
+    return term_info.ngrams.empty() && !term_info.normalized_term.empty();
+  });
+}
+
+bool RejectSubstringFallbackWithoutStoredText(FullPipelineOutput& output, const std::vector<SearchTermInfo>& term_infos,
+                                              const storage::DocumentStore* doc_store) {
+  if (doc_store == nullptr || doc_store->IsStoreTextsEnabled() || !RequiresSubstringFallback(term_infos)) {
+    return false;
+  }
+  output.success = false;
+  output.error_message =
+      "Query term is too short for n-gram search and requires normalized text storage. Set memory.verify_text to "
+      "\"ascii\" or \"all\" in configuration.";
+  return true;
 }
 
 bool BooleanAstMatchesNormalizedText(const query::QueryNode& node, const std::string& normalized_text,
@@ -280,10 +398,28 @@ query::Query WithCanonicalCacheKey(const query::Query& query, const FullPipeline
   return cache_query;
 }
 
+bool HasInvalidUtf8SearchTerm(const query::Query& query) {
+  if (!query.search_text.empty() && !mygram::utils::IsValidUtf8(query.search_text)) {
+    return true;
+  }
+  for (const auto& term : query.and_terms) {
+    if (!mygram::utils::IsValidUtf8(term)) {
+      return true;
+    }
+  }
+  for (const auto& term : query.not_terms) {
+    if (!mygram::utils::IsValidUtf8(term)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
-                                              int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
+                                              int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams,
+                                              bool compute_term_doc_freq) {
   std::vector<SearchTermInfo> term_infos;
   term_infos.reserve(search_terms.size());
 
@@ -307,22 +443,26 @@ std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& se
     }
 
     uint64_t term_doc_freq = 0;
-    if (!ngrams.empty() && min_size > 0 && min_size != std::numeric_limits<size_t>::max()) {
+    if (compute_term_doc_freq && !ngrams.empty() && min_size > 0 && min_size != std::numeric_limits<size_t>::max()) {
       term_doc_freq = static_cast<uint64_t>(current_index->SearchAnd(ngrams).size());
     }
 
-    term_infos.push_back({std::move(ngrams), min_size, term_doc_freq, std::move(normalized)});
+    term_infos.push_back({std::move(ngrams), min_size, term_doc_freq, std::move(normalized), compute_term_doc_freq});
   }
 
   return term_infos;
 }
 
 TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, index::Index* current_index,
-                                                   const std::vector<SearchTermInfo>& term_infos, bool cache_hit,
+                                                   storage::DocumentStore* current_doc_store,
+                                                   const config::Config* full_config,
+                                                   const std::vector<SearchTermInfo>& term_infos,
+                                                   const std::vector<std::string>& all_search_terms, bool cache_hit,
                                                    const std::string& primary_key_column,
                                                    std::vector<storage::DocId>& results) {
   TopNOptimizationResult result;
-  if (cache_hit || current_index == nullptr || term_infos.empty() || term_infos[0].estimated_size == 0) {
+  if (cache_hit || current_index == nullptr || current_doc_store == nullptr || term_infos.empty() ||
+      term_infos[0].estimated_size == 0) {
     return result;
   }
 
@@ -344,6 +484,9 @@ TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, in
 
   const bool is_primary_key_order = order_by.IsPrimaryKey() || equals_ignore_case(order_by.column, primary_key_column);
   const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
+  const bool verify_text_required =
+      full_config != nullptr && ShouldApplyVerifyText(full_config->memory.verify_text, all_search_terms);
+  const bool doc_id_order_matches_primary_key = current_doc_store->IsPrimaryKeyDocIdOrderValid();
 
   // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   constexpr uint32_t kMaxOffsetForOptimization = 10000;
@@ -351,7 +494,8 @@ TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, in
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
   result.applicable = term_infos.size() == 1 && query.not_terms.empty() && query.filters.empty() && query.limit > 0 &&
-                      query.offset <= kMaxOffsetForOptimization && is_primary_key_order && !is_score_sort;
+                      query.offset <= kMaxOffsetForOptimization && is_primary_key_order && !is_score_sort &&
+                      !verify_text_required && doc_id_order_matches_primary_key;
   if (!result.applicable) {
     return result;
   }
@@ -519,6 +663,15 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
   // Apply verify_text post-filter
   result.results =
       ApplyVerifyTextFilter(std::move(result.results), all_search_terms, current_index, current_doc_store, full_config);
+  if (RequiresExactTextForHybridFragments(all_search_terms, current_index, ngram_size, kanji_ngram_size,
+                                          cross_boundary)) {
+    std::vector<std::string> normalized_terms;
+    normalized_terms.reserve(all_search_terms.size());
+    for (const auto& term : all_search_terms) {
+      normalized_terms.push_back(current_index->NormalizeText(term));
+    }
+    result.results = PostFilterByText(result.results, normalized_terms, current_doc_store);
+  }
 
   return result;
 }
@@ -631,6 +784,21 @@ bool AllFiltersHaveBitmapSupport(const std::vector<query::FilterCondition>& filt
   return true;
 }
 
+std::vector<query::FilterCondition> ResolveFilterColumns(const std::vector<query::FilterCondition>& filters,
+                                                         storage::DocumentStore* doc_store) {
+  if (doc_store == nullptr) {
+    return filters;
+  }
+
+  std::vector<query::FilterCondition> resolved = filters;
+  for (auto& filter : resolved) {
+    if (auto column = doc_store->ResolveFilterColumnName(filter.column)) {
+      filter.column = *column;
+    }
+  }
+  return resolved;
+}
+
 /// Build a bitmap union of all type interpretations of a filter value string
 RoaringBitmapPtr BuildTypeUnionBitmap(const storage::FilterIndex* filter_index, const std::string& column,
                                       const std::string& value) {
@@ -715,6 +883,7 @@ RoaringBitmapPtr BuildTypeUnionBitmap(const storage::FilterIndex* filter_index, 
 std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& results,
                                          const std::vector<query::FilterCondition>& filters,
                                          storage::DocumentStore* doc_store) {
+  const auto resolved_filters = ResolveFilterColumns(filters, doc_store);
   // Eventual-consistency contract with BinlogEventProcessor: binlog apply
   // updates DocumentStore and Index in two steps. A concurrent search can see
   // a doc id whose store/filter row has not reached the same phase yet, or has
@@ -725,16 +894,16 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
 
   // Pre-parse all filter values once before the main loop
   std::vector<ParsedFilterValue> parsed_values;
-  parsed_values.reserve(filters.size());
-  for (const auto& filter_cond : filters) {
+  parsed_values.reserve(resolved_filters.size());
+  for (const auto& filter_cond : resolved_filters) {
     parsed_values.push_back(ParseFilterValue(filter_cond.value));
   }
 
   // Pre-fetch all filter values in a single lock acquisition (one shared lock
   // for all columns) instead of per-column locking
   std::vector<std::string> columns;
-  columns.reserve(filters.size());
-  for (const auto& filter_cond : filters) {
+  columns.reserve(resolved_filters.size());
+  for (const auto& filter_cond : resolved_filters) {
     columns.push_back(filter_cond.column);
   }
   auto batch_filter_values = doc_store->GetFilterValuesBatchMultiColumn(results, columns);
@@ -742,8 +911,8 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
   for (size_t doc_idx = 0; doc_idx < results.size(); ++doc_idx) {
     bool matches_all_filters = true;
 
-    for (size_t i = 0; i < filters.size(); ++i) {
-      const auto& filter_cond = filters[i];
+    for (size_t i = 0; i < resolved_filters.size(); ++i) {
+      const auto& filter_cond = resolved_filters[i];
       const auto& parsed_value = parsed_values[i];
       const auto& stored_value = batch_filter_values[i][doc_idx];
 
@@ -812,32 +981,33 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
 std::vector<storage::DocId> ApplyFiltersWithBitmap(const std::vector<storage::DocId>& results,
                                                    const std::vector<query::FilterCondition>& filters,
                                                    storage::DocumentStore* doc_store) {
+  const auto resolved_filters = ResolveFilterColumns(filters, doc_store);
   // Take a shared_ptr snapshot of filter_index -- keeps it alive even if
   // a concurrent writer replaces doc_store's filter_index_ pointer.
   auto filter_index = doc_store->GetFilterIndex();
 
   // Check if all filters can use bitmap acceleration
-  if (filter_index == nullptr || !AllFiltersHaveBitmapSupport(filters)) {
-    return ApplyFilters(results, filters, doc_store);
+  if (filter_index == nullptr || !AllFiltersHaveBitmapSupport(resolved_filters)) {
+    return ApplyFilters(results, resolved_filters, doc_store);
   }
 
   // Convert results vector to a temporary Roaring bitmap
   RoaringBitmapPtr result_bm = MakeRoaringFromVector(results);
   if (result_bm == nullptr) {
-    return ApplyFilters(results, filters, doc_store);
+    return ApplyFilters(results, resolved_filters, doc_store);
   }
 
-  for (const auto& filter : filters) {
+  for (const auto& filter : resolved_filters) {
     if (filter.op == query::FilterOp::EQ) {
       RoaringBitmapPtr match_bm = BuildTypeUnionBitmap(filter_index.get(), filter.column, filter.value);
       if (match_bm == nullptr) {
-        return ApplyFilters(results, filters, doc_store);
+        return ApplyFilters(results, resolved_filters, doc_store);
       }
       roaring_bitmap_and_inplace(result_bm.get(), match_bm.get());
     } else if (filter.op == query::FilterOp::NE) {
       RoaringBitmapPtr exclude_bm = BuildTypeUnionBitmap(filter_index.get(), filter.column, filter.value);
       if (exclude_bm == nullptr) {
-        return ApplyFilters(results, filters, doc_store);
+        return ApplyFilters(results, resolved_filters, doc_store);
       }
       roaring_bitmap_andnot_inplace(result_bm.get(), exclude_bm.get());
     }
@@ -966,6 +1136,9 @@ void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query
                    double query_time_ms, int ngram_size, int kanji_ngram_size, bool cross_boundary,
                    std::optional<uint64_t> data_version) {
   if (cache_manager == nullptr || !cache_manager->IsEnabled()) {
+    return;
+  }
+  if (ContainsEmptyPostingTerm(term_infos)) {
     return;
   }
   auto all_ngrams = MergeSortedTermNgramsForCache(term_infos);
@@ -1225,6 +1398,15 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
       result.results = PostFilterByFuzzyText(result.results, normalized_terms, max_distance, current_doc_store);
     }
   }
+  if (RequiresExactTextForHybridFragments(all_search_terms, current_index, ngram_size, kanji_ngram_size,
+                                          cross_boundary)) {
+    std::vector<std::string> normalized_terms;
+    normalized_terms.reserve(all_search_terms.size());
+    for (const auto& term : all_search_terms) {
+      normalized_terms.push_back(current_index->NormalizeText(term));
+    }
+    result.results = PostFilterByText(result.results, normalized_terms, current_doc_store);
+  }
 
   return result;
 }
@@ -1280,6 +1462,11 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     output.error_message = "Document store not available";
     return output;
   }
+  if (HasInvalidUtf8SearchTerm(query)) {
+    output.success = false;
+    output.error_message = "3001 Invalid UTF-8 in query text";
+    return output;
+  }
 
   const query::Query cache_query = WithCanonicalCacheKey(query, params);
 
@@ -1327,6 +1514,8 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
 
   bool cross_boundary = params.cross_boundary_ngrams;
+  const bool compute_term_doc_freq = query.order_by.has_value() && query.order_by->IsScoreSort() &&
+                                     params.full_config != nullptr && params.full_config->bm25.enable;
 
   query::QueryASTParser ast_parser;
   auto boolean_ast = ast_parser.Parse(query.search_text);
@@ -1348,10 +1537,15 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     output.all_search_terms = boolean_scoring_terms;
     output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
     output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
-                                          params.kanji_ngram_size, cross_boundary);
+                                          params.kanji_ngram_size, cross_boundary, compute_term_doc_freq);
 
     std::vector<std::string> verify_terms_for_mode = all_boolean_terms;
     verify_terms_for_mode.insert(verify_terms_for_mode.end(), query.and_terms.begin(), query.and_terms.end());
+    auto boolean_term_infos_for_fallback = GenerateTermInfos(
+        verify_terms_for_mode, params.current_index, params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    if (RejectSubstringFallbackWithoutStoredText(output, boolean_term_infos_for_fallback, params.current_doc_store)) {
+      return output;
+    }
     auto pipeline_result =
         ExecuteWithBooleanAst(query, *boolean_ast, params.current_index, params.current_doc_store, params.full_config,
                               verify_terms_for_mode, params.ngram_size, params.kanji_ngram_size, cross_boundary);
@@ -1385,7 +1579,10 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   if (query.fuzzy_max_distance.has_value()) {
     output.path_taken = PipelinePath::FUZZY;
     output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
-                                          params.kanji_ngram_size, cross_boundary);
+                                          params.kanji_ngram_size, cross_boundary, compute_term_doc_freq);
+    if (RejectSubstringFallbackWithoutStoredText(output, output.term_infos, params.current_doc_store)) {
+      return output;
+    }
 
     auto pipeline_result =
         ExecuteWithFuzzy(query, output.term_infos, output.all_search_terms, *query.fuzzy_max_distance,
@@ -1419,6 +1616,11 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     output.path_taken = PipelinePath::SYNONYM;
     auto synonym_groups = ExpandTermsWithSynonyms(output.all_search_terms, params.synonym_dict, params.current_index,
                                                   params.ngram_size, params.kanji_ngram_size, cross_boundary);
+    for (const auto& group : synonym_groups) {
+      if (RejectSubstringFallbackWithoutStoredText(output, group.variants, params.current_doc_store)) {
+        return output;
+      }
+    }
 
     auto pipeline_result =
         ExecuteWithSynonyms(query, synonym_groups, params.current_index, params.current_doc_store, params.full_config,
@@ -1454,7 +1656,10 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
   // Standard search path: generate n-grams for each term and estimate result sizes
   output.path_taken = PipelinePath::REGULAR;
   output.term_infos = GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size,
-                                        params.kanji_ngram_size, cross_boundary);
+                                        params.kanji_ngram_size, cross_boundary, compute_term_doc_freq);
+  if (RejectSubstringFallbackWithoutStoredText(output, output.term_infos, params.current_doc_store)) {
+    return output;
+  }
 
   // Sort terms by estimated size (smallest first for faster intersection)
   std::sort(

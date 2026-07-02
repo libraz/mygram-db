@@ -11,17 +11,19 @@ namespace mygramdb::server {
 
 std::optional<std::string> ResolveTableKey(const std::unordered_map<std::string, TableContext*>& tables,
                                            std::string_view name) {
-  // Exact match covers already-qualified references and any literal key.
-  if (tables.find(std::string(name)) != tables.end()) {
-    return std::string(name);
-  }
-
-  // Qualified names that were not found exactly do not resolve further.
   if (name.find('.') != std::string_view::npos) {
+    // Exact match covers already-qualified references and literal table names
+    // that contain dots.
+    if (tables.find(std::string(name)) != tables.end()) {
+      return std::string(name);
+    }
     return std::nullopt;
   }
 
-  // Bare name: look for a unique key of the form "<db>.<name>".
+  // Bare name: prefer a unique canonical key of the form "<db>.<name>" even
+  // if a legacy bare alias exists in the map. Cache invalidation and binlog
+  // events use qualified names, so returning the qualified key keeps query
+  // metadata byte-identical with mutation events.
   std::optional<std::string> resolved;
   for (const auto& [key, _] : tables) {
     const auto separator = key.find('.');
@@ -36,7 +38,16 @@ std::optional<std::string> ResolveTableKey(const std::unordered_map<std::string,
       resolved = key;
     }
   }
-  return resolved;
+  if (resolved.has_value()) {
+    return resolved;
+  }
+
+  // Legacy fallback for tests and single-table callers that only provide a
+  // bare key.
+  if (tables.find(std::string(name)) != tables.end()) {
+    return std::string(name);
+  }
+  return std::nullopt;
 }
 
 TableCatalog::TableCatalog(std::unordered_map<std::string, TableContext*> tables) : tables_(std::move(tables)) {

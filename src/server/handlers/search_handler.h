@@ -99,6 +99,11 @@ class SearchHandler : public CommandHandler {
   std::string HandleCount(const query::Query& query, ConnectionContext& conn_ctx);
 
   /**
+   * @brief Return a copy whose table field is the canonical catalog key.
+   */
+  mygram::utils::Expected<query::Query, mygram::utils::Error> CanonicalizeQueryTable(const query::Query& query) const;
+
+  /**
    * @brief Execute the shared search pipeline (term generation through verify_text filter)
    *
    * Delegates to search_pipeline::ExecuteFullPipeline so the TCP and HTTP code

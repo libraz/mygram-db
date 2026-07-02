@@ -551,6 +551,12 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "SORT _score requires BM25-aware search path"));
   }
 
+  if (!order_by.IsPrimaryKey() && !EqualsIgnoreCase(order_by.column, primary_key_column)) {
+    if (auto resolved_column = doc_store.ResolveFilterColumnName(order_by.column)) {
+      order_by.column = *resolved_column;
+    }
+  }
+
   // Column validation: lightweight check (only first few documents)
   // - Primary key (empty column name or explicit primary key column name): always valid
   // - Filter column: check existence in a sample of documents

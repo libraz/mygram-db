@@ -118,7 +118,7 @@ TEST_F(HttpServerTest, GetDocumentEndpoint) {
   EXPECT_EQ(res->status, 200);
 
   auto body = json::parse(res->body);
-  EXPECT_EQ(body["doc_id"], 1);
+  EXPECT_FALSE(body.contains("doc_id"));
   EXPECT_EQ(body["primary_key"], "article_1");
   EXPECT_TRUE(body.contains("filters"));
   EXPECT_EQ(body["filters"]["status"], 1);

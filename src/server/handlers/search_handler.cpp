@@ -285,9 +285,25 @@ std::vector<std::string> SearchHandler::GenerateHighlightSnippets(
   return snippets;
 }
 
+mygram::utils::Expected<query::Query, mygram::utils::Error> SearchHandler::CanonicalizeQueryTable(
+    const query::Query& query) const {
+  auto resolved = ResolveTableName(query.table);
+  if (!resolved) {
+    return mygram::utils::MakeUnexpected(resolved.error());
+  }
+  query::Query canonical = query;
+  canonical.table = *resolved;
+  return canonical;
+}
+
 std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionContext& conn_ctx) {
+  auto canonical_query = CanonicalizeQueryTable(query);
+  if (!canonical_query) {
+    return ResponseFormatter::FormatError(canonical_query.error().message());
+  }
+
   PipelineOutput output;
-  std::string pipeline_error = ExecuteSearchPipeline(query, conn_ctx, output);
+  std::string pipeline_error = ExecuteSearchPipeline(*canonical_query, conn_ctx, output);
   if (!pipeline_error.empty()) {
     return pipeline_error;
   }
@@ -309,13 +325,14 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   if (output.table_context != nullptr) {
     primary_key_column = output.table_context->config.primary_key;
   }
-  const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
+  const auto& effective_query = *canonical_query;
+  const bool is_score_sort = effective_query.order_by.has_value() && effective_query.order_by->IsScoreSort();
 
   if (conn_ctx.debug_mode) {
     query::OrderByClause order_by;
     bool order_by_implicit = false;
-    if (query.order_by.has_value()) {
-      order_by = query.order_by.value();
+    if (effective_query.order_by.has_value()) {
+      order_by = effective_query.order_by.value();
     } else {
       order_by.column = "";
       order_by.order = query::SortOrder::DESC;
@@ -328,14 +345,15 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       order_str += " (default)";
     }
     output.debug_info.order_by_applied = order_str;
-    output.debug_info.limit_applied = query.limit;
-    output.debug_info.offset_applied = query.offset;
-    output.debug_info.limit_explicit = query.limit_explicit;
-    output.debug_info.offset_explicit = query.offset_explicit;
+    output.debug_info.limit_applied = effective_query.limit;
+    output.debug_info.offset_applied = effective_query.offset;
+    output.debug_info.limit_explicit = effective_query.limit_explicit;
+    output.debug_info.offset_explicit = effective_query.offset_explicit;
   }
 
-  auto topn = search_pipeline::ApplySearchTopNOptimization(query, output.current_index, output.term_infos, is_cache_hit,
-                                                           primary_key_column, output.results);
+  auto topn = search_pipeline::ApplySearchTopNOptimization(
+      effective_query, output.current_index, output.current_doc_store, ctx_.full_config, output.term_infos,
+      output.all_search_terms, is_cache_hit, primary_key_column, output.results);
   if (topn.applicable) {
     total_results = topn.total_results;
     if (conn_ctx.debug_mode) {
@@ -357,7 +375,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   // Validate HIGHLIGHT is possible (requires stored normalized text)
-  if (query.highlight.has_value() && output.current_doc_store != nullptr &&
+  if (effective_query.highlight.has_value() && output.current_doc_store != nullptr &&
       !output.current_doc_store->IsStoreTextsEnabled()) {
     return ResponseFormatter::FormatError(
         "HIGHLIGHT requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in configuration.");
@@ -369,6 +387,11 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     if (ctx_.full_config == nullptr || !ctx_.full_config->bm25.enable) {
       return ResponseFormatter::FormatError("SORT _score requires BM25 to be enabled in configuration");
     }
+    if (output.current_doc_store == nullptr || !output.current_doc_store->IsStoreTextsEnabled()) {
+      return ResponseFormatter::FormatError(
+          "SORT _score requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
+          "configuration.");
+    }
 
     const auto& bm25_config = ctx_.full_config->bm25;
     if (output.table_context == nullptr) {
@@ -379,10 +402,15 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     index::BM25Params params{bm25_config.k1, bm25_config.b};
 
     // Regenerate term_infos if empty (e.g., cache hit path skips GenerateTermInfos)
-    if (output.term_infos.empty() && !output.all_search_terms.empty() && output.current_index != nullptr) {
+    const bool needs_term_doc_freq =
+        std::any_of(output.term_infos.begin(), output.term_infos.end(),
+                    [](const auto& term_info) { return !term_info.term_doc_freq_computed; });
+    if ((output.term_infos.empty() || needs_term_doc_freq) && !output.all_search_terms.empty() &&
+        output.current_index != nullptr) {
       output.term_infos =
           search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
-                                             output.current_kanji_ngram_size, output.current_cross_boundary);
+                                             output.current_kanji_ngram_size, output.current_cross_boundary,
+                                             /*compute_term_doc_freq=*/true);
     }
 
     // Reuse pre-computed term_infos (already normalized and ngram-generated)
@@ -411,13 +439,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       scores.push_back(sd.score);
     }
 
-    auto sort_order = query.order_by->order;
-    auto sorted_results =
-        query::ResultSorter::SortByScore(output.results, scores, sort_order, query.limit, query.offset);
+    auto sort_order = effective_query.order_by->order;
+    auto sorted_results = query::ResultSorter::SortByScore(output.results, scores, sort_order, effective_query.limit,
+                                                           effective_query.offset);
     size_t score_total = output.results.size();
 
-    if (query.highlight.has_value()) {
-      auto snippets = GenerateHighlightSnippets(query, output, sorted_results);
+    if (effective_query.highlight.has_value()) {
+      auto snippets = GenerateHighlightSnippets(effective_query, output, sorted_results);
       if (conn_ctx.debug_mode) {
         output.debug_info.final_results = sorted_results.size();
         return ResponseFormatter::FormatSearchResponseWithHighlights(
@@ -436,8 +464,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   // Sort and paginate results
-  auto sorted_result =
-      query::ResultSorter::SortAndPaginate(output.results, *output.current_doc_store, query, primary_key_column);
+  auto sorted_result = query::ResultSorter::SortAndPaginate(output.results, *output.current_doc_store, effective_query,
+                                                            primary_key_column);
 
   if (!sorted_result.has_value()) {
     return ResponseFormatter::FormatError(sorted_result.error().message());
@@ -445,8 +473,8 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
   auto sorted_results = std::move(sorted_result.value());
 
-  if (query.highlight.has_value()) {
-    auto snippets = GenerateHighlightSnippets(query, output, sorted_results);
+  if (effective_query.highlight.has_value()) {
+    auto snippets = GenerateHighlightSnippets(effective_query, output, sorted_results);
     if (conn_ctx.debug_mode) {
       output.debug_info.final_results = sorted_results.size();
       return ResponseFormatter::FormatSearchResponseWithHighlights(
@@ -466,8 +494,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 }
 
 std::string SearchHandler::HandleCount(const query::Query& query, ConnectionContext& conn_ctx) {
+  auto canonical_query = CanonicalizeQueryTable(query);
+  if (!canonical_query) {
+    return ResponseFormatter::FormatError(canonical_query.error().message());
+  }
+
   PipelineOutput output;
-  std::string pipeline_error = ExecuteSearchPipeline(query, conn_ctx, output);
+  std::string pipeline_error = ExecuteSearchPipeline(*canonical_query, conn_ctx, output);
   if (!pipeline_error.empty()) {
     return pipeline_error;
   }

@@ -14,7 +14,9 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
@@ -100,6 +102,7 @@ struct HttpServerConfig {
 
 // Forward declaration for TableContext
 struct TableContext;
+class SyncOperationManager;
 
 /**
  * @brief HTTP server for JSON API
@@ -131,7 +134,9 @@ class HttpServer {
              const config::Config* full_config = nullptr, mysql::IBinlogReader* binlog_reader = nullptr,
              cache::CacheManager* cache_manager = nullptr, std::atomic<bool>* loading = nullptr,
              ServerStats* tcp_stats = nullptr, std::shared_ptr<RateLimiter> rate_limiter = nullptr,
-             std::atomic<bool>* replication_paused_for_dump = nullptr);
+             std::atomic<bool>* replication_paused_for_dump = nullptr, SyncOperationManager* sync_manager = nullptr,
+             std::function<bool(const std::string&)> table_syncing_checker = {},
+             std::function<bool()> any_syncing_checker = {});
 
   ~HttpServer();
 
@@ -151,6 +156,10 @@ class HttpServer {
    * @brief Stop server
    */
   void Stop();
+
+#ifdef MYGRAMDB_HTTP_TEST_HOOKS
+  void ForceRunningFalseForTesting() { running_.store(false, std::memory_order_release); }
+#endif
 
   /**
    * @brief Check if server is running
@@ -224,6 +233,7 @@ class HttpServer {
   //     concurrent Stop() callers either observe running_=false (and bail) or
   //     race the join via Stop()'s own CAS.
   std::atomic<bool> running_{false};
+  std::mutex lifecycle_mutex_;
   std::chrono::steady_clock::time_point start_time_{std::chrono::steady_clock::now()};
 
   // Statistics
@@ -248,6 +258,9 @@ class HttpServer {
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
   ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
   std::atomic<bool>* replication_paused_for_dump_ = nullptr;
+  SyncOperationManager* sync_manager_ = nullptr;
+  std::function<bool(const std::string&)> table_syncing_checker_;
+  std::function<bool()> any_syncing_checker_;
 
   /**
    * @brief Setup routes
@@ -282,6 +295,7 @@ class HttpServer {
    */
   struct TableContextLookup {
     TableContext* table_ctx = nullptr;  ///< Non-null on success.
+    std::string table_key;              ///< Canonical table key on success.
     int status = 0;                     ///< HTTP status (0 means uninitialized).
     std::string message;                ///< Error message for failures.
   };
@@ -306,6 +320,11 @@ class HttpServer {
    *         whose `status` / `message` describe the error otherwise.
    */
   TableContextLookup ResolveHttpTableContext(const std::string& table_name);
+
+  /**
+   * @brief Send HTTP 503 when the resolved table is currently synchronizing.
+   */
+  bool RejectIfTableSyncing(const std::string& table_key, httplib::Response& res) const;
 
   /**
    * @brief Run the shared HandleSearch/HandleCount preamble.

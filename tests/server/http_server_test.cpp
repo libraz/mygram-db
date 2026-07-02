@@ -200,6 +200,20 @@ TEST_F(HttpServerStartupTest, DoubleStartReturnsError) {
   server.Stop();
 }
 
+TEST_F(HttpServerStartupTest, StopJoinsThreadEvenIfRunningFlagWasClearedInternally) {
+  auto cfg = MakeConfig(18098);
+  HttpServer server(cfg, table_contexts_, config_.get());
+
+  auto result = server.Start();
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(server.IsRunning());
+
+  server.ForceRunningFalseForTesting();
+  server.Stop();
+
+  EXPECT_FALSE(server.IsRunning());
+}
+
 /**
  * @brief P0-C regression: concurrent Start() calls must serialize through a
  *        single CAS, with at most one success.

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <thread>
 
@@ -318,6 +319,63 @@ TEST_F(HttpServerTest, ReplicationStatusIncludesTcpParityFields) {
   server->Stop();
 }
 #endif
+
+TEST_F(HttpServerTest, SharedRateLimiterControlsHttpRequests) {
+  auto shared_limiter = std::make_shared<RateLimiter>(/*capacity=*/1, /*refill_rate=*/0, /*max_clients=*/100,
+                                                      /*enabled=*/true);
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, nullptr, nullptr,
+                                              nullptr, shared_limiter);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  auto first = client.Get("/info");
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->status, 200);
+
+  auto second = client.Get("/info");
+  ASSERT_TRUE(second);
+  EXPECT_EQ(second->status, 429);
+}
+
+TEST_F(HttpServerTest, SyncingTableRejectsHttpReadsAndReadiness) {
+  auto table_syncing = [](const std::string& table_key) { return table_key == "test"; };
+  auto any_syncing = [] { return true; };
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, nullptr, nullptr,
+                                              nullptr, nullptr, nullptr, nullptr, table_syncing, any_syncing);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+
+  json search_body;
+  search_body["q"] = "machine";
+  auto search = client.Post("/tables/test/search", search_body.dump(), "application/json");
+  ASSERT_TRUE(search);
+  EXPECT_EQ(search->status, 503);
+  EXPECT_NE(search->body.find("synchronizing"), std::string::npos);
+
+  auto get = client.Get("/tables/test/article_1");
+  ASSERT_TRUE(get);
+  EXPECT_EQ(get->status, 503);
+  EXPECT_NE(get->body.find("synchronizing"), std::string::npos);
+
+  auto ready = client.Get("/health/ready");
+  ASSERT_TRUE(ready);
+  EXPECT_EQ(ready->status, 503);
+  const auto ready_body = json::parse(ready->body);
+  EXPECT_EQ(ready_body["reason"], "SYNC is in progress");
+}
 
 /**
  * @brief Multi-table HTTP server test fixture

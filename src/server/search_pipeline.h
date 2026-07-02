@@ -42,6 +42,7 @@ struct SearchTermInfo {
   size_t estimated_size;
   uint64_t term_doc_freq = 0;
   std::string normalized_term;
+  bool term_doc_freq_computed = false;
 };
 
 /// @brief Result of search pipeline execution (before pagination)
@@ -78,7 +79,8 @@ enum class CacheMissReason : std::uint8_t {
 /// @param cross_boundary_ngrams Generate n-grams spanning CJK/non-CJK boundaries
 /// @return Vector of term information with n-grams and size estimates
 std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
-                                              int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams);
+                                              int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams,
+                                              bool compute_term_doc_freq = false);
 
 /// @brief Merge already-sorted per-term n-gram lists into one sorted unique list for cache invalidation.
 std::vector<std::string> MergeSortedTermNgramsForCache(const std::vector<SearchTermInfo>& term_infos);
@@ -352,7 +354,10 @@ struct TopNOptimizationResult {
 
 /// @brief Apply the SEARCH GetTopN optimization shared by TCP and HTTP handlers.
 TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, index::Index* current_index,
-                                                   const std::vector<SearchTermInfo>& term_infos, bool cache_hit,
+                                                   storage::DocumentStore* current_doc_store,
+                                                   const config::Config* full_config,
+                                                   const std::vector<SearchTermInfo>& term_infos,
+                                                   const std::vector<std::string>& all_search_terms, bool cache_hit,
                                                    const std::string& primary_key_column,
                                                    std::vector<storage::DocId>& results);
 

@@ -13,6 +13,7 @@
 #include <set>
 #include <thread>
 
+#include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
@@ -119,13 +120,6 @@ TEST_F(HttpServerTest, SearchEndpoint) {
 
   httplib::Client client("http://127.0.0.1:18080");
 
-  auto doc_id1 = doc_store_->GetDocId("article_1");
-  auto doc_id2 = doc_store_->GetDocId("article_2");
-  auto doc_id3 = doc_store_->GetDocId("article_3");
-  ASSERT_TRUE(doc_id1.has_value());
-  ASSERT_TRUE(doc_id2.has_value());
-  ASSERT_TRUE(doc_id3.has_value());
-
   json request_body;
   request_body["q"] = "machine";
   request_body["limit"] = 10;
@@ -142,7 +136,7 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   ASSERT_TRUE(body["results"].is_array());
   ASSERT_EQ(body["results"].size(), 1);
   const auto& first_result = body["results"][0];
-  EXPECT_EQ(first_result["doc_id"], doc_id1.value());
+  EXPECT_FALSE(first_result.contains("doc_id"));
   EXPECT_EQ(first_result["primary_key"], "article_1");
   ASSERT_TRUE(first_result.contains("filters"));
   EXPECT_EQ(first_result["filters"]["category"], "tech");
@@ -161,8 +155,10 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   EXPECT_EQ(multi_body["limit"], 2);
   EXPECT_EQ(multi_body["offset"], 0);
   ASSERT_EQ(multi_body["results"].size(), 2);
-  EXPECT_EQ(multi_body["results"][0]["doc_id"], doc_id3.value());
-  EXPECT_EQ(multi_body["results"][1]["doc_id"], doc_id2.value());
+  EXPECT_FALSE(multi_body["results"][0].contains("doc_id"));
+  EXPECT_FALSE(multi_body["results"][1].contains("doc_id"));
+  EXPECT_EQ(multi_body["results"][0]["primary_key"], "article_3");
+  EXPECT_EQ(multi_body["results"][1]["primary_key"], "article_2");
 
   // Offset should advance into the result set and preserve ordering
   json paged_request = multi_request;
@@ -176,8 +172,10 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   EXPECT_EQ(paged_body["limit"], 2);
   EXPECT_EQ(paged_body["offset"], 1);
   ASSERT_EQ(paged_body["results"].size(), 2);
-  EXPECT_EQ(paged_body["results"][0]["doc_id"], doc_id2.value());
-  EXPECT_EQ(paged_body["results"][1]["doc_id"], doc_id1.value());
+  EXPECT_FALSE(paged_body["results"][0].contains("doc_id"));
+  EXPECT_FALSE(paged_body["results"][1].contains("doc_id"));
+  EXPECT_EQ(paged_body["results"][0]["primary_key"], "article_2");
+  EXPECT_EQ(paged_body["results"][1]["primary_key"], "article_1");
 }
 
 TEST_F(HttpServerTest, DbQualifiedTableRoutesResolveWithoutTopLevelCollision) {
@@ -254,6 +252,62 @@ TEST_F(HttpServerTest, SearchWithFilters) {
   EXPECT_EQ(body["results"][0]["filters"]["series"], "Project X=Beta");
 }
 
+TEST_F(HttpServerTest, FacetColumnResolvesCaseInsensitively) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["column"] = "CATEGORY";
+  request_body["q"] = "machine";
+
+  auto res = client.Post("/tables/test/facet", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200) << res->body;
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body["facets"].is_array());
+  ASSERT_EQ(body["facets"].size(), 1);
+  EXPECT_EQ(body["facets"][0]["value"], "tech");
+  EXPECT_EQ(body["facets"][0]["count"], 1);
+}
+
+TEST_F(HttpServerTest, FacetTreatsLimitKeywordInQAsLiteralText) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["column"] = "category";
+  request_body["q"] = "machine LIMIT 0";
+  request_body["limit"] = 10;
+
+  auto res = client.Post("/tables/test/facet", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+}
+
+TEST_F(HttpServerTest, FacetRejectsOversizedJsonColumn) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["column"] = std::string(query::QueryParser::kMaxFilterColumnNameLength + 1, 'a');
+  request_body["q"] = "machine";
+
+  auto res = client.Post("/tables/test/facet", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("Invalid facet column"), std::string::npos);
+}
+
 TEST_F(HttpServerTest, SearchReplacesInvalidUtf8InJsonResponse) {
   std::string invalid_pk = "bad";
   invalid_pk.push_back(static_cast<char>(0xff));
@@ -285,7 +339,7 @@ TEST_F(HttpServerTest, SearchReplacesInvalidUtf8InJsonResponse) {
 
   auto body = json::parse(res->body);
   ASSERT_EQ(body["results"].size(), 1);
-  EXPECT_EQ(body["results"][0]["doc_id"], doc_id.value());
+  EXPECT_FALSE(body["results"][0].contains("doc_id"));
   EXPECT_TRUE(body["results"][0]["primary_key"].get<std::string>().find("\xef\xbf\xbd") != std::string::npos);
   EXPECT_TRUE(body["results"][0]["filters"]["raw"].get<std::string>().find("\xef\xbf\xbd") != std::string::npos);
 }
@@ -360,6 +414,31 @@ TEST_F(HttpServerTest, SearchSupportsJsonScoreSort) {
   ASSERT_EQ(body["results"].size(), 2);
   EXPECT_EQ(body["results"][0]["primary_key"], "rank_repeat");
   EXPECT_EQ(body["results"][1]["primary_key"], "rank_short");
+}
+
+TEST_F(HttpServerTest, SearchScoreSortRejectsWhenTextStorageDisabled) {
+  doc_store_->SetStoreTexts(false);
+
+  auto doc_id = doc_store_->AddDocument("rank_no_text", {});
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(*doc_id, "alpha");
+  table_context_.bm25_stats.total_doc_length.store(5, std::memory_order_relaxed);
+  table_context_.bm25_stats.doc_count.store(1, std::memory_order_relaxed);
+  config_->bm25.enable = true;
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "alpha";
+  request_body["sort"] = {{"column", "_score"}, {"order", "DESC"}};
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+  EXPECT_NE(res->body.find("SORT _score requires normalized text storage"), std::string::npos);
 }
 
 TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
@@ -530,6 +609,67 @@ TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
 
   auto body = json::parse(res->body);
   EXPECT_EQ(body["error"], "Field 'filters' must be an object");
+}
+
+TEST_F(HttpServerTest, SearchRejectsOversizedJsonFilterColumn) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["filters"] = {{std::string(query::QueryParser::kMaxFilterColumnNameLength + 1, 'a'), "1"}};
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("Invalid filter column"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsOversizedJsonFilterValue) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["filters"] = {{"status", std::string(query::QueryParser::kMaxFilterValueLength + 1, '1')}};
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("FILTER value exceeds maximum length"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchAllowsJsonFilterValueStartingWithOperator) {
+  storage::FilterMap filters;
+  filters["series"] = std::string(">beta");
+  auto doc_id = doc_store_->AddDocument("operator_filter_value", filters);
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(*doc_id, "operator value");
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("http://127.0.0.1:18080");
+
+  json request_body;
+  request_body["q"] = "operator";
+  request_body["filters"] = {{"series", ">beta"}};
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["primary_key"], "operator_filter_value");
 }
 
 TEST_F(HttpServerTest, SearchMissingQuery) {
@@ -727,14 +867,9 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
 }
 
 /**
- * @brief Test that SORT inside `q` is rejected as parameter pollution (P1-9).
- *
- * The HTTP API accepts dedicated JSON fields for limit/offset/filters, so the
- * search expression `q` must not be allowed to embed parser clause keywords.
- * Otherwise a caller could override JSON-supplied values or smuggle extra
- * clauses past validation. This regression test pins that behavior.
+ * @brief SORT inside JSON `q` is literal search text, not a parser clause.
  */
-TEST_F(HttpServerTest, SearchRejectsSortKeywordInQ) {
+TEST_F(HttpServerTest, SearchTreatsSortKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
@@ -745,12 +880,7 @@ TEST_F(HttpServerTest, SearchRejectsSortKeywordInQ) {
 
   auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
-
-  auto body = json::parse(res->body);
-  ASSERT_TRUE(body.contains("error"));
-  EXPECT_NE(body["error"].get<std::string>().find("Reserved keyword"), std::string::npos);
-  EXPECT_NE(body["error"].get<std::string>().find("SORT"), std::string::npos);
+  EXPECT_EQ(res->status, 200);
 }
 
 /**
@@ -769,6 +899,7 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
   // Enable cache in config
   config_->cache.enabled = true;
   config_->cache.max_memory_bytes = 10 * 1024 * 1024;
+  config_->cache.min_query_cost_ms = 0.0;
 
   TcpServer tcp_server(tcp_config, table_contexts_, "./dumps", config_.get(), nullptr);
   ASSERT_TRUE(tcp_server.Start());
@@ -813,6 +944,21 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
   ASSERT_TRUE(info_body.contains("cache"));
   ASSERT_TRUE(info_body["cache"]["enabled"].get<bool>());
   EXPECT_GT(info_body["cache"]["total_queries"].get<int>(), 0);
+
+  auto* cache_manager = tcp_server.GetCacheManager();
+  ASSERT_NE(cache_manager, nullptr);
+  auto stats_after_hit = cache_manager->GetStatistics();
+  EXPECT_GT(stats_after_hit.cache_hits, 0U);
+
+  cache_manager->ClearTable("testdb.test");
+
+  auto res3 = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res3);
+  EXPECT_EQ(res3->status, 200);
+  auto stats_after_clear = cache_manager->GetStatistics();
+  EXPECT_EQ(stats_after_clear.cache_hits, stats_after_hit.cache_hits)
+      << "Qualified ClearTable must remove entries inserted through bare HTTP route";
+  EXPECT_GT(stats_after_clear.cache_misses, stats_after_hit.cache_misses);
 
   http_server.Stop();
   tcp_server.Stop();
@@ -1390,17 +1536,13 @@ TEST_F(HttpServerTest, CountRejectsIntegerQField) {
 }
 
 // ============================================================
-// Parameter pollution prevention tests (P1-9)
+// HTTP JSON q direct-storage tests (P3-2)
 // ============================================================
 
 /**
- * @brief Smuggling LIMIT inside `q` must not override JSON `limit`.
- *
- * Without the fix, the QueryParser would interpret the trailing `LIMIT 0`
- * as an override and the server would respond with zero results despite
- * the JSON request specifying `limit: 10`.
+ * @brief LIMIT inside `q` must not override JSON `limit`.
  */
-TEST_F(HttpServerTest, SearchRejectsLimitKeywordInQ) {
+TEST_F(HttpServerTest, SearchTreatsLimitKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
@@ -1412,19 +1554,16 @@ TEST_F(HttpServerTest, SearchRejectsLimitKeywordInQ) {
 
   auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
-
+  EXPECT_EQ(res->status, 200);
   auto body = json::parse(res->body);
-  ASSERT_TRUE(body.contains("error"));
-  // Either LIMIT or OFFSET must be flagged; matching is left-to-right so we
-  // expect LIMIT to be reported first.
-  EXPECT_NE(body["error"].get<std::string>().find("LIMIT"), std::string::npos);
+  EXPECT_EQ(body["limit"], 10);
+  EXPECT_EQ(body["offset"], 0);
 }
 
 /**
- * @brief Smuggling OFFSET alone inside `q` is also rejected.
+ * @brief OFFSET inside `q` is literal search text.
  */
-TEST_F(HttpServerTest, SearchRejectsOffsetKeywordInQ) {
+TEST_F(HttpServerTest, SearchTreatsOffsetKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
@@ -1435,17 +1574,13 @@ TEST_F(HttpServerTest, SearchRejectsOffsetKeywordInQ) {
 
   auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
-
-  auto body = json::parse(res->body);
-  ASSERT_TRUE(body.contains("error"));
-  EXPECT_NE(body["error"].get<std::string>().find("OFFSET"), std::string::npos);
+  EXPECT_EQ(res->status, 200);
 }
 
 /**
- * @brief Mixed-case reserved keywords are rejected (case-insensitive match).
+ * @brief Mixed-case reserved keywords are literal search text.
  */
-TEST_F(HttpServerTest, SearchRejectsMixedCaseLimitKeywordInQ) {
+TEST_F(HttpServerTest, SearchTreatsMixedCaseLimitKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
@@ -1456,7 +1591,7 @@ TEST_F(HttpServerTest, SearchRejectsMixedCaseLimitKeywordInQ) {
 
   auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
+  EXPECT_EQ(res->status, 200);
 }
 
 /**
@@ -1560,9 +1695,9 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithInvalidUtf8) {
 }
 
 /**
- * @brief COUNT also rejects reserved keywords inside `q`.
+ * @brief COUNT also treats FILTER inside JSON `q` as literal text.
  */
-TEST_F(HttpServerTest, CountRejectsFilterKeywordInQ) {
+TEST_F(HttpServerTest, CountTreatsFilterKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client("http://127.0.0.1:18080");
@@ -1572,11 +1707,7 @@ TEST_F(HttpServerTest, CountRejectsFilterKeywordInQ) {
 
   auto res = client.Post("/tables/test/count", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
-
-  auto body = json::parse(res->body);
-  ASSERT_TRUE(body.contains("error"));
-  EXPECT_NE(body["error"].get<std::string>().find("FILTER"), std::string::npos);
+  EXPECT_EQ(res->status, 200);
 }
 
 /**
@@ -1598,9 +1729,8 @@ TEST_F(HttpServerTest, CountRejectsTableNameWithWhitespace) {
 /**
  * @brief End-to-end: smuggled LIMIT does not affect pagination metadata.
  *
- * Even though the request is rejected at validation time, this guards against
- * a hypothetical regression where the validator is removed and the JSON
- * `limit` continues to be the source of truth.
+ * The JSON `limit` remains the source of truth even when the text contains
+ * words that look like text-protocol clauses.
  */
 TEST_F(HttpServerTest, SearchJsonLimitOverridesAttemptedSmuggle) {
   ASSERT_TRUE(http_server_->Start());
@@ -1621,7 +1751,7 @@ TEST_F(HttpServerTest, SearchJsonLimitOverridesAttemptedSmuggle) {
   EXPECT_EQ(clean_body["offset"], 0);
   EXPECT_EQ(clean_body["results"].size(), 2);
 
-  // Smuggle attempt: the request must be rejected (not silently override).
+  // Text-protocol-looking clause words remain literal query text.
   json smuggle_request;
   smuggle_request["q"] = "e LIMIT 0";
   smuggle_request["limit"] = 2;
@@ -1629,7 +1759,10 @@ TEST_F(HttpServerTest, SearchJsonLimitOverridesAttemptedSmuggle) {
 
   auto smuggle_res = client.Post("/tables/test/search", smuggle_request.dump(), "application/json");
   ASSERT_TRUE(smuggle_res);
-  EXPECT_EQ(smuggle_res->status, 400);
+  EXPECT_EQ(smuggle_res->status, 200);
+  auto smuggle_body = json::parse(smuggle_res->body);
+  EXPECT_EQ(smuggle_body["limit"], 2);
+  EXPECT_EQ(smuggle_body["offset"], 0);
 }
 
 }  // namespace server
