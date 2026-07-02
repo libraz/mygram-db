@@ -126,7 +126,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 
   // Validate that the primary_key column is unique (PRIMARY KEY or single-column UNIQUE KEY)
   auto validate_result =
-      connection_.ValidateUniqueColumn(connection_.GetConfig().database, table_config_.name, table_config_.primary_key);
+      connection_.ValidateUniqueColumn(table_config_.database, table_config_.name, table_config_.primary_key);
   if (!validate_result) {
     std::string error_msg = "Primary key validation failed: " + validate_result.error().message();
     mygram::utils::StructuredLog()
@@ -786,7 +786,18 @@ storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fie
               .Warn();
         }
       } else if (type == "timestamp") {
-        try_parse_numeric(uint64_t{});
+        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
+        if (epoch_opt) {
+          filters[filter_config.name] = *epoch_opt;
+        } else {
+          mygram::utils::StructuredLog()
+              .Event("loader_warning")
+              .Field("operation", "extract_filters")
+              .Field("type", "timestamp_conversion_failed")
+              .Field("value", value_str)
+              .Field("field", filter_config.name)
+              .Warn();
+        }
       } else if (type == "time") {
         // TIME: Convert to seconds since midnight using DateTimeProcessor.
         // Use the caller-provided processor to avoid re-creating it per row.

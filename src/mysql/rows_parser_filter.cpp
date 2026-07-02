@@ -113,8 +113,17 @@ storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<con
             .Warn();
       }
     } else if (filter_config.type == "timestamp") {
-      // TIMESTAMP: Already in epoch seconds (UTC), no timezone conversion needed
-      try_parse_numeric(filter_config.name, value_str, uint64_t{});
+      auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, "+00:00");
+      if (epoch_opt) {
+        filters[filter_config.name] = *epoch_opt;
+      } else {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "timestamp_conversion_failed")
+            .Field("value", value_str)
+            .Field("column_name", filter_config.name)
+            .Warn();
+      }
     } else if (filter_config.type == "time") {
       // TIME: Convert to seconds since midnight using cached DateTimeProcessor
       auto* processor = get_processor();

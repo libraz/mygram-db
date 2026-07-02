@@ -521,6 +521,25 @@ TEST_F(RowsParserTest, ExtractFiltersInvalidTypeConversion) {
   EXPECT_EQ(filters.size(), 0);
 }
 
+TEST_F(RowsParserTest, ExtractFiltersDateAndFractionalTimestamp) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.columns["published_on"] = "2024-01-02";
+  row_data.columns["updated_at"] = "1704153600.123456";
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"published_on", "date", false, false, ""});
+  filter_configs.push_back({"updated_at", "timestamp", false, false, ""});
+
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00");
+
+  ASSERT_EQ(filters.size(), 2);
+  ASSERT_TRUE(std::holds_alternative<uint64_t>(filters["published_on"]));
+  ASSERT_TRUE(std::holds_alternative<uint64_t>(filters["updated_at"]));
+  EXPECT_EQ(std::get<uint64_t>(filters["published_on"]), 1704153600);
+  EXPECT_EQ(std::get<uint64_t>(filters["updated_at"]), 1704153600);
+}
+
 // =============================================================================
 // Date/Time Type Parsing Tests
 // =============================================================================
@@ -3200,6 +3219,42 @@ TEST_F(RowsParserV2Test, V2UpdateRowsRejectsPartialAfterImageBitmap) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
   EXPECT_NE(result.error().message().find("binlog_row_image=FULL"), std::string::npos);
+}
+
+TEST_F(RowsParserV2Test, V2UpdateRowsRejectsTruncatedBeforeImage) {
+  auto table_meta = CreateTestTableMeta();
+  auto before_only = BuildSingleRowData(1, "old_name");
+  before_only.pop_back();
+
+  std::vector<uint8_t> columns_before_bitmap = {0xFF};
+  std::vector<uint8_t> columns_after_bitmap = {0xFF};
+
+  auto event = BinlogEventBuilder::BuildUpdateRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_before_bitmap,
+                                                     columns_after_bitmap, before_only);
+
+  auto result =
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
+}
+
+TEST_F(RowsParserV2Test, V2UpdateRowsRejectsTruncatedAfterImage) {
+  auto table_meta = CreateTestTableMeta();
+  auto row_data = BuildUpdateRowPair(1, "old_name", 1, "new_name");
+  row_data.pop_back();
+
+  std::vector<uint8_t> columns_before_bitmap = {0xFF};
+  std::vector<uint8_t> columns_after_bitmap = {0xFF};
+
+  auto event = BinlogEventBuilder::BuildUpdateRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_before_bitmap,
+                                                     columns_after_bitmap, row_data);
+
+  auto result =
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
 }
 
 /**

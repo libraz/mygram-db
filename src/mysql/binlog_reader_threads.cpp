@@ -210,6 +210,13 @@ void BinlogReader::ReaderThreadFunc() {
     // Read binlog events
     int event_count = 0;
     bool connection_lost = false;
+    auto request_processing_failure_reconnect = [&]() {
+      processing_failure_reconnect_requested_.store(true, std::memory_order_release);
+      connection_lost = true;
+      if (binlog_stream_ != nullptr && binlog_connection_ != nullptr && binlog_connection_->IsConnected()) {
+        binlog_stream_->Close(*binlog_connection_);
+      }
+    };
 
     while (!should_stop_ && !connection_lost) {
       if (processing_failure_reconnect_requested_.exchange(false, std::memory_order_acq_rel)) {
@@ -362,6 +369,7 @@ void BinlogReader::ReaderThreadFunc() {
         std::memcpy(&stored_crc, event_buffer + data_length, sizeof(stored_crc));
         if (computed_crc != stored_crc) {
           crc_errors_++;
+          SetLastError("CRC32 checksum mismatch in binlog event; reconnecting from last processed GTID");
           mygram::utils::StructuredLog()
               .Event("binlog_error")
               .Field("type", "crc32_checksum_mismatch")
@@ -370,7 +378,8 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("event_length", static_cast<uint64_t>(event_length))
               .Field("gtid", reader_last_gtid)
               .Error();
-          continue;
+          request_processing_failure_reconnect();
+          break;
         }
       }
 
@@ -394,22 +403,16 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         if (event_type == MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT) {
-          auto gtid_opt = BinlogEventParser::ExtractTaggedGTID(event_buffer, event_length);
-          if (gtid_opt) {
-            reader_last_gtid = gtid_opt.value();
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "reader_tagged_gtid_received")
-                .Field("gtid", reader_last_gtid)
-                .Debug();
-          } else {
-            mygram::utils::StructuredLog()
-                .Event("binlog_warning")
-                .Field("type", "gtid_tagged_parse_fallback")
-                .Field("message", "Failed to parse GTID_TAGGED_LOG_EVENT, keeping previous GTID")
-                .Warn();
-          }
-          continue;
+          SetLastError(
+              "Received GTID_TAGGED_LOG_EVENT. Tagged GTIDs are not supported because reconnect cannot encode "
+              "UUID:TAG:GNO positions safely.");
+          mygram::utils::StructuredLog()
+              .Event("binlog_fatal_error")
+              .Field("type", "unsupported_runtime_event")
+              .Field("event_type", "GTID_TAGGED_LOG_EVENT")
+              .Error();
+          should_stop_.store(true, std::memory_order_release);
+          break;
         }
 
         // MariaDB GTID event (type 162): extract domain-server-seq GTID
@@ -442,11 +445,14 @@ void BinlogReader::ReaderThreadFunc() {
               .Debug();
           auto metadata_opt = BinlogEventParser::ParseTableMapEvent(event_buffer, event_length);
           if (!metadata_opt) {
+            SetLastError("Failed to parse TABLE_MAP_EVENT from binlog; reconnecting from last processed GTID");
             mygram::utils::StructuredLog()
                 .Event("binlog_error")
                 .Field("type", "table_map_parse_failed")
                 .Field("event_num", static_cast<int64_t>(event_count))
                 .Error();
+            request_processing_failure_reconnect();
+            break;
           } else {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
@@ -466,14 +472,18 @@ void BinlogReader::ReaderThreadFunc() {
 
             if (is_monitored_table) {
               if (!FetchColumnNames(metadata_opt.value())) {
+                SetLastError(
+                    "Failed to fetch column names for monitored TABLE_MAP_EVENT; reconnecting from last "
+                    "processed GTID");
                 mygram::utils::StructuredLog()
-                    .Event("binlog_warning")
+                    .Event("binlog_error")
                     .Field("type", "column_fetch_failed")
                     .Field("database", metadata_opt->database_name)
                     .Field("table", metadata_opt->table_name)
                     .Field("gtid", GetCurrentGTID())
-                    .Message("Failed to fetch column names, using col_N placeholders")
-                    .Warn();
+                    .Error();
+                request_processing_failure_reconnect();
+                break;
               }
             } else {
               mygram::utils::StructuredLog()
@@ -592,9 +602,7 @@ void BinlogReader::ReaderThreadFunc() {
             .Field("reader_gtid", reader_last_gtid)
             .Field("current_gtid", GetCurrentGTID())
             .Error();
-        processing_failure_reconnect_requested_.store(true, std::memory_order_release);
-        connection_lost = true;
-        binlog_stream_->Close(*binlog_connection_);
+        request_processing_failure_reconnect();
         break;
       } else {
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "event_skipped").Debug();

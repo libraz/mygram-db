@@ -564,16 +564,12 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
                                                     header->bitmap_size, header->column_count, header->pk_col_idx,
                                                     header->text_col_idx, "UPDATE_ROWS", "before");
       if (!before_result) {
-        // Truncation in UPDATE is treated as end-of-rows (lenient)
         if (before_result.error().code() == ErrorCode::kMySQLFieldTruncated) {
-          if (mygram::utils::IsDebugLogEnabled()) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "parse_ended_early_before_image")
-                .Field("error", before_result.error().message())
-                .Debug();
-          }
-          break;
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "update_rows_before_image_truncated")
+              .Field("error", before_result.error().message())
+              .Error();
         }
         return MakeUnexpected(before_result.error());
       }
@@ -584,16 +580,12 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
           internal::ParseSingleRow(ptr, end, table_metadata, columns_after, header->bitmap_size, header->column_count,
                                    header->pk_col_idx, header->text_col_idx, "UPDATE_ROWS", "after");
       if (!after_result) {
-        // Truncation in UPDATE is treated as end-of-rows (lenient)
         if (after_result.error().code() == ErrorCode::kMySQLFieldTruncated) {
-          if (mygram::utils::IsDebugLogEnabled()) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "parse_ended_early_after_image")
-                .Field("error", after_result.error().message())
-                .Debug();
-          }
-          break;
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "update_rows_after_image_truncated")
+              .Field("error", after_result.error().message())
+              .Error();
         }
         return MakeUnexpected(after_result.error());
       }
