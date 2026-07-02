@@ -78,6 +78,26 @@ TEST_F(StructuredLogTest, StringFields) {
   EXPECT_NE(output.find("\"field2\":\"value2\""), std::string::npos);
 }
 
+TEST_F(StructuredLogTest, NullCStringFieldBecomesEmptyString) {
+  const char* value = nullptr;
+
+  StructuredLog().Event("test_event").Field("nullable", value).Info();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("\"nullable\":\"\""), std::string::npos);
+}
+
+TEST_F(StructuredLogTest, NullCStringFieldBecomesEmptyStringInTextFormat) {
+  StructuredLog::SetFormat(LogFormat::TEXT);
+  const char* value = nullptr;
+
+  StructuredLog().Event("test_event").Field("nullable", value).Info();
+
+  std::string output = GetLogOutput();
+  EXPECT_NE(output.find("nullable="), std::string::npos);
+  StructuredLog::SetFormat(LogFormat::JSON);
+}
+
 /**
  * @brief Test structured log with integer fields
  */

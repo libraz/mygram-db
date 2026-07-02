@@ -116,15 +116,13 @@ TEST(ErrorTest, MakeErrorWithContext) {
   EXPECT_EQ(error.context(), "/etc/passwd");
 }
 
-// ========== Test MYGRAM_ERROR macro ==========
+// ========== Test error location helper ==========
 
-TEST(ErrorTest, MygramErrorMacro) {
-  auto error = MYGRAM_ERROR(ErrorCode::kUnknown, "Something went wrong");
+TEST(ErrorTest, MakeErrorWithExplicitLocation) {
+  auto error = MakeErrorWithLocation(ErrorCode::kUnknown, "Something went wrong", "error_test.cpp", 123);
   EXPECT_EQ(error.code(), ErrorCode::kUnknown);
   EXPECT_EQ(error.message(), "Something went wrong");
-  // Context should contain file:line information
-  EXPECT_FALSE(error.context().empty());
-  EXPECT_NE(error.context().find("error_test.cpp"), std::string::npos);
+  EXPECT_EQ(error.context(), "error_test.cpp:123");
 }
 
 // ========== Test module-specific error codes ==========

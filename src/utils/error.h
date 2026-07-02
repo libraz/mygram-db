@@ -572,9 +572,4 @@ inline Error MakeErrorWithLocation(ErrorCode code, const std::string& message, c
   return {code, message, std::string(file) + ":" + std::to_string(line)};
 }
 
-// Keep macro for backward compatibility, but prefer MakeErrorWithLocation()
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define MYGRAM_ERROR(code, message) \
-  mygram::utils::MakeError(code, message, std::string(__FILE__) + ":" + std::to_string(__LINE__))
-
 }  // namespace mygramdb::utils

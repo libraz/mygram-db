@@ -25,7 +25,7 @@ namespace mygramdb::utils {
 /**
  * @brief Maximum query / request length to log.
  *
- * Untrusted client input is truncated to this many characters before being
+ * Untrusted client input is truncated to this many bytes before being
  * placed into structured log fields. This bounds log volume on long requests
  * and limits the blast radius of log-injection sequences embedded in queries.
  */
@@ -101,10 +101,11 @@ class StructuredLog {
    * @brief Add string field (const char*)
    */
   StructuredLog& Field(std::string_view key, const char* value) {
+    const char* safe_value = value != nullptr ? value : "";
     if (format_snapshot_ == LogFormat::JSON) {
-      fields_.push_back(MakeJSONField(key, Escape(std::string(value))));
+      fields_.push_back(MakeJSONField(key, Escape(std::string(safe_value))));
     } else {
-      fields_.push_back(MakeTextField(key, std::string(value)));
+      fields_.push_back(MakeTextField(key, std::string(safe_value)));
     }
     return *this;
   }

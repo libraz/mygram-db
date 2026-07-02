@@ -85,7 +85,7 @@ class BadExpectedAccess : public std::exception {
  * @tparam E The type of the error
  */
 template <typename T, typename E>
-class Expected {
+class [[nodiscard]] Expected {
  public:
   using value_type = T;
   using error_type = E;
@@ -236,37 +236,37 @@ class Expected {
 
   /**
    * @brief Access the contained value (unchecked, const lvalue)
-   * @warning Undefined behavior if Expected contains an error
+   * @throws std::bad_variant_access if Expected contains an error
    */
   [[nodiscard]] const T& operator*() const& { return std::get<0>(storage_); }
 
   /**
    * @brief Access the contained value (unchecked, lvalue)
-   * @warning Undefined behavior if Expected contains an error
+   * @throws std::bad_variant_access if Expected contains an error
    */
   [[nodiscard]] T& operator*() & { return std::get<0>(storage_); }
 
   /**
    * @brief Access the contained value (unchecked, const rvalue)
-   * @warning Undefined behavior if Expected contains an error
+   * @throws std::bad_variant_access if Expected contains an error
    */
   [[nodiscard]] const T&& operator*() const&& { return std::move(std::get<0>(storage_)); }
 
   /**
    * @brief Access the contained value (unchecked, rvalue)
-   * @warning Undefined behavior if Expected contains an error
+   * @throws std::bad_variant_access if Expected contains an error
    */
   [[nodiscard]] T&& operator*() && { return std::move(std::get<0>(storage_)); }
 
   /**
    * @brief Access the contained value via pointer (unchecked, const)
-   * @warning Undefined behavior if Expected contains an error
+   * @throws std::bad_variant_access if Expected contains an error
    */
   [[nodiscard]] const T* operator->() const { return &std::get<0>(storage_); }
 
   /**
    * @brief Access the contained value via pointer (unchecked)
-   * @warning Undefined behavior if Expected contains an error
+   * @throws std::bad_variant_access if Expected contains an error
    */
   [[nodiscard]] T* operator->() { return &std::get<0>(storage_); }
 
@@ -514,7 +514,7 @@ class Expected {
  * This allows representing success/failure without a value payload.
  */
 template <typename E>
-class Expected<void, E> {
+class [[nodiscard]] Expected<void, E> {
  public:
   using value_type = void;
   using error_type = E;

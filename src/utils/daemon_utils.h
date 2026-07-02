@@ -22,6 +22,9 @@ namespace mygramdb::utils {
  * @note This function should NOT be called when running under systemd
  *       (systemd expects Type=simple with foreground processes)
  * @note Windows is not supported - this is a no-op on Windows
+ * @note The launcher process exits after daemonization succeeds. Startup
+ *       failures after the double fork are reported through configured logs,
+ *       not through the launcher's exit status.
  */
 bool Daemonize();
 
