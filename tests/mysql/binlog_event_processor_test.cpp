@@ -995,6 +995,74 @@ TEST_F(BinlogEventProcessorTest, UpdateFilterOnlyKeepsTextSearchable) {
 }
 
 /**
+ * @brief Regression: filter-only UPDATE with an empty after-image text must not
+ *        drop a still-qualifying document from the full-text index.
+ *
+ * Reproduces the production symptom where `UPDATE ... SET status = 2` (a plain
+ * optional filter column) made the row vanish from search. When the after-image
+ * text comes back empty (a parsing quirk / incomplete after image) while the
+ * before-image text is non-empty and the document still satisfies all required
+ * filters, the processor must preserve the existing index entry rather than
+ * removing the document.
+ */
+TEST_F(BinlogEventProcessorTest, UpdateFilterOnlyWithEmptyAfterTextKeepsDocument) {
+  // Required filter: enabled = 1 (mirrors the e2e articles table config)
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "enabled";
+  required_filter.type = "int";
+  required_filter.op = "=";
+  required_filter.value = "1";
+  table_config_.required_filters.push_back(required_filter);
+
+  // INSERT: content "alpha beta" with enabled=1, status=1 (matches filter)
+  BinlogEvent insert_event;
+  insert_event.type = BinlogEventType::INSERT;
+  insert_event.primary_key = "pk1";
+  insert_event.text = "alpha beta";
+  insert_event.filters["enabled"] = static_cast<int32_t>(1);
+  insert_event.filters["status"] = static_cast<int32_t>(1);
+  insert_event.table_name = "test_table";
+
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  auto doc_id = *doc_store_->GetDocId("pk1");
+  ASSERT_EQ(index_->SearchAnd({"al"}).size(), 1);
+
+  // UPDATE: only the optional "status" filter changes (1 -> 2); enabled stays 1
+  // so the document still matches. The before-image carries the text but the
+  // after-image text comes back empty (the parsing quirk under test).
+  BinlogEvent update_event;
+  update_event.type = BinlogEventType::UPDATE;
+  update_event.primary_key = "pk1";
+  update_event.old_text = "alpha beta";  // before-image (what is indexed)
+  update_event.text = "";                // after-image text absent / empty
+  update_event.filters["enabled"] = static_cast<int32_t>(1);
+  update_event.filters["status"] = static_cast<int32_t>(2);
+  update_event.table_name = "test_table";
+
+  EXPECT_TRUE(
+      BinlogEventProcessor::ProcessEvent(update_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  // Document must remain in the store...
+  auto doc_id_after = doc_store_->GetDocId("pk1");
+  ASSERT_TRUE(doc_id_after.has_value());
+  EXPECT_EQ(*doc_id_after, doc_id);
+
+  // ...and stay searchable by its original text n-grams.
+  auto results = index_->SearchAnd({"al"});
+  ASSERT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0], doc_id);
+
+  // The optional filter change must still have been applied.
+  auto doc = doc_store_->GetDocument(doc_id);
+  ASSERT_TRUE(doc.has_value());
+  auto status_it = doc->filters.find("status");
+  ASSERT_NE(status_it, doc->filters.end());
+  EXPECT_EQ(std::get<int32_t>(status_it->second), 2);
+}
+
+/**
  * @brief Test that cache_manager parameter defaults to nullptr (backwards compatibility)
  */
 TEST_F(BinlogEventProcessorTest, ProcessEventWithNullCacheManager) {

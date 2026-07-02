@@ -241,14 +241,22 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
             }
             text_changed = true;
           } else if (!event.old_text.empty()) {
-            // Only old text available - remove from index
-            std::string old_normalized = index.NormalizeText(event.old_text);
-            index.RemoveDocument(doc_id, old_normalized);
-            doc_store.SetNormalizedText(doc_id, "");
-            if (bm25_stats != nullptr && !old_normalized.empty()) {
-              bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(old_normalized));
-            }
-            text_changed = true;
+            // Before-image text is present but the after-image text came back
+            // empty for a document that STILL satisfies all required filters.
+            // This is ambiguous: under binlog_row_image=FULL the after image
+            // always carries the (unchanged) text column, so an empty
+            // after-image text here most likely reflects an incomplete/absent
+            // after-image value (e.g. a filter-only UPDATE whose text column was
+            // not re-materialized) rather than a genuine content clear.
+            // Removing the document from the index on this signal alone would
+            // silently drop a still-qualifying row from search results (data
+            // loss), so the existing index entry and stored text are preserved.
+            mygram::utils::StructuredLog()
+                .Event("binlog_update")
+                .Field("primary_key", event.primary_key)
+                .Field("doc_id", static_cast<uint64_t>(doc_id))
+                .Field("action", "empty_after_text_index_preserved")
+                .Debug();
           } else if (!event.text.empty()) {
             // Only new text available - add to index
             std::string new_normalized = index.NormalizeText(event.text);
