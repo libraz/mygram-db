@@ -9,6 +9,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <functional>
+#include <thread>
 #include <unordered_map>
 
 #include "app/mysql_reconnection_handler.h"
@@ -343,6 +346,27 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   return {};
 }
 
+mygram::utils::Expected<void, mygram::utils::Error> ConnectWithStartupRetry(
+    const std::function<mygram::utils::Expected<void, mygram::utils::Error>()>& attempt,
+    const StartupConnectRetryPolicy& policy, const std::function<void(int)>& sleep_ms) {
+  const int max_attempts = std::max(1, policy.max_attempts);
+  auto result = attempt();
+  int delay_ms = policy.initial_delay_ms;
+  for (int attempt_number = 2; !result && attempt_number <= max_attempts; ++attempt_number) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_connection_retry")
+        .Field("attempt", static_cast<int64_t>(attempt_number))
+        .Field("max_attempts", static_cast<int64_t>(max_attempts))
+        .Field("delay_ms", static_cast<int64_t>(delay_ms))
+        .Field("error", result.error().message())
+        .Warn();
+    sleep_ms(delay_ms);
+    result = attempt();
+    delay_ms = std::min(delay_ms * 2, policy.max_delay_ms);
+  }
+  return result;
+}
+
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeMySQL() {
 #ifdef USE_MYSQL
   if (!RequiresMysqlConnectionForStartup(deps_.config)) {
@@ -380,7 +404,17 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
   mysql_connection_ = std::make_unique<mysql::Connection>(mysql_config);
 
-  auto connect_result = mysql_connection_->Connect("snapshot builder");
+  // Bounded retry to absorb the two-phase-startup timing gap where MySQL reports
+  // healthy but is not yet accepting new connections. Exponential backoff of
+  // 500ms .. 5s over up to 10 attempts yields a total budget on the order of ~30s.
+  constexpr int kStartupConnectMaxAttempts = 10;
+  constexpr int kStartupConnectInitialDelayMs = 500;
+  constexpr int kStartupConnectMaxDelayMs = 5000;
+  const StartupConnectRetryPolicy kStartupRetryPolicy{kStartupConnectMaxAttempts, kStartupConnectInitialDelayMs,
+                                                      kStartupConnectMaxDelayMs};
+  auto connect_result =
+      ConnectWithStartupRetry([this]() { return mysql_connection_->Connect("snapshot builder"); }, kStartupRetryPolicy,
+                              [](int delay_ms) { std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms)); });
   if (!connect_result) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed,

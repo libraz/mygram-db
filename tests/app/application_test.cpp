@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "app/configuration_manager.h"
 #include "app/mysql_reconnection_handler.h"
@@ -375,6 +376,81 @@ TEST(ServerOrchestratorMysqlStartupTest, RequiresMysqlForReplicationOrAutoSnapsh
   config.replication.enable = false;
   config.replication.auto_initial_snapshot = true;
   EXPECT_TRUE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
+}
+
+TEST(ServerOrchestratorStartupRetryTest, SucceedsOnFirstAttemptWithoutSleeping) {
+  int attempts = 0;
+  int sleeps = 0;
+  const mygramdb::app::StartupConnectRetryPolicy policy{5, 10, 40};
+
+  auto result = mygramdb::app::ConnectWithStartupRetry(
+      [&attempts]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        ++attempts;
+        return {};
+      },
+      policy, [&sleeps](int /*delay_ms*/) { ++sleeps; });
+
+  ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  EXPECT_EQ(attempts, 1);
+  EXPECT_EQ(sleeps, 0);
+}
+
+TEST(ServerOrchestratorStartupRetryTest, RetriesUntilSuccess) {
+  int attempts = 0;
+  int sleeps = 0;
+  const mygramdb::app::StartupConnectRetryPolicy policy{5, 10, 40};
+
+  // Fail the first two attempts, then succeed on the third.
+  auto result = mygramdb::app::ConnectWithStartupRetry(
+      [&attempts]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        ++attempts;
+        if (attempts < 3) {
+          return mygram::utils::MakeUnexpected(
+              mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed, "not ready"));
+        }
+        return {};
+      },
+      policy, [&sleeps](int /*delay_ms*/) { ++sleeps; });
+
+  ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  EXPECT_EQ(attempts, 3);
+  EXPECT_EQ(sleeps, 2);
+}
+
+TEST(ServerOrchestratorStartupRetryTest, ReturnsLastErrorAfterExhaustingAttempts) {
+  int attempts = 0;
+  int sleeps = 0;
+  const mygramdb::app::StartupConnectRetryPolicy policy{3, 10, 40};
+
+  auto result = mygramdb::app::ConnectWithStartupRetry(
+      [&attempts]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        ++attempts;
+        return mygram::utils::MakeUnexpected(
+            mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed, "still not ready"));
+      },
+      policy, [&sleeps](int /*delay_ms*/) { ++sleeps; });
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLConnectionFailed);
+  EXPECT_EQ(attempts, 3);
+  EXPECT_EQ(sleeps, 2);
+}
+
+TEST(ServerOrchestratorStartupRetryTest, AppliesBoundedExponentialBackoff) {
+  std::vector<int> delays;
+  const mygramdb::app::StartupConnectRetryPolicy policy{5, 500, 5000};
+
+  auto result = mygramdb::app::ConnectWithStartupRetry(
+      []() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        return mygram::utils::MakeUnexpected(
+            mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed, "fail"));
+      },
+      policy, [&delays](int delay_ms) { delays.push_back(delay_ms); });
+
+  ASSERT_FALSE(result.has_value());
+  // 5 attempts -> 4 backoff sleeps: 500, 1000, 2000, 4000 (all below the 5000 cap).
+  const std::vector<int> expected_delays{500, 1000, 2000, 4000};
+  EXPECT_EQ(delays, expected_delays);
 }
 
 #ifdef USE_MYSQL

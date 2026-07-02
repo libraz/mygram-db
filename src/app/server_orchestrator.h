@@ -59,6 +59,37 @@ class SignalManager;
 using LatestGtidProvider = std::function<Expected<std::string, mygram::utils::Error>()>;
 
 /**
+ * @brief Bounded retry policy for the initial startup MySQL connection.
+ *
+ * Applies only to the eager connection performed during server startup, to
+ * absorb the two-phase-startup timing gap where MySQL reports healthy but is
+ * not yet accepting new connections. Ongoing replication reconnection is
+ * handled separately by BinlogReader / MysqlReconnectionHandler.
+ */
+struct StartupConnectRetryPolicy {
+  int max_attempts;      ///< Total number of connection attempts (clamped to >= 1)
+  int initial_delay_ms;  ///< Backoff delay before the first retry
+  int max_delay_ms;      ///< Upper bound for the exponential backoff delay
+};
+
+/**
+ * @brief Attempt a MySQL connection with bounded exponential-backoff retry.
+ *
+ * Retries transient startup connection failures until the attempt succeeds or
+ * the attempt budget is exhausted. A `mysql_connection_retry` structured log
+ * event is emitted before each retry so the wait is observable.
+ *
+ * @param attempt   Callable performing a single connection attempt.
+ * @param policy    Bounded retry policy (attempt count and backoff bounds).
+ * @param sleep_ms  Callable sleeping for the given milliseconds (injected for testability).
+ * @return Expected<void, Error> - success, or the last connection error after
+ *         all attempts are exhausted.
+ */
+Expected<void, mygram::utils::Error> ConnectWithStartupRetry(
+    const std::function<Expected<void, mygram::utils::Error>()>& attempt, const StartupConnectRetryPolicy& policy,
+    const std::function<void(int)>& sleep_ms);
+
+/**
  * @brief Resolve the configured replication start GTID.
  *
  * Query failures for `replication.start_from=latest` are fatal; an empty
