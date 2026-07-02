@@ -142,7 +142,7 @@ See [Protocol Reference](https://mygramdb.libraz.net/docs/protocol) for all comm
 - **Runtime Variables**: MySQL-style SET/SHOW VARIABLES for zero-downtime config changes
 - **MySQL Failover**: Switch MySQL servers at runtime with GTID position preservation
 - **Multiple Tables**: Index multiple tables in one instance
-- **Dual Protocol**: TCP (memcached-style) and HTTP/REST API
+- **Dual Protocol**: TCP (memcached-style) for query and operations, HTTP/REST API for query/status surfaces
 - **High Concurrency**: Thread pool supporting 10,000+ connections
 - **Unicode**: ICU-based normalization for CJK/multilingual text
 - **Compression**: Hybrid Delta encoding + Roaring bitmaps
@@ -192,6 +192,10 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - [Installation Guide](https://mygramdb.libraz.net/docs/installation) - Build from source
 - [Development Guide](https://mygramdb.libraz.net/docs/development) - Contributing guidelines
 - [Client Library](https://mygramdb.libraz.net/docs/client-library) - C/C++ client library
+
+HTTP currently exposes search, document lookup, health, metrics, and read-only status endpoints. Operational commands such
+as `SYNC`, `DUMP`, `CACHE`, `SET`, and replication control are intentionally served through the TCP protocol and
+`mygram-cli`; HTTP-only deployments must keep an internal TCP/CLI path for maintenance and bootstrap tasks.
 
 ### Release Notes
 
