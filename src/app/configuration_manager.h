@@ -95,6 +95,15 @@ class ConfigurationManager {
   Expected<void, mygram::utils::Error> ApplyLoggingConfig() const;
 
   /**
+   * @brief Convert daemon-sensitive relative paths to absolute paths.
+   *
+   * Daemonization changes the process working directory to `/`, so paths that
+   * must remain stable after daemonization need to be resolved before logging
+   * is opened and before daemonize runs.
+   */
+  Expected<void, mygram::utils::Error> AbsolutizeDaemonPaths();
+
+  /**
    * @brief Reopen log file for log rotation
    * @return Expected with void or error
    *

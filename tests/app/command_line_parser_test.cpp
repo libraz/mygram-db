@@ -108,6 +108,16 @@ TEST_F(CommandLineParserTest, HelpFlagIgnoresOtherArgs) {
   EXPECT_TRUE(result->config_file.empty());
 }
 
+TEST_F(CommandLineParserTest, HelpDocumentsDaemonStartupFailureConstraint) {
+  testing::internal::CaptureStdout();
+  CommandLineParser::PrintHelp("mygramdb");
+  const std::string output = testing::internal::GetCapturedStdout();
+
+  EXPECT_NE(output.find("The launcher exits after daemonization succeeds"), std::string::npos);
+  EXPECT_NE(output.find("later startup failures"), std::string::npos);
+  EXPECT_NE(output.find("configured log file"), std::string::npos);
+}
+
 // ===========================================================================
 // Config file options
 // ===========================================================================

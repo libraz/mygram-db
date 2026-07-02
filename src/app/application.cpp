@@ -87,6 +87,19 @@ int Application::Run() {
     return special_exit_code;  // Early exit
   }
 
+  if (args_.daemon_mode) {
+    auto path_result = config_manager_->AbsolutizeDaemonPaths();
+    if (!path_result) {
+      mygram::utils::StructuredLog()
+          .Event("application_error")
+          .Field("type", "daemon_path_resolution_failed")
+          .Field("phase", "startup")
+          .Field("error", path_result.error().to_string())
+          .Error();
+      return 1;
+    }
+  }
+
   // Apply logging configuration
   auto logging_result = config_manager_->ApplyLoggingConfig();
   if (!logging_result) {

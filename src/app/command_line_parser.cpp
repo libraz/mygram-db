@@ -117,6 +117,11 @@ void CommandLineParser::PrintHelp(const char* program_name) {
   std::cout << "  -h, --help                     Show this help message\n";
   std::cout << "  -v, --version                  Show version information\n";
   std::cout << "\n";
+  std::cout << "Daemon mode:\n";
+  std::cout << "  - The launcher exits after daemonization succeeds; later startup failures\n";
+  std::cout << "    are reported in the configured log file.\n";
+  std::cout << "  - Configure logging.file for daemon mode so post-fork errors are visible.\n";
+  std::cout << "\n";
   std::cout << "Configuration file format (auto-detected):\n";
   std::cout << "  - YAML (.yaml, .yml) - validated against built-in schema\n";
   std::cout << "  - JSON (.json)       - validated against built-in schema\n";

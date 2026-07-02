@@ -28,6 +28,17 @@ std::shared_ptr<spdlog::logger> CreateFileLogger(const std::string& path) {
   return std::make_shared<spdlog::logger>("mygramdb", std::move(sink));
 }
 
+std::string AbsolutePathString(const std::string& path) {
+  if (path.empty()) {
+    return path;
+  }
+  std::filesystem::path fs_path(path);
+  if (fs_path.is_absolute()) {
+    return fs_path.lexically_normal().string();
+  }
+  return std::filesystem::absolute(fs_path).lexically_normal().string();
+}
+
 }  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ConfigurationManager>, mygram::utils::Error> ConfigurationManager::Create(
@@ -109,6 +120,18 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
   // Log confirmation message (after logger is configured)
   if (!config_.logging.file.empty()) {
     mygram::utils::StructuredLog().Event("logging_to_file").Field("path", config_.logging.file).Info();
+  }
+
+  return {};
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::AbsolutizeDaemonPaths() {
+  try {
+    config_.dump.dir = AbsolutePathString(config_.dump.dir);
+    config_.logging.file = AbsolutePathString(config_.logging.file);
+  } catch (const std::exception& ex) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kIOError, "Failed to absolutize daemon paths: " + std::string(ex.what())));
   }
 
   return {};
