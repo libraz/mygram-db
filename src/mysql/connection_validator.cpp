@@ -16,11 +16,93 @@
 #include "mysql/server_flavor.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/numeric_parse.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
 
+namespace {
+
+bool IsGtidIntervalToken(std::string_view token) {
+  auto dash_pos = token.find('-');
+  if (dash_pos == std::string_view::npos) {
+    return mygram::utils::ParseNumeric<uint64_t>(token).has_value();
+  }
+  if (dash_pos == 0 || dash_pos + 1 >= token.size()) {
+    return false;
+  }
+  return mygram::utils::ParseNumeric<uint64_t>(token.substr(0, dash_pos)).has_value() &&
+         mygram::utils::ParseNumeric<uint64_t>(token.substr(dash_pos + 1)).has_value();
+}
+
+}  // namespace
+
+std::string ConnectionValidator::RequiredTable::DisplayName() const {
+  return database.empty() ? name : database + "." + name;
+}
+
+bool ConnectionValidator::IsValidIdentifier(std::string_view identifier) {
+  if (identifier.empty()) {
+    return false;
+  }
+  for (char chr : identifier) {
+    if (chr == '\0' || (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool ConnectionValidator::IsSupportedBinlogChecksumValue(std::string_view value) {
+  std::string upper_value(value);
+  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+  return upper_value == "CRC32";
+}
+
+bool ConnectionValidator::ContainsTaggedGtid(std::string_view gtid_set) {
+  while (!gtid_set.empty()) {
+    auto comma_pos = gtid_set.find(',');
+    std::string_view entry = gtid_set.substr(0, comma_pos);
+    while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.front())) != 0) {
+      entry.remove_prefix(1);
+    }
+    while (!entry.empty() && std::isspace(static_cast<unsigned char>(entry.back())) != 0) {
+      entry.remove_suffix(1);
+    }
+
+    auto first_colon = entry.find(':');
+    if (first_colon != std::string_view::npos) {
+      std::string_view remainder = entry.substr(first_colon + 1);
+      auto second_colon = remainder.find(':');
+      if (second_colon != std::string_view::npos) {
+        std::string_view first_token = remainder.substr(0, second_colon);
+        if (!IsGtidIntervalToken(first_token)) {
+          return true;
+        }
+      }
+    }
+
+    if (comma_pos == std::string_view::npos) {
+      break;
+    }
+    gtid_set.remove_prefix(comma_pos + 1);
+  }
+  return false;
+}
+
 ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std::vector<std::string>& required_tables,
+                                                     const std::optional<std::string>& expected_uuid,
+                                                     const std::optional<std::string>& last_gtid) {
+  std::vector<RequiredTable> qualified_tables;
+  qualified_tables.reserve(required_tables.size());
+  for (const auto& table : required_tables) {
+    qualified_tables.push_back({conn.GetConfig().database, table});
+  }
+  return ValidateServer(conn, qualified_tables, expected_uuid, last_gtid);
+}
+
+ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
+                                                     const std::vector<RequiredTable>& required_tables,
                                                      const std::optional<std::string>& expected_uuid,
                                                      const std::optional<std::string>& last_gtid) {
   ValidationResult result;
@@ -146,11 +228,38 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn, const std
     return result;
   }
 
-  // 8. Check partial JSON mode (warning only)
-  CheckPartialJsonMode(conn, result.warnings);
+  // 8. Check binlog_checksum=CRC32 (required for event boundary and CRC verification)
+  auto checksum_check = CheckBinlogChecksum(conn);
+  if (!checksum_check) {
+    result.error_message = checksum_check.error().message();
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "binlog_checksum_not_crc32")
+        .Error();
+    return result;
+  }
 
-  // 9. Check tagged GTID support (warning only)
-  CheckTaggedGTIDSupport(conn, result.warnings);
+  // 9. Check partial JSON mode (unsupported)
+  auto partial_json_check = CheckPartialJsonMode(conn);
+  if (!partial_json_check) {
+    result.error_message = partial_json_check.error().message();
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "partial_json_enabled")
+        .Error();
+    return result;
+  }
+
+  // 10. Check tagged GTID support (unsupported)
+  auto tagged_gtid_check = CheckTaggedGTIDSupport(conn);
+  if (!tagged_gtid_check) {
+    result.error_message = tagged_gtid_check.error().message();
+    mygram::utils::StructuredLog()
+        .Event("connection_validation_failed")
+        .Field("reason", "tagged_gtid_unsupported")
+        .Error();
+    return result;
+  }
 
   // All checks passed
   result.valid = true;
@@ -178,45 +287,42 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTablesExist(
-    Connection& conn, const std::vector<std::string>& tables) {
+    Connection& conn, const std::vector<RequiredTable>& tables) {
   std::vector<std::string> missing_tables;
 
   for (const auto& table : tables) {
-    // Validate table name to prevent SQL injection
+    // Validate identifiers to prevent SQL injection
     // MySQL table names can contain: letters, digits, underscore, dollar sign, hyphen
     // Also reject null bytes which could truncate the name
-    bool valid_name = !table.empty();
-    for (char chr : table) {
-      if (chr == '\0' ||
-          (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-')) {
-        valid_name = false;
-        break;
-      }
-    }
-    if (!valid_name) {
+    if (!IsValidIdentifier(table.database) || !IsValidIdentifier(table.name)) {
       mygram::utils::StructuredLog()
           .Event("connection_validation_warning")
           .Field("reason", "invalid_table_name")
-          .Field("table", table)
+          .Field("table", table.DisplayName())
           .Warn();
-      missing_tables.push_back(table);
+      missing_tables.push_back(table.DisplayName());
       continue;
     }
 
     // Use mysql_real_escape_string for defense-in-depth SQL injection prevention
     MYSQL* handle = conn.GetHandle();
-    std::string escaped_table(table.size() * 2 + 1, '\0');
-    auto escaped_len = mysql_real_escape_string(handle, escaped_table.data(), table.c_str(), table.length());
-    escaped_table.resize(escaped_len);
+    std::string escaped_db(table.database.size() * 2 + 1, '\0');
+    std::string escaped_table(table.name.size() * 2 + 1, '\0');
+    auto escaped_db_len =
+        mysql_real_escape_string(handle, escaped_db.data(), table.database.c_str(), table.database.length());
+    auto escaped_table_len =
+        mysql_real_escape_string(handle, escaped_table.data(), table.name.c_str(), table.name.length());
+    escaped_db.resize(escaped_db_len);
+    escaped_table.resize(escaped_table_len);
 
     // Query INFORMATION_SCHEMA to check if table exists
-    std::string query = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '" +
-                        escaped_table + "' LIMIT 1";
+    std::string query = "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '" + escaped_db +
+                        "' AND TABLE_NAME = '" + escaped_table + "' LIMIT 1";
 
     auto result = conn.Execute(query);
     if (!result) {
       // Query failed - consider table as missing
-      missing_tables.push_back(table);
+      missing_tables.push_back(table.DisplayName());
       continue;
     }
 
@@ -224,7 +330,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTa
     MYSQL_ROW row = mysql_fetch_row(result->get());
     if (row == nullptr) {
       // No rows - table doesn't exist
-      missing_tables.push_back(table);
+      missing_tables.push_back(table.DisplayName());
     }
   }
 
@@ -430,20 +536,50 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBi
   return {};
 }
 
-bool ConnectionValidator::CheckPartialJsonMode(Connection& conn, std::vector<std::string>& warnings) {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogChecksum(Connection& conn) {
+  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_checksum'");
+  if (!result) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kMySQLBinlogError,
+        "Unable to determine binlog_checksum. MygramDB requires binlog_checksum=CRC32 because binlog event parsing "
+        "expects a trailing 4-byte CRC32 checksum."));
+  }
+
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr || row[1] == nullptr) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kMySQLBinlogError,
+        "binlog_checksum is unavailable. MygramDB requires binlog_checksum=CRC32 because binlog event parsing expects "
+        "a trailing 4-byte CRC32 checksum."));
+  }
+
+  std::string value(row[1]);
+  if (!IsSupportedBinlogChecksumValue(value)) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                 "binlog_checksum=" + value +
+                                     " is not supported. MygramDB requires binlog_checksum=CRC32 for binlog event "
+                                     "boundary handling and CRC verification. Set it with: SET GLOBAL "
+                                     "binlog_checksum=CRC32"));
+  }
+
+  return {};
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckPartialJsonMode(Connection& conn) {
   // MariaDB doesn't have binlog_row_value_options
   if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
-    return true;
+    return {};
   }
 
   auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_value_options'");
   if (!result) {
-    return true;
+    return {};
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());
   if (row == nullptr) {
-    return true;
+    return {};
   }
 
   if (row[1] != nullptr) {
@@ -452,60 +588,35 @@ bool ConnectionValidator::CheckPartialJsonMode(Connection& conn, std::vector<std
     std::string upper_value = value;
     std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
     if (upper_value.find("PARTIAL_JSON") != std::string::npos) {
-      warnings.emplace_back(
-          "binlog_row_value_options contains PARTIAL_JSON. "
-          "PARTIAL_UPDATE_ROWS_EVENT is not supported and will be skipped. "
-          "JSON column updates may be lost. Consider: "
-          "SET GLOBAL binlog_row_value_options=''");
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kMySQLBinlogError,
+          "binlog_row_value_options contains PARTIAL_JSON. PARTIAL_UPDATE_ROWS_EVENT is not supported and cannot be "
+          "decoded safely. Disable it with: SET GLOBAL binlog_row_value_options=''"));
     }
   }
 
-  return true;
+  return {};
 }
 
-bool ConnectionValidator::CheckTaggedGTIDSupport(Connection& conn, std::vector<std::string>& warnings) {
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTaggedGTIDSupport(Connection& conn) {
   // Tagged GTIDs are a MySQL 8.4+ feature, not applicable to MariaDB
   if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
-    return true;
+    return {};
   }
 
   auto executed = conn.GetExecutedGTID();
   if (!executed) {
-    return true;
+    return {};
   }
 
-  // Tagged GTIDs use format UUID:TAG:GNO where TAG contains no hyphens
-  // The '::' pattern indicates tag separator in GTID sets (empty tag)
-  // MySQL 8.4 tagged GTID format: UUID:tag:GNO
-  // Non-tagged format: UUID:GNO or UUID:GNO-GNO2
-
-  // Check if the server version supports tagged GTIDs (MySQL 8.4+)
-  auto result = conn.Execute("SELECT VERSION()");
-  if (result) {
-    MYSQL_ROW row = mysql_fetch_row(result->get());
-    if (row != nullptr && row[0] != nullptr) {
-      std::string version(row[0]);
-      // MySQL 8.4+ supports tagged GTIDs
-      int major = 0;
-      int minor = 0;
-      // NOLINTNEXTLINE(cert-err34-c,cppcoreguidelines-pro-type-vararg)
-      if (sscanf(version.c_str(), "%d.%d", &major, &minor) == 2) {
-        constexpr int kMinMajorVersion = 8;
-        constexpr int kMinMinorVersion = 4;
-        if (major > kMinMajorVersion || (major == kMinMajorVersion && minor >= kMinMinorVersion)) {
-          // MySQL 8.4+ - tagged GTIDs are possible
-          // Check if any are actually in use
-          if (executed->find("::") != std::string::npos) {
-            warnings.emplace_back(
-                "Tagged GTIDs detected in executed GTID set. "
-                "Tagged GTID support is experimental.");
-          }
-        }
-      }
-    }
+  if (ContainsTaggedGtid(*executed)) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kMySQLInvalidGTID,
+        "Tagged GTIDs are not supported. MygramDB cannot encode UUID:TAG:GNO positions for MySQL binlog reconnect. "
+        "Use an untagged GTID source or run a full resync from a compatible server."));
   }
 
-  return true;
+  return {};
 }
 
 }  // namespace mygramdb::mysql

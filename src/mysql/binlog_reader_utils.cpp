@@ -387,12 +387,13 @@ bool BinlogReader::RefreshExecutedGtidSet() {
 }
 
 bool BinlogReader::ValidateConnection() {
-  // Collect required table names from configuration
-  std::vector<std::string> required_tables;
+  // Collect required table identities from configuration.
+  std::vector<ConnectionValidator::RequiredTable> required_tables;
 
   required_tables.reserve(table_contexts_.size());
-  for (const auto& [table_name, ctx] : table_contexts_) {
-    required_tables.push_back(ctx->config.name);
+  for (const auto& [unused_table_name, ctx] : table_contexts_) {
+    (void)unused_table_name;
+    required_tables.push_back({ctx->config.database, ctx->config.name});
   }
 
   // Get expected server UUID (empty on first connection)

@@ -31,7 +31,7 @@ using mygram::utils::MakeUnexpected;
 
 MysqlReconnectionHandler::MysqlReconnectionHandler(
     mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader, std::atomic<bool>* reconnecting_flag,
-    std::vector<std::string> required_tables, std::atomic<bool>* dump_save_in_progress,
+    std::vector<mysql::ConnectionValidator::RequiredTable> required_tables, std::atomic<bool>* dump_save_in_progress,
     std::atomic<bool>* replication_paused_for_dump, server::replication_pause::Counter* replication_pause_counter)
     : mysql_connection_(mysql_connection),
       binlog_reader_(binlog_reader),
@@ -42,6 +42,11 @@ MysqlReconnectionHandler::MysqlReconnectionHandler(
       replication_pause_counter_(replication_pause_counter) {}
 
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new_host, int new_port) {
+  std::unique_lock<std::mutex> reconnect_lock(reconnect_mutex_, std::try_to_lock);
+  if (!reconnect_lock.owns_lock()) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError, "MySQL reconnection is already in progress"));
+  }
+
   if (dump_save_in_progress_ != nullptr && dump_save_in_progress_->load(std::memory_order_acquire)) {
     return MakeUnexpected(
         MakeError(ErrorCode::kMySQLReplicationError, "Cannot reconnect MySQL while DUMP SAVE is in progress"));
@@ -51,14 +56,17 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
                                     "Cannot reconnect MySQL while replication is paused for DUMP/SNAPSHOT"));
   }
 
+  bool expected_reconnecting = false;
+  if (reconnecting_flag_ != nullptr &&
+      !reconnecting_flag_->compare_exchange_strong(expected_reconnecting, true, std::memory_order_acq_rel,
+                                                   std::memory_order_acquire)) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError, "MySQL reconnection is already in progress"));
+  }
+
   // RAII guard to ensure reconnecting flag is always cleared on exit
   struct ReconnectingGuard {
     std::atomic<bool>* flag;
-    explicit ReconnectingGuard(std::atomic<bool>* f) : flag(f) {
-      if (flag != nullptr) {
-        flag->store(true);
-      }
-    }
+    explicit ReconnectingGuard(std::atomic<bool>* f) : flag(f) {}
     ~ReconnectingGuard() {
       if (flag != nullptr) {
         flag->store(false);

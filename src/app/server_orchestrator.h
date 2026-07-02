@@ -23,6 +23,7 @@
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
+#include "mysql/connection_validator.h"
 #endif
 
 namespace mygramdb {
@@ -50,9 +51,9 @@ class SignalManager;
                                                         std::string_view start_gtid);
 
 /**
- * @brief Collect configured table names for MySQL reconnection validation.
+ * @brief Collect configured table identities for MySQL reconnection validation.
  */
-[[nodiscard]] std::vector<std::string> CollectRequiredTableNames(
+[[nodiscard]] std::vector<mysql::ConnectionValidator::RequiredTable> CollectRequiredTables(
     const std::unordered_map<std::string, std::unique_ptr<server::TableContext>>& table_contexts);
 
 using LatestGtidProvider = std::function<Expected<std::string, mygram::utils::Error>()>;
@@ -66,6 +67,20 @@ using LatestGtidProvider = std::function<Expected<std::string, mygram::utils::Er
 Expected<std::string, mygram::utils::Error> ResolveReplicationStartGtid(std::string_view start_from,
                                                                         std::string_view snapshot_gtid,
                                                                         const LatestGtidProvider& latest_provider);
+
+/**
+ * @brief Decide whether normalized text must be retained for a table.
+ *
+ * `memory.verify_text` controls n-gram post-filtering only. Text retention is
+ * also required by short-term substring fallback, BM25 score sorting, and
+ * HIGHLIGHT.
+ */
+[[nodiscard]] bool ShouldStoreNormalizedTexts(const config::Config& config, const config::TableConfig& table_config);
+
+/**
+ * @brief Decide whether startup needs an eager MySQL connection.
+ */
+[[nodiscard]] bool RequiresMysqlConnectionForStartup(const config::Config& config);
 
 /**
  * @brief Orchestrates server component lifecycle

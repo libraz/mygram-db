@@ -16,6 +16,7 @@
 #include "cache/cache_manager.h"
 #include "config/runtime_variable_manager.h"
 #include "loader/initial_loader.h"
+#include "mysql/connection_validator.h"
 #include "query/synonym_dictionary.h"
 #include "server/http_server.h"
 #include "server/request_dispatcher.h"
@@ -52,12 +53,16 @@ bool ShouldStartBinlogReaderOnServerStart(const mysql::IBinlogReader* binlog_rea
   return binlog_reader != nullptr;
 }
 
-std::vector<std::string> CollectRequiredTableNames(
+std::vector<mysql::ConnectionValidator::RequiredTable> CollectRequiredTables(
     const std::unordered_map<std::string, std::unique_ptr<server::TableContext>>& table_contexts) {
-  std::vector<std::string> required_tables;
+  std::vector<mysql::ConnectionValidator::RequiredTable> required_tables;
   required_tables.reserve(table_contexts.size());
   for (const auto& [name, ctx] : table_contexts) {
-    required_tables.push_back(ctx != nullptr && !ctx->config.name.empty() ? ctx->config.name : name);
+    if (ctx != nullptr && !ctx->config.name.empty()) {
+      required_tables.push_back({ctx->config.database, ctx->config.name});
+    } else {
+      required_tables.push_back({"", name});
+    }
   }
   return required_tables;
 }
@@ -83,6 +88,20 @@ Expected<std::string, mygram::utils::Error> ResolveReplicationStartGtid(std::str
   }
 
   return std::string{};
+}
+
+bool ShouldStoreNormalizedTexts(const config::Config& config, const config::TableConfig& table_config) {
+  (void)config;
+  (void)table_config;
+  // HIGHLIGHT is a query-level feature with no startup-time disable switch, so
+  // regular server initialization must retain normalized text independently of
+  // memory.verify_text. Defensive runtime guards still cover tests/manual
+  // setups that explicitly disable storage via DocumentStore::SetStoreTexts().
+  return true;
+}
+
+bool RequiresMysqlConnectionForStartup(const config::Config& config) {
+  return config.replication.enable || config.replication.auto_initial_snapshot;
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initialize() {
@@ -259,8 +278,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
         deps_.config.memory.normalize.lower);
     ctx->doc_store = std::make_unique<storage::DocumentStore>();
 
-    // Disable normalized text storage when verify_text is off (saves memory)
-    if (deps_.config.memory.verify_text == "off") {
+    // Retain normalized text for text-dependent query features; the decision is
+    // intentionally decoupled from memory.verify_text, which only controls
+    // post-filtering.
+    if (!ShouldStoreNormalizedTexts(deps_.config, table_config)) {
       ctx->doc_store->SetStoreTexts(false);
     }
 
@@ -324,6 +345,15 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::InitializeMySQL() {
 #ifdef USE_MYSQL
+  if (!RequiresMysqlConnectionForStartup(deps_.config)) {
+    mygram::utils::StructuredLog()
+        .Event("server_debug")
+        .Field("action", "mysql_connection_skipped")
+        .Field("reason", "replication_and_auto_snapshot_disabled")
+        .Debug();
+    return {};
+  }
+
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "initializing_mysql").Debug();
 
   mysql::Connection::Config mysql_config;
@@ -651,12 +681,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 #ifdef USE_MYSQL
     http_server_ = std::make_unique<server::HttpServer>(
         http_config, table_contexts_ptrs, &deps_.config, binlog_reader_.get(), tcp_server_->GetCacheManager(),
-        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), nullptr,
-        tcp_server_->GetReplicationPausedForDumpFlag());
+        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), tcp_server_->GetSharedRateLimiter(),
+        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetSyncManager());
 #else
     http_server_ = std::make_unique<server::HttpServer>(
         http_config, table_contexts_ptrs, &deps_.config, nullptr, tcp_server_->GetCacheManager(),
-        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), nullptr,
+        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), tcp_server_->GetSharedRateLimiter(),
         tcp_server_->GetReplicationPausedForDumpFlag());
 #endif
 
@@ -693,7 +723,7 @@ void ServerOrchestrator::RegisterRuntimeCallbacks() {
 
 #ifdef USE_MYSQL
   if (mysql_connection_ && binlog_reader_) {
-    auto required_tables = CollectRequiredTableNames(table_contexts_);
+    auto required_tables = CollectRequiredTables(table_contexts_);
     auto reconnection_handler = std::make_shared<MysqlReconnectionHandler>(
         mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag(),
         std::move(required_tables), tcp_server_->GetDumpSaveInProgressFlag(),

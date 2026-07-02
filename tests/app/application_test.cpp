@@ -142,6 +142,49 @@ TEST_F(DumpDirectoryValidationTest, TmpPathSucceeds) {
   std::filesystem::remove_all(dump_path);
 }
 
+TEST_F(DumpDirectoryValidationTest, DaemonPathsAreAbsolutizedBeforeChdir) {
+  const auto original_cwd = std::filesystem::current_path();
+  struct CwdGuard {
+    std::filesystem::path original;
+    ~CwdGuard() { std::filesystem::current_path(original); }
+  } cwd_guard{original_cwd};
+  std::filesystem::current_path(base_dir_);
+
+  std::filesystem::path config_path = base_dir_ / "daemon_paths.yaml";
+  std::ofstream config(config_path);
+  config << "mysql:\n"
+         << "  host: \"127.0.0.1\"\n"
+         << "  port: 3306\n"
+         << "  user: \"test\"\n"
+         << "  password: \"test\"\n"
+         << "  database: \"test\"\n"
+         << "tables:\n"
+         << "  - name: \"test_table\"\n"
+         << "    primary_key: \"id\"\n"
+         << "    text_source:\n"
+         << "      column: \"content\"\n"
+         << "replication:\n"
+         << "  enable: false\n"
+         << "  server_id: 12345\n"
+         << "dump:\n"
+         << "  dir: \"relative_dumps\"\n"
+         << "logging:\n"
+         << "  file: \"logs/mygramdb.log\"\n";
+  config.close();
+
+  auto manager = mygramdb::app::ConfigurationManager::Create(config_path.string());
+  ASSERT_TRUE(manager.has_value()) << manager.error().to_string();
+
+  auto result = (*manager)->AbsolutizeDaemonPaths();
+  ASSERT_TRUE(result.has_value()) << result.error().to_string();
+
+  EXPECT_EQ((*manager)->GetConfig().dump.dir, std::filesystem::absolute("relative_dumps").lexically_normal().string());
+  EXPECT_EQ((*manager)->GetConfig().logging.file,
+            std::filesystem::absolute("logs/mygramdb.log").lexically_normal().string());
+
+  (void)cwd_guard;
+}
+
 TEST_F(DumpDirectoryValidationTest, RunLogsStartupAfterApplyingLoggingConfig) {
   std::filesystem::path log_path = base_dir_ / "mygramdb.log";
   std::filesystem::path dump_file = base_dir_ / "not_a_directory";
@@ -200,25 +243,28 @@ TEST(ServerOrchestratorReplicationTest, EmptyGtidStillStartsConfiguredBinlogRead
   EXPECT_FALSE(mygramdb::app::ShouldStartBinlogReaderOnServerStart(nullptr, ""));
 }
 
-TEST(ServerOrchestratorReplicationTest, CollectRequiredTableNamesUsesConfiguredNames) {
+TEST(ServerOrchestratorReplicationTest, CollectRequiredTablesUsesConfiguredDatabaseAndNames) {
   std::unordered_map<std::string, std::unique_ptr<mygramdb::server::TableContext>> tables;
 
   auto articles = std::make_unique<mygramdb::server::TableContext>();
   articles->name = "articles_map_key";
+  articles->config.database = "app_db";
   articles->config.name = "articles";
   tables.emplace("articles_map_key", std::move(articles));
 
   auto comments = std::make_unique<mygramdb::server::TableContext>();
   comments->name = "comments";
+  comments->config.database = "archive_db";
   comments->config.name = "comments";
   tables.emplace("comments", std::move(comments));
 
-  auto required_tables = mygramdb::app::CollectRequiredTableNames(tables);
-  std::sort(required_tables.begin(), required_tables.end());
+  auto required_tables = mygramdb::app::CollectRequiredTables(tables);
+  std::sort(required_tables.begin(), required_tables.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.DisplayName() < rhs.DisplayName(); });
 
   ASSERT_EQ(required_tables.size(), 2u);
-  EXPECT_EQ(required_tables[0], "articles");
-  EXPECT_EQ(required_tables[1], "comments");
+  EXPECT_EQ(required_tables[0].DisplayName(), "app_db.articles");
+  EXPECT_EQ(required_tables[1].DisplayName(), "archive_db.comments");
 }
 
 TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidUsesLatestProvider) {
@@ -266,6 +312,71 @@ TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidKeepsSnapshot
   EXPECT_FALSE(latest_called);
 }
 
+TEST(ServerOrchestratorTextStorageTest, BigramTablesStoreTextEvenWhenVerifyTextIsOff) {
+  mygramdb::config::Config config;
+  config.memory.verify_text = "off";
+
+  mygramdb::config::TableConfig table;
+  table.ngram_size = 2;
+  table.kanji_ngram_size = 2;
+
+  EXPECT_TRUE(mygramdb::app::ShouldStoreNormalizedTexts(config, table));
+}
+
+TEST(ServerOrchestratorTextStorageTest, UnigramTablesStoreTextForHighlightSupport) {
+  mygramdb::config::Config config;
+  config.memory.verify_text = "off";
+  config.bm25.enable = false;
+
+  mygramdb::config::TableConfig table;
+  table.ngram_size = 1;
+  table.kanji_ngram_size = 1;
+
+  EXPECT_TRUE(mygramdb::app::ShouldStoreNormalizedTexts(config, table));
+}
+
+TEST(ServerOrchestratorTextStorageTest, VerifyTextRequiresTextStorage) {
+  mygramdb::config::Config config;
+  config.memory.verify_text = "all";
+
+  mygramdb::config::TableConfig table;
+  table.ngram_size = 1;
+  table.kanji_ngram_size = 1;
+
+  EXPECT_TRUE(mygramdb::app::ShouldStoreNormalizedTexts(config, table));
+}
+
+TEST(ServerOrchestratorTextStorageTest, Bm25RequiresTextStorage) {
+  mygramdb::config::Config config;
+  config.memory.verify_text = "off";
+  config.bm25.enable = true;
+
+  mygramdb::config::TableConfig table;
+  table.ngram_size = 1;
+  table.kanji_ngram_size = 1;
+
+  EXPECT_TRUE(mygramdb::app::ShouldStoreNormalizedTexts(config, table));
+}
+
+TEST(ServerOrchestratorMysqlStartupTest, SkipsMysqlWhenReplicationAndAutoSnapshotAreDisabled) {
+  mygramdb::config::Config config;
+  config.replication.enable = false;
+  config.replication.auto_initial_snapshot = false;
+
+  EXPECT_FALSE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
+}
+
+TEST(ServerOrchestratorMysqlStartupTest, RequiresMysqlForReplicationOrAutoSnapshot) {
+  mygramdb::config::Config config;
+  config.replication.enable = true;
+  config.replication.auto_initial_snapshot = false;
+  EXPECT_TRUE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
+
+  config.replication.enable = false;
+  config.replication.auto_initial_snapshot = true;
+  EXPECT_TRUE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
+}
+
 #ifdef USE_MYSQL
 TEST(MysqlReconnectionHandlerTest, RejectsBeforeTouchingConnectionDuringDumpSave) {
   std::atomic<bool> reconnecting{false};
@@ -297,6 +408,22 @@ TEST(MysqlReconnectionHandlerTest, RejectsBeforeTouchingConnectionWhileReplicati
   ASSERT_FALSE(result);
   EXPECT_NE(result.error().message().find("replication is paused for DUMP/SNAPSHOT"), std::string::npos);
   EXPECT_FALSE(reconnecting.load(std::memory_order_acquire));
+}
+
+TEST(MysqlReconnectionHandlerTest, RejectsWhenReconnectAlreadyInProgress) {
+  std::atomic<bool> reconnecting{true};
+  std::atomic<bool> dump_save_in_progress{false};
+  std::atomic<bool> replication_paused_for_dump{false};
+  mygramdb::server::replication_pause::Counter pause_counter;
+
+  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
+                                                  &replication_paused_for_dump, &pause_counter);
+
+  auto result = handler.Reconnect("127.0.0.2", 3307);
+
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("already in progress"), std::string::npos);
+  EXPECT_TRUE(reconnecting.load(std::memory_order_acquire));
 }
 #endif
 

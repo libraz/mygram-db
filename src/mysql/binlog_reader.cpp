@@ -214,7 +214,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   for (const auto& [table_name, ctx] : table_contexts_) {
     auto validate_result =
-        connection_.ValidateUniqueColumn(connection_.GetConfig().database, ctx->config.name, ctx->config.primary_key);
+        connection_.ValidateUniqueColumn(ctx->config.database, ctx->config.name, ctx->config.primary_key);
     if (!validate_result) {
       std::string error_msg =
           "Primary key validation failed for table '" + table_name + "': " + validate_result.error().message();

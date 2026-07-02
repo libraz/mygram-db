@@ -7,9 +7,11 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include "mysql/connection_validator.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -62,7 +64,7 @@ class MysqlReconnectionHandler {
    */
   MysqlReconnectionHandler(mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader,
                            std::atomic<bool>* reconnecting_flag = nullptr,
-                           std::vector<std::string> required_tables = {},
+                           std::vector<mysql::ConnectionValidator::RequiredTable> required_tables = {},
                            std::atomic<bool>* dump_save_in_progress = nullptr,
                            std::atomic<bool>* replication_paused_for_dump = nullptr,
                            server::replication_pause::Counter* replication_pause_counter = nullptr);
@@ -102,11 +104,12 @@ class MysqlReconnectionHandler {
 #ifdef USE_MYSQL
   mysql::Connection* mysql_connection_;
   mysql::BinlogReader* binlog_reader_;
-  std::atomic<bool>* reconnecting_flag_;      // Flag to set during reconnection (non-owning)
-  std::vector<std::string> required_tables_;  // Tables to validate after reconnection
+  std::atomic<bool>* reconnecting_flag_;  // Flag to set during reconnection (non-owning)
+  std::vector<mysql::ConnectionValidator::RequiredTable> required_tables_;  // Tables to validate after reconnection
   std::atomic<bool>* dump_save_in_progress_;
   std::atomic<bool>* replication_paused_for_dump_;
   server::replication_pause::Counter* replication_pause_counter_;
+  std::mutex reconnect_mutex_;
 #endif
 
   /**

@@ -9,6 +9,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "utils/error.h"
@@ -44,6 +45,17 @@ struct ValidationResult {
  */
 class ConnectionValidator {
  public:
+  struct RequiredTable {
+    std::string database;
+    std::string name;
+
+    [[nodiscard]] std::string DisplayName() const;
+  };
+
+  static bool IsValidIdentifier(std::string_view identifier);
+  static bool IsSupportedBinlogChecksumValue(std::string_view value);
+  static bool ContainsTaggedGtid(std::string_view gtid_set);
+
   /**
    * @brief Validate MySQL server connection
    *
@@ -53,6 +65,10 @@ class ConnectionValidator {
    * @return ValidationResult with validation status and details
    */
   static ValidationResult ValidateServer(Connection& conn, const std::vector<std::string>& required_tables,
+                                         const std::optional<std::string>& expected_uuid = std::nullopt,
+                                         const std::optional<std::string>& last_gtid = std::nullopt);
+
+  static ValidationResult ValidateServer(Connection& conn, const std::vector<RequiredTable>& required_tables,
                                          const std::optional<std::string>& expected_uuid = std::nullopt,
                                          const std::optional<std::string>& last_gtid = std::nullopt);
 
@@ -68,7 +84,7 @@ class ConnectionValidator {
    * @return Expected<void, Error> - success or error with kMySQLTableNotFound listing missing tables
    */
   static mygram::utils::Expected<void, mygram::utils::Error> CheckTablesExist(Connection& conn,
-                                                                              const std::vector<std::string>& tables);
+                                                                              const std::vector<RequiredTable>& tables);
 
   /**
    * @brief Check server UUID and detect failover
@@ -120,20 +136,31 @@ class ConnectionValidator {
   static mygram::utils::Expected<void, mygram::utils::Error> CheckBinlogFormat(Connection& conn);
 
   /**
+   * @brief Check if binlog_checksum is set to CRC32
+   *
+   * MygramDB currently parses binlog events with a trailing 4-byte CRC32
+   * checksum. binlog_checksum=NONE would make the reader treat payload bytes as
+   * checksum bytes and silently lose row changes.
+   *
+   * @return Expected<void, Error> - success or error with kMySQLBinlogError
+   */
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckBinlogChecksum(Connection& conn);
+
+  /**
    * @brief Check if partial JSON update mode is enabled
    *
    * binlog_row_value_options=PARTIAL_JSON causes PARTIAL_UPDATE_ROWS_EVENT
-   * which is not yet supported. Issue a warning.
+   * which is not yet supported.
    */
-  static bool CheckPartialJsonMode(Connection& conn, std::vector<std::string>& warnings);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckPartialJsonMode(Connection& conn);
 
   /**
    * @brief Check for tagged GTID usage
    *
    * MySQL 8.4+ supports tagged GTIDs (UUID:TAG:GNO).
-   * Detect usage and warn about experimental support.
+   * Detect usage and reject it until GTID encode/decode supports tags end-to-end.
    */
-  static bool CheckTaggedGTIDSupport(Connection& conn, std::vector<std::string>& warnings);
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckTaggedGTIDSupport(Connection& conn);
 };
 
 }  // namespace mygramdb::mysql

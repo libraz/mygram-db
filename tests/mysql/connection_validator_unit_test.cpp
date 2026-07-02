@@ -160,6 +160,47 @@ TEST(ConnectionValidatorUnitTest, InvalidTableNamePatterns) {
   }
 }
 
+TEST(ConnectionValidatorUnitTest, RequiredTableDisplayNameIncludesDatabase) {
+  ConnectionValidator::RequiredTable table{"archive_db", "articles"};
+  EXPECT_EQ(table.DisplayName(), "archive_db.articles");
+
+  ConnectionValidator::RequiredTable legacy_table{"", "articles"};
+  EXPECT_EQ(legacy_table.DisplayName(), "articles");
+}
+
+TEST(ConnectionValidatorUnitTest, IdentifierValidationCoversDatabaseAndTableNames) {
+  EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("app_db"));
+  EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("articles-2026"));
+  EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("tenant$1"));
+
+  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier(""));
+  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier("app.db"));
+  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier("app db"));
+  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier("app';DROP"));
+  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier(std::string("app\0db", 6)));
+}
+
+TEST(ConnectionValidatorUnitTest, BinlogChecksumValidationRequiresCRC32) {
+  EXPECT_TRUE(ConnectionValidator::IsSupportedBinlogChecksumValue("CRC32"));
+  EXPECT_TRUE(ConnectionValidator::IsSupportedBinlogChecksumValue("crc32"));
+
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogChecksumValue("NONE"));
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogChecksumValue(""));
+}
+
+TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsOnlyTaggedEntries) {
+  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1"));
+  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-3:5-7"));
+  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid(
+      "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:2-4"));
+
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:my-tag:100"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10::100"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid(
+      "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:tag:2"));
+}
+
 TEST(ConnectionValidatorUnitTest, BinlogFormatValidationLogic) {
   std::string row_value = "ROW";
   std::string upper_value = row_value;
@@ -188,6 +229,24 @@ TEST(ConnectionValidatorErrorTest, ValidateServerNotConnected) {
   auto result = ConnectionValidator::ValidateServer(conn, required_tables);
   EXPECT_FALSE(result.valid);
   EXPECT_FALSE(result.error_message.empty());
+  EXPECT_THAT(result.error_message, ::testing::HasSubstr("Connection is not active"));
+}
+
+TEST(ConnectionValidatorErrorTest, ValidateServerAcceptsDatabaseQualifiedRequiredTables) {
+  Connection::Config config;
+  config.host = "127.0.0.1";
+  config.user = "test";
+  config.password = "test";
+  config.database = "default_db";
+  Connection conn(config);
+  std::vector<ConnectionValidator::RequiredTable> required_tables = {
+      {"default_db", "articles"},
+      {"archive_db", "articles"},
+  };
+
+  auto result = ConnectionValidator::ValidateServer(conn, required_tables);
+
+  EXPECT_FALSE(result.valid);
   EXPECT_THAT(result.error_message, ::testing::HasSubstr("Connection is not active"));
 }
 
