@@ -129,9 +129,10 @@ struct ReplicationStatus {
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers) - Default MygramDB
 // client settings
 struct ClientConfig {
-  std::string host = "127.0.0.1";                                              // Server hostname
-  uint16_t port = static_cast<uint16_t>(config::defaults::kTcpPort);           // Default port for MygramDB protocol
-  uint32_t timeout_ms = 5000;                                                  // Default timeout in milliseconds
+  std::string host = "127.0.0.1";                                     // Server hostname
+  uint16_t port = static_cast<uint16_t>(config::defaults::kTcpPort);  // Default port for MygramDB protocol
+  uint32_t timeout_ms = 5000;                                         // Default timeout in milliseconds
+  uint32_t dump_save_timeout_ms = 300000;  // Max wait for async DUMP SAVE completion (0 = timeout_ms)
   uint32_t recv_buffer_size = server::protocol::kDefaultClientRecvBufferSize;  // Default buffer size (64KB)
   std::string unix_socket_path;                                                // Unix socket path (empty = use TCP)
 };

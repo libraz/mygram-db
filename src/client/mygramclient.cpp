@@ -665,12 +665,7 @@ class MygramClient::Impl {
     return {};
   }
 
-  void Disconnect() {
-    if (sock_ >= 0) {
-      close(sock_);
-      sock_ = -1;
-    }
-  }
+  void Disconnect() { DisconnectSocket(); }
 
   [[nodiscard]] bool IsConnected() const { return sock_ >= 0; }
 
@@ -718,8 +713,9 @@ class MygramClient::Impl {
         if (errno == EINTR) {
           continue;
         }
+        DisconnectSocket();
         return MakeUnexpected(
-            MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to send command: ") + strerror(errno)));
+            MakeError(ErrorCode::kClientSendFailed, std::string("Failed to send command: ") + strerror(errno)));
       }
       total_sent += static_cast<size_t>(sent);
     }
@@ -733,13 +729,15 @@ class MygramClient::Impl {
       ssize_t received = recv(sock_, buffer.data(), buffer.size() - 1, 0);
       if (received <= 0) {
         if (received == 0) {
+          DisconnectSocket();
           return MakeUnexpected(MakeError(ErrorCode::kClientConnectionClosed, "Connection closed by server"));
         }
         if (errno == EINTR) {
           continue;
         }
+        DisconnectSocket();
         return MakeUnexpected(
-            MakeError(ErrorCode::kClientCommandFailed, std::string("Failed to receive response: ") + strerror(errno)));
+            MakeError(ErrorCode::kClientReceiveFailed, std::string("Failed to receive response: ") + strerror(errno)));
       }
 
       response.append(buffer.data(), static_cast<size_t>(received));
@@ -1015,11 +1013,11 @@ class MygramClient::Impl {
       if (!line.empty() && line.back() == '\r') {
         line.pop_back();
       }
-      if (line.empty() || line.front() == '#') {
+      size_t tab_pos = line.find('\t');
+      if (line.empty() || (line.front() == '#' && tab_pos == std::string::npos)) {
         continue;
       }
 
-      size_t tab_pos = line.find('\t');
       if (tab_pos == std::string::npos) {
         return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET response row"));
       }
@@ -1265,7 +1263,9 @@ class MygramClient::Impl {
   }
 
   Expected<std::string, Error> WaitForDumpSaveCompletion(const std::string& started_filepath) const {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.timeout_ms);
+    const uint32_t completion_timeout_ms =
+        config_.dump_save_timeout_ms == 0 ? config_.timeout_ms : config_.dump_save_timeout_ms;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(completion_timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
       auto status_result = SendAndExpectPrefix("DUMP STATUS", proto::kOkDumpStatusPrefix);
       if (!status_result) {
@@ -1299,7 +1299,7 @@ class MygramClient::Impl {
     }
 
     return MakeUnexpected(MakeError(ErrorCode::kClientTimeout, "Timed out waiting for DUMP SAVE to complete after " +
-                                                                   std::to_string(config_.timeout_ms) + " ms"));
+                                                                   std::to_string(completion_timeout_ms) + " ms"));
   }
 
   Expected<ReplicationStatus, Error> GetReplicationStatus() const {
@@ -1363,8 +1363,15 @@ class MygramClient::Impl {
   }
 
  private:
+  void DisconnectSocket() const {
+    if (sock_ >= 0) {
+      close(sock_);
+      sock_ = -1;
+    }
+  }
+
   ClientConfig config_;
-  int sock_{-1};
+  mutable int sock_{-1};
   // Serializes SendCommand() calls so concurrent threads do not interleave
   // send/recv on the same socket. Connect()/Disconnect() are intentionally
   // not protected by this mutex; concurrent Disconnect() during an in-flight

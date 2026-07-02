@@ -5,7 +5,11 @@
 
 #include "client/mygramclient.h"
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <cstring>
@@ -551,6 +555,24 @@ TEST_F(MygramClientTest, FacetWithSearchAndLimit) {
   EXPECT_EQ(resp.facets[0].count, 2u);
 }
 
+TEST_F(MygramClientTest, FacetValueStartingWithHashIsDataRow) {
+  storage::FilterMap filters;
+  filters["status"] = std::string("#active");
+  auto doc_id = doc_store_->AddDocument("hash_status", filters);
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(*doc_id, "hello hash facet");
+
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Facet("testdb.test", "status", "hello", 10);
+  ASSERT_TRUE(result) << "Facet error: " << result.error().message();
+
+  const auto& resp = *result;
+  ASSERT_EQ(resp.facets.size(), 1u);
+  EXPECT_EQ(resp.facets[0].value, "#active");
+  EXPECT_EQ(resp.facets[0].count, 1u);
+}
+
 TEST_F(MygramClientTest, FacetWithNotAndFilter) {
   AddTestDocuments();
 
@@ -956,6 +978,48 @@ TEST_F(MygramClientTest, SendCommand) {
 
   auto response = *result;
   EXPECT_TRUE(response.find("OK COUNT 2") != std::string::npos);
+}
+
+TEST_F(MygramClientTest, SendCommandDisconnectsAfterReceiveFailure) {
+  int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+  const uint16_t port = ntohs(addr.sin_port);
+
+  std::thread closer([listen_fd]() {
+    int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+      char buffer[128];
+      (void)recv(client_fd, buffer, sizeof(buffer), 0);
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = port;
+  config.timeout_ms = 1000;
+  MygramClient client(config);
+
+  ASSERT_TRUE(client.Connect());
+  ASSERT_TRUE(client.IsConnected());
+
+  auto result = client.SendCommand("COUNT testdb.test hello");
+  EXPECT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientConnectionClosed);
+  EXPECT_FALSE(client.IsConnected());
+
+  closer.join();
 }
 
 /**
@@ -1849,6 +1913,53 @@ TEST_F(MygramClientTest, CApiLastErrorCodeReturnsNumericClientCode) {
   EXPECT_EQ(rc, -1);
   EXPECT_EQ(mygramclient_get_last_error_code(c_client), 7009);
   EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("and_terms"), std::string::npos);
+
+  mygramclient_disconnect(c_client);
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiSuccessfulTypedCallsClearLastError) {
+  AddTestDocuments();
+
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  config.recv_buffer_size = 65536;
+
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+
+  MygramSearchResult_C* invalid_search = nullptr;
+  EXPECT_EQ(mygramclient_search_advanced(c_client, "testdb.test", "hello", 10, 0,
+                                         /*and_terms=*/nullptr, /*and_count=*/1,
+                                         /*not_terms=*/nullptr, /*not_count=*/0,
+                                         /*filter_keys=*/nullptr, /*filter_values=*/nullptr,
+                                         /*filter_count=*/0, nullptr, 1, &invalid_search),
+            -1);
+  EXPECT_NE(mygramclient_get_last_error_code(c_client), 0);
+  EXPECT_STRNE(mygramclient_get_last_error(c_client), "");
+
+  uint64_t count = 0;
+  ASSERT_EQ(mygramclient_count(c_client, "testdb.test", "hello", &count), 0)
+      << "Count error: " << mygramclient_get_last_error(c_client);
+  EXPECT_EQ(mygramclient_get_last_error_code(c_client), 0);
+  EXPECT_STREQ(mygramclient_get_last_error(c_client), "");
+
+  MygramDocument_C* doc = nullptr;
+  ASSERT_EQ(mygramclient_get(c_client, "testdb.test", "1", &doc), 0)
+      << "Get error: " << mygramclient_get_last_error(c_client);
+  EXPECT_EQ(mygramclient_get_last_error_code(c_client), 0);
+  EXPECT_STREQ(mygramclient_get_last_error(c_client), "");
+  mygramclient_free_document(doc);
+
+  char* response = nullptr;
+  ASSERT_EQ(mygramclient_send_command(c_client, "INFO", &response), 0)
+      << "SendCommand error: " << mygramclient_get_last_error(c_client);
+  EXPECT_EQ(mygramclient_get_last_error_code(c_client), 0);
+  EXPECT_STREQ(mygramclient_get_last_error(c_client), "");
+  mygramclient_free_string(response);
 
   mygramclient_disconnect(c_client);
   mygramclient_destroy(c_client);

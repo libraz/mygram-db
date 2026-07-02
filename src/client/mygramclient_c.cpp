@@ -434,6 +434,7 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
   }
 
   *result = result_c;
+  clear_last_error(client);
   return 0;
 }
 
@@ -478,6 +479,7 @@ int mygramclient_count_advanced(MygramClient_C* client, const char* table, const
   auto& resp = *count_result;
   *count = resp.count;
 
+  clear_last_error(client);
   return 0;
 }
 
@@ -559,6 +561,7 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
   }
 
   *result = result_c;
+  clear_last_error(client);
   return 0;
 }
 
@@ -635,6 +638,7 @@ int mygramclient_get(MygramClient_C* client, const char* table, const char* prim
   }
 
   *doc = doc_c;
+  clear_last_error(client);
   return 0;
 }
 
@@ -765,6 +769,11 @@ int mygramclient_save(MygramClient_C* client, const char* filepath, char** saved
   }
 
   *saved_path = strdup_safe(*save_result);
+  if (*saved_path == nullptr) {
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return -1;
+  }
+  clear_last_error(client);
   return 0;
 }
 
@@ -781,6 +790,11 @@ int mygramclient_load(MygramClient_C* client, const char* filepath, char** loade
   }
 
   *loaded_path = strdup_safe(*load_result);
+  if (*loaded_path == nullptr) {
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return -1;
+  }
+  clear_last_error(client);
   return 0;
 }
 
@@ -827,6 +841,7 @@ int mygramclient_replication_status(MygramClient_C* client, MygramReplicationSta
   }
 
   *status = out;
+  clear_last_error(client);
   return 0;
 }
 
@@ -867,6 +882,11 @@ int mygramclient_send_command(MygramClient_C* client, const char* command, char*
   }
 
   *response = strdup_safe(*result);
+  if (*response == nullptr) {
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return -1;
+  }
+  clear_last_error(client);
   return 0;
 }
 
