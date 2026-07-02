@@ -68,7 +68,11 @@ class HttpServerTest : public ::testing::Test {
     index_ = table_context_.index.get();
     doc_store_ = table_context_.doc_store.get();
 
-    table_contexts_["test"] = &table_context_;
+    // Register only the canonical database-qualified key, matching how
+    // production populates table_contexts_ (see server_orchestrator.cpp).
+    // Bare "test" requests are still served via ResolveTableKey's unique
+    // bare-name fallback, so table_key is always canonical downstream
+    // (cache tagging, ClearTable) regardless of which alias a client used.
     table_contexts_["testdb.test"] = &table_context_;
 
     // Create config

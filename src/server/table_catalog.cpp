@@ -11,19 +11,24 @@ namespace mygramdb::server {
 
 std::optional<std::string> ResolveTableKey(const std::unordered_map<std::string, TableContext*>& tables,
                                            std::string_view name) {
+  // Exact match on the literal registered key takes priority. This covers
+  // already-qualified references, literal keys containing dots, and bare keys
+  // that were explicitly registered as such (single-database deployments). An
+  // explicitly configured bare entry must resolve to itself rather than be
+  // shadowed by a same-named qualified entry that points at a different table.
+  if (tables.find(std::string(name)) != tables.end()) {
+    return std::string(name);
+  }
+
+  // A qualified name that was not present exactly does not resolve further.
   if (name.find('.') != std::string_view::npos) {
-    // Exact match covers already-qualified references and literal table names
-    // that contain dots.
-    if (tables.find(std::string(name)) != tables.end()) {
-      return std::string(name);
-    }
     return std::nullopt;
   }
 
-  // Bare name: prefer a unique canonical key of the form "<db>.<name>" even
-  // if a legacy bare alias exists in the map. Cache invalidation and binlog
-  // events use qualified names, so returning the qualified key keeps query
-  // metadata byte-identical with mutation events.
+  // Bare name with no exact key: look for a unique canonical key of the form
+  // "<db>.<name>". Returning the qualified key keeps query metadata
+  // byte-identical with cache-invalidation and binlog mutation events, which
+  // are keyed by qualified names.
   std::optional<std::string> resolved;
   for (const auto& [key, _] : tables) {
     const auto separator = key.find('.');
@@ -38,16 +43,7 @@ std::optional<std::string> ResolveTableKey(const std::unordered_map<std::string,
       resolved = key;
     }
   }
-  if (resolved.has_value()) {
-    return resolved;
-  }
-
-  // Legacy fallback for tests and single-table callers that only provide a
-  // bare key.
-  if (tables.find(std::string(name)) != tables.end()) {
-    return std::string(name);
-  }
-  return std::nullopt;
+  return resolved;
 }
 
 TableCatalog::TableCatalog(std::unordered_map<std::string, TableContext*> tables) : tables_(std::move(tables)) {
