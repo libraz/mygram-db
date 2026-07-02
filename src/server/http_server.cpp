@@ -951,7 +951,10 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
   const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
   if (max_query_length > 0 && query_text.size() > max_query_length) {
-    SendError(res, kHttpBadRequest, "Query text exceeds maximum length");
+    SendError(res, kHttpBadRequest,
+              "Query text length (" + std::to_string(query_text.size()) + ") exceeds maximum allowed length of " +
+                  std::to_string(max_query_length) +
+                  " characters. Increase api.max_query_length to permit longer queries.");
     return std::nullopt;
   }
 
@@ -1114,7 +1117,10 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     if (!query_text.empty()) {
       const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
       if (max_query_length > 0 && query_text.size() > max_query_length) {
-        SendError(res, kHttpBadRequest, "Query text exceeds maximum length");
+        SendError(res, kHttpBadRequest,
+                  "Query text length (" + std::to_string(query_text.size()) + ") exceeds maximum allowed length of " +
+                      std::to_string(max_query_length) +
+                      " characters. Increase api.max_query_length to permit longer queries.");
         return std::nullopt;
       }
       parsed_query.search_text = std::move(query_text);
