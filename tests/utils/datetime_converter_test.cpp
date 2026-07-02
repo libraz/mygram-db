@@ -158,6 +158,11 @@ TEST(DateTimeProcessorTest, DateTimeToEpochUTC) {
   auto result2 = processor.DateTimeToEpoch("2024-11-22 10:00:00");
   ASSERT_TRUE(result2.has_value());
   EXPECT_EQ(*result2, 1732269600);
+
+  // Date-only strings are accepted and interpreted as midnight
+  auto result3 = processor.DateTimeToEpoch("2024-01-01");
+  ASSERT_TRUE(result3.has_value());
+  EXPECT_EQ(*result3, 1704067200);  // 2024-01-01 00:00:00 UTC
 }
 
 TEST(DateTimeProcessorTest, DateTimeToEpochWithTimezone) {
@@ -183,7 +188,8 @@ TEST(DateTimeProcessorTest, DateTimeToEpochInvalid) {
 
   // Invalid format
   EXPECT_FALSE(processor.DateTimeToEpoch("").has_value());
-  EXPECT_FALSE(processor.DateTimeToEpoch("2024-01-01").has_value());           // Missing time (less than 19 chars)
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024-01").has_value());     // Too short (not date-only, not datetime)
+  EXPECT_FALSE(processor.DateTimeToEpoch("2024/01/01").has_value());  // Date-only with wrong separator
   EXPECT_FALSE(processor.DateTimeToEpoch("2024/01/01 00:00:00").has_value());  // Wrong separator
 
   // Invalid date/time (basic range checks only)
@@ -246,9 +252,14 @@ TEST(DateTimeProcessorTest, ParseDateTimeValueISO8601) {
   ASSERT_TRUE(result1.has_value());
   EXPECT_EQ(*result1, 1704067200);
 
-  // Date-only format is not supported (requires full datetime with time component)
+  // Date-only format is accepted and interpreted as midnight
   auto result2 = processor.ParseDateTimeValue("2024-01-01");
-  EXPECT_FALSE(result2.has_value());
+  ASSERT_TRUE(result2.has_value());
+  EXPECT_EQ(*result2, 1704067200);  // 2024-01-01 00:00:00 UTC
+
+  // Malformed date-only strings are still rejected
+  EXPECT_FALSE(processor.ParseDateTimeValue("2024/01/01").has_value());  // Wrong separator
+  EXPECT_FALSE(processor.ParseDateTimeValue("2024-01").has_value());     // Too short
 }
 
 TEST(DateTimeProcessorTest, ParseDateTimeValueWithTimezone) {
