@@ -559,7 +559,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateQueryLe
   const size_t expression_length = CalculateQueryExpressionLength(query);
   if (expression_length > max_query_length_) {
     return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kQuerySyntaxError,
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kQueryTooLong,
                                  "Query expression length (" + std::to_string(expression_length) +
                                      ") exceeds maximum allowed length of " + std::to_string(max_query_length_) +
                                      " characters. Increase api.max_query_length to permit longer queries."));

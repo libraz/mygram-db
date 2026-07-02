@@ -5,6 +5,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <cctype>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -28,6 +31,43 @@ using mygram::utils::ToUpper;
 static bool IsNonExpressionClauseKeyword(const std::string& token) {
   return token == "FILTER" || token == "SORT" || token == "LIMIT" || token == "OFFSET" || token == "HIGHLIGHT" ||
          token == "FUZZY" || token == "FACET";
+}
+
+static bool ContainsWhitespace(const std::string& token) {
+  return std::any_of(token.begin(), token.end(), [](unsigned char c) { return std::isspace(c) != 0; });
+}
+
+static bool ContainsStandaloneBooleanKeyword(const std::string& token) {
+  std::istringstream stream(token);
+  std::string part;
+  while (stream >> part) {
+    const std::string upper = ToUpper(part);
+    if (upper == "AND" || upper == "OR" || upper == "NOT") {
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::string EscapeQuotedSearchToken(const std::string& token) {
+  std::string escaped;
+  escaped.reserve(token.size() + 2);
+  escaped.push_back('"');
+  for (char c : token) {
+    if (c == '\\' || c == '"') {
+      escaped.push_back('\\');
+    }
+    escaped.push_back(c);
+  }
+  escaped.push_back('"');
+  return escaped;
+}
+
+static std::string SearchTokenForFlatExpression(const std::string& token) {
+  if (ContainsWhitespace(token) && ContainsStandaloneBooleanKeyword(token)) {
+    return EscapeQuotedSearchToken(token);
+  }
+  return token;
 }
 
 /**
@@ -144,7 +184,7 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
   }
 
   // Join search tokens with spaces to form complete search expression
-  query.search_text = search_tokens[0];
+  query.search_text = SearchTokenForFlatExpression(search_tokens[0]);
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   for (size_t i = 1; i < search_tokens.size(); ++i) {  // 1: Start from second token
     const std::string& token = search_tokens[i];
@@ -157,7 +197,7 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
     if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
       query.search_text += " ";
     }
-    query.search_text += token;
+    query.search_text += SearchTokenForFlatExpression(token);
   }
 
   // Check for empty search text (e.g., empty quoted strings)

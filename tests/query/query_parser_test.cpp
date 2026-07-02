@@ -183,6 +183,7 @@ TEST(QueryParserTest, SearchExceedsDefaultQueryLengthLimit) {
   auto query = parser.Parse("SEARCH articles " + long_term);
 
   EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryTooLong);
   EXPECT_NE(query.error().message().find("exceeds"), std::string::npos);
 }
 
@@ -192,6 +193,7 @@ TEST(QueryParserTest, SearchRespectsFilterContributionToLength) {
   auto query = parser.Parse("SEARCH articles short FILTER status = " + filter_value);
 
   EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryTooLong);
 }
 
 TEST(QueryParserTest, SearchAllowsCustomQueryLengthLimit) {
@@ -267,6 +269,11 @@ TEST(QueryParserTest, FilterOperators) {
   ASSERT_TRUE(query2);
   EXPECT_EQ(query2->filters[0].op, FilterOp::NE);
 
+  // SQL-style NE
+  auto query2b = parser.Parse("SEARCH articles hello FILTER status <> 1");
+  ASSERT_TRUE(query2b);
+  EXPECT_EQ(query2b->filters[0].op, FilterOp::NE);
+
   // GT
   auto query3 = parser.Parse("SEARCH articles hello FILTER status > 1");
   ASSERT_TRUE(query3);
@@ -307,6 +314,30 @@ TEST(QueryParserTest, FilterWithoutSpacesEquals) {
   EXPECT_EQ(query->filters[0].column, "status");
   EXPECT_EQ(query->filters[0].op, FilterOp::EQ);
   EXPECT_EQ(query->filters[0].value, "1");
+}
+
+TEST(QueryParserTest, FilterWithoutSpacesNotEqualSqlStylePreservesColumnCase) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello FILTER createdAt<>100");
+
+  ASSERT_TRUE(query);
+  EXPECT_TRUE(query->IsValid());
+  ASSERT_EQ(query->filters.size(), 1);
+  EXPECT_EQ(query->filters[0].column, "createdAt");
+  EXPECT_EQ(query->filters[0].op, FilterOp::NE);
+  EXPECT_EQ(query->filters[0].value, "100");
+}
+
+TEST(QueryParserTest, FilterPreservesColumnCase) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello FILTER createdAt >= 100");
+
+  ASSERT_TRUE(query);
+  EXPECT_TRUE(query->IsValid());
+  ASSERT_EQ(query->filters.size(), 1);
+  EXPECT_EQ(query->filters[0].column, "createdAt");
+  EXPECT_EQ(query->filters[0].op, FilterOp::GTE);
+  EXPECT_EQ(query->filters[0].value, "100");
 }
 
 TEST(QueryParserTest, FilterWithoutSpacesGreaterEqual) {
@@ -487,13 +518,15 @@ TEST(QueryParserTest, InvalidCompoundFilterRejectsOperatorPrefixedValue) {
   EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidFilter);
 }
 
-TEST(QueryParserTest, InvalidFilterRejectsOperatorPrefixedValue) {
+TEST(QueryParserTest, FilterAllowsOperatorPrefixedValueWhenSeparated) {
   QueryParser parser;
 
   auto query = parser.Parse("SEARCH articles hello FILTER price = >5");
-  EXPECT_FALSE(query);
-  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidFilter);
-  EXPECT_NE(query.error().message().find("operator character"), std::string::npos);
+  ASSERT_TRUE(query) << query.error().message();
+  ASSERT_EQ(query->filters.size(), 1);
+  EXPECT_EQ(query->filters[0].column, "price");
+  EXPECT_EQ(query->filters[0].op, FilterOp::EQ);
+  EXPECT_EQ(query->filters[0].value, ">5");
 }
 
 /**
@@ -708,6 +741,17 @@ TEST(QueryParserTest, QuotedStringMixed) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->search_text, "it's working");
+  EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, QuotedBooleanKeywordPhrasePreservesBoundaryForAst) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "hello OR world" LIMIT 10)");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::SEARCH);
+  EXPECT_EQ(query->search_text, R"("hello OR world")");
+  EXPECT_EQ(query->limit, 10);
   EXPECT_TRUE(query->IsValid());
 }
 
@@ -937,6 +981,17 @@ TEST(QueryParserTest, SearchWithSortDesc) {
   EXPECT_EQ(query->order_by->column, "created_at");
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
   EXPECT_EQ(query->limit, 10);
+  EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, SearchWithSortPreservesColumnCase) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT createdAt DESC LIMIT 10");
+
+  ASSERT_TRUE(query);
+  EXPECT_TRUE(query->order_by.has_value());
+  EXPECT_EQ(query->order_by->column, "createdAt");
+  EXPECT_EQ(query->order_by->order, SortOrder::DESC);
   EXPECT_TRUE(query->IsValid());
 }
 
@@ -2733,12 +2788,14 @@ TEST(QueryParserFuzzyTest, FuzzyInvalidDistance3) {
   QueryParser parser;
   auto result = parser.Parse("SEARCH t \"term\" FUZZY 3");
   EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("FUZZY distance must be 1 or 2"), std::string::npos);
 }
 
 TEST(QueryParserFuzzyTest, FuzzyInvalidDistance0) {
   QueryParser parser;
   auto result = parser.Parse("SEARCH t \"term\" FUZZY 0");
   EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("FUZZY distance must be 1 or 2"), std::string::npos);
 }
 
 TEST(QueryParserFuzzyTest, NoFuzzyByDefault) {
@@ -2781,6 +2838,8 @@ TEST(QueryParserFuzzyTest, FuzzyInvalidNonNumeric) {
   QueryParser parser;
   auto result = parser.Parse("SEARCH t \"term\" FUZZY abc");
   EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("FUZZY distance must be 1 or 2"), std::string::npos);
+  EXPECT_NE(result.error().message().find("abc"), std::string::npos);
 }
 
 // from_chars instead of stoi - non-numeric after FUZZY is an error
@@ -2790,6 +2849,8 @@ TEST(QueryParserFuzzyTest, FuzzyNonNumericIsError) {
   QueryParser parser;
   auto result = parser.Parse("SEARCH t hello FUZZY nonsense");
   EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("FUZZY distance must be 1 or 2"), std::string::npos);
+  EXPECT_NE(result.error().message().find("nonsense"), std::string::npos);
 }
 
 // ============================================================
@@ -2804,6 +2865,14 @@ TEST(QueryParserFacetTest, FacetBasic) {
   EXPECT_EQ(result->table, "t");
   EXPECT_EQ(result->facet_column, "column");
   EXPECT_TRUE(result->search_text.empty());
+}
+
+TEST(QueryParserFacetTest, FacetPreservesColumnCase) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t categoryName");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->type, QueryType::FACET);
+  EXPECT_EQ(result->facet_column, "categoryName");
 }
 
 TEST(QueryParserFacetTest, FacetWithSearch) {

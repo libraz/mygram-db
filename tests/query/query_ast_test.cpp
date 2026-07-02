@@ -599,7 +599,7 @@ TEST(QueryASTEvaluationTest, ComplexEvaluation) {
 }
 
 /**
- * @brief Test 1-character terms with bigram index (should return no results)
+ * @brief Test 1-character terms with bigram index use substring fallback.
  */
 TEST(QueryASTEvaluationTest, SingleCharTermWithBigrams) {
   index::Index idx(2);  // bigram
@@ -608,46 +608,48 @@ TEST(QueryASTEvaluationTest, SingleCharTermWithBigrams) {
   // Add documents
   auto doc1 = *doc_store.AddDocument("1");
   idx.AddDocument(doc1, "a");
+  doc_store.SetNormalizedText(doc1, "a");
 
   auto doc2 = *doc_store.AddDocument("2");
   idx.AddDocument(doc2, "ab");
+  doc_store.SetNormalizedText(doc2, "ab");
 
   auto doc3 = *doc_store.AddDocument("3");
   idx.AddDocument(doc3, "abc");
+  doc_store.SetNormalizedText(doc3, "abc");
 
   QueryASTParser parser;
 
-  // Single 1-char term - should return empty (no bigrams from 'a')
+  // Single 1-char term - no bigrams are generated, so substring fallback matches all docs containing "a".
   auto ast1 = parser.Parse("a");
   ASSERT_NE(ast1, nullptr);
   auto results1 = ast1->Evaluate(idx, doc_store);
-  EXPECT_EQ(results1.size(), 0);  // No results
+  EXPECT_EQ(results1.size(), 3);
 
-  // 1-char OR 2-char - should return results from 2-char term only
+  // 1-char OR 2-char - substring fallback for "a" contributes all docs.
   auto ast2 = parser.Parse("a OR ab");
   ASSERT_NE(ast2, nullptr);
   auto results2 = ast2->Evaluate(idx, doc_store);
-  EXPECT_EQ(results2.size(), 2);  // doc2 and doc3 (match "ab")
+  EXPECT_EQ(results2.size(), 3);
 
   // (1-char OR 3-char) AND 2-char
-  // 'a' returns empty, 'abc' returns doc3, so OR = {doc3}
-  // 'ab' returns {doc2, doc3}, so AND = {doc3}
+  // 'a' returns all docs, 'ab' returns {doc2, doc3}, so AND = {doc2, doc3}
   auto ast3 = parser.Parse("(a OR abc) AND ab");
   ASSERT_NE(ast3, nullptr);
   auto results3 = ast3->Evaluate(idx, doc_store);
-  EXPECT_EQ(results3.size(), 1);  // Only doc3
+  EXPECT_EQ(results3.size(), 2);
 
-  // 1-char AND 2-char - should return empty (no bigrams from 'a')
+  // 1-char AND 2-char - "a" uses substring fallback, then intersects with "ab".
   auto ast4 = parser.Parse("a AND ab");
   ASSERT_NE(ast4, nullptr);
   auto results4 = ast4->Evaluate(idx, doc_store);
-  EXPECT_EQ(results4.size(), 0);  // No results
+  EXPECT_EQ(results4.size(), 2);
 
-  // NOT 1-char - should return all documents (NOT empty = all)
+  // NOT 1-char - excludes all documents containing "a".
   auto ast5 = parser.Parse("NOT a");
   ASSERT_NE(ast5, nullptr);
   auto results5 = ast5->Evaluate(idx, doc_store);
-  EXPECT_EQ(results5.size(), 3);  // All documents (NOT empty = all)
+  EXPECT_EQ(results5.size(), 0);
 }
 
 // ============================================================================

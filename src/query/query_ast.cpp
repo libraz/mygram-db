@@ -17,6 +17,29 @@ namespace mygramdb::query {
 
 using mygram::utils::ToUpper;
 
+namespace {
+
+std::vector<index::DocId> SearchNormalizedSubstring(const std::string& normalized_term,
+                                                    const storage::DocumentStore& doc_store) {
+  if (normalized_term.empty()) {
+    return {};
+  }
+
+  auto candidates = doc_store.GetAllDocIds();
+  auto texts = doc_store.GetNormalizedTextBatch(candidates);
+
+  std::vector<index::DocId> matches;
+  matches.reserve(candidates.size());
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    if (texts[i].has_value() && texts[i]->find(normalized_term) != std::string::npos) {
+      matches.push_back(candidates[i]);
+    }
+  }
+  return matches;
+}
+
+}  // namespace
+
 // ============================================================================
 // QueryNode
 // ============================================================================
@@ -78,9 +101,11 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index, const s
       bool cross_boundary = index.GetCrossBoundaryNgrams();
       auto ngrams = mygram::utils::GenerateQueryNgrams(normalized_term, ngram_size, kanji_ngram_size, cross_boundary);
 
-      // If no n-grams generated (e.g., 1-char term with ngram_size=2), return empty
+      // If no n-grams are generated (e.g. a 1-char term with bigram indexing),
+      // fall back to normalized substring search so boolean routes match the
+      // plain search pipeline behavior when texts are stored.
       if (ngrams.empty()) {
-        return {};
+        return SearchNormalizedSubstring(normalized_term, doc_store);
       }
 
       // Search using generated n-grams
@@ -285,11 +310,11 @@ std::vector<Token> Tokenizer::Tokenize() {
       std::string upper_term = ToUpper(term);
 
       if (upper_term == "AND") {
-        tokens.emplace_back(TokenType::AND);
+        tokens.emplace_back(TokenType::AND, term);
       } else if (upper_term == "OR") {
-        tokens.emplace_back(TokenType::OR);
+        tokens.emplace_back(TokenType::OR, term);
       } else if (upper_term == "NOT") {
-        tokens.emplace_back(TokenType::NOT);
+        tokens.emplace_back(TokenType::NOT, term);
       } else {
         tokens.emplace_back(TokenType::TERM, term);
       }

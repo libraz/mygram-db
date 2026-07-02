@@ -18,7 +18,6 @@
 namespace mygramdb::query {
 
 using internal::EqualsIgnoreCase;
-using internal::ToLower;
 using mygram::utils::ErrorCode;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
@@ -105,7 +104,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
     std::string op_part;
     std::string value_part;
 
-    static const std::array<std::string, 6> kOperators = {">=", "<=", "!=", "=", ">", "<"};
+    static const std::array<std::string, 7> kOperators = {">=", "<=", "!=", "<>", "=", ">", "<"};
 
     for (const auto& op_symbol : kOperators) {
       auto operator_pos = token.find(op_symbol);
@@ -126,7 +125,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
       return false;
     }
 
-    filter.column = ToLower(column_part);
+    filter.column = column_part;
     filter.op = filter_op.value();
 
     if (!value_part.empty()) {
@@ -161,7 +160,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "FILTER requires column, operator, and value"));
   }
 
-  filter.column = ToLower(tokens[pos++]);
+  filter.column = tokens[pos++];
 
   auto filter_op = ParseFilterOp(tokens[pos++]);
   if (!filter_op.has_value()) {
@@ -170,10 +169,6 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
   filter.op = filter_op.value();
 
   filter.value = tokens[pos++];
-  if (auto result = ValidateFilterValue(filter.value); !result) {
-    return result;
-  }
-
   return {};
 }
 
@@ -321,9 +316,9 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseSort(const
     return {};
   }
 
-  // Normal case: SORT <column> [ASC|DESC]
-  // Lowercase for case-insensitive matching (MySQL column names are case-insensitive)
-  order_by.column = ToLower(tokens[pos++]);
+  // Normal case: SORT <column> [ASC|DESC]. Preserve original casing; execution resolves
+  // configured/filter columns case-insensitively while keeping stored keys intact.
+  order_by.column = tokens[pos++];
 
   // Check for comma in column name (multi-column sort attempt)
   if (order_by.column.find(',') != std::string::npos) {
@@ -454,8 +449,9 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFuzzy(cons
       }
       max_distance = val;
       ++pos;
+    } else {
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "FUZZY distance must be 1 or 2, got: " + token));
     }
-    // If not a valid number, don't consume — leave for next clause to handle
   }
 
   query.fuzzy_max_distance = max_distance;
