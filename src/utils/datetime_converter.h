@@ -136,6 +136,7 @@ bool IsNumericString(std::string_view str);
  * @brief Convert ISO8601-style datetime string to epoch seconds
  *
  * Supported formats:
+ * - "YYYY-MM-DD" (date-only, interpreted as midnight)
  * - "YYYY-MM-DD HH:MM:SS" (e.g., "2024-11-22 10:00:00")
  * - "YYYY-MM-DDTHH:MM:SS" (e.g., "2024-11-22T10:00:00")
  * - "YYYY-MM-DD HH:MM:SS.ffffff" (with microseconds)
@@ -155,7 +156,8 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
  *
  * This is a convenience function that:
  * 1. If the string is numeric, treats it as epoch seconds
- * 2. If the string is ISO8601 format, converts it using the timezone offset
+ * 2. If the string is epoch seconds with a fractional suffix, truncates to whole seconds
+ * 3. If the string is ISO8601 format, converts it using the timezone offset
  *
  * @param value_str DateTime value (either "1732240800" or "2024-11-22 10:00:00")
  * @param timezone_str Timezone offset string (e.g., "+09:00")

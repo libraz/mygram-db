@@ -313,4 +313,21 @@ TEST(ConvertToEpochBugFixTest, KnownUTCEpochValue) {
   EXPECT_EQ(*epoch0, 0);
 }
 
+TEST(ConvertToEpochBugFixTest, DateOnlyStringUsesMidnight) {
+  auto epoch = ConvertToEpoch("2024-01-02", 0);
+  ASSERT_TRUE(epoch.has_value());
+  EXPECT_EQ(*epoch, 1704153600);
+}
+
+TEST(ConvertToEpochBugFixTest, FractionalEpochTimestampTruncatesToSeconds) {
+  auto epoch = ParseDatetimeValue("1704153600.123456", "+00:00");
+  ASSERT_TRUE(epoch.has_value());
+  EXPECT_EQ(*epoch, 1704153600);
+
+  DateTimeProcessor processor(TimezoneOffset::Parse("+00:00").value());
+  auto processor_epoch = processor.TimestampToEpoch("1704153600.999999");
+  ASSERT_TRUE(processor_epoch.has_value());
+  EXPECT_EQ(*processor_epoch, 1704153600);
+}
+
 }  // namespace mygramdb::utils

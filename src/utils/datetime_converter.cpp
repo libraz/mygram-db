@@ -112,6 +112,8 @@ inline bool IsValidCalendarDate(int year, int month, int day) {
   return day <= DaysInMonth(year, month);
 }
 
+std::optional<uint64_t> ParseEpochSeconds(std::string_view value_str);
+
 // ============================================================================
 // TimezoneOffset implementation
 // ============================================================================
@@ -186,7 +188,7 @@ Expected<uint64_t, Error> DateTimeProcessor::DateTimeToEpoch(std::string_view da
 }
 
 Expected<uint64_t, Error> DateTimeProcessor::TimestampToEpoch(std::string_view timestamp_str) {
-  auto epoch = ParseNumeric<uint64_t>(timestamp_str);
+  auto epoch = ParseEpochSeconds(timestamp_str);
   if (!epoch.has_value()) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid timestamp"));
   }
@@ -306,13 +308,31 @@ bool IsNumericString(std::string_view str) {
   return std::all_of(str.begin(), str.end(), [](char character) { return character >= '0' && character <= '9'; });
 }
 
+std::optional<uint64_t> ParseEpochSeconds(std::string_view value_str) {
+  if (IsNumericString(value_str)) {
+    return ParseNumeric<uint64_t>(value_str);
+  }
+
+  const size_t dot_pos = value_str.find('.');
+  if (dot_pos == std::string_view::npos || dot_pos == 0 || dot_pos + 1 >= value_str.size()) {
+    return std::nullopt;
+  }
+  const auto seconds = value_str.substr(0, dot_pos);
+  const auto fractional = value_str.substr(dot_pos + 1);
+  if (!IsNumericString(seconds) || !IsNumericString(fractional)) {
+    return std::nullopt;
+  }
+  return ParseNumeric<uint64_t>(seconds);
+}
+
 std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t timezone_offset_sec) {
   // Expected formats:
+  // - "YYYY-MM-DD"
   // - "YYYY-MM-DD HH:MM:SS"
   // - "YYYY-MM-DDTHH:MM:SS"
   // - "YYYY-MM-DD HH:MM:SS.ffffff" (microseconds ignored)
 
-  if (datetime_str.size() < kDateTimeMinLength) {
+  if (datetime_str.size() != kDateTimeSeparatorPos && datetime_str.size() < kDateTimeMinLength) {
     return std::nullopt;
   }
 
@@ -362,43 +382,45 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
     day = day * kDecimalBase + (datetime_str[i] - '0');
   }
 
-  // Check separator (position 10): space or 'T'
-  if (datetime_str[kDateTimeSeparatorPos] != ' ' && datetime_str[kDateTimeSeparatorPos] != 'T') {
-    return std::nullopt;
-  }
-
-  // Parse hour (position 11-12)
-  for (size_t i = kHourStartPos; i < kHourEndPos; ++i) {
-    if (datetime_str[i] < '0' || datetime_str[i] > '9') {
+  if (datetime_str.size() > kDateTimeSeparatorPos) {
+    // Check separator (position 10): space or 'T'
+    if (datetime_str[kDateTimeSeparatorPos] != ' ' && datetime_str[kDateTimeSeparatorPos] != 'T') {
       return std::nullopt;
     }
-    hour = hour * kDecimalBase + (datetime_str[i] - '0');
-  }
 
-  // Check separator (position 13)
-  if (datetime_str[kFirstColonPos] != ':') {
-    return std::nullopt;
-  }
+    // Parse hour (position 11-12)
+    for (size_t i = kHourStartPos; i < kHourEndPos; ++i) {
+      if (datetime_str[i] < '0' || datetime_str[i] > '9') {
+        return std::nullopt;
+      }
+      hour = hour * kDecimalBase + (datetime_str[i] - '0');
+    }
 
-  // Parse minute (position 14-15)
-  for (size_t i = kMinuteStartPos; i < kMinuteEndPos; ++i) {
-    if (datetime_str[i] < '0' || datetime_str[i] > '9') {
+    // Check separator (position 13)
+    if (datetime_str[kFirstColonPos] != ':') {
       return std::nullopt;
     }
-    minute = minute * kDecimalBase + (datetime_str[i] - '0');
-  }
 
-  // Check separator (position 16)
-  if (datetime_str[kSecondColonPos] != ':') {
-    return std::nullopt;
-  }
+    // Parse minute (position 14-15)
+    for (size_t i = kMinuteStartPos; i < kMinuteEndPos; ++i) {
+      if (datetime_str[i] < '0' || datetime_str[i] > '9') {
+        return std::nullopt;
+      }
+      minute = minute * kDecimalBase + (datetime_str[i] - '0');
+    }
 
-  // Parse second (position 17-18)
-  for (size_t i = kSecondStartPos; i < kSecondEndPos; ++i) {
-    if (datetime_str[i] < '0' || datetime_str[i] > '9') {
+    // Check separator (position 16)
+    if (datetime_str[kSecondColonPos] != ':') {
       return std::nullopt;
     }
-    second = second * kDecimalBase + (datetime_str[i] - '0');
+
+    // Parse second (position 17-18)
+    for (size_t i = kSecondStartPos; i < kSecondEndPos; ++i) {
+      if (datetime_str[i] < '0' || datetime_str[i] > '9') {
+        return std::nullopt;
+      }
+      second = second * kDecimalBase + (datetime_str[i] - '0');
+    }
   }
 
   // Validate basic ranges
@@ -468,9 +490,10 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
 }
 
 std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::string_view timezone_str) {
-  // If numeric, treat as epoch seconds
-  if (IsNumericString(value_str)) {
-    return ParseNumeric<uint64_t>(value_str);
+  // If numeric, treat as epoch seconds. Fractional epoch strings from
+  // TIMESTAMP2 are accepted and truncated to whole seconds.
+  if (auto epoch_seconds = ParseEpochSeconds(value_str)) {
+    return epoch_seconds;
   }
 
   // Parse timezone offset
