@@ -234,9 +234,10 @@ TEST_F(IndexGetTopNTest, BatchBlockSearchPartialResults) {
 
   auto results = index_->SearchAnd({"te", "da"}, 100, true);
   EXPECT_EQ(results.size(), 50);
-  // Falls back to standard path, which returns ASC order
-  EXPECT_EQ(results[0], 1);
-  EXPECT_EQ(results[49], 50);
+  // Falls back to standard path; reverse=true returns highest DocIDs first
+  // even when the result set is smaller than the limit.
+  EXPECT_EQ(results[0], 50);
+  EXPECT_EQ(results[49], 1);
 }
 
 /**
