@@ -240,6 +240,11 @@ void CollectAstScoringTerms(const query::QueryNode& node, std::vector<std::strin
 
 bool ContainsEmptyPostingTerm(const std::vector<SearchTermInfo>& term_infos) {
   return std::any_of(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& term_info) {
+    // NOT-term infos are registered for cache invalidation only; an empty
+    // posting list is their normal state and must not block caching.
+    if (term_info.is_not_term) {
+      return false;
+    }
     return term_info.ngrams.empty() || term_info.estimated_size == 0 ||
            term_info.estimated_size == std::numeric_limits<size_t>::max();
   });
@@ -363,6 +368,9 @@ std::vector<SearchTermInfo> BuildCacheTermInfos(const std::vector<SearchTermInfo
   std::vector<SearchTermInfo> cache_term_infos = term_infos;
   auto not_term_infos =
       GenerateTermInfos(query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  for (auto& not_term_info : not_term_infos) {
+    not_term_info.is_not_term = true;
+  }
   cache_term_infos.insert(cache_term_infos.end(), std::make_move_iterator(not_term_infos.begin()),
                           std::make_move_iterator(not_term_infos.end()));
   return cache_term_infos;

@@ -43,6 +43,11 @@ struct SearchTermInfo {
   uint64_t term_doc_freq = 0;
   std::string normalized_term;
   bool term_doc_freq_computed = false;
+  /// True for NOT-term infos appended solely for cache-invalidation registration.
+  /// A NOT term legitimately has an empty posting list (nothing currently
+  /// matches it), so it must be excluded from empty-posting caching guards
+  /// while its n-grams are still registered for future invalidation.
+  bool is_not_term = false;
 };
 
 /// @brief Result of search pipeline execution (before pagination)
