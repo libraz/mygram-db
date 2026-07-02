@@ -10,6 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-07-03
+
+### Added
+
+- **Date-only string and fractional epoch second support** — `DateTimeToEpoch`/`ParseDatetimeValue` now accept `YYYY-MM-DD` (interpreted as midnight) and truncate `TIMESTAMP2`-style fractional epoch values to whole seconds.
+- **Database-qualified required-table validation** — Required-table existence checks now query `INFORMATION_SCHEMA` per table's configured database instead of relying on the connection's default database.
+
+### Fixed
+
+- **Critical: filter-only UPDATE could remove a document from the full-text index** — A binlog UPDATE handler decided index mutation based on whether the after-image text was empty rather than whether it changed, so a filter-only update (e.g. changing `status`) could silently drop a still-qualifying document from search results.
+- **Critical: UPDATE changing the primary key left a stale document under the old key** — Primary-key changes on UPDATE are now split into a DELETE for the old key followed by an INSERT for the new key.
+- **Critical: reverse search ordering was wrong for partial result sets** — `Index::SearchAnd(reverse=true)` now consistently returns highest-DocID-first regardless of whether the result set was truncated to `limit`.
+- **Critical: table-key resolution could route a request to the wrong table** — An exact match on a registered table key now always takes priority over qualified-name fallback scanning.
+- **Binlog fail-fast hardening** — CRC32 checksum mismatches, `TABLE_MAP_EVENT` parse failures, missing column metadata, and tagged GTIDs now trigger a reconnect or hard failure instead of continuing on inconsistent state; truncated UPDATE row images are now always propagated as an error.
+- **TIMESTAMP/DATE filter values** — Binlog and initial-load filter extraction now decode these through the datetime parser instead of as raw integers.
+- **HTTP query construction rebuilt** — `q` is now always treated as literal search text (no reserved-keyword smuggling); filter/sort/facet column names resolve case-insensitively while preserving original casing; `SORT _score` is rejected explicitly when normalized text storage is disabled.
+- **HTTP reads rejected during table synchronization** — Search/count/facet/get now return `503` while a table is synchronizing; `/health/ready` surfaces `sync_in_progress`.
+- **Boolean query AST fixes** — Correct substring fallback for terms too short for n-grams, literal-phrase handling for quoted `AND`/`OR`/`NOT`, the `<>` filter operator, filter/sort column-case preservation, `FUZZY` distance validation, `NOT`-term cache-invalidation registration, and `SearchRaw` boolean-expression transport/parsing for nested `OR` groups.
+- **Query-length error message** — HTTP now includes the configured limit value, matching the TCP/parser path.
+- **Pipelined requests misclassified as buffer overflow** — The reactor's read-buffer cap now applies only to the unframed tail, not already-extracted complete frames.
+- **SYNC/OPTIMIZE/snapshot concurrency guards** — `SYNC` is rejected while `OPTIMIZE`/`DUMP` is in progress; scheduled snapshots skip during `OPTIMIZE`; orphaned temp snapshot files are cleaned up.
+- **Daemon-mode relative paths** — `dump.dir`/`logging.file` are absolutized before daemonizing, fixing paths broken by the post-fork `chdir("/")`.
+- **V2 dump GTID length** — Now bounded by a dedicated 64 KB limit instead of the unrelated V1 path-length limit.
+- **CLI DOC output** — Escape sequences (`\n`, `\r`, `\t`, `\\`, `\"`, `\xHH`) are now fully decoded instead of passed through verbatim; exit-code detection no longer misfires on successful payloads containing disconnect-related wording.
+- **Client socket teardown and C API** — Socket state is consistently torn down on every send/receive failure; `FACET` no longer drops rows whose value starts with `#`; C API clears last-error on success and null-checks allocations.
+
+### Changed
+
+- **Default `ngram_size` changed from `1` to `2` (bigram)** when omitted from configuration.
+- `ENUM`/`SET` filter types are now explicitly rejected instead of silently accepted.
+- `Expected<T, E>`/`Expected<void, E>` are now `[[nodiscard]]`.
+
+### Testing
+
+- Regression tests added for every fix above; full unit suite (3722 tests, incl. SLOW/LOAD) and full Docker E2E suite (200 tests) pass cleanly.
+
+**Detailed Release Notes**: [docs/releases/v1.8.0.md](docs/releases/v1.8.0.md)
+
 ## [1.7.0] - 2026-06-15
 
 ### Added
@@ -678,7 +716,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/libraz/mygram-db/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/libraz/mygram-db/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/libraz/mygram-db/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/libraz/mygram-db/compare/v1.5.4...v1.6.0

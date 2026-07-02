@@ -4,7 +4,8 @@ This directory contains detailed release notes for each version of MygramDB.
 
 ## Available Versions
 
-- [v1.7.0](v1.7.0.md) - Latest release (2026-06-15) - Multi-Database Support (database-qualified identity, single-DB backward compatible), Boolean Search, HTTP/TCP Parity, Consistent Snapshots, Critical Binlog Fix
+- [v1.8.0](v1.8.0.md) - Latest release (2026-07-03) - Correctness & Reliability Hardening (binlog UPDATE/reindex fixes, reverse search ordering, table-key resolution, HTTP query rebuild parity, boolean query AST fixes)
+- [v1.7.0](v1.7.0.md) - 2026-06-15 - Multi-Database Support (database-qualified identity, single-DB backward compatible), Boolean Search, HTTP/TCP Parity, Consistent Snapshots, Critical Binlog Fix
 - [v1.6.1](v1.6.1.md) - 2026-05-07 - Lifecycle & Concurrency Hardening, HTTP Search Extensions (sort/fuzzy/highlight), CLI Rewrite
 - [v1.6.0](v1.6.0.md) - 2026-04-15 - BM25 Scoring, Synonyms, Highlighting, Fuzzy Search, FACET, V2 Dump, MariaDB Support
 - [v1.5.4](v1.5.4.md) - 2026-04-13 - CRC32 Binlog Checksum, Correctness & Security Hardening, Module Split
