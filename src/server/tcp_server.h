@@ -196,6 +196,13 @@ class TcpServer {
    */
   std::shared_ptr<RateLimiter> GetSharedRateLimiter() const { return rate_limiter_; }
 
+#ifdef USE_MYSQL
+  /**
+   * @brief Get SYNC operation manager pointer for cross-protocol guards.
+   */
+  SyncOperationManager* GetSyncManager() { return sync_manager_.get(); }
+#endif
+
  private:
   // Configuration
   ServerConfig config_;

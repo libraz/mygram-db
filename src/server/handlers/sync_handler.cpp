@@ -31,6 +31,22 @@ std::string SyncHandler::HandleSync(const query::Query& query) {
   if (!resolved) {
     return ResponseFormatter::FormatError(resolved.error().message());
   }
+  if (ctx_.optimization_in_progress.load(std::memory_order_acquire)) {
+    return ResponseFormatter::FormatError("Cannot start SYNC while OPTIMIZE is in progress");
+  }
+  if (ctx_.dump_save_in_progress.load(std::memory_order_acquire)) {
+    return ResponseFormatter::FormatError("Cannot start SYNC while DUMP SAVE is in progress");
+  }
+  if (ctx_.dump_load_in_progress.load(std::memory_order_acquire)) {
+    return ResponseFormatter::FormatError("Cannot start SYNC while DUMP LOAD is in progress");
+  }
+  auto table_context = GetTableContext(*resolved);
+  if (!table_context) {
+    return ResponseFormatter::FormatError(table_context.error().message());
+  }
+  if (table_context->index != nullptr && table_context->index->IsOptimizing()) {
+    return ResponseFormatter::FormatError("Cannot start SYNC while OPTIMIZE is in progress");
+  }
   auto result = sync_manager_->StartSync(*resolved);
   if (!result) {
     return ResponseFormatter::FormatError(result.error().message());

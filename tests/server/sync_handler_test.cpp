@@ -250,6 +250,126 @@ TEST_F(SyncHandlerTest, BareSyncResolvesInSingleDatabaseConfig) {
   sync_mgr.RequestShutdown();
 }
 
+TEST_F(SyncHandlerTest, SyncRejectedWhileOptimizeInProgress) {
+  SyncOperationManager sync_mgr(table_contexts_, config_.get(), nullptr);
+  TableCatalog catalog(table_contexts_);
+
+  std::atomic<bool> dump_load{false};
+  std::atomic<bool> dump_save{false};
+  std::atomic<bool> optimization{true};
+  std::atomic<bool> replication_paused{false};
+  std::atomic<bool> reconnecting{false};
+
+  HandlerContext ctx{
+      .table_catalog = &catalog,
+      .stats = *stats_,
+      .full_config = config_.get(),
+      .dump_dir = "/tmp/test",
+      .dump_load_in_progress = dump_load,
+      .dump_save_in_progress = dump_save,
+      .optimization_in_progress = optimization,
+      .replication_paused_for_dump = replication_paused,
+      .mysql_reconnecting = reconnecting,
+      .binlog_reader = nullptr,
+      .sync_manager = &sync_mgr,
+      .cache_manager = nullptr,
+      .variable_manager = nullptr,
+      .dump_progress = nullptr,
+  };
+
+  auto handler = SyncHandler::Create(ctx, &sync_mgr);
+  ASSERT_TRUE(handler) << handler.error().to_string();
+
+  query::QueryParser parser;
+  auto query = parser.Parse("SYNC test_table");
+  ASSERT_TRUE(query);
+
+  ConnectionContext conn_ctx;
+  std::string response = (*handler)->Handle(*query, conn_ctx);
+
+  EXPECT_NE(response.find("OPTIMIZE is in progress"), std::string::npos) << response;
+}
+
+TEST_F(SyncHandlerTest, SyncRejectedWhileDumpSaveInProgress) {
+  SyncOperationManager sync_mgr(table_contexts_, config_.get(), nullptr);
+  TableCatalog catalog(table_contexts_);
+
+  std::atomic<bool> dump_load{false};
+  std::atomic<bool> dump_save{true};
+  std::atomic<bool> optimization{false};
+  std::atomic<bool> replication_paused{false};
+  std::atomic<bool> reconnecting{false};
+
+  HandlerContext ctx{
+      .table_catalog = &catalog,
+      .stats = *stats_,
+      .full_config = config_.get(),
+      .dump_dir = "/tmp/test",
+      .dump_load_in_progress = dump_load,
+      .dump_save_in_progress = dump_save,
+      .optimization_in_progress = optimization,
+      .replication_paused_for_dump = replication_paused,
+      .mysql_reconnecting = reconnecting,
+      .binlog_reader = nullptr,
+      .sync_manager = &sync_mgr,
+      .cache_manager = nullptr,
+      .variable_manager = nullptr,
+      .dump_progress = nullptr,
+  };
+
+  auto handler = SyncHandler::Create(ctx, &sync_mgr);
+  ASSERT_TRUE(handler) << handler.error().to_string();
+
+  query::QueryParser parser;
+  auto query = parser.Parse("SYNC test_table");
+  ASSERT_TRUE(query);
+
+  ConnectionContext conn_ctx;
+  std::string response = (*handler)->Handle(*query, conn_ctx);
+
+  EXPECT_NE(response.find("DUMP SAVE is in progress"), std::string::npos) << response;
+}
+
+TEST_F(SyncHandlerTest, SyncRejectedWhileDumpLoadInProgress) {
+  SyncOperationManager sync_mgr(table_contexts_, config_.get(), nullptr);
+  TableCatalog catalog(table_contexts_);
+
+  std::atomic<bool> dump_load{true};
+  std::atomic<bool> dump_save{false};
+  std::atomic<bool> optimization{false};
+  std::atomic<bool> replication_paused{false};
+  std::atomic<bool> reconnecting{false};
+
+  HandlerContext ctx{
+      .table_catalog = &catalog,
+      .stats = *stats_,
+      .full_config = config_.get(),
+      .dump_dir = "/tmp/test",
+      .dump_load_in_progress = dump_load,
+      .dump_save_in_progress = dump_save,
+      .optimization_in_progress = optimization,
+      .replication_paused_for_dump = replication_paused,
+      .mysql_reconnecting = reconnecting,
+      .binlog_reader = nullptr,
+      .sync_manager = &sync_mgr,
+      .cache_manager = nullptr,
+      .variable_manager = nullptr,
+      .dump_progress = nullptr,
+  };
+
+  auto handler = SyncHandler::Create(ctx, &sync_mgr);
+  ASSERT_TRUE(handler) << handler.error().to_string();
+
+  query::QueryParser parser;
+  auto query = parser.Parse("SYNC test_table");
+  ASSERT_TRUE(query);
+
+  ConnectionContext conn_ctx;
+  std::string response = (*handler)->Handle(*query, conn_ctx);
+
+  EXPECT_NE(response.find("DUMP LOAD is in progress"), std::string::npos) << response;
+}
+
 // ============================================================================
 // Query Parser Tests
 // ============================================================================
