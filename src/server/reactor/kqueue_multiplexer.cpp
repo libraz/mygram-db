@@ -421,8 +421,9 @@ Expected<void, Error> KqueueMultiplexer::Poll(int timeout_ms, std::vector<ReadyE
 
     // Multiple kevents for the same fd (e.g. readable and writable delivered
     // in the same Poll) are intentionally emitted as separate ReadyEvent
-    // entries. IoReactor ORs them together at dispatch time. Coalescing here
-    // would add per-poll bookkeeping for no correctness gain.
+    // entries. IoReactor dispatches them in order and re-checks connection
+    // liveness for each event, so coalescing here would add per-poll
+    // bookkeeping for no correctness gain.
     out.push_back(ready);
   }
 

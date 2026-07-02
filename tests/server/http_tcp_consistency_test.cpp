@@ -265,6 +265,26 @@ TEST_F(HttpTcpConsistencyTest, SearchDefaultOrderAndLimitMatches) {
       << "tcp_response=" << tcp_response << " http_body=" << http_res->body;
 }
 
+TEST_F(HttpTcpConsistencyTest, QuotedBooleanKeywordPhraseMatches) {
+  auto tcp_response = SendTcpRequest(tcp_port_, R"(SEARCH app.articles "machine OR unrelated")");
+  ASSERT_FALSE(tcp_response.empty()) << "TCP server returned empty response";
+  ASSERT_EQ(tcp_response.rfind("OK RESULTS", 0), 0U) << "tcp_response=" << tcp_response;
+  size_t tcp_count = ParseTcpCount(tcp_response, "RESULTS");
+
+  httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
+  json req_body;
+  req_body["q"] = R"("machine OR unrelated")";
+  auto http_res = http_client.Post("/tables/app.articles/search", req_body.dump(), "application/json");
+  ASSERT_TRUE(http_res != nullptr) << "HTTP request returned null";
+  ASSERT_EQ(http_res->status, 200) << "HTTP body: " << http_res->body;
+
+  json http_body = json::parse(http_res->body);
+  size_t http_count = http_body["count"].get<size_t>();
+
+  EXPECT_EQ(tcp_count, 0u) << "tcp_response=" << tcp_response;
+  EXPECT_EQ(http_count, tcp_count) << "tcp_response=" << tcp_response << " http_body=" << http_res->body;
+}
+
 TEST_F(HttpTcpConsistencyTest, SearchLargeResultTopNOrderAndLimitMatches) {
   for (int i = 0; i < 80; ++i) {
     auto id = table_ctx_.doc_store->AddDocument("bulk_" + std::to_string(i), {});

@@ -358,6 +358,31 @@ TEST_F(ReactorConnectionNoDispatcherTest, OnReadableRespectsMaxReadBuffer) {
   EXPECT_NE(std::string(response, static_cast<size_t>(n)).find("ERROR request too large"), std::string::npos);
 }
 
+TEST_F(ReactorConnectionNoDispatcherTest, ReadBufferCapAppliesOnlyToUnframedTail) {
+  std::string frame(600 * 1024, 'X');
+  frame.append("\r\n");
+  const std::string payload = frame + frame;
+
+  size_t enqueued = 0;
+  EXPECT_TRUE(conn_->AppendReadBytesForTest(payload, enqueued))
+      << "Complete pipelined frames must not trip the reactor read-buffer cap";
+
+  EXPECT_EQ(enqueued, 2U);
+  EXPECT_EQ(conn_->PendingFrameCountForTest(), 2U);
+  EXPECT_EQ(conn_->ReadBufferSizeForTest(), 0U);
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowDoesNotInlineErrorAheadOfPendingWriteQueue) {
+  EXPECT_TRUE(conn_->ShouldSendReadOverflowErrorForTest());
+
+  ASSERT_FALSE(conn_->EnqueueResponse(std::string(256 * 1024, 'A')));
+  ASSERT_TRUE(conn_->IsClosing());
+  ASSERT_GT(conn_->WriteQueueDepthForTest(), 0U);
+
+  EXPECT_FALSE(conn_->ShouldSendReadOverflowErrorForTest())
+      << "read overflow must not send ERROR ahead of already queued response";
+}
+
 TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {
   conn_.reset();
   if (peer_fd_ >= 0) {

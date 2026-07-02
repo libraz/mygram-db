@@ -94,21 +94,9 @@ class ReactorIntegrationTest : public ::testing::Test {
     cfg.worker_threads = worker_threads;
     cfg.max_connections = max_connections;
     cfg.allow_cidrs = {"127.0.0.1/32"};
-    // The default ServerConfig::recv_buffer_size (4 KiB) is applied verbatim to
-    // each accepted client socket as SO_RCVBUF. Explicitly setting SO_RCVBUF
-    // pins the TCP receive window and disables Linux receive-buffer
-    // autotuning, throttling ingress to a few kilobytes per round trip. That
-    // is fine for the tiny request/response cadence most tests exercise, but
-    // ClientSendsLargeFrame deliberately pushes ~900 KiB and >1 MiB frames to
-    // verify the reactor's read-buffer cap and close path. With a 4 KiB window
-    // those frames trickle in over hundreds of round trips; under
-    // coverage-instrumented epoll on a contended CI runner the >1 MiB frame
-    // never reaches the 1 MiB cap within the test's wait budget, so the server
-    // is never observed closing the over-cap connection. Give the server a
-    // realistic receive buffer so the large frames it is sent can actually be
-    // ingested; this changes only how fast bytes are read, not any close/cap
-    // semantics under test.
-    cfg.recv_buffer_size = 1024 * 1024;
+    // Keep recv_buffer_size at the production default (0) so the kernel can
+    // autotune SO_RCVBUF while large-frame tests exercise only reactor
+    // read-buffer semantics.
     if (max_write_queue_bytes > 0) {
       cfg.max_write_queue_bytes = max_write_queue_bytes;
     }

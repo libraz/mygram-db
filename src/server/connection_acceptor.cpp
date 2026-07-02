@@ -640,8 +640,16 @@ bool ConnectionAcceptor::SetSocketOptions(int socket_fd) const {
 }
 
 void ConnectionAcceptor::SetClientSocketOptions(int client_fd) const {
-  socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_RCVBUF, config_.recv_buffer_size, "SO_RCVBUF");
-  socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_SNDBUF, config_.send_buffer_size, "SO_SNDBUF");
+  // Only pin SO_RCVBUF/SO_SNDBUF when explicitly configured (> 0). Setting an
+  // explicit SO_RCVBUF on Linux disables receive-window autotuning; a small
+  // value then throttles large inbound frames. A value of 0 leaves the kernel
+  // to size and autotune the socket buffers.
+  if (config_.recv_buffer_size > 0) {
+    socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_RCVBUF, config_.recv_buffer_size, "SO_RCVBUF");
+  }
+  if (config_.send_buffer_size > 0) {
+    socket_utils::TrySetSockOpt(client_fd, SOL_SOCKET, SO_SNDBUF, config_.send_buffer_size, "SO_SNDBUF");
+  }
 
   // TCP_NODELAY: Disable Nagle's algorithm so small responses (typical of the
   // text protocol's request/response cadence) are not held in the kernel for

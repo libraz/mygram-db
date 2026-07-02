@@ -125,23 +125,23 @@ bool ReactorConnection::OnReadable() {
 
   // 1. Drain the socket until EAGAIN / EWOULDBLOCK.
   std::array<char, kRecvChunkBytes> chunk{};
+  size_t enqueued = 0;
   while (true) {
     ssize_t n = ::recv(fd_, chunk.data(), chunk.size(), 0);
     if (n > 0) {
-      // Hard cap on the accumulation buffer — slow-reader / malformed frame
-      // protection.
-      if (read_buf_.size() + static_cast<size_t>(n) > kMaxReadBufferBytes) {
+      if (!AppendReadBytes(chunk.data(), static_cast<size_t>(n), enqueued)) {
         mygram::utils::StructuredLog()
             .Event("reactor_read_buf_overflow")
             .Field("fd", static_cast<int64_t>(fd_))
-            .Field("buf_bytes", static_cast<uint64_t>(read_buf_.size() + static_cast<size_t>(n)))
+            .Field("buf_bytes", static_cast<uint64_t>(read_buf_.size()))
             .Field("cap_bytes", static_cast<uint64_t>(kMaxReadBufferBytes))
             .Warn();
-        BestEffortSendError(fd_, "request too large");
+        if (ShouldSendReadOverflowError()) {
+          BestEffortSendError(fd_, "request too large");
+        }
         closing_.store(true, std::memory_order_release);
         return false;
       }
-      read_buf_.insert(read_buf_.end(), chunk.data(), chunk.data() + n);
       continue;
     }
     if (n == 0) {
@@ -172,14 +172,7 @@ bool ReactorConnection::OnReadable() {
     return false;
   }
 
-  // 2. Extract complete frames and push onto the drain queue.
-  size_t enqueued = 0;
-  {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    enqueued = ExtractFramesLocked();
-  }
-
-  // 3. If we parsed at least one frame, make sure a drain task is running.
+  // 2. If we parsed at least one frame, make sure a drain task is running.
   //    The drain task will close the connection on behalf of the read path
   //    once read_eof_ is set and there is nothing left to flush.
   if (enqueued > 0) {
@@ -276,6 +269,24 @@ bool ReactorConnection::OnWritable() {
 bool ReactorConnection::OnError() {
   closing_.store(true, std::memory_order_release);
   return false;
+}
+
+bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& enqueued) {
+  read_buf_.insert(read_buf_.end(), data, data + len);
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    enqueued += ExtractFramesLocked();
+  }
+
+  // Hard cap on the unframed tail only. Completed CRLF-delimited frames are
+  // moved to pending_frames_ above before this check, so a valid pipelined
+  // burst larger than 1 MiB is not mistaken for one oversized request.
+  return read_buf_.size() <= kMaxReadBufferBytes;
+}
+
+bool ReactorConnection::ShouldSendReadOverflowError() {
+  std::lock_guard<std::mutex> lock(write_mutex_);
+  return write_queue_.empty();
 }
 
 size_t ReactorConnection::ExtractFramesLocked() {

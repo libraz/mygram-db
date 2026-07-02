@@ -54,6 +54,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "server/server_types.h"
@@ -220,6 +221,16 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
     return write_armed_;
   }
 
+#ifdef MYGRAMDB_REACTOR_CONNECTION_TEST_HOOKS
+  [[nodiscard]] bool AppendReadBytesForTest(std::string_view bytes, size_t& enqueued) {
+    return AppendReadBytes(bytes.data(), bytes.size(), enqueued);
+  }
+
+  [[nodiscard]] size_t ReadBufferSizeForTest() const { return read_buf_.size(); }
+
+  [[nodiscard]] bool ShouldSendReadOverflowErrorForTest() { return ShouldSendReadOverflowError(); }
+#endif
+
   /**
    * @brief Enqueue a response for non-blocking send on this connection.
    *
@@ -246,6 +257,9 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   bool EnqueueResponse(std::string response);
 
  private:
+  bool AppendReadBytes(const char* data, size_t len, size_t& enqueued);
+  bool ShouldSendReadOverflowError();
+
   /**
    * @brief Attempt to submit a drain task to the thread pool.
    *

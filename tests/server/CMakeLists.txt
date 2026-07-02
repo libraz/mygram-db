@@ -295,6 +295,7 @@ target_link_libraries(http_server_test
 )
 
 target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+target_compile_definitions(http_server_test PRIVATE MYGRAMDB_HTTP_TEST_HOOKS)
 
 gtest_discover_tests(http_server_test
   DISCOVERY_MODE POST_BUILD
@@ -906,6 +907,8 @@ target_link_libraries(reactor_connection_test
   mygramdb_server
   GTest::gtest_main
 )
+
+target_compile_definitions(reactor_connection_test PRIVATE MYGRAMDB_REACTOR_CONNECTION_TEST_HOOKS)
 
 gtest_discover_tests(reactor_connection_test
   DISCOVERY_MODE POST_BUILD

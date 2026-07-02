@@ -52,8 +52,8 @@ class RateLimiter;
 // Default constants
 constexpr uint16_t kDefaultPort = static_cast<uint16_t>(config::defaults::kTcpPort);  // MygramDB TCP port
 constexpr int kDefaultMaxConnections = 10000;                                         // Maximum concurrent connections
-constexpr int kDefaultRecvBufferSize = 4096;                                          // Receive buffer size
-constexpr int kDefaultSendBufferSize = 65536;                                         // Send buffer size
+constexpr int kDefaultRecvBufferSize = 0;      // 0 = let the kernel size/autotune SO_RCVBUF (do not pin the window)
+constexpr int kDefaultSendBufferSize = 65536;  // Send buffer size (0 = kernel default/autotune)
 
 /**
  * @brief TCP server configuration
