@@ -1777,3 +1777,47 @@ TEST(DocumentStoreTest, AddDocumentWithNormalizedTextConsistency) {
   ASSERT_TRUE(status.has_value());
   EXPECT_EQ(std::get<int64_t>(*status), 1);
 }
+
+TEST(DocumentStoreTest, PrimaryKeyDocIdOrderValidForMonotonicNumericKeys) {
+  DocumentStore store;
+
+  ASSERT_TRUE(store.AddDocument("1").has_value());
+  ASSERT_TRUE(store.AddDocument("2").has_value());
+  ASSERT_TRUE(store.AddDocument("10").has_value());
+
+  EXPECT_TRUE(store.IsPrimaryKeyDocIdOrderValid());
+}
+
+TEST(DocumentStoreTest, PrimaryKeyDocIdOrderInvalidatedByNonNumericKey) {
+  DocumentStore store;
+
+  ASSERT_TRUE(store.AddDocument("1").has_value());
+  ASSERT_TRUE(store.AddDocument("pk2").has_value());
+
+  EXPECT_FALSE(store.IsPrimaryKeyDocIdOrderValid());
+}
+
+TEST(DocumentStoreTest, PrimaryKeyDocIdOrderInvalidatedByOutOfOrderNumericKey) {
+  DocumentStore store;
+
+  ASSERT_TRUE(store.AddDocument("10").has_value());
+  ASSERT_TRUE(store.AddDocument("2").has_value());
+
+  EXPECT_FALSE(store.IsPrimaryKeyDocIdOrderValid());
+}
+
+TEST(DocumentStoreTest, PrimaryKeyDocIdOrderInvalidatedByRemoveAndResetByClear) {
+  DocumentStore store;
+
+  auto doc_id = store.AddDocument("1");
+  ASSERT_TRUE(doc_id.has_value());
+  ASSERT_TRUE(store.AddDocument("2").has_value());
+
+  EXPECT_TRUE(store.RemoveDocument(*doc_id));
+  EXPECT_FALSE(store.IsPrimaryKeyDocIdOrderValid());
+
+  store.Clear();
+  EXPECT_TRUE(store.IsPrimaryKeyDocIdOrderValid());
+  ASSERT_TRUE(store.AddDocument("1").has_value());
+  EXPECT_TRUE(store.IsPrimaryKeyDocIdOrderValid());
+}

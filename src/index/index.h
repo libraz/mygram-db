@@ -320,6 +320,10 @@ class Index {
     return mygram::utils::NormalizeText(text, normalize_nfkc_, normalize_width_, normalize_lower_);
   }
 
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  [[nodiscard]] uint64_t LoadGenerationForTesting() const { return load_generation_.load(std::memory_order_acquire); }
+#endif
+
  private:
   friend struct mygramdb::storage::DumpLoadAccess;
 

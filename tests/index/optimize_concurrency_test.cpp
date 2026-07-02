@@ -183,6 +183,14 @@ TEST_F(OptimizeConcurrencyTest, OptimizationTimeout) {
   EXPECT_LT(duration, 30) << "Optimization should complete within 30 seconds";
 }
 
+TEST_F(OptimizeConcurrencyTest, ClearBumpsLoadGeneration) {
+  const uint64_t before = index_->LoadGenerationForTesting();
+
+  index_->Clear();
+
+  EXPECT_GT(index_->LoadGenerationForTesting(), before) << "Clear() must invalidate in-flight optimization snapshots";
+}
+
 /**
  * @brief Stress test: mixed operations during optimization
  */

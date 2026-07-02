@@ -7,6 +7,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -17,6 +19,24 @@
 namespace mygramdb::storage {
 
 using mygram::utils::ErrorCode;
+
+namespace {
+
+std::optional<uint64_t> ParseUnsignedPrimaryKey(std::string_view primary_key) {
+  if (primary_key.empty()) {
+    return std::nullopt;
+  }
+  uint64_t value = 0;
+  const char* begin = primary_key.data();
+  const char* end = begin + primary_key.size();
+  auto [ptr, ec] = std::from_chars(begin, end, value);
+  if (ec != std::errc{} || ptr != end) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+}  // namespace
 
 DocumentStore::DocumentStore() : filter_index_(std::make_shared<FilterIndex>()) {}
 
@@ -84,6 +104,8 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
   if (store_texts_.load(std::memory_order_relaxed) && !normalized_text.empty()) {
     doc_texts_[doc_id] = std::string(normalized_text);
   }
+
+  RecordPrimaryKeyForDocIdOrder(primary_key);
 
   mygram::utils::StructuredLog()
       .Event("document_added")
@@ -171,6 +193,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
       doc_texts_[doc_id] = doc.normalized_text;
     }
 
+    RecordPrimaryKeyForDocIdOrder(doc.primary_key);
     doc_ids.push_back(doc_id);
   }
 
@@ -245,6 +268,7 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
 
   // Remove normalized text
   doc_texts_.erase(doc_id);
+  primary_key_doc_id_order_valid_ = false;
 
   mygram::utils::StructuredLog()
       .Event("document_removed")
@@ -275,6 +299,8 @@ void DocumentStore::Clear() {
   filter_index_ = std::make_shared<FilterIndex>();
 
   next_doc_id_ = 1;
+  primary_key_doc_id_order_valid_ = true;
+  last_numeric_primary_key_.reset();
   mygram::utils::StructuredLog().Event("document_store_cleared").Info();
 }
 
@@ -293,6 +319,57 @@ void DocumentStore::ReplaceWithLoaded(DocumentStore& loaded) {
   doc_texts_ = std::move(loaded.doc_texts_);
   filter_index_ = std::move(loaded.filter_index_);
   next_doc_id_ = loaded.next_doc_id_;
+  primary_key_doc_id_order_valid_ = loaded.primary_key_doc_id_order_valid_;
+  last_numeric_primary_key_ = loaded.last_numeric_primary_key_;
+}
+
+bool DocumentStore::IsPrimaryKeyDocIdOrderValid() const {
+  std::shared_lock lock(mutex_);
+  return primary_key_doc_id_order_valid_;
+}
+
+void DocumentStore::RecordPrimaryKeyForDocIdOrder(std::string_view primary_key) {
+  if (!primary_key_doc_id_order_valid_) {
+    return;
+  }
+
+  auto numeric_primary_key = ParseUnsignedPrimaryKey(primary_key);
+  if (!numeric_primary_key.has_value()) {
+    primary_key_doc_id_order_valid_ = false;
+    last_numeric_primary_key_.reset();
+    return;
+  }
+
+  if (last_numeric_primary_key_.has_value() && *numeric_primary_key <= *last_numeric_primary_key_) {
+    primary_key_doc_id_order_valid_ = false;
+    last_numeric_primary_key_.reset();
+    return;
+  }
+
+  last_numeric_primary_key_ = *numeric_primary_key;
+}
+
+void DocumentStore::RecomputePrimaryKeyDocIdOrderLocked() {
+  primary_key_doc_id_order_valid_ = true;
+  last_numeric_primary_key_.reset();
+
+  std::vector<DocId> doc_ids;
+  doc_ids.reserve(doc_id_to_pk_.size());
+  for (const auto& [doc_id, unused_pk] : doc_id_to_pk_) {
+    doc_ids.push_back(doc_id);
+  }
+  std::sort(doc_ids.begin(), doc_ids.end());
+
+  for (DocId doc_id : doc_ids) {
+    auto it = doc_id_to_pk_.find(doc_id);
+    if (it == doc_id_to_pk_.end()) {
+      continue;
+    }
+    RecordPrimaryKeyForDocIdOrder(it->second);
+    if (!primary_key_doc_id_order_valid_) {
+      return;
+    }
+  }
 }
 
 void DocumentStore::Compact() {

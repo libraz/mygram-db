@@ -250,9 +250,9 @@ TEST_F(IndexGetTopNTest, BatchBlockSearchSmallDataset) {
   auto results = index_->SearchAnd({"te", "st"}, 100, true);
   // Falls back to standard path (min_size < 10000), limit applied with reverse
   EXPECT_EQ(results.size(), 100);
-  // Reverse takes last 100 elements (highest DocIDs: 4901-5000)
-  EXPECT_EQ(results[0], 4901);
-  EXPECT_EQ(results[99], 5000);
+  // Reverse returns highest DocIDs first
+  EXPECT_EQ(results[0], 5000);
+  EXPECT_EQ(results[99], 4901);
 }
 
 /**
@@ -284,16 +284,15 @@ TEST_F(IndexGetTopNTest, NoLimit) {
     index_->AddDocument(i, "test");
   }
 
-  // Search with limit=0 (return all)
-  // Note: limit=0 does not trigger optimization, returns natural order
+  // Search with limit=0 (return all) and reverse=true
   auto results = index_->SearchAnd({"te"}, 0, true);
 
   // Should return all 1000 documents
   EXPECT_EQ(results.size(), 1000);
 
-  // Should be in natural ascending order (optimization not triggered with limit=0)
-  EXPECT_EQ(results[0], 1);
-  EXPECT_EQ(results[999], 1000);
+  // Should still honor reverse order
+  EXPECT_EQ(results[0], 1000);
+  EXPECT_EQ(results[999], 1);
 }
 
 /**

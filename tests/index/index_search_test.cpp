@@ -624,12 +624,12 @@ TEST(IndexTest, SearchAndStandardPathLimitTruncation) {
     EXPECT_EQ(limited[i], static_cast<DocId>(i + 1));
   }
 
-  // With limit=10, reverse=true: should return last 10 (highest DocIDs)
+  // With limit=10, reverse=true: should return highest DocIDs first
   auto limited_rev = index.SearchAnd({"a", "b"}, 10, true);
   ASSERT_LE(limited_rev.size(), 10u);
   EXPECT_EQ(limited_rev.size(), 10u);
   for (size_t i = 0; i < limited_rev.size(); ++i) {
-    EXPECT_EQ(limited_rev[i], static_cast<DocId>(41 + i));
+    EXPECT_EQ(limited_rev[i], static_cast<DocId>(50 - i));
   }
 
   // With limit larger than result set: should return all

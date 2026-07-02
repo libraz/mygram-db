@@ -47,6 +47,9 @@ struct DumpLoadAccess {
       replacement.target_doc_store->doc_texts_ = std::move(replacement.loaded_doc_store->doc_texts_);
       replacement.target_doc_store->filter_index_ = std::move(replacement.loaded_doc_store->filter_index_);
       replacement.target_doc_store->next_doc_id_ = replacement.loaded_doc_store->next_doc_id_;
+      replacement.target_doc_store->primary_key_doc_id_order_valid_ =
+          replacement.loaded_doc_store->primary_key_doc_id_order_valid_;
+      replacement.target_doc_store->last_numeric_primary_key_ = replacement.loaded_doc_store->last_numeric_primary_key_;
     }
   }
 };

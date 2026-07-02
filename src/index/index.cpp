@@ -342,9 +342,12 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     if (reverse) {
       // Take the last `limit` elements (highest DocIDs)
       result.erase(result.begin(), result.begin() + static_cast<std::ptrdiff_t>(result.size() - limit));
+      std::reverse(result.begin(), result.end());
     } else {
       result.resize(limit);
     }
+  } else if (reverse) {
+    std::reverse(result.begin(), result.end());
   }
   return result;
 }
@@ -583,6 +586,7 @@ void Index::Clear() {
   // Acquire exclusive lock for modifying posting lists
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
   term_postings_.clear();
+  load_generation_.fetch_add(1, std::memory_order_acq_rel);
   mygram::utils::StructuredLog().Event("index_cleared").Info();
 }
 

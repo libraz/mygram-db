@@ -516,6 +516,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     doc_texts_ = std::move(new_doc_texts);
     filter_index_ = std::move(new_filter_index);
     next_doc_id_ = restored_next_id;
+    RecomputePrimaryKeyDocIdOrderLocked();
   }
 
   return {};

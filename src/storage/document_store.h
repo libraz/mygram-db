@@ -257,6 +257,17 @@ class DocumentStore {
   [[nodiscard]] bool HasFilterColumn(std::string_view filter_name) const;
 
   /**
+   * @brief Resolve a filter column name using case-insensitive matching
+   *
+   * Returns the stored column key when exactly one case-insensitive match exists.
+   * Exact matches are preferred. Ambiguous case-only duplicates return nullopt.
+   *
+   * @param filter_name Requested filter column name
+   * @return Stored filter column name if resolvable
+   */
+  [[nodiscard]] std::optional<std::string> ResolveFilterColumnName(std::string_view filter_name) const;
+
+  /**
    * @brief Get total document count (thread-safe)
    */
   [[nodiscard]] size_t Size() const {
@@ -303,6 +314,15 @@ class DocumentStore {
    * @return true if AddDocument stores normalized text
    */
   [[nodiscard]] bool IsStoreTextsEnabled() const { return store_texts_.load(std::memory_order_relaxed); }
+
+  /**
+   * @brief Whether primary-key order is known to match DocID allocation order.
+   *
+   * SEARCH Top-N can use Index DocID order as primary-key order only while this
+   * remains true. Non-numeric keys, out-of-order inserts, deletes, and loads
+   * that violate the invariant clear the flag.
+   */
+  [[nodiscard]] bool IsPrimaryKeyDocIdOrderValid() const;
 
   /**
    * @brief Set normalized text for a document (for n-gram verification)
@@ -435,6 +455,9 @@ class DocumentStore {
   // memory_order_release/acquire.
   std::atomic<bool> store_texts_{true};
 
+  bool primary_key_doc_id_order_valid_ = true;
+  std::optional<uint64_t> last_numeric_primary_key_;
+
   // Bitmap-based filter index for fast EQ/NE filter evaluation
   // Uses shared_ptr so readers can hold a lifetime-safe snapshot while Clear()
   // or LoadFrom() swaps in a new index. Per-document writes mutate the current
@@ -453,6 +476,9 @@ class DocumentStore {
   /// @param context Identifier for error messages (e.g., filepath or "stream")
   Expected<void, Error> DeserializeDocuments(std::istream& in, std::string* replication_gtid,
                                              const std::string& context);
+
+  void RecordPrimaryKeyForDocIdOrder(std::string_view primary_key);
+  void RecomputePrimaryKeyDocIdOrderLocked();
 };
 
 }  // namespace mygramdb::storage
