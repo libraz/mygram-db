@@ -276,7 +276,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
           .Field("path", path)
           .Field("trying", "yaml_first")
           .Debug();
-      auto yaml_result = LoadConfigYaml(path);
+      auto yaml_result = LoadYamlConfig(path, schema_path);
       if (yaml_result) {
         return yaml_result;
       }

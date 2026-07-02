@@ -326,6 +326,16 @@ TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
   EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 1);
 }
 
+TEST(ConfigTest, OmittedGlobalNgramSizeDefaultsToBigram) {
+  json config_json = {{"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  ASSERT_EQ(config_result->tables.size(), 1);
+  EXPECT_EQ(config_result->tables[0].ngram_size, 2);
+  EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 2);
+}
+
 TEST(ConfigTest, TableDatabaseDefaultsToMysqlDatabaseAndCanOverride) {
   json config_json = {
       {"mysql", {{"user", "root"}, {"database", "app_db"}}},
@@ -568,7 +578,7 @@ TEST(ConfigTest, MultiTableAutoInitialSnapshotRejectsLatestStartFrom) {
   EXPECT_FALSE(result);
   if (!result) {
     std::string error_msg = result.error().message();
-    EXPECT_TRUE(error_msg.find("multi-table auto_initial_snapshot requires start_from: snapshot") != std::string::npos)
+    EXPECT_TRUE(error_msg.find("auto_initial_snapshot requires start_from: snapshot") != std::string::npos)
         << error_msg;
     EXPECT_TRUE(error_msg.find("shared consistent snapshot GTID") != std::string::npos) << error_msg;
   }
@@ -600,8 +610,37 @@ TEST(ConfigTest, MultiTableAutoInitialSnapshotRejectsExplicitGtidStartFrom) {
   EXPECT_FALSE(result);
   if (!result) {
     std::string error_msg = result.error().message();
-    EXPECT_TRUE(error_msg.find("multi-table auto_initial_snapshot requires start_from: snapshot") != std::string::npos)
+    EXPECT_TRUE(error_msg.find("auto_initial_snapshot requires start_from: snapshot") != std::string::npos)
         << error_msg;
+  }
+}
+
+TEST(ConfigTest, SingleTableAutoInitialSnapshotRejectsLatestStartFrom) {
+  const auto path = TempConfigPath("single_table_latest_start_from.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  auto_initial_snapshot: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: latest\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    EXPECT_TRUE(error_msg.find("auto_initial_snapshot requires start_from: snapshot") != std::string::npos)
+        << error_msg;
+    EXPECT_TRUE(error_msg.find("shared consistent snapshot GTID") != std::string::npos) << error_msg;
   }
 }
 
@@ -882,6 +921,35 @@ TEST(ConfigTest, AutoDetectFormat) {
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   Config config = *config_result;
   EXPECT_EQ(config.mysql.user, "root");
+}
+
+TEST(ConfigTest, UnknownExtensionYamlFallbackHonorsCustomSchema) {
+  const auto config_path = TempConfigPath("config_custom_schema_ext");
+  std::ofstream yaml_file(config_path);
+  yaml_file << "mysql:\n";
+  yaml_file << "  host: forbidden-host\n";
+  yaml_file << "  user: root\n";
+  yaml_file << "  password: pass\n";
+  yaml_file << "  database: testdb\n";
+  yaml_file << "tables:\n";
+  yaml_file << "  - name: test\n";
+  yaml_file << "    text_source:\n";
+  yaml_file << "      column: text\n";
+  yaml_file.close();
+
+  const auto schema_path = TempConfigPath("custom_host_schema.json");
+  json schema = {
+      {"type", "object"},
+      {"properties",
+       {{"mysql", {{"type", "object"}, {"properties", {{"host", {{"type", "string"}, {"const", "allowed-host"}}}}}}}}}};
+  std::ofstream schema_file(schema_path);
+  schema_file << schema.dump(2);
+  schema_file.close();
+
+  auto result = LoadConfig(config_path, schema_path);
+
+  EXPECT_FALSE(result) << "Unknown-extension YAML fallback must apply the provided schema";
+  EXPECT_NE(result.error().message().find("schema"), std::string::npos);
 }
 
 /**
@@ -1543,6 +1611,52 @@ TEST(ConfigTest, ValidConfigReturnsExpectedValue) {
   EXPECT_EQ(config.tables[0].name, "test");
 
   std::remove("expected_value_test.yaml");
+}
+
+TEST(ConfigTest, RejectsEnumAndSetFilterTypes) {
+  {
+    std::ofstream f("enum_filter_test.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "    filters:\n";
+    f << "      - name: status\n";
+    f << "        type: enum\n";
+  }
+
+  auto enum_result = LoadConfig("enum_filter_test.yaml");
+  ASSERT_FALSE(enum_result);
+  EXPECT_FALSE(enum_result.error().message().empty());
+  std::remove("enum_filter_test.yaml");
+
+  {
+    std::ofstream f("set_required_filter_test.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "    required_filters:\n";
+    f << "      - name: flags\n";
+    f << "        type: set\n";
+    f << "        op: \"=\"\n";
+    f << "        value: active\n";
+  }
+
+  auto set_result = LoadConfig("set_required_filter_test.yaml");
+  ASSERT_FALSE(set_result);
+  EXPECT_FALSE(set_result.error().message().empty());
+  std::remove("set_required_filter_test.yaml");
 }
 
 /**

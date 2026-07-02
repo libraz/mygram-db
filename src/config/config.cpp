@@ -50,6 +50,42 @@ bool IsRequiredFilterValueKey(const std::string& key) {
   return key == "value";
 }
 
+bool IsSupportedFilterType(const std::string& type) {
+  static const std::set<std::string> kSupportedFilterTypes = {
+      "tinyint", "tinyint_unsigned", "smallint",  "smallint_unsigned",
+      "int",     "int_unsigned",     "mediumint", "mediumint_unsigned",
+      "bigint",  "bigint_unsigned",  "float",     "double",
+      "string",  "varchar",          "text",      "datetime",
+      "date",    "timestamp",        "time",      "boolean",
+  };
+  return kSupportedFilterTypes.find(type) != kSupportedFilterTypes.end();
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateFilterType(const std::string& type,
+                                                                       const std::string& context) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  if (type == "enum" || type == "set") {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    context + " type '" + type +
+                                        "' is not supported. ENUM/SET labels are not available from binlog row "
+                                        "events without extra metadata, so configuring them as filters would make "
+                                        "initial load and replication disagree."));
+  }
+
+  if (!IsSupportedFilterType(type)) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    context + " has unsupported type '" + type +
+                                        "'. Valid types: tinyint, tinyint_unsigned, smallint, smallint_unsigned, int, "
+                                        "int_unsigned, mediumint, mediumint_unsigned, bigint, bigint_unsigned, float, "
+                                        "double, string, varchar, text, datetime, date, timestamp, time, boolean"));
+  }
+
+  return {};
+}
+
 bool IsStrictIntegerLiteral(const std::string& value) {
   if (value.empty()) {
     return false;
@@ -392,6 +428,10 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
                                         "        value: 1"));
   }
   config.type = json_obj["type"].get<std::string>();
+  if (auto type_validation = ValidateFilterType(config.type, "Required filter '" + config.name + "'");
+      !type_validation) {
+    return MakeUnexpected(type_validation.error());
+  }
 
   if (json_obj.contains("op") || json_obj.contains("operator")) {
     // Support both "op" and "operator" as key names
@@ -466,7 +506,9 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
 /**
  * @brief Parse filter configuration from JSON
  */
-FilterConfig ParseFilterConfig(const json& json_obj) {
+mygram::utils::Expected<FilterConfig, mygram::utils::Error> ParseFilterConfig(const json& json_obj) {
+  using mygram::utils::MakeUnexpected;
+
   FilterConfig config;
 
   if (json_obj.contains("name")) {
@@ -474,6 +516,9 @@ FilterConfig ParseFilterConfig(const json& json_obj) {
   }
   if (json_obj.contains("type")) {
     config.type = json_obj["type"].get<std::string>();
+  }
+  if (auto type_validation = ValidateFilterType(config.type, "Filter '" + config.name + "'"); !type_validation) {
+    return MakeUnexpected(type_validation.error());
   }
   if (json_obj.contains("dict_compress")) {
     config.dict_compress = json_obj["dict_compress"].get<bool>();
@@ -582,7 +627,11 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
   // Parse filters (optional filters for search-time filtering)
   if (json_obj.contains("filters")) {
     for (const auto& filter_json : json_obj["filters"]) {
-      config.filters.push_back(ParseFilterConfig(filter_json));
+      auto filter_result = ParseFilterConfig(filter_json);
+      if (!filter_result) {
+        return MakeUnexpected(filter_result.error());
+      }
+      config.filters.push_back(*filter_result);
     }
   }
 
@@ -637,7 +686,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
   }
 
   // Parse global index config (legacy format)
-  int global_ngram_size = 1;  // default
+  int global_ngram_size = 2;  // default
   if (root.contains("index") && root["index"].contains("ngram_size")) {
     global_ngram_size = root["index"]["ngram_size"].get<int>();
   }
@@ -764,9 +813,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         }
       }
 
-      if (config.replication.auto_initial_snapshot && config.tables.size() > 1 && start != "snapshot") {
+      if (config.replication.auto_initial_snapshot && start != "snapshot") {
         std::stringstream err_msg;
-        err_msg << "Replication configuration error: multi-table auto_initial_snapshot requires start_from: snapshot\n";
+        err_msg << "Replication configuration error: auto_initial_snapshot requires start_from: snapshot\n";
         err_msg << "  start_from '" << start
                 << "' would ignore the shared consistent snapshot GTID and can skip binlog events.\n";
         err_msg << "  Use start_from: snapshot, or disable auto_initial_snapshot and run SYNC/DUMP LOAD explicitly.";
