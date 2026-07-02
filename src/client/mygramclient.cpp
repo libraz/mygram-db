@@ -894,7 +894,12 @@ class MygramClient::Impl {
     }
 
     std::ostringstream cmd;
-    cmd << "SEARCH " << table << " " << EscapeQueryString(raw_query);
+    // Send the boolean expression verbatim rather than as a quoted token. The
+    // server treats a quoted phrase that embeds AND/OR/NOT keywords as a literal
+    // phrase; passing the expression unquoted lets the server tokenize it and
+    // have its AST parser interpret the AND/OR/grouping operators. The query has
+    // already been validated as non-empty and free of control characters above.
+    cmd << "SEARCH " << table << " " << raw_query;
     if (highlight) {
       cmd << " HIGHLIGHT";
     }

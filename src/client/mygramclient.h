@@ -253,8 +253,9 @@ class MygramClient {
    * @brief Search using a pre-built QueryAST expression without decomposing it
    *
    * Use this with ConvertSearchExpression() output when boolean OR/grouping
-   * semantics must be preserved. The full expression is sent as one SEARCH
-   * text token so the server's AST parser can interpret it.
+   * semantics must be preserved. The expression is sent verbatim (unquoted) so
+   * the server tokenizes it and its AST parser can interpret the AND/OR/grouping
+   * operators; the caller is responsible for any quoting of literal phrases.
    */
   mygram::utils::Expected<SearchResponse, mygram::utils::Error> SearchRaw(const std::string& table,
                                                                           const std::string& raw_query,

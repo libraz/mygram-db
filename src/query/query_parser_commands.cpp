@@ -120,14 +120,27 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
   }
 
-  // Top-level OR is part of the boolean expression syntax handled by QueryASTParser.
-  // Preserve legacy AND/NOT clauses unless the expression contains top-level OR.
+  // Top-level OR and parenthesized operands are boolean expression syntax
+  // handled by QueryASTParser. Preserve legacy flat AND/NOT clauses unless the
+  // expression contains a top-level OR, or a top-level boolean operator whose
+  // operand is a parenthesis group (e.g. "alpha AND (xqz OR jkv)"). A group can
+  // never be a legacy clause term, so such an expression must be kept whole as
+  // search text for the AST parser instead of being split into clauses. A group
+  // that leads the expression with only simple trailing clauses (e.g.
+  // "(a OR b) AND c") stays on the legacy path so "c" remains an AND term.
   bool has_top_level_or = false;
+  bool has_grouped_operand = false;
   {
     int scan_paren_depth = 0;
+    bool seen_top_level_operator = false;
     for (size_t i = start_pos; i < tokens.size(); ++i) {
       const std::string upper = ToUpper(tokens[i]);
       auto [open, close] = detail::CountParensInToken(tokens[i]);
+      // A group that opens at the top level after a boolean operator is a
+      // grouped operand and requires whole-expression AST parsing.
+      if (scan_paren_depth == 0 && open > 0 && seen_top_level_operator) {
+        has_grouped_operand = true;
+      }
       scan_paren_depth += open - close;
       if (scan_paren_depth == 0 && IsNonExpressionClauseKeyword(upper)) {
         break;
@@ -139,8 +152,12 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
         has_top_level_or = true;
         break;
       }
+      if (scan_paren_depth == 0 && (upper == "AND" || upper == "NOT")) {
+        seen_top_level_operator = true;
+      }
     }
   }
+  const bool is_boolean_expression = has_top_level_or || has_grouped_operand;
 
   // Extract search text: consume tokens until we hit a command clause keyword.
   // Handle parentheses by tracking nesting level - but respect quoted strings.
@@ -159,7 +176,7 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
 
     // Check if this is a clause keyword (only when not inside parentheses).
     if (paren_depth == 0 &&
-        (IsNonExpressionClauseKeyword(upper_token) || (!has_top_level_or && IsClauseKeyword(upper_token)))) {
+        (IsNonExpressionClauseKeyword(upper_token) || (!is_boolean_expression && IsClauseKeyword(upper_token)))) {
       break;  // Stop consuming search text
     }
 
