@@ -340,6 +340,56 @@ TEST_F(BinlogFilterEvaluatorTest, NullValueWithRegularOperatorReturnsFalse) {
   EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(null_value, filter));
 }
 
+TEST_F(BinlogFilterEvaluatorTest, ExtractedExplicitNullMatchesRequiredIsNull) {
+  RowData row_data;
+  row_data.null_columns.insert("deleted_at");
+  TableConfig config = MakeTableConfig({MakeFilter("deleted_at", "datetime", "IS NULL", "")});
+
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, config);
+
+  ASSERT_TRUE(filters.contains("deleted_at"));
+  ASSERT_TRUE(std::holds_alternative<std::monostate>(filters.at("deleted_at")));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, ExtractedAbsentColumnDoesNotMatchRequiredIsNull) {
+  RowData row_data;
+  TableConfig config = MakeTableConfig({MakeFilter("deleted_at", "datetime", "IS NULL", "")});
+
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, config);
+
+  EXPECT_FALSE(filters.contains("deleted_at"));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, ExtractedBooleanRoundTripsThroughRequiredEvaluation) {
+  RowData row_data;
+  row_data.columns["enabled"] = "1";
+  TableConfig true_config = MakeTableConfig({MakeFilter("enabled", "boolean", "=", "true")});
+
+  auto true_filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, true_config);
+  ASSERT_TRUE(true_filters.contains("enabled"));
+  ASSERT_TRUE(std::holds_alternative<bool>(true_filters.at("enabled")));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(true_filters, true_config));
+
+  row_data.columns["enabled"] = "0";
+  TableConfig false_config = MakeTableConfig({MakeFilter("enabled", "boolean", "=", "0")});
+  auto false_filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, false_config);
+  ASSERT_TRUE(false_filters.contains("enabled"));
+  EXPECT_FALSE(std::get<bool>(false_filters.at("enabled")));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(false_filters, false_config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(false_filters, true_config));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, BooleanSupportsEqualityAndInequalityLiterals) {
+  const FilterValue true_value = true;
+  const FilterValue false_value = false;
+
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(true_value, MakeFilter("enabled", "boolean", "=", "1")));
+  EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(false_value, MakeFilter("enabled", "boolean", "!=", "true")));
+  EXPECT_FALSE(BinlogFilterEvaluator::CompareFilterValue(true_value, MakeFilter("enabled", "boolean", "=", "yes")));
+}
+
 // ===========================================================================
 // TIME value tests
 // ===========================================================================

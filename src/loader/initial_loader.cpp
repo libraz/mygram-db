@@ -23,13 +23,12 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstring>
 #include <sstream>
 #include <unordered_set>
 #include <vector>
 
+#include "mysql/rows_parser.h"
 #include "utils/datetime_converter.h"
-#include "utils/numeric_parse.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -222,13 +221,6 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   // Build field-name-to-index map once to avoid O(N) FindFieldIndex per column per row
   FieldIndexMap field_map = BuildFieldIndexMap(fields, num_fields);
 
-  // Pre-create DateTimeProcessor once to avoid per-row creation for TIME columns
-  const mygram::utils::DateTimeProcessor* time_processor = nullptr;
-  auto time_processor_result = mysql_config_.CreateDateTimeProcessor();
-  if (time_processor_result) {
-    time_processor = &(*time_processor_result);
-  }
-
   // Get total row count (approximate from result)
   uint64_t total_rows = mysql_num_rows(result_exp->get());
 
@@ -252,8 +244,21 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   index_batch.reserve(batch_size);
 
   while ((row = mysql_fetch_row(result_exp->get())) != nullptr && !cancelled_) {
+    const unsigned long* lengths = mysql_fetch_lengths(result_exp->get());
+    if (lengths == nullptr) {
+      const std::string error_msg = "mysql_fetch_lengths failed while reading initial snapshot";
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "row_lengths_unavailable")
+          .Field("table", table_config_.name)
+          .Error();
+      rollback_if_managed();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    }
+
     // Extract primary key (using pre-built field index map for O(1) lookup)
-    std::string primary_key = ExtractPrimaryKey(row, field_map);
+    std::string primary_key = ExtractPrimaryKey(row, lengths, field_map);
     if (primary_key.empty()) {
       std::string error_msg = "Failed to extract primary key";
       mygram::utils::StructuredLog()
@@ -269,21 +274,25 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     }
 
     // Extract text (using pre-built field index map for O(1) lookup)
-    std::string text = ExtractText(row, fields, field_map);
-    if (text.empty()) {
+    auto materialized_text = ExtractText(row, lengths, fields, field_map);
+    if (!materialized_text.IsAvailable()) {
+      const std::string error_msg = "Configured text source column is absent from initial snapshot row";
       mygram::utils::StructuredLog()
-          .Event("initial_load_skip")
-          .Field("reason", "empty_text")
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "text_source_absent")
           .Field("primary_key", primary_key)
-          .Debug();
-      continue;
+          .Error();
+      rollback_if_managed();
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
+    std::string text = std::move(materialized_text.value);
 
     // Normalize text
     std::string normalized_text = index_.NormalizeText(text);
 
     // Extract filters (using pre-built field index map for O(1) lookup)
-    auto filters = ExtractFilters(row, fields, field_map, time_processor);
+    auto filters = ExtractFilters(row, lengths, field_map);
 
     // Add to batch
     doc_batch.push_back({primary_key, filters, normalized_text});
@@ -584,8 +593,24 @@ std::string InitialLoader::BuildSelectQuery() const {
                  filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
         };
 
-        // Quote string values with escaping
-        if (requires_quoting()) {
+        // The connection renders TIMESTAMP in UTC. Interpret the configured
+        // literal in mysql.datetime_timezone, then compare using the same UTC
+        // epoch that row-based binlog decoding produces.
+        if (filter.type == "timestamp") {
+          auto epoch = mygram::utils::ParseDatetimeValue(filter.value, mysql_config_.datetime_timezone);
+          if (!epoch.has_value()) {
+            mygram::utils::StructuredLog()
+                .Event("loader_error")
+                .Field("operation", "build_select_query")
+                .Field("type", "invalid_timestamp_filter_value")
+                .Field("filter_name", filter.name)
+                .Field("value", filter.value)
+                .Field("timezone", mysql_config_.datetime_timezone)
+                .Error();
+            return "";
+          }
+          query << "FROM_UNIXTIME(" << *epoch << ")";
+        } else if (requires_quoting()) {
           query << "'" << escape_sql_value(filter.value) << "'";
         } else {
           // Validate numeric values to prevent SQL injection
@@ -636,221 +661,84 @@ InitialLoader::FieldIndexMap InitialLoader::BuildFieldIndexMap(MYSQL_FIELD* fiel
   return field_map;
 }
 
-std::string InitialLoader::ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map) const {
+mysql::MaterializedText InitialLoader::ExtractText(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
+                                                   const FieldIndexMap& field_map) const {
+  mysql::RowData source_row;
+  const auto add_source_column = [&](const std::string& column) -> bool {
+    auto it = field_map.find(column);
+    if (it == field_map.end()) {
+      return false;
+    }
+    const int idx = it->second;
+    if (!IsTextColumn(fields[idx].type)) {
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "extract_text")
+          .Field("type", "invalid_column_type")
+          .Field("column", column)
+          .Field("expected", "VARCHAR/TEXT")
+          .Field("actual_type_id", static_cast<uint64_t>(fields[idx].type))
+          .Error();
+      return false;
+    }
+    if (row[idx] == nullptr) {
+      source_row.columns[column] = "";
+      source_row.null_columns.insert(column);
+    } else {
+      source_row.columns[column] = std::string(row[idx], lengths[idx]);
+    }
+    return true;
+  };
+
   if (!table_config_.text_source.column.empty()) {
-    // Single column
-    auto it = field_map.find(table_config_.text_source.column);
-    if (it != field_map.end()) {
-      int idx = it->second;
-      // Validate column type
-      if (!IsTextColumn(fields[idx].type)) {
-        mygram::utils::StructuredLog()
-            .Event("loader_error")
-            .Field("operation", "extract_text")
-            .Field("type", "invalid_column_type")
-            .Field("column", table_config_.text_source.column)
-            .Field("expected", "VARCHAR/TEXT")
-            .Field("actual_type_id", static_cast<uint64_t>(fields[idx].type))
-            .Error();
-        return "";
-      }
-      if (row[idx] != nullptr) {
-        return {row[idx]};
-      }
+    if (!add_source_column(table_config_.text_source.column)) {
+      return {};
     }
   } else {
-    // Concatenate columns
-    size_t total_estimate = 0;
-    for (const auto& col : table_config_.text_source.concat) {
-      auto it = field_map.find(col);
-      if (it != field_map.end() && row[it->second] != nullptr) {
-        total_estimate += std::strlen(row[it->second]) + table_config_.text_source.delimiter.size();
+    for (const auto& column : table_config_.text_source.concat) {
+      if (!add_source_column(column)) {
+        return {};
       }
     }
-    std::string text;
-    text.reserve(total_estimate);
-
-    for (const auto& col : table_config_.text_source.concat) {
-      auto it = field_map.find(col);
-      if (it != field_map.end()) {
-        int idx = it->second;
-        if (!IsTextColumn(fields[idx].type)) {
-          mygram::utils::StructuredLog()
-              .Event("loader_error")
-              .Field("operation", "extract_text_concat")
-              .Field("type", "invalid_column_type")
-              .Field("column", col)
-              .Field("expected", "VARCHAR/TEXT")
-              .Field("actual_type_id", static_cast<uint64_t>(fields[idx].type))
-              .Error();
-          continue;
-        }
-        if (row[idx] != nullptr) {
-          if (!text.empty()) {
-            text += table_config_.text_source.delimiter;
-          }
-          text += row[idx];
-        }
-      }
-    }
-    return text;
   }
-
-  return "";
+  return mysql::MaterializeTextSource(source_row, table_config_.text_source);
 }
 
-std::string InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, const FieldIndexMap& field_map) const {
+std::string InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths,
+                                             const FieldIndexMap& field_map) const {
   auto it = field_map.find(table_config_.primary_key);
   if (it != field_map.end() && row[it->second] != nullptr) {
-    return {row[it->second]};
+    return {row[it->second], lengths[it->second]};
   }
   return "";
 }
 
-storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map,
-                                                 const mygram::utils::DateTimeProcessor* time_processor) const {
+storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, const unsigned long* lengths,
+                                                 const FieldIndexMap& field_map) const {
   storage::FilterMap filters;
 
-  for (const auto& filter_config : table_config_.filters) {
+  for (const auto& filter_config : config::BuildUnifiedFilterConfigs(table_config_)) {
     auto it = field_map.find(filter_config.name);
-    if (it == field_map.end() || row[it->second] == nullptr) {
+    if (it == field_map.end()) {
       continue;
     }
     int idx = it->second;
 
-    std::string value_str(row[idx]);
+    const bool is_null = row[idx] == nullptr;
+    std::string value_str = is_null ? std::string{} : std::string(row[idx], lengths[idx]);
     const std::string& type = filter_config.type;
 
-    // Helper lambda: parse numeric type and assign to filters, logging on failure
-    auto try_parse_numeric = [&](auto tag) {
-      using T = decltype(tag);
-      auto parsed = mygram::utils::ParseNumeric<T>(value_str);
-      if (parsed) {
-        filters[filter_config.name] = *parsed;
-      } else {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "extract_filters")
-            .Field("type", "filter_parse_failed")
-            .Field("filter_type", type)
-            .Field("field", filter_config.name)
-            .Field("value", value_str)
-            .Warn();
-      }
-    };
-
-    {
-      // Integer types
-      if (type == "tinyint") {
-        try_parse_numeric(int8_t{});
-      } else if (type == "tinyint_unsigned") {
-        try_parse_numeric(uint8_t{});
-      } else if (type == "smallint") {
-        try_parse_numeric(int16_t{});
-      } else if (type == "smallint_unsigned") {
-        try_parse_numeric(uint16_t{});
-      } else if (type == "int" || type == "mediumint") {
-        try_parse_numeric(int32_t{});
-      } else if (type == "int_unsigned" || type == "mediumint_unsigned") {
-        try_parse_numeric(uint32_t{});
-      } else if (type == "bigint") {
-        try_parse_numeric(int64_t{});
-      } else if (type == "bigint_unsigned") {
-        try_parse_numeric(uint64_t{});
-      }
-      // Float types
-      else if (type == "float" || type == "double") {
-        try_parse_numeric(double{});
-      }
-      // String types
-      else if (type == "string" || type == "varchar" || type == "text") {
-        filters[filter_config.name] = value_str;
-      }
-      // Boolean type
-      else if (type == "boolean") {
-        filters[filter_config.name] = (value_str == "1" || value_str == "true");
-      }
-      // Date/time types (convert to epoch seconds)
-      else if (type == "datetime" || type == "date") {
-        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
-        if (epoch_opt) {
-          filters[filter_config.name] = *epoch_opt;
-        } else {
-          mygram::utils::StructuredLog()
-              .Event("loader_warning")
-              .Field("operation", "extract_filters")
-              .Field("type", "datetime_conversion_failed")
-              .Field("value", value_str)
-              .Field("field", filter_config.name)
-              .Field("timezone", mysql_config_.datetime_timezone)
-              .Warn();
-        }
-      } else if (type == "timestamp") {
-        auto epoch_opt = mygram::utils::ParseDatetimeValue(value_str, mysql_config_.datetime_timezone);
-        if (epoch_opt) {
-          filters[filter_config.name] = *epoch_opt;
-        } else {
-          mygram::utils::StructuredLog()
-              .Event("loader_warning")
-              .Field("operation", "extract_filters")
-              .Field("type", "timestamp_conversion_failed")
-              .Field("value", value_str)
-              .Field("field", filter_config.name)
-              .Warn();
-        }
-      } else if (type == "time") {
-        // TIME: Convert to seconds since midnight using DateTimeProcessor.
-        // Use the caller-provided processor to avoid re-creating it per row.
-        if (time_processor != nullptr) {
-          auto seconds_result = time_processor->TimeToSeconds(value_str);
-          if (seconds_result) {
-            filters[filter_config.name] = storage::TimeValue{*seconds_result};
-          } else {
-            mygram::utils::StructuredLog()
-                .Event("loader_warning")
-                .Field("operation", "extract_filters")
-                .Field("type", "time_conversion_failed")
-                .Field("value", value_str)
-                .Field("field", filter_config.name)
-                .Field("error", seconds_result.error().message())
-                .Warn();
-          }
-        } else {
-          // Fallback: create processor on demand (should not happen in normal Load() path)
-          auto processor_result = mysql_config_.CreateDateTimeProcessor();
-          if (!processor_result) {
-            mygram::utils::StructuredLog()
-                .Event("loader_warning")
-                .Field("operation", "extract_filters")
-                .Field("type", "datetime_processor_creation_failed")
-                .Field("field", filter_config.name)
-                .Field("error", processor_result.error().message())
-                .Warn();
-          } else {
-            auto seconds_result = processor_result->TimeToSeconds(value_str);
-            if (seconds_result) {
-              filters[filter_config.name] = storage::TimeValue{*seconds_result};
-            } else {
-              mygram::utils::StructuredLog()
-                  .Event("loader_warning")
-                  .Field("operation", "extract_filters")
-                  .Field("type", "time_conversion_failed")
-                  .Field("value", value_str)
-                  .Field("field", filter_config.name)
-                  .Field("error", seconds_result.error().message())
-                  .Warn();
-            }
-          }
-        }
-      } else {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "extract_filters")
-            .Field("type", "unknown_filter_type")
-            .Field("filter_type", type)
-            .Field("field", filter_config.name)
-            .Warn();
-      }
+    auto converted = mysql::ConvertFilterValue(value_str, is_null, type, mysql_config_.datetime_timezone);
+    if (converted.has_value()) {
+      filters[filter_config.name] = std::move(*converted);
+    } else {
+      mygram::utils::StructuredLog()
+          .Event("loader_warning")
+          .Field("operation", "extract_filters")
+          .Field("type", "filter_conversion_failed")
+          .Field("filter_type", type)
+          .Field("field", filter_config.name)
+          .Warn();
     }
   }
 

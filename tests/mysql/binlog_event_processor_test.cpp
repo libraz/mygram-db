@@ -1062,6 +1062,41 @@ TEST_F(BinlogEventProcessorTest, UpdateFilterOnlyWithEmptyAfterTextKeepsDocument
   EXPECT_EQ(std::get<int32_t>(status_it->second), 2);
 }
 
+TEST_F(BinlogEventProcessorTest, PresentEmptyAfterTextRemovesOldPostingsAndUpdatesStoredText) {
+  BinlogEvent insert_event = BinlogEvent::CreateInsert("test_table", "pk-empty-update", "alpha beta");
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  auto doc_id = doc_store_->GetDocId("pk-empty-update");
+  ASSERT_TRUE(doc_id.has_value());
+  ASSERT_EQ(index_->SearchAnd({"al"}), (std::vector<storage::DocId>{*doc_id}));
+
+  BinlogEvent update_event = BinlogEvent::CreateUpdate("test_table", "pk-empty-update", "", "alpha beta");
+  update_event.text_state = TextValueState::kPresent;
+  update_event.old_text_state = TextValueState::kPresent;
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(update_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  EXPECT_TRUE(index_->SearchAnd({"al"}).empty());
+  EXPECT_EQ(doc_store_->GetDocId("pk-empty-update"), doc_id);
+  // DocumentStore uses absence in its sparse text map as the canonical empty
+  // representation; the document identity itself remains present.
+  EXPECT_FALSE(doc_store_->GetNormalizedText(*doc_id).has_value());
+}
+
+TEST_F(BinlogEventProcessorTest, EmptyTextInsertIsRetainedInDocumentStore) {
+  BinlogEvent insert_event = BinlogEvent::CreateInsert("test_table", "pk-empty-insert", "");
+  insert_event.text_state = TextValueState::kPresent;
+
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  auto doc_id = doc_store_->GetDocId("pk-empty-insert");
+  ASSERT_TRUE(doc_id.has_value());
+  EXPECT_EQ(doc_store_->Size(), 1);
+  EXPECT_TRUE(index_->SearchAnd({"al"}).empty());
+  EXPECT_FALSE(doc_store_->GetNormalizedText(*doc_id).has_value());
+}
+
 /**
  * @brief Test that cache_manager parameter defaults to nullptr (backwards compatibility)
  */

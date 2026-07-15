@@ -21,6 +21,7 @@
 #include "mysql/binlog_filter_evaluator.h"
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
+#include "mysql/text_materializer.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
 #include "utils/sql_utils.h"
@@ -84,7 +85,6 @@ struct RowsEventContext {
   // must match the registration key rather than the bare binlog table name.
   std::string table_key;
   std::string text_column;
-  bool use_concat = false;
 };
 
 struct QueryEventData {
@@ -186,7 +186,6 @@ std::optional<RowsEventContext> InitRowsEventContext(
     ctx.text_column = ctx.current_config->text_source.column;
   } else if (!ctx.current_config->text_source.concat.empty()) {
     ctx.text_column = ctx.current_config->text_source.concat[0];  // Use first for initial parse
-    ctx.use_concat = true;
   } else {
     ctx.text_column = "";
   }
@@ -194,47 +193,19 @@ std::optional<RowsEventContext> InitRowsEventContext(
   return ctx;
 }
 
-/**
- * @brief Concatenate text from multiple columns in a row
- *
- * @param row Row data containing columns
- * @param concat_columns List of column names to concatenate
- * @return Concatenated text with space separators
- */
-std::string ConcatenateTextColumns(const RowData& row, const std::vector<std::string>& concat_columns) {
-  std::string result;
-  size_t total_size = 0;
-  for (const auto& col_name : concat_columns) {
-    const std::string* value = row.FindColumnValue(col_name);
-    if (value != nullptr && !value->empty()) {
-      total_size += value->size() + 1;  // +1 for separator
-    }
+std::optional<MaterializedText> MaterializeRowText(const RowData& row, const RowsEventContext& ctx, const char* image) {
+  auto materialized = MaterializeTextSource(row, ctx.current_config->text_source);
+  if (materialized.state == TextValueState::kAbsent) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", "configured_text_column_absent")
+        .Field("table", ctx.table_key)
+        .Field("image", image)
+        .Field("required", "binlog_row_image=FULL")
+        .Error();
+    return std::nullopt;
   }
-  result.reserve(total_size);
-  for (const auto& col_name : concat_columns) {
-    const std::string* value = row.FindColumnValue(col_name);
-    if (value != nullptr && !value->empty()) {
-      if (!result.empty()) {
-        result += " ";  // Space separator between columns
-      }
-      result += *value;
-    }
-  }
-  return result;
-}
-
-/**
- * @brief Get text value from row, handling concat mode
- *
- * @param row Row data
- * @param ctx Rows event context
- * @return Text value (concatenated if use_concat is true)
- */
-inline std::string GetRowText(const RowData& row, const RowsEventContext& ctx) {
-  if (ctx.use_concat && !ctx.current_config->text_source.concat.empty()) {
-    return ConcatenateTextColumns(row, ctx.current_config->text_source.concat);
-  }
-  return row.text;
+  return materialized;
 }
 
 /**
@@ -327,11 +298,16 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       events.reserve(rows_result->size());
 
       for (const auto& row : *rows_result) {
+        auto materialized_text = MaterializeRowText(row, ctx, "after");
+        if (!materialized_text.has_value()) {
+          return {};
+        }
         BinlogEvent event;
         event.type = BinlogEventType::INSERT;
         event.table_name = ctx.table_key;
         event.primary_key = row.primary_key;
-        event.text = GetRowText(row, ctx);
+        event.text = std::move(materialized_text->value);
+        event.text_state = materialized_text->state;
         event.gtid = current_gtid;
 
         // Extract all filters (required + optional) from row data
@@ -380,13 +356,21 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         const auto& before_row = row_pair.first;  // Before image
         const auto& after_row = row_pair.second;  // After image
 
+        auto before_text = MaterializeRowText(before_row, ctx, "before");
+        auto after_text = MaterializeRowText(after_row, ctx, "after");
+        if (!before_text.has_value() || !after_text.has_value()) {
+          return {};
+        }
+
         BinlogEvent event;
         event.type = BinlogEventType::UPDATE;
         event.table_name = ctx.table_key;
         event.primary_key = after_row.primary_key;
         event.old_primary_key = before_row.primary_key;
-        event.text = GetRowText(after_row, ctx);       // New text (after image)
-        event.old_text = GetRowText(before_row, ctx);  // Old text (before image) for index update
+        event.text = std::move(after_text->value);
+        event.old_text = std::move(before_text->value);
+        event.text_state = after_text->state;
+        event.old_text_state = before_text->state;
         event.gtid = current_gtid;
 
         // Extract all filters from after image
@@ -432,11 +416,16 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       events.reserve(rows_result->size());
 
       for (const auto& row : *rows_result) {
+        auto materialized_text = MaterializeRowText(row, ctx, "before");
+        if (!materialized_text.has_value()) {
+          return {};
+        }
         BinlogEvent event;
         event.type = BinlogEventType::DELETE;
         event.table_name = ctx.table_key;
         event.primary_key = row.primary_key;
-        event.text = GetRowText(row, ctx);
+        event.text = std::move(materialized_text->value);
+        event.text_state = materialized_text->state;
         event.gtid = current_gtid;
 
         // Extract all filters from row data (before image for DELETE)

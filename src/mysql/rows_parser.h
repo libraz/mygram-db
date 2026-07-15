@@ -9,6 +9,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -121,6 +122,11 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteR
  */
 storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs,
                                   const std::string& datetime_timezone = "+00:00");
+
+/** Convert one present MySQL column through the shared filter value contract. */
+std::optional<storage::FilterValue> ConvertFilterValue(std::string_view value, bool is_null,
+                                                       std::string_view filter_type,
+                                                       const std::string& datetime_timezone = "+00:00");
 
 }  // namespace mygramdb::mysql
 

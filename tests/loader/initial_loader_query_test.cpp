@@ -27,8 +27,11 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "loader/initial_loader.h"
+#include "mysql/binlog_filter_evaluator.h"
+#include "mysql/text_materializer.h"
 #include "mysql_test_helpers.h"
 #include "storage/document_store.h"
+#include "utils/datetime_converter.h"
 
 namespace mygramdb::loader {
 
@@ -831,6 +834,217 @@ TEST(InitialLoaderIntegrationTest, ExistingSnapshotErrorDoesNotRollbackCallerTra
   ASSERT_NE(row, nullptr);
   ASSERT_NE(row[0], nullptr);
   EXPECT_STREQ(row[0], "1");
+
+  cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, EmbeddedNulValuesAreLoadedWithoutTruncation) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection connection(connection_config);
+  auto connect_result = connection.Connect("initial-loader-embedded-nul-test");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+  auto gtid_mode_enabled = connection.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
+    GTEST_SKIP() << "MySQL GTID mode is required";
+  }
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_embedded_nul_" + suffix;
+  auto cleanup = [&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table); };
+  cleanup();
+
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + table +
+                                       " (id VARBINARY(32) PRIMARY KEY, content BLOB NOT NULL, "
+                                       "category VARBINARY(32)) ENGINE=InnoDB"));
+  ASSERT_TRUE(connection.ExecuteUpdate("INSERT INTO " + table +
+                                       " VALUES (X'6162006364', X'707265006e6565646c65', X'72656400626c7565'), "
+                                       "(X'6162006566', X'70726500737566666978', X'677265656e0079656c6c6f77')"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+  config::FilterConfig category;
+  category.name = "category";
+  category.type = "string";
+  table_config.filters.push_back(category);
+
+  index::Index index(1);
+  storage::DocumentStore store;
+  loader::InitialLoader loader(connection, index, store, table_config);
+  auto load_result = loader.Load();
+  ASSERT_TRUE(load_result) << load_result.error().message();
+
+  const std::string expected_pk("ab\0cd", 5);
+  const std::string expected_text("pre\0needle", 10);
+  const std::string expected_filter("red\0blue", 8);
+  auto doc_id = store.GetDocId(expected_pk);
+  ASSERT_TRUE(doc_id.has_value());
+  EXPECT_EQ(store.GetPrimaryKey(*doc_id), expected_pk);
+  EXPECT_EQ(store.GetNormalizedText(*doc_id), expected_text);
+  auto filter_value = store.GetFilterValue(*doc_id, "category");
+  ASSERT_TRUE(filter_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<std::string>(*filter_value));
+  EXPECT_EQ(std::get<std::string>(*filter_value), expected_filter);
+  EXPECT_EQ(index.SearchAnd({"n"}), (std::vector<storage::DocId>{*doc_id}));
+
+  const std::string second_pk("ab\0ef", 5);
+  const std::string second_text("pre\0suffix", 10);
+  const std::string second_filter("green\0yellow", 12);
+  auto second_doc_id = store.GetDocId(second_pk);
+  ASSERT_TRUE(second_doc_id.has_value());
+  EXPECT_NE(*second_doc_id, *doc_id);
+  EXPECT_EQ(store.GetPrimaryKey(*second_doc_id), second_pk);
+  EXPECT_EQ(store.GetNormalizedText(*second_doc_id), second_text);
+  auto second_filter_value = store.GetFilterValue(*second_doc_id, "category");
+  ASSERT_TRUE(second_filter_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<std::string>(*second_filter_value));
+  EXPECT_EQ(std::get<std::string>(*second_filter_value), second_filter);
+
+  cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, SessionTimezoneAndTimestampFilterUseOneEpochContract) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection loader_connection(connection_config);
+  auto loader_connect = loader_connection.Connect("initial-loader-timestamp-timezone-test");
+  if (!loader_connect) {
+    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
+  }
+  mysql::Connection writer_connection(connection_config);
+  auto writer_connect = writer_connection.Connect("initial-loader-timestamp-timezone-writer");
+  if (!writer_connect) {
+    GTEST_SKIP() << "MySQL writer connection failed: " << writer_connect.error().message();
+  }
+
+  auto timezone_result = loader_connection.Execute("SELECT @@session.time_zone");
+  ASSERT_TRUE(timezone_result) << timezone_result.error().message();
+  MYSQL_ROW timezone_row = mysql_fetch_row(timezone_result->get());
+  ASSERT_NE(timezone_row, nullptr);
+  ASSERT_NE(timezone_row[0], nullptr);
+  EXPECT_STREQ(timezone_row[0], "+00:00");
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_timestamp_tz_" + suffix;
+  auto cleanup = [&]() { (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table); };
+  cleanup();
+
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE " + table +
+                                              " (id VARCHAR(32) PRIMARY KEY, content TEXT NOT NULL, "
+                                              "published_at TIMESTAMP NULL) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("SET SESSION time_zone = '+09:00'"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table +
+                                              " VALUES ('1', 'timestamp boundary', '2026-01-01 00:30:00')"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+  config::RequiredFilterConfig published_filter;
+  published_filter.name = "published_at";
+  published_filter.type = "timestamp";
+  published_filter.op = "=";
+  published_filter.value = "2026-01-01 00:30:00";
+  table_config.required_filters.push_back(published_filter);
+
+  config::MysqlConfig mysql_config;
+  mysql_config.datetime_timezone = "+09:00";
+  index::Index index(1);
+  storage::DocumentStore store;
+  loader::InitialLoader loader(loader_connection, index, store, table_config, mysql_config);
+  auto load_result = loader.Load();
+  ASSERT_TRUE(load_result) << load_result.error().message();
+
+  auto expected_epoch = mygram::utils::ParseDatetimeValue(published_filter.value, mysql_config.datetime_timezone);
+  ASSERT_TRUE(expected_epoch.has_value());
+  auto doc_id = store.GetDocId("1");
+  ASSERT_TRUE(doc_id.has_value());
+  auto snapshot_value = store.GetFilterValue(*doc_id, "published_at");
+  ASSERT_TRUE(snapshot_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<uint64_t>(*snapshot_value));
+  EXPECT_EQ(std::get<uint64_t>(*snapshot_value), *expected_epoch);
+
+  mysql::RowData binlog_row;
+  binlog_row.primary_key = "1";
+  binlog_row.columns["published_at"] = std::to_string(*expected_epoch);
+  auto binlog_filters =
+      mysql::BinlogFilterEvaluator::ExtractAllFilters(binlog_row, table_config, mysql_config.datetime_timezone);
+  ASSERT_TRUE(binlog_filters.contains("published_at"));
+  EXPECT_EQ(binlog_filters.at("published_at"), *snapshot_value);
+  EXPECT_TRUE(mysql::BinlogFilterEvaluator::EvaluateRequiredFilters(binlog_filters, table_config,
+                                                                    mysql_config.datetime_timezone));
+
+  cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, ConcatDelimiterAndEmptyDocumentsMatchBinlogMaterializer) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection connection(connection_config);
+  auto connect_result = connection.Connect("initial-loader-text-materializer-test");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_text_materializer_" + suffix;
+  auto cleanup = [&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table); };
+  cleanup();
+
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + table +
+                                       " (id VARCHAR(32) PRIMARY KEY, title TEXT NULL, middle TEXT NULL, "
+                                       "body TEXT NULL) ENGINE=InnoDB"));
+  ASSERT_TRUE(
+      connection.ExecuteUpdate("INSERT INTO " + table + " VALUES ('1', 'alpha', '', 'beta'), ('2', '', NULL, '')"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.concat = {"title", "middle", "body"};
+  table_config.text_source.delimiter = "|";
+  table_config.ngram_size = 1;
+
+  index::Index index(1);
+  storage::DocumentStore store;
+  loader::InitialLoader loader(connection, index, store, table_config);
+  auto load_result = loader.Load();
+  ASSERT_TRUE(load_result) << load_result.error().message();
+
+  ASSERT_EQ(store.Size(), 2);
+  auto first_doc_id = store.GetDocId("1");
+  auto empty_doc_id = store.GetDocId("2");
+  ASSERT_TRUE(first_doc_id.has_value());
+  ASSERT_TRUE(empty_doc_id.has_value());
+  EXPECT_EQ(store.GetNormalizedText(*first_doc_id), std::optional<std::string>{"alpha|beta"});
+  // Empty normalized text is represented sparsely as no doc_texts_ entry,
+  // while the document itself remains addressable by primary key.
+  EXPECT_FALSE(store.GetNormalizedText(*empty_doc_id).has_value());
+
+  mysql::RowData binlog_row;
+  binlog_row.columns["title"] = "alpha";
+  binlog_row.columns["middle"] = "";
+  binlog_row.columns["body"] = "beta";
+  auto binlog_text = mysql::MaterializeTextSource(binlog_row, table_config.text_source);
+  EXPECT_EQ(binlog_text.state, mysql::TextValueState::kPresent);
+  EXPECT_EQ(binlog_text.value, store.GetNormalizedText(*first_doc_id));
 
   cleanup();
 }

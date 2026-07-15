@@ -226,6 +226,18 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         .Debug();
   }
 
+  // TIMESTAMP values are rendered according to @@session.time_zone. Pin every
+  // application connection to UTC so snapshot strings and binlog epochs share
+  // one representation regardless of the server/global timezone. DATETIME
+  // interpretation remains controlled by mysql.datetime_timezone.
+  if (mysql_query(mysql_, "SET SESSION time_zone = '+00:00'") != 0) {
+    const std::string error = GetMySQLErrorMessage();
+    mygram::utils::StructuredLog().Event("mysql_session_timezone_error").Field("error", error).Error();
+    Close();
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLConnectionFailed, "Failed to set MySQL session time_zone to UTC: " + error));
+  }
+
   // Set session timeout to prevent disconnection during long-running operations
   // (e.g., snapshot building which can take several minutes)
   // This only affects the current session and does not impact other MySQL connections

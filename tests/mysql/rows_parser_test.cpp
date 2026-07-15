@@ -15,6 +15,7 @@
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
 #include "mysql/table_metadata.h"
+#include "mysql/text_materializer.h"
 
 #ifdef USE_MYSQL
 
@@ -468,9 +469,10 @@ TEST_F(RowsParserTest, ExtractFiltersWithNullValues) {
 
   auto filters = ExtractFilters(row_data, filter_configs);
 
-  // NULL values should be skipped
-  EXPECT_EQ(filters.size(), 1);
-  EXPECT_TRUE(filters.find("status") == filters.end());
+  // Explicit NULL is a value state, distinct from a column absent from the row.
+  EXPECT_EQ(filters.size(), 2);
+  ASSERT_TRUE(filters.find("status") != filters.end());
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(filters["status"]));
   EXPECT_TRUE(filters.find("category") != filters.end());
   EXPECT_EQ(std::get<std::string>(filters["category"]), "tech");
 }
@@ -505,6 +507,76 @@ TEST_F(RowsParserTest, ExtractFiltersMissingColumn) {
   EXPECT_EQ(filters.size(), 1);
   EXPECT_TRUE(filters.find("status") != filters.end());
   EXPECT_TRUE(filters.find("missing_col") == filters.end());
+}
+
+TEST_F(RowsParserTest, ExtractFiltersDistinguishesAbsentFromExplicitNull) {
+  RowData row_data;
+  row_data.primary_key = "123";
+  row_data.null_columns.insert("explicit_null");
+
+  std::vector<mygramdb::config::FilterConfig> filter_configs;
+  filter_configs.push_back({"explicit_null", "string", false, false, ""});
+  filter_configs.push_back({"absent", "string", false, false, ""});
+
+  auto filters = ExtractFilters(row_data, filter_configs);
+
+  ASSERT_EQ(filters.size(), 1);
+  ASSERT_TRUE(filters.contains("explicit_null"));
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(filters.at("explicit_null")));
+  EXPECT_FALSE(filters.contains("absent"));
+}
+
+TEST_F(RowsParserTest, ConvertFilterValuePreservesEmbeddedNulAndParsesBoolean) {
+  const std::string binary("red\0blue", 8);
+  auto string_value = ConvertFilterValue(std::string_view(binary.data(), binary.size()), false, "string");
+  ASSERT_TRUE(string_value.has_value());
+  ASSERT_TRUE(std::holds_alternative<std::string>(*string_value));
+  EXPECT_EQ(std::get<std::string>(*string_value), binary);
+
+  auto true_value = ConvertFilterValue("TRUE", false, "boolean");
+  auto false_value = ConvertFilterValue("0", false, "boolean");
+  ASSERT_TRUE(true_value.has_value());
+  ASSERT_TRUE(false_value.has_value());
+  EXPECT_EQ(std::get<bool>(*true_value), true);
+  EXPECT_EQ(std::get<bool>(*false_value), false);
+  EXPECT_FALSE(ConvertFilterValue("yes", false, "boolean").has_value());
+}
+
+TEST_F(RowsParserTest, TextMaterializerUsesConfiguredDelimiterAndSkipsEmptyContributors) {
+  RowData row_data;
+  row_data.columns["title"] = "alpha";
+  row_data.columns["middle"] = "";
+  row_data.columns["body"] = "beta";
+  mygramdb::config::TextSourceConfig source;
+  source.concat = {"title", "middle", "body"};
+  source.delimiter = "|";
+
+  auto materialized = MaterializeTextSource(row_data, source);
+
+  EXPECT_EQ(materialized.state, TextValueState::kPresent);
+  EXPECT_EQ(materialized.value, "alpha|beta");
+}
+
+TEST_F(RowsParserTest, TextMaterializerDistinguishesNullEmptyAndAbsent) {
+  mygramdb::config::TextSourceConfig source;
+  source.column = "content";
+
+  RowData null_row;
+  null_row.null_columns.insert("content");
+  auto null_text = MaterializeTextSource(null_row, source);
+  EXPECT_EQ(null_text.state, TextValueState::kNull);
+  EXPECT_TRUE(null_text.value.empty());
+
+  RowData empty_row;
+  empty_row.columns["content"] = "";
+  auto empty_text = MaterializeTextSource(empty_row, source);
+  EXPECT_EQ(empty_text.state, TextValueState::kPresent);
+  EXPECT_TRUE(empty_text.value.empty());
+
+  RowData absent_row;
+  auto absent_text = MaterializeTextSource(absent_row, source);
+  EXPECT_EQ(absent_text.state, TextValueState::kAbsent);
+  EXPECT_FALSE(absent_text.IsAvailable());
 }
 
 TEST_F(RowsParserTest, ExtractFiltersInvalidTypeConversion) {

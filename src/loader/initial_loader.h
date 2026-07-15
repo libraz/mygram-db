@@ -15,6 +15,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "mysql/connection.h"
+#include "mysql/text_materializer.h"
 #include "storage/document_store.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -157,20 +158,18 @@ class InitialLoader {
   /**
    * @brief Extract text from row using pre-built field index map
    */
-  std::string ExtractText(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map) const;
+  mysql::MaterializedText ExtractText(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
+                                      const FieldIndexMap& field_map) const;
 
   /**
    * @brief Extract primary key from row using pre-built field index map
    */
-  std::string ExtractPrimaryKey(MYSQL_ROW row, const FieldIndexMap& field_map) const;
+  std::string ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths, const FieldIndexMap& field_map) const;
 
   /**
    * @brief Extract filter values from row using pre-built field index map
-   * @param time_processor Optional pre-created DateTimeProcessor for TIME column conversion.
-   *                       When non-null, avoids re-creating the processor per row.
    */
-  storage::FilterMap ExtractFilters(MYSQL_ROW row, MYSQL_FIELD* fields, const FieldIndexMap& field_map,
-                                    const mygram::utils::DateTimeProcessor* time_processor = nullptr) const;
+  storage::FilterMap ExtractFilters(MYSQL_ROW row, const unsigned long* lengths, const FieldIndexMap& field_map) const;
 };
 
 }  // namespace mygramdb::loader

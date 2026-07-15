@@ -17,6 +17,7 @@
 #include "utils/comparison_utils.h"
 #include "utils/constants.h"
 #include "utils/datetime_converter.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -192,6 +193,29 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     // Perform comparison
     return mygram::utils::CompareValues(val.seconds, target, filter.op);
 
+  } else if (std::holds_alternative<bool>(value)) {
+    const std::string target_text = mygram::utils::ToLower(filter.value);
+    bool target = false;
+    if (target_text == "1" || target_text == "true") {
+      target = true;
+    } else if (target_text == "0" || target_text == "false") {
+      target = false;
+    } else {
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_boolean_filter")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
+      return false;
+    }
+    if (filter.op == "=") {
+      return std::get<bool>(value) == target;
+    }
+    if (filter.op == "!=") {
+      return std::get<bool>(value) != target;
+    }
+    return false;
   } else if (std::holds_alternative<int32_t>(value) || std::holds_alternative<uint32_t>(value) ||
              std::holds_alternative<int16_t>(value) || std::holds_alternative<uint16_t>(value) ||
              std::holds_alternative<int8_t>(value) || std::holds_alternative<uint8_t>(value)) {
@@ -241,20 +265,7 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
 storage::FilterMap BinlogFilterEvaluator::ExtractAllFilters(const RowData& row_data,
                                                             const config::TableConfig& table_config,
                                                             const std::string& datetime_timezone) {
-  storage::FilterMap all_filters;
-
-  // Convert required_filters to FilterConfig format for extraction
-  auto required_as_filters = config::ToFilterConfigs(table_config.required_filters);
-
-  // Extract required_filters columns
-  auto required_filters = ExtractFilters(row_data, required_as_filters, datetime_timezone);
-  all_filters.insert(required_filters.begin(), required_filters.end());
-
-  // Extract optional filters columns
-  auto optional_filters = ExtractFilters(row_data, table_config.filters, datetime_timezone);
-  all_filters.insert(optional_filters.begin(), optional_filters.end());
-
-  return all_filters;
+  return ExtractFilters(row_data, config::BuildUnifiedFilterConfigs(table_config), datetime_timezone);
 }
 
 }  // namespace mygramdb::mysql
