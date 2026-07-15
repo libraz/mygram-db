@@ -10,15 +10,17 @@
 [![MySQL](https://img.shields.io/badge/MySQL-8.4--9.6-blue?logo=mysql)](https://dev.mysql.com/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
 
-In-memory full-text search engine with MySQL binlog replication. Sub-millisecond queries on million-row datasets.
+In-memory full-text search engine synchronized through MySQL/MariaDB binlog replication. Keep MySQL as the source of truth, route search traffic to MygramDB, and target sub-millisecond responses on million-row datasets.
 
 ## Why MygramDB?
 
-MySQL FULLTEXT scans B-tree pages on disk and struggles with common terms and concurrent load. MygramDB keeps a compressed n-gram index entirely in memory, syncing via GTID binlog replication.
+MySQL FULLTEXT is convenient, but latency can grow with common terms, CJK n-gram searches, and concurrent load. MygramDB keeps a compressed n-gram index entirely in memory and applies MySQL/MariaDB updates through GTID binlog replication.
+
+Applications continue writing to MySQL/MariaDB and send search queries to MygramDB. It acts as a specialized read replica for full-text search, so existing RDBMS deployments can add faster search without a large architectural change.
 
 ## Performance
 
-Benchmarked on 1.1M Wikipedia articles (EN + JA), MygramDB v1.5.0 vs MySQL 8.4 FULLTEXT with ngram parser:
+Benchmarked on 1.1M Wikipedia articles (EN + JA), comparing MygramDB v1.5.0 with MySQL 8.4 FULLTEXT using the ngram parser.
 
 | Query Type | MySQL | MygramDB | Speedup |
 |------------|-------|----------|---------|
@@ -27,17 +29,18 @@ Benchmarked on 1.1M Wikipedia articles (EN + JA), MygramDB v1.5.0 vs MySQL 8.4 F
 | **COUNT** | 416–1,797ms | 0.08ms | 5,500–21,600x |
 | **Concurrent** (4 connections) | 8 QPS | 11,766 QPS | 1,400x |
 
-- Sub-millisecond latency for most queries, no cache warmup needed
-- v1.5.0 `verify_text` eliminates n-gram false positives (exact match with MySQL results)
+- Sub-millisecond latency for most queries with no cache warmup required
+- v1.5.0 `verify_text` removes n-gram false positives and returns results consistent with MySQL
 - Reproducible: `make bench-up && make bench-run` ([details](https://mygramdb.libraz.net/docs/performance))
 
 ## Quick Start
 
-### Docker (Production Ready)
+### Docker (Minimal Production Setup)
 
-**Prerequisites:** Ensure MySQL has GTID mode enabled:
+MygramDB reads binlogs to keep indexes up to date, so the source MySQL/MariaDB server must use GTID and ROW-format binary logs. For MySQL, first confirm that GTID mode is enabled.
+
 ```sql
--- Check GTID mode (should be ON)
+-- Check GTID mode (must be ON)
 SHOW VARIABLES LIKE 'gtid_mode';
 
 -- If OFF, enable GTID mode (MySQL 8.0+ / 9.x)
@@ -47,7 +50,8 @@ SET GLOBAL gtid_mode = ON_PERMISSIVE;
 SET GLOBAL gtid_mode = ON;
 ```
 
-**Start MygramDB:**
+Start MygramDB with environment variables for the MySQL connection, indexed table, text column, and replication server_id.
+
 ```bash
 docker run -d --name mygramdb \
   -p 11016:11016 \
@@ -73,7 +77,8 @@ docker exec mygramdb mygram-cli -p 11016 SYNC articles
 docker exec mygramdb mygram-cli -p 11016 SEARCH articles "hello world"
 ```
 
-**Security Note:** `NETWORK_ALLOW_CIDRS=0.0.0.0/0` allows connections from any IP address. For production, restrict to specific IP ranges:
+**Security note:** `NETWORK_ALLOW_CIDRS=0.0.0.0/0` allows connections from any IP address. In production, restrict this to only the application servers or management networks that need access. An empty, omitted, or invalid `network.allow_cidrs` denies all TCP and non-probe HTTP access; only `/health/live` and `/health/ready` bypass this ACL.
+
 ```bash
 # Production example: Allow only from application servers
 -e NETWORK_ALLOW_CIDRS=10.0.0.0/8,172.16.0.0/12
@@ -95,7 +100,7 @@ docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
 docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "hello"
 ```
 
-Includes MySQL 8.4 with sample data for instant testing. Also tested with MySQL 9.4 and MariaDB 10.11/11.4.
+This setup includes MySQL 8.4 with sample data, so you can validate behavior locally. MygramDB is also tested with MySQL 9.4 and MariaDB 10.11/11.4.
 
 ## Basic Usage
 
@@ -132,21 +137,21 @@ See [Protocol Reference](https://mygramdb.libraz.net/docs/protocol) for all comm
 
 ## Features
 
-- **Fast**: Sub-millisecond search on million-row datasets
+- **Fast Search**: In-memory index designed for sub-millisecond search on million-row datasets
 - **BM25 Relevance**: `SORT _score` for TF-IDF based relevance ranking
-- **Highlighting**: `HIGHLIGHT` clause returns snippets with matched terms tagged
+- **Highlighting**: `HIGHLIGHT` returns snippets with matched terms tagged
 - **Fuzzy Search**: `FUZZY` clause for Levenshtein edit distance matching
 - **Synonyms**: Automatic query expansion from TSV synonym dictionaries
 - **Faceted Search**: `FACET` command aggregates filter column values with counts
 - **MySQL/MariaDB Replication**: Real-time GTID-based binlog streaming (MySQL 8.4+, MariaDB 10.6+)
-- **Runtime Variables**: MySQL-style SET/SHOW VARIABLES for zero-downtime config changes
-- **MySQL Failover**: Switch MySQL servers at runtime with GTID position preservation
+- **Runtime Variables**: MySQL-style `SET` / `SHOW VARIABLES` commands for changing selected settings without downtime
+- **MySQL Failover**: Switch MySQL servers at runtime while preserving GTID position
 - **Multiple Tables**: Index multiple tables in one instance
-- **Dual Protocol**: TCP (memcached-style) for query and operations, HTTP/REST API for query/status surfaces
-- **High Concurrency**: Thread pool supporting 10,000+ connections
+- **Dual Protocol**: TCP (memcached-style) for search and operational commands, HTTP/REST API for search and status checks
+- **High Concurrency**: Thread pool built to handle 10,000+ concurrent connections
 - **Unicode**: ICU-based normalization for CJK/multilingual text
 - **Compression**: Hybrid Delta encoding + Roaring bitmaps
-- **Easy Deploy**: Single binary or Docker container
+- **Easy Deploy**: Run as a single binary or Docker container
 
 ## Architecture
 
@@ -160,20 +165,20 @@ graph LR
     App -->|Write| MySQL
 ```
 
-MygramDB acts as a specialized read replica for full-text search, while MySQL handles writes and normal queries.
+MygramDB acts as a specialized read replica for full-text search. MySQL/MariaDB remains the source of truth and continues handling writes and normal SQL queries.
 
 ## When to Use MygramDB
 
 ✅ **Good fit:**
-- Search-heavy workloads (read >> write)
-- Millions of documents with full-text search
+- Search-heavy workloads where reads greatly outnumber writes
+- Millions of documents that need full-text search
 - Need sub-100ms search latency
 - Simple deployment requirements
-- Japanese/CJK text with ngrams
+- Japanese/CJK text searched with n-grams
 
 ❌ **Not recommended:**
 - Write-heavy workloads
-- Dataset doesn't fit in RAM (~1-2GB per million docs)
+- Dataset does not fit in RAM (roughly 1-2GB per million docs)
 - Need distributed search across nodes
 - Complex aggregations/analytics
 
@@ -183,7 +188,7 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 
 - **[CHANGELOG](CHANGELOG.md)** - Version history and release notes
 - [Docker Deployment Guide](https://mygramdb.libraz.net/docs/docker-deployment) - Production Docker setup
-- [Configuration Guide](https://mygramdb.libraz.net/docs/configuration) - All configuration options
+- [Configuration Guide](https://mygramdb.libraz.net/docs/configuration) - Configuration options and explanations
 - [Protocol Reference](https://mygramdb.libraz.net/docs/protocol) - Complete command reference
 - [HTTP API Reference](https://mygramdb.libraz.net/docs/http-api) - REST API documentation
 - [Performance Guide](https://mygramdb.libraz.net/docs/performance) - Benchmarks and optimization
@@ -193,9 +198,7 @@ MygramDB acts as a specialized read replica for full-text search, while MySQL ha
 - [Development Guide](https://mygramdb.libraz.net/docs/development) - Contributing guidelines
 - [Client Library](https://mygramdb.libraz.net/docs/client-library) - C/C++ client library
 
-HTTP currently exposes search, document lookup, health, metrics, and read-only status endpoints. Operational commands such
-as `SYNC`, `DUMP`, `CACHE`, `SET`, and replication control are intentionally served through the TCP protocol and
-`mygram-cli`; HTTP-only deployments must keep an internal TCP/CLI path for maintenance and bootstrap tasks.
+HTTP exposes search, document lookup, health checks, metrics, and read-only status endpoints. Operational commands such as `SYNC`, `DUMP`, `CACHE`, `SET`, and replication control are served through the TCP protocol and `mygram-cli`. Even when only the HTTP API is exposed externally, keep an internal TCP/CLI path for initial sync and maintenance tasks.
 
 ### Release Notes
 

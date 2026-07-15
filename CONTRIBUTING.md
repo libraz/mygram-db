@@ -1,6 +1,6 @@
 # Contributing to MygramDB
 
-Thank you for your interest in contributing to MygramDB! We welcome contributions from the community.
+Thank you for your interest in contributing to MygramDB. Contributions, bug reports, documentation fixes, and small reproducible test cases are welcome.
 
 ## How to Contribute
 
@@ -28,21 +28,21 @@ Thank you for your interest in contributing to MygramDB! We welcome contribution
 
 - **Tests**: Ensure all tests pass (`make test`)
 - **Description**: Clearly describe what your PR does and why
-- **One feature per PR**: Keep changes focused and atomic
+- **Scope**: Keep each PR focused on one feature, bug fix, or documentation improvement
 
 ## Code Quality
 
-**Only requirement: Tests must pass**
+**Required check: tests must pass**
 
 ```bash
-make test  # This is the only required check
+make test  # Required before opening a PR
 ```
 
-CI also runs formatting and linting checks, but these are **not blocking**:
+CI also runs formatting and linting checks. These are currently advisory:
 - **Formatting** (clang-format): Runs in CI, warnings only
 - **Linting** (clang-tidy): Runs in CI, warnings only
 
-If there are style issues, the maintainer will fix them. You don't need to worry about formatting or linting.
+If style issues appear, maintainers may adjust them during review. Passing tests and providing a clear change description are the main expectations.
 
 ## Development Setup
 
@@ -62,13 +62,13 @@ make test
 
 ## Reporting Issues
 
-- Check if the issue already exists
-- Provide clear reproduction steps
-- Include relevant logs and system information
+- Check whether the issue already exists
+- Provide clear reproduction steps or a minimal example
+- Include relevant logs, versions, configuration snippets, and system information
 
 ## Questions?
 
-Feel free to open an issue for questions or discussions.
+Open an issue for questions, design discussion, or usage problems that are not covered by the documentation.
 
 ## License
 
