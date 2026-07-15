@@ -269,16 +269,59 @@ TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 403);
 
-  // Health endpoints bypass CIDR restrictions (required for Docker HEALTHCHECK, load balancers)
+  // Legacy and detailed health endpoints expose more than the minimal probes
+  // and therefore remain behind the ACL.
   auto health_res = client.Get("/health");
   ASSERT_TRUE(health_res);
-  EXPECT_EQ(health_res->status, 200);
+  EXPECT_EQ(health_res->status, 403);
 
   auto live_res = client.Get("/health/live");
   ASSERT_TRUE(live_res);
   EXPECT_EQ(live_res->status, 200);
 
+  auto ready_res = client.Get("/health/ready");
+  ASSERT_TRUE(ready_res);
+  EXPECT_EQ(ready_res->status, 200);
+
+  auto detail_res = client.Get("/health/detail");
+  ASSERT_TRUE(detail_res);
+  EXPECT_EQ(detail_res->status, 403);
+
   restricted_server->Stop();
+}
+
+TEST_F(HttpServerTest, EmptyAndInvalidAclFailClosedForNonProbeEndpoints) {
+  for (const auto& cidrs : std::vector<std::vector<std::string>>{{}, {"not-a-cidr", "999.1.2.3/24"}}) {
+    uint16_t port = FindAvailableLoopbackPort();
+    ASSERT_GT(port, 0);
+
+    HttpServerConfig restricted_config;
+    restricted_config.bind = "127.0.0.1";
+    restricted_config.port = port;
+    restricted_config.allow_cidrs = cidrs;
+
+    auto restricted_server = std::make_unique<HttpServer>(restricted_config, table_contexts_, config_.get(), nullptr);
+    ASSERT_TRUE(restricted_server->Start());
+
+    httplib::Client client("http://127.0.0.1:" + std::to_string(port));
+    for (const auto* path : {"/info", "/metrics", "/health", "/health/detail"}) {
+      auto response = client.Get(path);
+      ASSERT_TRUE(response) << path;
+      EXPECT_EQ(response->status, 403) << path;
+    }
+
+    json search_body;
+    search_body["q"] = "hello";
+    auto search = client.Post("/tables/test/search", search_body.dump(), "application/json");
+    ASSERT_TRUE(search);
+    EXPECT_EQ(search->status, 403);
+
+    auto live = client.Get("/health/live");
+    ASSERT_TRUE(live);
+    EXPECT_EQ(live->status, 200);
+
+    restricted_server->Stop();
+  }
 }
 
 TEST_F(HttpServerTest, MultipleRequests) {

@@ -619,15 +619,15 @@ void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
     const std::string& client_ip = req.remote_addr.empty() ? "unknown" : req.remote_addr;
 
-    // Health check endpoints bypass CIDR and rate limit restrictions
-    // (required for Docker HEALTHCHECK, load balancers, and orchestrator probes)
-    if (req.path == "/health" || req.path == "/health/live" || req.path == "/health/ready" ||
-        req.path == "/health/detail") {
+    // Only minimal liveness/readiness probes bypass CIDR and rate limiting.
+    // /health/detail exposes operational data and must follow the same access
+    // controls as every other non-probe endpoint.
+    if (req.path == "/health/live" || req.path == "/health/ready") {
       return httplib::Server::HandlerResponse::Unhandled;
     }
 
     // Check CIDR-based access control first
-    if (!parsed_allow_cidrs_.empty() && !mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+    if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
       RecordRequest();
       mygram::utils::StructuredLog()
           .Event("http_request_rejected_acl")
