@@ -6,6 +6,7 @@
 #include "config/config.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <filesystem>
 #include <fstream>
@@ -20,10 +21,14 @@ using json = nlohmann::json;
 
 namespace {
 
+const std::filesystem::path& ConfigTestDirectory() {
+  static const auto dir = std::filesystem::temp_directory_path() / "mygramdb_config_test" / std::to_string(::getpid());
+  return dir;
+}
+
 std::string TempConfigPath(const std::string& filename) {
-  auto dir = std::filesystem::temp_directory_path() / "mygramdb_config_test";
-  std::filesystem::create_directories(dir);
-  return (dir / filename).string();
+  std::filesystem::create_directories(ConfigTestDirectory());
+  return (ConfigTestDirectory() / filename).string();
 }
 
 std::string SourcePath(const std::string& relative_path) {
@@ -33,6 +38,34 @@ std::string SourcePath(const std::string& relative_path) {
   return relative_path;
 #endif
 }
+
+class ConfigTestEnvironment : public ::testing::Environment {
+ public:
+  void SetUp() override {
+    original_directory_ = std::filesystem::current_path();
+
+    std::error_code error;
+    std::filesystem::remove_all(ConfigTestDirectory(), error);
+    ASSERT_FALSE(error) << error.message();
+    std::filesystem::create_directories(ConfigTestDirectory(), error);
+    ASSERT_FALSE(error) << error.message();
+    std::filesystem::current_path(ConfigTestDirectory(), error);
+    ASSERT_FALSE(error) << error.message();
+  }
+
+  void TearDown() override {
+    std::error_code error;
+    std::filesystem::current_path(original_directory_, error);
+    EXPECT_FALSE(error) << error.message();
+    std::filesystem::remove_all(ConfigTestDirectory(), error);
+    EXPECT_FALSE(error) << error.message();
+  }
+
+ private:
+  std::filesystem::path original_directory_;
+};
+
+[[maybe_unused]] auto* const kConfigTestEnvironment = ::testing::AddGlobalTestEnvironment(new ConfigTestEnvironment());
 
 }  // namespace
 
@@ -272,6 +305,8 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   f << "      file: synonyms.tsv\n";
   f << "dump:\n";
   f << "  default_filename: custom.dmp\n";
+  f << "  restore_memory_budget_mb: 8192\n";
+  f << "  restore_max_section_mb: 1024\n";
   f << "api:\n";
   f << "  http:\n";
   f << "    enable: true\n";
@@ -294,6 +329,8 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   EXPECT_TRUE(config.tables[0].synonyms.enable);
   EXPECT_EQ(config.tables[0].synonyms.file, "synonyms.tsv");
   EXPECT_EQ(config.dump.default_filename, "custom.dmp");
+  EXPECT_EQ(config.dump.restore_memory_budget_mb, 8192);
+  EXPECT_EQ(config.dump.restore_max_section_mb, 1024);
   EXPECT_TRUE(config.api.http.enable);
   EXPECT_EQ(config.api.http.max_body_bytes, 1048576);
   EXPECT_EQ(config.api.unix_socket.path, "/tmp/mygramdb-test.sock");
@@ -334,6 +371,18 @@ TEST(ConfigTest, OmittedGlobalNgramSizeDefaultsToBigram) {
   ASSERT_EQ(config_result->tables.size(), 1);
   EXPECT_EQ(config_result->tables[0].ngram_size, 2);
   EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 2);
+}
+
+TEST(ConfigTest, InvalidNetworkAllowCidrIsRejectedSemantically) {
+  json config_json = {
+      {"network", {{"allow_cidrs", json::array({"127.0.0.1/32", "999.0.0.1/24"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("network.allow_cidrs"), std::string::npos);
+  EXPECT_NE(config_result.error().message().find("999.0.0.1/24"), std::string::npos);
 }
 
 TEST(ConfigTest, TableDatabaseDefaultsToMysqlDatabaseAndCanOverride) {
@@ -1657,6 +1706,93 @@ TEST(ConfigTest, RejectsEnumAndSetFilterTypes) {
   ASSERT_FALSE(set_result);
   EXPECT_FALSE(set_result.error().message().empty());
   std::remove("set_required_filter_test.yaml");
+}
+
+TEST(ConfigTest, RejectsConflictingTypesForSameRequiredAndOptionalFilterColumn) {
+  {
+    std::ofstream f("conflicting_filter_types_test.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "    required_filters:\n";
+    f << "      - name: enabled\n";
+    f << "        type: boolean\n";
+    f << "        op: \"=\"\n";
+    f << "        value: true\n";
+    f << "    filters:\n";
+    f << "      - name: enabled\n";
+    f << "        type: string\n";
+  }
+
+  auto result = LoadConfig("conflicting_filter_types_test.yaml");
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("conflicting types"), std::string::npos);
+  std::remove("conflicting_filter_types_test.yaml");
+}
+
+TEST(ConfigTest, UnifiesSameTypeRequiredAndOptionalFilterColumn) {
+  {
+    std::ofstream f("unified_filter_column_test.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "    required_filters:\n";
+    f << "      - name: enabled\n";
+    f << "        type: boolean\n";
+    f << "        op: \"=\"\n";
+    f << "        value: true\n";
+    f << "    filters:\n";
+    f << "      - name: enabled\n";
+    f << "        type: boolean\n";
+    f << "        bitmap_index: true\n";
+  }
+
+  auto result = LoadConfig("unified_filter_column_test.yaml");
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_EQ(result->tables.size(), 1);
+  auto unified = BuildUnifiedFilterConfigs(result->tables.front());
+  ASSERT_EQ(unified.size(), 1);
+  EXPECT_EQ(unified.front().name, "enabled");
+  EXPECT_EQ(unified.front().type, "boolean");
+  EXPECT_TRUE(unified.front().bitmap_index);
+  std::remove("unified_filter_column_test.yaml");
+}
+
+TEST(ConfigTest, RejectsOrderingOperatorForBooleanRequiredFilter) {
+  {
+    std::ofstream f("boolean_required_operator_test.yaml");
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "    required_filters:\n";
+    f << "      - name: enabled\n";
+    f << "        type: boolean\n";
+    f << "        op: \">\"\n";
+    f << "        value: false\n";
+  }
+
+  auto result = LoadConfig("boolean_required_operator_test.yaml");
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("supports only"), std::string::npos);
+  std::remove("boolean_required_operator_test.yaml");
 }
 
 /**

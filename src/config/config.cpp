@@ -18,6 +18,7 @@
 #include "utils/constants.h"
 #include "utils/datetime_converter.h"
 #include "utils/memory_utils.h"
+#include "utils/network_utils.h"
 #include "utils/numeric_parse.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -471,6 +472,13 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
     return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
   }
 
+  if (config.type == "boolean" && config.op != "=" && config.op != "!=" && config.op != "IS NULL" &&
+      config.op != "IS NOT NULL") {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Required boolean filter '" + config.name +
+                                                                        "' supports only =, !=, IS NULL, and IS NOT "
+                                                                        "NULL"));
+  }
+
   // Validate: IS NULL/IS NOT NULL should not have a value
   if ((config.op == "IS NULL" || config.op == "IS NOT NULL") && !config.value.empty()) {
     std::stringstream err_msg;
@@ -632,6 +640,29 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
         return MakeUnexpected(filter_result.error());
       }
       config.filters.push_back(*filter_result);
+    }
+  }
+
+  // A physical column has one value domain. Allowing required/optional
+  // declarations to assign different types makes snapshot and binlog paths
+  // materialize different std::variant alternatives for the same column.
+  std::unordered_map<std::string, std::string> filter_column_types;
+  for (const auto& required : config.required_filters) {
+    auto [it, inserted] = filter_column_types.emplace(required.name, required.type);
+    if (!inserted && it->second != required.type) {
+      return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Configuration error in table '" + config.name +
+                                                                          "': filter column '" + required.name +
+                                                                          "' has conflicting types '" + it->second +
+                                                                          "' and '" + required.type + "'"));
+    }
+  }
+  for (const auto& optional : config.filters) {
+    auto [it, inserted] = filter_column_types.emplace(optional.name, optional.type);
+    if (!inserted && it->second != optional.type) {
+      return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Configuration error in table '" + config.name +
+                                                                          "': filter column '" + optional.name +
+                                                                          "' has conflicting types '" + it->second +
+                                                                          "' and '" + optional.type + "'"));
     }
   }
 
@@ -881,6 +912,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
     if (dmp.contains("retain")) {
       config.dump.retain = dmp["retain"].get<int>();
     }
+    if (dmp.contains("restore_memory_budget_mb")) {
+      config.dump.restore_memory_budget_mb = dmp["restore_memory_budget_mb"].get<int>();
+    }
+    if (dmp.contains("restore_max_section_mb")) {
+      config.dump.restore_max_section_mb = dmp["restore_max_section_mb"].get<int>();
+    }
   }
 
   // Parse API config (both old "server" format and new "api" format)
@@ -1008,6 +1045,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
     const auto& net = root["network"];
     if (net.contains("allow_cidrs")) {
       config.network.allow_cidrs = net["allow_cidrs"].get<std::vector<std::string>>();
+      for (const auto& cidr : config.network.allow_cidrs) {
+        if (!mygram::utils::CIDR::Parse(cidr).has_value()) {
+          return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                          "network.allow_cidrs contains invalid IPv4 CIDR: '" + cidr + "'"));
+        }
+      }
     }
   }
 

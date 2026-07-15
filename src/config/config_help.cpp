@@ -173,6 +173,8 @@ nlohmann::json ConfigToJson(const Config& config) {
       {"default_filename", config.dump.default_filename},
       {"interval_sec", config.dump.interval_sec},
       {"retain", config.dump.retain},
+      {"restore_memory_budget_mb", config.dump.restore_memory_budget_mb},
+      {"restore_max_section_mb", config.dump.restore_max_section_mb},
   };
 
   // API configuration

@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "utils/constants.h"
@@ -130,7 +131,8 @@ struct FilterConfig {
                      //          "int", "int_unsigned", "bigint", "bigint_unsigned"
                      // Float: "float", "double"
                      // String: "string", "varchar", "text"
-                     // Date: "datetime", "date", "timestamp"
+                     // Date/time: "datetime", "date", "timestamp", "time"
+                     // Boolean: "boolean"
   bool dict_compress = false;
   bool bitmap_index = false;
   std::string bucket;  // For datetime: "minute", "hour", "day"
@@ -206,6 +208,34 @@ struct TableConfig {
   PostingConfig posting;
   SynonymConfig synonyms;
 };
+
+/**
+ * Build the single filter-column schema shared by snapshot loading and
+ * binlog extraction. Required-filter columns are included in stored metadata;
+ * an optional definition of the same (validated-compatible) column supplies
+ * its search-time options without creating a second value definition.
+ */
+inline std::vector<FilterConfig> BuildUnifiedFilterConfigs(const TableConfig& table) {
+  std::vector<FilterConfig> result;
+  result.reserve(table.required_filters.size() + table.filters.size());
+  std::unordered_map<std::string, size_t> column_indexes;
+
+  for (const auto& required : table.required_filters) {
+    auto [it, inserted] = column_indexes.emplace(required.name, result.size());
+    if (inserted) {
+      result.push_back(ToFilterConfig(required));
+    }
+  }
+  for (const auto& optional : table.filters) {
+    auto [it, inserted] = column_indexes.emplace(optional.name, result.size());
+    if (inserted) {
+      result.push_back(optional);
+    } else {
+      result[it->second] = optional;
+    }
+  }
+  return result;
+}
 
 inline std::string QualifiedTableName(const std::string& database, const std::string& table) {
   return database.empty() ? table : database + "." + table;
@@ -301,6 +331,8 @@ struct DumpConfig {
   std::string default_filename = defaults::kDumpDefaultFilename;
   int interval_sec = defaults::kDumpIntervalSec;
   int retain = 3;
+  int restore_memory_budget_mb = 4096;  ///< Maximum aggregate memory of staged V2 restore data
+  int restore_max_section_mb = 2048;    ///< Maximum encoded size of one V2 section
 };
 
 /**
