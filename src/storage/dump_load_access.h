@@ -26,9 +26,22 @@ struct DumpLoadAccess {
     DocumentStore* loaded_doc_store = nullptr;
   };
 
-  static void ReplaceLoadedTables(std::vector<LoadedTableReplacement> replacements) {
+  [[nodiscard]] static bool ReplaceLoadedTables(std::vector<LoadedTableReplacement> replacements) {
     std::sort(replacements.begin(), replacements.end(),
               [](const auto& lhs, const auto& rhs) { return lhs.table_name < rhs.table_name; });
+
+    for (size_t i = 0; i < replacements.size(); ++i) {
+      const auto& replacement = replacements[i];
+      if (replacement.target_index == nullptr || replacement.loaded_index == nullptr ||
+          replacement.target_doc_store == nullptr || replacement.loaded_doc_store == nullptr) {
+        return false;
+      }
+      if (i > 0 && (replacement.table_name == replacements[i - 1].table_name ||
+                    replacement.target_index == replacements[i - 1].target_index ||
+                    replacement.target_doc_store == replacements[i - 1].target_doc_store)) {
+        return false;
+      }
+    }
 
     std::vector<std::unique_lock<std::shared_mutex>> target_locks;
     target_locks.reserve(replacements.size() * 2);
@@ -51,6 +64,7 @@ struct DumpLoadAccess {
           replacement.loaded_doc_store->primary_key_doc_id_order_valid_;
       replacement.target_doc_store->last_numeric_primary_key_ = replacement.loaded_doc_store->last_numeric_primary_key_;
     }
+    return true;
   }
 };
 

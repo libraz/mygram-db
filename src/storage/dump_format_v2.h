@@ -95,6 +95,14 @@ constexpr uint32_t kMaxGtidLength = 64 * 1024;
 /// Maximum allowed section data length (4 GB - prevents OOM from malicious files)
 constexpr uint64_t kMaxSectionDataLength = 4ULL * 1024 * 1024 * 1024;
 
+/** Resource limits for a V2 restore. The memory budget applies to encoded
+ * payload being decoded plus the staged Index/DocumentStore objects that are
+ * held before the atomic replacement. */
+struct RestoreLimits {
+  uint64_t memory_budget_bytes = 4ULL * 1024 * 1024 * 1024;
+  uint64_t max_section_bytes = 2ULL * 1024 * 1024 * 1024;
+};
+
 /**
  * @brief Version 2 dump header
  *
@@ -220,7 +228,8 @@ Expected<void, Error> ReadDumpV2(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {});
+    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {},
+    const RestoreLimits& restore_limits = {});
 
 // ============================================================================
 // Version dispatch functions
@@ -248,7 +257,8 @@ Expected<void, Error> ReadDump(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {});
+    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {},
+    const RestoreLimits& restore_limits = {});
 
 /**
  * @brief Verify dump file integrity (auto-detects V1 or V2 format)

@@ -8,9 +8,11 @@
 #include <gtest/gtest.h>
 #include <zlib.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -105,6 +107,18 @@ std::string TempFilePath(const std::string& suffix) {
 /// Helper: cleanup temp file
 void CleanupFile(const std::string& path) {
   std::filesystem::remove(path);
+}
+
+void RewriteFileWithValidHeaderCRC(const std::string& filepath, std::vector<char> file_data) {
+  const auto total_size = static_cast<uint64_t>(file_data.size());
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderTotalFileSizeOffset)], &total_size, sizeof(total_size));
+  std::memset(&file_data[static_cast<size_t>(kV2HeaderFileCRC32Offset)], 0, sizeof(uint32_t));
+  const auto crc = static_cast<uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_data.size())));
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderFileCRC32Offset)], &crc, sizeof(crc));
+  std::ofstream output(filepath, std::ios::binary | std::ios::trunc);
+  output.write(file_data.data(), static_cast<std::streamsize>(file_data.size()));
+  ASSERT_TRUE(output.good());
 }
 
 std::string SerializeIndex(Index& index) {
@@ -203,6 +217,27 @@ void RewriteFileCrc(std::vector<char>& file_data) {
   auto crc = static_cast<uint32_t>(
       crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_data.size())));
   std::memcpy(&file_data[file_crc_offset], &crc, sizeof(crc));
+}
+
+void WriteCustomV2Dump(const std::string& filepath,
+                       const std::vector<std::pair<dump_format::SectionType, std::string>>& sections) {
+  std::ofstream out(filepath, std::ios::binary);
+  ASSERT_TRUE(out);
+  out.write(dump_format::kMagicNumber.data(), 4);
+  ASSERT_TRUE(WriteBinary(out, static_cast<uint32_t>(dump_format::FormatVersion::V2)));
+  HeaderV2 header;
+  header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + 4);
+  header.flags = dump_format::flags_v2::kWithCRC;
+  header.section_count = static_cast<uint32_t>(sections.size());
+  ASSERT_TRUE(WriteHeaderV2(out, header));
+  for (const auto& [type, data] : sections)
+    ASSERT_TRUE(WriteSectionEnvelope(out, type, data));
+  out.close();
+  auto bytes = ReadFileBytes(filepath);
+  const auto size = static_cast<uint64_t>(bytes.size());
+  std::memcpy(&bytes[static_cast<size_t>(kV2HeaderTotalFileSizeOffset)], &size, sizeof(size));
+  RewriteFileCrc(bytes);
+  WriteFileBytes(filepath, bytes);
 }
 
 /// RAII guard that cleans up a temp file on construction and destruction.
@@ -1439,4 +1474,167 @@ TEST(DumpFormatV2Test, UnsupportedVersion) {
   EXPECT_FALSE(result.has_value());
 
   cleanup();
+}
+
+TEST(DumpFormatV2Test, TinyFileWithHugeSectionLengthFailsBeforePayloadAllocation) {
+  const auto filepath = TempFilePath("huge_section_length");
+  CleanupFile(filepath);
+  Config config = MakeTestConfig();
+  Index source_index;
+  DocumentStore source_store;
+  ASSERT_TRUE(source_store.AddDocument("pk", {}, "text"));
+  WriteManualV2Dump(filepath, config,
+                    {BuildTableSectionData("articles", SerializeIndex(source_index), SerializeDocStore(source_store))});
+
+  auto bytes = ReadFileBytes(filepath);
+  ASSERT_GT(bytes.size(), 64u);
+  uint32_t header_size = 0;
+  std::memcpy(&header_size, &bytes[8], sizeof(header_size));
+  const size_t first_envelope = 8 + header_size;
+  const uint64_t impossible_length = 1024ULL * 1024 * 1024;
+  std::memcpy(&bytes[first_envelope + 8], &impossible_length, sizeof(impossible_length));
+  RewriteFileWithValidHeaderCRC(filepath, std::move(bytes));
+
+  std::string gtid;
+  Config loaded_config;
+  Index live_index;
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("bytes remaining"), std::string::npos);
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+  CleanupFile(filepath);
+}
+
+TEST(DumpFormatV2Test, HugeInnerLengthFailsBeforeAllocationAndPreservesLiveStore) {
+  const auto filepath = TempFilePath("huge_inner_length");
+  CleanupFile(filepath);
+  std::ostringstream malformed;
+  ASSERT_TRUE(dump_v1::internal::WriteString(malformed, "articles"));
+  ASSERT_TRUE(WriteBinary(malformed, uint32_t{0}));
+  ASSERT_TRUE(WriteBinary(malformed, std::numeric_limits<uint64_t>::max()));
+  WriteManualV2Dump(filepath, MakeTestConfig(), {malformed.str()});
+
+  std::string gtid;
+  Config loaded_config;
+  Index live_index;
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Index length exceeds"), std::string::npos);
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+  CleanupFile(filepath);
+}
+
+TEST(DumpFormatV2Test, DuplicateTableSectionIsRejectedWithoutApplyingEitherReplacement) {
+  const auto filepath = TempFilePath("duplicate_table_section");
+  CleanupFile(filepath);
+  Index source_index;
+  DocumentStore source_store;
+  ASSERT_TRUE(source_store.AddDocument("dump", {}, "dump text"));
+  const std::string table_section =
+      BuildTableSectionData("articles", SerializeIndex(source_index), SerializeDocStore(source_store));
+  WriteManualV2Dump(filepath, MakeTestConfig(), {table_section, table_section});
+
+  std::string gtid;
+  Config loaded_config;
+  Index live_index;
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live", {}, "live text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("duplicate table section"), std::string::npos);
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+  EXPECT_FALSE(live_store.GetDocId("dump").has_value());
+  CleanupFile(filepath);
+}
+
+TEST(DumpFormatV2Test, ConfiguredSectionAndMemoryLimitsRejectBeforeLiveReplacement) {
+  const auto filepath = TempFilePath("restore_limits");
+  CleanupFile(filepath);
+  Index source_index;
+  DocumentStore source_store;
+  ASSERT_TRUE(source_store.AddDocument("dump", {}, "dump text"));
+  WriteManualV2Dump(filepath, MakeTestConfig(),
+                    {BuildTableSectionData("articles", SerializeIndex(source_index), SerializeDocStore(source_store))});
+
+  std::string gtid;
+  Config loaded_config;
+  Index live_index;
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  const RestoreLimits limits{1, 1};
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+  CleanupFile(filepath);
+}
+
+TEST(DumpFormatV2Test, DuplicateConfigAndStatisticsSectionsAreRejected) {
+  std::ostringstream config_data;
+  ASSERT_TRUE(dump_v1::SerializeConfig(config_data, MakeTestConfig()));
+  std::ostringstream statistics_data;
+  ASSERT_TRUE(dump_v1::SerializeStatistics(statistics_data, DumpStatistics{}));
+
+  for (const auto duplicate_type : {dump_format::SectionType::kConfig, dump_format::SectionType::kStatistics}) {
+    const auto filepath =
+        TempFilePath(duplicate_type == dump_format::SectionType::kConfig ? "duplicate_config" : "duplicate_statistics");
+    CleanupFile(filepath);
+    std::vector<std::pair<dump_format::SectionType, std::string>> sections;
+    sections.emplace_back(dump_format::SectionType::kConfig, config_data.str());
+    if (duplicate_type == dump_format::SectionType::kConfig) {
+      sections.emplace_back(dump_format::SectionType::kConfig, config_data.str());
+    } else {
+      sections.emplace_back(dump_format::SectionType::kStatistics, statistics_data.str());
+      sections.emplace_back(dump_format::SectionType::kStatistics, statistics_data.str());
+    }
+    WriteCustomV2Dump(filepath, sections);
+    std::string gtid;
+    Config loaded;
+    std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts;
+    auto result = ReadDumpV2(filepath, gtid, loaded, contexts);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().message().find("duplicate"), std::string::npos);
+    CleanupFile(filepath);
+  }
+}
+
+TEST(DumpFormatV2Test, LargeRestoreStaysWithinConfiguredStagingBudget) {
+  const char* enabled = std::getenv("ENABLE_LARGE_DUMP_TESTS");
+  if (enabled == nullptr || std::string(enabled) != "1") {
+    GTEST_SKIP() << "Set ENABLE_LARGE_DUMP_TESTS=1 to run the large restore/RSS check";
+  }
+
+  const auto filepath = TempFilePath("large_restore_budget");
+  CleanupFile(filepath);
+  Index source_index;
+  DocumentStore source_store;
+  const std::string text(128, 'x');
+  constexpr uint32_t kDocumentCount = 100000;
+  for (uint32_t i = 0; i < kDocumentCount; ++i) {
+    ASSERT_TRUE(source_store.AddDocument("pk-" + std::to_string(i), {}, text));
+  }
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+  ASSERT_TRUE(WriteDumpV2(filepath, "", MakeTestConfig(), source_contexts));
+
+  std::string gtid;
+  Config loaded_config;
+  Index loaded_index;
+  DocumentStore loaded_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> loaded_contexts{
+      {"articles", {&loaded_index, &loaded_store}}};
+  constexpr uint64_t kBudget = 256ULL * 1024 * 1024;
+  const RestoreLimits limits{kBudget, kBudget};
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, loaded_contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(loaded_store.Size(), kDocumentCount);
+  EXPECT_LT(loaded_store.MemoryUsage() + loaded_index.MemoryUsage(), kBudget);
+  CleanupFile(filepath);
 }

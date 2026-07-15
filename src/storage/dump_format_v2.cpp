@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -30,7 +31,6 @@
 #include "utils/atomic_file_writer.h"
 #include "utils/binary_io.h"
 #include "utils/fd_guard.h"
-#include "utils/memory_utils.h"
 #include "utils/structured_log.h"
 
 #ifdef _WIN32
@@ -71,25 +71,127 @@ struct PendingTableLoad {
   std::unique_ptr<DocumentStore> loaded_doc_store;
 };
 
-Expected<void, Error> LoadPendingTableData(PendingTableLoad& pending, const std::string& index_data,
-                                           const std::string& doc_data) {
+class BoundedInputStreambuf : public std::streambuf {
+ public:
+  BoundedInputStreambuf(std::istream& source, uint64_t length) : source_(source), source_remaining_(length) {
+    setg(buffer_.data(), buffer_.data(), buffer_.data());
+  }
+
+  [[nodiscard]] uint64_t Remaining() const { return source_remaining_ + static_cast<uint64_t>(egptr() - gptr()); }
+
+ protected:
+  int_type underflow() override {
+    if (gptr() < egptr())
+      return traits_type::to_int_type(*gptr());
+    if (source_remaining_ == 0)
+      return traits_type::eof();
+    const size_t requested = static_cast<size_t>(std::min<uint64_t>(buffer_.size(), source_remaining_));
+    source_.read(buffer_.data(), static_cast<std::streamsize>(requested));
+    const auto count = source_.gcount();
+    if (count <= 0)
+      return traits_type::eof();
+    source_remaining_ -= static_cast<uint64_t>(count);
+    setg(buffer_.data(), buffer_.data(), buffer_.data() + count);
+    return traits_type::to_int_type(*gptr());
+  }
+
+  std::streamsize xsgetn(char* destination, std::streamsize count) override {
+    if (count <= 0)
+      return 0;
+    std::streamsize copied = 0;
+    const std::streamsize buffered = egptr() - gptr();
+    const std::streamsize from_buffer = std::min(count, buffered);
+    if (from_buffer > 0) {
+      std::memcpy(destination, gptr(), static_cast<size_t>(from_buffer));
+      gbump(static_cast<int>(from_buffer));
+      copied += from_buffer;
+    }
+    const uint64_t wanted = std::min<uint64_t>(static_cast<uint64_t>(count - copied), source_remaining_);
+    if (wanted > 0) {
+      source_.read(destination + copied, static_cast<std::streamsize>(wanted));
+      const auto read = source_.gcount();
+      if (read > 0) {
+        source_remaining_ -= static_cast<uint64_t>(read);
+        copied += read;
+      }
+    }
+    return copied;
+  }
+
+ private:
+  static constexpr size_t kBufferSize = 64 * 1024;
+  std::istream& source_;
+  uint64_t source_remaining_;
+  std::vector<char> buffer_ = std::vector<char>(kBufferSize);
+};
+
+class BoundedInputStream : public std::istream {
+ public:
+  BoundedInputStream(std::istream& source, uint64_t length) : std::istream(nullptr), buffer_(source, length) {
+    rdbuf(&buffer_);
+  }
+
+  [[nodiscard]] uint64_t Remaining() const { return buffer_.Remaining(); }
+
+  bool Drain() {
+    std::vector<char> discard(64 * 1024);
+    while (Remaining() > 0) {
+      const auto chunk = static_cast<std::streamsize>(std::min<uint64_t>(discard.size(), Remaining()));
+      read(discard.data(), chunk);
+      if (gcount() != chunk)
+        return false;
+    }
+    return true;
+  }
+
+ private:
+  BoundedInputStreambuf buffer_;
+};
+
+Expected<uint32_t, Error> CalculateSectionCRC32(std::ifstream& input, std::streampos start, uint64_t length) {
+  input.clear();
+  input.seekg(start);
+  if (!input.good()) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to seek to section data"));
+  }
+  BoundedInputStream section(input, length);
+  std::vector<char> buffer(1024 * 1024);
+  uint32_t crc = 0;
+  while (section.Remaining() > 0) {
+    const auto chunk = static_cast<std::streamsize>(std::min<uint64_t>(buffer.size(), section.Remaining()));
+    section.read(buffer.data(), chunk);
+    if (section.gcount() != chunk) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read section for CRC32"));
+    }
+    crc = static_cast<uint32_t>(crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()),
+                                      static_cast<uInt>(chunk)));  // NOLINT
+  }
+  input.clear();
+  input.seekg(start);
+  if (!input.good()) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to rewind section data"));
+  }
+  return crc;
+}
+
+Expected<void, Error> LoadPendingIndex(PendingTableLoad& pending, std::istream& index_stream) {
   auto loaded_index = std::make_unique<index::Index>(
       pending.index->GetNgramSize(), pending.index->GetKanjiNgramSize(), index::kDefaultRoaringThreshold,
       pending.index->GetCrossBoundaryNgrams(), pending.index->GetNormalizeNfkc(), pending.index->GetNormalizeWidth(),
       pending.index->GetNormalizeLower());
-  std::istringstream index_stream(index_data);
   if (auto index_result = loaded_index->LoadFromStream(index_stream); !index_result) {
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDumpReadError, "LoadFromStream failed for index", index_result.error().message()));
   }
 
-  auto loaded_doc_store = std::make_unique<DocumentStore>();
-  std::istringstream doc_stream(doc_data);
-  if (auto result = loaded_doc_store->LoadFromStream(doc_stream, nullptr); !result) {
-    return result;
-  }
-
   pending.loaded_index = std::move(loaded_index);
+  return {};
+}
+
+Expected<void, Error> LoadPendingDocumentStore(PendingTableLoad& pending, std::istream& doc_stream) {
+  auto loaded_doc_store = std::make_unique<DocumentStore>();
+  if (auto result = loaded_doc_store->LoadFromStream(doc_stream, nullptr); !result)
+    return result;
   pending.loaded_doc_store = std::move(loaded_doc_store);
   return {};
 }
@@ -126,7 +228,10 @@ Expected<void, Error> ApplyPendingTableLoads(const std::vector<PendingTableLoad>
                                                                   pending.loaded_doc_store.get()});
   }
 
-  DumpLoadAccess::ReplaceLoadedTables(std::move(replacements));
+  if (!DumpLoadAccess::ReplaceLoadedTables(std::move(replacements))) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Duplicate or invalid table replacement in V2 dump"));
+  }
 
   for (const auto& pending : pending_loads) {
     StructuredLog().Event("dump_v2_table_loaded").Field("table", pending.table_name).Info();
@@ -1023,8 +1128,11 @@ Expected<void, Error> ReadDumpV2(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
     std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
-    const DumpConfigValidationCallback& config_validator) {
+    const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits) {
   try {
+    if (restore_limits.memory_budget_bytes == 0 || restore_limits.max_section_bytes == 0) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "V2 restore limits must be greater than zero"));
+    }
     std::ifstream ifs(filepath, std::ios::binary);
     if (!ifs) {
       LogStorageError("open_file", filepath, "Failed to open for reading");
@@ -1076,19 +1184,20 @@ Expected<void, Error> ReadDumpV2(
     gtid = header.gtid;
 
     // Verify file size
+    uint64_t actual_file_size = 0;
     {
       std::streampos saved_pos = ifs.tellg();
       ifs.seekg(0, std::ios::end);
-      auto actual_size = static_cast<uint64_t>(ifs.tellg());
+      actual_file_size = static_cast<uint64_t>(ifs.tellg());
       ifs.seekg(saved_pos);
 
-      if (actual_size != header.total_file_size) {
+      if (actual_file_size != header.total_file_size) {
         StructuredLog()
             .Event("storage_validation_error")
             .Field("type", "file_size_mismatch")
             .Field("filepath", filepath)
             .Field("expected_size", header.total_file_size)
-            .Field("actual_size", actual_size)
+            .Field("actual_size", actual_file_size)
             .Error();
         if (integrity_error != nullptr) {
           integrity_error->type = dump_format::CRCErrorType::FileCRC;
@@ -1127,49 +1236,50 @@ Expected<void, Error> ReadDumpV2(
 
     // Read sections
     bool config_found = false;
+    bool statistics_found = false;
     uint32_t sections_read = 0;
     std::vector<PendingTableLoad> pending_table_loads;
     std::unordered_set<std::string> dump_tables;
-
-    // Maximum allowed size for table data sections
-    const uint64_t kMaxTableDataSectionLength = [] {
-      auto mem_info = mygram::utils::GetSystemMemoryInfo();
-      return mem_info ? mem_info->total_physical_bytes : 64ULL * 1024 * 1024 * 1024;
-    }();
+    uint64_t staged_memory_bytes = 0;
 
     for (uint32_t i = 0; i < header.section_count; ++i) {
       dump_format::SectionEnvelope envelope;
       if (auto result = ReadSectionEnvelope(ifs, envelope); !result) {
-        if (ifs.eof()) {
-          break;  // Normal EOF
-        }
         return result;
       }
 
-      // Read section data
-      if (envelope.data_length > kMaxTableDataSectionLength) {
+      const std::streampos section_start = ifs.tellg();
+      if (section_start < 0) {
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to locate section data"));
+      }
+      const uint64_t section_offset = static_cast<uint64_t>(section_start);
+      if (section_offset > actual_file_size || envelope.data_length > actual_file_size - section_offset) {
         return MakeUnexpected(
-            MakeError(ErrorCode::kStorageDumpReadError, "Section data length exceeds physical memory"));
+            MakeError(ErrorCode::kStorageDumpReadError, "Section data length exceeds bytes remaining in dump file"));
+      }
+      if (envelope.data_length > restore_limits.max_section_bytes) {
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                        "Section data length exceeds configured restore section limit"));
+      }
+      if (envelope.data_length > restore_limits.memory_budget_bytes ||
+          (envelope.type == dump_format::SectionType::kTableData &&
+           (staged_memory_bytes > restore_limits.memory_budget_bytes ||
+            envelope.data_length > restore_limits.memory_budget_bytes - staged_memory_bytes))) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpReadError, "Section exceeds configured V2 restore memory budget"));
       }
 
-      std::string section_data(envelope.data_length, '\0');
-      if (envelope.data_length > 0) {
-        ifs.read(section_data.data(), static_cast<std::streamsize>(envelope.data_length));
-        if (!ifs.good()) {
-          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read section data"));
-        }
-      }
-
-      // Verify section CRC
-      uint32_t actual_crc = ComputeCRC32(section_data);
-      if (actual_crc != envelope.crc32) {
+      auto crc_result = CalculateSectionCRC32(ifs, section_start, envelope.data_length);
+      if (!crc_result)
+        return MakeUnexpected(crc_result.error());
+      if (*crc_result != envelope.crc32) {
         StructuredLog()
             .Event("storage_validation_error")
             .Field("type", "section_crc32_mismatch")
             .Field("filepath", filepath)
             .Field("section_type", static_cast<uint64_t>(static_cast<uint32_t>(envelope.type)))
             .Field("expected_crc", static_cast<uint64_t>(envelope.crc32))
-            .Field("actual_crc", static_cast<uint64_t>(actual_crc))
+            .Field("actual_crc", static_cast<uint64_t>(*crc_result))
             .Error();
         if (integrity_error != nullptr) {
           integrity_error->type = dump_format::CRCErrorType::SectionCRC;
@@ -1181,52 +1291,82 @@ Expected<void, Error> ReadDumpV2(
       // Dispatch by section type
       switch (envelope.type) {
         case dump_format::SectionType::kConfig: {
-          std::istringstream config_stream(section_data);
+          if (config_found) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "V2 dump contains duplicate Config sections"));
+          }
+          BoundedInputStream config_stream(ifs, envelope.data_length);
           if (auto result = dump_v1::DeserializeConfig(config_stream, config); !result) {
             LogStorageError("deserialize_config_v2", filepath, result.error().message());
             return result;
+          }
+          if (config_stream.Remaining() != 0) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "Config section contains trailing or malformed data"));
           }
           config_found = true;
           break;
         }
 
         case dump_format::SectionType::kStatistics: {
+          if (statistics_found) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "V2 dump contains duplicate Statistics sections"));
+          }
+          BoundedInputStream stats_stream(ifs, envelope.data_length);
           if (stats != nullptr) {
-            std::istringstream stats_stream(section_data);
             if (auto result = dump_v1::DeserializeStatistics(stats_stream, *stats); !result) {
               LogStorageError("deserialize_statistics_v2", filepath, result.error().message());
               return result;
             }
+          } else if (!stats_stream.Drain()) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to skip Statistics section"));
           }
+          if (stats_stream.Remaining() != 0) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "Statistics section contains trailing or malformed data"));
+          }
+          statistics_found = true;
           break;
         }
 
         case dump_format::SectionType::kTableData: {
-          std::istringstream table_stream(section_data);
+          BoundedInputStream table_stream(ifs, envelope.data_length);
 
           // Read table name
           std::string table_name;
           if (!dump_v1::internal::ReadString(table_stream, table_name, kMaxIdentifierLength)) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read table name"));
           }
-          dump_tables.insert(table_name);
+          if (!dump_tables.insert(table_name).second) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                            "V2 dump contains duplicate table section for '" + table_name + "'"));
+          }
 
           // Read table statistics
           uint32_t table_stats_len = 0;
           if (!ReadBinary(table_stream, table_stats_len)) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read table stats length"));
           }
-          if (table_stats_len > 0 && table_stats != nullptr) {
-            std::string ts_data(table_stats_len, '\0');
-            table_stream.read(ts_data.data(), static_cast<std::streamsize>(table_stats_len));
-            std::istringstream ts_stream(ts_data);
+          if (table_stats_len > table_stream.Remaining()) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                            "Table statistics length exceeds table section bytes remaining"));
+          }
+          if (table_stats_len > 0) {
+            BoundedInputStream ts_stream(table_stream, table_stats_len);
             TableStatistics table_stat;
-            if (auto result = dump_v1::DeserializeTableStatistics(ts_stream, table_stat); !result) {
-              return result;
+            if (table_stats != nullptr) {
+              if (auto result = dump_v1::DeserializeTableStatistics(ts_stream, table_stat); !result)
+                return result;
+              table_stats->emplace(table_name, std::move(table_stat));
+            } else if (!ts_stream.Drain()) {
+              return MakeUnexpected(
+                  MakeError(ErrorCode::kStorageDumpReadError, "Failed to skip table Statistics data"));
             }
-            (*table_stats)[table_name] = table_stat;
-          } else if (table_stats_len > 0) {
-            table_stream.seekg(table_stats_len, std::ios::cur);
+            if (ts_stream.Remaining() != 0) {
+              return MakeUnexpected(
+                  MakeError(ErrorCode::kStorageDumpReadError, "Table Statistics data contains trailing bytes"));
+            }
           }
 
           // Check if table context exists
@@ -1237,7 +1377,9 @@ Expected<void, Error> ReadDumpV2(
                 .Field("operation", "load_dump_v2")
                 .Field("table", table_name)
                 .Warn();
-            // Skip remaining data in this section (already consumed by stringstream)
+            if (!table_stream.Drain()) {
+              return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to skip unknown table data"));
+            }
             break;
           }
 
@@ -1246,21 +1388,37 @@ Expected<void, Error> ReadDumpV2(
           pending.table_name = table_name;
           pending.index = ctx_pair.first;
           pending.doc_store = ctx_pair.second;
+          if (pending.index == nullptr || pending.doc_store == nullptr) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "Configured table has null restore target: " + table_name));
+          }
 
           // Read index data
           uint64_t index_len = 0;
           if (!ReadBinary(table_stream, index_len)) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read index length"));
           }
-          std::string index_data;
-          if (index_len > 0) {
-            index_data.resize(index_len);
-            table_stream.read(index_data.data(), static_cast<std::streamsize>(index_len));
-            if (!table_stream.good()) {
-              return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read index data"));
-            }
-          } else {
+          if (index_len == 0) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid index length"));
+          }
+          if (index_len > table_stream.Remaining()) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "Index length exceeds table section bytes remaining"));
+          }
+          {
+            BoundedInputStream index_stream(table_stream, index_len);
+            if (auto result = LoadPendingIndex(pending, index_stream); !result)
+              return result;
+            if (index_stream.Remaining() != 0) {
+              return MakeUnexpected(
+                  MakeError(ErrorCode::kStorageDumpReadError, "Index decoder did not consume its bounded payload"));
+            }
+          }
+          const uint64_t index_memory = pending.loaded_index->MemoryUsage();
+          if (staged_memory_bytes > restore_limits.memory_budget_bytes ||
+              index_memory > restore_limits.memory_budget_bytes - staged_memory_bytes) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                            "Loaded index exceeds configured V2 restore memory budget"));
           }
 
           // Read docstore data
@@ -1268,17 +1426,35 @@ Expected<void, Error> ReadDumpV2(
           if (!ReadBinary(table_stream, doc_len)) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read docstore length"));
           }
-          std::string doc_data;
-          doc_data.resize(doc_len);
-          table_stream.read(doc_data.data(), static_cast<std::streamsize>(doc_len));
-          if (!table_stream.good()) {
-            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read docstore data"));
+          if (doc_len == 0 || doc_len > table_stream.Remaining()) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "Docstore length exceeds table section bytes remaining"));
+          }
+          {
+            BoundedInputStream doc_stream(table_stream, doc_len);
+            if (auto result = LoadPendingDocumentStore(pending, doc_stream); !result)
+              return result;
+            if (doc_stream.Remaining() != 0) {
+              return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                              "DocumentStore decoder did not consume its bounded payload"));
+            }
+          }
+          if (table_stream.Remaining() != 0) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "Table section contains trailing or malformed data"));
           }
 
-          if (auto result = LoadPendingTableData(pending, index_data, doc_data); !result) {
-            return result;
+          const uint64_t doc_memory = pending.loaded_doc_store->MemoryUsage();
+          if (index_memory > std::numeric_limits<uint64_t>::max() - doc_memory) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Loaded table memory size overflow"));
           }
-
+          const uint64_t table_memory = index_memory + doc_memory;
+          if (staged_memory_bytes > restore_limits.memory_budget_bytes ||
+              table_memory > restore_limits.memory_budget_bytes - staged_memory_bytes) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                            "Loaded tables exceed configured V2 restore memory budget"));
+          }
+          staged_memory_bytes += table_memory;
           pending_table_loads.push_back(std::move(pending));
           break;
         }
@@ -1290,6 +1466,11 @@ Expected<void, Error> ReadDumpV2(
               .Field("section_type", static_cast<uint64_t>(static_cast<uint32_t>(envelope.type)))
               .Field("data_length", envelope.data_length)
               .Warn();
+          ifs.clear();
+          ifs.seekg(section_start + static_cast<std::streamoff>(envelope.data_length));
+          if (!ifs.good()) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to skip unknown section"));
+          }
           break;
       }
 
@@ -1410,7 +1591,7 @@ Expected<void, Error> ReadDump(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
     std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
-    const DumpConfigValidationCallback& config_validator) {
+    const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits) {
   // Read magic + version to determine format
   std::ifstream ifs(filepath, std::ios::binary);
   if (!ifs) {
@@ -1445,7 +1626,8 @@ Expected<void, Error> ReadDump(
                                config_validator);
   }
 
-  return ReadDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error, config_validator);
+  return ReadDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error, config_validator,
+                    restore_limits);
 }
 
 Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error) {

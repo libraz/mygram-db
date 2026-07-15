@@ -5,6 +5,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -236,10 +237,15 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
   DocId max_loaded_doc_id = 0;
 
   // Reserve capacity to avoid rehashing during bulk insertion
-  new_doc_id_to_pk.reserve(static_cast<size_t>(doc_count));
-  new_pk_to_doc_id.reserve(static_cast<size_t>(doc_count));
-  new_doc_filters.reserve(static_cast<size_t>(doc_count));
-  new_doc_texts.reserve(static_cast<size_t>(doc_count));
+  // Do not trust doc_count enough to reserve all of it up front: a tiny
+  // truncated stream can otherwise request billions of buckets before the
+  // first document boundary is validated.
+  constexpr uint64_t kMaxInitialReserve = 65536;
+  const size_t initial_reserve = static_cast<size_t>(std::min(doc_count, kMaxInitialReserve));
+  new_doc_id_to_pk.reserve(initial_reserve);
+  new_pk_to_doc_id.reserve(initial_reserve);
+  new_doc_filters.reserve(initial_reserve);
+  new_doc_texts.reserve(initial_reserve);
 
   // Read doc_id -> pk mappings and filters
   for (uint64_t i = 0; i < doc_count; ++i) {
@@ -275,8 +281,14 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
                                       "Failed to read primary key data at document " + std::to_string(i), context));
     }
 
-    new_doc_id_to_pk[doc_id] = primary_key_str;
-    new_pk_to_doc_id[primary_key_str] = doc_id;
+    if (!new_doc_id_to_pk.emplace(doc_id, primary_key_str).second) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Duplicate document ID " + std::to_string(doc_id) + " in snapshot", context));
+    }
+    if (!new_pk_to_doc_id.emplace(primary_key_str, doc_id).second) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Duplicate primary key in snapshot at document " + std::to_string(i), context));
+    }
 
     // Read filters
     uint32_t filter_count = 0;
@@ -456,10 +468,14 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
                                             "Unknown filter type index: " + std::to_string(type_idx), context));
         }
 
-        filters[name] = value;
+        if (!filters.emplace(name, std::move(value)).second) {
+          return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                          "Duplicate filter name '" + name + "' for doc_id " + std::to_string(doc_id),
+                                          context));
+        }
       }
 
-      new_doc_filters[doc_id] = filters;
+      new_doc_filters.emplace(doc_id, std::move(filters));
     }
 
     // Read normalized text (v2+)
@@ -484,7 +500,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
               MakeError(mygram::utils::ErrorCode::kStorageReadError,
                         "Stream error while reading normalized text for doc_id " + std::to_string(doc_id), context));
         }
-        new_doc_texts[doc_id] = std::move(text);
+        new_doc_texts.emplace(doc_id, std::move(text));
       }
     }
   }
@@ -500,11 +516,20 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     new_filter_index->AddDocument(doc_id, filters);
   }
 
-  DocId restored_next_id = next_id;
-  if (max_loaded_doc_id == UINT32_MAX) {
-    restored_next_id = 0;
-  } else if (max_loaded_doc_id > 0 && restored_next_id <= max_loaded_doc_id) {
-    restored_next_id = max_loaded_doc_id + 1;
+  if (doc_count > 0 && (max_loaded_doc_id == UINT32_MAX || next_id <= max_loaded_doc_id)) {
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                    "next_doc_id must be greater than every loaded document ID", context));
+  }
+  if (new_doc_id_to_pk.size() != doc_count || new_pk_to_doc_id.size() != doc_count) {
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                    "Document ID and primary key maps are not bijective", context));
+  }
+  for (const auto& [doc_id, primary_key] : new_doc_id_to_pk) {
+    auto reverse = new_pk_to_doc_id.find(primary_key);
+    if (reverse == new_pk_to_doc_id.end() || reverse->second != doc_id) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Document ID and primary key maps are not bijective", context));
+    }
   }
 
   // Swap the loaded data in with minimal lock time
@@ -515,7 +540,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     doc_filters_ = std::move(new_doc_filters);
     doc_texts_ = std::move(new_doc_texts);
     filter_index_ = std::move(new_filter_index);
-    next_doc_id_ = restored_next_id;
+    next_doc_id_ = next_id;
     RecomputePrimaryKeyDocIdOrderLocked();
   }
 

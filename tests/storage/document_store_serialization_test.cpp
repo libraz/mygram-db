@@ -854,7 +854,7 @@ TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsTruncatedPrimitiveFi
   EXPECT_FALSE(result.has_value());
 }
 
-TEST_F(DocumentStoreSerializationTest, LoadFromStreamBumpsNextDocIdAboveLoadedMax) {
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsNextDocIdNotAboveLoadedMaxAndPreservesLiveStore) {
   std::ostringstream out;
   out.write("MGDS", 4);
   mygramdb::storage::internal::WriteBinary(out, uint32_t{2});   // version
@@ -869,13 +869,83 @@ TEST_F(DocumentStoreSerializationTest, LoadFromStreamBumpsNextDocIdAboveLoadedMa
 
   std::istringstream input_stream(out.str());
   DocumentStore store;
+  ASSERT_TRUE(store.AddDocument("live"));
   auto load_result = store.LoadFromStream(input_stream);
-  ASSERT_TRUE(load_result.has_value()) << load_result.error().to_string();
+  ASSERT_FALSE(load_result.has_value());
+  EXPECT_NE(load_result.error().message().find("next_doc_id"), std::string::npos);
+  EXPECT_TRUE(store.GetDocId("live").has_value());
+  EXPECT_FALSE(store.GetDocId("docA").has_value());
+}
 
-  auto add_result = store.AddDocument("docB");
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsDuplicateDocIdAndPrimaryKey) {
+  auto make_snapshot = [](bool duplicate_doc_id) {
+    std::ostringstream out;
+    out.write("MGDS", 4);
+    mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // version
+    mygramdb::storage::internal::WriteBinary(out, uint32_t{3});  // next_doc_id
+    mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // gtid length
+    mygramdb::storage::internal::WriteBinary(out, uint64_t{2});  // doc_count
+    auto write_doc = [&](uint32_t doc_id, const std::string& pk) {
+      mygramdb::storage::internal::WriteBinary(out, doc_id);
+      mygramdb::storage::internal::WriteBinary(out, static_cast<uint32_t>(pk.size()));
+      out.write(pk.data(), static_cast<std::streamsize>(pk.size()));
+      mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // filters
+      mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // text
+    };
+    write_doc(1, "same");
+    write_doc(duplicate_doc_id ? 1U : 2U, duplicate_doc_id ? "other" : "same");
+    return out.str();
+  };
 
-  ASSERT_TRUE(add_result.has_value()) << add_result.error().to_string();
-  EXPECT_EQ(*add_result, 43);
-  EXPECT_EQ(store.GetDocId("docA"), 42);
-  EXPECT_EQ(store.GetDocId("docB"), 43);
+  for (bool duplicate_doc_id : {true, false}) {
+    DocumentStore store;
+    ASSERT_TRUE(store.AddDocument("live"));
+    std::istringstream input(make_snapshot(duplicate_doc_id));
+    auto result = store.LoadFromStream(input);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().message().find(duplicate_doc_id ? "Duplicate document ID" : "Duplicate primary key"),
+              std::string::npos);
+    EXPECT_TRUE(store.GetDocId("live").has_value());
+  }
+}
+
+TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsDuplicateFilterName) {
+  std::ostringstream out;
+  out.write("MGDS", 4);
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // version
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // next_doc_id
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // gtid length
+  mygramdb::storage::internal::WriteBinary(out, uint64_t{1});  // doc_count
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{1});  // doc_id
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // pk length
+  out.write("pk", 2);
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});  // filter count
+  for (int i = 0; i < 2; ++i) {
+    mygramdb::storage::internal::WriteBinary(out, uint32_t{6});
+    out.write("status", 6);
+    mygramdb::storage::internal::WriteBinary(out, mygramdb::storage::internal::kTypeIndexBool);
+    mygramdb::storage::internal::WriteBinary(out, true);
+  }
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{0});  // text
+
+  DocumentStore store;
+  std::istringstream input(out.str());
+  auto result = store.LoadFromStream(input);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Duplicate filter name"), std::string::npos);
+}
+
+TEST_F(DocumentStoreSerializationTest, TinyStreamWithHugeDocumentCountFailsWithoutUnboundedReserve) {
+  std::ostringstream out;
+  out.write("MGDS", 4);
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{2});
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{1});
+  mygramdb::storage::internal::WriteBinary(out, uint32_t{0});
+  mygramdb::storage::internal::WriteBinary(out, uint64_t{1000000000});
+
+  DocumentStore store;
+  std::istringstream input(out.str());
+  auto result = store.LoadFromStream(input);
+  EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(store.Size(), 0u);
 }

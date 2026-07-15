@@ -291,7 +291,10 @@ Expected<void, Error> ApplyPendingTableLoads(const std::vector<PendingTableLoad>
                                                                   pending.loaded_doc_store.get()});
   }
 
-  DumpLoadAccess::ReplaceLoadedTables(std::move(replacements));
+  if (!DumpLoadAccess::ReplaceLoadedTables(std::move(replacements))) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Duplicate or invalid table replacement in dump"));
+  }
 
   for (const auto& pending : pending_loads) {
     StructuredLog().Event("dump_table_loaded").Field("table", pending.table_name).Info();
