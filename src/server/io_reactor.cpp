@@ -77,6 +77,11 @@ Expected<void, Error> IoReactor::Start() {
   std::string backend_name;
   {
     std::unique_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+    std::shared_lock<std::shared_mutex> conn_lock(connections_mutex_);
+    if (!connections_.empty()) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kInternalError, "IoReactor::Start found stale connections from a prior lifecycle"));
+    }
     mux_ = std::move(mux);
     backend_name = mux_->Name();
     running_.store(true, std::memory_order_release);
@@ -150,22 +155,21 @@ void IoReactor::Stop() {
     event_loop_thread_.join();
   }
 
-  // Drop all registered connections. Drain tasks that still hold a
-  // shared_ptr copy will keep their connection alive until they finish.
-  // Note: the close_callback_ is intentionally NOT invoked from this clear()
-  // path — Unregister() invokes it for naturally-closed connections, but
-  // mass-clear during Stop() leaves the callback un-invoked because
-  // the captured ServerStats / ConnectionAcceptor objects may not be in a
-  // state that tolerates being decremented (TcpServer is in shutdown).
-  {
-    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
-    connections_.clear();
+  if (stop_before_mux_exclusive_hook_for_test_) {
+    stop_before_mux_exclusive_hook_for_test_();
   }
   {
-    // Exclusive lock: wait for any in-flight Register/Unregister/ArmWrite to
-    // finish before destroying the multiplexer. The event-loop thread has
-    // already been joined, so the only contenders are other threads.
+    // Wait for every in-flight Register to finish its Add + map publication
+    // before clearing the map. Lock order remains mux_lifecycle_ ->
+    // connections_mutex_. Clearing before this exclusive acquisition lets a
+    // Register holding the shared mux lock publish after the clear.
     std::unique_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+
+    // Drop all registered connections. Drain tasks that still hold a
+    // shared_ptr copy will keep their connection alive until they finish.
+    // The close callback is intentionally not invoked during mass shutdown.
+    std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
+    connections_.clear();
     mux_.reset();
   }
 
@@ -210,11 +214,8 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
 
   // Acquire mux_lifecycle_ (shared) FIRST and perform every reactor-state
   // mutation — running_ check, mux_->Add, connections_ insert — inside this
-  // critical section. Stop() takes mux_lifecycle_ exclusively at the very end
-  // of its shutdown sequence; while we hold this shared lock, Stop() cannot
-  // proceed past `connections_.clear()` (which happens BEFORE the exclusive
-  // mux_lifecycle_ acquisition in Stop). That eliminates the window where
-  // Register's connections_.emplace could leak past Stop's clear().
+  // critical section. Stop() takes mux_lifecycle_ exclusively before clearing
+  // connections_, so publication and teardown are strictly ordered.
   //
   // Lock ordering: mux_lifecycle_ (shared) -> connections_mutex_ (unique).
   std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
@@ -238,6 +239,10 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
   auto add_result = mux_->Add(fd, reactor::event::kReadable);
   if (!add_result) {
     return MakeUnexpected(add_result.error());
+  }
+
+  if (register_after_add_hook_for_test_) {
+    register_after_add_hook_for_test_();
   }
 
   // Step 3: publish into connections_. We re-check the duplicate guard in
@@ -302,6 +307,14 @@ void IoReactor::SetCloseCallback(std::function<void(int)> cb) {
 
 void IoReactor::SetMultiplexerFactoryForTest(MultiplexerFactory f) {
   mux_factory_ = std::move(f);
+}
+
+void IoReactor::SetRegisterAfterAddHookForTest(std::function<void()> hook) {
+  register_after_add_hook_for_test_ = std::move(hook);
+}
+
+void IoReactor::SetStopBeforeMuxExclusiveHookForTest(std::function<void()> hook) {
+  stop_before_mux_exclusive_hook_for_test_ = std::move(hook);
 }
 
 Expected<void, Error> IoReactor::ArmWrite(int fd) {

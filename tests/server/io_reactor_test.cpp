@@ -15,8 +15,11 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <future>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -839,6 +842,74 @@ TEST_F(IoReactorTest, RegisterRaceWithStopLeavesNoStaleEntries) {
     EXPECT_EQ(reactor->ConnectionCount(), 0u)
         << "iter " << iter << " successes=" << register_successes.load() << " failures=" << register_failures.load();
   }
+}
+
+TEST_F(IoReactorTest, RegisterPublishIsSerializedBeforeStopClear) {
+  auto pool = std::make_unique<ThreadPool>(2, 64);
+  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+  reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
+
+  std::promise<void> register_after_add_promise;
+  auto register_after_add = register_after_add_promise.get_future();
+  std::promise<void> release_register_promise;
+  auto release_register = release_register_promise.get_future().share();
+  std::promise<void> stop_before_exclusive_promise;
+  auto stop_before_exclusive = stop_before_exclusive_promise.get_future();
+
+  reactor->SetRegisterAfterAddHookForTest([&]() {
+    register_after_add_promise.set_value();
+    release_register.wait();
+  });
+  reactor->SetStopBeforeMuxExclusiveHookForTest([&]() { stop_before_exclusive_promise.set_value(); });
+
+  ASSERT_TRUE(reactor->Start());
+  SocketPair first_pair;
+  const int original_fd = first_pair.TakeClient();
+
+  std::optional<mygram::utils::Expected<void, mygram::utils::Error>> register_result;
+  std::thread registrar([&]() {
+    auto conn = ReactorConnection::Create(original_fd, reactor.get(), nullptr, pool.get());
+    register_result.emplace(reactor->Register(std::move(conn)));
+  });
+
+  ASSERT_EQ(register_after_add.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+  std::thread stopper([&]() { reactor->Stop(); });
+  ASSERT_EQ(stop_before_exclusive.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+  // Register still holds mux_lifecycle_ shared here. Stop has set running=false
+  // and reached the exclusive-lock boundary, but must not clear until the
+  // pending map publication finishes.
+  EXPECT_FALSE(reactor->IsRunning());
+  release_register_promise.set_value();
+
+  registrar.join();
+  stopper.join();
+  ASSERT_TRUE(register_result.has_value());
+  EXPECT_TRUE(register_result->has_value());
+  EXPECT_EQ(reactor->ConnectionCount(), 0u);
+
+  errno = 0;
+  EXPECT_EQ(::fcntl(original_fd, F_GETFD), -1);
+  EXPECT_EQ(errno, EBADF);
+
+  // A clean restart must be able to publish the same numeric fd again.
+  reactor->SetRegisterAfterAddHookForTest({});
+  reactor->SetStopBeforeMuxExclusiveHookForTest({});
+  ASSERT_TRUE(reactor->Start());
+
+  SocketPair replacement_pair;
+  int replacement_fd = replacement_pair.TakeClient();
+  if (replacement_fd != original_fd) {
+    ASSERT_EQ(::dup2(replacement_fd, original_fd), original_fd);
+    ::close(replacement_fd);
+    replacement_fd = original_fd;
+  }
+  auto replacement = ReactorConnection::Create(replacement_fd, reactor.get(), nullptr, pool.get());
+  EXPECT_TRUE(reactor->Register(std::move(replacement)).has_value());
+  EXPECT_EQ(reactor->ConnectionCount(), 1u);
+  reactor->Stop();
+  EXPECT_EQ(reactor->ConnectionCount(), 0u);
 }
 
 }  // namespace mygramdb::server

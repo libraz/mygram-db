@@ -195,6 +195,10 @@ class IoReactor {
    */
   void SetMultiplexerFactoryForTest(MultiplexerFactory f);
 
+  /** TEST-ONLY hooks used to force the Register/Stop publication ordering. */
+  void SetRegisterAfterAddHookForTest(std::function<void()> hook);
+  void SetStopBeforeMuxExclusiveHookForTest(std::function<void()> hook);
+
   /**
    * @brief Arm `kWritable` on an already-registered fd.
    *
@@ -282,6 +286,10 @@ class IoReactor {
   // TEST-ONLY: overrides reactor::CreateEventMultiplexer() when set.
   // Null in production; set by SetMultiplexerFactoryForTest() before Start().
   MultiplexerFactory mux_factory_;
+
+  // TEST-ONLY: set before Start and never mutated while callbacks execute.
+  std::function<void()> register_after_add_hook_for_test_;
+  std::function<void()> stop_before_mux_exclusive_hook_for_test_;
 
   // Tracks when the reaper last ran, so the event loop only sweeps once per
   // `reaper_interval_sec` regardless of poll cadence. Touched only by the
