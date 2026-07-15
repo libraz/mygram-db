@@ -17,6 +17,7 @@
 
 #include "cache/cache_manager.h"
 #include "server/log_field_names.h"
+#include "server/operation_coordinator.h"
 #include "server/operation_names.h"
 #include "server/protocol_constants.h"
 #include "server/replication_pause_counter.h"
@@ -159,6 +160,16 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     filepath = ctx_.dump_dir + "/" + ctx_.full_config->dump.default_filename;
   }
 
+  std::shared_ptr<OperationCoordinator::Token> operation_token;
+  if (ctx_.operation_coordinator != nullptr) {
+    auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kDumpSave, filepath);
+    if (!acquired.has_value()) {
+      return ResponseFormatter::FormatError("Cannot save dump while " + ctx_.operation_coordinator->DescribeActive() +
+                                            " is in progress");
+    }
+    operation_token = std::make_shared<OperationCoordinator::Token>(std::move(*acquired));
+  }
+
   // Atomic test-and-set on dump_save_in_progress, bundled with a release-on-
   // scope-exit RAII guard via OperationGuard::TryAcquire.
   //
@@ -235,7 +246,10 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     // from TcpServer::Stop()) on the unique_ptr itself. JoinWorker()
     // above has already drained any prior worker, satisfying the
     // StartWorker pre-condition.
-    ctx_.dump_progress->StartWorker([this, filepath]() { DumpSaveWorker(filepath); });
+    ctx_.dump_progress->StartWorker([this, filepath, operation_token]() {
+      (void)operation_token;  // Holds the coordinator slot through worker completion.
+      DumpSaveWorker(filepath);
+    });
 
     // Thread created successfully — ownership of the dump_save_in_progress
     // flag transfers to the worker (DumpSaveWorker has its own RAII guard
@@ -522,6 +536,16 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   }
   std::string filepath = std::move(*resolved);
 
+  OperationCoordinator::Token operation_token;
+  if (ctx_.operation_coordinator != nullptr) {
+    auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kDumpLoad, filepath);
+    if (!acquired.has_value()) {
+      return ResponseFormatter::FormatError("Cannot load dump while " + ctx_.operation_coordinator->DescribeActive() +
+                                            " is in progress");
+    }
+    operation_token = std::move(*acquired);
+  }
+
   // Atomic test-and-set on dump_load_in_progress, bundled with a release-on-
   // scope-exit RAII guard via OperationGuard::TryAcquire.
   //
@@ -684,7 +708,12 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
               mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, *mismatch));
         }
         return {};
-      });
+      },
+      ctx_.full_config == nullptr
+          ? storage::dump_v2::RestoreLimits{}
+          : storage::dump_v2::RestoreLimits{
+                static_cast<uint64_t>(ctx_.full_config->dump.restore_memory_budget_mb) * 1024ULL * 1024ULL,
+                static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) * 1024ULL * 1024ULL});
 
   // The loading guard remains active through replication restart and cache
   // rebuild. It is released only after the success path completes, ensuring

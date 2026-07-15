@@ -128,6 +128,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
 
   // Step 1: validation + grab any stale thread under the lock.
   std::thread previous_thread;
+  OperationCoordinator::Token operation_token;
   {
     std::unique_lock<std::mutex> lock(sync_mutex_);
 
@@ -135,6 +136,14 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     if (table_contexts_.find(table_name) == table_contexts_.end()) {
       return MakeUnexpected(MakeError(ErrorCode::kSyncTableNotFound, "Table '" + table_name + "' not found"));
     }
+
+    auto acquired = operation_coordinator_.TryAcquire(LongOperation::kSync, table_name);
+    if (!acquired.has_value()) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kSyncAlreadyInProgress,
+                    "Cannot start SYNC while " + operation_coordinator_.DescribeActive() + " is in progress"));
+    }
+    operation_token = std::move(*acquired);
 
     // Check if already running. is_running is true while a worker thread is
     // active OR while another StartSync is in its JOINING_PREVIOUS window.
@@ -214,7 +223,8 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     // Launch async build (store thread instead of detaching)
     // Wrap in try/catch to rollback state if thread creation fails
     try {
-      sync_threads_[table_name] = std::thread([this, table_name]() { BuildSnapshotAsync(table_name); });
+      sync_threads_[table_name] = std::thread(
+          [this, table_name, token = std::move(operation_token)]() mutable { BuildSnapshotAsync(table_name); });
     } catch (const std::system_error& e) {
       // Rollback: remove from syncing_tables_ and reset sync state
       {
@@ -443,6 +453,7 @@ void SyncOperationManager::RequestShutdown() {
   // semantics are: once RequestShutdown returns, no new SYNC can be
   // started and all in-flight syncs have been Cancel()ed.
   shutdown_requested_.store(true, std::memory_order_release);
+  operation_coordinator_.BlockNewOperationsForShutdown();
 
   // Cancel all active loaders
   std::lock_guard<std::mutex> lock(loaders_mutex_);

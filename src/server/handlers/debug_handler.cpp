@@ -8,6 +8,7 @@
 #include <sstream>
 
 #include "server/log_field_names.h"
+#include "server/operation_coordinator.h"
 #include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
 #include "utils/flag_guard.h"
@@ -55,8 +56,15 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
             "Please wait for load to complete.");
       }
 
-      // Note: DUMP SAVE (dump_save_in_progress flag) is allowed during OPTIMIZE
-      // to support auto-save functionality that runs in background
+      OperationCoordinator::Token operation_token;
+      if (ctx_.operation_coordinator != nullptr) {
+        auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kOptimize, query.table);
+        if (!acquired.has_value()) {
+          return ResponseFormatter::FormatError("Cannot optimize while " +
+                                                ctx_.operation_coordinator->DescribeActive() + " is in progress");
+        }
+        operation_token = std::move(*acquired);
+      }
 
       // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire.
       // Same contract as DUMP SAVE / DUMP LOAD: prevents two concurrent OPTIMIZE

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "config/config.h"
+#include "server/operation_coordinator.h"
 #include "server/replication_pause_counter.h"
 #include "server/server_types.h"
 #include "utils/error.h"
@@ -191,6 +192,9 @@ class SyncOperationManager {
    */
   void SetCacheManager(cache::CacheManager* cache_manager);
 
+  OperationCoordinator& GetOperationCoordinator() { return operation_coordinator_; }
+  const OperationCoordinator& GetOperationCoordinator() const { return operation_coordinator_; }
+
 #ifdef MYGRAMDB_SYNC_TEST_HOOKS
   void MarkSyncingTableForTest(const std::string& table_name) {
     {
@@ -222,6 +226,7 @@ class SyncOperationManager {
   mysql::IBinlogReader* binlog_reader_;
   replication_pause::Counter* replication_pause_counter_;
   std::atomic<cache::CacheManager*> cache_manager_{nullptr};
+  OperationCoordinator operation_coordinator_;
 
   // State tracking
   //

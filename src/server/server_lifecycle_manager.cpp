@@ -311,6 +311,7 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
       .cache_manager = cache_manager,
       .variable_manager = variable_manager,
       .rate_limiter = rate_limiter_,
+      .operation_coordinator = sync_manager_ != nullptr ? &sync_manager_->GetOperationCoordinator() : nullptr,
   });
   return handler_context;
 }

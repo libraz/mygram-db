@@ -178,6 +178,20 @@ void SnapshotScheduler::SchedulerLoop() {
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
+    OperationCoordinator::Token operation_token;
+    if (sync_manager_ != nullptr) {
+      auto& coordinator = sync_manager_->GetOperationCoordinator();
+      auto acquired = coordinator.TryAcquire(LongOperation::kAutoSnapshot, "scheduled");
+      if (!acquired.has_value()) {
+        mygram::utils::StructuredLog()
+            .Event("auto_snapshot_skipped")
+            .Field("reason", coordinator.DescribeActive() + " is in progress")
+            .Info();
+        return;
+      }
+      operation_token = std::move(*acquired);
+    }
+
     // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire.
     // Prevents TOCTOU race between checking and setting the flag; same contract
     // as HandleDumpSave / HandleDumpLoad in DumpHandler.

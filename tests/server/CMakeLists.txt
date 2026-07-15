@@ -1,5 +1,19 @@
 # ServerStats tests
 
+add_executable(operation_coordinator_test
+  operation_coordinator_test.cpp
+)
+
+target_link_libraries(operation_coordinator_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(operation_coordinator_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_executable(server_stats_test
   server_stats_test.cpp
 )

@@ -47,6 +47,7 @@ namespace mygramdb::server {
 // Forward declarations
 class TableCatalog;
 class SyncOperationManager;
+class OperationCoordinator;
 class RateLimiter;
 
 // Default constants
@@ -429,6 +430,11 @@ struct HandlerContext {
   /// Optional diagnostic/test hook invoked by DumpHandler after DUMP SAVE has
   /// acquired dump_save_in_progress and before it re-checks competing flags.
   std::function<void()> after_dump_save_flag_acquired;
+
+  // Single atomic admission point for long-running store/replication
+  // operations. Production wires this to SyncOperationManager ownership;
+  // legacy/unit contexts may leave it null and use the existing flags.
+  OperationCoordinator* operation_coordinator = nullptr;
 };
 
 }  // namespace mygramdb::server
