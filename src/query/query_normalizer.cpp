@@ -5,62 +5,123 @@
 
 #include "query/query_normalizer.h"
 
+#include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstdint>
 #include <string>
+#include <tuple>
+#include <vector>
 
 #include "utils/string_utils.h"
 
 namespace mygramdb::cache {
 
-std::string QueryNormalizer::Normalize(const query::Query& query, const TextNormalizer& text_normalizer) {
-  std::string result;
-  result.reserve(128);  // Pre-allocate to reduce reallocations
+namespace {
 
-  // Start with command type
+// Bumping this prefix creates a new cache namespace. Query cache entries are
+// currently process-local, but keeping the version in the hashed material also
+// makes future persistence safe across serializer changes.
+constexpr std::array<char, 5> kSerializerPrefix = {'M', 'G', 'Q', 'K', '\x02'};
+
+enum class FieldTag : uint8_t {
+  kCommand = 1,
+  kTable = 2,
+  kSearchText = 3,
+  kAndTerm = 4,
+  kNotTerm = 5,
+  kFilter = 6,
+  kFuzzyDistance = 7,
+};
+
+enum class FilterFieldTag : uint8_t { kColumn = 1, kOperator = 2, kValue = 3 };
+
+void AppendUint64(std::string& output, uint64_t value) {
+  for (int shift = 56; shift >= 0; shift -= 8) {
+    output.push_back(static_cast<char>((value >> shift) & 0xffU));
+  }
+}
+
+void AppendField(std::string& output, uint8_t tag, std::string_view value) {
+  output.push_back(static_cast<char>(tag));
+  AppendUint64(output, static_cast<uint64_t>(value.size()));
+  output.append(value.data(), value.size());
+}
+
+void AppendField(std::string& output, FieldTag tag, std::string_view value) {
+  AppendField(output, static_cast<uint8_t>(tag), value);
+}
+
+std::string OneByteValue(uint8_t value) {
+  return std::string(1, static_cast<char>(value));
+}
+
+}  // namespace
+
+std::string QueryNormalizer::Normalize(const query::Query& query, const TextNormalizer& text_normalizer) {
+  uint8_t command = 0;
   switch (query.type) {
     case query::QueryType::SEARCH:
-      result += 'S';
+      command = 1;
       break;
     case query::QueryType::COUNT:
-      result += 'C';
+      command = 2;
       break;
     default:
-      // Only SEARCH and COUNT queries are cacheable
+      // Only SEARCH and COUNT queries are cacheable.
       return "";
   }
 
-  // Add table name (lowercase for case-insensitive consistency)
-  std::string lowercase_table = mygram::utils::ToLower(query.table);
-  result += ' ';
-  result += lowercase_table;
+  std::string result;
+  result.reserve(128);
+  result.append(kSerializerPrefix.data(), kSerializerPrefix.size());
 
-  // Add main search text
-  if (!query.search_text.empty()) {
-    result += ' ';
-    result += NormalizeSearchText(query.search_text, text_normalizer);
+  AppendField(result, FieldTag::kCommand, OneByteValue(command));
+  AppendField(result, FieldTag::kTable, query.table);
+  AppendField(result, FieldTag::kSearchText, NormalizeSearchText(query.search_text, text_normalizer));
+
+  std::vector<std::string> and_terms;
+  and_terms.reserve(query.and_terms.size());
+  for (const auto& term : query.and_terms) {
+    and_terms.push_back(NormalizeSearchText(term, text_normalizer));
+  }
+  std::sort(and_terms.begin(), and_terms.end());
+  for (const auto& term : and_terms) {
+    AppendField(result, FieldTag::kAndTerm, term);
   }
 
-  // Add AND terms
-  if (!query.and_terms.empty()) {
-    result += ' ';
-    result.append(NormalizeAndTerms(query.and_terms, text_normalizer));
+  std::vector<std::string> not_terms;
+  not_terms.reserve(query.not_terms.size());
+  for (const auto& term : query.not_terms) {
+    not_terms.push_back(NormalizeSearchText(term, text_normalizer));
+  }
+  std::sort(not_terms.begin(), not_terms.end());
+  for (const auto& term : not_terms) {
+    AppendField(result, FieldTag::kNotTerm, term);
   }
 
-  // Add NOT terms
-  if (!query.not_terms.empty()) {
-    result += ' ';
-    result.append(NormalizeNotTerms(query.not_terms, text_normalizer));
-  }
-
-  // Add filters (sorted for consistency)
-  if (!query.filters.empty()) {
-    result += ' ';
-    result.append(NormalizeFilters(query.filters));
+  std::vector<query::FilterCondition> filters = query.filters;
+  std::sort(filters.begin(), filters.end(), [](const auto& lhs, const auto& rhs) {
+    return std::tie(lhs.column, lhs.op, lhs.value) < std::tie(rhs.column, rhs.op, rhs.value);
+  });
+  for (const auto& filter : filters) {
+    std::string encoded_filter;
+    encoded_filter.reserve(filter.column.size() + filter.value.size() + 32);
+    AppendField(encoded_filter, static_cast<uint8_t>(FilterFieldTag::kColumn), filter.column);
+    AppendField(encoded_filter, static_cast<uint8_t>(FilterFieldTag::kOperator),
+                OneByteValue(static_cast<uint8_t>(filter.op)));
+    AppendField(encoded_filter, static_cast<uint8_t>(FilterFieldTag::kValue), filter.value);
+    AppendField(result, FieldTag::kFilter, encoded_filter);
   }
 
   if (query.fuzzy_max_distance.has_value()) {
-    result += " FUZZY ";
-    result += std::to_string(*query.fuzzy_max_distance);
+    const uint32_t distance = *query.fuzzy_max_distance;
+    std::string encoded_distance;
+    encoded_distance.reserve(sizeof(distance));
+    for (int shift = 24; shift >= 0; shift -= 8) {
+      encoded_distance.push_back(static_cast<char>((distance >> shift) & 0xffU));
+    }
+    AppendField(result, FieldTag::kFuzzyDistance, encoded_distance);
   }
 
   // Note: LIMIT, OFFSET, and SORT are intentionally excluded from cache key.
@@ -103,70 +164,6 @@ std::string QueryNormalizer::NormalizeSearchText(const std::string& text, const 
   }
 
   return normalized;
-}
-
-std::string QueryNormalizer::NormalizeAndTerms(const std::vector<std::string>& and_terms,
-                                               const TextNormalizer& text_normalizer) {
-  // Sort AND terms for consistent cache key
-  std::vector<std::string> sorted_terms;
-  sorted_terms.reserve(and_terms.size());
-  for (const auto& term : and_terms) {
-    sorted_terms.push_back(NormalizeSearchText(term, text_normalizer));
-  }
-  std::sort(sorted_terms.begin(), sorted_terms.end());
-
-  std::string result;
-  for (size_t i = 0; i < sorted_terms.size(); ++i) {
-    if (i > 0) {
-      result += ' ';
-    }
-    result.append("AND ");
-    result += sorted_terms[i];
-  }
-  return result;
-}
-
-std::string QueryNormalizer::NormalizeNotTerms(const std::vector<std::string>& not_terms,
-                                               const TextNormalizer& text_normalizer) {
-  // Sort NOT terms for consistent cache key
-  std::vector<std::string> sorted_terms;
-  sorted_terms.reserve(not_terms.size());
-  for (const auto& term : not_terms) {
-    sorted_terms.push_back(NormalizeSearchText(term, text_normalizer));
-  }
-  std::sort(sorted_terms.begin(), sorted_terms.end());
-
-  std::string result;
-  for (size_t i = 0; i < sorted_terms.size(); ++i) {
-    if (i > 0) {
-      result += ' ';
-    }
-    result.append("NOT ");
-    result += sorted_terms[i];
-  }
-  return result;
-}
-
-std::string QueryNormalizer::NormalizeFilters(const std::vector<query::FilterCondition>& filters) {
-  // Sort filters by column name for consistent cache key
-  std::vector<query::FilterCondition> sorted_filters = filters;
-  std::sort(
-      sorted_filters.begin(), sorted_filters.end(),
-      [](const query::FilterCondition& lhs, const query::FilterCondition& rhs) { return lhs.column < rhs.column; });
-
-  std::string result;
-  for (size_t i = 0; i < sorted_filters.size(); ++i) {
-    if (i > 0) {
-      result += ' ';
-    }
-    result.append("FILTER ");
-    result += sorted_filters[i].column;
-    result += ' ';
-    result.append(query::FilterOpToString(sorted_filters[i].op));
-    result += ' ';
-    result += sorted_filters[i].value;
-  }
-  return result;
 }
 
 }  // namespace mygramdb::cache

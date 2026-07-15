@@ -16,17 +16,18 @@ namespace mygramdb::cache {
 /**
  * @brief Normalize queries for cache key generation
  *
- * Normalizes queries to maximize cache hit rate while maintaining correctness.
+ * Serializes queries to an injective, versioned cache-key representation.
  * Multiple queries with the same semantic meaning will produce the same
- * normalized form.
+ * representation, while structural boundaries remain unambiguous.
  *
  * Normalization rules:
  * 1. Whitespace: Normalize to single spaces
- * 2. Keywords: Convert to uppercase (SEARCH, FILTER, etc.)
- * 3. Search text: Normalize whitespace, then apply the optional index text normalizer
- * 4. Clause order: Canonicalize to fixed order
- * 5. Filter order: Sort alphabetically by column name
- * 6. Presentation clauses: Exclude LIMIT/OFFSET/SORT from the key
+ * 2. Structure: Encode every field with a type tag and byte length
+ * 3. Table identity: Preserve the exact canonical table key supplied by the catalog
+ * 4. Search text: Normalize whitespace, then apply the optional index text normalizer
+ * 5. Clause order: Canonicalize to fixed order
+ * 6. Filter order: Sort by the complete (column, operator, value) tuple
+ * 7. Presentation clauses: Exclude LIMIT/OFFSET/SORT from the key
  *
  * Note: LIMIT, OFFSET, and SORT are intentionally excluded from the normalized
  * form. The cache stores full unsorted results, and presentation clauses are
@@ -41,7 +42,9 @@ class QueryNormalizer {
    * @brief Normalize query for cache key generation
    * @param query Parsed query object
    * @param text_normalizer Optional index-compatible normalizer for search, AND, and NOT terms
-   * @return Normalized query string
+   * The returned string is binary and may contain NUL bytes. It is intended
+   * only as input to CacheKeyGenerator.
+   * @return Versioned canonical query serialization
    */
   static std::string Normalize(const query::Query& query, const TextNormalizer& text_normalizer = nullptr);
 
@@ -50,24 +53,6 @@ class QueryNormalizer {
    * @brief Normalize search text whitespace and apply optional index text normalization
    */
   static std::string NormalizeSearchText(const std::string& text, const TextNormalizer& text_normalizer);
-
-  /**
-   * @brief Normalize AND terms
-   */
-  static std::string NormalizeAndTerms(const std::vector<std::string>& and_terms,
-                                       const TextNormalizer& text_normalizer);
-
-  /**
-   * @brief Normalize NOT terms
-   */
-  static std::string NormalizeNotTerms(const std::vector<std::string>& not_terms,
-                                       const TextNormalizer& text_normalizer);
-
-  /**
-   * @brief Normalize filter conditions
-   * Sorts filters alphabetically by column name for consistency
-   */
-  static std::string NormalizeFilters(const std::vector<query::FilterCondition>& filters);
 };
 
 }  // namespace mygramdb::cache

@@ -238,10 +238,6 @@ TEST(QueryNormalizerTest, FuzzyDistanceIncludedInCacheKey) {
   EXPECT_NE(exact_key, fuzzy_one_key);
   EXPECT_NE(exact_key, fuzzy_two_key);
   EXPECT_NE(fuzzy_one_key, fuzzy_two_key);
-  EXPECT_NE(fuzzy_one_key.find("FUZZY 1"), std::string::npos);
-  EXPECT_NE(fuzzy_two_key.find("FUZZY 2"), std::string::npos);
-  EXPECT_EQ(fuzzy_one_key.find("FUZZY 1"), fuzzy_one_key.rfind("FUZZY 1"));
-  EXPECT_EQ(fuzzy_two_key.find("FUZZY 2"), fuzzy_two_key.rfind("FUZZY 2"));
 }
 
 /**
@@ -395,14 +391,14 @@ TEST(QueryNormalizerTest, SearchAndNotTermsUseIndexTextNormalizerWhenProvided) {
 
   EXPECT_EQ(normalized1, normalized2);
   EXPECT_NE(normalized1.find("hello"), std::string::npos);
-  EXPECT_NE(normalized1.find("AND cafe"), std::string::npos);
-  EXPECT_NE(normalized1.find("NOT noise"), std::string::npos);
+  EXPECT_NE(normalized1.find("cafe"), std::string::npos);
+  EXPECT_NE(normalized1.find("noise"), std::string::npos);
 }
 
 /**
- * @brief Test table name case insensitivity
+ * @brief Test exact canonical table identity preservation
  */
-TEST(QueryNormalizerTest, TableNameCaseInsensitive) {
+TEST(QueryNormalizerTest, TableNameCaseSensitiveIdentity) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "Posts";
@@ -425,9 +421,10 @@ TEST(QueryNormalizerTest, TableNameCaseInsensitive) {
   std::string normalized2 = QueryNormalizer::Normalize(query2);
   std::string normalized3 = QueryNormalizer::Normalize(query3);
 
-  // Different table name case should produce same normalized query (lowercase)
-  EXPECT_EQ(normalized1, normalized2);
-  EXPECT_EQ(normalized2, normalized3);
+  // The table catalog treats these as distinct configured identities.
+  EXPECT_NE(normalized1, normalized2);
+  EXPECT_NE(normalized2, normalized3);
+  EXPECT_NE(normalized1, normalized3);
 }
 
 /**
@@ -445,8 +442,9 @@ TEST(QueryNormalizerTest, EmptySearchText) {
 
   // Should produce valid normalized query without search text
   EXPECT_FALSE(normalized.empty());
-  EXPECT_NE(normalized.find("S posts"), std::string::npos);
-  EXPECT_NE(normalized.find("FILTER status = active"), std::string::npos);
+  EXPECT_NE(normalized.find("posts"), std::string::npos);
+  EXPECT_NE(normalized.find("status"), std::string::npos);
+  EXPECT_NE(normalized.find("active"), std::string::npos);
 }
 
 /**
@@ -488,7 +486,8 @@ TEST(QueryNormalizerTest, SpecialCharactersInFilterValues) {
 
   // Should handle filter values containing keywords
   EXPECT_FALSE(normalized.empty());
-  EXPECT_NE(normalized.find("FILTER title = LIMIT 100"), std::string::npos);
+  EXPECT_NE(normalized.find("title"), std::string::npos);
+  EXPECT_NE(normalized.find("LIMIT 100"), std::string::npos);
 }
 
 /**
@@ -504,7 +503,7 @@ TEST(QueryNormalizerTest, CountQuery) {
   std::string normalized = QueryNormalizer::Normalize(query1);
 
   EXPECT_FALSE(normalized.empty());
-  EXPECT_EQ(normalized.find("C"), 0);
+  EXPECT_FALSE(normalized.empty());
 }
 
 /**
@@ -824,7 +823,7 @@ TEST(QueryNormalizerTest, SearchAndCountProduceDifferentNormalizedStrings) {
 }
 
 /**
- * @brief SEARCH and COUNT should use distinct prefixes
+ * @brief SEARCH and COUNT should use distinct command fields
  */
 TEST(QueryNormalizerTest, SearchAndCountPrefixesAreDistinct) {
   query::Query search_query;
@@ -836,8 +835,73 @@ TEST(QueryNormalizerTest, SearchAndCountPrefixesAreDistinct) {
   query::Query count_query = search_query;
   count_query.type = query::QueryType::COUNT;
 
-  EXPECT_EQ(QueryNormalizer::Normalize(search_query).substr(0, 2), "S ");
-  EXPECT_EQ(QueryNormalizer::Normalize(count_query).substr(0, 2), "C ");
+  EXPECT_NE(QueryNormalizer::Normalize(search_query), QueryNormalizer::Normalize(count_query));
+}
+
+TEST(QueryNormalizerTest, SearchTextCannotCollideWithFilterStructure) {
+  query::Query literal;
+  literal.type = query::QueryType::SEARCH;
+  literal.table = "db.posts";
+  literal.search_text = "x FILTER a = b";
+
+  query::Query structured = literal;
+  structured.search_text = "x";
+  structured.filters = {{"a", query::FilterOp::EQ, "b"}};
+
+  EXPECT_NE(QueryNormalizer::Normalize(literal), QueryNormalizer::Normalize(structured));
+}
+
+TEST(QueryNormalizerTest, FilterValueCannotCollideWithAdditionalFilter) {
+  query::Query one_filter;
+  one_filter.type = query::QueryType::SEARCH;
+  one_filter.table = "db.posts";
+  one_filter.search_text = "x";
+  one_filter.filters = {{"a", query::FilterOp::EQ, "b FILTER c = d"}};
+
+  query::Query two_filters = one_filter;
+  two_filters.filters = {{"a", query::FilterOp::EQ, "b"}, {"c", query::FilterOp::EQ, "d"}};
+
+  EXPECT_NE(QueryNormalizer::Normalize(one_filter), QueryNormalizer::Normalize(two_filters));
+}
+
+TEST(QueryNormalizerTest, BinaryFieldBoundariesAreInjective) {
+  query::Query first;
+  first.type = query::QueryType::SEARCH;
+  first.table = "db.posts";
+  first.search_text = std::string("a\0b", 3);
+  first.and_terms = {"c"};
+
+  query::Query second = first;
+  second.search_text = "a";
+  second.and_terms = {std::string("b\0c", 3)};
+
+  EXPECT_NE(QueryNormalizer::Normalize(first), QueryNormalizer::Normalize(second));
+}
+
+TEST(QueryNormalizerTest, EquivalentProtocolQueriesShareOnlyCanonicalStructure) {
+  // HTTP builds this Query directly from JSON. TCP reaches the same Query
+  // shape through QueryParser; clause ordering and presentation fields must
+  // not create different cache entries.
+  query::Query http_query;
+  http_query.type = query::QueryType::SEARCH;
+  http_query.table = "db.posts";
+  http_query.search_text = "hello   world";
+  http_query.and_terms = {"second", "first"};
+  http_query.filters = {{"status", query::FilterOp::EQ, "active"}, {"tenant", query::FilterOp::EQ, "7"}};
+  http_query.limit = 25;
+  http_query.offset = 50;
+
+  query::Query tcp_query = http_query;
+  tcp_query.search_text = "hello world";
+  tcp_query.and_terms = {"first", "second"};
+  std::reverse(tcp_query.filters.begin(), tcp_query.filters.end());
+  tcp_query.limit = 100;
+  tcp_query.offset = 0;
+
+  EXPECT_EQ(QueryNormalizer::Normalize(http_query), QueryNormalizer::Normalize(tcp_query));
+
+  tcp_query.filters.front().value = "8";
+  EXPECT_NE(QueryNormalizer::Normalize(http_query), QueryNormalizer::Normalize(tcp_query));
 }
 
 }  // namespace mygramdb::cache

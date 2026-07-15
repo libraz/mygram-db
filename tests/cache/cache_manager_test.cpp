@@ -842,6 +842,26 @@ TEST(CacheManagerTest, IgnoresNonCanonicalPrecomputedCacheKey) {
   EXPECT_FALSE(canonical_lookup.has_value()) << "Canonical-marked stale keys should be trusted and miss";
 }
 
+TEST(CacheManagerTest, ExactCaseTableIdentitiesDoNotShareEntries) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.min_query_cost_ms = 0.0;
+
+  NgramConfigMap ngram_configs;
+  ngram_configs["Db.Users"] = NgramConfig{.ngram_size = 3, .kanji_ngram_size = 2, .cross_boundary_ngrams = true};
+  ngram_configs["db.users"] = NgramConfig{.ngram_size = 3, .kanji_ngram_size = 2, .cross_boundary_ngrams = true};
+  CacheManager mgr(config, std::move(ngram_configs));
+
+  auto upper = CreateQuery("Db.Users", "alice");
+  auto lower = CreateQuery("db.users", "alice");
+  ASSERT_TRUE(mgr.Insert(upper, {1, 2}, {"ali", "lic", "ice"}, 1.0));
+
+  EXPECT_FALSE(mgr.Lookup(lower).has_value());
+  ASSERT_TRUE(mgr.Lookup(upper).has_value());
+  EXPECT_EQ(*mgr.Lookup(upper), (std::vector<DocId>{1, 2}));
+}
+
 // =============================================================================
 // CR-7 regression: Disable race
 // =============================================================================
