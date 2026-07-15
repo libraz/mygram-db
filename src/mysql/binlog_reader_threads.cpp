@@ -656,10 +656,17 @@ void BinlogReader::WorkerThreadFunc() {
         }
       }
       queue_full_cv_.notify_all();
-      processing_failure_reconnect_requested_.store(true, std::memory_order_release);
-      // GTID is not updated on failure. The reader is forced to reconnect
-      // from the last processed GTID, and queued later events are discarded
-      // so they cannot permanently skip the failed event.
+      if (schema_incompatible_.load(std::memory_order_acquire)) {
+        // A schema mismatch is persistent. Reconnecting would replay the same
+        // DDL forever, so stop and expose not-ready until SYNC/config action.
+        should_stop_.store(true, std::memory_order_release);
+        queue_cv_.notify_all();
+        queue_full_cv_.notify_all();
+      } else {
+        processing_failure_reconnect_requested_.store(true, std::memory_order_release);
+        // GTID is not updated on a retryable failure. Reconnect from the last
+        // processed position and discard later queued events.
+      }
     }
   }
 
@@ -674,6 +681,13 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
       pending_commit_gtid_.clear();
     }
     return true;
+  }
+
+  if (event.type == BinlogEventType::DDL) {
+    const DDLSchemaCheck schema_check = ValidateSchemaAfterDDL(event);
+    if (schema_check != DDLSchemaCheck::kCompatible) {
+      return false;
+    }
   }
 
   if (!ProcessEvent(event)) {

@@ -106,6 +106,71 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
                                             cache_manager_.load(std::memory_order_acquire), bm25_stats);
 }
 
+BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEvent& event) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+
+  if (event.ddl_type == DDLType::kTruncate) {
+    return DDLSchemaCheck::kCompatible;
+  }
+
+  auto incompatible = [&](const std::string& reason) {
+    const std::string message = "SCHEMA_INCOMPATIBLE: " + reason +
+                                ". Replication stopped before advancing GTID; run SYNC after fixing the schema or "
+                                "update the table configuration.";
+    schema_incompatible_.store(true, std::memory_order_release);
+    SetLastError(MakeError(ErrorCode::kMySQLInvalidSchema, message, event.table_name));
+    mygram::utils::StructuredLog()
+        .Event("binlog_fatal_error")
+        .Field("type", "schema_incompatible")
+        .Field("table", event.table_name)
+        .Field("gtid", event.gtid)
+        .Field("query", event.text)
+        .Field("error", message)
+        .Error();
+    return DDLSchemaCheck::kIncompatible;
+  };
+
+  if (event.ddl_type == DDLType::kDrop) {
+    return incompatible("configured table was dropped");
+  }
+  if (event.ddl_type == DDLType::kRename) {
+    return incompatible("configured table was renamed; aliases are not followed automatically");
+  }
+  if (event.ddl_type != DDLType::kAlter) {
+    return incompatible("unclassified DDL affected a configured table");
+  }
+
+  auto table_iter = table_contexts_.find(event.table_name);
+  auto baseline_iter = configured_schema_baselines_.find(event.table_name);
+  if (table_iter == table_contexts_.end() || table_iter->second == nullptr ||
+      baseline_iter == configured_schema_baselines_.end()) {
+    return incompatible("no startup schema fingerprint exists for the affected table");
+  }
+  if (metadata_connection_ == nullptr) {
+    SetLastError(MakeError(ErrorCode::kMySQLDisconnected, "DDL schema validation requires the metadata connection",
+                           event.table_name));
+    return DDLSchemaCheck::kRetryableFailure;
+  }
+
+  auto current = DDLSchemaValidator::Capture(*metadata_connection_, table_iter->second->config);
+  if (!current) {
+    const ErrorCode code = current.error().code();
+    if (code == ErrorCode::kMySQLConnectionFailed || code == ErrorCode::kMySQLDisconnected ||
+        code == ErrorCode::kMySQLTimeout || code == ErrorCode::kMySQLQueryFailed) {
+      SetLastError(current.error());
+      return DDLSchemaCheck::kRetryableFailure;
+    }
+    return incompatible(current.error().message());
+  }
+
+  auto comparison = DDLSchemaValidator::Compare(baseline_iter->second, *current, table_iter->second->config);
+  if (!comparison) {
+    return incompatible(comparison.error().message());
+  }
+  return DDLSchemaCheck::kCompatible;
+}
+
 bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   std::string cache_key = metadata.database_name + "." + metadata.table_name;
 

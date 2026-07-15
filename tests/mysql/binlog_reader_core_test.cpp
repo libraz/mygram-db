@@ -790,11 +790,30 @@ TEST_F(BinlogReaderFixture, DmlGtidAdvancesOnlyAtCommitBoundary) {
 TEST_F(BinlogReaderFixture, DdlGtidAdvancesImmediatelyAfterSuccess) {
   reader_->SetCurrentGTID("uuid:50");
 
-  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_.name, "ALTER TABLE articles ADD COLUMN title TEXT");
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_.name, "TRUNCATE TABLE articles");
   ddl_event.gtid = "uuid:51";
 
   ASSERT_TRUE(reader_->ProcessQueuedEvent(ddl_event));
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
+}
+
+TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecovery) {
+  reader_->SetCurrentGTID("uuid:50");
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_.name, "RENAME TABLE articles TO articles_v2");
+  ddl_event.gtid = "uuid:51";
+
+  EXPECT_FALSE(reader_->ProcessQueuedEvent(ddl_event));
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50");
+  EXPECT_TRUE(reader_->HasSchemaIncompatibleError());
+  EXPECT_NE(reader_->GetLastError().find("SCHEMA_INCOMPATIBLE"), std::string::npos);
+
+  auto restart_without_rebuild = reader_->Start();
+  EXPECT_FALSE(restart_without_rebuild);
+  EXPECT_NE(reader_->GetLastError().find("requires SYNC"), std::string::npos);
+
+  reader_->SetCurrentGTID("uuid:60");
+  EXPECT_FALSE(reader_->HasSchemaIncompatibleError());
+  EXPECT_TRUE(reader_->GetLastError().empty());
 }
 
 /**

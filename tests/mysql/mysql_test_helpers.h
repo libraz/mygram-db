@@ -29,6 +29,7 @@ inline bool ShouldRunMySQLIntegrationTests() {
  *
  * Reads the following environment variables (with defaults):
  *   - MYSQL_HOST     (default: "127.0.0.1")
+ *   - MYSQL_PORT     (default: 3306)
  *   - MYSQL_USER     (default: "root")
  *   - MYSQL_PASSWORD (default: "")
  *   - MYSQL_DATABASE (default: "test")
@@ -41,7 +42,16 @@ inline Connection::Config GetMySQLTestConfig() {
   const char* host = std::getenv("MYSQL_HOST");
   config.host = host != nullptr ? host : "127.0.0.1";
 
-  config.port = 3306;
+  const char* port = std::getenv("MYSQL_PORT");
+  if (port != nullptr) {
+    try {
+      config.port = static_cast<uint16_t>(std::stoul(port));
+    } catch (...) {
+      config.port = 3306;
+    }
+  } else {
+    config.port = 3306;
+  }
 
   const char* user = std::getenv("MYSQL_USER");
   config.user = user != nullptr ? user : "root";

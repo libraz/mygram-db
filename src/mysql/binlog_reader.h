@@ -25,8 +25,10 @@
 #include "mysql/binlog_stream.h"
 #include "mysql/connection.h"
 #include "mysql/connection_validator.h"
+#include "mysql/ddl_schema_validator.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
+#include "mysql/text_materializer.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
 
@@ -76,6 +78,8 @@ struct BinlogEvent {
   std::string old_primary_key;  // Before-image PK for UPDATE events that change the primary key
   std::string text;             // Normalized text for INSERT/UPDATE (after image for UPDATE)
   std::string old_text;         // Before image text for UPDATE events (empty for INSERT/DELETE)
+  TextValueState text_state = TextValueState::kAbsent;
+  TextValueState old_text_state = TextValueState::kAbsent;
   storage::FilterMap filters;
   std::string gtid;  // GTID for this event
 
@@ -123,6 +127,7 @@ struct BinlogEvent {
     event.table_name = table;
     event.primary_key = primary_key_val;
     event.text = txt;
+    event.text_state = TextValueState::kPresent;
     event.gtid = gtid_val;
     return event;
   }
@@ -146,6 +151,8 @@ struct BinlogEvent {
     event.primary_key = primary_key_val;
     event.text = new_txt;
     event.old_text = old_txt;
+    event.text_state = TextValueState::kPresent;
+    event.old_text_state = old_txt.empty() ? TextValueState::kAbsent : TextValueState::kPresent;
     event.gtid = gtid_val;
     return event;
   }
@@ -166,6 +173,7 @@ struct BinlogEvent {
     event.table_name = table;
     event.primary_key = primary_key_val;
     event.text = txt;
+    event.text_state = txt.empty() ? TextValueState::kAbsent : TextValueState::kPresent;
     event.gtid = gtid_val;
     return event;
   }
@@ -351,6 +359,9 @@ class BinlogReader final : public IBinlogReader {
    */
   uint64_t GetCRCErrors() const { return crc_errors_; }
 
+  /** True after a configured table DDL changed a monitored schema contract. */
+  bool HasSchemaIncompatibleError() const { return schema_incompatible_.load(std::memory_order_acquire); }
+
   /**
    * @brief Get last error message (IBinlogReader interface)
    */
@@ -411,6 +422,7 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<bool> running_{false};
   std::atomic<bool> should_stop_{false};
   std::atomic<bool> processing_failure_reconnect_requested_{false};
+  std::atomic<bool> schema_incompatible_{false};
   std::mutex stop_mutex_;  ///< Serializes Stop() calls to prevent concurrent join races
 
   // Event queue (using unique_ptr to avoid copying large BinlogEvent objects)
@@ -451,6 +463,7 @@ class BinlogReader final : public IBinlogReader {
 
   // Table metadata cache
   TableMetadataCache table_metadata_cache_;
+  std::unordered_map<std::string, ConfiguredTableSchema> configured_schema_baselines_;
 
   struct ColumnDefinition {
     std::string name;
@@ -536,6 +549,11 @@ class BinlogReader final : public IBinlogReader {
    * @brief Process single event (delegates to BinlogEventProcessor)
    */
   bool ProcessEvent(const BinlogEvent& event);
+
+  enum class DDLSchemaCheck : uint8_t { kCompatible, kRetryableFailure, kIncompatible };
+
+  /** Validate a monitored DDL before mutating state or advancing its GTID. */
+  DDLSchemaCheck ValidateSchemaAfterDDL(const BinlogEvent& event);
 
   /**
    * @brief Fetch column names from INFORMATION_SCHEMA and update TableMetadata

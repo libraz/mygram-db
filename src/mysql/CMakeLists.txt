@@ -4,6 +4,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
   add_library(mygramdb_mysql
     connection.cpp
     connection_validator.cpp
+    ddl_schema_validator.cpp
     binlog_stream.cpp
     binlog_reader.cpp
     binlog_reader_threads.cpp

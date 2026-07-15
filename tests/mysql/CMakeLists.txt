@@ -76,6 +76,20 @@ gtest_discover_tests(binlog_reader_stop_contract_test
 )
 
 if(USE_MYSQL AND MYSQL_FOUND)
+  add_executable(ddl_schema_validator_test
+    ddl_schema_validator_test.cpp
+  )
+
+  target_link_libraries(ddl_schema_validator_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(ddl_schema_validator_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # MariaDB GTID parsing tests (no MySQL connection required)
   add_executable(mariadb_gtid_test
     mariadb_gtid_test.cpp

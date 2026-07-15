@@ -99,6 +99,15 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     mygram::utils::StructuredLog().Event("binlog_reader_stale_state_cleaned").Info();
   }
 
+  // A monitored schema mismatch is not a transport failure. Replaying the
+  // same DDL forever cannot repair it, so require an explicit state rebuild
+  // (SYNC/DUMP LOAD calls SetCurrentGTID) or a new reader/configuration.
+  if (schema_incompatible_.load(std::memory_order_acquire)) {
+    SetLastError(MakeError(ErrorCode::kMySQLInvalidSchema,
+                           "SCHEMA_INCOMPATIBLE: replication requires SYNC or a configuration change"));
+    return MakeUnexpected(GetLastErrorObject());
+  }
+
   // Atomically check and set running_ to prevent concurrent Start() calls
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
@@ -263,6 +272,30 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     return MakeUnexpected(metadata_connect_result.error());
   }
 
+  // Capture the startup contract for only the configured PK/text/filter
+  // columns. Post-DDL validation compares against these fingerprints, so
+  // unrelated ADD COLUMN / ADD INDEX operations remain compatible.
+  configured_schema_baselines_.clear();
+  for (const auto& [table_name, ctx] : table_contexts_) {
+    if (ctx == nullptr) {
+      SetLastError(MakeError(ErrorCode::kMySQLInvalidSchema, "Null table context while capturing configured schema",
+                             table_name));
+      return MakeUnexpected(GetLastErrorObject());
+    }
+    auto schema = DDLSchemaValidator::Capture(*metadata_connection_, ctx->config);
+    if (!schema) {
+      SetLastError(schema.error());
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "configured_schema_capture_failed")
+          .Field("table", table_name)
+          .Field("error", schema.error().message())
+          .Error();
+      return MakeUnexpected(schema.error());
+    }
+    configured_schema_baselines_.emplace(table_name, std::move(*schema));
+  }
+
   // Validate connection before starting replication
   if (!ValidateConnection()) {
     mygram::utils::LogBinlogError("validation_failed", current_gtid_, GetLastError());
@@ -378,15 +411,22 @@ std::string BinlogReader::GetCurrentGTID() const {
 }
 
 void BinlogReader::SetCurrentGTID(const std::string& gtid) {
-  std::scoped_lock lock(gtid_mutex_);
-  current_gtid_ = gtid;
-  pending_commit_gtid_.clear();
-  // Update executed_gtid_set_ for REPLICATION STATUS display only.
-  // Reconnection always uses current_gtid_ (via ConvertSingleGtidToRange),
-  // never executed_gtid_set_, to prevent skipping undelivered events.
-  if (gtid.find('-') != std::string::npos || gtid.find(',') != std::string::npos) {
-    executed_gtid_set_ = gtid;
+  {
+    std::scoped_lock lock(gtid_mutex_);
+    current_gtid_ = gtid;
+    pending_commit_gtid_.clear();
+    // Update executed_gtid_set_ for REPLICATION STATUS display only.
+    // Reconnection always uses current_gtid_ (via ConvertSingleGtidToRange),
+    // never executed_gtid_set_, to prevent skipping undelivered events.
+    if (gtid.find('-') != std::string::npos || gtid.find(',') != std::string::npos) {
+      executed_gtid_set_ = gtid;
+    }
   }
+  // SetCurrentGTID is used after SYNC/DUMP LOAD has replaced the indexed
+  // state. That explicit operator action is the only in-process recovery from
+  // a persistent schema incompatibility.
+  schema_incompatible_.store(false, std::memory_order_release);
+  SetLastError(mygram::utils::Error{});
   mygram::utils::StructuredLog().Event("binlog_gtid_set").Field("gtid", gtid).Info();
 }
 
