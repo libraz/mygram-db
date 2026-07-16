@@ -10,9 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-07-16
+
 ### Added
 
 - **C client parity and ABI-safe configuration** — Added typed raw boolean search/highlight functions and the size/versioned `MygramClientConfigV2_C` with Unix-domain-socket and asynchronous DUMP SAVE timeout settings. The legacy C configuration remains ABI-compatible.
+- **Boolean filter type** — Filter columns can be declared `boolean`, restricted to equality and NULL operators, materialized identically across the initial snapshot and binlog paths.
+- **DDL schema-compatibility enforcement** — The binlog reader fingerprints the configured primary-key, text, and filter columns at startup and revalidates after each DDL on a monitored table; unrelated `ADD COLUMN`/`ADD INDEX` stay compatible, while a drop, rename, or semantic change to a monitored column stops replication before advancing the GTID and requires an explicit `SYNC` or configuration change to recover.
+- **V2 dump restore limits** — `dump.restore_memory_budget_mb` and `dump.restore_max_section_mb` bound the memory staged during a V2 restore so a corrupt or malicious dump cannot exhaust memory before the atomic swap.
 - **Cache accounting metric** — INFO and Prometheus now expose the shared accounted cache total, including container and invalidation-index overhead.
 
 ### Fixed
@@ -20,17 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Critical snapshot/binlog position gap** — Initial and shared snapshots capture a conservative GTID lower bound before opening the consistent snapshot, preventing commits from being permanently skipped.
 - **Critical SYNC data integrity** — SYNC builds replacement state on the side, swaps only after success, rolls back a failed restart, and resumes the shared reader from its pre-SYNC drained GTID so other tables do not lose events.
 - **Critical MariaDB compressed-event handling** — `log_bin_compress=ON` and compressed event IDs 165–168 now fail closed before GTID advancement.
+- **Snapshot/binlog materialization parity** — A shared text-source materializer and filter-value converter make the initial snapshot and row-based binlog paths produce identical results (absent/NULL/present state, boolean filters, and TIMESTAMP compared as a UTC epoch); every MySQL session is pinned to UTC, and a configured text column absent from a FULL row image now fails closed.
+- **Fail-closed HTTP access control** — The CIDR allow list applies to every non-probe HTTP request, so an empty, omitted, or invalid list denies access instead of allowing all; only `/health/live` and `/health/ready` bypass it, and `/health/detail` now follows the same access control as other endpoints.
 - **Reconnect transactionality** — Candidate MySQL connections are validated before publication; failed reader restart restores the old connection and replication position, and reconnect now shares long-operation admission with DUMP/SYNC/snapshots.
-- **Reactor and lifecycle bounds** — Read/frame budgets and watermarks prevent single-client starvation, HTTP lifecycle transitions are serialized, reactor shutdown closes every registered connection exactly once, and shutdown drain failures propagate as errors.
+- **Reactor and lifecycle bounds** — Read/frame budgets and watermarks prevent single-client starvation, HTTP lifecycle transitions are serialized, reactor shutdown closes every registered connection exactly once, connection registrations are tokenized to prevent reused-FD dispatch, and shutdown drain failures propagate as errors.
 - **Process-wide reactor memory admission** — `api.tcp.max_total_buffered_bytes` caps aggregate pending request frames and unsent responses across all clients, preventing per-connection limits from multiplying into unbounded process memory.
-- **Cache semantic and ABA correctness** — Cache keys include execution semantics and synonym revision; text-sensitive entries invalidate safely; monotonic epochs and entry generations prevent stale deferred work from deleting or reinserting a newer incarnation.
+- **Cache semantic and ABA correctness** — Cache keys use a versioned, length-prefixed binary encoding that includes execution semantics and synonym revision so search text cannot collide with filter structure; text-sensitive entries invalidate safely; monotonic epochs and entry generations prevent stale deferred work from deleting or reinserting a newer incarnation.
 - **Literal reserved-word search and required empty strings** — Quoted parser provenance is preserved across TCP/client paths, and required string filters now distinguish an explicitly empty value from an omitted field.
+- **Dump verify_text metadata** — V1/V2 dump compatibility metadata is extended so `verify_text` semantics survive save and load.
+- **Filter schema and CIDR validation** — Declaring a column as both a required and optional filter with conflicting types is rejected at load, and invalid IPv4 CIDRs in `network.allow_cidrs` are rejected instead of silently ignored.
+- **Dump replacement safety** — `ReplaceLoadedTables` rejects duplicate or null table replacements and propagates the failure instead of applying a partial swap.
 - **Configuration activation** — Enabled synonym dictionaries fail startup when absent or invalid, while failed reloads preserve the last published dictionary.
 
 ### Changed
 
+- **Long-running operation coordinator** — `SYNC`, `DUMP SAVE`, `DUMP LOAD`, `OPTIMIZE`, and automatic snapshots now pass through a single atomic admission point; each acquires a token and overlapping requests fail with a descriptive error naming the in-progress operation, and shutdown drains the active token before exiting.
 - `cache.max_memory_mb` is enforced as a shared budget across cache entries, container/LRU/table indexes, and invalidation metadata.
 - `api.tcp.thread_pool_queue_size: 0` now retains its documented unbounded meaning.
+
+### Testing
+
+- Added cross-version E2E coverage (MariaDB compression, real-server failover, DDL, multi-table isolation, protocol/Unicode/connection-stress) on configurable isolated ports, plus C ABI, ctypes, operation-coordinator, reactor-lifecycle, cache-invalidation, and configuration regression tests.
+
+**Detailed Release Notes**: [docs/releases/v1.8.1.md](docs/releases/v1.8.1.md)
 
 ## [1.8.0] - 2026-07-03
 
@@ -738,7 +755,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/libraz/mygram-db/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/libraz/mygram-db/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/libraz/mygram-db/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/libraz/mygram-db/compare/v1.6.0...v1.6.1
