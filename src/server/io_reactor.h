@@ -60,6 +60,9 @@ struct ReactorConfig {
   /// forcibly closes a slow reader.
   size_t max_write_queue_bytes = ReactorConnection::kDefaultMaxWriteQueueBytes;
 
+  /// Process-wide cap for all reactor pending request frames and unsent responses.
+  size_t max_total_buffered_bytes = 256 * mygram::constants::kBytesPerMegabyte;
+
   /// Poll timeout in milliseconds. Short enough to react to `Stop()`
   /// promptly, long enough to keep the event loop idle-efficient.
   int poll_timeout_ms = 100;
@@ -125,7 +128,8 @@ class IoReactor {
    *
    * Drain tasks in flight keep their own shared_ptr copies, so the actual
    * socket close happens when the last shared_ptr drops (typically after
-   * the drain task finishes writing its final response).
+   * the drain task finishes writing its final response). Registered
+   * connections receive their close callback exactly once during mass stop.
    *
    * @note CR-3 caller contract: callers (e.g., TcpServer::Stop) MUST shut
    * down their thread pool AFTER reactor_->Stop() returns. Drain tasks
@@ -162,7 +166,7 @@ class IoReactor {
    * AFTER the connection is removed from the multiplexer and the map but
    * BEFORE this function returns. The callback runs with no locks held.
    */
-  void Unregister(int fd);
+  void Unregister(int fd, const ReactorConnection* owner = nullptr);
 
   /**
    * @brief Install a callback invoked from `Unregister` after a connection
@@ -206,12 +210,16 @@ class IoReactor {
    * no longer write synchronously and needs to resume on the next writable
    * event.
    */
-  mygram::utils::Expected<void, mygram::utils::Error> ArmWrite(int fd);
+  mygram::utils::Expected<void, mygram::utils::Error> ArmWrite(int fd, const ReactorConnection* owner = nullptr);
 
   /**
    * @brief Disarm `kWritable` on an already-registered fd.
    */
-  mygram::utils::Expected<void, mygram::utils::Error> DisarmWrite(int fd);
+  mygram::utils::Expected<void, mygram::utils::Error> DisarmWrite(int fd, const ReactorConnection* owner = nullptr);
+
+  /** Enable/disable readable interest without clobbering writable interest. */
+  mygram::utils::Expected<void, mygram::utils::Error> SetReadEnabled(int fd, const ReactorConnection* owner,
+                                                                     bool enabled);
 
   /// Number of connections currently registered (for metrics).
   [[nodiscard]] size_t ConnectionCount() const;
@@ -223,6 +231,8 @@ class IoReactor {
   /// Returns "unavailable" if the reactor has not been started.
   [[nodiscard]] const char* BackendName() const;
 
+  [[nodiscard]] std::shared_ptr<ReactorMemoryBudget> MemoryBudget() const { return memory_budget_; }
+
  private:
   void EventLoop();
   void DispatchEvent(const reactor::ReadyEvent& ev);
@@ -231,8 +241,8 @@ class IoReactor {
   /// the initial-read deadline or the ordinary idle deadline. Called from
   /// the event loop on a `reaper_interval_sec` cadence so it runs without
   /// any extra threads. The reaper takes a shared lock on
-  /// `connections_mutex_`, copies the candidate fds into a local vector, and
-  /// then drops the lock before invoking `Unregister(fd)` so the close
+  /// `connections_mutex_`, copies shared owners into a local vector, and then
+  /// drops the lock before invoking owner-qualified `Unregister(fd, owner)` so the close
   /// callback runs without nested locking.
   ///
   /// This complements (does NOT replace) `SO_KEEPALIVE`: keepalive's
@@ -243,11 +253,14 @@ class IoReactor {
   /// Look up a connection under a shared lock and return a shared_ptr copy
   /// (or nullptr). The copy is released outside the lock so user code runs
   /// without holding the connections_mutex_.
-  std::shared_ptr<ReactorConnection> Lookup(int fd) const;
+  std::shared_ptr<ReactorConnection> Lookup(int fd, reactor::RegistrationToken registration_token) const;
+  mygram::utils::Expected<void, mygram::utils::Error> SetInterestBit(int fd, const ReactorConnection* owner,
+                                                                     uint8_t bit, bool enabled);
 
   ThreadPool* pool_;               // non-owning
   RequestDispatcher* dispatcher_;  // non-owning
   ReactorConfig config_;
+  std::shared_ptr<ReactorMemoryBudget> memory_budget_;
 
   std::unique_ptr<reactor::EventMultiplexer> mux_;
   // shared_mutex around mux_:
@@ -278,7 +291,14 @@ class IoReactor {
   std::mutex start_stop_mutex_;
 
   mutable std::shared_mutex connections_mutex_;
-  std::unordered_map<int, std::shared_ptr<ReactorConnection>> connections_;
+  struct ConnectionEntry {
+    std::shared_ptr<ReactorConnection> connection;
+    uint8_t interest = reactor::event::kReadable;
+    reactor::RegistrationToken registration_token = reactor::kInvalidRegistrationToken;
+  };
+  std::unordered_map<int, ConnectionEntry> connections_;
+  std::unordered_map<reactor::RegistrationToken, int> connection_fds_by_token_;
+  std::atomic<reactor::RegistrationToken> next_registration_token_{1};
 
   // Optional teardown callback (see SetCloseCallback). Set-once before Start.
   std::function<void(int)> close_callback_;

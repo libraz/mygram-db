@@ -38,7 +38,7 @@ Expected<void, Error> MockEventMultiplexer::Open() {
   return {};
 }
 
-Expected<void, Error> MockEventMultiplexer::Add(int fd, uint8_t interest) {
+Expected<void, Error> MockEventMultiplexer::Add(int fd, uint8_t interest, RegistrationToken registration_token) {
   std::unique_lock<std::mutex> lock(mu_);
   if (add_should_fail_) {
     return MakeUnexpected(
@@ -48,18 +48,25 @@ Expected<void, Error> MockEventMultiplexer::Add(int fd, uint8_t interest) {
     return MakeUnexpected(
         MakeError(ErrorCode::kNetworkReactorRegisterFailed, "MockEventMultiplexer::Add: fd already registered"));
   }
-  interest_[fd] = interest;
+  if (registration_token == kInvalidRegistrationToken) {
+    registration_token = static_cast<RegistrationToken>(static_cast<uint32_t>(fd)) + 1;
+  }
+  interest_[fd] = Registration{.interest = interest, .token = registration_token};
   return {};
 }
 
-Expected<void, Error> MockEventMultiplexer::Modify(int fd, uint8_t interest) {
+Expected<void, Error> MockEventMultiplexer::Modify(int fd, uint8_t interest, RegistrationToken registration_token) {
   std::unique_lock<std::mutex> lock(mu_);
   auto it = interest_.find(fd);
   if (it == interest_.end()) {
     return MakeUnexpected(
         MakeError(ErrorCode::kNetworkReactorModifyFailed, "MockEventMultiplexer::Modify: unknown fd"));
   }
-  it->second = interest;
+  if (registration_token != kInvalidRegistrationToken && registration_token != it->second.token) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorModifyFailed, "MockEventMultiplexer::Modify: stale registration token"));
+  }
+  it->second.interest = interest;
   return {};
 }
 
@@ -119,19 +126,19 @@ Expected<void, Error> MockEventMultiplexer::Wake() {
 // ---------------------------------------------------------------------------
 
 void MockEventMultiplexer::InjectReadable(int fd) {
-  InjectRaw(ReadyEvent{fd, event::kReadable});
+  InjectRaw(ReadyEvent{fd, event::kReadable, RegistrationTokenFor(fd)});
 }
 
 void MockEventMultiplexer::InjectWritable(int fd) {
-  InjectRaw(ReadyEvent{fd, event::kWritable});
+  InjectRaw(ReadyEvent{fd, event::kWritable, RegistrationTokenFor(fd)});
 }
 
 void MockEventMultiplexer::InjectHangup(int fd) {
-  InjectRaw(ReadyEvent{fd, event::kHangup});
+  InjectRaw(ReadyEvent{fd, event::kHangup, RegistrationTokenFor(fd)});
 }
 
 void MockEventMultiplexer::InjectError(int fd, int /*errno_val*/) {
-  InjectRaw(ReadyEvent{fd, event::kError});
+  InjectRaw(ReadyEvent{fd, event::kError, RegistrationTokenFor(fd)});
 }
 
 void MockEventMultiplexer::InjectRaw(ReadyEvent ev) {
@@ -160,7 +167,13 @@ std::vector<int> MockEventMultiplexer::RegisteredFds() const {
 uint8_t MockEventMultiplexer::InterestFor(int fd) const {
   std::unique_lock<std::mutex> lock(mu_);
   auto it = interest_.find(fd);
-  return it != interest_.end() ? it->second : 0U;
+  return it != interest_.end() ? it->second.interest : 0U;
+}
+
+RegistrationToken MockEventMultiplexer::RegistrationTokenFor(int fd) const {
+  std::unique_lock<std::mutex> lock(mu_);
+  auto it = interest_.find(fd);
+  return it != interest_.end() ? it->second.token : kInvalidRegistrationToken;
 }
 
 int MockEventMultiplexer::PollCallCount() const {

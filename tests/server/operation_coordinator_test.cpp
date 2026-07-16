@@ -56,13 +56,17 @@ void ExpectExactlyOneAccepted(LongOperation first, LongOperation second) {
 }  // namespace
 
 TEST(OperationCoordinatorTest, StatefulOperationMatrixAcceptsExactlyOneConcurrentStarter) {
-  constexpr std::array<OperationPair, 6> pairs = {
+  constexpr std::array<OperationPair, 10> pairs = {
       OperationPair{LongOperation::kDumpSave, LongOperation::kSync},
       OperationPair{LongOperation::kDumpLoad, LongOperation::kSync},
       OperationPair{LongOperation::kOptimize, LongOperation::kSync},
       OperationPair{LongOperation::kAutoSnapshot, LongOperation::kSync},
       OperationPair{LongOperation::kDumpSave, LongOperation::kOptimize},
       OperationPair{LongOperation::kDumpSave, LongOperation::kDumpLoad},
+      OperationPair{LongOperation::kMysqlReconnect, LongOperation::kSync},
+      OperationPair{LongOperation::kMysqlReconnect, LongOperation::kDumpSave},
+      OperationPair{LongOperation::kMysqlReconnect, LongOperation::kDumpLoad},
+      OperationPair{LongOperation::kMysqlReconnect, LongOperation::kAutoSnapshot},
   };
 
   for (const auto& pair : pairs) {

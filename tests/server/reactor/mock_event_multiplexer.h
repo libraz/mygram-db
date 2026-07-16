@@ -43,8 +43,10 @@ class MockEventMultiplexer final : public EventMultiplexer {
   // -------------------------------------------------------------------------
 
   mygram::utils::Expected<void, mygram::utils::Error> Open() override;
-  mygram::utils::Expected<void, mygram::utils::Error> Add(int fd, uint8_t interest) override;
-  mygram::utils::Expected<void, mygram::utils::Error> Modify(int fd, uint8_t interest) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Add(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Modify(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) override;
   mygram::utils::Expected<void, mygram::utils::Error> Remove(int fd) override;
   mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms, std::vector<ReadyEvent>& out) override;
   const char* Name() const override { return "mock"; }
@@ -85,6 +87,7 @@ class MockEventMultiplexer final : public EventMultiplexer {
 
   /// Current interest mask for @p fd, or 0 if unknown.
   uint8_t InterestFor(int fd) const;
+  RegistrationToken RegistrationTokenFor(int fd) const;
 
   /// Total number of completed Poll() invocations.
   int PollCallCount() const;
@@ -114,7 +117,11 @@ class MockEventMultiplexer final : public EventMultiplexer {
   /// One-shot Wake() flag. Cleared by Poll() once consumed so subsequent
   /// blocking Polls revert to normal cv-wait behaviour.
   bool wake_pending_{false};
-  std::unordered_map<int, uint8_t> interest_;
+  struct Registration {
+    uint8_t interest = event::kNone;
+    RegistrationToken token = kInvalidRegistrationToken;
+  };
+  std::unordered_map<int, Registration> interest_;
   std::deque<ReadyEvent> injected_;
   int poll_call_count_{0};
 };

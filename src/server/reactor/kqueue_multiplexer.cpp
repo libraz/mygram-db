@@ -130,7 +130,9 @@ Expected<void, Error> KqueueMultiplexer::Wake() {
 }
 
 Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_interest, uint8_t* applied_interest,
-                                                       uint8_t old_interest, bool is_add) {
+                                                       uint8_t old_interest, bool is_add,
+                                                       RegistrationToken registration_token) {
+  static_assert(sizeof(uintptr_t) >= sizeof(RegistrationToken), "kqueue udata must hold a complete registration token");
   // kqueue has no single-call "set the interest set of this fd to X" primitive
   // the way `epoll_ctl(MOD)` does, so we diff the new interest against the
   // previously-armed interest and emit at most two change records: one per
@@ -203,7 +205,8 @@ Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_inter
 
   for (int i = 0; i < nchanges; ++i) {
     struct kevent kev {};
-    EV_SET(&kev, static_cast<uintptr_t>(fd), changes[i].filter, changes[i].flags, 0, 0, nullptr);
+    EV_SET(&kev, static_cast<uintptr_t>(fd), changes[i].filter, changes[i].flags, 0, 0,
+           reinterpret_cast<void*>(static_cast<uintptr_t>(registration_token)));
     if (::kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr) < 0) {
       const int en = errno;
       const ErrorCode code = is_add ? ErrorCode::kNetworkReactorRegisterFailed : ErrorCode::kNetworkReactorModifyFailed;
@@ -228,7 +231,7 @@ Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_inter
   return {};
 }
 
-Expected<void, Error> KqueueMultiplexer::Add(int fd, uint8_t interest) {
+Expected<void, Error> KqueueMultiplexer::Add(int fd, uint8_t interest, RegistrationToken registration_token) {
   if (kqueue_fd_ < 0) {
     return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRegisterFailed,
                                     "KqueueMultiplexer::Add called before Open", "fd=" + std::to_string(fd)));
@@ -241,23 +244,26 @@ Expected<void, Error> KqueueMultiplexer::Add(int fd, uint8_t interest) {
   // connection register / arm-write / disarm-write paths, which are well
   // outside the steady-state hot loop.
   std::lock_guard<std::mutex> lock(interest_mutex_);
+  if (registration_token == kInvalidRegistrationToken) {
+    registration_token = static_cast<RegistrationToken>(static_cast<uint32_t>(fd)) + 1;
+  }
   uint8_t applied = 0U;
-  auto result = ApplyInterest(fd, interest, &applied, /*old_interest=*/0U, /*is_add=*/true);
+  auto result = ApplyInterest(fd, interest, &applied, /*old_interest=*/0U, /*is_add=*/true, registration_token);
   if (!result.has_value()) {
     // CR-4: a partial Add can leave one filter armed in the kernel while the
     // other failed. Record exactly what the kernel knows about so a follow-up
     // Remove() can clean it up. If nothing was applied we omit the entry
     // entirely so Remove() remains a no-op.
     if (applied != 0U) {
-      interest_[fd] = applied;
+      interest_[fd] = Registration{.interest = applied, .token = registration_token};
     }
     return result;
   }
-  interest_[fd] = interest;
+  interest_[fd] = Registration{.interest = interest, .token = registration_token};
   return {};
 }
 
-Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest) {
+Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest, RegistrationToken registration_token) {
   if (kqueue_fd_ < 0) {
     return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed,
                                     "KqueueMultiplexer::Modify called before Open", "fd=" + std::to_string(fd)));
@@ -276,7 +282,12 @@ Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest) {
     return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed,
                                     "KqueueMultiplexer::Modify called with unknown fd", "fd=" + std::to_string(fd)));
   }
-  const uint8_t old_interest = it->second;
+  if (registration_token != kInvalidRegistrationToken && registration_token != it->second.token) {
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorModifyFailed,
+                                    "KqueueMultiplexer::Modify rejected stale registration token",
+                                    "fd=" + std::to_string(fd)));
+  }
+  const uint8_t old_interest = it->second.interest;
   if (old_interest == interest) {
     // Fast path: caller asked for the already-installed interest set, no
     // syscall needed and no map update needed.
@@ -284,16 +295,16 @@ Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest) {
   }
 
   uint8_t applied = old_interest;
-  auto result = ApplyInterest(fd, interest, &applied, old_interest, /*is_add=*/false);
+  auto result = ApplyInterest(fd, interest, &applied, old_interest, /*is_add=*/false, it->second.token);
   if (!result.has_value()) {
     // CR-4: serialised kevent() calls mean we know exactly which filters were
     // updated before the failure. Persist that partial state so `interest_`
     // matches the kernel; otherwise a follow-up Remove() would emit the wrong
     // EV_DELETE set and leak a filter (or invent a phantom one).
-    it->second = applied;
+    it->second.interest = applied;
     return result;
   }
-  it->second = interest;
+  it->second.interest = interest;
   return {};
 }
 
@@ -307,7 +318,7 @@ Expected<void, Error> KqueueMultiplexer::Remove(int fd) {
     // Idempotent: never-added or already-removed fds are a no-op success.
     return {};
   }
-  const uint8_t old_interest = it->second;
+  const uint8_t old_interest = it->second.interest;
   interest_.erase(it);
 
   if (kqueue_fd_ < 0) {
@@ -400,6 +411,7 @@ Expected<void, Error> KqueueMultiplexer::Poll(int timeout_ms, std::vector<ReadyE
     ReadyEvent ready{};
     ready.fd = static_cast<int>(kev.ident);
     ready.events = event::kNone;
+    ready.registration_token = static_cast<RegistrationToken>(reinterpret_cast<uintptr_t>(kev.udata));
 
     // Per kevent(2): `EV_ERROR` signals a per-change failure and `kev.data`
     // carries the errno. A zero `kev.data` with `EV_ERROR` set is used by

@@ -903,6 +903,7 @@ Expected<void, Error> WriteDumpV1(
     // total_file_size(8) + file_crc32(4) + gtid_length(4) + gtid_data(N)
     header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + gtid.size());
     header.flags = dump_format::flags_v1::kNone;
+    header.flags |= dump_format::flags_v1::kHasCompatibilityMetadata;
     if (stats != nullptr) {
       header.flags |= dump_format::flags_v1::kWithStatistics;
     }
@@ -919,6 +920,10 @@ Expected<void, Error> WriteDumpV1(
     std::ostringstream config_stream;
     if (auto result = SerializeConfig(config_stream, config); !result) {
       LogStorageError("serialize_config", temp_filepath, result.error().message());
+      return result;
+    }
+    if (auto result = SerializeCompatibilityMetadata(config_stream, config); !result) {
+      LogStorageError("serialize_compatibility_metadata", temp_filepath, result.error().message());
       return result;
     }
     std::string config_data = config_stream.str();
@@ -1287,6 +1292,12 @@ Expected<void, Error> ReadDumpV1(
     if (auto result = DeserializeConfig(config_stream, config); !result) {
       LogStorageError("deserialize_config", filepath, result.error().message());
       return result;
+    }
+    if ((header.flags & dump_format::flags_v1::kHasCompatibilityMetadata) != 0U) {
+      if (auto result = DeserializeCompatibilityMetadata(config_stream, config); !result) {
+        LogStorageError("deserialize_compatibility_metadata", filepath, result.error().message());
+        return result;
+      }
     }
     if (config_validator) {
       if (auto result = config_validator(config); !result) {

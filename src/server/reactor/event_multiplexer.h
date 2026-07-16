@@ -40,6 +40,9 @@
 
 namespace mygramdb::server::reactor {
 
+using RegistrationToken = uint64_t;
+constexpr RegistrationToken kInvalidRegistrationToken = 0;
+
 /**
  * @brief Interest / ready-event bitmask values.
  *
@@ -63,8 +66,9 @@ constexpr uint8_t kHangup = 1U << 3;    ///< EPOLLHUP|EPOLLRDHUP / EV_EOF
  * appear if the corresponding interest bit was armed.
  */
 struct ReadyEvent {
-  int fd;
-  uint8_t events;
+  int fd = -1;
+  uint8_t events = event::kNone;
+  RegistrationToken registration_token = kInvalidRegistrationToken;
 };
 
 /**
@@ -112,7 +116,8 @@ class EventMultiplexer {
    * always reported and cannot be masked. Returns
    * `kNetworkReactorRegisterFailed` on syscall failure.
    */
-  virtual mygram::utils::Expected<void, mygram::utils::Error> Add(int fd, uint8_t interest) = 0;
+  virtual mygram::utils::Expected<void, mygram::utils::Error> Add(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) = 0;
 
   /**
    * @brief Update the interest set for an already-registered fd.
@@ -120,7 +125,8 @@ class EventMultiplexer {
    * This is the hot-path primitive for `ArmWrite`/`DisarmWrite`: flipping
    * `kWritable` on or off without recreating registration state.
    */
-  virtual mygram::utils::Expected<void, mygram::utils::Error> Modify(int fd, uint8_t interest) = 0;
+  virtual mygram::utils::Expected<void, mygram::utils::Error> Modify(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) = 0;
 
   /**
    * @brief Remove a previously-registered fd.

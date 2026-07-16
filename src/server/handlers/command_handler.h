@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
@@ -79,6 +80,7 @@ class CommandHandler {
     storage::DocumentStore* doc_store = nullptr;
     int ngram_size = 0;
     int kanji_ngram_size = 0;
+    std::shared_lock<std::shared_mutex> generation_lock;
   };
 
   /**

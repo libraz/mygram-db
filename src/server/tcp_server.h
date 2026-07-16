@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -97,7 +98,7 @@ class TcpServer {
   /**
    * @brief Stop server
    */
-  void Stop();
+  mygram::utils::Expected<void, mygram::utils::Error> Stop();
 
   /**
    * @brief Check if server is running
@@ -164,6 +165,14 @@ class TcpServer {
    */
   replication_pause::Counter* GetReplicationPauseCounter() { return &replication_pause_counter_; }
 
+  OperationCoordinator* GetOperationCoordinator() {
+#ifdef USE_MYSQL
+    return sync_manager_ != nullptr ? &sync_manager_->GetOperationCoordinator() : nullptr;
+#else
+    return nullptr;
+#endif
+  }
+
   /**
    * @brief Get cache manager pointer (for HttpServer)
    */
@@ -201,6 +210,11 @@ class TcpServer {
    * @brief Get SYNC operation manager pointer for cross-protocol guards.
    */
   SyncOperationManager* GetSyncManager() { return sync_manager_.get(); }
+
+  /** TEST-ONLY: overrides the bounded SYNC-drain result. */
+  void SetSyncShutdownWaitHookForTest(std::function<bool(int)> hook) {
+    sync_shutdown_wait_hook_for_test_ = std::move(hook);
+  }
 #endif
 
  private:
@@ -240,6 +254,7 @@ class TcpServer {
   std::shared_ptr<RateLimiter> rate_limiter_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
+  std::function<bool(int)> sync_shutdown_wait_hook_for_test_;
 #endif
 
   // Legacy fields (for backward compatibility during migration)

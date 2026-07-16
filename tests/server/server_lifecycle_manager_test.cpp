@@ -166,6 +166,16 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithoutOptionalComponents)
   result->acceptor->Stop();
 }
 
+TEST_F(ServerLifecycleManagerTest, ExplicitZeroThreadPoolQueueRemainsUnbounded) {
+  server_config_.thread_pool_queue_size = 0;
+  auto manager = CreateManager();
+  auto result = manager->Initialize();
+  ASSERT_TRUE(result) << result.error().to_string();
+  ASSERT_NE(result->thread_pool, nullptr);
+  EXPECT_EQ(result->thread_pool->GetMaxQueueSize(), 0U);
+  result->acceptor->Stop();
+}
+
 /**
  * @test Initialize_FailsOnInvalidPort
  * @brief Test that initialization fails when port binding fails

@@ -65,6 +65,9 @@ class ThreadPool {
    */
   size_t GetQueueSize() const;
 
+  /** Configured queue bound (0 means unbounded). */
+  size_t GetMaxQueueSize() const { return max_queue_size_; }
+
   /**
    * @brief Check if pool is shutting down
    */

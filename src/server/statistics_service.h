@@ -89,6 +89,7 @@ AggregatedMetrics StatisticsService::AggregateMetrics(const MapT& tables) {
   AggregatedMetrics metrics;
 
   for (const auto& [table_name, ctx] : tables) {
+    std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
     metrics.total_index_memory += ctx->index->MemoryUsage();
     metrics.total_doc_memory += ctx->doc_store->MemoryUsage();
     metrics.total_documents += ctx->doc_store->Size();

@@ -152,6 +152,9 @@ class SyncOperationManager {
    */
   bool WaitForCompletion(int timeout_sec);
 
+  /** Wait without a deadline. Used only by destructors as the final UAF guard. */
+  void WaitForCompletion();
+
   /**
    * @brief Check if any table is currently syncing
    */

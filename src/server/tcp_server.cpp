@@ -76,7 +76,17 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
 }
 
 TcpServer::~TcpServer() {
-  Stop();
+  auto stop_result = Stop();
+#ifdef USE_MYSQL
+  if (!stop_result && sync_manager_) {
+    mygram::utils::StructuredLog()
+        .Event("tcp_server_destructor_waiting_for_sync")
+        .FieldError(stop_result.error())
+        .Error();
+    sync_manager_->WaitForCompletion();
+    (void)Stop();
+  }
+#endif
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
@@ -197,6 +207,9 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   if (config_.max_write_queue_bytes > 0) {
     rcfg.max_write_queue_bytes = static_cast<size_t>(config_.max_write_queue_bytes);
   }
+  if (config_.max_total_buffered_bytes > 0) {
+    rcfg.max_total_buffered_bytes = static_cast<size_t>(config_.max_total_buffered_bytes);
+  }
   if (config_.recv_timeout_sec > 0) {
     rcfg.initial_read_timeout_sec = config_.recv_timeout_sec;
   }
@@ -276,7 +289,10 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   return {};
 }
 
-void TcpServer::Stop() {
+mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Stop() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
   mygram::utils::StructuredLog().Event("tcp_server_stopping").Debug();
 
   // Step 1: announce shutdown.
@@ -312,7 +328,15 @@ void TcpServer::Stop() {
   // Request SYNC manager to shutdown
   if (sync_manager_) {
     sync_manager_->RequestShutdown();
-    sync_manager_->WaitForCompletion(kDefaultSyncShutdownTimeoutSec);
+    const bool sync_drained = sync_shutdown_wait_hook_for_test_
+                                  ? sync_shutdown_wait_hook_for_test_(kDefaultSyncShutdownTimeoutSec)
+                                  : sync_manager_->WaitForCompletion(kDefaultSyncShutdownTimeoutSec);
+    if (!sync_drained) {
+      auto error = MakeError(ErrorCode::kServerShuttingDown,
+                             "TCP shutdown timed out waiting for active SYNC workers; dependencies remain alive");
+      mygram::utils::StructuredLog().Event("tcp_server_stop_incomplete").FieldError(error).Error();
+      return MakeUnexpected(std::move(error));
+    }
   }
 #endif
 
@@ -368,6 +392,7 @@ void TcpServer::Stop() {
   // is safe.
 
   mygram::utils::StructuredLog().Event("tcp_server_stopped").Field("total_requests", stats_.GetTotalRequests()).Debug();
+  return {};
 }
 
 }  // namespace mygramdb::server

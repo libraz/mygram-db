@@ -372,6 +372,48 @@ TEST_F(ReactorConnectionNoDispatcherTest, ReadBufferCapAppliesOnlyToUnframedTail
   EXPECT_EQ(conn_->ReadBufferSizeForTest(), 0U);
 }
 
+TEST_F(ReactorConnectionNoDispatcherTest, PendingFrameAdmissionIsBoundedBeforeAllocation) {
+  std::string payload;
+  payload.reserve((ReactorConnection::kMaxPendingFrames + 1) * 3);
+  for (size_t i = 0; i < ReactorConnection::kMaxPendingFrames + 1; ++i) {
+    payload += "x\r\n";
+  }
+
+  size_t enqueued = 0;
+  EXPECT_FALSE(conn_->AppendReadBytesForTest(payload, enqueued));
+  EXPECT_EQ(enqueued, ReactorConnection::kMaxPendingFrames);
+  EXPECT_EQ(conn_->PendingFrameCountForTest(), ReactorConnection::kMaxPendingFrames);
+  EXPECT_LE(conn_->PendingFrameBytesForTest(), ReactorConnection::kMaxPendingFrameBytes);
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, PendingFrameWatermarksPauseAndResumeReads) {
+  std::string payload;
+  for (size_t i = 0; i < ReactorConnection::kPendingFramesHighWatermark; ++i) {
+    payload += "x\r\n";
+  }
+
+  size_t enqueued = 0;
+  ASSERT_TRUE(conn_->AppendReadBytesForTest(payload, enqueued));
+  EXPECT_TRUE(conn_->ReadPausedForTest());
+  EXPECT_EQ(enqueued, ReactorConnection::kPendingFramesHighWatermark);
+
+  conn_->DrainPendingFramesForTest(ReactorConnection::kPendingFramesHighWatermark -
+                                   ReactorConnection::kPendingFramesLowWatermark);
+  EXPECT_FALSE(conn_->ReadPausedForTest());
+  EXPECT_EQ(conn_->PendingFrameCountForTest(), ReactorConnection::kPendingFramesLowWatermark);
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, OversizedCompletedFrameIsRejectedBeforeQueueAllocation) {
+  std::string payload(ReactorConnection::kMaxReadBufferBytes + 1, 'x');
+  payload += "\r\n";
+
+  size_t enqueued = 0;
+  EXPECT_FALSE(conn_->AppendReadBytesForTest(payload, enqueued));
+  EXPECT_EQ(enqueued, 0U);
+  EXPECT_EQ(conn_->PendingFrameCountForTest(), 0U);
+  EXPECT_EQ(conn_->PendingFrameBytesForTest(), 0U);
+}
+
 TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowDoesNotInlineErrorAheadOfPendingWriteQueue) {
   EXPECT_TRUE(conn_->ShouldSendReadOverflowErrorForTest());
 
@@ -400,6 +442,96 @@ TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {
 
   EXPECT_FALSE(conn_->EnqueueResponse("hello"));
   EXPECT_TRUE(conn_->IsClosing());
+}
+
+TEST(ReactorConnectionBudgetTest, SharedPendingFrameBudgetRejectsAggregateAcrossConnections) {
+  auto budget = std::make_shared<ReactorMemoryBudget>(10);
+  auto first = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
+                                         ReactorConnection::kDefaultMaxWriteQueueBytes, budget);
+  auto second = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
+                                          ReactorConnection::kDefaultMaxWriteQueueBytes, budget);
+
+  size_t first_enqueued = 0;
+  EXPECT_TRUE(first->AppendReadBytesForTest("123456", first_enqueued));
+  EXPECT_EQ(first_enqueued, 0U);
+  EXPECT_EQ(first->ReadBufferSizeForTest(), 6U);
+  EXPECT_EQ(budget->UsedBytes(), 6U);
+
+  size_t second_enqueued = 0;
+  EXPECT_FALSE(second->AppendReadBytesForTest("78901", second_enqueued));
+  EXPECT_EQ(second_enqueued, 0U);
+  EXPECT_EQ(second->ReadBufferSizeForTest(), 0U);
+  EXPECT_EQ(second->PendingFrameCountForTest(), 0U);
+  EXPECT_EQ(budget->UsedBytes(), 6U);
+
+  first.reset();
+  EXPECT_EQ(budget->UsedBytes(), 0U);
+}
+
+TEST(ReactorConnectionBudgetTest, EmptyFramesConsumeQueueEntryOverhead) {
+  constexpr size_t kBudgetLimit = ReactorConnection::kQueueEntryOverheadBytes + 2;
+  auto budget = std::make_shared<ReactorMemoryBudget>(kBudgetLimit);
+  auto first = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
+                                         ReactorConnection::kDefaultMaxWriteQueueBytes, budget);
+  auto second = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
+                                          ReactorConnection::kDefaultMaxWriteQueueBytes, budget);
+
+  size_t first_enqueued = 0;
+  EXPECT_TRUE(first->AppendReadBytesForTest("\r\n", first_enqueued));
+  EXPECT_EQ(first_enqueued, 1U);
+  EXPECT_EQ(first->PendingFrameCountForTest(), 1U);
+  EXPECT_EQ(budget->UsedBytes(), ReactorConnection::kQueueEntryOverheadBytes);
+
+  size_t second_enqueued = 0;
+  EXPECT_FALSE(second->AppendReadBytesForTest("\r\n", second_enqueued));
+  EXPECT_EQ(second_enqueued, 0U);
+  EXPECT_EQ(second->PendingFrameCountForTest(), 0U);
+  EXPECT_EQ(second->ReadBufferSizeForTest(), 2U);
+  EXPECT_EQ(budget->UsedBytes(), kBudgetLimit);
+
+  second.reset();
+  EXPECT_EQ(budget->UsedBytes(), ReactorConnection::kQueueEntryOverheadBytes);
+  first->DrainPendingFramesForTest(1);
+  EXPECT_EQ(budget->UsedBytes(), 0U);
+}
+
+TEST(ReactorConnectionBudgetTest, FrameExtractionTransfersBudgetAndRetainsIncompleteTail) {
+  constexpr size_t kFrameCharge = 3 + ReactorConnection::kQueueEntryOverheadBytes;
+  constexpr size_t kTailBytes = 4;
+  auto budget = std::make_shared<ReactorMemoryBudget>(80);
+  auto conn = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
+                                        ReactorConnection::kDefaultMaxWriteQueueBytes, budget);
+
+  size_t enqueued = 0;
+  EXPECT_TRUE(conn->AppendReadBytesForTest("abc\r\ntail", enqueued));
+  EXPECT_EQ(enqueued, 1U);
+  EXPECT_EQ(conn->PendingFrameCountForTest(), 1U);
+  EXPECT_EQ(conn->ReadBufferSizeForTest(), kTailBytes);
+  EXPECT_EQ(budget->UsedBytes(), kFrameCharge + kTailBytes);
+
+  conn->DrainPendingFramesForTest(1);
+  EXPECT_EQ(budget->UsedBytes(), kTailBytes);
+  conn.reset();
+  EXPECT_EQ(budget->UsedBytes(), 0U);
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, SharedWriteBudgetRejectsBeforeQueueAllocation) {
+  conn_.reset();
+  ::close(peer_fd_);
+  peer_fd_ = -1;
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  peer_fd_ = fds[0];
+  rc_fd_ = fds[1];
+  SetNonBlocking(rc_fd_);
+  auto budget = std::make_shared<ReactorMemoryBudget>(4);
+  conn_ = ReactorConnection::Create(rc_fd_, nullptr, nullptr, nullptr, nullptr,
+                                    ReactorConnection::kDefaultMaxWriteQueueBytes, budget);
+
+  EXPECT_FALSE(conn_->EnqueueResponse("hello"));
+  EXPECT_TRUE(conn_->IsClosing());
+  EXPECT_EQ(conn_->WriteQueueDepthForTest(), 0U);
+  EXPECT_EQ(budget->UsedBytes(), 0U);
 }
 
 // ---------------------------------------------------------------------------

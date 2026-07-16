@@ -309,8 +309,6 @@ target_link_libraries(http_server_test
 )
 
 target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
-target_compile_definitions(http_server_test PRIVATE MYGRAMDB_HTTP_TEST_HOOKS)
-
 gtest_discover_tests(http_server_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30

@@ -63,12 +63,15 @@ mygram::utils::Expected<CommandHandler::TableContextResult, mygram::utils::Error
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kTableNotFound, "Table not found: " + table_name));
   }
 
+  std::shared_lock<std::shared_mutex> generation_lock(*table_ctx->generation_mutex);
+
   return TableContextResult{
       .table_context = table_ctx,
       .index = table_ctx->index.get(),
       .doc_store = table_ctx->doc_store.get(),
       .ngram_size = table_ctx->config.ngram_size,
       .kanji_ngram_size = table_ctx->config.kanji_ngram_size,
+      .generation_lock = std::move(generation_lock),
   };
 }
 

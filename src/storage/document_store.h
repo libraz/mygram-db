@@ -369,11 +369,11 @@ class DocumentStore {
   void Clear();
 
   /**
-   * @brief Replace documents with data from a validated loaded store.
+   * @brief Atomically swap in validated state while retaining the old state.
    *
-   * Used by dump loading to commit pre-validated table data without
-   * deserializing again during the apply phase. The target store_texts setting
-   * is preserved.
+   * The previous live data is left in @p loaded, allowing dump/SYNC callers
+   * to roll back a larger transaction if a subsequent component fails. The
+   * target store_texts setting is preserved.
    */
   void ReplaceWithLoaded(DocumentStore& loaded);
 

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <optional>
+#include <shared_mutex>
 #include <sstream>
 
 #include "cache/cache_manager.h"
@@ -58,6 +59,14 @@ const config::TableConfig* FindTableConfigByName(const config::Config& config, c
 
 std::optional<std::string> FindTokenizerConfigMismatch(const config::Config& loaded_config,
                                                        const config::Config& live_config) {
+  if (loaded_config.memory.verify_text.empty()) {
+    if (live_config.memory.verify_text != "off") {
+      return "legacy dump is missing memory.verify_text compatibility metadata; load with verify_text=off or rebuild "
+             "the dump from the source database";
+    }
+  } else if (loaded_config.memory.verify_text != live_config.memory.verify_text) {
+    return "memory.verify_text mismatch between dump and running config";
+  }
   if (loaded_config.memory.normalize.nfkc != live_config.memory.normalize.nfkc) {
     return "memory.normalize.nfkc mismatch between dump and running config";
   }
@@ -367,6 +376,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 
   // Convert table contexts to format expected by dump API
   auto converted_contexts = ctx_.table_catalog->GetDumpableContexts();
+
   // Call dump API (writes V2 format)
   mygram::utils::StructuredLog()
       .Event("dump_save_write_starting")
@@ -686,6 +696,17 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Convert table contexts to format expected by dump API
   auto converted_contexts = ctx_.table_catalog->GetDumpableContexts();
 
+  // Block pre-existing requests and publish the complete restored table set
+  // as one generation. New requests are already rejected by the loading
+  // flag. Keep these locks through state replacement, replay-fence reset,
+  // cache invalidation, and BM25 rebuild.
+  std::vector<std::unique_lock<std::shared_mutex>> generation_locks;
+  generation_locks.reserve(ctx_.table_catalog->GetTables().size());
+  for (const auto& [table_name, table_ctx] : ctx_.table_catalog->GetTables()) {
+    (void)table_name;
+    generation_locks.emplace_back(*table_ctx->generation_mutex);
+  }
+
   // Variables to receive loaded data
   std::string gtid;
   config::Config loaded_config;
@@ -731,6 +752,18 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   }
 
 #ifdef USE_MYSQL
+  if (result) {
+    // A DUMP LOAD is an explicit position replacement even when the dump was
+    // created before GTID was available. Any replay fence belongs to the
+    // discarded generation and must not survive the load.
+    for (const auto& [table_name, table_ctx] : ctx_.table_catalog->GetTables()) {
+      (void)table_name;
+      if (table_ctx->replay_watermark != nullptr) {
+        std::lock_guard<std::mutex> replay_lock(table_ctx->replay_watermark->mutex);
+        table_ctx->replay_watermark->snapshot_gtid.clear();
+      }
+    }
+  }
   // Update GTID from loaded dump (if load was successful and GTID is available)
   // This must be done regardless of whether replication was running before,
   // to enable manual REPLICATION START after DUMP LOAD

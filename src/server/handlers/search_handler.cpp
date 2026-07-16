@@ -203,6 +203,7 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   output.table_context = table_ctx->table_context;
   output.current_ngram_size = table_ctx->ngram_size;
   output.current_kanji_ngram_size = table_ctx->kanji_ngram_size;
+  output.generation_lock = std::move(table_ctx->generation_lock);
   if (output.current_index == nullptr) {
     return ResponseFormatter::FormatError("Index not available");
   }

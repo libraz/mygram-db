@@ -202,6 +202,10 @@ bool ContainsBooleanSyntax(const std::string& search_text) {
   return false;
 }
 
+const std::string& SemanticSearchExpression(const query::Query& query) {
+  return query.search_expression.empty() ? query.search_text : query.search_expression;
+}
+
 void CollectAstTerms(const query::QueryNode& node, std::vector<std::string>& terms) {
   if (node.type == query::NodeType::TERM) {
     terms.push_back(node.term);
@@ -381,8 +385,8 @@ void ApplyNotAndFilters(SearchPipelineResult& result, const query::Query& query,
                         storage::DocumentStore* current_doc_store, int ngram_size, int kanji_ngram_size,
                         bool cross_boundary) {
   if (!query.not_terms.empty()) {
-    result.results =
-        ApplyNotFilter(result.results, query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary);
+    result.results = ApplyNotFilter(result.results, query.not_terms, current_index, current_doc_store, ngram_size,
+                                    kanji_ngram_size, cross_boundary);
   }
   if (!query.filters.empty()) {
     result.results = ApplyFiltersWithBitmap(result.results, query.filters, current_doc_store);
@@ -396,7 +400,22 @@ query::Query WithCanonicalCacheKey(const query::Query& query, const FullPipeline
   auto text_normalizer = [&params](std::string_view text) {
     return params.current_index != nullptr ? params.current_index->NormalizeText(text) : std::string(text);
   };
-  const std::string normalized = cache::QueryNormalizer::Normalize(cache_query, text_normalizer);
+  cache::CacheSemanticContext semantic_context;
+  if (ContainsBooleanSyntax(SemanticSearchExpression(query))) {
+    semantic_context.execution_mode = cache::CacheExecutionMode::kBooleanAst;
+  } else if (query.fuzzy_max_distance.has_value()) {
+    semantic_context.execution_mode = cache::CacheExecutionMode::kFuzzy;
+  } else if (params.synonym_dict != nullptr) {
+    semantic_context.execution_mode = cache::CacheExecutionMode::kSynonym;
+  }
+  if (params.full_config != nullptr) {
+    semantic_context.verification_policy = params.full_config->memory.verify_text;
+  }
+  if (params.synonym_dict != nullptr) {
+    semantic_context.synonym_revision = params.synonym_dict->Revision();
+  }
+
+  const std::string normalized = cache::QueryNormalizer::Normalize(cache_query, text_normalizer, semantic_context);
   if (!normalized.empty()) {
     const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
     cache_query.cache_key = std::make_pair(key.hash_high, key.hash_low);
@@ -470,7 +489,7 @@ TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, in
                                                    std::vector<storage::DocId>& results) {
   TopNOptimizationResult result;
   if (cache_hit || current_index == nullptr || current_doc_store == nullptr || term_infos.empty() ||
-      term_infos[0].estimated_size == 0) {
+      term_infos[0].ngrams.empty() || term_infos[0].estimated_size == 0) {
     return result;
   }
 
@@ -659,8 +678,8 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 
   // Apply NOT filter
   if (!query.not_terms.empty()) {
-    result.results =
-        ApplyNotFilter(result.results, query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary);
+    result.results = ApplyNotFilter(result.results, query.not_terms, current_index, current_doc_store, ngram_size,
+                                    kanji_ngram_size, cross_boundary);
   }
 
   // Apply column filters
@@ -686,7 +705,8 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 
 std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
                                            const std::vector<std::string>& not_terms, index::Index* current_index,
-                                           int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
+                                           storage::DocumentStore* current_doc_store, int ngram_size,
+                                           int kanji_ngram_size, bool cross_boundary_ngrams) {
   if (results.empty() || not_terms.empty()) {
     return results;
   }
@@ -694,15 +714,9 @@ std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& re
   std::vector<storage::DocId> excluded_docs;
   std::vector<storage::DocId> temp;
 
-  for (const auto& not_term : not_terms) {
-    std::string norm_not = current_index->NormalizeText(not_term);
-    auto ngrams = mygram::utils::GenerateQueryNgrams(norm_not, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
-    mygram::utils::DeduplicateSorted(ngrams);
-    if (ngrams.empty()) {
-      continue;
-    }
-
-    auto term_docs = current_index->SearchAnd(ngrams);
+  auto term_infos = GenerateTermInfos(not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  for (const auto& term_info : term_infos) {
+    auto term_docs = SearchTermDocuments(term_info, current_index, current_doc_store);
     temp.clear();
     temp.reserve(excluded_docs.size() + term_docs.size());
     std::set_union(excluded_docs.begin(), excluded_docs.end(), term_docs.begin(), term_docs.end(),
@@ -1142,7 +1156,7 @@ bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentS
 void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query,
                    const std::vector<storage::DocId>& results, const std::vector<SearchTermInfo>& term_infos,
                    double query_time_ms, int ngram_size, int kanji_ngram_size, bool cross_boundary,
-                   std::optional<uint64_t> data_version) {
+                   std::optional<uint64_t> data_version, bool invalidate_on_any_text_change) {
   if (cache_manager == nullptr || !cache_manager->IsEnabled()) {
     return;
   }
@@ -1152,9 +1166,10 @@ void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query
   auto all_ngrams = MergeSortedTermNgramsForCache(term_infos);
   if (data_version.has_value()) {
     cache_manager->InsertIfVersion(query, results, all_ngrams, query_time_ms, *data_version, ngram_size,
-                                   kanji_ngram_size, cross_boundary);
+                                   kanji_ngram_size, cross_boundary, invalidate_on_any_text_change);
   } else {
-    cache_manager->Insert(query, results, all_ngrams, query_time_ms, ngram_size, kanji_ngram_size, cross_boundary);
+    cache_manager->Insert(query, results, all_ngrams, query_time_ms, ngram_size, kanji_ngram_size, cross_boundary,
+                          invalidate_on_any_text_change);
   }
 }
 
@@ -1212,13 +1227,14 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
 
   for (const auto& and_term : query.and_terms) {
     auto term_infos = GenerateTermInfos({and_term}, current_index, ngram_size, kanji_ngram_size, cross_boundary);
-    if (term_infos.empty() || term_infos[0].ngrams.empty() || term_infos[0].estimated_size == 0) {
+    if (term_infos.empty() || term_infos[0].normalized_term.empty() ||
+        (!term_infos[0].ngrams.empty() && term_infos[0].estimated_size == 0)) {
       result.results.clear();
       result.empty_term_detected = true;
       return result;
     }
 
-    auto and_results = current_index->SearchAnd(term_infos[0].ngrams);
+    auto and_results = SearchTermDocuments(term_infos[0], current_index, current_doc_store);
     std::vector<storage::DocId> intersection;
     std::set_intersection(result.results.begin(), result.results.end(), and_results.begin(), and_results.end(),
                           std::back_inserter(intersection));
@@ -1251,11 +1267,11 @@ SearchPipelineResult ExecuteWithSynonyms(const query::Query& query, const std::v
     std::vector<storage::DocId> group_results;
 
     for (const auto& variant : group.variants) {
-      if (variant.ngrams.empty() || variant.estimated_size == 0) {
+      if (variant.normalized_term.empty() || (!variant.ngrams.empty() && variant.estimated_size == 0)) {
         continue;
       }
 
-      auto var_results = current_index->SearchAnd(variant.ngrams);
+      auto var_results = SearchTermDocuments(variant, current_index, current_doc_store);
       if (group_results.empty()) {
         group_results = std::move(var_results);
       } else {
@@ -1526,8 +1542,9 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
                                      params.full_config != nullptr && params.full_config->bm25.enable;
 
   query::QueryASTParser ast_parser;
-  auto boolean_ast = ast_parser.Parse(query.search_text);
-  const bool has_boolean_syntax = ContainsBooleanSyntax(query.search_text);
+  const std::string& semantic_expression = SemanticSearchExpression(query);
+  auto boolean_ast = ast_parser.Parse(semantic_expression);
+  const bool has_boolean_syntax = ContainsBooleanSyntax(semantic_expression);
   if (!boolean_ast && has_boolean_syntax) {
     output.success = false;
     output.error_message = "Invalid boolean search expression: " + ast_parser.GetError();
@@ -1578,7 +1595,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
       cache_term_infos = BuildCacheTermInfos(cache_term_infos, query, params.current_index, params.ngram_size,
                                              params.kanji_ngram_size, cross_boundary);
       InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
-                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
+                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version, true);
     }
     return output;
   }
@@ -1614,7 +1631,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
       auto cache_term_infos = BuildCacheTermInfos(output.term_infos, query, params.current_index, params.ngram_size,
                                                   params.kanji_ngram_size, cross_boundary);
       InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
-                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
+                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version, true);
     }
     return output;
   }
@@ -1656,7 +1673,7 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
       all_term_infos = BuildCacheTermInfos(all_term_infos, query, params.current_index, params.ngram_size,
                                            params.kanji_ngram_size, cross_boundary);
       InsertToCache(params.cache_manager, cache_query, output.results, all_term_infos, output.query_time_ms,
-                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
+                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version, true);
     }
     return output;
   }
@@ -1696,7 +1713,12 @@ FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipe
     auto cache_term_infos = BuildCacheTermInfos(output.term_infos, query, params.current_index, params.ngram_size,
                                                 params.kanji_ngram_size, cross_boundary);
     InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
-                  params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version);
+                  params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version,
+                  RequiresSubstringFallback(cache_term_infos) ||
+                      (params.full_config != nullptr &&
+                       ShouldApplyVerifyText(params.full_config->memory.verify_text, output.all_search_terms)) ||
+                      RequiresExactTextForHybridFragments(output.all_search_terms, params.current_index,
+                                                          params.ngram_size, params.kanji_ngram_size, cross_boundary));
   }
 
   return output;

@@ -34,7 +34,10 @@ constexpr size_t kReadyEventReserve = 64;
 }
 
 IoReactor::IoReactor(ThreadPool* pool, RequestDispatcher* dispatcher, ReactorConfig cfg)
-    : pool_(pool), dispatcher_(dispatcher), config_(std::move(cfg)) {}
+    : pool_(pool),
+      dispatcher_(dispatcher),
+      config_(std::move(cfg)),
+      memory_budget_(std::make_shared<ReactorMemoryBudget>(config_.max_total_buffered_bytes)) {}
 
 IoReactor::~IoReactor() {
   Stop();
@@ -158,6 +161,7 @@ void IoReactor::Stop() {
   if (stop_before_mux_exclusive_hook_for_test_) {
     stop_before_mux_exclusive_hook_for_test_();
   }
+  std::vector<int> closed_fds;
   {
     // Wait for every in-flight Register to finish its Add + map publication
     // before clearing the map. Lock order remains mux_lifecycle_ ->
@@ -167,10 +171,22 @@ void IoReactor::Stop() {
 
     // Drop all registered connections. Drain tasks that still hold a
     // shared_ptr copy will keep their connection alive until they finish.
-    // The close callback is intentionally not invoked during mass shutdown.
+    // Capture the exact registered fd set so the close callback can run once
+    // per connection after all reactor locks have been released.
     std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
+    closed_fds.reserve(connections_.size());
+    for (const auto& [fd, entry] : connections_) {
+      closed_fds.push_back(fd);
+    }
     connections_.clear();
+    connection_fds_by_token_.clear();
     mux_.reset();
+  }
+
+  if (close_callback_) {
+    for (const int fd : closed_fds) {
+      close_callback_(fd);
+    }
   }
 
   mygram::utils::StructuredLog().Event("reactor_stopped").Info();
@@ -236,7 +252,11 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
 
   // Step 2: register with the multiplexer. On failure return immediately
   // without ever touching the connections_ map.
-  auto add_result = mux_->Add(fd, reactor::event::kReadable);
+  reactor::RegistrationToken registration_token = next_registration_token_.fetch_add(1, std::memory_order_relaxed);
+  while (registration_token == reactor::kInvalidRegistrationToken) {
+    registration_token = next_registration_token_.fetch_add(1, std::memory_order_relaxed);
+  }
+  auto add_result = mux_->Add(fd, reactor::event::kReadable, registration_token);
   if (!add_result) {
     return MakeUnexpected(add_result.error());
   }
@@ -250,7 +270,9 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
   // the mux_->Add we just performed so the kernel poll set stays clean.
   {
     std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
-    auto [it, inserted] = connections_.emplace(fd, conn);
+    auto [it, inserted] = connections_.emplace(
+        fd, ConnectionEntry{
+                .connection = conn, .interest = reactor::event::kReadable, .registration_token = registration_token});
     if (!inserted) {
       // Lost the race against a concurrent Register with the same fd. Pull
       // our entry back out of the multiplexer to avoid leaking interest.
@@ -272,12 +294,13 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
       }
       return MakeUnexpected(MakeError(ErrorCode::kInternalError, "IoReactor::Register duplicate fd (race)"));
     }
+    connection_fds_by_token_.emplace(registration_token, fd);
   }
 
   return {};
 }
 
-void IoReactor::Unregister(int fd) {
+void IoReactor::Unregister(int fd, const ReactorConnection* owner) {
   // Remove from the multiplexer first so the event loop stops reporting
   // events for this fd, then drop the shared_ptr from the map. Drain tasks
   // that captured a copy keep the ReactorConnection alive until they
@@ -285,14 +308,17 @@ void IoReactor::Unregister(int fd) {
   bool was_registered = false;
   {
     std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
+    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
+    auto it = connections_.find(fd);
+    if (it == connections_.end() || (owner != nullptr && it->second.connection.get() != owner)) {
+      return;
+    }
     if (mux_) {
-      // Remove() is idempotent from the caller's perspective.
       (void)mux_->Remove(fd);
     }
-  }
-  {
-    std::unique_lock<std::shared_mutex> lock(connections_mutex_);
-    was_registered = connections_.erase(fd) > 0;
+    connection_fds_by_token_.erase(it->second.registration_token);
+    connections_.erase(it);
+    was_registered = true;
   }
   // Close callback runs outside all locks so callers cannot deadlock the
   // reactor by taking their own mutexes inside the callback.
@@ -317,20 +343,40 @@ void IoReactor::SetStopBeforeMuxExclusiveHookForTest(std::function<void()> hook)
   stop_before_mux_exclusive_hook_for_test_ = std::move(hook);
 }
 
-Expected<void, Error> IoReactor::ArmWrite(int fd) {
-  std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
-  if (!mux_) {
-    return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "ArmWrite while reactor stopped"));
-  }
-  return mux_->Modify(fd, reactor::event::kReadable | reactor::event::kWritable);
+Expected<void, Error> IoReactor::ArmWrite(int fd, const ReactorConnection* owner) {
+  return SetInterestBit(fd, owner, reactor::event::kWritable, true);
 }
 
-Expected<void, Error> IoReactor::DisarmWrite(int fd) {
+Expected<void, Error> IoReactor::DisarmWrite(int fd, const ReactorConnection* owner) {
+  return SetInterestBit(fd, owner, reactor::event::kWritable, false);
+}
+
+Expected<void, Error> IoReactor::SetReadEnabled(int fd, const ReactorConnection* owner, bool enabled) {
+  return SetInterestBit(fd, owner, reactor::event::kReadable, enabled);
+}
+
+Expected<void, Error> IoReactor::SetInterestBit(int fd, const ReactorConnection* owner, uint8_t bit, bool enabled) {
   std::shared_lock<std::shared_mutex> mux_lock(mux_lifecycle_);
   if (!mux_) {
-    return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "DisarmWrite while reactor stopped"));
+    return MakeUnexpected(MakeError(ErrorCode::kNetworkServerNotStarted, "interest update while reactor stopped"));
   }
-  return mux_->Modify(fd, reactor::event::kReadable);
+  std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
+  auto it = connections_.find(fd);
+  if (it == connections_.end() || (owner != nullptr && it->second.connection.get() != owner)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorModifyFailed, "interest update rejected for stale or unknown connection"));
+  }
+  const uint8_t next_interest = enabled ? static_cast<uint8_t>(it->second.interest | bit)
+                                        : static_cast<uint8_t>(it->second.interest & static_cast<uint8_t>(~bit));
+  if (next_interest == it->second.interest) {
+    return {};
+  }
+  auto modify_result = mux_->Modify(fd, next_interest, it->second.registration_token);
+  if (!modify_result) {
+    return MakeUnexpected(modify_result.error());
+  }
+  it->second.interest = next_interest;
+  return {};
 }
 
 size_t IoReactor::ConnectionCount() const {
@@ -343,13 +389,17 @@ const char* IoReactor::BackendName() const {
   return mux_ ? mux_->Name() : "unavailable";
 }
 
-std::shared_ptr<ReactorConnection> IoReactor::Lookup(int fd) const {
+std::shared_ptr<ReactorConnection> IoReactor::Lookup(int fd, reactor::RegistrationToken registration_token) const {
   std::shared_lock<std::shared_mutex> lock(connections_mutex_);
-  auto it = connections_.find(fd);
-  if (it == connections_.end()) {
+  auto token_it = connection_fds_by_token_.find(registration_token);
+  if (token_it == connection_fds_by_token_.end() || token_it->second != fd) {
     return nullptr;
   }
-  return it->second;
+  auto it = connections_.find(fd);
+  if (it == connections_.end() || it->second.registration_token != registration_token) {
+    return nullptr;
+  }
+  return it->second.connection;
 }
 
 void IoReactor::EventLoop() {
@@ -403,6 +453,7 @@ void IoReactor::ReapIdleConnections() {
   const auto initial_read_deadline = std::chrono::seconds(config_.initial_read_timeout_sec);
   struct ReapCandidate {
     int fd;
+    std::shared_ptr<ReactorConnection> connection;
     std::chrono::seconds age;
     const char* reason;
     int timeout_sec;
@@ -411,22 +462,23 @@ void IoReactor::ReapIdleConnections() {
   {
     std::shared_lock<std::shared_mutex> lock(connections_mutex_);
     to_close.reserve(connections_.size());
-    for (const auto& [fd, conn] : connections_) {
+    for (const auto& [fd, entry] : connections_) {
+      const auto& conn = entry.connection;
       if (!conn) {
         continue;
       }
       if (config_.initial_read_timeout_sec > 0 && !conn->HasReceivedFrame()) {
         const auto initial_age = now - conn->CreatedAt();
         if (initial_age >= initial_read_deadline) {
-          to_close.push_back({fd, std::chrono::duration_cast<std::chrono::seconds>(initial_age), "initial_read_timeout",
-                              config_.initial_read_timeout_sec});
+          to_close.push_back({fd, conn, std::chrono::duration_cast<std::chrono::seconds>(initial_age),
+                              "initial_read_timeout", config_.initial_read_timeout_sec});
           continue;
         }
       }
       if (config_.idle_timeout_sec > 0) {
         const auto idle_for = now - conn->LastActive();
         if (idle_for >= idle_deadline) {
-          to_close.push_back({fd, std::chrono::duration_cast<std::chrono::seconds>(idle_for), "idle_timeout",
+          to_close.push_back({fd, conn, std::chrono::duration_cast<std::chrono::seconds>(idle_for), "idle_timeout",
                               config_.idle_timeout_sec});
         }
       }
@@ -441,12 +493,12 @@ void IoReactor::ReapIdleConnections() {
         .Field("age_seconds", static_cast<int64_t>(candidate.age.count()))
         .Field("timeout_sec", static_cast<int64_t>(candidate.timeout_sec))
         .Info();
-    Unregister(candidate.fd);
+    Unregister(candidate.fd, candidate.connection.get());
   }
 }
 
 void IoReactor::DispatchEvent(const reactor::ReadyEvent& ev) {
-  auto conn = Lookup(ev.fd);
+  auto conn = Lookup(ev.fd, ev.registration_token);
   if (!conn) {
     // Stale event (connection was unregistered between Poll and dispatch).
     return;
@@ -475,7 +527,7 @@ void IoReactor::DispatchEvent(const reactor::ReadyEvent& ev) {
   }
 
   if (!keep) {
-    Unregister(ev.fd);
+    Unregister(ev.fd, conn.get());
   }
 }
 

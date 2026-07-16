@@ -157,6 +157,10 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
  */
 Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config);
 
+/** Serialize/deserialize versioned semantic compatibility metadata. */
+Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config);
+Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config);
+
 /**
  * @brief Serialize DumpStatistics to output stream
  * @param output_stream Output stream

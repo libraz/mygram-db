@@ -313,14 +313,14 @@ void DocumentStore::ReplaceWithLoaded(DocumentStore& loaded) {
   std::unique_lock<std::shared_mutex> loaded_lock(loaded.mutex_, std::defer_lock);
   std::lock(target_lock, loaded_lock);
 
-  doc_id_to_pk_ = std::move(loaded.doc_id_to_pk_);
-  pk_to_doc_id_ = std::move(loaded.pk_to_doc_id_);
-  doc_filters_ = std::move(loaded.doc_filters_);
-  doc_texts_ = std::move(loaded.doc_texts_);
-  filter_index_ = std::move(loaded.filter_index_);
-  next_doc_id_ = loaded.next_doc_id_;
-  primary_key_doc_id_order_valid_ = loaded.primary_key_doc_id_order_valid_;
-  last_numeric_primary_key_ = loaded.last_numeric_primary_key_;
+  doc_id_to_pk_.swap(loaded.doc_id_to_pk_);
+  pk_to_doc_id_.swap(loaded.pk_to_doc_id_);
+  doc_filters_.swap(loaded.doc_filters_);
+  doc_texts_.swap(loaded.doc_texts_);
+  filter_index_.swap(loaded.filter_index_);
+  std::swap(next_doc_id_, loaded.next_doc_id_);
+  std::swap(primary_key_doc_id_order_valid_, loaded.primary_key_doc_id_order_valid_);
+  last_numeric_primary_key_.swap(loaded.last_numeric_primary_key_);
 }
 
 bool DocumentStore::IsPrimaryKeyDocIdOrderValid() const {

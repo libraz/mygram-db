@@ -14,11 +14,13 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -157,9 +159,16 @@ class HttpServer {
    */
   void Stop();
 
-#ifdef MYGRAMDB_HTTP_TEST_HOOKS
   void ForceRunningFalseForTesting() { running_.store(false, std::memory_order_release); }
-#endif
+  void ForceListenerExitForTesting() {
+    if (server_) {
+      server_->stop();
+    }
+  }
+  void SetAfterStartingHookForTesting(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    after_starting_hook_for_testing_ = std::move(hook);
+  }
 
   /**
    * @brief Check if server is running
@@ -214,26 +223,16 @@ class HttpServer {
   std::atomic<int> default_limit_{config::defaults::kDefaultLimit};
   std::atomic<size_t> max_query_length_{0};  // Configured max query length limit
 
-  // running_ is the canonical lifecycle gate for HttpServer.
-  //
-  // Contract:
-  //   - Start() acquires the gate via compare_exchange_strong(false -> true).
-  //     Only the thread that succeeds at this CAS owns the right to spawn the
-  //     server thread. All competing concurrent Start() calls observe the gate
-  //     as already taken and return ErrorCode::kNetworkAlreadyRunning.
-  //   - Stop() releases the gate via compare_exchange_strong(true -> false).
-  //     Only the thread that succeeds at this CAS owns the right to stop the
-  //     httplib server and join the worker thread. Subsequent Stop() calls
-  //     short-circuit.
-  //   - Internal failure paths (bind failure inside the worker thread, listen
-  //     loop returning false) call store(false) only because they are reached
-  //     while the gate is already held by the corresponding Start() invocation.
-  //     They therefore "release" the gate the same way Stop() does, which is
-  //     safe because the parent Start() has not yet returned success and
-  //     concurrent Stop() callers either observe running_=false (and bail) or
-  //     race the join via Stop()'s own CAS.
+  enum class LifecycleState : uint8_t { kStopped, kStarting, kRunning, kStopping };
+
+  // lifecycle_state_ is canonical and is only accessed under lifecycle_mutex_.
+  // running_ is an observer-only mirror for lock-free health checks.
   std::atomic<bool> running_{false};
   std::mutex lifecycle_mutex_;
+  std::condition_variable lifecycle_cv_;
+  LifecycleState lifecycle_state_{LifecycleState::kStopped};
+  uint64_t stop_completion_epoch_{0};  ///< Monotonic ticket; waiters must not depend on transient kStopped state
+  std::function<void()> after_starting_hook_for_testing_;
   std::chrono::steady_clock::time_point start_time_{std::chrono::steady_clock::now()};
 
   // Statistics
@@ -280,6 +279,7 @@ class HttpServer {
    * long as `table_contexts_` is not mutated mid-request.
    */
   struct PreparedHttpQuery {
+    std::shared_lock<std::shared_mutex> generation_lock;
     TableContext* table_ctx = nullptr;
     nlohmann::json body;
     query::Query query;

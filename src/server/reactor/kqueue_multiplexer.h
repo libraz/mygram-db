@@ -84,10 +84,12 @@ class KqueueMultiplexer final : public EventMultiplexer {
   mygram::utils::Expected<void, mygram::utils::Error> Open() override;
 
   /// @copydoc EventMultiplexer::Add
-  mygram::utils::Expected<void, mygram::utils::Error> Add(int fd, uint8_t interest) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Add(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) override;
 
   /// @copydoc EventMultiplexer::Modify
-  mygram::utils::Expected<void, mygram::utils::Error> Modify(int fd, uint8_t interest) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Modify(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) override;
 
   /// @copydoc EventMultiplexer::Remove
   mygram::utils::Expected<void, mygram::utils::Error> Remove(int fd) override;
@@ -140,7 +142,7 @@ class KqueueMultiplexer final : public EventMultiplexer {
    */
   mygram::utils::Expected<void, mygram::utils::Error> ApplyInterest(int fd, uint8_t new_interest,
                                                                     uint8_t* applied_interest, uint8_t old_interest,
-                                                                    bool is_add);
+                                                                    bool is_add, RegistrationToken registration_token);
 
   int kqueue_fd_ = -1;
 
@@ -170,7 +172,11 @@ class KqueueMultiplexer final : public EventMultiplexer {
   /// Last-known interest mask per registered fd. Populated by `Add()`,
   /// updated by `Modify()`, erased by `Remove()`. Required because kqueue
   /// does not let us read back the currently-armed filter set.
-  std::unordered_map<int, uint8_t> interest_;
+  struct Registration {
+    uint8_t interest = event::kNone;
+    RegistrationToken token = kInvalidRegistrationToken;
+  };
+  std::unordered_map<int, Registration> interest_;
 };
 
 }  // namespace mygramdb::server::reactor

@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -75,6 +76,8 @@ struct ServerConfig {
   int64_t max_write_queue_bytes =
       16LL *
       static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  ///< Per-connection slow-reader cap; see config.h
+  int64_t max_total_buffered_bytes =
+      256LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  ///< Shared reactor request/write budget
 
   // TCP keepalive applied per-accepted client socket. See
   // config.h ApiConfig::tcp::keepalive for rationale.
@@ -111,6 +114,7 @@ struct ServerConfig {
     sc.keepalive.interval_sec = cfg.api.tcp.keepalive.interval_sec;
     sc.keepalive.probe_count = cfg.api.tcp.keepalive.probe_count;
     sc.max_write_queue_bytes = cfg.api.tcp.max_write_queue_bytes;
+    sc.max_total_buffered_bytes = cfg.api.tcp.max_total_buffered_bytes;
     sc.default_limit = cfg.api.default_limit;
     sc.max_query_length = cfg.api.max_query_length;
     sc.allow_cidrs = cfg.network.allow_cidrs;
@@ -195,15 +199,34 @@ struct BM25Stats {
 };
 
 /**
+ * @brief Per-table replay fence used after an isolated SYNC snapshot.
+ *
+ * A table snapshot already contains every transaction through snapshot_gtid.
+ * When the shared reader restarts from an older drained position to preserve
+ * other tables, events for this table through that position must be consumed
+ * for GTID progress but not applied to the newly published snapshot.
+ */
+struct TableReplayWatermark {
+  mutable std::mutex mutex;
+  std::string snapshot_gtid;
+};
+
+/**
  * @brief Table context managing resources for a single table
  */
 struct TableContext {
   std::string name;
   config::TableConfig config;
+  // Serializes a complete table generation (index, documents, BM25 stats,
+  // replay fence, and cache generation) against request-side reads.  Normal
+  // requests take a shared lock; binlog mutations and SYNC/DUMP publication
+  // take the unique lock so a request can never observe a mixed generation.
+  std::shared_ptr<std::shared_mutex> generation_mutex = std::make_shared<std::shared_mutex>();
   std::unique_ptr<index::Index> index;
   std::unique_ptr<storage::DocumentStore> doc_store;
   BM25Stats bm25_stats;
   std::unique_ptr<query::SynonymDictionary> synonym_dict;  ///< Synonym dictionary (Step 1B)
+  std::shared_ptr<TableReplayWatermark> replay_watermark = std::make_shared<TableReplayWatermark>();
   // Note: BinlogReader is shared across all tables (single GTID stream)
 };
 

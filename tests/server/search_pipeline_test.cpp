@@ -577,7 +577,7 @@ TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesNotFilterInternally) {
 
   // Verify the NOT filter was applied inside Execute -- applying it again
   // should not change the results (no double-filtering)
-  auto double_filtered = ApplyNotFilter(result.results, query.not_terms, index_.get(), 2, 1, true);
+  auto double_filtered = ApplyNotFilter(result.results, query.not_terms, index_.get(), doc_store_.get(), 2, 1, true);
   EXPECT_EQ(double_filtered.size(), result.results.size())
       << "NOT filter was not applied inside Execute(); applying it again "
          "changed the result set (double-filter bug)";
@@ -1355,6 +1355,70 @@ TEST_F(FullPipelineTest, ShortAndTermFallsBackToSubstringSearch) {
   EXPECT_EQ(output.results, (std::vector<storage::DocId>{*target_doc}));
 }
 
+TEST_F(FullPipelineTest, ShortNotTermUsesSubstringFallback) {
+  auto excluded = doc_store_->AddDocument("pk_short_not", {}, "learning x");
+  auto retained = doc_store_->AddDocument("pk_short_not_keep", {}, "learning y");
+  ASSERT_TRUE(excluded.has_value());
+  ASSERT_TRUE(retained.has_value());
+  index_->AddDocument(*excluded, "learning x");
+  index_->AddDocument(*retained, "learning y");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.not_terms = {"x"};
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(std::find(output.results.begin(), output.results.end(), *excluded), output.results.end());
+  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *retained), output.results.end());
+}
+
+TEST_F(FullPipelineTest, BooleanExpressionWithShortLegacyAndTermUsesSubstringFallback) {
+  auto learning_x = doc_store_->AddDocument("pk_bool_short_learning", {}, "learning x");
+  auto cats_x = doc_store_->AddDocument("pk_bool_short_cats", {}, "cats x");
+  ASSERT_TRUE(learning_x.has_value());
+  ASSERT_TRUE(cats_x.has_value());
+  index_->AddDocument(*learning_x, "learning x");
+  index_->AddDocument(*cats_x, "cats x");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning OR cats";
+  query.and_terms = {"x"};
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  ASSERT_TRUE(output.success) << output.error_message;
+  EXPECT_EQ(output.results, (std::vector<storage::DocId>{*learning_x, *cats_x}));
+}
+
+TEST_F(FullPipelineTest, ShortSynonymVariantUsesSubstringFallback) {
+  auto target = doc_store_->AddDocument("pk_short_synonym", {}, "x marker");
+  ASSERT_TRUE(target.has_value());
+  index_->AddDocument(*target, "x marker");
+
+  SynonymTermGroup group;
+  group.normalized_terms = {"x"};
+  group.variants.push_back(SearchTermInfo{{}, std::numeric_limits<size_t>::max(), 0, "x", false});
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "x";
+  query.limit = 100;
+
+  auto result = ExecuteWithSynonyms(query, {group}, index_.get(), doc_store_.get(), nullptr, 2, 0, false, 1000);
+
+  EXPECT_FALSE(result.empty_term_detected);
+  EXPECT_EQ(result.results, (std::vector<storage::DocId>{*target}));
+}
+
 TEST_F(FullPipelineTest, VerifyTextFilterApplied) {
   // Enable verify_text and check that false positives are filtered
   config::Config config;
@@ -1403,6 +1467,31 @@ TEST(SearchTopNOptimizationTest, SkipsWhenVerifyTextIsRequired) {
 
   EXPECT_TRUE(topn.considered);
   EXPECT_FALSE(topn.applicable);
+}
+
+TEST(SearchTopNOptimizationTest, ShortTermPreservesSubstringResults) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+  auto doc = doc_store.AddDocument("1", {}, "x marker");
+  ASSERT_TRUE(doc.has_value());
+  index.AddDocument(*doc, "x marker");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "x";
+  query.limit = 1;
+
+  auto term_infos = GenerateTermInfos({query.search_text}, &index, 2, 0, false);
+  std::vector<storage::DocId> results{*doc};
+  config::Config config;
+  config.memory.verify_text = "off";
+
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text}, false,
+                                          "id", results);
+
+  EXPECT_FALSE(topn.considered);
+  EXPECT_EQ(results, (std::vector<storage::DocId>{*doc}));
 }
 
 TEST(SearchTopNOptimizationTest, SkipsWhenPrimaryKeyDocIdOrderIsUnknown) {

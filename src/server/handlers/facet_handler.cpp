@@ -118,8 +118,8 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
 
       // Apply NOT filter (only for non-search path; Execute already handles it)
       if (has_not) {
-        results = search_pipeline::ApplyNotFilter(results, query.not_terms, current_index, ngram_size, kanji_ngram_size,
-                                                  cross_boundary);
+        results = search_pipeline::ApplyNotFilter(results, query.not_terms, current_index, current_doc_store,
+                                                  ngram_size, kanji_ngram_size, cross_boundary);
       }
 
       // Apply column filters (only for non-search path; Execute already handles it)

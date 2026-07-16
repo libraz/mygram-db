@@ -19,8 +19,10 @@
 #include <chrono>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "mock_event_multiplexer.h"
@@ -33,6 +35,7 @@ namespace mygramdb::server {
 
 using mygram::utils::ErrorCode;
 using reactor::MockEventMultiplexer;
+using reactor::event::kError;
 using reactor::event::kReadable;
 using reactor::event::kWritable;
 
@@ -292,6 +295,37 @@ TEST_F(IoReactorTest, CloseCallbackNotInvokedForUnknownFd) {
   EXPECT_EQ(callback_count.load(), 0);
 }
 
+TEST_F(IoReactorTest, StopInvokesCloseCallbackExactlyOnceForEveryRegisteredConnection) {
+  std::atomic<int> callback_count{0};
+  std::mutex callback_mutex;
+  std::unordered_set<int> closed_fds;
+  reactor_->SetCloseCallback([&](int fd) {
+    callback_count.fetch_add(1);
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    closed_fds.insert(fd);
+  });
+  StartWithMock();
+
+  constexpr int kConnections = 10;
+  std::vector<std::unique_ptr<SocketPair>> sockets;
+  std::vector<std::shared_ptr<ReactorConnection>> connections;
+  for (int i = 0; i < kConnections; ++i) {
+    auto socket = std::make_unique<SocketPair>();
+    auto connection = MakeConn(socket->TakeClient());
+    ASSERT_TRUE(reactor_->Register(connection));
+    sockets.push_back(std::move(socket));
+    connections.push_back(std::move(connection));
+  }
+
+  reactor_->Stop();
+  EXPECT_EQ(callback_count.load(), kConnections);
+  EXPECT_EQ(closed_fds.size(), static_cast<size_t>(kConnections));
+  EXPECT_EQ(reactor_->ConnectionCount(), 0U);
+
+  reactor_->Stop();
+  EXPECT_EQ(callback_count.load(), kConnections);
+}
+
 // ---------------------------------------------------------------------------
 // Test 12: EventDispatchRoutesToCorrectConnection
 // ---------------------------------------------------------------------------
@@ -386,6 +420,82 @@ TEST_F(IoReactorTest, DisarmWriteUpdatesInterest) {
   ASSERT_TRUE(reactor_->DisarmWrite(client_fd));
   EXPECT_EQ(mock->InterestFor(client_fd) & kWritable, 0u);
   EXPECT_NE(mock->InterestFor(client_fd) & kReadable, 0u);
+}
+
+TEST_F(IoReactorTest, ReadAndWriteInterestUpdatesDoNotClobberEachOther) {
+  auto* mock = StartWithMock();
+  SocketPair sp;
+  int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(conn));
+
+  ASSERT_TRUE(reactor_->ArmWrite(client_fd, conn.get()));
+  ASSERT_TRUE(reactor_->SetReadEnabled(client_fd, conn.get(), false));
+  EXPECT_EQ(mock->InterestFor(client_fd) & kReadable, 0U);
+  EXPECT_NE(mock->InterestFor(client_fd) & kWritable, 0U);
+
+  ASSERT_TRUE(reactor_->SetReadEnabled(client_fd, conn.get(), true));
+  EXPECT_NE(mock->InterestFor(client_fd) & kReadable, 0U);
+  EXPECT_NE(mock->InterestFor(client_fd) & kWritable, 0U);
+
+  ASSERT_TRUE(reactor_->DisarmWrite(client_fd, conn.get()));
+  EXPECT_NE(mock->InterestFor(client_fd) & kReadable, 0U);
+  EXPECT_EQ(mock->InterestFor(client_fd) & kWritable, 0U);
+}
+
+TEST_F(IoReactorTest, StaleOwnerCannotModifyOrUnregisterReusedFd) {
+  auto* mock = StartWithMock();
+  SocketPair sp;
+  int client_fd = sp.TakeClient();
+  auto live = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(live));
+
+  auto stale = ReactorConnection::Create(-1, reactor_.get(), nullptr, pool_.get());
+  EXPECT_FALSE(reactor_->ArmWrite(client_fd, stale.get()).has_value());
+  reactor_->Unregister(client_fd, stale.get());
+
+  EXPECT_EQ(reactor_->ConnectionCount(), 1U);
+  EXPECT_EQ(mock->InterestFor(client_fd), kReadable);
+
+  reactor_->Unregister(client_fd, live.get());
+  EXPECT_EQ(reactor_->ConnectionCount(), 0U);
+}
+
+TEST_F(IoReactorTest, PolledEventFromOldRegistrationCannotCloseReusedFd) {
+  auto* mock = StartWithMock();
+  SocketPair sp;
+  int reused_fd = sp.TakeClient();
+  auto old_connection = MakeConn(reused_fd);
+  ASSERT_TRUE(reactor_->Register(old_connection));
+  const auto old_token = mock->RegistrationTokenFor(reused_fd);
+  ASSERT_NE(old_token, reactor::kInvalidRegistrationToken);
+
+  // Preserve the actual descriptor while replacing only its reactor owner,
+  // reproducing the poll-ready ABA window without relying on OS fd allocation.
+  EXPECT_EQ(old_connection->ReleaseFd(), reused_fd);
+  reactor_->Unregister(reused_fd, old_connection.get());
+  ASSERT_EQ(reactor_->ConnectionCount(), 0U);
+
+  auto new_connection = MakeConn(reused_fd);
+  ASSERT_TRUE(reactor_->Register(new_connection));
+  const auto new_token = mock->RegistrationTokenFor(reused_fd);
+  ASSERT_NE(new_token, reactor::kInvalidRegistrationToken);
+  ASSERT_NE(new_token, old_token);
+
+  const int polls_before_stale = mock->PollCallCount();
+  mock->InjectRaw(reactor::ReadyEvent{reused_fd, kError, old_token});
+  ASSERT_TRUE(mock->WaitForPollCalled(polls_before_stale + 1, std::chrono::milliseconds(2000)));
+  EXPECT_EQ(reactor_->ConnectionCount(), 1U);
+  EXPECT_EQ(mock->RegistrationTokenFor(reused_fd), new_token);
+
+  const int polls_before_current = mock->PollCallCount();
+  mock->InjectRaw(reactor::ReadyEvent{reused_fd, kError, new_token});
+  ASSERT_TRUE(mock->WaitForPollCalled(polls_before_current + 1, std::chrono::milliseconds(2000)));
+  const auto dispatch_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (reactor_->ConnectionCount() != 0U && std::chrono::steady_clock::now() < dispatch_deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_EQ(reactor_->ConnectionCount(), 0U);
 }
 
 // ---------------------------------------------------------------------------

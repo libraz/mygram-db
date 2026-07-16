@@ -623,6 +623,8 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_current_entries: " << cache_stats.current_entries << "\r\n";
     oss << "cache_memory_bytes: " << cache_stats.current_memory_bytes << "\r\n";
     oss << "cache_memory_human: " << mygram::utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
+    oss << "cache_accounted_memory_bytes: " << cache_stats.accounted_memory_bytes << "\r\n";
+    oss << "cache_accounted_memory_human: " << mygram::utils::FormatBytes(cache_stats.accounted_memory_bytes) << "\r\n";
     oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
     oss << "cache_ttl_expirations: " << cache_stats.ttl_expirations << "\r\n";
     oss << "cache_rejections: " << cache_stats.rejection_count << "\r\n";
@@ -851,6 +853,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# HELP mygramdb_index_documents_total Total number of documents in the index\n";
   oss << "# TYPE mygramdb_index_documents_total gauge\n";
   for (const auto& [table_name, ctx] : table_contexts) {
+    std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
     const std::string table_label = EscapePrometheusLabelValue(table_name);
     oss << "mygramdb_index_documents_total{table=\"" << table_label << "\"} " << ctx->doc_store->Size() << "\n";
   }
@@ -861,6 +864,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   std::unordered_map<std::string, index::Index::IndexStatistics> cached_stats;
   cached_stats.reserve(table_contexts.size());
   for (const auto& [table_name, ctx] : table_contexts) {
+    std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
     cached_stats.emplace(table_name, ctx->index->GetStatistics());
   }
 
@@ -913,6 +917,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# HELP mygramdb_index_optimization_in_progress Index optimization in progress (0=idle, 1=running)\n";
   oss << "# TYPE mygramdb_index_optimization_in_progress gauge\n";
   for (const auto& [table_name, ctx] : table_contexts) {
+    std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
     int optimizing = ctx->index->IsOptimizing() ? 1 : 0;
     const std::string table_label = EscapePrometheusLabelValue(table_name);
     oss << "mygramdb_index_optimization_in_progress{table=\"" << table_label << "\"} " << optimizing << "\n";
@@ -1000,6 +1005,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "mygramdb_cache_memory_bytes{type=\"cache\"} " << cache_stats.current_memory_bytes << "\n";
     oss << "mygramdb_cache_memory_bytes{type=\"invalidation_index\"} " << cache_stats.invalidation_index_memory_bytes
         << "\n";
+    oss << "mygramdb_cache_memory_bytes{type=\"accounted_total\"} " << cache_stats.accounted_memory_bytes << "\n";
     oss << "\n";
 
     oss << "# HELP mygramdb_cache_evictions_total Total number of cache evictions\n";

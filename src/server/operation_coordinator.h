@@ -18,6 +18,7 @@ enum class LongOperation : uint8_t {
   kDumpLoad,
   kOptimize,
   kAutoSnapshot,
+  kMysqlReconnect,
 };
 
 class OperationCoordinator {

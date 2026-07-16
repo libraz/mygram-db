@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -41,6 +42,29 @@ TEST_F(ThreadPoolTest, Construction) {
   ThreadPool pool3(2, 100);
   EXPECT_EQ(pool3.GetThreadCount(), 2);
   EXPECT_FALSE(pool3.IsShutdown());
+}
+
+TEST_F(ThreadPoolTest, ExplicitZeroQueueAcceptsMoreThanLegacyThousandTasks) {
+  ThreadPool pool(1, 0);
+  EXPECT_EQ(pool.GetMaxQueueSize(), 0U);
+
+  std::promise<void> worker_started;
+  std::promise<void> release_worker;
+  auto release_future = release_worker.get_future().share();
+  ASSERT_TRUE(pool.Submit([&]() {
+    worker_started.set_value();
+    release_future.wait();
+  }));
+  worker_started.get_future().wait();
+
+  constexpr int kQueuedTasks = 1500;
+  for (int i = 0; i < kQueuedTasks; ++i) {
+    ASSERT_TRUE(pool.Submit([]() {})) << "unbounded queue rejected task " << i;
+  }
+  EXPECT_EQ(pool.GetQueueSize(), static_cast<size_t>(kQueuedTasks));
+
+  release_worker.set_value();
+  pool.Shutdown();
 }
 
 TEST_F(ThreadPoolTest, SubmitAndExecute) {

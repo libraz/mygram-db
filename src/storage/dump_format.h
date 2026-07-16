@@ -74,12 +74,13 @@ enum class FormatVersion : uint32_t {
  * - kIncremental: Incremental dump (not yet implemented)
  */
 namespace flags_v1 {
-constexpr uint32_t kNone = 0x00000000;            // No flags set
-constexpr uint32_t kCompressed = 0x00000001;      // Data is compressed (reserved for future)
-constexpr uint32_t kEncrypted = 0x00000002;       // Data is encrypted (reserved for future)
-constexpr uint32_t kIncremental = 0x00000004;     // Incremental dump (reserved for future)
-constexpr uint32_t kWithStatistics = 0x00000008;  // Contains statistics sections
-constexpr uint32_t kWithCRC = 0x00000010;         // Contains CRC checksums (always set in V1)
+constexpr uint32_t kNone = 0x00000000;                      // No flags set
+constexpr uint32_t kCompressed = 0x00000001;                // Data is compressed (reserved for future)
+constexpr uint32_t kEncrypted = 0x00000002;                 // Data is encrypted (reserved for future)
+constexpr uint32_t kIncremental = 0x00000004;               // Incremental dump (reserved for future)
+constexpr uint32_t kWithStatistics = 0x00000008;            // Contains statistics sections
+constexpr uint32_t kWithCRC = 0x00000010;                   // Contains CRC checksums (always set in V1)
+constexpr uint32_t kHasCompatibilityMetadata = 0x00000020;  // Config extension follows the legacy payload
 }  // namespace flags_v1
 
 /**
@@ -91,12 +92,13 @@ constexpr uint32_t kWithCRC = 0x00000010;         // Contains CRC checksums (alw
  */
 // NOLINTNEXTLINE(performance-enum-size) - Must match file format uint32_t
 enum class SectionType : uint32_t {
-  kConfig = 1,         // Configuration section
-  kStatistics = 2,     // Global dump statistics
-  kTableData = 3,      // Table data (index + docstore)
-  kTableBM25 = 5,      // BM25 term frequency data (Step 1A, reserved)
-  kTableSynonyms = 7,  // Synonym dictionary (Step 1B, reserved)
-  // 8-15: Reserved for future expansion
+  kConfig = 1,                 // Configuration section
+  kStatistics = 2,             // Global dump statistics
+  kTableData = 3,              // Table data (index + docstore)
+  kTableBM25 = 5,              // BM25 term frequency data (Step 1A, reserved)
+  kTableSynonyms = 7,          // Synonym dictionary (Step 1B, reserved)
+  kCompatibilityMetadata = 8,  // Versioned semantic settings omitted by the legacy config payload
+  // 9-15: Reserved for future expansion
 };
 
 /**

@@ -10,6 +10,7 @@
 
 #include <iomanip>
 #include <optional>
+#include <shared_mutex>
 #include <sstream>
 #include <thread>
 
@@ -17,16 +18,19 @@
 #include "loader/initial_loader.h"
 #include "mysql/binlog_reader_interface.h"
 #include "mysql/connection.h"
+#include "mysql/gtid_waiter.h"
 #include "server/replication_pause_counter.h"
 #include "server/response_formatter.h"
 #include "utils/fd_guard.h"
 #include "utils/memory_utils.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
 
 namespace {
 constexpr int kDefaultSyncWaitTimeoutSec = 30;
+constexpr auto kSyncCatchupTimeout = std::chrono::seconds(60);
 }  // namespace
 
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
@@ -509,6 +513,28 @@ bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
   return true;
 }
 
+void SyncOperationManager::WaitForCompletion() {
+  {
+    std::unique_lock<std::mutex> lock(syncing_tables_mutex_);
+    syncing_tables_cv_.wait(lock, [this] { return syncing_tables_.empty(); });
+  }
+
+  std::unordered_map<std::string, std::thread> completed_threads;
+  {
+    std::lock_guard<std::mutex> sync_lock(sync_mutex_);
+    std::lock_guard<std::mutex> tables_lock(syncing_tables_mutex_);
+    for (auto iter = sync_threads_.begin(); iter != sync_threads_.end();) {
+      if (iter->second.joinable()) {
+        completed_threads.emplace(iter->first, std::move(iter->second));
+      }
+      iter = sync_threads_.erase(iter);
+    }
+  }
+  for (auto& entry : completed_threads) {
+    entry.second.join();
+  }
+}
+
 bool SyncOperationManager::IsAnySyncing() const {
   std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
   return !syncing_tables_.empty();
@@ -516,6 +542,15 @@ bool SyncOperationManager::IsAnySyncing() const {
 
 std::unordered_set<std::string> SyncOperationManager::GetSyncingTables() const {
   std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
+  if (!syncing_tables_.empty() && full_config_ != nullptr && full_config_->replication.enable) {
+    std::unordered_set<std::string> all_tables;
+    all_tables.reserve(table_contexts_.size());
+    for (const auto& [table_name, context] : table_contexts_) {
+      (void)context;
+      all_tables.insert(table_name);
+    }
+    return all_tables;
+  }
   return syncing_tables_;
 }
 
@@ -524,7 +559,16 @@ bool SyncOperationManager::GetSyncingTablesIfAny(std::vector<std::string>& out_t
   if (syncing_tables_.empty()) {
     return false;
   }
-  out_tables.assign(syncing_tables_.begin(), syncing_tables_.end());
+  if (full_config_ != nullptr && full_config_->replication.enable) {
+    out_tables.clear();
+    out_tables.reserve(table_contexts_.size());
+    for (const auto& [table_name, context] : table_contexts_) {
+      (void)context;
+      out_tables.push_back(table_name);
+    }
+  } else {
+    out_tables.assign(syncing_tables_.begin(), syncing_tables_.end());
+  }
   return true;
 }
 
@@ -565,6 +609,13 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   bool replication_was_running = false;
   std::string saved_gtid;
   std::optional<replication_pause::Scope> replication_pause_scope;
+  TableContext* live_ctx = nullptr;
+  std::unique_ptr<index::Index> candidate_index;
+  std::unique_ptr<storage::DocumentStore> candidate_doc_store;
+  bool live_state_swapped = false;
+  bool replay_watermark_published = false;
+  uint64_t previous_bm25_total_length = 0;
+  uint64_t previous_bm25_doc_count = 0;
 
   // RAII cleanup guard
   struct SyncGuard {
@@ -652,6 +703,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     }
 
     auto* ctx = table_iter->second;
+    live_ctx = ctx;
 
     // Check for null pointers
     if (!ctx->index || !ctx->doc_store) {
@@ -663,8 +715,21 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       return;
     }
 
-    // Stop replication BEFORE clearing data to prevent the reader/worker
-    // threads from re-adding documents into the cleared index/doc_store.
+    // Build into isolated candidates. The live table remains untouched until
+    // the complete MySQL snapshot has been validated. Pointer identity of the
+    // live objects is preserved because BinlogReader retains TableContext
+    // pointers for the lifetime of the server.
+    candidate_index = std::make_unique<index::Index>(
+        ctx->index->GetNgramSize(), ctx->index->GetKanjiNgramSize(), ctx->index->GetRoaringThreshold(),
+        ctx->index->GetCrossBoundaryNgrams(), ctx->index->GetNormalizeNfkc(), ctx->index->GetNormalizeWidth(),
+        ctx->index->GetNormalizeLower());
+    candidate_doc_store = std::make_unique<storage::DocumentStore>();
+    candidate_doc_store->SetStoreTexts(ctx->doc_store->IsStoreTextsEnabled());
+
+    // Stop replication before taking the replacement snapshot. The reader is
+    // global across every configured table, so its drained GTID is the only
+    // safe restart point: restarting from the target table's snapshot GTID
+    // would permanently skip the same interval for all non-target tables.
     // This relies on IBinlogReader::Stop()'s synchronous contract: after Stop()
     // returns, no binlog worker thread may write into index/doc_store.
     // Save the current GTID so we can restore replication if SYNC is
@@ -688,31 +753,31 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           return;
         }
       }
-      saved_gtid = reader->GetCurrentGTID();
       mygram::utils::StructuredLog()
           .Event("replication_stopping")
           .Field("operation", "sync")
           .Field("table", table_name)
-          .Field("reason", "stop_before_clear")
-          .Field("saved_gtid", saved_gtid)
+          .Field("reason", "stop_before_candidate_snapshot")
           .Info();
       reader->Stop();
+      // Stop() is synchronous. Capture the position only after all worker
+      // mutations have drained; a pre-Stop read can lag the actual live state.
+      saved_gtid = reader->GetCurrentGTID();
       replication_was_running = true;
       if (replication_pause_counter_ != nullptr) {
         replication_pause_counter_->PublishDrainedGTID(saved_gtid);
       }
+    } else if (full_config_->replication.enable && reader != nullptr) {
+      // A stopped reader still owns the only safe lower bound for non-target
+      // tables. Starting from the target snapshot would silently skip their
+      // backlog. The target watermark below makes replay from this position
+      // safe even after a schema-incompatible stop.
+      saved_gtid = reader->GetCurrentGTID();
     }
 
-    // Clear index and doc_store before SYNC to ensure a clean rebuild.
-    // Without this, stale data from a previous (possibly failed) SYNC can
-    // persist: the InitialLoader skips index updates for documents whose PK
-    // already exists in the doc_store, causing content mismatches where
-    // doc_store has new data but the index retains old posting lists.
-    ctx->index->Clear();
-    ctx->doc_store->Clear();
-
-    // Build initial data load
-    loader::InitialLoader loader(*mysql_conn, *ctx->index, *ctx->doc_store, ctx->config, full_config_->mysql,
+    // Build the initial load off to the side. Failure or cancellation simply
+    // destroys these candidates and cannot erase the pre-SYNC live table.
+    loader::InitialLoader loader(*mysql_conn, *candidate_index, *candidate_doc_store, ctx->config, full_config_->mysql,
                                  full_config_->build);
 
     RegisterLoader(table_name, &loader);
@@ -739,23 +804,16 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     bool was_cancelled = loader.IsCancelled() || shutdown_requested_;
 
     if (was_cancelled) {
-      // Clean up partial data on cancellation to maintain consistency
       uint64_t partial_rows = loader.GetProcessedRows();
       std::string cancel_reason = shutdown_requested_ ? "shutdown" : "user_stop_request";
 
       mygram::utils::StructuredLog()
-          .Event("sync_cleanup")
+          .Event("sync_candidate_discarded")
           .Field("table", table_name)
           .Field("reason", cancel_reason)
           .Field("partial_rows_discarded", partial_rows)
-          .Field("message", "Partial data discarded due to cancellation")
+          .Field("message", "Candidate data discarded; live table preserved")
           .Warn();
-
-      // Use Clear() instead of creating new instances to preserve pointers
-      // that BinlogReader holds through TableContext (BUG: instance replacement
-      // causes replication to use different doc_store than SYNC populated)
-      ctx->index->Clear();
-      ctx->doc_store->Clear();
 
       std::string cancel_msg = shutdown_requested_ ? "Server shutdown requested" : "Cancelled by user (SYNC STOP)";
       update_state([&cancel_msg](SyncState& state) {
@@ -792,26 +850,70 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       std::string gtid = loader.GetStartGTID();
       uint64_t processed = loader.GetProcessedRows();
 
-      update_state([&gtid, processed](SyncState& state) {
-        state.status = "COMPLETED";
-        state.gtid = gtid;
-        state.processed_rows = processed;
-        state.is_running = false;
-      });
-
-      // Clear search cache for this table after SYNC replaces the index
-      auto* cache_mgr = cache_manager_.load(std::memory_order_acquire);
-      if (cache_mgr != nullptr) {
-        cache_mgr->ClearTable(table_name);
-        mygram::utils::StructuredLog()
-            .Event("sync_cache_cleared")
-            .Field("table", table_name)
-            .Field("rows", processed)
-            .Info();
+      std::string catchup_target_gtid;
+      if (full_config_->replication.enable && reader != nullptr) {
+        auto catchup_target = mysql_conn->GetLatestGTID();
+        if (!catchup_target) {
+          std::string error_msg =
+              "Snapshot built but post-snapshot GTID capture failed: " + catchup_target.error().message();
+          if (replication_was_running) {
+            auto restart_result = RestartReplicationFromGtid(reader, saved_gtid, table_name, "sync_target_failed");
+            if (!restart_result) {
+              error_msg += "; replication restart failed: " + restart_result.error().message();
+            }
+          }
+          update_state([&error_msg](SyncState& state) {
+            state.status = "FAILED";
+            state.replication_status = "FAILED";
+            state.error_message = error_msg;
+            state.is_running = false;
+          });
+          mygram::utils::StructuredLog()
+              .Event("sync_catchup_target_failed")
+              .Field("table", table_name)
+              .FieldError(catchup_target.error())
+              .Error();
+          return;
+        }
+        catchup_target_gtid = *catchup_target;
       }
 
-      // Restart replication from the SYNC GTID position.
-      // Replication was stopped before Clear() above; now set the new GTID and restart.
+      uint64_t candidate_total_length = 0;
+      uint64_t candidate_doc_count = 0;
+      for (auto doc_id : candidate_doc_store->GetAllDocIds()) {
+        auto text = candidate_doc_store->GetNormalizedText(doc_id);
+        if (text.has_value() && !text->empty()) {
+          candidate_total_length += mygram::utils::CountCodePoints(*text);
+          ++candidate_doc_count;
+        }
+      }
+
+      // Provisional, reversible commit. ReplaceWithLoaded() swaps state, so
+      // the candidates retain the complete old live table for rollback until
+      // replication has restarted successfully.
+      {
+        std::unique_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
+        previous_bm25_total_length = ctx->bm25_stats.total_doc_length.load(std::memory_order_relaxed);
+        previous_bm25_doc_count = ctx->bm25_stats.doc_count.load(std::memory_order_relaxed);
+        // The shared reader must restart from the older drained position so
+        // non-target tables do not lose commits made during this snapshot.
+        {
+          std::lock_guard<std::mutex> replay_lock(ctx->replay_watermark->mutex);
+          ctx->replay_watermark->snapshot_gtid =
+              (full_config_->replication.enable && reader != nullptr) ? gtid : std::string{};
+        }
+        ctx->index->ReplaceWithLoaded(*candidate_index);
+        ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
+        ctx->bm25_stats.total_doc_length.store(candidate_total_length, std::memory_order_relaxed);
+        ctx->bm25_stats.doc_count.store(candidate_doc_count, std::memory_order_relaxed);
+      }
+      replay_watermark_published = full_config_->replication.enable && reader != nullptr && !gtid.empty();
+      live_state_swapped = true;
+
+      // Restart from the drained pre-SYNC position when the shared reader was
+      // running. Replaying the target-table overlap is intentionally
+      // idempotent, while advancing to the snapshot marker would skip
+      // non-target events that committed during the rebuild.
       // Log replication configuration for debugging
       mygram::utils::StructuredLog()
           .Event("sync_replication_check")
@@ -822,7 +924,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("gtid", gtid)
           .Info();
 
-      if (full_config_->replication.enable && reader != nullptr && !gtid.empty()) {
+      const std::string restart_gtid = saved_gtid;
+      bool replication_started = false;
+      if (full_config_->replication.enable && reader != nullptr) {
         // If replication is still running (e.g., was not stopped earlier because
         // it wasn't enabled at that point), stop it now before updating GTID.
         if (!replication_was_running && reader->IsRunning()) {
@@ -830,40 +934,86 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         }
 
         // Always set GTID and start replication after SYNC
-        mygram::utils::StructuredLog().Event("sync_setting_gtid").Field("table", table_name).Field("gtid", gtid).Info();
+        mygram::utils::StructuredLog()
+            .Event("sync_setting_gtid")
+            .Field("table", table_name)
+            .Field("gtid", restart_gtid)
+            .Info();
 
-        reader->SetCurrentGTID(gtid);
+        reader->SetCurrentGTID(restart_gtid);
 
         // Log before attempting to start replication
         mygram::utils::StructuredLog()
             .Event("sync_starting_replication")
             .Field("table", table_name)
-            .Field("gtid", gtid)
+            .Field("gtid", restart_gtid)
             .Field("reader_running", reader->IsRunning())
             .Info();
 
         auto start_result = reader->Start();
-        if (start_result) {
-          update_state([](SyncState& state) { state.replication_status = "STARTED"; });
-          mygram::utils::StructuredLog()
-              .Event("sync_completed")
-              .Field("table", table_name)
-              .Field("rows", processed)
-              .Field("gtid", gtid)
-              .Field("replication_status", "started")
-              .Info();
+        std::optional<mygram::utils::Error> handoff_error;
+        if (!start_result) {
+          handoff_error = start_result.error();
         } else {
-          std::string error_msg = "Snapshot OK but replication failed: " + start_result.error().message();
+          auto catchup_result = mysql::WaitForAppliedPosition(*reader, catchup_target_gtid, kSyncCatchupTimeout);
+          if (!catchup_result) {
+            handoff_error = catchup_result.error();
+          }
+        }
+
+        if (handoff_error.has_value()) {
+          // Do not expose a snapshot whose replication hand-off failed. Swap
+          // the exact previous states back into place before reporting failure.
+          reader->Stop();
+          {
+            std::unique_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
+            ctx->index->ReplaceWithLoaded(*candidate_index);
+            ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
+            ctx->bm25_stats.total_doc_length.store(previous_bm25_total_length, std::memory_order_relaxed);
+            ctx->bm25_stats.doc_count.store(previous_bm25_doc_count, std::memory_order_relaxed);
+            std::lock_guard<std::mutex> replay_lock(ctx->replay_watermark->mutex);
+            ctx->replay_watermark->snapshot_gtid.clear();
+          }
+          replay_watermark_published = false;
+          live_state_swapped = false;
+
+          std::string error_msg = "Snapshot discarded because replication hand-off failed: " + handoff_error->message();
+          if (replication_was_running) {
+            auto rollback_restart = RestartReplicationFromGtid(reader, saved_gtid, table_name, "sync_swap_rollback");
+            if (!rollback_restart) {
+              error_msg += "; rollback replication restart failed: " + rollback_restart.error().message();
+            }
+          }
           update_state([&error_msg](SyncState& state) {
+            state.status = "FAILED";
             state.replication_status = "FAILED";
             state.error_message = error_msg;
+            state.is_running = false;
           });
           mygram::utils::StructuredLog()
-              .Event("sync_replication_start_failed")
+              .Event("sync_replication_handoff_failed")
               .Field("table", table_name)
-              .FieldError(start_result.error())
+              .Field("target_gtid", catchup_target_gtid)
+              .FieldError(*handoff_error)
               .Error();
+          return;
         }
+
+        replication_started = true;
+        {
+          std::lock_guard<std::mutex> replay_lock(ctx->replay_watermark->mutex);
+          ctx->replay_watermark->snapshot_gtid.clear();
+        }
+        replay_watermark_published = false;
+        update_state([](SyncState& state) { state.replication_status = "STARTED"; });
+        mygram::utils::StructuredLog()
+            .Event("sync_completed")
+            .Field("table", table_name)
+            .Field("rows", processed)
+            .Field("gtid", restart_gtid)
+            .Field("catchup_target_gtid", catchup_target_gtid)
+            .Field("replication_status", "started")
+            .Info();
       } else {
         update_state([](SyncState& state) { state.replication_status = "DISABLED"; });
         mygram::utils::StructuredLog()
@@ -873,9 +1023,31 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
             .Field("replication_status", "disabled")
             .Info();
       }
+
+      // The replacement and its replication hand-off are now committed.
+      live_state_swapped = false;
+      update_state([&gtid, processed, replication_started](SyncState& state) {
+        state.status = "COMPLETED";
+        state.gtid = gtid;
+        state.processed_rows = processed;
+        state.is_running = false;
+        if (!replication_started && state.replication_status.empty()) {
+          state.replication_status = "DISABLED";
+        }
+      });
+
+      auto* cache_mgr = cache_manager_.load(std::memory_order_acquire);
+      if (cache_mgr != nullptr) {
+        cache_mgr->ClearTable(table_name);
+        mygram::utils::StructuredLog()
+            .Event("sync_cache_cleared")
+            .Field("table", table_name)
+            .Field("rows", processed)
+            .Info();
+      }
     } else {
-      // SYNC failed - must clean up partial data to maintain consistency
-      // The partial data violates time-consistency (snapshot integrity)
+      // SYNC failed. Only the isolated candidate contains partial data; the
+      // live table remains byte-for-byte unchanged.
       std::string error_msg = result.error().message();
 
       // Check if error might be session timeout related
@@ -889,23 +1061,15 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
                      " is sufficient for snapshot duration)";
       }
 
-      // Clean up partial data by recreating Index and DocumentStore
-      // This ensures no inconsistent partial state remains
       uint64_t partial_rows = loader.GetProcessedRows();
 
       mygram::utils::StructuredLog()
-          .Event("sync_cleanup")
+          .Event("sync_candidate_discarded")
           .Field("table", table_name)
           .Field("reason", "sync_failed")
           .Field("partial_rows_discarded", partial_rows)
-          .Field("message", "Partial data discarded to maintain consistency")
+          .Field("message", "Partial candidate discarded; live table preserved")
           .Warn();
-
-      // Use Clear() instead of creating new instances to preserve pointers
-      // that BinlogReader holds through TableContext (BUG: instance replacement
-      // causes replication to use different doc_store than SYNC populated)
-      ctx->index->Clear();
-      ctx->doc_store->Clear();
 
       update_state([&error_msg](SyncState& state) {
         state.status = "FAILED";
@@ -936,25 +1100,25 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   } catch (const std::exception& e) {
     std::string error_msg = e.what();
 
-    // Clean up partial data on exception to maintain consistency
-    // Need to re-acquire table context (may have changed during exception)
-    auto table_iter = table_contexts_.find(table_name);
-    if (table_iter != table_contexts_.end()) {
-      auto* ctx = table_iter->second;
-      if (ctx != nullptr && ctx->index && ctx->doc_store) {
-        mygram::utils::StructuredLog()
-            .Event("sync_cleanup")
-            .Field("table", table_name)
-            .Field("reason", "exception")
-            .Field("message", "Partial data discarded due to exception")
-            .Warn();
-
-        // Use Clear() instead of creating new instances to preserve pointers
-        // that BinlogReader holds through TableContext (BUG: instance replacement
-        // causes replication to use different doc_store than SYNC populated)
-        ctx->index->Clear();
-        ctx->doc_store->Clear();
+    if (live_state_swapped && live_ctx != nullptr && candidate_index && candidate_doc_store) {
+      if (reader != nullptr) {
+        reader->Stop();
       }
+      {
+        std::unique_lock<std::shared_mutex> generation_lock(*live_ctx->generation_mutex);
+        live_ctx->index->ReplaceWithLoaded(*candidate_index);
+        live_ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
+        live_ctx->bm25_stats.total_doc_length.store(previous_bm25_total_length, std::memory_order_relaxed);
+        live_ctx->bm25_stats.doc_count.store(previous_bm25_doc_count, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> replay_lock(live_ctx->replay_watermark->mutex);
+        live_ctx->replay_watermark->snapshot_gtid.clear();
+      }
+      live_state_swapped = false;
+    }
+    if (replay_watermark_published && live_ctx != nullptr && live_ctx->replay_watermark != nullptr) {
+      std::lock_guard<std::mutex> replay_lock(live_ctx->replay_watermark->mutex);
+      live_ctx->replay_watermark->snapshot_gtid.clear();
+      replay_watermark_published = false;
     }
 
     update_state([&error_msg](SyncState& state) {
@@ -994,13 +1158,12 @@ void SyncOperationManager::UnregisterLoader(const std::string& table_name) {
 
 mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::RestartReplicationFromGtid(
     mysql::IBinlogReader* reader, const std::string& gtid, const std::string& table_name, const std::string& reason) {
-  if (reader == nullptr || gtid.empty()) {
+  if (reader == nullptr) {
     mygram::utils::StructuredLog()
         .Event("replication_restart_skipped")
         .Field("table", table_name)
         .Field("reason", reason)
-        .Field("reader_null", reader == nullptr)
-        .Field("gtid_empty", gtid.empty())
+        .Field("reader_null", true)
         .Warn();
     return {};
   }
@@ -1012,6 +1175,9 @@ mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::Restar
       .Field("gtid", gtid)
       .Info();
 
+  // An empty position is a valid conservative lower bound during the first
+  // manual SYNC: it means replay from the beginning. Skipping Start() here
+  // would leave a previously-running reader permanently stopped.
   reader->SetCurrentGTID(gtid);
 
   auto start_result = reader->Start();

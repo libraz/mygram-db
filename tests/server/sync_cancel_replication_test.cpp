@@ -227,6 +227,21 @@ TEST_F(SyncCancelReplicationTest, RestartReplicationFromGtidReportsStartFailure)
   EXPECT_FALSE(mock_reader_->IsRunning());
 }
 
+TEST_F(SyncCancelReplicationTest, EmptyConservativeGtidStillRestartsReplication) {
+  mock_reader_->SetRunning(false);
+  mock_reader_->SetGtid("");
+
+  auto manager = std::make_unique<SyncOperationManager>(table_contexts_ptrs_, config_.get(), mock_reader_.get());
+  auto restart_result =
+      manager->RestartReplicationFromGtidForTest(mock_reader_.get(), "", "test_table", "empty_lower_bound");
+
+  ASSERT_TRUE(restart_result.has_value()) << restart_result.error().message();
+  EXPECT_EQ(1, mock_reader_->GetStartCallCount());
+  ASSERT_EQ(1U, mock_reader_->GetSetGtidCalls().size());
+  EXPECT_TRUE(mock_reader_->GetSetGtidCalls().front().empty());
+  EXPECT_TRUE(mock_reader_->IsRunning());
+}
+
 /**
  * @brief Verify replication is NOT restarted during shutdown cancellation
  *

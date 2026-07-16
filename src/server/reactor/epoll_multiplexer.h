@@ -19,6 +19,8 @@
 
 #include <sys/epoll.h>
 
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "server/reactor/event_multiplexer.h"
@@ -60,8 +62,10 @@ class EpollMultiplexer : public EventMultiplexer {
   EpollMultiplexer& operator=(EpollMultiplexer&&) = delete;
 
   mygram::utils::Expected<void, mygram::utils::Error> Open() override;
-  mygram::utils::Expected<void, mygram::utils::Error> Add(int fd, uint8_t interest) override;
-  mygram::utils::Expected<void, mygram::utils::Error> Modify(int fd, uint8_t interest) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Add(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) override;
+  mygram::utils::Expected<void, mygram::utils::Error> Modify(
+      int fd, uint8_t interest, RegistrationToken registration_token = kInvalidRegistrationToken) override;
   mygram::utils::Expected<void, mygram::utils::Error> Remove(int fd) override;
   mygram::utils::Expected<void, mygram::utils::Error> Poll(int timeout_ms, std::vector<ReadyEvent>& out) override;
   const char* Name() const override;
@@ -89,6 +93,10 @@ class EpollMultiplexer : public EventMultiplexer {
   /// completely, so sustained bursts do not fragment across multiple Poll
   /// rounds. Never shrinks back down.
   std::vector<struct epoll_event> events_;
+
+  std::mutex registration_mutex_;
+  std::unordered_map<int, RegistrationToken> tokens_by_fd_;
+  std::unordered_map<RegistrationToken, int> fds_by_token_;
 };
 
 }  // namespace mygramdb::server::reactor

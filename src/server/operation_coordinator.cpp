@@ -59,6 +59,8 @@ const char* OperationCoordinator::Name(LongOperation type) {
       return "OPTIMIZE";
     case LongOperation::kAutoSnapshot:
       return "auto snapshot";
+    case LongOperation::kMysqlReconnect:
+      return "MySQL reconnect";
   }
   return "unknown operation";
 }

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <shared_mutex>
 #include <sstream>
 #include <thread>
 
@@ -242,6 +243,51 @@ TEST_F(DumpHandlerTest, DumpLoadBasic) {
 
   // Verify document count
   EXPECT_EQ(3u, table_ctx_->doc_store->Size()) << "Document count mismatch";
+}
+
+TEST_F(DumpHandlerTest, DumpLoadWaitsForExistingGenerationReadersBeforeReplacingState) {
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  ASSERT_TRUE(handler_->Handle(save_query, conn_ctx_).find("OK SAVED") == 0);
+
+  auto live_id = table_ctx_->doc_store->AddDocument("live", {{"content", "must remain visible"}});
+  ASSERT_TRUE(live_id.has_value());
+  ASSERT_TRUE(table_ctx_->index->AddDocument(static_cast<index::DocId>(*live_id), "must remain visible"));
+  ASSERT_EQ(table_ctx_->doc_store->Size(), 4U);
+
+  std::shared_lock<std::shared_mutex> in_flight_request(*table_ctx_->generation_mutex);
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+
+  std::atomic<bool> load_finished{false};
+  std::string response;
+  std::thread load_thread([&]() {
+    response = handler_->Handle(load_query, conn_ctx_);
+    load_finished.store(true, std::memory_order_release);
+  });
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!dump_load_in_progress_.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  const bool load_entered = dump_load_in_progress_.load(std::memory_order_acquire);
+  if (!load_entered) {
+    in_flight_request.unlock();
+    load_thread.join();
+    FAIL() << "DUMP LOAD did not enter the guarded phase before the deadline";
+    return;
+  }
+  EXPECT_FALSE(load_finished.load(std::memory_order_acquire));
+  EXPECT_EQ(table_ctx_->doc_store->Size(), 4U);
+
+  in_flight_request.unlock();
+  load_thread.join();
+
+  EXPECT_TRUE(response.find("OK LOADED") == 0) << "Response: " << response;
+  EXPECT_EQ(table_ctx_->doc_store->Size(), 3U);
+  EXPECT_FALSE(table_ctx_->doc_store->GetDocId("live").has_value());
 }
 
 TEST_F(DumpHandlerTest, DumpLoadRequiresFilepath) {
@@ -1572,6 +1618,24 @@ TEST_F(DumpHandlerGtidTest, NormalizeConfigMismatchRejectsDumpLoad) {
   std::string load_response = handler_->Handle(load_query, conn_ctx_);
   EXPECT_TRUE(load_response.find("ERROR") == 0) << "Load should fail: " << load_response;
   EXPECT_TRUE(load_response.find("memory.normalize.lower mismatch") != std::string::npos) << load_response;
+}
+
+TEST_F(DumpHandlerGtidTest, VerifyTextConfigMismatchRejectsDumpLoad) {
+  mock_binlog_reader_->SetGtidForTest("uuid:55557");
+  const std::string filepath = test_dump_dir_.string() + "/verify_text_config_test.dmp";
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = filepath;
+  ASSERT_TRUE(handler_->Handle(save_query, conn_ctx_).find("OK SAVED") == 0);
+
+  config_->memory.verify_text = "all";
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = filepath;
+  const std::string response = handler_->Handle(load_query, conn_ctx_);
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("memory.verify_text mismatch"), std::string::npos) << response;
 }
 
 /**

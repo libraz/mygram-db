@@ -73,6 +73,7 @@ Config MakeTestConfig() {
   cfg.memory.arena_chunk_mb = 64;
   cfg.memory.roaring_threshold = 256;
   cfg.memory.minute_epoch = false;
+  cfg.memory.verify_text = "all";
   cfg.memory.normalize.nfkc = true;
   cfg.memory.normalize.width = "full";
   cfg.memory.normalize.lower = true;
@@ -400,6 +401,7 @@ TEST(DumpFormatV2Test, FullDumpRoundTrip) {
   EXPECT_EQ(read_config.tables[0].name, "articles");
   EXPECT_EQ(read_config.tables[0].database, write_config.mysql.database);
   EXPECT_EQ(read_config.api.max_query_length, write_config.api.max_query_length);
+  EXPECT_EQ(read_config.memory.verify_text, write_config.memory.verify_text);
 }
 
 TEST(DumpFormatV2Test, GtidAboveV1PathLimitRoundTrips) {
@@ -782,8 +784,30 @@ TEST(DumpFormatV2Test, DispatchReadsV1File) {
 
   EXPECT_EQ(read_gtid, gtid);
   EXPECT_EQ(read_config.mysql.host, cfg.mysql.host);
+  EXPECT_EQ(read_config.memory.verify_text, cfg.memory.verify_text);
 
   cleanup();
+}
+
+TEST(DumpFormatV2Test, LegacyV2WithoutCompatibilityMetadataLeavesVerifyTextUnknown) {
+  const auto filepath = TempFilePath("legacy_v2_without_compatibility_metadata");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index source_index;
+  DocumentStore source_store;
+  WriteManualV2Dump(filepath, cfg,
+                    {BuildTableSectionData("articles", SerializeIndex(source_index), SerializeDocStore(source_store))});
+
+  std::string gtid;
+  Config loaded_config;
+  Index loaded_index;
+  DocumentStore loaded_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{
+      {"articles", {&loaded_index, &loaded_store}}};
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_TRUE(loaded_config.memory.verify_text.empty());
 }
 
 TEST(DumpFormatV2Test, V1LoadFailsWhenConfiguredTableIsMissingFromDump) {
@@ -1264,12 +1288,13 @@ TEST(DumpFormatV2Test, GetDumpInfoV2) {
   EXPECT_TRUE(info.has_statistics);
   EXPECT_GT(info.file_size, 0u);
   EXPECT_GT(info.timestamp, 0u);
-  // Config + Statistics + 1 TableData = 3 sections
-  EXPECT_EQ(info.section_count, 3u);
-  EXPECT_EQ(info.section_types.size(), 3u);
+  // Config + CompatibilityMetadata + Statistics + 1 TableData = 4 sections
+  EXPECT_EQ(info.section_count, 4u);
+  EXPECT_EQ(info.section_types.size(), 4u);
   EXPECT_EQ(info.section_types[0], dump_format::SectionType::kConfig);
-  EXPECT_EQ(info.section_types[1], dump_format::SectionType::kStatistics);
-  EXPECT_EQ(info.section_types[2], dump_format::SectionType::kTableData);
+  EXPECT_EQ(info.section_types[1], dump_format::SectionType::kCompatibilityMetadata);
+  EXPECT_EQ(info.section_types[2], dump_format::SectionType::kStatistics);
+  EXPECT_EQ(info.section_types[3], dump_format::SectionType::kTableData);
 
   cleanup();
 }
@@ -1422,8 +1447,8 @@ TEST(DumpFormatV2Test, UnknownSectionSkipped) {
   DumpV2Info info;
   ASSERT_TRUE(GetDumpInfo(filepath, info).has_value());
   EXPECT_EQ(info.section_count, new_section_count);
-  // Should contain Config, unknown(99), TableData
-  ASSERT_EQ(info.section_types.size(), 3u);
+  // Should contain Config, unknown(99), CompatibilityMetadata, TableData
+  ASSERT_EQ(info.section_types.size(), 4u);
   EXPECT_EQ(static_cast<uint32_t>(info.section_types[1]), 99u);
 
   cleanup();
@@ -1576,20 +1601,39 @@ TEST(DumpFormatV2Test, ConfiguredSectionAndMemoryLimitsRejectBeforeLiveReplaceme
   CleanupFile(filepath);
 }
 
-TEST(DumpFormatV2Test, DuplicateConfigAndStatisticsSectionsAreRejected) {
+TEST(DumpFormatV2Test, DuplicateSingletonSectionsAreRejected) {
   std::ostringstream config_data;
   ASSERT_TRUE(dump_v1::SerializeConfig(config_data, MakeTestConfig()));
+  std::ostringstream compatibility_data;
+  ASSERT_TRUE(dump_v1::SerializeCompatibilityMetadata(compatibility_data, MakeTestConfig()));
   std::ostringstream statistics_data;
   ASSERT_TRUE(dump_v1::SerializeStatistics(statistics_data, DumpStatistics{}));
 
-  for (const auto duplicate_type : {dump_format::SectionType::kConfig, dump_format::SectionType::kStatistics}) {
-    const auto filepath =
-        TempFilePath(duplicate_type == dump_format::SectionType::kConfig ? "duplicate_config" : "duplicate_statistics");
+  for (const auto duplicate_type : {dump_format::SectionType::kConfig, dump_format::SectionType::kCompatibilityMetadata,
+                                    dump_format::SectionType::kStatistics}) {
+    std::string suffix;
+    switch (duplicate_type) {
+      case dump_format::SectionType::kConfig:
+        suffix = "duplicate_config";
+        break;
+      case dump_format::SectionType::kCompatibilityMetadata:
+        suffix = "duplicate_compatibility_metadata";
+        break;
+      case dump_format::SectionType::kStatistics:
+        suffix = "duplicate_statistics";
+        break;
+      default:
+        FAIL() << "unexpected singleton section type";
+    }
+    const auto filepath = TempFilePath(suffix);
     CleanupFile(filepath);
     std::vector<std::pair<dump_format::SectionType, std::string>> sections;
     sections.emplace_back(dump_format::SectionType::kConfig, config_data.str());
     if (duplicate_type == dump_format::SectionType::kConfig) {
       sections.emplace_back(dump_format::SectionType::kConfig, config_data.str());
+    } else if (duplicate_type == dump_format::SectionType::kCompatibilityMetadata) {
+      sections.emplace_back(dump_format::SectionType::kCompatibilityMetadata, compatibility_data.str());
+      sections.emplace_back(dump_format::SectionType::kCompatibilityMetadata, compatibility_data.str());
     } else {
       sections.emplace_back(dump_format::SectionType::kStatistics, statistics_data.str());
       sections.emplace_back(dump_format::SectionType::kStatistics, statistics_data.str());

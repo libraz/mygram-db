@@ -677,14 +677,10 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  // Atomically transition running_ from false -> true. This replaces the prior
-  // check-then-set pattern, which let two concurrent Start() calls both pass
-  // the load and both proceed to spawn the server thread (P0-C). The CAS uses
-  // memory_order_acq_rel on success so that subsequent stores to server_thread_
-  // happen-after this acquire, and memory_order_relaxed on failure since the
-  // failure path only reads `expected` for diagnostic purposes.
-  bool expected = false;
-  if (!running_.compare_exchange_strong(expected, true, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+  std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
+  lifecycle_cv_.wait(lifecycle_lock, [this]() { return lifecycle_state_ != LifecycleState::kStopping; });
+
+  if (lifecycle_state_ == LifecycleState::kStarting || lifecycle_state_ == LifecycleState::kRunning) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
     mygram::utils::StructuredLog()
         .Event("http_server_start_failed")
@@ -692,7 +688,30 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
         .Error();
     return MakeUnexpected(error);
   }
-  std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
+
+  // An accept loop may have exited abnormally and published kStopped while
+  // leaving its std::thread joinable. Reap that owner before assigning a new
+  // thread object; overwriting a joinable std::thread terminates the process.
+  if (server_thread_ && server_thread_->joinable()) {
+    lifecycle_state_ = LifecycleState::kStopping;
+    running_.store(false, std::memory_order_release);
+    if (server_) {
+      server_->stop();
+    }
+    auto stale_thread = std::move(server_thread_);
+    lifecycle_lock.unlock();
+    stale_thread->join();
+    lifecycle_lock.lock();
+    lifecycle_state_ = LifecycleState::kStopped;
+    ++stop_completion_epoch_;
+    lifecycle_cv_.notify_all();
+  }
+
+  lifecycle_state_ = LifecycleState::kStarting;
+  running_.store(false, std::memory_order_release);
+  if (after_starting_hook_for_testing_) {
+    after_starting_hook_for_testing_();
+  }
 
   mygram::utils::StructuredLog()
       .Event("http_server_starting")
@@ -727,9 +746,9 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
         .Field("port", static_cast<uint64_t>(config_.port))
         .Field(log_fields::kFieldError, error_msg)
         .Error();
-    // Release the running_ gate so subsequent Start()s can retry. Bind
-    // happened on this thread, so no worker exists to clean up.
     running_.store(false, std::memory_order_release);
+    lifecycle_state_ = LifecycleState::kStopped;
+    lifecycle_cv_.notify_all();
     auto error = MakeError(ErrorCode::kNetworkBindFailed, std::move(error_msg));
     return MakeUnexpected(error);
   }
@@ -746,12 +765,12 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   // few milliseconds in all observed runs. By the time Start() returns,
   // both bind_to_port and the accept-loop entry are committed.
   server_thread_ = std::make_unique<std::thread>([this]() {
-    if (!server_->listen_after_bind()) {
-      // Abnormal exit from the accept loop. Release the running_ gate so a
-      // subsequent Start() can attempt a fresh bind. Stop()'s CAS handles
-      // the case where Stop() is the one tearing us down: its CAS observes
-      // running_=false here and short-circuits.
+    server_->listen_after_bind();
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (lifecycle_state_ == LifecycleState::kRunning) {
+      lifecycle_state_ = LifecycleState::kStopped;
       running_.store(false, std::memory_order_release);
+      lifecycle_cv_.notify_all();
     }
   });
   const auto ready_deadline = std::chrono::steady_clock::now() + kHttpServerReadyTimeout;
@@ -759,11 +778,18 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   if (!server_->is_running()) {
+    lifecycle_state_ = LifecycleState::kStopping;
     server_->stop();
     running_.store(false, std::memory_order_release);
-    if (server_thread_ && server_thread_->joinable()) {
-      server_thread_->join();
+    auto failed_thread = std::move(server_thread_);
+    lifecycle_lock.unlock();
+    if (failed_thread && failed_thread->joinable()) {
+      failed_thread->join();
     }
+    lifecycle_lock.lock();
+    lifecycle_state_ = LifecycleState::kStopped;
+    ++stop_completion_epoch_;
+    lifecycle_cv_.notify_all();
     auto error = MakeError(ErrorCode::kNetworkBindFailed, "HTTP server did not become ready before timeout");
     mygram::utils::StructuredLog()
         .Event("http_server_ready_timeout")
@@ -771,6 +797,10 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
         .Error();
     return MakeUnexpected(error);
   }
+
+  lifecycle_state_ = LifecycleState::kRunning;
+  running_.store(true, std::memory_order_release);
+  lifecycle_cv_.notify_all();
 
   mygram::utils::StructuredLog()
       .Event("http_server_started")
@@ -782,10 +812,17 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
 
 void HttpServer::Stop() {
   std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
-  const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
-  if (!was_running && (!server_thread_ || !server_thread_->joinable())) {
+  if (lifecycle_state_ == LifecycleState::kStopping) {
+    const uint64_t observed_epoch = stop_completion_epoch_;
+    lifecycle_cv_.wait(lifecycle_lock, [this, observed_epoch]() { return stop_completion_epoch_ != observed_epoch; });
     return;
   }
+  if (lifecycle_state_ == LifecycleState::kStopped && (!server_thread_ || !server_thread_->joinable())) {
+    return;
+  }
+
+  lifecycle_state_ = LifecycleState::kStopping;
+  running_.store(false, std::memory_order_release);
 
   mygram::utils::StructuredLog().Event("http_server_stopping").Info();
 
@@ -802,6 +839,12 @@ void HttpServer::Stop() {
   if (thread_to_join && thread_to_join->joinable()) {
     thread_to_join->join();
   }
+
+  lifecycle_lock.lock();
+  lifecycle_state_ = LifecycleState::kStopped;
+  ++stop_completion_epoch_;
+  lifecycle_cv_.notify_all();
+  lifecycle_lock.unlock();
 
   mygram::utils::StructuredLog().Event("http_server_stopped").Info();
 }
@@ -899,6 +942,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     return std::nullopt;
   }
   auto* table_ctx = lookup.table_ctx;
+  std::shared_lock<std::shared_mutex> generation_lock(*table_ctx->generation_mutex);
 
   // Parse JSON body
   json body;
@@ -1040,6 +1084,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   }
 
   PreparedHttpQuery prepared;
+  prepared.generation_lock = std::move(generation_lock);
   prepared.table_ctx = table_ctx;
   prepared.body = std::move(body);
   prepared.query = std::move(parsed_query);
@@ -1063,6 +1108,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     return std::nullopt;
   }
   auto* table_ctx = lookup.table_ctx;
+  std::shared_lock<std::shared_mutex> generation_lock(*table_ctx->generation_mutex);
 
   json body;
   try {
@@ -1155,6 +1201,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   }
 
   PreparedHttpQuery prepared;
+  prepared.generation_lock = std::move(generation_lock);
   prepared.table_ctx = table_ctx;
   prepared.body = std::move(body);
   prepared.query = std::move(parsed_query);
@@ -1353,7 +1400,7 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
         results = current_doc_store->GetAllDocIds();
 
         if (has_not) {
-          results = search_pipeline::ApplyNotFilter(results, query->not_terms, current_index,
+          results = search_pipeline::ApplyNotFilter(results, query->not_terms, current_index, current_doc_store,
                                                     table_ctx->config.ngram_size, table_ctx->config.kanji_ngram_size,
                                                     table_ctx->config.cross_boundary_ngrams);
         }
@@ -1425,6 +1472,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     if (RejectIfTableSyncing(lookup.table_key, res)) {
       return;
     }
+    std::shared_lock<std::shared_mutex> generation_lock(*lookup.table_ctx->generation_mutex);
     auto* current_doc_store = lookup.table_ctx->doc_store.get();
 
     RecordCommand(query::QueryType::GET);
@@ -1493,6 +1541,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 
     json tables_obj;
     for (const auto& [table_name, ctx] : table_contexts_) {
+      std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
       size_t index_mem = ctx->index->MemoryUsage();
       size_t doc_mem = ctx->doc_store->MemoryUsage();
       auto idx_stats = ctx->index->GetStatistics();
@@ -1729,6 +1778,7 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
   size_t total_documents = 0;
   for (const auto& [table_name, ctx] : table_contexts_) {
     if (ctx != nullptr && ctx->index) {
+      std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
       total_terms += ctx->index->TermCount();
       // Note: Index doesn't have document count method, use doc_store instead
       if (ctx->doc_store != nullptr) {

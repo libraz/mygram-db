@@ -122,13 +122,15 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 /// @param results Current result set
 /// @param not_terms Terms to exclude
 /// @param current_index Index for NOT search
+/// @param current_doc_store Document store for too-short substring fallback
 /// @param ngram_size N-gram size for ASCII/alphanumeric characters
 /// @param kanji_ngram_size N-gram size for CJK characters
 /// @param cross_boundary_ngrams Generate n-grams spanning CJK/non-CJK boundaries
 /// @return Filtered results with NOT-matching documents removed
 std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
                                            const std::vector<std::string>& not_terms, index::Index* current_index,
-                                           int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams);
+                                           storage::DocumentStore* current_doc_store, int ngram_size,
+                                           int kanji_ngram_size, bool cross_boundary_ngrams);
 
 /// @brief Apply filter conditions using bitmap intersection (fast path) with fallback
 ///
@@ -238,7 +240,7 @@ bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentS
 void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query,
                    const std::vector<storage::DocId>& results, const std::vector<SearchTermInfo>& term_infos,
                    double query_time_ms, int ngram_size, int kanji_ngram_size, bool cross_boundary,
-                   std::optional<uint64_t> data_version = std::nullopt);
+                   std::optional<uint64_t> data_version = std::nullopt, bool invalidate_on_any_text_change = false);
 
 /// @brief A synonym group: original term + all its synonyms, each with their own n-grams
 struct SynonymTermGroup {

@@ -87,6 +87,7 @@ TEST(DumpFormatV1Test, HeaderSizeWithEmptyGtid) {
 TEST(DumpFormatV1Test, ConfigRoundTripPreservesPerTableDatabase) {
   Config write_config;
   write_config.mysql.database = "default_db";
+  write_config.memory.verify_text = "all";
 
   TableConfig live;
   live.name = "articles";
@@ -101,17 +102,22 @@ TEST(DumpFormatV1Test, ConfigRoundTripPreservesPerTableDatabase) {
   std::ostringstream output;
   auto write_result = SerializeConfig(output, write_config);
   ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+  auto metadata_result = SerializeCompatibilityMetadata(output, write_config);
+  ASSERT_TRUE(metadata_result.has_value()) << metadata_result.error().message();
 
   Config read_config;
   std::istringstream input(output.str());
   auto read_result = DeserializeConfig(input, read_config);
   ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+  auto metadata_read_result = DeserializeCompatibilityMetadata(input, read_config);
+  ASSERT_TRUE(metadata_read_result.has_value()) << metadata_read_result.error().message();
 
   ASSERT_EQ(read_config.tables.size(), 2u);
   EXPECT_EQ(read_config.tables[0].name, "articles");
   EXPECT_EQ(read_config.tables[0].database, "live_db");
   EXPECT_EQ(read_config.tables[1].name, "articles");
   EXPECT_EQ(read_config.tables[1].database, "archive_db");
+  EXPECT_EQ(read_config.memory.verify_text, "all");
 }
 
 // ============================================================================

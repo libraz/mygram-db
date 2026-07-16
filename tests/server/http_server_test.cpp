@@ -21,6 +21,7 @@
 #include "index/index.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
+#include "support/deterministic_gate.h"
 
 namespace mygramdb {
 namespace server {
@@ -212,6 +213,70 @@ TEST_F(HttpServerStartupTest, StopJoinsThreadEvenIfRunningFlagWasClearedInternal
   server.Stop();
 
   EXPECT_FALSE(server.IsRunning());
+}
+
+TEST_F(HttpServerStartupTest, StopDuringStartingWaitsAndLeavesNoListener) {
+  auto cfg = MakeConfig(18101);
+  HttpServer server(cfg, table_contexts_, config_.get());
+
+  constexpr int kRaceRepetitions = 100;
+  for (int repetition = 0; repetition < kRaceRepetitions; ++repetition) {
+    mygramdb::testing::DeterministicGate start_gate;
+    server.SetAfterStartingHookForTesting([&]() { start_gate.ArriveAndWait(); });
+
+    auto start_future = std::async(std::launch::async, [&]() { return server.Start(); });
+    ASSERT_TRUE(start_gate.WaitUntilArrived(std::chrono::seconds(2))) << repetition;
+
+    auto stop_future = std::async(std::launch::async, [&]() { server.Stop(); });
+    EXPECT_EQ(stop_future.wait_for(std::chrono::milliseconds(1)), std::future_status::timeout) << repetition;
+
+    start_gate.Release();
+    ASSERT_TRUE(start_future.get().has_value()) << repetition;
+    ASSERT_EQ(stop_future.wait_for(std::chrono::seconds(2)), std::future_status::ready) << repetition;
+    stop_future.get();
+    EXPECT_FALSE(server.IsRunning()) << repetition;
+  }
+
+  // A leaked listener would make this immediate restart fail to bind.
+  server.SetAfterStartingHookForTesting({});
+  ASSERT_TRUE(server.Start().has_value());
+  server.Stop();
+}
+
+TEST_F(HttpServerStartupTest, AbnormalListenerExitIsReapedBeforeRestart) {
+  auto cfg = MakeConfig(18102);
+  HttpServer server(cfg, table_contexts_, config_.get());
+  ASSERT_TRUE(server.Start().has_value());
+
+  server.ForceListenerExitForTesting();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (server.IsRunning() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  ASSERT_FALSE(server.IsRunning());
+
+  // Start must join the exited thread instead of overwriting it.
+  ASSERT_TRUE(server.Start().has_value());
+  EXPECT_TRUE(server.IsRunning());
+  server.Stop();
+}
+
+TEST_F(HttpServerStartupTest, ConcurrentStopsJoinExactlyOnce) {
+  auto cfg = MakeConfig(18103);
+  HttpServer server(cfg, table_contexts_, config_.get());
+  ASSERT_TRUE(server.Start().has_value());
+
+  std::vector<std::future<void>> stops;
+  for (int i = 0; i < 8; ++i) {
+    stops.push_back(std::async(std::launch::async, [&]() { server.Stop(); }));
+  }
+  for (auto& stop : stops) {
+    ASSERT_EQ(stop.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    stop.get();
+  }
+  EXPECT_FALSE(server.IsRunning());
+  ASSERT_TRUE(server.Start().has_value());
+  server.Stop();
 }
 
 /**

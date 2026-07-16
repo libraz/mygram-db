@@ -128,7 +128,7 @@ Expected<void, Error> EpollMultiplexer::Open() {
 
   struct epoll_event wake_ev {};
   wake_ev.events = EPOLLIN;
-  wake_ev.data.fd = efd;
+  wake_ev.data.u64 = kInvalidRegistrationToken;
   if (::epoll_ctl(fd, EPOLL_CTL_ADD, efd, &wake_ev) != 0) {
     const int en = errno;
     ::close(efd);
@@ -162,22 +162,35 @@ Expected<void, Error> EpollMultiplexer::Wake() {
   return {};
 }
 
-Expected<void, Error> EpollMultiplexer::Add(int fd, uint8_t interest) {
+Expected<void, Error> EpollMultiplexer::Add(int fd, uint8_t interest, RegistrationToken registration_token) {
+  std::lock_guard<std::mutex> lock(registration_mutex_);
+  if (registration_token == kInvalidRegistrationToken) {
+    registration_token = static_cast<RegistrationToken>(static_cast<uint32_t>(fd)) + 1;
+  }
   struct epoll_event ev {};
   ev.events = InterestToEpollEvents(interest);
-  ev.data.fd = fd;
+  ev.data.u64 = registration_token;
 
   if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) != 0) {
     const int en = errno;
     return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRegisterFailed, FormatErrno("epoll_ctl(ADD)", en)));
   }
+  tokens_by_fd_[fd] = registration_token;
+  fds_by_token_[registration_token] = fd;
   return {};
 }
 
-Expected<void, Error> EpollMultiplexer::Modify(int fd, uint8_t interest) {
+Expected<void, Error> EpollMultiplexer::Modify(int fd, uint8_t interest, RegistrationToken registration_token) {
+  std::lock_guard<std::mutex> lock(registration_mutex_);
+  auto token_it = tokens_by_fd_.find(fd);
+  if (token_it == tokens_by_fd_.end() ||
+      (registration_token != kInvalidRegistrationToken && registration_token != token_it->second)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorModifyFailed, "epoll modify rejected for stale or unknown registration"));
+  }
   struct epoll_event ev {};
   ev.events = InterestToEpollEvents(interest);
-  ev.data.fd = fd;
+  ev.data.u64 = token_it->second;
 
   if (::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev) != 0) {
     const int en = errno;
@@ -187,16 +200,25 @@ Expected<void, Error> EpollMultiplexer::Modify(int fd, uint8_t interest) {
 }
 
 Expected<void, Error> EpollMultiplexer::Remove(int fd) {
+  std::lock_guard<std::mutex> lock(registration_mutex_);
+  auto token_it = tokens_by_fd_.find(fd);
+  if (token_it == tokens_by_fd_.end()) {
+    return {};
+  }
   if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) != 0) {
     const int en = errno;
     // Idempotent teardown race: the fd may have been closed (EBADF) or never
     // actually registered (ENOENT) by the time IoReactor::Stop() reaches us.
     // Swallow those two cases; everything else is a real failure.
     if (en == ENOENT || en == EBADF) {
+      fds_by_token_.erase(token_it->second);
+      tokens_by_fd_.erase(token_it);
       return {};
     }
     return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno("epoll_ctl(DEL)", en)));
   }
+  fds_by_token_.erase(token_it->second);
+  tokens_by_fd_.erase(token_it);
   return {};
 }
 
@@ -221,7 +243,7 @@ Expected<void, Error> EpollMultiplexer::Poll(int timeout_ms, std::vector<ReadyEv
     // Drain and drop the self-wake eventfd so callers never observe it as a
     // bogus ready fd. The eventfd is non-blocking and registered with
     // EPOLLIN only, so this read is safe even on spurious wakeups.
-    if (ev.data.fd == wake_fd_) {
+    if (ev.data.u64 == kInvalidRegistrationToken) {
       uint64_t drained = 0;
       // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - we deliberately
       // ignore the byte count; the side-effect of clearing the counter is
@@ -230,7 +252,16 @@ Expected<void, Error> EpollMultiplexer::Poll(int timeout_ms, std::vector<ReadyEv
       continue;
     }
 
-    out.push_back(ReadyEvent{ev.data.fd, EpollEventsToReady(ev.events)});
+    int fd = -1;
+    {
+      std::lock_guard<std::mutex> lock(registration_mutex_);
+      auto fd_it = fds_by_token_.find(ev.data.u64);
+      if (fd_it == fds_by_token_.end()) {
+        continue;
+      }
+      fd = fd_it->second;
+    }
+    out.push_back(ReadyEvent{fd, EpollEventsToReady(ev.events), ev.data.u64});
   }
 
   // Dynamic grow: if this Poll() filled the scratch buffer, chances are we

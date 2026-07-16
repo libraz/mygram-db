@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -72,6 +73,7 @@ class SearchHandler : public CommandHandler {
    * @brief Result from ExecuteSearchPipeline
    */
   struct PipelineOutput {
+    std::shared_lock<std::shared_mutex> generation_lock;
     std::vector<storage::DocId> results;        ///< Full result set (before pagination)
     std::vector<std::string> all_search_terms;  ///< All search terms (main + AND)
     std::vector<SearchTermInfo> term_infos;     ///< Term information with n-grams

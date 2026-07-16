@@ -23,6 +23,7 @@ TEST(ServerConfigTest, FromConfigCopiesTcpSettings) {
   cfg.api.tcp.recv_timeout_sec = 30;
   cfg.api.tcp.thread_pool_queue_size = 2000;
   cfg.api.tcp.max_write_queue_bytes = 32LL * 1024 * 1024;
+  cfg.api.tcp.max_total_buffered_bytes = 512LL * 1024 * 1024;
 
   auto sc = ServerConfig::FromConfig(cfg);
 
@@ -33,6 +34,7 @@ TEST(ServerConfigTest, FromConfigCopiesTcpSettings) {
   EXPECT_EQ(sc.recv_timeout_sec, 30);
   EXPECT_EQ(sc.thread_pool_queue_size, 2000);
   EXPECT_EQ(sc.max_write_queue_bytes, 32LL * 1024 * 1024);
+  EXPECT_EQ(sc.max_total_buffered_bytes, 512LL * 1024 * 1024);
 }
 
 /**

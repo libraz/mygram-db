@@ -46,7 +46,9 @@
 
 #include <sys/types.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -66,6 +68,38 @@ class IoReactor;
 class RequestDispatcher;
 class ServerStats;
 class ThreadPool;
+
+/** Shared admission budget for request frames and unsent responses. */
+class ReactorMemoryBudget {
+ public:
+  explicit ReactorMemoryBudget(size_t limit_bytes) : limit_bytes_(limit_bytes) {}
+
+  [[nodiscard]] bool TryReserve(size_t bytes) {
+    size_t current = used_bytes_.load(std::memory_order_relaxed);
+    while (bytes <= limit_bytes_ - std::min(current, limit_bytes_)) {
+      if (used_bytes_.compare_exchange_weak(current, current + bytes, std::memory_order_acq_rel,
+                                            std::memory_order_relaxed)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void Release(size_t bytes) {
+    const size_t previous = used_bytes_.fetch_sub(bytes, std::memory_order_acq_rel);
+    assert(previous >= bytes);
+    if (previous < bytes) {
+      used_bytes_.store(0, std::memory_order_release);
+    }
+  }
+
+  [[nodiscard]] size_t UsedBytes() const { return used_bytes_.load(std::memory_order_relaxed); }
+  [[nodiscard]] size_t LimitBytes() const { return limit_bytes_; }
+
+ private:
+  const size_t limit_bytes_;
+  std::atomic<size_t> used_bytes_{0};
+};
 
 /**
  * @brief Per-connection state owned jointly by the reactor and drain tasks.
@@ -104,6 +138,23 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /// task to tear down the connection.
   static constexpr size_t kDefaultMaxWriteQueueBytes = 16 * mygram::constants::kBytesPerMegabyte;  // 16 MiB
 
+  /// Fairness budget for one level-triggered readable event. Remaining
+  /// socket bytes stay readable and are reported on the next poll cycle.
+  static constexpr size_t kReadEventByteBudget = 64 * 1024;
+  static constexpr size_t kReadEventFrameBudget = 64;
+
+  /// Hard limits for completed request frames awaiting worker dispatch.
+  /// Admission is checked before allocating the next std::string.
+  static constexpr size_t kMaxPendingFrames = 1024;
+  static constexpr size_t kMaxPendingFrameBytes = 4 * mygram::constants::kBytesPerMegabyte;
+  static constexpr size_t kPendingFramesHighWatermark = kMaxPendingFrames * 3 / 4;
+  static constexpr size_t kPendingFramesLowWatermark = kMaxPendingFrames / 2;
+  static constexpr size_t kPendingFrameBytesHighWatermark = kMaxPendingFrameBytes * 3 / 4;
+  static constexpr size_t kPendingFrameBytesLowWatermark = kMaxPendingFrameBytes / 2;
+
+  /// Conservative charge for deque node/string bookkeeping, including empty frames.
+  static constexpr size_t kQueueEntryOverheadBytes = 64;
+
   /**
    * @brief Factory. Must be used instead of a bare constructor because
    *        `std::enable_shared_from_this` requires the object to live inside
@@ -118,14 +169,16 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    */
   static std::shared_ptr<ReactorConnection> Create(int fd, IoReactor* reactor, RequestDispatcher* dispatcher,
                                                    ThreadPool* thread_pool, ServerStats* stats = nullptr,
-                                                   size_t max_write_queue_bytes = kDefaultMaxWriteQueueBytes);
+                                                   size_t max_write_queue_bytes = kDefaultMaxWriteQueueBytes,
+                                                   std::shared_ptr<ReactorMemoryBudget> memory_budget = nullptr);
 
   /**
    * @brief Public constructor (required by `std::make_shared`). Prefer
    *        `Create()` at call sites for clarity.
    */
   ReactorConnection(int fd, IoReactor* reactor, RequestDispatcher* dispatcher, ThreadPool* thread_pool,
-                    ServerStats* stats, size_t max_write_queue_bytes);
+                    ServerStats* stats, size_t max_write_queue_bytes,
+                    std::shared_ptr<ReactorMemoryBudget> memory_budget = nullptr);
 
   ~ReactorConnection();
 
@@ -208,6 +261,20 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
     return pending_frames_.size();
   }
 
+  [[nodiscard]] size_t PendingFrameBytesForTest() const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    return pending_frame_bytes_;
+  }
+
+  [[nodiscard]] size_t GlobalBufferedBytesForTest() const {
+    return memory_budget_ == nullptr ? 0 : memory_budget_->UsedBytes();
+  }
+
+  [[nodiscard]] bool ReadPausedForTest() const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    return read_paused_;
+  }
+
   /// Current number of entries in the write queue. TEST ONLY.
   [[nodiscard]] size_t WriteQueueDepthForTest() const {
     std::lock_guard<std::mutex> lock(write_mutex_);
@@ -229,6 +296,19 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   [[nodiscard]] size_t ReadBufferSizeForTest() const { return read_buf_.size(); }
 
   [[nodiscard]] bool ShouldSendReadOverflowErrorForTest() { return ShouldSendReadOverflowError(); }
+
+  void DrainPendingFramesForTest(size_t count) {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    while (count-- > 0 && !pending_frames_.empty()) {
+      pending_frame_bytes_ -= pending_frames_.front().size();
+      pending_frame_overhead_bytes_ -= kQueueEntryOverheadBytes;
+      if (memory_budget_ != nullptr) {
+        memory_budget_->Release(pending_frames_.front().size() + kQueueEntryOverheadBytes);
+      }
+      pending_frames_.pop_front();
+    }
+    (void)MaybeResumeReadsLocked();
+  }
 #endif
 
   /**
@@ -259,6 +339,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
  private:
   bool AppendReadBytes(const char* data, size_t len, size_t& enqueued);
   bool ShouldSendReadOverflowError();
+  bool MaybeResumeReadsLocked();
 
   /**
    * @brief Attempt to submit a drain task to the thread pool.
@@ -310,6 +391,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   int fd_;
   bool closed_ = false;  // destructor close(2) guard
   const size_t max_write_queue_bytes_;
+  std::shared_ptr<ReactorMemoryBudget> memory_budget_;
 
   // Non-owning collaborators. Set at construction, read-only afterwards.
   IoReactor* reactor_;
@@ -325,10 +407,15 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   // Read-side state — touched only by the event-loop thread.
   std::vector<char> read_buf_;
+  size_t read_buffer_budget_bytes_ = 0;
 
   // Frame queue: event loop produces, drain task consumes.
   mutable std::mutex frame_mutex_;
   std::deque<std::string> pending_frames_;
+  size_t pending_frame_bytes_ = 0;
+  size_t pending_frame_overhead_bytes_ = 0;
+  bool frame_queue_overflow_ = false;
+  bool read_paused_ = false;
 
   // Write queue: drain task (worker) produces; either the worker itself
   // (inline fast path) or the event-loop thread (OnWritable slow path)
@@ -336,8 +423,9 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   mutable std::mutex write_mutex_;
   std::deque<std::string> write_queue_;
   size_t write_queue_bytes_ = 0;  ///< Sum of byte lengths in write_queue_.
-  size_t front_offset_ = 0;       ///< Bytes of write_queue_.front() already sent.
-  bool write_armed_ = false;      ///< Whether reactor_->ArmWrite was called for this fd.
+  size_t write_queue_overhead_bytes_ = 0;
+  size_t front_offset_ = 0;   ///< Bytes of write_queue_.front() already sent.
+  bool write_armed_ = false;  ///< Whether reactor_->ArmWrite was called for this fd.
 
   // Atomic flags.
   /// Hard-close flag: connection must be torn down as soon as inflight work

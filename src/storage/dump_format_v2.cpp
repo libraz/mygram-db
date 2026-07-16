@@ -890,6 +890,25 @@ Expected<void, Error> WriteDumpV2(
       ++section_count;
     }
 
+    // Versioned semantic compatibility metadata lives in its own optional
+    // section. Older V2 readers skip unknown sections by contract, while new
+    // readers can distinguish a legacy dump with missing metadata from an
+    // explicit "off" value.
+    {
+      std::ostringstream compatibility_stream;
+      if (auto result = dump_v1::SerializeCompatibilityMetadata(compatibility_stream, config); !result) {
+        LogStorageError("serialize_compatibility_metadata", temp_filepath, result.error().message());
+        return result;
+      }
+      if (auto result =
+              WriteSectionEnvelope(ofs, dump_format::SectionType::kCompatibilityMetadata, compatibility_stream);
+          !result) {
+        LogStorageError("write_compatibility_metadata_section", temp_filepath, result.error().message());
+        return result;
+      }
+      ++section_count;
+    }
+
     // Section 2: Statistics (optional)
     if (stats != nullptr) {
       std::ostringstream stats_stream;
@@ -1236,6 +1255,7 @@ Expected<void, Error> ReadDumpV2(
 
     // Read sections
     bool config_found = false;
+    bool compatibility_metadata_found = false;
     bool statistics_found = false;
     uint32_t sections_read = 0;
     std::vector<PendingTableLoad> pending_table_loads;
@@ -1305,6 +1325,28 @@ Expected<void, Error> ReadDumpV2(
                 MakeError(ErrorCode::kStorageDumpReadError, "Config section contains trailing or malformed data"));
           }
           config_found = true;
+          break;
+        }
+
+        case dump_format::SectionType::kCompatibilityMetadata: {
+          if (compatibility_metadata_found) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                            "V2 dump contains duplicate CompatibilityMetadata sections"));
+          }
+          if (!config_found) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                            "V2 CompatibilityMetadata section must follow the Config section"));
+          }
+          BoundedInputStream compatibility_stream(ifs, envelope.data_length);
+          if (auto result = dump_v1::DeserializeCompatibilityMetadata(compatibility_stream, config); !result) {
+            LogStorageError("deserialize_compatibility_metadata_v2", filepath, result.error().message());
+            return result;
+          }
+          if (compatibility_stream.Remaining() != 0) {
+            return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                            "Compatibility metadata section contains trailing or malformed data"));
+          }
+          compatibility_metadata_found = true;
           break;
         }
 

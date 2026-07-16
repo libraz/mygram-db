@@ -479,6 +479,10 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
 
 Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config) {
   constexpr uint32_t kMaxTableCount = 10000;  // Reasonable limit for table count
+  // The legacy config payload never persisted this semantic setting. Keep an
+  // explicit unknown sentinel until a flagged V1 extension or the dedicated
+  // V2 compatibility section supplies it.
+  config.memory.verify_text.clear();
   // MySQL config
   if (!ReadString(input_stream, config.mysql.host, kMaxConfigValueLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read mysql.host"));
@@ -668,6 +672,34 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read api.max_query_length"));
   }
 
+  return {};
+}
+
+Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config) {
+  constexpr uint32_t kCompatibilityMetadataVersion = 1;
+  if (!WriteBinary(output_stream, kCompatibilityMetadataVersion)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write compatibility metadata version"));
+  }
+  if (!WriteString(output_stream, config.memory.verify_text)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.verify_text"));
+  }
+  return {};
+}
+
+Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config) {
+  constexpr uint32_t kCompatibilityMetadataVersion = 1;
+  uint32_t version = 0;
+  if (!ReadBinary(input_stream, version)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read compatibility metadata version"));
+  }
+  if (version != kCompatibilityMetadataVersion) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch,
+                                    "Unsupported compatibility metadata version: " + std::to_string(version)));
+  }
+  if (!ReadString(input_stream, config.memory.verify_text, kMaxIdentifierLength)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.verify_text"));
+  }
   return {};
 }
 

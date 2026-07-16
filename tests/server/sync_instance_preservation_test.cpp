@@ -6,7 +6,8 @@
  * Root cause: SYNC cleanup created new Index/DocumentStore instances, breaking
  * pointers that BinlogReader holds through TableContext.
  *
- * Fix: Use Clear() instead of make_unique to preserve instance pointers.
+ * Fix: side-build candidates and reversibly swap their state into the live
+ * objects, preserving both the old data and instance pointers until commit.
  */
 
 #include <gtest/gtest.h>
@@ -133,6 +134,60 @@ TEST_F(InstancePreservationTest, DocIdRestartsAfterClear) {
   auto new_doc_id = doc_store_->AddDocument("new_pk", {});
   ASSERT_TRUE(new_doc_id.has_value());
   EXPECT_EQ(*new_doc_id, 1) << "doc_id should restart from 1 after Clear()";
+}
+
+TEST_F(InstancePreservationTest, CandidateSwapIsReversibleAndPreservesPointers) {
+  auto old_doc_id = doc_store_->AddDocument("old", {});
+  ASSERT_TRUE(old_doc_id.has_value());
+  index_->AddDocument(*old_doc_id, "old content");
+
+  index::Index candidate_index;
+  storage::DocumentStore candidate_store;
+  auto new_doc_id = candidate_store.AddDocument("new", {});
+  ASSERT_TRUE(new_doc_id.has_value());
+  candidate_index.AddDocument(*new_doc_id, "new replacement content");
+
+  auto* const index_address = index_.get();
+  auto* const store_address = doc_store_.get();
+  index_->ReplaceWithLoaded(candidate_index);
+  doc_store_->ReplaceWithLoaded(candidate_store);
+
+  EXPECT_EQ(index_.get(), index_address);
+  EXPECT_EQ(doc_store_.get(), store_address);
+  EXPECT_FALSE(doc_store_->GetDocId("old").has_value());
+  EXPECT_TRUE(doc_store_->GetDocId("new").has_value());
+  EXPECT_TRUE(candidate_store.GetDocId("old").has_value());
+
+  // Simulate a replication restart failure after provisional commit.
+  index_->ReplaceWithLoaded(candidate_index);
+  doc_store_->ReplaceWithLoaded(candidate_store);
+
+  EXPECT_EQ(index_.get(), index_address);
+  EXPECT_EQ(doc_store_.get(), store_address);
+  EXPECT_TRUE(doc_store_->GetDocId("old").has_value());
+  EXPECT_FALSE(doc_store_->GetDocId("new").has_value());
+  EXPECT_TRUE(candidate_store.GetDocId("new").has_value());
+}
+
+TEST_F(InstancePreservationTest, DiscardingPartialCandidateLeavesLiveTableUntouched) {
+  auto old_doc_id = doc_store_->AddDocument("old", {});
+  ASSERT_TRUE(old_doc_id.has_value());
+  index_->AddDocument(*old_doc_id, "stable live content");
+  const auto original_terms = index_->TermCount();
+
+  {
+    index::Index partial_index;
+    storage::DocumentStore partial_store;
+    auto partial_doc_id = partial_store.AddDocument("partial", {});
+    ASSERT_TRUE(partial_doc_id.has_value());
+    partial_index.AddDocument(*partial_doc_id, "incomplete candidate");
+    // Load failure/cancellation destroys only this scope.
+  }
+
+  EXPECT_EQ(doc_store_->Size(), 1);
+  EXPECT_TRUE(doc_store_->GetDocId("old").has_value());
+  EXPECT_FALSE(doc_store_->GetDocId("partial").has_value());
+  EXPECT_EQ(index_->TermCount(), original_terms);
 }
 
 }  // namespace mygramdb::server

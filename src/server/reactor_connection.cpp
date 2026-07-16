@@ -28,6 +28,7 @@
 #include "server/request_dispatcher.h"
 #include "server/server_stats.h"
 #include "server/thread_pool.h"
+#include "utils/fd_guard.h"
 #include "utils/network_utils.h"
 #include "utils/structured_log.h"
 
@@ -68,14 +69,21 @@ void BestEffortSendError(int fd, std::string_view message) {
 
 std::shared_ptr<ReactorConnection> ReactorConnection::Create(int fd, IoReactor* reactor, RequestDispatcher* dispatcher,
                                                              ThreadPool* thread_pool, ServerStats* stats,
-                                                             size_t max_write_queue_bytes) {
-  return std::make_shared<ReactorConnection>(fd, reactor, dispatcher, thread_pool, stats, max_write_queue_bytes);
+                                                             size_t max_write_queue_bytes,
+                                                             std::shared_ptr<ReactorMemoryBudget> memory_budget) {
+  if (memory_budget == nullptr && reactor != nullptr) {
+    memory_budget = reactor->MemoryBudget();
+  }
+  return std::make_shared<ReactorConnection>(fd, reactor, dispatcher, thread_pool, stats, max_write_queue_bytes,
+                                             std::move(memory_budget));
 }
 
 ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatcher* dispatcher, ThreadPool* thread_pool,
-                                     ServerStats* stats, size_t max_write_queue_bytes)
+                                     ServerStats* stats, size_t max_write_queue_bytes,
+                                     std::shared_ptr<ReactorMemoryBudget> memory_budget)
     : fd_(fd),
       max_write_queue_bytes_(max_write_queue_bytes),
+      memory_budget_(std::move(memory_budget)),
       reactor_(reactor),
       dispatcher_(dispatcher),
       thread_pool_(thread_pool),
@@ -88,10 +96,19 @@ ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatch
   if (client_ip != "unknown") {
     conn_ctx_.client_ip = std::move(client_ip);
   }
-  read_buf_.reserve(kDefaultReadBufferBytes);
 }
 
 ReactorConnection::~ReactorConnection() {
+  if (memory_budget_ != nullptr) {
+    std::scoped_lock lock(frame_mutex_, write_mutex_);
+    memory_budget_->Release(read_buffer_budget_bytes_ + pending_frame_bytes_ + pending_frame_overhead_bytes_ +
+                            write_queue_bytes_ + write_queue_overhead_bytes_);
+    read_buffer_budget_bytes_ = 0;
+    pending_frame_bytes_ = 0;
+    pending_frame_overhead_bytes_ = 0;
+    write_queue_bytes_ = 0;
+    write_queue_overhead_bytes_ = 0;
+  }
   if (!closed_ && fd_ >= 0) {
     ::close(fd_);
     closed_ = true;
@@ -126,21 +143,31 @@ bool ReactorConnection::OnReadable() {
   // 1. Drain the socket until EAGAIN / EWOULDBLOCK.
   std::array<char, kRecvChunkBytes> chunk{};
   size_t enqueued = 0;
+  size_t received_bytes = 0;
   while (true) {
     ssize_t n = ::recv(fd_, chunk.data(), chunk.size(), 0);
     if (n > 0) {
+      received_bytes += static_cast<size_t>(n);
       if (!AppendReadBytes(chunk.data(), static_cast<size_t>(n), enqueued)) {
         mygram::utils::StructuredLog()
-            .Event("reactor_read_buf_overflow")
+            .Event(frame_queue_overflow_ ? "reactor_pending_frames_overflow" : "reactor_read_buf_overflow")
             .Field("fd", static_cast<int64_t>(fd_))
             .Field("buf_bytes", static_cast<uint64_t>(read_buf_.size()))
             .Field("cap_bytes", static_cast<uint64_t>(kMaxReadBufferBytes))
+            .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
+            .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
             .Warn();
         if (ShouldSendReadOverflowError()) {
-          BestEffortSendError(fd_, "request too large");
+          BestEffortSendError(fd_, frame_queue_overflow_ ? "server busy" : "request too large");
         }
         closing_.store(true, std::memory_order_release);
         return false;
+      }
+      // epoll and kqueue are level-triggered, so yielding here cannot lose
+      // unread socket data. This prevents a single hot fd from monopolizing
+      // the event loop even when it continuously streams valid frames.
+      if (received_bytes >= kReadEventByteBudget || enqueued >= kReadEventFrameBudget) {
+        break;
       }
       continue;
     }
@@ -240,7 +267,7 @@ bool ReactorConnection::OnWritable() {
   // this fd. If we had never actually armed (edge case — OnWritable fired
   // spuriously), skip the disarm call.
   if (write_armed_ && reactor_ != nullptr) {
-    (void)reactor_->DisarmWrite(fd_);
+    (void)reactor_->DisarmWrite(fd_, this);
     write_armed_ = false;
   }
 
@@ -272,21 +299,70 @@ bool ReactorConnection::OnError() {
 }
 
 bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& enqueued) {
+  if (len > read_buf_.max_size() - read_buf_.size()) {
+    return false;
+  }
+  if (memory_budget_ != nullptr && !memory_budget_->TryReserve(len)) {
+    frame_queue_overflow_ = true;
+    mygram::utils::StructuredLog()
+        .Event("reactor_global_buffer_budget_exhausted")
+        .Field("fd", static_cast<int64_t>(fd_))
+        .Field("kind", "incomplete_request")
+        .Field("attempted_bytes", static_cast<uint64_t>(len))
+        .Field("used_bytes", static_cast<uint64_t>(memory_budget_->UsedBytes()))
+        .Field("cap_bytes", static_cast<uint64_t>(memory_budget_->LimitBytes()))
+        .Warn();
+    return false;
+  }
+  auto read_reservation_guard = mygram::utils::ScopeGuard([this, len]() {
+    if (memory_budget_ != nullptr) {
+      memory_budget_->Release(len);
+    }
+  });
   read_buf_.insert(read_buf_.end(), data, data + len);
+  read_buffer_budget_bytes_ += len;
+  read_reservation_guard.Release();
+  bool interest_update_ok = true;
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     enqueued += ExtractFramesLocked();
+    if (!read_paused_ && (pending_frames_.size() >= kPendingFramesHighWatermark ||
+                          pending_frame_bytes_ >= kPendingFrameBytesHighWatermark)) {
+      // Serialize the state transition and mux update with DrainTask's low-
+      // watermark rearm so a fast drain cannot re-enable reads before this
+      // disarm reaches the kernel.
+      read_paused_ = true;
+      if (reactor_ != nullptr) {
+        auto result = reactor_->SetReadEnabled(fd_, this, false);
+        interest_update_ok = result.has_value();
+      }
+    }
   }
 
   // Hard cap on the unframed tail only. Completed CRLF-delimited frames are
   // moved to pending_frames_ above before this check, so a valid pipelined
   // burst larger than 1 MiB is not mistaken for one oversized request.
-  return read_buf_.size() <= kMaxReadBufferBytes;
+  return interest_update_ok && !frame_queue_overflow_ && read_buf_.size() <= kMaxReadBufferBytes;
 }
 
 bool ReactorConnection::ShouldSendReadOverflowError() {
   std::lock_guard<std::mutex> lock(write_mutex_);
   return write_queue_.empty();
+}
+
+bool ReactorConnection::MaybeResumeReadsLocked() {
+  if (!read_paused_ || pending_frames_.size() > kPendingFramesLowWatermark ||
+      pending_frame_bytes_ > kPendingFrameBytesLowWatermark) {
+    return true;
+  }
+  if (reactor_ != nullptr) {
+    auto result = reactor_->SetReadEnabled(fd_, this, true);
+    if (!result) {
+      return false;
+    }
+  }
+  read_paused_ = false;
+  return true;
 }
 
 size_t ReactorConnection::ExtractFramesLocked() {
@@ -312,14 +388,66 @@ size_t ReactorConnection::ExtractFramesLocked() {
     }
     // Frame is [consumed, found_off); delimiter is [found_off, found_off+2).
     const size_t frame_len = found_off - consumed;
+    if (frame_len > kMaxReadBufferBytes || pending_frames_.size() >= kMaxPendingFrames ||
+        frame_len > kMaxPendingFrameBytes - std::min(pending_frame_bytes_, kMaxPendingFrameBytes)) {
+      frame_queue_overflow_ = true;
+      break;
+    }
+    const size_t frame_budget_bytes = frame_len + kQueueEntryOverheadBytes;
+    if (memory_budget_ != nullptr && !memory_budget_->TryReserve(frame_budget_bytes)) {
+      frame_queue_overflow_ = true;
+      mygram::utils::StructuredLog()
+          .Event("reactor_global_buffer_budget_exhausted")
+          .Field("fd", static_cast<int64_t>(fd_))
+          .Field("kind", "request_frame")
+          .Field("attempted_bytes", static_cast<uint64_t>(frame_budget_bytes))
+          .Field("used_bytes", static_cast<uint64_t>(memory_budget_->UsedBytes()))
+          .Field("cap_bytes", static_cast<uint64_t>(memory_budget_->LimitBytes()))
+          .Warn();
+      break;
+    }
+    auto reservation_guard = mygram::utils::ScopeGuard([this, frame_budget_bytes]() {
+      if (memory_budget_ != nullptr) {
+        memory_budget_->Release(frame_budget_bytes);
+      }
+    });
     pending_frames_.emplace_back(read_buf_.data() + consumed, frame_len);
+    reservation_guard.Release();
+    pending_frame_bytes_ += frame_len;
+    pending_frame_overhead_bytes_ += kQueueEntryOverheadBytes;
     ++enqueued;
     consumed = found_off + kFrameDelimiterLen;
     scan_start = consumed;
   }
   if (consumed > 0) {
-    // Single splice at the end to avoid quadratic erase-per-frame cost.
-    read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<std::ptrdiff_t>(consumed));
+    // Compact the unframed tail so bytes transferred to pending strings do
+    // not remain hidden in vector capacity outside the global budget. Charge
+    // the replacement tail before allocating it, then release the complete
+    // old-buffer ownership after the swap.
+    const size_t tail_size = read_buf_.size() - consumed;
+    bool compacted = false;
+    const bool tail_reserved = memory_budget_ != nullptr && tail_size > 0 && memory_budget_->TryReserve(tail_size);
+    if (memory_budget_ == nullptr || tail_size == 0 || tail_reserved) {
+      auto tail_reservation_guard = mygram::utils::ScopeGuard([this, tail_size, tail_reserved]() {
+        if (tail_reserved) {
+          memory_budget_->Release(tail_size);
+        }
+      });
+      std::vector<char> tail(read_buf_.begin() + static_cast<std::ptrdiff_t>(consumed), read_buf_.end());
+      read_buf_.swap(tail);
+      if (memory_budget_ != nullptr) {
+        memory_budget_->Release(read_buffer_budget_bytes_);
+      }
+      read_buffer_budget_bytes_ = tail_size;
+      tail_reservation_guard.Release();
+      compacted = true;
+    }
+    if (!compacted) {
+      // Keeping the old capacity and its full charge is conservative. The
+      // logical prefix is erased, but the budget is released only after a
+      // later successful compaction or destruction.
+      read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<std::ptrdiff_t>(consumed));
+    }
   }
   if (enqueued > 0) {
     received_frame_.store(true, std::memory_order_release);
@@ -356,13 +484,28 @@ bool ReactorConnection::ScheduleDrainTask() {
 void ReactorConnection::DrainTask() {
   while (!closing_.load(std::memory_order_acquire)) {
     std::string frame;
+    size_t frame_budget_bytes = 0;
+    bool resume_failed = false;
     {
       std::lock_guard<std::mutex> lock(frame_mutex_);
       if (pending_frames_.empty()) {
         break;
       }
+      frame_budget_bytes = pending_frames_.front().size();
+      pending_frame_bytes_ -= frame_budget_bytes;
+      pending_frame_overhead_bytes_ -= kQueueEntryOverheadBytes;
       frame = std::move(pending_frames_.front());
       pending_frames_.pop_front();
+      resume_failed = !MaybeResumeReadsLocked();
+    }
+    auto frame_budget_guard = mygram::utils::ScopeGuard([this, frame_budget_bytes]() {
+      if (memory_budget_ != nullptr) {
+        memory_budget_->Release(frame_budget_bytes + kQueueEntryOverheadBytes);
+      }
+    });
+    if (resume_failed) {
+      closing_.store(true, std::memory_order_release);
+      break;
     }
 
     // Dispatch. `Dispatch` is synchronous and returns the full response.
@@ -456,7 +599,7 @@ void ReactorConnection::DrainTask() {
     // event loop will observe the erase on its next Poll iteration. The
     // shared_ptr held by this lambda capture keeps the object alive until
     // DrainTask returns.
-    reactor_->Unregister(fd_);
+    reactor_->Unregister(fd_, this);
   }
 }
 
@@ -493,9 +636,30 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
     return false;
   }
 
+  const size_t response_budget_bytes = payload_bytes + kQueueEntryOverheadBytes;
+  if (memory_budget_ != nullptr && !memory_budget_->TryReserve(response_budget_bytes)) {
+    mygram::utils::StructuredLog()
+        .Event("reactor_global_buffer_budget_exhausted")
+        .Field("fd", static_cast<int64_t>(fd_))
+        .Field("kind", "write_queue")
+        .Field("attempted_bytes", static_cast<uint64_t>(response_budget_bytes))
+        .Field("used_bytes", static_cast<uint64_t>(memory_budget_->UsedBytes()))
+        .Field("cap_bytes", static_cast<uint64_t>(memory_budget_->LimitBytes()))
+        .Warn();
+    closing_.store(true, std::memory_order_release);
+    return false;
+  }
+  auto reservation_guard = mygram::utils::ScopeGuard([this, response_budget_bytes]() {
+    if (memory_budget_ != nullptr) {
+      memory_budget_->Release(response_budget_bytes);
+    }
+  });
+
   response.append(kResponseTerminator, kResponseTerminatorLen);
   write_queue_.emplace_back(std::move(response));
   write_queue_bytes_ += payload_bytes;
+  write_queue_overhead_bytes_ += kQueueEntryOverheadBytes;
+  reservation_guard.Release();
   pending_write_bytes_.store(write_queue_bytes_, std::memory_order_relaxed);
 
   // Fast path: if the queue is not currently armed for EPOLLOUT, the
@@ -517,7 +681,7 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
       closing_.store(true, std::memory_order_release);
       return false;
     }
-    auto arm_result = reactor_->ArmWrite(fd_);
+    auto arm_result = reactor_->ArmWrite(fd_, this);
     if (!arm_result) {
       mygram::utils::StructuredLog()
           .Event("reactor_arm_write_failed")
@@ -561,9 +725,16 @@ bool ReactorConnection::DrainWriteQueueLocked() {
         write_queue_bytes_ = sent_bytes;
       }
       write_queue_bytes_ -= sent_bytes;
+      if (memory_budget_ != nullptr) {
+        memory_budget_->Release(sent_bytes);
+      }
       pending_write_bytes_.store(write_queue_bytes_, std::memory_order_relaxed);
       if (front_offset_ == front.size()) {
         write_queue_.pop_front();
+        write_queue_overhead_bytes_ -= kQueueEntryOverheadBytes;
+        if (memory_budget_ != nullptr) {
+          memory_budget_->Release(kQueueEntryOverheadBytes);
+        }
         front_offset_ = 0;
       }
       continue;

@@ -28,14 +28,6 @@
 
 namespace mygramdb::server {
 
-namespace {
-// Historical default for backpressure queue depth. Used when the operator
-// leaves `api.tcp.thread_pool_queue_size` at 0 in YAML. This is NOT the same
-// semantic as "0 = unbounded" on ThreadPool; we treat 0 as "keep the legacy
-// default" so that existing configs and tests continue to work unchanged.
-constexpr size_t kDefaultThreadPoolQueueSize = 1000;
-}  // namespace
-
 mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::Error> ServerLifecycleManager::Create(
     const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
     const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
@@ -259,8 +251,14 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
 
 mygram::utils::Expected<std::unique_ptr<ThreadPool>, mygram::utils::Error> ServerLifecycleManager::InitThreadPool()
     const {
-  const size_t queue_size = config_.thread_pool_queue_size > 0 ? static_cast<size_t>(config_.thread_pool_queue_size)
-                                                               : kDefaultThreadPoolQueueSize;
+  const size_t queue_size =
+      config_.thread_pool_queue_size > 0 ? static_cast<size_t>(config_.thread_pool_queue_size) : 0;
+  mygram::utils::StructuredLog()
+      .Event("thread_pool_queue_config")
+      .Field("requested",
+             config_.thread_pool_queue_size == 0 ? "unbounded" : std::to_string(config_.thread_pool_queue_size))
+      .Field("effective", queue_size == 0 ? "unbounded" : std::to_string(queue_size))
+      .Info();
   auto pool = std::make_unique<ThreadPool>(config_.worker_threads > 0 ? config_.worker_threads : 0, queue_size);
   return pool;
 }

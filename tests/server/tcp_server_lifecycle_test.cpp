@@ -187,6 +187,29 @@ TEST_F(TcpServerLifecycleTest, IdempotentStop) {
   EXPECT_FALSE(server_->IsRunning());
 }
 
+#ifdef USE_MYSQL
+TEST_F(TcpServerLifecycleTest, SyncDrainTimeoutReturnsErrorWithoutTearingDownNetwork) {
+  BuildAndStart();
+  std::atomic<int> wait_calls{0};
+  server_->SetSyncShutdownWaitHookForTest([&](int timeout_sec) {
+    EXPECT_EQ(timeout_sec, 30);
+    wait_calls.fetch_add(1);
+    return false;
+  });
+
+  auto first_stop = server_->Stop();
+  ASSERT_FALSE(first_stop);
+  EXPECT_EQ(first_stop.error().code(), mygram::utils::ErrorCode::kServerShuttingDown);
+  EXPECT_TRUE(server_->IsRunning());
+  EXPECT_EQ(wait_calls.load(), 1);
+
+  server_->SetSyncShutdownWaitHookForTest([](int) { return true; });
+  auto retry_stop = server_->Stop();
+  ASSERT_TRUE(retry_stop) << retry_stop.error().to_string();
+  EXPECT_FALSE(server_->IsRunning());
+}
+#endif
+
 /**
  * @brief CR-3 / CR-10: Stop() is safe when called while DumpProgress holds
  *                      a worker thread that is about to call binlog Start.
