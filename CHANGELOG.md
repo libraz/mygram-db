@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **C client parity and ABI-safe configuration** — Added typed raw boolean search/highlight functions and the size/versioned `MygramClientConfigV2_C` with Unix-domain-socket and asynchronous DUMP SAVE timeout settings. The legacy C configuration remains ABI-compatible.
+- **Cache accounting metric** — INFO and Prometheus now expose the shared accounted cache total, including container and invalidation-index overhead.
+
+### Fixed
+
+- **Critical snapshot/binlog position gap** — Initial and shared snapshots capture a conservative GTID lower bound before opening the consistent snapshot, preventing commits from being permanently skipped.
+- **Critical SYNC data integrity** — SYNC builds replacement state on the side, swaps only after success, rolls back a failed restart, and resumes the shared reader from its pre-SYNC drained GTID so other tables do not lose events.
+- **Critical MariaDB compressed-event handling** — `log_bin_compress=ON` and compressed event IDs 165–168 now fail closed before GTID advancement.
+- **Reconnect transactionality** — Candidate MySQL connections are validated before publication; failed reader restart restores the old connection and replication position, and reconnect now shares long-operation admission with DUMP/SYNC/snapshots.
+- **Reactor and lifecycle bounds** — Read/frame budgets and watermarks prevent single-client starvation, HTTP lifecycle transitions are serialized, reactor shutdown closes every registered connection exactly once, and shutdown drain failures propagate as errors.
+- **Process-wide reactor memory admission** — `api.tcp.max_total_buffered_bytes` caps aggregate pending request frames and unsent responses across all clients, preventing per-connection limits from multiplying into unbounded process memory.
+- **Cache semantic and ABA correctness** — Cache keys include execution semantics and synonym revision; text-sensitive entries invalidate safely; monotonic epochs and entry generations prevent stale deferred work from deleting or reinserting a newer incarnation.
+- **Literal reserved-word search and required empty strings** — Quoted parser provenance is preserved across TCP/client paths, and required string filters now distinguish an explicitly empty value from an omitted field.
+- **Configuration activation** — Enabled synonym dictionaries fail startup when absent or invalid, while failed reloads preserve the last published dictionary.
+
+### Changed
+
+- `cache.max_memory_mb` is enforced as a shared budget across cache entries, container/LRU/table indexes, and invalidation metadata.
+- `api.tcp.thread_pool_queue_size: 0` now retains its documented unbounded meaning.
+
 ## [1.8.0] - 2026-07-03
 
 ### Added

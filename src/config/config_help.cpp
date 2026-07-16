@@ -89,13 +89,16 @@ nlohmann::json ConfigToJson(const Config& config) {
     if (!table.required_filters.empty()) {
       table_json["required_filters"] = nlohmann::json::array();
       for (const auto& filter : table.required_filters) {
-        table_json["required_filters"].push_back({
+        nlohmann::json required_filter_json = {
             {"name", filter.name},
             {"type", filter.type},
             {"op", filter.op},
-            {"value", filter.value},
             {"bitmap_index", filter.bitmap_index},
-        });
+        };
+        if (filter.op != "IS NULL" && filter.op != "IS NOT NULL") {
+          required_filter_json["value"] = filter.value;
+        }
+        table_json["required_filters"].push_back(std::move(required_filter_json));
       }
     }
 
@@ -114,6 +117,11 @@ nlohmann::json ConfigToJson(const Config& config) {
         }
         table_json["filters"].push_back(filter_json);
       }
+    }
+
+    table_json["synonyms"] = {{"enable", table.synonyms.enable}};
+    if (!table.synonyms.file.empty()) {
+      table_json["synonyms"]["file"] = table.synonyms.file;
     }
 
     // Posting configuration
@@ -195,6 +203,7 @@ nlohmann::json ConfigToJson(const Config& config) {
                 {"probe_count", config.api.tcp.keepalive.probe_count},
             }},
            {"max_write_queue_bytes", config.api.tcp.max_write_queue_bytes},
+           {"max_total_buffered_bytes", config.api.tcp.max_total_buffered_bytes},
        }},
       {"http",
        {

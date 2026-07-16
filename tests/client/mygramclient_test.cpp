@@ -11,7 +11,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <thread>
@@ -168,6 +170,98 @@ TEST_F(MygramClientTest, BasicSearch) {
   auto resp = *result;
   EXPECT_EQ(resp.total_count, 2);  // Documents 1 and 2 contain "hello"
   EXPECT_EQ(resp.results.size(), 2);
+}
+
+TEST_F(MygramClientTest, TypedSearchQuotesStandaloneReservedWord) {
+  AddTestDocuments();
+  doc_store_->AddDocument("4", {});
+  index_->AddDocument(4, mygram::utils::NormalizeText("FILTER", true, "keep", true));
+  ASSERT_TRUE(client_->Connect());
+
+  auto result = client_->Search("testdb.test", "FILTER", 100);
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_EQ(result->results.size(), 1U);
+  EXPECT_EQ(result->results[0].primary_key, "4");
+}
+
+TEST_F(MygramClientTest, CApiSearchRawPreservesGroupedBooleanExpression) {
+  AddTestDocuments();
+  doc_store_->AddDocument("4", {});
+  index_->AddDocument(4, mygram::utils::NormalizeText("alpha xqz", true, "keep", true));
+  doc_store_->AddDocument("5", {});
+  index_->AddDocument(5, mygram::utils::NormalizeText("alpha jkv", true, "keep", true));
+  doc_store_->AddDocument("6", {});
+  index_->AddDocument(6, mygram::utils::NormalizeText("alpha other", true, "keep", true));
+
+  MygramClientConfig_C config{};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << mygramclient_get_last_error(c_client);
+
+  MygramSearchResult_C* result = nullptr;
+  ASSERT_EQ(mygramclient_search_raw(c_client, "testdb.test", "alpha AND (xqz OR jkv)", 100, 0, &result), 0)
+      << mygramclient_get_last_error(c_client);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->total_count, 2U);
+  EXPECT_EQ(result->count, 2U);
+  mygramclient_free_search_result(result);
+
+  MygramSearchResultWithHighlights_C* highlighted = nullptr;
+  ASSERT_EQ(
+      mygramclient_search_raw_with_highlights(c_client, "testdb.test", "alpha AND (xqz OR jkv)", 100, 0, &highlighted),
+      0)
+      << mygramclient_get_last_error(c_client);
+  ASSERT_NE(highlighted, nullptr);
+  EXPECT_EQ(highlighted->total_count, 2U);
+  mygramclient_free_search_result_with_highlights(highlighted);
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiV2SupportsUnixSocketAndShorterKnownStruct) {
+  AddTestDocuments();
+  const auto socket_path =
+      std::filesystem::temp_directory_path() / ("mygramclient_c_v2_" + std::to_string(::getpid()) + ".sock");
+  server::ServerConfig uds_config;
+  uds_config.unix_socket_path = socket_path.string();
+  uds_config.port = 0;
+  auto uds_server = std::make_unique<server::TcpServer>(uds_config, table_contexts_);
+  ASSERT_TRUE(uds_server->Start());
+
+  MygramClientConfigV2_C config{};
+  config.struct_size = sizeof(config);
+  config.version = MYGRAMCLIENT_CONFIG_V2_VERSION;
+  config.host = "invalid.invalid";
+  config.timeout_ms = 5000;
+  config.unix_socket_path = socket_path.c_str();
+  config.dump_save_timeout_ms = 700000;
+  MygramClient_C* uds_client = mygramclient_create_v2(&config);
+  ASSERT_NE(uds_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(uds_client), 0) << mygramclient_get_last_error(uds_client);
+  mygramclient_destroy(uds_client);
+  ASSERT_TRUE(uds_server->Stop());
+
+  MygramClientConfigV2_C short_config{};
+  short_config.struct_size = offsetof(MygramClientConfigV2_C, unix_socket_path);
+  short_config.version = MYGRAMCLIENT_CONFIG_V2_VERSION;
+  short_config.host = "127.0.0.1";
+  short_config.port = server_->GetPort();
+  short_config.timeout_ms = 5000;
+  short_config.unix_socket_path = "/must/be/ignored/by/older/size";
+  MygramClient_C* tcp_client = mygramclient_create_v2(&short_config);
+  ASSERT_NE(tcp_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(tcp_client), 0) << mygramclient_get_last_error(tcp_client);
+  mygramclient_destroy(tcp_client);
+}
+
+TEST(MygramClientCApiV2Test, RejectsStructSizeOnlyPrefixWithoutReadingPastAllocation) {
+  alignas(uint32_t) std::array<std::byte, sizeof(uint32_t)> storage{};
+  const uint32_t caller_size = sizeof(uint32_t);
+  std::memcpy(storage.data(), &caller_size, sizeof(caller_size));
+  const auto* short_config = reinterpret_cast<const MygramClientConfigV2_C*>(storage.data());
+  EXPECT_EQ(mygramclient_create_v2(short_config), nullptr);
 }
 
 TEST_F(MygramClientTest, SearchCountGetAndFacetAcceptDatabaseQualifiedTableName) {

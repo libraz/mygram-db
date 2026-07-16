@@ -382,6 +382,79 @@ TEST(RequiredFiltersTest, ComparisonMustHaveValue) {
   std::remove(temp_file.c_str());
 }
 
+TEST(RequiredFiltersTest, EmptyStringValueIsPresentAndValidForStringTypes) {
+  for (const std::string& type : {"string", "varchar", "text"}) {
+    const std::string json_content = R"({
+  "mysql": {"user": "test_user", "database": "test"},
+  "tables": [{
+    "name": "articles",
+    "text_source": {"column": "content"},
+    "required_filters": [{"name": "status", "type": ")" +
+                                     type + R"(", "op": "=", "value": ""}]
+  }]
+})";
+    const std::string temp_file = "/tmp/test_empty_required_filter_" + type + ".json";
+    std::ofstream(temp_file) << json_content;
+
+    auto config_result = config::LoadConfig(temp_file);
+    ASSERT_TRUE(config_result) << type << ": " << config_result.error().to_string();
+    ASSERT_EQ(config_result->tables[0].required_filters.size(), 1);
+    EXPECT_TRUE(config_result->tables[0].required_filters[0].value.empty());
+    std::remove(temp_file.c_str());
+  }
+}
+
+TEST(RequiredFiltersTest, EmptyValueIsRejectedForNonStringType) {
+  const std::string json_content = R"({
+  "mysql": {"user": "test_user", "database": "test"},
+  "tables": [{
+    "name": "articles",
+    "text_source": {"column": "content"},
+    "required_filters": [{"name": "enabled", "type": "int", "op": "=", "value": ""}]
+  }]
+})";
+  const std::string temp_file = "/tmp/test_empty_numeric_required_filter.json";
+  std::ofstream(temp_file) << json_content;
+
+  EXPECT_FALSE(config::LoadConfig(temp_file));
+  std::remove(temp_file.c_str());
+}
+
+TEST(RequiredFiltersTest, NullOperatorRejectsEvenEmptyValueField) {
+  const std::string json_content = R"({
+  "mysql": {"user": "test_user", "database": "test"},
+  "tables": [{
+    "name": "articles",
+    "text_source": {"column": "content"},
+    "required_filters": [{"name": "deleted_at", "type": "datetime", "op": "IS NULL", "value": ""}]
+  }]
+})";
+  const std::string temp_file = "/tmp/test_null_operator_empty_value.json";
+  std::ofstream(temp_file) << json_content;
+
+  EXPECT_FALSE(config::LoadConfig(temp_file));
+  std::remove(temp_file.c_str());
+}
+
+TEST(RequiredFiltersTest, UnsupportedJsonValueTypesAreRejected) {
+  for (const std::string& value : {"null", "[]", "{}"}) {
+    const std::string json_content = R"({
+  "mysql": {"user": "test_user", "database": "test"},
+  "tables": [{
+    "name": "articles",
+    "text_source": {"column": "content"},
+    "required_filters": [{"name": "status", "type": "string", "op": "=", "value": )" +
+                                     value + R"(}]
+  }]
+})";
+    const std::string temp_file = "/tmp/test_invalid_required_filter_value.json";
+    std::ofstream(temp_file) << json_content;
+
+    EXPECT_FALSE(config::LoadConfig(temp_file)) << value;
+    std::remove(temp_file.c_str());
+  }
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

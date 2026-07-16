@@ -11,9 +11,11 @@
 
 #include "client/mygramclient_c.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "client/mygramclient.h"
@@ -203,30 +205,73 @@ static int ForwardString(MygramClient_C* client, char** out, Fn&& fn) {
   return 0;
 }
 
+static MygramClient_C* CreateClient(ClientConfig config) {
+  try {
+    auto client_c = std::make_unique<MygramClient_C>();
+    client_c->client = std::make_unique<MygramClient>(std::move(config));
+    return client_c.release();
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+static bool V2FieldAvailable(uint32_t struct_size, size_t offset, size_t field_size) {
+  return static_cast<size_t>(struct_size) >= offset + field_size;
+}
+
 MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
   if (config == nullptr) {
     return nullptr;
   }
 
-  // Use unique_ptr so any exception during MygramClient construction frees
-  // the wrapper without leaking memory. release() transfers ownership to the
-  // caller only after every fallible step has succeeded.
-  std::unique_ptr<MygramClient_C> client_c;
-  try {
-    client_c = std::make_unique<MygramClient_C>();
+  ClientConfig cpp_config;
+  cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";
+  cpp_config.port = config->port != 0 ? config->port : static_cast<uint16_t>(mygramdb::config::defaults::kTcpPort);
+  cpp_config.timeout_ms = config->timeout_ms != 0 ? config->timeout_ms : 5000;
+  cpp_config.recv_buffer_size = config->recv_buffer_size != 0 ? config->recv_buffer_size : 65536;
+  return CreateClient(std::move(cpp_config));
+}
 
-    ClientConfig cpp_config;
-    cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";
-    cpp_config.port = config->port != 0 ? config->port : static_cast<uint16_t>(mygramdb::config::defaults::kTcpPort);
-    cpp_config.timeout_ms = config->timeout_ms != 0 ? config->timeout_ms : 5000;
-    cpp_config.recv_buffer_size = config->recv_buffer_size != 0 ? config->recv_buffer_size : 65536;
-
-    client_c->client = std::make_unique<MygramClient>(cpp_config);
-  } catch (...) {
+MygramClient_C* mygramclient_create_v2(const MygramClientConfigV2_C* config) {
+  if (config == nullptr) {
+    return nullptr;
+  }
+  constexpr size_t kMinimumSize = offsetof(MygramClientConfigV2_C, recv_buffer_size) + sizeof(uint32_t);
+  // struct_size is the only field callers are required to make readable
+  // before compatibility can be established. Never inspect version or any
+  // later member until this prefix proves it is present.
+  if (config->struct_size < kMinimumSize) {
+    return nullptr;
+  }
+  if (config->version != MYGRAMCLIENT_CONFIG_V2_VERSION) {
     return nullptr;
   }
 
-  return client_c.release();
+  ClientConfig cpp_config;
+  if (config->host != nullptr) {
+    cpp_config.host = config->host;
+  }
+  if (config->port != 0) {
+    cpp_config.port = config->port;
+  }
+  if (config->timeout_ms != 0) {
+    cpp_config.timeout_ms = config->timeout_ms;
+  }
+  if (config->recv_buffer_size != 0) {
+    cpp_config.recv_buffer_size = config->recv_buffer_size;
+  }
+  if (V2FieldAvailable(config->struct_size, offsetof(MygramClientConfigV2_C, unix_socket_path),
+                       sizeof(config->unix_socket_path)) &&
+      config->unix_socket_path != nullptr) {
+    cpp_config.unix_socket_path = config->unix_socket_path;
+  }
+  if (V2FieldAvailable(config->struct_size, offsetof(MygramClientConfigV2_C, dump_save_timeout_ms),
+                       sizeof(config->dump_save_timeout_ms)) &&
+      config->dump_save_timeout_ms != 0) {
+    cpp_config.dump_save_timeout_ms = config->dump_save_timeout_ms;
+  }
+
+  return CreateClient(std::move(cpp_config));
 }
 
 void mygramclient_destroy(MygramClient_C* client) {
@@ -262,16 +307,105 @@ int mygramclient_is_connected(const MygramClient_C* client) {
   return client->client->IsConnected() ? 1 : 0;
 }
 
+static int CopySearchResult(MygramClient_C* client, const SearchResponse& response, MygramSearchResult_C** result) {
+  *result = nullptr;
+  auto result_c = std::make_unique<MygramSearchResult_C>();
+  result_c->count = response.results.size();
+  result_c->total_count = response.total_count;
+  result_c->primary_keys = nullptr;
+  if (!response.results.empty()) {
+    result_c->primary_keys = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
+    if (result_c->primary_keys == nullptr) {
+      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+      return -1;
+    }
+  }
+  for (size_t i = 0; i < response.results.size(); ++i) {
+    result_c->primary_keys[i] = strdup_safe(response.results[i].primary_key);
+    if (result_c->primary_keys[i] == nullptr) {
+      free_c_string_array(result_c->primary_keys, response.results.size());
+      result_c->primary_keys = nullptr;
+      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+      return -1;
+    }
+  }
+  *result = result_c.release();
+  clear_last_error(client);
+  return 0;
+}
+
+static int CopyHighlightedSearchResult(MygramClient_C* client, const SearchResponse& response,
+                                       MygramSearchResultWithHighlights_C** result) {
+  *result = nullptr;
+  auto result_c = std::make_unique<MygramSearchResultWithHighlights_C>();
+  result_c->count = response.results.size();
+  result_c->total_count = response.total_count;
+  result_c->primary_keys = nullptr;
+  result_c->snippets = nullptr;
+  if (!response.results.empty()) {
+    result_c->primary_keys = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
+    result_c->snippets = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
+    if (result_c->primary_keys == nullptr || result_c->snippets == nullptr) {
+      free(result_c->primary_keys);
+      free(result_c->snippets);
+      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+      return -1;
+    }
+  }
+  for (size_t i = 0; i < response.results.size(); ++i) {
+    result_c->primary_keys[i] = strdup_safe(response.results[i].primary_key);
+    result_c->snippets[i] = strdup_safe(response.results[i].snippet);
+    if (result_c->primary_keys[i] == nullptr || result_c->snippets[i] == nullptr) {
+      free_c_string_array(result_c->primary_keys, response.results.size());
+      free_c_string_array(result_c->snippets, response.results.size());
+      result_c->primary_keys = nullptr;
+      result_c->snippets = nullptr;
+      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+      return -1;
+    }
+  }
+  *result = result_c.release();
+  clear_last_error(client);
+  return 0;
+}
+
 int mygramclient_search(MygramClient_C* client, const char* table, const char* query, uint32_t limit, uint32_t offset,
                         MygramSearchResult_C** result) {
   return mygramclient_search_advanced(client, table, query, limit, offset, nullptr, 0, nullptr, 0, nullptr, nullptr, 0,
                                       nullptr, 1, result);  // Default sort_desc = 1 (descending)
 }
 
+int mygramclient_search_raw(MygramClient_C* client, const char* table, const char* raw_query, uint32_t limit,
+                            uint32_t offset, MygramSearchResult_C** result) {
+  if (client == nullptr || client->client == nullptr || table == nullptr || raw_query == nullptr || result == nullptr) {
+    return -1;
+  }
+  auto response = client->client->SearchRaw(table, raw_query, limit, offset);
+  if (!response) {
+    set_last_error(client, response.error());
+    return -1;
+  }
+  return CopySearchResult(client, *response, result);
+}
+
 int mygramclient_search_with_highlights(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
                                         uint32_t offset, MygramSearchResultWithHighlights_C** result) {
   return mygramclient_search_with_highlights_advanced(client, table, query, limit, offset, nullptr, 0, nullptr, 0,
                                                       nullptr, nullptr, 0, nullptr, 1, result);
+}
+
+int mygramclient_search_raw_with_highlights(MygramClient_C* client, const char* table, const char* raw_query,
+                                            uint32_t limit, uint32_t offset,
+                                            MygramSearchResultWithHighlights_C** result) {
+  if (client == nullptr || client->client == nullptr || table == nullptr || raw_query == nullptr || result == nullptr) {
+    return -1;
+  }
+  auto response = client->client->SearchRawWithHighlights(table, raw_query, limit, offset);
+  if (!response) {
+    set_last_error(client, response.error());
+    return -1;
+  }
+  return CopyHighlightedSearchResult(client, *response, result);
 }
 
 int mygramclient_search_with_highlights_advanced(MygramClient_C* client, const char* table, const char* query,

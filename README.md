@@ -39,6 +39,8 @@ Benchmarked on 1.1M Wikipedia articles (EN + JA), comparing MygramDB v1.5.0 with
 
 MygramDB reads binlogs to keep indexes up to date, so the source MySQL/MariaDB server must use GTID and ROW-format binary logs. For MySQL, first confirm that GTID mode is enabled.
 
+MariaDB deployments must also keep `log_bin_compress=OFF`. Compressed MariaDB row events are intentionally rejected at startup and at runtime because silently skipping them would advance GTID without applying the row changes.
+
 ```sql
 -- Check GTID mode (must be ON)
 SHOW VARIABLES LIKE 'gtid_mode';
@@ -197,6 +199,7 @@ MygramDB acts as a specialized read replica for full-text search. MySQL/MariaDB 
 - [Installation Guide](https://mygramdb.libraz.net/docs/installation) - Build from source
 - [Development Guide](https://mygramdb.libraz.net/docs/development) - Contributing guidelines
 - [Client Library](https://mygramdb.libraz.net/docs/client-library) - C/C++ client library
+- [C/C++ API parity](docs/client-api.md) - SearchRaw, Unix sockets, timeout, and C ABI versioning
 
 HTTP exposes search, document lookup, health checks, metrics, and read-only status endpoints. Operational commands such as `SYNC`, `DUMP`, `CACHE`, `SET`, and replication control are served through the TCP protocol and `mygram-cli`. Even when only the HTTP API is exposed externally, keep an internal TCP/CLI path for initial sync and maintenance tasks.
 
@@ -216,6 +219,7 @@ HTTP exposes search, document lookup, health checks, metrics, and read-only stat
 - MariaDB 10.6+ / 11.x (tested with 10.11 and 11.4)
 - GTID mode enabled (`gtid_mode=ON` for MySQL, GTID enabled for MariaDB)
 - Binary log format: ROW (`binlog_format=ROW`)
+- Full row images (`binlog_row_image=FULL`); MariaDB binary-log compression disabled (`log_bin_compress=OFF`)
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
 See [Installation Guide](https://mygramdb.libraz.net/docs/installation) for details.

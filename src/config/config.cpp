@@ -438,7 +438,8 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
     // Support both "op" and "operator" as key names
     config.op = json_obj.contains("op") ? json_obj["op"].get<std::string>() : json_obj["operator"].get<std::string>();
   }
-  if (json_obj.contains("value")) {
+  const bool has_value = json_obj.contains("value");
+  if (has_value) {
     // value can be string or number, convert to string
     if (json_obj["value"].is_string()) {
       config.value = json_obj["value"].get<std::string>();
@@ -451,6 +452,11 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
       config.value = json_obj["value"].dump();
     } else if (json_obj["value"].is_boolean()) {
       config.value = json_obj["value"].get<bool>() ? "1" : "0";
+    } else {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kConfigInvalidValue,
+                    "Required filter error: 'value' for filter '" + config.name +
+                        "' must be a string, number, or boolean (arrays, objects, and null are not supported)"));
     }
   }
   if (json_obj.contains("bitmap_index")) {
@@ -480,7 +486,7 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
   }
 
   // Validate: IS NULL/IS NOT NULL should not have a value
-  if ((config.op == "IS NULL" || config.op == "IS NOT NULL") && !config.value.empty()) {
+  if ((config.op == "IS NULL" || config.op == "IS NOT NULL") && has_value) {
     std::stringstream err_msg;
     err_msg << "Required filter error: Operator '" << config.op << "' should not have a value\n";
     err_msg << "  For NULL checks, omit the 'value' field.\n";
@@ -495,7 +501,7 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
   // Validate: Other operators should have a value
   auto is_null_operator = [&config]() -> bool { return config.op == "IS NULL" || config.op == "IS NOT NULL"; };
 
-  if (!is_null_operator() && config.value.empty()) {
+  if (!is_null_operator() && !has_value) {
     std::stringstream err_msg;
     err_msg << "Required filter error: Operator '" << config.op << "' requires a value\n";
     err_msg << "  Please provide a 'value' field for this operator.\n";
@@ -506,6 +512,14 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
     err_msg << "        op: \"" << config.op << "\"\n";
     err_msg << "        value: 1";
     return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
+  }
+
+  const bool supports_empty_string = config.type == "string" || config.type == "varchar" || config.type == "text";
+  if (!is_null_operator() && config.value.empty() && !supports_empty_string) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    "Required filter error: Empty 'value' is valid only for string, varchar, and text "
+                                    "filters; filter '" +
+                                        config.name + "' has type '" + config.type + "'"));
   }
 
   return config;
@@ -692,6 +706,11 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
         return MakeUnexpected(v.error());
       }
     }
+  }
+  if (config.synonyms.enable && config.synonyms.file.empty()) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kConfigInvalidValue,
+        "Configuration error in table '" + config.name + "': synonyms.file is required when synonyms.enable=true"));
   }
 
   return config;
@@ -976,6 +995,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       }
       if (tcp.contains("max_write_queue_bytes")) {
         config.api.tcp.max_write_queue_bytes = tcp["max_write_queue_bytes"].get<int64_t>();
+      }
+      if (tcp.contains("max_total_buffered_bytes")) {
+        config.api.tcp.max_total_buffered_bytes = tcp["max_total_buffered_bytes"].get<int64_t>();
       }
     }
     if (api.contains("http")) {

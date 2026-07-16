@@ -242,6 +242,27 @@ TEST(ConfigHelpTest, ConfigToJsonIncludesBM25Section) {
   EXPECT_NE(output.find("0.6"), std::string::npos);
 }
 
+TEST(ConfigHelpTest, ConfigDisplayPreservesSynonymAndNullFilterContracts) {
+  Config config;
+  TableConfig table;
+  table.name = "articles";
+  table.synonyms.enable = true;
+  table.synonyms.file = "/etc/mygramdb/synonyms.tsv";
+  RequiredFilterConfig null_filter;
+  null_filter.name = "deleted_at";
+  null_filter.type = "datetime";
+  null_filter.op = "IS NULL";
+  table.required_filters.push_back(null_filter);
+  config.tables.push_back(table);
+
+  auto result = FormatConfigForDisplay(config, "tables");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_NE(result->find("synonyms"), std::string::npos);
+  EXPECT_NE(result->find("/etc/mygramdb/synonyms.tsv"), std::string::npos);
+  EXPECT_NE(result->find("IS NULL"), std::string::npos);
+  EXPECT_EQ(result->find("value:"), std::string::npos);
+}
+
 // Test SplitPath (via public interface behavior)
 TEST_F(ConfigSchemaExplorerTest, PathNavigationSimple) {
   auto help = explorer().GetHelp("mysql");

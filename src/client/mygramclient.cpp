@@ -343,10 +343,13 @@ std::string EscapeQueryString(const std::string& str) {
   }
 
   // Check if string needs quoting (contains spaces or special chars)
-  bool needs_quotes = false;
+  const std::string upper = ToUpper(str);
+  bool needs_quotes = upper == "AND" || upper == "OR" || upper == "NOT" || upper == "FILTER" || upper == "SORT" ||
+                      upper == "LIMIT" || upper == "OFFSET" || upper == "HIGHLIGHT" || upper == "FUZZY" ||
+                      upper == "FACET" || upper == "ORDER";
   for (char character : str) {
     if (character == ' ' || character == '\t' || character == '\n' || character == '\r' || character == '"' ||
-        character == '\'') {
+        character == '\'' || character == '\\' || character == '(' || character == ')') {
       needs_quotes = true;
       break;
     }

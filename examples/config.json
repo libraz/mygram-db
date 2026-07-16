@@ -60,6 +60,9 @@
         "block_size": 128,
         "freq_bits": 0,
         "use_roaring": "auto"
+      },
+      "synonyms": {
+        "enable": false
       }
     }
   ],
@@ -101,7 +104,10 @@
     "tcp": {
       "bind": "127.0.0.1",
       "port": 11016,
-      "max_connections": 10000
+      "max_connections": 10000,
+      "thread_pool_queue_size": 1000,
+      "max_write_queue_bytes": 16777216,
+      "max_total_buffered_bytes": 268435456
     },
     "http": {
       "enable": false,

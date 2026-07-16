@@ -39,6 +39,8 @@ MySQL FULLTEXT は手軽ですが、ヒット数の多い語句、CJK の n-gram
 
 MygramDB は binlog を読んでインデックスを更新するため、接続先の MySQL/MariaDB 側で GTID と ROW 形式の binlog が必要です。MySQL では、まず GTID モードが有効になっていることを確認してください。
 
+MariaDBでは `log_bin_compress=OFF` も必須です。圧縮row eventを無音でskipすると行変更を反映せずGTIDだけが進むため、MygramDBは起動時および実行時に圧縮eventを明示的に拒否します。
+
 ```sql
 -- GTID モードを確認（ON である必要があります）
 SHOW VARIABLES LIKE 'gtid_mode';
@@ -197,6 +199,7 @@ MygramDB は全文検索専用の読み取りレプリカとして機能しま�
 - [インストールガイド](https://mygramdb.libraz.net/ja/docs/installation) - ソースからビルド
 - [開発ガイド](https://mygramdb.libraz.net/ja/docs/development) - コントリビューションガイドライン
 - [クライアントライブラリ](https://mygramdb.libraz.net/ja/docs/client-library) - C/C++ クライアントライブラリ
+- [C/C++ API機能対応](docs/client-api_ja.md) - SearchRaw、Unix socket、timeout、C ABI versioning
 
 HTTP API は、検索、ドキュメント取得、ヘルスチェック、メトリクス、読み取り専用のステータス確認を提供します。一方で、`SYNC`、`DUMP`、`CACHE`、`SET`、レプリケーション制御などの運用コマンドは TCP プロトコルと `mygram-cli` で提供します。HTTP API だけを外部公開する構成でも、初期同期やメンテナンスのために、内部ネットワークから TCP/CLI を実行できる経路を残してください。
 
@@ -216,6 +219,7 @@ HTTP API は、検索、ドキュメント取得、ヘルスチェック、メ�
 - MariaDB 10.6+ / 11.x（10.11 および 11.4 でテスト済み）
 - GTID モード有効化（MySQL: `gtid_mode=ON`、MariaDB: GTID 有効）
 - バイナリログ形式: ROW (`binlog_format=ROW`)
+- 完全row image（`binlog_row_image=FULL`）、MariaDBのbinlog圧縮無効（`log_bin_compress=OFF`）
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
 詳細は [インストールガイド](https://mygramdb.libraz.net/ja/docs/installation) を参照してください。

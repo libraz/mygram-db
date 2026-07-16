@@ -188,8 +188,8 @@ struct PostingConfig {
  * @brief Synonym dictionary configuration
  */
 struct SynonymConfig {
-  bool enable = false;  ///< Enable synonym expansion during search
-  std::string file;     ///< Path to TSV synonym file (one group per line, tab-separated)
+  bool enable = false;  ///< Enable synonym expansion; startup fails if the configured TSV cannot be loaded
+  std::string file;     ///< Required non-empty TSV path when enable=true (one tab-separated group per line)
 };
 
 /**
@@ -365,7 +365,8 @@ struct ApiConfig {
 
     /// Thread pool task queue size. Once a connection is accepted but cannot
     /// be dispatched (all workers busy, queue full), the server responds with
-    /// SERVER_BUSY and closes. Default: 1000.
+    /// SERVER_BUSY and closes. 0 means genuinely unbounded; use it only when
+    /// another admission limit bounds producer growth. Default: 1000.
     int thread_pool_queue_size = 1000;  // NOLINT(readability-magic-numbers)
 
     /// Per-connection soft cap on unsent response bytes (design doc §7 R3).
@@ -376,6 +377,9 @@ struct ApiConfig {
     /// raise this cap (if the responses are legitimately large) or
     /// investigate the client(s) that are failing to drain their socket.
     int64_t max_write_queue_bytes = 16LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  // 16 MiB
+
+    /// Shared cap across all pending request frames and unsent responses.
+    int64_t max_total_buffered_bytes = 256LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  // 256 MiB
 
     /// Per-connection TCP keepalive (applied to accepted client sockets).
     ///
@@ -467,7 +471,7 @@ struct LoggingConfig {
 struct CacheConfig {
   bool enabled = true;  ///< Enable/disable cache (default: true)
   size_t max_memory_bytes =
-      32 * mygram::constants::kBytesPerMegabyte;  ///< Maximum cache memory in bytes (default: 32MB)  // NOLINT
+      32 * mygram::constants::kBytesPerMegabyte;  ///< Shared entry/index/container budget (default: 32MB)  // NOLINT
   double min_query_cost_ms = 10.0;                ///< Minimum query cost to cache (default: 10ms)  // NOLINT
   int ttl_seconds = 3600;                         ///< Cache entry TTL (default: 1 hour, 0 = no TTL)  // NOLINT
   std::string invalidation_strategy = "ngram";    ///< "ngram" precise invalidation or "table" coarse invalidation

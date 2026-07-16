@@ -38,6 +38,27 @@ typedef struct {
   uint32_t recv_buffer_size;  // Receive buffer size (default: 65536)
 } MygramClientConfig_C;
 
+#define MYGRAMCLIENT_CONFIG_V2_VERSION 2U
+
+/**
+ * @brief Size/versioned client configuration.
+ *
+ * Callers must set struct_size to sizeof(MygramClientConfigV2_C) (or the size
+ * known to an older caller) and version to MYGRAMCLIENT_CONFIG_V2_VERSION.
+ * Fields beyond struct_size are ignored, preserving ABI compatibility when
+ * this structure grows.
+ */
+typedef struct {
+  uint32_t struct_size;           // Size known by the caller
+  uint32_t version;               // MYGRAMCLIENT_CONFIG_V2_VERSION
+  const char* host;               // TCP host (default: "127.0.0.1")
+  uint16_t port;                  // TCP port (default: 11016)
+  uint32_t timeout_ms;            // Per-request timeout (default: 5000)
+  uint32_t recv_buffer_size;      // Receive buffer size (default: 65536)
+  const char* unix_socket_path;   // UDS path; takes precedence over TCP when non-NULL
+  uint32_t dump_save_timeout_ms;  // Async DUMP SAVE deadline (0 = client default)
+} MygramClientConfigV2_C;
+
 /**
  * @brief Search result
  */
@@ -98,6 +119,9 @@ typedef struct {
  */
 MygramClient_C* mygramclient_create(const MygramClientConfig_C* config);
 
+/** Create a client with the size/versioned configuration. */
+MygramClient_C* mygramclient_create_v2(const MygramClientConfigV2_C* config);
+
 /**
  * @brief Destroy a MygramDB client and free resources
  *
@@ -142,6 +166,10 @@ int mygramclient_is_connected(const MygramClient_C* client);
 int mygramclient_search(MygramClient_C* client, const char* table, const char* query, uint32_t limit, uint32_t offset,
                         MygramSearchResult_C** result);
 
+/** Execute a boolean/grouped expression verbatim. */
+int mygramclient_search_raw(MygramClient_C* client, const char* table, const char* raw_query, uint32_t limit,
+                            uint32_t offset, MygramSearchResult_C** result);
+
 /**
  * @brief Search for documents and return highlight snippets
  *
@@ -155,6 +183,11 @@ int mygramclient_search(MygramClient_C* client, const char* table, const char* q
  */
 int mygramclient_search_with_highlights(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
                                         uint32_t offset, MygramSearchResultWithHighlights_C** result);
+
+/** Execute a boolean/grouped expression verbatim and return highlights. */
+int mygramclient_search_raw_with_highlights(MygramClient_C* client, const char* table, const char* raw_query,
+                                            uint32_t limit, uint32_t offset,
+                                            MygramSearchResultWithHighlights_C** result);
 
 /**
  * @brief Search for documents with AND/NOT/FILTER clauses and return highlight snippets

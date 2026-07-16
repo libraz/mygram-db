@@ -17,6 +17,11 @@ gtest_discover_tests(mygramclient_test
   PROPERTIES RESOURCE_LOCK client_server_connection
 )
 
+add_executable(c_api_v2_smoke c_api_v2_smoke.c)
+set_target_properties(c_api_v2_smoke PROPERTIES LINKER_LANGUAGE CXX)
+target_link_libraries(c_api_v2_smoke PRIVATE mygramclient_static)
+add_test(NAME CApiV2CompileLinkSmokeTest COMMAND c_api_v2_smoke)
+
 # Search expression parser tests
 
 add_executable(search_expression_test

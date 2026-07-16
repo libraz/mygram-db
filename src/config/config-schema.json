@@ -201,7 +201,8 @@
                   "enum": ["=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"]
                 },
                 "value": {
-                  "description": "Comparison value (not required for IS NULL/IS NOT NULL)"
+                  "description": "Comparison value (must be omitted for IS NULL/IS NOT NULL)",
+                  "type": ["string", "number", "boolean"]
                 },
                 "bitmap_index": {
                   "type": "boolean",
@@ -303,15 +304,25 @@
             "type": "object",
             "description": "Synonym expansion configuration for this table",
             "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {"enable": {"const": true}},
+                  "required": ["enable"]
+                },
+                "then": {"required": ["file"]}
+              }
+            ],
             "properties": {
               "enable": {
                 "type": "boolean",
-                "description": "Enable synonym expansion",
+                "description": "Enable synonym expansion. Startup fails if file is absent, unreadable, or cannot be loaded.",
                 "default": false
               },
               "file": {
                 "type": "string",
-                "description": "Path to synonym TSV file"
+                "description": "Required TSV path when enable=true. The dictionary is published atomically only after a successful load.",
+                "minLength": 1
               }
             }
           }
@@ -626,6 +637,13 @@
               "default": 16777216,
               "minimum": 4096,
               "maximum": 1073741824
+            },
+            "max_total_buffered_bytes": {
+              "type": "integer",
+              "description": "Shared admission cap across all reactor pending request frames and unsent responses. Connections exceeding the process-wide budget are closed. Default: 256 MiB (268435456 bytes).",
+              "default": 268435456,
+              "minimum": 1048576,
+              "maximum": 68719476736
             }
           }
         },
@@ -813,7 +831,7 @@
         },
         "max_memory_mb": {
           "type": "integer",
-          "description": "Maximum cache memory in MB",
+          "description": "Shared cache budget in MB, including entry payloads, cache containers, LRU/table indexes, and invalidation metadata. The accounted total is exported by INFO and Prometheus metrics.",
           "default": 32,
           "minimum": 1
         },

@@ -340,6 +340,20 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   EXPECT_DOUBLE_EQ(config.bm25.b, 0.6);
 }
 
+TEST(ConfigTest, SynonymsEnabledRequiresNonEmptyFile) {
+  json no_file = {
+      {"tables",
+       json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}, {"synonyms", {{"enable", true}}}}})}};
+  auto missing = internal::ParseConfigFromJson(no_file);
+  ASSERT_FALSE(missing);
+  EXPECT_NE(missing.error().message().find("synonyms.file"), std::string::npos);
+
+  no_file["tables"][0]["synonyms"]["file"] = "";
+  auto empty = internal::ParseConfigFromJson(no_file);
+  ASSERT_FALSE(empty);
+  EXPECT_NE(empty.error().message().find("synonyms.file"), std::string::npos);
+}
+
 TEST(ConfigTest, GlobalNgramSizeAlsoAppliesToImplicitKanjiNgramSize) {
   json config_json = {{"index", {{"ngram_size", 3}}},
                       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
