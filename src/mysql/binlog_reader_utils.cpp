@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <shared_mutex>
 #include <sstream>
 #include <utility>
 
@@ -55,6 +56,7 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
   }
 
   auto* table_context = table_iter->second;
+  std::unique_lock<std::shared_mutex> generation_lock(*table_context->generation_mutex);
   const bool is_legacy_context = table_context == &legacy_table_context_;
   index::Index* current_index =
       table_context->index ? table_context->index.get() : (is_legacy_context ? legacy_index_ : nullptr);
@@ -147,12 +149,16 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
       baseline_iter == configured_schema_baselines_.end()) {
     return incompatible("no startup schema fingerprint exists for the affected table");
   }
+  std::lock_guard<std::mutex> metadata_lock(metadata_connection_mutex_);
   if (metadata_connection_ == nullptr) {
     SetLastError(MakeError(ErrorCode::kMySQLDisconnected, "DDL schema validation requires the metadata connection",
                            event.table_name));
     return DDLSchemaCheck::kRetryableFailure;
   }
 
+  // Capture performs a query and consumes its MYSQL_RES. Keep that entire
+  // lifetime serialized with FetchColumnNames(), which runs on the reader
+  // thread and shares this connection.
   auto current = DDLSchemaValidator::Capture(*metadata_connection_, table_iter->second->config);
   if (!current) {
     const ErrorCode code = current.error().code();
@@ -228,6 +234,7 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
 
   // Use dedicated metadata connection to avoid thread safety issues (#1)
   // The main connection_ must not be used from the reader thread.
+  std::lock_guard<std::mutex> metadata_lock(metadata_connection_mutex_);
   if (!metadata_connection_) {
     mygram::utils::StructuredLog()
         .Event("binlog_error")
@@ -384,49 +391,87 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
 }
 
 void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {
-  std::scoped_lock lock(gtid_mutex_);
+  std::string applied_gtid;
+  {
+    std::scoped_lock lock(gtid_mutex_);
+    bool updated_as_mariadb = false;
 
-  if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
-    auto parsed = MariaDBGTID::Parse(gtid);
-    if (parsed) {
-      std::map<uint32_t, MariaDBGTID> by_domain;
+    if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
+      auto parsed = MariaDBGTID::Parse(gtid);
+      if (parsed) {
+        std::map<uint32_t, MariaDBGTID> by_domain;
 
-      auto current_set = MariaDBGTID::ParseSet(current_gtid_);
-      if (current_set) {
-        for (const auto& existing : *current_set) {
-          auto iter = by_domain.find(existing.domain_id);
-          if (iter == by_domain.end() || existing.sequence_no > iter->second.sequence_no) {
-            by_domain[existing.domain_id] = existing;
+        auto current_set = MariaDBGTID::ParseSet(current_gtid_);
+        if (current_set) {
+          for (const auto& existing : *current_set) {
+            auto iter = by_domain.find(existing.domain_id);
+            if (iter == by_domain.end() || existing.sequence_no > iter->second.sequence_no) {
+              by_domain[existing.domain_id] = existing;
+            }
           }
         }
-      }
 
-      auto iter = by_domain.find(parsed->domain_id);
-      if (iter == by_domain.end() || parsed->sequence_no >= iter->second.sequence_no) {
-        by_domain[parsed->domain_id] = *parsed;
-      }
+        auto iter = by_domain.find(parsed->domain_id);
+        if (iter == by_domain.end() || parsed->sequence_no >= iter->second.sequence_no) {
+          by_domain[parsed->domain_id] = *parsed;
+        }
 
-      std::vector<MariaDBGTID> merged;
-      merged.reserve(by_domain.size());
-      for (const auto& [domain_id, domain_gtid] : by_domain) {
-        (void)domain_id;
-        merged.push_back(domain_gtid);
+        std::vector<MariaDBGTID> merged;
+        merged.reserve(by_domain.size());
+        for (const auto& [domain_id, domain_gtid] : by_domain) {
+          (void)domain_id;
+          merged.push_back(domain_gtid);
+        }
+        current_gtid_ = MariaDBGTID::SetToString(merged);
+        updated_as_mariadb = true;
       }
-      current_gtid_ = MariaDBGTID::SetToString(merged);
-      return;
     }
+
+    if (!updated_as_mariadb) {
+      auto merged = GtidEncoder::MergeSingleGtidIntoSet(current_gtid_, gtid);
+      current_gtid_ = merged.has_value() ? *merged : gtid;
+    }
+    applied_gtid = current_gtid_;
   }
 
-  auto merged = GtidEncoder::MergeSingleGtidIntoSet(current_gtid_, gtid);
-  if (merged.has_value()) {
-    current_gtid_ = *merged;
-    return;
-  }
-
-  current_gtid_ = gtid;
   // Note: executed_gtid_set_ is intentionally NOT updated here.
   // UpdateCurrentGTID is called with single GTIDs from binlog events (e.g., "uuid:101").
   // The full GTID set for reconnection is maintained separately.
+  ClearReachedReplayWatermarks(applied_gtid);
+}
+
+void BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid) {
+  if (applied_gtid.empty()) {
+    return;
+  }
+  for (const auto& [table_name, table_context] : table_contexts_) {
+    if (table_context == nullptr || table_context->replay_watermark == nullptr) {
+      continue;
+    }
+    const auto& state = table_context->replay_watermark;
+    std::string watermark;
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      watermark = state->snapshot_gtid;
+    }
+    if (watermark.empty()) {
+      continue;
+    }
+    auto reached = GtidEncoder::PositionCoversAuto(watermark, applied_gtid);
+    if (!reached || !*reached) {
+      continue;
+    }
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (state->snapshot_gtid == watermark) {
+      state->snapshot_gtid.clear();
+      mygram::utils::StructuredLog()
+          .Event("table_replay_watermark_cleared")
+          .Field("table", table_name)
+          .Field("watermark", watermark)
+          .Field("applied_gtid", applied_gtid)
+          .Info();
+    }
+  }
 }
 
 bool BinlogReader::RefreshExecutedGtidSet() {

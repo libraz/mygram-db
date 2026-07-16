@@ -5,7 +5,7 @@ services:
     image: mariadb:${MARIADB_VERSION:-11.4}
     container_name: inttest_mariadb
     ports:
-      - "13306:3306"
+      - "${MYSQL_PORT:-13306}:3306"
     environment:
       MARIADB_ROOT_PASSWORD: test_root_password
       MARIADB_DATABASE: testdb

@@ -402,6 +402,43 @@ TEST_F(BinlogEventProcessorTest, UpdateTransitionOutOfRequired) {
   EXPECT_EQ(removed_results.size(), 0);
 }
 
+TEST_F(BinlogEventProcessorTest, EmptyStringRequiredFilterHandlesUpdateTransitions) {
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "varchar";
+  required_filter.op = "=";
+  required_filter.value = "";
+  table_config_.required_filters.push_back(required_filter);
+
+  BinlogEvent insert_event;
+  insert_event.type = BinlogEventType::INSERT;
+  insert_event.primary_key = "pk1";
+  insert_event.text = "alpha text";
+  insert_event.filters["status"] = std::string{};
+  insert_event.table_name = "test_table";
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  ASSERT_TRUE(doc_store_->GetDocId("pk1").has_value());
+
+  BinlogEvent transition_out = insert_event;
+  transition_out.type = BinlogEventType::UPDATE;
+  transition_out.old_text = insert_event.text;
+  transition_out.filters["status"] = std::string{"active"};
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(transition_out, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  EXPECT_FALSE(doc_store_->GetDocId("pk1").has_value());
+
+  BinlogEvent transition_in = insert_event;
+  transition_in.type = BinlogEventType::UPDATE;
+  transition_in.primary_key = "pk2";
+  transition_in.old_text = "beta text";
+  transition_in.text = "beta text";
+  transition_in.filters["status"] = std::string{};
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(transition_in, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  EXPECT_TRUE(doc_store_->GetDocId("pk2").has_value());
+}
+
 /**
  * @brief Bug: UPDATE transition out of required filters must use old_text (before-image) for removal
  *

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <map>
 #include <string_view>
 
 #include "utils/string_utils.h"
@@ -150,6 +151,34 @@ std::string MariaDBGTID::SetToString(const std::vector<MariaDBGTID>& gtids) {
     result += gtids[i].ToString();
   }
   return result;
+}
+
+mygram::utils::Expected<bool, mygram::utils::Error> MariaDBGTID::PositionCovers(const std::string& required,
+                                                                                const std::string& available) {
+  auto required_set = ParseSet(required);
+  if (!required_set) {
+    return mygram::utils::MakeUnexpected(required_set.error());
+  }
+  auto available_set = ParseSet(available);
+  if (!available_set) {
+    return mygram::utils::MakeUnexpected(available_set.error());
+  }
+
+  std::map<uint32_t, uint64_t> available_by_domain;
+  for (const auto& gtid : *available_set) {
+    auto [iter, inserted] = available_by_domain.emplace(gtid.domain_id, gtid.sequence_no);
+    if (!inserted) {
+      iter->second = std::max(iter->second, gtid.sequence_no);
+    }
+  }
+
+  for (const auto& gtid : *required_set) {
+    auto iter = available_by_domain.find(gtid.domain_id);
+    if (iter == available_by_domain.end() || iter->second < gtid.sequence_no) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool MariaDBGTID::IsMariaDBGtidFormat(const std::string& gtid_str) {

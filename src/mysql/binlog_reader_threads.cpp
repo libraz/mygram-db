@@ -25,6 +25,7 @@
 #include "mysql/binlog_stream.h"
 #include "mysql/gtid_encoder.h"
 #include "mysql/mariadb_event_parser.h"
+#include "mysql/mariadb_gtid.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
 #include "utils/crc32.h"
@@ -48,10 +49,44 @@ bool IsRowsEventType(MySQLBinlogEventType event_type) {
     case MySQLBinlogEventType::WRITE_ROWS_EVENT:
     case MySQLBinlogEventType::UPDATE_ROWS_EVENT:
     case MySQLBinlogEventType::DELETE_ROWS_EVENT:
+    case MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT:
+    case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT:
+    case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT:
+    case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT:
       return true;
     default:
       return false;
   }
+}
+
+mygram::utils::Expected<bool, mygram::utils::Error> BinlogReader::ShouldSuppressTableReplay(
+    const std::string& table_name, const std::string& event_gtid) const {
+  auto table_iter = table_contexts_.find(table_name);
+  if (table_iter == table_contexts_.end()) {
+    const auto separator = table_name.rfind('.');
+    if (separator != std::string::npos) {
+      table_iter = table_contexts_.find(table_name.substr(separator + 1));
+    }
+  }
+  if (table_iter == table_contexts_.end() || table_iter->second == nullptr || event_gtid.empty()) {
+    return false;
+  }
+
+  const auto& watermark_state = table_iter->second->replay_watermark;
+  if (watermark_state == nullptr) {
+    return false;
+  }
+
+  std::string snapshot_gtid;
+  {
+    std::lock_guard<std::mutex> lock(watermark_state->mutex);
+    snapshot_gtid = watermark_state->snapshot_gtid;
+  }
+  if (snapshot_gtid.empty()) {
+    return false;
+  }
+
+  return GtidEncoder::PositionCoversAuto(event_gtid, snapshot_gtid);
 }
 
 uint64_t ExtractRowsEventTableId(const unsigned char* buffer) {
@@ -84,10 +119,28 @@ void BinlogReader::ReaderThreadFunc() {
     std::scoped_lock lock(gtid_mutex_);
     reader_last_gtid = current_gtid_;
   }
+  // QUERY_EVENT is the commit boundary for standalone transactions, while
+  // row transactions start with BEGIN and finish at XID/COMMIT. Track that
+  // distinction locally so ignored/non-target standalone statements still
+  // advance the worker-owned applied GTID without publishing a received-but-
+  // unapplied position.
+  bool reader_transaction_open = false;
+  replay_suppressed_table_ids_.clear();
 
   // Main reconnection loop (infinite retries)
   int reconnect_attempt = 0;
   bool idle_timeout_reconnect = false;  // Track if reconnecting due to idle timeout
+  bool initial_stream_open_pending = true;
+  auto publish_initial_stream_state = [this](StreamStartupState state) {
+    {
+      std::lock_guard<std::mutex> lock(stream_startup_mutex_);
+      if (stream_startup_state_ != StreamStartupState::kPending) {
+        return;
+      }
+      stream_startup_state_ = state;
+    }
+    stream_startup_cv_.notify_all();
+  };
 
   // Helper lambda: sleep with backoff, check should_stop_, reconnect, validate.
   // Returns: 1 = success, 0 = reconnect failed (retry), -1 = should stop
@@ -137,7 +190,13 @@ void BinlogReader::ReaderThreadFunc() {
     // Setup session (CRC32 checksum, heartbeat, etc.) via protocol-specific stream
     auto setup_result = binlog_stream_->SetupSession(*binlog_connection_);
     if (!setup_result) {
-      SetLastError(setup_result.error().message());
+      SetLastError(setup_result.error());
+
+      if (initial_stream_open_pending) {
+        publish_initial_stream_state(StreamStartupState::kFailed);
+        should_stop_.store(true, std::memory_order_release);
+        break;
+      }
 
       // On first attempt (reconnect_attempt == 0), this is likely a read timeout recovery
       if (reconnect_attempt == 0) {
@@ -172,7 +231,13 @@ void BinlogReader::ReaderThreadFunc() {
     // Open binlog stream via protocol-specific implementation
     auto open_result = binlog_stream_->Open(*binlog_connection_, current_gtid, config_.server_id);
     if (!open_result) {
-      SetLastError(open_result.error().message());
+      SetLastError(open_result.error());
+
+      if (initial_stream_open_pending) {
+        publish_initial_stream_state(StreamStartupState::kFailed);
+        should_stop_.store(true, std::memory_order_release);
+        break;
+      }
 
       // Check if binlog purged (non-recoverable)
       if (open_result.error().message().find("purged") != std::string::npos) {
@@ -193,6 +258,11 @@ void BinlogReader::ReaderThreadFunc() {
         break;
       }
       continue;
+    }
+
+    if (initial_stream_open_pending) {
+      initial_stream_open_pending = false;
+      publish_initial_stream_state(StreamStartupState::kOpened);
     }
 
     // Reset no-data counter on successful stream open (reconnection)
@@ -417,6 +487,20 @@ void BinlogReader::ReaderThreadFunc() {
 
         // MariaDB GTID event (type 162): extract domain-server-seq GTID
         if (event_type == MySQLBinlogEventType::MARIADB_GTID_EVENT) {
+          const auto flags = MariaDBEventParser::ExtractGTIDFlags(event_buffer, event_length);
+          if (flags.has_value() && ((*flags & MariaDBEventParser::kXaFlagMask) != 0U)) {
+            SetLastError(
+                "Received a MariaDB GTID_EVENT for an XA transaction. XA transactions are unsupported because "
+                "prepared rows cannot be published before a later XA COMMIT or discarded on XA ROLLBACK.");
+            mygram::utils::StructuredLog()
+                .Event("binlog_fatal_error")
+                .Field("type", "unsupported_xa_transaction")
+                .Field("event_type", "MARIADB_GTID_EVENT")
+                .Field("flags", static_cast<uint64_t>(*flags))
+                .Error();
+            should_stop_.store(true, std::memory_order_release);
+            break;
+          }
           auto gtid_opt = MariaDBEventParser::ExtractGTID(event_buffer, event_length);
           if (gtid_opt) {
             reader_last_gtid = gtid_opt.value();
@@ -469,6 +553,33 @@ void BinlogReader::ReaderThreadFunc() {
                 table_contexts_.find(config::QualifiedTableName(metadata_opt->database_name,
                                                                 metadata_opt->table_name)) != table_contexts_.end() ||
                 table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
+
+            const std::string qualified_table =
+                config::QualifiedTableName(metadata_opt->database_name, metadata_opt->table_name);
+            auto suppress_replay = ShouldSuppressTableReplay(qualified_table, reader_last_gtid);
+            if (!suppress_replay) {
+              SetLastError("Cannot evaluate per-table SYNC replay watermark: " + suppress_replay.error().message());
+              mygram::utils::StructuredLog()
+                  .Event("binlog_fatal_error")
+                  .Field("type", "invalid_table_replay_watermark")
+                  .Field("table", qualified_table)
+                  .Field("gtid", reader_last_gtid)
+                  .FieldError(suppress_replay.error())
+                  .Error();
+              should_stop_.store(true, std::memory_order_release);
+              break;
+            }
+            if (*suppress_replay) {
+              replay_suppressed_table_ids_.insert(metadata_opt->table_id);
+              mygram::utils::StructuredLog()
+                  .Event("binlog_replay_suppressed")
+                  .Field("table", qualified_table)
+                  .Field("gtid", reader_last_gtid)
+                  .Field("reason", "covered_by_sync_snapshot")
+                  .Debug();
+              continue;
+            }
+            replay_suppressed_table_ids_.erase(metadata_opt->table_id);
 
             if (is_monitored_table) {
               if (!FetchColumnNames(metadata_opt.value())) {
@@ -527,6 +638,17 @@ void BinlogReader::ReaderThreadFunc() {
           continue;
         }
 
+        // A preceding TABLE_MAP established that this target-table row event
+        // is already included in its isolated SYNC snapshot. Consume the
+        // transaction's eventual COMMIT for GTID progress, but do not parse or
+        // apply the row image. Non-target tables in the same replay interval
+        // continue through the normal path.
+        if (IsRowsEventType(event_type) && event_length >= mygram::constants::kBinlogEventHeaderLen + 6 &&
+            replay_suppressed_table_ids_.find(ExtractRowsEventTableId(event_buffer)) !=
+                replay_suppressed_table_ids_.end()) {
+          continue;
+        }
+
         // Detect unsupported event types that cause silent data loss at runtime
         if (event_type == MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT) {
           SetLastError(
@@ -554,6 +676,69 @@ void BinlogReader::ReaderThreadFunc() {
               .Error();
           should_stop_.store(true, std::memory_order_release);
           break;
+        }
+
+        if (event_type == MySQLBinlogEventType::XA_PREPARE_LOG_EVENT) {
+          SetLastError(
+              "Received XA_PREPARE_LOG_EVENT. XA transactions are unsupported because prepared rows cannot be "
+              "published before a later XA COMMIT or discarded on XA ROLLBACK.");
+          mygram::utils::StructuredLog()
+              .Event("binlog_fatal_error")
+              .Field("type", "unsupported_runtime_event")
+              .Field("event_type", "XA_PREPARE_LOG_EVENT")
+              .Error();
+          should_stop_.store(true, std::memory_order_release);
+          break;
+        }
+
+        if (IsUnsupportedMariaDBCompressedEvent(event_type)) {
+          SetLastError(
+              "Received a MariaDB compressed binlog event while log_bin_compress is enabled. "
+              "Compressed events cannot be decoded; disable log_bin_compress and run SYNC.");
+          mygram::utils::StructuredLog()
+              .Event("binlog_fatal_error")
+              .Field("type", "unsupported_runtime_event")
+              .Field("event_type", GetEventTypeName(event_type))
+              .Error();
+          // Fail closed before the following XID can advance current_gtid_.
+          should_stop_.store(true, std::memory_order_release);
+          break;
+        }
+      }
+
+      auto query_boundary = BinlogEventParser::QueryTransactionBoundary::kNone;
+      const bool query_was_inside_transaction = reader_transaction_open;
+      bool query_parsed = false;
+      std::string query_text;
+      if (event_type == MySQLBinlogEventType::QUERY_EVENT) {
+        auto query = BinlogEventParser::ExtractQueryString(event_buffer, event_length);
+        if (!query.has_value()) {
+          SetLastError("Failed to parse QUERY_EVENT while ROW binlog format is required; refusing to advance GTID");
+          mygram::utils::StructuredLog()
+              .Event("binlog_fatal_error")
+              .Field("type", "malformed_query_event")
+              .Field("gtid", reader_last_gtid)
+              .Error();
+          should_stop_.store(true, std::memory_order_release);
+          break;
+        }
+        query_parsed = true;
+        query_text = std::move(*query);
+        query_boundary = BinlogEventParser::ClassifyQueryTransactionBoundary(query_text);
+        if (query_boundary == BinlogEventParser::QueryTransactionBoundary::kUnsupportedXa) {
+          SetLastError(
+              "Received an XA transaction statement. XA transactions are unsupported because prepared rows "
+              "cannot be published before a later XA COMMIT or discarded on XA ROLLBACK.");
+          mygram::utils::StructuredLog()
+              .Event("binlog_fatal_error")
+              .Field("type", "unsupported_xa_transaction")
+              .Field("query", query_text)
+              .Error();
+          should_stop_.store(true, std::memory_order_release);
+          break;
+        }
+        if (query_boundary == BinlogEventParser::QueryTransactionBoundary::kBegin) {
+          reader_transaction_open = true;
         }
       }
 
@@ -593,6 +778,10 @@ void BinlogReader::ReaderThreadFunc() {
 
           PushEvent(std::make_unique<BinlogEvent>(std::move(event)));
         }
+        if (event_type == MySQLBinlogEventType::QUERY_EVENT &&
+            query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd) {
+          reader_transaction_open = false;
+        }
       } else if (IsMonitoredRowsEventParseFailure(event_type, event_buffer, event_length)) {
         SetLastError("Failed to parse monitored ROWS_EVENT from binlog; reconnecting from last processed GTID");
         mygram::utils::StructuredLog()
@@ -605,7 +794,46 @@ void BinlogReader::ReaderThreadFunc() {
         request_processing_failure_reconnect();
         break;
       } else {
+        // A standalone QUERY_EVENT has no following XID. Even when the query
+        // does not affect a configured table (server initialization DDL,
+        // grants, etc.), enqueue its GTID behind all previously parsed work so
+        // the applied position remains a complete, ordered server GTID set.
+        // Never do this for BEGIN or for statements inside an explicit
+        // transaction; those advance only at COMMIT/XID.
+        const bool standalone_query_completed =
+            event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed && !reader_last_gtid.empty() &&
+            (query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd ||
+             (query_boundary == BinlogEventParser::QueryTransactionBoundary::kNone && !query_was_inside_transaction &&
+              BinlogEventParser::IsSafeIgnoredQuery(query_text)));
+        if (standalone_query_completed) {
+          auto progress = std::make_unique<BinlogEvent>();
+          progress->type = BinlogEventType::COMMIT;
+          progress->gtid = reader_last_gtid;
+          PushEvent(std::move(progress));
+        } else if (event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
+                   query_boundary == BinlogEventParser::QueryTransactionBoundary::kNone &&
+                   !BinlogEventParser::IsSafeIgnoredQuery(query_text)) {
+          SetLastError(
+              "Received an unrecognized QUERY_EVENT while ROW binlog format is required; refusing to "
+              "advance GTID without applying possible statement-based data changes");
+          mygram::utils::StructuredLog()
+              .Event("binlog_fatal_error")
+              .Field("type", "unsafe_query_event")
+              .Field("query", query_text)
+              .Field("gtid", reader_last_gtid)
+              .Error();
+          should_stop_.store(true, std::memory_order_release);
+          break;
+        }
+        if (event_type == MySQLBinlogEventType::QUERY_EVENT &&
+            query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd) {
+          reader_transaction_open = false;
+        }
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "event_skipped").Debug();
+      }
+
+      if (event_type == MySQLBinlogEventType::XID_EVENT) {
+        reader_transaction_open = false;
       }
     }
 
@@ -679,6 +907,29 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
     if (!commit_gtid.empty()) {
       UpdateCurrentGTID(commit_gtid);
       pending_commit_gtid_.clear();
+    }
+    return true;
+  }
+
+  auto suppress_replay = ShouldSuppressTableReplay(event.table_name, event.gtid);
+  if (!suppress_replay) {
+    SetLastError("Cannot evaluate per-table SYNC replay watermark: " + suppress_replay.error().message());
+    mygram::utils::StructuredLog()
+        .Event("binlog_fatal_error")
+        .Field("type", "invalid_table_replay_watermark")
+        .Field("table", event.table_name)
+        .Field("gtid", event.gtid)
+        .FieldError(suppress_replay.error())
+        .Error();
+    schema_incompatible_.store(true, std::memory_order_release);
+    return false;
+  }
+  if (*suppress_replay) {
+    processed_events_++;
+    if (event.type == BinlogEventType::DDL) {
+      UpdateCurrentGTID(event.gtid);
+    } else if (!event.gtid.empty()) {
+      pending_commit_gtid_ = event.gtid;
     }
     return true;
   }

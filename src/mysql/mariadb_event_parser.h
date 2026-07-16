@@ -31,6 +31,10 @@ namespace mygramdb::mysql {
  */
 class MariaDBEventParser {
  public:
+  static constexpr uint8_t kPreparedXaFlag = 0x40;
+  static constexpr uint8_t kCompletedXaFlag = 0x80;
+  static constexpr uint8_t kXaFlagMask = kPreparedXaFlag | kCompletedXaFlag;
+
   /**
    * @brief Extract GTID from MARIADB_GTID_EVENT (type 162)
    *
@@ -46,6 +50,9 @@ class MariaDBEventParser {
    * @return GTID string in "domain-server-seq" format, or nullopt on error
    */
   static std::optional<std::string> ExtractGTID(const unsigned char* buffer, size_t length);
+
+  /** Extract the one-byte MariaDB GTID event flags field. */
+  static std::optional<uint8_t> ExtractGTIDFlags(const unsigned char* buffer, size_t length);
 
   /**
    * @brief Parse MARIADB_GTID_LIST_EVENT (type 163)

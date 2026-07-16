@@ -9,6 +9,7 @@
 
 #include <optional>
 
+#include "server/operation_coordinator.h"
 #include "server/replication_pause_counter.h"
 #include "utils/fd_guard.h"
 #include "utils/structured_log.h"
@@ -32,19 +33,32 @@ using mygram::utils::MakeUnexpected;
 MysqlReconnectionHandler::MysqlReconnectionHandler(
     mysql::Connection* mysql_connection, mysql::BinlogReader* binlog_reader, std::atomic<bool>* reconnecting_flag,
     std::vector<mysql::ConnectionValidator::RequiredTable> required_tables, std::atomic<bool>* dump_save_in_progress,
-    std::atomic<bool>* replication_paused_for_dump, server::replication_pause::Counter* replication_pause_counter)
+    std::atomic<bool>* replication_paused_for_dump, server::replication_pause::Counter* replication_pause_counter,
+    server::OperationCoordinator* operation_coordinator)
     : mysql_connection_(mysql_connection),
       binlog_reader_(binlog_reader),
       reconnecting_flag_(reconnecting_flag),
       required_tables_(std::move(required_tables)),
       dump_save_in_progress_(dump_save_in_progress),
       replication_paused_for_dump_(replication_paused_for_dump),
-      replication_pause_counter_(replication_pause_counter) {}
+      replication_pause_counter_(replication_pause_counter),
+      operation_coordinator_(operation_coordinator) {}
 
 Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new_host, int new_port) {
   std::unique_lock<std::mutex> reconnect_lock(reconnect_mutex_, std::try_to_lock);
   if (!reconnect_lock.owns_lock()) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError, "MySQL reconnection is already in progress"));
+  }
+
+  std::optional<server::OperationCoordinator::Token> operation_token;
+  if (operation_coordinator_ != nullptr) {
+    operation_token = operation_coordinator_->TryAcquire(server::LongOperation::kMysqlReconnect,
+                                                         new_host + ":" + std::to_string(new_port));
+    if (!operation_token.has_value()) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLReplicationError,
+                    "Cannot reconnect MySQL while " + operation_coordinator_->DescribeActive() + " is in progress"));
+    }
   }
 
   if (dump_save_in_progress_ != nullptr && dump_save_in_progress_->load(std::memory_order_acquire)) {
@@ -83,57 +97,33 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       .Field("new_port", static_cast<int64_t>(new_port))
       .Info();
 
-  // Step 1: Save current GTID position from BinlogReader
-  std::string current_gtid;
-  if (binlog_reader_ != nullptr && binlog_reader_->IsRunning()) {
-    current_gtid = binlog_reader_->GetCurrentGTID();
-    mygram::utils::StructuredLog().Event("mysql_reconnection_gtid_saved").Field("gtid", current_gtid).Info();
-  }
-
-  // Step 2: Stop BinlogReader (graceful shutdown)
-  std::optional<server::replication_pause::Scope> pause_scope;
-  bool replication_pause_acquired = false;
-  if (binlog_reader_ != nullptr && binlog_reader_->IsRunning() && replication_pause_counter_ != nullptr) {
-    pause_scope.emplace(*replication_pause_counter_);
-    replication_pause_acquired = pause_scope->Acquire();
-    if (!replication_pause_acquired) {
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError,
-                                      "Cannot reconnect MySQL while another replication pause is active"));
-    }
-  }
-
-  auto release_pause = mygram::utils::ScopeGuard([this, &pause_scope, &replication_pause_acquired]() {
-    if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
-      replication_paused_for_dump_->store(false, std::memory_order_release);
-    }
-    if (pause_scope.has_value() && pause_scope->held()) {
-      pause_scope->Release();
-    }
-  });
-
-  if (binlog_reader_ != nullptr && binlog_reader_->IsRunning()) {
-    mygram::utils::StructuredLog().Event("mysql_reconnection_stopping_binlog").Info();
-    binlog_reader_->Stop();
-    if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
-      replication_paused_for_dump_->store(true, std::memory_order_release);
-    }
-    mygram::utils::StructuredLog().Event("mysql_reconnection_binlog_stopped").Info();
-  }
-
-  // Step 3: Reconnect to new MySQL host/port
+  // Connect and validate the candidate before disturbing the live connection
+  // or replication reader. Most failover errors therefore leave production
+  // state completely untouched.
   mygram::utils::StructuredLog()
       .Event("mysql_reconnection_connecting")
       .Field("host", new_host)
       .Field("port", static_cast<int64_t>(new_port))
       .Info();
 
+  if (mysql_connection_ == nullptr) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Current MySQL connection is null"));
+  }
+
+  auto old_uuid_result = mysql_connection_->GetServerUUID();
+  if (!old_uuid_result) {
+    return MakeUnexpected(old_uuid_result.error());
+  }
+  const std::optional<std::string> old_server_uuid = *old_uuid_result;
+  const bool replication_was_running = binlog_reader_ != nullptr && binlog_reader_->IsRunning();
+  const std::optional<std::string> preliminary_gtid =
+      replication_was_running ? std::optional<std::string>{binlog_reader_->GetCurrentGTID()} : std::nullopt;
+
   // Get current connection config and update host/port
   auto config = mysql_connection_->GetConfig();
   config.host = new_host;
   config.port = static_cast<uint16_t>(new_port);
 
-  // Create new connection in a temporary first, then swap on success (#9)
-  // This preserves the old connection if the new one fails to connect.
   mysql::Connection new_connection(config);
   auto connect_result = new_connection.Connect("reconnection");
   if (!connect_result) {
@@ -146,12 +136,7 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
     return connect_result;
   }
 
-  // New connection succeeded - replace old connection (old one is closed by move assignment)
-  *mysql_connection_ = std::move(new_connection);
-  mygram::utils::StructuredLog().Event("mysql_reconnection_old_connection_replaced").Info();
-
-  // Step 4: Validate new connection
-  auto validate_result = ValidateConnection(mysql_connection_);
+  auto validate_result = ValidateConnection(&new_connection, old_server_uuid, preliminary_gtid);
   if (!validate_result) {
     mygram::utils::StructuredLog()
         .Event("mysql_reconnection_validation_failed")
@@ -168,41 +153,94 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
       .Field("port", static_cast<int64_t>(new_port))
       .Info();
 
-  // Step 5: Restart BinlogReader with saved GTID
-  if (binlog_reader_ != nullptr) {
-    if (!current_gtid.empty()) {
-      // Resume from saved GTID position
-      mygram::utils::StructuredLog().Event("mysql_reconnection_restarting_binlog").Field("gtid", current_gtid).Info();
-      auto start_result = binlog_reader_->StartFromGtid(current_gtid);
-      if (!start_result) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_reconnection_binlog_restart_failed")
-            .Field("error", start_result.error().message())
-            .Error();
-        return start_result;
-      }
-    } else {
-      // Start from latest position
-      mygram::utils::StructuredLog().Event("mysql_reconnection_restarting_binlog").Field("position", "latest").Info();
-      auto start_result = binlog_reader_->Start();
-      if (!start_result) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_reconnection_binlog_restart_failed")
-            .Field("error", start_result.error().message())
-            .Error();
-        return start_result;
+  std::string current_gtid;
+  std::optional<server::replication_pause::Scope> pause_scope;
+  bool replication_pause_acquired = false;
+  if (replication_was_running) {
+    if (replication_pause_counter_ != nullptr) {
+      pause_scope.emplace(*replication_pause_counter_);
+      replication_pause_acquired = pause_scope->Acquire();
+      if (!replication_pause_acquired) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLReplicationError,
+                                        "Cannot reconnect MySQL while another replication pause is active"));
       }
     }
+  }
 
+  auto release_pause = mygram::utils::ScopeGuard([this, &pause_scope, &replication_pause_acquired]() {
+    if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
+      replication_paused_for_dump_->store(false, std::memory_order_release);
+    }
+    if (pause_scope.has_value() && pause_scope->held()) {
+      pause_scope->Release();
+    }
+  });
+
+  if (replication_was_running) {
+    mygram::utils::StructuredLog().Event("mysql_reconnection_stopping_binlog").Info();
+    binlog_reader_->Stop();
+    current_gtid = binlog_reader_->GetCurrentGTID();
+    mygram::utils::StructuredLog().Event("mysql_reconnection_gtid_saved").Field("gtid", current_gtid).Info();
+    if (replication_pause_counter_ != nullptr) {
+      replication_pause_counter_->PublishDrainedGTID(current_gtid);
+    }
+    if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
+      replication_paused_for_dump_->store(true, std::memory_order_release);
+    }
+    mygram::utils::StructuredLog().Event("mysql_reconnection_binlog_stopped").Info();
+
+    // Events may have drained between the preliminary validation and Stop().
+    // Re-check the exact hand-off position before replacing the live
+    // connection. A mismatch here still leaves the old connection installed;
+    // resume it and report the candidate error.
+    auto drained_validation = ValidateConnection(&new_connection, old_server_uuid, current_gtid);
+    if (!drained_validation) {
+      Expected<void, Error> rollback_start =
+          current_gtid.empty() ? binlog_reader_->Start() : binlog_reader_->StartFromGtid(current_gtid);
+      if (!rollback_start) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kMySQLReplicationError,
+                      "Failover validation failed and rollback replication restart also failed: candidate=" +
+                          drained_validation.error().message() + "; rollback=" + rollback_start.error().message()));
+      }
+      return MakeUnexpected(drained_validation.error());
+    }
+  }
+
+  // Commit the validated candidate while retaining the old connection for
+  // rollback until replication has successfully started on the new server.
+  mysql::Connection old_connection(std::move(*mysql_connection_));
+  *mysql_connection_ = std::move(new_connection);
+  mygram::utils::StructuredLog().Event("mysql_reconnection_old_connection_replaced").Info();
+
+  if (replication_was_running) {
+    Expected<void, Error> start_result =
+        current_gtid.empty() ? binlog_reader_->Start() : binlog_reader_->StartFromGtid(current_gtid);
+    if (!start_result) {
+      const Error candidate_error = start_result.error();
+      mygram::utils::StructuredLog()
+          .Event("mysql_reconnection_binlog_restart_failed")
+          .Field("error", candidate_error.message())
+          .Error();
+
+      // Start() failure leaves the reader stopped. Restore the main connection
+      // object in-place so BinlogReader's reference remains valid, then resume
+      // from the exact processed GTID on the old server.
+      mysql::Connection failed_candidate(std::move(*mysql_connection_));
+      *mysql_connection_ = std::move(old_connection);
+      Expected<void, Error> rollback_start =
+          current_gtid.empty() ? binlog_reader_->Start() : binlog_reader_->StartFromGtid(current_gtid);
+      if (!rollback_start) {
+        return MakeUnexpected(MakeError(
+            ErrorCode::kMySQLReplicationError,
+            "Failover failed and rollback replication restart also failed: candidate=" + candidate_error.message() +
+                "; rollback=" + rollback_start.error().message()));
+      }
+      mygram::utils::StructuredLog().Event("mysql_reconnection_rolled_back").Field("gtid", current_gtid).Warn();
+      return MakeUnexpected(candidate_error);
+    }
     mygram::utils::StructuredLog().Event("mysql_reconnection_binlog_restarted").Info();
   }
-  if (replication_pause_acquired && replication_paused_for_dump_ != nullptr) {
-    replication_paused_for_dump_->store(false, std::memory_order_release);
-  }
-  if (pause_scope.has_value() && pause_scope->held()) {
-    pause_scope->Release();
-  }
-  release_pause.Release();
 
   mygram::utils::StructuredLog()
       .Event("mysql_reconnection_success")
@@ -215,13 +253,16 @@ Expected<void, Error> MysqlReconnectionHandler::Reconnect(const std::string& new
   return {};
 }
 
-Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connection* connection) const {
+Expected<void, Error> MysqlReconnectionHandler::ValidateConnection(mysql::Connection* connection,
+                                                                   const std::optional<std::string>& expected_uuid,
+                                                                   const std::optional<std::string>& last_gtid) const {
   if (connection == nullptr) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Connection is null"));
   }
 
   // Validate connection including required tables check
-  auto validation_result = mysql::ConnectionValidator::ValidateServer(*connection, required_tables_, std::nullopt);
+  auto validation_result =
+      mysql::ConnectionValidator::ValidateServer(*connection, required_tables_, expected_uuid, last_gtid);
 
   if (!validation_result.valid) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, validation_result.error_message));

@@ -61,6 +61,13 @@ std::optional<std::string> MariaDBEventParser::ExtractGTID(const unsigned char* 
   return gtid.ToString();
 }
 
+std::optional<uint8_t> MariaDBEventParser::ExtractGTIDFlags(const unsigned char* buffer, size_t length) {
+  if (buffer == nullptr || length < mygram::constants::kBinlogEventHeaderLen + kMariaDBGtidEventMinPostHeader) {
+    return std::nullopt;
+  }
+  return buffer[mygram::constants::kBinlogEventHeaderLen + 12];
+}
+
 std::optional<std::vector<MariaDBGTID>> MariaDBEventParser::ParseGTIDList(const unsigned char* buffer, size_t length) {
   // Need at least header + count_and_flags(4)
   if (buffer == nullptr || length < mygram::constants::kBinlogEventHeaderLen + 4) {

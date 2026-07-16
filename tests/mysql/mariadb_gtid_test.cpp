@@ -218,6 +218,27 @@ TEST(MariaDBGTIDTest, SetToStringMultiple) {
   EXPECT_EQ(MariaDBGTID::SetToString(gtids), "0-1-42,1-2-100");
 }
 
+TEST(MariaDBGTIDTest, PositionCoverageAllowsServerIdChangeAtSameOrLaterSequence) {
+  auto same = MariaDBGTID::PositionCovers("0-1-42,7-1-10", "0-99-42,7-2-11");
+  ASSERT_TRUE(same);
+  EXPECT_TRUE(*same);
+}
+
+TEST(MariaDBGTIDTest, PositionCoverageRejectsMissingDomainOrEarlierSequence) {
+  auto missing_domain = MariaDBGTID::PositionCovers("0-1-42,7-1-10", "0-2-100");
+  ASSERT_TRUE(missing_domain);
+  EXPECT_FALSE(*missing_domain);
+
+  auto earlier = MariaDBGTID::PositionCovers("0-1-42", "0-2-41");
+  ASSERT_TRUE(earlier);
+  EXPECT_FALSE(*earlier);
+}
+
+TEST(MariaDBGTIDTest, PositionCoverageRejectsMalformedPositions) {
+  EXPECT_FALSE(MariaDBGTID::PositionCovers("invalid", "0-1-42"));
+  EXPECT_FALSE(MariaDBGTID::PositionCovers("0-1-42", "invalid"));
+}
+
 // ===========================================================================
 // Roundtrip: Parse -> ToString
 // ===========================================================================

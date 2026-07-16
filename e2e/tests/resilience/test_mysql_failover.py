@@ -12,7 +12,7 @@ import pytest
 from lib.mysql_client import MysqlClient
 from lib.wait import wait_until, wait_until_gte
 
-pytestmark = pytest.mark.resilience
+pytestmark = [pytest.mark.resilience, pytest.mark.failover]
 
 SECONDARY_PORT = 23307
 
@@ -59,7 +59,115 @@ def _quote_sql(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "''")
 
 
+def _add_processed_gtid_to_secondary(secondary: MysqlClient, current_gtid: str) -> None:
+    missing_gtid = _single_value(
+        secondary,
+        f"SELECT GTID_SUBTRACT('{_quote_sql(current_gtid)}', @@GLOBAL.gtid_executed) AS missing",
+        "missing",
+    )
+    if missing_gtid:
+        secondary.execute(f"SET @@GLOBAL.gtid_purged = '+{_quote_sql(missing_gtid)}'")
+
+
 class TestMySQLFailover:
+    def test_failed_connect_and_validation_leave_primary_reader_live(
+        self, mysql: MysqlClient, mygramdb: Any
+    ) -> None:
+        secondary = _secondary_mysql()
+        wait_until(
+            lambda: secondary.ping(),
+            timeout=60,
+            interval=2,
+            description="secondary MySQL to be ready",
+        )
+
+        before_gtid = _replication_status_value(mygramdb, "current_gtid")
+        connect_failure = mygramdb.tcp_command("SET mysql.port = 1", timeout=30)
+        assert connect_failure is not None and connect_failure.startswith("ERROR"), connect_failure
+        assert _replication_status_value(mygramdb, "status") == "running"
+        assert _replication_status_value(mygramdb, "current_gtid") == before_gtid
+
+        # The independent secondary does not contain the primary's processed
+        # GTID yet, so candidate validation must fail before live resources are
+        # replaced.
+        validation_failure = mygramdb.tcp_command(f"SET mysql.port = {SECONDARY_PORT}", timeout=30)
+        assert validation_failure is not None and validation_failure.startswith("ERROR"), (
+            validation_failure
+        )
+        assert _replication_status_value(mygramdb, "status") == "running"
+
+        marker = f"failover_rollback_{uuid.uuid4().hex[:8]}"
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Failover rollback",
+                    "content": f"{marker} must replicate from the original primary",
+                    "status": 1,
+                    "category": "failover",
+                    "enabled": 1,
+                }
+            ],
+        )
+        wait_until_gte(
+            lambda: mygramdb.count("testdb.articles", marker),
+            minimum=1,
+            timeout=20,
+            interval=0.5,
+            description="primary replication after failed failover",
+        )
+
+    def test_candidate_reader_start_failure_rolls_back_to_primary(
+        self, mysql: MysqlClient, mygramdb: Any
+    ) -> None:
+        secondary = _secondary_mysql()
+        wait_until(
+            lambda: secondary.ping(),
+            timeout=60,
+            interval=2,
+            description="secondary MySQL to be ready",
+        )
+
+        before_gtid = _replication_status_value(mygramdb, "current_gtid")
+        _add_processed_gtid_to_secondary(secondary, before_gtid)
+
+        # Leave exactly one ordinary connection slot. Candidate validation uses
+        # the main candidate connection and therefore succeeds, while
+        # BinlogReader::StartFromGtid cannot open its dedicated binlog
+        # connection. This exercises the post-swap rollback path without a
+        # production-only failpoint.
+        secondary.execute("SET GLOBAL max_connections = 1")
+        try:
+            start_failure = mygramdb.tcp_command(f"SET mysql.port = {SECONDARY_PORT}", timeout=30)
+        finally:
+            secondary.execute("SET GLOBAL max_connections = 151")
+
+        assert start_failure is not None and start_failure.startswith("ERROR"), start_failure
+        assert "connection" in start_failure.lower(), start_failure
+        assert _replication_status_value(mygramdb, "status") == "running"
+        assert _replication_status_value(mygramdb, "current_gtid") == before_gtid
+
+        marker = f"failover_start_rollback_{uuid.uuid4().hex[:8]}"
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Failover start rollback",
+                    "content": f"{marker} must replicate from the restored primary",
+                    "status": 1,
+                    "category": "failover",
+                    "enabled": 1,
+                }
+            ],
+        )
+        wait_until_gte(
+            lambda: mygramdb.count("testdb.articles", marker),
+            minimum=1,
+            timeout=20,
+            interval=0.5,
+            description="primary replication after candidate reader start rollback",
+        )
+
     def test_reconnect_to_secondary_preserves_gtid_and_replicates_new_events(
         self, mysql: MysqlClient, mygramdb: Any
     ) -> None:
@@ -116,7 +224,7 @@ class TestMySQLFailover:
                 }
             ],
         )
-        secondary.execute(f"SET @@GLOBAL.gtid_purged = '+{_quote_sql(current_gtid)}'")
+        _add_processed_gtid_to_secondary(secondary, current_gtid)
 
         set_result = mygramdb.tcp_command(f"SET mysql.port = {SECONDARY_PORT}", timeout=30)
         assert set_result is not None and (
@@ -130,11 +238,27 @@ class TestMySQLFailover:
             description="replication to restart after failover",
         )
 
+        # The two test servers are deliberately independent rather than a
+        # primary/replica pair, so their AUTO_INCREMENT counters can overlap.
+        # Use an ID beyond both sources to ensure this assertion exercises a
+        # genuinely new candidate event instead of the duplicate-PK path.
+        primary_max_id = int(
+            _single_value(mysql, "SELECT COALESCE(MAX(id), 0) AS max_id FROM articles", "max_id")
+        )
+        secondary_max_id = int(
+            _single_value(
+                secondary,
+                "SELECT COALESCE(MAX(id), 0) AS max_id FROM articles",
+                "max_id",
+            )
+        )
+        secondary_insert_id = max(primary_max_id, secondary_max_id) + 1
         secondary_marker = f"failover_secondary_{uuid.uuid4().hex[:8]}"
         secondary.insert_rows(
             "articles",
             [
                 {
+                    "id": secondary_insert_id,
                     "title": "Failover Secondary",
                     "content": f"{secondary_marker} replicated after failover",
                     "status": 1,

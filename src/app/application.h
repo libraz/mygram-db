@@ -102,7 +102,7 @@ class Application {
   Expected<void, mygram::utils::Error> Initialize();
   Expected<void, mygram::utils::Error> Start();
   void RunMainLoop();
-  void Stop();
+  Expected<void, mygram::utils::Error> Stop();
 
   // Special modes (return exit code)
   int HandleSpecialModes();

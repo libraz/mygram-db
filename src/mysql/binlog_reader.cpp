@@ -124,18 +124,23 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     std::unique_ptr<Connection>& metadata_conn;
     std::unique_ptr<IBinlogStream>& stream;
     std::atomic<bool>& should_stop;
+    std::condition_variable& queue_cv;
+    std::condition_variable& queue_full_cv;
     bool success = false;
 
     StartupGuard(std::atomic<bool>& running, std::unique_ptr<std::thread>& worker, std::unique_ptr<std::thread>& reader,
                  std::unique_ptr<Connection>& conn, std::unique_ptr<Connection>& meta_conn,
-                 std::unique_ptr<IBinlogStream>& binlog_stream, std::atomic<bool>& stop)
+                 std::unique_ptr<IBinlogStream>& binlog_stream, std::atomic<bool>& stop,
+                 std::condition_variable& event_cv, std::condition_variable& event_full_cv)
         : running_flag(running),
           worker_thread(worker),
           reader_thread(reader),
           binlog_conn(conn),
           metadata_conn(meta_conn),
           stream(binlog_stream),
-          should_stop(stop) {}
+          should_stop(stop),
+          queue_cv(event_cv),
+          queue_full_cv(event_full_cv) {}
 
     ~StartupGuard() {
       if (success) {
@@ -144,6 +149,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
       // Failure - clean up all resources
       should_stop = true;
+      queue_cv.notify_all();
+      queue_full_cv.notify_all();
 
       // Join threads if they were created
       if (worker_thread && worker_thread->joinable()) {
@@ -175,7 +182,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   };
 
   StartupGuard guard(running_, worker_thread_, reader_thread_, binlog_connection_, metadata_connection_, binlog_stream_,
-                     should_stop_);
+                     should_stop_, queue_cv_, queue_full_cv_);
 
   // Validate server_id (must be non-zero for replication)
   if (config_.server_id == 0) {
@@ -321,6 +328,10 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   // Reset debug log counters for this run
   no_data_log_count_ = 0;
   skip_log_count_ = 0;
+  {
+    std::lock_guard<std::mutex> lock(stream_startup_mutex_);
+    stream_startup_state_ = StreamStartupState::kPending;
+  }
 
   try {
     // Start worker thread first
@@ -328,6 +339,32 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
     // Start reader thread
     reader_thread_ = std::make_unique<std::thread>(&BinlogReader::ReaderThreadFunc, this);
+
+    // Start() is a stream-open contract, not merely a thread-spawn contract.
+    // A caller may publish a SYNC generation immediately after this returns,
+    // so fail synchronously if the first session setup/COM_BINLOG_DUMP cannot
+    // be established.
+    {
+      std::unique_lock<std::mutex> lock(stream_startup_mutex_);
+      constexpr auto kStreamOpenTimeout = std::chrono::seconds(30);
+      const bool signalled = stream_startup_cv_.wait_for(lock, kStreamOpenTimeout, [this] {
+        return stream_startup_state_ == StreamStartupState::kOpened ||
+               stream_startup_state_ == StreamStartupState::kFailed;
+      });
+      if (!signalled) {
+        SetLastError(MakeError(ErrorCode::kMySQLBinlogError, "Timed out opening initial binlog stream"));
+        should_stop_.store(true, std::memory_order_release);
+        queue_cv_.notify_all();
+        queue_full_cv_.notify_all();
+        return MakeUnexpected(GetLastErrorObject());
+      }
+      if (stream_startup_state_ == StreamStartupState::kFailed) {
+        should_stop_.store(true, std::memory_order_release);
+        queue_cv_.notify_all();
+        queue_full_cv_.notify_all();
+        return MakeUnexpected(GetLastErrorObject());
+      }
+    }
 
     mygram::utils::StructuredLog()
         .Event("binlog_reader_started")

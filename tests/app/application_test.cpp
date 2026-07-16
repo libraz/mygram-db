@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -21,7 +22,9 @@
 #include "app/configuration_manager.h"
 #include "app/mysql_reconnection_handler.h"
 #include "app/server_orchestrator.h"
+#include "app/signal_manager.h"
 #include "mysql/null_binlog_reader.h"
+#include "server/operation_coordinator.h"
 #include "server/replication_pause_counter.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -84,8 +87,14 @@ std::string ValidateDumpDirectory(const std::string& dump_dir) {
 class DumpDirectoryValidationTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Create a temporary base directory for tests
-    base_dir_ = std::filesystem::temp_directory_path() / "mygramdb_test_dump";
+    // CTest runs individual GoogleTest cases in parallel processes. Give each
+    // case a unique directory so one fixture cannot remove another case's log
+    // or configuration files during TearDown().
+    const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    base_dir_ = std::filesystem::temp_directory_path() /
+                ("mygramdb_test_dump_" + std::string(test_info != nullptr ? test_info->name() : "unknown") + "_" +
+                 std::to_string(nonce));
     std::filesystem::create_directories(base_dir_);
   }
 
@@ -378,6 +387,35 @@ TEST(ServerOrchestratorMysqlStartupTest, RequiresMysqlForReplicationOrAutoSnapsh
   EXPECT_TRUE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
 }
 
+TEST(ServerOrchestratorStartupTest, MissingEnabledSynonymFileFailsInitialization) {
+  auto signal_manager = mygramdb::app::SignalManager::Create();
+  ASSERT_TRUE(signal_manager) << signal_manager.error().to_string();
+
+  mygramdb::config::Config config;
+  config.replication.enable = false;
+  config.replication.auto_initial_snapshot = false;
+  config.api.tcp.bind = "127.0.0.1";
+  config.api.tcp.port = 0;
+  mygramdb::config::TableConfig table;
+  table.name = "posts";
+  table.text_source.column = "body";
+  table.synonyms.enable = true;
+  table.synonyms.file = "/definitely/missing/mygramdb-synonyms.tsv";
+  config.tables.push_back(std::move(table));
+  const std::string dump_dir = std::filesystem::temp_directory_path().string();
+
+  mygramdb::app::ServerOrchestrator::Dependencies deps{
+      .config = config,
+      .signal_manager = **signal_manager,
+      .dump_dir = dump_dir,
+  };
+  auto orchestrator = mygramdb::app::ServerOrchestrator::Create(deps);
+  ASSERT_TRUE(orchestrator);
+  auto result = (*orchestrator)->Initialize();
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("Failed to load synonyms"), std::string::npos);
+}
+
 TEST(ServerOrchestratorStartupRetryTest, SucceedsOnFirstAttemptWithoutSleeping) {
   int attempts = 0;
   int sleeps = 0;
@@ -500,6 +538,24 @@ TEST(MysqlReconnectionHandlerTest, RejectsWhenReconnectAlreadyInProgress) {
   ASSERT_FALSE(result);
   EXPECT_NE(result.error().message().find("already in progress"), std::string::npos);
   EXPECT_TRUE(reconnecting.load(std::memory_order_acquire));
+}
+
+TEST(MysqlReconnectionHandlerTest, OperationCoordinatorRejectsReconnectDuringLongOperation) {
+  std::atomic<bool> reconnecting{false};
+  std::atomic<bool> dump_save_in_progress{false};
+  std::atomic<bool> replication_paused_for_dump{false};
+  mygramdb::server::replication_pause::Counter pause_counter;
+  mygramdb::server::OperationCoordinator coordinator;
+  auto dump_token = coordinator.TryAcquire(mygramdb::server::LongOperation::kDumpSave, "test");
+  ASSERT_TRUE(dump_token.has_value());
+
+  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
+                                                  &replication_paused_for_dump, &pause_counter, &coordinator);
+  auto result = handler.Reconnect("127.0.0.2", 3307);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("DUMP SAVE"), std::string::npos);
+  EXPECT_FALSE(reconnecting.load());
 }
 #endif
 

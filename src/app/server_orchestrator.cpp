@@ -20,6 +20,7 @@
 #include "config/runtime_variable_manager.h"
 #include "loader/initial_loader.h"
 #include "mysql/connection_validator.h"
+#include "mysql/gtid_waiter.h"
 #include "query/synonym_dictionary.h"
 #include "server/http_server.h"
 #include "server/request_dispatcher.h"
@@ -35,6 +36,7 @@ namespace mygramdb::app {
 namespace {
 constexpr uint64_t kProgressLogInterval = 10000;  // Log progress every N rows
 constexpr int kMillisecondsPerSecond = static_cast<int>(mygram::constants::kMillisecondsPerSecond);
+constexpr auto kSnapshotCatchupTimeout = std::chrono::seconds(60);
 }  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ServerOrchestrator>, mygram::utils::Error> ServerOrchestrator::Create(
@@ -47,7 +49,7 @@ ServerOrchestrator::ServerOrchestrator(Dependencies deps) : deps_(deps) {}
 
 ServerOrchestrator::~ServerOrchestrator() {
   if (started_) {
-    Stop();
+    (void)Stop();
   }
 }
 
@@ -173,6 +175,18 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
     }
     binlog_started = true;
     mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
+
+    auto catchup_result =
+        mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_, kSnapshotCatchupTimeout);
+    if (!catchup_result) {
+      binlog_reader_->Stop();
+      mygram::utils::StructuredLog()
+          .Event("startup_replication_catchup_failed")
+          .Field("target_gtid", snapshot_catchup_target_gtid_)
+          .FieldError(catchup_result.error())
+          .Error();
+      return mygram::utils::MakeUnexpected(catchup_result.error());
+    }
   }
 #endif
 
@@ -196,7 +210,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
       // Cleanup in reverse start order. Start() must be transactional: callers
       // either get a fully-running orchestrator or no background workers left
       // behind after a partial startup failure.
-      tcp_server_->Stop();
+      (void)tcp_server_->Stop();
 #ifdef USE_MYSQL
       if (binlog_started && binlog_reader_ && binlog_reader_->IsRunning()) {
         binlog_reader_->Stop();
@@ -220,7 +234,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
   return {};
 }
 
-void ServerOrchestrator::Stop() {
+Expected<void, mygram::utils::Error> ServerOrchestrator::Stop() {
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_components").Debug();
 
   // Stop HTTP server first (depends on TCP server's cache manager)
@@ -231,7 +245,15 @@ void ServerOrchestrator::Stop() {
 
   // Stop TCP server
   if (tcp_server_) {
-    tcp_server_->Stop();
+    auto tcp_stop = tcp_server_->Stop();
+    if (!tcp_stop) {
+      mygram::utils::StructuredLog()
+          .Event("server_stop_incomplete")
+          .Field("component", "tcp_server")
+          .FieldError(tcp_stop.error())
+          .Error();
+      return mygram::utils::MakeUnexpected(tcp_stop.error());
+    }
   }
 
 #ifdef USE_MYSQL
@@ -250,6 +272,7 @@ void ServerOrchestrator::Stop() {
   // Table contexts will be automatically destroyed
   started_ = false;
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "all_components_stopped").Debug();
+  return {};
 }
 
 bool ServerOrchestrator::IsRunning() const {
@@ -289,7 +312,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     }
 
     // Load synonym dictionary if configured
-    if (table_config.synonyms.enable && !table_config.synonyms.file.empty()) {
+    if (table_config.synonyms.enable) {
       ctx->synonym_dict = std::make_unique<query::SynonymDictionary>();
       auto normalizer = [&ctx](std::string_view text) { return ctx->index->NormalizeText(text); };
       auto load_result = ctx->synonym_dict->LoadFromFile(table_config.synonyms.file, normalizer);
@@ -300,6 +323,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
             .Field("file", table_config.synonyms.file)
             .Field("error", load_result.error().message())
             .Error();
+        return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+            load_result.error().code(), "Failed to load synonyms for table '" + table_config.name + "' from '" +
+                                            table_config.synonyms.file + "': " + load_result.error().message()));
       } else {
         mygram::utils::StructuredLog()
             .Event("synonym_dictionary_loaded")
@@ -441,32 +467,27 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
   const bool use_shared_snapshot = deps_.config.replication.enable && deps_.config.tables.size() > 1;
   std::string shared_snapshot_gtid;
   if (use_shared_snapshot) {
+    // Capture a lower-bound GTID before opening the snapshot. Global GTID
+    // variables are not MVCC snapshot data; reading one after START can include
+    // a concurrent commit that the snapshot cannot see, causing permanent loss.
+    auto gtid_result = mysql_connection_->CaptureSnapshotLowerBoundGTID();
+    if (!gtid_result) {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
+                                   "Failed to capture pre-snapshot GTID: " + gtid_result.error().message()));
+    }
+    shared_snapshot_gtid = *gtid_result;
+    if (shared_snapshot_gtid.empty()) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
+          "GTID is empty - cannot start multi-table replication from undefined snapshot position"));
+    }
+
     auto start_txn_result = mysql_connection_->ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
     if (!start_txn_result) {
       return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
           mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
           "Failed to start shared consistent snapshot: " + start_txn_result.error().message()));
-    }
-
-    auto gtid_result = mysql_connection_->GetExecutedGTID();
-    if (gtid_result) {
-      shared_snapshot_gtid = *gtid_result;
-      shared_snapshot_gtid.erase(std::remove_if(shared_snapshot_gtid.begin(), shared_snapshot_gtid.end(),
-                                                [](unsigned char chr) { return std::isspace(chr); }),
-                                 shared_snapshot_gtid.end());
-    }
-    if (shared_snapshot_gtid.empty()) {
-      auto rollback_result = mysql_connection_->ExecuteUpdate("ROLLBACK");
-      if (!rollback_result) {
-        mygram::utils::StructuredLog()
-            .Event("loader_warning")
-            .Field("operation", "rollback_shared_snapshot")
-            .Field("error", rollback_result.error().message())
-            .Warn();
-      }
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
-          "GTID is empty - cannot start multi-table replication from undefined snapshot position"));
     }
 
     snapshot_gtid_ = shared_snapshot_gtid;
@@ -594,6 +615,24 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
           mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
                                    "Failed to commit shared consistent snapshot: " + commit_result.error().message()));
     }
+  }
+
+  // The snapshot GTID above is a safe lower bound for starting replication.
+  // Capture a separate post-snapshot target and withhold readiness until the
+  // reader has actually applied through it.
+  if (deps_.config.replication.enable && !table_contexts_.empty()) {
+    auto catchup_target = mysql_connection_->GetLatestGTID();
+    if (!catchup_target) {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
+                                   "Failed to capture post-snapshot GTID: " + catchup_target.error().message()));
+    }
+    snapshot_catchup_target_gtid_ = *catchup_target;
+    mygram::utils::StructuredLog()
+        .Event("snapshot_catchup_target_captured")
+        .Field("start_gtid", snapshot_gtid_)
+        .Field("target_gtid", snapshot_catchup_target_gtid_)
+        .Info();
   }
 #endif
   return {};
@@ -761,7 +800,8 @@ void ServerOrchestrator::RegisterRuntimeCallbacks() {
     auto reconnection_handler = std::make_shared<MysqlReconnectionHandler>(
         mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag(),
         std::move(required_tables), tcp_server_->GetDumpSaveInProgressFlag(),
-        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetReplicationPauseCounter());
+        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetReplicationPauseCounter(),
+        tcp_server_->GetOperationCoordinator());
 
     variable_manager->SetMysqlReconnectCallback(
         [handler = reconnection_handler](const std::string& host, int port) { return handler->Reconnect(host, port); });

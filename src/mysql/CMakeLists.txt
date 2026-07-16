@@ -17,6 +17,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
     rows_parser_field_decoder.cpp
     rows_parser_filter.cpp
     gtid_encoder.cpp
+    gtid_waiter.cpp
     mariadb_gtid.cpp
     mysql_binlog_stream.cpp
     mariadb_binlog_stream.cpp

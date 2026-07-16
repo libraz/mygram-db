@@ -9,9 +9,14 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include <vector>
 
+#include "mysql/gtid_waiter.h"
 #include "mysql/mariadb_gtid.h"
 #include "utils/error.h"
 
@@ -45,6 +50,68 @@ std::vector<uint8_t> ExtractUuid(const std::vector<uint8_t>& data, size_t offset
 }
 
 }  // namespace
+
+TEST(GtidEncoderPositionCoversAutoTest, ComparesMariaDbMultiDomainSets) {
+  auto covered = GtidEncoder::PositionCoversAuto("0-1-9,2-7-4", "0-3-12,2-9-4,5-1-1");
+  ASSERT_TRUE(covered.has_value()) << covered.error().message();
+  EXPECT_TRUE(*covered);
+
+  auto missing = GtidEncoder::PositionCoversAuto("0-1-13,2-7-4", "0-3-12,2-9-4");
+  ASSERT_TRUE(missing.has_value()) << missing.error().message();
+  EXPECT_FALSE(*missing);
+}
+
+TEST(GtidEncoderPositionCoversAutoTest, ComparesMysqlSetsWithoutMariaHeuristics) {
+  constexpr std::string_view kUuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  auto covered = GtidEncoder::PositionCoversAuto(std::string(kUuid) + ":1-8", std::string(kUuid) + ":1-10");
+  ASSERT_TRUE(covered.has_value()) << covered.error().message();
+  EXPECT_TRUE(*covered);
+}
+
+class GtidWaiterReader final : public IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+    running_.store(true);
+    return {};
+  }
+  void Stop() override { running_.store(false); }
+  bool IsRunning() const override { return running_.load(); }
+  std::string GetCurrentGTID() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return gtid_;
+  }
+  void SetCurrentGTID(const std::string& gtid) override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    gtid_ = gtid;
+  }
+  std::string GetLastError() const override { return {}; }
+  uint64_t GetProcessedEvents() const override { return 0; }
+  size_t GetQueueSize() const override { return 0; }
+
+ private:
+  std::atomic<bool> running_{true};
+  mutable std::mutex mutex_;
+  std::string gtid_ = "0-1-2,2-1-1";
+};
+
+TEST(GtidWaiterTest, WaitsForMariaDbMultiDomainTarget) {
+  GtidWaiterReader reader;
+  std::thread advance([&reader]() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    reader.SetCurrentGTID("0-1-5,2-1-3");
+  });
+  auto result = WaitForAppliedPosition(reader, "0-9-5,2-7-3", std::chrono::milliseconds(200));
+  advance.join();
+  EXPECT_TRUE(result.has_value()) << result.error().message();
+}
+
+TEST(GtidWaiterTest, FailsClosedWhenReaderStopsBeforeTarget) {
+  GtidWaiterReader reader;
+  reader.Stop();
+  auto result = WaitForAppliedPosition(reader, "0-9-5,2-7-3", std::chrono::milliseconds(200));
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("stopped"), std::string::npos);
+}
 
 class GtidEncoderTest : public ::testing::Test {};
 
@@ -708,4 +775,27 @@ TEST_F(GtidEncoderTest, MergeSingleTaggedGtidIntoSetPreservesTagKey) {
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-3,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:tag:7-8");
+}
+
+TEST_F(GtidEncoderTest, PositionCoversSingleEventWithinSnapshotSet) {
+  constexpr std::string_view kUuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  auto covered = GtidEncoder::PositionCovers(std::string(kUuid) + ":42", std::string(kUuid) + ":1-100");
+
+  ASSERT_TRUE(covered.has_value()) << covered.error().message();
+  EXPECT_TRUE(*covered);
+}
+
+TEST_F(GtidEncoderTest, PositionCoversRequiresEveryServerAndInterval) {
+  constexpr std::string_view kUuidA = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  constexpr std::string_view kUuidB = "11111111-2222-3333-4444-555555555555";
+  const std::string required = std::string(kUuidA) + ":5-8," + std::string(kUuidB) + ":3";
+
+  auto covered = GtidEncoder::PositionCovers(required, std::string(kUuidA) + ":1-10");
+  ASSERT_TRUE(covered.has_value()) << covered.error().message();
+  EXPECT_FALSE(*covered);
+}
+
+TEST_F(GtidEncoderTest, PositionCoversRejectsMalformedInput) {
+  auto covered = GtidEncoder::PositionCovers("not-a-gtid", "also-invalid");
+  EXPECT_FALSE(covered.has_value());
 }

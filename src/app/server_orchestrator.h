@@ -204,7 +204,7 @@ class ServerOrchestrator {
    * 4. MySQL connection
    * 5. Table contexts (Index, DocumentStore)
    */
-  void Stop();
+  Expected<void, mygram::utils::Error> Stop();
 
   /**
    * @brief Check if servers are running
@@ -236,7 +236,8 @@ class ServerOrchestrator {
   std::unique_ptr<server::HttpServer> http_server_;
 
   // State
-  std::string snapshot_gtid_;  ///< Captured during snapshot build
+  std::string snapshot_gtid_;                 ///< Captured during snapshot build
+  std::string snapshot_catchup_target_gtid_;  ///< Position captured after the snapshot transaction completed
   std::atomic<bool> initialized_{false};
   std::atomic<bool> started_{false};
 };

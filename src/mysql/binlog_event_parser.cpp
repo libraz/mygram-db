@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <sstream>
 #include <string_view>
 
 #include "mysql/binlog_event_types.h"
@@ -538,6 +539,20 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
           .Field("message",
                  "binlog_transaction_compression=ON is not supported. "
                  "Disable compression or upgrade MygramDB.")
+          .Error();
+      return {};
+
+    case MySQLBinlogEventType::MARIADB_QUERY_COMPRESSED_EVENT:
+    case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT:
+    case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT:
+    case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT:
+      // The reader rejects these before dispatch so their XID cannot advance
+      // the processed GTID. Keep the parser fail-closed for direct callers too.
+      mygram::utils::StructuredLog()
+          .Event("binlog_error")
+          .Field("type", "unsupported_event")
+          .Field("event_type", GetEventTypeName(event_type))
+          .Field("message", "MariaDB log_bin_compress events are not supported")
           .Error();
       return {};
 
@@ -1164,6 +1179,76 @@ std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned 
     return std::nullopt;
   }
   return data->query;
+}
+
+BinlogEventParser::QueryTransactionBoundary BinlogEventParser::ClassifyQueryTransactionBoundary(
+    std::string_view query) {
+  std::string normalized = mygram::utils::ToUpper(mygram::utils::TrimAsciiWhitespaceView(query));
+  while (!normalized.empty() &&
+         (normalized.back() == ';' || std::isspace(static_cast<unsigned char>(normalized.back())) != 0)) {
+    normalized.pop_back();
+  }
+
+  std::istringstream tokens(normalized);
+  std::string first;
+  std::string second;
+  tokens >> first >> second;
+  if (first == "XA") {
+    // XA PREPARE is logged as a separate transaction group and may later be
+    // rolled back. The current materializer has no prepared-state staging,
+    // so every XA form is rejected by the reader before any row event can be
+    // published. XA BEGIN is a valid alias of XA START.
+    return QueryTransactionBoundary::kUnsupportedXa;
+  }
+  if (first == "BEGIN" || (first == "START" && second == "TRANSACTION")) {
+    return QueryTransactionBoundary::kBegin;
+  }
+  if (first == "COMMIT" || (first == "ROLLBACK" && second != "TO")) {
+    return QueryTransactionBoundary::kEnd;
+  }
+  return QueryTransactionBoundary::kNone;
+}
+
+bool BinlogEventParser::IsSafeIgnoredQuery(std::string_view query) {
+  std::string normalized = mygram::utils::StripSQLComments(std::string(query));
+  normalized = mygram::utils::ToUpper(mygram::utils::NormalizeWhitespace(normalized));
+  normalized = std::string(mygram::utils::TrimAsciiWhitespaceView(normalized));
+  while (!normalized.empty() && normalized.back() == ';') {
+    normalized.pop_back();
+    normalized = std::string(mygram::utils::TrimAsciiWhitespaceView(normalized));
+  }
+
+  std::istringstream tokens(normalized);
+  std::string first;
+  std::string second;
+  tokens >> first >> second;
+
+  // These statements affect session/account/server metadata, not configured
+  // table rows. They commonly appear in initialization binlogs that a
+  // complete GTID set must still cover.
+  if (first == "GRANT" || first == "REVOKE" || first == "SET" || first == "USE") {
+    return true;
+  }
+  if (first == "FLUSH" && second == "PRIVILEGES") {
+    return true;
+  }
+  if (first == "SAVEPOINT" || (first == "ROLLBACK" && second == "TO") ||
+      (first == "RELEASE" && second == "SAVEPOINT")) {
+    return true;
+  }
+  if (first == "CREATE" && (second == "DATABASE" || second == "SCHEMA" || second == "USER" || second == "ROLE")) {
+    return true;
+  }
+  if ((first == "ALTER" || first == "DROP") && (second == "USER" || second == "ROLE")) {
+    return true;
+  }
+
+  // ParseBinlogEvent emits an event when these forms affect a configured
+  // table. Reaching this predicate therefore proves that they only concern
+  // non-target tables and their GTID may safely advance.
+  return (first == "CREATE" && second == "TABLE") || (first == "ALTER" && second == "TABLE") ||
+         (first == "DROP" && second == "TABLE") || (first == "RENAME" && second == "TABLE") ||
+         (first == "TRUNCATE" && second == "TABLE");
 }
 
 /**

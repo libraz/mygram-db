@@ -60,6 +60,17 @@ struct MariaDBGTID {
   static std::string SetToString(const std::vector<MariaDBGTID>& gtids);
 
   /**
+   * @brief Check whether an available GTID position covers a required one.
+   *
+   * MariaDB sequence numbers are ordered within a replication domain. Server
+   * IDs may legitimately change during failover, so coverage compares the
+   * highest sequence number for every required domain and deliberately does
+   * not require the originating server ID to match.
+   */
+  static mygram::utils::Expected<bool, mygram::utils::Error> PositionCovers(const std::string& required,
+                                                                            const std::string& available);
+
+  /**
    * @brief Check if a string looks like a MariaDB GTID (not MySQL)
    *
    * MariaDB GTIDs have exactly 2 dashes and all segments are numeric.

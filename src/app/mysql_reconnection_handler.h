@@ -8,6 +8,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,9 @@ class BinlogReader;
 namespace mygramdb::server::replication_pause {
 class Counter;
 }
+namespace mygramdb::server {
+class OperationCoordinator;
+}
 #endif
 
 namespace mygramdb::app {
@@ -35,13 +39,12 @@ namespace mygramdb::app {
  * Performs graceful reconnection with minimal data loss.
  *
  * Failover flow:
- * 1. Save current GTID position from BinlogReader
- * 2. Stop BinlogReader (graceful shutdown)
- * 3. Close old MySQL connection
- * 4. Create new connection to new_host:new_port
- * 5. Validate new connection (GTID mode, binlog format)
- * 6. Resume replication from saved GTID
- * 7. Start new BinlogReader
+ * 1. Connect and validate a candidate without touching live resources
+ * 2. Stop BinlogReader and capture its drained GTID
+ * 3. Revalidate the candidate against that exact hand-off position
+ * 4. Replace the connection while retaining the old one for rollback
+ * 5. Resume replication from the drained GTID
+ * 6. Commit on success, or restore the old connection and reader on failure
  *
  * Thread Safety:
  * - Sets reconnecting_flag_ to signal the server to block SEARCH queries during reconnection
@@ -67,7 +70,8 @@ class MysqlReconnectionHandler {
                            std::vector<mysql::ConnectionValidator::RequiredTable> required_tables = {},
                            std::atomic<bool>* dump_save_in_progress = nullptr,
                            std::atomic<bool>* replication_paused_for_dump = nullptr,
-                           server::replication_pause::Counter* replication_pause_counter = nullptr);
+                           server::replication_pause::Counter* replication_pause_counter = nullptr,
+                           server::OperationCoordinator* operation_coordinator = nullptr);
 #else
   MysqlReconnectionHandler() = default;
 #endif
@@ -87,13 +91,9 @@ class MysqlReconnectionHandler {
    * @return Expected with void or error
    *
    * Steps:
-   * 1. Save current GTID position from BinlogReader
-   * 2. Stop BinlogReader (graceful shutdown)
-   * 3. Close old MySQL connection
-   * 4. Create new connection to new_host:new_port
-   * 5. Validate new connection (GTID mode, binlog format)
-   * 6. Resume replication from saved GTID
-   * 7. Start new BinlogReader
+   * The candidate is validated before live resources are disturbed and again
+   * against the exact GTID captured after the reader drains. Connection and
+   * reader changes are committed together or rolled back together.
    *
    * Note: This is a synchronous operation that blocks until reconnection completes.
    * Expected duration: 1-5 seconds.
@@ -109,6 +109,7 @@ class MysqlReconnectionHandler {
   std::atomic<bool>* dump_save_in_progress_;
   std::atomic<bool>* replication_paused_for_dump_;
   server::replication_pause::Counter* replication_pause_counter_;
+  server::OperationCoordinator* operation_coordinator_;
   std::mutex reconnect_mutex_;
 #endif
 
@@ -123,7 +124,9 @@ class MysqlReconnectionHandler {
    * - binlog_row_image is FULL
    */
 #ifdef USE_MYSQL
-  mygram::utils::Expected<void, mygram::utils::Error> ValidateConnection(mysql::Connection* connection) const;
+  mygram::utils::Expected<void, mygram::utils::Error> ValidateConnection(
+      mysql::Connection* connection, const std::optional<std::string>& expected_uuid,
+      const std::optional<std::string>& last_gtid) const;
 #endif
 };
 

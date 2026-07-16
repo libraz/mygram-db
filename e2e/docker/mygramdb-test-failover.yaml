@@ -15,7 +15,7 @@ tables:
       column: "content"
     required_filters:
       - name: "enabled"
-        type: "int"
+        type: "tinyint"
         op: "="
         value: 1
         bitmap_index: false

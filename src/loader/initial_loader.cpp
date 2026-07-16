@@ -141,9 +141,25 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 
   start_gtid_.clear();
   if (manage_transaction) {
-    // Start transaction with consistent snapshot for GTID consistency.
-    // InnoDB's consistent snapshot guarantees that @@global.gtid_executed
-    // read inside the transaction reflects the snapshot point.
+    // Capture a conservative replication position BEFORE opening the snapshot.
+    // @@GLOBAL.gtid_executed / gtid_current_pos are server-global status
+    // variables, not MVCC data: reading them after START TRANSACTION can include
+    // commits that are absent from the snapshot and would then be skipped by
+    // replication. A pre-snapshot position intentionally permits at-least-once
+    // replay for commits in the small interval before START; row application is
+    // idempotent and converges to the snapshot/current binlog state.
+    auto gtid_result = connection_.CaptureSnapshotLowerBoundGTID();
+    if (!gtid_result) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed,
+                                      "Failed to capture pre-snapshot GTID: " + gtid_result.error().message()));
+    }
+    start_gtid_ = *gtid_result;
+    if (after_gtid_capture_hook_for_test_) {
+      after_gtid_capture_hook_for_test_();
+    }
+
+    // Start the consistent snapshot only after the safe lower-bound GTID has
+    // been captured.
     mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
     auto start_txn_result = connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
     if (!start_txn_result) {
@@ -155,19 +171,6 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
           .Field("error", error_msg)
           .Error();
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
-    }
-
-    // Capture GTID inside the transaction — consistent with the snapshot.
-    // Uses flavor-aware GetExecutedGTID() which queries:
-    //   MySQL:   @@GLOBAL.gtid_executed
-    //   MariaDB: @@GLOBAL.gtid_current_pos
-    auto gtid_result = connection_.GetExecutedGTID();
-    if (gtid_result && !gtid_result->empty()) {
-      start_gtid_ = *gtid_result;
-      // Remove whitespace (MySQL may include newlines in multi-UUID sets)
-      start_gtid_.erase(
-          std::remove_if(start_gtid_.begin(), start_gtid_.end(), [](unsigned char chr) { return std::isspace(chr); }),
-          start_gtid_.end());
     }
   } else if (existing_snapshot_gtid != nullptr) {
     start_gtid_ = *existing_snapshot_gtid;

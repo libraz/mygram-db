@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "mysql/binlog_event_types.h"
 #include "mysql/connection.h"
 #include "mysql/connection_validator.h"
 
@@ -186,6 +187,21 @@ TEST(ConnectionValidatorUnitTest, BinlogChecksumValidationRequiresCRC32) {
 
   EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogChecksumValue("NONE"));
   EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogChecksumValue(""));
+}
+
+TEST(ConnectionValidatorUnitTest, MariaDBCompressedEventsAreExplicitlyFailClosed) {
+  using mygramdb::mysql::IsUnsupportedMariaDBCompressedEvent;
+  using mygramdb::mysql::MySQLBinlogEventType;
+
+  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_QUERY_COMPRESSED_EVENT));
+  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT));
+  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT));
+  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT));
+  EXPECT_FALSE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_GTID_EVENT));
+  EXPECT_FALSE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::WRITE_ROWS_EVENT));
+
+  EXPECT_STREQ(mygramdb::mysql::GetEventTypeName(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT),
+               "MARIADB_WRITE_ROWS_COMPRESSED_EVENT");
 }
 
 TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsOnlyTaggedEntries) {

@@ -8,6 +8,7 @@
 #include <optional>
 #include <sstream>
 
+#include "mysql/mariadb_gtid.h"
 #include "utils/numeric_parse.h"
 #include "utils/string_utils.h"
 
@@ -441,6 +442,46 @@ std::optional<std::string> GtidEncoder::MergeSingleGtidIntoSet(std::string_view 
   intervals.push_back(next_entry->second.front());
   NormalizeMysqlGtidIntervals(intervals);
   return MysqlGtidSetToString(*current_set);
+}
+
+mygram::utils::Expected<bool, Error> GtidEncoder::PositionCovers(std::string_view required,
+                                                                 std::string_view available) {
+  auto required_set = ParseMysqlGtidSet(required);
+  auto available_set = ParseMysqlGtidSet(available);
+  if (!required_set.has_value() || !available_set.has_value()) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Cannot compare malformed MySQL GTID sets"));
+  }
+
+  for (const auto& [sid, required_intervals] : *required_set) {
+    auto available_iter = available_set->find(sid);
+    if (available_iter == available_set->end()) {
+      return false;
+    }
+    const auto& available_intervals = available_iter->second;
+    for (const auto& required_interval : required_intervals) {
+      const bool covered = std::any_of(available_intervals.begin(), available_intervals.end(),
+                                       [&required_interval](const auto& available_interval) {
+                                         return available_interval.start <= required_interval.start &&
+                                                available_interval.end >= required_interval.end;
+                                       });
+      if (!covered) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+mygram::utils::Expected<bool, Error> GtidEncoder::PositionCoversAuto(std::string_view required,
+                                                                     std::string_view available) {
+  const std::string required_text(required);
+  const std::string available_text(available);
+  auto required_mariadb = MariaDBGTID::ParseSet(required_text);
+  auto available_mariadb = MariaDBGTID::ParseSet(available_text);
+  if (required_mariadb && available_mariadb) {
+    return MariaDBGTID::PositionCovers(required_text, available_text);
+  }
+  return PositionCovers(required, available);
 }
 
 void GtidEncoder::StoreInt64(std::vector<uint8_t>& buffer, uint64_t value) {

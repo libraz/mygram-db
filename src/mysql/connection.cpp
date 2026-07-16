@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstring>
 #include <sstream>
@@ -436,6 +437,16 @@ mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetExecut
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_executed_gtid").Field("gtid", gtid).Debug();
   return gtid;
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> Connection::CaptureSnapshotLowerBoundGTID() {
+  auto result = GetExecutedGTID();
+  if (!result) {
+    return mygram::utils::MakeUnexpected(result.error());
+  }
+  result->erase(std::remove_if(result->begin(), result->end(), [](unsigned char chr) { return std::isspace(chr); }),
+                result->end());
+  return result;
 }
 
 mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetPurgedGTID() {

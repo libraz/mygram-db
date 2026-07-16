@@ -15,7 +15,29 @@ tables:
       column: "content"
     required_filters:
       - name: "enabled"
+        type: "tinyint"
+        op: "="
+        value: 1
+        bitmap_index: false
+    filters:
+      - name: "status"
         type: "int"
+        dict_compress: false
+        bitmap_index: false
+      - name: "category"
+        type: "string"
+        dict_compress: false
+        bitmap_index: false
+    ngram_size: 2
+    kanji_ngram_size: 1
+
+  - name: "products"
+    primary_key: "id"
+    text_source:
+      column: "description"
+    required_filters:
+      - name: "enabled"
+        type: "tinyint"
         op: "="
         value: 1
         bitmap_index: false
@@ -72,3 +94,6 @@ logging:
 
 cache:
   enabled: true
+
+bm25:
+  enable: true

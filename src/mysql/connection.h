@@ -163,6 +163,12 @@ class Connection {
   mygram::utils::Expected<std::string, mygram::utils::Error> GetExecutedGTID();
 
   /**
+   * Capture and canonicalize the conservative replication lower bound that
+   * must be read before START TRANSACTION WITH CONSISTENT SNAPSHOT.
+   */
+  mygram::utils::Expected<std::string, mygram::utils::Error> CaptureSnapshotLowerBoundGTID();
+
+  /**
    * @brief Get purged GTID set (GTIDs no longer in binlog)
    * @return GTID string, empty string if not applicable (e.g., MariaDB),
    *         or Error on query failure

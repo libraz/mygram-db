@@ -484,6 +484,18 @@ TEST_F(BinlogFilterEvaluatorTest, SingleRequiredFilterMismatch) {
   EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
 }
 
+TEST_F(BinlogFilterEvaluatorTest, EmptyStringRequiredFilterMatchesOnlyEmptyValue) {
+  TableConfig config = MakeTableConfig({MakeFilter("status", "varchar", "=", "")});
+
+  FilterMap empty_filters;
+  empty_filters["status"] = std::string{};
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(empty_filters, config));
+
+  FilterMap nonempty_filters;
+  nonempty_filters["status"] = std::string{"active"};
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(nonempty_filters, config));
+}
+
 TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersAllMatch) {
   TableConfig config =
       MakeTableConfig({MakeFilter("status", "int", "=", "1"), MakeFilter("type", "string", "=", "article")});

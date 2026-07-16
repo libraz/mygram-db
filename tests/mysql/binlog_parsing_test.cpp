@@ -1483,6 +1483,47 @@ TEST(BinlogParsingTest, QueryCommitEventWithoutGtidIsIgnored) {
   EXPECT_TRUE(events.empty());
 }
 
+TEST(BinlogParsingTest, QueryTransactionBoundariesDistinguishStandaloneAndExplicitTransactions) {
+  using Boundary = BinlogEventParser::QueryTransactionBoundary;
+
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("BEGIN"), Boundary::kBegin);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary(" start transaction read only; "), Boundary::kBegin);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("XA START 'xid'"), Boundary::kUnsupportedXa);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("XA BEGIN 'xid'"), Boundary::kUnsupportedXa);
+
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("COMMIT WORK"), Boundary::kEnd);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary(" rollback; "), Boundary::kEnd);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("XA COMMIT 'xid'"), Boundary::kUnsupportedXa);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("XA ROLLBACK 'xid'"), Boundary::kUnsupportedXa);
+
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("ROLLBACK TO SAVEPOINT sp"), Boundary::kNone);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("SAVEPOINT sp"), Boundary::kNone);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("CREATE TABLE ignored (id INT)"), Boundary::kNone);
+}
+
+TEST(BinlogParsingTest, IgnoredStandaloneQueryProgressIsFailClosed) {
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("GRANT SELECT ON db.* TO 'reader'@'%'"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE DATABASE IF NOT EXISTS testdb"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE IF NOT EXISTS unrelated (id BIGINT PRIMARY KEY)"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("FLUSH PRIVILEGES"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("ALTER TABLE unrelated ADD COLUMN value INT"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("SAVEPOINT before_optional_work"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("ROLLBACK TO SAVEPOINT before_optional_work"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("RELEASE SAVEPOINT before_optional_work"));
+
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("INSERT INTO articles VALUES (1, 'lost')"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("UPDATE articles SET content = 'lost'"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("DELETE FROM articles"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("REPLACE INTO articles VALUES (1, 'lost')"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("LOAD DATA INFILE '/tmp/x' INTO TABLE articles"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("FLUSH TABLES WITH READ LOCK"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CALL mutate_articles()"));
+  // The reader calls this only after ParseBinlogEvent has already emitted
+  // configured-table DDL. Reaching it for CREATE TABLE therefore means that
+  // the statement concerns no configured table.
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE articles (id BIGINT PRIMARY KEY)"));
+}
+
 /**
  * @brief Single column text_source should work correctly
  */

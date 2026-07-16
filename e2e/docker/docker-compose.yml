@@ -3,7 +3,7 @@ services:
     image: mysql:${MYSQL_VERSION:-8.4}
     container_name: inttest_mysql
     ports:
-      - "23306:3306"
+      - "${MYSQL_PORT:-23306}:3306"
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_TEST_PASSWORD:-test_root_password}
       MYSQL_DATABASE: testdb

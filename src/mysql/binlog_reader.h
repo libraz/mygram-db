@@ -16,6 +16,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "config/config.h"
@@ -403,6 +404,11 @@ class BinlogReader final : public IBinlogReader {
   Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
   std::unique_ptr<Connection> binlog_connection_;    // Dedicated connection for binlog reading (internally owned)
   std::unique_ptr<Connection> metadata_connection_;  // Dedicated connection for metadata queries (internally owned)
+  // Both the reader thread (TABLE_MAP column lookup) and worker thread
+  // (post-DDL schema validation) use metadata_connection_. A MYSQL handle may
+  // not execute or consume two result sets concurrently, so keep each complete
+  // query/result lifetime under this lock.
+  mutable std::mutex metadata_connection_mutex_;
 
   // Table contexts keyed by table name. The deprecated single-table
   // constructor is normalized into this map via legacy_table_context_.
@@ -430,6 +436,11 @@ class BinlogReader final : public IBinlogReader {
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
   std::condition_variable queue_full_cv_;
+
+  enum class StreamStartupState : uint8_t { kIdle, kPending, kOpened, kFailed };
+  StreamStartupState stream_startup_state_{StreamStartupState::kIdle};
+  std::mutex stream_startup_mutex_;
+  std::condition_variable stream_startup_cv_;
 
   // Worker threads
   std::unique_ptr<std::thread> reader_thread_;
@@ -463,6 +474,9 @@ class BinlogReader final : public IBinlogReader {
 
   // Table metadata cache
   TableMetadataCache table_metadata_cache_;
+  // Reader-thread-only set of table IDs whose rows belong to the replay
+  // interval already represented by an isolated table snapshot.
+  std::unordered_set<uint64_t> replay_suppressed_table_ids_;
   std::unordered_map<std::string, ConfiguredTableSchema> configured_schema_baselines_;
 
   struct ColumnDefinition {
@@ -528,6 +542,15 @@ class BinlogReader final : public IBinlogReader {
   bool ProcessQueuedEvent(const BinlogEvent& event);
 
   /**
+   * @brief Return whether a table event is already represented by its SYNC snapshot.
+   *
+   * Comparison errors are returned to the caller and must stop replication;
+   * applying an event when the replay fence cannot be interpreted is unsafe.
+   */
+  mygram::utils::Expected<bool, mygram::utils::Error> ShouldSuppressTableReplay(const std::string& table_name,
+                                                                                const std::string& event_gtid) const;
+
+  /**
    * @brief Return true when an empty parse result means a monitored row event failed to decode.
    */
   [[nodiscard]] bool IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_type, const unsigned char* buffer,
@@ -566,6 +589,9 @@ class BinlogReader final : public IBinlogReader {
    * @brief Update current GTID
    */
   void UpdateCurrentGTID(const std::string& gtid);
+
+  /** Clear each table replay fence once the applied reader position reaches it. */
+  void ClearReachedReplayWatermarks(const std::string& applied_gtid);
 
   /**
    * @brief Refresh executed GTID set from server

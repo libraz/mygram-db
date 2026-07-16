@@ -107,8 +107,8 @@ class ConnectionValidator {
   /**
    * @brief Check if binlog transaction compression is enabled
    *
-   * TRANSACTION_PAYLOAD_EVENT (type 40) from binlog_transaction_compression=ON
-   * is not supported. Reject connections with compression enabled.
+   * TRANSACTION_PAYLOAD_EVENT (MySQL) and compressed query/row events
+   * (MariaDB log_bin_compress) are not supported. Reject either setting.
    *
    * @return Expected<void, Error> - success or error with kMySQLBinlogError
    */

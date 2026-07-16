@@ -42,6 +42,18 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
   }
   mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "mariadb_checksum_configured").Debug();
 
+  // MariaDB replicas advertise capability bit 4 before COM_BINLOG_DUMP when
+  // using GTID. Without it, the server omits MariaDB-specific GTID events
+  // (type 162) from the stream, so a consumer can apply rows but can never
+  // advance its durable processed position. Do not guess sequence numbers
+  // from XID ordering; require the protocol event that carries domain/server.
+  if (mysql_query(conn.GetHandle(), "SET @mariadb_slave_capability = 4") != 0) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kMariaDBProtocolError,
+        std::string("Failed to advertise MariaDB replication capabilities: ") + CurrentConnectionError(conn)));
+  }
+  mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "mariadb_capability_configured").Debug();
+
   // Strict GTID mode: fail if a GTID gap is detected rather than silently skipping
   if (mysql_query(conn.GetHandle(), "SET @slave_gtid_strict_mode = 1") != 0) {
     // Non-fatal: log and continue (older MariaDB versions may not support this)

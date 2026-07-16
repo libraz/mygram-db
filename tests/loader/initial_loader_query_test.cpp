@@ -390,6 +390,16 @@ TEST_F(SqlEscapingTest, NormalValuesUnchanged) {
   EXPECT_EQ(EscapeSqlValue(""), "");
 }
 
+TEST_F(SqlEscapingTest, EmptyStringRequiredFilterBuildsQuotedEmptyLiteral) {
+  config::RequiredFilterConfig filter;
+  filter.name = "status";
+  filter.type = "varchar";
+  filter.op = "=";
+  filter.value = "";
+
+  EXPECT_EQ(BuildWhereClause({filter}), " WHERE status = ''");
+}
+
 /**
  * @brief Test that a SQL injection attempt via filter value is neutralized
  */
@@ -628,31 +638,17 @@ TEST_F(BatchProcessingTest, SingleItemBatch) {
 }
 
 // ===========================================================================
-// GTID capture simplification (regression tests)
+// Conservative pre-snapshot GTID capture (regression tests)
 // ===========================================================================
 
 /**
- * @brief Verify GTID is captured inside consistent snapshot (regression test)
+ * @brief Document that GTID is captured before the consistent snapshot
  *
- * The old code had a retry loop that captured GTID before and after
- * START TRANSACTION WITH CONSISTENT SNAPSHOT, comparing them.
- * The new code relies on InnoDB's consistent snapshot guarantee:
- * SELECT @@global.gtid_executed inside the transaction returns
- * the snapshot-consistent value without needing retries.
- *
- * This test documents the expected behavior: a single GTID capture
- * inside the transaction is sufficient for consistency.
+ * Global GTID variables are not MVCC snapshot data. The safe ordering is:
+ * capture a lower-bound GTID first, then open the snapshot. Commits in between
+ * may be replayed, but a commit absent from the snapshot is never skipped.
  */
-TEST_F(BatchProcessingTest, GtidCapturedInsideConsistentSnapshotDocumented) {
-  // The simplified GTID capture flow:
-  // 1. START TRANSACTION WITH CONSISTENT SNAPSHOT
-  // 2. SELECT @@global.gtid_executed (single query, no retry)
-  // 3. Use the result as the snapshot GTID
-  //
-  // This test verifies the InitialLoader doesn't have a retry loop
-  // by checking that the batch processing logic works correctly
-  // with a single GTID value (no before/after comparison needed).
-
+TEST_F(BatchProcessingTest, PreSnapshotGtidAllowsIdempotentReplay) {
   // Simulate a normal loading flow (mirrors InitialLoader behavior)
   std::vector<storage::DocumentStore::DocumentItem> doc_batch;
   std::vector<index::Index::DocumentItem> index_batch;
@@ -718,7 +714,6 @@ TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGt
   ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table_a + " VALUES ('1', 'snapshot old alpha')"));
   ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table_b + " VALUES ('1', 'snapshot old beta')"));
 
-  ASSERT_TRUE(loader_connection.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT"));
   auto gtid_result = loader_connection.GetExecutedGTID();
   ASSERT_TRUE(gtid_result) << gtid_result.error().message();
   std::string snapshot_gtid = *gtid_result;
@@ -726,10 +721,12 @@ TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGt
       std::remove_if(snapshot_gtid.begin(), snapshot_gtid.end(), [](unsigned char chr) { return std::isspace(chr); }),
       snapshot_gtid.end());
   ASSERT_FALSE(snapshot_gtid.empty());
+  ASSERT_TRUE(loader_connection.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT"));
 
-  auto make_table_config = [](const std::string& table_name) {
+  auto make_table_config = [&connection_config](const std::string& table_name) {
     config::TableConfig table_config;
     table_config.name = table_name;
+    table_config.database = connection_config.database;
     table_config.primary_key = "id";
     table_config.text_source.column = "content";
     table_config.ngram_size = 1;
@@ -756,6 +753,68 @@ TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGt
   ASSERT_TRUE(loaded_text_b.has_value());
   EXPECT_EQ(*loaded_text_b, "snapshot old beta");
 
+  cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, CommitBetweenGtidCaptureAndSnapshotCannotBeSkipped) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection loader_connection(connection_config);
+  auto loader_connect = loader_connection.Connect("initial-loader-gtid-interleaving-test");
+  if (!loader_connect) {
+    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
+  }
+  auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
+    GTEST_SKIP() << "GTID mode is required";
+  }
+
+  mysql::Connection writer_connection(connection_config);
+  auto writer_connect = writer_connection.Connect("initial-loader-gtid-interleaving-writer");
+  ASSERT_TRUE(writer_connect) << writer_connect.error().message();
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_gtid_interleave_" + suffix;
+  auto cleanup = [&]() { (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table); };
+  cleanup();
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE " + table +
+                                              " (id VARCHAR(32) PRIMARY KEY, content TEXT) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table + " VALUES ('1', 'baseline alpha')"));
+
+  auto before_result = loader_connection.GetExecutedGTID();
+  ASSERT_TRUE(before_result) << before_result.error().message();
+  std::string before_gtid = *before_result;
+  before_gtid.erase(
+      std::remove_if(before_gtid.begin(), before_gtid.end(), [](unsigned char chr) { return std::isspace(chr); }),
+      before_gtid.end());
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+  index::Index index(1);
+  storage::DocumentStore store;
+  InitialLoader loader(loader_connection, index, store, table_config);
+  loader.SetAfterGtidCaptureHookForTest(
+      [&]() { EXPECT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table + " VALUES ('2', 'racing beta')")); });
+
+  auto load_result = loader.Load();
+  ASSERT_TRUE(load_result) << load_result.error().message();
+  EXPECT_EQ(loader.GetStartGTID(), before_gtid);
+  EXPECT_EQ(store.Size(), 2U);
+  EXPECT_TRUE(store.GetDocId("1").has_value());
+  EXPECT_TRUE(store.GetDocId("2").has_value());
+
+  auto mysql_count = writer_connection.Execute("SELECT COUNT(*) FROM " + table);
+  ASSERT_TRUE(mysql_count) << mysql_count.error().message();
+  MYSQL_ROW row = mysql_fetch_row(mysql_count->get());
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(std::stoull(row[0]), store.Size());
   cleanup();
 }
 
@@ -800,7 +859,6 @@ TEST(InitialLoaderIntegrationTest, ExistingSnapshotErrorDoesNotRollbackCallerTra
       writer_connection.ExecuteUpdate("CREATE TABLE " + probe_table + " (id VARCHAR(32) PRIMARY KEY) ENGINE=InnoDB"));
   ASSERT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + load_table + " VALUES ('1', 'snapshot text', 1)"));
 
-  ASSERT_TRUE(loader_connection.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT"));
   auto gtid_result = loader_connection.GetExecutedGTID();
   ASSERT_TRUE(gtid_result) << gtid_result.error().message();
   std::string snapshot_gtid = *gtid_result;
@@ -808,10 +866,12 @@ TEST(InitialLoaderIntegrationTest, ExistingSnapshotErrorDoesNotRollbackCallerTra
       std::remove_if(snapshot_gtid.begin(), snapshot_gtid.end(), [](unsigned char chr) { return std::isspace(chr); }),
       snapshot_gtid.end());
   ASSERT_FALSE(snapshot_gtid.empty());
+  ASSERT_TRUE(loader_connection.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT"));
   ASSERT_TRUE(loader_connection.ExecuteUpdate("INSERT INTO " + probe_table + " VALUES ('kept')"));
 
   config::TableConfig table_config;
   table_config.name = load_table;
+  table_config.database = connection_config.database;
   table_config.primary_key = "id";
   table_config.text_source.column = "content";
   table_config.ngram_size = 1;
@@ -1046,6 +1106,54 @@ TEST(InitialLoaderIntegrationTest, ConcatDelimiterAndEmptyDocumentsMatchBinlogMa
   EXPECT_EQ(binlog_text.state, mysql::TextValueState::kPresent);
   EXPECT_EQ(binlog_text.value, store.GetNormalizedText(*first_doc_id));
 
+  cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, EmptyStringRequiredFilterLoadsOnlyMatchingRows) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection connection(connection_config);
+  auto connect_result = connection.Connect("initial-loader-empty-required-filter-test");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_empty_required_filter_" + suffix;
+  auto cleanup = [&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table); };
+  cleanup();
+
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + table +
+                                       " (id VARCHAR(32) PRIMARY KEY, content TEXT NOT NULL, "
+                                       "status VARCHAR(32) NOT NULL) ENGINE=InnoDB"));
+  ASSERT_TRUE(connection.ExecuteUpdate("INSERT INTO " + table +
+                                       " VALUES ('1', 'included text', ''), ('2', 'excluded text', 'active')"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "varchar";
+  required_filter.op = "=";
+  required_filter.value = "";
+  table_config.required_filters.push_back(required_filter);
+
+  index::Index index(1);
+  storage::DocumentStore store;
+  loader::InitialLoader loader(connection, index, store, table_config);
+  auto load_result = loader.Load();
+  ASSERT_TRUE(load_result) << load_result.error().message();
+
+  EXPECT_EQ(store.Size(), 1);
+  EXPECT_TRUE(store.GetDocId("1").has_value());
+  EXPECT_FALSE(store.GetDocId("2").has_value());
   cleanup();
 }
 

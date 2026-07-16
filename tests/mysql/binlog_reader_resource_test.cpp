@@ -21,9 +21,11 @@
 #include "loader/initial_loader.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
+#include "mysql/gtid_encoder.h"
 #include "mysql_test_helpers.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
+#include "utils/fd_guard.h"
 
 namespace mygramdb::mysql {
 
@@ -41,19 +43,18 @@ class BinlogReaderResourceTest : public ::testing::Test {
     stats_ = std::make_unique<server::ServerStats>();
 
     // Setup MySQL connection config
-    config::MysqlConfig mysql_config;
-    mysql_config.host = std::getenv("MYSQL_HOST") ? std::getenv("MYSQL_HOST") : "127.0.0.1";
-    mysql_config.port = std::getenv("MYSQL_PORT") ? std::atoi(std::getenv("MYSQL_PORT")) : 3306;
-    mysql_config.user = std::getenv("MYSQL_USER") ? std::getenv("MYSQL_USER") : "root";
-    mysql_config.password = std::getenv("MYSQL_PASSWORD") ? std::getenv("MYSQL_PASSWORD") : "";
-    mysql_config.database = std::getenv("MYSQL_DATABASE") ? std::getenv("MYSQL_DATABASE") : "test";
+    mysql_config_.host = std::getenv("MYSQL_HOST") ? std::getenv("MYSQL_HOST") : "127.0.0.1";
+    mysql_config_.port = std::getenv("MYSQL_PORT") ? std::atoi(std::getenv("MYSQL_PORT")) : 3306;
+    mysql_config_.user = std::getenv("MYSQL_USER") ? std::getenv("MYSQL_USER") : "root";
+    mysql_config_.password = std::getenv("MYSQL_PASSWORD") ? std::getenv("MYSQL_PASSWORD") : "";
+    mysql_config_.database = std::getenv("MYSQL_DATABASE") ? std::getenv("MYSQL_DATABASE") : "test";
 
     Connection::Config conn_config;
-    conn_config.host = mysql_config.host;
-    conn_config.port = static_cast<uint16_t>(mysql_config.port);
-    conn_config.user = mysql_config.user;
-    conn_config.password = mysql_config.password;
-    conn_config.database = mysql_config.database;
+    conn_config.host = mysql_config_.host;
+    conn_config.port = static_cast<uint16_t>(mysql_config_.port);
+    conn_config.user = mysql_config_.user;
+    conn_config.password = mysql_config_.password;
+    conn_config.database = mysql_config_.database;
     conn_config.connect_timeout = 10;
     conn_config.read_timeout = 30;
     conn_config.write_timeout = 30;
@@ -61,7 +62,8 @@ class BinlogReaderResourceTest : public ::testing::Test {
     connection_ = std::make_unique<Connection>(conn_config);
 
     // Setup table config
-    table_config_.name = "test_table";
+    table_config_.database = mysql_config_.database;
+    table_config_.name = "articles";
     table_config_.primary_key = "id";
     table_config_.text_source.column = "content";
   }
@@ -79,6 +81,7 @@ class BinlogReaderResourceTest : public ::testing::Test {
   std::unique_ptr<index::Index> index_;
   std::unique_ptr<storage::DocumentStore> doc_store_;
   std::unique_ptr<server::ServerStats> stats_;
+  config::MysqlConfig mysql_config_;
   config::TableConfig table_config_;
   std::unique_ptr<BinlogReader> reader_;
 };
@@ -105,8 +108,11 @@ TEST_F(BinlogReaderResourceTest, MultipleStartStopCycles) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
   reader_config.server_id = 12345;  // Test server ID
+  auto executed_gtid = connection_->GetExecutedGTID();
+  ASSERT_TRUE(executed_gtid) << executed_gtid.error().message();
+  reader_config.start_gtid = *executed_gtid;
 
-  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, mysql_config_,
                                            reader_config, stats_.get());
 
   // Perform multiple Start/Stop cycles
@@ -152,8 +158,11 @@ TEST_F(BinlogReaderResourceTest, ConcurrentStartAttempts) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
   reader_config.server_id = 12345;  // Test server ID
+  auto executed_gtid = connection_->GetExecutedGTID();
+  ASSERT_TRUE(executed_gtid) << executed_gtid.error().message();
+  reader_config.start_gtid = *executed_gtid;
 
-  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, mysql_config_,
                                            reader_config, stats_.get());
 
   std::atomic<int> successful_starts{0};
@@ -205,10 +214,12 @@ TEST_F(BinlogReaderResourceTest, DestructorCleanup) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
   reader_config.server_id = 12345;  // Test server ID
+  auto executed_gtid = connection_->GetExecutedGTID();
+  ASSERT_TRUE(executed_gtid) << executed_gtid.error().message();
+  reader_config.start_gtid = *executed_gtid;
 
   {
-    BinlogReader reader(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{}, reader_config,
-                        stats_.get());
+    BinlogReader reader(*connection_, *index_, *doc_store_, table_config_, mysql_config_, reader_config, stats_.get());
 
     auto start_result = reader.Start();
     if (start_result) {
@@ -243,8 +254,11 @@ TEST_F(BinlogReaderResourceTest, QueueSizeManagement) {
   BinlogReader::Config reader_config;
   reader_config.queue_size = 10;    // Small queue to test backpressure
   reader_config.server_id = 12345;  // Test server ID
+  auto executed_gtid = connection_->GetExecutedGTID();
+  ASSERT_TRUE(executed_gtid) << executed_gtid.error().message();
+  reader_config.start_gtid = *executed_gtid;
 
-  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, mysql_config_,
                                            reader_config, stats_.get());
 
   auto start_result = reader_->Start();
@@ -283,7 +297,7 @@ TEST_F(BinlogReaderResourceTest, GTIDPersistence) {
   reader_config.queue_size = 100;
   reader_config.server_id = 12345;  // Test server ID
 
-  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, config::MysqlConfig{},
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, mysql_config_,
                                            reader_config, stats_.get());
 
   // Set initial GTID
@@ -548,15 +562,141 @@ TEST_F(BinlogReaderResourceTest, DdlSchemaValidationContinuesSafeChangesAndStops
       marker += table.size();
     }
     ASSERT_TRUE(writer.ExecuteUpdate(ddl)) << ddl;
+    const auto unsafe_gtid = writer.GetLatestGTID();
+    ASSERT_TRUE(unsafe_gtid) << unsafe_gtid.error().message();
     ASSERT_TRUE(wait_until([&] { return !reader_->IsRunning(); })) << ddl;
     EXPECT_TRUE(reader_->HasSchemaIncompatibleError()) << ddl;
     EXPECT_NE(reader_->GetLastError().find("SCHEMA_INCOMPATIBLE"), std::string::npos) << ddl;
-    EXPECT_EQ(reader_->GetCurrentGTID(), safe_gtid) << "unsafe DDL GTID advanced: " << ddl;
+    const std::string stopped_gtid = reader_->GetCurrentGTID();
+    const auto covers_safe = GtidEncoder::PositionCoversAuto(safe_gtid, stopped_gtid);
+    ASSERT_TRUE(covers_safe) << covers_safe.error().message();
+    EXPECT_TRUE(*covers_safe) << "reader stopped before the last safe GTID: " << ddl;
+    const auto covers_unsafe = GtidEncoder::PositionCoversAuto(*unsafe_gtid, stopped_gtid);
+    ASSERT_TRUE(covers_unsafe) << covers_unsafe.error().message();
+    EXPECT_FALSE(*covers_unsafe) << "unsafe DDL GTID advanced: " << ddl;
 
     reader_->Stop();
     reader_.reset();
     cleanup();
   }
+}
+
+TEST_F(BinlogReaderResourceTest, StatementBasedDmlStopsBeforePublishingItsGtid) {
+  auto connect_result = connection_->Connect("statement-dml-main");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+  const auto connection_config = mysql::testing::GetMySQLTestConfig();
+  Connection writer(connection_config);
+  ASSERT_TRUE(writer.Connect("statement-dml-writer"));
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_statement_guard_" + suffix;
+  auto cleanup = mygramdb::utils::ScopeGuard([&]() {
+    (void)writer.ExecuteUpdate("SET SESSION binlog_format = 'ROW'");
+    (void)writer.ExecuteUpdate("DROP TABLE IF EXISTS " + table);
+  });
+  ASSERT_TRUE(writer.ExecuteUpdate("CREATE TABLE " + table +
+                                   " (id BIGINT NOT NULL PRIMARY KEY, content TEXT NOT NULL) ENGINE=InnoDB"));
+
+  table_config_.name = table;
+  table_config_.database = connection_config.database;
+  table_config_.primary_key = "id";
+  table_config_.text_source.column = "content";
+  config::MysqlConfig mysql_config;
+  loader::InitialLoader loader(*connection_, *index_, *doc_store_, table_config_, mysql_config);
+  ASSERT_TRUE(loader.Load());
+
+  BinlogReader::Config reader_config;
+  reader_config.start_gtid = loader.GetStartGTID();
+  reader_config.queue_size = 100;
+  reader_config.reconnect_delay_ms = 50;
+  reader_config.server_id = 43301;
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, mysql_config,
+                                           reader_config, stats_.get());
+  auto start = reader_->Start();
+  ASSERT_TRUE(start) << start.error().message() << ": " << reader_->GetLastError();
+
+  ASSERT_TRUE(writer.ExecuteUpdate("SET SESSION binlog_format = 'STATEMENT'"));
+  ASSERT_TRUE(writer.ExecuteUpdate("INSERT INTO " + table + " VALUES (1, 'must not be skipped')"));
+  const auto statement_gtid = writer.GetLatestGTID();
+  ASSERT_TRUE(statement_gtid) << statement_gtid.error().message();
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (reader_->IsRunning() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  const bool stopped_on_statement = !reader_->IsRunning();
+  if (!stopped_on_statement) {
+    reader_->Stop();
+  }
+  ASSERT_TRUE(stopped_on_statement) << reader_->GetLastError();
+  EXPECT_NE(reader_->GetLastError().find("unrecognized QUERY_EVENT"), std::string::npos);
+  EXPECT_FALSE(doc_store_->GetDocId("1").has_value());
+  const auto covers_statement = GtidEncoder::PositionCoversAuto(*statement_gtid, reader_->GetCurrentGTID());
+  ASSERT_TRUE(covers_statement) << covers_statement.error().message();
+  EXPECT_FALSE(*covers_statement) << "statement DML GTID was published despite its row being unapplied";
+}
+
+TEST_F(BinlogReaderResourceTest, XaTransactionStopsBeforePublishingPreparedGtid) {
+  auto connect_result = connection_->Connect("xa-guard-main");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+  const auto connection_config = mysql::testing::GetMySQLTestConfig();
+  Connection writer(connection_config);
+  ASSERT_TRUE(writer.Connect("xa-guard-writer"));
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_xa_guard_" + suffix;
+  const std::string xid = "mygram_xa_" + suffix;
+  auto table_cleanup =
+      mygramdb::utils::ScopeGuard([&]() { (void)writer.ExecuteUpdate("DROP TABLE IF EXISTS " + table); });
+  ASSERT_TRUE(writer.ExecuteUpdate("CREATE TABLE " + table +
+                                   " (id BIGINT NOT NULL PRIMARY KEY, content TEXT NOT NULL) ENGINE=InnoDB"));
+
+  table_config_.name = table;
+  table_config_.database = connection_config.database;
+  table_config_.primary_key = "id";
+  table_config_.text_source.column = "content";
+  config::MysqlConfig mysql_config;
+  loader::InitialLoader loader(*connection_, *index_, *doc_store_, table_config_, mysql_config);
+  ASSERT_TRUE(loader.Load());
+
+  BinlogReader::Config reader_config;
+  reader_config.start_gtid = loader.GetStartGTID();
+  reader_config.queue_size = 100;
+  reader_config.reconnect_delay_ms = 50;
+  reader_config.server_id = 43302;
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, mysql_config,
+                                           reader_config, stats_.get());
+  auto start = reader_->Start();
+  ASSERT_TRUE(start) << start.error().message() << ": " << reader_->GetLastError();
+
+  bool xa_open = false;
+  auto xa_cleanup = mygramdb::utils::ScopeGuard([&]() {
+    if (xa_open) {
+      (void)writer.ExecuteUpdate("XA ROLLBACK '" + xid + "'");
+    }
+  });
+  ASSERT_TRUE(writer.ExecuteUpdate("XA START '" + xid + "'"));
+  xa_open = true;
+  ASSERT_TRUE(writer.ExecuteUpdate("INSERT INTO " + table + " VALUES (1, 'prepared but not committed')"));
+  ASSERT_TRUE(writer.ExecuteUpdate("XA END '" + xid + "'"));
+  ASSERT_TRUE(writer.ExecuteUpdate("XA PREPARE '" + xid + "'"));
+  const auto prepared_gtid = writer.GetLatestGTID();
+  ASSERT_TRUE(prepared_gtid) << prepared_gtid.error().message();
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (reader_->IsRunning() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_FALSE(reader_->IsRunning()) << reader_->GetLastError();
+  EXPECT_NE(reader_->GetLastError().find("XA"), std::string::npos);
+  EXPECT_FALSE(doc_store_->GetDocId("1").has_value());
+  const auto covers_prepared = GtidEncoder::PositionCoversAuto(*prepared_gtid, reader_->GetCurrentGTID());
+  ASSERT_TRUE(covers_prepared) << covers_prepared.error().message();
+  EXPECT_FALSE(*covers_prepared) << "prepared XA GTID was published before commit";
 }
 
 }  // namespace mygramdb::mysql

@@ -76,7 +76,7 @@ Application::Application(CommandLineArgs args, std::unique_ptr<ConfigurationMana
 
 Application::~Application() {
   if (started_) {
-    Stop();
+    (void)Stop();
   }
 }
 
@@ -179,7 +179,16 @@ int Application::Run() {
   RunMainLoop();
 
   // Graceful shutdown
-  Stop();
+  auto stop_result = Stop();
+  if (!stop_result) {
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", "shutdown_incomplete")
+        .Field("phase", "shutdown")
+        .Field("error", stop_result.error().to_string())
+        .Error();
+    return 1;
+  }
 
   mygram::utils::StructuredLog().Event("application_stopped").Info();
   return 0;
@@ -261,17 +270,21 @@ void Application::RunMainLoop() {
   mygram::utils::StructuredLog().Event("shutdown_requested").Debug();
 }
 
-void Application::Stop() {
+mygram::utils::Expected<void, mygram::utils::Error> Application::Stop() {
   if (!started_) {
-    return;  // Nothing to stop
+    return {};  // Nothing to stop
   }
 
   // Stop server orchestrator (stops all servers in reverse order)
   if (server_orchestrator_) {
-    server_orchestrator_->Stop();
+    auto stop_result = server_orchestrator_->Stop();
+    if (!stop_result) {
+      return mygram::utils::MakeUnexpected(stop_result.error());
+    }
   }
 
   started_ = false;
+  return {};
 }
 
 int Application::HandleSpecialModes() {

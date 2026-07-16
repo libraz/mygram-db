@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 #include "config/config.h"
 #include "index/index.h"
@@ -58,8 +59,9 @@ class InitialLoader {
   /**
    * @brief Load initial data from MySQL with consistent GTID
    *
-   * Uses START TRANSACTION WITH CONSISTENT SNAPSHOT to ensure
-   * data consistency and captures the GTID at snapshot time.
+   * Captures a conservative GTID lower bound, then uses
+   * START TRANSACTION WITH CONSISTENT SNAPSHOT for data consistency.
+   * Commits between those steps may be replayed, but are never skipped.
    *
    * @param progress_callback Optional progress callback
    * @return Expected<void, Error> on success or error
@@ -70,8 +72,8 @@ class InitialLoader {
   /**
    * @brief Load initial data using an already-open consistent snapshot.
    *
-   * The caller must have executed START TRANSACTION WITH CONSISTENT SNAPSHOT
-   * on the shared connection and captured snapshot_gtid inside that transaction.
+   * The caller must have captured snapshot_gtid before executing
+   * START TRANSACTION WITH CONSISTENT SNAPSHOT on the shared connection.
    * This method does not COMMIT on success; the caller owns the transaction.
    */
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromExistingSnapshot(
@@ -80,8 +82,9 @@ class InitialLoader {
   /**
    * @brief Get GTID captured at load time
    *
-   * This GTID represents the state of the database when the initial load
-   * was performed. Binlog replication should start from this GTID.
+   * This GTID is a safe lower bound captured before the snapshot.
+   * Binlog replication should start from this GTID; commits that raced with
+   * snapshot creation can be replayed but cannot be skipped.
    *
    * @return GTID string or empty if not available
    */
@@ -103,6 +106,11 @@ class InitialLoader {
    */
   bool IsCancelled() const { return cancelled_; }
 
+  /** Test seam between conservative GTID capture and snapshot creation. */
+  void SetAfterGtidCaptureHookForTest(std::function<void()> hook) {
+    after_gtid_capture_hook_for_test_ = std::move(hook);
+  }
+
  private:
   mysql::Connection& connection_;
   index::Index& index_;
@@ -114,6 +122,7 @@ class InitialLoader {
   std::atomic<uint64_t> processed_rows_{0};
   std::atomic<bool> cancelled_{false};
   std::string start_gtid_;  // GTID captured at load time
+  std::function<void()> after_gtid_capture_hook_for_test_;
 
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadInternal(
       const ProgressCallback& progress_callback, bool manage_transaction, const std::string* existing_snapshot_gtid);

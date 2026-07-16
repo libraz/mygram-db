@@ -139,11 +139,25 @@ TEST_F(MariaDBEventParserGTIDTest, WithFlags) {
   auto result = MariaDBEventParser::ExtractGTID(event.data(), event.size());
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result.value(), "1-2-100");
+  EXPECT_EQ(MariaDBEventParser::ExtractGTIDFlags(event.data(), event.size()), 0x01);
+}
+
+TEST_F(MariaDBEventParserGTIDTest, XaFlagsAreExposedBeforeRowEvents) {
+  auto prepared = BuildGTIDEvent(0, 1, 42, MariaDBEventParser::kPreparedXaFlag);
+  auto completed = BuildGTIDEvent(0, 1, 43, MariaDBEventParser::kCompletedXaFlag);
+
+  ASSERT_TRUE(MariaDBEventParser::ExtractGTIDFlags(prepared.data(), prepared.size()).has_value());
+  EXPECT_NE(*MariaDBEventParser::ExtractGTIDFlags(prepared.data(), prepared.size()) & MariaDBEventParser::kXaFlagMask,
+            0U);
+  ASSERT_TRUE(MariaDBEventParser::ExtractGTIDFlags(completed.data(), completed.size()).has_value());
+  EXPECT_NE(*MariaDBEventParser::ExtractGTIDFlags(completed.data(), completed.size()) & MariaDBEventParser::kXaFlagMask,
+            0U);
 }
 
 TEST_F(MariaDBEventParserGTIDTest, NullBuffer) {
   auto result = MariaDBEventParser::ExtractGTID(nullptr, 100);
   EXPECT_FALSE(result.has_value());
+  EXPECT_FALSE(MariaDBEventParser::ExtractGTIDFlags(nullptr, 100).has_value());
 }
 
 TEST_F(MariaDBEventParserGTIDTest, TooShort) {

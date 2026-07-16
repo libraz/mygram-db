@@ -9,6 +9,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "mysql/binlog_reader.h"
@@ -24,6 +25,8 @@ namespace mygramdb::mysql {
  */
 class BinlogEventParser {
  public:
+  enum class QueryTransactionBoundary : uint8_t { kNone, kBegin, kEnd, kUnsupportedXa };
+
   /**
    * @brief Parse binlog event buffer and create BinlogEvent(s)
    * @param buffer Raw binlog event data
@@ -77,6 +80,25 @@ class BinlogEventParser {
    * @return Query string if successfully extracted
    */
   static std::optional<std::string> ExtractQueryString(const unsigned char* buffer, unsigned long length);
+
+  /**
+   * @brief Classify QUERY_EVENT transaction boundaries.
+   *
+   * The reader uses this to distinguish a standalone statement (whose GTID
+   * completes at the QUERY_EVENT) from statements inside an explicit
+   * transaction (whose GTID completes at XID/COMMIT).
+   */
+  static QueryTransactionBoundary ClassifyQueryTransactionBoundary(std::string_view query);
+
+  /**
+   * @brief Whether an ignored standalone QUERY_EVENT is proven not to mutate table rows.
+   *
+   * Statement-based DML and unknown statements must never advance the applied
+   * GTID because the row materializer has not applied their effects. This is
+   * intentionally an allowlist of administrative statements and supported
+   * non-target table DDL emitted while the server remains in ROW mode.
+   */
+  static bool IsSafeIgnoredQuery(std::string_view query);
 
   /**
    * @brief Check if DDL affects target table

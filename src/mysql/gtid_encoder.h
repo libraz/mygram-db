@@ -63,6 +63,26 @@ class GtidEncoder {
    */
   static std::optional<std::string> MergeSingleGtidIntoSet(std::string_view current_gtid, std::string_view next_gtid);
 
+  /**
+   * @brief Check whether every transaction in required is present in available.
+   *
+   * This is a local, side-effect-free equivalent of MySQL GTID_SUBSET used by
+   * per-table replay fences where querying the server from the worker thread
+   * would be unsafe and unnecessarily expensive.
+   */
+  static mygram::utils::Expected<bool, mygram::utils::Error> PositionCovers(std::string_view required,
+                                                                            std::string_view available);
+
+  /**
+   * @brief Compare either MySQL or MariaDB GTID sets without guessing from punctuation.
+   *
+   * MariaDB multi-domain positions contain commas, so the single-GTID shape
+   * predicate is insufficient. This method first attempts complete MariaDB
+   * set parsing for both operands and otherwise applies strict MySQL parsing.
+   */
+  static mygram::utils::Expected<bool, mygram::utils::Error> PositionCoversAuto(std::string_view required,
+                                                                                std::string_view available);
+
  private:
   struct Interval {
     uint64_t start;
