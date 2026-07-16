@@ -45,6 +45,9 @@ testpaths = [
 ]
 markers = [
     "mysql: MySQL server configuration and connection tests",
+    "mysql9: Requires MySQL 9.x features",
+    "mysql_only: Not supported by MariaDB",
+    "mariadb_only: Requires MariaDB",
     "smoke: Basic connectivity and health checks",
     "replication: MySQL replication verification",
     "search: Search accuracy tests",
@@ -58,6 +61,7 @@ markers = [
     "load: Load and performance tests",
     "persistence: Dump/restore",
     "resilience: Fault recovery",
+    "failover: Requires the dedicated two-server failover fixture",
     "multi_table: Multiple table tests",
 ]
 timeout = 120

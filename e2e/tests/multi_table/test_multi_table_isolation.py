@@ -8,6 +8,7 @@ to validate actual document retrieval.
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
 import uuid
 
@@ -556,31 +557,23 @@ class TestMultiTableDDL:
                 ],
             )
 
-            # If replication doesn't recover in time, fall back to SYNC
-            try:
-                wait_until(
-                    lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
-                    timeout=30,
-                    interval=1,
-                    description=f"articles SEARCH to find {marker} via replication",
-                )
-            except Exception:
-                # Replication may not have recovered yet (known DDL issue)
-                # Verify via SYNC instead
-                mygramdb.sync("testdb.articles", timeout=60)
-                wait_until(
-                    lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
-                    timeout=30,
-                    interval=1,
-                    description=f"articles SEARCH to find {marker} via SYNC fallback",
-                )
+            wait_until(
+                lambda: mygramdb.search("testdb.articles", marker, limit=10)["total"] >= 1,
+                timeout=30,
+                interval=1,
+                description=f"articles SEARCH to find {marker} via replication",
+            )
         except Exception:
             _reseed_table(mysql, mygramdb, "articles", count=100)
             raise
 
     def test_sync_one_table_no_impact_on_other(self, mysql, mygramdb, seed_data):
-        """SYNC testdb.articles should not affect products SEARCH results."""
+        """Non-target INSERT/UPDATE/DELETE during SYNC must be replayed."""
         prod_marker = f"synciso_{uuid.uuid4().hex[:8]}"
+        delete_marker = f"syncdelete_{uuid.uuid4().hex[:8]}"
+        insert_marker = f"syncinsert_{uuid.uuid4().hex[:8]}"
+        updated_marker = f"syncupdated_{uuid.uuid4().hex[:8]}"
+        load_marker = f"syncload_{uuid.uuid4().hex[:8]}"
 
         mysql.insert_rows(
             "products",
@@ -591,7 +584,14 @@ class TestMultiTableDDL:
                     "status": 1,
                     "category": "tech",
                     "enabled": 1,
-                }
+                },
+                {
+                    "name": "Sync Delete Product",
+                    "description": f"Product {delete_marker} will be deleted during articles sync",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                },
             ],
         )
 
@@ -601,16 +601,97 @@ class TestMultiTableDDL:
             interval=0.5,
             description=f"products to find {prod_marker}",
         )
-
-        # Record products state before sync
-        before = mygramdb.search("testdb.products", prod_marker, limit=10)
-
-        # SYNC testdb.articles (full rebuild)
-        mygramdb.sync("testdb.articles", timeout=60)
-
-        # Products must be unchanged
-        after = mygramdb.search("testdb.products", prod_marker, limit=10)
-        assert after["total"] == before["total"], (
-            f"Products SEARCH changed after articles SYNC: "
-            f"before={before['total']}, after={after['total']}"
+        wait_until(
+            lambda: mygramdb.search("testdb.products", delete_marker, limit=10)["total"] >= 1,
+            timeout=20,
+            interval=0.5,
+            description=f"products to find {delete_marker}",
         )
+
+        # Make the target snapshot long enough to observe its active state.
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": f"SYNC load row {i}",
+                    "content": f"{load_marker} content {i}",
+                    "status": 1,
+                    "category": "sync-load",
+                    "enabled": 1,
+                }
+                for i in range(3000)
+            ],
+        )
+
+        sync_result: list[bool] = []
+        sync_error: list[BaseException] = []
+
+        def _run_sync() -> None:
+            try:
+                sync_result.append(mygramdb.sync("testdb.articles", timeout=120))
+            except BaseException as exc:  # surfaced in the main test thread
+                sync_error.append(exc)
+
+        sync_thread = threading.Thread(target=_run_sync, daemon=True)
+        sync_thread.start()
+        wait_until(
+            lambda: any(
+                state in (mygramdb._sync_status_line("testdb.articles") or "")
+                for state in ("STARTING", "IN_PROGRESS")
+            ),
+            timeout=20,
+            interval=0.02,
+            description="articles SYNC to enter an active state",
+        )
+
+        product_rows = mysql.execute(
+            "SELECT id, description FROM products WHERE description LIKE %s OR description LIKE %s",
+            (f"%{prod_marker}%", f"%{delete_marker}%"),
+        )
+        product_id = next(row["id"] for row in product_rows if prod_marker in row["description"])
+        delete_id = next(row["id"] for row in product_rows if delete_marker in row["description"])
+        mysql.update(
+            "products",
+            f"description = 'Product {updated_marker} updated during articles sync'",
+            f"id = {int(product_id)}",
+        )
+        mysql.delete("products", f"id = {int(delete_id)}")
+        mysql.insert_rows(
+            "products",
+            [
+                {
+                    "name": "Sync Insert Product",
+                    "description": f"Product {insert_marker} inserted during articles sync",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+
+        sync_thread.join(timeout=130)
+        assert not sync_thread.is_alive(), "SYNC did not complete"
+        assert not sync_error, f"SYNC raised: {sync_error}"
+        assert sync_result == [True]
+
+        wait_until(
+            lambda: mygramdb.search("testdb.products", insert_marker, limit=10)["total"] == 1,
+            timeout=30,
+            interval=0.25,
+            description="non-target INSERT during SYNC to be replayed",
+        )
+        wait_until(
+            lambda: mygramdb.search("testdb.products", updated_marker, limit=10)["total"] == 1,
+            timeout=30,
+            interval=0.25,
+            description="non-target UPDATE during SYNC to be replayed",
+        )
+        wait_until(
+            lambda: mygramdb.search("testdb.products", delete_marker, limit=10)["total"] == 0,
+            timeout=30,
+            interval=0.25,
+            description="non-target DELETE during SYNC to be replayed",
+        )
+        assert mygramdb.search("testdb.products", prod_marker, limit=10)["total"] == 0
+
+        mysql.execute("DELETE FROM articles WHERE content LIKE %s", (f"{load_marker}%",))

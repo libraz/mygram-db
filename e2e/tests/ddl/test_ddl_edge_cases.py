@@ -51,6 +51,16 @@ def _ensure_replication_running(mygramdb):
     return False
 
 
+def _replication_status_value(mygramdb, key):
+    """Read one field from the complete REPLICATION STATUS response."""
+    response = mygramdb.replication_status()
+    for line in response.splitlines():
+        line = line.removeprefix("OK ")
+        if line.startswith(f"{key}:"):
+            return line.split(":", 1)[1].strip()
+    raise AssertionError(f"{key} not found in REPLICATION STATUS:\n{response}")
+
+
 def _verify_replication_works(mysql, mygramdb, timeout=15):
     """Verify replication is actually processing events by inserting a test row."""
     marker = f"replcheck_{uuid.uuid4().hex[:8]}"
@@ -109,9 +119,8 @@ class TestDDLEdgeCases:
     """Test edge cases in DDL handling.
 
     Tests are ordered to run non-destructive tests first, then destructive ones.
-    Destructive DDL (DROP/RENAME) can permanently break replication due to a known
-    server bug where BinlogReader::Stop() deadlocks (binlog read_timeout=60s,
-    reader thread stuck in mysql_binlog_fetch).
+    Replication recovery failures are test failures; no stale known-bug skip is
+    allowed to hide a stopped reader.
     """
 
     def test_ddl_on_non_tracked_table(self, mysql, mygramdb, seed_data):
@@ -146,8 +155,9 @@ class TestDDLEdgeCases:
 
     def test_sequential_ddl_with_dml(self, mysql, mygramdb, seed_data):
         """Sequential DDL + DML operations should all be handled correctly."""
-        if not _ensure_replication_running(mygramdb):
-            pytest.skip("Replication is stuck in stopping state (known server bug)")
+        assert _ensure_replication_running(mygramdb), (
+            "Replication did not recover before sequential DDL"
+        )
 
         marker = f"seqddl_{uuid.uuid4().hex[:8]}"
 
@@ -209,20 +219,27 @@ class TestDDLEdgeCases:
                 pass
 
     def test_alter_text_source_column_type(self, mysql, mygramdb, seed_data):
-        """ALTER content column type should not break replication."""
-        if not _ensure_replication_running(mygramdb):
-            pytest.skip("Replication is stuck in stopping state (known server bug)")
+        """Configured text type changes must stop before advancing GTID."""
+        assert _ensure_replication_running(mygramdb), "Replication did not recover before ALTER"
+
+        before_gtid = _replication_status_value(mygramdb, "current_gtid")
+        marker = f"coltype_{uuid.uuid4().hex[:8]}"
 
         try:
             mysql.execute("ALTER TABLE articles MODIFY COLUMN content MEDIUMTEXT NOT NULL")
-            time.sleep(5)
+            wait_until(
+                lambda: _replication_status_value(mygramdb, "status") == "stopped",
+                timeout=20,
+                interval=0.2,
+                description="replication to fail closed on configured text type change",
+            )
 
-            assert mygramdb.ping(), "Server should be alive after ALTER column type"
+            assert mygramdb.ping(), "Server should remain live after incompatible ALTER"
+            assert not mygramdb.health_ready(), "Incompatible schema must make readiness fail"
+            assert _replication_status_value(mygramdb, "current_gtid") == before_gtid
 
-            # Replication may have reconnected after DDL
-            _ensure_replication_running(mygramdb)
-
-            marker = f"coltype_{uuid.uuid4().hex[:8]}"
+            # This row must not be silently acknowledged while replication is
+            # stopped. The explicit recovery SYNC in finally must load it.
             mysql.insert_rows(
                 "articles",
                 [
@@ -235,44 +252,41 @@ class TestDDLEdgeCases:
                     }
                 ],
             )
-
-            wait_until_gte(
-                lambda: mygramdb.count("testdb.articles", marker),
-                minimum=1,
-                timeout=30,
-                interval=0.5,
-                description="insert after column type change",
-            )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 mysql.execute("ALTER TABLE articles MODIFY COLUMN content TEXT NOT NULL")
-                time.sleep(2)
-            except Exception:
-                pass
+            mygramdb.sync("testdb.articles", timeout=60)
 
-    def test_drop_table_clears_index(self, mysql, mygramdb, seed_data):
-        """DROP TABLE should clear MygramDB index, then recover after recreation."""
+        wait_until_gte(
+            lambda: mygramdb.count("testdb.articles", marker),
+            minimum=1,
+            timeout=20,
+            interval=0.5,
+            description="explicit SYNC recovery after incompatible text type change",
+        )
+        assert mygramdb.health_ready()
+
+    def test_drop_table_fails_closed_and_preserves_live_index(self, mysql, mygramdb, seed_data):
+        """DROP must preserve live state and stop before advancing its GTID."""
         try:
-            info_before = mygramdb.info()
-            doc_count_before = info_before.get(
-                "total_documents", info_before.get("doc_count", info_before.get("documents", 0))
-            )
-            assert doc_count_before > 0, "Should have documents before DROP"
+            before_gtid = _replication_status_value(mygramdb, "current_gtid")
+            before_total = mygramdb.search("testdb.articles", "test", limit=1)["total"]
+            assert before_total > 0, "Should have searchable documents before DROP"
 
             mysql.execute("DROP TABLE articles")
-
-            def _articles_cleared() -> bool:
-                result = mygramdb.search("testdb.articles", "test", limit=1)
-                return result["total"] == 0
-
             wait_until(
-                _articles_cleared,
-                timeout=15,
-                interval=1,
-                description="DROP TABLE to clear articles index",
+                lambda: _replication_status_value(mygramdb, "status") == "stopped",
+                timeout=20,
+                interval=0.2,
+                description="replication to fail closed on configured table DROP",
             )
+            assert _replication_status_value(mygramdb, "current_gtid") == before_gtid
+            assert not mygramdb.health_ready()
+            assert mygramdb.search("testdb.articles", "test", limit=1)["total"] == before_total
         finally:
             _recreate_articles_table(mysql, mygramdb)
+
+        assert mygramdb.health_ready()
 
     def test_drop_table_server_survives(self, mysql, mygramdb, seed_data):
         """Server should survive DROP TABLE and remain functional."""

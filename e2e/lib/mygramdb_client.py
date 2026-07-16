@@ -249,7 +249,11 @@ class MygramdbClient:
         uses a multi-line read and isolates the line for the requested table.
         Returns None if the response could not be read.
         """
-        resp = self.tcp_command_multiline("SYNC STATUS", timeout=5.0, terminator=b"END\r\n")
+        # The response body ends with ``END\r\n`` and the reactor appends the
+        # protocol frame terminator, yielding ``END\r\n\r\n`` on the wire.
+        # Waiting for only the body suffix makes ``endswith`` miss the frame
+        # and turns every status read into a five-second socket timeout.
+        resp = self.tcp_command_multiline("SYNC STATUS", timeout=5.0, terminator=b"END\r\n\r\n")
         if resp is None:
             return None
         if table is None:
@@ -496,7 +500,7 @@ class MygramdbClient:
 
     def replication_status(self) -> str:
         """Send REPLICATION STATUS command and return response."""
-        resp = self.tcp_command("REPLICATION STATUS")
+        resp = self.tcp_command_multiline("REPLICATION STATUS", timeout=10.0, terminator=b"END\r\n")
         return resp or ""
 
     @staticmethod

@@ -26,7 +26,9 @@ MYGRAMDB_TCP_PORT = int(os.environ.get("MYGRAMDB_TCP_PORT", "11016"))
 MYGRAMDB_HTTP_PORT = int(os.environ.get("MYGRAMDB_HTTP_PORT", "20080"))
 
 PROJECT_ROOT = Path(__file__).parent.parent
-MYGRAMDB_BINARY = PROJECT_ROOT / "build" / "bin" / "mygramdb"
+MYGRAMDB_BINARY = Path(
+    os.environ.get("MYGRAMDB_BINARY", PROJECT_ROOT / "build" / "bin" / "mygramdb")
+)
 MYGRAMDB_CONFIG = Path(
     os.environ.get("MYGRAMDB_CONFIG", Path(__file__).parent / "docker" / "mygramdb-test.yaml")
 )
@@ -49,13 +51,18 @@ def db_flavor() -> str:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip tests marked mysql_only when running against MariaDB."""
-    if DB_FLAVOR != "mariadb":
-        return
-    skip_marker = pytest.mark.skip(reason="MySQL-only test (requires ngram FULLTEXT)")
+    """Apply environment-dependent skips for specialized database fixtures."""
+    skip_mysql_only = pytest.mark.skip(reason="MySQL-only test (requires ngram FULLTEXT)")
+    skip_mariadb_only = pytest.mark.skip(reason="MariaDB-only test")
+    skip_failover = pytest.mark.skip(reason="Failover test requires e2e/run-failover.sh")
+    failover_enabled = os.environ.get("ENABLE_FAILOVER_TESTS") == "1"
     for item in items:
-        if "mysql_only" in item.keywords:
-            item.add_marker(skip_marker)
+        if DB_FLAVOR == "mariadb" and "mysql_only" in item.keywords:
+            item.add_marker(skip_mysql_only)
+        if DB_FLAVOR != "mariadb" and "mariadb_only" in item.keywords:
+            item.add_marker(skip_mariadb_only)
+        if not failover_enabled and "failover" in item.keywords:
+            item.add_marker(skip_failover)
 
 
 @pytest.fixture(scope="session")

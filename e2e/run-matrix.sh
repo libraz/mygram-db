@@ -67,14 +67,20 @@ for target in "${TARGETS[@]}"; do
         export MARIADB_VERSION="$version"
         export DB_FLAVOR="mariadb"
         export MYSQL_VERSION="$version"
-        export MYSQL_PORT=13306
+        export MYSQL_PORT="${MARIADB_PORT:-13306}"
+        export MYGRAM_MYSQL_PORT="$MYSQL_PORT"
+        export MYGRAMDB_TCP_PORT=11017
+        export MYGRAMDB_HTTP_PORT=18081
         export MYGRAMDB_CONFIG="$SCRIPT_DIR/docker/mygramdb-test-mariadb.yaml"
         export MYGRAMDB_DUMP_DIR="$SCRIPT_DIR/results/dumps-mariadb"
     else
         compose_file="docker/docker-compose.yml"
         export MYSQL_VERSION="$version"
         export DB_FLAVOR="mysql"
-        export MYSQL_PORT=23306
+        export MYSQL_PORT="${MYSQL_HOST_PORT:-23306}"
+        export MYGRAM_MYSQL_PORT="$MYSQL_PORT"
+        export MYGRAMDB_TCP_PORT=11016
+        export MYGRAMDB_HTTP_PORT=20080
         export MYGRAMDB_CONFIG="$SCRIPT_DIR/docker/mygramdb-test.yaml"
         export MYGRAMDB_DUMP_DIR="$SCRIPT_DIR/results/dumps"
         unset MARIADB_VERSION 2>/dev/null || true
@@ -92,16 +98,17 @@ for target in "${TARGETS[@]}"; do
         echo "FAIL: Could not start $flavor $version"
         summary_lines+=("FAIL  $flavor $version  (container start failed)")
         ((overall_fail++))
+        docker compose -f "$compose_file" down -v 2>/dev/null || true
         continue
     fi
 
     # Run pytest
     echo "Running tests..."
     report_file="results/reports/${flavor}-${version}.xml"
-    python3 -m pytest tests/ \
+    python3 -m pytest \
         --tb=short -q \
         --junitxml="$report_file" \
-        "${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}" \
+        ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"} \
         2>&1
     rc=$?
 

@@ -35,6 +35,7 @@ cleanup() {
 trap cleanup EXIT
 
 export MYSQL_PORT=23306
+export ENABLE_FAILOVER_TESTS=1
 export MYGRAMDB_TCP_PORT=11018
 export MYGRAMDB_HTTP_PORT=20082
 export MYGRAMDB_CONFIG="$SCRIPT_DIR/docker/mygramdb-test-failover.yaml"

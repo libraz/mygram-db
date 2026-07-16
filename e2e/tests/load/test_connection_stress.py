@@ -17,9 +17,6 @@ from lib.raw_socket import (
     raw_tcp_slow_send,
 )
 
-MYGRAMDB_HOST = "127.0.0.1"
-MYGRAMDB_TCP_PORT = 11016
-
 
 @pytest.mark.load
 class TestConnectionStress:
@@ -34,7 +31,7 @@ class TestConnectionStress:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(10.0)
-                sock.connect((MYGRAMDB_HOST, MYGRAMDB_TCP_PORT))
+                sock.connect((mygramdb.host, mygramdb.tcp_port))
                 sock.sendall(b"INFO\r\n")
                 data = b""
                 while True:
@@ -67,7 +64,7 @@ class TestConnectionStress:
         errors = 0
         for _ in range(500):
             try:
-                raw_tcp_connect_disconnect(MYGRAMDB_HOST, MYGRAMDB_TCP_PORT)
+                raw_tcp_connect_disconnect(mygramdb.host, mygramdb.tcp_port)
             except Exception:
                 errors += 1
 
@@ -83,8 +80,8 @@ class TestConnectionStress:
         command = b"INFO\r\n"
         chunks = [bytes([b]) for b in command]
         resp = raw_tcp_slow_send(
-            MYGRAMDB_HOST,
-            MYGRAMDB_TCP_PORT,
+            mygramdb.host,
+            mygramdb.tcp_port,
             chunks,
             delay=0.3,
             timeout=15.0,
@@ -98,7 +95,7 @@ class TestConnectionStress:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(10.0)
         try:
-            sock.connect((MYGRAMDB_HOST, MYGRAMDB_TCP_PORT))
+            sock.connect((mygramdb.host, mygramdb.tcp_port))
             sock.sendall(b"INFO\r\n")
 
             # Read 1 byte at a time
@@ -129,7 +126,7 @@ class TestConnectionStress:
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(15.0)
-                sock.connect((MYGRAMDB_HOST, MYGRAMDB_TCP_PORT))
+                sock.connect((mygramdb.host, mygramdb.tcp_port))
 
                 commands_sent = 0
                 for _ in range(20):
@@ -177,7 +174,7 @@ class TestConnectionStress:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(10.0)
         try:
-            sock.connect((MYGRAMDB_HOST, MYGRAMDB_TCP_PORT))
+            sock.connect((mygramdb.host, mygramdb.tcp_port))
             sock.sendall(b"INFO\r\n")
             sock.shutdown(socket.SHUT_WR)
 

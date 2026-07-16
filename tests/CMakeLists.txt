@@ -1,6 +1,7 @@
 # Tests
 
 include(GoogleTest)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # Signal handler safety tests
 add_executable(signal_handler_test signal_handler_test.cpp)
