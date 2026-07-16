@@ -570,6 +570,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateQueryLe
 
 std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
   std::vector<std::string> tokens;
+  token_was_quoted_.clear();
   std::string token;
   char quote_char = '\0';  // '\0' = not in quotes, '"' or '\'' = in quotes
   bool escape_next = false;
@@ -617,6 +618,7 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
         // Start of quoted string - save any pending token first
         if (!token.empty()) {
           tokens.push_back(token);
+          token_was_quoted_.push_back(false);
           token.clear();
         }
         quote_char = character;
@@ -630,6 +632,7 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
       if (is_whitespace) {
         if (!token.empty()) {
           tokens.push_back(token);
+          token_was_quoted_.push_back(false);
           token.clear();
         }
         i += extra_bytes;  // Skip extra bytes of multi-byte space
@@ -642,6 +645,7 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
         // End of quoted string - always add token, even if empty
         // Empty quoted strings are significant (e.g., to detect errors)
         tokens.push_back(token);
+        token_was_quoted_.push_back(true);
         token.clear();
         quote_char = '\0';
         continue;
@@ -667,6 +671,7 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
   // Add final token if any
   if (!token.empty()) {
     tokens.push_back(token);
+    token_was_quoted_.push_back(false);
   }
 
   return tokens;

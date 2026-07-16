@@ -243,8 +243,9 @@ class Index {
   /**
    * @brief Replace postings with data from a validated loaded index.
    *
-   * Used by dump loading to commit pre-validated table data without
-   * deserializing again during the apply phase.
+   * Used by dump/SYNC loading to commit pre-validated table data without
+   * deserializing again during the apply phase. The previous live state is
+   * retained in @p loaded so a multi-component commit can be rolled back.
    */
   void ReplaceWithLoaded(Index& loaded);
 

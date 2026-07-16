@@ -2540,6 +2540,28 @@ TEST(QueryCacheTest, EraseWithoutCallbackSuppressesEvictionCallback) {
   EXPECT_FALSE(cache.Lookup(key_b).has_value());
 }
 
+TEST(QueryCacheTest, StaleEntryIdentityCannotInvalidateOrEraseReinsertedValue) {
+  QueryCache cache(1024 * 1024, 0.0);
+  const auto key = CacheKeyGenerator::Generate("generation_aba");
+
+  CacheMetadata first;
+  first.table = "posts";
+  first.entry_generation = 11;
+  ASSERT_TRUE(cache.Insert(key, {1}, first, 1.0));
+  const CacheEntryIdentity stale{key, first.entry_generation};
+  ASSERT_TRUE(cache.EraseWithoutCallback(stale));
+
+  CacheMetadata second = first;
+  second.entry_generation = 12;
+  ASSERT_TRUE(cache.Insert(key, {2}, second, 1.0));
+
+  EXPECT_FALSE(cache.MarkInvalidated(stale));
+  EXPECT_FALSE(cache.EraseWithoutCallback(stale));
+  const auto result = cache.Lookup(key);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, std::vector<DocId>({2}));
+}
+
 // =============================================================================
 // Step 3 (HIGH): H-M3 / H-M6 / H-M7 regression tests
 // =============================================================================

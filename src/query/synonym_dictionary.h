@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <shared_mutex>
 #include <string>
@@ -63,6 +64,7 @@ class SynonymDictionary {
   [[nodiscard]] bool IsEmpty() const;
   [[nodiscard]] size_t GroupCount() const;
   [[nodiscard]] size_t TermCount() const;
+  [[nodiscard]] uint64_t Revision() const { return revision_.load(std::memory_order_acquire); }
 
   /// Iterate every normalized term. Callback is called once per term while
   /// holding a shared lock. Used by callers (e.g., orchestrator) to validate
@@ -85,6 +87,7 @@ class SynonymDictionary {
   std::unordered_map<std::string, size_t> term_to_group_;
 
   mutable std::shared_mutex mutex_;
+  std::atomic<uint64_t> revision_{0};
 
   static constexpr size_t kMaxGroupSize = 20;  ///< Max synonyms per group
 };

@@ -22,7 +22,7 @@ namespace {
 // Bumping this prefix creates a new cache namespace. Query cache entries are
 // currently process-local, but keeping the version in the hashed material also
 // makes future persistence safe across serializer changes.
-constexpr std::array<char, 5> kSerializerPrefix = {'M', 'G', 'Q', 'K', '\x02'};
+constexpr std::array<char, 5> kSerializerPrefix = {'M', 'G', 'Q', 'K', '\x03'};
 
 enum class FieldTag : uint8_t {
   kCommand = 1,
@@ -32,6 +32,9 @@ enum class FieldTag : uint8_t {
   kNotTerm = 5,
   kFilter = 6,
   kFuzzyDistance = 7,
+  kExecutionMode = 8,
+  kVerificationPolicy = 9,
+  kSynonymRevision = 10,
 };
 
 enum class FilterFieldTag : uint8_t { kColumn = 1, kOperator = 2, kValue = 3 };
@@ -58,7 +61,8 @@ std::string OneByteValue(uint8_t value) {
 
 }  // namespace
 
-std::string QueryNormalizer::Normalize(const query::Query& query, const TextNormalizer& text_normalizer) {
+std::string QueryNormalizer::Normalize(const query::Query& query, const TextNormalizer& text_normalizer,
+                                       const CacheSemanticContext& semantic_context) {
   uint8_t command = 0;
   switch (query.type) {
     case query::QueryType::SEARCH:
@@ -78,7 +82,14 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const TextNorm
 
   AppendField(result, FieldTag::kCommand, OneByteValue(command));
   AppendField(result, FieldTag::kTable, query.table);
-  AppendField(result, FieldTag::kSearchText, NormalizeSearchText(query.search_text, text_normalizer));
+  AppendField(result, FieldTag::kExecutionMode, OneByteValue(static_cast<uint8_t>(semantic_context.execution_mode)));
+  AppendField(result, FieldTag::kVerificationPolicy, semantic_context.verification_policy);
+  std::string encoded_revision;
+  AppendUint64(encoded_revision, semantic_context.synonym_revision);
+  AppendField(result, FieldTag::kSynonymRevision, encoded_revision);
+  AppendField(result, FieldTag::kSearchText,
+              NormalizeSearchText(query.search_expression.empty() ? query.search_text : query.search_expression,
+                                  text_normalizer));
 
   std::vector<std::string> and_terms;
   and_terms.reserve(query.and_terms.size());

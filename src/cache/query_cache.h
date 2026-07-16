@@ -57,6 +57,7 @@ struct CacheStatisticsSnapshot {
   uint64_t current_entries = 0;
   uint64_t current_memory_bytes = 0;
   uint64_t invalidation_index_memory_bytes = 0;  ///< Memory used by InvalidationManager's tracking structures
+  uint64_t accounted_memory_bytes = 0;           ///< QueryCache containers + invalidation index (shared budget total)
   uint64_t evictions = 0;
   uint64_t ttl_expirations = 0;         ///< TTL-expired entries removed
   uint64_t decompression_failures = 0;  ///< Entries removed due to decompression failure
@@ -123,7 +124,7 @@ struct CacheStatisticsSnapshot {
  *   3 helper methods on snapshot (HitRate, AverageCacheHitLatency,
  *     AverageCacheMissLatency) and 1 accessor (TotalTimeSaved)
  */
-inline constexpr uint32_t kCacheStatsFieldVersion = 2;
+inline constexpr uint32_t kCacheStatsFieldVersion = 3;
 
 /**
  * @brief Internal cache statistics (thread-safe, non-copyable)
@@ -187,6 +188,7 @@ class QueryCache {
    * @param key The cache key being evicted
    */
   using EvictionCallback = std::function<void(const CacheKey&)>;
+  using IdentityEvictionCallback = std::function<void(const CacheEntryIdentity&)>;
 
   /**
    * @brief Callback type for batch eviction notifications
@@ -199,6 +201,7 @@ class QueryCache {
    * RefreshLRU). Per-key Erase still uses EvictionCallback.
    */
   using BatchEvictionCallback = std::function<void(const std::vector<CacheKey>&)>;
+  using BatchIdentityEvictionCallback = std::function<void(const std::vector<CacheEntryIdentity>&)>;
 
   /**
    * @brief Constructor
@@ -227,6 +230,8 @@ class QueryCache {
   struct LookupMetadata {
     double query_cost_ms = 0.0;                        ///< Original query execution time
     std::chrono::steady_clock::time_point created_at;  ///< When cache entry was created
+    uint64_t entry_generation = 0;
+    uint64_t data_version = 0;
   };
 
   /**
@@ -261,6 +266,7 @@ class QueryCache {
    * @return true if entry was found and marked
    */
   bool MarkInvalidated(const CacheKey& key);
+  bool MarkInvalidated(const CacheEntryIdentity& identity);
 
   /**
    * @brief Erase cache entry (Step 2: deferred)
@@ -268,6 +274,7 @@ class QueryCache {
    * @return true if entry was found and erased
    */
   bool Erase(const CacheKey& key);
+  bool Erase(const CacheEntryIdentity& identity);
 
   /**
    * @brief Erase cache entry without firing eviction_callback_
@@ -282,6 +289,7 @@ class QueryCache {
    * that the eviction callback would otherwise have performed.
    */
   bool EraseWithoutCallback(const CacheKey& key);
+  bool EraseWithoutCallback(const CacheEntryIdentity& identity);
 
   /**
    * @brief Clear all cache entries
@@ -346,6 +354,15 @@ class QueryCache {
    */
   [[nodiscard]] std::optional<CacheMetadata> GetMetadata(const CacheKey& key) const;
 
+  /** Estimate all QueryCache-owned entry and container memory. */
+  [[nodiscard]] size_t MemoryUsage() const;
+
+  /** Evict one least-recently-used entry and notify generation-aware observers. */
+  bool EvictLeastRecentlyUsed();
+
+  /** Record a CacheManager shared-budget rejection. */
+  void IncrementMemoryBudgetRejection() { stats_.rejection_oversize.fetch_add(1, std::memory_order_relaxed); }
+
   /**
    * @brief Increment invalidation batch counter
    *
@@ -358,6 +375,9 @@ class QueryCache {
    * @param callback Function to call when an entry is evicted via LRU
    */
   void SetEvictionCallback(EvictionCallback callback) { eviction_callback_ = std::move(callback); }
+  void SetIdentityEvictionCallback(IdentityEvictionCallback callback) {
+    identity_eviction_callback_ = std::move(callback);
+  }
 
   /**
    * @brief Set batch eviction callback (optional, for bulk-path optimization)
@@ -373,6 +393,9 @@ class QueryCache {
    * looping the per-key callback to preserve backward compatibility.
    */
   void SetBatchEvictionCallback(BatchEvictionCallback callback) { batch_eviction_callback_ = std::move(callback); }
+  void SetBatchIdentityEvictionCallback(BatchIdentityEvictionCallback callback) {
+    batch_identity_eviction_callback_ = std::move(callback);
+  }
 
   /**
    * @brief Set minimum query cost threshold for caching
@@ -449,17 +472,19 @@ class QueryCache {
 
   // Eviction callback (per-key, fired by Erase)
   EvictionCallback eviction_callback_;
+  IdentityEvictionCallback identity_eviction_callback_;
 
   // Optional batch eviction callback (fired by Clear/ClearTable/EvictForSpace/
   // RefreshLRU when set). Falls back to looping eviction_callback_ if unset.
   BatchEvictionCallback batch_eviction_callback_;
+  BatchIdentityEvictionCallback batch_identity_eviction_callback_;
 
   // Keys pending cleanup (collected by Lookup, processed by RefreshLRU)
   // Using unordered_set for deduplication (same key may expire on multiple Lookups)
   static constexpr size_t kMaxPendingKeys = 10000;  ///< Max pending keys per category
   mutable std::mutex expired_keys_mutex_;
-  std::unordered_set<CacheKey> pending_expired_keys_;        ///< TTL-expired keys
-  std::unordered_set<CacheKey> pending_decompression_keys_;  ///< Decompression-failed keys
+  std::unordered_set<CacheEntryIdentity> pending_expired_keys_;        ///< TTL-expired entry incarnations
+  std::unordered_set<CacheEntryIdentity> pending_decompression_keys_;  ///< Decompression-failed incarnations
 
   // Background LRU refresh worker. PeriodicWorker owns the previous
   // std::thread + std::condition_variable + atomic<bool> trio; the worker invokes
@@ -476,7 +501,7 @@ class QueryCache {
    * @return true if enough space was freed
    * @pre Caller must hold exclusive lock on mutex_
    */
-  bool EvictForSpace(size_t required_bytes, std::vector<CacheKey>* evicted_keys = nullptr);
+  bool EvictForSpace(size_t required_bytes, std::vector<CacheEntryIdentity>* evicted_entries = nullptr);
 
   /**
    * @brief Remove a single cache entry while holding exclusive lock
@@ -494,7 +519,7 @@ class QueryCache {
    *       callback themselves after releasing the lock.
    */
   void RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason,
-                         std::vector<CacheKey>* evicted_keys = nullptr);
+                         std::vector<CacheEntryIdentity>* evicted_entries = nullptr);
 
   /**
    * @brief Remove a key from the table reverse index while holding exclusive lock.
@@ -512,7 +537,7 @@ class QueryCache {
    *
    * @note Safe to call with an empty vector (no-op).
    */
-  void FireEvictionCallbacks(const std::vector<CacheKey>& keys);
+  void FireEvictionCallbacks(const std::vector<CacheEntryIdentity>& entries);
 
   /**
    * @brief Move key to front of LRU list (most recently used)
@@ -559,7 +584,7 @@ class QueryCache {
 // contains a std::mutex whose size is implementation-defined and would make
 // the assertion brittle.
 // ---------------------------------------------------------------------------
-inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 216;
+inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 224;
 static_assert(sizeof(CacheStatisticsSnapshot) == kExpectedCacheStatisticsSnapshotSize,
               "CacheStatisticsSnapshot layout changed: also update CacheStatistics, "
               "QueryCache::GetStatistics(), and bump kCacheStatsFieldVersion.");

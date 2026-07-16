@@ -152,9 +152,11 @@ class InvalidationQueue {
    */
   struct PendingKey {
     std::string table;
-    CacheKey key;
+    CacheEntryIdentity identity;
 
-    bool operator==(const PendingKey& other) const noexcept { return table == other.table && key == other.key; }
+    bool operator==(const PendingKey& other) const noexcept {
+      return table == other.table && identity == other.identity;
+    }
   };
 
   /**
@@ -170,7 +172,7 @@ class InvalidationQueue {
       constexpr unsigned int kShiftLeft = 6;
       constexpr unsigned int kShiftRight = 2;
       const std::uint64_t table_hash = std::hash<std::string>{}(pending.table);
-      const std::uint64_t key_hash = std::hash<CacheKey>{}(pending.key);
+      const std::uint64_t key_hash = std::hash<CacheEntryIdentity>{}(pending.identity);
       std::uint64_t combined = table_hash;
       combined ^= key_hash + kFibonacci + (combined << kShiftLeft) + (combined >> kShiftRight);
       return static_cast<size_t>(combined);

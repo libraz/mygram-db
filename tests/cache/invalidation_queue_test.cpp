@@ -1470,4 +1470,40 @@ TEST(InvalidationQueueTest, MultipleStopStartCyclesEachReenableEnqueue) {
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
 }
 
+TEST(InvalidationQueueTest, DeferredOldGenerationDoesNotEraseReinsertedEntry) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, CreateTestNgramConfigs(3, 2));
+  queue.SetBatchSize(1000);
+  queue.SetMaxDelay(60000);
+
+  const auto key = CacheKeyGenerator::Generate("queue_generation_aba");
+  CacheMetadata first;
+  first.table = "posts";
+  first.ngrams = {"gol"};
+  first.entry_generation = 31;
+  ASSERT_TRUE(cache.Insert(key, {1}, first, 1.0));
+  mgr.RegisterCacheEntry(key, first);
+
+  ASSERT_TRUE(queue.Start().has_value());
+  queue.Enqueue("posts", "", "gol");
+  ASSERT_EQ(queue.GetPendingCount(), 1U);
+
+  const CacheEntryIdentity old_identity{key, first.entry_generation};
+  ASSERT_TRUE(cache.EraseWithoutCallback(old_identity));
+  mgr.UnregisterCacheEntry(old_identity);
+
+  CacheMetadata second = first;
+  second.entry_generation = 32;
+  ASSERT_TRUE(cache.Insert(key, {2}, second, 1.0));
+  mgr.RegisterCacheEntry(key, second);
+
+  queue.Stop();
+
+  const auto result = cache.Lookup(key);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, std::vector<DocId>({2}));
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
+}
+
 }  // namespace mygramdb::cache

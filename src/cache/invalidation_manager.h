@@ -38,6 +38,7 @@ class QueryCache;
  * CacheMetadata duplication.
  */
 struct InvalidationMetadata {
+  uint64_t entry_generation = 0;
   std::string table;                  ///< Table name
   std::vector<std::string> ngrams;    ///< Ngrams (sorted) for reverse index cleanup
   int ngram_size = 0;                 ///< N-gram size used when entry was created
@@ -45,6 +46,7 @@ struct InvalidationMetadata {
   bool cross_boundary_ngrams = true;  ///< Cross-boundary setting used when entry was created
   bool has_filters = false;           ///< Whether the cached query used filter conditions
   bool has_not_terms = false;         ///< Whether the cached query used NOT terms
+  bool invalidate_on_any_text_change = false;
 };
 
 class InvalidationManager {
@@ -92,6 +94,10 @@ class InvalidationManager {
                                                          int kanji_ngram_size, bool cross_boundary_ngrams = true,
                                                          bool filter_columns_changed = false);
 
+  std::unordered_set<CacheEntryIdentity> InvalidateAffectedEntryIdentities(
+      const std::string& table_name, const std::string& old_text, const std::string& new_text, int ngram_size,
+      int kanji_ngram_size, bool cross_boundary_ngrams = true, bool filter_columns_changed = false);
+
   /**
    * @brief Unregister cache entry from invalidation tracking
    *
@@ -100,6 +106,7 @@ class InvalidationManager {
    * @param key Cache key to unregister
    */
   void UnregisterCacheEntry(const CacheKey& key);
+  void UnregisterCacheEntry(const CacheEntryIdentity& identity);
 
   /**
    * @brief Unregister a batch of cache entries under a single mutex acquisition.
@@ -116,6 +123,7 @@ class InvalidationManager {
    *             tolerated by the underlying find/erase calls).
    */
   void UnregisterCacheEntries(const std::vector<CacheKey>& keys);
+  void UnregisterCacheEntryIdentities(const std::vector<CacheEntryIdentity>& identities);
 
   /**
    * @brief Clear all invalidation tracking for a table
@@ -179,7 +187,7 @@ class InvalidationManager {
    * @param key Cache key to unregister
    * @note Assumes mutex_ is already held by caller
    */
-  void UnregisterCacheEntryUnlocked(const CacheKey& key);
+  void UnregisterCacheEntryUnlocked(const CacheKey& key, const uint64_t* expected_generation = nullptr);
 
   /**
    * @brief Extract ngrams from text

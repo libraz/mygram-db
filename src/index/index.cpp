@@ -598,7 +598,11 @@ void Index::ReplaceWithLoaded(Index& loaded) {
   std::unique_lock<std::shared_mutex> target_lock(postings_mutex_, std::defer_lock);
   std::unique_lock<std::shared_mutex> loaded_lock(loaded.postings_mutex_, std::defer_lock);
   std::lock(target_lock, loaded_lock);
-  term_postings_ = std::move(loaded.term_postings_);
+  // Swap rather than move-assign so callers can roll back a multi-component
+  // commit (Index + DocumentStore + replication restart) if a later step
+  // fails. The loaded object retains the previous live postings until the
+  // transaction is known to be durable.
+  term_postings_.swap(loaded.term_postings_);
   load_generation_.fetch_add(1, std::memory_order_acq_rel);
 }
 

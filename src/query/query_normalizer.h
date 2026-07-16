@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -12,6 +13,14 @@
 #include "query/query_parser.h"
 
 namespace mygramdb::cache {
+
+enum class CacheExecutionMode : uint8_t { kRegular = 0, kBooleanAst = 1, kFuzzy = 2, kSynonym = 3 };
+
+struct CacheSemanticContext {
+  CacheExecutionMode execution_mode = CacheExecutionMode::kRegular;
+  std::string verification_policy;
+  uint64_t synonym_revision = 0;
+};
 
 /**
  * @brief Normalize queries for cache key generation
@@ -46,7 +55,8 @@ class QueryNormalizer {
    * only as input to CacheKeyGenerator.
    * @return Versioned canonical query serialization
    */
-  static std::string Normalize(const query::Query& query, const TextNormalizer& text_normalizer = nullptr);
+  static std::string Normalize(const query::Query& query, const TextNormalizer& text_normalizer = nullptr,
+                               const CacheSemanticContext& semantic_context = {});
 
  private:
   /**

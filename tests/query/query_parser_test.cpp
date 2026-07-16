@@ -559,6 +559,30 @@ TEST(QueryParserTest, SearchUnknownKeyword) {
   EXPECT_EQ(query->search_text, "hello UNKNOWN keyword");
 }
 
+TEST(QueryParserTest, QuotedReservedWordsRemainLiteralSearchText) {
+  const std::vector<std::string> reserved = {"FILTER", "AND",       "NOT",   "SORT",  "LIMIT",
+                                             "OFFSET", "HIGHLIGHT", "FUZZY", "FACET", "ORDER"};
+  for (const auto& word : reserved) {
+    QueryParser parser;
+    auto parsed = parser.Parse("SEARCH articles \"" + word + "\"");
+    ASSERT_TRUE(parsed) << word << ": " << parsed.error().message();
+    EXPECT_EQ(parsed->search_text, word);
+    EXPECT_EQ(parsed->search_expression, "\"" + word + "\"");
+    EXPECT_TRUE(parsed->and_terms.empty());
+    EXPECT_TRUE(parsed->not_terms.empty());
+    EXPECT_TRUE(parsed->filters.empty());
+  }
+}
+
+TEST(QueryParserTest, QuotedBooleanWordDoesNotBecomeLegacyClause) {
+  QueryParser parser;
+  auto parsed = parser.Parse("SEARCH articles \"AND\" tutorial");
+  ASSERT_TRUE(parsed) << parsed.error().message();
+  EXPECT_EQ(parsed->search_text, "AND tutorial");
+  EXPECT_EQ(parsed->search_expression, "\"AND\" tutorial");
+  EXPECT_TRUE(parsed->and_terms.empty());
+}
+
 /**
  * @brief Test Japanese search text
  */
@@ -1516,20 +1540,17 @@ TEST(QueryParserTest, SearchNestedUnclosedParenthesis) {
 /**
  * @brief Test SEARCH with quoted string containing unbalanced parentheses
  *
- * Note: After tokenization, quotes are removed, so the tokenized result
- * contains an unbalanced parenthesis. This is detected as an error because
- * the parenthesis balance check happens after tokenization.
- *
- * Users should either balance parentheses even inside quotes, or use
- * different delimiters for such searches.
+ * Quote provenance must keep the parenthesis literal rather than feeding it
+ * into expression-balance validation.
  */
 TEST(QueryParserTest, SearchQuotedParentheses) {
   QueryParser parser;
   auto query = parser.Parse(R"(SEARCH threads "hello (world" LIMIT 10)");
 
-  // Unbalanced parenthesis detected after tokenization
-  EXPECT_FALSE(query);
-  EXPECT_NE(query.error().message().find("parenthesis"), std::string::npos);
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->search_text, "hello (world");
+  EXPECT_EQ(query->search_expression, "\"hello (world\"");
+  EXPECT_TRUE(query->limit_explicit);
 }
 
 /**

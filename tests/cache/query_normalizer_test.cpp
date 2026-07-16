@@ -904,4 +904,58 @@ TEST(QueryNormalizerTest, EquivalentProtocolQueriesShareOnlyCanonicalStructure) 
   EXPECT_NE(QueryNormalizer::Normalize(http_query), QueryNormalizer::Normalize(tcp_query));
 }
 
+TEST(QueryNormalizerTest, ExecutionModeSeparatesBooleanFromWidthNormalizedLiteral) {
+  query::Query ascii_boolean;
+  ascii_boolean.type = query::QueryType::SEARCH;
+  ascii_boolean.table = "posts";
+  ascii_boolean.search_text = "foo OR bar";
+  query::Query width_literal = ascii_boolean;
+  width_literal.search_text = "foo ＯＲ bar";
+
+  const QueryNormalizer::TextNormalizer colliding_normalizer = [](std::string_view) { return "foo or bar"; };
+  CacheSemanticContext boolean_context;
+  boolean_context.execution_mode = CacheExecutionMode::kBooleanAst;
+  CacheSemanticContext literal_context;
+  literal_context.execution_mode = CacheExecutionMode::kRegular;
+
+  EXPECT_NE(QueryNormalizer::Normalize(ascii_boolean, colliding_normalizer, boolean_context),
+            QueryNormalizer::Normalize(width_literal, colliding_normalizer, literal_context));
+}
+
+TEST(QueryNormalizerTest, SemanticExecutionModesUseDistinctNamespaces) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "posts";
+  query.search_text = "alpha";
+
+  std::vector<std::string> keys;
+  for (auto mode : {CacheExecutionMode::kRegular, CacheExecutionMode::kBooleanAst, CacheExecutionMode::kFuzzy,
+                    CacheExecutionMode::kSynonym}) {
+    CacheSemanticContext context;
+    context.execution_mode = mode;
+    keys.push_back(QueryNormalizer::Normalize(query, nullptr, context));
+  }
+  std::sort(keys.begin(), keys.end());
+  EXPECT_EQ(std::unique(keys.begin(), keys.end()), keys.end());
+}
+
+TEST(QueryNormalizerTest, VerificationPolicyAndSynonymRevisionAreKeyMaterial) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "posts";
+  query.search_text = "alpha";
+
+  CacheSemanticContext first;
+  first.execution_mode = CacheExecutionMode::kSynonym;
+  first.verification_policy = "off";
+  first.synonym_revision = 1;
+  auto second = first;
+  second.verification_policy = "all";
+  auto third = first;
+  third.synonym_revision = 2;
+
+  EXPECT_NE(QueryNormalizer::Normalize(query, nullptr, first), QueryNormalizer::Normalize(query, nullptr, second));
+  EXPECT_NE(QueryNormalizer::Normalize(query, nullptr, first), QueryNormalizer::Normalize(query, nullptr, third));
+}
+
 }  // namespace mygramdb::cache

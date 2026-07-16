@@ -28,6 +28,7 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
 
   // Store minimal invalidation metadata (table + ngrams + ngram settings)
   InvalidationMetadata inv_meta;
+  inv_meta.entry_generation = metadata.entry_generation;
   inv_meta.table = metadata.table;
   inv_meta.ngrams = metadata.ngrams;
   inv_meta.ngram_size = metadata.ngram_size;
@@ -35,6 +36,7 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
   inv_meta.cross_boundary_ngrams = metadata.cross_boundary_ngrams;
   inv_meta.has_filters = !metadata.filters.empty();
   inv_meta.has_not_terms = metadata.has_not_terms;
+  inv_meta.invalidate_on_any_text_change = metadata.invalidate_on_any_text_change;
   cache_metadata_[key] = std::move(inv_meta);
 
   const auto& stored_meta = cache_metadata_[key];
@@ -55,7 +57,7 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
   }
 }
 
-std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
+std::unordered_set<CacheEntryIdentity> InvalidationManager::InvalidateAffectedEntryIdentities(
     const std::string& table_name, const std::string& old_text, const std::string& new_text, int ngram_size,
     int kanji_ngram_size, bool cross_boundary_ngrams, bool filter_columns_changed) {
   // Extract ngrams from old and new text (both are sorted vectors)
@@ -68,15 +70,18 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
                                 std::back_inserter(changed_ngrams));
 
   // Find affected cache keys
-  std::unordered_set<CacheKey> affected_keys;
+  std::unordered_set<CacheEntryIdentity> affected_entries;
 
   {
     std::shared_lock lock(mutex_);
 
     auto table_it = ngram_to_cache_keys_.find(table_name);
-    if (table_it == ngram_to_cache_keys_.end()) {
-      return affected_keys;  // No entries for this table
-    }
+    auto add_affected = [&](const CacheKey& cache_key) {
+      auto meta_it = cache_metadata_.find(cache_key);
+      if (meta_it != cache_metadata_.end()) {
+        affected_entries.insert(CacheEntryIdentity{cache_key, meta_it->second.entry_generation});
+      }
+    };
 
     // Collect distinct historical ngram settings for this table that differ
     // from the current settings. Uses O(1) lookup via table_ngram_settings_ instead
@@ -109,11 +114,13 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
     }
 
     // For each changed ngram, collect affected cache keys
-    for (const auto& ngram : changed_ngrams) {
-      auto ngram_it = table_it->second.find(ngram);
-      if (ngram_it != table_it->second.end()) {
-        for (const auto& cache_key : ngram_it->second) {
-          affected_keys.insert(cache_key);
+    if (table_it != ngram_to_cache_keys_.end()) {
+      for (const auto& ngram : changed_ngrams) {
+        auto ngram_it = table_it->second.find(ngram);
+        if (ngram_it != table_it->second.end()) {
+          for (const auto& cache_key : ngram_it->second) {
+            add_affected(cache_key);
+          }
         }
       }
     }
@@ -132,7 +139,7 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
         for (const auto& cache_key : tk_it->second) {
           auto meta_it = cache_metadata_.find(cache_key);
           if (meta_it != cache_metadata_.end() && meta_it->second.has_filters) {
-            affected_keys.insert(cache_key);
+            add_affected(cache_key);
           }
         }
       }
@@ -143,8 +150,9 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
       if (tk_it != table_to_cache_keys_.end()) {
         for (const auto& cache_key : tk_it->second) {
           auto meta_it = cache_metadata_.find(cache_key);
-          if (meta_it != cache_metadata_.end() && meta_it->second.has_not_terms) {
-            affected_keys.insert(cache_key);
+          if (meta_it != cache_metadata_.end() &&
+              (meta_it->second.has_not_terms || meta_it->second.invalidate_on_any_text_change)) {
+            add_affected(cache_key);
           }
         }
       }
@@ -152,20 +160,37 @@ std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
   }
 
   // Step 1: Immediate invalidation (mark entries as invalidated)
-  for (const auto& key : affected_keys) {
+  for (const auto& identity : affected_entries) {
     if (cache_ != nullptr) {
-      cache_->MarkInvalidated(key);
+      cache_->MarkInvalidated(identity);
     }
   }
 
-  return affected_keys;
+  return affected_entries;
+}
+
+std::unordered_set<CacheKey> InvalidationManager::InvalidateAffectedEntries(
+    const std::string& table_name, const std::string& old_text, const std::string& new_text, int ngram_size,
+    int kanji_ngram_size, bool cross_boundary_ngrams, bool filter_columns_changed) {
+  const auto identities = InvalidateAffectedEntryIdentities(
+      table_name, old_text, new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams, filter_columns_changed);
+  std::unordered_set<CacheKey> keys;
+  keys.reserve(identities.size());
+  for (const auto& identity : identities) {
+    keys.insert(identity.key);
+  }
+  return keys;
 }
 
 // Internal helper: unregister cache entry without locking (assumes mutex is already held)
-void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key) {
+void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key, const uint64_t* expected_generation) {
   // Find metadata
   auto metadata_it = cache_metadata_.find(key);
   if (metadata_it == cache_metadata_.end()) {
+    return;
+  }
+
+  if (expected_generation != nullptr && metadata_it->second.entry_generation != *expected_generation) {
     return;
   }
 
@@ -227,6 +252,11 @@ void InvalidationManager::UnregisterCacheEntry(const CacheKey& key) {
   UnregisterCacheEntryUnlocked(key);
 }
 
+void InvalidationManager::UnregisterCacheEntry(const CacheEntryIdentity& identity) {
+  std::unique_lock lock(mutex_);
+  UnregisterCacheEntryUnlocked(identity.key, &identity.generation);
+}
+
 void InvalidationManager::UnregisterCacheEntries(const std::vector<CacheKey>& keys) {
   if (keys.empty()) {
     return;
@@ -236,6 +266,16 @@ void InvalidationManager::UnregisterCacheEntries(const std::vector<CacheKey>& ke
   std::unique_lock lock(mutex_);
   for (const auto& key : keys) {
     UnregisterCacheEntryUnlocked(key);
+  }
+}
+
+void InvalidationManager::UnregisterCacheEntryIdentities(const std::vector<CacheEntryIdentity>& identities) {
+  if (identities.empty()) {
+    return;
+  }
+  std::unique_lock lock(mutex_);
+  for (const auto& identity : identities) {
+    UnregisterCacheEntryUnlocked(identity.key, &identity.generation);
   }
 }
 

@@ -5,12 +5,15 @@
 
 #include "cache/cache_manager.h"
 
+#include <algorithm>
+
 #include "cache/cache_key.h"
 
 namespace mygramdb::cache {
 
 CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs)
     : enabled_(cache_config.enabled),
+      max_memory_bytes_(cache_config.max_memory_bytes),
       ttl_seconds_(cache_config.ttl_seconds),
       table_invalidation_strategy_(cache_config.invalidation_strategy == "table") {
   // Create the cache internals even when runtime enforcement starts disabled.
@@ -25,18 +28,18 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
   // is used by Erase(); bulk paths (Clear/ClearTable/EvictForSpace/RefreshLRU)
   // route through the batch callback below to amortize the
   // InvalidationManager::mutex_ acquisition.
-  query_cache_->SetEvictionCallback([this](const CacheKey& key) {
+  query_cache_->SetIdentityEvictionCallback([this](const CacheEntryIdentity& identity) {
     if (invalidation_mgr_) {
-      invalidation_mgr_->UnregisterCacheEntry(key);
+      invalidation_mgr_->UnregisterCacheEntry(identity);
     }
   });
 
   // Batch eviction callback: takes InvalidationManager::mutex_ exactly once
   // for the whole batch instead of once per key. Bound to the same
   // invalidation_mgr_ as the per-key callback.
-  query_cache_->SetBatchEvictionCallback([this](const std::vector<CacheKey>& keys) {
+  query_cache_->SetBatchIdentityEvictionCallback([this](const std::vector<CacheEntryIdentity>& entries) {
     if (invalidation_mgr_) {
-      invalidation_mgr_->UnregisterCacheEntries(keys);
+      invalidation_mgr_->UnregisterCacheEntryIdentities(entries);
     }
   });
 
@@ -104,13 +107,16 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
     return std::nullopt;
   }
 
-  // Lookup in cache with metadata
+  // InvalidationQueue marks affected identities synchronously before
+  // Invalidate() returns. TableContext::generation_mutex serializes the full
+  // binlog mutation + this immediate mark against request lookups, preserving
+  // precise invalidation without turning every table mutation into a full
+  // table-cache miss.
   QueryCache::LookupMetadata metadata;
   auto result = query_cache_->LookupWithMetadata(key.value(), metadata);
   if (!result.has_value()) {
     return std::nullopt;
   }
-
   // Package result with metadata
   CacheLookupResult lookup_result;
   lookup_result.results = std::move(result.value());
@@ -122,24 +128,24 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
 
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
                           const std::vector<std::string>& ngrams, double query_cost_ms, int ngram_size,
-                          int kanji_ngram_size, bool cross_boundary_ngrams) {
+                          int kanji_ngram_size, bool cross_boundary_ngrams, bool invalidate_on_any_text_change) {
   return InsertIfVersion(query, result, ngrams, query_cost_ms, CaptureDataVersion(query.table), ngram_size,
-                         kanji_ngram_size, cross_boundary_ngrams);
+                         kanji_ngram_size, cross_boundary_ngrams, invalidate_on_any_text_change);
 }
 
 uint64_t CacheManager::CaptureDataVersion(const std::string& table_name) const {
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
   auto it = table_data_versions_.find(table_name);
   if (it == table_data_versions_.end()) {
-    return 0;
+    return last_global_clear_version_;
   }
-  return it->second;
+  return std::max(last_global_clear_version_, it->second);
 }
 
 bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<DocId>& result,
                                    const std::vector<std::string>& ngrams, double query_cost_ms,
                                    uint64_t expected_data_version, int ngram_size, int kanji_ngram_size,
-                                   bool cross_boundary_ngrams) {
+                                   bool cross_boundary_ngrams, bool invalidate_on_any_text_change) {
   if (!enabled_ || !query_cache_ || !invalidation_mgr_) {
     return false;
   }
@@ -174,6 +180,7 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   metadata.kanji_ngram_size = kanji_ngram_size;
   metadata.cross_boundary_ngrams = cross_boundary_ngrams;
   metadata.has_not_terms = !query.not_terms.empty();
+  metadata.invalidate_on_any_text_change = invalidate_on_any_text_change;
   metadata.access_count = 0;
 
   // Serialize Insert with Clear/ClearTable so that we never end up with a key
@@ -184,17 +191,36 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
     return false;
   }
   const auto table_version_it = table_data_versions_.find(query.table);
-  const uint64_t current_table_version = table_version_it == table_data_versions_.end() ? 0 : table_version_it->second;
+  const uint64_t current_table_version = table_data_versions_.end() == table_version_it
+                                             ? last_global_clear_version_
+                                             : std::max(last_global_clear_version_, table_version_it->second);
   if (current_table_version != expected_data_version) {
     return false;
   }
+  metadata.data_version = expected_data_version;
+  metadata.entry_generation = next_entry_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
 
   // Insert into cache
   const bool inserted = query_cache_->Insert(key, result, metadata, query_cost_ms);
+  if (inserted && after_query_cache_insert_hook_for_test_) {
+    after_query_cache_insert_hook_for_test_();
+  }
 
   // Register with invalidation manager
   if (inserted) {
     invalidation_mgr_->RegisterCacheEntry(key, metadata);
+    while (query_cache_->MemoryUsage() + invalidation_mgr_->MemoryUsage() > max_memory_bytes_) {
+      if (!query_cache_->EvictLeastRecentlyUsed()) {
+        query_cache_->IncrementMemoryBudgetRejection();
+        return false;
+      }
+    }
+
+    const auto surviving_metadata = query_cache_->GetMetadata(key);
+    if (!surviving_metadata.has_value() || surviving_metadata->entry_generation != metadata.entry_generation) {
+      query_cache_->IncrementMemoryBudgetRejection();
+      return false;
+    }
   }
 
   return inserted;
@@ -215,10 +241,9 @@ void CacheManager::Invalidate(const std::string& table_name, const std::string& 
     return;
   }
 
-  data_version_.fetch_add(1, std::memory_order_acq_rel);
   {
     std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
-    ++table_data_versions_[table_name];
+    table_data_versions_[table_name] = data_version_.fetch_add(1, std::memory_order_acq_rel) + 1;
   }
 
   // Enqueue for asynchronous invalidation
@@ -234,7 +259,7 @@ void CacheManager::Clear() {
   // between query_cache_->Clear() and invalidation_mgr_->Clear() that would
   // leave behind phantom metadata. See serialize_mutex_ doc in cache_manager.h.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
-  data_version_.fetch_add(1, std::memory_order_acq_rel);
+  last_global_clear_version_ = data_version_.fetch_add(1, std::memory_order_acq_rel) + 1;
   table_data_versions_.clear();
 
   if (query_cache_) {
@@ -260,8 +285,7 @@ void CacheManager::ClearTable(const std::string& table_name) {
   // Serialize with Insert; same rationale as Clear(). See serialize_mutex_
   // doc in cache_manager.h.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
-  data_version_.fetch_add(1, std::memory_order_acq_rel);
-  ++table_data_versions_[table_name];
+  table_data_versions_[table_name] = data_version_.fetch_add(1, std::memory_order_acq_rel) + 1;
 
   if (query_cache_) {
     query_cache_->ClearTable(table_name);
@@ -281,6 +305,9 @@ CacheStatisticsSnapshot CacheManager::GetStatistics() const {
   // Add InvalidationManager memory usage
   if (invalidation_mgr_) {
     snapshot.invalidation_index_memory_bytes = invalidation_mgr_->MemoryUsage();
+  }
+  if (query_cache_) {
+    snapshot.accounted_memory_bytes = query_cache_->MemoryUsage() + snapshot.invalidation_index_memory_bytes;
   }
 
   return snapshot;
@@ -343,7 +370,7 @@ void CacheManager::Disable() {
   // re-checks enabled_ after acquiring the same mutex, so a caller that was
   // queued behind this Clear exits without adding post-disable metadata.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
-  data_version_.fetch_add(1, std::memory_order_acq_rel);
+  last_global_clear_version_ = data_version_.fetch_add(1, std::memory_order_acq_rel) + 1;
   table_data_versions_.clear();
   if (query_cache_) {
     query_cache_->Clear();

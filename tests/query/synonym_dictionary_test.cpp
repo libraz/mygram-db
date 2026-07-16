@@ -108,6 +108,20 @@ TEST_F(SynonymDictionaryTest, LoadFromFileBasic) {
   EXPECT_EQ(dict.TermCount(), 3);
 }
 
+TEST_F(SynonymDictionaryTest, FailedStreamLoadPreservesPublishedDictionaryAndRevision) {
+  SynonymDictionary dict;
+  const auto path = CreateTempTSV("fast\tquick\n");
+  ASSERT_TRUE(dict.LoadFromFile(path, IdentityNormalizer));
+  const uint64_t revision = dict.Revision();
+
+  std::string truncated(1, '\0');
+  std::istringstream input(truncated);
+  EXPECT_FALSE(dict.LoadFromStream(input));
+  EXPECT_EQ(dict.Revision(), revision);
+  const auto expanded = dict.Expand("fast");
+  EXPECT_NE(std::find(expanded.begin(), expanded.end(), "quick"), expanded.end());
+}
+
 TEST_F(SynonymDictionaryTest, ExpandReturnsGroup) {
   auto path = CreateTempTSV("nyc\tnew york city\n");
   SynonymDictionary dict;

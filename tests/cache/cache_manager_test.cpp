@@ -8,14 +8,67 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <future>
 #include <iostream>
+#include <optional>
 #include <thread>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#elif defined(__linux__)
+#include <unistd.h>
+
+#include <fstream>
+#endif
 
 #include "cache/cache_types.h"
 #include "config/config.h"
 #include "query/query_parser.h"
+#include "support/deterministic_gate.h"
 
 namespace mygramdb::cache {
+
+namespace {
+
+constexpr bool IsAddressSanitizerBuild() {
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+  return true;
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+std::optional<size_t> CurrentResidentBytes() {
+#if defined(__APPLE__)
+  mach_task_basic_info_data_t info{};
+  mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) {
+    return std::nullopt;
+  }
+  return static_cast<size_t>(info.resident_size);
+#elif defined(__linux__)
+  std::ifstream statm("/proc/self/statm");
+  size_t total_pages = 0;
+  size_t resident_pages = 0;
+  if (!(statm >> total_pages >> resident_pages)) {
+    return std::nullopt;
+  }
+  const long page_size = ::sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    return std::nullopt;
+  }
+  return resident_pages * static_cast<size_t>(page_size);
+#else
+  return std::nullopt;
+#endif
+}
+
+}  // namespace
 
 /**
  * @brief Helper to create NgramConfigMap for testing
@@ -125,6 +178,20 @@ TEST(CacheManagerTest, InsertIfVersionAllowsUnrelatedTableInvalidation) {
   auto cached = mgr.Lookup(query);
   ASSERT_TRUE(cached.has_value());
   EXPECT_EQ(result, cached.value());
+}
+
+TEST(CacheManagerTest, EmptyGlobalClearRejectsPreviouslyCapturedTableVersion) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  auto query = CreateQuery("posts", "golang");
+  const uint64_t before_clear = mgr.CaptureDataVersion("posts");
+  mgr.Clear();  // Empty clear must still advance the table-visible generation.
+
+  EXPECT_GT(mgr.CaptureDataVersion("posts"), before_clear);
+  EXPECT_FALSE(mgr.InsertIfVersion(query, {1, 2, 3}, {"gol", "ola"}, 15.0, before_clear, 3, 2, true));
 }
 
 /**
@@ -779,6 +846,34 @@ TEST(CacheManagerTest, ClearDoesNotLeavePhantomInvalidationMetadata) {
       << stats.current_entries << " entries";
 }
 
+TEST(CacheManagerTest, ClearWaitsForAtomicInsertRegistrationBoundary) {
+  constexpr int kRaceRepetitions = 100;
+  for (int repetition = 0; repetition < kRaceRepetitions; ++repetition) {
+    config::CacheConfig config;
+    config.enabled = true;
+    config.max_memory_bytes = 1024 * 1024;
+    config.min_query_cost_ms = 0.0;
+    CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+    mygramdb::testing::DeterministicGate insert_gate;
+    mgr.SetAfterQueryCacheInsertHookForTest([&]() { insert_gate.ArriveAndWait(); });
+
+    const auto query = CreateQuery("posts", "deterministic_clear_insert_" + std::to_string(repetition));
+    auto insert = std::async(std::launch::async, [&]() { return mgr.Insert(query, {1}, {"det"}, 1.0); });
+    ASSERT_TRUE(insert_gate.WaitUntilArrived(std::chrono::seconds(2))) << repetition;
+
+    auto clear = std::async(std::launch::async, [&]() { mgr.Clear(); });
+    EXPECT_EQ(clear.wait_for(std::chrono::milliseconds(1)), std::future_status::timeout) << repetition;
+    insert_gate.Release();
+    ASSERT_TRUE(insert.get()) << repetition;
+    ASSERT_EQ(clear.wait_for(std::chrono::seconds(2)), std::future_status::ready) << repetition;
+    clear.get();
+
+    EXPECT_FALSE(mgr.Lookup(query).has_value()) << repetition;
+    EXPECT_EQ(mgr.GetStatistics().current_entries, 0U) << repetition;
+    EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U) << repetition;
+  }
+}
+
 /**
  * @brief Test CacheManager destructor safety with small cache triggering evictions
  *
@@ -1035,6 +1130,42 @@ TEST(CacheManagerTest, DisableEnableCycleInvalidationStillWorks) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     EXPECT_FALSE(mgr.Lookup(query).has_value()) << "cycle " << cycle << " Invalidate dropped";
+  }
+}
+
+TEST(CacheManagerTest, SharedMemoryBudgetIncludesInvalidationAndContainerOverhead) {
+  const auto rss_before = CurrentResidentBytes();
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 64 * 1024;
+  config.min_query_cost_ms = 0.0;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  for (int i = 0; i < 500; ++i) {
+    auto query = CreateQuery("posts", "memory_budget_" + std::to_string(i));
+    std::vector<std::string> ngrams;
+    ngrams.reserve(64);
+    for (int n = 0; n < 64; ++n) {
+      ngrams.push_back("ngram_" + std::to_string(i) + "_" + std::to_string(n));
+    }
+    ASSERT_TRUE(mgr.Insert(query, {static_cast<DocId>(i)}, ngrams, 1.0, 3, 2, true));
+    const auto stats = mgr.GetStatistics();
+    EXPECT_LE(stats.accounted_memory_bytes, stats.max_memory_bytes)
+        << "shared cache budget exceeded after insertion " << i;
+  }
+
+  const auto final_stats = mgr.GetStatistics();
+  EXPECT_GT(final_stats.evictions, 0U);
+  EXPECT_LT(final_stats.current_entries, 500U);
+  const auto rss_after = CurrentResidentBytes();
+  // ASan's allocator quarantine and shadow-memory commits dominate process
+  // RSS at this scale. The shared accounted budget remains asserted above;
+  // compare physical RSS only in a production-style allocator build.
+  if (!IsAddressSanitizerBuild() && rss_before.has_value() && rss_after.has_value()) {
+    constexpr size_t kAllocatorAndMeasurementTolerance = 8 * 1024 * 1024;
+    const size_t rss_growth = *rss_after > *rss_before ? *rss_after - *rss_before : 0;
+    EXPECT_LE(rss_growth, config.max_memory_bytes + kAllocatorAndMeasurementTolerance)
+        << "cache RSS growth exceeded the shared budget plus allocator tolerance";
   }
 }
 

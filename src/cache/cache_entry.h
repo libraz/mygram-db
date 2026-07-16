@@ -46,6 +46,8 @@ constexpr size_t kSharedPtrControlBlockOverhead = 24;
  */
 struct CacheMetadata {
   CacheKey key;                                         ///< Cache key (MD5 hash)
+  uint64_t entry_generation = 0;                        ///< Concrete incarnation of this logical cache key
+  uint64_t data_version = 0;                            ///< Table generation used to compute this result
   std::string table;                                    ///< Table name
   std::vector<std::string> ngrams;                      ///< All ngrams used in this query (sorted)
   std::vector<query::FilterCondition> filters;          ///< Filter conditions (for future optimization)
@@ -53,6 +55,7 @@ struct CacheMetadata {
   int kanji_ngram_size = 0;                             ///< Kanji N-gram size used for this query's ngrams
   bool cross_boundary_ngrams = true;                    ///< Cross-boundary setting used for this query's ngrams
   bool has_not_terms = false;                           ///< Query has NOT terms requiring broad text invalidation
+  bool invalidate_on_any_text_change = false;           ///< Result depends on exact/fuzzy/substring text semantics
   std::chrono::steady_clock::time_point created_at;     ///< Creation time
   std::chrono::steady_clock::time_point last_accessed;  ///< Last access time
   std::atomic<uint32_t> access_count{0};                ///< Number of times accessed (atomic for lock-free update)
@@ -67,6 +70,8 @@ struct CacheMetadata {
   // Copy constructor (atomics must be loaded/stored explicitly)
   CacheMetadata(const CacheMetadata& other)
       : key(other.key),
+        entry_generation(other.entry_generation),
+        data_version(other.data_version),
         table(other.table),
         ngrams(other.ngrams),
         filters(other.filters),
@@ -74,6 +79,7 @@ struct CacheMetadata {
         kanji_ngram_size(other.kanji_ngram_size),
         cross_boundary_ngrams(other.cross_boundary_ngrams),
         has_not_terms(other.has_not_terms),
+        invalidate_on_any_text_change(other.invalidate_on_any_text_change),
         created_at(other.created_at),
         last_accessed(other.last_accessed),
         access_count(other.access_count.load()),
@@ -82,6 +88,8 @@ struct CacheMetadata {
   // Move constructor
   CacheMetadata(CacheMetadata&& other) noexcept
       : key(other.key),
+        entry_generation(other.entry_generation),
+        data_version(other.data_version),
         table(std::move(other.table)),
         ngrams(std::move(other.ngrams)),
         filters(std::move(other.filters)),
@@ -89,6 +97,7 @@ struct CacheMetadata {
         kanji_ngram_size(other.kanji_ngram_size),
         cross_boundary_ngrams(other.cross_boundary_ngrams),
         has_not_terms(other.has_not_terms),
+        invalidate_on_any_text_change(other.invalidate_on_any_text_change),
         created_at(other.created_at),
         last_accessed(other.last_accessed),
         access_count(other.access_count.load()),
@@ -98,6 +107,8 @@ struct CacheMetadata {
   CacheMetadata& operator=(const CacheMetadata& other) {
     if (this != &other) {
       key = other.key;
+      entry_generation = other.entry_generation;
+      data_version = other.data_version;
       table = other.table;
       ngrams = other.ngrams;
       filters = other.filters;
@@ -105,6 +116,7 @@ struct CacheMetadata {
       kanji_ngram_size = other.kanji_ngram_size;
       cross_boundary_ngrams = other.cross_boundary_ngrams;
       has_not_terms = other.has_not_terms;
+      invalidate_on_any_text_change = other.invalidate_on_any_text_change;
       created_at = other.created_at;
       last_accessed = other.last_accessed;
       access_count.store(other.access_count.load());
@@ -117,6 +129,8 @@ struct CacheMetadata {
   CacheMetadata& operator=(CacheMetadata&& other) noexcept {
     if (this != &other) {
       key = other.key;
+      entry_generation = other.entry_generation;
+      data_version = other.data_version;
       table = std::move(other.table);
       ngrams = std::move(other.ngrams);
       filters = std::move(other.filters);
@@ -124,6 +138,7 @@ struct CacheMetadata {
       kanji_ngram_size = other.kanji_ngram_size;
       cross_boundary_ngrams = other.cross_boundary_ngrams;
       has_not_terms = other.has_not_terms;
+      invalidate_on_any_text_change = other.invalidate_on_any_text_change;
       created_at = other.created_at;
       last_accessed = other.last_accessed;
       access_count.store(other.access_count.load());

@@ -60,6 +60,20 @@ struct CacheKey {
 };
 
 /**
+ * @brief Identity of one concrete cache-entry incarnation.
+ *
+ * CacheKey identifies the logical query, while generation distinguishes a
+ * later re-insert of that same query. Deferred TTL/invalidation work must use
+ * the full identity so stale cleanup cannot erase the newer incarnation.
+ */
+struct CacheEntryIdentity {
+  CacheKey key;
+  uint64_t generation = 0;
+
+  bool operator==(const CacheEntryIdentity& other) const { return key == other.key && generation == other.generation; }
+};
+
+/**
  * @brief Generate cache key from normalized query string
  */
 class CacheKeyGenerator {
@@ -90,6 +104,18 @@ struct hash<mygramdb::cache::CacheKey> {
     constexpr unsigned int kShiftRight = 2;
     std::uint64_t combined = key.hash_high;
     combined ^= key.hash_low + kFibonacci + (combined << kShiftLeft) + (combined >> kShiftRight);
+    return static_cast<size_t>(combined);
+  }
+};
+
+template <>
+struct hash<mygramdb::cache::CacheEntryIdentity> {
+  size_t operator()(const mygramdb::cache::CacheEntryIdentity& identity) const noexcept {
+    constexpr std::uint64_t kFibonacci = 0x9E3779B97F4A7C15ULL;
+    constexpr unsigned int kShiftLeft = 6;
+    constexpr unsigned int kShiftRight = 2;
+    std::uint64_t combined = std::hash<mygramdb::cache::CacheKey>{}(identity.key);
+    combined ^= identity.generation + kFibonacci + (combined << kShiftLeft) + (combined >> kShiftRight);
     return static_cast<size_t>(combined);
   }
 };

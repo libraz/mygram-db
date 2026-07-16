@@ -127,6 +127,8 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
     return record_miss();
   }
 
+  const CacheEntryIdentity entry_identity{key, iter->second.first.metadata.entry_generation};
+
   // Check TTL expiration (if TTL is enabled)
   int current_ttl = ttl_seconds_.load(std::memory_order_relaxed);
   if (current_ttl > 0) {
@@ -138,7 +140,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
         if (pending_expired_keys_.size() < kMaxPendingKeys) {
-          pending_expired_keys_.insert(key);
+          pending_expired_keys_.insert(entry_identity);
         }
       }
 
@@ -159,6 +161,8 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
   if (metadata != nullptr) {
     metadata->query_cost_ms = query_cost_ms;
     metadata->created_at = entry.metadata.created_at;
+    metadata->entry_generation = entry.metadata.entry_generation;
+    metadata->data_version = entry.metadata.data_version;
   }
 
   // Lock-free access tracking (no lock upgrade needed)
@@ -188,7 +192,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
         if (pending_decompression_keys_.size() < kMaxPendingKeys) {
-          first_detection = pending_decompression_keys_.insert(key).second;
+          first_detection = pending_decompression_keys_.insert(entry_identity).second;
         }
         // If kMaxPendingKeys cap reached and the key is not already pending,
         // first_detection stays false and we skip the counter increment to
@@ -290,7 +294,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
   // Collect keys evicted to make room; eviction_callback_ must fire after we
   // release mutex_ to avoid lock-order inversion with InvalidationManager
   //.
-  std::vector<CacheKey> evicted_keys;
+  std::vector<CacheEntryIdentity> evicted_entries;
 
   {
     // Exclusive lock for write
@@ -304,12 +308,12 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
 
     // Evict entries if needed
     if (total_memory_bytes_ + entry_memory > max_memory_bytes_) {
-      if (!EvictForSpace(entry_memory, &evicted_keys)) {
+      if (!EvictForSpace(entry_memory, &evicted_entries)) {
         // Fire callbacks for whatever was evicted before we bailed out — those
         // entries are gone from cache_map_ and InvalidationManager must learn
         // about them regardless of whether the new insert succeeded.
         lock.unlock();
-        FireEvictionCallbacks(evicted_keys);
+        FireEvictionCallbacks(evicted_entries);
         return false;
       }
     }
@@ -343,7 +347,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
   // InvalidateAffectedEntries acquires the locks in the opposite order.
   // Calling the callback under our unique_lock would establish the inverse
   // ordering and risk deadlock.
-  FireEvictionCallbacks(evicted_keys);
+  FireEvictionCallbacks(evicted_entries);
 
   return true;
 }
@@ -374,8 +378,19 @@ bool QueryCache::MarkInvalidated(const CacheKey& key) {
   return true;
 }
 
+bool QueryCache::MarkInvalidated(const CacheEntryIdentity& identity) {
+  std::shared_lock lock(mutex_);
+  auto iter = cache_map_.find(identity.key);
+  if (iter == cache_map_.end() || iter->second.first.metadata.entry_generation != identity.generation) {
+    return false;
+  }
+  iter->second.first.invalidated.store(true);
+  stats_.invalidations_immediate++;
+  return true;
+}
+
 bool QueryCache::Erase(const CacheKey& key) {
-  bool fire_callback = false;
+  std::optional<CacheEntryIdentity> removed_identity;
   {
     std::unique_lock lock(mutex_);
 
@@ -388,7 +403,9 @@ bool QueryCache::Erase(const CacheKey& key) {
     // callback typically takes InvalidationManager::mutex_, and the reverse
     // order is taken by InvalidateAffectedEntries -> MarkInvalidated; firing
     // the callback while holding our unique_lock would risk deadlock.
-    fire_callback = static_cast<bool>(eviction_callback_);
+    if (identity_eviction_callback_ || eviction_callback_) {
+      removed_identity = CacheEntryIdentity{key, iter->second.first.metadata.entry_generation};
+    }
 
     // Remove from LRU list
     lru_list_.erase(iter->second.second);
@@ -410,10 +427,34 @@ bool QueryCache::Erase(const CacheKey& key) {
   // callers that want to suppress this callback (the InvalidationQueue
   // cleanup path performs its own UnregisterCacheEntry and must not
   // double-unregister) should use EraseWithoutCallback() instead.
-  if (fire_callback) {
-    eviction_callback_(key);
+  if (removed_identity.has_value()) {
+    FireEvictionCallbacks({*removed_identity});
   }
 
+  return true;
+}
+
+bool QueryCache::Erase(const CacheEntryIdentity& identity) {
+  bool fire_callback = false;
+  {
+    std::unique_lock lock(mutex_);
+    auto iter = cache_map_.find(identity.key);
+    if (iter == cache_map_.end() || iter->second.first.metadata.entry_generation != identity.generation) {
+      return false;
+    }
+    fire_callback = static_cast<bool>(identity_eviction_callback_) || static_cast<bool>(eviction_callback_);
+    lru_list_.erase(iter->second.second);
+    const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
+    total_memory_bytes_ -= entry_memory;
+    stats_.current_entries--;
+    stats_.current_memory_bytes = total_memory_bytes_;
+    stats_.invalidations_deferred++;
+    RemoveTableIndexEntryLocked(identity.key, iter->second.first.metadata.table);
+    cache_map_.erase(iter);
+  }
+  if (fire_callback) {
+    FireEvictionCallbacks({identity});
+  }
   return true;
 }
 
@@ -449,6 +490,23 @@ bool QueryCache::EraseWithoutCallback(const CacheKey& key) {
   return true;
 }
 
+bool QueryCache::EraseWithoutCallback(const CacheEntryIdentity& identity) {
+  std::unique_lock lock(mutex_);
+  auto iter = cache_map_.find(identity.key);
+  if (iter == cache_map_.end() || iter->second.first.metadata.entry_generation != identity.generation) {
+    return false;
+  }
+  lru_list_.erase(iter->second.second);
+  const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
+  total_memory_bytes_ -= entry_memory;
+  stats_.current_entries--;
+  stats_.current_memory_bytes = total_memory_bytes_;
+  stats_.invalidations_deferred++;
+  RemoveTableIndexEntryLocked(identity.key, iter->second.first.metadata.table);
+  cache_map_.erase(iter);
+  return true;
+}
+
 void QueryCache::Clear() {
   // collect keys under the lock and fire eviction callbacks AFTER
   // releasing the lock. This:
@@ -457,17 +515,18 @@ void QueryCache::Clear() {
   //   (2) lets the BatchEvictionCallback path acquire InvalidationManager::mutex_
   //       exactly once instead of N times when an external observer is wired up
   //       (e.g. CacheManager -> InvalidationManager).
-  std::vector<CacheKey> evicted_keys;
+  std::vector<CacheEntryIdentity> evicted_entries;
   {
     std::unique_lock lock(mutex_);
 
     // Capture keys before swap. Callback delivery preserves insertion order
     // observed at swap time; ordering is informational because the per-key
     // unregister is independent.
-    if (eviction_callback_ || batch_eviction_callback_) {
-      evicted_keys.reserve(cache_map_.size());
+    if (eviction_callback_ || batch_eviction_callback_ || identity_eviction_callback_ ||
+        batch_identity_eviction_callback_) {
+      evicted_entries.reserve(cache_map_.size());
       for (const auto& [key, entry_pair] : cache_map_) {
-        evicted_keys.push_back(key);
+        evicted_entries.push_back(CacheEntryIdentity{key, entry_pair.first.metadata.entry_generation});
       }
     }
 
@@ -483,12 +542,12 @@ void QueryCache::Clear() {
     stats_.forced_clears.fetch_add(1, std::memory_order_relaxed);
   }
 
-  FireEvictionCallbacks(evicted_keys);
+  FireEvictionCallbacks(evicted_entries);
 }
 
 void QueryCache::ClearTable(const std::string& table) {
   // collect evicted keys under the lock, fire callbacks after.
-  std::vector<CacheKey> evicted_keys;
+  std::vector<CacheEntryIdentity> evicted_entries;
   {
     std::unique_lock lock(mutex_);
 
@@ -506,7 +565,7 @@ void QueryCache::ClearTable(const std::string& table) {
     for (const auto& key : to_erase) {
       auto iter = cache_map_.find(key);
       if (iter != cache_map_.end()) {
-        RemoveEntryLocked(iter, RemovalReason::kTableClear, &evicted_keys);
+        RemoveEntryLocked(iter, RemovalReason::kTableClear, &evicted_entries);
       }
     }
     stats_.current_memory_bytes = total_memory_bytes_;
@@ -516,7 +575,7 @@ void QueryCache::ClearTable(const std::string& table) {
     stats_.forced_clears.fetch_add(1, std::memory_order_relaxed);
   }
 
-  FireEvictionCallbacks(evicted_keys);
+  FireEvictionCallbacks(evicted_entries);
 }
 
 bool QueryCache::CorruptEntryForTest(const CacheKey& key) {
@@ -553,7 +612,53 @@ std::optional<CacheMetadata> QueryCache::GetMetadata(const CacheKey& key) const 
   return iter->second.first.metadata;
 }
 
-bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheKey>* evicted_keys) {
+size_t QueryCache::MemoryUsage() const {
+  size_t total = 0;
+  {
+    std::shared_lock lock(mutex_);
+    total = total_memory_bytes_;
+    total += cache_map_.bucket_count() * sizeof(void*);
+    total += lru_list_.size() * (sizeof(CacheKey) + (2 * sizeof(void*)));
+
+    total += table_to_cache_keys_.bucket_count() * sizeof(void*);
+    for (const auto& [table, keys] : table_to_cache_keys_) {
+      total += sizeof(std::string) + table.capacity() + sizeof(void*) + sizeof(size_t);
+      total += keys.bucket_count() * sizeof(void*);
+      total += keys.size() * (sizeof(CacheKey) + sizeof(void*) + sizeof(size_t));
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> pending_lock(expired_keys_mutex_);
+    total += pending_expired_keys_.bucket_count() * sizeof(void*);
+    total += pending_decompression_keys_.bucket_count() * sizeof(void*);
+    total += (pending_expired_keys_.size() + pending_decompression_keys_.size()) *
+             (sizeof(CacheEntryIdentity) + sizeof(void*) + sizeof(size_t));
+  }
+  return total;
+}
+
+bool QueryCache::EvictLeastRecentlyUsed() {
+  std::vector<CacheEntryIdentity> evicted_entries;
+  {
+    std::unique_lock lock(mutex_);
+    while (!lru_list_.empty()) {
+      const CacheKey key = lru_list_.back();
+      auto iter = cache_map_.find(key);
+      if (iter == cache_map_.end()) {
+        lru_list_.pop_back();
+        stats_.stale_lru_entries.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      RemoveEntryLocked(iter, RemovalReason::kLRUEviction, &evicted_entries);
+      break;
+    }
+  }
+  FireEvictionCallbacks(evicted_entries);
+  return !evicted_entries.empty();
+}
+
+bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheEntryIdentity>* evicted_entries) {
   // Evict from LRU tail until enough space is available
   while (total_memory_bytes_ + required_bytes > max_memory_bytes_ && !lru_list_.empty()) {
     // Get least recently used key
@@ -580,7 +685,7 @@ bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheKey>* evi
       continue;
     }
 
-    RemoveEntryLocked(iter, RemovalReason::kLRUEviction, evicted_keys);
+    RemoveEntryLocked(iter, RemovalReason::kLRUEviction, evicted_entries);
   }
 
   stats_.current_memory_bytes = total_memory_bytes_;
@@ -590,7 +695,7 @@ bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheKey>* evi
 }
 
 void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason,
-                                   std::vector<CacheKey>* evicted_keys) {
+                                   std::vector<CacheEntryIdentity>* evicted_entries) {
   const CacheKey& key = iter->first;
 
   // do NOT invoke eviction_callback_ here. The callback typically takes
@@ -599,8 +704,8 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
   // ordering used by InvalidationManager::InvalidateAffectedEntries and risks
   // deadlock. Callers append `key` to @p evicted_keys and call
   // FireEvictionCallbacks() AFTER releasing mutex_.
-  if (evicted_keys != nullptr) {
-    evicted_keys->push_back(key);
+  if (evicted_entries != nullptr) {
+    evicted_entries->push_back(CacheEntryIdentity{key, iter->second.first.metadata.entry_generation});
   }
 
   // Remove from LRU list
@@ -674,17 +779,17 @@ void QueryCache::Touch(const CacheKey& key) {
 
 void QueryCache::RefreshLRU() {
   // Drain pending keys from Lookup() before acquiring main lock
-  std::unordered_set<CacheKey> lookup_expired_keys;
-  std::unordered_set<CacheKey> decomp_failed_keys;
+  std::unordered_set<CacheEntryIdentity> lookup_expired_entries;
+  std::unordered_set<CacheEntryIdentity> decomp_failed_entries;
   {
     std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
-    lookup_expired_keys.swap(pending_expired_keys_);
-    decomp_failed_keys.swap(pending_decompression_keys_);
+    lookup_expired_entries.swap(pending_expired_keys_);
+    decomp_failed_entries.swap(pending_decompression_keys_);
   }
 
   // collect evicted keys under the main lock and fire the
   // eviction callback after we release it.
-  std::vector<CacheKey> evicted_keys;
+  std::vector<CacheEntryIdentity> evicted_entries;
   {
     std::unique_lock lock(mutex_);
 
@@ -693,7 +798,7 @@ void QueryCache::RefreshLRU() {
 
     // Track keys detected as expired during Lookup (stats already counted)
     // Scan-detected expired keys will be collected separately
-    std::unordered_set<CacheKey> scan_expired_keys;
+    std::unordered_set<CacheEntryIdentity> scan_expired_entries;
 
     // Update LRU for entries that were accessed since last refresh
     for (auto& [key, entry_pair] : cache_map_) {
@@ -702,8 +807,9 @@ void QueryCache::RefreshLRU() {
         auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry_pair.first.metadata.created_at).count();
         if (age >= current_ttl) {
           // Only add to scan set if not already detected by Lookup
-          if (lookup_expired_keys.find(key) == lookup_expired_keys.end()) {
-            scan_expired_keys.insert(key);
+          const CacheEntryIdentity identity{key, entry_pair.first.metadata.entry_generation};
+          if (lookup_expired_entries.find(identity) == lookup_expired_entries.end()) {
+            scan_expired_entries.insert(identity);
           }
           continue;  // Skip LRU update for expired entries
         }
@@ -717,26 +823,26 @@ void QueryCache::RefreshLRU() {
     }
 
     // Remove Lookup-detected expired entries (stats already counted by Lookup)
-    for (const auto& key : lookup_expired_keys) {
-      auto iter = cache_map_.find(key);
-      if (iter != cache_map_.end()) {
-        RemoveEntryLocked(iter, RemovalReason::kTTLExpiredAlreadyCounted, &evicted_keys);
+    for (const auto& identity : lookup_expired_entries) {
+      auto iter = cache_map_.find(identity.key);
+      if (iter != cache_map_.end() && iter->second.first.metadata.entry_generation == identity.generation) {
+        RemoveEntryLocked(iter, RemovalReason::kTTLExpiredAlreadyCounted, &evicted_entries);
       }
     }
 
     // Remove scan-detected expired entries (stats not yet counted)
-    for (const auto& key : scan_expired_keys) {
-      auto iter = cache_map_.find(key);
-      if (iter != cache_map_.end()) {
-        RemoveEntryLocked(iter, RemovalReason::kTTLExpired, &evicted_keys);
+    for (const auto& identity : scan_expired_entries) {
+      auto iter = cache_map_.find(identity.key);
+      if (iter != cache_map_.end() && iter->second.first.metadata.entry_generation == identity.generation) {
+        RemoveEntryLocked(iter, RemovalReason::kTTLExpired, &evicted_entries);
       }
     }
 
     // Remove decompression-failed entries (stats already counted by Lookup)
-    for (const auto& key : decomp_failed_keys) {
-      auto iter = cache_map_.find(key);
-      if (iter != cache_map_.end()) {
-        RemoveEntryLocked(iter, RemovalReason::kDecompressionFailureAlreadyCounted, &evicted_keys);
+    for (const auto& identity : decomp_failed_entries) {
+      auto iter = cache_map_.find(identity.key);
+      if (iter != cache_map_.end() && iter->second.first.metadata.entry_generation == identity.generation) {
+        RemoveEntryLocked(iter, RemovalReason::kDecompressionFailureAlreadyCounted, &evicted_entries);
       }
     }
 
@@ -748,17 +854,35 @@ void QueryCache::RefreshLRU() {
     stats_.current_memory_bytes.store(total_memory_bytes_, std::memory_order_relaxed);
   }
 
-  FireEvictionCallbacks(evicted_keys);
+  FireEvictionCallbacks(evicted_entries);
 }
 
-void QueryCache::FireEvictionCallbacks(const std::vector<CacheKey>& keys) {
-  if (keys.empty()) {
+void QueryCache::FireEvictionCallbacks(const std::vector<CacheEntryIdentity>& entries) {
+  if (entries.empty()) {
     return;
   }
 
   // Prefer the batch callback when wired up: it lets observers acquire
   // their own mutex once instead of N times. Falls back to the per-key callback
   // for backward compatibility with callers that only set EvictionCallback.
+  if (batch_identity_eviction_callback_) {
+    batch_identity_eviction_callback_(entries);
+    return;
+  }
+
+  if (identity_eviction_callback_) {
+    for (const auto& identity : entries) {
+      identity_eviction_callback_(identity);
+    }
+    return;
+  }
+
+  std::vector<CacheKey> keys;
+  keys.reserve(entries.size());
+  for (const auto& identity : entries) {
+    keys.push_back(identity.key);
+  }
+
   if (batch_eviction_callback_) {
     batch_eviction_callback_(keys);
     return;

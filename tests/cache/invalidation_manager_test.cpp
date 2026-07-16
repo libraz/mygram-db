@@ -85,6 +85,29 @@ TEST(InvalidationManagerTest, PreciseInvalidation) {
   EXPECT_TRUE(invalidated.find(key3) != invalidated.end());
 }
 
+TEST(InvalidationManagerTest, TextSensitiveEntryInvalidatesWhenNgramSetIsUnchanged) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  auto sensitive_key = CacheKeyGenerator::Generate("sensitive");
+  CacheMetadata sensitive;
+  sensitive.table = "posts";
+  sensitive.ngrams = {"ab", "ba"};
+  sensitive.ngram_size = 2;
+  sensitive.invalidate_on_any_text_change = true;
+  mgr.RegisterCacheEntry(sensitive_key, sensitive);
+
+  auto ngram_only_key = CacheKeyGenerator::Generate("ngram-only");
+  CacheMetadata ngram_only = sensitive;
+  ngram_only.invalidate_on_any_text_change = false;
+  mgr.RegisterCacheEntry(ngram_only_key, ngram_only);
+
+  auto invalidated = mgr.InvalidateAffectedEntries("posts", "aba", "ababa", 2, 0, false);
+
+  EXPECT_TRUE(invalidated.find(sensitive_key) != invalidated.end());
+  EXPECT_FALSE(invalidated.find(ngram_only_key) != invalidated.end());
+}
+
 /**
  * @brief Test UPDATE invalidation - both old and new text affect queries
  */
@@ -446,6 +469,28 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterCacheEntryCleansUpStaleNgrams) {
 
   auto invalidated_ccc = mgr.InvalidateAffectedEntries("posts", "", "ccc", 3, 2);
   EXPECT_EQ(1, invalidated_ccc.size()) << "Should invalidate on new ngram 'ccc'";
+}
+
+TEST(InvalidationManagerTest, StaleGenerationUnregisterPreservesReregisteredMetadata) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto key = CacheKeyGenerator::Generate("generation_metadata_aba");
+
+  CacheMetadata first;
+  first.table = "posts";
+  first.ngrams = {"old"};
+  first.entry_generation = 21;
+  mgr.RegisterCacheEntry(key, first);
+
+  CacheMetadata second = first;
+  second.ngrams = {"new"};
+  second.entry_generation = 22;
+  mgr.RegisterCacheEntry(key, second);
+
+  mgr.UnregisterCacheEntry(CacheEntryIdentity{key, first.entry_generation});
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
+  const auto affected = mgr.InvalidateAffectedEntryIdentities("posts", "", "new", 3, 2);
+  EXPECT_TRUE(affected.find(CacheEntryIdentity{key, second.entry_generation}) != affected.end());
 }
 
 /**

@@ -6,11 +6,13 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "cache/cache_types.h"
@@ -89,7 +91,8 @@ class CacheManager {
    * @return true if cached, false otherwise
    */
   bool Insert(const query::Query& query, const std::vector<DocId>& result, const std::vector<std::string>& ngrams,
-              double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true);
+              double query_cost_ms, int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true,
+              bool invalidate_on_any_text_change = false);
 
   /**
    * @brief Capture the current data-change generation for guarded cache inserts
@@ -97,12 +100,18 @@ class CacheManager {
   [[nodiscard]] uint64_t CaptureDataVersion() const { return data_version_.load(std::memory_order_acquire); }
   [[nodiscard]] uint64_t CaptureDataVersion(const std::string& table_name) const;
 
+  /** Test seam invoked while Insert owns the cross-component transaction lock. */
+  void SetAfterQueryCacheInsertHookForTest(std::function<void()> hook) {
+    after_query_cache_insert_hook_for_test_ = std::move(hook);
+  }
+
   /**
    * @brief Insert only if no data invalidation/clear occurred since expected_data_version was captured
    */
   bool InsertIfVersion(const query::Query& query, const std::vector<DocId>& result,
                        const std::vector<std::string>& ngrams, double query_cost_ms, uint64_t expected_data_version,
-                       int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true);
+                       int ngram_size = 0, int kanji_ngram_size = 0, bool cross_boundary_ngrams = true,
+                       bool invalidate_on_any_text_change = false);
 
   /**
    * @brief Invalidate cache entries affected by data modification
@@ -194,9 +203,12 @@ class CacheManager {
   [[nodiscard]] std::optional<CacheKey> ResolveCacheKey(const query::Query& query) const;
 
   std::atomic<bool> enabled_;
+  size_t max_memory_bytes_;
   std::atomic<int> ttl_seconds_;  // TTL configuration in seconds (0 = no expiration)
   std::atomic<uint64_t> data_version_{0};
+  std::atomic<uint64_t> next_entry_generation_{0};
   std::unordered_map<std::string, uint64_t> table_data_versions_;
+  uint64_t last_global_clear_version_ = 0;
   bool table_invalidation_strategy_ = false;
 
   /// Serializes the *combined* (QueryCache + InvalidationManager) mutating
@@ -220,6 +232,7 @@ class CacheManager {
   std::unique_ptr<QueryCache> query_cache_;
   std::unique_ptr<InvalidationManager> invalidation_mgr_;
   std::unique_ptr<InvalidationQueue> invalidation_queue_;
+  std::function<void()> after_query_cache_insert_hook_for_test_;
 };
 
 }  // namespace mygramdb::cache

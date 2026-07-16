@@ -49,9 +49,9 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   }
 
   // Step 1: Immediate invalidation (mark entries)
-  std::unordered_set<CacheKey> affected_keys;
+  std::unordered_set<CacheEntryIdentity> affected_entries;
   if (invalidation_mgr_ != nullptr) {
-    affected_keys = invalidation_mgr_->InvalidateAffectedEntries(
+    affected_entries = invalidation_mgr_->InvalidateAffectedEntryIdentities(
         table_name, old_text, new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams, filter_columns_changed);
   }
 
@@ -65,7 +65,7 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     if (stopped_.load()) {
       mygram::utils::StructuredLog()
           .Event("cache_invalidation_queue_enqueue_after_stop")
-          .Field("count", static_cast<uint64_t>(affected_keys.size()))
+          .Field("count", static_cast<uint64_t>(affected_entries.size()))
           .Warn();
       return;
     }
@@ -83,7 +83,7 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
             .Event("cache_invalidation_queue_overflow")
             .Field("queue_size", static_cast<uint64_t>(pending_cache_keys_.size()))
             .Field("max_queue_size", static_cast<uint64_t>(max_queue_size_))
-            .Field("dropped_count", static_cast<uint64_t>(affected_keys.size()))
+            .Field("dropped_count", static_cast<uint64_t>(affected_entries.size()))
             .Warn();
       } else {
         // Use emplace to preserve existing entries' original timestamps,
@@ -92,8 +92,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
         // hex round-trip that the previous string-based encoding required
         // on the invalidation hot path.
         auto now = std::chrono::steady_clock::now();
-        for (const auto& key : affected_keys) {
-          pending_cache_keys_.emplace(PendingKey{table_name, key}, now);
+        for (const auto& identity : affected_entries) {
+          pending_cache_keys_.emplace(PendingKey{table_name, identity}, now);
         }
         if (now < oldest_timestamp_) {
           oldest_timestamp_ = now;
@@ -124,12 +124,12 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     //
     // This also ensures cleanup works in tests that wire an InvalidationQueue
     // to a QueryCache without CacheManager's eviction callback installed.
-    for (const auto& key : affected_keys) {
+    for (const auto& identity : affected_entries) {
       if (cache_ != nullptr) {
-        cache_->EraseWithoutCallback(key);
+        cache_->EraseWithoutCallback(identity);
       }
       if (invalidation_mgr_ != nullptr) {
-        invalidation_mgr_->UnregisterCacheEntry(key);
+        invalidation_mgr_->UnregisterCacheEntry(identity);
       }
     }
     return;
@@ -180,10 +180,15 @@ void InvalidationQueue::Stop() {
   // documented shutdown contract — do not move the store inside the lock.
   stopped_.store(true);
 
-  // Atomically check and clear running_ to prevent concurrent Stop() calls
-  bool expected = true;
-  if (!running_.compare_exchange_strong(expected, false)) {
-    return;  // Already stopped
+  // Publish the wait predicate while holding the same mutex used by
+  // WorkerLoop's condition-variable wait. Updating only the atomic and then
+  // notifying can lose the wakeup between predicate evaluation and sleep.
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    bool expected = true;
+    if (!running_.compare_exchange_strong(expected, false)) {
+      return;  // Already stopped
+    }
   }
 
   queue_cv_.notify_all();
@@ -262,9 +267,9 @@ void InvalidationQueue::ProcessBatch() {
   // Process batch: erase invalidated entries from cache.
   // Typed PendingKey (table + CacheKey) is consumed directly — no string
   // parsing, no hex round-trip.
-  std::unordered_set<CacheKey> keys_to_erase;
+  std::unordered_set<CacheEntryIdentity> entries_to_erase;
   for (const auto& [pending_key, timestamp] : batch) {
-    keys_to_erase.insert(pending_key.key);
+    entries_to_erase.insert(pending_key.identity);
   }
 
   // Erase entries from cache and clean up their metadata.
@@ -285,12 +290,12 @@ void InvalidationQueue::ProcessBatch() {
   // Invariant: "On the invalidation-queue cleanup path, UnregisterCacheEntry
   // fires exactly once per affected key — directly from the queue, never via
   // eviction_callback_."
-  for (const auto& key : keys_to_erase) {
+  for (const auto& identity : entries_to_erase) {
     if (cache_ != nullptr) {
-      cache_->EraseWithoutCallback(key);
+      cache_->EraseWithoutCallback(identity);
     }
     if (invalidation_mgr_ != nullptr) {
-      invalidation_mgr_->UnregisterCacheEntry(key);
+      invalidation_mgr_->UnregisterCacheEntry(identity);
     }
   }
 

@@ -206,6 +206,7 @@ struct Query {
   QueryType type = QueryType::UNKNOWN;
   std::string table;
   std::string search_text;
+  std::string search_expression;       ///< Quote-preserving form used for boolean/literal semantic parsing
   std::vector<std::string> and_terms;  // Additional terms for AND search
   std::vector<std::string> not_terms;  // Terms to exclude (NOT search)
   std::vector<FilterCondition> filters;
@@ -325,6 +326,7 @@ class QueryParser {
 
  private:
   std::string error_;
+  std::vector<bool> token_was_quoted_;
   size_t max_query_length_ = config::defaults::kDefaultQueryLengthLimit;  // Default upper bound
 
   /**

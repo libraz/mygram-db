@@ -18,6 +18,7 @@ SynonymDictionary::SynonymDictionary(SynonymDictionary&& other) noexcept {
   std::unique_lock lock(other.mutex_);
   groups_ = std::move(other.groups_);
   term_to_group_ = std::move(other.term_to_group_);
+  revision_.store(other.revision_.load(std::memory_order_acquire), std::memory_order_release);
 }
 
 SynonymDictionary& SynonymDictionary::operator=(SynonymDictionary&& other) noexcept {
@@ -27,6 +28,7 @@ SynonymDictionary& SynonymDictionary::operator=(SynonymDictionary&& other) noexc
     std::lock(lock1, lock2);
     groups_ = std::move(other.groups_);
     term_to_group_ = std::move(other.term_to_group_);
+    revision_.store(other.revision_.load(std::memory_order_acquire), std::memory_order_release);
   }
   return *this;
 }
@@ -42,9 +44,8 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
     return MakeUnexpected(MakeError(ErrorCode::kStorageReadError, "Cannot open synonym file: " + filepath));
   }
 
-  std::unique_lock lock(mutex_);
-  groups_.clear();
-  term_to_group_.clear();
+  std::vector<std::vector<std::string>> loaded_groups;
+  std::unordered_map<std::string, size_t> loaded_term_to_group;
 
   std::string line;
   size_t line_num = 0;
@@ -120,7 +121,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
     std::vector<std::string> conflicting_terms;
     new_terms.reserve(terms.size());
     for (const auto& term : terms) {
-      if (term_to_group_.find(term) == term_to_group_.end()) {
+      if (loaded_term_to_group.find(term) == loaded_term_to_group.end()) {
         new_terms.push_back(term);
       } else {
         conflicting_terms.push_back(term);
@@ -150,13 +151,23 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
       continue;
     }
 
-    size_t group_index = groups_.size();
-    groups_.push_back(std::move(new_terms));
-    for (const auto& term : groups_.back()) {
-      term_to_group_[term] = group_index;
+    size_t group_index = loaded_groups.size();
+    loaded_groups.push_back(std::move(new_terms));
+    for (const auto& term : loaded_groups.back()) {
+      loaded_term_to_group[term] = group_index;
     }
   }
 
+  if (file.bad()) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageReadError, "Failed while reading synonym file: " + filepath));
+  }
+
+  {
+    std::unique_lock lock(mutex_);
+    groups_.swap(loaded_groups);
+    term_to_group_.swap(loaded_term_to_group);
+    revision_.fetch_add(1, std::memory_order_acq_rel);
+  }
   return {};
 }
 
@@ -201,6 +212,7 @@ void SynonymDictionary::Clear() {
   std::unique_lock lock(mutex_);
   groups_.clear();
   term_to_group_.clear();
+  revision_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 bool SynonymDictionary::SaveToStream(std::ostream& output_stream) const {
@@ -227,9 +239,8 @@ bool SynonymDictionary::SaveToStream(std::ostream& output_stream) const {
 }
 
 bool SynonymDictionary::LoadFromStream(std::istream& input_stream) {
-  std::unique_lock lock(mutex_);
-  groups_.clear();
-  term_to_group_.clear();
+  std::vector<std::vector<std::string>> loaded_groups;
+  std::unordered_map<std::string, size_t> loaded_term_to_group;
 
   uint32_t group_count = 0;
   if (!mygram::utils::ReadBinary(input_stream, group_count)) {
@@ -242,7 +253,7 @@ bool SynonymDictionary::LoadFromStream(std::istream& input_stream) {
     return false;
   }
 
-  groups_.reserve(group_count);
+  loaded_groups.reserve(group_count);
   for (uint32_t g = 0; g < group_count; ++g) {
     uint32_t term_count = 0;
     if (!mygram::utils::ReadBinary(input_stream, term_count)) {
@@ -264,13 +275,19 @@ bool SynonymDictionary::LoadFromStream(std::istream& input_stream) {
       group.push_back(std::move(term));
     }
 
-    size_t group_index = groups_.size();
-    groups_.push_back(std::move(group));
-    for (const auto& term : groups_.back()) {
-      term_to_group_[term] = group_index;
+    size_t group_index = loaded_groups.size();
+    loaded_groups.push_back(std::move(group));
+    for (const auto& term : loaded_groups.back()) {
+      loaded_term_to_group[term] = group_index;
     }
   }
 
+  {
+    std::unique_lock lock(mutex_);
+    groups_.swap(loaded_groups);
+    term_to_group_.swap(loaded_term_to_group);
+    revision_.fetch_add(1, std::memory_order_acq_rel);
+  }
   return true;
 }
 

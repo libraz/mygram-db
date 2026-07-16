@@ -70,6 +70,10 @@ static std::string SearchTokenForFlatExpression(const std::string& token) {
   return token;
 }
 
+static std::string SearchTokenForSemanticExpression(const std::string& token, bool was_quoted) {
+  return was_quoted ? EscapeQuotedSearchToken(token) : SearchTokenForFlatExpression(token);
+}
+
 /**
  * @brief Extract search text tokens from a command's token list
  *
@@ -88,8 +92,8 @@ static std::string SearchTokenForFlatExpression(const std::string& token) {
  * @return Position after search text extraction on success, or empty on error
  */
 static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextTokens(
-    const std::vector<std::string>& tokens, size_t start_pos, Query& query, const std::string& command_name,
-    std::string& error_msg, bool require_search_text = true) {
+    const std::vector<std::string>& tokens, const std::vector<bool>& token_was_quoted, size_t start_pos, Query& query,
+    const std::string& command_name, std::string& error_msg, bool require_search_text = true) {
   // Check for comma-separated table names (SQL-style multi-table syntax)
   if (query.table.find(',') != std::string::npos || (tokens.size() > start_pos && tokens[start_pos] == ",")) {
     error_msg =
@@ -102,6 +106,9 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
   // First pass: check parentheses balance across ALL tokens
   int total_paren_depth = 0;
   for (size_t i = start_pos; i < tokens.size(); ++i) {
+    if (i < token_was_quoted.size() && token_was_quoted[i]) {
+      continue;
+    }
     auto [open, close] = detail::CountParensInToken(tokens[i]);
     total_paren_depth += open - close;
 
@@ -134,6 +141,9 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
     int scan_paren_depth = 0;
     bool seen_top_level_operator = false;
     for (size_t i = start_pos; i < tokens.size(); ++i) {
+      if (i < token_was_quoted.size() && token_was_quoted[i]) {
+        continue;
+      }
       const std::string upper = ToUpper(tokens[i]);
       auto [open, close] = detail::CountParensInToken(tokens[i]);
       // A group that opens at the top level after a boolean operator is a
@@ -167,21 +177,22 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
 
   while (pos < tokens.size()) {
     const std::string& token = tokens[pos];
+    const bool was_quoted = pos < token_was_quoted.size() && token_was_quoted[pos];
 
     // Track parentheses depth (respecting quotes)
-    auto [open, close] = detail::CountParensInToken(token);
+    auto [open, close] = was_quoted ? std::pair<int, int>{0, 0} : detail::CountParensInToken(token);
     paren_depth += open - close;
 
     const std::string upper_token = ToUpper(token);
 
     // Check if this is a clause keyword (only when not inside parentheses).
-    if (paren_depth == 0 &&
+    if (!was_quoted && paren_depth == 0 &&
         (IsNonExpressionClauseKeyword(upper_token) || (!is_boolean_expression && IsClauseKeyword(upper_token)))) {
       break;  // Stop consuming search text
     }
 
     // Special check for deprecated ORDER keyword - provide helpful error
-    if (paren_depth == 0 && EqualsIgnoreCase(token, "ORDER")) {
+    if (!was_quoted && paren_depth == 0 && EqualsIgnoreCase(token, "ORDER")) {
       error_msg = "ORDER BY is not supported. Use SORT instead.";
       query.type = QueryType::UNKNOWN;
       return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
@@ -201,7 +212,10 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
   }
 
   // Join search tokens with spaces to form complete search expression
+  const size_t search_token_offset = start_pos;
   query.search_text = SearchTokenForFlatExpression(search_tokens[0]);
+  query.search_expression = SearchTokenForSemanticExpression(
+      search_tokens[0], search_token_offset < token_was_quoted.size() && token_was_quoted[search_token_offset]);
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   for (size_t i = 1; i < search_tokens.size(); ++i) {  // 1: Start from second token
     const std::string& token = search_tokens[i];
@@ -213,8 +227,12 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
 
     if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
       query.search_text += " ";
+      query.search_expression += " ";
     }
     query.search_text += SearchTokenForFlatExpression(token);
+    const size_t original_pos = search_token_offset + i;
+    query.search_expression += SearchTokenForSemanticExpression(
+        token, original_pos < token_was_quoted.size() && token_was_quoted[original_pos]);
   }
 
   // Check for empty search text (e.g., empty quoted strings)
@@ -251,7 +269,8 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
 
   // Extract search text using shared helper
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  auto search_result = ParseSearchTextTokens(tokens, 2, query, "SEARCH", error_);  // 2: after SEARCH + table
+  auto search_result =
+      ParseSearchTextTokens(tokens, token_was_quoted_, 2, query, "SEARCH", error_);  // 2: after SEARCH + table
   if (!search_result.has_value()) {
     SetError(error_);
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
@@ -367,7 +386,8 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
 
   // Extract search text using shared helper
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  auto search_result = ParseSearchTextTokens(tokens, 2, query, "COUNT", error_);  // 2: after COUNT + table
+  auto search_result =
+      ParseSearchTextTokens(tokens, token_was_quoted_, 2, query, "COUNT", error_);  // 2: after COUNT + table
   if (!search_result.has_value()) {
     SetError(error_);
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
@@ -479,7 +499,7 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
-  auto search_result = ParseSearchTextTokens(tokens, pos, query, "FACET", error_, false);
+  auto search_result = ParseSearchTextTokens(tokens, token_was_quoted_, pos, query, "FACET", error_, false);
   if (!search_result.has_value()) {
     SetError(error_);
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
