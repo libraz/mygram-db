@@ -157,9 +157,11 @@ class Tokenizer {
         break;
       }
       char current_char = input_[pos_];
-      // Stop at whitespace or special characters
-      if (std::isspace(static_cast<unsigned char>(current_char)) != 0 || current_char == '+' || current_char == '-' ||
-          current_char == '(' || current_char == ')' || current_char == '"') {
+      // '+' and '-' are unary operators only when Next() sees them at a token
+      // boundary. Once a term has started they are ordinary text, as in
+      // "COVID-19", "e-mail", and "C++".
+      if (std::isspace(static_cast<unsigned char>(current_char)) != 0 || current_char == '(' || current_char == ')' ||
+          current_char == '"') {
         break;
       }
       term += current_char;
@@ -219,20 +221,20 @@ class Parser {
         if (auto term = ParsePrefixedTerm()) {
           expr.required_terms.push_back(*term);
         } else {
-          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Expected term after '+'"));
+          return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Expected term after '+'"));
         }
       } else if (current_.type == TokenType::kMinus) {
         Advance();
         if (auto term = ParsePrefixedTerm()) {
           expr.excluded_terms.push_back(*term);
         } else {
-          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Expected term after '-'"));
+          return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Expected term after '-'"));
         }
       } else if (current_.type == TokenType::kLParen) {
         // Parenthesized expression - capture as raw
         std::string paren_expr = CaptureParenExpression();
         if (paren_expr.empty()) {
-          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Unbalanced parentheses"));
+          return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unbalanced parentheses"));
         }
         if (!expr.raw_expression.empty()) {
           expr.raw_expression += " ";
@@ -241,11 +243,14 @@ class Parser {
       } else if (current_.type == TokenType::kTerm || current_.type == TokenType::kQuotedTerm) {
         // Check if this starts an OR expression
         if (LooksLikeOrExpression()) {
-          std::string or_expr = CaptureOrExpression();
+          auto or_expr = CaptureOrExpression();
+          if (!or_expr) {
+            return MakeUnexpected(or_expr.error());
+          }
           if (!expr.raw_expression.empty()) {
             expr.raw_expression += " ";
           }
-          expr.raw_expression += or_expr;
+          expr.raw_expression += *or_expr;
         } else {
           // Regular term (implicit AND) - add quotes if it was a quoted term
           std::string term = current_.value;
@@ -257,9 +262,9 @@ class Parser {
           Advance();
         }
       } else if (current_.type == TokenType::kOr) {
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Unexpected 'OR' operator"));
+        return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unexpected 'OR' operator"));
       } else if (current_.type == TokenType::kRParen) {
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Unexpected ')'"));
+        return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unexpected ')'"));
       } else {
         Advance();
       }
@@ -311,7 +316,7 @@ class Parser {
     return has_or;
   }
 
-  std::string CaptureOrExpression() {
+  Expected<std::string, Error> CaptureOrExpression() {
     std::ostringstream oss;
 
     // Capture first term
@@ -335,11 +340,11 @@ class Parser {
       } else if (current_.type == TokenType::kLParen) {
         std::string paren = CaptureParenExpression();
         if (paren.empty()) {
-          return "";  // Error
+          return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unbalanced parentheses after 'OR'"));
         }
         oss << paren;
       } else {
-        return "";  // Error: expected term after OR
+        return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Expected term after 'OR'"));
       }
     }
 
@@ -353,6 +358,7 @@ class Parser {
 
     std::ostringstream oss;
     int depth = 0;
+    TokenType previous_type = TokenType::kEnd;
 
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-do-while) - do-while is appropriate for paren matching
     do {
@@ -363,8 +369,16 @@ class Parser {
         --depth;
         oss << ")";
       } else if (current_.type == TokenType::kTerm) {
+        if (previous_type == TokenType::kTerm || previous_type == TokenType::kQuotedTerm ||
+            previous_type == TokenType::kRParen) {
+          oss << " ";
+        }
         oss << current_.value;
       } else if (current_.type == TokenType::kQuotedTerm) {
+        if (previous_type == TokenType::kTerm || previous_type == TokenType::kQuotedTerm ||
+            previous_type == TokenType::kRParen) {
+          oss << " ";
+        }
         oss << "\"" << current_.value << "\"";
       } else if (current_.type == TokenType::kOr) {
         oss << " OR ";
@@ -376,6 +390,7 @@ class Parser {
         return "";  // Unbalanced
       }
 
+      previous_type = current_.type;
       if (depth > 0) {
         Advance();
       }
@@ -397,15 +412,14 @@ bool SearchExpression::HasComplexExpression() const {
     return true;
   }
 
-  // Check if any term contains OR or parentheses
-  auto has_or_or_parens = [](const std::string& term) {
-    return term.find("OR") != std::string::npos || term.find('(') != std::string::npos ||
-           term.find(')') != std::string::npos;
+  // A parenthesized expression following unary +/- is retained as one term.
+  // Detect that structural representation, never an "OR" substring inside a
+  // token (which would misclassify ordinary words such as ORDER and ORANGE).
+  const auto is_parenthesized = [](const std::string& term) {
+    return term.size() >= 2 && term.front() == '(' && term.back() == ')';
   };
-
-  return std::any_of(required_terms.begin(), required_terms.end(), has_or_or_parens) ||
-         std::any_of(excluded_terms.begin(), excluded_terms.end(), has_or_or_parens) ||
-         std::any_of(optional_terms.begin(), optional_terms.end(), has_or_or_parens);
+  return std::any_of(required_terms.begin(), required_terms.end(), is_parenthesized) ||
+         std::any_of(excluded_terms.begin(), excluded_terms.end(), is_parenthesized);
 }
 
 std::string SearchExpression::ToQueryString() const {
@@ -445,7 +459,7 @@ std::string SearchExpression::ToQueryString() const {
 
 Expected<SearchExpression, Error> ParseSearchExpression(const std::string& expression) {
   if (expression.empty()) {
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Empty search expression"));
+    return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Empty search expression"));
   }
 
   Parser parser(expression);
@@ -460,20 +474,29 @@ Expected<std::string, Error> ConvertSearchExpression(const std::string& expressi
   return result->ToQueryString();
 }
 
-bool SimplifySearchExpression(const std::string& expression, std::string& main_term,
-                              std::vector<std::string>& and_terms, std::vector<std::string>& not_terms) {
+Expected<SimplifiedExpression, Error> SimplifySearchExpression(const std::string& expression) {
   auto result = ParseSearchExpression(expression);
   if (!result) {
-    return false;
+    return MakeUnexpected(result.error());
   }
 
   auto& expr = *result;
 
+  // The legacy structured result cannot represent a required/excluded term
+  // combined with an OR or parenthesized sub-expression. Refuse to silently
+  // drop that part of the expression.
+  if (!expr.raw_expression.empty() && (!expr.required_terms.empty() || !expr.excluded_terms.empty())) {
+    return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError,
+                                    "Expression cannot be represented by the simplified client API"));
+  }
+
+  SimplifiedExpression simplified;
+
   // Extract main term. Required terms (from + prefix or implicit AND) take
   // priority; the first becomes main_term and the rest are AND terms.
   if (!expr.required_terms.empty()) {
-    main_term = expr.required_terms[0];
-    and_terms.assign(expr.required_terms.begin() + 1, expr.required_terms.end());
+    simplified.main_term = expr.required_terms[0];
+    simplified.and_terms.assign(expr.required_terms.begin() + 1, expr.required_terms.end());
   } else if (!expr.raw_expression.empty()) {
     // No required terms but the expression contains an OR / parenthesized
     // sub-expression (e.g. "python OR ruby" or "(a OR b)"). Surface the raw
@@ -481,17 +504,16 @@ bool SimplifySearchExpression(const std::string& expression, std::string& main_t
     // already so the result is a valid query when AND-composed by callers.
     const std::string& raw = expr.raw_expression;
     if (!raw.empty() && raw.front() == '(' && raw.back() == ')') {
-      main_term = raw;
+      simplified.main_term = raw;
     } else {
-      main_term = "(" + raw + ")";
+      simplified.main_term = "(" + raw + ")";
     }
-    and_terms.clear();
   } else {
-    return false;  // No terms found
+    return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "No search terms found"));
   }
 
-  not_terms = expr.excluded_terms;
-  return true;
+  simplified.not_terms = expr.excluded_terms;
+  return simplified;
 }
 
 }  // namespace mygramdb::client

@@ -46,6 +46,162 @@ constexpr int64_t kMillisecondsPerSecond = mygram::constants::kMillisecondsPerSe
 constexpr int64_t kMicrosecondsPerMillisecond = mygram::constants::kMicrosecondsPerMillisecond;
 constexpr std::chrono::milliseconds kDumpStatusPollInterval{100};
 constexpr unsigned char kAsciiSpace = 0x20;
+constexpr uint32_t kDefaultClientTimeoutMs = 5000;
+constexpr uint32_t kMaxClientRecvBufferSize = 16U * 1024U * 1024U;
+
+std::string_view FilterOpToWire(FilterOp op) {
+  switch (op) {
+    case FilterOp::kEqual:
+      return "=";
+    case FilterOp::kNotEqual:
+      return "!=";
+    case FilterOp::kGreaterThan:
+      return ">";
+    case FilterOp::kGreaterThanOrEqual:
+      return ">=";
+    case FilterOp::kLessThan:
+      return "<";
+    case FilterOp::kLessThanOrEqual:
+      return "<=";
+  }
+  return "=";
+}
+
+int HexValue(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return 10 + (ch - 'a');
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return 10 + (ch - 'A');
+  }
+  return -1;
+}
+
+std::string EscapeProtocolToken(const std::string& value) {
+  bool needs_quotes = value.empty();
+  for (size_t i = 0; i < value.size(); ++i) {
+    const unsigned char ch = static_cast<unsigned char>(value[i]);
+    if (std::isspace(ch) != 0 || std::iscntrl(ch) != 0 || ch == '"' || ch == '\\' || ch == '\'') {
+      needs_quotes = true;
+      break;
+    }
+    size_t whitespace_length = 0;
+    if (mygram::utils::IsUnicodeWhitespace(value, i, whitespace_length)) {
+      needs_quotes = true;
+      break;
+    }
+  }
+  if (!needs_quotes) {
+    return value;
+  }
+
+  constexpr char kHexDigits[] = "0123456789ABCDEF";
+  std::string escaped;
+  escaped.reserve(value.size() + 2);
+  escaped += '"';
+  for (unsigned char ch : value) {
+    switch (ch) {
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        if (std::iscntrl(ch) != 0) {
+          escaped += "\\x";
+          escaped += kHexDigits[ch >> 4];
+          escaped += kHexDigits[ch & 0x0F];
+        } else {
+          escaped += static_cast<char>(ch);
+        }
+        break;
+    }
+  }
+  escaped += '"';
+  return escaped;
+}
+
+bool ParseProtocolToken(std::string_view input, size_t& pos, std::string& value) {
+  while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos])) != 0) {
+    ++pos;
+  }
+  if (pos >= input.size()) {
+    return false;
+  }
+
+  value.clear();
+  if (input[pos] != '"') {
+    const size_t start = pos;
+    while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos])) == 0) {
+      ++pos;
+    }
+    value.assign(input.substr(start, pos - start));
+    return true;
+  }
+
+  ++pos;
+  while (pos < input.size()) {
+    const char ch = input[pos++];
+    if (ch == '"') {
+      return true;
+    }
+    if (ch != '\\') {
+      value += ch;
+      continue;
+    }
+    if (pos >= input.size()) {
+      return false;
+    }
+
+    const char escaped = input[pos++];
+    switch (escaped) {
+      case 'n':
+        value += '\n';
+        break;
+      case 'r':
+        value += '\r';
+        break;
+      case 't':
+        value += '\t';
+        break;
+      case '\\':
+      case '"':
+        value += escaped;
+        break;
+      case 'x': {
+        if (pos + 1 >= input.size()) {
+          return false;
+        }
+        const int high = HexValue(input[pos]);
+        const int low = HexValue(input[pos + 1]);
+        if (high < 0 || low < 0) {
+          return false;
+        }
+        value += static_cast<char>((high << 4) | low);
+        pos += 2;
+        break;
+      }
+      default:
+        value += escaped;
+        break;
+    }
+  }
+
+  return false;
+}
 
 std::string QuoteCommandArgumentIfNeeded(const std::string& arg) {
   bool needs_quotes = arg.empty();
@@ -573,7 +729,16 @@ Expected<void, Error> ConnectWithTimeout(int sock, const sockaddr* addr, socklen
  */
 class MygramClient::Impl {
  public:
-  explicit Impl(ClientConfig config) : config_(std::move(config)) {}
+  explicit Impl(ClientConfig config) : config_(std::move(config)) {
+    if (config_.timeout_ms == 0) {
+      config_.timeout_ms = kDefaultClientTimeoutMs;
+    }
+    if (config_.recv_buffer_size == 0) {
+      config_.recv_buffer_size = server::protocol::kDefaultClientRecvBufferSize;
+    } else if (config_.recv_buffer_size > kMaxClientRecvBufferSize) {
+      config_.recv_buffer_size = kMaxClientRecvBufferSize;
+    }
+  }
 
   ~Impl() { Disconnect(); }
 
@@ -780,19 +945,28 @@ class MygramClient::Impl {
     std::string header_line = first_line_end == std::string::npos ? main_part : main_part.substr(0, first_line_end);
     strip_trailing_cr(header_line);
 
-    std::istringstream iss(header_line);
     std::string status;
     std::string results_str;
-    uint64_t total_count = 0;
-    iss >> status >> results_str >> total_count;
+    std::string total_count_str;
+    size_t header_pos = 0;
+    if (!ParseProtocolToken(header_line, header_pos, status) ||
+        !ParseProtocolToken(header_line, header_pos, results_str) ||
+        !ParseProtocolToken(header_line, header_pos, total_count_str)) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed SEARCH response header"));
+    }
+    auto total_count = mygram::utils::ParseNumeric<uint64_t>(total_count_str);
+    if (!total_count) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed SEARCH result count"));
+    }
 
     SearchResponse resp;
-    resp.total_count = total_count;
+    resp.total_count = *total_count;
 
     if (first_line_end == std::string::npos) {
-      // Remaining whitespace-separated tokens on the main line are primary keys.
+      // Remaining tokens are reversibly escaped primary keys. Unquoted tokens
+      // remain accepted for compatibility with older servers.
       std::string token;
-      while (iss >> token) {
+      while (ParseProtocolToken(header_line, header_pos, token)) {
         resp.results.emplace_back(token);
       }
     } else {
@@ -807,9 +981,21 @@ class MygramClient::Impl {
 
         size_t tab_pos = line.find('\t');
         if (tab_pos == std::string::npos) {
-          resp.results.emplace_back(line);
+          size_t primary_key_pos = 0;
+          std::string primary_key;
+          if (!ParseProtocolToken(line, primary_key_pos, primary_key) || primary_key_pos != line.size()) {
+            return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed SEARCH primary key"));
+          }
+          resp.results.emplace_back(primary_key);
         } else {
-          resp.results.emplace_back(line.substr(0, tab_pos), line.substr(tab_pos + 1));
+          const std::string_view primary_key_wire(line.data(), tab_pos);
+          size_t primary_key_pos = 0;
+          std::string primary_key;
+          if (!ParseProtocolToken(primary_key_wire, primary_key_pos, primary_key) ||
+              primary_key_pos != primary_key_wire.size()) {
+            return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed SEARCH primary key"));
+          }
+          resp.results.emplace_back(std::move(primary_key), line.substr(tab_pos + 1));
         }
       }
     }
@@ -841,13 +1027,53 @@ class MygramClient::Impl {
                                          const std::vector<std::string>& not_terms,
                                          const std::vector<std::pair<std::string, std::string>>& filters,
                                          const std::string& sort_column, bool sort_desc, bool highlight = false) const {
-    if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
+    SearchOptions options;
+    options.limit = limit;
+    options.offset = offset;
+    options.and_terms = and_terms;
+    options.not_terms = not_terms;
+    options.sort_column = sort_column;
+    options.sort_desc = sort_desc;
+    options.filters.reserve(filters.size());
+    for (const auto& [key, value] : filters) {
+      options.filters.push_back({key, FilterOp::kEqual, value});
+    }
+    if (highlight) {
+      options.highlight.emplace();
+    }
+    return Search(table, query, options);
+  }
+
+  Expected<SearchResponse, Error> Search(const std::string& table, const std::string& query,
+                                         const SearchOptions& options) const {
+    std::vector<std::pair<std::string, std::string>> validation_filters;
+    validation_filters.reserve(options.filters.size());
+    for (const auto& filter : options.filters) {
+      validation_filters.emplace_back(filter.key, filter.value);
+    }
+    if (auto err = ValidateSearchInputs(table, query, options.and_terms, options.not_terms, validation_filters)) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
-    if (!sort_column.empty()) {
+    if (!options.sort_column.empty()) {
       // sort_column is an identifier sent unquoted on the wire; reject whitespace.
-      if (auto err = ValidateIdentifier(sort_column, "sort column")) {
+      if (auto err = ValidateIdentifier(options.sort_column, "sort column")) {
         return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+      }
+    }
+    if (options.fuzzy_distance.has_value() && (*options.fuzzy_distance < 1 || *options.fuzzy_distance > 2)) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "FUZZY distance must be 1 or 2"));
+    }
+    if (options.highlight.has_value()) {
+      const auto& highlight = *options.highlight;
+      if (highlight.open_tag.empty() != highlight.close_tag.empty()) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kClientInvalidArgument, "HIGHLIGHT open_tag and close_tag must be provided together"));
+      }
+      if ((!highlight.open_tag.empty() &&
+           (ValidateNoControlCharacters(highlight.open_tag, "highlight open tag").has_value() ||
+            ValidateNoControlCharacters(highlight.close_tag, "highlight close tag").has_value())) ||
+          highlight.snippet_length > 10000 || highlight.max_fragments > 100) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "Invalid HIGHLIGHT options"));
       }
     }
 
@@ -855,32 +1081,45 @@ class MygramClient::Impl {
     std::ostringstream cmd;
     cmd << "SEARCH " << table << " " << EscapeQueryString(query);
 
-    for (const auto& term : and_terms) {
+    for (const auto& term : options.and_terms) {
       cmd << " AND " << EscapeQueryString(term);
     }
 
-    for (const auto& term : not_terms) {
+    for (const auto& term : options.not_terms) {
       cmd << " NOT " << EscapeQueryString(term);
     }
 
-    for (const auto& [key, value] : filters) {
-      cmd << " FILTER " << key << " = " << EscapeQueryString(value);
+    for (const auto& filter : options.filters) {
+      cmd << " FILTER " << filter.key << " " << FilterOpToWire(filter.op) << " " << EscapeQueryString(filter.value);
     }
 
     // SORT clause (replaces ORDER BY)
-    if (!sort_column.empty()) {
-      cmd << " SORT " << sort_column << (sort_desc ? " DESC" : " ASC");
-    } else if (!sort_desc) {
+    if (!options.sort_column.empty()) {
+      cmd << " SORT " << options.sort_column << (options.sort_desc ? " DESC" : " ASC");
+    } else if (!options.sort_desc) {
       // Only add SORT ASC if explicitly requesting ascending order for primary key
       cmd << " SORT ASC";
     }
     // Default is SORT DESC (primary key descending), so no need to add it explicitly
 
-    if (highlight) {
+    if (options.fuzzy_distance.has_value()) {
+      cmd << " FUZZY " << *options.fuzzy_distance;
+    }
+    if (options.highlight.has_value()) {
+      const auto& highlight = *options.highlight;
       cmd << " HIGHLIGHT";
+      if (!highlight.open_tag.empty()) {
+        cmd << " TAG " << EscapeQueryString(highlight.open_tag) << " " << EscapeQueryString(highlight.close_tag);
+      }
+      if (highlight.snippet_length > 0) {
+        cmd << " SNIPPET_LEN " << highlight.snippet_length;
+      }
+      if (highlight.max_fragments > 0) {
+        cmd << " MAX_FRAGMENTS " << highlight.max_fragments;
+      }
     }
 
-    AppendLimitOffset(cmd, limit, offset);
+    AppendLimitOffset(cmd, options.limit, options.offset);
     return ExecuteSearchCommand(cmd.str());
   }
 
@@ -1045,17 +1284,17 @@ class MygramClient::Impl {
   }
 
   Expected<Document, Error> Get(const std::string& table, const std::string& primary_key) const {
-    // table and primary_key are identifiers sent unquoted on the wire; reject
-    // whitespace, control characters and empty values.
+    // Table names remain identifiers. Primary keys are data and use reversible
+    // token escaping so a key returned by SEARCH can always be sent to GET.
     if (auto err = ValidateIdentifier(table, "table name")) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
-    if (auto err = ValidateIdentifier(primary_key, "primary key")) {
-      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
+    if (primary_key.empty()) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "Input for primary key is empty"));
     }
 
     std::ostringstream cmd;
-    cmd << "GET " << table << " " << primary_key;
+    cmd << "GET " << table << " " << EscapeProtocolToken(primary_key);
 
     // Parse response: OK DOC <primary_key> [<key=value>...]
     auto result = SendAndExpectPrefix(cmd.str(), proto::kOkDocPrefix);
@@ -1064,17 +1303,19 @@ class MygramClient::Impl {
     }
     const std::string& response = *result;
 
-    std::istringstream iss(response);
     std::string status;
     std::string doc_str;
     std::string doc_pk;
-    iss >> status >> doc_str >> doc_pk;
+    size_t response_pos = 0;
+    if (!ParseProtocolToken(response, response_pos, status) || !ParseProtocolToken(response, response_pos, doc_str) ||
+        !ParseProtocolToken(response, response_pos, doc_pk)) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed GET response"));
+    }
 
     Document doc(doc_pk);
 
     // Parse remaining key=value pairs
-    std::string rest;
-    std::getline(iss, rest);
+    const std::string rest = response.substr(response_pos);
     doc.fields = ParseKeyValuePairs(rest);
 
     return doc;
@@ -1416,6 +1657,12 @@ mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::Sear
     const std::vector<std::pair<std::string, std::string>>& filters, const std::string& sort_column,
     bool sort_desc) const {
   return impl_->Search(table, query, limit, offset, and_terms, not_terms, filters, sort_column, sort_desc);
+}
+
+mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::Search(const std::string& table,
+                                                                                   const std::string& query,
+                                                                                   const SearchOptions& options) const {
+  return impl_->Search(table, query, options);
 }
 
 mygram::utils::Expected<SearchResponse, mygram::utils::Error> MygramClient::SearchWithHighlights(

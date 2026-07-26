@@ -8,6 +8,14 @@
  * All functions return 0 on success, non-zero on error.
  * Use mygramclient_get_last_error() to retrieve error messages.
  *
+ * A handle may be shared by threads. Error-state access is synchronized and
+ * mygramclient_get_last_error() returns a thread-local snapshot that remains
+ * valid until that thread calls it again. On failure, writable pointer
+ * out-parameters are set to NULL and numeric out-parameters are set to zero.
+ * No C++ exception crosses this C ABI: unexpected failures are translated to
+ * the documented failure return, safe output values, and last_error when a
+ * client handle is available.
+ *
  * Note: This is a C API header, so typedef is used instead of using declarations
  * for C compatibility. The modernize-use-using check is disabled for this file.
  */
@@ -86,6 +94,41 @@ typedef struct {
   size_t count;          // Number of results
   uint64_t total_count;  // Total matching documents (may exceed count)
 } MygramSearchResultWithHighlights_C;
+
+typedef enum {
+  MYGRAM_FILTER_EQ = 0,
+  MYGRAM_FILTER_NE = 1,
+  MYGRAM_FILTER_GT = 2,
+  MYGRAM_FILTER_GTE = 3,
+  MYGRAM_FILTER_LT = 4,
+  MYGRAM_FILTER_LTE = 5,
+} MygramFilterOp_C;
+
+typedef struct {
+  const char* key;
+  MygramFilterOp_C op;
+  const char* value;
+} MygramFilter_C;
+
+typedef struct {
+  uint32_t struct_size;
+  uint32_t limit;   // 0 = server default
+  uint32_t offset;  // 0 = first result
+  const char* const* and_terms;
+  size_t and_count;
+  const char* const* not_terms;
+  size_t not_count;
+  const MygramFilter_C* filters;
+  size_t filter_count;
+  const char* sort_column;
+  int sort_desc;
+  uint32_t fuzzy_distance;  // 0 = disabled; otherwise 1 or 2
+  int highlight;
+  const char* highlight_open_tag;
+  const char* highlight_close_tag;
+  uint32_t highlight_snippet_length;  // 0 = server default
+  uint32_t highlight_max_fragments;   // 0 = server default
+} MygramSearchOptions_C;
 
 /**
  * @brief Document with fields
@@ -188,6 +231,10 @@ int mygramclient_search_with_highlights(MygramClient_C* client, const char* tabl
 int mygramclient_search_raw_with_highlights(MygramClient_C* client, const char* table, const char* raw_query,
                                             uint32_t limit, uint32_t offset,
                                             MygramSearchResultWithHighlights_C** result);
+
+/** Search through the complete typed FILTER/FUZZY/HIGHLIGHT surface. */
+int mygramclient_search_with_options(MygramClient_C* client, const char* table, const char* query,
+                                     const MygramSearchOptions_C* options, MygramSearchResultWithHighlights_C** result);
 
 /**
  * @brief Search for documents with AND/NOT/FILTER clauses and return highlight snippets
@@ -542,21 +589,33 @@ typedef struct {
  * Supported syntax:
  * - `+term` - Required term (AND)
  * - `-term` - Excluded term (NOT)
- * - `term` - Optional term
+ * - `term` - Required term (implicit AND)
  * - `"phrase"` - Quoted phrase
  * - `OR` - Logical OR operator
  * - `()` - Grouping
  *
  * Examples:
- * - `golang tutorial` → main_term="golang", optional_terms=["tutorial"]
+ * - `golang tutorial` → main_term="golang", and_terms=["tutorial"]
  * - `+golang -old` → main_term="golang", and_terms=[], not_terms=["old"]
  * - `+golang +tutorial -old` → main_term="golang", and_terms=["tutorial"], not_terms=["old"]
  *
  * @param expression Web-style search expression
  * @param parsed Output parsed expression (caller must free with mygramclient_free_parsed_expression)
- * @return 0 on success, -1 on error
+ * Complex expressions that combine OR/grouping with other required or
+ * excluded terms cannot be represented by MygramParsedExpression_C and return
+ * -1 instead of silently dropping part of the expression.
+ *
+ * @return 0 on success, -1 on syntax, allocation, or representation error
  */
 int mygramclient_parse_search_expression(const char* expression, MygramParsedExpression_C** parsed);
+
+/**
+ * @brief Convert web-style input to a lossless raw server expression.
+ *
+ * The returned string is suitable for mygramclient_search_raw() and must be
+ * released with mygramclient_free_string().
+ */
+int mygramclient_convert_search_expression(const char* expression, char** converted);
 
 /**
  * @brief Free parsed expression

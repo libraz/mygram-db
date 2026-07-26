@@ -87,6 +87,7 @@ inline bool IsResponseComplete(std::string_view response, ResponseCompletionStat
   bool is_single_line = (first_crlf == response.size() - 2);
 
   constexpr std::string_view kEndMarker = "END\r\n";
+  constexpr std::string_view kEndDoubleCrlfMarker = "END\r\n\r\n";
   constexpr std::string_view kDoubleCrlf = "\r\n\r\n";
 
   // INFO: first line is exactly "OK INFO"
@@ -123,7 +124,10 @@ inline bool IsResponseComplete(std::string_view response, ResponseCompletionStat
   constexpr std::string_view kOkSyncStatusPrefix = "OK SYNC_STATUS";
   if (first_crlf == kOkSyncStatusPrefix.size() &&
       response.compare(0, kOkSyncStatusPrefix.size(), kOkSyncStatusPrefix) == 0) {
-    return EndsWith(response, kEndMarker);
+    // SyncOperationManager's body already carries a trailing CRLF after END,
+    // and the TCP reactor appends the protocol frame terminator. Accept that
+    // exact wire suffix in addition to the direct-handler form.
+    return EndsWith(response, kEndMarker) || EndsWith(response, kEndDoubleCrlfMarker);
   }
 
   // CONFIG: first line starts with "+OK"

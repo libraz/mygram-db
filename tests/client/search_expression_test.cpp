@@ -107,6 +107,23 @@ TEST(SearchExpressionTest, OrExpression) {
   EXPECT_TRUE(expr.excluded_terms.empty());
 }
 
+TEST(SearchExpressionTest, OrSubstringInsideOrdinaryWordIsNotComplex) {
+  const std::vector<std::string> ordinary_terms = {
+      "ORANGE",
+      "ORDER",
+      "FLOOR",
+      "orchestra",
+  };
+
+  for (const auto& term : ordinary_terms) {
+    auto result = ParseSearchExpression(term);
+    ASSERT_TRUE(result) << term;
+    EXPECT_FALSE(result->HasComplexExpression()) << term;
+    ASSERT_EQ(result->required_terms.size(), 1U) << term;
+    EXPECT_EQ(result->required_terms.front(), term);
+  }
+}
+
 /**
  * @brief Test parenthesized expression
  */
@@ -202,18 +219,14 @@ TEST(SearchExpressionTest, ConvertSearchExpression) {
  * @brief Test SimplifySearchExpression
  */
 TEST(SearchExpressionTest, SimplifySearchExpression) {
-  std::string main_term;
-  std::vector<std::string> and_terms;
-  std::vector<std::string> not_terms;
+  auto simplified = SimplifySearchExpression("golang tutorial -old");
 
-  bool success = SimplifySearchExpression("golang tutorial -old", main_term, and_terms, not_terms);
-
-  EXPECT_TRUE(success);
-  EXPECT_EQ(main_term, "golang");
-  EXPECT_EQ(and_terms.size(), 1);
-  EXPECT_EQ(and_terms[0], "tutorial");
-  EXPECT_EQ(not_terms.size(), 1);
-  EXPECT_EQ(not_terms[0], "old");
+  ASSERT_TRUE(simplified) << simplified.error().message();
+  EXPECT_EQ(simplified->main_term, "golang");
+  ASSERT_EQ(simplified->and_terms.size(), 1);
+  EXPECT_EQ(simplified->and_terms[0], "tutorial");
+  ASSERT_EQ(simplified->not_terms.size(), 1);
+  EXPECT_EQ(simplified->not_terms[0], "old");
 }
 
 /**
@@ -223,6 +236,7 @@ TEST(SearchExpressionTest, EmptyExpression) {
   auto result = ParseSearchExpression("");
   ASSERT_TRUE(!result);
 
+  EXPECT_EQ(result.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError);
   std::string error = result.error().message();
   EXPECT_FALSE(error.empty());
 }
@@ -234,6 +248,7 @@ TEST(SearchExpressionTest, InvalidMissingTermAfterPlus) {
   auto result = ParseSearchExpression("+");
   ASSERT_TRUE(!result);
 
+  EXPECT_EQ(result.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError);
   std::string error = result.error().message();
   EXPECT_TRUE(error.find("Expected term after") != std::string::npos || !error.empty());
 }
@@ -245,6 +260,7 @@ TEST(SearchExpressionTest, InvalidUnbalancedParens) {
   auto result = ParseSearchExpression("(golang tutorial");
   ASSERT_TRUE(!result);
 
+  EXPECT_EQ(result.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError);
   std::string error = result.error().message();
   EXPECT_TRUE(error.find("Unbalanced") != std::string::npos || !error.empty());
 }
@@ -458,53 +474,88 @@ TEST(SearchExpressionTest, EmojiToQueryString) {
  * required terms, even though raw_expression contained the OR sub-expression.
  */
 TEST(SearchExpressionTest, SimplifyOrOnly) {
-  std::string main_term;
-  std::vector<std::string> and_terms;
-  std::vector<std::string> not_terms;
-
-  bool success = SimplifySearchExpression("python OR ruby", main_term, and_terms, not_terms);
-  EXPECT_TRUE(success);
-  EXPECT_FALSE(main_term.empty());
-  EXPECT_NE(main_term.find("python"), std::string::npos);
-  EXPECT_NE(main_term.find("ruby"), std::string::npos);
-  EXPECT_NE(main_term.find("OR"), std::string::npos);
-  EXPECT_TRUE(and_terms.empty());
-  EXPECT_TRUE(not_terms.empty());
+  auto simplified = SimplifySearchExpression("python OR ruby");
+  ASSERT_TRUE(simplified) << simplified.error().message();
+  EXPECT_FALSE(simplified->main_term.empty());
+  EXPECT_NE(simplified->main_term.find("python"), std::string::npos);
+  EXPECT_NE(simplified->main_term.find("ruby"), std::string::npos);
+  EXPECT_NE(simplified->main_term.find("OR"), std::string::npos);
+  EXPECT_TRUE(simplified->and_terms.empty());
+  EXPECT_TRUE(simplified->not_terms.empty());
 }
 
 /**
  * @brief Test SimplifySearchExpression with parenthesized OR expression
  */
 TEST(SearchExpressionTest, SimplifyParenthesizedOnly) {
-  std::string main_term;
-  std::vector<std::string> and_terms;
-  std::vector<std::string> not_terms;
-
-  bool success = SimplifySearchExpression("(python OR ruby)", main_term, and_terms, not_terms);
-  EXPECT_TRUE(success);
-  EXPECT_FALSE(main_term.empty());
+  auto simplified = SimplifySearchExpression("(python OR ruby)");
+  ASSERT_TRUE(simplified) << simplified.error().message();
+  EXPECT_FALSE(simplified->main_term.empty());
   // main_term should already be parenthesized.
-  EXPECT_EQ(main_term.front(), '(');
-  EXPECT_EQ(main_term.back(), ')');
-  EXPECT_NE(main_term.find("python"), std::string::npos);
-  EXPECT_NE(main_term.find("ruby"), std::string::npos);
+  EXPECT_EQ(simplified->main_term.front(), '(');
+  EXPECT_EQ(simplified->main_term.back(), ')');
+  EXPECT_NE(simplified->main_term.find("python"), std::string::npos);
+  EXPECT_NE(simplified->main_term.find("ruby"), std::string::npos);
+}
+
+TEST(SearchExpressionTest, ParenthesizedImplicitAndPreservesWhitespace) {
+  auto converted = ConvertSearchExpression("+(machine learning)");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "(machine learning)");
+
+  converted = ConvertSearchExpression("+(a \"quoted phrase\" b)");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "(a \"quoted phrase\" b)");
 }
 
 /**
  * @brief Test SimplifySearchExpression with mixed required + OR sub-expression
  */
 TEST(SearchExpressionTest, SimplifyMixed) {
-  std::string main_term;
-  std::vector<std::string> and_terms;
-  std::vector<std::string> not_terms;
+  auto simplified = SimplifySearchExpression("+golang (tutorial OR guide)");
+  ASSERT_FALSE(simplified);
+  EXPECT_EQ(simplified.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError);
+}
 
-  bool success = SimplifySearchExpression("+golang (tutorial OR guide)", main_term, and_terms, not_terms);
-  EXPECT_TRUE(success);
-  EXPECT_EQ(main_term, "golang");
-  // The OR sub-expression is preserved on the SearchExpression's raw_expression
-  // but is not currently surfaced through SimplifySearchExpression's outputs.
-  // Just verify the simplification didn't fail and main_term/not_terms behave.
-  EXPECT_TRUE(not_terms.empty());
+TEST(SearchExpressionTest, MalformedOrChainsAreRejected) {
+  const std::vector<std::string> expressions = {
+      "a OR -b",
+      "a b OR",
+      "foo OR",
+  };
+
+  for (const auto& expression : expressions) {
+    auto result = ConvertSearchExpression(expression);
+    EXPECT_FALSE(result.has_value()) << expression;
+    if (!result.has_value()) {
+      EXPECT_EQ(result.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError) << expression;
+    }
+  }
+}
+
+TEST(SearchExpressionTest, PlusAndMinusInsideTermsAreLiteralText) {
+  const std::vector<std::string> terms = {"COVID-19", "e-mail", "UTF-8", "C++"};
+  for (const auto& term : terms) {
+    auto parsed = ParseSearchExpression(term);
+    ASSERT_TRUE(parsed) << term << ": " << parsed.error().message();
+    ASSERT_EQ(parsed->required_terms.size(), 1U) << term;
+    EXPECT_EQ(parsed->required_terms.front(), term);
+    EXPECT_TRUE(parsed->excluded_terms.empty());
+
+    auto converted = ConvertSearchExpression(term);
+    ASSERT_TRUE(converted) << term;
+    EXPECT_EQ(*converted, term);
+  }
+}
+
+TEST(SearchExpressionTest, LeadingPlusAndMinusRemainUnaryOperators) {
+  auto parsed = ParseSearchExpression("+COVID-19 -e-mail C++");
+  ASSERT_TRUE(parsed) << parsed.error().message();
+  ASSERT_EQ(parsed->required_terms.size(), 2U);
+  EXPECT_EQ(parsed->required_terms[0], "COVID-19");
+  EXPECT_EQ(parsed->required_terms[1], "C++");
+  ASSERT_EQ(parsed->excluded_terms.size(), 1U);
+  EXPECT_EQ(parsed->excluded_terms[0], "e-mail");
 }
 
 /**

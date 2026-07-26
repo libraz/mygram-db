@@ -195,7 +195,7 @@ std::string DecodeGetDocBodyForDisplay(std::string_view body) {
  *        or special characters that would otherwise be split into multiple
  *        tokens. Backslash and double-quote are escaped within the quotes.
  */
-std::string QuoteArgIfNeeded(const std::string& arg) {
+[[maybe_unused]] std::string QuoteArgIfNeeded(const std::string& arg) {
   bool needs_quotes = arg.empty();
   for (char character : arg) {
     if (character == ' ' || character == '\t' || character == '"' || character == '\\' || character == '\'') {
@@ -234,7 +234,16 @@ std::string JoinArgsForCommand(const std::vector<std::string>& args) {
     if (i > 0) {
       result += ' ';
     }
-    result += QuoteArgIfNeeded(args[i]);
+    // argv already preserves the caller's argument boundaries. Re-quoting an
+    // argument containing spaces changes boolean groups such as
+    // "(golang OR python)" into a literal phrase. Preserve the text exactly,
+    // while dropping frame-breaking control bytes.
+    for (char character : args[i]) {
+      const auto byte = static_cast<unsigned char>(character);
+      if (byte >= kAsciiPrintableMin || byte >= 0x80U) {
+        result += character;
+      }
+    }
   }
   return result;
 }
@@ -700,7 +709,7 @@ class MygramClient {
     }
   }
 
-  [[nodiscard]] int RunSingleCommand(const std::string& command) const {
+  [[nodiscard]] int RunSingleCommand(const std::string& command) {
     std::string response;
     const int max_attempts = config_.wait_ready ? (1 + config_.retry_count) : 1;
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
@@ -708,6 +717,13 @@ class MygramClient {
         std::cerr << "Server is not ready; retrying in " << config_.retry_interval << " seconds... (attempt "
                   << (attempt + 1) << "/" << max_attempts << ")\n";
         sleep(static_cast<unsigned int>(config_.retry_interval));
+        if (!IsConnected()) {
+          auto reconnect = client_->Connect();
+          if (!reconnect) {
+            response = "(error) SERVER_DISCONNECTED: " + reconnect.error().message();
+            continue;
+          }
+        }
       }
 
       response = SendCommand(command);

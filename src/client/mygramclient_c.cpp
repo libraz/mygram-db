@@ -13,12 +13,15 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "client/mygramclient.h"
+#include "client/mygramclient_c_testing.h"
 #include "client/search_expression.h"
 #include "utils/error.h"
 
@@ -28,6 +31,7 @@ using mygram::utils::ErrorCode;
 // Opaque handle structure
 struct MygramClient_C {
   std::unique_ptr<MygramClient> client;
+  mutable std::mutex error_mutex;
   std::string last_error;
   int last_error_code = static_cast<int>(ErrorCode::kSuccess);
 };
@@ -35,6 +39,9 @@ struct MygramClient_C {
 // Helper: Allocate C string copy
 // cppcoreguidelines-no-malloc)
 static char* strdup_safe(const std::string& str) {
+  if (mygramdb::client::testing::ShouldFailCStringAllocation()) {
+    return nullptr;
+  }
   char* result = static_cast<char*>(malloc(str.size() + 1));
   if (result != nullptr) {
     std::memcpy(result, str.c_str(), str.size() + 1);
@@ -104,6 +111,7 @@ static void set_last_error(MygramClient_C* client, const std::string& message,
   if (client == nullptr) {
     return;
   }
+  std::lock_guard<std::mutex> lock(client->error_mutex);
   client->last_error = message;
   client->last_error_code = static_cast<int>(code);
 }
@@ -112,6 +120,7 @@ static void set_last_error(MygramClient_C* client, const mygram::utils::Error& e
   if (client == nullptr) {
     return;
   }
+  std::lock_guard<std::mutex> lock(client->error_mutex);
   client->last_error = error.to_string();
   client->last_error_code = static_cast<int>(error.code());
 }
@@ -120,8 +129,14 @@ static void clear_last_error(MygramClient_C* client) {
   if (client == nullptr) {
     return;
   }
+  std::lock_guard<std::mutex> lock(client->error_mutex);
   client->last_error.clear();
   client->last_error_code = static_cast<int>(ErrorCode::kSuccess);
+}
+
+static int invalid_argument(MygramClient_C* client, const char* message) {
+  set_last_error(client, message, ErrorCode::kClientInvalidArgument);
+  return -1;
 }
 
 /**
@@ -142,6 +157,22 @@ static std::vector<std::string> CArrayToVector(const char* const* arr, size_t co
     }
   }
   return result;
+}
+
+static bool CArrayContainsNull(const char* const* arr, size_t count) {
+  if (arr == nullptr) {
+    return count != 0;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (arr[i] == nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool CFilterArraysContainNull(const char* const* keys, const char* const* values, size_t count) {
+  return CArrayContainsNull(keys, count) || CArrayContainsNull(values, count);
 }
 
 /**
@@ -174,7 +205,7 @@ static std::vector<std::pair<std::string, std::string>> CFilterArraysToVector(co
 template <typename Fn>
 static int ForwardVoid(MygramClient_C* client, Fn&& fn) {
   if (client == nullptr || client->client == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client must not be NULL");
   }
   auto result = fn(*client->client);
   if (!result) {
@@ -187,10 +218,12 @@ static int ForwardVoid(MygramClient_C* client, Fn&& fn) {
 
 template <typename Fn>
 static int ForwardString(MygramClient_C* client, char** out, Fn&& fn) {
-  if (client == nullptr || client->client == nullptr || out == nullptr) {
-    return -1;
+  if (out != nullptr) {
+    *out = nullptr;
   }
-  *out = nullptr;
+  if (client == nullptr || client->client == nullptr || out == nullptr) {
+    return invalid_argument(client, "Invalid argument: client and output must not be NULL");
+  }
   auto result = fn(*client->client);
   if (!result) {
     set_last_error(client, result.error());
@@ -218,6 +251,122 @@ static MygramClient_C* CreateClient(ClientConfig config) {
 static bool V2FieldAvailable(uint32_t struct_size, size_t offset, size_t field_size) {
   return static_cast<size_t>(struct_size) >= offset + field_size;
 }
+
+static void record_c_api_exception(MygramClient_C* client, const char* message) noexcept {
+  if (client == nullptr) {
+    return;
+  }
+  try {
+    set_last_error(client, message, ErrorCode::kClientCommandFailed);
+  } catch (...) {
+    // Even recording the error can allocate. Preserve the C boundary first;
+    // callers still receive the operation's safe failure value.
+  }
+}
+
+template <typename Result, typename Fn>
+static Result c_api_guard(MygramClient_C* client, Result failure, Fn&& fn) noexcept {
+  try {
+    mygramdb::client::testing::ThrowOnCApiEntryIfRequested();
+    return fn();
+  } catch (const std::exception& exception) {
+    record_c_api_exception(client, exception.what());
+  } catch (...) {
+    record_c_api_exception(client, "Unknown exception in C API");
+  }
+  return failure;
+}
+
+template <typename Fn>
+static void c_api_guard_void(MygramClient_C* client, Fn&& fn) noexcept {
+  try {
+    mygramdb::client::testing::ThrowOnCApiEntryIfRequested();
+    fn();
+  } catch (const std::exception& exception) {
+    record_c_api_exception(client, exception.what());
+  } catch (...) {
+    record_c_api_exception(client, "Unknown exception in C API");
+  }
+}
+
+// Keep the existing implementations readable and route every exported symbol
+// through the uniform wrappers defined at the end of this translation unit.
+namespace {
+
+#define mygramclient_create mygramclient_create_impl
+#define mygramclient_create_v2 mygramclient_create_v2_impl
+#define mygramclient_destroy mygramclient_destroy_impl
+#define mygramclient_connect mygramclient_connect_impl
+#define mygramclient_disconnect mygramclient_disconnect_impl
+#define mygramclient_is_connected mygramclient_is_connected_impl
+#define mygramclient_search mygramclient_search_impl
+#define mygramclient_search_raw mygramclient_search_raw_impl
+#define mygramclient_search_with_highlights mygramclient_search_with_highlights_impl
+#define mygramclient_search_raw_with_highlights mygramclient_search_raw_with_highlights_impl
+#define mygramclient_search_with_options mygramclient_search_with_options_impl
+#define mygramclient_search_with_highlights_advanced mygramclient_search_with_highlights_advanced_impl
+#define mygramclient_search_advanced mygramclient_search_advanced_impl
+#define mygramclient_count mygramclient_count_impl
+#define mygramclient_count_advanced mygramclient_count_advanced_impl
+#define mygramclient_facet mygramclient_facet_impl
+#define mygramclient_facet_advanced mygramclient_facet_advanced_impl
+#define mygramclient_get mygramclient_get_impl
+#define mygramclient_info mygramclient_info_impl
+#define mygramclient_get_config mygramclient_get_config_impl
+#define mygramclient_set_variable mygramclient_set_variable_impl
+#define mygramclient_show_variables mygramclient_show_variables_impl
+#define mygramclient_cache_clear mygramclient_cache_clear_impl
+#define mygramclient_cache_stats mygramclient_cache_stats_impl
+#define mygramclient_cache_enable mygramclient_cache_enable_impl
+#define mygramclient_cache_disable mygramclient_cache_disable_impl
+#define mygramclient_optimize mygramclient_optimize_impl
+#define mygramclient_sync mygramclient_sync_impl
+#define mygramclient_sync_status mygramclient_sync_status_impl
+#define mygramclient_sync_stop mygramclient_sync_stop_impl
+#define mygramclient_dump_info mygramclient_dump_info_impl
+#define mygramclient_dump_status mygramclient_dump_status_impl
+#define mygramclient_dump_verify mygramclient_dump_verify_impl
+#define mygramclient_save mygramclient_save_impl
+#define mygramclient_load mygramclient_load_impl
+#define mygramclient_replication_status mygramclient_replication_status_impl
+#define mygramclient_free_replication_status mygramclient_free_replication_status_impl
+#define mygramclient_replication_stop mygramclient_replication_stop_impl
+#define mygramclient_replication_start mygramclient_replication_start_impl
+#define mygramclient_debug_on mygramclient_debug_on_impl
+#define mygramclient_debug_off mygramclient_debug_off_impl
+#define mygramclient_send_command mygramclient_send_command_impl
+#define mygramclient_get_last_error mygramclient_get_last_error_impl
+#define mygramclient_get_last_error_code mygramclient_get_last_error_code_impl
+#define mygramclient_free_search_result mygramclient_free_search_result_impl
+#define mygramclient_free_search_result_with_highlights mygramclient_free_search_result_with_highlights_impl
+#define mygramclient_free_facet_result mygramclient_free_facet_result_impl
+#define mygramclient_free_document mygramclient_free_document_impl
+#define mygramclient_free_server_info mygramclient_free_server_info_impl
+#define mygramclient_free_string mygramclient_free_string_impl
+#define mygramclient_parse_search_expression mygramclient_parse_search_expression_impl
+#define mygramclient_convert_search_expression mygramclient_convert_search_expression_impl
+#define mygramclient_free_parsed_expression mygramclient_free_parsed_expression_impl
+
+int mygramclient_search_advanced_impl(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
+                                      uint32_t offset, const char** and_terms, size_t and_count, const char** not_terms,
+                                      size_t not_count, const char** filter_keys, const char** filter_values,
+                                      size_t filter_count, const char* sort_column, int sort_desc,
+                                      MygramSearchResult_C** result);
+int mygramclient_search_with_highlights_advanced_impl(MygramClient_C* client, const char* table, const char* query,
+                                                      uint32_t limit, uint32_t offset, const char** and_terms,
+                                                      size_t and_count, const char** not_terms, size_t not_count,
+                                                      const char** filter_keys, const char** filter_values,
+                                                      size_t filter_count, const char* sort_column, int sort_desc,
+                                                      MygramSearchResultWithHighlights_C** result);
+int mygramclient_count_advanced_impl(MygramClient_C* client, const char* table, const char* query,
+                                     const char** and_terms, size_t and_count, const char** not_terms, size_t not_count,
+                                     const char** filter_keys, const char** filter_values, size_t filter_count,
+                                     uint64_t* count);
+int mygramclient_facet_advanced_impl(MygramClient_C* client, const char* table, const char* column, const char* query,
+                                     uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
+                                     size_t not_count, const char** filter_keys, const char** filter_values,
+                                     size_t filter_count, MygramFacetResult_C** result);
+void mygramclient_free_parsed_expression_impl(MygramParsedExpression_C* parsed);
 
 MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
   if (config == nullptr) {
@@ -280,7 +429,7 @@ void mygramclient_destroy(MygramClient_C* client) {
 
 int mygramclient_connect(MygramClient_C* client) {
   if (client == nullptr || client->client == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client must not be NULL");
   }
 
   auto result = client->client->Connect();
@@ -307,27 +456,62 @@ int mygramclient_is_connected(const MygramClient_C* client) {
   return client->client->IsConnected() ? 1 : 0;
 }
 
-static int CopySearchResult(MygramClient_C* client, const SearchResponse& response, MygramSearchResult_C** result) {
-  *result = nullptr;
-  auto result_c = std::make_unique<MygramSearchResult_C>();
-  result_c->count = response.results.size();
-  result_c->total_count = response.total_count;
-  result_c->primary_keys = nullptr;
-  if (!response.results.empty()) {
-    result_c->primary_keys = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
-    if (result_c->primary_keys == nullptr) {
+static bool CopySearchResponseStrings(MygramClient_C* client, const SearchResponse& response, char**& primary_keys,
+                                      char*** snippets) {
+  primary_keys = nullptr;
+  if (snippets != nullptr) {
+    *snippets = nullptr;
+  }
+  if (response.results.empty()) {
+    return true;
+  }
+
+  primary_keys = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
+  if (primary_keys == nullptr) {
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return false;
+  }
+  if (snippets != nullptr) {
+    *snippets = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
+    if (*snippets == nullptr) {
+      free(primary_keys);
+      primary_keys = nullptr;
       set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
+      return false;
     }
   }
-  for (size_t i = 0; i < response.results.size(); ++i) {
-    result_c->primary_keys[i] = strdup_safe(response.results[i].primary_key);
-    if (result_c->primary_keys[i] == nullptr) {
-      free_c_string_array(result_c->primary_keys, response.results.size());
-      result_c->primary_keys = nullptr;
-      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
+
+  for (size_t index = 0; index < response.results.size(); ++index) {
+    primary_keys[index] = strdup_safe(response.results[index].primary_key);
+    if (snippets != nullptr) {
+      (*snippets)[index] = strdup_safe(response.results[index].snippet);
     }
+    if (primary_keys[index] == nullptr || (snippets != nullptr && (*snippets)[index] == nullptr)) {
+      free_c_string_array(primary_keys, response.results.size());
+      primary_keys = nullptr;
+      if (snippets != nullptr) {
+        free_c_string_array(*snippets, response.results.size());
+        *snippets = nullptr;
+      }
+      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+      return false;
+    }
+  }
+  return true;
+}
+
+static int CopySearchResult(MygramClient_C* client, const SearchResponse& response, MygramSearchResult_C** result) {
+  *result = nullptr;
+  std::unique_ptr<MygramSearchResult_C, decltype(&std::free)> result_c(
+      static_cast<MygramSearchResult_C*>(calloc(1, sizeof(MygramSearchResult_C))), &std::free);
+  if (result_c == nullptr) {
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return -1;
+  }
+  result_c->count = response.results.size();
+  result_c->total_count = response.total_count;
+  if (!CopySearchResponseStrings(client, response, result_c->primary_keys, nullptr)) {
+    return -1;
   }
   *result = result_c.release();
   clear_last_error(client);
@@ -337,32 +521,17 @@ static int CopySearchResult(MygramClient_C* client, const SearchResponse& respon
 static int CopyHighlightedSearchResult(MygramClient_C* client, const SearchResponse& response,
                                        MygramSearchResultWithHighlights_C** result) {
   *result = nullptr;
-  auto result_c = std::make_unique<MygramSearchResultWithHighlights_C>();
+  std::unique_ptr<MygramSearchResultWithHighlights_C, decltype(&std::free)> result_c(
+      static_cast<MygramSearchResultWithHighlights_C*>(calloc(1, sizeof(MygramSearchResultWithHighlights_C))),
+      &std::free);
+  if (result_c == nullptr) {
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return -1;
+  }
   result_c->count = response.results.size();
   result_c->total_count = response.total_count;
-  result_c->primary_keys = nullptr;
-  result_c->snippets = nullptr;
-  if (!response.results.empty()) {
-    result_c->primary_keys = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
-    result_c->snippets = static_cast<char**>(calloc(response.results.size(), sizeof(char*)));
-    if (result_c->primary_keys == nullptr || result_c->snippets == nullptr) {
-      free(result_c->primary_keys);
-      free(result_c->snippets);
-      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
-    }
-  }
-  for (size_t i = 0; i < response.results.size(); ++i) {
-    result_c->primary_keys[i] = strdup_safe(response.results[i].primary_key);
-    result_c->snippets[i] = strdup_safe(response.results[i].snippet);
-    if (result_c->primary_keys[i] == nullptr || result_c->snippets[i] == nullptr) {
-      free_c_string_array(result_c->primary_keys, response.results.size());
-      free_c_string_array(result_c->snippets, response.results.size());
-      result_c->primary_keys = nullptr;
-      result_c->snippets = nullptr;
-      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
-    }
+  if (!CopySearchResponseStrings(client, response, result_c->primary_keys, &result_c->snippets)) {
+    return -1;
   }
   *result = result_c.release();
   clear_last_error(client);
@@ -377,8 +546,11 @@ int mygramclient_search(MygramClient_C* client, const char* table, const char* q
 
 int mygramclient_search_raw(MygramClient_C* client, const char* table, const char* raw_query, uint32_t limit,
                             uint32_t offset, MygramSearchResult_C** result) {
+  if (result != nullptr) {
+    *result = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || table == nullptr || raw_query == nullptr || result == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, table, raw_query, and result must not be NULL");
   }
   auto response = client->client->SearchRaw(table, raw_query, limit, offset);
   if (!response) {
@@ -397,10 +569,72 @@ int mygramclient_search_with_highlights(MygramClient_C* client, const char* tabl
 int mygramclient_search_raw_with_highlights(MygramClient_C* client, const char* table, const char* raw_query,
                                             uint32_t limit, uint32_t offset,
                                             MygramSearchResultWithHighlights_C** result) {
+  if (result != nullptr) {
+    *result = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || table == nullptr || raw_query == nullptr || result == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, table, raw_query, and result must not be NULL");
   }
   auto response = client->client->SearchRawWithHighlights(table, raw_query, limit, offset);
+  if (!response) {
+    set_last_error(client, response.error());
+    return -1;
+  }
+  return CopyHighlightedSearchResult(client, *response, result);
+}
+
+int mygramclient_search_with_options(MygramClient_C* client, const char* table, const char* query,
+                                     const MygramSearchOptions_C* options,
+                                     MygramSearchResultWithHighlights_C** result) {
+  if (result != nullptr) {
+    *result = nullptr;
+  }
+  if (client == nullptr || client->client == nullptr || table == nullptr || query == nullptr || options == nullptr ||
+      result == nullptr) {
+    return invalid_argument(client, "Invalid argument: client, table, query, options, and result must not be NULL");
+  }
+  if (options->struct_size < sizeof(MygramSearchOptions_C)) {
+    return invalid_argument(client, "Invalid argument: search options struct_size is too small");
+  }
+  if ((options->and_count > 0 && options->and_terms == nullptr) ||
+      (options->not_count > 0 && options->not_terms == nullptr) ||
+      (options->filter_count > 0 && options->filters == nullptr)) {
+    return invalid_argument(client, "Invalid argument: option array is NULL while its count is non-zero");
+  }
+  if (CArrayContainsNull(options->and_terms, options->and_count) ||
+      CArrayContainsNull(options->not_terms, options->not_count)) {
+    return invalid_argument(client, "Invalid argument: option term arrays must not contain NULL");
+  }
+
+  SearchOptions cpp_options;
+  cpp_options.limit = options->limit;
+  cpp_options.offset = options->offset;
+  cpp_options.and_terms = CArrayToVector(options->and_terms, options->and_count);
+  cpp_options.not_terms = CArrayToVector(options->not_terms, options->not_count);
+  cpp_options.sort_column = options->sort_column != nullptr ? options->sort_column : "";
+  cpp_options.sort_desc = options->sort_desc != 0;
+  if (options->fuzzy_distance != 0) {
+    cpp_options.fuzzy_distance = options->fuzzy_distance;
+  }
+  if (options->highlight != 0) {
+    HighlightOptions highlight;
+    highlight.open_tag = options->highlight_open_tag != nullptr ? options->highlight_open_tag : "";
+    highlight.close_tag = options->highlight_close_tag != nullptr ? options->highlight_close_tag : "";
+    highlight.snippet_length = options->highlight_snippet_length;
+    highlight.max_fragments = options->highlight_max_fragments;
+    cpp_options.highlight = std::move(highlight);
+  }
+  cpp_options.filters.reserve(options->filter_count);
+  for (size_t i = 0; i < options->filter_count; ++i) {
+    const auto& filter = options->filters[i];
+    if (filter.key == nullptr || filter.value == nullptr || filter.op < MYGRAM_FILTER_EQ ||
+        filter.op > MYGRAM_FILTER_LTE) {
+      return invalid_argument(client, "Invalid argument: malformed typed filter");
+    }
+    cpp_options.filters.push_back({filter.key, static_cast<FilterOp>(filter.op), filter.value});
+  }
+
+  auto response = client->client->Search(table, query, cpp_options);
   if (!response) {
     set_last_error(client, response.error());
     return -1;
@@ -414,8 +648,11 @@ int mygramclient_search_with_highlights_advanced(MygramClient_C* client, const c
                                                  const char** filter_keys, const char** filter_values,
                                                  size_t filter_count, const char* sort_column, int sort_desc,
                                                  MygramSearchResultWithHighlights_C** result) {
+  if (result != nullptr) {
+    *result = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || table == nullptr || query == nullptr || result == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, table, query, and result must not be NULL");
   }
 
   if (and_count > 0 && and_terms == nullptr) {
@@ -431,6 +668,10 @@ int mygramclient_search_with_highlights_advanced(MygramClient_C* client, const c
                    ErrorCode::kClientInvalidArgument);
     return -1;
   }
+  if (CArrayContainsNull(and_terms, and_count) || CArrayContainsNull(not_terms, not_count) ||
+      CFilterArraysContainNull(filter_keys, filter_values, filter_count)) {
+    return invalid_argument(client, "Invalid argument: term and filter arrays must not contain NULL");
+  }
 
   auto and_terms_vec = CArrayToVector(and_terms, and_count);
   auto not_terms_vec = CArrayToVector(not_terms, not_count);
@@ -444,51 +685,7 @@ int mygramclient_search_with_highlights_advanced(MygramClient_C* client, const c
     return -1;
   }
 
-  const auto& resp = *search_result;
-  auto* result_c = static_cast<MygramSearchResultWithHighlights_C*>(malloc(sizeof(MygramSearchResultWithHighlights_C)));
-  if (result_c == nullptr) {
-    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-    return -1;
-  }
-
-  result_c->count = resp.results.size();
-  result_c->total_count = resp.total_count;
-  result_c->primary_keys = nullptr;
-  result_c->snippets = nullptr;
-
-  if (!resp.results.empty()) {
-    result_c->primary_keys = static_cast<char**>(malloc(sizeof(char*) * resp.results.size()));
-    result_c->snippets = static_cast<char**>(malloc(sizeof(char*) * resp.results.size()));
-    if (result_c->primary_keys == nullptr || result_c->snippets == nullptr) {
-      free(result_c->primary_keys);
-      free(result_c->snippets);
-      free(result_c);
-      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
-    }
-  }
-
-  for (size_t i = 0; i < resp.results.size(); ++i) {
-    result_c->primary_keys[i] = strdup_safe(resp.results[i].primary_key);
-    result_c->snippets[i] = strdup_safe(resp.results[i].snippet);
-    if (result_c->primary_keys[i] == nullptr || result_c->snippets[i] == nullptr) {
-      free(result_c->primary_keys[i]);
-      free(result_c->snippets[i]);
-      for (size_t j = 0; j < i; ++j) {
-        free(result_c->primary_keys[j]);
-        free(result_c->snippets[j]);
-      }
-      free(result_c->primary_keys);
-      free(result_c->snippets);
-      free(result_c);
-      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
-    }
-  }
-
-  *result = result_c;
-  clear_last_error(client);
-  return 0;
+  return CopyHighlightedSearchResult(client, *search_result, result);
 }
 
 int mygramclient_search_advanced(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
@@ -496,8 +693,11 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
                                  size_t not_count, const char** filter_keys, const char** filter_values,
                                  size_t filter_count, const char* sort_column, int sort_desc,
                                  MygramSearchResult_C** result) {
+  if (result != nullptr) {
+    *result = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || table == nullptr || query == nullptr || result == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, table, query, and result must not be NULL");
   }
 
   // Reject the (count > 0, ptr == nullptr) combination for each array argument.
@@ -515,6 +715,10 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
                    ErrorCode::kClientInvalidArgument);
     return -1;
   }
+  if (CArrayContainsNull(and_terms, and_count) || CArrayContainsNull(not_terms, not_count) ||
+      CFilterArraysContainNull(filter_keys, filter_values, filter_count)) {
+    return invalid_argument(client, "Invalid argument: term and filter arrays must not contain NULL");
+  }
 
   // Convert C arrays to C++ vectors
   auto and_terms_vec = CArrayToVector(and_terms, and_count);
@@ -531,45 +735,7 @@ int mygramclient_search_advanced(MygramClient_C* client, const char* table, cons
     return -1;
   }
 
-  auto& resp = *search_result;
-
-  auto* result_c = static_cast<MygramSearchResult_C*>(malloc(sizeof(MygramSearchResult_C)));
-  if (result_c == nullptr) {
-    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-    return -1;
-  }
-
-  result_c->count = resp.results.size();
-  result_c->total_count = resp.total_count;
-  result_c->primary_keys = nullptr;
-
-  // Allocate array for primary keys
-  if (!resp.results.empty()) {
-    result_c->primary_keys = static_cast<char**>(malloc(sizeof(char*) * resp.results.size()));
-    if (result_c->primary_keys == nullptr) {
-      free(result_c);
-      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
-    }
-  }
-
-  for (size_t i = 0; i < resp.results.size(); ++i) {
-    result_c->primary_keys[i] = strdup_safe(resp.results[i].primary_key);
-    if (result_c->primary_keys[i] == nullptr) {
-      // Free all previously allocated entries
-      for (size_t j = 0; j < i; ++j) {
-        free(result_c->primary_keys[j]);
-      }
-      free(result_c->primary_keys);
-      free(result_c);
-      set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
-      return -1;
-    }
-  }
-
-  *result = result_c;
-  clear_last_error(client);
-  return 0;
+  return CopySearchResult(client, *search_result, result);
 }
 
 int mygramclient_count(MygramClient_C* client, const char* table, const char* query, uint64_t* count) {
@@ -579,8 +745,11 @@ int mygramclient_count(MygramClient_C* client, const char* table, const char* qu
 int mygramclient_count_advanced(MygramClient_C* client, const char* table, const char* query, const char** and_terms,
                                 size_t and_count, const char** not_terms, size_t not_count, const char** filter_keys,
                                 const char** filter_values, size_t filter_count, uint64_t* count) {
+  if (count != nullptr) {
+    *count = 0;
+  }
   if (client == nullptr || client->client == nullptr || table == nullptr || query == nullptr || count == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, table, query, and count must not be NULL");
   }
 
   // Reject the (count > 0, ptr == nullptr) combination for each array argument.
@@ -596,6 +765,10 @@ int mygramclient_count_advanced(MygramClient_C* client, const char* table, const
     set_last_error(client, "Invalid argument: filter_keys or filter_values is NULL but filter_count > 0",
                    ErrorCode::kClientInvalidArgument);
     return -1;
+  }
+  if (CArrayContainsNull(and_terms, and_count) || CArrayContainsNull(not_terms, not_count) ||
+      CFilterArraysContainNull(filter_keys, filter_values, filter_count)) {
+    return invalid_argument(client, "Invalid argument: term and filter arrays must not contain NULL");
   }
 
   // Convert C arrays to C++ vectors
@@ -627,9 +800,12 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
                                 uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
                                 size_t not_count, const char** filter_keys, const char** filter_values,
                                 size_t filter_count, MygramFacetResult_C** result) {
+  if (result != nullptr) {
+    *result = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || table == nullptr || column == nullptr || query == nullptr ||
       result == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, table, column, query, and result must not be NULL");
   }
 
   if (and_count > 0 && and_terms == nullptr) {
@@ -644,6 +820,10 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
     set_last_error(client, "Invalid argument: filter_keys or filter_values is NULL but filter_count > 0",
                    ErrorCode::kClientInvalidArgument);
     return -1;
+  }
+  if (CArrayContainsNull(and_terms, and_count) || CArrayContainsNull(not_terms, not_count) ||
+      CFilterArraysContainNull(filter_keys, filter_values, filter_count)) {
+    return invalid_argument(client, "Invalid argument: term and filter arrays must not contain NULL");
   }
 
   auto and_terms_vec = CArrayToVector(and_terms, and_count);
@@ -700,8 +880,11 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
 }
 
 int mygramclient_get(MygramClient_C* client, const char* table, const char* primary_key, MygramDocument_C** doc) {
+  if (doc != nullptr) {
+    *doc = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || table == nullptr || primary_key == nullptr || doc == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, table, primary_key, and doc must not be NULL");
   }
 
   auto get_result = client->client->Get(table, primary_key);
@@ -720,6 +903,11 @@ int mygramclient_get(MygramClient_C* client, const char* table, const char* prim
   }
 
   doc_c->primary_key = strdup_safe(document.primary_key);
+  if (doc_c->primary_key == nullptr) {
+    free(doc_c);
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return -1;
+  }
   doc_c->field_count = document.fields.size();
 
   if (doc_c->field_count > 0) {
@@ -777,8 +965,11 @@ int mygramclient_get(MygramClient_C* client, const char* table, const char* prim
 }
 
 int mygramclient_info(MygramClient_C* client, MygramServerInfo_C** info) {
+  if (info != nullptr) {
+    *info = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || info == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client and info must not be NULL");
   }
 
   auto info_result = client->client->Info();
@@ -797,6 +988,11 @@ int mygramclient_info(MygramClient_C* client, MygramServerInfo_C** info) {
   }
 
   info_c->version = strdup_safe(server_info.version);
+  if (info_c->version == nullptr) {
+    free(info_c);
+    set_last_error(client, "Memory allocation failed", ErrorCode::kClientCommandFailed);
+    return -1;
+  }
   info_c->uptime_seconds = server_info.uptime_seconds;
   info_c->total_requests = server_info.total_requests;
   info_c->active_connections = server_info.active_connections;
@@ -823,7 +1019,7 @@ int mygramclient_get_config(MygramClient_C* client, char** config_str) {
 
 int mygramclient_set_variable(MygramClient_C* client, const char* name, const char* value) {
   if (name == nullptr || value == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: name and value must not be NULL");
   }
   return ForwardVoid(client, [name, value](MygramClient& c) { return c.SetVariable(name, value); });
 }
@@ -857,7 +1053,10 @@ int mygramclient_optimize(MygramClient_C* client, const char* table, char** resp
 
 int mygramclient_sync(MygramClient_C* client, const char* table, char** response) {
   if (table == nullptr) {
-    return -1;
+    if (response != nullptr) {
+      *response = nullptr;
+    }
+    return invalid_argument(client, "Invalid argument: table must not be NULL");
   }
   return ForwardString(client, response, [table](MygramClient& c) { return c.Sync(table); });
 }
@@ -873,7 +1072,10 @@ int mygramclient_sync_stop(MygramClient_C* client, const char* table, char** res
 
 int mygramclient_dump_info(MygramClient_C* client, const char* filepath, char** response) {
   if (filepath == nullptr) {
-    return -1;
+    if (response != nullptr) {
+      *response = nullptr;
+    }
+    return invalid_argument(client, "Invalid argument: filepath must not be NULL");
   }
   return ForwardString(client, response, [filepath](MygramClient& c) { return c.DumpInfo(filepath); });
 }
@@ -884,14 +1086,20 @@ int mygramclient_dump_status(MygramClient_C* client, char** response) {
 
 int mygramclient_dump_verify(MygramClient_C* client, const char* filepath, char** response) {
   if (filepath == nullptr) {
-    return -1;
+    if (response != nullptr) {
+      *response = nullptr;
+    }
+    return invalid_argument(client, "Invalid argument: filepath must not be NULL");
   }
   return ForwardString(client, response, [filepath](MygramClient& c) { return c.DumpVerify(filepath); });
 }
 
 int mygramclient_save(MygramClient_C* client, const char* filepath, char** saved_path) {
+  if (saved_path != nullptr) {
+    *saved_path = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || saved_path == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client and saved_path must not be NULL");
   }
 
   std::string filepath_str = filepath != nullptr ? filepath : "";
@@ -912,8 +1120,11 @@ int mygramclient_save(MygramClient_C* client, const char* filepath, char** saved
 }
 
 int mygramclient_load(MygramClient_C* client, const char* filepath, char** loaded_path) {
+  if (loaded_path != nullptr) {
+    *loaded_path = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || filepath == nullptr || loaded_path == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, filepath, and loaded_path must not be NULL");
   }
 
   auto load_result = client->client->Load(filepath);
@@ -933,8 +1144,11 @@ int mygramclient_load(MygramClient_C* client, const char* filepath, char** loade
 }
 
 int mygramclient_replication_status(MygramClient_C* client, MygramReplicationStatus_C** status) {
+  if (status != nullptr) {
+    *status = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || status == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client and status must not be NULL");
   }
 
   auto repl_result = client->client->GetReplicationStatus();
@@ -1005,8 +1219,11 @@ int mygramclient_debug_off(MygramClient_C* client) {
 }
 
 int mygramclient_send_command(MygramClient_C* client, const char* command, char** response) {
+  if (response != nullptr) {
+    *response = nullptr;
+  }
   if (client == nullptr || client->client == nullptr || command == nullptr || response == nullptr) {
-    return -1;
+    return invalid_argument(client, "Invalid argument: client, command, and response must not be NULL");
   }
 
   auto result = client->client->SendCommand(command);
@@ -1028,8 +1245,14 @@ const char* mygramclient_get_last_error(const MygramClient_C* client) {
   if (client == nullptr) {
     return "Invalid client handle";
   }
-
-  return client->last_error.c_str();
+  thread_local std::string error_snapshot;
+  try {
+    std::lock_guard<std::mutex> lock(client->error_mutex);
+    error_snapshot = client->last_error;
+    return error_snapshot.c_str();
+  } catch (...) {
+    return "Unable to copy client error";
+  }
 }
 
 int mygramclient_get_last_error_code(const MygramClient_C* client) {
@@ -1037,6 +1260,7 @@ int mygramclient_get_last_error_code(const MygramClient_C* client) {
     return static_cast<int>(ErrorCode::kUnknown);
   }
 
+  std::lock_guard<std::mutex> lock(client->error_mutex);
   return client->last_error_code;
 }
 
@@ -1095,16 +1319,15 @@ void mygramclient_free_string(char* str) {
 }
 
 int mygramclient_parse_search_expression(const char* expression, MygramParsedExpression_C** parsed) {
+  if (parsed != nullptr) {
+    *parsed = nullptr;
+  }
   if (expression == nullptr || parsed == nullptr) {
     return -1;
   }
 
-  // Parse using SimplifySearchExpression
-  std::string main_term;
-  std::vector<std::string> and_terms;
-  std::vector<std::string> not_terms;
-
-  if (!SimplifySearchExpression(expression, main_term, and_terms, not_terms)) {
+  auto simplified = SimplifySearchExpression(expression);
+  if (!simplified) {
     return -1;
   }
 
@@ -1122,25 +1345,25 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
   result->optional_count = 0;
 
   // Copy main term
-  result->main_term = strdup_safe(main_term);
+  result->main_term = strdup_safe(simplified->main_term);
   if (result->main_term == nullptr) {
     free(result);
     return -1;
   }
 
   // Copy AND terms
-  if (!string_vector_to_c_array_checked(and_terms, &result->and_terms)) {
+  if (!string_vector_to_c_array_checked(simplified->and_terms, &result->and_terms)) {
     mygramclient_free_parsed_expression(result);
     return -1;
   }
-  result->and_count = and_terms.size();
+  result->and_count = simplified->and_terms.size();
 
   // Copy NOT terms
-  if (!string_vector_to_c_array_checked(not_terms, &result->not_terms)) {
+  if (!string_vector_to_c_array_checked(simplified->not_terms, &result->not_terms)) {
     mygramclient_free_parsed_expression(result);
     return -1;
   }
-  result->not_count = not_terms.size();
+  result->not_count = simplified->not_terms.size();
 
   // optional_terms / optional_count are deprecated since the implicit-AND
   // parser change: every parsed term is now classified as required (AND)
@@ -1151,6 +1374,21 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
 
   *parsed = result;
   return 0;
+}
+
+int mygramclient_convert_search_expression(const char* expression, char** converted) {
+  if (converted != nullptr) {
+    *converted = nullptr;
+  }
+  if (expression == nullptr || converted == nullptr) {
+    return -1;
+  }
+  auto result = ConvertSearchExpression(expression);
+  if (!result) {
+    return -1;
+  }
+  *converted = strdup_safe(*result);
+  return *converted == nullptr ? -1 : 0;
 }
 
 void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
@@ -1164,6 +1402,284 @@ void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
   free_c_string_array(parsed->optional_terms, parsed->optional_count);
   free(parsed);
 }
+
+}  // namespace
+
+#undef mygramclient_create
+#undef mygramclient_create_v2
+#undef mygramclient_destroy
+#undef mygramclient_connect
+#undef mygramclient_disconnect
+#undef mygramclient_is_connected
+#undef mygramclient_search
+#undef mygramclient_search_raw
+#undef mygramclient_search_with_highlights
+#undef mygramclient_search_raw_with_highlights
+#undef mygramclient_search_with_options
+#undef mygramclient_search_with_highlights_advanced
+#undef mygramclient_search_advanced
+#undef mygramclient_count
+#undef mygramclient_count_advanced
+#undef mygramclient_facet
+#undef mygramclient_facet_advanced
+#undef mygramclient_get
+#undef mygramclient_info
+#undef mygramclient_get_config
+#undef mygramclient_set_variable
+#undef mygramclient_show_variables
+#undef mygramclient_cache_clear
+#undef mygramclient_cache_stats
+#undef mygramclient_cache_enable
+#undef mygramclient_cache_disable
+#undef mygramclient_optimize
+#undef mygramclient_sync
+#undef mygramclient_sync_status
+#undef mygramclient_sync_stop
+#undef mygramclient_dump_info
+#undef mygramclient_dump_status
+#undef mygramclient_dump_verify
+#undef mygramclient_save
+#undef mygramclient_load
+#undef mygramclient_replication_status
+#undef mygramclient_free_replication_status
+#undef mygramclient_replication_stop
+#undef mygramclient_replication_start
+#undef mygramclient_debug_on
+#undef mygramclient_debug_off
+#undef mygramclient_send_command
+#undef mygramclient_get_last_error
+#undef mygramclient_get_last_error_code
+#undef mygramclient_free_search_result
+#undef mygramclient_free_search_result_with_highlights
+#undef mygramclient_free_facet_result
+#undef mygramclient_free_document
+#undef mygramclient_free_server_info
+#undef mygramclient_free_string
+#undef mygramclient_parse_search_expression
+#undef mygramclient_convert_search_expression
+#undef mygramclient_free_parsed_expression
+
+#define DEFINE_C_INT_WRAPPER(name, client_expr, call_args, ...)                   \
+  int name(__VA_ARGS__) {                                                         \
+    return c_api_guard(client_expr, -1, [&]() { return name##_impl call_args; }); \
+  }
+
+#define DEFINE_C_INT_POINTER_OUT_WRAPPER(name, client_expr, out, call_args, ...)  \
+  int name(__VA_ARGS__) {                                                         \
+    if (out != nullptr) {                                                         \
+      *out = nullptr;                                                             \
+    }                                                                             \
+    return c_api_guard(client_expr, -1, [&]() { return name##_impl call_args; }); \
+  }
+
+extern "C" {
+
+MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
+  return c_api_guard<MygramClient_C*>(nullptr, nullptr, [&]() { return mygramclient_create_impl(config); });
+}
+
+MygramClient_C* mygramclient_create_v2(const MygramClientConfigV2_C* config) {
+  return c_api_guard<MygramClient_C*>(nullptr, nullptr, [&]() { return mygramclient_create_v2_impl(config); });
+}
+
+void mygramclient_destroy(MygramClient_C* client) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_destroy_impl(client); });
+}
+
+DEFINE_C_INT_WRAPPER(mygramclient_connect, client, (client), MygramClient_C* client)
+
+void mygramclient_disconnect(MygramClient_C* client) {
+  c_api_guard_void(client, [&]() { mygramclient_disconnect_impl(client); });
+}
+
+int mygramclient_is_connected(const MygramClient_C* client) {
+  return c_api_guard(const_cast<MygramClient_C*>(client), 0, [&]() { return mygramclient_is_connected_impl(client); });
+}
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_search, client, result, (client, table, query, limit, offset, result),
+                                 MygramClient_C* client, const char* table, const char* query, uint32_t limit,
+                                 uint32_t offset, MygramSearchResult_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_search_raw, client, result,
+                                 (client, table, raw_query, limit, offset, result), MygramClient_C* client,
+                                 const char* table, const char* raw_query, uint32_t limit, uint32_t offset,
+                                 MygramSearchResult_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_search_with_highlights, client, result,
+                                 (client, table, query, limit, offset, result), MygramClient_C* client,
+                                 const char* table, const char* query, uint32_t limit, uint32_t offset,
+                                 MygramSearchResultWithHighlights_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_search_raw_with_highlights, client, result,
+                                 (client, table, raw_query, limit, offset, result), MygramClient_C* client,
+                                 const char* table, const char* raw_query, uint32_t limit, uint32_t offset,
+                                 MygramSearchResultWithHighlights_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_search_with_options, client, result,
+                                 (client, table, query, options, result), MygramClient_C* client, const char* table,
+                                 const char* query, const MygramSearchOptions_C* options,
+                                 MygramSearchResultWithHighlights_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_search_with_highlights_advanced, client, result,
+                                 (client, table, query, limit, offset, and_terms, and_count, not_terms, not_count,
+                                  filter_keys, filter_values, filter_count, sort_column, sort_desc, result),
+                                 MygramClient_C* client, const char* table, const char* query, uint32_t limit,
+                                 uint32_t offset, const char** and_terms, size_t and_count, const char** not_terms,
+                                 size_t not_count, const char** filter_keys, const char** filter_values,
+                                 size_t filter_count, const char* sort_column, int sort_desc,
+                                 MygramSearchResultWithHighlights_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_search_advanced, client, result,
+                                 (client, table, query, limit, offset, and_terms, and_count, not_terms, not_count,
+                                  filter_keys, filter_values, filter_count, sort_column, sort_desc, result),
+                                 MygramClient_C* client, const char* table, const char* query, uint32_t limit,
+                                 uint32_t offset, const char** and_terms, size_t and_count, const char** not_terms,
+                                 size_t not_count, const char** filter_keys, const char** filter_values,
+                                 size_t filter_count, const char* sort_column, int sort_desc,
+                                 MygramSearchResult_C** result)
+
+int mygramclient_count(MygramClient_C* client, const char* table, const char* query, uint64_t* count) {
+  if (count != nullptr) {
+    *count = 0;
+  }
+  return c_api_guard(client, -1, [&]() { return mygramclient_count_impl(client, table, query, count); });
+}
+
+int mygramclient_count_advanced(MygramClient_C* client, const char* table, const char* query, const char** and_terms,
+                                size_t and_count, const char** not_terms, size_t not_count, const char** filter_keys,
+                                const char** filter_values, size_t filter_count, uint64_t* count) {
+  if (count != nullptr) {
+    *count = 0;
+  }
+  return c_api_guard(client, -1, [&]() {
+    return mygramclient_count_advanced_impl(client, table, query, and_terms, and_count, not_terms, not_count,
+                                            filter_keys, filter_values, filter_count, count);
+  });
+}
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_facet, client, result, (client, table, column, query, limit, result),
+                                 MygramClient_C* client, const char* table, const char* column, const char* query,
+                                 uint32_t limit, MygramFacetResult_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_facet_advanced, client, result,
+                                 (client, table, column, query, limit, and_terms, and_count, not_terms, not_count,
+                                  filter_keys, filter_values, filter_count, result),
+                                 MygramClient_C* client, const char* table, const char* column, const char* query,
+                                 uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
+                                 size_t not_count, const char** filter_keys, const char** filter_values,
+                                 size_t filter_count, MygramFacetResult_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_get, client, doc, (client, table, primary_key, doc),
+                                 MygramClient_C* client, const char* table, const char* primary_key,
+                                 MygramDocument_C** doc)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_info, client, info, (client, info), MygramClient_C* client,
+                                 MygramServerInfo_C** info)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_get_config, client, config_str, (client, config_str),
+                                 MygramClient_C* client, char** config_str)
+
+DEFINE_C_INT_WRAPPER(mygramclient_set_variable, client, (client, name, value), MygramClient_C* client, const char* name,
+                     const char* value)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_show_variables, client, response, (client, like_pattern, response),
+                                 MygramClient_C* client, const char* like_pattern, char** response)
+
+DEFINE_C_INT_WRAPPER(mygramclient_cache_clear, client, (client, table), MygramClient_C* client, const char* table)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_cache_stats, client, response, (client, response), MygramClient_C* client,
+                                 char** response)
+DEFINE_C_INT_WRAPPER(mygramclient_cache_enable, client, (client), MygramClient_C* client)
+DEFINE_C_INT_WRAPPER(mygramclient_cache_disable, client, (client), MygramClient_C* client)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_optimize, client, response, (client, table, response),
+                                 MygramClient_C* client, const char* table, char** response)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_sync, client, response, (client, table, response), MygramClient_C* client,
+                                 const char* table, char** response)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_sync_status, client, response, (client, response), MygramClient_C* client,
+                                 char** response)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_sync_stop, client, response, (client, table, response),
+                                 MygramClient_C* client, const char* table, char** response)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_dump_info, client, response, (client, filepath, response),
+                                 MygramClient_C* client, const char* filepath, char** response)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_dump_status, client, response, (client, response), MygramClient_C* client,
+                                 char** response)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_dump_verify, client, response, (client, filepath, response),
+                                 MygramClient_C* client, const char* filepath, char** response)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_save, client, saved_path, (client, filepath, saved_path),
+                                 MygramClient_C* client, const char* filepath, char** saved_path)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_load, client, loaded_path, (client, filepath, loaded_path),
+                                 MygramClient_C* client, const char* filepath, char** loaded_path)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_replication_status, client, status, (client, status),
+                                 MygramClient_C* client, MygramReplicationStatus_C** status)
+
+void mygramclient_free_replication_status(MygramReplicationStatus_C* status) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_replication_status_impl(status); });
+}
+
+DEFINE_C_INT_WRAPPER(mygramclient_replication_stop, client, (client), MygramClient_C* client)
+DEFINE_C_INT_WRAPPER(mygramclient_replication_start, client, (client), MygramClient_C* client)
+DEFINE_C_INT_WRAPPER(mygramclient_debug_on, client, (client), MygramClient_C* client)
+DEFINE_C_INT_WRAPPER(mygramclient_debug_off, client, (client), MygramClient_C* client)
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_send_command, client, response, (client, command, response),
+                                 MygramClient_C* client, const char* command, char** response)
+
+const char* mygramclient_get_last_error(const MygramClient_C* client) {
+  return c_api_guard<const char*>(const_cast<MygramClient_C*>(client), "C API exception",
+                                  [&]() { return mygramclient_get_last_error_impl(client); });
+}
+
+int mygramclient_get_last_error_code(const MygramClient_C* client) {
+  return c_api_guard(const_cast<MygramClient_C*>(client), static_cast<int>(ErrorCode::kClientCommandFailed),
+                     [&]() { return mygramclient_get_last_error_code_impl(client); });
+}
+
+void mygramclient_free_search_result(MygramSearchResult_C* result) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_search_result_impl(result); });
+}
+
+void mygramclient_free_search_result_with_highlights(MygramSearchResultWithHighlights_C* result) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_search_result_with_highlights_impl(result); });
+}
+
+void mygramclient_free_facet_result(MygramFacetResult_C* result) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_facet_result_impl(result); });
+}
+
+void mygramclient_free_document(MygramDocument_C* doc) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_document_impl(doc); });
+}
+
+void mygramclient_free_server_info(MygramServerInfo_C* info) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_server_info_impl(info); });
+}
+
+void mygramclient_free_string(char* str) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_string_impl(str); });
+}
+
+int mygramclient_parse_search_expression(const char* expression, MygramParsedExpression_C** parsed) {
+  if (parsed != nullptr) {
+    *parsed = nullptr;
+  }
+  return c_api_guard(static_cast<MygramClient_C*>(nullptr), -1,
+                     [&]() { return mygramclient_parse_search_expression_impl(expression, parsed); });
+}
+
+int mygramclient_convert_search_expression(const char* expression, char** converted) {
+  if (converted != nullptr) {
+    *converted = nullptr;
+  }
+  return c_api_guard(static_cast<MygramClient_C*>(nullptr), -1,
+                     [&]() { return mygramclient_convert_search_expression_impl(expression, converted); });
+}
+
+void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
+  c_api_guard_void(nullptr, [&]() { mygramclient_free_parsed_expression_impl(parsed); });
+}
+
+}  // extern "C"
+
+#undef DEFINE_C_INT_WRAPPER
+#undef DEFINE_C_INT_POINTER_OUT_WRAPPER
 
 // NOLINTEND(readability-identifier-naming, cppcoreguidelines-owning-memory,
 // cppcoreguidelines-no-malloc, readability-implicit-bool-conversion)

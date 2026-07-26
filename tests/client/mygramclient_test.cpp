@@ -12,14 +12,18 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "client/mygramclient_c.h"
+#include "client/mygramclient_c_testing.h"
 #include "client/protocol_detection.h"
 #include "client/search_expression.h"
 #include "index/index.h"
@@ -119,6 +123,16 @@ class MygramClientTest : public ::testing::Test {
     index_->AddDocument(3, text3);
   }
 
+  void AddGroupedBooleanTestDocuments() {
+    AddTestDocuments();
+    doc_store_->AddDocument("4", {});
+    index_->AddDocument(4, mygram::utils::NormalizeText("alpha xqz", true, "keep", true));
+    doc_store_->AddDocument("5", {});
+    index_->AddDocument(5, mygram::utils::NormalizeText("alpha jkv", true, "keep", true));
+    doc_store_->AddDocument("6", {});
+    index_->AddDocument(6, mygram::utils::NormalizeText("alpha other", true, "keep", true));
+  }
+
   index::Index* index_;                // Raw pointer to table_context_.index
   storage::DocumentStore* doc_store_;  // Raw pointer to table_context_.doc_store
   server::TableContext table_context_;
@@ -133,6 +147,23 @@ class MygramClientTest : public ::testing::Test {
  */
 TEST_F(MygramClientTest, Construction) {
   EXPECT_FALSE(client_->IsConnected());
+}
+
+TEST_F(MygramClientTest, ZeroAndOversizedConfigValuesUseSafeDefaults) {
+  ClientConfig zero_config;
+  zero_config.host = "127.0.0.1";
+  zero_config.port = server_->GetPort();
+  zero_config.timeout_ms = 0;
+  zero_config.recv_buffer_size = 0;
+  MygramClient zero_client(zero_config);
+  ASSERT_TRUE(zero_client.Connect());
+  EXPECT_TRUE(zero_client.Info());
+
+  ClientConfig oversized_config = zero_config;
+  oversized_config.recv_buffer_size = UINT32_MAX;
+  MygramClient oversized_client(oversized_config);
+  ASSERT_TRUE(oversized_client.Connect());
+  EXPECT_TRUE(oversized_client.Info());
 }
 
 /**
@@ -185,13 +216,7 @@ TEST_F(MygramClientTest, TypedSearchQuotesStandaloneReservedWord) {
 }
 
 TEST_F(MygramClientTest, CApiSearchRawPreservesGroupedBooleanExpression) {
-  AddTestDocuments();
-  doc_store_->AddDocument("4", {});
-  index_->AddDocument(4, mygram::utils::NormalizeText("alpha xqz", true, "keep", true));
-  doc_store_->AddDocument("5", {});
-  index_->AddDocument(5, mygram::utils::NormalizeText("alpha jkv", true, "keep", true));
-  doc_store_->AddDocument("6", {});
-  index_->AddDocument(6, mygram::utils::NormalizeText("alpha other", true, "keep", true));
+  AddGroupedBooleanTestDocuments();
 
   MygramClientConfig_C config{};
   config.host = "127.0.0.1";
@@ -206,8 +231,23 @@ TEST_F(MygramClientTest, CApiSearchRawPreservesGroupedBooleanExpression) {
       << mygramclient_get_last_error(c_client);
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(result->total_count, 2U);
-  EXPECT_EQ(result->count, 2U);
+  ASSERT_EQ(result->count, 2U);
+  ASSERT_NE(result->primary_keys, nullptr);
+  EXPECT_NE(result->primary_keys[0], nullptr);
   mygramclient_free_search_result(result);
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiSearchRawWithHighlightsPreservesGroupedBooleanExpression) {
+  AddGroupedBooleanTestDocuments();
+
+  MygramClientConfig_C config{};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << mygramclient_get_last_error(c_client);
 
   MygramSearchResultWithHighlights_C* highlighted = nullptr;
   ASSERT_EQ(
@@ -216,6 +256,11 @@ TEST_F(MygramClientTest, CApiSearchRawPreservesGroupedBooleanExpression) {
       << mygramclient_get_last_error(c_client);
   ASSERT_NE(highlighted, nullptr);
   EXPECT_EQ(highlighted->total_count, 2U);
+  ASSERT_EQ(highlighted->count, 2U);
+  ASSERT_NE(highlighted->primary_keys, nullptr);
+  ASSERT_NE(highlighted->snippets, nullptr);
+  EXPECT_NE(highlighted->primary_keys[0], nullptr);
+  EXPECT_NE(highlighted->snippets[0], nullptr);
   mygramclient_free_search_result_with_highlights(highlighted);
   mygramclient_destroy(c_client);
 }
@@ -262,6 +307,14 @@ TEST(MygramClientCApiV2Test, RejectsStructSizeOnlyPrefixWithoutReadingPastAlloca
   std::memcpy(storage.data(), &caller_size, sizeof(caller_size));
   const auto* short_config = reinterpret_cast<const MygramClientConfigV2_C*>(storage.data());
   EXPECT_EQ(mygramclient_create_v2(short_config), nullptr);
+}
+
+TEST(MygramClientCApiV2Test, RejectsUnsupportedConfigVersion) {
+  MygramClientConfigV2_C config{};
+  config.struct_size = sizeof(config);
+  config.version = MYGRAMCLIENT_CONFIG_V2_VERSION + 1;
+  config.host = "127.0.0.1";
+  EXPECT_EQ(mygramclient_create_v2(&config), nullptr);
 }
 
 TEST_F(MygramClientTest, SearchCountGetAndFacetAcceptDatabaseQualifiedTableName) {
@@ -399,8 +452,9 @@ TEST_F(MygramClientTest, SearchWithLimit) {
 }
 
 TEST_F(MygramClientTest, SearchWithHighlightsReturnsSnippets) {
-  const std::string text = mygram::utils::NormalizeText("Hello world example", true, "keep", true);
-  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, text));
+  const std::string original_text = "Hello ＷＯＲＬＤ example";
+  const std::string text = mygram::utils::NormalizeText(original_text, true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, text, original_text));
   index_->AddDocument(1, text);
 
   ASSERT_TRUE(client_->Connect());
@@ -412,12 +466,14 @@ TEST_F(MygramClientTest, SearchWithHighlightsReturnsSnippets) {
   EXPECT_EQ(resp.total_count, 1);
   ASSERT_EQ(resp.results.size(), 1);
   EXPECT_EQ(resp.results[0].primary_key, "highlight_doc");
-  EXPECT_NE(resp.results[0].snippet.find("<em>hello</em>"), std::string::npos);
+  EXPECT_NE(resp.results[0].snippet.find("<em>Hello</em>"), std::string::npos);
+  EXPECT_NE(resp.results[0].snippet.find("ＷＯＲＬＤ"), std::string::npos);
 }
 
 TEST_F(MygramClientTest, CApiSearchWithHighlightsReturnsSnippets) {
-  const std::string text = mygram::utils::NormalizeText("Hello world example", true, "keep", true);
-  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, text));
+  const std::string original_text = "Hello ＷＯＲＬＤ example";
+  const std::string text = mygram::utils::NormalizeText(original_text, true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, text, original_text));
   index_->AddDocument(1, text);
 
   MygramClientConfig_C config = {};
@@ -439,7 +495,8 @@ TEST_F(MygramClientTest, CApiSearchWithHighlightsReturnsSnippets) {
   ASSERT_NE(search_result->primary_keys, nullptr);
   ASSERT_NE(search_result->snippets, nullptr);
   EXPECT_STREQ(search_result->primary_keys[0], "highlight_doc");
-  EXPECT_NE(std::string(search_result->snippets[0]).find("<em>hello</em>"), std::string::npos);
+  EXPECT_NE(std::string(search_result->snippets[0]).find("<em>Hello</em>"), std::string::npos);
+  EXPECT_NE(std::string(search_result->snippets[0]).find("ＷＯＲＬＤ"), std::string::npos);
 
   mygramclient_free_search_result_with_highlights(search_result);
   mygramclient_disconnect(c_client);
@@ -548,6 +605,55 @@ TEST_F(MygramClientTest, SearchWithFilters) {
   EXPECT_EQ(resp.total_count, 2);  // Both docs 1 and 2 are active
 }
 
+TEST_F(MygramClientTest, TypedSearchOptionsExposeFilterFuzzyAndHighlight) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  SearchOptions options;
+  options.limit = 10;
+  options.filters.push_back({"status", FilterOp::kNotEqual, "inactive"});
+  options.fuzzy_distance = 1;
+  options.highlight = HighlightOptions{"<mark>", "</mark>", 128, 2};
+
+  auto result = client_->Search("testdb.test", "hello", options);
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_EQ(result->results.size(), 2U);
+  EXPECT_EQ(result->total_count, 2U);
+}
+
+TEST_F(MygramClientTest, CApiTypedSearchOptionsExposeCompleteSurface) {
+  AddTestDocuments();
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0);
+
+  MygramFilter_C filter{"status", MYGRAM_FILTER_NE, "inactive"};
+  MygramSearchOptions_C options = {};
+  options.struct_size = sizeof(options);
+  options.limit = 1;
+  options.filters = &filter;
+  options.filter_count = 1;
+  options.sort_desc = 1;
+  options.fuzzy_distance = 1;
+  options.highlight = 1;
+  options.highlight_open_tag = "<mark>";
+  options.highlight_close_tag = "</mark>";
+  options.highlight_snippet_length = 128;
+  options.highlight_max_fragments = 2;
+
+  MygramSearchResultWithHighlights_C* result = nullptr;
+  ASSERT_EQ(mygramclient_search_with_options(c_client, "testdb.test", "hello", &options, &result), 0)
+      << mygramclient_get_last_error(c_client);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->count, 1U);
+  EXPECT_EQ(result->total_count, 2U);
+  mygramclient_free_search_result_with_highlights(result);
+  mygramclient_destroy(c_client);
+}
+
 TEST_F(MygramClientTest, SearchRawPreservesConvertedOrExpression) {
   const std::string left_text = mygram::utils::NormalizeText("alpha xqz", true, "keep", true);
   const std::string right_text = mygram::utils::NormalizeText("alpha jkv", true, "keep", true);
@@ -569,16 +675,9 @@ TEST_F(MygramClientTest, SearchRawPreservesConvertedOrExpression) {
   ASSERT_TRUE(raw_result) << "SearchRaw error: " << raw_result.error().message();
   EXPECT_EQ(raw_result->total_count, 2u);
 
-  std::string main_term;
-  std::vector<std::string> and_terms;
-  std::vector<std::string> not_terms;
-  ASSERT_TRUE(SimplifySearchExpression("+alpha (xqz OR jkv)", main_term, and_terms, not_terms));
-  EXPECT_EQ(main_term, "alpha");
-  EXPECT_TRUE(and_terms.empty());
-
-  auto simplified_result = client_->Search("testdb.test", main_term, 10, 0, and_terms, not_terms);
-  ASSERT_TRUE(simplified_result) << "Search error: " << simplified_result.error().message();
-  EXPECT_GT(simplified_result->total_count, raw_result->total_count);
+  auto simplified = SimplifySearchExpression("+alpha (xqz OR jkv)");
+  ASSERT_FALSE(simplified);
+  EXPECT_EQ(simplified.error().code(), mygram::utils::ErrorCode::kClientExpressionParseError);
 }
 
 TEST_F(MygramClientTest, RejectsControlCharactersInQuery) {
@@ -711,6 +810,55 @@ TEST_F(MygramClientTest, CApiFacetReturnsValueCounts) {
   mygramclient_destroy(c_client);
 }
 
+TEST_F(MygramClientTest, CApiFacetAdvancedCoversFiltersAndArrayContracts) {
+  AddTestDocuments();
+
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 5000;
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0) << mygramclient_get_last_error(c_client);
+
+  const char* not_terms[] = {"x"};
+  const char* filter_keys[] = {"status"};
+  const char* filter_values[] = {"inactive"};
+  MygramFacetResult_C* result = nullptr;
+  ASSERT_EQ(mygramclient_facet_advanced(c_client, "testdb.test", "status", "w", 0, nullptr, 0, not_terms, 1,
+                                        filter_keys, filter_values, 1, &result),
+            0)
+      << mygramclient_get_last_error(c_client);
+  ASSERT_NE(result, nullptr);
+  ASSERT_EQ(result->count, 1u);
+  EXPECT_STREQ(result->values[0], "inactive");
+  EXPECT_EQ(result->counts[0], 1u);
+  mygramclient_free_facet_result(result);
+
+  result = reinterpret_cast<MygramFacetResult_C*>(static_cast<uintptr_t>(1));
+  EXPECT_EQ(mygramclient_facet_advanced(c_client, "testdb.test", "status", "w", 0, nullptr, 1, nullptr, 0, nullptr,
+                                        nullptr, 0, &result),
+            -1);
+  EXPECT_EQ(result, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("and_terms"), std::string::npos);
+
+  result = reinterpret_cast<MygramFacetResult_C*>(static_cast<uintptr_t>(1));
+  EXPECT_EQ(mygramclient_facet_advanced(c_client, "testdb.test", "status", "w", 0, nullptr, 0, nullptr, 1, nullptr,
+                                        nullptr, 0, &result),
+            -1);
+  EXPECT_EQ(result, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("not_terms"), std::string::npos);
+
+  result = reinterpret_cast<MygramFacetResult_C*>(static_cast<uintptr_t>(1));
+  EXPECT_EQ(mygramclient_facet_advanced(c_client, "testdb.test", "status", "w", 0, nullptr, 0, nullptr, 0, nullptr,
+                                        nullptr, 1, &result),
+            -1);
+  EXPECT_EQ(result, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("filter"), std::string::npos);
+
+  mygramclient_destroy(c_client);
+}
+
 /**
  * @brief Test GET command
  */
@@ -752,6 +900,53 @@ TEST_F(MygramClientTest, GetPreservesStringFilterValuesWithSpaces) {
   ASSERT_EQ(result->fields.size(), 1u);
   EXPECT_EQ(result->fields[0].first, "display_name");
   EXPECT_EQ(result->fields[0].second, "Alice Smith");
+}
+
+TEST_F(MygramClientTest, PrimaryKeysRoundTripAcrossSearchHighlightAndGet) {
+  const std::string spaced_primary_key = "a b";
+  const std::string underscored_primary_key = "a_b";
+  const std::string controlled_primary_key = std::string("control") + '\x01' + "key";
+  const std::string unicode_space_primary_key = "a　b";
+
+  auto spaced_doc_id = doc_store_->AddDocument(spaced_primary_key);
+  auto underscored_doc_id = doc_store_->AddDocument(underscored_primary_key);
+  auto controlled_doc_id = doc_store_->AddDocument(controlled_primary_key);
+  auto unicode_space_doc_id = doc_store_->AddDocument(unicode_space_primary_key);
+  ASSERT_TRUE(spaced_doc_id);
+  ASSERT_TRUE(underscored_doc_id);
+  ASSERT_TRUE(controlled_doc_id);
+  ASSERT_TRUE(unicode_space_doc_id);
+  index_->AddDocument(*spaced_doc_id, "roundtrip");
+  index_->AddDocument(*underscored_doc_id, "roundtrip");
+  index_->AddDocument(*controlled_doc_id, "roundtrip");
+  index_->AddDocument(*unicode_space_doc_id, "roundtrip");
+
+  ASSERT_TRUE(client_->Connect());
+
+  auto search = client_->Search("testdb.test", "roundtrip", 10);
+  ASSERT_TRUE(search) << search.error().message();
+  ASSERT_EQ(search->results.size(), 4U);
+
+  std::unordered_set<std::string> returned_primary_keys;
+  for (const auto& result : search->results) {
+    returned_primary_keys.insert(result.primary_key);
+    auto document = client_->Get("testdb.test", result.primary_key);
+    ASSERT_TRUE(document) << "GET failed for returned key: " << document.error().message();
+    EXPECT_EQ(document->primary_key, result.primary_key);
+  }
+  EXPECT_EQ(returned_primary_keys.count(spaced_primary_key), 1U);
+  EXPECT_EQ(returned_primary_keys.count(underscored_primary_key), 1U);
+  EXPECT_EQ(returned_primary_keys.count(controlled_primary_key), 1U);
+  EXPECT_EQ(returned_primary_keys.count(unicode_space_primary_key), 1U);
+
+  auto highlighted = client_->SearchWithHighlights("testdb.test", "roundtrip", 10);
+  ASSERT_TRUE(highlighted) << highlighted.error().message();
+  ASSERT_EQ(highlighted->results.size(), 4U);
+  std::unordered_set<std::string> highlighted_primary_keys;
+  for (const auto& result : highlighted->results) {
+    highlighted_primary_keys.insert(result.primary_key);
+  }
+  EXPECT_EQ(highlighted_primary_keys, returned_primary_keys);
 }
 
 /**
@@ -1246,6 +1441,20 @@ TEST_F(MygramClientTest, CApiSaveAndLoadUseDumpCommands) {
   EXPECT_NE(saved_path_str.find(dump_name), std::string::npos);
   mygramclient_free_string(saved_path);
 
+  char* dump_response = nullptr;
+  ASSERT_EQ(mygramclient_dump_info(c_client, saved_path_str.c_str(), &dump_response), 0)
+      << "DUMP INFO error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(dump_response, nullptr);
+  EXPECT_TRUE(std::string(dump_response).find("OK DUMP_INFO") == 0) << dump_response;
+  mygramclient_free_string(dump_response);
+
+  dump_response = nullptr;
+  ASSERT_EQ(mygramclient_dump_verify(c_client, saved_path_str.c_str(), &dump_response), 0)
+      << "DUMP VERIFY error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(dump_response, nullptr);
+  EXPECT_TRUE(std::string(dump_response).find("OK DUMP_VERIFIED") == 0) << dump_response;
+  mygramclient_free_string(dump_response);
+
   index_->Clear();
   doc_store_->Clear();
 
@@ -1276,7 +1485,30 @@ TEST_F(MygramClientTest, CApiTypedAdminWrappersUseProtocolCommands) {
 
   MygramClient_C* c_client = mygramclient_create(&config);
   ASSERT_NE(c_client, nullptr);
+  EXPECT_EQ(mygramclient_is_connected(c_client), 0);
   ASSERT_EQ(mygramclient_connect(c_client), 0) << "Connect error: " << mygramclient_get_last_error(c_client);
+  EXPECT_EQ(mygramclient_is_connected(c_client), 1);
+
+  MygramServerInfo_C* info = nullptr;
+  ASSERT_EQ(mygramclient_info(c_client, &info), 0) << "INFO error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(info, nullptr);
+  EXPECT_NE(info->version, nullptr);
+  ASSERT_EQ(info->table_count, 1u);
+  ASSERT_NE(info->tables, nullptr);
+  EXPECT_NE(info->tables[0], nullptr);
+  EXPECT_STREQ(info->tables[0], "testdb.test");
+  mygramclient_free_server_info(info);
+  mygramclient_free_server_info(nullptr);
+
+  char* config_response = nullptr;
+  ASSERT_EQ(mygramclient_get_config(c_client, &config_response), 0)
+      << "CONFIG error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(config_response, nullptr);
+  EXPECT_NE(std::string(config_response).find("test"), std::string::npos);
+  mygramclient_free_string(config_response);
+
+  ASSERT_EQ(mygramclient_debug_on(c_client), 0) << "DEBUG ON error: " << mygramclient_get_last_error(c_client);
+  ASSERT_EQ(mygramclient_debug_off(c_client), 0) << "DEBUG OFF error: " << mygramclient_get_last_error(c_client);
 
   ASSERT_EQ(mygramclient_set_variable(c_client, "logging.level", "info"), 0)
       << "SET error: " << mygramclient_get_last_error(c_client);
@@ -1315,8 +1547,36 @@ TEST_F(MygramClientTest, CApiTypedAdminWrappersUseProtocolCommands) {
   EXPECT_TRUE(std::string(response).find("OK DUMP_STATUS") == 0) << response;
   mygramclient_free_string(response);
 
+  response = nullptr;
+  ASSERT_EQ(mygramclient_sync_status(c_client, &response), 0)
+      << "SYNC STATUS error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(std::string(response).find("OK SYNC_STATUS") == 0) << response;
+  mygramclient_free_string(response);
+
+  response = nullptr;
+  ASSERT_EQ(mygramclient_sync(c_client, "testdb.test", &response), 0)
+      << "SYNC error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(std::string(response).find("OK SYNC") == 0) << response;
+  mygramclient_free_string(response);
+
+  response = nullptr;
+  ASSERT_EQ(mygramclient_sync_stop(c_client, "testdb.test", &response), 0)
+      << "SYNC STOP error: " << mygramclient_get_last_error(c_client);
+  ASSERT_NE(response, nullptr);
+  EXPECT_TRUE(std::string(response).find("OK SYNC") == 0) << response;
+  mygramclient_free_string(response);
+
+  EXPECT_EQ(mygramclient_replication_stop(c_client), -1);
+  EXPECT_STRNE(mygramclient_get_last_error(c_client), "");
+  EXPECT_EQ(mygramclient_replication_start(c_client), -1);
+  EXPECT_STRNE(mygramclient_get_last_error(c_client), "");
+
   mygramclient_disconnect(c_client);
+  EXPECT_EQ(mygramclient_is_connected(c_client), 0);
   mygramclient_destroy(c_client);
+  EXPECT_EQ(mygramclient_is_connected(nullptr), 0);
 }
 
 /**
@@ -1634,6 +1894,14 @@ TEST_F(MygramClientCApiTest, ParseSearchExpression_Complex) {
   mygramclient_free_parsed_expression(parsed);
 }
 
+TEST_F(MygramClientCApiTest, ParseSearchExpression_UnrepresentableComplexExpressionFailsClosed) {
+  auto* parsed = reinterpret_cast<MygramParsedExpression_C*>(uintptr_t{1});
+  int result = mygramclient_parse_search_expression("+golang (tutorial OR guide)", &parsed);
+
+  EXPECT_EQ(result, -1);
+  EXPECT_EQ(parsed, nullptr);
+}
+
 /**
  * @brief Test C API parse_search_expression - Japanese text
  */
@@ -1873,18 +2141,6 @@ TEST_F(MygramClientTest, RejectsWhitespaceInSortColumn) {
 }
 
 /**
- * @brief Test that Get rejects whitespace in the primary key identifier
- */
-TEST_F(MygramClientTest, RejectsWhitespaceInPrimaryKey) {
-  ASSERT_TRUE(client_->Connect());
-
-  auto result = client_->Get("testdb.test", "bad pk");
-  ASSERT_FALSE(result);
-  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
-  EXPECT_NE(result.error().message().find("whitespace"), std::string::npos) << "Error: " << result.error().message();
-}
-
-/**
  * @brief Test that Search rejects whitespace in a filter key
  */
 TEST_F(MygramClientTest, RejectsWhitespaceInFilterKey) {
@@ -2010,6 +2266,161 @@ TEST_F(MygramClientTest, CApiLastErrorCodeReturnsNumericClientCode) {
 
   mygramclient_disconnect(c_client);
   mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiInvalidArgumentsInitializeOutputsAndSetError) {
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+
+  auto* search = reinterpret_cast<MygramSearchResult_C*>(static_cast<uintptr_t>(1));
+  EXPECT_EQ(mygramclient_search(c_client, nullptr, "hello", 10, 0, &search), -1);
+  EXPECT_EQ(search, nullptr);
+  EXPECT_EQ(mygramclient_get_last_error_code(c_client),
+            static_cast<int>(mygram::utils::ErrorCode::kClientInvalidArgument));
+
+  uint64_t count = 42;
+  EXPECT_EQ(mygramclient_count(c_client, nullptr, "hello", &count), -1);
+  EXPECT_EQ(count, 0U);
+  EXPECT_EQ(mygramclient_get_last_error_code(c_client),
+            static_cast<int>(mygram::utils::ErrorCode::kClientInvalidArgument));
+
+  char* response = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+  EXPECT_EQ(mygramclient_send_command(c_client, nullptr, &response), -1);
+  EXPECT_EQ(response, nullptr);
+  EXPECT_EQ(mygramclient_get_last_error_code(c_client),
+            static_cast<int>(mygram::utils::ErrorCode::kClientInvalidArgument));
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiGetAndInfoReportCStringAllocationFailure) {
+  AddTestDocuments();
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0);
+
+  MygramDocument_C* doc = reinterpret_cast<MygramDocument_C*>(static_cast<uintptr_t>(1));
+  client::testing::SetCStringAllocationFailureCountdown(0);
+  const int get_result = mygramclient_get(c_client, "testdb.test", "1", &doc);
+  client::testing::SetCStringAllocationFailureCountdown(-1);
+  EXPECT_EQ(get_result, -1);
+  EXPECT_EQ(doc, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("allocation"), std::string::npos);
+
+  MygramServerInfo_C* info = reinterpret_cast<MygramServerInfo_C*>(static_cast<uintptr_t>(1));
+  client::testing::SetCStringAllocationFailureCountdown(0);
+  const int info_result = mygramclient_info(c_client, &info);
+  client::testing::SetCStringAllocationFailureCountdown(-1);
+  EXPECT_EQ(info_result, -1);
+  EXPECT_EQ(info, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("allocation"), std::string::npos);
+
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiExceptionBarrierReturnsSafeValuesForEveryResultShape) {
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+
+  auto* search = reinterpret_cast<MygramSearchResult_C*>(static_cast<uintptr_t>(1));
+  uint64_t count = 42;
+  char* response = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+  auto* parsed = reinterpret_cast<MygramParsedExpression_C*>(static_cast<uintptr_t>(1));
+  char* converted = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+
+  client::testing::SetThrowOnCApiEntry(true);
+  const int connect_result = mygramclient_connect(c_client);
+  const int connected_result = mygramclient_is_connected(c_client);
+  const int search_result = mygramclient_search(c_client, "testdb.test", "hello", 10, 0, &search);
+  const int count_result = mygramclient_count(c_client, "testdb.test", "hello", &count);
+  const int command_result = mygramclient_send_command(c_client, "INFO", &response);
+  const int parse_result = mygramclient_parse_search_expression("hello", &parsed);
+  const int convert_result = mygramclient_convert_search_expression("hello", &converted);
+  const char* guarded_error = mygramclient_get_last_error(c_client);
+  const int guarded_error_code = mygramclient_get_last_error_code(c_client);
+  MygramClient_C* guarded_create = mygramclient_create(&config);
+  mygramclient_disconnect(c_client);
+  mygramclient_free_string(nullptr);
+  mygramclient_free_parsed_expression(nullptr);
+  client::testing::SetThrowOnCApiEntry(false);
+
+  EXPECT_EQ(connect_result, -1);
+  EXPECT_EQ(connected_result, 0);
+  EXPECT_EQ(search_result, -1);
+  EXPECT_EQ(search, nullptr);
+  EXPECT_EQ(count_result, -1);
+  EXPECT_EQ(count, 0U);
+  EXPECT_EQ(command_result, -1);
+  EXPECT_EQ(response, nullptr);
+  EXPECT_EQ(parse_result, -1);
+  EXPECT_EQ(parsed, nullptr);
+  EXPECT_EQ(convert_result, -1);
+  EXPECT_EQ(converted, nullptr);
+  EXPECT_STREQ(guarded_error, "C API exception");
+  EXPECT_EQ(guarded_error_code, static_cast<int>(mygram::utils::ErrorCode::kClientCommandFailed));
+  EXPECT_EQ(guarded_create, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("injected C API exception"), std::string::npos);
+
+  mygramclient_destroy(c_client);
+}
+
+TEST_F(MygramClientTest, CApiLastErrorSnapshotIsThreadSafe) {
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+
+  constexpr int kThreads = 8;
+  constexpr int kIterations = 200;
+  std::atomic<bool> start{false};
+  std::atomic<int> failures{0};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+  for (int thread_index = 0; thread_index < kThreads; ++thread_index) {
+    threads.emplace_back([&, thread_index] {
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (int iteration = 0; iteration < kIterations; ++iteration) {
+        char* output = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+        if (mygramclient_send_command(c_client, nullptr, &output) != -1 || output != nullptr) {
+          failures.fetch_add(1, std::memory_order_relaxed);
+        }
+        const char* snapshot = mygramclient_get_last_error(c_client);
+        std::this_thread::yield();
+        if (snapshot == nullptr || std::strlen(snapshot) == 0 || mygramclient_get_last_error_code(c_client) == 0) {
+          failures.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+  start.store(true, std::memory_order_release);
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  EXPECT_EQ(failures.load(), 0);
+  mygramclient_destroy(c_client);
+}
+
+TEST(MygramClientCApiStandaloneTest, ConvertsComplexExpressionLosslessly) {
+  char* converted = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+  ASSERT_EQ(mygramclient_convert_search_expression("golang (tutorial OR guide)", &converted), 0);
+  ASSERT_NE(converted, nullptr);
+  EXPECT_NE(std::string(converted).find("tutorial OR guide"), std::string::npos);
+  mygramclient_free_string(converted);
+
+  converted = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+  EXPECT_EQ(mygramclient_convert_search_expression(nullptr, &converted), -1);
+  EXPECT_EQ(converted, nullptr);
 }
 
 TEST_F(MygramClientTest, CApiSuccessfulTypedCallsClearLastError) {
@@ -2304,6 +2715,7 @@ TEST(IsResponseCompleteTest, SyncStatusRequiresEndMarker) {
   EXPECT_FALSE(IsResponseComplete("OK SYNC_STATUS\r\n"));
   EXPECT_FALSE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\n"));
   EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\nEND\r\n"));
+  EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\nEND\r\n\r\n"));
   EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\ntable=users status=RUNNING\r\nEND\r\n"));
 }
 

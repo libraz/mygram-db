@@ -9,10 +9,16 @@
  * private static.
  */
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
+#include <array>
+#include <atomic>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Rename main() to avoid clashing with gtest's main, and unprivate
@@ -107,6 +113,51 @@ TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
   EXPECT_FALSE(MygramClient::IsWaitReadyRetryableResponse("ERROR Unknown table"));
 }
 
+TEST_F(CliConstantsTest, WaitReadyReconnectsAfterDroppedConnection) {
+  int listener = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(listen(listener, 2), 0);
+  socklen_t address_size = sizeof(address);
+  ASSERT_EQ(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size), 0);
+
+  std::atomic<int> served{0};
+  std::thread server([&] {
+    for (int connection_index = 0; connection_index < 2; ++connection_index) {
+      int connection = accept(listener, nullptr, nullptr);
+      if (connection < 0) {
+        return;
+      }
+      std::array<char, 256> request{};
+      (void)recv(connection, request.data(), request.size(), 0);
+      if (connection_index == 1) {
+        constexpr std::string_view response = "OK INFO\r\nstatus: ready\r\nEND\r\n";
+        (void)send(connection, response.data(), response.size(), 0);
+      }
+      close(connection);
+      served.fetch_add(1);
+    }
+  });
+
+  Config config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.wait_ready = true;
+  config.retry_count = 1;
+  config.retry_interval = 0;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+  EXPECT_EQ(client.RunSingleCommand("INFO"), 0);
+
+  server.join();
+  close(listener);
+  EXPECT_EQ(served.load(), 2);
+}
+
 // =============================================================================
 // String helpers
 // =============================================================================
@@ -168,7 +219,11 @@ TEST_F(CliStringHelperTest, QuoteArgIfNeeded) {
 
 TEST_F(CliStringHelperTest, JoinArgsForCommand) {
   EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello"}), "SEARCH articles hello");
-  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}), "SEARCH articles \"hello world\"");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}), "SEARCH articles hello world");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "(golang OR python)", "AND", "tutorial"}),
+            "SEARCH articles (golang OR python) AND tutorial");
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "\"hello world\""}), "SEARCH articles \"hello world\"");
+  EXPECT_EQ(JoinArgsForCommand({"INFO\r\nSHUTDOWN"}), "INFOSHUTDOWN");
   EXPECT_EQ(JoinArgsForCommand({}), "");
   EXPECT_EQ(JoinArgsForCommand({"INFO"}), "INFO");
 }
@@ -475,7 +530,7 @@ TEST_F(CliPrintResponseTest, FacetResponseShowsValueLines) {
 
 TEST_F(CliPrintResponseTest, SyncStartedShortForm) {
   StdoutCapture capture;
-  MygramClient::PrintResponse("OK SYNC STARTED table=foo job_id=1");
+  MygramClient::PrintResponse("OK SYNC STARTED table=foo");
   std::string output = capture.GetOutput();
 
   EXPECT_NE(output.find("SYNC STARTED"), std::string::npos);
@@ -873,7 +928,7 @@ TEST_F(CliArgumentParsingTest, VersionFlagExits) {
 }
 
 // =============================================================================
-// Single-command-mode argument joining (preserves spaces via QuoteArgIfNeeded)
+// Single-command-mode argument joining preserves boolean expression text.
 // =============================================================================
 
 class CliJoinArgsTest : public ::testing::Test {};
@@ -882,14 +937,12 @@ TEST_F(CliJoinArgsTest, PreservesSimpleArgs) {
   EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello", "world"}), "SEARCH articles hello world");
 }
 
-TEST_F(CliJoinArgsTest, QuotesSpaceContainingArgs) {
-  // The old CLI just space-joined argv: "hello world" -> 2 tokens on the wire.
-  // With proper quoting, it stays a single token.
-  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}), "SEARCH articles \"hello world\"");
+TEST_F(CliJoinArgsTest, PreservesSpaceContainingExpressionArgs) {
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}), "SEARCH articles hello world");
 }
 
-TEST_F(CliJoinArgsTest, EscapesEmbeddedQuotes) {
-  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "say \"hi\""}), "SEARCH articles \"say \\\"hi\\\"\"");
+TEST_F(CliJoinArgsTest, PreservesEmbeddedQuotes) {
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "say \"hi\""}), "SEARCH articles say \"hi\"");
 }
 
 }  // namespace

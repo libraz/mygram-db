@@ -72,6 +72,40 @@ struct SearchResponse {
   std::optional<DebugInfo> debug;     // Debug info (if debug mode enabled)
 };
 
+enum class FilterOp : uint8_t {
+  kEqual = 0,
+  kNotEqual,
+  kGreaterThan,
+  kGreaterThanOrEqual,
+  kLessThan,
+  kLessThanOrEqual,
+};
+
+struct FilterCondition {
+  std::string key;
+  FilterOp op = FilterOp::kEqual;
+  std::string value;
+};
+
+struct HighlightOptions {
+  std::string open_tag;
+  std::string close_tag;
+  uint32_t snippet_length = 0;  // 0 = server default
+  uint32_t max_fragments = 0;   // 0 = server default
+};
+
+struct SearchOptions {
+  uint32_t limit = 0;
+  uint32_t offset = 0;
+  std::vector<std::string> and_terms;
+  std::vector<std::string> not_terms;
+  std::vector<FilterCondition> filters;
+  std::string sort_column;
+  bool sort_desc = true;
+  std::optional<uint32_t> fuzzy_distance;
+  std::optional<HighlightOptions> highlight;
+};
+
 /**
  * @brief Count query response
  */
@@ -131,10 +165,11 @@ struct ReplicationStatus {
 struct ClientConfig {
   std::string host = "127.0.0.1";                                     // Server hostname
   uint16_t port = static_cast<uint16_t>(config::defaults::kTcpPort);  // Default port for MygramDB protocol
-  uint32_t timeout_ms = 5000;                                         // Default timeout in milliseconds
+  uint32_t timeout_ms = 5000;                                         // Default timeout in milliseconds (0 = default)
   uint32_t dump_save_timeout_ms = 300000;  // Max wait for async DUMP SAVE completion (0 = timeout_ms)
-  uint32_t recv_buffer_size = server::protocol::kDefaultClientRecvBufferSize;  // Default buffer size (64KB)
-  std::string unix_socket_path;                                                // Unix socket path (empty = use TCP)
+  uint32_t recv_buffer_size =
+      server::protocol::kDefaultClientRecvBufferSize;  // Default buffer size (64KB; 0 = default, max 16 MiB)
+  std::string unix_socket_path;                        // Unix socket path (empty = use TCP)
 };
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
@@ -236,6 +271,13 @@ class MygramClient {
       const std::vector<std::string>& and_terms = {}, const std::vector<std::string>& not_terms = {},
       const std::vector<std::pair<std::string, std::string>>& filters = {}, const std::string& sort_column = "",
       bool sort_desc = true) const;
+
+  /**
+   * @brief Search with typed FILTER operators, FUZZY, and HIGHLIGHT options.
+   */
+  mygram::utils::Expected<SearchResponse, mygram::utils::Error> Search(const std::string& table,
+                                                                       const std::string& query,
+                                                                       const SearchOptions& options) const;
 
   /**
    * @brief Search for documents and return highlighted snippets

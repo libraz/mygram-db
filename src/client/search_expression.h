@@ -59,6 +59,15 @@ struct SearchExpression {
 };
 
 /**
+ * @brief Lossless representation supported by the legacy structured client API.
+ */
+struct SimplifiedExpression {
+  std::string main_term;
+  std::vector<std::string> and_terms;
+  std::vector<std::string> not_terms;
+};
+
+/**
  * @brief Parse web-style search expression
  *
  * Converts expressions like "+golang -old (tutorial OR guide)" into
@@ -112,15 +121,13 @@ mygram::utils::Expected<std::string, mygram::utils::Error> ConvertSearchExpressi
  * @brief Simplify search expression to basic terms (for backward compatibility)
  *
  * For clients that don't support QueryAST, this extracts simple term lists.
- * Complex expressions with OR/grouping will lose semantic meaning.
+ * Returns an error when a complex OR/grouping expression cannot be represented
+ * without losing semantic meaning.
  *
  * @param expression Web-style search expression
- * @param main_term Output: first required term (or first term if none required)
- * @param and_terms Output: additional required terms
- * @param not_terms Output: excluded terms
- * @return true on success, false on error (check error message)
+ * @return Simplified expression, or a typed client error
  */
-bool SimplifySearchExpression(const std::string& expression, std::string& main_term,
-                              std::vector<std::string>& and_terms, std::vector<std::string>& not_terms);
+mygram::utils::Expected<SimplifiedExpression, mygram::utils::Error> SimplifySearchExpression(
+    const std::string& expression);
 
 }  // namespace mygramdb::client
