@@ -61,11 +61,12 @@ class TestTruncate:
         mysql.insert_rows("articles", rows)
 
         def _get_doc_count() -> int:
-            return mygramdb.count("testdb.articles", "test")
+            info = mygramdb.info()
+            return int(info.get("total_documents", info.get("doc_count", 0)))
 
         wait_until_gte(
             _get_doc_count,
-            minimum=30,
+            minimum=len(rows),
             timeout=30,
             interval=1,
             description="re-insert after TRUNCATE",

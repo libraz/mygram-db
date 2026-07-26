@@ -54,18 +54,20 @@ def wait_until_value(
     """Poll until func() returns the expected value."""
     deadline = time.monotonic() + timeout
     last_value: T | None = None
+    last_error: Exception | None = None
 
     while time.monotonic() < deadline:
         try:
             last_value = func()
             if last_value == expected:
                 return last_value
-        except Exception:
-            pass
+        except Exception as e:
+            last_error = e
         time.sleep(interval)
 
+    error_detail = f", last error: {last_error}" if last_error else ""
     raise WaitTimeoutError(
-        f"{description} (expected={expected}, last={last_value})",
+        f"{description} (expected={expected}, last={last_value}{error_detail})",
         timeout,
     )
 
@@ -81,17 +83,19 @@ def wait_until_gte(
     """Poll until func() returns a value >= minimum."""
     deadline = time.monotonic() + timeout
     last_value: int | float = 0
+    last_error: Exception | None = None
 
     while time.monotonic() < deadline:
         try:
             last_value = func()
             if last_value >= minimum:
                 return last_value
-        except Exception:
-            pass
+        except Exception as e:
+            last_error = e
         time.sleep(interval)
 
+    error_detail = f", last error: {last_error}" if last_error else ""
     raise WaitTimeoutError(
-        f"{description} (expected >= {minimum}, last={last_value})",
+        f"{description} (expected >= {minimum}, last={last_value}{error_detail})",
         timeout,
     )

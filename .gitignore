@@ -61,6 +61,7 @@ logs/
 *.sql
 !support/docker/mysql/init/*.sql
 !e2e/docker/mysql-init/*.sql
+!e2e/docker/mariadb-init/*.sql
 
 # IDE
 .idea/
@@ -89,13 +90,16 @@ CLAUDE.md
 # Backup
 backup/
 
-# Python (support/benchmark)
+# Python (support/benchmark, support/seed)
 __pycache__/
 *.py[oc]
 *.egg-info
 .venv/
 .python-version
 dumps/
+# Dependencies are locked by rye (requirements*.lock); a uv lockfile would be
+# a second, conflicting source of truth.
+uv.lock
 
 # E2E test results
 e2e/results/reports/*.xml

@@ -22,11 +22,10 @@ build-backend = "hatchling.build"
 packages = ["lib"]
 
 [tool.pytest.ini_options]
-# Order matters: non-destructive tests first, DDL/destructive tests last.
-# DDL operations (DROP, TRUNCATE, RENAME) disrupt binlog replication state
-# and can cause subsequent tests to see stale data if run too early.
 testpaths = [
+    "tests/unit",
     "tests/smoke",
+    "tests/ddl",
     "tests/search",
     "tests/unicode",
     "tests/edge_cases",
@@ -38,7 +37,6 @@ testpaths = [
     "tests/persistence",
     "tests/concurrency",
     "tests/multi_table",
-    "tests/ddl",
     "tests/resilience",
     "tests/load",
     "tests/benchmark",
@@ -82,8 +80,9 @@ quote-style = "double"
 python_version = "3.10"
 warn_unused_configs = true
 
-[dependency-groups]
-dev = [
+[tool.rye]
+managed = true
+dev-dependencies = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
 ]

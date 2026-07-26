@@ -44,11 +44,9 @@ fi
 echo "Starting MySQL test container..."
 docker compose -f docker/docker-compose.yml up -d --wait --wait-timeout 120
 
-# Install Python dependencies if needed
-if ! python3 -c "import pytest" 2>/dev/null; then
-    echo "Installing Python dependencies..."
-    pip3 install -q -e ".[dev]" 2>/dev/null || pip3 install -q -e .
-fi
+# shellcheck source=python-env.sh
+source "$SCRIPT_DIR/python-env.sh"
+e2e_python_setup "$SCRIPT_DIR"
 
 # Create results directories
 mkdir -p results/reports results/metrics
@@ -63,7 +61,7 @@ trap cleanup EXIT
 # Run tests (MygramDB binary is started/stopped by conftest.py)
 echo "Running tests..."
 set +e
-python3 -m pytest "${PYTEST_ARGS[@]}"
+"$E2E_PYTHON_BIN" -m pytest "${PYTEST_ARGS[@]}"
 EXIT_CODE=$?
 set -e
 

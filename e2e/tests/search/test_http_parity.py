@@ -92,7 +92,7 @@ class TestHttpParity:
 
     def test_http_invalid_boolean_is_client_error(self, mygramdb, seed_data):
         status, body = mygramdb.http_post(
-            "/tables/testdb.articles/search", {"q": "(broken OR", "limit": 10}
+            "/tables/testdb.articles/search", {"q": "(broken OR", "mode": "boolean", "limit": 10}
         )
         assert status == 400
         assert isinstance(body, dict)

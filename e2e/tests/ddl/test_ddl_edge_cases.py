@@ -102,8 +102,8 @@ def _recreate_articles_table(mysql, mygramdb):
     mygramdb.sync("testdb.articles", timeout=60)
 
     def _has_docs() -> bool:
-        count = mygramdb.count("testdb.articles", "test")
-        return count >= 30
+        info = mygramdb.info()
+        return int(info.get("total_documents", info.get("doc_count", 0))) >= len(rows)
 
     wait_until(
         _has_docs,

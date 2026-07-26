@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help setup build test test-fast test-slow test-load test-all test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check pkg-rpm-el9 pkg-rpm-el10 pkg-rpm-all pkg-deb-jammy pkg-deb-noble pkg-deb-all pkg-all pkg-test-rpm-el9 pkg-test-rpm-el10 pkg-test-deb-jammy pkg-test-deb-noble pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble pkg-verify-all
+.PHONY: help setup build test test-fast test-slow test-load test-all test-mysql test-large-dump test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check pkg-rpm-el9 pkg-rpm-el10 pkg-rpm-all pkg-deb-jammy pkg-deb-noble pkg-deb-all pkg-all pkg-test-rpm-el9 pkg-test-rpm-el10 pkg-test-deb-jammy pkg-test-deb-noble pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble pkg-verify-all
 
 # Build directory
 BUILD_DIR := build
@@ -36,6 +36,8 @@ help:
 	@echo "  make test-fast      - Run tests excluding SLOW label (same as test, explicit name)"
 	@echo "  make test-slow      - Run only SLOW-labeled tests"
 	@echo "  make test-all       - Run ALL tests including SLOW"
+	@echo "  make test-mysql     - Run opt-in MySQL integration tests (requires Docker)"
+	@echo "  make test-large-dump - Run opt-in large dump restore test"
 	@echo "  make test-full      - Run all tests with full parallelism (same as TEST_JOBS=\$$(nproc))"
 	@echo "  make test-sequential - Run tests sequentially (same as TEST_JOBS=1)"
 	@echo "  make test-verbose   - Run tests with verbose output (same as TEST_VERBOSE=1)"
@@ -62,6 +64,8 @@ help:
 	@echo "  make e2e-test         - Run full E2E test suite"
 	@echo "  make e2e-test-smoke   - Run only smoke tests"
 	@echo "  make e2e-test-load    - Run only load tests"
+	@echo "  make e2e-matrix       - Run MySQL/MariaDB E2E version matrix"
+	@echo "  make e2e-failover     - Run two-server MySQL failover E2E suite"
 	@echo "  make e2e-test-cleanup - Clean up E2E test environment"
 	@echo "  make e2e-lint         - Lint E2E Python code"
 	@echo "  make e2e-format       - Format E2E Python code"
@@ -104,6 +108,8 @@ help:
 	@echo "  make install                          # Install to $(PREFIX) (default: /usr/local)"
 	@echo "  make PREFIX=/opt/mygramdb install     # Install to custom location"
 	@echo "  make CMAKE_OPTIONS=\"-DENABLE_ASAN=ON\" configure  # Enable AddressSanitizer"
+	@echo "  make CMAKE_OPTIONS=\"-DENABLE_UBSAN=ON\" configure # Enable UndefinedBehaviorSanitizer"
+	@echo "  make CMAKE_OPTIONS=\"-DBUILD_FUZZERS=ON\" configure # Build local fuzz target (not CTest/CI)"
 	@echo "  make CMAKE_OPTIONS=\"-DBUILD_TESTS=OFF\" configure # Disable tests"
 	@echo "  make docker-up                        # Start Docker environment"
 	@echo "  make docker-logs                      # View logs"
@@ -180,6 +186,35 @@ test-load: build
 	@echo "Running LOAD tests..."
 	@cd $(BUILD_DIR) && ctest -L LOAD --output-on-failure
 	@echo "LOAD tests complete!"
+
+# Run MySQL-backed integration tests against the E2E MySQL service
+test-mysql: build
+	@echo "Running MySQL integration tests..."
+	@set -eu; \
+		compose_file="e2e/docker/docker-compose.yml"; \
+		cleanup() { \
+			status=$$?; \
+			trap - EXIT HUP INT TERM; \
+			docker compose -f "$$compose_file" down -v >/dev/null 2>&1 || true; \
+			exit $$status; \
+		}; \
+		trap cleanup EXIT HUP INT TERM; \
+		docker compose -f "$$compose_file" up -d --wait --wait-timeout 120 mysql; \
+		export ENABLE_MYSQL_INTEGRATION_TESTS=1; \
+		export MYSQL_HOST=127.0.0.1; \
+		export MYSQL_PORT="$${MYSQL_PORT:-23306}"; \
+		export MYSQL_USER=root; \
+		export MYSQL_PASSWORD="$${MYSQL_TEST_PASSWORD:-test_root_password}"; \
+		export MYSQL_DATABASE=testdb; \
+		ctest --test-dir $(BUILD_DIR) -R '^(MySQLConnectionIntegrationTest\..*|InitialLoaderIntegrationTest\..*|BinlogReaderResourceTest\..*|SyncOperationManagerTest\.ConcurrentStartSyncThreadSafe)$$' --output-on-failure
+	@echo "MySQL integration tests complete!"
+
+# Run the opt-in large dump restore budget test
+test-large-dump: build
+	@echo "Running large dump restore test..."
+	@cd $(BUILD_DIR) && ENABLE_LARGE_DUMP_TESTS=1 \
+		ctest -R '^DumpFormatV2Test\.LargeRestoreStaysWithinConfiguredStagingBudget$$' --output-on-failure
+	@echo "Large dump restore test complete!"
 
 # Convenience aliases for common test scenarios
 test-full:
@@ -267,7 +302,7 @@ quick-test: build
 # E2E Integration Tests
 # ============================================================================
 
-.PHONY: e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark e2e-benchmark-full e2e-benchmark-saturation
+.PHONY: e2e-test e2e-test-smoke e2e-test-load e2e-matrix e2e-failover e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark e2e-benchmark-full e2e-benchmark-saturation
 
 # Run full e2e test suite (requires Docker)
 e2e-test:
@@ -283,6 +318,18 @@ e2e-test-smoke:
 e2e-test-load:
 	@echo "Running E2E load tests..."
 	@bash e2e/run-all.sh -m load
+
+# Run the MySQL/MariaDB version matrix. The default e2e-test target skips
+# mariadb_only tests because it uses the MySQL fixture.
+e2e-matrix:
+	@echo "Running MySQL/MariaDB E2E matrix..."
+	@bash e2e/run-matrix.sh
+
+# Run the GTID-validated MySQL failover suite. The default e2e-test target
+# skips tests marked failover because it has no secondary server.
+e2e-failover:
+	@echo "Running MySQL failover E2E suite..."
+	@bash e2e/run-failover.sh
 
 # Clean up e2e test environment
 e2e-test-cleanup:
@@ -377,9 +424,9 @@ bench-up:
 	@echo "Run 'make bench-logs' to monitor progress."
 
 bench-run:
-	@command -v uv >/dev/null 2>&1 || { echo "Error: 'uv' is required. Install via: curl -LsSf https://astral.sh/uv/install.sh | sh"; exit 1; }
+	@command -v rye >/dev/null 2>&1 || { echo "Error: 'rye' is required. Install via: curl -sSf https://rye.astral.sh/get | bash"; exit 1; }
 	@echo "Running benchmark (MygramDB vs MySQL FULLTEXT)..."
-	uv run --with mysql-connector-python python support/seed/benchmark.py \
+	@cd support/seed && rye sync --no-lock -q && rye run python benchmark.py \
 		--mysql-host 127.0.0.1 --mysql-port 3306 \
 		--mysql-user root --mysql-password $(MYSQL_PASSWORD) --mysql-db mydb \
 		--mygramdb-host 127.0.0.1 --mygramdb-port 11016

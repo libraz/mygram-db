@@ -1,0 +1,16 @@
+[project]
+name = "mygramdb-seed"
+version = "0.1.0"
+description = "Benchmark dataset seeding and MygramDB vs MySQL FULLTEXT comparison"
+authors = [
+    { name = "libraz", email = "libraz@libraz.net" }
+]
+dependencies = [
+    "mysql-connector-python>=9.5.0",
+]
+requires-python = ">= 3.10"
+
+[tool.rye]
+managed = true
+# Scripts are run in place, not installed, so nothing needs to be packaged.
+virtual = true

@@ -10,6 +10,8 @@
 #   universal: false
 
 -e file:.
+ast-serialize==0.6.0
+    # via mypy
 certifi==2026.2.25
     # via requests
 charset-normalizer==3.4.5
@@ -20,10 +22,17 @@ idna==3.11
     # via requests
 iniconfig==2.3.0
     # via pytest
+librt==0.13.0
+    # via mypy
+mypy==2.3.0
+mypy-extensions==1.1.0
+    # via mypy
 mysql-connector-python==9.6.0
     # via mygramdb-e2e
 packaging==26.0
     # via pytest
+pathspec==1.1.1
+    # via mypy
 pluggy==1.6.0
     # via pytest
 py-cpuinfo==9.0.0
@@ -40,9 +49,12 @@ pytest-timeout==2.4.0
     # via mygramdb-e2e
 requests==2.32.5
     # via mygramdb-e2e
+ruff==0.16.0
 tomli==2.4.0
+    # via mypy
     # via pytest
 typing-extensions==4.15.0
     # via exceptiongroup
+    # via mypy
 urllib3==2.6.3
     # via requests

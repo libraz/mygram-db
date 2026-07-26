@@ -35,11 +35,9 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-# Install deps
-if ! python3 -c "import pytest" 2>/dev/null; then
-    echo "Installing Python dependencies..."
-    pip3 install -q -e ".[dev]" 2>/dev/null || pip3 install -q -e .
-fi
+# shellcheck source=python-env.sh
+source "$SCRIPT_DIR/python-env.sh"
+e2e_python_setup "$SCRIPT_DIR"
 
 mkdir -p results/reports
 
@@ -105,7 +103,7 @@ for target in "${TARGETS[@]}"; do
     # Run pytest
     echo "Running tests..."
     report_file="results/reports/${flavor}-${version}.xml"
-    python3 -m pytest \
+    "$E2E_PYTHON_BIN" -m pytest \
         --tb=short -q \
         --junitxml="$report_file" \
         ${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"} \

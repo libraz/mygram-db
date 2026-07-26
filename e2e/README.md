@@ -5,7 +5,7 @@ A system that automatically runs end-to-end integration tests, load tests, and e
 ## Quick Start
 
 ```bash
-# Run all tests (Docker image build → compose up → pytest → compose down)
+# Run all tests (native build → compose up → pytest → compose down)
 make e2e-test
 
 # Smoke tests only
@@ -13,6 +13,15 @@ make e2e-test-smoke
 
 # Load tests only
 make e2e-test-load
+
+# Full database-version matrix
+make e2e-matrix
+
+# Two-server MySQL failover suite
+make e2e-failover
+
+# Focused MariaDB replication check
+bash e2e/test_mariadb_replication.sh
 
 # Cleanup (when containers remain after a test failure)
 make e2e-test-cleanup
@@ -22,14 +31,14 @@ make e2e-test-cleanup
 
 - Docker / Docker Compose
 - Python 3.10+
-- `mygramdb:latest` Docker image (must be pre-built via `make docker-build`)
+- A native MygramDB build at `build/bin/mygramdb` (`make build`)
 
 ## Architecture
 
 ```
 e2e/
 ├── docker/                     # Test-dedicated Docker environment
-│   ├── docker-compose.yml      #   inttest_mysql + inttest_mygramdb (no host port exposure)
+│   ├── docker-compose.yml      #   inttest_mysql; MygramDB runs natively
 │   └── mysql-init/             #   Table definitions + FULLTEXT indexes
 ├── lib/                        # Common helpers
 │   ├── mysql_client.py         #   Direct MySQL connection client
@@ -39,7 +48,8 @@ e2e/
 │   ├── data_generator.py       #   Synthetic data generation (fixed seed)
 │   ├── wait.py                 #   Polling wait utility
 │   └── wordlists/              #   English/Japanese/Unicode word lists
-├── tests/                      # Test suites (14 categories, 34 files, 70 tests)
+├── tests/                      # Test suites grouped by capability
+│   ├── unit/                   #   Service-independent helper tests
 │   ├── smoke/                  #   Basic connectivity (health, sync, info)
 │   ├── replication/            #   INSERT/UPDATE/DELETE propagation
 │   ├── search/                 #   Search accuracy, filters, pagination
@@ -57,7 +67,11 @@ e2e/
 ├── benchmark.py                # CLI benchmark tool
 ├── conftest.py                 # pytest fixtures
 ├── pyproject.toml              # Python dependencies, pytest/ruff/mypy config
-├── run-all.sh                  # Entry point
+├── run-all.sh                  # Default MySQL entry point (skips mariadb_only/failover)
+├── run-matrix.sh               # MySQL/MariaDB version matrix entry point
+├── run-failover.sh             # GTID-validated MySQL failover entry point
+├── test_mariadb_replication.sh # Focused MariaDB replication entry point
+├── python-env.sh               # Shared interpreter provisioning (rye, or venv fallback)
 └── results/                    # Generated at runtime
     ├── reports/                #   JUnit XML
     ├── metrics/                #   Prometheus snapshots
@@ -66,22 +80,26 @@ e2e/
 
 ## Test Categories and Markers
 
-| Marker | Category | Test Count | Description |
-|--------|----------|------------|-------------|
-| `smoke` | Basic Connectivity | 7 | health endpoints, sync, info, TCP ping |
-| `replication` | Replication | 8 | INSERT/UPDATE/DELETE propagation, batch 1000 rows |
-| `search` | Search Accuracy | 10 | Word search, filters, pagination, MySQL FULLTEXT comparison |
-| `unicode` | Unicode | 9 | Japanese/Chinese, NFKC, fullwidth/halfwidth, emoji |
-| `edge_cases` | Boundary Conditions | 8 | Empty documents, 1MB documents, SQL injection strings |
-| `ddl` | DDL Events | 4 | TRUNCATE, ALTER TABLE |
-| `concurrency` | Concurrent Access | 4 | Search during writes (10 parallel), rapid UPDATEs |
-| `cache` | Cache | 4 | Miss→Hit, invalidation after INSERT, CACHE CLEAR |
-| `memory` | Memory Management | 3 | Soft/hard limits, release after TRUNCATE |
-| `statistics` | Metrics | 8 | Replication/command/cache counter accuracy |
-| `load` | Load Testing | 1 | Concurrent load, p99 regression detection |
-| `persistence` | Persistence | 2 | DUMP SAVE→LOAD round-trip |
-| `resilience` | Failure Recovery | 2 | Reconnection after MySQL restart |
-| `multi_table` | Multi-table | 2 | Index independence |
+The table intentionally omits hand-maintained test counts. Use
+`rye run pytest --collect-only -q` when an exact inventory is needed.
+
+| Marker | Category | Description |
+|--------|----------|-------------|
+| `smoke` | Basic Connectivity | health endpoints, sync, info, TCP ping |
+| `replication` | Replication | INSERT/UPDATE/DELETE propagation, batch replication |
+| `search` | Search Accuracy | Word search, filters, pagination, MySQL FULLTEXT comparison |
+| `unicode` | Unicode | Japanese/Chinese, NFKC, fullwidth/halfwidth, emoji |
+| `edge_cases` | Boundary Conditions | Empty documents, large documents, SQL injection strings |
+| `ddl` | DDL Events | TRUNCATE, ALTER, DROP, and RENAME handling |
+| `concurrency` | Concurrent Access | Search during writes and rapid UPDATEs |
+| `cache` | Cache | Hit/miss, invalidation after writes, CACHE CLEAR |
+| `memory` | Memory Management | Soft/hard limits and release after TRUNCATE |
+| `statistics` | Metrics | Replication/command/cache counter accuracy |
+| `load` | Load Testing | Concurrent load and performance regression detection |
+| `persistence` | Persistence | DUMP SAVE/LOAD round-trip |
+| `resilience` | Failure Recovery | Reconnection after MySQL restart |
+| `failover` | Failover | Dedicated two-server GTID failover checks |
+| `multi_table` | Multi-table | Table independence |
 
 ### Running by Category
 
@@ -97,11 +115,11 @@ bash e2e/run-all.sh tests/unicode/test_cjk_search.py
 
 ## Docker Environment
 
-Uses a test-dedicated Docker environment, fully isolated from the existing development environment.
+The E2E runner starts a dedicated MySQL container and a native MygramDB process.
 
-- **Container names**: `inttest_mysql`, `inttest_mygramdb` (no conflict with existing `mygramdb_*`)
-- **Network**: `inttest_network` (Docker internal only, no host port exposure)
-- **Memory limits**: MygramDB 200MB hard limit / 150MB soft target (for memory pressure testing)
+- **Container**: `inttest_mysql`; the MygramDB process is started by pytest
+- **Ports**: MySQL is exposed on host port `23306` by default; set `MYSQL_PORT` to change it. MygramDB uses TCP `11016` and HTTP `20080` by default.
+- **Memory limits**: the E2E config sets MygramDB to 256MB hard limit / 200MB soft target
 - **MySQL**: 8.4, GTID enabled, binlog ROW format, utf8mb4
 
 ## Data Generation

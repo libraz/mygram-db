@@ -19,7 +19,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker/docker-compose.mariadb.yml"
-CONFIG_FILE="$SCRIPT_DIR/docker/mygramdb-test-mariadb.yaml"
+CONFIG_FILE="${MYGRAMDB_CONFIG:-$SCRIPT_DIR/docker/mygramdb-test-mariadb.yaml}"
 MYGRAMDB_BIN="$PROJECT_ROOT/build/bin/mygramdb"
 MYGRAMDB_CLI="$PROJECT_ROOT/build/bin/mygram-cli"
 LOG_FILE="/tmp/mygramdb-mariadb-e2e.log"
@@ -28,7 +28,7 @@ DUMP_DIR="$SCRIPT_DIR/results/dumps-mariadb"
 # Configurable via environment variables
 MARIADB_VERSION="${MARIADB_VERSION:-11.4}"
 MARIADB_HOST="127.0.0.1"
-MARIADB_PORT=13306
+MARIADB_PORT="${MYSQL_PORT:-13306}"
 MARIADB_USER="root"
 MARIADB_PASS="test_root_password"
 MARIADB_DB="testdb"
@@ -215,6 +215,10 @@ search_count() {
   echo "${n:-0}"
 }
 
+replication_gtid() {
+  echo "$1" | sed -n 's/^\(OK \)\{0,1\}current_gtid:[[:space:]]*//p' | head -1
+}
+
 # ===========================================================================
 # Test 2: INSERT replication
 # ===========================================================================
@@ -355,6 +359,89 @@ if echo "$repl_status" | grep -qE '[0-9]+-[0-9]+-[0-9]+'; then
 else
   fail "FAIL: GTID not in expected MariaDB format"
   fail "Status: $repl_status"
+  ((fail_count++))
+fi
+
+# ===========================================================================
+# Test 8: Standalone non-transactional GTID progress
+# ===========================================================================
+log ""
+log "=== Test: Standalone Non-Transactional GTID Progress ==="
+
+# MyISAM row changes are logged as FL_STANDALONE event groups and have no
+# XID_EVENT/COMMIT QUERY_EVENT. The applied GTID must advance at STMT_END_F
+# after all row events for the statement have been queued.
+mysql_cmd "ALTER TABLE articles ENGINE=MyISAM"
+sleep 2
+before_status=$(cli_cmd REPLICATION STATUS)
+before_gtid=$(replication_gtid "$before_status")
+standalone_marker="mariadb standalone gtid marker"
+mysql_cmd "INSERT INTO articles (title, content, status, category, enabled) VALUES ('Standalone GTID', '$standalone_marker', 1, 'standalone', 1)"
+
+standalone_replicated=false
+for _ in $(seq 1 30); do
+  standalone_search=$(cli_cmd SEARCH articles "$standalone_marker")
+  standalone_count=$(search_count "$standalone_search")
+  after_status=$(cli_cmd REPLICATION STATUS)
+  after_gtid=$(replication_gtid "$after_status")
+  if [[ "$standalone_count" -ge 1 && -n "$before_gtid" && -n "$after_gtid" && "$after_gtid" != "$before_gtid" ]]; then
+    standalone_replicated=true
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$standalone_replicated" == true ]]; then
+  log "PASS: standalone MyISAM row applied and GTID advanced ($before_gtid -> $after_gtid)"
+  ((pass_count++))
+else
+  fail "FAIL: standalone MyISAM row/GTID did not complete (before='$before_gtid', after='${after_gtid:-}', count='${standalone_count:-0}')"
+  ((fail_count++))
+fi
+
+mysql_cmd "ALTER TABLE articles ENGINE=InnoDB"
+mysql_cmd "DELETE FROM articles WHERE title = 'Standalone GTID'"
+
+# ===========================================================================
+# Test 9: CRC32 is required again before stream recovery
+# ===========================================================================
+log ""
+log "=== Test: CRC32 Recovery Validation ==="
+
+stop_result=$(cli_cmd REPLICATION STOP)
+for _ in $(seq 1 30); do
+  restart_status=$(cli_cmd REPLICATION STATUS)
+  if [[ "$restart_status" != *"running"* ]]; then
+    break
+  fi
+  sleep 1
+done
+mysql_cmd "SET GLOBAL binlog_checksum = NONE"
+restart_result=$(cli_cmd REPLICATION START)
+restart_status=$(cli_cmd REPLICATION STATUS)
+if [[ "$restart_status" != *"running"* && "$restart_result $restart_status" == *"binlog_checksum"* &&
+      "$restart_result $restart_status" == *"CRC32"* ]]; then
+  log "PASS: stream recovery refuses binlog_checksum=NONE with an actionable CRC32 error"
+  ((pass_count++))
+else
+  fail "FAIL: recovery did not reject binlog_checksum=NONE (stop='$stop_result', start='$restart_result', status='$restart_status')"
+  ((fail_count++))
+fi
+
+mysql_cmd "SET GLOBAL binlog_checksum = CRC32"
+sync_result=$(cli_cmd SYNC articles)
+for _ in $(seq 1 30); do
+  restart_status=$(cli_cmd REPLICATION STATUS)
+  if [[ "$restart_status" == *"running"* ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ "$restart_status" == *"running"* ]]; then
+  log "PASS: replication recovers after CRC32 is restored"
+  ((pass_count++))
+else
+  fail "FAIL: replication did not recover after CRC32 restore (sync='$sync_result', status='$restart_status')"
   ((fail_count++))
 fi
 

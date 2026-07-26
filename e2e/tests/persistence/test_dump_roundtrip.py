@@ -1,6 +1,6 @@
 """Test dump save and load roundtrip."""
 
-import time
+import uuid
 
 import pytest
 
@@ -12,103 +12,173 @@ pytestmark = pytest.mark.persistence
 class TestDumpRoundtrip:
     """Test DUMP SAVE and DUMP LOAD data preservation."""
 
-    def test_dump_save_load(self, mygramdb, seed_data):
-        """DUMP SAVE followed by DUMP LOAD should preserve data."""
+    @staticmethod
+    def _stop_replication(mygramdb) -> None:
+        """Stop replication and wait for the synchronous STOP response."""
+        response = mygramdb.tcp_command("REPLICATION STOP", timeout=65.0)
+        assert response is not None and "STOPPED" in response, (
+            f"Failed to stop replication: {response}"
+        )
 
-        def _get_doc_count():
-            info = mygramdb.info()
-            return info.get("total_documents", info.get("doc_count", info.get("documents", 0)))
+    @staticmethod
+    def _snapshot(mygramdb, marker: str) -> dict:
+        """Capture independent observables for the UUID-scoped documents."""
+        search = mygramdb.search("testdb.articles", marker, sort="id ASC", limit=100)
+        filtered = mygramdb.search(
+            "testdb.articles",
+            marker,
+            sort="id ASC",
+            limit=100,
+            filters={"status": 1},
+        )
+        return {
+            "primary_keys": frozenset(search["ids"]),
+            "search_total": search["total"],
+            "count": mygramdb.count("testdb.articles", marker),
+            "filtered_primary_keys": frozenset(filtered["ids"]),
+            "filtered_total": filtered["total"],
+            "facet_counts": mygramdb.facet("testdb.articles", "category", marker),
+        }
 
-        # Wait for replication to catch up so baseline is stable.
-        # Seed data inserts happen before this test; replication may still be
-        # processing events. Two consecutive identical counts = stable.
-        prev_count = -1
-        for _ in range(15):
-            cur = _get_doc_count()
-            if cur == prev_count:
-                break
-            prev_count = cur
-            time.sleep(1)
+    @staticmethod
+    def _wait_for_dump_save(mygramdb) -> None:
+        """Wait until the asynchronous save is complete and its slot is released."""
 
-        doc_count_before = _get_doc_count()
-        assert doc_count_before > 0, "Need data to test dump"
-
-        # Save dump and wait for completion (async: stops replication, writes, restarts)
-        assert mygramdb.dump_save(), "DUMP SAVE should succeed"
-
-        # Poll until DUMP LOAD succeeds (save must complete first)
-        def _try_load():
-            resp = mygramdb.tcp_command("DUMP LOAD mygramdb.dmp", timeout=60.0)
-            return resp is not None and "OK" in resp
+        def _save_completed() -> bool:
+            status = mygramdb.tcp_command_multiline(
+                "DUMP STATUS",
+                timeout=5.0,
+                terminator=b"END\r\n",
+            )
+            if status is not None and "status: FAILED" in status:
+                raise AssertionError(f"DUMP SAVE failed:\n{status}")
+            return (
+                status is not None
+                and "status: COMPLETED" in status
+                and "save_in_progress: false" in status
+            )
 
         wait_until(
-            _try_load,
+            _save_completed,
             timeout=60,
-            interval=2,
-            description="DUMP LOAD after DUMP SAVE",
+            interval=0.25,
+            description="DUMP SAVE completion",
         )
 
-        # Wait for replication to catch up after DUMP LOAD restart.
-        # DUMP LOAD restores the dump snapshot and restarts replication from
-        # the dump's GTID, so events after that point are re-consumed.
-        prev_count = -1
-        for _ in range(15):
-            cur = _get_doc_count()
-            if cur == prev_count:
-                break
-            prev_count = cur
-            time.sleep(1)
+    def test_dump_save_load(self, mysql, mygramdb, seed_data):
+        """DUMP LOAD restores the exact saved state without a masking SYNC."""
+        marker = f"dump_roundtrip_{uuid.uuid4().hex}"
+        cleanup_errors = []
+        core_failed = False
 
-        # Verify data preserved: after catch-up the count should match the
-        # stable baseline (same MySQL state, same GTID convergence point).
-        doc_count_after = _get_doc_count()
-        assert doc_count_after >= doc_count_before, (
-            f"Data lost after DUMP LOAD: before={doc_count_before}, after={doc_count_after}"
-        )
+        rows = [
+            {
+                "title": "Dump Roundtrip Tech One",
+                "content": f"{marker} saved document one",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            },
+            {
+                "title": "Dump Roundtrip Tech Two",
+                "content": f"{marker} saved document two",
+                "status": 1,
+                "category": "tech",
+                "enabled": 1,
+            },
+            {
+                "title": "Dump Roundtrip Science",
+                "content": f"{marker} saved document three",
+                "status": 2,
+                "category": "science",
+                "enabled": 1,
+            },
+        ]
 
-    def test_search_after_dump_load(self, mysql, mygramdb, seed_data):
-        """Search should work correctly after DUMP LOAD."""
-        marker = "dump_search_marker"
-        mysql.insert_rows(
-            "articles",
-            [
-                {
-                    "title": "Dump Search Test",
-                    "content": f"Content with {marker}",
-                    "status": 1,
-                    "category": "tech",
-                    "enabled": 1,
-                }
-            ],
-        )
+        try:
+            mysql.insert_rows("articles", rows)
+            marker_rows = mysql.execute(
+                "SELECT id, status FROM articles WHERE content LIKE %s ORDER BY id",
+                (f"%{marker}%",),
+            )
+            marker_ids = [int(row["id"]) for row in marker_rows]
+            status_one_ids = {int(row["id"]) for row in marker_rows if int(row["status"]) == 1}
+            assert len(marker_ids) == len(rows)
 
-        # Sync to ensure marker data is in the index
-        mygramdb.sync("testdb.articles", timeout=30)
-        time.sleep(1)
+            # Establish the dump's GTID and make the marker state queryable once.
+            assert mygramdb.sync("testdb.articles", timeout=30)
+            self._stop_replication(mygramdb)
 
-        count_before = mygramdb.count("testdb.articles", marker)
-        assert count_before >= 1, f"Marker should exist after sync, got {count_before}"
+            state_a = self._snapshot(mygramdb, marker)
+            assert state_a == {
+                "primary_keys": frozenset(marker_ids),
+                "search_total": 3,
+                "count": 3,
+                "filtered_primary_keys": frozenset(status_one_ids),
+                "filtered_total": 2,
+                "facet_counts": {"tech": 2, "science": 1},
+            }
 
-        # Save dump (async, writes to file then resumes replication)
-        mygramdb.dump_save()
-        time.sleep(15)
+            assert mygramdb.dump_save(), "DUMP SAVE should start"
+            self._wait_for_dump_save(mygramdb)
 
-        # Load the dump
-        def _try_load():
-            resp = mygramdb.tcp_command("DUMP LOAD mygramdb.dmp", timeout=60.0)
-            return resp is not None and "OK" in resp
+            # Build a distinctly different live state after the saved snapshot.
+            mysql.execute(
+                "DELETE FROM articles WHERE id IN (%s, %s)",
+                (marker_ids[0], marker_ids[1]),
+            )
+            mysql.execute(
+                "UPDATE articles SET status = %s, category = %s WHERE id = %s",
+                (9, "archive", marker_ids[2]),
+            )
+            assert mygramdb.sync("testdb.articles", timeout=30)
 
-        wait_until(
-            _try_load,
-            timeout=30,
-            interval=2,
-            description="dump load after save",
-        )
+            state_b = self._snapshot(mygramdb, marker)
+            assert state_b == {
+                "primary_keys": frozenset({marker_ids[2]}),
+                "search_total": 1,
+                "count": 1,
+                "filtered_primary_keys": frozenset(),
+                "filtered_total": 0,
+                "facet_counts": {"archive": 1},
+            }
 
-        # After dump load, sync to ensure index is rebuilt
-        mygramdb.sync("testdb.articles", timeout=30)
-        time.sleep(2)
+            self._stop_replication(mygramdb)
+            assert mygramdb.dump_load("mygramdb.dmp"), "DUMP LOAD should succeed"
 
-        # Search should still work
-        count = mygramdb.count("testdb.articles", marker)
-        assert count >= 1, f"Search should work after DUMP LOAD, got {count}"
+            # Deliberately no SYNC here: these results must come from the dump.
+            assert self._snapshot(mygramdb, marker) == state_a
+        except BaseException:
+            core_failed = True
+            raise
+        finally:
+            try:
+                mysql.execute(
+                    "DELETE FROM articles WHERE content LIKE %s",
+                    (f"%{marker}%",),
+                )
+            except Exception as exc:
+                cleanup_errors.append(f"MySQL marker cleanup failed: {exc}")
+
+            try:
+                status = mygramdb.replication_status()
+                if "running" not in status.lower():
+                    response = mygramdb.tcp_command("REPLICATION START", timeout=30.0)
+                    if response is None or not any(
+                        token in response.lower() for token in ("started", "already", "running")
+                    ):
+                        assert mygramdb.sync("testdb.articles", timeout=30), (
+                            f"Could not restore replication after response: {response}"
+                        )
+
+                wait_until(
+                    lambda: mygramdb.count("testdb.articles", marker) == 0,
+                    timeout=30,
+                    interval=0.25,
+                    description="dump marker cleanup convergence",
+                )
+            except Exception as exc:
+                cleanup_errors.append(f"MygramDB cleanup convergence failed: {exc}")
+
+            if cleanup_errors and not core_failed:
+                pytest.fail("; ".join(cleanup_errors))

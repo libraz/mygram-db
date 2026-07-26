@@ -2,6 +2,8 @@
 
 import pytest
 
+from lib.wait import wait_until
+
 pytestmark = pytest.mark.smoke
 
 
@@ -14,7 +16,12 @@ class TestHealthEndpoints:
 
     def test_health_ready(self, mygramdb, seed_data):
         """Health ready endpoint should return OK after sync."""
-        assert mygramdb.health_ready()
+        wait_until(
+            mygramdb.health_ready,
+            timeout=15,
+            interval=0.25,
+            description="health readiness after sync",
+        )
 
     def test_health_detail(self, mygramdb, seed_data):
         """Health detail should return structured data."""

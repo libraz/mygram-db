@@ -21,10 +21,9 @@ echo "MySQL version: $MYSQL_VERSION"
 
 docker compose -f docker/docker-compose.failover.yml up -d --wait --wait-timeout 120
 
-if ! python3 -c "import pytest" 2>/dev/null; then
-    echo "Installing Python dependencies..."
-    pip3 install -q -e ".[dev]" 2>/dev/null || pip3 install -q -e .
-fi
+# shellcheck source=python-env.sh
+source "$SCRIPT_DIR/python-env.sh"
+e2e_python_setup "$SCRIPT_DIR"
 
 mkdir -p results/reports results/metrics results/dumps-failover
 
@@ -42,4 +41,4 @@ export MYGRAMDB_CONFIG="$SCRIPT_DIR/docker/mygramdb-test-failover.yaml"
 export MYGRAMDB_LOG="/tmp/mygramdb-failover-e2e.log"
 export MYGRAMDB_DUMP_DIR="$PROJECT_ROOT/e2e/results/dumps-failover"
 
-python3 -m pytest tests/resilience/test_mysql_failover.py "$@"
+"$E2E_PYTHON_BIN" -m pytest tests/resilience/test_mysql_failover.py "$@"

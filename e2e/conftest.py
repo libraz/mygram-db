@@ -199,6 +199,11 @@ def seed_data(mysql: MysqlClient, mygramdb: MygramdbClient) -> None:
     mysql.insert_rows("products", product_rows)
     mygramdb.sync("testdb.products")
 
+    # Readiness is intentionally all-table: initialize the configured
+    # post-filter table as well, even though its fixture-specific rows are
+    # populated by later tests.
+    mygramdb.sync("testdb.post_filter_docs")
+
     def _doc_count() -> bool:
         info = mygramdb.info()
         count = info.get("total_documents", info.get("doc_count", info.get("documents", 0)))

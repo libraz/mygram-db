@@ -1,29 +1,73 @@
-"""Test that binlog events are not lost after read_timeout reconnection."""
+"""Test that binlog events are not lost across an observed reconnect."""
 
-import time
+import json
+import os
 import uuid
+from pathlib import Path
 
 import pytest
 
-from lib.wait import wait_until_gte
+from lib.wait import wait_until, wait_until_gte
 
 pytestmark = pytest.mark.replication
 
 
+def _stream_open_count() -> int:
+    """Count completed binlog stream opens in the structured server log."""
+    log_path = Path(os.environ.get("MYGRAMDB_LOG", "/tmp/mygramdb-e2e.log"))
+    try:
+        # Structured logs may contain a truncated or non-UTF-8 payload emitted
+        # by an upstream test value. It must not make reconnect observation
+        # itself fail before JSON records can be scanned.
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (FileNotFoundError, OSError):
+        return 0
+
+    count = 0
+    for line in lines:
+        json_start = line.find("{")
+        if json_start < 0:
+            continue
+        try:
+            record = json.loads(line[json_start:])
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") == "binlog_stream_opened":
+            count += 1
+    return count
+
+
+def _force_and_wait_for_reconnect(mysql) -> None:
+    """Drop the binlog connection and observe the replacement stream opening."""
+    connections = mysql.execute(
+        "SELECT ID FROM information_schema.PROCESSLIST "
+        "WHERE COMMAND IN ('Binlog Dump', 'Binlog Dump GTID')"
+    )
+    if not connections:
+        pytest.fail("MygramDB binlog connection not found in MySQL PROCESSLIST")
+
+    before = _stream_open_count()
+    connection_id = int(connections[0]["ID"])
+    mysql.execute(f"KILL CONNECTION {connection_id}")
+    wait_until(
+        lambda: _stream_open_count() > before,
+        timeout=15,
+        interval=0.25,
+        description="binlog stream to reopen after idle read timeout",
+    )
+
+
 class TestReconnectPropagation:
-    """Test that events are not lost after binlog reader read_timeout reconnection."""
+    """Test that events are not lost after the binlog connection is replaced."""
 
-    def test_event_after_idle_reconnect(self, mysql, mygramdb, seed_data):
-        """INSERT after idle timeout should propagate correctly.
+    def test_event_after_observed_reconnect(self, mysql, mygramdb, seed_data):
+        """INSERT after a forced, observed reconnect should propagate correctly.
 
-        The binlog reader has a 5-second read_timeout. When no events arrive
-        within this period, the connection times out and the reader reconnects.
-        This test verifies that events inserted after the reconnection are
-        not missed due to incorrect GTID handling during reconnection.
+        MySQL heartbeats keep a healthy idle stream alive, so sleeping does not
+        imply a reconnect. Drop the actual binlog connection and require a new
+        ``binlog_stream_opened`` event before testing GTID resume behavior.
         """
-        # Wait for idle timeout to trigger (read_timeout is 5 seconds)
-        # Wait 8 seconds to ensure at least one timeout + reconnection cycle
-        time.sleep(8)
+        _force_and_wait_for_reconnect(mysql)
 
         # Insert a row after the reconnection
         marker = f"reconnect_{uuid.uuid4().hex[:8]}"
@@ -49,14 +93,13 @@ class TestReconnectPropagation:
             description="INSERT propagation after idle reconnect",
         )
 
-    def test_multiple_events_after_idle_reconnect(self, mysql, mygramdb, seed_data):
-        """Multiple INSERTs after idle timeout should all propagate.
+    def test_multiple_events_after_observed_reconnect(self, mysql, mygramdb, seed_data):
+        """Multiple INSERTs after an observed reconnect should all propagate.
 
         Verifies that not just one, but multiple consecutive events are
         correctly received after reconnection.
         """
-        # Wait for idle timeout
-        time.sleep(8)
+        _force_and_wait_for_reconnect(mysql)
 
         # Insert multiple rows
         marker = f"reconnmulti_{uuid.uuid4().hex[:8]}"

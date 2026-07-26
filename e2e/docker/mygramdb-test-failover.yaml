@@ -31,6 +31,13 @@ tables:
     ngram_size: 2
     kanji_ngram_size: 1
 
+  - name: "post_filter_docs"
+    primary_key: "id"
+    text_source:
+      column: "content"
+    ngram_size: 2
+    kanji_ngram_size: 1
+
 build:
   batch_size: 5000
   parallelism: 2
@@ -43,6 +50,7 @@ replication:
 memory:
   hard_limit_mb: 256
   soft_target_mb: 200
+  verify_text: "all"
   normalize:
     nfkc: true
     width: "narrow"

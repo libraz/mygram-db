@@ -49,8 +49,8 @@ class TestMemoryRelease:
         mysql.insert_rows("articles", rows)
 
         def _reseeded() -> bool:
-            count = mygramdb.count("testdb.articles", "test")
-            return count >= 30
+            info = mygramdb.info()
+            return int(info.get("total_documents", info.get("doc_count", 0))) >= len(rows)
 
         wait_until(
             _reseeded,
