@@ -19,6 +19,7 @@
 
 #include "client/protocol_detection.h"
 #include "config/config.h"
+#include "config/runtime_variable_manager.h"
 #include "index/index.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
@@ -81,9 +82,49 @@ TEST_F(SyncOperationManagerApiTest, IsAnySyncingReturnsFalseWhenIdle) {
   EXPECT_FALSE(manager_->IsAnySyncing());
 }
 
+TEST_F(SyncOperationManagerApiTest, CurrentConfigSnapshotUsesRuntimeMysqlValuesInsteadOfStartupConfig) {
+  auto variable_manager_result = config::RuntimeVariableManager::Create(*config_);
+  ASSERT_TRUE(variable_manager_result.has_value());
+  auto variable_manager = std::move(*variable_manager_result);
+
+  manager_->SetCurrentConfigProvider(
+      [variable_manager_ptr = variable_manager.get()] { return variable_manager_ptr->GetCurrentConfig(); });
+
+  ASSERT_TRUE(variable_manager->SetVariable("mysql.host", "new-primary.internal").has_value());
+  ASSERT_TRUE(variable_manager->SetVariable("mysql.port", "4407").has_value());
+
+  // The startup object deliberately remains stale. A SYNC snapshot must come
+  // from RuntimeVariableManager, not silently fall back to this object.
+  EXPECT_EQ(config_->mysql.host, "localhost");
+  EXPECT_EQ(config_->mysql.port, 3306);
+
+  const auto current_config = manager_->GetCurrentConfigSnapshotForTest();
+  ASSERT_TRUE(current_config.has_value());
+  EXPECT_EQ(current_config->mysql.host, "new-primary.internal");
+  EXPECT_EQ(current_config->mysql.port, 4407);
+  EXPECT_EQ(current_config->mysql.user, "test");
+  EXPECT_EQ(current_config->mysql.database, "testdb");
+}
+
+TEST_F(SyncOperationManagerApiTest, ScopedLoaderRegistrationUnregistersDuringExceptionUnwind) {
+  EXPECT_EQ(manager_->ActiveLoaderCountForTest(), 0U);
+
+  try {
+    auto registration = manager_->RegisterNullLoaderScopedForTest("users");
+    EXPECT_EQ(manager_->ActiveLoaderCountForTest(), 1U);
+    throw std::runtime_error("injected loader failure");
+  } catch (const std::runtime_error&) {
+  }
+
+  EXPECT_EQ(manager_->ActiveLoaderCountForTest(), 0U);
+  manager_->RequestShutdown();
+}
+
 TEST_F(SyncOperationManagerApiTest, ActiveSyncStatusUsesClientCompletableFrame) {
   auto start_result = manager_->StartSync("users");
   ASSERT_TRUE(start_result.has_value());
+  EXPECT_EQ(*start_result, "OK SYNC STARTED table=users");
+  EXPECT_EQ(start_result->find("job_id"), std::string::npos);
 
   const std::string status = manager_->GetSyncStatus();
   EXPECT_TRUE(status.rfind("OK SYNC_STATUS\r\n", 0) == 0) << status;
@@ -91,6 +132,25 @@ TEST_F(SyncOperationManagerApiTest, ActiveSyncStatusUsesClientCompletableFrame) 
 
   manager_->RequestShutdown();
   EXPECT_TRUE(manager_->WaitForCompletion(/*timeout_sec=*/30));
+}
+
+TEST_F(SyncOperationManagerApiTest, StopSyncSignalsCancellationWithoutJoiningWorker) {
+  constexpr auto kWorkerDuration = std::chrono::milliseconds(500);
+  manager_->InstallSyncThreadForTest("users",
+                                     std::thread([] { std::this_thread::sleep_for(std::chrono::milliseconds(500)); }));
+
+  const auto start = std::chrono::steady_clock::now();
+  const std::string response = manager_->StopSync("users");
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+
+  EXPECT_NE(response.find("SYNC CANCELLATION REQUESTED table=users"), std::string::npos) << response;
+  EXPECT_LT(elapsed, std::chrono::milliseconds(200))
+      << "StopSync joined the worker on the request thread instead of returning after signalling";
+  const std::string status = manager_->GetSyncStatus();
+  EXPECT_NE(status.find("status=CANCELLING"), std::string::npos) << status;
+
+  manager_->ClearSyncingTableForTest("users");
+  EXPECT_TRUE(manager_->WaitForCompletion(/*timeout_sec=*/2));
 }
 
 /**

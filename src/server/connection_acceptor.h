@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 
+#include "server/denial_log_limiter.h"
 #include "server/server_types.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -195,6 +196,7 @@ class ConnectionAcceptor {
   // sleeper immediately. Held only while computing the wait predicate.
   std::mutex stop_mutex_;
   std::condition_variable stop_cv_;
+  DenialLogLimiter acl_denial_log_limiter_;
 };
 
 }  // namespace mygramdb::server

@@ -16,8 +16,8 @@ ServerStats::ServerStats() : start_time_(static_cast<uint64_t>(std::time(nullptr
 // when adding a new specific counter.
 void ServerStats::IncrementCommand(query::QueryType type) {
   // These are independent counters with no happens-before relationship.
-  // relaxed ordering is sufficient (reviewed: no cross-counter invariant
-  // requires sequential consistency).
+  // relaxed ordering is sufficient because no cross-counter invariant
+  // requires sequential consistency.
   switch (type) {
     case query::QueryType::SEARCH:
       cmd_search_.fetch_add(1, std::memory_order_relaxed);
@@ -92,11 +92,14 @@ void ServerStats::UpdateMemoryUsage(size_t current_bytes) {
 }
 
 void ServerStats::IncrementConnections() {
-  active_connections_++;
+  active_connections_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void ServerStats::DecrementConnections() {
-  active_connections_--;
+  size_t current = active_connections_.load(std::memory_order_relaxed);
+  while (current != 0 && !active_connections_.compare_exchange_weak(current, current - 1, std::memory_order_relaxed,
+                                                                    std::memory_order_relaxed)) {
+  }
 }
 
 void ServerStats::IncrementTotalConnections() {

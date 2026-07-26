@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <set>
 #include <string>
@@ -18,6 +19,8 @@
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 // Forward declarations
 namespace mygramdb::cache {
@@ -54,6 +57,10 @@ struct SearchTermInfo {
 struct SearchPipelineResult {
   std::vector<storage::DocId> results;  ///< Full results before pagination
   bool empty_term_detected = false;     ///< True if any search term has zero matching docs
+  size_t total_candidates = 0;          ///< Candidates produced by the first positive search operation
+  size_t after_intersection = 0;        ///< Candidates after all positive terms were intersected
+  size_t after_not = 0;                 ///< Candidates after explicit NOT terms
+  size_t after_filters = 0;             ///< Candidates after column filters
 };
 
 /// @brief Shared search pipeline - stateless functions for search execution
@@ -130,7 +137,8 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
                                            const std::vector<std::string>& not_terms, index::Index* current_index,
                                            storage::DocumentStore* current_doc_store, int ngram_size,
-                                           int kanji_ngram_size, bool cross_boundary_ngrams);
+                                           int kanji_ngram_size, bool cross_boundary_ngrams,
+                                           const query::SynonymDictionary* synonym_dict = nullptr);
 
 /// @brief Apply filter conditions using bitmap intersection (fast path) with fallback
 ///
@@ -258,7 +266,8 @@ std::vector<SynonymTermGroup> ExpandTermsWithSynonyms(const std::vector<std::str
 SearchPipelineResult ExecuteWithSynonyms(const query::Query& query, const std::vector<SynonymTermGroup>& synonym_groups,
                                          index::Index* current_index, storage::DocumentStore* current_doc_store,
                                          const config::Config* full_config, int ngram_size, int kanji_ngram_size,
-                                         bool cross_boundary, size_t filter_threshold);
+                                         bool cross_boundary, size_t filter_threshold,
+                                         const query::SynonymDictionary* synonym_dict = nullptr);
 
 /// @brief Synonym-aware post-filter: for each group, document must contain at least one synonym
 std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<storage::DocId>& candidates,
@@ -343,8 +352,12 @@ struct FullPipelineOutput {
   double cache_saved_ms = 0.0;                      ///< Time saved by the cache hit (only when cache_hit)
   bool empty_term_detected = false;                 ///< True if a search term had zero matches (early exit)
   PipelinePath path_taken = PipelinePath::REGULAR;  ///< Which search path was selected
-  bool success = true;                              ///< False if an error occurred
-  std::string error_message;                        ///< Error message (when success is false)
+  /// True only when the final results can be reproduced by one unfiltered Index::SearchAnd call.
+  bool semantics_reproducible_by_single_term_ngram_and = false;
+  size_t total_candidates = 0;
+  size_t after_intersection = 0;
+  size_t after_not = 0;
+  size_t after_filters = 0;
 };
 
 /// @brief Metadata describing SEARCH GetTopN optimization selection.
@@ -360,13 +373,11 @@ struct TopNOptimizationResult {
 };
 
 /// @brief Apply the SEARCH GetTopN optimization shared by TCP and HTTP handlers.
-TopNOptimizationResult ApplySearchTopNOptimization(const query::Query& query, index::Index* current_index,
-                                                   storage::DocumentStore* current_doc_store,
-                                                   const config::Config* full_config,
-                                                   const std::vector<SearchTermInfo>& term_infos,
-                                                   const std::vector<std::string>& all_search_terms, bool cache_hit,
-                                                   const std::string& primary_key_column,
-                                                   std::vector<storage::DocId>& results);
+TopNOptimizationResult ApplySearchTopNOptimization(
+    const query::Query& query, index::Index* current_index, storage::DocumentStore* current_doc_store,
+    const config::Config* full_config, const std::vector<SearchTermInfo>& term_infos,
+    const std::vector<std::string>& all_search_terms, bool semantics_reproducible_by_single_term_ngram_and,
+    bool cache_hit, const std::string& primary_key_column, std::vector<storage::DocId>& results);
 
 /// @brief Build normalized terms used by highlight generation.
 std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, index::Index* current_index,
@@ -385,7 +396,27 @@ std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& sea
 /// @param query Parsed query
 /// @param params Pipeline parameters (index, doc_store, config, cache, etc.)
 /// @return Pipeline output with results and metadata
-FullPipelineOutput ExecuteFullPipeline(const query::Query& query, const FullPipelineParams& params);
+mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPipeline(const query::Query& query,
+                                                                                      const FullPipelineParams& params);
+
+/// @brief Parameters for the shared TCP/HTTP FACET execution path.
+struct FacetPipelineParams {
+  FullPipelineParams search;
+  std::vector<std::string> configured_filter_columns;
+  /// Rechecked after the filter-index snapshot is acquired so DUMP LOAD cannot
+  /// race a facet request on either transport.
+  std::function<bool()> load_in_progress;
+};
+
+struct FacetPipelineOutput {
+  std::vector<std::pair<std::string, uint64_t>> value_counts;
+  size_t matched_documents = 0;
+  double query_time_ms = 0.0;
+};
+
+/// @brief Execute FACET aggregation with identical semantics for TCP and HTTP.
+mygram::utils::Expected<FacetPipelineOutput, mygram::utils::Error> ExecuteFacetPipeline(
+    const query::Query& query, const FacetPipelineParams& params);
 
 }  // namespace search_pipeline
 }  // namespace mygramdb::server

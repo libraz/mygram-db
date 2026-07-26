@@ -5,6 +5,9 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+
 #include "config/config.h"
 #include "config/runtime_variable_manager.h"
 #include "query/query_parser.h"
@@ -40,6 +43,7 @@ class ConfigHandlerTest : public ::testing::Test {
     test_config_.mysql.user = "test_user";
     test_config_.mysql.password = "secret_password";
     test_config_.mysql.database = "test_db";
+    test_config_.source_path = (std::filesystem::current_path() / "active-config.yaml").string();
 
     config::TableConfig table;
     table.name = "test_table";
@@ -214,6 +218,34 @@ TEST_F(ConfigHandlerTest, ConfigShowInvalidPath) {
   EXPECT_TRUE(response.find("ERR") != std::string::npos);
 }
 
+TEST_F(ConfigHandlerTest, ConfigShowCoversPreviouslyMissingSchemaLeaves) {
+  const std::vector<std::string> paths = {
+      "mysql.ssl_enable",
+      "mysql.ssl_ca",
+      "mysql.ssl_cert",
+      "mysql.ssl_key",
+      "mysql.ssl_verify_server_cert",
+      "mysql.session_timeout_sec",
+      "mysql.datetime_timezone",
+      "memory.verify_text",
+      "api.rate_limiting.capacity",
+      "api.unix_socket.path",
+      "api.http.read_timeout_sec",
+      "api.http.write_timeout_sec",
+      "api.http.max_body_bytes",
+      "logging.file",
+      "tables.cross_boundary_ngrams",
+  };
+  for (const auto& path : paths) {
+    query::Query query;
+    query.type = query::QueryType::CONFIG_SHOW;
+    query.filepath = path;
+    const std::string response = handler_->Handle(query, conn_ctx_);
+    EXPECT_NE(response.find("+OK"), std::string::npos) << path << ": " << response;
+    EXPECT_EQ(response.find("Path not found"), std::string::npos) << path << ": " << response;
+  }
+}
+
 // CONFIG VERIFY tests
 
 TEST_F(ConfigHandlerTest, ConfigVerifyNoFilepath) {
@@ -260,6 +292,41 @@ TEST_F(ConfigHandlerTest, ConfigVerifyRejectsPathTraversal) {
 
   EXPECT_TRUE(response.find("ERR") != std::string::npos);
   EXPECT_TRUE(response.find("path traversal") != std::string::npos);
+}
+
+TEST_F(ConfigHandlerTest, ConfigVerifyDoesNotResolveAgainstProcessWorkingDirectory) {
+  const auto nonce = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const std::filesystem::path active_dir = std::filesystem::temp_directory_path() / ("mygram-config-active-" + nonce);
+  const std::filesystem::path working_dir = std::filesystem::temp_directory_path() / ("mygram-config-cwd-" + nonce);
+  std::filesystem::create_directories(active_dir);
+  std::filesystem::create_directories(working_dir);
+
+  const std::filesystem::path candidate = working_dir / "candidate.yaml";
+  {
+    std::ofstream file(candidate);
+    file << "mysql:\n"
+         << "  user: test\n"
+         << "  database: test\n"
+         << "tables:\n"
+         << "  - name: docs\n"
+         << "    text_source: {column: body}\n";
+  }
+
+  test_config_.source_path = (active_dir / "active.yaml").string();
+  const std::filesystem::path original_cwd = std::filesystem::current_path();
+  std::filesystem::current_path(working_dir);
+
+  query::Query query;
+  query.type = query::QueryType::CONFIG_VERIFY;
+  query.filepath = "candidate.yaml";
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  std::filesystem::current_path(original_cwd);
+  std::filesystem::remove_all(active_dir);
+  std::filesystem::remove_all(working_dir);
+
+  EXPECT_NE(response.find("ERR"), std::string::npos);
+  EXPECT_NE(response.find("file not found"), std::string::npos);
 }
 
 // Query Parser integration tests

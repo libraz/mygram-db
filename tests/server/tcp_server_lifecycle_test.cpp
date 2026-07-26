@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "config/config.h"
+#include "config/runtime_variable_manager.h"
 #include "index/index.h"
 #include "mysql/binlog_reader_interface.h"
 #include "server/tcp_server.h"
@@ -135,9 +136,9 @@ class TcpServerLifecycleTest : public ::testing::Test {
   }
 
   // Common setup: build TcpServer wired to the mock reader and start it.
-  void BuildAndStart() {
-    server_ = std::make_unique<TcpServer>(config_, table_contexts_, test_dump_dir_.string(),
-                                          /*full_config=*/nullptr, mock_reader_.get());
+  void BuildAndStart(const config::Config* full_config = nullptr) {
+    server_ =
+        std::make_unique<TcpServer>(config_, table_contexts_, test_dump_dir_.string(), full_config, mock_reader_.get());
     auto r = server_->Start();
     if (!r) {
       const std::string error = r.error().to_string();
@@ -169,6 +170,32 @@ TEST_F(TcpServerLifecycleTest, CleanStartStop) {
   server_->Stop();
   EXPECT_FALSE(server_->IsRunning());
 }
+
+#ifdef USE_MYSQL
+TEST_F(TcpServerLifecycleTest, RuntimeMysqlConfigIsWiredIntoSyncManager) {
+  config::Config full_config;
+  full_config.mysql.host = "startup-primary.internal";
+  full_config.mysql.port = 3306;
+  full_config.mysql.user = "test";
+  full_config.mysql.database = "testdb";
+  BuildAndStart(&full_config);
+
+  auto* variable_manager = server_->GetVariableManager();
+  auto* sync_manager = server_->GetSyncManager();
+  ASSERT_NE(variable_manager, nullptr);
+  ASSERT_NE(sync_manager, nullptr);
+
+  ASSERT_TRUE(variable_manager->SetVariable("mysql.host", "runtime-primary.internal").has_value());
+  ASSERT_TRUE(variable_manager->SetVariable("mysql.port", "4407").has_value());
+
+  const auto current_config = sync_manager->GetCurrentConfigSnapshotForTest();
+  ASSERT_TRUE(current_config.has_value());
+  EXPECT_EQ(current_config->mysql.host, "runtime-primary.internal");
+  EXPECT_EQ(current_config->mysql.port, 4407);
+  EXPECT_EQ(full_config.mysql.host, "startup-primary.internal");
+  EXPECT_EQ(full_config.mysql.port, 3306);
+}
+#endif
 
 /**
  * @brief CR-3: Calling Stop() multiple times is idempotent and does not

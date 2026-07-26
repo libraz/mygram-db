@@ -6,6 +6,7 @@
 #include "server/connection_acceptor.h"
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -44,7 +45,7 @@ constexpr int kFdExhaustionRetrySleepMs = 100;
 }  // namespace
 
 // ToSockaddr / ToSockaddrUn are provided by utils/network_utils.h
-using mygram::utils::ToSockaddr;
+using mygram::utils::ToSockaddrStorage;
 using mygram::utils::ToSockaddrUn;
 
 ConnectionAcceptor::ConnectionAcceptor(ServerConfig config) : config_(std::move(config)) {}
@@ -203,72 +204,83 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     return {};
   }
 
-  // === TCP mode (existing code below unchanged) ===
-
-  // Create socket. As in the UDS branch, build the fd in a local and only
-  // publish to the atomic member after listen() succeeds.
-  int sfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sfd < 0) {
-    auto error =
-        MakeError(ErrorCode::kNetworkSocketCreationFailed, "Failed to create socket: " + std::string(strerror(errno)));
-    mygram::utils::StructuredLog()
-        .Event("socket_create_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
-    return MakeUnexpected(error);
-  }
-
-  // Set socket options
-  if (!SetSocketOptions(sfd)) {
-    close(sfd);
-    auto error = MakeError(ErrorCode::kNetworkSocketCreationFailed, "Failed to set socket options");
-    mygram::utils::StructuredLog()
-        .Event("socket_set_options_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
-    return MakeUnexpected(error);
-  }
-
-  // Bind
-  struct sockaddr_in address = {};
-  address.sin_family = AF_INET;
-  address.sin_port = htons(config_.port);
-
-  // Determine bind address (default to 0.0.0.0 for backward compatibility)
-  in_addr bind_addr{};
-  if (config_.host.empty() || config_.host == "0.0.0.0") {
-    bind_addr.s_addr = INADDR_ANY;
-  } else {
-    if (inet_pton(AF_INET, config_.host.c_str(), &bind_addr) != 1) {
-      close(sfd);
-      auto error = MakeError(ErrorCode::kNetworkInvalidBindAddress, "Invalid bind address: " + config_.host);
-      mygram::utils::StructuredLog()
-          .Event("socket_bind_failed")
-          .Field("bind_address", config_.host)
-          .Field(log_fields::kFieldError, error.to_string())
-          .Error();
-      return MakeUnexpected(error);
-    }
-  }
-  address.sin_addr = bind_addr;
-
-  if (bind(sfd, ToSockaddr(&address), sizeof(address)) < 0) {
-    close(sfd);
-    auto error = MakeError(ErrorCode::kNetworkBindFailed, "Failed to bind to port " + std::to_string(config_.port) +
-                                                              ": " + std::string(strerror(errno)));
+  // === TCP mode ===
+  // Resolve both IPv4 and IPv6 literals/hostnames and bind the first usable
+  // address. This keeps config validation and the actual listener capability
+  // aligned instead of accepting IPv6 for HTTP while rejecting it for TCP.
+  struct addrinfo hints {};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE;
+  const std::string service = std::to_string(config_.port);
+  const char* host = config_.host.empty() ? nullptr : config_.host.c_str();
+  struct addrinfo* resolved = nullptr;
+  const int resolve_result = getaddrinfo(host, service.c_str(), &hints, &resolved);
+  if (resolve_result != 0) {
+    auto error = MakeError(ErrorCode::kNetworkInvalidBindAddress,
+                           "Invalid bind address '" + config_.host + "': " + gai_strerror(resolve_result));
     mygram::utils::StructuredLog()
         .Event("socket_bind_failed")
+        .Field("bind_address", config_.host)
+        .Field(log_fields::kFieldError, error.to_string())
+        .Error();
+    return MakeUnexpected(error);
+  }
+
+  int sfd = -1;
+  int last_bind_error = 0;
+  for (const struct addrinfo* candidate = resolved; candidate != nullptr; candidate = candidate->ai_next) {
+    sfd = socket(candidate->ai_family, candidate->ai_socktype, candidate->ai_protocol);
+    if (sfd < 0) {
+      last_bind_error = errno;
+      continue;
+    }
+    if (!SetSocketOptions(sfd)) {
+      last_bind_error = errno;
+      close(sfd);
+      sfd = -1;
+      continue;
+    }
+    if (candidate->ai_family == AF_INET6) {
+      // Keep wildcard IPv6 listeners dual-stack where the platform permits
+      // it. ACL normalization handles IPv4-mapped peer addresses.
+      int ipv6_only = 0;
+      (void)setsockopt(sfd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only, sizeof(ipv6_only));
+    }
+    if (bind(sfd, candidate->ai_addr, candidate->ai_addrlen) == 0) {
+      break;
+    }
+    last_bind_error = errno;
+    close(sfd);
+    sfd = -1;
+  }
+  freeaddrinfo(resolved);
+
+  if (sfd < 0) {
+    const std::string reason = last_bind_error == 0 ? "no usable resolved address" : strerror(last_bind_error);
+    auto error =
+        MakeError(ErrorCode::kNetworkBindFailed, "Failed to bind " + config_.host + ":" + service + ": " + reason);
+    mygram::utils::StructuredLog()
+        .Event("socket_bind_failed")
+        .Field("bind_address", config_.host)
         .Field("port", static_cast<uint64_t>(config_.port))
         .Field(log_fields::kFieldError, error.to_string())
         .Error();
     return MakeUnexpected(error);
   }
 
-  // Get actual port if port 0 was specified
+  // Get the actual ephemeral port independent of the selected address family.
   if (config_.port == 0) {
+    struct sockaddr_storage address {};
     socklen_t addr_len = sizeof(address);
-    if (getsockname(sfd, ToSockaddr(&address), &addr_len) == 0) {
-      actual_port_ = ntohs(address.sin_port);
+    if (getsockname(sfd, ToSockaddrStorage(&address), &addr_len) == 0) {
+      if (address.ss_family == AF_INET6) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_storage discriminated by family
+        actual_port_ = ntohs(reinterpret_cast<struct sockaddr_in6*>(&address)->sin6_port);
+      } else {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - sockaddr_storage discriminated by family
+        actual_port_ = ntohs(reinterpret_cast<struct sockaddr_in*>(&address)->sin_port);
+      }
     }
   } else {
     actual_port_ = config_.port;
@@ -458,9 +470,9 @@ void ConnectionAcceptor::AcceptLoop() {
       socklen_t client_len_un = sizeof(client_addr_un);
       client_fd = accept(sfd, ToSockaddrUn(&client_addr_un), &client_len_un);
     } else {
-      struct sockaddr_in client_addr {};
+      struct sockaddr_storage client_addr {};
       socklen_t client_len = sizeof(client_addr);
-      client_fd = accept(sfd, ToSockaddr(&client_addr), &client_len);
+      client_fd = accept(sfd, ToSockaddrStorage(&client_addr), &client_len);
     }
 
     if (client_fd < 0) {
@@ -512,10 +524,14 @@ void ConnectionAcceptor::AcceptLoop() {
       }
 
       if (!mygram::utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
-        mygram::utils::StructuredLog()
-            .Event("connection_rejected_acl")
-            .Field(log_fields::kFieldClientIp, client_ip)
-            .Warn();
+        const auto decision = acl_denial_log_limiter_.Record(client_ip);
+        if (decision.should_log) {
+          mygram::utils::StructuredLog()
+              .Event("connection_rejected_acl")
+              .Field(log_fields::kFieldClientIp, client_ip)
+              .Field("suppressed_since_last_log", decision.suppressed_count)
+              .Warn();
+        }
         close(client_fd);
         continue;
       }

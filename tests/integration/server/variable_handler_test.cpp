@@ -7,10 +7,20 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
-#include <chrono>
+#include <array>
+#include <atomic>
+#include <cerrno>
+#include <charconv>
+#include <cstring>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
@@ -32,13 +42,26 @@ class TcpClient {
       throw std::runtime_error("Failed to create socket");
     }
 
-    struct sockaddr_in server_addr;
+    struct timeval receive_timeout {};
+    receive_timeout.tv_sec = 5;
+    if (setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)) < 0) {
+      close(sock_);
+      sock_ = -1;
+      throw std::runtime_error("Failed to set receive timeout");
+    }
+
+    struct sockaddr_in server_addr {};
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr);
+    if (inet_pton(AF_INET, host.c_str(), &server_addr.sin_addr) != 1) {
+      close(sock_);
+      sock_ = -1;
+      throw std::runtime_error("Invalid host address: " + host);
+    }
 
     if (connect(sock_, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
       close(sock_);
+      sock_ = -1;
       throw std::runtime_error("Failed to connect to " + host + ":" + std::to_string(port));
     }
   }
@@ -50,19 +73,54 @@ class TcpClient {
   }
 
   std::string SendCommand(const std::string& command) {
-    std::string request = command + "\r\n";
-    send(sock_, request.c_str(), request.length(), 0);
-
-    char buffer[8192];
-    ssize_t received = recv(sock_, buffer, sizeof(buffer) - 1, 0);
-    if (received <= 0) {
-      return "";
+    const std::string request = command + "\r\n";
+    size_t sent = 0;
+    while (sent < request.size()) {
+      const ssize_t result = send(sock_, request.data() + sent, request.size() - sent, 0);
+      if (result > 0) {
+        sent += static_cast<size_t>(result);
+        continue;
+      }
+      if (result < 0 && errno == EINTR) {
+        continue;
+      }
+      throw std::runtime_error("Failed to send command: " + std::string(std::strerror(errno)));
     }
-    buffer[received] = '\0';
-    return std::string(buffer);
+
+    std::string response;
+    std::array<char, 4096> buffer{};
+    while (response.size() < kMaxResponseBytes) {
+      const ssize_t received = recv(sock_, buffer.data(), buffer.size(), 0);
+      if (received > 0) {
+        response.append(buffer.data(), static_cast<size_t>(received));
+        if (IsResponseComplete(response)) {
+          return response;
+        }
+        continue;
+      }
+      if (received < 0 && errno == EINTR) {
+        continue;
+      }
+      if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        throw std::runtime_error("Timed out waiting for complete response");
+      }
+      if (received == 0) {
+        throw std::runtime_error("Connection closed before complete response");
+      }
+      throw std::runtime_error("Failed to receive response: " + std::string(std::strerror(errno)));
+    }
+    throw std::runtime_error("Response exceeded maximum size");
   }
 
  private:
+  static bool IsResponseComplete(const std::string& response) {
+    if (response.rfind("ERROR ", 0) == 0) {
+      return response.find("\r\n") != std::string::npos;
+    }
+    return response.size() >= 4 && response.compare(response.size() - 4, 4, "\r\n\r\n") == 0;
+  }
+
+  static constexpr size_t kMaxResponseBytes = 1024 * 1024;
   int sock_ = -1;
 };
 
@@ -89,25 +147,27 @@ class VariableHandlerTest : public ::testing::Test {
     config_.host = "127.0.0.1";
     config_.allow_cidrs = {"127.0.0.1/32"};
 
-    // Note: These tests require RuntimeVariableManager integration which is complex
-    // For now, we skip the actual server integration tests
-    // The unit tests for RuntimeVariableManager already cover the functionality
-    GTEST_SKIP() << "TcpServer integration with RuntimeVariableManager requires full application setup. "
-                 << "See unit tests for RuntimeVariableManager functionality.";
+    server_ = std::make_unique<TcpServer>(config_, table_contexts_, "./dumps", &full_config_);
+    auto start_result = server_->Start();
+    ASSERT_TRUE(start_result) << "Failed to start TcpServer: " << start_result.error().to_string();
+    ASSERT_NE(server_->GetVariableManager(), nullptr);
+
+    port_ = server_->GetPort();
+    ASSERT_NE(port_, 0);
   }
 
   void TearDown() override {
     if (server_) {
-      server_->Stop();
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      auto stop_result = server_->Stop();
+      EXPECT_TRUE(stop_result) << "Failed to stop TcpServer: " << stop_result.error().to_string();
     }
   }
 
   TableContext table_context_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
   ServerConfig config_;
+  Config full_config_;
   std::unique_ptr<TcpServer> server_;
-  std::unique_ptr<RuntimeVariableManager> runtime_variable_manager_;
   uint16_t port_ = 0;
 };
 
@@ -404,7 +464,7 @@ TEST_F(VariableHandlerTest, ConcurrentSetCommands) {
         for (int j = 0; j < num_iterations; ++j) {
           int value = 50 + (i * 10) + j;
           std::string response = client.SendCommand("SET api.default_limit = " + std::to_string(value));
-          if (response.find("OK") == std::string::npos && response.find("ERROR") == std::string::npos) {
+          if (response.rfind("+OK", 0) != 0) {
             errors++;
           }
         }
@@ -425,5 +485,21 @@ TEST_F(VariableHandlerTest, ConcurrentSetCommands) {
   // Final value should be valid
   TcpClient client("127.0.0.1", port_);
   std::string response = client.SendCommand("SHOW VARIABLES LIKE 'api.default_limit'");
-  EXPECT_NE(response.find("api.default_limit"), std::string::npos);
+  const auto name_pos = response.find("api.default_limit");
+  ASSERT_NE(name_pos, std::string::npos) << "Response: " << response;
+  const auto value_separator = response.find('|', name_pos);
+  ASSERT_NE(value_separator, std::string::npos) << "Response: " << response;
+  const auto value_begin = response.find_first_not_of(' ', value_separator + 1);
+  ASSERT_NE(value_begin, std::string::npos) << "Response: " << response;
+  const auto value_end = response.find_first_of(" |", value_begin);
+  ASSERT_NE(value_end, std::string::npos) << "Response: " << response;
+
+  const std::string value_text = response.substr(value_begin, value_end - value_begin);
+  int final_value = 0;
+  const auto [end, parse_error] =
+      std::from_chars(value_text.data(), value_text.data() + value_text.size(), final_value);
+  ASSERT_EQ(parse_error, std::errc()) << "Response: " << response;
+  ASSERT_EQ(end, value_text.data() + value_text.size()) << "Response: " << response;
+  EXPECT_GE(final_value, 50);
+  EXPECT_LE(final_value, 99);
 }

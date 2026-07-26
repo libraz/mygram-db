@@ -7,6 +7,7 @@
 #include "server/snapshot_scheduler.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <ctime>
 #include <exception>
@@ -32,9 +33,28 @@ namespace mygramdb::server {
 constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every second
 constexpr auto kOrphanTempSnapshotMaxAge = std::chrono::hours(1);
 
-bool IsAutoSnapshotTempFile(const std::filesystem::path& path) {
+bool IsDumpTempFile(const std::filesystem::path& path) {
   const std::string filename = path.filename().string();
-  return filename.rfind("auto_", 0) == 0 && filename.find(".dmp.tmp") != std::string::npos;
+  const auto marker = filename.find(".dmp.tmp");
+  if (marker == std::string::npos) {
+    return false;
+  }
+  const auto suffix_offset = marker + std::string_view(".dmp.tmp").size();
+  if (suffix_offset == filename.size()) {
+    return true;
+  }
+  if (filename[suffix_offset] != '.') {
+    return false;
+  }
+  const std::string_view unique_suffix(filename.data() + suffix_offset + 1, filename.size() - suffix_offset - 1);
+  const auto separator = unique_suffix.find('.');
+  if (separator == std::string_view::npos || separator == 0 || separator + 1 == unique_suffix.size()) {
+    return false;
+  }
+  const auto is_decimal = [](std::string_view value) {
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; });
+  };
+  return is_decimal(unique_suffix.substr(0, separator)) && is_decimal(unique_suffix.substr(separator + 1));
 }
 
 SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
@@ -44,7 +64,7 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
                                      replication_pause::Counter* replication_pause_counter,
                                      std::atomic<bool>* dump_load_in_progress, SyncOperationManager* sync_manager,
                                      std::function<bool()> sync_in_progress_checker,
-                                     std::atomic<bool>* optimization_in_progress)
+                                     std::atomic<bool>* optimization_in_progress, std::atomic<bool>* shutdown_requested)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
@@ -57,7 +77,8 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
       replication_pause_counter_(replication_pause_counter != nullptr ? replication_pause_counter
                                                                       : &local_replication_pause_counter_),
       sync_manager_(sync_manager),
-      sync_in_progress_checker_(std::move(sync_in_progress_checker)) {
+      sync_in_progress_checker_(std::move(sync_in_progress_checker)),
+      shutdown_requested_(shutdown_requested) {
   // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
   // which is the only production caller. Tests must also provide a non-null catalog.
 }
@@ -68,6 +89,10 @@ SnapshotScheduler::~SnapshotScheduler() {
 
 mygram::utils::Expected<void, mygram::utils::Error> SnapshotScheduler::Start() {
   if (config_.interval_sec <= 0) {
+    // Orphan cleanup is a dump-directory responsibility, not an auto-snapshot
+    // retention feature. Manual DUMP SAVE uses the same atomic temp naming and
+    // must still be reclaimed when periodic snapshots are disabled.
+    CleanupOldSnapshots();
     mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
     return {};
   }
@@ -122,7 +147,7 @@ void SnapshotScheduler::Stop() {
   // Wake the scheduler loop so it exits promptly instead of sleeping
   // for up to kShutdownCheckIntervalMs.
   //
-  // Lock-discipline note (pre-empts re-flagging by future system reviews):
+  // Lock discipline:
   //   - stop_cv_ is associated with stop_mutex_, not start_stop_mutex_.
   //   - Calling notify_all without holding stop_mutex_ is permitted by the
   //     C++ standard ([thread.condition.condvar]); the standard only requires
@@ -178,6 +203,11 @@ void SnapshotScheduler::SchedulerLoop() {
 
 void SnapshotScheduler::TakeSnapshot() {
   try {
+    if (shutdown_requested_ != nullptr && shutdown_requested_->load(std::memory_order_acquire)) {
+      mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "server shutdown").Info();
+      return;
+    }
+
     OperationCoordinator::Token operation_token;
     if (sync_manager_ != nullptr) {
       auto& coordinator = sync_manager_->GetOperationCoordinator();
@@ -264,7 +294,11 @@ void SnapshotScheduler::TakeSnapshot() {
       replication_pause_acquired = true;
       if (first_pauser) {
         if (!binlog_reader_->IsRunning()) {
-          replication_pause_counter_->PublishDrainedGTID("");
+          // REPLICATION STOP can win after the initial IsRunning() check.
+          // Preserve the last applied position for this pause generation
+          // instead of publishing an artificial empty position.
+          gtid = binlog_reader_->GetCurrentGTID();
+          replication_pause_counter_->PublishDrainedGTID(gtid);
           pause_scope.Release();
           replication_pause_acquired = false;
         } else {
@@ -278,6 +312,14 @@ void SnapshotScheduler::TakeSnapshot() {
       }
     } else if (binlog_reader_ != nullptr) {
       gtid = binlog_reader_->GetCurrentGTID();
+    }
+    if (binlog_reader_ != nullptr && gtid.empty()) {
+      mygram::utils::StructuredLog()
+          .Event("auto_snapshot_skipped")
+          .Field("reason", "replication GTID is empty")
+          .Field(log_fields::kFieldFilepath, dump_path.string())
+          .Error();
+      return;
     }
     if (replication_pause_acquired) {
       // We are the first pauser: actually stop the reader and assert the
@@ -323,6 +365,15 @@ void SnapshotScheduler::TakeSnapshot() {
           if (binlog_reader_ == nullptr) {
             return;
           }
+          if (shutdown_requested_ != nullptr && shutdown_requested_->load(std::memory_order_acquire)) {
+            mygram::utils::StructuredLog()
+                .Event("replication_resume_skipped")
+                .Field("operation", "snapshot")
+                .Field("reason", "server shutdown")
+                .Field(log_fields::kFieldFilepath, dump_path_str)
+                .Info();
+            return;
+          }
           auto start_result = binlog_reader_->Start();
           if (start_result) {
             mygram::utils::StructuredLog()
@@ -348,7 +399,11 @@ void SnapshotScheduler::TakeSnapshot() {
     auto dumpable = catalog_->GetDumpableContexts();
 
     // Perform save using dump API (writes V2 format)
-    auto result = storage::dump_v2::WriteDump(dump_path.string(), gtid, *full_config_, dumpable);
+    auto result = storage::dump_v2::WriteDump(
+        dump_path.string(), gtid, *full_config_, dumpable, nullptr, nullptr, {},
+        storage::dump_v2::RestoreLimits{
+            static_cast<uint64_t>(full_config_->dump.restore_memory_budget_mb) * 1024ULL * 1024ULL,
+            static_cast<uint64_t>(full_config_->dump.restore_max_section_mb) * 1024ULL * 1024ULL});
 
     if (result) {
       mygram::utils::StructuredLog()
@@ -371,10 +426,6 @@ void SnapshotScheduler::TakeSnapshot() {
 }
 
 void SnapshotScheduler::CleanupOldSnapshots() {
-  if (config_.retain <= 0) {
-    return;
-  }
-
   try {
     std::filesystem::path dump_path(dump_dir_);
 
@@ -393,7 +444,7 @@ void SnapshotScheduler::CleanupOldSnapshots() {
         if (entry.path().filename().string().rfind("auto_", 0) == 0) {
           dump_files.emplace_back(entry.path(), std::filesystem::last_write_time(entry));
         }
-      } else if (entry.is_regular_file() && IsAutoSnapshotTempFile(entry.path())) {
+      } else if (entry.is_regular_file() && IsDumpTempFile(entry.path())) {
         const auto last_write_time = std::filesystem::last_write_time(entry);
         if (now - last_write_time >= kOrphanTempSnapshotMaxAge) {
           old_temp_files.push_back(entry.path());
@@ -406,21 +457,23 @@ void SnapshotScheduler::CleanupOldSnapshots() {
               [](const auto& lhs, const auto& rhs) { return lhs.second > rhs.second; });
 
     // Delete old files beyond retain count
-    const auto retain_count = static_cast<size_t>(config_.retain);
-    for (size_t i = retain_count; i < dump_files.size(); ++i) {
-      mygram::utils::StructuredLog()
-          .Event("snapshot_removing_old")
-          .Field(log_fields::kFieldFilepath, dump_files[i].first.string())
-          .Info();
-      std::error_code ec;
-      std::filesystem::remove(dump_files[i].first, ec);
-      if (ec) {
+    if (config_.retain > 0) {
+      const auto retain_count = static_cast<size_t>(config_.retain);
+      for (size_t i = retain_count; i < dump_files.size(); ++i) {
         mygram::utils::StructuredLog()
-            .Event("snapshot_cleanup_error")
+            .Event("snapshot_removing_old")
             .Field(log_fields::kFieldFilepath, dump_files[i].first.string())
-            .Field(log_fields::kFieldError, ec.message())
-            .Warn();
-        // Continue with remaining files
+            .Info();
+        std::error_code ec;
+        std::filesystem::remove(dump_files[i].first, ec);
+        if (ec) {
+          mygram::utils::StructuredLog()
+              .Event("snapshot_cleanup_error")
+              .Field(log_fields::kFieldFilepath, dump_files[i].first.string())
+              .Field(log_fields::kFieldError, ec.message())
+              .Warn();
+          // Continue with remaining files
+        }
       }
     }
 

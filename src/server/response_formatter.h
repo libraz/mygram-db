@@ -19,6 +19,7 @@
 #include "server/server_stats.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
 
 namespace mygramdb::mysql {
 class IBinlogReader;
@@ -164,6 +165,7 @@ class ResponseFormatter {
    * @return Formatted response
    */
   static std::string FormatError(std::string_view message);
+  static std::string FormatError(const mygram::utils::Error& error);
 
   /**
    * @brief Format a simple "+OK" status reply (Redis-style).

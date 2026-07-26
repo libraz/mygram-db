@@ -26,6 +26,7 @@
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
 #include "storage/dump_format_v1.h"
+#include "storage/dump_format_v2.h"
 
 #ifdef USE_MYSQL
 #include "mysql/binlog_reader_interface.h"
@@ -1226,6 +1227,11 @@ class MockBinlogReader : public mysql::IBinlogReader {
  */
 class DumpHandlerGtidTest : public ::testing::Test {
  protected:
+  enum class EmptyGtidDumpFormat {
+    kV1,
+    kV2,
+  };
+
   void SetUp() override {
     spdlog::set_level(spdlog::level::debug);
 
@@ -1282,6 +1288,112 @@ class DumpHandlerGtidTest : public ::testing::Test {
   }
 
   void TearDown() override { std::filesystem::remove_all(test_dump_dir_); }
+
+  mygram::utils::Expected<void, mygram::utils::Error> WriteEmptyGtidDump(const std::string& filepath,
+                                                                         EmptyGtidDumpFormat format) {
+    index::Index dump_index(2);
+    storage::DocumentStore dump_store;
+    auto dump_doc_id = dump_store.AddDocument("dump-only", {{"content", "dump payload"}});
+    if (!dump_doc_id) {
+      return mygram::utils::MakeUnexpected(dump_doc_id.error());
+    }
+    dump_store.SetNormalizedText(*dump_doc_id, "dump payload");
+    if (!dump_index.AddDocument(static_cast<index::DocId>(*dump_doc_id), "dump payload")) {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageDumpWriteError, "Failed to prepare dump index"));
+    }
+
+    std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> dump_contexts;
+    dump_contexts["test_table"] = {&dump_index, &dump_store};
+    if (format == EmptyGtidDumpFormat::kV1) {
+      return storage::dump_v1::WriteDumpV1(filepath, "", *config_, dump_contexts);
+    }
+    return storage::dump_v2::WriteDump(filepath, "", *config_, dump_contexts);
+  }
+
+  void ExpectEmptyGtidRejectedWithoutMutation(EmptyGtidDumpFormat format) {
+    const std::string format_name = format == EmptyGtidDumpFormat::kV1 ? "v1" : "v2";
+    const std::string filepath = (test_dump_dir_ / ("empty_gtid_" + format_name + ".dmp")).string();
+    auto write_result = WriteEmptyGtidDump(filepath, format);
+    ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+    auto live_doc_id = table_ctx_->doc_store->AddDocument("live-only", {{"content", "live sentinel"}});
+    ASSERT_TRUE(live_doc_id.has_value()) << live_doc_id.error().message();
+    table_ctx_->doc_store->SetNormalizedText(*live_doc_id, "live sentinel");
+    ASSERT_TRUE(table_ctx_->index->AddDocument(static_cast<index::DocId>(*live_doc_id), "live sentinel"));
+
+    auto* const index_before = table_ctx_->index.get();
+    auto* const store_before = table_ctx_->doc_store.get();
+    const auto doc_ids_before = store_before->GetAllDocIds();
+    const auto primary_keys_before = store_before->GetPrimaryKeysBatch(doc_ids_before);
+    const size_t terms_before = index_before->TermCount();
+    const uint64_t live_term_count_before = index_before->Count("li");
+    const uint64_t dump_term_count_before = index_before->Count("du");
+    constexpr std::string_view kWatermark = "live-watermark:42";
+    {
+      std::lock_guard<std::mutex> lock(table_ctx_->replay_watermark->mutex);
+      table_ctx_->replay_watermark->snapshot_gtid = kWatermark;
+    }
+
+    const std::string previous_gtid = "previous-gtid:99";
+    mock_binlog_reader_->SetGtidForTest(previous_gtid);
+    mock_binlog_reader_->SetRunningForTest(true);
+    mock_binlog_reader_->ResetTestFlags();
+
+    query::Query load_query;
+    load_query.type = query::QueryType::DUMP_LOAD;
+    load_query.filepath = filepath;
+    const std::string response = handler_->Handle(load_query, conn_ctx_);
+
+    EXPECT_TRUE(response.find("ERROR") == 0) << response;
+    EXPECT_NE(response.find("loaded GTID=''"), std::string::npos) << response;
+    EXPECT_NE(response.find("previous GTID='" + previous_gtid + "'"), std::string::npos) << response;
+    EXPECT_EQ(table_ctx_->index.get(), index_before);
+    EXPECT_EQ(table_ctx_->doc_store.get(), store_before);
+    EXPECT_EQ(store_before->GetAllDocIds(), doc_ids_before);
+    EXPECT_EQ(store_before->GetPrimaryKeysBatch(doc_ids_before), primary_keys_before);
+    EXPECT_EQ(index_before->TermCount(), terms_before);
+    EXPECT_EQ(index_before->Count("li"), live_term_count_before);
+    EXPECT_EQ(index_before->Count("du"), dump_term_count_before);
+    {
+      std::lock_guard<std::mutex> lock(table_ctx_->replay_watermark->mutex);
+      EXPECT_EQ(table_ctx_->replay_watermark->snapshot_gtid, kWatermark);
+    }
+    EXPECT_EQ(mock_binlog_reader_->GetCurrentGTID(), previous_gtid);
+    EXPECT_FALSE(mock_binlog_reader_->WasSetGtidCalled());
+    EXPECT_TRUE(mock_binlog_reader_->WasStopCalled());
+    EXPECT_TRUE(mock_binlog_reader_->WasStartCalled());
+    EXPECT_TRUE(mock_binlog_reader_->IsRunning());
+    EXPECT_FALSE(replication_paused_for_dump_.load());
+    EXPECT_FALSE(dump_load_in_progress_.load());
+  }
+
+  void ExpectEmptyGtidAllowedForEmptyCurrent(EmptyGtidDumpFormat format) {
+    const std::string format_name = format == EmptyGtidDumpFormat::kV1 ? "v1" : "v2";
+    const std::string filepath = (test_dump_dir_ / ("empty_current_" + format_name + ".dmp")).string();
+    auto write_result = WriteEmptyGtidDump(filepath, format);
+    ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+    mock_binlog_reader_->SetGtidForTest("");
+    mock_binlog_reader_->SetRunningForTest(true);
+    mock_binlog_reader_->ResetTestFlags();
+
+    query::Query load_query;
+    load_query.type = query::QueryType::DUMP_LOAD;
+    load_query.filepath = filepath;
+    const std::string response = handler_->Handle(load_query, conn_ctx_);
+
+    EXPECT_TRUE(response.find("OK LOADED") == 0) << response;
+    const auto loaded_doc_ids = table_ctx_->doc_store->GetAllDocIds();
+    ASSERT_EQ(loaded_doc_ids.size(), 1u);
+    EXPECT_EQ(table_ctx_->doc_store->GetPrimaryKey(loaded_doc_ids.front()), std::optional<std::string>("dump-only"));
+    EXPECT_EQ(table_ctx_->index->Count("du"), 1u);
+    EXPECT_EQ(mock_binlog_reader_->GetCurrentGTID(), "");
+    EXPECT_FALSE(mock_binlog_reader_->WasSetGtidCalled());
+    EXPECT_TRUE(mock_binlog_reader_->WasStopCalled());
+    EXPECT_TRUE(mock_binlog_reader_->WasStartCalled());
+    EXPECT_TRUE(mock_binlog_reader_->IsRunning());
+  }
 
   std::unique_ptr<TableContext> table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
@@ -1402,6 +1514,22 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRestoresGtidAndRestartsReplication) {
   // Verify replication was stopped then restarted
   EXPECT_TRUE(mock_binlog_reader_->WasStopCalled()) << "Replication should be stopped before load";
   EXPECT_TRUE(mock_binlog_reader_->WasStartCalled()) << "Replication should be restarted after load";
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadV1RejectsEmptyGtidWithoutMutatingLiveState) {
+  ExpectEmptyGtidRejectedWithoutMutation(EmptyGtidDumpFormat::kV1);
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadV2RejectsEmptyGtidWithoutMutatingLiveState) {
+  ExpectEmptyGtidRejectedWithoutMutation(EmptyGtidDumpFormat::kV2);
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadV1AllowsEmptyGtidWhenCurrentGtidIsEmpty) {
+  ExpectEmptyGtidAllowedForEmptyCurrent(EmptyGtidDumpFormat::kV1);
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadV2AllowsEmptyGtidWhenCurrentGtidIsEmpty) {
+  ExpectEmptyGtidAllowedForEmptyCurrent(EmptyGtidDumpFormat::kV2);
 }
 
 TEST_F(DumpHandlerGtidTest, DumpSaveDoesNotRestartReplicationStoppedAfterPauseAcquire) {

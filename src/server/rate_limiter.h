@@ -11,6 +11,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "server/denial_log_limiter.h"
 #include "utils/periodic_worker.h"
 
 namespace mygramdb::server {
@@ -128,6 +129,11 @@ class RateLimiter {
   bool AllowRequest(const std::string& client_ip);
 
   /**
+   * @brief Bound warning logs generated for rejected requests.
+   */
+  DenialLogLimiter::Decision RecordDenialLog(const std::string& key) { return denial_log_limiter_.Record(key); }
+
+  /**
    * @brief Update rate limiting parameters for new clients
    * @param capacity New maximum tokens per client (burst size)
    * @param refill_rate New tokens added per second per client
@@ -203,6 +209,7 @@ class RateLimiter {
   std::atomic<uint64_t> total_requests_{0};
   std::atomic<uint64_t> allowed_requests_{0};
   std::atomic<uint64_t> blocked_requests_{0};
+  DenialLogLimiter denial_log_limiter_;
 
   // Background sweeper. Cleanup is offloaded to a dedicated thread to avoid
   // O(n) latency spikes on the request hot path. The previous implementation

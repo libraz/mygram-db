@@ -116,7 +116,7 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
   return ResponseFormatter::FormatOk() + "\r\n" + result;
 }
 
-std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
+std::string AdminHandler::HandleConfigVerify(const std::string& filepath) const {
   if (filepath.empty()) {
     return ResponseFormatter::FormatError("CONFIG VERIFY requires a filepath");
   }
@@ -135,15 +135,14 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
     return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed");
   }
 
-  // Resolve via shared safe-path utility. CONFIG VERIFY uses the current
-  // working directory as the base directory (matching the previous
-  // behaviour of passing the relative path directly to LoadConfig).
-  std::error_code ec;
-  std::string base_dir = std::filesystem::current_path(ec).string();
-  if (ec) {
-    return ResponseFormatter::FormatError(std::string("CONFIG VERIFY: cannot resolve current directory: ") +
-                                          ec.message());
+  // Resolve relative to the active configuration file. The process working
+  // directory is mutable (daemonization changes it to "/") and must not
+  // become an implicit file-disclosure root for a remote command.
+  if (ctx_.full_config == nullptr || ctx_.full_config->source_path.empty()) {
+    return ResponseFormatter::FormatError("CONFIG VERIFY: active configuration directory is unavailable");
   }
+  std::error_code ec;
+  const std::string base_dir = std::filesystem::path(ctx_.full_config->source_path).parent_path().string();
 
   auto resolved = mygram::utils::ResolveSafePath(filepath, base_dir, {".yaml", ".yml"});
   if (!resolved) {
@@ -206,7 +205,7 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) {
   }
 
   // Try to load and validate the configuration file
-  auto config_result = config::LoadConfig(canonical_path);
+  auto config_result = config::LoadConfigForValidation(canonical_path);
   if (!config_result) {
     // Logged at WARN: this is a client-input validation failure (user supplied
     // a bad YAML), not a server-side system error, so it should not raise

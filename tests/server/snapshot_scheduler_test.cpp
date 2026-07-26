@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -330,17 +331,39 @@ TEST_F(SnapshotSchedulerTest, CleanupRetainZeroSkipsCleanup) {
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "auto_20240102_120000.dmp"));
 }
 
-TEST_F(SnapshotSchedulerTest, CleanupRemovesOnlyOldAutoTempFiles) {
+TEST_F(SnapshotSchedulerTest, DisabledSchedulerStillCleansOldManualDumpTempFiles) {
+  const auto old_manual_temp = test_dir_ / "manual_backup.dmp.tmp.123.456";
+  std::ofstream(old_manual_temp) << "manual temp";
+  std::filesystem::last_write_time(old_manual_temp,
+                                   std::filesystem::file_time_type::clock::now() - std::chrono::hours(2));
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 0;
+  dump_config.retain = 0;
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+
+  ASSERT_TRUE(scheduler.Start().has_value());
+  EXPECT_FALSE(std::filesystem::exists(old_manual_temp));
+}
+
+TEST_F(SnapshotSchedulerTest, CleanupRemovesOldAutoAndManualDumpTempFiles) {
   const auto old_auto_temp = test_dir_ / "auto_20240101_120000.dmp.tmp.123.456";
   const auto recent_auto_temp = test_dir_ / "auto_20240102_120000.dmp.tmp.123.456";
-  const auto manual_temp = test_dir_ / "manual_backup.dmp.tmp.123.456";
+  const auto old_manual_temp = test_dir_ / "manual_backup.dmp.tmp.123.456";
+  const auto recent_manual_temp = test_dir_ / "recent_backup.dmp.tmp.123.456";
+  const auto unrelated_temp = test_dir_ / "notes.dmp.tmp.keep";
 
   std::ofstream(old_auto_temp) << "old temp";
   std::ofstream(recent_auto_temp) << "recent temp";
-  std::ofstream(manual_temp) << "manual temp";
+  std::ofstream(old_manual_temp) << "manual temp";
+  std::ofstream(recent_manual_temp) << "recent manual temp";
+  std::ofstream(unrelated_temp) << "unrelated";
 
   const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
   std::filesystem::last_write_time(old_auto_temp, old_time);
+  std::filesystem::last_write_time(old_manual_temp, old_time);
+  std::filesystem::last_write_time(unrelated_temp, old_time);
 
   DumpConfig dump_config;
   dump_config.interval_sec = 1;
@@ -356,7 +379,9 @@ TEST_F(SnapshotSchedulerTest, CleanupRemovesOnlyOldAutoTempFiles) {
 
   EXPECT_FALSE(std::filesystem::exists(old_auto_temp));
   EXPECT_TRUE(std::filesystem::exists(recent_auto_temp));
-  EXPECT_TRUE(std::filesystem::exists(manual_temp));
+  EXPECT_FALSE(std::filesystem::exists(old_manual_temp));
+  EXPECT_TRUE(std::filesystem::exists(recent_manual_temp));
+  EXPECT_TRUE(std::filesystem::exists(unrelated_temp));
 }
 
 // ===========================================================================
@@ -550,6 +575,9 @@ class StubBinlogReader : public mygramdb::mysql::IBinlogReader {
   void Stop() override {
     running_.store(false, std::memory_order_release);
     stop_count_.fetch_add(1, std::memory_order_acq_rel);
+    if (on_stop_) {
+      on_stop_();
+    }
   }
 
   bool IsRunning() const override {
@@ -580,6 +608,7 @@ class StubBinlogReader : public mygramdb::mysql::IBinlogReader {
   void SetRunningForTest(bool running) { running_.store(running, std::memory_order_release); }
   void StopAfterNextTrueIsRunningForTest() { stop_after_true_is_running_.store(true, std::memory_order_release); }
   void ObserveFlagAtGetGtid(std::atomic<bool>* flag) { observed_flag_ = flag; }
+  void SetOnStop(std::function<void()> on_stop) { on_stop_ = std::move(on_stop); }
 
   int StartCount() const { return start_count_.load(std::memory_order_acquire); }
   int StopCount() const { return stop_count_.load(std::memory_order_acquire); }
@@ -595,6 +624,7 @@ class StubBinlogReader : public mygramdb::mysql::IBinlogReader {
   mutable std::atomic<bool> flag_seen_true_at_gtid_{false};
   mutable std::atomic<bool> stop_after_true_is_running_{false};
   std::atomic<bool>* observed_flag_ = nullptr;
+  std::function<void()> on_stop_;
 };
 
 }  // namespace
@@ -639,6 +669,33 @@ TEST_F(SnapshotSchedulerTest, TakeSnapshotPausesAndResumesReplication) {
   // Final state: flag cleared and stub running again.
   EXPECT_FALSE(replication_paused_for_dump_.load());
   EXPECT_TRUE(stub.IsRunning()) << "Replication must be running after the snapshot completes";
+}
+
+TEST_F(SnapshotSchedulerTest, TakeSnapshotDoesNotRestartReplicationDuringServerShutdown) {
+  StubBinlogReader stub;
+  stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");
+  stub.SetRunningForTest(true);
+  std::atomic<bool> shutdown_requested{false};
+  stub.SetOnStop([&shutdown_requested]() { shutdown_requested.store(true, std::memory_order_release); });
+
+  replication_pause::Counter counter;
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_, &counter, nullptr, nullptr, {},
+                              nullptr, &shutdown_requested);
+
+  ASSERT_TRUE(scheduler.Start().has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  scheduler.Stop();
+
+  EXPECT_EQ(stub.StopCount(), 1);
+  EXPECT_EQ(stub.StartCount(), 0) << "shutdown must suppress the snapshot scope guard's replication restart";
+  EXPECT_FALSE(stub.IsRunning());
+  EXPECT_FALSE(counter.IsPaused());
+  EXPECT_FALSE(replication_paused_for_dump_.load(std::memory_order_acquire));
 }
 
 /**
@@ -691,9 +748,52 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartIfManualStopWinsRaceBefo
 
   EXPECT_EQ(stub.StopCount(), 0) << "Snapshot must not Stop() after a manual Stop wins the IsRunning/Stop race";
   EXPECT_EQ(stub.StartCount(), 0) << "Snapshot must not restart replication it did not pause";
+  EXPECT_GE(stub.GetGtidCount(), 1) << "Snapshot must preserve the reader's last GTID after the stop race";
   EXPECT_FALSE(counter.IsPaused());
   EXPECT_FALSE(replication_paused_for_dump_.load());
   EXPECT_FALSE(stub.IsRunning());
+
+  size_t auto_snapshot_count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().filename().string().rfind("auto_", 0) == 0 && entry.path().extension() == ".dmp") {
+      ++auto_snapshot_count;
+    }
+  }
+  EXPECT_EQ(auto_snapshot_count, 1U) << "A non-empty last GTID remains safe to snapshot after the stop race";
+}
+
+TEST_F(SnapshotSchedulerTest, AutoSnapshotRejectsEmptyGtidAfterManualStopRace) {
+  StubBinlogReader stub;
+  stub.SetGtidForTest("");
+  stub.SetRunningForTest(true);
+  stub.StopAfterNextTrueIsRunningForTest();
+
+  replication_pause::Counter counter;
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_, &counter);
+
+  scheduler.Start();
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  scheduler.Stop();
+
+  EXPECT_GE(stub.GetGtidCount(), 1) << "The raced stop branch must query the last applied GTID";
+  EXPECT_EQ(stub.StopCount(), 0);
+  EXPECT_EQ(stub.StartCount(), 0);
+  EXPECT_FALSE(counter.IsPaused());
+  EXPECT_FALSE(replication_paused_for_dump_.load());
+
+  size_t auto_snapshot_count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().filename().string().rfind("auto_", 0) == 0 && entry.path().extension() == ".dmp") {
+      ++auto_snapshot_count;
+    }
+  }
+  EXPECT_EQ(auto_snapshot_count, 0U) << "An auto snapshot with no replication position must fail closed";
 }
 
 /**

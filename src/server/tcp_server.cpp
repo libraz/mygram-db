@@ -64,12 +64,21 @@ constexpr int kDefaultSyncShutdownTimeoutSec = 30;
 }  // namespace
 
 TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
-                     std::string dump_dir, const config::Config* full_config, mysql::IBinlogReader* binlog_reader)
+                     std::string dump_dir, const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
+                     SyncCompletionCallback sync_completion_callback)
     : config_(std::move(config)),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
       table_contexts_(std::move(table_contexts)),
-      binlog_reader_(binlog_reader) {
+      binlog_reader_(binlog_reader)
+#ifdef USE_MYSQL
+      ,
+      sync_completion_callback_(std::move(sync_completion_callback))
+#endif
+{
+#ifndef USE_MYSQL
+  (void)sync_completion_callback;
+#endif
   config_.parsed_allow_cidrs = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
   // NOTE: Component initialization moved to Start() method
   // This allows for better error handling and resource cleanup
@@ -107,7 +116,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // token bucket per peer IP for every TCP command frame.
   //
   // Held as shared_ptr so HttpServer can co-own the same instance via
-  // GetSharedRateLimiter() (Fix N-4): a client's quota MUST apply across
+  // A client's quota MUST apply across
   // protocols. Two independent limiters give the client effectively 2x the
   // configured limit, which silently defeats DoS protection.
   if (full_config_ != nullptr) {
@@ -129,6 +138,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Note: Must be created before lifecycle manager because SyncHandler needs it
   sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, full_config_, binlog_reader_,
                                                          &replication_pause_counter_);
+  sync_manager_->SetCompletionCallback(sync_completion_callback_);
 #endif
 
   // Initialize all server components via ServerLifecycleManager
@@ -137,12 +147,12 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   auto lifecycle_manager_result = ServerLifecycleManager::Create(
       config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
       optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
-      binlog_reader_, sync_manager_.get(), rate_limiter_.get());
+      binlog_reader_, sync_manager_.get(), rate_limiter_.get(), &shutdown_in_progress_);
 #else
   auto lifecycle_manager_result = ServerLifecycleManager::Create(
       config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
       optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
-      binlog_reader_, rate_limiter_.get());
+      binlog_reader_, rate_limiter_.get(), &shutdown_in_progress_);
 #endif
   if (!lifecycle_manager_result) {
     return MakeUnexpected(lifecycle_manager_result.error());
@@ -165,6 +175,12 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   }
 #endif
   variable_manager_ = std::move(components.variable_manager);
+#ifdef USE_MYSQL
+  if (sync_manager_ && variable_manager_) {
+    sync_manager_->SetCurrentConfigProvider(
+        [variable_manager = variable_manager_.get()] { return variable_manager->GetCurrentConfig(); });
+  }
+#endif
   handler_context_ = std::move(components.handler_context);
 
   // Update HandlerContext pointer to point to TcpServer-owned variable_manager
@@ -177,7 +193,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
 
   // Wire the shutdown flag through to handlers so that long-running workers
   // (DumpSaveWorker, DumpLoadWorker) can skip post-operation binlog Start()
-  // when TcpServer::Stop() has been called (CR-10). Setting this BEFORE the
+  // when TcpServer::Stop() has been called. Setting this BEFORE the
   // acceptor/reactor start ensures the flag is observable by any worker
   // started via the first DUMP SAVE request.
   handler_context_->shutdown_flag = &shutdown_in_progress_;
@@ -213,6 +229,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   if (config_.recv_timeout_sec > 0) {
     rcfg.initial_read_timeout_sec = config_.recv_timeout_sec;
   }
+  rcfg.idle_timeout_sec = config_.idle_timeout_sec;
+  rcfg.reaper_interval_sec = config_.reaper_interval_sec;
   reactor_ = std::make_unique<IoReactor>(thread_pool_.get(), dispatcher_.get(), rcfg);
   // When the reactor tears down a connection, decrement the acceptor's
   // max_connections gate so new accepts can proceed, and the server stats
@@ -248,23 +266,28 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     const size_t max_write_bytes = config_.max_write_queue_bytes > 0
                                        ? static_cast<size_t>(config_.max_write_queue_bytes)
                                        : ReactorConnection::kDefaultMaxWriteQueueBytes;
-    acceptor_->SetReactorHandler(
-        [reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes](int client_fd) -> bool {
-          auto conn =
-              ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes);
-          auto reg = reactor_ptr->Register(conn);
-          if (reg.has_value()) {
-            // Count this as an active connection so GetConnectionCount() and the
-            // mygramdb_active_connections metric report the live reactor
-            // population. The matching decrement happens in the close callback
-            // installed above.
-            stats_ptr->IncrementConnections();
-            stats_ptr->IncrementTotalConnections();
-            return true;
-          }
-          (void)conn->ReleaseFd();
-          return false;
-        });
+    const size_t max_pending_frames = config_.max_pending_frames > 0 ? static_cast<size_t>(config_.max_pending_frames)
+                                                                     : ReactorConnection::kMaxPendingFrames;
+    const size_t max_pending_frame_bytes = config_.max_pending_frame_bytes > 0
+                                               ? static_cast<size_t>(config_.max_pending_frame_bytes)
+                                               : ReactorConnection::kMaxPendingFrameBytes;
+    acceptor_->SetReactorHandler([reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr, max_write_bytes, max_pending_frames,
+                                  max_pending_frame_bytes](int client_fd) -> bool {
+      auto conn = ReactorConnection::Create(client_fd, reactor_ptr, dispatcher_ptr, pool_ptr, stats_ptr,
+                                            max_write_bytes, nullptr, max_pending_frames, max_pending_frame_bytes);
+      // Publish the active count before reactor registration. Register()
+      // makes the connection visible to the event loop, which may close a
+      // short-lived peer before Register() returns to this accept thread.
+      stats_ptr->IncrementConnections();
+      auto reg = reactor_ptr->Register(conn);
+      if (reg.has_value()) {
+        stats_ptr->IncrementTotalConnections();
+        return true;
+      }
+      stats_ptr->DecrementConnections();
+      (void)conn->ReleaseFd();
+      return false;
+    });
   }
 
   // Spawn the accept loop AFTER SetReactorHandler so the new thread observes a
@@ -302,12 +325,12 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Stop() {
   // resumable check point and skip post-operation binlog restart. Without
   // this, a worker that captured replication_was_running=true at entry will
   // call binlog_reader_->Start() during shutdown, racing the binlog_reader_
-  // destructor that is about to run after Stop() returns (CR-10).
+  // destructor that is about to run after Stop() returns.
   shutdown_in_progress_.store(true, std::memory_order_release);
 
   // Step 2: stop ingest paths that may touch binlog_reader_.
   //
-  // Order rationale (CR-3 / CR-10):
+  // Shutdown order rationale:
   //   (a) The dump worker may be inside DumpSaveWorker / DumpLoadWorker,
   //       which call binlog_reader_->Stop() / Start() under
   //       replication_paused_for_dump_. Joining the worker here — while
@@ -375,7 +398,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Stop() {
   // shared_ptr<ReactorConnection> copies that reach into close_callback_
   // (which captures `accept_ptr` and `close_stats_ptr` from this TcpServer);
   // those captured pointers must remain valid for the lifetime of any
-  // in-flight callback (CR-3). Joining the pool here ensures every queued
+  // in-flight callback. Joining the pool here ensures every queued
   // task — including the close callbacks Unregister() may have just spawned
   // when the reactor stopped — has fully completed before the captured
   // ServerStats / ConnectionAcceptor objects start destruction.

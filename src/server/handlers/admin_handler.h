@@ -40,7 +40,7 @@ class AdminHandler : public CommandHandler {
    * @param filepath Path to configuration file
    * @return Response string
    */
-  static std::string HandleConfigVerify(const std::string& filepath);
+  std::string HandleConfigVerify(const std::string& filepath) const;
 };
 
 }  // namespace mygramdb::server

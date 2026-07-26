@@ -65,6 +65,22 @@ class ConnectionAcceptorTcpTest : public ::testing::Test {
     }
     return sock;
   }
+
+  int ConnectToTcp6(const std::string& host, uint16_t port) {
+    int sock = socket(AF_INET6, SOCK_STREAM, 0);
+    if (sock < 0) {
+      return -1;
+    }
+    struct sockaddr_in6 addr {};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_port = htons(port);
+    if (inet_pton(AF_INET6, host.c_str(), &addr.sin6_addr) != 1 ||
+        connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+      close(sock);
+      return -1;
+    }
+    return sock;
+  }
 };
 
 // --- Basic lifecycle ---
@@ -89,6 +105,36 @@ TEST_F(ConnectionAcceptorTcpTest, StartAndStopOnAutoPort) {
 
   acceptor.Stop();
   EXPECT_FALSE(acceptor.IsRunning());
+}
+
+TEST_F(ConnectionAcceptorTcpTest, IPv6LoopbackBindAcceptsAllowedPeer) {
+  auto config = MakeConfig(0);
+  config.host = "::1";
+  config.parsed_allow_cidrs.clear();
+  auto loopback = mygram::utils::CIDR::Parse("::1/128");
+  ASSERT_TRUE(loopback.has_value());
+  config.parsed_allow_cidrs.push_back(*loopback);
+
+  std::atomic<bool> accepted{false};
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([&accepted](int fd) {
+    accepted.store(true);
+    close(fd);
+    return true;
+  });
+  auto start = acceptor.Start();
+  if (!start) {
+    GTEST_SKIP() << "IPv6 loopback unavailable: " << start.error().to_string();
+  }
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
+  int client = ConnectToTcp6("::1", acceptor.GetPort());
+  ASSERT_GE(client, 0);
+  close(client);
+  for (int i = 0; i < 100 && !accepted.load(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_TRUE(accepted.load());
+  acceptor.Stop();
 }
 
 TEST_F(ConnectionAcceptorTcpTest, PortZeroAssignsEphemeralPort) {

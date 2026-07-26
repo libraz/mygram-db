@@ -13,10 +13,13 @@
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <vector>
 
+#include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
+#include "server/denial_log_limiter.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
@@ -54,6 +57,28 @@ uint16_t FindAvailableLoopbackPort() {
 
   ::close(fd);
   return ntohs(actual_addr.sin_port);
+}
+
+uint16_t FindAvailableIpv6LoopbackPort() {
+  int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return 0;
+  }
+  sockaddr_in6 addr{};
+  addr.sin6_family = AF_INET6;
+  addr.sin6_addr = in6addr_loopback;
+  addr.sin6_port = htons(0);
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    ::close(fd);
+    return 0;
+  }
+  socklen_t addr_len = sizeof(addr);
+  if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &addr_len) != 0) {
+    ::close(fd);
+    return 0;
+  }
+  ::close(fd);
+  return ntohs(addr.sin6_port);
 }
 
 }  // namespace
@@ -99,6 +124,8 @@ class HttpServerTest : public ::testing::Test {
     doc_store_ = table_context_.doc_store.get();
 
     table_contexts_["test"] = &table_context_;
+    port_ = FindAvailableLoopbackPort();
+    ASSERT_GT(port_, 0);
 
     // Create config
     config_ = std::make_unique<config::Config>();
@@ -110,7 +137,7 @@ class HttpServerTest : public ::testing::Test {
     config_->api.tcp.port = 11016;
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
-    config_->api.http.port = 18080;  // Use different port for testing
+    config_->api.http.port = port_;
     config_->api.http.enable_cors = false;
     config_->api.http.cors_allow_origin = "*";
     config_->replication.enable = false;
@@ -119,7 +146,7 @@ class HttpServerTest : public ::testing::Test {
     // Create HTTP server
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
-    http_config.port = 18080;
+    http_config.port = port_;
     http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
     http_config.enable_cors = false;
@@ -142,12 +169,92 @@ class HttpServerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<HttpServer> http_server_;
+  uint16_t port_ = 0;
 };
+
+TEST(DenialLogLimiterTest, BoundsDistinctAndRepeatedAttackLogsAndReportsAggregate) {
+  DenialLogLimiter limiter(std::chrono::seconds(60), 2);
+  const auto start = DenialLogLimiter::Clock::now();
+
+  EXPECT_TRUE(limiter.RecordAt("acl:192.0.2.1", start).should_log);
+  EXPECT_FALSE(limiter.RecordAt("acl:192.0.2.1", start).should_log);
+  EXPECT_TRUE(limiter.RecordAt("acl:192.0.2.2", start).should_log);
+  EXPECT_FALSE(limiter.RecordAt("acl:192.0.2.3", start).should_log);
+
+  const auto aggregate = limiter.RecordAt("acl:192.0.2.4", start + std::chrono::seconds(61));
+  EXPECT_TRUE(aggregate.should_log);
+  EXPECT_EQ(aggregate.suppressed_count, 2U);
+}
+
+TEST(DenialLogLimiterTest, ConcurrentAttackStillRespectsGlobalLogBound) {
+  constexpr size_t kLogBound = 10;
+  constexpr size_t kAttackers = 64;
+  DenialLogLimiter limiter(std::chrono::seconds(60), kLogBound);
+  const auto now = DenialLogLimiter::Clock::now();
+  std::atomic<size_t> emitted{0};
+  std::vector<std::thread> attackers;
+  attackers.reserve(kAttackers);
+  for (size_t i = 0; i < kAttackers; ++i) {
+    attackers.emplace_back([&, i] {
+      if (limiter.RecordAt("acl:2001:db8::" + std::to_string(i), now).should_log) {
+        emitted.fetch_add(1, std::memory_order_relaxed);
+      }
+    });
+  }
+  for (auto& attacker : attackers) {
+    attacker.join();
+  }
+  EXPECT_EQ(emitted.load(std::memory_order_relaxed), kLogBound);
+}
+
+TEST_F(HttpServerTest, IPv6LoopbackBindAndAclAcceptHealthRequest) {
+  const uint16_t port = FindAvailableIpv6LoopbackPort();
+  if (port == 0) {
+    GTEST_SKIP() << "IPv6 loopback unavailable";
+  }
+  HttpServerConfig http_config;
+  http_config.bind = "::1";
+  http_config.port = port;
+  http_config.allow_cidrs = {"::1/128"};
+  HttpServer server(http_config, table_contexts_, config_.get());
+  auto started = server.Start();
+  if (!started) {
+    GTEST_SKIP() << "IPv6 loopback bind unavailable: " << started.error().to_string();
+  }
+
+  httplib::Client client("::1", port);
+  auto response = client.Get("/health/detail");
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 200);
+  server.Stop();
+}
+
+TEST_F(HttpServerTest, IPv6LoopbackBindAndAclRejectDisallowedPeer) {
+  const uint16_t port = FindAvailableIpv6LoopbackPort();
+  if (port == 0) {
+    GTEST_SKIP() << "IPv6 loopback unavailable";
+  }
+  HttpServerConfig http_config;
+  http_config.bind = "::1";
+  http_config.port = port;
+  http_config.allow_cidrs = {"2001:db8::/32"};
+  HttpServer server(http_config, table_contexts_, config_.get());
+  auto started = server.Start();
+  if (!started) {
+    GTEST_SKIP() << "IPv6 loopback bind unavailable: " << started.error().to_string();
+  }
+
+  httplib::Client client("::1", port);
+  auto response = client.Get("/health/detail");
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 403);
+  server.Stop();
+}
 
 TEST_F(HttpServerTest, StartStop) {
   ASSERT_TRUE(http_server_->Start());
   EXPECT_TRUE(http_server_->IsRunning());
-  EXPECT_EQ(http_server_->GetPort(), 18080);
+  EXPECT_EQ(http_server_->GetPort(), port_);
 
   http_server_->Stop();
   EXPECT_FALSE(http_server_->IsRunning());
@@ -156,7 +263,7 @@ TEST_F(HttpServerTest, StartStop) {
 TEST_F(HttpServerTest, HealthEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
   auto res = client.Get("/health");
 
   ASSERT_TRUE(res);
@@ -171,7 +278,7 @@ TEST_F(HttpServerTest, HealthEndpoint) {
 TEST_F(HttpServerTest, InfoEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
   auto res = client.Get("/info");
 
   ASSERT_TRUE(res);
@@ -231,10 +338,49 @@ TEST_F(HttpServerTest, InfoEndpoint) {
   EXPECT_EQ(body["cache"]["enabled"], false);
 }
 
+TEST_F(HttpServerTest, InfoEndpointExposesAccountedCacheMemoryAndRejectionReasons) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 1,
+      .kanji_ngram_size = 1,
+      .cross_boundary_ngrams = true,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = FindAvailableLoopbackPort();
+  ASSERT_NE(http_config.port, 0);
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, &cache_manager);
+
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("http://127.0.0.1:" + std::to_string(http_config.port));
+  auto res = client.Get("/info");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200);
+
+  const auto body = json::parse(res->body);
+  ASSERT_TRUE(body["cache"]["enabled"]);
+  EXPECT_TRUE(body["cache"].contains("memory_bytes"));
+  EXPECT_TRUE(body["cache"].contains("invalidation_index_memory_bytes"));
+  EXPECT_TRUE(body["cache"].contains("accounted_memory_bytes"));
+  EXPECT_TRUE(body["cache"].contains("accounted_memory_human"));
+  EXPECT_TRUE(body["cache"].contains("rejection_count"));
+  EXPECT_TRUE(body["cache"].contains("rejection_oversize"));
+  EXPECT_TRUE(body["cache"].contains("rejection_duplicate"));
+  EXPECT_TRUE(body["cache"].contains("decompression_failures"));
+  EXPECT_TRUE(body["cache"].contains("stale_lru_entries"));
+}
+
 TEST_F(HttpServerTest, ConfigEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
   auto res = client.Get("/config");
 
   ASSERT_TRUE(res);
@@ -327,7 +473,7 @@ TEST_F(HttpServerTest, EmptyAndInvalidAclFailClosedForNonProbeEndpoints) {
 TEST_F(HttpServerTest, MultipleRequests) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Make multiple non-health requests. Health probes are intentionally not
   // counted in total_requests (fix N-7); use /info as the counted endpoint.
@@ -360,17 +506,19 @@ TEST_F(HttpServerTest, MultipleRequests) {
  */
 TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   std::atomic<bool> loading_flag{false};
+  const uint16_t loading_port = FindAvailableLoopbackPort();
+  ASSERT_GT(loading_port, 0);
 
   // Create HTTP server with loading flag
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18083;
+  http_config.port = loading_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer server(http_config, table_contexts_, config_.get(), nullptr, nullptr, &loading_flag);
   ASSERT_TRUE(server.Start());
 
-  httplib::Client client("http://127.0.0.1:18083");
+  httplib::Client client("127.0.0.1", loading_port);
 
   // Test search when not loading - should succeed
   json request_body;

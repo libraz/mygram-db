@@ -205,6 +205,37 @@ TEST_F(ServerStatsTest, ReplicationStatsThreadSafe) {
   EXPECT_EQ(stats_->GetReplDeletesApplied(), kNumThreads * kIncrementsPerThread);
 }
 
+TEST_F(ServerStatsTest, ActiveConnectionsDecrementSaturatesAtZero) {
+  EXPECT_EQ(stats_->GetActiveConnections(), 0U);
+
+  stats_->DecrementConnections();
+  stats_->DecrementConnections();
+  EXPECT_EQ(stats_->GetActiveConnections(), 0U);
+
+  stats_->IncrementConnections();
+  stats_->DecrementConnections();
+  stats_->DecrementConnections();
+  EXPECT_EQ(stats_->GetActiveConnections(), 0U);
+
+  constexpr int kConnections = 100;
+  constexpr int kThreads = 8;
+  for (int i = 0; i < kConnections; ++i) {
+    stats_->IncrementConnections();
+  }
+  std::vector<std::thread> decrementers;
+  for (int i = 0; i < kThreads; ++i) {
+    decrementers.emplace_back([this]() {
+      for (int j = 0; j < kConnections; ++j) {
+        stats_->DecrementConnections();
+      }
+    });
+  }
+  for (auto& thread : decrementers) {
+    thread.join();
+  }
+  EXPECT_EQ(stats_->GetActiveConnections(), 0U);
+}
+
 /**
  * @brief Test combined statistics scenario
  */

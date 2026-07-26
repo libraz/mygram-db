@@ -284,14 +284,24 @@ TEST_F(VerifyTextAllTest, DumpLoadInvalidatesCache) {
   EXPECT_TRUE(response.find("OK DUMP_STARTED") == 0 || response.find("OK SAVED") == 0) << response;
   ASSERT_TRUE(WaitForDumpComplete(client)) << "DUMP SAVE did not complete";
 
+  // Mutate the live generation after the snapshot, then populate a cache entry
+  // whose value differs from the snapshot. If DUMP LOAD does not clear the
+  // cache, the final search incorrectly returns this two-document result.
+  AddDocumentWithText("pk2", "cached query test");
+  response = client.SendCommand("CACHE CLEAR app_db.articles");
+  ASSERT_TRUE(response.find("OK CACHE_CLEARED") == 0) << "CACHE CLEAR: " << response;
+  response = client.SendCommand("SEARCH app_db.articles cached");
+  ASSERT_TRUE(response.find("OK RESULTS 2") == 0) << "Pre-load live generation: " << response;
+
   response = client.SendCommand("DUMP LOAD cache_test.dmp");
   EXPECT_TRUE(response.find("OK LOADED") == 0) << response;
 
-  // Search after DUMP LOAD: cache should have been cleared
-  // Result should still be correct (from fresh index, not stale cache)
+  // The snapshot contains only pk1. A stale cache would still return pk1+pk2.
   response = client.SendCommand("SEARCH app_db.articles cached");
   EXPECT_TRUE(response.find("OK RESULTS 1") == 0)
       << "After DUMP LOAD, search should return fresh results: " << response;
+  EXPECT_NE(response.find("pk1"), std::string::npos);
+  EXPECT_EQ(response.find("pk2"), std::string::npos);
 }
 
 // ============================================================================

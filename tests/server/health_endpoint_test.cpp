@@ -12,6 +12,7 @@
 #include <httplib.h>
 
 #include <chrono>
+#include <functional>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <thread>
@@ -23,6 +24,7 @@
 #include "server/http_server.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
+#include "support/network_test_utils.h"
 
 using json = nlohmann::json;
 
@@ -60,27 +62,31 @@ class HealthEndpointTest : public ::testing::Test {
 
     table_contexts_["test_table"] = &table_ctx_;
 
-    // Configure HTTP server with fixed port for testing
+    port_ = testing::FindAvailableLoopbackPort();
+    ASSERT_GT(port_, 0);
+
+    // Configure HTTP server with an isolated loopback port.
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
-    http_config.port = 18080;  // Use fixed port for testing
+    http_config.port = port_;
     http_config.read_timeout_sec = 5;
     http_config.write_timeout_sec = 5;
     http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
     // Create server with loading flag
     loading_ = false;
+    initial_data_ready_ = true;
     config::CacheConfig cache_config;
     cache_config.enabled = false;
     cache_manager_ = std::make_unique<cache::CacheManager>(cache_config, cache::NgramConfigMap{});
     server_ = std::make_unique<HttpServer>(http_config, table_contexts_, nullptr, &binlog_reader_, cache_manager_.get(),
-                                           &loading_, nullptr, nullptr, &replication_paused_for_dump_);
+                                           &loading_, nullptr, nullptr, &replication_paused_for_dump_, nullptr,
+                                           std::function<bool(const std::string&)>{}, std::function<bool()>{},
+                                           [this]() { return initial_data_ready_.load(std::memory_order_acquire); });
 
     // Start server
     ASSERT_TRUE(server_->Start());
 
-    // Use configured port
-    port_ = http_config.port;
     base_url_ = "http://127.0.0.1:" + std::to_string(port_);
 
     // Wait for server to be actually ready by polling health endpoint
@@ -118,6 +124,7 @@ class HealthEndpointTest : public ::testing::Test {
   HealthFakeBinlogReader binlog_reader_;
   std::atomic<bool> loading_;
   std::atomic<bool> replication_paused_for_dump_{false};
+  std::atomic<bool> initial_data_ready_{true};
   int port_{0};
   std::string base_url_;
 };
@@ -183,6 +190,27 @@ TEST_F(HealthEndpointTest, ReadinessProbeReflectsServerState) {
   EXPECT_EQ(response2["status"], "not_ready");
   EXPECT_TRUE(response2.value("loading", false)) << "loading should be true";
   EXPECT_EQ(response2["reason"], "Server is loading");
+}
+
+TEST_F(HealthEndpointTest, ReadinessRejectsUninitializedManualSnapshotMode) {
+  httplib::Client client(base_url_);
+  client.set_connection_timeout(5);
+
+  loading_ = false;
+  initial_data_ready_.store(false, std::memory_order_release);
+  auto res = client.Get("/health/ready");
+
+  ASSERT_TRUE(res) << "Request failed";
+  EXPECT_EQ(res->status, 503);
+  const auto response = json::parse(res->body);
+  EXPECT_EQ(response["status"], "not_ready");
+  EXPECT_FALSE(response.value("data_initialized", true));
+  EXPECT_EQ(response["reason"], "Initial data has not been loaded");
+
+  initial_data_ready_.store(true, std::memory_order_release);
+  res = client.Get("/health/ready");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
 }
 
 /**

@@ -35,8 +35,13 @@ bool NeedsGetValueQuoting(std::string_view value) {
   if (value.empty()) {
     return true;
   }
-  for (unsigned char ch : value) {
+  for (size_t i = 0; i < value.size(); ++i) {
+    const unsigned char ch = static_cast<unsigned char>(value[i]);
     if (std::isspace(ch) != 0 || ch == '"' || ch == '\\' || std::iscntrl(ch) != 0) {
+      return true;
+    }
+    size_t whitespace_length = 0;
+    if (mygram::utils::IsUnicodeWhitespace(value, i, whitespace_length)) {
       return true;
     }
   }
@@ -100,19 +105,6 @@ std::string EscapePrometheusLabelValue(std::string_view value) {
     }
   }
   return escaped;
-}
-
-std::string SanitizePrimaryKeyForResponse(std::string_view primary_key) {
-  std::string sanitized;
-  sanitized.reserve(primary_key.size());
-  for (unsigned char ch : primary_key) {
-    if (std::isspace(ch) != 0 || std::iscntrl(ch) != 0) {
-      sanitized += '_';
-    } else {
-      sanitized += static_cast<char>(ch);
-    }
-  }
-  return sanitized;
 }
 
 std::string SanitizeDelimitedFieldForResponse(std::string_view value) {
@@ -203,15 +195,11 @@ void AppendDebugBlock(std::string& response, const query::DebugInfo& debug_info,
   oss << "terms: " << debug_info.search_terms.size() << "\r\n";
   oss << "ngrams: " << debug_info.ngrams_used.size() << "\r\n";
 
-  if (include_detailed_counts) {
+  if (include_detailed_counts && debug_info.pipeline_stage_counts_available) {
     oss << "candidates: " << debug_info.total_candidates << "\r\n";
     oss << "after_intersection: " << debug_info.after_intersection << "\r\n";
-    if (debug_info.after_not > 0) {
-      oss << "after_not: " << debug_info.after_not << "\r\n";
-    }
-    if (debug_info.after_filters > 0) {
-      oss << "after_filters: " << debug_info.after_filters << "\r\n";
-    }
+    oss << "after_not: " << debug_info.after_not << "\r\n";
+    oss << "after_filters: " << debug_info.after_filters << "\r\n";
   }
 
   oss << "final: " << debug_info.final_results << "\r\n";
@@ -278,7 +266,9 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   for (const auto& primary_key : primary_keys) {
     if (!primary_key.empty()) {
       response += ' ';
-      response += SanitizePrimaryKeyForResponse(primary_key);
+      std::ostringstream escaped_primary_key;
+      WriteEscapedGetStringValue(escaped_primary_key, primary_key);
+      response += escaped_primary_key.str();
     } else {
       // Doc ID exists in index but not in document store - data inconsistency
       missing_count++;
@@ -332,7 +322,9 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
       continue;  // Skip missing documents
     }
     response += "\r\n";
-    response += SanitizePrimaryKeyForResponse(primary_keys[i]);
+    std::ostringstream escaped_primary_key;
+    WriteEscapedGetStringValue(escaped_primary_key, primary_keys[i]);
+    response += escaped_primary_key.str();
     response += '\t';
     if (i < snippets.size()) {
       response += SanitizeDelimitedFieldForResponse(snippets[i]);
@@ -393,9 +385,8 @@ std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<s
 
   if (debug_info != nullptr) {
     response += "# query_time_ms: " + std::to_string(debug_info->query_time_ms) + "\r\n";
-    if (debug_info->final_results > 0) {
-      response += "# total_docs_searched: " + std::to_string(debug_info->final_results) + "\r\n";
-    }
+    response += "# matched_documents: " + std::to_string(debug_info->total_candidates) + "\r\n";
+    response += "# distinct_values: " + std::to_string(debug_info->final_results) + "\r\n";
   }
 
   response += "\r\n";
@@ -408,7 +399,8 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
   }
 
   std::ostringstream oss;
-  oss << protocol::kOkDocWithSpacePrefix << SanitizePrimaryKeyForResponse(doc->primary_key);
+  oss << protocol::kOkDocWithSpacePrefix;
+  WriteEscapedGetStringValue(oss, doc->primary_key);
 
   // Add filters
   // Default precision for floating point values in response
@@ -628,6 +620,10 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
     oss << "cache_ttl_expirations: " << cache_stats.ttl_expirations << "\r\n";
     oss << "cache_rejections: " << cache_stats.rejection_count << "\r\n";
+    oss << "cache_rejection_oversize: " << cache_stats.rejection_oversize << "\r\n";
+    oss << "cache_rejection_duplicate: " << cache_stats.rejection_duplicate << "\r\n";
+    oss << "cache_decompression_failures: " << cache_stats.decompression_failures << "\r\n";
+    oss << "cache_stale_lru_entries: " << cache_stats.stale_lru_entries << "\r\n";
     oss << "cache_forced_clears: " << cache_stats.forced_clears << "\r\n";
     oss << "cache_invalidations_immediate: " << cache_stats.invalidations_immediate << "\r\n";
     oss << "cache_invalidations_deferred: " << cache_stats.invalidations_deferred << "\r\n";
@@ -1023,6 +1019,22 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "mygramdb_cache_rejections_total " << cache_stats.rejection_count << "\n";
     oss << "\n";
 
+    oss << "# HELP mygramdb_cache_insert_rejections_total Cache inserts rejected by reason\n";
+    oss << "# TYPE mygramdb_cache_insert_rejections_total counter\n";
+    oss << "mygramdb_cache_insert_rejections_total{reason=\"oversize\"} " << cache_stats.rejection_oversize << "\n";
+    oss << "mygramdb_cache_insert_rejections_total{reason=\"duplicate\"} " << cache_stats.rejection_duplicate << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_decompression_failures_total Cached payload decompression failures\n";
+    oss << "# TYPE mygramdb_cache_decompression_failures_total counter\n";
+    oss << "mygramdb_cache_decompression_failures_total " << cache_stats.decompression_failures << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_stale_lru_entries_total Defensive stale LRU entries detected\n";
+    oss << "# TYPE mygramdb_cache_stale_lru_entries_total counter\n";
+    oss << "mygramdb_cache_stale_lru_entries_total " << cache_stats.stale_lru_entries << "\n";
+    oss << "\n";
+
     oss << "# HELP mygramdb_cache_forced_clears_total Total Clear()/ClearTable() invocations\n";
     oss << "# TYPE mygramdb_cache_forced_clears_total counter\n";
     oss << "mygramdb_cache_forced_clears_total " << cache_stats.forced_clears << "\n";
@@ -1076,6 +1088,10 @@ std::string ResponseFormatter::FormatError(std::string_view message) {
     }
   }
   return result;
+}
+
+std::string ResponseFormatter::FormatError(const mygram::utils::Error& error) {
+  return FormatError(error.to_string());
 }
 
 std::string ResponseFormatter::FormatOk(std::string_view body) {

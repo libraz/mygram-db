@@ -11,6 +11,7 @@
 #include "cache/cache_manager.h"
 #include "server/protocol_constants.h"
 #include "server/response_formatter.h"
+#include "server/table_catalog.h"
 
 namespace mygramdb::server {
 
@@ -32,9 +33,11 @@ std::string CacheHandler::Handle(const query::Query& query, ConnectionContext& c
 }
 
 std::string CacheHandler::HandleClear(const query::Query& query) {
-  // Check if cache manager exists
   if (ctx_.cache_manager == nullptr) {
     return ResponseFormatter::FormatError("Cache not configured");
+  }
+  if (!ctx_.cache_manager->IsEnabled()) {
+    return ResponseFormatter::FormatError("Cache is disabled");
   }
 
   if (query.table.empty()) {
@@ -44,8 +47,15 @@ std::string CacheHandler::HandleClear(const query::Query& query) {
   }
 
   // CACHE CLEAR <table> - clear table-specific cache
-  ctx_.cache_manager->ClearTable(query.table);
-  return ResponseFormatter::FormatStatus("CACHE_CLEARED table=" + query.table);
+  if (ctx_.table_catalog == nullptr) {
+    return ResponseFormatter::FormatError("Table catalog is not available");
+  }
+  const auto resolved_table = ctx_.table_catalog->ResolveName(query.table);
+  if (!resolved_table.has_value()) {
+    return ResponseFormatter::FormatError("Table not found or ambiguous: " + query.table);
+  }
+  ctx_.cache_manager->ClearTable(*resolved_table);
+  return ResponseFormatter::FormatStatus("CACHE_CLEARED table=" + *resolved_table);
 }
 
 std::string CacheHandler::HandleStats() {
@@ -77,8 +87,15 @@ std::string CacheHandler::HandleStats() {
   // Memory usage
   oss << "current_entries: " << stats.current_entries << "\r\n";
   oss << "current_memory_bytes: " << stats.current_memory_bytes << "\r\n";
+  oss << "invalidation_index_memory_bytes: " << stats.invalidation_index_memory_bytes << "\r\n";
+  oss << "accounted_memory_bytes: " << stats.accounted_memory_bytes << "\r\n";
   oss << "evictions: " << stats.evictions << "\r\n";
   oss << "ttl_expirations: " << stats.ttl_expirations << "\r\n";
+  oss << "rejection_count: " << stats.rejection_count << "\r\n";
+  oss << "rejection_oversize: " << stats.rejection_oversize << "\r\n";
+  oss << "rejection_duplicate: " << stats.rejection_duplicate << "\r\n";
+  oss << "decompression_failures: " << stats.decompression_failures << "\r\n";
+  oss << "stale_lru_entries: " << stats.stale_lru_entries << "\r\n";
 
   // Invalidation statistics
   oss << "invalidations_immediate: " << stats.invalidations_immediate << "\r\n";

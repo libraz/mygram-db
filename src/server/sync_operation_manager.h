@@ -10,8 +10,10 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -25,6 +27,7 @@
 #include "server/server_types.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/fd_guard.h"
 
 namespace mygramdb::cache {
 class CacheManager;
@@ -56,12 +59,12 @@ namespace mygramdb::server {
  */
 struct SyncState {
   std::atomic<bool> is_running{false};
+  std::atomic<bool> cancel_requested{false};
   std::string table_name;               // Protected by sync_mutex_
   std::atomic<uint64_t> total_rows{0};  // Atomic to prevent data races during concurrent access
   std::atomic<uint64_t> processed_rows{0};
   std::chrono::steady_clock::time_point start_time;  // Set once, read-only after init
-  std::string
-      status;  // Protected by sync_mutex_ - "IDLE", "STARTING", "IN_PROGRESS", "COMPLETED", "FAILED", "CANCELLED"
+  std::string status;  // Protected by sync_mutex_ - "IDLE", "STARTING", "IN_PROGRESS", "CANCELLING", terminal states
   std::string error_message;       // Protected by sync_mutex_
   std::string gtid;                // Protected by sync_mutex_
   std::string replication_status;  // Protected by sync_mutex_ - "STARTED", "ALREADY_RUNNING", "DISABLED", "FAILED"
@@ -85,6 +88,9 @@ struct SyncState {
  */
 class SyncOperationManager {
  public:
+  using CurrentConfigProvider = std::function<config::Config()>;
+  using CompletionCallback = std::function<void(const std::string&)>;
+
   /**
    * @brief Construct SyncOperationManager
    * @param table_contexts Reference to table contexts (must outlive this instance)
@@ -195,10 +201,40 @@ class SyncOperationManager {
    */
   void SetCacheManager(cache::CacheManager* cache_manager);
 
+  /**
+   * @brief Set the source of the current runtime configuration.
+   *
+   * The provider must outlive this manager. It is installed during server
+   * initialization, before request processing starts, and allows each SYNC to
+   * take one coherent configuration snapshot after runtime SET changes.
+   */
+  void SetCurrentConfigProvider(CurrentConfigProvider provider);
+
+  /**
+   * @brief Set a callback invoked after a table snapshot is committed.
+   *
+   * Installed before request processing starts. Failed, cancelled, or rolled
+   * back SYNC operations never invoke it.
+   */
+  void SetCompletionCallback(CompletionCallback callback);
+
   OperationCoordinator& GetOperationCoordinator() { return operation_coordinator_; }
   const OperationCoordinator& GetOperationCoordinator() const { return operation_coordinator_; }
 
 #ifdef MYGRAMDB_SYNC_TEST_HOOKS
+  auto RegisterNullLoaderScopedForTest(const std::string& table_name) {
+    return RegisterLoaderScoped(table_name, nullptr);
+  }
+
+  [[nodiscard]] size_t ActiveLoaderCountForTest() const {
+    std::lock_guard<std::mutex> lock(loaders_mutex_);
+    return active_loaders_.size();
+  }
+
+  [[nodiscard]] std::optional<config::Config> GetCurrentConfigSnapshotForTest() const {
+    return GetCurrentConfigSnapshot();
+  }
+
   void MarkSyncingTableForTest(const std::string& table_name) {
     {
       std::lock_guard<std::mutex> lock(syncing_tables_mutex_);
@@ -215,6 +251,19 @@ class SyncOperationManager {
     syncing_tables_cv_.notify_all();
   }
 
+  void InstallSyncThreadForTest(const std::string& table_name, std::thread worker) {
+    {
+      std::lock_guard<std::mutex> lock(sync_mutex_);
+      auto& state = sync_states_[table_name];
+      state.table_name = table_name;
+      state.is_running = true;
+      state.cancel_requested = false;
+      state.status = "IN_PROGRESS";
+      sync_threads_[table_name] = std::move(worker);
+    }
+    MarkSyncingTableForTest(table_name);
+  }
+
   mygram::utils::Expected<void, mygram::utils::Error> RestartReplicationFromGtidForTest(mysql::IBinlogReader* reader,
                                                                                         const std::string& gtid,
                                                                                         const std::string& table_name,
@@ -226,6 +275,8 @@ class SyncOperationManager {
  private:
   const std::unordered_map<std::string, TableContext*>& table_contexts_;
   const config::Config* full_config_;
+  CurrentConfigProvider current_config_provider_;
+  CompletionCallback completion_callback_;
   mysql::IBinlogReader* binlog_reader_;
   replication_pause::Counter* replication_pause_counter_;
   std::atomic<cache::CacheManager*> cache_manager_{nullptr};
@@ -269,6 +320,11 @@ class SyncOperationManager {
   void BuildSnapshotAsync(const std::string& table_name);
 
   /**
+   * @brief Read one coherent configuration snapshot for a SYNC operation.
+   */
+  [[nodiscard]] std::optional<config::Config> GetCurrentConfigSnapshot() const;
+
+  /**
    * @brief Register active initial loader
    */
   void RegisterLoader(const std::string& table_name, loader::InitialLoader* loader);
@@ -277,6 +333,12 @@ class SyncOperationManager {
    * @brief Unregister active initial loader
    */
   void UnregisterLoader(const std::string& table_name);
+
+  /**
+   * @brief Register a loader and return an exception-safe unregistration guard.
+   */
+  mygram::utils::ScopeGuard<std::function<void()>> RegisterLoaderScoped(const std::string& table_name,
+                                                                        loader::InitialLoader* loader);
 
   /**
    * @brief Restart replication from a saved GTID position

@@ -22,6 +22,7 @@
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
 #include "support/deterministic_gate.h"
+#include "support/network_test_utils.h"
 
 namespace mygramdb {
 namespace server {
@@ -44,10 +45,10 @@ class HttpServerStartupTest : public ::testing::Test {
     config_ = std::make_unique<config::Config>();
   }
 
-  HttpServerConfig MakeConfig(int port) {
+  HttpServerConfig MakeConfig(int port = 0) {
     HttpServerConfig cfg;
     cfg.bind = "127.0.0.1";
-    cfg.port = port;
+    cfg.port = port == 0 ? testing::FindAvailableLoopbackPort() : port;
     cfg.allow_cidrs = {"127.0.0.1/32"};
     return cfg;
   }
@@ -61,7 +62,8 @@ class HttpServerStartupTest : public ::testing::Test {
  * @brief Verify that starting on a valid port succeeds without sleep-based polling
  */
 TEST_F(HttpServerStartupTest, StartOnValidPortSucceeds) {
-  auto cfg = MakeConfig(18090);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
 
   auto result = server.Start();
@@ -69,7 +71,7 @@ TEST_F(HttpServerStartupTest, StartOnValidPortSucceeds) {
   EXPECT_TRUE(server.IsRunning());
 
   // Verify the server actually accepts connections
-  httplib::Client client("http://127.0.0.1:18090");
+  httplib::Client client("127.0.0.1", cfg.port);
   auto res = client.Get("/health");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -161,11 +163,15 @@ TEST_F(HttpServerStartupTest, BindFailureReturnsPromptly) {
   struct sockaddr_in addr {};
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = htons(18097);
+  addr.sin_port = 0;
   ASSERT_EQ(::bind(sock_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)), 0);
   ASSERT_EQ(::listen(sock_fd, 1), 0);
 
-  auto cfg = MakeConfig(18097);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(::getsockname(sock_fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len), 0);
+  const uint16_t occupied_port = ntohs(addr.sin_port);
+  ASSERT_GT(occupied_port, 0);
+  auto cfg = MakeConfig(occupied_port);
 
   // Wrap Start() in a future so we can assert on completion time without
   // letting a regression deadlock the test process.
@@ -189,7 +195,8 @@ TEST_F(HttpServerStartupTest, BindFailureReturnsPromptly) {
  * @brief Verify that double-start returns an appropriate error
  */
 TEST_F(HttpServerStartupTest, DoubleStartReturnsError) {
-  auto cfg = MakeConfig(18092);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
 
   auto result1 = server.Start();
@@ -202,7 +209,8 @@ TEST_F(HttpServerStartupTest, DoubleStartReturnsError) {
 }
 
 TEST_F(HttpServerStartupTest, StopJoinsThreadEvenIfRunningFlagWasClearedInternally) {
-  auto cfg = MakeConfig(18098);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
 
   auto result = server.Start();
@@ -216,7 +224,8 @@ TEST_F(HttpServerStartupTest, StopJoinsThreadEvenIfRunningFlagWasClearedInternal
 }
 
 TEST_F(HttpServerStartupTest, StopDuringStartingWaitsAndLeavesNoListener) {
-  auto cfg = MakeConfig(18101);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
 
   constexpr int kRaceRepetitions = 100;
@@ -244,7 +253,8 @@ TEST_F(HttpServerStartupTest, StopDuringStartingWaitsAndLeavesNoListener) {
 }
 
 TEST_F(HttpServerStartupTest, AbnormalListenerExitIsReapedBeforeRestart) {
-  auto cfg = MakeConfig(18102);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
   ASSERT_TRUE(server.Start().has_value());
 
@@ -262,7 +272,8 @@ TEST_F(HttpServerStartupTest, AbnormalListenerExitIsReapedBeforeRestart) {
 }
 
 TEST_F(HttpServerStartupTest, ConcurrentStopsJoinExactlyOnce) {
-  auto cfg = MakeConfig(18103);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
   ASSERT_TRUE(server.Start().has_value());
 
@@ -291,10 +302,10 @@ TEST_F(HttpServerStartupTest, ConcurrentStopsJoinExactlyOnce) {
  * exactly one succeeds while the rest receive the "already running" error.
  */
 TEST_F(HttpServerStartupTest, ConcurrentStartCallsNoRace) {
-  constexpr int kPort = 18093;
   constexpr int kThreadCount = 8;
 
-  auto cfg = MakeConfig(kPort);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
 
   // Synchronize all worker threads on a barrier so they collide on the CAS
@@ -336,7 +347,7 @@ TEST_F(HttpServerStartupTest, ConcurrentStartCallsNoRace) {
   EXPECT_TRUE(server.IsRunning());
 
   // Sanity: server is actually responsive after the race resolves.
-  httplib::Client client("http://127.0.0.1:" + std::to_string(kPort));
+  httplib::Client client("127.0.0.1", cfg.port);
   auto res = client.Get("/health");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
@@ -353,13 +364,14 @@ TEST_F(HttpServerStartupTest, ConcurrentStartCallsNoRace) {
  * handler. cpp-httplib returns 413 Payload Too Large for this case.
  */
 TEST_F(HttpServerStartupTest, RejectsBodyExceedingMaxSize) {
-  auto cfg = MakeConfig(18094);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   cfg.max_body_bytes = 1024;  // 1 KiB cap
 
   HttpServer server(cfg, table_contexts_, config_.get());
   ASSERT_TRUE(server.Start().has_value());
 
-  httplib::Client client("http://127.0.0.1:18094");
+  httplib::Client client("127.0.0.1", cfg.port);
 
   // Build a 2 KiB JSON-shaped body. The actual content does not need to be
   // valid JSON because the server should reject it before parsing.
@@ -385,11 +397,12 @@ TEST_F(HttpServerStartupTest, RejectsBodyExceedingMaxSize) {
  * is shared, so GET returns a 400 for invalid names just like SEARCH.
  */
 TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
-  auto cfg = MakeConfig(18096);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
   ASSERT_TRUE(server.Start().has_value());
 
-  httplib::Client client("http://127.0.0.1:18096");
+  httplib::Client client("127.0.0.1", cfg.port);
 
   // `te$st` contains an ASCII punctuation character that is rejected by the
   // table-name whitelist (only [A-Za-z0-9._-] plus non-ASCII bytes are
@@ -411,13 +424,14 @@ TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
  * the response status must NOT be 413).
  */
 TEST_F(HttpServerStartupTest, AcceptsBodyWithinMaxSize) {
-  auto cfg = MakeConfig(18095);
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
   cfg.max_body_bytes = 1024;
 
   HttpServer server(cfg, table_contexts_, config_.get());
   ASSERT_TRUE(server.Start().has_value());
 
-  httplib::Client client("http://127.0.0.1:18095");
+  httplib::Client client("127.0.0.1", cfg.port);
   std::string body = R"({"q":"test"})";
   ASSERT_LE(body.size(), cfg.max_body_bytes);
 

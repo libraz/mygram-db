@@ -182,7 +182,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   // Atomic test-and-set on dump_save_in_progress, bundled with a release-on-
   // scope-exit RAII guard via OperationGuard::TryAcquire.
   //
-  // CR-2: do NOT split this into a separate load() + store(true) — that race
+  // Do NOT split this into a separate load() + store(true) — that race
   // lets two concurrent DUMP SAVE clients both observe false and then both
   // store true, spawning duplicate worker threads. OperationGuard collapses
   // the test-and-set into a single atomic step. This matches the pattern in
@@ -385,12 +385,16 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
       .Field("tables", static_cast<uint64_t>(converted_contexts.size()))
       .Info();
 
-  auto result = storage::dump_v2::WriteDump(filepath, gtid, *ctx_.full_config, converted_contexts, nullptr, nullptr,
-                                            [this](const std::string& table_name, size_t tables_processed) {
-                                              if (ctx_.dump_progress != nullptr) {
-                                                ctx_.dump_progress->UpdateTable(table_name, tables_processed);
-                                              }
-                                            });
+  auto result = storage::dump_v2::WriteDump(
+      filepath, gtid, *ctx_.full_config, converted_contexts, nullptr, nullptr,
+      [this](const std::string& table_name, size_t tables_processed) {
+        if (ctx_.dump_progress != nullptr) {
+          ctx_.dump_progress->UpdateTable(table_name, tables_processed);
+        }
+      },
+      storage::dump_v2::RestoreLimits{
+          static_cast<uint64_t>(ctx_.full_config->dump.restore_memory_budget_mb) * 1024ULL * 1024ULL,
+          static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) * 1024ULL * 1024ULL});
 
   mygram::utils::StructuredLog()
       .Event("dump_save_write_finished")
@@ -410,7 +414,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
   // START might be rejected by the "paused for dump" guard. Clearing the
   // flag first decouples the dump-pause state from binlog-restart errors.
   //
-  // CR-10 shutdown check: skip the auto-restart if TcpServer::Stop() has
+  // Skip the auto-restart if TcpServer::Stop() has
   // already announced shutdown. The binlog_reader_ is guaranteed alive at
   // this point (Stop() joins this worker BEFORE dropping binlog_reader_),
   // but a Start() call here would just spawn replication threads that
@@ -559,7 +563,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Atomic test-and-set on dump_load_in_progress, bundled with a release-on-
   // scope-exit RAII guard via OperationGuard::TryAcquire.
   //
-  // CR-2: do NOT split this into a separate load() + later AtomicFlagGuard —
+  // Do NOT split this into a separate load() + later AtomicFlagGuard —
   // that race lets two concurrent DUMP LOAD clients both observe false and
   // then both proceed to stop replication / clear data, corrupting state.
   // OperationGuard::TryAcquire collapses the test-and-set into a single
@@ -586,6 +590,8 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         "Cannot load dump while OPTIMIZE is in progress. "
         "Please wait for optimization to complete.");
   }
+
+  std::string previous_gtid;
 
 #ifdef USE_MYSQL
   // Check if replication is running (need to stop it before DUMP LOAD)
@@ -632,6 +638,14 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         .Info();
   }
 
+  // Capture the comparison position only after a running reader has been
+  // stopped and drained. The loaded position is supplied by ReadDump from the
+  // same open/read operation, so validation does not depend on a TOCTOU-prone
+  // DUMP INFO pre-read.
+  if (ctx_.binlog_reader != nullptr) {
+    previous_gtid = ctx_.binlog_reader->GetCurrentGTID();
+  }
+
   // Fallback ScopeGuard that releases the pause counter and (when we
   // are the last releaser) restarts replication on every error-path
   // exit. The success path explicitly performs the restart and dismisses
@@ -640,7 +654,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // ReadDump, exception, etc.) does not leave the server with
   // replication permanently stopped (P0-A).
   //
-  // CR-10 shutdown check inside the lambda: if TcpServer::Stop() has
+  // Check shutdown inside the lambda: if TcpServer::Stop() has
   // announced shutdown, skip the binlog Start() entirely. The reader is
   // guaranteed alive (TcpServer::Stop joins this worker before the
   // reader is dropped) but a Start() during teardown would just spawn
@@ -715,19 +729,39 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Call dump API (auto-detects V1 or V2 format)
   auto result = storage::dump_v2::ReadDump(
       filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error,
-      [this](const config::Config& dump_config) -> mygram::utils::Expected<void, mygram::utils::Error> {
+      [this, &previous_gtid](const config::Config& dump_config,
+                             const std::string& loaded_gtid) -> mygram::utils::Expected<void, mygram::utils::Error> {
         if (ctx_.full_config == nullptr) {
-          return {};
+          // GTID validation below does not depend on the server config.
+        } else {
+          if (auto mismatch = FindTokenizerConfigMismatch(dump_config, *ctx_.full_config); mismatch.has_value()) {
+            mygram::utils::StructuredLog()
+                .Event("dump_load_rejected")
+                .Field("reason", "tokenizer_config_mismatch")
+                .Field("detail", *mismatch)
+                .Error();
+            return mygram::utils::MakeUnexpected(
+                mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, *mismatch));
+          }
         }
-        if (auto mismatch = FindTokenizerConfigMismatch(dump_config, *ctx_.full_config); mismatch.has_value()) {
+
+#ifdef USE_MYSQL
+        if (ctx_.binlog_reader != nullptr && !previous_gtid.empty() && loaded_gtid.empty()) {
+          const std::string detail = "loaded GTID='" + loaded_gtid + "', previous GTID='" + previous_gtid + "'";
           mygram::utils::StructuredLog()
               .Event("dump_load_rejected")
-              .Field("reason", "tokenizer_config_mismatch")
-              .Field("detail", *mismatch)
+              .Field("reason", "empty_loaded_gtid")
+              .Field("loaded_gtid", loaded_gtid)
+              .Field("previous_gtid", previous_gtid)
+              .Field("detail", detail)
               .Error();
-          return mygram::utils::MakeUnexpected(
-              mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, *mismatch));
+          return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageDumpReadError,
+                                                                        "Cannot replace a non-empty GTID: " + detail));
         }
+#else
+        (void)loaded_gtid;
+        (void)previous_gtid;
+#endif
         return {};
       },
       ctx_.full_config == nullptr
@@ -739,17 +773,6 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // The loading guard remains active through replication restart and cache
   // rebuild. It is released only after the success path completes, ensuring
   // dump_load_in_progress stays true if the load failed.
-
-  if (result && ctx_.full_config != nullptr) {
-    if (auto mismatch = FindTokenizerConfigMismatch(loaded_config, *ctx_.full_config); mismatch.has_value()) {
-      mygram::utils::StructuredLog()
-          .Event("dump_load_rejected")
-          .Field("reason", "tokenizer_config_mismatch")
-          .Field("detail", *mismatch)
-          .Error();
-      return ResponseFormatter::FormatError("Cannot load dump: " + *mismatch);
-    }
-  }
 
 #ifdef USE_MYSQL
   if (result) {
@@ -799,8 +822,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
             ++doc_count;
           }
         }
-        table_ctx->bm25_stats.total_doc_length.store(total_length, std::memory_order_relaxed);
-        table_ctx->bm25_stats.doc_count.store(doc_count, std::memory_order_relaxed);
+        table_ctx->bm25_stats.SetCorpusStats(total_length, doc_count);
       }
     }
   }
@@ -811,7 +833,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // ScopeGuard so the restart is not duplicated. Error paths fall through to
   // the guard's destructor, which performs the same restart.
   //
-  // CR-10: skip the explicit restart when shutdown is in progress (the
+  // Skip the explicit restart when shutdown is in progress (the
   // ScopeGuard performs the same shutdown-aware skip).
   //
   // H-C3: As in the ScopeGuard above, the explicit restart goes through

@@ -67,6 +67,7 @@ gtest_discover_tests(stress_test
   DISCOVERY_TIMEOUT 30
   PROPERTIES
     LABELS "LOAD"
+    RUN_SERIAL TRUE
     TIMEOUT 300  # 5 minutes timeout
 )
 
@@ -95,6 +96,7 @@ gtest_discover_tests(thread_pool_saturation_test
   PROPERTIES
     LABELS "LOAD"
     RESOURCE_LOCK server_port
+    RUN_SERIAL TRUE
     TIMEOUT 120  # 2 minutes: starvation test waits up to 1.5s per late client
 )
 

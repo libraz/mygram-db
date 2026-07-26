@@ -603,11 +603,35 @@ TEST_F(HttpServerMultiTableTest, InvalidTableName) {
 }
 
 TEST_F(HttpServerMultiTableTest, DifferentNgramSizes) {
-  // This test is now handled by other tests since both tables use ngram_size=1
-  // Testing different ngram sizes would require creating separate table contexts
-  // which is beyond the scope of this test fixture
-  // Skip for now - can be added as a separate test if needed
-  GTEST_SKIP() << "Skipping - both tables now use ngram_size=1 for consistency";
+  auto index = std::make_unique<index::Index>(2);
+  auto doc_store = std::make_unique<storage::DocumentStore>();
+  const auto breaking_id = doc_store->AddDocument("news_1", {});
+  const auto world_id = doc_store->AddDocument("news_2", {});
+  ASSERT_TRUE(breaking_id);
+  ASSERT_TRUE(world_id);
+  index->AddDocument(*breaking_id, "breaking news");
+  index->AddDocument(*world_id, "world news");
+  table_context2_.config.ngram_size = 2;
+  table_context2_.index = std::move(index);
+  table_context2_.doc_store = std::move(doc_store);
+
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client(LoopbackUrl(port_));
+
+  const auto info_response = client.Get("/info");
+  ASSERT_TRUE(info_response);
+  ASSERT_EQ(info_response->status, 200);
+  const auto info = json::parse(info_response->body);
+  EXPECT_EQ(info["tables"]["table1"]["ngram_size"], 1);
+  EXPECT_EQ(info["tables"]["table2"]["ngram_size"], 2);
+
+  json request;
+  request["q"] = "breaking";
+  request["limit"] = 10;
+  const auto search_response = client.Post("/tables/table2/search", request.dump(), "application/json");
+  ASSERT_TRUE(search_response);
+  ASSERT_EQ(search_response->status, 200);
+  EXPECT_EQ(json::parse(search_response->body)["count"], 1);
 }
 
 // Test fixture for kanji_ngram_size testing
@@ -738,9 +762,11 @@ TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
   full_config.api.max_query_length = 10000;
 
   // Start TCP server
+  const uint16_t tcp_port = FindAvailableLoopbackPort();
+  ASSERT_GT(tcp_port, 0);
   ServerConfig tcp_config;
   tcp_config.host = "127.0.0.1";
-  tcp_config.port = 11020;
+  tcp_config.port = tcp_port;
   tcp_config.default_limit = 100;
 
   TcpServer tcp_server(tcp_config, table_contexts, "./dumps", &full_config, nullptr);
@@ -759,9 +785,11 @@ TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
   }
 
   // Start HTTP server WITH tcp_stats pointer
+  const uint16_t http_port = FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18085;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr,
@@ -769,7 +797,7 @@ TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
   ASSERT_TRUE(http_server.Start());
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  httplib::Client http_client("127.0.0.1", 18085);
+  httplib::Client http_client("127.0.0.1", http_port);
   http_client.set_read_timeout(std::chrono::seconds(5));
 
   // Get /info via HTTP
@@ -878,15 +906,17 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   ctx3.index->AddDocument(*doc_id3, "japanese table");
   table_contexts["テーブル"] = &ctx3;
 
+  const uint16_t http_port = FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18085;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer http_server(http_config, table_contexts, nullptr, nullptr);
   ASSERT_TRUE(http_server.Start());
 
-  httplib::Client client("http://127.0.0.1:18085");
+  httplib::Client client("127.0.0.1", http_port);
 
   // Test 1: Table with dash "my-table"
   json request1;
@@ -910,7 +940,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   // Note: URL encoding required for unicode
   json request3;
   request3["q"] = "japanese";
-  auto encoded_table_name = httplib::detail::encode_url("テーブル");
+  auto encoded_table_name = httplib::encode_uri("テーブル");
   auto res3 = client.Post("/tables/" + encoded_table_name + "/search", request3.dump(), "application/json");
   ASSERT_TRUE(res3) << "Should be able to access table with unicode name";
   EXPECT_EQ(res3->status, 200);
@@ -940,15 +970,17 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
   }
   table_contexts["test"] = &ctx;
 
+  const uint16_t http_port = FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18086;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer http_server(http_config, table_contexts, nullptr, nullptr);
   ASSERT_TRUE(http_server.Start());
 
-  httplib::Client client("http://127.0.0.1:18086");
+  httplib::Client client("127.0.0.1", http_port);
 
   // Test EQ operator
   {
@@ -1083,15 +1115,17 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
 
   table_contexts["test"] = &ctx;
 
+  const uint16_t http_port = FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18087;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer http_server(http_config, table_contexts, nullptr, nullptr);
   ASSERT_TRUE(http_server.Start());
 
-  httplib::Client client("http://127.0.0.1:18087");
+  httplib::Client client("127.0.0.1", http_port);
 
   // Test GT operator with large unsigned value
   {
@@ -1204,9 +1238,11 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
   full_config.api.default_limit = 100;
   full_config.api.max_query_length = 10000;
 
+  const uint16_t http_port = FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18086;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};
 
   HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr,
@@ -1216,7 +1252,7 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
 
   uint64_t baseline = http_server.GetTotalRequests();
 
-  httplib::Client client("127.0.0.1", 18086);
+  httplib::Client client("127.0.0.1", http_port);
   client.set_read_timeout(std::chrono::seconds(5));
 
   ASSERT_TRUE(client.Get("/info"));
@@ -1254,7 +1290,7 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
 
 TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
   // tcp_stats supplied -> every handler (search/count/info/health*) must
-  // route IncrementRequests() to tcp_stats_. After the L-6 reconciliation
+  // route IncrementRequests() to tcp_stats_. The effective-statistics accessor
   // GetTotalRequests() reads through to the effective (tcp_stats_) source so
   // both accessors agree on the same counter — this prevents /info from
   // appearing to "lose" requests when callers query GetTotalRequests()
@@ -1276,9 +1312,11 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
   ServerStats tcp_stats;
   uint64_t tcp_baseline = tcp_stats.GetTotalRequests();
 
+  const uint16_t http_port = FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18087;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};
 
   HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr, &tcp_stats);
@@ -1287,7 +1325,7 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
 
   uint64_t http_baseline = http_server.GetTotalRequests();
 
-  httplib::Client client("127.0.0.1", 18087);
+  httplib::Client client("127.0.0.1", http_port);
   client.set_read_timeout(std::chrono::seconds(5));
 
   // /info historically routed to tcp_stats; verify it still does.
@@ -1380,7 +1418,7 @@ TEST(HttpServerStatsTest, GetCommandStatsCountRoutedRequests) {
 }
 
 /**
- * @test L-6: HttpServer::GetStats() must reflect the effective stats source.
+ * @test HttpServer::GetStats() reflects the effective stats source.
  *
  * Constructing HttpServer with `tcp_stats` makes that instance the canonical
  * counter sink — RecordRequest() routes there, and GetStats()/GetTotalRequests()
@@ -1394,10 +1432,8 @@ TEST(HttpServerStatsTest, EffectiveStatsTracksConfiguredSource) {
 
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  // Use a port outside the range used by other tests in this file
-  // (18086/18087) and outside the bind-conflict suite range (18091) so this
-  // pure-accessor test never collides with parallel server-binding tests.
-  http_config.port = 18093;
+  // This pure-accessor test never starts a listener.
+  http_config.port = 0;
   http_config.allow_cidrs = {"127.0.0.1/32"};
 
   config::Config full_config;

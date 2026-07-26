@@ -122,6 +122,11 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManager) {
   EXPECT_TRUE(response.find("cache_current_entries: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_memory_bytes: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_memory_human: ") != std::string::npos);
+  EXPECT_TRUE(response.find("cache_accounted_memory_bytes: ") != std::string::npos);
+  EXPECT_TRUE(response.find("cache_rejection_oversize: ") != std::string::npos);
+  EXPECT_TRUE(response.find("cache_rejection_duplicate: ") != std::string::npos);
+  EXPECT_TRUE(response.find("cache_decompression_failures: ") != std::string::npos);
+  EXPECT_TRUE(response.find("cache_stale_lru_entries: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_evictions: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_invalidations_immediate: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_invalidations_deferred: ") != std::string::npos);
@@ -200,14 +205,33 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithResults) {
   EXPECT_TRUE(response.find("pk3") != std::string::npos);
 }
 
-TEST_F(ResponseFormatterTest, FormatSearchResponseSanitizesPrimaryKeyDelimiters) {
+TEST_F(ResponseFormatterTest, FormatSearchResponseEscapesPrimaryKeyDelimitersReversibly) {
   auto doc_id = table_context_.doc_store->AddDocument("pk with\r\nnewline\tand tab");
 
   std::vector<index::DocId> results = {*doc_id};
 
   std::string response = ResponseFormatter::FormatSearchResponse(results, 1, table_context_.doc_store.get());
 
-  EXPECT_EQ(response, "OK RESULTS 1 pk_with__newline_and_tab");
+  EXPECT_EQ(response, "OK RESULTS 1 \"pk with\\r\\nnewline\\tand tab\"");
+}
+
+TEST_F(ResponseFormatterTest, FormatSearchResponseDoesNotCollapseSpaceAndUnderscorePrimaryKeys) {
+  auto spaced_doc_id = table_context_.doc_store->AddDocument("a b");
+  auto underscored_doc_id = table_context_.doc_store->AddDocument("a_b");
+
+  std::vector<index::DocId> results = {*spaced_doc_id, *underscored_doc_id};
+
+  std::string response = ResponseFormatter::FormatSearchResponse(results, 2, table_context_.doc_store.get());
+
+  EXPECT_EQ(response, "OK RESULTS 2 \"a b\" a_b");
+}
+
+TEST_F(ResponseFormatterTest, FormatSearchResponseQuotesUnicodeWhitespaceInPrimaryKey) {
+  auto doc_id = table_context_.doc_store->AddDocument("a　b");
+
+  std::string response = ResponseFormatter::FormatSearchResponse({*doc_id}, 1, table_context_.doc_store.get());
+
+  EXPECT_EQ(response, "OK RESULTS 1 \"a　b\"");
 }
 
 TEST_F(ResponseFormatterTest, FormatSearchResponseWithHighlightsTerminatesMultilineResponse) {
@@ -232,6 +256,15 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithHighlightsSanitizesLineDel
       ResponseFormatter::FormatSearchResponseWithHighlights(results, 1, table_context_.doc_store.get(), snippets);
 
   EXPECT_EQ(response, "OK RESULTS 1\r\npk1\tline1  line2 line3\r\n");
+}
+
+TEST_F(ResponseFormatterTest, FormatSearchResponseWithHighlightsEscapesPrimaryKeyReversibly) {
+  auto doc_id = table_context_.doc_store->AddDocument("a b\tc");
+
+  std::string response =
+      ResponseFormatter::FormatSearchResponseWithHighlights({*doc_id}, 1, table_context_.doc_store.get(), {"snippet"});
+
+  EXPECT_EQ(response, "OK RESULTS 1\r\n\"a b\\tc\"\tsnippet\r\n");
 }
 
 TEST_F(ResponseFormatterTest, FormatFacetResponseSanitizesLineDelimiters) {
@@ -465,6 +498,13 @@ TEST_F(ResponseFormatterTest, FormatError) {
   EXPECT_TRUE(response.find("Invalid query syntax") != std::string::npos);
 }
 
+TEST_F(ResponseFormatterTest, FormatTypedErrorIncludesStableNumericCode) {
+  const auto error =
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kQueryExpressionParseError, "Invalid boolean expression");
+
+  EXPECT_EQ(ResponseFormatter::FormatError(error), "ERROR [Expression parse error (3010)] Invalid boolean expression");
+}
+
 /**
  * @brief Test error response with special characters
  */
@@ -624,4 +664,7 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsWithCache) {
   EXPECT_TRUE(response.find("mygramdb_cache_invalidations_total") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_hit_rate") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_misses_total") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_insert_rejections_total") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_decompression_failures_total") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_stale_lru_entries_total") != std::string::npos);
 }

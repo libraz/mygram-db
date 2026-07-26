@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -32,8 +33,26 @@
 #include "query/synonym_dictionary.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
+#include "utils/binary_io.h"
 
 namespace mygramdb::server::search_pipeline {
+
+std::unique_ptr<query::SynonymDictionary> MakeSynonymDictionary(const std::vector<std::vector<std::string>>& groups) {
+  std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+  mygram::utils::WriteBinary(stream, static_cast<uint32_t>(groups.size()));
+  for (const auto& group : groups) {
+    mygram::utils::WriteBinary(stream, static_cast<uint32_t>(group.size()));
+    for (const auto& term : group) {
+      mygram::utils::WriteString(stream, term);
+    }
+  }
+  stream.seekg(0);
+  auto dictionary = std::make_unique<query::SynonymDictionary>();
+  if (!dictionary->LoadFromStream(stream)) {
+    return nullptr;
+  }
+  return dictionary;
+}
 
 class SearchPipelineFilterTest : public ::testing::Test {
  protected:
@@ -864,13 +883,101 @@ TEST_F(FullPipelineTest, BasicSearch) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
-  EXPECT_TRUE(output.error_message.empty());
-  EXPECT_FALSE(output.cache_hit);
+  EXPECT_TRUE(output.has_value());
+  EXPECT_TRUE((output.has_value() ? std::string{} : output.error().message()).empty());
+  EXPECT_FALSE(output->cache_hit);
   // "learning" appears in doc1 and doc2
-  EXPECT_EQ(output.results.size(), 2);
-  EXPECT_EQ(output.all_search_terms.size(), 1);
-  EXPECT_EQ(output.all_search_terms[0], "learning");
+  EXPECT_EQ(output->results.size(), 2);
+  EXPECT_EQ(output->all_search_terms.size(), 1);
+  EXPECT_EQ(output->all_search_terms[0], "learning");
+}
+
+TEST_F(FullPipelineTest, ReportsRealFunnelCountsIncludingZeroStages) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.and_terms = {"machine"};
+  query.not_terms = {"basics"};
+  query.filters.push_back({"status", query::FilterOp::EQ, "1"});
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  ASSERT_TRUE(output.has_value()) << (output ? "" : output.error().message());
+  // Terms are size-ordered, so the selective "machine" posting list is the
+  // first candidate set even though it appears in and_terms.
+  EXPECT_EQ(output->total_candidates, 1U);
+  EXPECT_EQ(output->after_intersection, 1U);
+  EXPECT_EQ(output->after_not, 0U);
+  EXPECT_EQ(output->after_filters, 0U);
+  EXPECT_TRUE(output->results.empty());
+}
+
+TEST_F(FullPipelineTest, SharedFacetPipelineRechecksLoadingAfterSnapshot) {
+  query::Query query;
+  query.type = query::QueryType::FACET;
+  query.table = "test";
+  query.facet_column = "status";
+
+  FacetPipelineParams params;
+  params.search = MakeParams();
+  params.load_in_progress = []() { return true; };
+  auto output = ExecuteFacetPipeline(query, params);
+
+  ASSERT_FALSE(output.has_value());
+  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kServerShuttingDown);
+}
+
+TEST_F(FullPipelineTest, SingleTermNgramAndReproducibilityIsExplicitPerExecutionPath) {
+  auto cjk_only = doc_store_->AddDocument("pk4", {}, "京都");
+  auto mixed_match = doc_store_->AddDocument("pk5", {}, "京タワー");
+  ASSERT_TRUE(cjk_only.has_value());
+  ASSERT_TRUE(mixed_match.has_value());
+  index_->AddDocument(*cjk_only, "京都");
+  index_->AddDocument(*mixed_match, "京タワー");
+
+  struct TestCase {
+    const char* name;
+    query::Query query;
+    int kanji_ngram_size;
+    bool cross_boundary_ngrams;
+    bool expected;
+  };
+
+  query::Query plain;
+  plain.type = query::QueryType::SEARCH;
+  plain.table = "test";
+  plain.search_text = "learning";
+  plain.limit = 1;
+
+  query::Query fuzzy = plain;
+  fuzzy.search_text = "learnig";
+  fuzzy.fuzzy_max_distance = 1;
+
+  query::Query boolean_not = plain;
+  boolean_not.search_text = "learning AND (NOT deep)";
+
+  query::Query hybrid = plain;
+  hybrid.search_text = "京タ";
+
+  const std::vector<TestCase> cases = {
+      {"plain", plain, 0, false, true},
+      {"fuzzy", fuzzy, 0, false, false},
+      {"boolean_not", boolean_not, 0, false, false},
+      {"hybrid_fragment", hybrid, 1, false, false},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    auto params = MakeParams();
+    params.kanji_ngram_size = test_case.kanji_ngram_size;
+    params.cross_boundary_ngrams = test_case.cross_boundary_ngrams;
+
+    auto output = ExecuteFullPipeline(test_case.query, params);
+
+    ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+    EXPECT_EQ(output->semantics_reproducible_by_single_term_ngram_and, test_case.expected);
+  }
 }
 
 TEST_F(FullPipelineTest, InvalidUtf8SearchTextReturnsQueryError) {
@@ -882,10 +989,9 @@ TEST_F(FullPipelineTest, InvalidUtf8SearchTextReturnsQueryError) {
 
   auto output = ExecuteFullPipeline(query, MakeParams());
 
-  EXPECT_FALSE(output.success);
-  EXPECT_NE(output.error_message.find("3001"), std::string::npos);
-  EXPECT_NE(output.error_message.find("Invalid UTF-8"), std::string::npos);
-  EXPECT_TRUE(output.results.empty());
+  ASSERT_FALSE(output.has_value());
+  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kQueryInvalidToken);
+  EXPECT_NE(output.error().message().find("Invalid UTF-8"), std::string::npos);
 }
 
 TEST_F(FullPipelineTest, InvalidUtf8AndTermReturnsQueryError) {
@@ -898,10 +1004,22 @@ TEST_F(FullPipelineTest, InvalidUtf8AndTermReturnsQueryError) {
 
   auto output = ExecuteFullPipeline(query, MakeParams());
 
-  EXPECT_FALSE(output.success);
-  EXPECT_NE(output.error_message.find("3001"), std::string::npos);
-  EXPECT_NE(output.error_message.find("Invalid UTF-8"), std::string::npos);
-  EXPECT_TRUE(output.results.empty());
+  ASSERT_FALSE(output.has_value());
+  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kQueryInvalidToken);
+  EXPECT_NE(output.error().message().find("Invalid UTF-8"), std::string::npos);
+}
+
+TEST_F(FullPipelineTest, InvalidBooleanExpressionPreservesTypedParseError) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning AND (";
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  ASSERT_FALSE(output.has_value());
+  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kQueryExpressionParseError);
+  EXPECT_NE(output.error().message().find("Invalid boolean search expression"), std::string::npos);
 }
 
 TEST_F(FullPipelineTest, SearchWithFilters) {
@@ -915,9 +1033,9 @@ TEST_F(FullPipelineTest, SearchWithFilters) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.has_value());
   // Both learning docs have status=1
-  EXPECT_EQ(output.results.size(), 2);
+  EXPECT_EQ(output->results.size(), 2);
 }
 
 TEST_F(FullPipelineTest, BooleanTopLevelOrReturnsUnion) {
@@ -930,8 +1048,119 @@ TEST_F(FullPipelineTest, BooleanTopLevelOrReturnsUnion) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[2]}));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[2]}));
+}
+
+TEST_F(FullPipelineTest, BooleanTermsUseFuzzySemantics) {
+  auto golang_doc = doc_store_->AddDocument("pk_golang", {}, "golang tutorial");
+  auto python_doc = doc_store_->AddDocument("pk_python", {}, "python tutorial");
+  ASSERT_TRUE(golang_doc.has_value());
+  ASSERT_TRUE(python_doc.has_value());
+  index_->AddDocument(*golang_doc, "golang tutorial");
+  index_->AddDocument(*python_doc, "python tutorial");
+
+  config::Config config;
+  config.memory.verify_text = "all";
+  auto params = MakeParams();
+  params.full_config = &config;
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "goleng OR python";
+  query.fuzzy_max_distance = 1;
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->path_taken, PipelinePath::FUZZY);
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*golang_doc, *python_doc}));
+}
+
+TEST_F(FullPipelineTest, BooleanTermsAndNotNodesUseSynonymSemantics) {
+  auto automobile_doc = doc_store_->AddDocument("pk_auto", {}, "vehicle automobile");
+  auto bicycle_doc = doc_store_->AddDocument("pk_bike", {}, "vehicle bicycle");
+  auto cat_doc = doc_store_->AddDocument("pk_cat_syn", {}, "cat handbook");
+  ASSERT_TRUE(automobile_doc.has_value());
+  ASSERT_TRUE(bicycle_doc.has_value());
+  ASSERT_TRUE(cat_doc.has_value());
+  index_->AddDocument(*automobile_doc, "vehicle automobile");
+  index_->AddDocument(*bicycle_doc, "vehicle bicycle");
+  index_->AddDocument(*cat_doc, "cat handbook");
+
+  auto synonyms = MakeSynonymDictionary({{"car", "automobile"}, {"cat", "feline"}});
+  ASSERT_NE(synonyms, nullptr);
+  config::Config config;
+  config.memory.verify_text = "all";
+  auto params = MakeParams();
+  params.synonym_dict = synonyms.get();
+  params.full_config = &config;
+
+  query::Query positive;
+  positive.type = query::QueryType::SEARCH;
+  positive.table = "test";
+  positive.search_text = "car OR feline";
+  positive.limit = 100;
+  auto positive_output = ExecuteFullPipeline(positive, params);
+  ASSERT_TRUE(positive_output.has_value())
+      << (positive_output.has_value() ? std::string{} : positive_output.error().message());
+  EXPECT_EQ(positive_output->path_taken, PipelinePath::SYNONYM);
+  EXPECT_EQ(positive_output->results, (std::vector<storage::DocId>{doc_ids_[2], *automobile_doc, *cat_doc}));
+
+  query::Query boolean_not = positive;
+  boolean_not.search_text = "vehicle AND NOT car";
+  auto boolean_not_output = ExecuteFullPipeline(boolean_not, params);
+  ASSERT_TRUE(boolean_not_output.has_value())
+      << (boolean_not_output.has_value() ? std::string{} : boolean_not_output.error().message());
+  EXPECT_EQ(boolean_not_output->results, (std::vector<storage::DocId>{*bicycle_doc}));
+}
+
+TEST_F(FullPipelineTest, ExplicitNotTermsExcludeEverySynonymVariant) {
+  auto automobile_doc = doc_store_->AddDocument("pk_auto_not", {}, "vehicle automobile");
+  auto bicycle_doc = doc_store_->AddDocument("pk_bike_not", {}, "vehicle bicycle");
+  ASSERT_TRUE(automobile_doc.has_value());
+  ASSERT_TRUE(bicycle_doc.has_value());
+  index_->AddDocument(*automobile_doc, "vehicle automobile");
+  index_->AddDocument(*bicycle_doc, "vehicle bicycle");
+
+  auto synonyms = MakeSynonymDictionary({{"car", "automobile"}});
+  ASSERT_NE(synonyms, nullptr);
+  auto params = MakeParams();
+  params.synonym_dict = synonyms.get();
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "vehicle";
+  query.not_terms = {"car"};
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*bicycle_doc}));
+}
+
+TEST_F(FullPipelineTest, BooleanOperandsAcceptAsciiPunctuation) {
+  auto email_doc = doc_store_->AddDocument("pk_email", {}, "contact foo@example.com");
+  auto version_doc = doc_store_->AddDocument("pk_version", {}, "release v1.2");
+  ASSERT_TRUE(email_doc.has_value());
+  ASSERT_TRUE(version_doc.has_value());
+  index_->AddDocument(*email_doc, "contact foo@example.com");
+  index_->AddDocument(*version_doc, "release v1.2");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "foo@example.com OR v1.2";
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*email_doc, *version_doc}));
 }
 
 TEST_F(FullPipelineTest, ParserQuotedBooleanPhraseDoesNotBecomeOrExpression) {
@@ -942,8 +1171,23 @@ TEST_F(FullPipelineTest, ParserQuotedBooleanPhraseDoesNotBecomeOrExpression) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(*parsed, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_TRUE(output.results.empty());
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(output->results.empty());
+}
+
+TEST_F(FullPipelineTest, ParserQuotedPhraseWithBooleanWordSearchesLiteralPhrase) {
+  auto phrase_doc = doc_store_->AddDocument("pk_phrase", {}, "classic rock and roll history");
+  ASSERT_TRUE(phrase_doc.has_value());
+  index_->AddDocument(*phrase_doc, "classic rock and roll history");
+
+  query::QueryParser parser;
+  auto parsed = parser.Parse(R"(SEARCH test "rock and roll" LIMIT 100)");
+  ASSERT_TRUE(parsed) << parsed.error().message();
+
+  auto output = ExecuteFullPipeline(*parsed, MakeParams());
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*phrase_doc}));
 }
 
 TEST_F(FullPipelineTest, ParenthesizedSingleTermDoesNotEnableBooleanMode) {
@@ -956,12 +1200,12 @@ TEST_F(FullPipelineTest, ParenthesizedSingleTermDoesNotEnableBooleanMode) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  ASSERT_EQ(output.all_search_terms.size(), 1);
-  EXPECT_EQ(output.all_search_terms[0], "(learning)");
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  ASSERT_EQ(output->all_search_terms.size(), 1);
+  EXPECT_EQ(output->all_search_terms[0], "(learning)");
 }
 
-TEST_F(FullPipelineTest, LowercaseBooleanWordsDoNotEnableBooleanMode) {
+TEST_F(FullPipelineTest, LowercaseBooleanWordsEnableBooleanMode) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
   query.table = "test";
@@ -971,9 +1215,8 @@ TEST_F(FullPipelineTest, LowercaseBooleanWordsDoNotEnableBooleanMode) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  ASSERT_EQ(output.all_search_terms.size(), 1);
-  EXPECT_EQ(output.all_search_terms[0], "basics or cats");
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[2]}));
 }
 
 TEST_F(FullPipelineTest, BooleanParenthesizedOrAndLegacyAndClause) {
@@ -987,8 +1230,8 @@ TEST_F(FullPipelineTest, BooleanParenthesizedOrAndLegacyAndClause) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[2]}));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[2]}));
 }
 
 TEST_F(FullPipelineTest, BooleanTopLevelOrWithPostfixNot) {
@@ -1001,8 +1244,8 @@ TEST_F(FullPipelineTest, BooleanTopLevelOrWithPostfixNot) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[0]}));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[0]}));
 }
 
 TEST_F(FullPipelineTest, BooleanNotTermExcludedFromScoringTerms) {
@@ -1028,24 +1271,25 @@ TEST_F(FullPipelineTest, BooleanNotTermExcludedFromScoringTerms) {
   params.full_config = &config;
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  ASSERT_EQ(output.results, (std::vector<storage::DocId>{*plain_doc}));
-  ASSERT_EQ(output.all_search_terms.size(), 1);
-  EXPECT_EQ(output.all_search_terms[0], "alpha");
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  ASSERT_EQ(output->results, (std::vector<storage::DocId>{*plain_doc}));
+  ASSERT_EQ(output->all_search_terms.size(), 1);
+  EXPECT_EQ(output->all_search_terms[0], "alpha");
 
   std::vector<std::string> normalized_terms;
   std::vector<uint64_t> term_dfs;
-  for (const auto& term_info : output.term_infos) {
+  for (const auto& term_info : output->term_infos) {
     EXPECT_TRUE(term_info.term_doc_freq_computed);
     normalized_terms.push_back(term_info.normalized_term);
     term_dfs.push_back(term_info.term_doc_freq);
   }
 
   const index::BM25Params bm25_params{1.2, 0.0};
-  const auto scored = index::BM25Scorer::ScoreDocuments(output.results, normalized_terms, term_dfs, *doc_store_,
+  const auto scored = index::BM25Scorer::ScoreDocuments(output->results, normalized_terms, term_dfs, *doc_store_,
                                                         doc_store_->GetAllDocIds().size(), 1.0, bm25_params);
-  ASSERT_EQ(scored.size(), 1);
-  EXPECT_GT(scored[0].score, 0.0);
+  ASSERT_TRUE(scored.has_value()) << scored.error().message();
+  ASSERT_EQ(scored->size(), 1);
+  EXPECT_GT((*scored)[0].score, 0.0);
 }
 
 TEST_F(FullPipelineTest, BooleanVerifyTextHonorsOrBranches) {
@@ -1065,8 +1309,8 @@ TEST_F(FullPipelineTest, BooleanVerifyTextHonorsOrBranches) {
   params.full_config = &config;
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{doc_ids_[2]}));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[2]}));
 }
 
 TEST_F(FullPipelineTest, BooleanEmptyTermResultSkipsCache) {
@@ -1079,9 +1323,9 @@ TEST_F(FullPipelineTest, BooleanEmptyTermResultSkipsCache) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_TRUE(output.results.empty());
-  EXPECT_TRUE(output.empty_term_detected);
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(output->results.empty());
+  EXPECT_TRUE(output->empty_term_detected);
 }
 
 TEST_F(FullPipelineTest, ShortTermWithoutStoredTextReturnsExplicitError) {
@@ -1096,8 +1340,9 @@ TEST_F(FullPipelineTest, ShortTermWithoutStoredTextReturnsExplicitError) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_FALSE(output.success);
-  EXPECT_NE(output.error_message.find("too short for n-gram search"), std::string::npos);
+  EXPECT_FALSE(output.has_value());
+  EXPECT_NE((output.has_value() ? std::string{} : output.error().message()).find("too short for n-gram search"),
+            std::string::npos);
 }
 
 TEST_F(FullPipelineTest, BooleanShortNotWithoutStoredTextReturnsExplicitError) {
@@ -1112,8 +1357,9 @@ TEST_F(FullPipelineTest, BooleanShortNotWithoutStoredTextReturnsExplicitError) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_FALSE(output.success);
-  EXPECT_NE(output.error_message.find("too short for n-gram search"), std::string::npos);
+  EXPECT_FALSE(output.has_value());
+  EXPECT_NE((output.has_value() ? std::string{} : output.error().message()).find("too short for n-gram search"),
+            std::string::npos);
 }
 
 TEST_F(FullPipelineTest, MixedScriptBoundaryFragmentRequiresExactTextMatch) {
@@ -1135,8 +1381,8 @@ TEST_F(FullPipelineTest, MixedScriptBoundaryFragmentRequiresExactTextMatch) {
   params.cross_boundary_ngrams = false;
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{*mixed_match}));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*mixed_match}));
 }
 
 TEST_F(FullPipelineTest, SearchWithNotTerms) {
@@ -1149,8 +1395,8 @@ TEST_F(FullPipelineTest, SearchWithNotTerms) {
     base_query.limit = 100;
     auto params = MakeParams();
     auto base_output = ExecuteFullPipeline(base_query, params);
-    ASSERT_TRUE(base_output.success);
-    ASSERT_GE(base_output.results.size(), 1) << "Base search for 'learning' should find docs";
+    ASSERT_TRUE(base_output.has_value());
+    ASSERT_GE(base_output->results.size(), 1) << "Base search for 'learning' should find docs";
   }
 
   query::Query query;
@@ -1163,11 +1409,11 @@ TEST_F(FullPipelineTest, SearchWithNotTerms) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.has_value());
   // NOT "deep" should exclude doc2, leaving fewer results than the base search
-  EXPECT_GE(output.results.size(), 0);
+  EXPECT_GE(output->results.size(), 0);
   // At minimum, the NOT filter should not add results
-  EXPECT_LE(output.results.size(), 2);
+  EXPECT_LE(output->results.size(), 2);
 }
 
 TEST_F(FullPipelineTest, NotFilterDoesNotPoolNgramsAcrossTerms) {
@@ -1195,11 +1441,11 @@ TEST_F(FullPipelineTest, NotFilterDoesNotPoolNgramsAcrossTerms) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *plain_doc), output.results.end());
-  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *dog_doc), output.results.end());
-  EXPECT_EQ(std::find(output.results.begin(), output.results.end(), *dolphin_doc), output.results.end());
-  EXPECT_EQ(std::find(output.results.begin(), output.results.end(), *fog_doc), output.results.end());
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_NE(std::find(output->results.begin(), output->results.end(), *plain_doc), output->results.end());
+  EXPECT_NE(std::find(output->results.begin(), output->results.end(), *dog_doc), output->results.end());
+  EXPECT_EQ(std::find(output->results.begin(), output->results.end(), *dolphin_doc), output->results.end());
+  EXPECT_EQ(std::find(output->results.begin(), output->results.end(), *fog_doc), output->results.end());
 }
 
 TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
@@ -1231,8 +1477,8 @@ TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
   params.cache_manager = &cache_manager;
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  ASSERT_FALSE(output.cache_hit);
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  ASSERT_FALSE(output->cache_hit);
   ASSERT_TRUE(cache_manager.Lookup(query).has_value());
 
   cache_manager.Invalidate("test", "article cat", "article do");
@@ -1254,10 +1500,10 @@ TEST_F(FullPipelineTest, SearchWithAndTerms) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.has_value());
   // Only doc1 has both "learning" and "machine"
-  EXPECT_EQ(output.results.size(), 1);
-  EXPECT_EQ(output.all_search_terms.size(), 2);
+  EXPECT_EQ(output->results.size(), 1);
+  EXPECT_EQ(output->all_search_terms.size(), 2);
 }
 
 TEST_F(FullPipelineTest, NullIndexReturnsError) {
@@ -1270,8 +1516,8 @@ TEST_F(FullPipelineTest, NullIndexReturnsError) {
   params.current_index = nullptr;
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_FALSE(output.success);
-  EXPECT_FALSE(output.error_message.empty());
+  EXPECT_FALSE(output.has_value());
+  EXPECT_FALSE((output.has_value() ? std::string{} : output.error().message()).empty());
 }
 
 TEST_F(FullPipelineTest, NullDocStoreReturnsError) {
@@ -1284,8 +1530,8 @@ TEST_F(FullPipelineTest, NullDocStoreReturnsError) {
   params.current_doc_store = nullptr;
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_FALSE(output.success);
-  EXPECT_FALSE(output.error_message.empty());
+  EXPECT_FALSE(output.has_value());
+  EXPECT_FALSE((output.has_value() ? std::string{} : output.error().message()).empty());
 }
 
 TEST_F(FullPipelineTest, EmptySearchTextReturnsEmpty) {
@@ -1298,8 +1544,8 @@ TEST_F(FullPipelineTest, EmptySearchTextReturnsEmpty) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
-  EXPECT_TRUE(output.results.empty());
+  EXPECT_TRUE(output.has_value());
+  EXPECT_TRUE(output->results.empty());
 }
 
 TEST_F(FullPipelineTest, NoMatchReturnsEmpty) {
@@ -1312,8 +1558,8 @@ TEST_F(FullPipelineTest, NoMatchReturnsEmpty) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
-  EXPECT_TRUE(output.results.empty());
+  EXPECT_TRUE(output.has_value());
+  EXPECT_TRUE(output->results.empty());
 }
 
 TEST_F(FullPipelineTest, ShortTermFallsBackToSubstringSearch) {
@@ -1330,9 +1576,9 @@ TEST_F(FullPipelineTest, ShortTermFallsBackToSubstringSearch) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_FALSE(output.empty_term_detected);
-  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *single_char_doc), output.results.end());
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_FALSE(output->empty_term_detected);
+  EXPECT_NE(std::find(output->results.begin(), output->results.end(), *single_char_doc), output->results.end());
 }
 
 TEST_F(FullPipelineTest, ShortAndTermFallsBackToSubstringSearch) {
@@ -1350,9 +1596,9 @@ TEST_F(FullPipelineTest, ShortAndTermFallsBackToSubstringSearch) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_FALSE(output.empty_term_detected);
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{*target_doc}));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_FALSE(output->empty_term_detected);
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*target_doc}));
 }
 
 TEST_F(FullPipelineTest, ShortNotTermUsesSubstringFallback) {
@@ -1372,9 +1618,9 @@ TEST_F(FullPipelineTest, ShortNotTermUsesSubstringFallback) {
 
   auto output = ExecuteFullPipeline(query, MakeParams());
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(std::find(output.results.begin(), output.results.end(), *excluded), output.results.end());
-  EXPECT_NE(std::find(output.results.begin(), output.results.end(), *retained), output.results.end());
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(std::find(output->results.begin(), output->results.end(), *excluded), output->results.end());
+  EXPECT_NE(std::find(output->results.begin(), output->results.end(), *retained), output->results.end());
 }
 
 TEST_F(FullPipelineTest, BooleanExpressionWithShortLegacyAndTermUsesSubstringFallback) {
@@ -1394,8 +1640,8 @@ TEST_F(FullPipelineTest, BooleanExpressionWithShortLegacyAndTermUsesSubstringFal
 
   auto output = ExecuteFullPipeline(query, MakeParams());
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results, (std::vector<storage::DocId>{*learning_x, *cats_x}));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*learning_x, *cats_x}));
 }
 
 TEST_F(FullPipelineTest, ShortSynonymVariantUsesSubstringFallback) {
@@ -1434,9 +1680,9 @@ TEST_F(FullPipelineTest, VerifyTextFilterApplied) {
   params.full_config = &config;
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.has_value());
   // With verify_text=all, results should still include docs that actually contain "learning"
-  EXPECT_EQ(output.results.size(), 2);
+  EXPECT_EQ(output->results.size(), 2);
 }
 
 TEST(SearchTopNOptimizationTest, SkipsWhenVerifyTextIsRequired) {
@@ -1463,6 +1709,7 @@ TEST(SearchTopNOptimizationTest, SkipsWhenVerifyTextIsRequired) {
   config.memory.verify_text = "all";
 
   auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/false,
                                           /*cache_hit=*/false, "id", results);
 
   EXPECT_TRUE(topn.considered);
@@ -1487,8 +1734,9 @@ TEST(SearchTopNOptimizationTest, ShortTermPreservesSubstringResults) {
   config::Config config;
   config.memory.verify_text = "off";
 
-  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text}, false,
-                                          "id", results);
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/false,
+                                          /*cache_hit=*/false, "id", results);
 
   EXPECT_FALSE(topn.considered);
   EXPECT_EQ(results, (std::vector<storage::DocId>{*doc}));
@@ -1518,10 +1766,46 @@ TEST(SearchTopNOptimizationTest, SkipsWhenPrimaryKeyDocIdOrderIsUnknown) {
   config.memory.verify_text = "off";
 
   auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/true,
                                           /*cache_hit=*/false, "id", results);
 
   EXPECT_TRUE(topn.considered);
   EXPECT_FALSE(topn.applicable);
+}
+
+TEST(SearchTopNOptimizationTest, ExplicitSemanticsFlagPreservesPostFilteredResults) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+
+  std::vector<storage::DocId> doc_ids;
+  for (int i = 1; i <= 4; ++i) {
+    auto doc_id = doc_store.AddDocument(std::to_string(i), {}, "alpha");
+    ASSERT_TRUE(doc_id.has_value());
+    index.AddDocument(*doc_id, "alpha");
+    doc_ids.push_back(*doc_id);
+  }
+  ASSERT_TRUE(doc_store.IsPrimaryKeyDocIdOrderValid());
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.limit = 1;
+
+  auto term_infos = GenerateTermInfos({query.search_text}, &index, 2, 0, false);
+  std::vector<storage::DocId> post_filtered_results{doc_ids.front()};
+  const auto expected = post_filtered_results;
+
+  config::Config config;
+  config.memory.verify_text = "off";
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/false,
+                                          /*cache_hit=*/false, "id", post_filtered_results);
+
+  EXPECT_TRUE(topn.considered);
+  EXPECT_FALSE(topn.applicable);
+  EXPECT_FALSE(topn.optimized);
+  EXPECT_EQ(post_filtered_results, expected);
 }
 
 TEST_F(FullPipelineTest, FuzzySearchPath) {
@@ -1539,9 +1823,9 @@ TEST_F(FullPipelineTest, FuzzySearchPath) {
   params.full_config = &config;
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
+  EXPECT_TRUE(output.has_value());
   // Fuzzy search should find docs containing "learning" (edit distance 1 from "learnig")
-  EXPECT_GE(output.results.size(), 1);
+  EXPECT_GE(output->results.size(), 1);
 }
 
 TEST_F(FullPipelineTest, QueryTimeMsPopulated) {
@@ -1554,8 +1838,8 @@ TEST_F(FullPipelineTest, QueryTimeMsPopulated) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.success);
-  EXPECT_GE(output.query_time_ms, 0.0);
+  EXPECT_TRUE(output.has_value());
+  EXPECT_GE(output->query_time_ms, 0.0);
 }
 
 // =============================================================================
@@ -1626,19 +1910,45 @@ TEST_F(FullPipelineCacheTest, CacheHitFlagSetRegardlessOfDebugMode) {
 
   // First run: cache miss, populates the cache.
   auto first_output = ExecuteFullPipeline(query, params);
-  ASSERT_TRUE(first_output.success);
-  EXPECT_FALSE(first_output.cache_hit);
-  EXPECT_EQ(first_output.cache_miss_reason, CacheMissReason::kNotFound);
+  ASSERT_TRUE(first_output.has_value());
+  EXPECT_FALSE(first_output->cache_hit);
+  EXPECT_EQ(first_output->cache_miss_reason, CacheMissReason::kNotFound);
 
   // Second run with the same query: must report cache_hit = true on the
   // FullPipelineOutput itself, independent of any debug-mode flag (debug mode
   // is not exercised here).
   auto second_output = ExecuteFullPipeline(query, params);
-  ASSERT_TRUE(second_output.success);
-  EXPECT_TRUE(second_output.cache_hit);
-  EXPECT_EQ(second_output.cache_miss_reason, CacheMissReason::kHit);
-  EXPECT_EQ(second_output.path_taken, PipelinePath::CACHE_HIT);
-  EXPECT_EQ(second_output.results, first_output.results);
+  ASSERT_TRUE(second_output.has_value());
+  EXPECT_TRUE(second_output->cache_hit);
+  EXPECT_EQ(second_output->cache_miss_reason, CacheMissReason::kHit);
+  EXPECT_EQ(second_output->path_taken, PipelinePath::CACHE_HIT);
+  EXPECT_EQ(second_output->results, first_output->results);
+}
+
+TEST_F(FullPipelineCacheTest, BooleanCacheHitPreservesPositiveHighlightTerms) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning NOT (deep OR machine)";
+  query.search_expression = query.search_text;
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto miss = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(miss.has_value()) << (miss ? "" : miss.error().message());
+  ASSERT_FALSE(miss->cache_hit);
+
+  auto hit = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(hit.has_value()) << (hit ? "" : hit.error().message());
+  ASSERT_TRUE(hit->cache_hit);
+  EXPECT_EQ(hit->all_search_terms, miss->all_search_terms);
+  EXPECT_EQ(hit->all_search_terms, (std::vector<std::string>{"learning"}));
+  EXPECT_FALSE(hit->term_infos.empty());
+
+  const auto miss_highlight_terms = BuildHighlightTerms(miss->all_search_terms, index_.get(), nullptr);
+  const auto hit_highlight_terms = BuildHighlightTerms(hit->all_search_terms, index_.get(), nullptr);
+  EXPECT_EQ(hit_highlight_terms, miss_highlight_terms);
+  EXPECT_EQ(hit_highlight_terms, (std::vector<std::string>{"learning"}));
 }
 
 TEST_F(FullPipelineCacheTest, CanonicalCacheKeyOverridesParserPrecomputedKey) {
@@ -1659,14 +1969,14 @@ TEST_F(FullPipelineCacheTest, CanonicalCacheKeyOverridesParserPrecomputedKey) {
   auto params = MakeParams();
 
   auto first_output = ExecuteFullPipeline(first_query, params);
-  ASSERT_TRUE(first_output.success);
-  EXPECT_FALSE(first_output.cache_hit);
-  ASSERT_FALSE(first_output.results.empty());
+  ASSERT_TRUE(first_output.has_value());
+  EXPECT_FALSE(first_output->cache_hit);
+  ASSERT_FALSE(first_output->results.empty());
 
   auto second_output = ExecuteFullPipeline(second_query, params);
-  ASSERT_TRUE(second_output.success);
-  EXPECT_TRUE(second_output.cache_hit);
-  EXPECT_EQ(second_output.results, first_output.results);
+  ASSERT_TRUE(second_output.has_value());
+  EXPECT_TRUE(second_output->cache_hit);
+  EXPECT_EQ(second_output->results, first_output->results);
 }
 
 TEST_F(FullPipelineCacheTest, SortClauseDoesNotPartitionCacheEntries) {
@@ -1683,14 +1993,14 @@ TEST_F(FullPipelineCacheTest, SortClauseDoesNotPartitionCacheEntries) {
   auto params = MakeParams();
 
   auto first_output = ExecuteFullPipeline(asc_query, params);
-  ASSERT_TRUE(first_output.success);
-  EXPECT_FALSE(first_output.cache_hit);
+  ASSERT_TRUE(first_output.has_value());
+  EXPECT_FALSE(first_output->cache_hit);
 
   auto second_output = ExecuteFullPipeline(desc_query, params);
-  ASSERT_TRUE(second_output.success);
-  EXPECT_TRUE(second_output.cache_hit);
-  EXPECT_EQ(second_output.cache_miss_reason, CacheMissReason::kHit);
-  EXPECT_EQ(second_output.results, first_output.results);
+  ASSERT_TRUE(second_output.has_value());
+  EXPECT_TRUE(second_output->cache_hit);
+  EXPECT_EQ(second_output->cache_miss_reason, CacheMissReason::kHit);
+  EXPECT_EQ(second_output->results, first_output->results);
 }
 
 TEST_F(FullPipelineCacheTest, CacheMissReasonNotFoundForUnknownQuery) {
@@ -1702,9 +2012,31 @@ TEST_F(FullPipelineCacheTest, CacheMissReasonNotFoundForUnknownQuery) {
 
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
-  ASSERT_TRUE(output.success);
-  EXPECT_FALSE(output.cache_hit);
-  EXPECT_EQ(output.cache_miss_reason, CacheMissReason::kNotFound);
+  ASSERT_TRUE(output.has_value());
+  EXPECT_FALSE(output->cache_hit);
+  EXPECT_EQ(output->cache_miss_reason, CacheMissReason::kNotFound);
+}
+
+TEST_F(FullPipelineCacheTest, FacetReusesSearchDocIdCacheEntry) {
+  query::Query search;
+  search.type = query::QueryType::SEARCH;
+  search.table = "test";
+  search.search_text = "learning";
+  search.limit = 100;
+
+  auto params = MakeParams();
+  auto first = ExecuteFullPipeline(search, params);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_FALSE(first->cache_hit);
+
+  query::Query facet = search;
+  facet.type = query::QueryType::FACET;
+  facet.facet_column = "category";
+  auto second = ExecuteFullPipeline(facet, params);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_TRUE(second->cache_hit);
+  EXPECT_EQ(second->cache_miss_reason, CacheMissReason::kHit);
+  EXPECT_EQ(second->results, first->results);
 }
 
 TEST_F(FullPipelineCacheTest, CacheMissReasonDisabledWhenCacheManagerNull) {
@@ -1717,9 +2049,9 @@ TEST_F(FullPipelineCacheTest, CacheMissReasonDisabledWhenCacheManagerNull) {
   auto params = MakeParams();
   params.cache_manager = nullptr;
   auto output = ExecuteFullPipeline(query, params);
-  ASSERT_TRUE(output.success);
-  EXPECT_FALSE(output.cache_hit);
-  EXPECT_EQ(output.cache_miss_reason, CacheMissReason::kDisabled);
+  ASSERT_TRUE(output.has_value());
+  EXPECT_FALSE(output->cache_hit);
+  EXPECT_EQ(output->cache_miss_reason, CacheMissReason::kDisabled);
 }
 
 TEST_F(FullPipelineCacheTest, CacheMissReasonStaleVsNotFound) {
@@ -1746,18 +2078,23 @@ TEST_F(FullPipelineCacheTest, CacheMissReasonStaleVsNotFound) {
 
   auto params = MakeParams();
   auto first = ExecuteFullPipeline(query, params);
-  ASSERT_TRUE(first.success);
-  ASSERT_FALSE(first.results.empty());
+  ASSERT_TRUE(first.has_value());
+  ASSERT_FALSE(first->results.empty());
 
   // Removing a doc that appears in the cached result set causes
   // GetPrimaryKeysBatch to return an empty primary key for that DocId, which
   // IsCacheStale flags as stale.
-  doc_store_->RemoveDocument(first.results.front());
+  doc_store_->RemoveDocument(first->results.front());
 
   CacheMissReason reason = CacheMissReason::kHit;
   auto stale_result = TryCacheLookup(query, cache_manager_.get(), doc_store_.get(), &reason);
   EXPECT_FALSE(stale_result.has_value());
   EXPECT_EQ(reason, CacheMissReason::kStale);
+
+  // Staleness detection must remove the resident key. Otherwise the next
+  // completed search cannot be cached because QueryCache sees a duplicate.
+  EXPECT_FALSE(cache_manager_->Lookup(query).has_value());
+  EXPECT_TRUE(cache_manager_->Insert(query, {999}, {"learning"}, 1.0, 2, 0, false));
 }
 
 // =============================================================================

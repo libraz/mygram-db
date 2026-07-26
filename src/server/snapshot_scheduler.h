@@ -59,6 +59,8 @@ class SnapshotScheduler {
    * @param replication_paused_for_dump Reference to replication-paused flag, asserted while
    *        a snapshot is in progress so that manual REPLICATION START is rejected during the dump.
    * @param optimization_in_progress Optional OPTIMIZE flag; auto snapshots skip while it is set.
+   * @param shutdown_requested Optional server-shutdown flag. Once asserted,
+   *        snapshots never restart replication.
    */
   SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog, const config::Config* full_config,
                     std::string dump_dir, mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
@@ -66,7 +68,8 @@ class SnapshotScheduler {
                     replication_pause::Counter* replication_pause_counter = nullptr,
                     std::atomic<bool>* dump_load_in_progress = nullptr, SyncOperationManager* sync_manager = nullptr,
                     std::function<bool()> sync_in_progress_checker = {},
-                    std::atomic<bool>* optimization_in_progress = nullptr);
+                    std::atomic<bool>* optimization_in_progress = nullptr,
+                    std::atomic<bool>* shutdown_requested = nullptr);
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -144,6 +147,7 @@ class SnapshotScheduler {
   replication_pause::Counter* replication_pause_counter_;
   SyncOperationManager* sync_manager_;
   std::function<bool()> sync_in_progress_checker_;
+  std::atomic<bool>* shutdown_requested_;
 };
 
 }  // namespace mygramdb::server

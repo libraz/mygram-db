@@ -67,6 +67,43 @@ constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
 constexpr auto kHttpServerReadyTimeout = std::chrono::seconds(5);
 
+using mygram::utils::Error;
+using mygram::utils::ErrorCode;
+using mygram::utils::Expected;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
+
+std::string QuoteLiteralSearchExpression(std::string_view text) {
+  std::string quoted;
+  quoted.reserve(text.size() + 2);
+  quoted.push_back('"');
+  for (char character : text) {
+    if (character == '\\' || character == '"') {
+      quoted.push_back('\\');
+    }
+    quoted.push_back(character);
+  }
+  quoted.push_back('"');
+  return quoted;
+}
+
+Expected<bool, Error> ParseHttpQueryMode(const json& body) {
+  if (!body.contains("mode")) {
+    return false;
+  }
+  if (!body["mode"].is_string()) {
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'mode' must be a string"));
+  }
+  const std::string mode = body["mode"].get<std::string>();
+  if (mode == "literal") {
+    return false;
+  }
+  if (mode == "boolean") {
+    return true;
+  }
+  return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'mode' must be either 'literal' or 'boolean'"));
+}
+
 json FilterValueToJson(const storage::FilterValue& value) {
   json serialized = nullptr;
   std::visit(
@@ -222,15 +259,19 @@ bool IsSafeJsonColumnName(std::string_view column);
  *
  * @param filters_json The JSON object containing filter definitions
  * @param query The query to populate with parsed filter conditions
- * @param[out] error_message Set to error description on failure
- * @return true on success, false on parse error (error_message is set)
+ * @return Success, or a typed query error
  */
-bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::string& error_message) {
+Expected<void, Error> ParseFiltersFromJson(const json& filters_json, query::Query& query) {
   query.filters.clear();
+  if (filters_json.size() > query::QueryParser::kMaxTermCount) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kQueryInvalidFilter,
+                  "Too many FILTER conditions (max " + std::to_string(query::QueryParser::kMaxTermCount) + ")"));
+  }
+
   for (const auto& [key, val] : filters_json.items()) {
     if (!IsSafeJsonColumnName(key)) {
-      error_message = "Invalid filter column";
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter column"));
     }
 
     query::FilterCondition filter;
@@ -241,15 +282,14 @@ bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::st
       std::string op_str = val.value("op", "EQ");
       auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
       if (!parsed_op.has_value()) {
-        error_message = "Invalid filter operator: " + op_str;
-        return false;
+        return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter operator: " + op_str));
       }
       filter.op = parsed_op.value();
 
       auto str_val = JsonFilterValueToString(val["value"]);
       if (!str_val.has_value()) {
-        error_message = "Invalid filter value type for column: " + key;
-        return false;
+        return MakeUnexpected(
+            MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter value type for column: " + key));
       }
       filter.value = std::move(str_val.value());
     } else {
@@ -257,21 +297,21 @@ bool ParseFiltersFromJson(const json& filters_json, query::Query& query, std::st
       filter.op = query::FilterOp::EQ;
       auto str_val = JsonFilterValueToString(val);
       if (!str_val.has_value()) {
-        error_message = "Invalid filter value type for column: " + key;
-        return false;
+        return MakeUnexpected(
+            MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter value type for column: " + key));
       }
       filter.value = std::move(str_val.value());
     }
 
     if (filter.value.size() > query::QueryParser::kMaxFilterValueLength) {
-      error_message =
-          "FILTER value exceeds maximum length (" + std::to_string(query::QueryParser::kMaxFilterValueLength) + ")";
-      return false;
+      return MakeUnexpected(MakeError(
+          ErrorCode::kQueryInvalidFilter,
+          "FILTER value exceeds maximum length (" + std::to_string(query::QueryParser::kMaxFilterValueLength) + ")"));
     }
 
     query.filters.push_back(std::move(filter));
   }
-  return true;
+  return {};
 }
 
 bool IsSafeJsonColumnName(std::string_view column) {
@@ -303,27 +343,23 @@ bool EqualsAsciiIgnoreCase(std::string_view lhs, std::string_view rhs) {
   return true;
 }
 
-bool ParseSortFromJson(const json& sort_json, query::Query& query, std::string& error_message) {
+Expected<void, Error> ParseSortFromJson(const json& sort_json, query::Query& query) {
   if (!sort_json.is_object()) {
-    error_message = "Field 'sort' must be an object";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort' must be an object"));
   }
   if (!sort_json.contains("column") || !sort_json["column"].is_string()) {
-    error_message = "Field 'sort.column' must be a string";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort.column' must be a string"));
   }
 
   std::string column = sort_json["column"].get<std::string>();
   if (column != "_score" && column != "id" && !IsSafeJsonColumnName(column)) {
-    error_message = "Invalid sort column";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort column"));
   }
 
   query::SortOrder order = query::SortOrder::DESC;
   if (sort_json.contains("order")) {
     if (!sort_json["order"].is_string()) {
-      error_message = "Field 'sort.order' must be a string";
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort.order' must be a string"));
     }
     std::string order_str = sort_json["order"].get<std::string>();
     if (EqualsAsciiIgnoreCase(order_str, "ASC")) {
@@ -331,8 +367,7 @@ bool ParseSortFromJson(const json& sort_json, query::Query& query, std::string& 
     } else if (EqualsAsciiIgnoreCase(order_str, "DESC")) {
       order = query::SortOrder::DESC;
     } else {
-      error_message = "Invalid sort order: " + order_str;
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort order: " + order_str));
     }
   }
 
@@ -340,85 +375,79 @@ bool ParseSortFromJson(const json& sort_json, query::Query& query, std::string& 
     column.clear();  // Query AST convention: empty column means primary key.
   }
   query.order_by = query::OrderByClause{std::move(column), order};
-  return true;
+  return {};
 }
 
-bool ParseHighlightUint(const json& highlight_json, const char* field_name, uint32_t min_value, uint32_t max_value,
-                        uint32_t& out, std::string& error_message) {
+Expected<void, Error> ParseHighlightUint(const json& highlight_json, const char* field_name, uint32_t min_value,
+                                         uint32_t max_value, uint32_t& out) {
   if (!highlight_json.contains(field_name)) {
-    return true;
+    return {};
   }
   const auto& value = highlight_json[field_name];
   if (!value.is_number_unsigned() && !value.is_number_integer()) {
-    error_message = std::string("Field 'highlight.") + field_name + "' must be an integer";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError,
+                                    std::string("Field 'highlight.") + field_name + "' must be an integer"));
   }
   int64_t parsed = value.get<int64_t>();
   if (parsed < static_cast<int64_t>(min_value) || parsed > static_cast<int64_t>(max_value)) {
     std::ostringstream oss;
     oss << "Field 'highlight." << field_name << "' must be between " << min_value << " and " << max_value;
-    error_message = oss.str();
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, oss.str()));
   }
   out = static_cast<uint32_t>(parsed);
-  return true;
+  return {};
 }
 
 constexpr size_t kMaxHighlightTagLength = 256;
 
-bool ParseHighlightFromJson(const json& highlight_json, query::Query& query, std::string& error_message) {
+Expected<void, Error> ParseHighlightFromJson(const json& highlight_json, query::Query& query) {
   if (!highlight_json.is_object()) {
-    error_message = "Field 'highlight' must be an object";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight' must be an object"));
   }
 
   query::HighlightOptions opts;
   if (highlight_json.contains("open_tag")) {
     if (!highlight_json["open_tag"].is_string()) {
-      error_message = "Field 'highlight.open_tag' must be a string";
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.open_tag' must be a string"));
     }
     opts.open_tag = highlight_json["open_tag"].get<std::string>();
     if (opts.open_tag.size() > kMaxHighlightTagLength) {
-      error_message = "Field 'highlight.open_tag' must be at most 256 bytes";
-      return false;
+      return MakeUnexpected(
+          MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.open_tag' must be at most 256 bytes"));
     }
   }
   if (highlight_json.contains("close_tag")) {
     if (!highlight_json["close_tag"].is_string()) {
-      error_message = "Field 'highlight.close_tag' must be a string";
-      return false;
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.close_tag' must be a string"));
     }
     opts.close_tag = highlight_json["close_tag"].get<std::string>();
     if (opts.close_tag.size() > kMaxHighlightTagLength) {
-      error_message = "Field 'highlight.close_tag' must be at most 256 bytes";
-      return false;
+      return MakeUnexpected(
+          MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.close_tag' must be at most 256 bytes"));
     }
   }
 
-  if (!ParseHighlightUint(highlight_json, "snippet_length", 1, 10000, opts.snippet_length, error_message)) {
-    return false;
+  if (auto result = ParseHighlightUint(highlight_json, "snippet_length", 1, 10000, opts.snippet_length); !result) {
+    return result;
   }
-  if (!ParseHighlightUint(highlight_json, "max_fragments", 1, 100, opts.max_fragments, error_message)) {
-    return false;
+  if (auto result = ParseHighlightUint(highlight_json, "max_fragments", 1, 100, opts.max_fragments); !result) {
+    return result;
   }
 
   query.highlight = std::move(opts);
-  return true;
+  return {};
 }
 
-bool ParseFuzzyFromJson(const json& fuzzy_json, query::Query& query, std::string& error_message) {
+Expected<void, Error> ParseFuzzyFromJson(const json& fuzzy_json, query::Query& query) {
   if (!fuzzy_json.is_number_unsigned() && !fuzzy_json.is_number_integer()) {
-    error_message = "Field 'fuzzy' must be an integer";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'fuzzy' must be an integer"));
   }
   int64_t distance = fuzzy_json.get<int64_t>();
   if (distance < 1 || distance > 2) {
-    error_message = "Field 'fuzzy' must be 1 or 2";
-    return false;
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'fuzzy' must be 1 or 2"));
   }
   query.fuzzy_max_distance = static_cast<uint32_t>(distance);
-  return true;
+  return {};
 }
 
 std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, TableContext& table_ctx) {
@@ -480,10 +509,13 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortH
   auto scored = index::BM25Scorer::ScoreDocuments(results, normalized_terms, term_dfs, *table_ctx.doc_store,
                                                   table_ctx.bm25_stats.doc_count.load(std::memory_order_relaxed),
                                                   table_ctx.bm25_stats.avg_doc_length(), bm25_params);
+  if (!scored) {
+    return MakeUnexpected(scored.error());
+  }
 
   std::vector<double> scores;
-  scores.reserve(scored.size());
-  for (const auto& scored_doc : scored) {
+  scores.reserve(scored->size());
+  for (const auto& scored_doc : *scored) {
     scores.push_back(scored_doc.score);
   }
   return query::ResultSorter::SortByScore(results, scores, query.order_by->order, query.limit, query.offset);
@@ -499,7 +531,7 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
                        std::shared_ptr<RateLimiter> rate_limiter, std::atomic<bool>* replication_paused_for_dump,
                        SyncOperationManager* sync_manager,
                        std::function<bool(const std::string&)> table_syncing_checker,
-                       std::function<bool()> any_syncing_checker)
+                       std::function<bool()> any_syncing_checker, std::function<bool()> initial_data_ready_checker)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
       full_config_(full_config),
@@ -511,7 +543,8 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       replication_paused_for_dump_(replication_paused_for_dump),
       sync_manager_(sync_manager),
       table_syncing_checker_(std::move(table_syncing_checker)),
-      any_syncing_checker_(std::move(any_syncing_checker)) {
+      any_syncing_checker_(std::move(any_syncing_checker)),
+      initial_data_ready_checker_(std::move(initial_data_ready_checker)) {
   parsed_allow_cidrs_ = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
 
   if (full_config_ != nullptr) {
@@ -545,7 +578,7 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   server_->set_read_timeout(config_.read_timeout_sec, 0);
   server_->set_write_timeout(config_.write_timeout_sec, 0);
 
-  // Cap the maximum HTTP body size (Fix N-2). cpp-httplib rejects oversize
+  // Cap the maximum HTTP body size. cpp-httplib rejects oversize
   // POST bodies with 413 Payload Too Large before any handler runs, which
   // protects /search and /count from memory-exhaustion attacks via giant
   // JSON payloads. Default 16 MiB; configurable via api.http.max_body_bytes.
@@ -626,25 +659,34 @@ void HttpServer::SetupAccessControl() {
       return httplib::Server::HandlerResponse::Unhandled;
     }
 
-    // Check CIDR-based access control first
-    if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+    // Consume the shared request quota before ACL handling. Otherwise a
+    // denied source bypasses all rate-limit suppression and can turn the ACL
+    // warning itself into an unbounded disk-write primitive.
+    if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
       RecordRequest();
-      mygram::utils::StructuredLog()
-          .Event("http_request_rejected_acl")
-          .Field(log_fields::kFieldClientIp, client_ip)
-          .Warn();
-      SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
+      const auto decision = rate_limiter_->RecordDenialLog("http:" + client_ip);
+      if (decision.should_log) {
+        mygram::utils::StructuredLog()
+            .Event("http_rate_limit_exceeded")
+            .Field(log_fields::kFieldClientIp, client_ip)
+            .Field("suppressed_since_last_log", decision.suppressed_count)
+            .Warn();
+      }
+      SendError(res, kHttpTooManyRequests, "Rate limit exceeded");
       return httplib::Server::HandlerResponse::Handled;
     }
 
-    // Check rate limit (if enabled)
-    if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
+    if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
       RecordRequest();
-      mygram::utils::StructuredLog()
-          .Event("http_rate_limit_exceeded")
-          .Field(log_fields::kFieldClientIp, client_ip)
-          .Warn();
-      SendError(res, kHttpTooManyRequests, "Rate limit exceeded");
+      const auto decision = denial_log_limiter_.Record("acl:" + client_ip);
+      if (decision.should_log) {
+        mygram::utils::StructuredLog()
+            .Event("http_request_rejected_acl")
+            .Field(log_fields::kFieldClientIp, client_ip)
+            .Field("suppressed_since_last_log", decision.suppressed_count)
+            .Warn();
+      }
+      SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
       return httplib::Server::HandlerResponse::Handled;
     }
 
@@ -721,7 +763,7 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
 
   // Bind synchronously on the calling thread.
   //
-  // Rationale (Fix H-N1): the previous design spawned a worker thread that
+  // The previous design spawned a worker thread that
   // called `bind_to_port` then signalled completion through a promise, with
   // the parent waiting on `start_future.wait_for(timeout)`. That introduced
   // a join-deadlock window: on `wait_for` timeout the parent called
@@ -1002,10 +1044,31 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     return std::nullopt;
   }
 
+  auto boolean_mode = ParseHttpQueryMode(body);
+  if (!boolean_mode) {
+    SendError(res, kHttpBadRequest, boolean_mode.error().message());
+    return std::nullopt;
+  }
+
   query::Query parsed_query;
-  parsed_query.type = (command == "COUNT") ? query::QueryType::COUNT : query::QueryType::SEARCH;
-  parsed_query.table = lookup.table_key;
-  parsed_query.search_text = std::move(query_text);
+  if (*boolean_mode) {
+    parsed_query.type = (command == "COUNT") ? query::QueryType::COUNT : query::QueryType::SEARCH;
+    parsed_query.table = lookup.table_key;
+    parsed_query.search_text = query_text;
+    parsed_query.search_expression = std::move(query_text);
+  } else {
+    // Route literal HTTP searches through the same command parser used by the
+    // raw TCP protocol. This keeps quote preservation, punctuation, and flat
+    // search-text extraction identical across every public surface.
+    query::QueryParser parser;
+    parser.SetMaxQueryLength(max_query_length);
+    auto base_query = parser.Parse(command + " " + lookup.table_key + " " + QuoteLiteralSearchExpression(query_text));
+    if (!base_query) {
+      SendError(res, kHttpBadRequest, base_query.error().message());
+      return std::nullopt;
+    }
+    parsed_query = std::move(*base_query);
+  }
 
   if (apply_pagination) {
     // Add limit
@@ -1052,33 +1115,29 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     return std::nullopt;
   }
   if (body.contains("filters")) {
-    std::string filter_error;
-    if (!ParseFiltersFromJson(body["filters"], parsed_query, filter_error)) {
-      SendError(res, kHttpBadRequest, filter_error);
+    if (auto result = ParseFiltersFromJson(body["filters"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
       return std::nullopt;
     }
   }
 
   if (body.contains("sort")) {
-    std::string sort_error;
-    if (!ParseSortFromJson(body["sort"], parsed_query, sort_error)) {
-      SendError(res, kHttpBadRequest, sort_error);
+    if (auto result = ParseSortFromJson(body["sort"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
       return std::nullopt;
     }
   }
 
   if (body.contains("highlight")) {
-    std::string highlight_error;
-    if (!ParseHighlightFromJson(body["highlight"], parsed_query, highlight_error)) {
-      SendError(res, kHttpBadRequest, highlight_error);
+    if (auto result = ParseHighlightFromJson(body["highlight"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
       return std::nullopt;
     }
   }
 
   if (body.contains("fuzzy")) {
-    std::string fuzzy_error;
-    if (!ParseFuzzyFromJson(body["fuzzy"], parsed_query, fuzzy_error)) {
-      SendError(res, kHttpBadRequest, fuzzy_error);
+    if (auto result = ParseFuzzyFromJson(body["fuzzy"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
       return std::nullopt;
     }
   }
@@ -1132,7 +1191,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     return std::nullopt;
   }
 
-  static constexpr std::array<std::string_view, 4> kFacetRejectedFields = {"offset", "sort", "highlight", "fuzzy"};
+  static constexpr std::array<std::string_view, 3> kFacetRejectedFields = {"sort", "highlight", "fuzzy"};
   for (const auto field : kFacetRejectedFields) {
     if (body.contains(std::string(field))) {
       SendError(res, kHttpBadRequest, "Field '" + std::string(field) + "' is not supported by FACET");
@@ -1143,6 +1202,12 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   std::string column = body["column"].get<std::string>();
   if (!IsSafeJsonColumnName(column)) {
     SendError(res, kHttpBadRequest, "Invalid facet column");
+    return std::nullopt;
+  }
+
+  auto boolean_mode = ParseHttpQueryMode(body);
+  if (!boolean_mode) {
+    SendError(res, kHttpBadRequest, boolean_mode.error().message());
     return std::nullopt;
   }
 
@@ -1169,7 +1234,9 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
                       " characters. Increase api.max_query_length to permit longer queries.");
         return std::nullopt;
       }
-      parsed_query.search_text = std::move(query_text);
+      parsed_query.search_text = query_text;
+      parsed_query.search_expression =
+          *boolean_mode ? std::move(query_text) : QuoteLiteralSearchExpression(parsed_query.search_text);
     }
   }
 
@@ -1187,15 +1254,30 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     parsed_query.limit = static_cast<uint32_t>(limit);
     parsed_query.limit_explicit = true;
   }
+  if (body.contains("offset")) {
+    if (!body["offset"].is_number_integer()) {
+      SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
+      return std::nullopt;
+    }
+    const int64_t offset = body["offset"].get<int64_t>();
+    if (offset < 0 || static_cast<uint64_t>(offset) > std::numeric_limits<uint32_t>::max()) {
+      SendError(res, kHttpBadRequest, "Invalid offset: must be between 0 and 4294967295");
+      return std::nullopt;
+    }
+    parsed_query.offset = static_cast<uint32_t>(offset);
+    parsed_query.offset_explicit = true;
+  }
+  if (!parsed_query.limit_explicit) {
+    parsed_query.limit = static_cast<uint32_t>(default_limit_.load(std::memory_order_acquire));
+  }
 
   if (body.contains("filters") && !body["filters"].is_object()) {
     SendError(res, kHttpBadRequest, "Field 'filters' must be an object");
     return std::nullopt;
   }
   if (body.contains("filters")) {
-    std::string filter_error;
-    if (!ParseFiltersFromJson(body["filters"], parsed_query, filter_error)) {
-      SendError(res, kHttpBadRequest, filter_error);
+    if (auto result = ParseFiltersFromJson(body["filters"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
       return std::nullopt;
     }
   }
@@ -1230,22 +1312,23 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
-    if (!pipeline_output.success) {
-      SendError(res, kHttpBadRequest, pipeline_output.error_message);
+    if (!pipeline_output) {
+      SendError(res, kHttpBadRequest, pipeline_output.error().to_string());
       return;
     }
 
-    auto& results = pipeline_output.results;
+    auto& results = pipeline_output->results;
     size_t total_count = results.size();
     auto topn = search_pipeline::ApplySearchTopNOptimization(
-        *query, params.current_index, params.current_doc_store, full_config_, pipeline_output.term_infos,
-        pipeline_output.all_search_terms, pipeline_output.cache_hit, params.primary_key_column, results);
+        *query, params.current_index, params.current_doc_store, full_config_, pipeline_output->term_infos,
+        pipeline_output->all_search_terms, pipeline_output->semantics_reproducible_by_single_term_ngram_and,
+        pipeline_output->cache_hit, params.primary_key_column, results);
     if (topn.applicable) {
       total_count = topn.total_results;
     }
 
     auto sorted_result =
-        SortHttpResults(results, *query, *table_ctx, pipeline_output, full_config_, params.primary_key_column);
+        SortHttpResults(results, *query, *table_ctx, *pipeline_output, full_config_, params.primary_key_column);
     if (!sorted_result.has_value()) {
       SendError(res, kHttpBadRequest, sorted_result.error().message());
       return;
@@ -1261,6 +1344,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     json results_array = json::array();
     auto docs = current_doc_store->GetDocumentsBatch(sorted_results);
     std::vector<std::optional<std::string>> highlight_texts;
+    std::vector<std::optional<std::string>> original_highlight_texts;
     std::vector<std::string> highlight_terms;
     if (query->highlight.has_value()) {
       if (!current_doc_store->IsStoreTextsEnabled()) {
@@ -1270,7 +1354,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         return;
       }
       highlight_texts = current_doc_store->GetNormalizedTextBatch(sorted_results);
-      highlight_terms = BuildHighlightTerms(pipeline_output.all_search_terms, *table_ctx);
+      original_highlight_texts = current_doc_store->GetOriginalTextBatch(sorted_results);
+      highlight_terms = BuildHighlightTerms(pipeline_output->all_search_terms, *table_ctx);
     }
     for (size_t i = 0; i < docs.size(); ++i) {
       if (docs[i]) {
@@ -1287,7 +1372,12 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         }
 
         if (query->highlight.has_value() && i < highlight_texts.size()) {
-          if (highlight_texts[i].has_value()) {
+          if (i < original_highlight_texts.size() && original_highlight_texts[i].has_value()) {
+            auto hl = query::Highlighter::GenerateOriginal(
+                *original_highlight_texts[i], highlight_terms,
+                [&](std::string_view text) { return table_ctx->index->NormalizeText(text); }, *query->highlight);
+            doc_obj["highlight"] = hl.snippet;
+          } else if (highlight_texts[i].has_value()) {
             auto hl = query::Highlighter::Generate(*highlight_texts[i], highlight_terms, *query->highlight);
             doc_obj["highlight"] = hl.snippet;
           } else {
@@ -1332,14 +1422,14 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
 
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
-    if (!pipeline_output.success) {
-      SendError(res, kHttpBadRequest, pipeline_output.error_message);
+    if (!pipeline_output) {
+      SendError(res, kHttpBadRequest, pipeline_output.error().to_string());
       return;
     }
 
     // Build JSON response - just return count
     json response;
-    response["count"] = pipeline_output.results.size();
+    response["count"] = pipeline_output->results.size();
 
     SendJson(res, kHttpOk, response);
 
@@ -1366,68 +1456,24 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
     auto* table_ctx = prepared->table_ctx;
     auto& query_ref = prepared->query;
     auto* query = &query_ref;
-    auto* current_doc_store = table_ctx->doc_store.get();
-    auto* current_index = table_ctx->index.get();
-    std::string facet_column = query->facet_column;
-    if (auto resolved_column = current_doc_store->ResolveFilterColumnName(facet_column)) {
-      facet_column = *resolved_column;
+    search_pipeline::FacetPipelineParams params;
+    params.search = search_pipeline::BuildPipelineParamsFromContext(
+        *table_ctx, full_config_, cache_manager_, SearchHandler::GetFilterThreshold(), /*attach_bm25_stats=*/true);
+    for (const auto& filter : config::BuildUnifiedFilterConfigs(table_ctx->config)) {
+      params.configured_filter_columns.push_back(filter.name);
     }
-
-    auto filter_index = current_doc_store->GetFilterIndex();
-    if (!filter_index) {
-      SendError(res, kHttpInternalServerError, "Filter index not available");
+    params.load_in_progress = [this]() { return loading_ != nullptr && loading_->load(std::memory_order_acquire); };
+    auto facet_output = search_pipeline::ExecuteFacetPipeline(*query, params);
+    if (!facet_output) {
+      const int status = facet_output.error().code() == mygram::utils::ErrorCode::kServerShuttingDown
+                             ? kHttpServiceUnavailable
+                             : kHttpBadRequest;
+      SendError(res, status, facet_output.error().to_string());
       return;
     }
 
-    std::vector<std::pair<std::string, uint64_t>> value_counts;
-    const bool has_search = !query->search_text.empty() || !query->and_terms.empty();
-    const bool has_not = !query->not_terms.empty();
-    const bool has_filters = !query->filters.empty();
-
-    if (has_search || has_not || has_filters) {
-      std::vector<storage::DocId> results;
-      if (has_search) {
-        auto params = search_pipeline::BuildPipelineParamsFromContext(*table_ctx, full_config_, cache_manager_,
-                                                                      SearchHandler::GetFilterThreshold(),
-                                                                      /*attach_bm25_stats=*/true);
-        auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
-        if (!pipeline_output.success) {
-          SendError(res, kHttpBadRequest, pipeline_output.error_message);
-          return;
-        }
-        results = std::move(pipeline_output.results);
-      } else {
-        results = current_doc_store->GetAllDocIds();
-
-        if (has_not) {
-          results = search_pipeline::ApplyNotFilter(results, query->not_terms, current_index, current_doc_store,
-                                                    table_ctx->config.ngram_size, table_ctx->config.kanji_ngram_size,
-                                                    table_ctx->config.cross_boundary_ngrams);
-        }
-
-        if (has_filters) {
-          results = search_pipeline::ApplyFiltersWithBitmap(results, query->filters, current_doc_store);
-        }
-      }
-
-      if (!results.empty()) {
-        auto result_bitmap = mygram::utils::MakeRoaringFromVector(results);
-        if (result_bitmap == nullptr) {
-          SendError(res, kHttpInternalServerError, "Failed to allocate result bitmap");
-          return;
-        }
-        value_counts = filter_index->GetColumnValueCountsFiltered(facet_column, result_bitmap.get());
-      }
-    } else {
-      value_counts = filter_index->GetColumnValueCounts(facet_column);
-    }
-
-    if (query->limit_explicit && value_counts.size() > query->limit) {
-      value_counts.resize(query->limit);
-    }
-
     json facets = json::array();
-    for (auto& [serialized, count] : value_counts) {
+    for (auto& [serialized, count] : facet_output->value_counts) {
       facets.push_back({
           {"value", storage::FilterIndex::DeserializeToDisplayString(serialized)},
           {"count", count},
@@ -1638,8 +1684,16 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["current_entries"] = cache_stats.current_entries;
       cache_obj["memory_bytes"] = cache_stats.current_memory_bytes;
       cache_obj["memory_human"] = mygram::utils::FormatBytes(cache_stats.current_memory_bytes);
+      cache_obj["invalidation_index_memory_bytes"] = cache_stats.invalidation_index_memory_bytes;
+      cache_obj["accounted_memory_bytes"] = cache_stats.accounted_memory_bytes;
+      cache_obj["accounted_memory_human"] = mygram::utils::FormatBytes(cache_stats.accounted_memory_bytes);
       cache_obj["evictions"] = cache_stats.evictions;
       cache_obj["ttl_expirations"] = cache_stats.ttl_expirations;
+      cache_obj["rejection_count"] = cache_stats.rejection_count;
+      cache_obj["rejection_oversize"] = cache_stats.rejection_oversize;
+      cache_obj["rejection_duplicate"] = cache_stats.rejection_duplicate;
+      cache_obj["decompression_failures"] = cache_stats.decompression_failures;
+      cache_obj["stale_lru_entries"] = cache_stats.stale_lru_entries;
       cache_obj["invalidations_immediate"] = cache_stats.invalidations_immediate;
       cache_obj["invalidations_deferred"] = cache_stats.invalidations_deferred;
       cache_obj["invalidations_batches"] = cache_stats.invalidations_batches;
@@ -1701,16 +1755,18 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
 #else
                                                      false;
 #endif
+  const bool initial_data_ready = initial_data_ready_checker_ ? initial_data_ready_checker_() : true;
 #ifdef USE_MYSQL
   const bool replication_unavailable =
       (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !replication_paused_for_dump && !sync_in_progress);
 #else
   const bool replication_unavailable = false;
 #endif
-  bool is_ready = !is_loading && !sync_in_progress && !replication_unavailable;
+  bool is_ready = initial_data_ready && !is_loading && !sync_in_progress && !replication_unavailable;
 
   json response;
   response["loading"] = is_loading;
+  response["data_initialized"] = initial_data_ready;
 #ifdef USE_MYSQL
   if (binlog_reader_ != nullptr) {
     response["replication_running"] = !replication_unavailable;
@@ -1726,7 +1782,9 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
     SendJson(res, kHttpOk, response);
   } else {
     response["status"] = "not_ready";
-    if (is_loading) {
+    if (!initial_data_ready) {
+      response["reason"] = "Initial data has not been loaded";
+    } else if (is_loading) {
       response["reason"] = "Server is loading";
     } else if (sync_in_progress) {
       response["reason"] = "SYNC is in progress";

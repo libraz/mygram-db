@@ -22,6 +22,7 @@
 #include "server/response_formatter.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
+#include "server/table_catalog.h"
 
 namespace mygramdb::server {
 
@@ -39,9 +40,11 @@ class CacheHandlerTest : public ::testing::Test {
     cache_manager_ = std::make_unique<cache::CacheManager>(config_->cache, cache::NgramConfigMap{});
 
     stats_ = std::make_unique<ServerStats>();
+    catalog_ =
+        std::make_unique<TableCatalog>(std::unordered_map<std::string, TableContext*>{{"app_db.articles", nullptr}});
 
     handler_ctx_ = std::make_unique<HandlerContext>(HandlerContext{
-        .table_catalog = nullptr,
+        .table_catalog = catalog_.get(),
         .stats = *stats_,
         .full_config = config_.get(),
         .dump_dir = "/tmp",
@@ -63,6 +66,7 @@ class CacheHandlerTest : public ::testing::Test {
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<ServerStats> stats_;
+  std::unique_ptr<TableCatalog> catalog_;
   std::atomic<bool> dump_load_in_progress_{false};
   std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
@@ -119,6 +123,48 @@ TEST_F(CacheHandlerTest, EnableDisableResponsesShareOkPrefix) {
   disable_query.type = query::QueryType::CACHE_DISABLE;
   std::string disable_response = handler_->Handle(disable_query, conn_ctx_);
   EXPECT_EQ(disable_response.rfind("OK ", 0), 0U) << "Response: " << disable_response;
+}
+
+TEST_F(CacheHandlerTest, StatsExposeAccountedMemoryAndRejectionReasons) {
+  query::Query query;
+  query.type = query::QueryType::CACHE_STATS;
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_NE(response.find("current_memory_bytes:"), std::string::npos);
+  EXPECT_NE(response.find("invalidation_index_memory_bytes:"), std::string::npos);
+  EXPECT_NE(response.find("accounted_memory_bytes:"), std::string::npos);
+  EXPECT_NE(response.find("rejection_count:"), std::string::npos);
+  EXPECT_NE(response.find("rejection_oversize:"), std::string::npos);
+  EXPECT_NE(response.find("rejection_duplicate:"), std::string::npos);
+  EXPECT_NE(response.find("decompression_failures:"), std::string::npos);
+  EXPECT_NE(response.find("stale_lru_entries:"), std::string::npos);
+}
+
+TEST_F(CacheHandlerTest, ClearRejectsUnknownTableAndCanonicalizesKnownTable) {
+  query::Query unknown;
+  unknown.type = query::QueryType::CACHE_CLEAR;
+  unknown.table = "missing";
+  EXPECT_EQ(handler_->Handle(unknown, conn_ctx_),
+            ResponseFormatter::FormatError("Table not found or ambiguous: missing"));
+
+  query::Query known;
+  known.type = query::QueryType::CACHE_CLEAR;
+  known.table = "articles";
+  EXPECT_EQ(handler_->Handle(known, conn_ctx_), ResponseFormatter::FormatStatus("CACHE_CLEARED table=app_db.articles"));
+}
+
+TEST_F(CacheHandlerTest, ClearRejectsRequestsWhileCacheIsDisabled) {
+  cache_manager_->Disable();
+
+  query::Query clear_all;
+  clear_all.type = query::QueryType::CACHE_CLEAR;
+  EXPECT_EQ(handler_->Handle(clear_all, conn_ctx_), ResponseFormatter::FormatError("Cache is disabled"));
+
+  query::Query clear_table;
+  clear_table.type = query::QueryType::CACHE_CLEAR;
+  clear_table.table = "articles";
+  EXPECT_EQ(handler_->Handle(clear_table, conn_ctx_), ResponseFormatter::FormatError("Cache is disabled"));
 }
 
 }  // namespace mygramdb::server

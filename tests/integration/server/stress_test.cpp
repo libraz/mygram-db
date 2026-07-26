@@ -37,9 +37,9 @@ class StressTest : public ::testing::Test {
 
 /**
  * @brief Test with 100,000 documents
- * This test is disabled by default in CI due to time constraints
+ * This test is gated by the LOAD label and runs via make test-load.
  */
-TEST_F(StressTest, DISABLED_LargeScale100K) {
+TEST_F(StressTest, LargeScale100K) {
   const int num_docs = 100000;
 
   auto start = std::chrono::high_resolution_clock::now();
@@ -98,9 +98,9 @@ TEST_F(StressTest, DISABLED_LargeScale100K) {
 
 /**
  * @brief Test with 1 million documents (if resources allow)
- * This test is disabled by default due to resource requirements
+ * This test is gated by the LOAD label and runs via make test-load.
  */
-TEST_F(StressTest, DISABLED_LargeScale1M) {
+TEST_F(StressTest, LargeScale1M) {
   const int num_docs = 1000000;
 
   auto start = std::chrono::high_resolution_clock::now();

@@ -31,7 +31,14 @@ bool RequestDispatcher::HasHandler(query::QueryType type) const {
 std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionContext& conn_ctx) {
   if (ctx_.rate_limiter != nullptr && !conn_ctx.client_ip.empty() &&
       !ctx_.rate_limiter->AllowRequest(conn_ctx.client_ip)) {
-    mygram::utils::StructuredLog().Event("rate_limit_exceeded").Field("client_ip", conn_ctx.client_ip).Warn();
+    const auto decision = ctx_.rate_limiter->RecordDenialLog("tcp:" + conn_ctx.client_ip);
+    if (decision.should_log) {
+      mygram::utils::StructuredLog()
+          .Event("rate_limit_exceeded")
+          .Field("client_ip", conn_ctx.client_ip)
+          .Field("suppressed_since_last_log", decision.suppressed_count)
+          .Warn();
+    }
     return ResponseFormatter::FormatError("Rate limit exceeded");
   }
 
@@ -61,7 +68,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
   }
 
   // Apply configured default LIMIT if not explicitly specified
-  if (!query->limit_explicit && (query->type == query::QueryType::SEARCH)) {
+  if (!query->limit_explicit && (query->type == query::QueryType::SEARCH || query->type == query::QueryType::FACET)) {
     query->limit = static_cast<uint32_t>(default_limit_.load(std::memory_order_acquire));
   }
 

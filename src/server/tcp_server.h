@@ -60,6 +60,8 @@ class RuntimeVariableManager;
 
 namespace mygramdb::server {
 
+using SyncCompletionCallback = std::function<void(const std::string&)>;
+
 /**
  * @brief Simple TCP server for text protocol
  *
@@ -79,7 +81,7 @@ class TcpServer {
    */
   TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
             std::string dump_dir = "./dumps", const config::Config* full_config = nullptr,
-            mysql::IBinlogReader* binlog_reader = nullptr);
+            mysql::IBinlogReader* binlog_reader = nullptr, SyncCompletionCallback sync_completion_callback = {});
 
   ~TcpServer();
 
@@ -141,7 +143,7 @@ class TcpServer {
    * NOTE: These raw-pointer accessors are an architectural shortcut for injecting
    * shared state into HttpServer and handlers. Ideally these dependencies should be
    * injected at construction time. Retained for now to avoid a large-scale refactor
-   * of the server initialization order. [AUDIT:raw-pointer-accessors]
+   * of the server initialization order.
    */
   std::atomic<bool>* GetDumpLoadInProgressFlag() { return &dump_load_in_progress_; }
 
@@ -199,7 +201,7 @@ class TcpServer {
    * Returned by reference so callers can construct an HttpServer that
    * shares the same RateLimiter instance. A client's quota MUST apply across
    * protocols; two independent limiters give the client effectively 2x the
-   * configured limit (Fix N-4).
+   * configured limit.
    *
    * Returns nullptr-equivalent shared_ptr if rate limiting is disabled.
    */
@@ -233,7 +235,7 @@ class TcpServer {
   replication_pause::Counter replication_pause_counter_;
   // Set by Stop() before joining the dump worker so DumpSaveWorker / DumpLoadWorker
   // can skip the post-operation binlog Start() when the server is tearing down
-  // (see CR-3 / CR-10 audit, May 2026). Without this, a worker that observes
+  // Without this, a worker that observes
   // replication_was_running=true at entry will call binlog_reader_->Start()
   // during shutdown — racing the binlog_reader's destructor.
   std::atomic<bool> shutdown_in_progress_{false};
@@ -248,12 +250,13 @@ class TcpServer {
   std::unique_ptr<SnapshotScheduler> scheduler_;
   std::unique_ptr<cache::CacheManager> cache_manager_;
   std::unique_ptr<config::RuntimeVariableManager> variable_manager_;
-  // shared_ptr so the same instance can be co-owned with HttpServer (Fix N-4).
+  // shared_ptr so the same instance can be co-owned with HttpServer.
   // ServerLifecycleManager constructs both servers and hands the same shared
   // RateLimiter to each so a client's quota applies across protocols.
   std::shared_ptr<RateLimiter> rate_limiter_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
+  SyncCompletionCallback sync_completion_callback_;
   std::function<bool(int)> sync_shutdown_wait_hook_for_test_;
 #endif
 

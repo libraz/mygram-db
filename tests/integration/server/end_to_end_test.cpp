@@ -437,9 +437,10 @@ TEST_F(EndToEndTest, WorkflowWithFacet) {
   // "news" has most docs (3 including "sports news"), should be first
   EXPECT_TRUE(response.find("news") != std::string::npos);
 
-  // Facet on non-existent column — should return empty
+  // Facet on a non-existent column — reject the invalid request rather than
+  // presenting an empty result as if the column existed.
   response = client.SendCommand("FACET posts nonexistent");
-  EXPECT_TRUE(response.find("OK FACET 0") == 0);
+  EXPECT_TRUE(response.find("ERROR") == 0);
 
   // Facet on non-existent table — should return error
   response = client.SendCommand("FACET nonexistent category");

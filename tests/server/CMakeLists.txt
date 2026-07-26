@@ -24,10 +24,24 @@ target_link_libraries(server_stats_test
 )
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid server stats state conflicts
-gtest_discover_tests(server_stats_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
+gtest_add_tests(
+  TARGET server_stats_test
+  SOURCES server_stats_test.cpp
+  TEST_LIST server_stats_registered_tests
+)
+set_tests_properties(${server_stats_registered_tests}
   PROPERTIES RESOURCE_LOCK server_state
+)
+list(FIND server_stats_registered_tests
+  "ServerStatsTest.ActiveConnectionsDecrementSaturatesAtZero"
+  active_connections_saturation_index
+)
+if(active_connections_saturation_index EQUAL -1)
+  message(FATAL_ERROR
+    "Exact CONCURRENCY test not found: ServerStatsTest.ActiveConnectionsDecrementSaturatesAtZero")
+endif()
+set_property(TEST "ServerStatsTest.ActiveConnectionsDecrementSaturatesAtZero"
+  APPEND PROPERTY LABELS "CONCURRENCY"
 )
 
 # ResponseFormatter tests
@@ -100,7 +114,9 @@ target_compile_definitions(tcp_server_search_test PRIVATE
 gtest_discover_tests(tcp_server_search_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK server_port
 )
 
 add_executable(tcp_server_commands_test
@@ -115,7 +131,9 @@ target_link_libraries(tcp_server_commands_test
 gtest_discover_tests(tcp_server_commands_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK server_port
 )
 
 add_executable(tcp_server_advanced_test
@@ -138,6 +156,8 @@ add_executable(tcp_server_lifecycle_test
   tcp_server_lifecycle_test.cpp
 )
 
+target_compile_definitions(tcp_server_lifecycle_test PRIVATE MYGRAMDB_SYNC_TEST_HOOKS)
+
 target_link_libraries(tcp_server_lifecycle_test
   mygramdb_server
   GTest::gtest_main
@@ -146,7 +166,9 @@ target_link_libraries(tcp_server_lifecycle_test
 gtest_discover_tests(tcp_server_lifecycle_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
+  PROPERTIES
+    RESOURCE_LOCK server_port
+    TIMEOUT 30
 )
 
 # Thread Pool tests
@@ -160,14 +182,25 @@ target_link_libraries(thread_pool_test
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention
-# SLOW: Multiple sleep_for calls for timing-dependent thread pool behavior
-gtest_discover_tests(thread_pool_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES
-    LABELS "SLOW"
-    RESOURCE_LOCK thread_resources
+# RESOURCE_LOCK: Prevent parallel execution to avoid thread resource contention.
+mygramdb_add_split_gtests(thread_pool_test
+  SOURCE thread_pool_test.cpp
+  RESOURCE_LOCK thread_resources
+  SLOW_TIMEOUT 30
+  ALL_CONCURRENCY
+  SLOW_TESTS
+    ThreadPoolTest.SubmitAndExecute
+    ThreadPoolTest.MultipleTasks
+    ThreadPoolTest.QueueSize
+    ThreadPoolTest.BoundedQueue
+    ThreadPoolTest.QueueFullRejectsTasks
+    ThreadPoolTest.Shutdown
+    ThreadPoolTest.ShutdownRejectsTasks
+    ThreadPoolTest.DestructorWaitsForTasks
+    ThreadPoolTest.ExceptionHandling
+    ThreadPoolTest.ShutdownWithTimeoutWakesPromptlyOnDrain
+    ThreadPoolTest.ShutdownWithTimeoutAbortsAfterDeadline
+    ThreadPoolTest.ShutdownTimeoutDiscardsPendingTasks
 )
 
 # Thread Pool shutdown tests
@@ -190,12 +223,17 @@ if(APPLE)
     PROPERTIES
       RESOURCE_LOCK thread_resources
       RUN_SERIAL TRUE
+      LABELS "SLOW"
+      TIMEOUT 30
   )
 else()
   gtest_discover_tests(thread_pool_shutdown_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
-    PROPERTIES RESOURCE_LOCK thread_resources
+    PROPERTIES
+      LABELS "SLOW"
+      RESOURCE_LOCK thread_resources
+      TIMEOUT 30
   )
 endif()
 
@@ -217,7 +255,6 @@ target_include_directories(http_server_basic_test PRIVATE ${CMAKE_BINARY_DIR}/sr
 gtest_discover_tests(http_server_basic_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
 )
 
 add_executable(http_server_search_test
@@ -236,7 +273,6 @@ target_include_directories(http_server_search_test PRIVATE ${CMAKE_BINARY_DIR}/s
 gtest_discover_tests(http_server_search_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
 )
 
 # Cross-protocol consistency: same pipeline used by HTTP and TCP
@@ -246,6 +282,7 @@ add_executable(http_tcp_consistency_test
 
 target_link_libraries(http_tcp_consistency_test
   mygramdb_server
+  mygramclient_static
   httplib::httplib
   nlohmann_json::nlohmann_json
   GTest::gtest_main
@@ -256,7 +293,6 @@ target_include_directories(http_tcp_consistency_test PRIVATE ${CMAKE_BINARY_DIR}
 gtest_discover_tests(http_tcp_consistency_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
 )
 
 add_executable(http_server_document_test
@@ -275,7 +311,6 @@ target_include_directories(http_server_document_test PRIVATE ${CMAKE_BINARY_DIR}
 gtest_discover_tests(http_server_document_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
 )
 
 add_executable(http_server_features_test
@@ -294,7 +329,8 @@ target_include_directories(http_server_features_test PRIVATE ${CMAKE_BINARY_DIR}
 gtest_discover_tests(http_server_features_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
+  PROPERTIES
+    LABELS "SLOW"
 )
 
 add_executable(http_server_test
@@ -312,7 +348,6 @@ target_include_directories(http_server_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 gtest_discover_tests(http_server_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
 )
 
 # DumpProgress thread safety tests
@@ -330,7 +365,9 @@ target_link_libraries(dump_progress_test
 gtest_discover_tests(dump_progress_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    RESOURCE_LOCK thread_resources
+    TIMEOUT 30
 )
 
 # DumpHandler tests
@@ -443,7 +480,9 @@ target_compile_definitions(sync_cancel_replication_test PRIVATE MYGRAMDB_SYNC_TE
 gtest_discover_tests(sync_cancel_replication_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    RESOURCE_LOCK thread_resources
+    TIMEOUT 30
 )
 
 # SyncOperationManager Deadlock Prevention tests
@@ -461,7 +500,9 @@ target_link_libraries(sync_operation_manager_deadlock_test
 gtest_discover_tests(sync_operation_manager_deadlock_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    RESOURCE_LOCK thread_resources
+    TIMEOUT 30
 )
 
 # SyncOperationManager API tests (idle-state helpers)
@@ -469,6 +510,8 @@ gtest_discover_tests(sync_operation_manager_deadlock_test
 add_executable(sync_operation_manager_test
   sync_operation_manager_test.cpp
 )
+
+target_compile_definitions(sync_operation_manager_test PRIVATE MYGRAMDB_SYNC_TEST_HOOKS)
 
 target_link_libraries(sync_operation_manager_test
   mygramdb_server
@@ -478,7 +521,9 @@ target_link_libraries(sync_operation_manager_test
 gtest_discover_tests(sync_operation_manager_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK thread_resources
+  PROPERTIES
+    RESOURCE_LOCK thread_resources
+    LABELS CONCURRENCY
 )
 
 # RateLimiter tests
@@ -492,14 +537,18 @@ target_link_libraries(rate_limiter_test
   GTest::gtest_main
 )
 
-# TokenBucketTest.CapacityLimit uses sleep-based timing (~2 seconds)
-gtest_discover_tests(rate_limiter_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES
-    LABELS "SLOW"
-    RESOURCE_LOCK thread_resources
-    TIMEOUT 30
+mygramdb_add_split_gtests(rate_limiter_test
+  SOURCE rate_limiter_test.cpp
+  RESOURCE_LOCK thread_resources
+  SLOW_TIMEOUT 30
+  SLOW_TESTS
+    TokenBucketTest.TokenRefill
+    TokenBucketTest.CapacityLimit
+    RateLimiterTest.RealisticRefill
+    RateLimiterTest.NoDeadlockUnderConcurrentLoad
+    RateLimiterTest.GetStatsDoesNotBlockAllowRequest
+    RateLimiterTest.BackgroundSweeperRemovesExpiredBuckets
+    RateLimiterTest.AllowRequestNoLongerPerformsInlineCleanup
 )
 
 # RateLimiter cleanup tests
@@ -538,7 +587,10 @@ target_link_libraries(connection_limit_test
 gtest_discover_tests(connection_limit_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_port
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK server_port
+    TIMEOUT 30
 )
 
 # Health Endpoint tests
@@ -556,21 +608,18 @@ target_link_libraries(health_endpoint_test
 
 target_include_directories(health_endpoint_test PRIVATE ${CMAKE_BINARY_DIR}/src)
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid port binding conflicts
 # On macOS, run serially to avoid network stack resource contention
 if(APPLE)
   gtest_discover_tests(health_endpoint_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES
-      RESOURCE_LOCK server_port
       RUN_SERIAL TRUE
   )
 else()
   gtest_discover_tests(health_endpoint_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
-    PROPERTIES RESOURCE_LOCK server_port
   )
 endif()
 
@@ -706,14 +755,24 @@ target_link_libraries(snapshot_scheduler_test
   GTest::gtest_main
 )
 
-# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts
-# SLOW: StartStopRapidly takes 5.1+ seconds
-gtest_discover_tests(snapshot_scheduler_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES
-    LABELS "SLOW"
-    RESOURCE_LOCK storage_io
+# RESOURCE_LOCK: Prevent parallel execution to avoid file I/O conflicts.
+mygramdb_add_split_gtests(snapshot_scheduler_test
+  SOURCE snapshot_scheduler_test.cpp
+  RESOURCE_LOCK storage_io
+  SLOW_TIMEOUT 30
+  SLOW_TESTS
+    SnapshotSchedulerTest.AutoSnapshotSkipsWhileDumpLoadInProgress
+    SnapshotSchedulerTest.AutoSnapshotSkipsWhileOptimizeInProgress
+    SnapshotSchedulerTest.AutoSnapshotSkipsWhileSyncInProgress
+    SnapshotSchedulerTest.CleanupRemovesOldAutoAndManualDumpTempFiles
+    SnapshotSchedulerTest.CleanupContinuesOnDeleteFailure
+    SnapshotSchedulerTest.StartStopRapidly
+    SnapshotSchedulerTest.TakeSnapshotPausesAndResumesReplication
+    SnapshotSchedulerTest.TakeSnapshotSkipsReplicationControlWhenStopped
+    SnapshotSchedulerTest.AutoSnapshotDoesNotRestartIfManualStopWinsRaceBeforePause
+    SnapshotSchedulerTest.AutoSnapshotRejectsEmptyGtidAfterManualStopRace
+    SnapshotSchedulerTest.AutoSnapshotDoesNotRestartWhenAnotherOperationHoldsPause
+    SnapshotSchedulerTest.AutoSnapshotPauseResumeStillWorksOnCleanCounter
 )
 
 # SearchHandler tests
@@ -847,7 +906,10 @@ target_link_libraries(connection_acceptor_tcp_test
 gtest_discover_tests(connection_acceptor_tcp_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK server_socket
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK server_socket
+    TIMEOUT 30
 )
 
 # Socket utilities tests (TrySetSockOpt helper)
@@ -891,6 +953,8 @@ add_executable(io_reactor_test
   ${CMAKE_CURRENT_SOURCE_DIR}/reactor/mock_event_multiplexer.cpp
 )
 
+target_compile_definitions(io_reactor_test PRIVATE MYGRAMDB_REACTOR_CONNECTION_TEST_HOOKS)
+
 target_link_libraries(io_reactor_test
   mygramdb_server
   GTest::gtest_main
@@ -900,13 +964,21 @@ target_include_directories(io_reactor_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/reactor
 )
 
-# SLOW: IdleConnectionIsReaped / ActiveConnectionIsNotReaped sleep ~2.5s each
-gtest_discover_tests(io_reactor_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES
-    LABELS "SLOW"
-    RESOURCE_LOCK thread_resources
+mygramdb_add_split_gtests(io_reactor_test
+  SOURCE io_reactor_test.cpp
+  RESOURCE_LOCK thread_resources
+  SLOW_TIMEOUT 30
+  ALL_CONCURRENCY
+  SLOW_TESTS
+    IoReactorTest.EventDispatchRoutesToCorrectConnection
+    IoReactorTest.PolledEventFromOldRegistrationCannotCloseReusedFd
+    IoReactorTest.IdleConnectionIsReaped
+    IoReactorTest.ActiveConnectionIsNotReaped
+    IoReactorTest.InitialReadTimeoutClosesConnectionDespitePartialBytes
+    IoReactorTest.StopReturnsPromptlyWithLongPollTimeout
+    IoReactorTest.StopReturnsPromptlyWithRealBackend
+    IoReactorTest.RegisterRaceWithStopLeavesNoStaleEntries
+    IoReactorTest.RegisterPublishIsSerializedBeforeStopClear
 )
 
 # ReactorConnection unit tests (Step 2.T4)
@@ -922,8 +994,26 @@ target_link_libraries(reactor_connection_test
 
 target_compile_definitions(reactor_connection_test PRIVATE MYGRAMDB_REACTOR_CONNECTION_TEST_HOOKS)
 
-gtest_discover_tests(reactor_connection_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
+gtest_add_tests(
+  TARGET reactor_connection_test
+  SOURCES reactor_connection_test.cpp
+  TEST_LIST reactor_connection_registered_tests
+)
+set_tests_properties(${reactor_connection_registered_tests}
   PROPERTIES RESOURCE_LOCK thread_resources
 )
+foreach(reactor_connection_concurrency_test
+    "ReactorConnectionNoDispatcherTest.ReadOverflowErrorHoldsWriteMutexAcrossSend"
+    "ReactorConnectionTest.ThreadPoolQueueExhaustionSendsServerBusyBeforeClosing")
+  list(FIND reactor_connection_registered_tests
+    "${reactor_connection_concurrency_test}"
+    reactor_connection_concurrency_index
+  )
+  if(reactor_connection_concurrency_index EQUAL -1)
+    message(FATAL_ERROR
+      "Exact CONCURRENCY test not found: ${reactor_connection_concurrency_test}")
+  endif()
+  set_property(TEST "${reactor_connection_concurrency_test}"
+    APPEND PROPERTY LABELS "CONCURRENCY"
+  )
+endforeach()

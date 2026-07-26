@@ -29,6 +29,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
+#include "server/denial_log_limiter.h"
 #include "server/rate_limiter.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
@@ -138,7 +139,7 @@ class HttpServer {
              ServerStats* tcp_stats = nullptr, std::shared_ptr<RateLimiter> rate_limiter = nullptr,
              std::atomic<bool>* replication_paused_for_dump = nullptr, SyncOperationManager* sync_manager = nullptr,
              std::function<bool(const std::string&)> table_syncing_checker = {},
-             std::function<bool()> any_syncing_checker = {});
+             std::function<bool()> any_syncing_checker = {}, std::function<bool()> initial_data_ready_checker = {});
 
   ~HttpServer();
 
@@ -194,10 +195,9 @@ class HttpServer {
    * that shared instance. Otherwise the local `stats_` is used (the
    * standalone HttpServer mode used by unit tests).
    *
-   * Reconciles review finding L-6: previously `stats_` was always exposed
-   * even when it was dead (because `RecordRequest()` had already routed
-   * counter increments to the shared tcp_stats instance), causing /info to
-   * appear to "lose" requests when the dead `stats_` was queried directly.
+   * This prevents the embedded server from querying the inactive local
+   * counter after `RecordRequest()` has routed increments to shared TCP
+   * statistics.
    */
   uint64_t GetTotalRequests() const { return GetEffectiveStats().GetTotalRequests(); }
 
@@ -218,7 +218,7 @@ class HttpServer {
   // Uses std::unordered_map (not absl::flat_hash_map) to match the
   // std::unordered_map<> parameter type used by ResponseFormatter and
   // StatisticsService. The HTTP handler's table lookup frequency is low
-  // enough that the difference is negligible (reviewed: D3 false positive).
+  // enough that the difference is negligible.
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::atomic<int> default_limit_{config::defaults::kDefaultLimit};
   std::atomic<size_t> max_query_length_{0};  // Configured max query length limit
@@ -254,12 +254,14 @@ class HttpServer {
   // `full_config_->api.rate_limiting`.
   std::shared_ptr<RateLimiter> rate_limiter_;
   std::vector<mygram::utils::CIDR> parsed_allow_cidrs_;
+  DenialLogLimiter denial_log_limiter_;
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
   ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
   std::atomic<bool>* replication_paused_for_dump_ = nullptr;
   SyncOperationManager* sync_manager_ = nullptr;
   std::function<bool(const std::string&)> table_syncing_checker_;
   std::function<bool()> any_syncing_checker_;
+  std::function<bool()> initial_data_ready_checker_;
 
   /**
    * @brief Setup routes

@@ -111,8 +111,15 @@ void SearchHandler::PopulateInputDebugInfo(search_pipeline::PipelinePath path_ta
 
 void SearchHandler::PopulateCacheHitDebugInfo(const search_pipeline::FullPipelineOutput& pipeline_output,
                                               PipelineOutput& output) {
+  output.debug_info.search_terms = output.all_search_terms;
+  for (const auto& term_info : output.term_infos) {
+    output.debug_info.ngrams_used.insert(output.debug_info.ngrams_used.end(), term_info.ngrams.begin(),
+                                         term_info.ngrams.end());
+    output.debug_info.posting_list_sizes.push_back(term_info.estimated_size);
+  }
   output.debug_info.query_time_ms = pipeline_output.query_time_ms;
   output.debug_info.final_results = output.results.size();
+  output.debug_info.pipeline_stage_counts_available = false;
   output.debug_info.cache_info.status = query::CacheDebugInfo::Status::HIT;
   output.debug_info.cache_info.cache_age_ms = pipeline_output.cache_age_ms;
   output.debug_info.cache_info.cache_saved_ms = pipeline_output.cache_saved_ms;
@@ -130,11 +137,10 @@ void SearchHandler::PopulateEmptyTermDebugInfo(search_pipeline::PipelinePath pat
 void SearchHandler::PopulatePostPipelineDebugInfo(const query::Query& query,
                                                   const search_pipeline::FullPipelineOutput& pipeline_output,
                                                   PipelineOutput& output) const {
-  // Successful (non-empty-term) path: report the matched candidates count.
-  output.debug_info.total_candidates = output.results.size();
-  output.debug_info.after_intersection = output.results.size();
-  output.debug_info.after_not = output.results.size();
-  output.debug_info.after_filters = output.results.size();
+  output.debug_info.total_candidates = pipeline_output.total_candidates;
+  output.debug_info.after_intersection = pipeline_output.after_intersection;
+  output.debug_info.after_not = pipeline_output.after_not;
+  output.debug_info.after_filters = pipeline_output.after_filters;
 
   // Path-specific optimization label.
   if (pipeline_output.path_taken == search_pipeline::PipelinePath::FUZZY) {
@@ -212,33 +218,35 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   // Delegate the actual search to the unified pipeline shared with HTTP.
   auto params = BuildPipelineParams(query, output);
   auto pipeline_output = search_pipeline::ExecuteFullPipeline(query, params);
-  if (!pipeline_output.success) {
-    return ResponseFormatter::FormatError(pipeline_output.error_message);
+  if (!pipeline_output) {
+    return ResponseFormatter::FormatError(pipeline_output.error());
   }
 
   // Project pipeline output into PipelineOutput consumed by HandleSearch /
   // HandleCount.
-  output.results = std::move(pipeline_output.results);
-  output.all_search_terms = std::move(pipeline_output.all_search_terms);
-  output.term_infos = std::move(pipeline_output.term_infos);
-  output.query_time_ms = pipeline_output.query_time_ms;
+  output.results = std::move(pipeline_output->results);
+  output.all_search_terms = std::move(pipeline_output->all_search_terms);
+  output.term_infos = std::move(pipeline_output->term_infos);
+  output.query_time_ms = pipeline_output->query_time_ms;
   // Mirror the authoritative cache hit signal so the caller can branch
   // independently of debug_mode (debug_info is only populated when debug_mode
   // is true; relying on it for control flow caused cache hits to skip the
   // optimized early-return path in the common non-debug case).
-  output.cache_hit = pipeline_output.cache_hit;
+  output.cache_hit = pipeline_output->cache_hit;
+  output.semantics_reproducible_by_single_term_ngram_and =
+      pipeline_output->semantics_reproducible_by_single_term_ngram_and;
 
   // Populate debug_info if requested. The cache-hit path produces a different
   // set of debug fields than the cache-miss paths.
   if (conn_ctx.debug_mode) {
-    if (pipeline_output.cache_hit) {
-      PopulateCacheHitDebugInfo(pipeline_output, output);
+    if (pipeline_output->cache_hit) {
+      PopulateCacheHitDebugInfo(*pipeline_output, output);
     } else {
-      PopulateInputDebugInfo(pipeline_output.path_taken, params, output);
-      if (pipeline_output.empty_term_detected) {
-        PopulateEmptyTermDebugInfo(pipeline_output.path_taken, pipeline_output, output);
+      PopulateInputDebugInfo(pipeline_output->path_taken, params, output);
+      if (pipeline_output->empty_term_detected) {
+        PopulateEmptyTermDebugInfo(pipeline_output->path_taken, *pipeline_output, output);
       } else {
-        PopulatePostPipelineDebugInfo(query, pipeline_output, output);
+        PopulatePostPipelineDebugInfo(query, *pipeline_output, output);
       }
     }
   }
@@ -272,12 +280,18 @@ std::vector<std::string> SearchHandler::GenerateHighlightSnippets(
   auto normalized_terms =
       search_pipeline::BuildHighlightTerms(output.all_search_terms, output.current_index, synonym_dict);
 
-  auto batch_texts = output.current_doc_store->GetNormalizedTextBatch(paginated_results);
+  auto original_texts = output.current_doc_store->GetOriginalTextBatch(paginated_results);
+  auto normalized_texts = output.current_doc_store->GetNormalizedTextBatch(paginated_results);
   std::vector<std::string> snippets;
   snippets.reserve(paginated_results.size());
-  for (const auto& text_opt : batch_texts) {
-    if (text_opt.has_value()) {
-      auto hl_result = query::Highlighter::Generate(text_opt.value(), normalized_terms, hl_opts);
+  for (size_t i = 0; i < paginated_results.size(); ++i) {
+    if (original_texts[i].has_value()) {
+      auto hl_result = query::Highlighter::GenerateOriginal(
+          *original_texts[i], normalized_terms,
+          [&](std::string_view text) { return output.current_index->NormalizeText(text); }, hl_opts);
+      snippets.push_back(std::move(hl_result.snippet));
+    } else if (normalized_texts[i].has_value()) {
+      auto hl_result = query::Highlighter::Generate(*normalized_texts[i], normalized_terms, hl_opts);
       snippets.push_back(std::move(hl_result.snippet));
     } else {
       snippets.emplace_back();
@@ -354,13 +368,12 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
   auto topn = search_pipeline::ApplySearchTopNOptimization(
       effective_query, output.current_index, output.current_doc_store, ctx_.full_config, output.term_infos,
-      output.all_search_terms, is_cache_hit, primary_key_column, output.results);
+      output.all_search_terms, output.semantics_reproducible_by_single_term_ngram_and, is_cache_hit, primary_key_column,
+      output.results);
   if (topn.applicable) {
     total_results = topn.total_results;
     if (conn_ctx.debug_mode) {
       if (topn.optimized) {
-        output.debug_info.total_candidates = output.results.size();
-        output.debug_info.after_intersection = output.results.size();
         std::string direction = topn.reverse ? "DESC" : "ASC";
         if (topn.single_ngram) {
           output.debug_info.optimization_used = "Index GetTopN (single-ngram + " + direction + " + limit)";
@@ -432,11 +445,14 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     auto scored = index::BM25Scorer::ScoreDocuments(
         output.results, normalized_terms, term_dfs, *output.current_doc_store,
         bm25_stats.doc_count.load(std::memory_order_relaxed), bm25_stats.avg_doc_length(), params);
+    if (!scored) {
+      return ResponseFormatter::FormatError(scored.error());
+    }
 
     // Extract scores parallel to results
     std::vector<double> scores;
-    scores.reserve(scored.size());
-    for (const auto& sd : scored) {
+    scores.reserve(scored->size());
+    for (const auto& sd : *scored) {
       scores.push_back(sd.score);
     }
 

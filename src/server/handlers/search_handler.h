@@ -81,6 +81,7 @@ class SearchHandler : public CommandHandler {
     /// Authoritative cache hit signal (mirrored from FullPipelineOutput).
     /// Set regardless of debug_mode; do not derive cache state from debug_info.
     bool cache_hit = false;
+    bool semantics_reproducible_by_single_term_ngram_and = false;
     query::DebugInfo debug_info;  ///< Debug info (populated when debug_mode)
     index::Index* current_index = nullptr;
     storage::DocumentStore* current_doc_store = nullptr;

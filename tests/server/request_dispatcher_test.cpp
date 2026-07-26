@@ -478,6 +478,31 @@ TEST_F(RequestDispatcherTest, RuntimeApiConfigUpdateAffectsParsingAndDefaultLimi
   EXPECT_NE(response.find("exceeds maximum allowed length of 20"), std::string::npos) << "Response: " << response;
 }
 
+TEST_F(RequestDispatcherTest, DefaultLimitAppliesToFacetAndTracksRuntimeUpdates) {
+  ServerConfig config;
+  config.default_limit = 17;
+  config.max_query_length = 10000;
+  RequestDispatcher dispatcher(*ctx_, config);
+  RecordingHandler recording_handler(*ctx_);
+  dispatcher.RegisterHandler(QueryType::FACET, &recording_handler);
+
+  ConnectionContext conn_ctx;
+  EXPECT_EQ(dispatcher.Dispatch("FACET posts category", conn_ctx), "OK RECORDED");
+  ASSERT_TRUE(recording_handler.last_query.has_value());
+  EXPECT_EQ(recording_handler.last_query->limit, 17u);
+  EXPECT_FALSE(recording_handler.last_query->limit_explicit);
+
+  dispatcher.UpdateApiConfig(3, 10000);
+  EXPECT_EQ(dispatcher.Dispatch("FACET posts category", conn_ctx), "OK RECORDED");
+  ASSERT_TRUE(recording_handler.last_query.has_value());
+  EXPECT_EQ(recording_handler.last_query->limit, 3u);
+
+  EXPECT_EQ(dispatcher.Dispatch("FACET posts category LIMIT 2", conn_ctx), "OK RECORDED");
+  ASSERT_TRUE(recording_handler.last_query.has_value());
+  EXPECT_EQ(recording_handler.last_query->limit, 2u);
+  EXPECT_TRUE(recording_handler.last_query->limit_explicit);
+}
+
 TEST_F(RequestDispatcherTest, RateLimiterConsumesTokenPerTcpRequest) {
   RateLimiter limiter(/*capacity=*/2, /*refill_rate=*/0, /*max_clients=*/16);
   ctx_->rate_limiter = &limiter;

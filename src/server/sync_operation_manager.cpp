@@ -48,6 +48,24 @@ void SyncOperationManager::SetCacheManager(cache::CacheManager* cache_manager) {
   cache_manager_.store(cache_manager, std::memory_order_release);
 }
 
+void SyncOperationManager::SetCurrentConfigProvider(CurrentConfigProvider provider) {
+  current_config_provider_ = std::move(provider);
+}
+
+void SyncOperationManager::SetCompletionCallback(CompletionCallback callback) {
+  completion_callback_ = std::move(callback);
+}
+
+std::optional<config::Config> SyncOperationManager::GetCurrentConfigSnapshot() const {
+  if (current_config_provider_) {
+    return current_config_provider_();
+  }
+  if (full_config_ != nullptr) {
+    return *full_config_;
+  }
+  return std::nullopt;
+}
+
 SyncOperationManager::~SyncOperationManager() {
   RequestShutdown();
   WaitForCompletion(kDefaultSyncWaitTimeoutSec);
@@ -201,8 +219,11 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
       return MakeUnexpected(MakeError(ErrorCode::kSyncMemoryCritical, "Memory critically low. Cannot start SYNC."));
     }
 
-    // Log session timeout warning
-    uint32_t session_timeout = full_config_->mysql.session_timeout_sec;
+    // Log session timeout from the same live configuration source used by
+    // the worker. Runtime SET changes must never fall back to startup config.
+    const auto current_config = GetCurrentConfigSnapshot();
+    uint32_t session_timeout =
+        current_config.has_value() ? static_cast<uint32_t>(current_config->mysql.session_timeout_sec) : 0;
     mygram::utils::StructuredLog()
         .Event("sync_starting")
         .Field("table", table_name)
@@ -219,6 +240,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     // Initialize state. is_running may already be true if we set it during
     // Step 1 (JOINING_PREVIOUS); in either case we want it true now.
     sync_states_[table_name].is_running = true;
+    sync_states_[table_name].cancel_requested = false;
     sync_states_[table_name].status = "STARTING";
     sync_states_[table_name].table_name = table_name;
     sync_states_[table_name].processed_rows = 0;
@@ -244,7 +266,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     }
   }
 
-  return ResponseFormatter::FormatStatus("SYNC STARTED table=" + table_name + " job_id=1");
+  return ResponseFormatter::FormatStatus("SYNC STARTED table=" + table_name);
 }
 
 std::string SyncOperationManager::GetSyncStatus() {
@@ -343,10 +365,22 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
       return ResponseFormatter::FormatError("No active SYNC operations to stop");
     }
 
-    // Cancel all active loaders (lock acquired independently, not nested with
-    // syncing_tables_mutex_, to avoid deadlock). Cancel() is idempotent so
-    // calling it on a loader that finished between the two lock acquisitions
-    // is safe.
+    // Publish the cancellation request before looking up loaders. A worker
+    // that has not registered its stack-local loader yet observes this flag
+    // and cancels as soon as the loader is available.
+    {
+      std::lock_guard<std::mutex> lock(sync_mutex_);
+      for (const auto& tbl : tables_to_stop) {
+        auto state_iter = sync_states_.find(tbl);
+        if (state_iter != sync_states_.end() && state_iter->second.is_running) {
+          state_iter->second.cancel_requested.store(true, std::memory_order_release);
+          state_iter->second.status = "CANCELLING";
+          state_iter->second.error_message = "Cancellation requested by user";
+        }
+      }
+    }
+
+    // Cancel all loaders that are already registered. Cancel() is idempotent.
     {
       std::lock_guard<std::mutex> lock(loaders_mutex_);
       for (const auto& tbl : tables_to_stop) {
@@ -363,40 +397,13 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
       }
     }
 
-    // Move threads out of sync_threads_ under lock, then join WITHOUT holding
-    // the lock. This mirrors the destructor pattern and avoids deadlock: the
-    // background thread's update_state lambda also acquires sync_mutex_.
-    std::unordered_map<std::string, std::thread> threads_to_join;
-    {
-      std::lock_guard<std::mutex> lock(sync_mutex_);
-      for (const auto& tbl : tables_to_stop) {
-        auto thread_iter = sync_threads_.find(tbl);
-        if (thread_iter != sync_threads_.end()) {
-          threads_to_join[tbl] = std::move(thread_iter->second);
-          sync_threads_.erase(thread_iter);
-        }
-      }
-    }
-
-    // Join threads WITHOUT holding sync_mutex_
-    for (auto& [tbl, thread] : threads_to_join) {
-      if (thread.joinable()) {
-        thread.join();
-      }
-    }
-    // Note: is_running is NOT reset here because BuildSnapshotAsync's update_state
-    // callback always sets is_running = false before the thread exits (both normal
-    // and error paths). Since we join() above, the thread has completed and
-    // update_state has already run (reviewed: sync_mutex_ is released at line 259
-    // before join, so the thread can acquire it in update_state).
-
-    return ResponseFormatter::FormatStatus("SYNC STOPPED count=" + std::to_string(tables_to_stop.size()));
+    // Do not join on the request dispatcher. The worker owns terminal-state
+    // publication and is reaped by WaitForCompletion, restart, or destruction.
+    return ResponseFormatter::FormatStatus("SYNC CANCELLATION REQUESTED count=" +
+                                           std::to_string(tables_to_stop.size()));
   }
 
-  // Stop specific table
-  // Acquire locks in documented order: sync_mutex_ -> syncing_tables_mutex_ -> loaders_mutex_
-  // to avoid TOCTOU window where sync could complete between separate lock acquisitions.
-  std::thread thread_to_join;
+  // Stop a specific table. Signal only: never join on the request dispatcher.
   {
     std::lock_guard<std::mutex> sync_lock(sync_mutex_);
     {
@@ -406,7 +413,16 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
       }
     }
 
-    // Cancel the loader (still under sync_mutex_, acquire loaders_mutex_ per lock order)
+    auto state_iter = sync_states_.find(table_name);
+    if (state_iter == sync_states_.end() || !state_iter->second.is_running) {
+      return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
+    }
+    state_iter->second.cancel_requested.store(true, std::memory_order_release);
+    state_iter->second.status = "CANCELLING";
+    state_iter->second.error_message = "Cancellation requested by user";
+
+    // Cancel the loader if it is already registered. If not, the worker will
+    // observe cancel_requested immediately after registration.
     {
       std::lock_guard<std::mutex> loader_lock(loaders_mutex_);
       auto iter = active_loaders_.find(table_name);
@@ -417,38 +433,11 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
             .Field("source", "user_request")
             .Info();
         iter->second->Cancel();
-      } else {
-        // Clean up sync state before returning error to avoid stuck state
-        auto state_it = sync_states_.find(table_name);
-        if (state_it != sync_states_.end()) {
-          state_it->second.is_running = false;
-          state_it->second.status = "FAILED";
-          state_it->second.error_message = "Loader not found during stop";
-        }
-        {
-          std::lock_guard<std::mutex> tables_lock(syncing_tables_mutex_);
-          syncing_tables_.erase(table_name);
-        }
-        syncing_tables_cv_.notify_all();
-        return ResponseFormatter::FormatError("SYNC loader not found for table: " + table_name);
       }
     }
-
-    // Move thread out of sync_threads_ (already under sync_mutex_)
-    auto thread_iter = sync_threads_.find(table_name);
-    if (thread_iter != sync_threads_.end()) {
-      thread_to_join = std::move(thread_iter->second);
-      sync_threads_.erase(thread_iter);
-    }
   }
 
-  // Join thread WITHOUT holding sync_mutex_ to avoid deadlock with
-  // the background thread's update_state lambda.
-  if (thread_to_join.joinable()) {
-    thread_to_join.join();
-  }
-
-  return ResponseFormatter::FormatStatus("SYNC STOPPED table=" + table_name);
+  return ResponseFormatter::FormatStatus("SYNC CANCELLATION REQUESTED table=" + table_name);
 }
 
 void SyncOperationManager::RequestShutdown() {
@@ -593,7 +582,8 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   // Update state under lock
   {
     std::lock_guard<std::mutex> lock(sync_mutex_);
-    sync_states_[table_name].status = "IN_PROGRESS";
+    sync_states_[table_name].status =
+        sync_states_[table_name].cancel_requested.load(std::memory_order_acquire) ? "CANCELLING" : "IN_PROGRESS";
     sync_states_[table_name].start_time = std::chrono::steady_clock::now();
   }
 
@@ -601,6 +591,22 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   auto update_state = [this, table_name](auto&& updater) {
     std::lock_guard<std::mutex> lock(sync_mutex_);
     updater(sync_states_[table_name]);
+  };
+  auto cancellation_requested = [this, table_name]() {
+    if (shutdown_requested_.load(std::memory_order_acquire)) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    const auto iter = sync_states_.find(table_name);
+    return iter != sync_states_.end() && iter->second.cancel_requested.load(std::memory_order_acquire);
+  };
+  auto publish_cancelled = [this, &update_state]() {
+    const bool shutting_down = shutdown_requested_.load(std::memory_order_acquire);
+    update_state([shutting_down](SyncState& state) {
+      state.status = "CANCELLED";
+      state.error_message = shutting_down ? "Server shutdown requested" : "Cancelled by user (SYNC STOP)";
+      state.is_running = false;
+    });
   };
 
   // Variables for replication restart on cancellation/failure/exception.
@@ -643,8 +649,17 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   });
 
   try {
-    // Validate config
-    if (full_config_ == nullptr) {
+    if (cancellation_requested()) {
+      publish_cancelled();
+      return;
+    }
+
+    // Capture exactly one current configuration snapshot for this complete
+    // operation. In particular, mysql.host and mysql.port may have changed
+    // through SET after startup; reading individual fields lazily could mix
+    // values from different revisions.
+    const auto current_config = GetCurrentConfigSnapshot();
+    if (!current_config.has_value()) {
       update_state([](SyncState& state) {
         state.status = "FAILED";
         state.error_message = "Configuration not available";
@@ -660,12 +675,12 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Connect to MySQL
     mysql::Connection::Config mysql_config{
-        .host = full_config_->mysql.host,
-        .port = static_cast<uint16_t>(full_config_->mysql.port),
-        .user = full_config_->mysql.user,
-        .password = full_config_->mysql.password,
-        .database = full_config_->mysql.database,
-        .session_timeout_sec = static_cast<uint32_t>(full_config_->mysql.session_timeout_sec)};
+        .host = current_config->mysql.host,
+        .port = static_cast<uint16_t>(current_config->mysql.port),
+        .user = current_config->mysql.user,
+        .password = current_config->mysql.password,
+        .database = current_config->mysql.database,
+        .session_timeout_sec = static_cast<uint32_t>(current_config->mysql.session_timeout_sec)};
 
     auto mysql_conn = std::make_unique<mysql::Connection>(mysql_config);
 
@@ -683,6 +698,10 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("error", error_msg)
           .Field("error_code", static_cast<int64_t>(connect_result.error().code()))
           .Error();
+      return;
+    }
+    if (cancellation_requested()) {
+      publish_cancelled();
       return;
     }
 
@@ -734,7 +753,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     // returns, no binlog worker thread may write into index/doc_store.
     // Save the current GTID so we can restore replication if SYNC is
     // cancelled or fails.
-    if (full_config_->replication.enable && reader != nullptr && reader->IsRunning()) {
+    if (current_config->replication.enable && reader != nullptr && reader->IsRunning()) {
       if (replication_pause_counter_ != nullptr) {
         replication_pause_scope.emplace(*replication_pause_counter_);
         const bool first_pauser = replication_pause_scope->Acquire();
@@ -767,7 +786,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       if (replication_pause_counter_ != nullptr) {
         replication_pause_counter_->PublishDrainedGTID(saved_gtid);
       }
-    } else if (full_config_->replication.enable && reader != nullptr) {
+    } else if (current_config->replication.enable && reader != nullptr) {
       // A stopped reader still owns the only safe lower bound for non-target
       // tables. Starting from the target snapshot would silently skip their
       // backlog. The target watermark below makes replay from this position
@@ -777,10 +796,13 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Build the initial load off to the side. Failure or cancellation simply
     // destroys these candidates and cannot erase the pre-SYNC live table.
-    loader::InitialLoader loader(*mysql_conn, *candidate_index, *candidate_doc_store, ctx->config, full_config_->mysql,
-                                 full_config_->build);
+    loader::InitialLoader loader(*mysql_conn, *candidate_index, *candidate_doc_store, ctx->config,
+                                 current_config->mysql, current_config->build);
 
-    RegisterLoader(table_name, &loader);
+    auto loader_registration = RegisterLoaderScoped(table_name, &loader);
+    if (cancellation_requested()) {
+      loader.Cancel();
+    }
 
     // Extract atomic pointers under sync_mutex_ to avoid dangling reference
     // if sync_states_ rehashes from concurrent insertions.
@@ -796,12 +818,15 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       total_rows_ptr->store(progress.total_rows, std::memory_order_relaxed);
       processed_rows_ptr->store(progress.processed_rows, std::memory_order_relaxed);
     });
-
     UnregisterLoader(table_name);
+    loader_registration.Release();
 
     // Handle cancellation (both shutdown and user-requested SYNC STOP)
     // Check if loader was cancelled OR shutdown was requested
-    bool was_cancelled = loader.IsCancelled() || shutdown_requested_;
+    // Include the manager-level request flag as well as the loader flag. A
+    // stop can race the narrow interval after the loader unregisters and
+    // before this terminal-state check; it must still win over completion.
+    bool was_cancelled = loader.IsCancelled() || cancellation_requested();
 
     if (was_cancelled) {
       uint64_t partial_rows = loader.GetProcessedRows();
@@ -851,7 +876,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       uint64_t processed = loader.GetProcessedRows();
 
       std::string catchup_target_gtid;
-      if (full_config_->replication.enable && reader != nullptr) {
+      if (current_config->replication.enable && reader != nullptr) {
         auto catchup_target = mysql_conn->GetLatestGTID();
         if (!catchup_target) {
           std::string error_msg =
@@ -900,14 +925,13 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         {
           std::lock_guard<std::mutex> replay_lock(ctx->replay_watermark->mutex);
           ctx->replay_watermark->snapshot_gtid =
-              (full_config_->replication.enable && reader != nullptr) ? gtid : std::string{};
+              (current_config->replication.enable && reader != nullptr) ? gtid : std::string{};
         }
         ctx->index->ReplaceWithLoaded(*candidate_index);
         ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
-        ctx->bm25_stats.total_doc_length.store(candidate_total_length, std::memory_order_relaxed);
-        ctx->bm25_stats.doc_count.store(candidate_doc_count, std::memory_order_relaxed);
+        ctx->bm25_stats.SetCorpusStats(candidate_total_length, candidate_doc_count);
       }
-      replay_watermark_published = full_config_->replication.enable && reader != nullptr && !gtid.empty();
+      replay_watermark_published = current_config->replication.enable && reader != nullptr && !gtid.empty();
       live_state_swapped = true;
 
       // Restart from the drained pre-SYNC position when the shared reader was
@@ -918,7 +942,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       mygram::utils::StructuredLog()
           .Event("sync_replication_check")
           .Field("table", table_name)
-          .Field("replication_enable", full_config_->replication.enable)
+          .Field("replication_enable", current_config->replication.enable)
           .Field("reader_exists", reader != nullptr)
           .Field("gtid_empty", gtid.empty())
           .Field("gtid", gtid)
@@ -926,7 +950,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
       const std::string restart_gtid = saved_gtid;
       bool replication_started = false;
-      if (full_config_->replication.enable && reader != nullptr) {
+      if (current_config->replication.enable && reader != nullptr) {
         // If replication is still running (e.g., was not stopped earlier because
         // it wasn't enabled at that point), stop it now before updating GTID.
         if (!replication_was_running && reader->IsRunning()) {
@@ -955,7 +979,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         if (!start_result) {
           handoff_error = start_result.error();
         } else {
-          auto catchup_result = mysql::WaitForAppliedPosition(*reader, catchup_target_gtid, kSyncCatchupTimeout);
+          auto catchup_result = mysql::WaitForAppliedPosition(
+              *reader, catchup_target_gtid, kSyncCatchupTimeout, std::chrono::milliseconds(10),
+              [this]() { return shutdown_requested_.load(std::memory_order_acquire); });
           if (!catchup_result) {
             handoff_error = catchup_result.error();
           }
@@ -969,8 +995,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
             std::unique_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
             ctx->index->ReplaceWithLoaded(*candidate_index);
             ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
-            ctx->bm25_stats.total_doc_length.store(previous_bm25_total_length, std::memory_order_relaxed);
-            ctx->bm25_stats.doc_count.store(previous_bm25_doc_count, std::memory_order_relaxed);
+            ctx->bm25_stats.SetCorpusStats(previous_bm25_total_length, previous_bm25_doc_count);
             std::lock_guard<std::mutex> replay_lock(ctx->replay_watermark->mutex);
             ctx->replay_watermark->snapshot_gtid.clear();
           }
@@ -1045,6 +1070,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
             .Field("rows", processed)
             .Info();
       }
+      if (completion_callback_) {
+        completion_callback_(table_name);
+      }
     } else {
       // SYNC failed. Only the isolated candidate contains partial data; the
       // live table remains byte-for-byte unchanged.
@@ -1056,7 +1084,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
            error_msg.find("connection") != std::string::npos || error_msg.find("Lost connection") != std::string::npos);
 
       if (is_timeout_related) {
-        uint32_t session_timeout = full_config_->mysql.session_timeout_sec;
+        uint32_t session_timeout = current_config->mysql.session_timeout_sec;
         error_msg += " (check if session_timeout_sec=" + std::to_string(session_timeout) +
                      " is sufficient for snapshot duration)";
       }
@@ -1108,8 +1136,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         std::unique_lock<std::shared_mutex> generation_lock(*live_ctx->generation_mutex);
         live_ctx->index->ReplaceWithLoaded(*candidate_index);
         live_ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
-        live_ctx->bm25_stats.total_doc_length.store(previous_bm25_total_length, std::memory_order_relaxed);
-        live_ctx->bm25_stats.doc_count.store(previous_bm25_doc_count, std::memory_order_relaxed);
+        live_ctx->bm25_stats.SetCorpusStats(previous_bm25_total_length, previous_bm25_doc_count);
         std::lock_guard<std::mutex> replay_lock(live_ctx->replay_watermark->mutex);
         live_ctx->replay_watermark->snapshot_gtid.clear();
       }
@@ -1154,6 +1181,12 @@ void SyncOperationManager::RegisterLoader(const std::string& table_name, loader:
 void SyncOperationManager::UnregisterLoader(const std::string& table_name) {
   std::lock_guard<std::mutex> lock(loaders_mutex_);
   active_loaders_.erase(table_name);
+}
+
+mygram::utils::ScopeGuard<std::function<void()>> SyncOperationManager::RegisterLoaderScoped(
+    const std::string& table_name, loader::InitialLoader* loader) {
+  RegisterLoader(table_name, loader);
+  return mygram::utils::ScopeGuard<std::function<void()>>([this, table_name]() { UnregisterLoader(table_name); });
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::RestartReplicationFromGtid(

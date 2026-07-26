@@ -2,8 +2,8 @@
  * @file log_field_names.h
  * @brief Canonical StructuredLog field-name and event-name constants.
  *
- * Step 4A introduces this header to eliminate field-name drift across
- * server / cache logs (e.g. `path` vs `filepath`, `remote_addr` vs
+ * This header eliminates field-name drift across server / cache logs
+ * (e.g. `path` vs `filepath`, `remote_addr` vs
  * `client_ip`, `client_fd` vs `connection_fd` vs `fd`).
  *
  * ## Usage
@@ -29,8 +29,8 @@
  *
  * The legacy catch-all events `server_error` / `server_warning` are being
  * phased out — do NOT add new call sites that emit those event names.
- * Existing call sites are being renamed to dedicated `<module>_<verb>_*`
- * events (tracked under TODOs in the relevant source files).
+ * Existing call sites should be renamed to dedicated `<module>_<verb>_*`
+ * events when touched.
  */
 
 #pragma once

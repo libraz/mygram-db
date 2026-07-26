@@ -170,11 +170,11 @@ TEST_F(JapaneseSynonymPipelineTest, KanaKanjiSynonymExpansion_SearchByHiragana) 
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results.size(), 2U);
-  EXPECT_TRUE(Contains(output.results, pk1));
-  EXPECT_TRUE(Contains(output.results, pk2));
-  EXPECT_FALSE(Contains(output.results, pk3));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results.size(), 2U);
+  EXPECT_TRUE(Contains(output->results, pk1));
+  EXPECT_TRUE(Contains(output->results, pk2));
+  EXPECT_FALSE(Contains(output->results, pk3));
 }
 
 // TC-SP-02: Kanji query returns the same set via synonym expansion.
@@ -194,11 +194,11 @@ TEST_F(JapaneseSynonymPipelineTest, KanaKanjiSynonymExpansion_SearchByKanji) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_EQ(output.results.size(), 2U);
-  EXPECT_TRUE(Contains(output.results, pk1));
-  EXPECT_TRUE(Contains(output.results, pk2));
-  EXPECT_FALSE(Contains(output.results, pk3));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results.size(), 2U);
+  EXPECT_TRUE(Contains(output->results, pk1));
+  EXPECT_TRUE(Contains(output->results, pk2));
+  EXPECT_FALSE(Contains(output->results, pk3));
 }
 
 // TC-SP-03: Half-width kana query normalizes to full-width katakana and
@@ -221,10 +221,10 @@ TEST_F(JapaneseSynonymPipelineTest, HalfWidthKanaQueryMatchesFullWidthDocument) 
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_TRUE(Contains(output.results, pk1));
-  EXPECT_TRUE(Contains(output.results, pk2));
-  EXPECT_FALSE(Contains(output.results, pk3));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(Contains(output->results, pk1));
+  EXPECT_TRUE(Contains(output->results, pk2));
+  EXPECT_FALSE(Contains(output->results, pk3));
 }
 
 // TC-SP-04: Kanji bigrams (kanji_ngram_size=2) still allow synonym expansion
@@ -246,10 +246,10 @@ TEST_F(JapaneseSynonymPipelineTest, KanjiNgramSizeDoesNotBreakSynonymExpansion) 
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_TRUE(Contains(output.results, pk1));
-  EXPECT_TRUE(Contains(output.results, pk2));
-  EXPECT_FALSE(Contains(output.results, pk3));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(Contains(output->results, pk1));
+  EXPECT_TRUE(Contains(output->results, pk2));
+  EXPECT_FALSE(Contains(output->results, pk3));
 }
 
 // TC-SP-05: OR within a group, AND across groups. Fruit + phone both required.
@@ -273,11 +273,11 @@ TEST_F(JapaneseSynonymPipelineTest, SynonymOrSemantics_MultipleQueryTerms_AndAcr
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_TRUE(Contains(output.results, pk1));
-  EXPECT_TRUE(Contains(output.results, pk2));
-  EXPECT_FALSE(Contains(output.results, pk3));
-  EXPECT_FALSE(Contains(output.results, pk4));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(Contains(output->results, pk1));
+  EXPECT_TRUE(Contains(output->results, pk2));
+  EXPECT_FALSE(Contains(output->results, pk3));
+  EXPECT_FALSE(Contains(output->results, pk4));
 }
 
 // TC-SP-06: verify_text="all" must accept documents that match only via a
@@ -303,10 +303,10 @@ TEST_F(JapaneseSynonymPipelineTest, PostFilterByTextWithSynonyms_VerifyText) {
   params.full_config = &config;
   auto output = ExecuteFullPipeline(query, params);
 
-  ASSERT_TRUE(output.success) << output.error_message;
-  EXPECT_TRUE(Contains(output.results, pk1));
-  EXPECT_TRUE(Contains(output.results, pk2));
-  EXPECT_FALSE(Contains(output.results, pk3));
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(Contains(output->results, pk1));
+  EXPECT_TRUE(Contains(output->results, pk2));
+  EXPECT_FALSE(Contains(output->results, pk3));
 }
 
 }  // namespace mygramdb::server::search_pipeline

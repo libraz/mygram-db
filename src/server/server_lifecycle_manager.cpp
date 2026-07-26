@@ -40,7 +40,7 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
     SyncOperationManager* sync_manager
 #endif
     ,
-    RateLimiter* rate_limiter) {
+    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -66,7 +66,7 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
                                  sync_manager
 #endif
                                  ,
-                                 rate_limiter));
+                                 rate_limiter, shutdown_requested));
   return manager;
 }
 
@@ -82,7 +82,7 @@ ServerLifecycleManager::ServerLifecycleManager(
     SyncOperationManager* sync_manager
 #endif
     ,
-    RateLimiter* rate_limiter)
+    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested)
     : config_(config),
       table_contexts_(table_contexts),
       dump_dir_(dump_dir),
@@ -100,7 +100,8 @@ ServerLifecycleManager::ServerLifecycleManager(
       sync_manager_(sync_manager)
 #endif
       ,
-      rate_limiter_(rate_limiter) {
+      rate_limiter_(rate_limiter),
+      shutdown_requested_(shutdown_requested) {
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::Initialize() {
@@ -481,7 +482,7 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
   auto scheduler = std::make_unique<SnapshotScheduler>(
       full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_, dump_save_in_progress_,
       replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_, sync_manager_,
-      std::function<bool()>{}, &optimization_in_progress_);
+      std::function<bool()>{}, &optimization_in_progress_, shutdown_requested_);
 
   // Start the scheduler
   auto start_result = scheduler->Start();

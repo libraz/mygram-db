@@ -16,6 +16,7 @@
 #include "server/http_server.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
+#include "support/network_test_utils.h"
 
 using json = nlohmann::json;
 
@@ -63,6 +64,8 @@ class HttpServerTest : public ::testing::Test {
     doc_store_ = table_context_.doc_store.get();
 
     table_contexts_["test"] = &table_context_;
+    port_ = testing::FindAvailableLoopbackPort();
+    ASSERT_GT(port_, 0);
 
     // Create config
     config_ = std::make_unique<config::Config>();
@@ -74,7 +77,7 @@ class HttpServerTest : public ::testing::Test {
     config_->api.tcp.port = 11016;
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
-    config_->api.http.port = 18080;  // Use different port for testing
+    config_->api.http.port = port_;
     config_->api.http.enable_cors = false;
     config_->api.http.cors_allow_origin = "*";
     config_->replication.enable = false;
@@ -83,7 +86,7 @@ class HttpServerTest : public ::testing::Test {
     // Create HTTP server
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
-    http_config.port = 18080;
+    http_config.port = port_;
     http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
     http_config.enable_cors = false;
@@ -106,12 +109,13 @@ class HttpServerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<HttpServer> http_server_;
+  uint16_t port_ = 0;
 };
 
 TEST_F(HttpServerTest, GetDocumentEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
   auto res = client.Get("/tables/test/article_1");
 
   ASSERT_TRUE(res);
@@ -130,7 +134,7 @@ TEST_F(HttpServerTest, GetDocumentEndpoint) {
 TEST_F(HttpServerTest, GetDocumentNotFound) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
   auto res = client.Get("/tables/test/missing_pk");
 
   ASSERT_TRUE(res);
@@ -144,7 +148,7 @@ TEST_F(HttpServerTest, GetDocumentNotFound) {
 TEST_F(HttpServerTest, GetDocumentInvalidID) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
   auto res = client.Get("/tables/test/invalid");
 
   ASSERT_TRUE(res);

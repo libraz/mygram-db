@@ -236,4 +236,73 @@ TEST_F(FacetHandlerTest, FacetColumnResolvesCaseInsensitively) {
   EXPECT_TRUE(response.find("\t2") != std::string::npos) << "Response: " << response;
 }
 
+TEST_F(FacetHandlerTest, FacetAppliesOffsetBeforeLimit) {
+  AddDoc("d1", "one", "alpha");
+  AddDoc("d2", "two", "alpha");
+  AddDoc("d3", "three", "beta");
+
+  query::Query query;
+  query.type = query::QueryType::FACET;
+  query.table = "app_db.articles";
+  query.facet_column = "category";
+  query.offset = 1;
+  query.offset_explicit = true;
+  query.limit = 1;
+  query.limit_explicit = true;
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_EQ(response.find("OK FACET 1"), 0U) << response;
+  EXPECT_EQ(response.find("alpha"), std::string::npos) << response;
+  EXPECT_NE(response.find("beta\t1"), std::string::npos) << response;
+}
+
+TEST_F(FacetHandlerTest, UnknownFacetColumnReturnsTypedError) {
+  AddDoc("d1", "one", "alpha");
+
+  query::Query query;
+  query.type = query::QueryType::FACET;
+  query.table = "app_db.articles";
+  query.facet_column = "catgeory";
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_EQ(response.find("ERROR [Index not found (4000)] Facet column \"catgeory\" not found"), 0U) << response;
+}
+
+TEST_F(FacetHandlerTest, FacetDebugUsesMatchedDocumentAndDistinctValueLabels) {
+  AddDoc("d1", "one", "alpha");
+  AddDoc("d2", "two", "alpha");
+  AddDoc("d3", "three", "beta");
+  conn_ctx_.debug_mode = true;
+
+  query::Query query;
+  query.type = query::QueryType::FACET;
+  query.table = "app_db.articles";
+  query.facet_column = "category";
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_NE(response.find("# matched_documents: 3"), std::string::npos) << response;
+  EXPECT_NE(response.find("# distinct_values: 2"), std::string::npos) << response;
+  EXPECT_EQ(response.find("total_docs_searched"), std::string::npos) << response;
+}
+
+TEST_F(FacetHandlerTest, FacetWithoutExplicitLimitUsesSafeDefault) {
+  for (int i = 0; i < 105; ++i) {
+    AddDoc("doc_" + std::to_string(i), "text", "category_" + std::to_string(i));
+  }
+
+  query::Query query;
+  query.type = query::QueryType::FACET;
+  query.table = "app_db.articles";
+  query.facet_column = "category";
+  ASSERT_FALSE(query.limit_explicit);
+  ASSERT_EQ(query.limit, 100u);
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_EQ(response.find("OK FACET 100"), 0u) << response;
+}
+
 }  // namespace mygramdb::server

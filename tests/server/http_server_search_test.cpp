@@ -11,20 +11,39 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
 #include <thread>
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
+#include "query/synonym_dictionary.h"
 #include "server/http_server.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
+#include "support/network_test_utils.h"
+#include "utils/binary_io.h"
 
 using json = nlohmann::json;
 
 namespace mygramdb {
 namespace server {
+
+std::unique_ptr<query::SynonymDictionary> MakeHttpTestSynonymDictionary(
+    const std::vector<std::vector<std::string>>& groups) {
+  std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+  mygram::utils::WriteBinary(stream, static_cast<uint32_t>(groups.size()));
+  for (const auto& group : groups) {
+    mygram::utils::WriteBinary(stream, static_cast<uint32_t>(group.size()));
+    for (const auto& term : group) {
+      mygram::utils::WriteString(stream, term);
+    }
+  }
+  stream.seekg(0);
+  auto dictionary = std::make_unique<query::SynonymDictionary>();
+  return dictionary->LoadFromStream(stream) ? std::move(dictionary) : nullptr;
+}
 
 class HttpServerTest : public ::testing::Test {
  protected:
@@ -74,6 +93,8 @@ class HttpServerTest : public ::testing::Test {
     // bare-name fallback, so table_key is always canonical downstream
     // (cache tagging, ClearTable) regardless of which alias a client used.
     table_contexts_["testdb.test"] = &table_context_;
+    port_ = testing::FindAvailableLoopbackPort();
+    ASSERT_GT(port_, 0);
 
     // Create config
     config_ = std::make_unique<config::Config>();
@@ -85,7 +106,7 @@ class HttpServerTest : public ::testing::Test {
     config_->api.tcp.port = 11016;
     config_->api.http.enable = true;
     config_->api.http.bind = "127.0.0.1";
-    config_->api.http.port = 18080;  // Use different port for testing
+    config_->api.http.port = port_;
     config_->api.http.enable_cors = false;
     config_->api.http.cors_allow_origin = "*";
     config_->replication.enable = false;
@@ -94,7 +115,7 @@ class HttpServerTest : public ::testing::Test {
     // Create HTTP server
     HttpServerConfig http_config;
     http_config.bind = "127.0.0.1";
-    http_config.port = 18080;
+    http_config.port = port_;
     http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
     http_config.enable_cors = false;
@@ -117,12 +138,13 @@ class HttpServerTest : public ::testing::Test {
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
   std::unique_ptr<HttpServer> http_server_;
+  uint16_t port_ = 0;
 };
 
 TEST_F(HttpServerTest, SearchEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -188,7 +210,7 @@ TEST_F(HttpServerTest, DbQualifiedTableRoutesResolveWithoutTopLevelCollision) {
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json search_body;
   search_body["q"] = "machine";
@@ -223,7 +245,7 @@ TEST_F(HttpServerTest, DbQualifiedTableRoutesResolveWithoutTopLevelCollision) {
 TEST_F(HttpServerTest, GetNotFoundIncrementsCommandStats) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   uint64_t before = http_server_->GetStats().GetCommandCount(query::QueryType::GET);
   auto res = client.Get("/tables/test/missing_article");
@@ -236,7 +258,7 @@ TEST_F(HttpServerTest, GetNotFoundIncrementsCommandStats) {
 TEST_F(HttpServerTest, SearchWithFilters) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -259,7 +281,7 @@ TEST_F(HttpServerTest, SearchWithFilters) {
 TEST_F(HttpServerTest, FacetColumnResolvesCaseInsensitively) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["column"] = "CATEGORY";
@@ -277,10 +299,57 @@ TEST_F(HttpServerTest, FacetColumnResolvesCaseInsensitively) {
   EXPECT_EQ(body["facets"][0]["count"], 1);
 }
 
+TEST_F(HttpServerTest, FacetSupportsOffsetAndAppliesItBeforeLimit) {
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  json all_request = {{"column", "category"}};
+  auto all_res = client.Post("/tables/test/facet", all_request.dump(), "application/json");
+  ASSERT_TRUE(all_res);
+  ASSERT_EQ(all_res->status, 200) << all_res->body;
+  const auto all_body = json::parse(all_res->body);
+  ASSERT_EQ(all_body["facets"].size(), 2);
+
+  json page_request = {{"column", "category"}, {"offset", 1}, {"limit", 1}};
+  auto page_res = client.Post("/tables/test/facet", page_request.dump(), "application/json");
+  ASSERT_TRUE(page_res);
+  ASSERT_EQ(page_res->status, 200) << page_res->body;
+  const auto page_body = json::parse(page_res->body);
+  ASSERT_EQ(page_body["facets"].size(), 1);
+  EXPECT_EQ(page_body["facets"][0], all_body["facets"][1]);
+}
+
+TEST_F(HttpServerTest, FacetUnknownColumnReturnsTypedError) {
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  json request = {{"column", "catgeory"}};
+  auto res = client.Post("/tables/test/facet", request.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 400);
+  const auto body = json::parse(res->body);
+  EXPECT_NE(body["error"].get<std::string>().find("(4000)"), std::string::npos);
+  EXPECT_NE(body["error"].get<std::string>().find("Facet column \"catgeory\" not found"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, FacetTextOnlyColumnReturnsErrorInsteadOfEmptySuccess) {
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  const json request = {{"column", "body"}};
+  auto res = client.Post("/tables/test/facet", request.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 400);
+  EXPECT_NE(json::parse(res->body)["error"].get<std::string>().find("Facet column \"body\" not found"),
+            std::string::npos);
+}
+
 TEST_F(HttpServerTest, FacetTreatsLimitKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["column"] = "category";
@@ -296,7 +365,7 @@ TEST_F(HttpServerTest, FacetTreatsLimitKeywordInQAsLiteralText) {
 TEST_F(HttpServerTest, FacetRejectsOversizedJsonColumn) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["column"] = std::string(query::QueryParser::kMaxFilterColumnNameLength + 1, 'a');
@@ -329,7 +398,7 @@ TEST_F(HttpServerTest, SearchReplacesInvalidUtf8InJsonResponse) {
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "invalid";
@@ -351,7 +420,7 @@ TEST_F(HttpServerTest, SearchReplacesInvalidUtf8InJsonResponse) {
 TEST_F(HttpServerTest, SearchFilterValueWithSpacesAndEquals) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -370,7 +439,7 @@ TEST_F(HttpServerTest, SearchFilterValueWithSpacesAndEquals) {
 TEST_F(HttpServerTest, SearchSupportsJsonSort) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "e";
@@ -402,7 +471,7 @@ TEST_F(HttpServerTest, SearchSupportsJsonScoreSort) {
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "alpha";
@@ -432,7 +501,7 @@ TEST_F(HttpServerTest, SearchScoreSortRejectsWhenTextStorageDisabled) {
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "alpha";
@@ -448,7 +517,7 @@ TEST_F(HttpServerTest, SearchScoreSortRejectsWhenTextStorageDisabled) {
 TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machime";
@@ -465,14 +534,67 @@ TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
   EXPECT_EQ(body["results"][0]["primary_key"], "article_1");
 }
 
+TEST_F(HttpServerTest, SearchAppliesJsonFuzzyToBooleanTerms) {
+  auto article1 = doc_store_->GetDocId("article_1");
+  auto article3 = doc_store_->GetDocId("article_3");
+  ASSERT_TRUE(article1.has_value());
+  ASSERT_TRUE(article3.has_value());
+  doc_store_->SetNormalizedText(*article1, "machine learning");
+  doc_store_->SetNormalizedText(*article3, "old article");
+  config_->memory.verify_text = "all";
+
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  json request_body;
+  request_body["q"] = "machime OR old";
+  request_body["mode"] = "boolean";
+  request_body["fuzzy"] = 1;
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200) << res->body;
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["count"], 2);
+  std::set<std::string> primary_keys;
+  for (const auto& result : body["results"]) {
+    primary_keys.insert(result["primary_key"].get<std::string>());
+  }
+  EXPECT_EQ(primary_keys, (std::set<std::string>{"article_1", "article_3"}));
+}
+
+TEST_F(HttpServerTest, SearchAppliesSynonymsToBooleanNotTerms) {
+  auto automobile = doc_store_->AddDocument("automobile", {}, "vehicle automobile");
+  auto bicycle = doc_store_->AddDocument("bicycle", {}, "vehicle bicycle");
+  ASSERT_TRUE(automobile.has_value());
+  ASSERT_TRUE(bicycle.has_value());
+  index_->AddDocument(*automobile, "vehicle automobile");
+  index_->AddDocument(*bicycle, "vehicle bicycle");
+  table_context_.synonym_dict = MakeHttpTestSynonymDictionary({{"car", "automobile"}});
+  ASSERT_NE(table_context_.synonym_dict, nullptr);
+
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  const json request_body = {{"q", "vehicle AND NOT car"}, {"mode", "boolean"}};
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200) << res->body;
+  auto body = json::parse(res->body);
+  ASSERT_EQ(body["count"], 1) << res->body;
+  EXPECT_EQ(body["results"][0]["primary_key"], "bicycle");
+}
+
 TEST_F(HttpServerTest, SearchSupportsJsonHighlight) {
   auto doc_id = doc_store_->GetDocId("article_1");
   ASSERT_TRUE(doc_id.has_value());
   doc_store_->SetNormalizedText(*doc_id, "machine learning");
+  doc_store_->SetOriginalText(*doc_id, "Machine ＬＥＡＲＮＩＮＧ");
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -487,7 +609,8 @@ TEST_F(HttpServerTest, SearchSupportsJsonHighlight) {
   auto body = json::parse(res->body);
   ASSERT_EQ(body["results"].size(), 1);
   ASSERT_TRUE(body["results"][0].contains("highlight"));
-  EXPECT_NE(body["results"][0]["highlight"].get<std::string>().find("<strong>machine</strong>"), std::string::npos);
+  EXPECT_NE(body["results"][0]["highlight"].get<std::string>().find("<strong>Machine</strong>"), std::string::npos);
+  EXPECT_NE(body["results"][0]["highlight"].get<std::string>().find("ＬＥＡＲＮＩＮＧ"), std::string::npos);
 }
 
 TEST_F(HttpServerTest, SearchHighlightUsesBooleanAstTerms) {
@@ -500,10 +623,11 @@ TEST_F(HttpServerTest, SearchHighlightUsesBooleanAstTerms) {
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine OR news";
+  request_body["mode"] = "boolean";
   request_body["highlight"] = {
       {"open_tag", "<strong>"}, {"close_tag", "</strong>"}, {"snippet_length", 80}, {"max_fragments", 1}};
 
@@ -533,7 +657,7 @@ TEST_F(HttpServerTest, SearchHighlightExpandsMultiWordNgramAndTerms) {
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine learning";
@@ -560,7 +684,7 @@ TEST_F(HttpServerTest, SearchHighlightExpandsMultiWordNgramAndTerms) {
 TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -582,10 +706,11 @@ TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
 TEST_F(HttpServerTest, SearchInvalidBooleanExpressionReturnsBadRequest) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine OR";
+  request_body["mode"] = "boolean";
 
   auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
@@ -600,7 +725,7 @@ TEST_F(HttpServerTest, SearchInvalidBooleanExpressionReturnsBadRequest) {
 TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -615,10 +740,81 @@ TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
   EXPECT_EQ(body["error"], "Field 'filters' must be an object");
 }
 
+TEST_F(HttpServerTest, SearchAllowsMaximumJsonFilterCount) {
+  storage::FilterMap filters;
+  json request_filters = json::object();
+  for (size_t i = 0; i < query::QueryParser::kMaxTermCount; ++i) {
+    const std::string column = "filter_" + std::to_string(i);
+    filters[column] = std::string("match");
+    request_filters[column] = "match";
+  }
+
+  auto doc_id = doc_store_->AddDocument("maximum_filter_count", filters);
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(*doc_id, "maximum filters");
+
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  json request_body;
+  request_body["q"] = "maximum";
+  request_body["filters"] = std::move(request_filters);
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200) << res->body;
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["primary_key"], "maximum_filter_count");
+}
+
+TEST_F(HttpServerTest, RejectsMoreThanMaximumJsonFiltersAcrossEndpointsBeforeValidation) {
+  json request_filters = json::object();
+  // An invalid column proves the count check runs before per-filter parsing.
+  request_filters[""] = "invalid";
+  for (size_t i = 0; i < query::QueryParser::kMaxTermCount; ++i) {
+    request_filters["filter_" + std::to_string(i)] = "match";
+  }
+
+  const std::string expected_error =
+      "Too many FILTER conditions (max " + std::to_string(query::QueryParser::kMaxTermCount) + ")";
+
+  // Keep the HTTP error synchronized with the TCP parser's response.
+  std::string tcp_query = "SEARCH test maximum";
+  for (size_t i = 0; i <= query::QueryParser::kMaxTermCount; ++i) {
+    tcp_query += " FILTER filter_" + std::to_string(i) + " = match";
+  }
+  query::QueryParser parser;
+  auto parsed = parser.Parse(tcp_query);
+  ASSERT_FALSE(parsed);
+  ASSERT_EQ(parsed.error().message(), expected_error);
+
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  const std::vector<std::pair<std::string, json>> requests = {
+      {"/tables/test/search", {{"q", "maximum"}, {"filters", request_filters}}},
+      {"/tables/test/count", {{"q", "maximum"}, {"filters", request_filters}}},
+      {"/tables/test/facet", {{"column", "status"}, {"q", "maximum"}, {"filters", request_filters}}},
+  };
+
+  for (const auto& [path, request_body] : requests) {
+    auto res = client.Post(path, request_body.dump(), "application/json");
+    ASSERT_TRUE(res) << path;
+    ASSERT_EQ(res->status, 400) << path << ": " << res->body;
+
+    auto body = json::parse(res->body);
+    ASSERT_TRUE(body.contains("error")) << path;
+    EXPECT_EQ(body["error"], expected_error) << path;
+  }
+}
+
 TEST_F(HttpServerTest, SearchRejectsOversizedJsonFilterColumn) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -636,7 +832,7 @@ TEST_F(HttpServerTest, SearchRejectsOversizedJsonFilterColumn) {
 TEST_F(HttpServerTest, SearchRejectsOversizedJsonFilterValue) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -660,7 +856,7 @@ TEST_F(HttpServerTest, SearchAllowsJsonFilterValueStartingWithOperator) {
 
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "operator";
@@ -679,7 +875,7 @@ TEST_F(HttpServerTest, SearchAllowsJsonFilterValueStartingWithOperator) {
 TEST_F(HttpServerTest, SearchMissingQuery) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["limit"] = 10;  // Missing "q" field
@@ -697,7 +893,7 @@ TEST_F(HttpServerTest, SearchMissingQuery) {
 TEST_F(HttpServerTest, SearchRejectsInvalidPaginationBounds) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   auto expect_bad_request = [&](json request_body, const std::string& expected_error_fragment) {
     auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
@@ -737,7 +933,7 @@ TEST_F(HttpServerTest, SearchRejectsInvalidPaginationBounds) {
 TEST_F(HttpServerTest, SearchInvalidJSON) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   auto res = client.Post("/tables/test/search", "invalid json{", "application/json");
 
@@ -753,7 +949,7 @@ TEST_F(HttpServerTest, SearchInvalidJSON) {
 TEST_F(HttpServerTest, SearchWithNumericFilters) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Test int64_t filter comparison
   json request_body;
@@ -792,7 +988,7 @@ TEST_F(HttpServerTest, SearchWithNumericFilters) {
 TEST_F(HttpServerTest, SearchWithDoubleFilters) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Test double filter comparison
   json request_body;
@@ -824,7 +1020,7 @@ TEST_F(HttpServerTest, SearchWithDoubleFilters) {
 TEST_F(HttpServerTest, SearchWithBoolFilters) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Add documents with bool filters
   storage::FilterMap filters_bool_true;
@@ -876,7 +1072,7 @@ TEST_F(HttpServerTest, SearchWithBoolFilters) {
 TEST_F(HttpServerTest, SearchTreatsSortKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "e SORT score DESC";
@@ -895,9 +1091,11 @@ TEST_F(HttpServerTest, SearchTreatsSortKeywordInQAsLiteralText) {
  */
 TEST_F(HttpServerTest, SearchUsesCacheManager) {
   // Create a simple TcpServer to get cache manager
+  const uint16_t tcp_port = testing::FindAvailableLoopbackPort();
+  ASSERT_GT(tcp_port, 0);
   ServerConfig tcp_config;
   tcp_config.host = "127.0.0.1";
-  tcp_config.port = 11099;  // Use different port
+  tcp_config.port = tcp_port;
   tcp_config.worker_threads = 2;
 
   // Enable cache in config
@@ -909,16 +1107,18 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
   ASSERT_TRUE(tcp_server.Start());
 
   // Create HTTP server with cache manager from TCP server
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18084;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer http_server(http_config, table_contexts_, config_.get(), nullptr, tcp_server.GetCacheManager(),
                          tcp_server.GetDumpLoadInProgressFlag());
   ASSERT_TRUE(http_server.Start());
 
-  httplib::Client client("http://127.0.0.1:18084");
+  httplib::Client client("127.0.0.1", http_port);
 
   json request_body;
   request_body["q"] = "machine";
@@ -978,7 +1178,7 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
 TEST_F(HttpServerTest, ConcurrentSearchRequestsNoDataRace) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Launch multiple threads making concurrent search requests
   const int num_threads = 10;
@@ -988,8 +1188,8 @@ TEST_F(HttpServerTest, ConcurrentSearchRequestsNoDataRace) {
   std::atomic<int> failure_count{0};
 
   for (int i = 0; i < num_threads; i++) {
-    threads.emplace_back([&client, &success_count, &failure_count, requests_per_thread]() {
-      httplib::Client thread_client("http://127.0.0.1:18080");
+    threads.emplace_back([this, &client, &success_count, &failure_count, requests_per_thread]() {
+      httplib::Client thread_client("127.0.0.1", port_);
       for (int j = 0; j < requests_per_thread; j++) {
         json request_body;
         request_body["q"] = (j % 2 == 0) ? "machine" : "news";
@@ -1048,19 +1248,24 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
   full_config.api.default_limit = 20;  // Custom limit!
   full_config.api.max_query_length = 10000;
 
+  const uint16_t tcp_port = testing::FindAvailableLoopbackPort();
+  ASSERT_GT(tcp_port, 0);
+
   // Start TCP server (for completeness, though we're testing HTTP)
   ServerConfig tcp_config;
   tcp_config.host = "127.0.0.1";
-  tcp_config.port = 11021;
+  tcp_config.port = tcp_port;
   tcp_config.default_limit = 20;  // Same limit
 
   TcpServer tcp_server(tcp_config, table_contexts, "./dumps", &full_config, nullptr);
   ASSERT_TRUE(tcp_server.Start());
 
   // Start HTTP server
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = 18086;
+  http_config.port = http_port;
   http_config.allow_cidrs = {"127.0.0.1/32"};  // Allow localhost
 
   HttpServer http_server(http_config, table_contexts, &full_config, nullptr, nullptr, nullptr,
@@ -1068,7 +1273,7 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
   ASSERT_TRUE(http_server.Start());
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-  httplib::Client http_client("127.0.0.1", 18086);
+  httplib::Client http_client("127.0.0.1", http_port);
   http_client.set_read_timeout(std::chrono::seconds(5));
 
   // Test 1: Search WITHOUT explicit limit - should use default_limit=20
@@ -1146,7 +1351,7 @@ TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
 TEST_F(HttpServerTest, CountEndpoint) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Test basic COUNT - should return count only, not documents
   json request_body;
@@ -1182,7 +1387,7 @@ TEST_F(HttpServerTest, CountEndpoint) {
 TEST_F(HttpServerTest, CountWithFilters) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Test COUNT with filter (status = 1)
   json request_body;
@@ -1217,7 +1422,7 @@ TEST_F(HttpServerTest, CountWithFilters) {
 TEST_F(HttpServerTest, CountWithFilterOperators) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Test COUNT with GT operator
   json request_body;
@@ -1253,7 +1458,7 @@ TEST_F(HttpServerTest, CountWithFilterOperators) {
 TEST_F(HttpServerTest, CountErrorCases) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Test missing required field 'q'
   json request_body;
@@ -1317,7 +1522,7 @@ TEST_F(HttpServerTest, CountErrorCases) {
 TEST_F(HttpServerTest, SearchRejectsCRInQuery) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "test\rinjection";
@@ -1339,7 +1544,7 @@ TEST_F(HttpServerTest, SearchRejectsCRInQuery) {
 TEST_F(HttpServerTest, SearchRejectsLFInQuery) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "test\ninjection";
@@ -1361,7 +1566,7 @@ TEST_F(HttpServerTest, SearchRejectsLFInQuery) {
 TEST_F(HttpServerTest, SearchRejectsCRLFInQuery) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "test\r\nHTTP/1.1 200 OK\r\n";
@@ -1383,7 +1588,7 @@ TEST_F(HttpServerTest, SearchRejectsCRLFInQuery) {
 TEST_F(HttpServerTest, SearchRejectsNullByteInQuery) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Build JSON manually since json library may not handle embedded nulls
   std::string query_text = "test";
@@ -1409,7 +1614,7 @@ TEST_F(HttpServerTest, SearchRejectsNullByteInQuery) {
 TEST_F(HttpServerTest, SearchAcceptsNormalQuery) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine learning";
@@ -1430,7 +1635,7 @@ TEST_F(HttpServerTest, SearchAcceptsNormalQuery) {
 TEST_F(HttpServerTest, CountRejectsCRLFInQuery) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "test\r\ninjection";
@@ -1452,7 +1657,7 @@ TEST_F(HttpServerTest, CountRejectsCRLFInQuery) {
 TEST_F(HttpServerTest, SearchRejectsIntegerQField) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = 12345;  // integer, not string
@@ -1470,7 +1675,7 @@ TEST_F(HttpServerTest, SearchRejectsIntegerQField) {
 TEST_F(HttpServerTest, SearchRejectsArrayQField) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = json::array({"hello", "world"});  // array, not string
@@ -1488,7 +1693,7 @@ TEST_F(HttpServerTest, SearchRejectsArrayQField) {
 TEST_F(HttpServerTest, SearchRejectsNullQField) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = nullptr;  // null, not string
@@ -1506,7 +1711,7 @@ TEST_F(HttpServerTest, SearchRejectsNullQField) {
 TEST_F(HttpServerTest, SearchRejectsBooleanQField) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = true;  // boolean, not string
@@ -1524,7 +1729,7 @@ TEST_F(HttpServerTest, SearchRejectsBooleanQField) {
 TEST_F(HttpServerTest, CountRejectsIntegerQField) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = 42;  // integer, not string
@@ -1549,7 +1754,7 @@ TEST_F(HttpServerTest, CountRejectsIntegerQField) {
 TEST_F(HttpServerTest, SearchTreatsLimitKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "e LIMIT 0 OFFSET 999999";
@@ -1570,7 +1775,7 @@ TEST_F(HttpServerTest, SearchTreatsLimitKeywordInQAsLiteralText) {
 TEST_F(HttpServerTest, SearchTreatsOffsetKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine OFFSET 100";
@@ -1587,7 +1792,7 @@ TEST_F(HttpServerTest, SearchTreatsOffsetKeywordInQAsLiteralText) {
 TEST_F(HttpServerTest, SearchTreatsMixedCaseLimitKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine Limit 5";
@@ -1608,7 +1813,7 @@ TEST_F(HttpServerTest, SearchTreatsMixedCaseLimitKeywordInQAsLiteralText) {
 TEST_F(HttpServerTest, SearchAllowsLimitKeywordInQuotedPhrase) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "\"machine LIMIT learning\"";  // quoted phrase
@@ -1628,15 +1833,30 @@ TEST_F(HttpServerTest, SearchAllowsLimitKeywordInQuotedPhrase) {
 TEST_F(HttpServerTest, SearchAllowsBooleanOperatorsInQ) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine AND learning";  // boolean AND
+  request_body["mode"] = "boolean";
   request_body["limit"] = 10;
 
   auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 200);
+}
+
+TEST_F(HttpServerTest, SearchRejectsInvalidQueryMode) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["mode"] = "auto";
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+  EXPECT_NE(json::parse(res->body)["error"].get<std::string>().find("literal"), std::string::npos);
 }
 
 /**
@@ -1649,7 +1869,7 @@ TEST_F(HttpServerTest, SearchAllowsBooleanOperatorsInQ) {
 TEST_F(HttpServerTest, SearchRejectsTableNameWithWhitespace) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -1670,7 +1890,7 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithWhitespace) {
 TEST_F(HttpServerTest, SearchRejectsTableNameWithSemicolon) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -1683,7 +1903,7 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithSemicolon) {
 TEST_F(HttpServerTest, SearchRejectsTableNameWithInvalidUtf8) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -1704,7 +1924,7 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithInvalidUtf8) {
 TEST_F(HttpServerTest, CountTreatsFilterKeywordInQAsLiteralText) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "e FILTER status = 1";
@@ -1720,7 +1940,7 @@ TEST_F(HttpServerTest, CountTreatsFilterKeywordInQAsLiteralText) {
 TEST_F(HttpServerTest, CountRejectsTableNameWithWhitespace) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   json request_body;
   request_body["q"] = "machine";
@@ -1739,7 +1959,7 @@ TEST_F(HttpServerTest, CountRejectsTableNameWithWhitespace) {
 TEST_F(HttpServerTest, SearchJsonLimitOverridesAttemptedSmuggle) {
   ASSERT_TRUE(http_server_->Start());
 
-  httplib::Client client("http://127.0.0.1:18080");
+  httplib::Client client("127.0.0.1", port_);
 
   // Sanity: a clean request with explicit limit returns the requested limit.
   json clean_request;
