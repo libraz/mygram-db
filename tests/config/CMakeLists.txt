@@ -17,6 +17,20 @@ gtest_discover_tests(config_test
   PROPERTIES RESOURCE_LOCK config_file_io
 )
 
+add_test(
+  NAME DockerEntrypoint.ConfigSurfaceAndEscaping
+  COMMAND sh
+    ${CMAKE_CURRENT_SOURCE_DIR}/docker_entrypoint_test.sh
+    ${PROJECT_SOURCE_DIR}/support/docker/entrypoint.sh
+    $<TARGET_FILE:mygramdb>
+    ${CMAKE_CURRENT_BINARY_DIR}/docker_entrypoint_test
+    ${PROJECT_SOURCE_DIR}/docker-compose.yml
+)
+set_tests_properties(
+  DockerEntrypoint.ConfigSurfaceAndEscaping
+  PROPERTIES RESOURCE_LOCK config_file_io
+)
+
 # Required filters test
 add_executable(required_filters_test
   required_filters_test.cpp

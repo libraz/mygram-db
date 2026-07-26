@@ -4,7 +4,9 @@
  */
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
+#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -16,7 +18,9 @@ class ConfigRateLimitingTest : public ::testing::Test {
  protected:
   void SetUp() override {
     // Create temporary config file
-    config_file_ = "/tmp/mygramdb_test_rate_limiting_config.yaml";
+    config_file_ =
+        (std::filesystem::temp_directory_path() / ("mygramdb_rate_limiting_" + std::to_string(::getpid()) + ".yaml"))
+            .string();
   }
 
   void TearDown() override {
@@ -44,6 +48,7 @@ mysql:
 
 tables:
   - name: test_table
+    text_source: {column: content}
 )");
 
   auto config_result = LoadConfig(config_file_);
@@ -68,6 +73,7 @@ mysql:
 
 tables:
   - name: test_table
+    text_source: {column: content}
 
 api:
   rate_limiting:
@@ -95,6 +101,7 @@ mysql:
 
 tables:
   - name: test_table
+    text_source: {column: content}
 
 api:
   rate_limiting:
@@ -125,6 +132,7 @@ mysql:
 
 tables:
   - name: test_table
+    text_source: {column: content}
 
 api:
   rate_limiting:
@@ -154,6 +162,7 @@ mysql:
 
 tables:
   - name: test_table
+    text_source: {column: content}
 
 api:
   rate_limiting:

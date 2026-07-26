@@ -8,10 +8,12 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include "config/config_help.h"
 #include "config/config_internal.h"
 #include "utils/error.h"
 #include "utils/memory_utils.h"
@@ -147,6 +149,7 @@ TEST(ConfigTest, LoadValidConfig) {
   auto config_result = LoadConfig(path);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   Config config = *config_result;
+  EXPECT_EQ(config.source_path, std::filesystem::canonical(path).string());
 
   // MySQL config
   EXPECT_EQ(config.mysql.host, "127.0.0.1");
@@ -308,6 +311,11 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   f << "  restore_memory_budget_mb: 8192\n";
   f << "  restore_max_section_mb: 1024\n";
   f << "api:\n";
+  f << "  tcp:\n";
+  f << "    idle_timeout_sec: 45\n";
+  f << "    reaper_interval_sec: 3\n";
+  f << "    max_pending_frames: 2048\n";
+  f << "    max_pending_frame_bytes: 8388608\n";
   f << "  http:\n";
   f << "    enable: true\n";
   f << "    max_body_bytes: 1048576\n";
@@ -331,6 +339,10 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   EXPECT_EQ(config.dump.default_filename, "custom.dmp");
   EXPECT_EQ(config.dump.restore_memory_budget_mb, 8192);
   EXPECT_EQ(config.dump.restore_max_section_mb, 1024);
+  EXPECT_EQ(config.api.tcp.idle_timeout_sec, 45);
+  EXPECT_EQ(config.api.tcp.reaper_interval_sec, 3);
+  EXPECT_EQ(config.api.tcp.max_pending_frames, 2048);
+  EXPECT_EQ(config.api.tcp.max_pending_frame_bytes, 8388608);
   EXPECT_TRUE(config.api.http.enable);
   EXPECT_EQ(config.api.http.max_body_bytes, 1048576);
   EXPECT_EQ(config.api.unix_socket.path, "/tmp/mygramdb-test.sock");
@@ -377,6 +389,18 @@ TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
   EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 1);
 }
 
+TEST(ConfigTest, ExplicitZeroKanjiNgramSizeInheritsLegacyGlobalNgramSize) {
+  json config_json = {
+      {"index", {{"ngram_size", 3}}},
+      {"tables", json::array({{{"name", "test"}, {"kanji_ngram_size", 0}, {"text_source", {{"column", "text"}}}}})}};
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
+  ASSERT_EQ(config_result->tables.size(), 1);
+  EXPECT_EQ(config_result->tables[0].ngram_size, 3);
+  EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 3);
+}
+
 TEST(ConfigTest, OmittedGlobalNgramSizeDefaultsToBigram) {
   json config_json = {{"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
 
@@ -397,6 +421,17 @@ TEST(ConfigTest, InvalidNetworkAllowCidrIsRejectedSemantically) {
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("network.allow_cidrs"), std::string::npos);
   EXPECT_NE(config_result.error().message().find("999.0.0.1/24"), std::string::npos);
+}
+
+TEST(ConfigTest, IPv6NetworkAllowCidrsAreAcceptedSemantically) {
+  json config_json = {
+      {"network", {{"allow_cidrs", json::array({"::1/128", "2001:db8::/32"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+  EXPECT_EQ(config_result->network.allow_cidrs, (std::vector<std::string>{"::1/128", "2001:db8::/32"}));
 }
 
 TEST(ConfigTest, TableDatabaseDefaultsToMysqlDatabaseAndCanOverride) {
@@ -734,7 +769,7 @@ TEST(ConfigTest, MultiTableAutoInitialSnapshotAllowsSnapshotStartFrom) {
   EXPECT_EQ(result->replication.start_from, "snapshot");
 }
 
-TEST(ConfigTest, ReservedConfigKnobsAreMarkedNotYetEnforcedInSchema) {
+TEST(ConfigTest, UnimplementedConfigKnobsAreMarkedNotYetEnforcedInSchema) {
   std::ifstream f(SourcePath("src/config/config-schema.json"));
   ASSERT_TRUE(f.is_open());
   json schema = json::parse(f);
@@ -758,7 +793,6 @@ TEST(ConfigTest, ReservedConfigKnobsAreMarkedNotYetEnforcedInSchema) {
   expect_reserved({"properties", "memory", "properties", "soft_target_mb"});
   expect_reserved({"properties", "memory", "properties", "arena_chunk_mb"});
   expect_reserved({"properties", "memory", "properties", "minute_epoch"});
-  expect_reserved({"properties", "cache", "properties", "eviction_batch_size"});
 }
 
 TEST(ConfigTest, BinlogSchemaAllowsOnlyRequiredValues) {
@@ -1536,6 +1570,122 @@ TEST(ConfigTest, MysqlPortRangeValidation) {
   }
 }
 
+TEST(ConfigTest, QuotedNumericYamlScalarsRemainStrings) {
+  const std::string path = TempConfigPath("quoted_numeric_strings.yaml");
+  std::ofstream file(path);
+  file << "mysql:\n"
+       << "  user: \"12345\"\n"
+       << "  password: \"67890\"\n"
+       << "  database: \"24680\"\n"
+       << "tables:\n"
+       << "  - name: \"13579\"\n"
+       << "    primary_key: \"123\"\n"
+       << "    text_source:\n"
+       << "      column: \"456\"\n";
+  file.close();
+
+  auto result = LoadConfig(path);
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->mysql.user, "12345");
+  EXPECT_EQ(result->mysql.password, "67890");
+  EXPECT_EQ(result->mysql.database, "24680");
+  EXPECT_EQ(result->tables[0].name, "13579");
+  EXPECT_EQ(result->tables[0].primary_key, "123");
+  EXPECT_EQ(result->tables[0].text_source.column, "456");
+  std::filesystem::remove(path);
+}
+
+TEST(ConfigTest, MediumintFilterTypesPassSchemaAndParser) {
+  const std::string path = TempConfigPath("mediumint_filters.yaml");
+  std::ofstream file(path);
+  file << "mysql:\n"
+       << "  user: test\n"
+       << "  database: test\n"
+       << "tables:\n"
+       << "  - name: docs\n"
+       << "    text_source:\n"
+       << "      column: body\n"
+       << "    required_filters:\n"
+       << "      - {name: status, type: mediumint, op: '=', value: 1}\n"
+       << "    filters:\n"
+       << "      - {name: score, type: mediumint_unsigned}\n";
+  file.close();
+
+  auto result = LoadConfig(path);
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->tables[0].required_filters[0].type, "mediumint");
+  EXPECT_EQ(result->tables[0].filters[0].type, "mediumint_unsigned");
+  std::filesystem::remove(path);
+}
+
+TEST(ConfigTest, TableWithoutTextSourceIsRejected) {
+  const std::string path = TempConfigPath("missing_text_source.yaml");
+  std::ofstream file(path);
+  file << "mysql:\n"
+       << "  user: test\n"
+       << "  database: test\n"
+       << "tables:\n"
+       << "  - name: docs\n";
+  file.close();
+
+  auto result = LoadConfig(path);
+  EXPECT_FALSE(result);
+  std::filesystem::remove(path);
+}
+
+TEST(ConfigTest, MysqlPortEnvironmentOverrideEnforcesSchemaRange) {
+  const std::string path = TempConfigPath("env_port_range.yaml");
+  std::ofstream file(path);
+  file << "mysql:\n"
+       << "  user: test\n"
+       << "  database: test\n"
+       << "tables:\n"
+       << "  - name: docs\n"
+       << "    text_source: {column: body}\n";
+  file.close();
+
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_PORT", "999999", 1), 0);
+  auto result = LoadConfig(path);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_PORT"), 0);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
+  std::filesystem::remove(path);
+}
+
+TEST(ConfigTest, ValidationOnlyLoadIgnoresEnvironmentOverrides) {
+  const std::string path = TempConfigPath("validation_ignores_env.yaml");
+  std::ofstream file(path);
+  file << "mysql:\n"
+       << "  host: file-host\n"
+       << "  port: 3307\n"
+       << "  user: file-user\n"
+       << "  password: file-password\n"
+       << "  database: file-database\n"
+       << "tables:\n"
+       << "  - name: docs\n"
+       << "    text_source: {column: body}\n";
+  file.close();
+
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_HOST", "environment-host", 1), 0);
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_PORT", "999999", 1), 0);
+  auto result = LoadConfigForValidation(path);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_HOST"), 0);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_PORT"), 0);
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->mysql.host, "file-host");
+  EXPECT_EQ(result->mysql.port, 3307);
+  std::filesystem::remove(path);
+}
+
+TEST(ConfigTest, RuntimeRateLimitBoundsMatchSchema) {
+  std::ifstream schema_file(SourcePath("src/config/config-schema.json"));
+  ASSERT_TRUE(schema_file.is_open());
+  const json schema = json::parse(schema_file);
+  const auto& rate_limiting = schema["properties"]["api"]["properties"]["rate_limiting"]["properties"];
+  EXPECT_EQ(rate_limiting["capacity"]["maximum"].get<int>(), ApiConfig::kMaxRateLimitCapacity);
+  EXPECT_EQ(rate_limiting["refill_rate"]["maximum"].get<int>(), ApiConfig::kMaxRateLimitRefillRate);
+}
+
 /**
  * @brief Test ToFilterConfig converts a single RequiredFilterConfig correctly
  */
@@ -1989,4 +2139,21 @@ TEST(ConfigTest, QueueSizeRangeValidation) {
     EXPECT_FALSE(result) << "queue_size=-5 should be rejected";
     std::remove("queue_negative.yaml");
   }
+}
+
+TEST(ConfigTest, CompleteYamlAndJsonExamplesHaveIdenticalCanonicalProjection) {
+  auto yaml_config = LoadConfigForValidation(SourcePath("examples/config.yaml"));
+  ASSERT_TRUE(yaml_config) << yaml_config.error().message();
+  auto json_config = LoadConfigForValidation(SourcePath("examples/config.json"));
+  ASSERT_TRUE(json_config) << json_config.error().message();
+
+  const auto yaml_variables = ConfigToVariableMap(*yaml_config);
+  const auto json_variables = ConfigToVariableMap(*json_config);
+  for (const auto& [name, yaml_value] : yaml_variables) {
+    const auto json_iter = json_variables.find(name);
+    ASSERT_NE(json_iter, json_variables.end()) << "JSON example omits canonical variable " << name;
+    EXPECT_EQ(yaml_value, json_iter->second) << "Example value differs for " << name;
+  }
+  EXPECT_EQ(json_variables.size(), yaml_variables.size())
+      << "The JSON example contains a canonical variable absent from the YAML example";
 }

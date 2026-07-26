@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <string>
@@ -182,6 +183,10 @@ class RuntimeVariableManager {
  private:
   RuntimeVariableManager() = default;
 
+  // Serializes the state-update -> reconnect-callback -> optional-rollback
+  // transaction across concurrent mysql.host/mysql.port SET operations.
+  std::mutex mysql_reconnect_transaction_mutex_;
+
   // Thread-safe storage (readers-writer lock)
   mutable std::shared_mutex mutex_;
 
@@ -200,7 +205,7 @@ class RuntimeVariableManager {
   // Non-owning pointer for cache configuration updates.
   // Thread-safe: always accessed under mutex_ (SetCacheManager acquires unique_lock,
   // ApplyCache* methods acquire shared_lock). Set during initialization before
-  // worker threads start, but the lock provides safety regardless (reviewed).
+  // worker threads start, and the lock also protects later updates.
   cache::CacheManager* cache_manager_ = nullptr;
 
   /**

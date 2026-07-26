@@ -8,10 +8,108 @@
 #include <gtest/gtest.h>
 
 #include <optional>
+#include <string_view>
 
+#include "config_schema_embedded.h"
 #include "utils/error.h"
 
 namespace mygramdb::config {
+
+namespace {
+
+void CollectSchemaLeaves(const nlohmann::json& node, const std::string& path, std::vector<std::string>& leaves) {
+  if (node.contains("properties")) {
+    for (const auto& [name, child] : node["properties"].items()) {
+      CollectSchemaLeaves(child, path.empty() ? name : path + "." + name, leaves);
+    }
+    return;
+  }
+  if (node.value("type", nlohmann::json{}) == "array" && node.contains("items")) {
+    CollectSchemaLeaves(node["items"], path + "[]", leaves);
+    return;
+  }
+  leaves.push_back(path);
+}
+
+std::string VariablePathForSchemaLeaf(std::string path) {
+  if (path == "index.ngram_size") {
+    return "tables[0].ngram_size";
+  }
+  if (path == "server.host") {
+    return "api.tcp.bind";
+  }
+  if (path == "server.port") {
+    return "api.tcp.port";
+  }
+  if (path == "tables[].text_source.concat[]") {
+    return "tables[1].text_source.concat";
+  }
+  if (path == "tables[].text_source.delimiter") {
+    return "tables[1].text_source.delimiter";
+  }
+  if (path == "network.allow_cidrs[]") {
+    return "network.allow_cidrs";
+  }
+  size_t array_pos = 0;
+  while ((array_pos = path.find("[]", array_pos)) != std::string::npos) {
+    path.replace(array_pos, 2, "[0]");
+    array_pos += 3;
+  }
+  return path;
+}
+
+std::string ConfigShowPath(std::string variable_path) {
+  if (variable_path.rfind("tables[", 0) == 0) {
+    // CONFIG SHOW deliberately addresses arrays as a whole; individual table
+    // indices are represented only by the flattened SHOW VARIABLES projection.
+    return "tables";
+  }
+  size_t index_pos = 0;
+  while ((index_pos = variable_path.find("[0]", index_pos)) != std::string::npos) {
+    variable_path.erase(index_pos, 3);
+  }
+  while ((index_pos = variable_path.find("[1]", index_pos)) != std::string::npos) {
+    variable_path.erase(index_pos, 3);
+  }
+  return variable_path;
+}
+
+Config FullyPopulatedConfig() {
+  Config config;
+  config.mysql.password = "secret";
+  config.network.allow_cidrs = {"127.0.0.1/32"};
+
+  TableConfig column_table;
+  column_table.name = "articles";
+  column_table.database = "app";
+  column_table.text_source.column = "body";
+  RequiredFilterConfig required;
+  required.name = "enabled";
+  required.type = "int";
+  required.op = "=";
+  required.value = "1";
+  required.bitmap_index = true;
+  column_table.required_filters.push_back(required);
+  FilterConfig filter;
+  filter.name = "created_at";
+  filter.type = "datetime";
+  filter.dict_compress = true;
+  filter.bitmap_index = true;
+  filter.bucket = "day";
+  column_table.filters.push_back(filter);
+  column_table.synonyms.enable = true;
+  column_table.synonyms.file = "synonyms.tsv";
+  config.tables.push_back(column_table);
+
+  TableConfig concat_table = column_table;
+  concat_table.name = "pages";
+  concat_table.text_source.column.clear();
+  concat_table.text_source.concat = {"title", "body"};
+  config.tables.push_back(concat_table);
+  return config;
+}
+
+}  // namespace
 
 class ConfigSchemaExplorerTest : public ::testing::Test {
  protected:
@@ -240,6 +338,24 @@ TEST(ConfigHelpTest, ConfigToJsonIncludesBM25Section) {
   EXPECT_NE(output.find("1.7"), std::string::npos);
   EXPECT_NE(output.find("b"), std::string::npos);
   EXPECT_NE(output.find("0.6"), std::string::npos);
+}
+
+TEST(ConfigHelpTest, EverySchemaLeafMapsToConfigShowAndCanonicalVariable) {
+  const auto schema = nlohmann::json::parse(kConfigSchemaJson);
+  std::vector<std::string> schema_leaves;
+  CollectSchemaLeaves(schema, "", schema_leaves);
+  const Config config = FullyPopulatedConfig();
+  const auto variables = ConfigToVariableMap(config);
+
+  for (const auto& schema_leaf : schema_leaves) {
+    const std::string variable_path = VariablePathForSchemaLeaf(schema_leaf);
+    EXPECT_NE(variables.find(variable_path), variables.end())
+        << "Schema leaf has no Config/SHOW VARIABLES projection: " << schema_leaf << " -> " << variable_path;
+
+    auto displayed = FormatConfigForDisplay(config, ConfigShowPath(variable_path));
+    EXPECT_TRUE(displayed) << "Schema leaf has no CONFIG SHOW path: " << schema_leaf << " -> "
+                           << ConfigShowPath(variable_path);
+  }
 }
 
 TEST(ConfigHelpTest, ConfigDisplayPreservesSynonymAndNullFilterContracts) {

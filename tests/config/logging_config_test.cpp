@@ -11,6 +11,7 @@
 #include <fstream>
 
 #include "config/config.h"
+#include "utils/structured_log.h"
 
 using namespace mygramdb::config;
 
@@ -101,6 +102,21 @@ TEST(LoggingConfigTest, FileLogging) {
   EXPECT_EQ(config.logging.format, "text");
   EXPECT_EQ(config.logging.file, "/var/log/mygramdb/mygramdb.log");
 
+  std::filesystem::remove(config_path);
+}
+
+TEST(LoggingConfigTest, LoadingConfigDoesNotMutateLiveStructuredLogFormat) {
+  std::string config_path = CreateTempConfig(
+      "logging:\n"
+      "  level: \"info\"\n"
+      "  format: \"json\"\n");
+
+  mygram::utils::StructuredLog::SetFormat(mygram::utils::LogFormat::TEXT);
+  auto config_result = LoadConfig(config_path);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+  EXPECT_EQ(mygram::utils::StructuredLog::GetFormat(), mygram::utils::LogFormat::TEXT);
+
+  mygram::utils::StructuredLog::SetFormat(mygram::utils::LogFormat::JSON);
   std::filesystem::remove(config_path);
 }
 

@@ -37,7 +37,8 @@
         "database": {
           "type": "string",
           "description": "Database name",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
         },
         "use_gtid": {
           "type": "boolean",
@@ -120,23 +121,27 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["name"],
+        "required": ["name", "text_source"],
         "additionalProperties": false,
         "properties": {
           "name": {
             "type": "string",
             "description": "Table name in MySQL database",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
           },
           "database": {
             "type": "string",
             "description": "Database/schema containing this table. Defaults to mysql.database",
-            "minLength": 1
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
           },
           "primary_key": {
             "type": "string",
             "description": "Primary key column name",
-            "default": "id"
+            "default": "id",
+            "minLength": 1,
+            "pattern": "^[^\\u0000]+$"
           },
           "text_source": {
             "type": "object",
@@ -145,13 +150,17 @@
             "properties": {
               "column": {
                 "type": "string",
-                "description": "Single column to index for full-text search"
+                "description": "Single column to index for full-text search",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]+$"
               },
               "concat": {
                 "type": "array",
                 "description": "Multiple columns to concatenate",
                 "items": {
-                  "type": "string"
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]+$"
                 },
                 "minItems": 2
               },
@@ -180,7 +189,9 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "description": "Filter column name"
+                  "description": "Filter column name",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]+$"
                 },
                 "type": {
                   "type": "string",
@@ -188,6 +199,7 @@
                   "enum": [
                     "tinyint", "tinyint_unsigned",
                     "smallint", "smallint_unsigned",
+                    "mediumint", "mediumint_unsigned",
                     "int", "int_unsigned",
                     "bigint", "bigint_unsigned",
                     "float", "double",
@@ -206,7 +218,7 @@
                 },
                 "bitmap_index": {
                   "type": "boolean",
-                  "description": "Enable bitmap index for search-time filtering",
+                  "description": "Reserved / not yet enforced: bitmap index selection for required filters",
                   "default": false
                 }
               }
@@ -222,7 +234,9 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "description": "Filter column name"
+                  "description": "Filter column name",
+                  "minLength": 1,
+                  "pattern": "^[^\\u0000]+$"
                 },
                 "type": {
                   "type": "string",
@@ -230,6 +244,7 @@
                   "enum": [
                     "tinyint", "tinyint_unsigned",
                     "smallint", "smallint_unsigned",
+                    "mediumint", "mediumint_unsigned",
                     "int", "int_unsigned",
                     "bigint", "bigint_unsigned",
                     "float", "double",
@@ -239,17 +254,17 @@
                 },
                 "dict_compress": {
                   "type": "boolean",
-                  "description": "Enable dictionary compression",
+                  "description": "Reserved / not yet enforced: dictionary compression",
                   "default": false
                 },
                 "bitmap_index": {
                   "type": "boolean",
-                  "description": "Enable bitmap indexing",
+                  "description": "Reserved / not yet enforced: bitmap index selection",
                   "default": false
                 },
                 "bucket": {
                   "type": "string",
-                  "description": "Bucket datetime values",
+                  "description": "Reserved / not yet enforced: bucket datetime values",
                   "enum": ["minute", "hour", "day"]
                 }
               }
@@ -281,20 +296,20 @@
             "properties": {
               "block_size": {
                 "type": "integer",
-                "description": "Block size for delta encoding",
+                "description": "Reserved / not yet enforced: block size for delta encoding",
                 "default": 128,
                 "minimum": 8,
                 "maximum": 1024
               },
               "freq_bits": {
                 "type": "integer",
-                "description": "Term frequency bits: 0=boolean, 4, or 8",
+                "description": "Reserved / not yet enforced: term frequency bits (0=boolean, 4, or 8)",
                 "default": 0,
                 "enum": [0, 4, 8]
               },
               "use_roaring": {
                 "type": "string",
-                "description": "Roaring bitmap usage",
+                "description": "Reserved / not yet enforced: Roaring bitmap usage",
                 "default": "auto",
                 "enum": ["auto", "always", "never"]
               }
@@ -586,10 +601,24 @@
             },
             "recv_timeout_sec": {
               "type": "integer",
-              "description": "SO_RCVTIMEO applied to accepted client connections. With the current blocking-recv I/O model, this also bounds how long a worker stays parked on an idle or half-dead client. 0 disables the timeout.",
+              "description": "Initial first-frame timeout for accepted TCP connections. 0 disables the timeout.",
               "default": 60,
               "minimum": 0,
               "maximum": 86400
+            },
+            "idle_timeout_sec": {
+              "type": "integer",
+              "description": "Application-level idle connection timeout. 0 disables idle reaping.",
+              "default": 300,
+              "minimum": 0,
+              "maximum": 86400
+            },
+            "reaper_interval_sec": {
+              "type": "integer",
+              "description": "Interval in seconds between idle-connection reaper sweeps.",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 3600
             },
             "thread_pool_queue_size": {
               "type": "integer",
@@ -644,6 +673,20 @@
               "default": 268435456,
               "minimum": 1048576,
               "maximum": 68719476736
+            },
+            "max_pending_frames": {
+              "type": "integer",
+              "description": "Per-connection hard cap on completed request frames awaiting worker dispatch. Reads pause at 75% of this limit.",
+              "default": 1024,
+              "minimum": 4,
+              "maximum": 1000000
+            },
+            "max_pending_frame_bytes": {
+              "type": "integer",
+              "description": "Per-connection hard cap on bytes held by completed request frames awaiting worker dispatch. Reads pause at 75% of this limit.",
+              "default": 4194304,
+              "minimum": 4096,
+              "maximum": 1073741824
             }
           }
         },
@@ -860,7 +903,7 @@
         },
         "eviction_batch_size": {
           "type": "integer",
-          "description": "Reserved / not yet enforced: number of entries to evict at once",
+          "description": "Maximum number of entries evicted in one capacity-enforcement batch",
           "default": 10,
           "minimum": 1
         },

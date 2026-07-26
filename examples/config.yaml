@@ -62,7 +62,7 @@ tables:
         type: "int"                 # Column type (same options as filters)
         op: "="                     # Operator: "=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"
         value: 1                    # Comparison value (omit for IS NULL/IS NOT NULL)
-        bitmap_index: false         # Enable bitmap index for search-time filtering (default: false)
+        bitmap_index: false         # Reserved / not yet enforced
 
       - name: "deleted_at"
         type: "datetime"
@@ -75,8 +75,8 @@ tables:
     filters:
       - name: "status"              # Filter column name
         type: "int"                 # Column type (see docs for all types)
-        dict_compress: false        # Enable dictionary compression (default: false, recommended for low-cardinality)
-        bitmap_index: false         # Enable bitmap indexing (default: false, faster filtering)
+        dict_compress: false        # Reserved / not yet enforced
+        bitmap_index: false         # Reserved / not yet enforced
 
       - name: "category"
         type: "string"
@@ -85,21 +85,20 @@ tables:
 
       - name: "created_at"
         type: "datetime"
-        # bucket: "minute"          # Bucket datetime values: "minute", "hour", "day" (optional, reduces cardinality)
+        # bucket: "minute"          # Reserved / not yet enforced
 
     # N-gram Configuration
     ngram_size: 2                   # N-gram size for ASCII/alphanumeric characters (default: 2)
                                     # 1=unigram, 2=bigram, etc.
                                     # For mixed-language content: recommended 2
-    kanji_ngram_size: 1             # N-gram size for CJK (kanji/kana/hanzi) characters (default: 0 = use ngram_size)
-                                    # For Japanese/Chinese: recommended 1
+    kanji_ngram_size: 0             # N-gram size for CJK (kanji/kana/hanzi) characters (default: 0 = use ngram_size)
                                     # Set to 0 to use ngram_size for all characters
 
-    # Posting List Configuration
+    # Posting List Configuration (reserved / not yet enforced)
     posting:
-      block_size: 128               # Block size for delta encoding (default: 128)
-      freq_bits: 0                  # Term frequency bits: 0=boolean, 4, or 8 (default: 0)
-      use_roaring: "auto"           # Roaring bitmap usage: "auto", "always", "never" (default: auto)
+      block_size: 128
+      freq_bits: 0
+      use_roaring: "auto"
 
     # Synonym expansion (optional). When enabled, file is mandatory and startup
     # fails if the complete TSV cannot be loaded; the previous dictionary is
@@ -170,6 +169,14 @@ memory:
   #   "all"   - Verify all queries (most accurate, higher memory usage)
   # Memory impact: "off" ~414MB/M docs, "all" ~2.2GB/M docs
   verify_text: "off"
+
+# BM25 relevance scoring
+# SORT _score requires both bm25.enable=true and stored normalized text, which
+# means memory.verify_text must be "ascii" or "all".
+bm25:
+  enable: false                     # Enable relevance scoring (default: false)
+  k1: 1.2                           # Term-frequency saturation (default: 1.2)
+  b: 0.75                           # Document-length normalization (default: 0.75)
 
 # Dump Persistence (Automatic Backup)
 dump:
@@ -262,7 +269,7 @@ cache:
 
   # Advanced tuning (optional)
   compression_enabled: true         # Enable LZ4 compression for cached results (default: true)
-  eviction_batch_size: 10           # Reserved / not yet enforced (default: 10)
+  eviction_batch_size: 10           # Maximum entries evicted per capacity pass (default: 10)
 
   # Invalidation queue settings (optional)
   invalidation:

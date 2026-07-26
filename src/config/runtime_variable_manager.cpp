@@ -9,11 +9,14 @@
 
 #include <charconv>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <sstream>
 #include <vector>
 
 #include "cache/cache_manager.h"
+#include "config/config_help.h"
+#include "utils/constants.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::config {
@@ -30,127 +33,32 @@ constexpr int kMaxRuntimeQueryLength = 4096;
 
 std::string JoinStrings(const std::vector<std::string>& values, const std::string& delimiter) {
   std::ostringstream oss;
-  for (size_t i = 0; i < values.size(); ++i) {
-    if (i > 0) {
+  for (size_t index = 0; index < values.size(); ++index) {
+    if (index > 0) {
       oss << delimiter;
     }
-    oss << values[i];
+    oss << values[index];
   }
   return oss.str();
 }
 }  // namespace
 
-// Mutable variables (can be changed at runtime)
-static const std::map<std::string, bool> kVariableMutability = {
-    // Logging
-    {"logging.level", true},
-    {"logging.format", true},
-    {"logging.file", false},  // Immutable (requires file handle reopening)
-
-    // MySQL connection
-    {"mysql.host", true},
-    {"mysql.port", true},
-    {"mysql.user", false},                    // Immutable (authentication)
-    {"mysql.password", false},                // Immutable (authentication)
-    {"mysql.database", false},                // Immutable (requires reinitialization)
-    {"mysql.use_gtid", false},                // Immutable (replication mode)
-    {"mysql.binlog_format", false},           // Immutable (validation only)
-    {"mysql.binlog_row_image", false},        // Immutable (validation only)
-    {"mysql.connect_timeout_ms", false},      // Immutable
-    {"mysql.read_timeout_ms", false},         // Immutable
-    {"mysql.write_timeout_ms", false},        // Immutable
-    {"mysql.session_timeout_sec", false},     // Immutable
-    {"mysql.ssl_enable", false},              // Immutable (SSL setup)
-    {"mysql.ssl_ca", false},                  // Immutable
-    {"mysql.ssl_cert", false},                // Immutable
-    {"mysql.ssl_key", false},                 // Immutable
-    {"mysql.ssl_verify_server_cert", false},  // Immutable
-    {"mysql.datetime_timezone", false},       // Immutable
-
-    // API settings
-    {"api.default_limit", true},
-    {"api.max_query_length", true},
-    {"api.tcp.bind", false},                      // Immutable (requires socket rebind)
-    {"api.tcp.port", false},                      // Immutable
-    {"api.tcp.max_connections", false},           // Immutable
-    {"api.tcp.worker_threads", false},            // Immutable (thread pool is bound at startup)
-    {"api.tcp.recv_timeout_sec", false},          // Immutable (applied per connection at accept)
-    {"api.tcp.thread_pool_queue_size", false},    // Immutable (thread pool queue sized at startup)
-    {"api.tcp.keepalive.enabled", false},         // Immutable (applied per connection at accept)
-    {"api.tcp.keepalive.idle_sec", false},        // Immutable
-    {"api.tcp.keepalive.interval_sec", false},    // Immutable
-    {"api.tcp.keepalive.probe_count", false},     // Immutable
-    {"api.tcp.max_write_queue_bytes", false},     // Immutable (per-connection cap set at accept)
-    {"api.tcp.max_total_buffered_bytes", false},  // Immutable (shared reactor admission budget)
-    {"api.http.enable", false},                   // Immutable
-    {"api.http.bind", false},                     // Immutable
-    {"api.http.port", false},                     // Immutable
-    {"api.http.enable_cors", false},              // Immutable
-    {"api.http.cors_allow_origin", false},        // Immutable
-    {"api.http.read_timeout_sec", false},         // Immutable
-    {"api.http.write_timeout_sec", false},        // Immutable
-    {"api.http.max_body_bytes", false},           // Immutable
-    {"api.unix_socket.path", false},              // Immutable
-
-    // Rate limiting
-    {"api.rate_limiting.enable", true},
-    {"api.rate_limiting.capacity", true},
-    {"api.rate_limiting.refill_rate", true},
-    {"api.rate_limiting.max_clients", false},  // Immutable (memory allocation)
-
-    // Cache
-    {"cache.enabled", true},
-    {"cache.min_query_cost_ms", true},
-    {"cache.ttl_seconds", true},
-    {"cache.max_memory_mb", false},              // Immutable (operator-facing alias)
-    {"cache.max_memory_bytes", false},           // Immutable (memory allocation)
-    {"cache.invalidation_strategy", false},      // Immutable (architecture change)
-    {"cache.compression_enabled", false},        // Immutable
-    {"cache.invalidation.batch_size", false},    // Immutable
-    {"cache.invalidation.max_delay_ms", false},  // Immutable
-
-    // Memory (all immutable)
-    {"memory.hard_limit_mb", false},
-    {"memory.soft_target_mb", false},
-    {"memory.arena_chunk_mb", false},
-    {"memory.roaring_threshold", false},
-    {"memory.minute_epoch", false},
-    {"memory.normalize.nfkc", false},
-    {"memory.normalize.width", false},
-    {"memory.normalize.lower", false},
-    {"memory.verify_text", false},
-
-    // Replication (all immutable)
-    {"replication.enable", false},
-    {"replication.auto_initial_snapshot", false},
-    {"replication.server_id", false},
-    {"replication.start_from", false},
-    {"replication.queue_size", false},
-    {"replication.reconnect_backoff_min_ms", false},
-    {"replication.reconnect_backoff_max_ms", false},
-
-    // Build (all immutable)
-    {"build.mode", false},
-    {"build.batch_size", false},
-    {"build.parallelism", false},
-    {"build.throttle_ms", false},
-
-    // Dump (all immutable)
-    {"dump.dir", false},
-    {"dump.default_filename", false},
-    {"dump.interval_sec", false},
-    {"dump.retain", false},
-
-    // Network (immutable - security critical)
-    {"network.allow_cidrs", false},
-
-    // BM25 (immutable - ranking model configuration)
-    {"bm25.enable", false},
-    {"bm25.k1", false},
-    {"bm25.b", false},
-
-    // Tables (all immutable - requires index rebuild)
-    // Note: table.* variables are not listed here (checked dynamically)
+// Runtime mutation is an intentionally small allowlist. Every other variable
+// comes from ConfigToVariableMap and is therefore known-but-immutable without
+// being copied into a second exhaustive registry.
+static const std::set<std::string> kMutableVariables = {
+    "logging.level",
+    "logging.format",
+    "mysql.host",
+    "mysql.port",
+    "api.default_limit",
+    "api.max_query_length",
+    "api.rate_limiting.enable",
+    "api.rate_limiting.capacity",
+    "api.rate_limiting.refill_rate",
+    "cache.enabled",
+    "cache.min_query_cost_ms",
+    "cache.ttl_seconds",
 };
 
 Expected<std::unique_ptr<RuntimeVariableManager>, Error> RuntimeVariableManager::Create(const Config& initial_config) {
@@ -172,26 +80,18 @@ void RuntimeVariableManager::InitializeRuntimeValues() {
   runtime_values_["api.rate_limiting.capacity"] = std::to_string(base_config_.api.rate_limiting.capacity);
   runtime_values_["api.rate_limiting.refill_rate"] = std::to_string(base_config_.api.rate_limiting.refill_rate);
   runtime_values_["cache.enabled"] = base_config_.cache.enabled ? "true" : "false";
-  runtime_values_["cache.min_query_cost_ms"] = std::to_string(base_config_.cache.min_query_cost_ms);
+  runtime_values_["cache.min_query_cost_ms"] = nlohmann::json(base_config_.cache.min_query_cost_ms).dump();
   runtime_values_["cache.ttl_seconds"] = std::to_string(base_config_.cache.ttl_seconds);
 }
 
 Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& variable_name, const std::string& value) {
-  // Check if variable exists
-  auto var_iter = kVariableMutability.find(variable_name);
-  if (var_iter == kVariableMutability.end()) {
-    // Check if it's a table variable (always immutable)
-    if (variable_name.find("tables[") == 0) {
+  if (kMutableVariables.find(variable_name) == kMutableVariables.end()) {
+    std::shared_lock lock(mutex_);
+    if (GetVariableInternal(variable_name).has_value()) {
       return MakeUnexpected(
           MakeError(ErrorCode::kInvalidArgument, "Variable '" + variable_name + "' is immutable (requires restart)"));
     }
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Unknown variable: " + variable_name));
-  }
-
-  // Check if variable is mutable
-  if (!var_iter->second) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kInvalidArgument, "Variable '" + variable_name + "' is immutable (requires restart)"));
   }
 
   // Apply variable-specific logic under a single lock, then call callbacks outside.
@@ -347,33 +247,15 @@ Expected<std::string, Error> RuntimeVariableManager::GetVariable(const std::stri
 std::map<std::string, VariableInfo> RuntimeVariableManager::GetAllVariables(const std::string& prefix) const {
   std::shared_lock lock(mutex_);
   std::map<std::string, VariableInfo> result;
-
-  // Add all known variables
-  for (const auto& [name, is_mutable] : kVariableMutability) {
-    if (!prefix.empty() && name.find(prefix) != 0) {
-      continue;  // Skip if doesn't match prefix
-    }
-
-    auto value = GetVariableInternal(name);
-    if (value.has_value()) {
-      result[name] = {*value, is_mutable};
-    }
+  auto variables = ConfigToVariableMap(base_config_);
+  variables["cache.max_memory_bytes"] = std::to_string(base_config_.cache.max_memory_bytes);
+  for (const auto& [name, value] : runtime_values_) {
+    variables[name] = value;
   }
-
-  // Add table variables (always immutable)
-  for (size_t i = 0; i < base_config_.tables.size(); ++i) {
-    const auto& table = base_config_.tables[i];
-    std::string table_prefix = "tables[" + std::to_string(i) + "].";
-
-    if (!prefix.empty() && table_prefix.find(prefix) != 0) {
-      continue;
+  for (const auto& [name, value] : variables) {
+    if (prefix.empty() || name.find(prefix) == 0) {
+      result[name] = {value, kMutableVariables.find(name) != kMutableVariables.end()};
     }
-
-    result[table_prefix + "name"] = {table.name, false};
-    result[table_prefix + "database"] = {table.database, false};
-    result[table_prefix + "primary_key"] = {table.primary_key, false};
-    result[table_prefix + "ngram_size"] = {std::to_string(table.ngram_size), false};
-    // Add more table fields as needed
   }
 
   return result;
@@ -385,13 +267,7 @@ Config RuntimeVariableManager::GetCurrentConfig() const {
 }
 
 bool RuntimeVariableManager::IsMutable(const std::string& variable_name) {
-  // Table variables are always immutable
-  if (variable_name.find("tables[") == 0) {
-    return false;
-  }
-
-  auto var_iter = kVariableMutability.find(variable_name);
-  return (var_iter != kVariableMutability.end()) && var_iter->second;
+  return kMutableVariables.find(variable_name) != kMutableVariables.end();
 }
 
 void RuntimeVariableManager::SetMysqlReconnectCallback(
@@ -441,7 +317,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyLoggingLevel(const std::strin
 
   if (!is_valid_level()) {
     return MakeUnexpected(
-        MakeError(ErrorCode::kInvalidArgument, "Invalid logging level (must be debug/info/warn/error): " + value));
+        MakeError(ErrorCode::kConfigInvalidValue, "Invalid logging level (must be debug/info/warn/error): " + value));
   }
 
   // Apply to spdlog
@@ -462,7 +338,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyLoggingFormat(const std::stri
   // Validate format
   if (value != "json" && value != "text") {
     return MakeUnexpected(
-        MakeError(ErrorCode::kInvalidArgument, "Invalid logging format (must be json/text): " + value));
+        MakeError(ErrorCode::kConfigInvalidValue, "Invalid logging format (must be json/text): " + value));
   }
 
   // Apply format change to StructuredLog
@@ -477,8 +353,9 @@ Expected<void, Error> RuntimeVariableManager::ApplyLoggingFormat(const std::stri
 
 Expected<void, Error> RuntimeVariableManager::ApplyMysqlHost(const std::string& value) {
   if (value.empty()) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "mysql.host cannot be empty"));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "mysql.host cannot be empty"));
   }
+  std::lock_guard<std::mutex> transaction_lock(mysql_reconnect_transaction_mutex_);
 
   // Lock → update runtime_values_ → capture callback data → unlock → call callback
   int current_port = 0;
@@ -518,8 +395,9 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlHost(const std::string& 
 
 Expected<void, Error> RuntimeVariableManager::ApplyMysqlPort(int value) {
   if (value <= 0 || value > kMaxPortNumber) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid port number (must be 1-65535)"));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Invalid port number (must be 1-65535)"));
   }
+  std::lock_guard<std::mutex> transaction_lock(mysql_reconnect_transaction_mutex_);
 
   // Lock → update runtime_values_ → capture callback data → unlock → call callback
   std::string current_host;
@@ -558,9 +436,9 @@ Expected<void, Error> RuntimeVariableManager::ApplyMysqlPort(int value) {
 
 Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
   if (value < defaults::kMinLimit || value > defaults::kMaxLimit) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid api.default_limit (must be " +
-                                                                     std::to_string(defaults::kMinLimit) + "-" +
-                                                                     std::to_string(defaults::kMaxLimit) + ")"));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Invalid api.default_limit (must be " +
+                                                                        std::to_string(defaults::kMinLimit) + "-" +
+                                                                        std::to_string(defaults::kMaxLimit) + ")"));
   }
 
   int max_query_length = 0;
@@ -582,7 +460,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
 Expected<void, Error> RuntimeVariableManager::ApplyApiMaxQueryLength(int value) {
   if (value < 0 || value > kMaxRuntimeQueryLength) {
     return MakeUnexpected(MakeError(
-        ErrorCode::kInvalidArgument,
+        ErrorCode::kConfigInvalidValue,
         "api.max_query_length must be between 0 and " + std::to_string(kMaxRuntimeQueryLength) + " (0 = unlimited)"));
   }
 
@@ -625,8 +503,10 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingEnable(bool value
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingCapacity(int value) {
-  if (value <= 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.rate_limiting.capacity must be > 0"));
+  if (value <= 0 || value > ApiConfig::kMaxRateLimitCapacity) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kConfigInvalidValue,
+        "api.rate_limiting.capacity must be between 1 and " + std::to_string(ApiConfig::kMaxRateLimitCapacity)));
   }
 
   // Lock → update config + runtime_values_ → capture callback data → unlock → call callback
@@ -651,8 +531,10 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingCapacity(int valu
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingRefillRate(int value) {
-  if (value <= 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "api.rate_limiting.refill_rate must be > 0"));
+  if (value <= 0 || value > ApiConfig::kMaxRateLimitRefillRate) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kConfigInvalidValue,
+        "api.rate_limiting.refill_rate must be between 1 and " + std::to_string(ApiConfig::kMaxRateLimitRefillRate)));
   }
 
   // Lock → update config + runtime_values_ → capture callback data → unlock → call callback
@@ -716,7 +598,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheEnabled(bool value) {
 
 Expected<void, Error> RuntimeVariableManager::ApplyCacheMinQueryCost(double value) {
   if (value < 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "cache.min_query_cost_ms must be >= 0"));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "cache.min_query_cost_ms must be >= 0"));
   }
 
   // Lock → update config + runtime_values_ → capture cache_manager → unlock → apply
@@ -724,7 +606,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheMinQueryCost(double valu
   {
     std::unique_lock lock(mutex_);
     base_config_.cache.min_query_cost_ms = value;
-    runtime_values_["cache.min_query_cost_ms"] = std::to_string(value);
+    runtime_values_["cache.min_query_cost_ms"] = nlohmann::json(value).dump();
     cache_mgr = cache_manager_;
   }
 
@@ -738,7 +620,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheMinQueryCost(double valu
 
 Expected<void, Error> RuntimeVariableManager::ApplyCacheTtl(int value) {
   if (value < 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "cache.ttl_seconds must be >= 0"));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "cache.ttl_seconds must be >= 0"));
   }
 
   // Lock → update config + runtime_values_ → capture cache_manager → unlock → apply
@@ -765,6 +647,13 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   auto value_iter = runtime_values_.find(variable_name);
   if (value_iter != runtime_values_.end()) {
     return value_iter->second;
+  }
+
+  auto variables = ConfigToVariableMap(base_config_);
+  variables["cache.max_memory_bytes"] = std::to_string(base_config_.cache.max_memory_bytes);
+  auto canonical = variables.find(variable_name);
+  if (canonical != variables.end()) {
+    return canonical->second;
   }
 
   // Check base config for immutable variables
@@ -837,6 +726,12 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   if (variable_name == "api.tcp.recv_timeout_sec") {
     return std::to_string(base_config_.api.tcp.recv_timeout_sec);
   }
+  if (variable_name == "api.tcp.idle_timeout_sec") {
+    return std::to_string(base_config_.api.tcp.idle_timeout_sec);
+  }
+  if (variable_name == "api.tcp.reaper_interval_sec") {
+    return std::to_string(base_config_.api.tcp.reaper_interval_sec);
+  }
   if (variable_name == "api.tcp.thread_pool_queue_size") {
     return std::to_string(base_config_.api.tcp.thread_pool_queue_size);
   }
@@ -857,6 +752,12 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   }
   if (variable_name == "api.tcp.max_total_buffered_bytes") {
     return std::to_string(base_config_.api.tcp.max_total_buffered_bytes);
+  }
+  if (variable_name == "api.tcp.max_pending_frames") {
+    return std::to_string(base_config_.api.tcp.max_pending_frames);
+  }
+  if (variable_name == "api.tcp.max_pending_frame_bytes") {
+    return std::to_string(base_config_.api.tcp.max_pending_frame_bytes);
   }
   if (variable_name == "api.http.enable") {
     return base_config_.api.http.enable ? "true" : "false";
@@ -988,6 +889,12 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   if (variable_name == "dump.retain") {
     return std::to_string(base_config_.dump.retain);
   }
+  if (variable_name == "dump.restore_memory_budget_mb") {
+    return std::to_string(base_config_.dump.restore_memory_budget_mb);
+  }
+  if (variable_name == "dump.restore_max_section_mb") {
+    return std::to_string(base_config_.dump.restore_max_section_mb);
+  }
 
   // Network config
   if (variable_name == "network.allow_cidrs") {
@@ -1025,7 +932,7 @@ Expected<bool, Error> RuntimeVariableManager::ParseBool(const std::string& value
   if (is_false_value()) {
     return false;
   }
-  return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid boolean value: " + value));
+  return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Invalid boolean value: " + value));
 }
 
 Expected<int, Error> RuntimeVariableManager::ParseInt(const std::string& value) {
@@ -1033,13 +940,13 @@ Expected<int, Error> RuntimeVariableManager::ParseInt(const std::string& value) 
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
   if (ec != std::errc{}) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid integer value: " + value));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Invalid integer value: " + value));
   }
   // Reject trailing non-numeric characters (e.g., "42abc")
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   if (ptr != value.data() + value.size()) {
     return MakeUnexpected(
-        MakeError(ErrorCode::kInvalidArgument, "Invalid integer value (trailing characters): " + value));
+        MakeError(ErrorCode::kConfigInvalidValue, "Invalid integer value (trailing characters): " + value));
   }
   return result;
 }
@@ -1049,12 +956,12 @@ Expected<double, Error> RuntimeVariableManager::ParseDouble(const std::string& v
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
   if (ec != std::errc{}) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid double value: " + value));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Invalid double value: " + value));
   }
   // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
   if (ptr != value.data() + value.size()) {
     return MakeUnexpected(
-        MakeError(ErrorCode::kInvalidArgument, "Invalid double value (trailing characters): " + value));
+        MakeError(ErrorCode::kConfigInvalidValue, "Invalid double value (trailing characters): " + value));
   }
   return result;
 }

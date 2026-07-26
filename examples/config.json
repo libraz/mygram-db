@@ -55,7 +55,7 @@
         }
       ],
       "ngram_size": 2,
-      "kanji_ngram_size": 1,
+      "kanji_ngram_size": 2,
       "posting": {
         "block_size": 128,
         "freq_bits": 0,
@@ -75,7 +75,7 @@
   "replication": {
     "enable": true,
     "auto_initial_snapshot": false,
-    "server_id": 12345,
+    "server_id": 83917,
     "start_from": "snapshot",
     "queue_size": 10000,
     "reconnect_backoff_min_ms": 500,
@@ -94,11 +94,18 @@
     },
     "verify_text": "off"
   },
+  "bm25": {
+    "enable": false,
+    "k1": 1.2,
+    "b": 0.75
+  },
   "dump": {
     "dir": "/var/lib/mygramdb/dumps",
     "default_filename": "mygramdb.dmp",
     "interval_sec": 0,
-    "retain": 3
+    "retain": 3,
+    "restore_memory_budget_mb": 4096,
+    "restore_max_section_mb": 2048
   },
   "api": {
     "tcp": {
@@ -108,6 +115,9 @@
       "thread_pool_queue_size": 1000,
       "max_write_queue_bytes": 16777216,
       "max_total_buffered_bytes": 268435456
+    },
+    "unix_socket": {
+      "path": ""
     },
     "http": {
       "enable": false,

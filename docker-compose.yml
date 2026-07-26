@@ -58,7 +58,7 @@ services:
       TABLE_PRIMARY_KEY: ${TABLE_PRIMARY_KEY:-id}
       TABLE_TEXT_COLUMN: ${TABLE_TEXT_COLUMN:-content}
       TABLE_NGRAM_SIZE: ${TABLE_NGRAM_SIZE:-2}
-      TABLE_KANJI_NGRAM_SIZE: ${TABLE_KANJI_NGRAM_SIZE:-1}
+      TABLE_KANJI_NGRAM_SIZE: ${TABLE_KANJI_NGRAM_SIZE:-0}
 
       # Replication Configuration
       REPLICATION_ENABLE: ${REPLICATION_ENABLE:-true}
@@ -77,10 +77,27 @@ services:
       MEMORY_NORMALIZE_LOWER: ${MEMORY_NORMALIZE_LOWER:-false}
       MEMORY_VERIFY_TEXT: ${MEMORY_VERIFY_TEXT:-off}
 
-      # Snapshot Configuration
-      SNAPSHOT_DIR: ${SNAPSHOT_DIR:-/var/lib/mygramdb/snapshots}
-      SNAPSHOT_INTERVAL_SEC: ${SNAPSHOT_INTERVAL_SEC:-600}
-      SNAPSHOT_RETAIN: ${SNAPSHOT_RETAIN:-3}
+      # Dump Configuration
+      DUMP_DIR: ${DUMP_DIR:-/var/lib/mygramdb/dumps}
+      DUMP_INTERVAL_SEC: ${DUMP_INTERVAL_SEC:-600}
+      DUMP_RETAIN: ${DUMP_RETAIN:-3}
+
+      # Relevance and cache
+      BM25_ENABLE: ${BM25_ENABLE:-false}
+      BM25_K1: ${BM25_K1:-1.2}
+      BM25_B: ${BM25_B:-0.75}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
+      CACHE_MAX_MEMORY_MB: ${CACHE_MAX_MEMORY_MB:-32}
+      CACHE_MIN_QUERY_COST_MS: ${CACHE_MIN_QUERY_COST_MS:-10.0}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-3600}
+
+      # MySQL timezone/TLS
+      MYSQL_DATETIME_TIMEZONE: ${MYSQL_DATETIME_TIMEZONE:-+00:00}
+      MYSQL_SSL_ENABLE: ${MYSQL_SSL_ENABLE:-false}
+      MYSQL_SSL_CA: ${MYSQL_SSL_CA:-}
+      MYSQL_SSL_CERT: ${MYSQL_SSL_CERT:-}
+      MYSQL_SSL_KEY: ${MYSQL_SSL_KEY:-}
+      MYSQL_SSL_VERIFY_SERVER_CERT: ${MYSQL_SSL_VERIFY_SERVER_CERT:-true}
 
       # API Server Configuration
       API_BIND: ${API_BIND:-0.0.0.0}
@@ -88,6 +105,10 @@ services:
       API_HTTP_ENABLE: ${API_HTTP_ENABLE:-true}
       API_HTTP_BIND: ${API_HTTP_BIND:-0.0.0.0}
       API_HTTP_PORT: ${API_HTTP_PORT:-8080}
+      API_RATE_LIMIT_ENABLE: ${API_RATE_LIMIT_ENABLE:-false}
+      API_RATE_LIMIT_CAPACITY: ${API_RATE_LIMIT_CAPACITY:-100}
+      API_RATE_LIMIT_REFILL_RATE: ${API_RATE_LIMIT_REFILL_RATE:-10}
+      API_RATE_LIMIT_MAX_CLIENTS: ${API_RATE_LIMIT_MAX_CLIENTS:-10000}
 
       # Network Configuration
       # IMPORTANT: For production, restrict to specific IP ranges (e.g., "10.0.0.0/8,172.16.0.0/12")
@@ -103,7 +124,8 @@ services:
     volumes:
       - mygramdb_data:/var/lib/mygramdb
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health/live"]
+      # $$ defers expansion until the probe runs inside the container.
+      test: ["CMD-SHELL", "curl -sf \"http://localhost:$${API_HTTP_PORT:-8080}/health/live\""]
       interval: 30s
       timeout: 3s
       retries: 3

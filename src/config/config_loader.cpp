@@ -6,6 +6,7 @@
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
 
+#include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -14,6 +15,7 @@
 
 #include "config/config.h"
 #include "config/config_internal.h"
+#include "server/log_field_names.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::config {
@@ -91,8 +93,11 @@ mygram::utils::Expected<std::string, mygram::utils::Error> ReadFileToString(cons
 
 }  // namespace internal
 
-mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::string& path,
-                                                                     const std::string& schema_path) {
+namespace {
+
+mygram::utils::Expected<Config, mygram::utils::Error> LoadJsonConfig(const std::string& path,
+                                                                     const std::string& schema_path,
+                                                                     bool validation_only) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -144,22 +149,22 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::
     }
 
     // Parse config from JSON object
-    auto config_result = internal::ParseConfigFromJson(config_json);
+    auto config_result = internal::ParseConfigFromJson(config_json, !validation_only);
     if (!config_result) {
       return MakeUnexpected(config_result.error());
     }
     auto& config = *config_result;
+    config.source_path = std::filesystem::canonical(path).string();
 
-    // Apply log format immediately so subsequent logs use the configured format
-    mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
-
-    mygram::utils::StructuredLog()
-        .Event("config_loaded")
-        .Field("path", path)
-        .Field("tables", static_cast<uint64_t>(config.tables.size()))
-        .Field("mysql_host", config.mysql.host)
-        .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
-        .Info();
+    if (!validation_only) {
+      mygram::utils::StructuredLog()
+          .Event("config_loaded")
+          .Field(server::log_fields::kFieldFilepath, path)
+          .Field("tables", static_cast<uint64_t>(config.tables.size()))
+          .Field("mysql_host", config.mysql.host)
+          .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
+          .Info();
+    }
 
     return config;
   } catch (const std::exception& e) {
@@ -168,10 +173,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::
   }
 }
 
-namespace {
-
 mygram::utils::Expected<Config, mygram::utils::Error> LoadYamlConfig(const std::string& path,
-                                                                     const std::string& schema_path) {
+                                                                     const std::string& schema_path,
+                                                                     bool validation_only) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -197,22 +201,22 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadYamlConfig(const std::
     }
 
     // Parse config from JSON object
-    auto config_result = internal::ParseConfigFromJson(json_root);
+    auto config_result = internal::ParseConfigFromJson(json_root, !validation_only);
     if (!config_result) {
       return MakeUnexpected(config_result.error());
     }
     auto& config = *config_result;
+    config.source_path = std::filesystem::canonical(path).string();
 
-    // Apply log format immediately so subsequent logs use the configured format
-    mygram::utils::StructuredLog::SetFormat(mygram::utils::StructuredLog::ParseFormat(config.logging.format));
-
-    mygram::utils::StructuredLog()
-        .Event("config_loaded")
-        .Field("path", path)
-        .Field("tables", static_cast<uint64_t>(config.tables.size()))
-        .Field("mysql_host", config.mysql.host)
-        .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
-        .Info();
+    if (!validation_only) {
+      mygram::utils::StructuredLog()
+          .Event("config_loaded")
+          .Field(server::log_fields::kFieldFilepath, path)
+          .Field("tables", static_cast<uint64_t>(config.tables.size()))
+          .Field("mysql_host", config.mysql.host)
+          .Field("mysql_port", static_cast<uint64_t>(config.mysql.port))
+          .Info();
+    }
 
     return config;
   } catch (const YAML::Exception& e) {
@@ -239,11 +243,19 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadYamlConfig(const std::
 }  // namespace
 
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::string& path) {
-  return LoadYamlConfig(path, "");
+  return LoadYamlConfig(path, "", false);
 }
 
-mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::string& path,
-                                                                 const std::string& schema_path) {
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::string& path,
+                                                                     const std::string& schema_path) {
+  return LoadJsonConfig(path, schema_path, false);
+}
+
+namespace {
+
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigImpl(const std::string& path,
+                                                                     const std::string& schema_path,
+                                                                     bool validation_only) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -256,38 +268,38 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
       mygram::utils::StructuredLog()
           .Event("config_format_detected")
           .Field("format", "json")
-          .Field("path", path)
+          .Field(server::log_fields::kFieldFilepath, path)
           .Debug();
-      return LoadConfigJson(path, schema_path);
+      return LoadJsonConfig(path, schema_path, validation_only);
 
     case FileFormat::kYaml:
       mygram::utils::StructuredLog()
           .Event("config_format_detected")
           .Field("format", "yaml")
-          .Field("path", path)
+          .Field(server::log_fields::kFieldFilepath, path)
           .Debug();
-      return LoadYamlConfig(path, schema_path);
+      return LoadYamlConfig(path, schema_path, validation_only);
 
     case FileFormat::kUnknown:
     default:
       // Try YAML first (legacy default), then JSON
       mygram::utils::StructuredLog()
           .Event("config_format_unknown")
-          .Field("path", path)
+          .Field(server::log_fields::kFieldFilepath, path)
           .Field("trying", "yaml_first")
           .Debug();
-      auto yaml_result = LoadYamlConfig(path, schema_path);
+      auto yaml_result = LoadYamlConfig(path, schema_path, validation_only);
       if (yaml_result) {
         return yaml_result;
       }
 
       mygram::utils::StructuredLog()
           .Event("config_fallback")
-          .Field("path", path)
+          .Field(server::log_fields::kFieldFilepath, path)
           .Field("from", "yaml")
           .Field("to", "json")
           .Debug();
-      auto json_result = LoadConfigJson(path, schema_path);
+      auto json_result = LoadJsonConfig(path, schema_path, validation_only);
       if (json_result) {
         return json_result;
       }
@@ -301,6 +313,18 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
       err_msg << "  Please ensure the file has the correct extension and valid syntax.";
       return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, err_msg.str(), path));
   }
+}
+
+}  // namespace
+
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::string& path,
+                                                                 const std::string& schema_path) {
+  return LoadConfigImpl(path, schema_path, false);
+}
+
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigForValidation(const std::string& path,
+                                                                              const std::string& schema_path) {
+  return LoadConfigImpl(path, schema_path, true);
 }
 
 }  // namespace mygramdb::config

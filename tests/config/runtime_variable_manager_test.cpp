@@ -7,11 +7,15 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
+#include "config/config_help.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -256,11 +260,51 @@ TEST(RuntimeVariableManagerTest, GetUnknownVariable) {
 
   auto result = manager->GetVariable("unknown.variable");
   EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument);
 
   auto reserved_not_exposed = manager->GetVariable("cache.eviction_batch_size");
-  EXPECT_FALSE(reserved_not_exposed);
-  EXPECT_EQ(static_cast<int>(reserved_not_exposed.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  ASSERT_TRUE(reserved_not_exposed);
+  EXPECT_EQ(*reserved_not_exposed, "10");
+}
+
+TEST(RuntimeVariableManagerTest, ShowVariablesUsesCanonicalConfigProjectionForEveryLeaf) {
+  Config config = CreateTestConfig();
+  TableConfig table;
+  table.name = "articles";
+  table.database = "test_db";
+  table.text_source.concat = {"title", "body"};
+  table.text_source.delimiter = " | ";
+  RequiredFilterConfig required;
+  required.name = "enabled";
+  required.type = "int";
+  required.op = "=";
+  required.value = "1";
+  required.bitmap_index = true;
+  table.required_filters.push_back(required);
+  FilterConfig filter;
+  filter.name = "created_at";
+  filter.type = "datetime";
+  filter.dict_compress = true;
+  filter.bitmap_index = true;
+  filter.bucket = "day";
+  table.filters.push_back(filter);
+  table.synonyms.enable = true;
+  table.synonyms.file = "synonyms.tsv";
+  config.tables.push_back(table);
+  config.network.allow_cidrs = {"127.0.0.1/32", "10.0.0.0/8"};
+
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+  const auto canonical = ConfigToVariableMap(config);
+  const auto variables = manager->GetAllVariables();
+
+  for (const auto& [name, value] : canonical) {
+    const auto found = variables.find(name);
+    ASSERT_NE(found, variables.end()) << "SHOW VARIABLES omitted canonical Config leaf " << name;
+    EXPECT_EQ(found->second.value, value) << name;
+  }
+  ASSERT_NE(variables.find("cache.eviction_batch_size"), variables.end());
+  ASSERT_NE(variables.find("tables[0].required_filters[0].value"), variables.end());
+  ASSERT_NE(variables.find("tables[0].filters[0].bucket"), variables.end());
 }
 
 /**
@@ -375,7 +419,7 @@ TEST(RuntimeVariableManagerTest, SetLoggingLevelInvalid) {
 
   auto result = manager->SetVariable("logging.level", "invalid_level");
   EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(result.error().code(), ErrorCode::kConfigInvalidValue);
 
   // Original value should remain unchanged
   auto get_result = manager->GetVariable("logging.level");
@@ -410,7 +454,7 @@ TEST(RuntimeVariableManagerTest, SetLoggingFormatInvalid) {
 
   auto result = manager->SetVariable("logging.format", "xml");
   EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(result.error().code(), ErrorCode::kConfigInvalidValue);
 
   // Original value should remain unchanged
   auto get_result = manager->GetVariable("logging.format");
@@ -545,6 +589,24 @@ TEST(RuntimeVariableManagerTest, SetCacheMinQueryCostNegative) {
   auto get_result = manager->GetVariable("cache.min_query_cost_ms");
   ASSERT_TRUE(get_result);
   EXPECT_DOUBLE_EQ(std::stod(*get_result), 10.0);
+}
+
+TEST(RuntimeVariableManagerTest, RuntimeSetEnforcesSchemaUpperBoundsAndConfigErrorCode) {
+  auto manager = std::move(*RuntimeVariableManager::Create(CreateTestConfig()));
+
+  const std::vector<std::pair<std::string, std::string>> invalid = {
+      {"api.rate_limiting.capacity", "10001"},
+      {"api.rate_limiting.refill_rate", "1001"},
+      {"cache.min_query_cost_ms", "-0.1"},
+      {"cache.ttl_seconds", "-1"},
+      {"mysql.port", "65536"},
+      {"api.default_limit", "1001"},
+  };
+  for (const auto& [name, value] : invalid) {
+    auto result = manager->SetVariable(name, value);
+    ASSERT_FALSE(result) << name;
+    EXPECT_EQ(result.error().code(), ErrorCode::kConfigInvalidValue) << name;
+  }
 }
 
 /**
@@ -1098,6 +1160,47 @@ TEST(RuntimeVariableManagerTest, SetMysqlHostAndPortSimultaneous) {
   EXPECT_EQ(*port_result, "3307");
 }
 
+TEST(RuntimeVariableManagerTest, ConcurrentMysqlEndpointChangesPublishCallbacksInCommittedOrder) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  std::mutex callback_mutex;
+  std::condition_variable callback_entered;
+  bool first_callback_blocked = false;
+  bool release_first_callback = false;
+  std::vector<std::pair<std::string, int>> endpoints;
+  manager->SetMysqlReconnectCallback([&](const std::string& host, int port) -> Expected<void, Error> {
+    std::unique_lock lock(callback_mutex);
+    endpoints.emplace_back(host, port);
+    if (endpoints.size() == 1) {
+      first_callback_blocked = true;
+      callback_entered.notify_all();
+      callback_entered.wait(lock, [&] { return release_first_callback; });
+    }
+    return {};
+  });
+
+  std::thread host_setter([&] { EXPECT_TRUE(manager->SetVariable("mysql.host", "db.internal")); });
+  {
+    std::unique_lock lock(callback_mutex);
+    ASSERT_TRUE(callback_entered.wait_for(lock, std::chrono::seconds(2), [&] { return first_callback_blocked; }));
+  }
+  std::thread port_setter([&] { EXPECT_TRUE(manager->SetVariable("mysql.port", "3307")); });
+  {
+    std::lock_guard lock(callback_mutex);
+    release_first_callback = true;
+  }
+  callback_entered.notify_all();
+  host_setter.join();
+  port_setter.join();
+
+  ASSERT_EQ(endpoints.size(), 2U);
+  EXPECT_EQ(endpoints[0], std::make_pair(std::string("db.internal"), 3306));
+  EXPECT_EQ(endpoints[1], std::make_pair(std::string("db.internal"), 3307));
+  EXPECT_EQ(*manager->GetVariable("mysql.host"), "db.internal");
+  EXPECT_EQ(*manager->GetVariable("mysql.port"), "3307");
+}
+
 /**
  * @brief Test partial failure in rate limiting parameters
  */
@@ -1137,7 +1240,7 @@ TEST(RuntimeVariableManagerTest, SetVariableRejectsTrailingCharacters) {
   // "42abc" should be rejected as an invalid integer
   auto result = manager->SetVariable("api.default_limit", "42abc");
   EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(result.error().code(), ErrorCode::kConfigInvalidValue);
 
   // Original value should remain unchanged
   auto get_result = manager->GetVariable("api.default_limit");

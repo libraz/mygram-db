@@ -4,13 +4,23 @@
  */
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <variant>
 
 #include "config/config.h"
 using namespace mygramdb;
+
+namespace {
+
+std::string TempConfigPath(const std::string& name) {
+  return (std::filesystem::temp_directory_path() / ("mygramdb_" + name + "_" + std::to_string(::getpid()))).string();
+}
+
+}  // namespace
 
 /**
  * @brief Test parsing required_filters from YAML configuration
@@ -48,7 +58,7 @@ replication:
 )";
 
   // Write to temp file
-  std::string temp_file = "/tmp/test_required_filters.yaml";
+  std::string temp_file = TempConfigPath("required_filters.yaml");
   std::ofstream ofs(temp_file);
   ofs << yaml_content;
   ofs.close();
@@ -129,7 +139,7 @@ TEST(RequiredFiltersTest, ParseJsonConfig) {
 })";
 
   // Write to temp file
-  std::string temp_file = "/tmp/test_required_filters.json";
+  std::string temp_file = TempConfigPath("required_filters.json");
   std::ofstream ofs(temp_file);
   ofs << json_content;
   ofs.close();

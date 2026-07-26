@@ -134,6 +134,19 @@ bool IsSensitiveField(const std::string& path);
 std::string MaskSensitiveValue(const std::string& path, const std::string& value);
 
 /**
+ * @brief Project a Config into the canonical SHOW VARIABLES key/value surface.
+ *
+ * Object members use dot-separated paths, object arrays use bracket indexes,
+ * and scalar arrays are represented as comma-separated values at their parent
+ * path. Sensitive values are already masked by the same projection used by
+ * CONFIG SHOW.
+ *
+ * @param config Configuration object
+ * @return Canonical variable-name to display-value mapping
+ */
+std::map<std::string, std::string> ConfigToVariableMap(const Config& config);
+
+/**
  * @brief Format current config for display (mask sensitive fields)
  *
  * @param config Configuration object

@@ -63,6 +63,13 @@ nlohmann::json ConfigToJson(const Config& config) {
       {"connect_timeout_ms", config.mysql.connect_timeout_ms},
       {"read_timeout_ms", config.mysql.read_timeout_ms},
       {"write_timeout_ms", config.mysql.write_timeout_ms},
+      {"session_timeout_sec", config.mysql.session_timeout_sec},
+      {"ssl_enable", config.mysql.ssl_enable},
+      {"ssl_ca", config.mysql.ssl_ca},
+      {"ssl_cert", config.mysql.ssl_cert},
+      {"ssl_key", config.mysql.ssl_key},
+      {"ssl_verify_server_cert", config.mysql.ssl_verify_server_cert},
+      {"datetime_timezone", config.mysql.datetime_timezone},
   };
 
   // Tables configuration
@@ -74,6 +81,7 @@ nlohmann::json ConfigToJson(const Config& config) {
         {"primary_key", table.primary_key},
         {"ngram_size", table.ngram_size},
         {"kanji_ngram_size", table.kanji_ngram_size},
+        {"cross_boundary_ngrams", table.cross_boundary_ngrams},
     };
 
     // Text source
@@ -160,6 +168,7 @@ nlohmann::json ConfigToJson(const Config& config) {
       {"arena_chunk_mb", config.memory.arena_chunk_mb},
       {"roaring_threshold", config.memory.roaring_threshold},
       {"minute_epoch", config.memory.minute_epoch},
+      {"verify_text", config.memory.verify_text},
       {"normalize",
        {
            {"nfkc", config.memory.normalize.nfkc},
@@ -194,6 +203,8 @@ nlohmann::json ConfigToJson(const Config& config) {
            {"max_connections", config.api.tcp.max_connections},
            {"worker_threads", config.api.tcp.worker_threads},
            {"recv_timeout_sec", config.api.tcp.recv_timeout_sec},
+           {"idle_timeout_sec", config.api.tcp.idle_timeout_sec},
+           {"reaper_interval_sec", config.api.tcp.reaper_interval_sec},
            {"thread_pool_queue_size", config.api.tcp.thread_pool_queue_size},
            {"keepalive",
             {
@@ -204,6 +215,8 @@ nlohmann::json ConfigToJson(const Config& config) {
             }},
            {"max_write_queue_bytes", config.api.tcp.max_write_queue_bytes},
            {"max_total_buffered_bytes", config.api.tcp.max_total_buffered_bytes},
+           {"max_pending_frames", config.api.tcp.max_pending_frames},
+           {"max_pending_frame_bytes", config.api.tcp.max_pending_frame_bytes},
        }},
       {"http",
        {
@@ -212,6 +225,17 @@ nlohmann::json ConfigToJson(const Config& config) {
            {"port", config.api.http.port},
            {"enable_cors", config.api.http.enable_cors},
            {"cors_allow_origin", config.api.http.cors_allow_origin},
+           {"read_timeout_sec", config.api.http.read_timeout_sec},
+           {"write_timeout_sec", config.api.http.write_timeout_sec},
+           {"max_body_bytes", config.api.http.max_body_bytes},
+       }},
+      {"unix_socket", {{"path", config.api.unix_socket.path}}},
+      {"rate_limiting",
+       {
+           {"enable", config.api.rate_limiting.enable},
+           {"capacity", config.api.rate_limiting.capacity},
+           {"refill_rate", config.api.rate_limiting.refill_rate},
+           {"max_clients", config.api.rate_limiting.max_clients},
        }},
       {"default_limit", config.api.default_limit},
       {"max_query_length", config.api.max_query_length},
@@ -226,6 +250,7 @@ nlohmann::json ConfigToJson(const Config& config) {
   json["logging"] = {
       {"level", config.logging.level},
       {"format", config.logging.format},
+      {"file", config.logging.file},
   };
 
   // Cache configuration
@@ -302,6 +327,47 @@ std::optional<nlohmann::json> NavigateJsonPath(const nlohmann::json& json, const
   }
 
   return current;
+}
+
+void FlattenConfigVariables(const nlohmann::json& value, const std::string& path,
+                            std::map<std::string, std::string>& variables) {
+  if (value.is_object()) {
+    for (const auto& [key, child] : value.items()) {
+      const std::string child_path = path.empty() ? key : path + "." + key;
+      FlattenConfigVariables(child, child_path, variables);
+    }
+    return;
+  }
+
+  if (value.is_array()) {
+    const bool scalar_array =
+        std::all_of(value.begin(), value.end(), [](const auto& item) { return !item.is_object() && !item.is_array(); });
+    if (scalar_array) {
+      std::ostringstream joined;
+      for (size_t index = 0; index < value.size(); ++index) {
+        if (index > 0) {
+          joined << ",";
+        }
+        if (value[index].is_string()) {
+          joined << value[index].template get<std::string>();
+        } else {
+          joined << value[index].dump();
+        }
+      }
+      variables[path] = joined.str();
+      return;
+    }
+    for (size_t index = 0; index < value.size(); ++index) {
+      FlattenConfigVariables(value[index], path + "[" + std::to_string(index) + "]", variables);
+    }
+    return;
+  }
+
+  if (value.is_string()) {
+    variables[path] = value.get<std::string>();
+  } else {
+    variables[path] = value.dump();
+  }
 }
 
 /**
@@ -659,6 +725,12 @@ std::string MaskSensitiveValue(const std::string& path, const std::string& value
     return "***";
   }
   return value;
+}
+
+std::map<std::string, std::string> ConfigToVariableMap(const Config& config) {
+  std::map<std::string, std::string> variables;
+  FlattenConfigVariables(ConfigToJson(config), "", variables);
+  return variables;
 }
 
 mygram::utils::Expected<std::string, mygram::utils::Error> FormatConfigForDisplay(const Config& config,

@@ -143,53 +143,43 @@ TEST(BindAddressValidationTest, ValidIPv4AllInterfaces) {
   std::filesystem::remove(path);
 }
 
-TEST(BindAddressValidationTest, ValidIPv6Loopback) {
+TEST(BindAddressValidationTest, ValidTcpIPv6Loopback) {
   std::string path = CreateBindAddressConfig("::1", "");
   auto result = LoadConfig(path);
-  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
-  if (result) {
-    EXPECT_EQ(result->api.tcp.bind, "::1");
-  }
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->api.tcp.bind, "::1");
   std::filesystem::remove(path);
 }
 
-TEST(BindAddressValidationTest, ValidIPv6AllInterfaces) {
+TEST(BindAddressValidationTest, ValidTcpIPv6AllInterfaces) {
   std::string path = CreateBindAddressConfig("::", "");
   auto result = LoadConfig(path);
-  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
-  if (result) {
-    EXPECT_EQ(result->api.tcp.bind, "::");
-  }
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->api.tcp.bind, "::");
   std::filesystem::remove(path);
 }
 
-TEST(BindAddressValidationTest, ValidIPv6FullAddress) {
+TEST(BindAddressValidationTest, ValidTcpIPv6FullAddress) {
   std::string path = CreateBindAddressConfig("2001:0db8:85a3:0000:0000:8a2e:0370:7334", "");
   auto result = LoadConfig(path);
-  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
-  if (result) {
-    EXPECT_EQ(result->api.tcp.bind, "2001:0db8:85a3:0000:0000:8a2e:0370:7334");
-  }
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->api.tcp.bind, "2001:0db8:85a3:0000:0000:8a2e:0370:7334");
   std::filesystem::remove(path);
 }
 
-TEST(BindAddressValidationTest, ValidIPv6MappedIPv4Address) {
+TEST(BindAddressValidationTest, ValidTcpIpv6MappedIpv4) {
   std::string path = CreateBindAddressConfig("::ffff:127.0.0.1", "");
   auto result = LoadConfig(path);
-  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
-  if (result) {
-    EXPECT_EQ(result->api.tcp.bind, "::ffff:127.0.0.1");
-  }
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->api.tcp.bind, "::ffff:127.0.0.1");
   std::filesystem::remove(path);
 }
 
-TEST(BindAddressValidationTest, ValidScopedIPv6Address) {
+TEST(BindAddressValidationTest, ValidTcpScopedIpv6) {
   std::string path = CreateBindAddressConfig("fe80::1%lo0", "");
   auto result = LoadConfig(path);
-  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
-  if (result) {
-    EXPECT_EQ(result->api.tcp.bind, "fe80::1%lo0");
-  }
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->api.tcp.bind, "fe80::1%lo0");
   std::filesystem::remove(path);
 }
 
@@ -203,13 +193,11 @@ TEST(BindAddressValidationTest, ValidIPv4Address) {
   std::filesystem::remove(path);
 }
 
-TEST(BindAddressValidationTest, ValidHostname) {
+TEST(BindAddressValidationTest, ValidTcpHostname) {
   std::string path = CreateBindAddressConfig("myhost.local", "");
   auto result = LoadConfig(path);
-  EXPECT_TRUE(result) << "Failed: " << result.error().to_string();
-  if (result) {
-    EXPECT_EQ(result->api.tcp.bind, "myhost.local");
-  }
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->api.tcp.bind, "myhost.local");
   std::filesystem::remove(path);
 }
 

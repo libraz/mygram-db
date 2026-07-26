@@ -4,7 +4,9 @@
  */
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
+#include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -12,6 +14,14 @@
 
 using namespace mygramdb::config;
 using json = nlohmann::json;
+
+namespace {
+
+std::string TempConfigPath(const std::string& name) {
+  return (std::filesystem::temp_directory_path() / ("mygramdb_" + name + "_" + std::to_string(::getpid()))).string();
+}
+
+}  // namespace
 
 /**
  * @brief Test integer value formatting (should not have decimal point)
@@ -54,7 +64,7 @@ logging:
 )";
 
   // Write temporary config file
-  std::string temp_file = "/tmp/test_integer_format.yaml";
+  std::string temp_file = TempConfigPath("integer_format.yaml");
   std::ofstream ofs(temp_file);
   ofs << yaml_content;
   ofs.close();
@@ -124,7 +134,7 @@ logging:
 )";
 
   // Write temporary config file
-  std::string temp_file = "/tmp/test_float_format.yaml";
+  std::string temp_file = TempConfigPath("float_format.yaml");
   std::ofstream ofs(temp_file);
   ofs << yaml_content;
   ofs.close();
@@ -187,7 +197,7 @@ logging:
 )";
 
   // Write temporary config file
-  std::string temp_file = "/tmp/test_string_format.yaml";
+  std::string temp_file = TempConfigPath("string_format.yaml");
   std::ofstream ofs(temp_file);
   ofs << yaml_content;
   ofs.close();
@@ -252,7 +262,7 @@ logging:
 )";
 
   // Write temporary config file
-  std::string temp_file = "/tmp/test_boolean_format.yaml";
+  std::string temp_file = TempConfigPath("boolean_format.yaml");
   std::ofstream ofs(temp_file);
   ofs << yaml_content;
   ofs.close();
@@ -323,7 +333,7 @@ logging:
 )";
 
   // Write temporary config file
-  std::string temp_file = "/tmp/test_mixed_format.yaml";
+  std::string temp_file = TempConfigPath("mixed_format.yaml");
   std::ofstream ofs(temp_file);
   ofs << yaml_content;
   ofs.close();
@@ -382,7 +392,7 @@ replication:
   server_id: 12345
 )";
 
-  std::string temp_file = "/tmp/test_filter_scalar_preserve.yaml";
+  std::string temp_file = TempConfigPath("filter_scalar_preserve.yaml");
   std::ofstream ofs(temp_file);
   ofs << yaml_content;
   ofs.close();

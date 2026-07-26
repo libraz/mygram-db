@@ -115,7 +115,7 @@ struct RequiredFilterConfig {
   std::string type;           // Type options (same as FilterConfig)
   std::string op;             // Operator: "=", "!=", "<", ">", "<=", ">=", "IS NULL", "IS NOT NULL"
   std::string value;          // Value (empty for IS NULL/IS NOT NULL operators)
-  bool bitmap_index = false;  // Enable bitmap index for search-time filtering
+  bool bitmap_index = false;  // Reserved / not yet enforced
 };
 
 /**
@@ -126,16 +126,16 @@ struct RequiredFilterConfig {
  */
 struct FilterConfig {
   std::string name;
-  std::string type;  // Type options:
-                     // Integer: "tinyint", "tinyint_unsigned", "smallint", "smallint_unsigned",
-                     //          "int", "int_unsigned", "bigint", "bigint_unsigned"
-                     // Float: "float", "double"
-                     // String: "string", "varchar", "text"
-                     // Date/time: "datetime", "date", "timestamp", "time"
-                     // Boolean: "boolean"
-  bool dict_compress = false;
-  bool bitmap_index = false;
-  std::string bucket;  // For datetime: "minute", "hour", "day"
+  std::string type;            // Type options:
+                               // Integer: "tinyint", "tinyint_unsigned", "smallint", "smallint_unsigned",
+                               //          "int", "int_unsigned", "bigint", "bigint_unsigned"
+                               // Float: "float", "double"
+                               // String: "string", "varchar", "text"
+                               // Date/time: "datetime", "date", "timestamp", "time"
+                               // Boolean: "boolean"
+  bool dict_compress = false;  // Reserved / not yet enforced
+  bool bitmap_index = false;   // Reserved / not yet enforced
+  std::string bucket;          // Reserved / not yet enforced
 };
 
 /**
@@ -179,9 +179,9 @@ struct TextSourceConfig {
  * @brief Posting list configuration
  */
 struct PostingConfig {
-  int block_size = defaults::kPostingBlockSize;
-  int freq_bits = 0;                 // 0=boolean, 4, or 8
-  std::string use_roaring = "auto";  // "auto", "always", "never"
+  int block_size = defaults::kPostingBlockSize;  // Reserved / not yet enforced
+  int freq_bits = 0;                             // Reserved / not yet enforced
+  std::string use_roaring = "auto";              // Reserved / not yet enforced
 };
 
 /**
@@ -343,6 +343,8 @@ struct ApiConfig {
   static constexpr int kDefaultRateLimitCapacity = 100;      ///< Default burst size
   static constexpr int kDefaultRateLimitRefillRate = 10;     ///< Default tokens per second
   static constexpr int kDefaultRateLimitMaxClients = 10000;  ///< Default max tracked clients
+  static constexpr int kMaxRateLimitCapacity = 10000;        ///< Schema maximum burst size
+  static constexpr int kMaxRateLimitRefillRate = 1000;       ///< Schema maximum tokens/second
   static constexpr int kDefaultMaxConnections = 10000;       ///< Default maximum concurrent connections
 
   struct {
@@ -363,6 +365,12 @@ struct ApiConfig {
     /// connection slots until the longer general idle timeout. Default: 60.
     int recv_timeout_sec = 60;  // NOLINT(readability-magic-numbers)
 
+    /// Application-level idle connection timeout. 0 disables idle reaping.
+    int idle_timeout_sec = 300;  // NOLINT(readability-magic-numbers)
+
+    /// Interval between idle-connection sweeps.
+    int reaper_interval_sec = 5;  // NOLINT(readability-magic-numbers)
+
     /// Thread pool task queue size. Once a connection is accepted but cannot
     /// be dispatched (all workers busy, queue full), the server responds with
     /// SERVER_BUSY and closes. 0 means genuinely unbounded; use it only when
@@ -380,6 +388,11 @@ struct ApiConfig {
 
     /// Shared cap across all pending request frames and unsent responses.
     int64_t max_total_buffered_bytes = 256LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  // 256 MiB
+
+    /// Per-connection completed-frame queue limits. Reads are paused at 75%
+    /// of either limit and resumed after the queue drains to 50%.
+    int max_pending_frames = 1024;  // NOLINT(readability-magic-numbers)
+    int64_t max_pending_frame_bytes = 4LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  // 4 MiB
 
     /// Per-connection TCP keepalive (applied to accepted client sockets).
     ///
@@ -478,7 +491,7 @@ struct CacheConfig {
 
   // Advanced tuning
   bool compression_enabled = true;  ///< Enable LZ4 compression (default: true)
-  int eviction_batch_size = 10;     ///< Reserved / not yet enforced  // NOLINT
+  int eviction_batch_size = 10;     ///< Maximum entries evicted per capacity pass  // NOLINT
 
   // Invalidation queue settings
   struct {
@@ -500,6 +513,10 @@ struct BM25Config {
  * @brief Root configuration
  */
 struct Config {
+  // Absolute path of the file this runtime configuration was loaded from.
+  // Loader metadata only: it is not a schema/configuration key and is omitted
+  // from CONFIG SHOW and dump serialization.
+  std::string source_path;
   MysqlConfig mysql;
   std::vector<TableConfig> tables;
   BuildConfig build;
@@ -525,6 +542,15 @@ struct Config {
  */
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::string& path,
                                                                  const std::string& schema_path = "");
+
+/**
+ * @brief Parse and validate a configuration without runtime side effects
+ *
+ * Environment overrides are intentionally ignored and no config-loaded event
+ * is emitted. Used by CONFIG VERIFY to inspect the supplied file itself.
+ */
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigForValidation(const std::string& path,
+                                                                              const std::string& schema_path = "");
 
 /**
  * @brief Load configuration from YAML file (legacy compatibility)

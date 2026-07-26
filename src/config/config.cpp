@@ -20,6 +20,7 @@
 #include "utils/memory_utils.h"
 #include "utils/network_utils.h"
 #include "utils/numeric_parse.h"
+#include "utils/sql_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -46,6 +47,16 @@ namespace {
 using json = nlohmann::json;
 
 constexpr size_t kGtidPrefixLength = mygram::constants::kGtidPrefixLength;
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateSQLIdentifier(const std::string& identifier,
+                                                                          const std::string& context) {
+  auto quoted = mygramdb::utils::QuoteSQLIdentifier(identifier);
+  if (!quoted) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                                                  context + ": " + quoted.error().message()));
+  }
+  return {};
+}
 
 bool IsRequiredFilterValueKey(const std::string& key) {
   return key == "value";
@@ -134,7 +145,11 @@ bool IsStrictDecimalLiteral(const std::string& value) {
 
 json ParseYamlScalar(const YAML::Node& node, bool preserve_scalar_string) {
   const std::string value = node.as<std::string>();
-  if (preserve_scalar_string) {
+  // Preserve explicitly quoted/tagged YAML strings instead of guessing their
+  // type from the contents (for example password: "12345").
+  const std::string tag = node.Tag();
+  const bool explicitly_tagged_string = tag == "!" || tag == "tag:yaml.org,2002:str" || tag == "!!str";
+  if (preserve_scalar_string || explicitly_tagged_string) {
     return value;
   }
   if (value == "true") {
@@ -268,7 +283,8 @@ json YamlToJsonImpl(const YAML::Node& node, bool preserve_scalar_string = false)
  *   - MYGRAM_MYSQL_PORT: MySQL port (takes precedence over config file)
  *   - MYGRAM_MYSQL_DATABASE: MySQL database (takes precedence over config file)
  */
-mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(const json& json_obj) {
+mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(const json& json_obj,
+                                                                            bool apply_environment_overrides) {
   MysqlConfig config;
 
   // Host: environment variable takes precedence
@@ -277,26 +293,28 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
     if (json_obj.contains("host")) {
       json_value = json_obj["host"].get<std::string>();
     }
-    config.host = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_HOST", config.host);
+    config.host = apply_environment_overrides
+                      ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_HOST", config.host)
+                      : json_value.value_or(config.host);
   }
 
   {
     // Port: environment variable takes precedence
-    auto env_port = GetEnvValue("MYGRAM_MYSQL_PORT");
+    auto env_port = apply_environment_overrides ? GetEnvValue("MYGRAM_MYSQL_PORT") : std::nullopt;
     if (env_port.has_value()) {
       auto parsed_port = mygram::utils::ParseNumeric<int>(env_port.value());
-      if (parsed_port.has_value()) {
+      if (parsed_port.has_value() && *parsed_port >= 1 && *parsed_port <= 65535) {
         config.port = *parsed_port;
       } else {
         mygram::utils::StructuredLog()
             .Event("config_env_override_rejected")
             .Field("variable", "MYGRAM_MYSQL_PORT")
             .Field("value", env_port.value())
-            .Field("reason", "invalid integer value")
+            .Field("reason", "expected an integer in range 1-65535")
             .Error();
         return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
             mygram::utils::ErrorCode::kConfigInvalidValue,
-            "Invalid MYGRAM_MYSQL_PORT value: expected integer, got '" + env_port.value() + "'"));
+            "Invalid MYGRAM_MYSQL_PORT value: expected integer in range 1-65535, got '" + env_port.value() + "'"));
       }
     } else if (json_obj.contains("port")) {
       config.port = json_obj["port"].get<int>();
@@ -309,7 +327,9 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
     if (json_obj.contains("user")) {
       json_value = json_obj["user"].get<std::string>();
     }
-    config.user = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_USER", config.user);
+    config.user = apply_environment_overrides
+                      ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_USER", config.user)
+                      : json_value.value_or(config.user);
   }
 
   // Password: environment variable takes precedence (security best practice)
@@ -318,7 +338,9 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
     if (json_obj.contains("password")) {
       json_value = json_obj["password"].get<std::string>();
     }
-    config.password = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_PASSWORD", config.password);
+    config.password = apply_environment_overrides
+                          ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_PASSWORD", config.password)
+                          : json_value.value_or(config.password);
   }
 
   // Database: environment variable takes precedence
@@ -327,7 +349,12 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
     if (json_obj.contains("database")) {
       json_value = json_obj["database"].get<std::string>();
     }
-    config.database = GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_DATABASE", config.database);
+    config.database = apply_environment_overrides
+                          ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_DATABASE", config.database)
+                          : json_value.value_or(config.database);
+  }
+  if (auto validation = ValidateSQLIdentifier(config.database, "mysql.database"); !validation) {
+    return mygram::utils::MakeUnexpected(validation.error());
   }
   if (json_obj.contains("use_gtid")) {
     config.use_gtid = json_obj["use_gtid"].get<bool>();
@@ -413,6 +440,9 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
                                     "        value: 1"));
   }
   config.name = json_obj["name"].get<std::string>();
+  if (auto validation = ValidateSQLIdentifier(config.name, "Required filter name"); !validation) {
+    return MakeUnexpected(validation.error());
+  }
 
   if (!json_obj.contains("type") || json_obj["type"].get<std::string>().empty()) {
     return MakeUnexpected(MakeError(ErrorCode::kConfigMissingRequired,
@@ -536,6 +566,9 @@ mygram::utils::Expected<FilterConfig, mygram::utils::Error> ParseFilterConfig(co
   if (json_obj.contains("name")) {
     config.name = json_obj["name"].get<std::string>();
   }
+  if (auto validation = ValidateSQLIdentifier(config.name, "Filter name"); !validation) {
+    return MakeUnexpected(validation.error());
+  }
   if (json_obj.contains("type")) {
     config.type = json_obj["type"].get<std::string>();
   }
@@ -578,12 +611,21 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
     return MakeUnexpected(MakeError(ErrorCode::kConfigMissingRequired, err_msg.str()));
   }
   config.name = json_obj["name"].get<std::string>();
+  if (auto validation = ValidateSQLIdentifier(config.name, "Table name"); !validation) {
+    return MakeUnexpected(validation.error());
+  }
 
   if (json_obj.contains("database")) {
     config.database = json_obj["database"].get<std::string>();
+    if (auto validation = ValidateSQLIdentifier(config.database, "Table database"); !validation) {
+      return MakeUnexpected(validation.error());
+    }
   }
   if (json_obj.contains("primary_key")) {
     config.primary_key = json_obj["primary_key"].get<std::string>();
+  }
+  if (auto validation = ValidateSQLIdentifier(config.primary_key, "Primary key column"); !validation) {
+    return MakeUnexpected(validation.error());
   }
   if (json_obj.contains("ngram_size")) {
     config.ngram_size = json_obj["ngram_size"].get<int>();
@@ -626,9 +668,17 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
     const auto& text_source = json_obj["text_source"];
     if (text_source.contains("column")) {
       config.text_source.column = text_source["column"].get<std::string>();
+      if (auto validation = ValidateSQLIdentifier(config.text_source.column, "Text source column"); !validation) {
+        return MakeUnexpected(validation.error());
+      }
     }
     if (text_source.contains("concat")) {
       config.text_source.concat = text_source["concat"].get<std::vector<std::string>>();
+      for (const auto& column : config.text_source.concat) {
+        if (auto validation = ValidateSQLIdentifier(column, "Text source concat column"); !validation) {
+          return MakeUnexpected(validation.error());
+        }
+      }
     }
     if (text_source.contains("delimiter")) {
       config.text_source.delimiter = text_source["delimiter"].get<std::string>();
@@ -719,7 +769,8 @@ mygram::utils::Expected<TableConfig, mygram::utils::Error> ParseTableConfig(cons
 /**
  * @brief Parse configuration from JSON object
  */
-mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(const json& root) {
+mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(const json& root,
+                                                                              bool apply_environment_overrides) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -728,7 +779,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
 
   // Parse MySQL config
   if (root.contains("mysql")) {
-    auto mysql_result = ParseMysqlConfig(root["mysql"]);
+    auto mysql_result = ParseMysqlConfig(root["mysql"], apply_environment_overrides);
     if (!mysql_result) {
       return MakeUnexpected(mysql_result.error());
     }
@@ -755,9 +806,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       // Apply global ngram_size if not set per-table
       if (!table_json.contains("ngram_size")) {
         table.ngram_size = global_ngram_size;
-        if (!table_json.contains("kanji_ngram_size")) {
-          table.kanji_ngram_size = table.ngram_size;
-        }
+      }
+      // Resolve the kanji inheritance only after the legacy global ngram size
+      // has been applied. An explicit zero means "inherit", not "use the
+      // TableConfig construction-time default".
+      if (!table_json.contains("kanji_ngram_size") || table_json["kanji_ngram_size"].get<int>() == 0) {
+        table.kanji_ngram_size = table.ngram_size;
       }
       config.tables.push_back(std::move(table));
     }
@@ -975,6 +1029,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       if (tcp.contains("recv_timeout_sec")) {
         config.api.tcp.recv_timeout_sec = tcp["recv_timeout_sec"].get<int>();
       }
+      if (tcp.contains("idle_timeout_sec")) {
+        config.api.tcp.idle_timeout_sec = tcp["idle_timeout_sec"].get<int>();
+      }
+      if (tcp.contains("reaper_interval_sec")) {
+        config.api.tcp.reaper_interval_sec = tcp["reaper_interval_sec"].get<int>();
+      }
       if (tcp.contains("thread_pool_queue_size")) {
         config.api.tcp.thread_pool_queue_size = tcp["thread_pool_queue_size"].get<int>();
       }
@@ -998,6 +1058,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       }
       if (tcp.contains("max_total_buffered_bytes")) {
         config.api.tcp.max_total_buffered_bytes = tcp["max_total_buffered_bytes"].get<int64_t>();
+      }
+      if (tcp.contains("max_pending_frames")) {
+        config.api.tcp.max_pending_frames = tcp["max_pending_frames"].get<int>();
+      }
+      if (tcp.contains("max_pending_frame_bytes")) {
+        config.api.tcp.max_pending_frame_bytes = tcp["max_pending_frame_bytes"].get<int64_t>();
       }
     }
     if (api.contains("http")) {
@@ -1070,7 +1136,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       for (const auto& cidr : config.network.allow_cidrs) {
         if (!mygram::utils::CIDR::Parse(cidr).has_value()) {
           return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
-                                          "network.allow_cidrs contains invalid IPv4 CIDR: '" + cidr + "'"));
+                                          "network.allow_cidrs contains invalid IPv4 or IPv6 CIDR: '" + cidr + "'"));
         }
       }
     }
@@ -1216,8 +1282,9 @@ mygram::utils::Expected<mygram::utils::DateTimeProcessor, mygram::utils::Error> 
 // the anonymous namespace is a sibling, not a parent.
 namespace internal {
 
-mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const nlohmann::json& root) {
-  return ParseConfigFromJsonImpl(root);
+mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const nlohmann::json& root,
+                                                                          bool apply_environment_overrides) {
+  return ParseConfigFromJsonImpl(root, apply_environment_overrides);
 }
 
 nlohmann::json YamlToJson(const YAML::Node& node) {

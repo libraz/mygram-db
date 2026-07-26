@@ -26,7 +26,8 @@ nlohmann::json YamlToJson(const YAML::Node& node);
  * @param root JSON object containing configuration
  * @return Config on success, or Error on parse failure
  */
-mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const nlohmann::json& root);
+mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJson(const nlohmann::json& root,
+                                                                          bool apply_environment_overrides = true);
 
 /**
  * @brief Read file contents as string
