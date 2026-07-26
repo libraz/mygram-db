@@ -53,8 +53,12 @@ mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> ResultCompre
     return MakeUnexpected(MakeError(ErrorCode::kCacheCompressionFailed, "LZ4 compression failed"));
   }
 
-  // Resize to actual compressed size
+  // Resize to actual compressed size, then release the LZ4_compressBound()
+  // headroom. CacheEntry::MemoryUsage() intentionally charges vector
+  // capacity(), so retaining that allocation would make compression consume
+  // roughly the same memory as the uncompressed DocId array.
   compressed.resize(static_cast<size_t>(compressed_size));
+  compressed.shrink_to_fit();
   return compressed;
 }
 

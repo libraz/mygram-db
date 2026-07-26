@@ -32,6 +32,7 @@ struct CacheLookupResult {
   std::vector<DocId> results;                        ///< Cached search results
   double query_cost_ms = 0.0;                        ///< Original query execution time
   std::chrono::steady_clock::time_point created_at;  ///< When cache entry was created
+  uint64_t entry_generation = 0;                     ///< ABA-safe identity for conditional removal
 };
 
 /**
@@ -47,7 +48,8 @@ class CacheManager {
    * @param cache_config Cache configuration
    * @param ngram_configs Per-table N-gram configuration for cache invalidation
    */
-  CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs);
+  CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs,
+               InvalidationQueue::WorkerThreadFactory worker_thread_factory = {});
 
   /**
    * @brief Destructor
@@ -78,6 +80,17 @@ class CacheManager {
    * @return Cached result with metadata if found and valid, nullopt otherwise
    */
   [[nodiscard]] std::optional<CacheLookupResult> LookupWithMetadata(const query::Query& query);
+
+  /**
+   * @brief Erase the cache entry resolved for a query
+   *
+   * Used when a caller detects semantic staleness after a successful payload
+   * lookup (for example, cached DocIds that no longer resolve).
+   * @param query Query whose canonical cache key should be removed
+   * @param expected_entry_generation Generation returned by LookupWithMetadata
+   * @return true only when that exact generation was still resident
+   */
+  bool Erase(const query::Query& query, uint64_t expected_entry_generation);
 
   /**
    * @brief Insert query result into cache
@@ -195,12 +208,17 @@ class CacheManager {
   [[nodiscard]] size_t GetTrackedInvalidationEntries() const;
 
  private:
+  struct ResolvedCacheKey {
+    CacheKey key;
+    std::string discriminator;
+  };
+
   /**
    * @brief Resolve cache key from a query
    * @param query Parsed query
    * @return Resolved CacheKey, or nullopt if the query is not cacheable
    */
-  [[nodiscard]] std::optional<CacheKey> ResolveCacheKey(const query::Query& query) const;
+  [[nodiscard]] std::optional<ResolvedCacheKey> ResolveCacheKey(const query::Query& query) const;
 
   std::atomic<bool> enabled_;
   size_t max_memory_bytes_;

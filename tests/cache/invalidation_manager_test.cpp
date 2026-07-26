@@ -46,6 +46,26 @@ TEST(InvalidationManagerTest, BasicRegistration) {
   EXPECT_FALSE(invalidated.find(key2) != invalidated.end());
 }
 
+TEST(InvalidationManagerTest, MemoryEstimateUpdatesIncrementally) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto key = CacheKeyGenerator::Generate("estimated-memory");
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"hel", "ell", "llo"};
+  metadata.ngram_size = 3;
+  metadata.kanji_ngram_size = 1;
+
+  EXPECT_EQ(mgr.MemoryUsage(), 0U);
+  mgr.RegisterCacheEntry(key, metadata);
+  const size_t estimate = mgr.MemoryUsage();
+  EXPECT_GT(estimate, 0U);
+  EXPECT_GT(mgr.DiagnosticMemoryUsage(), 0U);
+
+  mgr.UnregisterCacheEntry(key);
+  EXPECT_EQ(mgr.MemoryUsage(), 0U);
+}
+
 /**
  * @brief Test precise invalidation - only affected queries should be invalidated
  */

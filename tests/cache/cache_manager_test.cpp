@@ -8,9 +8,12 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <future>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 
 #if defined(__APPLE__)
@@ -128,6 +131,116 @@ TEST(CacheManagerTest, BasicWorkflow) {
   // Lookup - should miss (invalidated)
   cached = mgr.Lookup(query);
   EXPECT_FALSE(cached.has_value());
+}
+
+TEST(CacheManagerTest, FacetAndSearchShareUnderlyingDocIdEntry) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.min_query_cost_ms = 0.0;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  auto search = CreateQuery("posts", "golang");
+  query::Query facet = search;
+  facet.type = query::QueryType::FACET;
+  facet.facet_column = "category";
+
+  const std::vector<DocId> result = {1, 2, 3};
+  ASSERT_TRUE(mgr.Insert(search, result, {"gol", "ola", "lan", "ang"}, 1.0));
+  auto facet_hit = mgr.Lookup(facet);
+  ASSERT_TRUE(facet_hit.has_value());
+  EXPECT_EQ(*facet_hit, result);
+
+  mgr.Clear();
+  ASSERT_TRUE(mgr.Insert(facet, result, {"gol", "ola", "lan", "ang"}, 1.0));
+  auto search_hit = mgr.Lookup(search);
+  ASSERT_TRUE(search_hit.has_value());
+  EXPECT_EQ(*search_hit, result);
+}
+
+TEST(CacheManagerTest, ConditionalEraseDoesNotRemoveReinsertedGeneration) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.min_query_cost_ms = 0.0;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "stale");
+  ASSERT_TRUE(mgr.Insert(query, {1}, {"sta", "tal", "ale"}, 1.0));
+  auto old = mgr.LookupWithMetadata(query);
+  ASSERT_TRUE(old.has_value());
+  ASSERT_NE(old->entry_generation, 0U);
+
+  ASSERT_TRUE(mgr.Erase(query, old->entry_generation));
+  ASSERT_TRUE(mgr.Insert(query, {2}, {"sta", "tal", "ale"}, 1.0));
+  EXPECT_FALSE(mgr.Erase(query, old->entry_generation));
+
+  auto current = mgr.Lookup(query);
+  ASSERT_TRUE(current.has_value());
+  EXPECT_EQ(*current, (std::vector<DocId>{2}));
+}
+
+TEST(CacheManagerTest, WorkerStartFailureKeepsCacheDisabledAtConstructionAndEnable) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2), [](std::function<void()>) -> std::thread {
+    throw std::runtime_error("deterministic thread factory failure");
+  });
+
+  EXPECT_FALSE(mgr.IsEnabled());
+  EXPECT_FALSE(mgr.Enable());
+  EXPECT_FALSE(mgr.IsEnabled());
+
+  auto query = CreateQuery("posts", "golang");
+  EXPECT_FALSE(mgr.Insert(query, {1, 2, 3}, {"gol", "ola", "lan", "ang"}, 15.0));
+}
+
+TEST(CacheManagerTest, ConcurrentEnableDisableSerializesWholeLifecycleTransition) {
+  config::CacheConfig config;
+  config.enabled = false;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+
+  std::mutex gate_mutex;
+  std::condition_variable gate_cv;
+  bool factory_entered = false;
+  bool release_factory = false;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2), [&](std::function<void()> worker) {
+    {
+      std::unique_lock<std::mutex> lock(gate_mutex);
+      factory_entered = true;
+      gate_cv.notify_all();
+      gate_cv.wait(lock, [&] { return release_factory; });
+    }
+    return std::thread(std::move(worker));
+  });
+
+  auto enable_result = std::async(std::launch::async, [&] { return mgr.Enable(); });
+  {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    gate_cv.wait(lock, [&] { return factory_entered; });
+  }
+
+  std::promise<void> disable_invoked;
+  auto disable_result = std::async(std::launch::async, [&] {
+    disable_invoked.set_value();
+    mgr.Disable();
+  });
+  disable_invoked.get_future().wait();
+
+  {
+    std::lock_guard<std::mutex> lock(gate_mutex);
+    release_factory = true;
+  }
+  gate_cv.notify_all();
+
+  EXPECT_TRUE(enable_result.get());
+  disable_result.get();
+  EXPECT_FALSE(mgr.IsEnabled());
+
+  ASSERT_TRUE(mgr.Enable());
+  EXPECT_TRUE(mgr.IsEnabled());
 }
 
 TEST(CacheManagerTest, InsertIfVersionRejectsStaleResultAfterInvalidate) {

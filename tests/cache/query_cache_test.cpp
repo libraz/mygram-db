@@ -37,6 +37,39 @@ TEST(QueryCacheTest, BasicInsertLookup) {
   EXPECT_EQ(result, cached.value());
 }
 
+TEST(QueryCacheTest, DigestCollisionDoesNotReturnAnotherQueryResult) {
+  QueryCache cache(1024 * 1024, 0.0, 0, false);
+  const CacheKey colliding_digest(0x1234, 0x5678);
+  CacheMetadata metadata;
+  metadata.key = colliding_digest;
+  metadata.cache_discriminator = "SEARCH app.articles alpha";
+
+  ASSERT_TRUE(cache.Insert(colliding_digest, {7, 11}, metadata, 1.0));
+  EXPECT_EQ(cache.Lookup(colliding_digest, metadata.cache_discriminator), (std::optional<std::vector<DocId>>{{7, 11}}));
+  EXPECT_FALSE(cache.Lookup(colliding_digest, "SEARCH app.articles beta").has_value());
+}
+
+TEST(QueryCacheTest, RefreshPurgesInvalidatedEntrySoSameKeyCanBeRecached) {
+  QueryCache cache(1024 * 1024, 0.0);
+  const auto key = CacheKeyGenerator::Generate("invalidated-recache");
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"inv"};
+  ASSERT_TRUE(cache.Insert(key, {1, 2, 3}, metadata, 1.0));
+  ASSERT_TRUE(cache.MarkInvalidated(key));
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+
+  for (int attempt = 0; attempt < 20 && cache.GetStatistics().current_entries != 0; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+
+  EXPECT_EQ(cache.GetStatistics().current_entries, 0U);
+  EXPECT_TRUE(cache.Insert(key, {4, 5}, metadata, 1.0));
+  auto recached = cache.Lookup(key);
+  ASSERT_TRUE(recached.has_value());
+  EXPECT_EQ(*recached, (std::vector<DocId>{4, 5}));
+}
+
 /**
  * @brief Test lookup miss
  */
@@ -129,6 +162,43 @@ TEST(QueryCacheTest, LRUEviction) {
   // is in fact strict LRU (EvictForSpace pops from lru_list_.back()), so
   // with deterministic sizing we can and should assert this.
   EXPECT_FALSE(cache.Lookup(key2).has_value()) << "Strict LRU must evict the least-recently-used entry (key2)";
+}
+
+TEST(QueryCacheTest, CapacityEvictionHonorsConfiguredBatchSize) {
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"tes", "est"};
+
+  constexpr size_t kPayloadDocs = 200;
+  constexpr size_t kCacheBytes = 4096;
+  constexpr size_t kEvictionBatchSize = 3;
+  QueryCache cache(kCacheBytes, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0,
+                   /*compression_enabled=*/false, kEvictionBatchSize);
+
+  auto make_payload = [](DocId base) {
+    std::vector<DocId> payload;
+    payload.reserve(kPayloadDocs);
+    for (size_t index = 0; index < kPayloadDocs; ++index) {
+      payload.push_back(static_cast<DocId>(base + index));
+    }
+    return payload;
+  };
+
+  const auto key1 = CacheKeyGenerator::Generate("batch-eviction-1");
+  const auto key2 = CacheKeyGenerator::Generate("batch-eviction-2");
+  const auto key3 = CacheKeyGenerator::Generate("batch-eviction-3");
+  const auto key4 = CacheKeyGenerator::Generate("batch-eviction-4");
+  ASSERT_TRUE(cache.Insert(key1, make_payload(1000), metadata, 1.0));
+  ASSERT_TRUE(cache.Insert(key2, make_payload(2000), metadata, 1.0));
+  ASSERT_TRUE(cache.Insert(key3, make_payload(3000), metadata, 1.0));
+
+  ASSERT_TRUE(cache.Insert(key4, make_payload(4000), metadata, 1.0));
+
+  EXPECT_EQ(cache.GetStatistics().evictions, kEvictionBatchSize);
+  EXPECT_FALSE(cache.Lookup(key1).has_value());
+  EXPECT_FALSE(cache.Lookup(key2).has_value());
+  EXPECT_FALSE(cache.Lookup(key3).has_value());
+  EXPECT_TRUE(cache.Lookup(key4).has_value());
 }
 
 /**
@@ -2655,6 +2725,25 @@ TEST(QueryCacheTest, BatchEvictionCallbackInvokedOncePerBulkOp) {
   EXPECT_EQ(total_keys.load(), kEntries) << "Batch callback must receive every evicted key";
   EXPECT_EQ(per_key_calls.load(), 0)
       << "Per-key callback must NOT fire when BatchEvictionCallback is set on bulk paths";
+}
+
+TEST(QueryCacheTest, MemoryPressureHonorsConfiguredEvictionBatchSize) {
+  constexpr size_t kEvictionBatchSize = 3;
+  QueryCache cache(16 * 1024, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0,
+                   /*compression_enabled=*/false, kEvictionBatchSize);
+  std::vector<size_t> callback_sizes;
+  cache.SetBatchEvictionCallback([&](const std::vector<CacheKey>& keys) { callback_sizes.push_back(keys.size()); });
+
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  const std::vector<DocId> payload(512, 42);
+  for (int i = 0; i < 20 && callback_sizes.empty(); ++i) {
+    ASSERT_TRUE(
+        cache.Insert(CacheKeyGenerator::Generate("batch-pressure-" + std::to_string(i)), payload, metadata, 1.0));
+  }
+
+  ASSERT_FALSE(callback_sizes.empty()) << "test setup did not reach memory pressure";
+  EXPECT_GE(callback_sizes.front(), kEvictionBatchSize);
 }
 
 /**

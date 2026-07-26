@@ -60,6 +60,8 @@ struct InvalidationEvent {
  */
 class InvalidationQueue {
  public:
+  using WorkerThreadFactory = std::function<std::thread(std::function<void()>)>;
+
   /**
    * @brief Constructor
    * @param cache Pointer to query cache
@@ -67,7 +69,8 @@ class InvalidationQueue {
    * @param table_contexts Map of table name to TableContext pointer (for per-table ngram settings)
    * @note table_contexts must remain valid for the lifetime of this InvalidationQueue instance
    */
-  InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr, NgramConfigMap ngram_configs);
+  InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr, NgramConfigMap ngram_configs,
+                    WorkerThreadFactory worker_thread_factory = {});
 
   /**
    * @brief Destructor
@@ -184,8 +187,11 @@ class InvalidationQueue {
   std::unordered_map<PendingKey, std::chrono::steady_clock::time_point, PendingKeyHash> pending_cache_keys_;
 
   mutable std::mutex queue_mutex_;
+  /// Serializes the complete Start/Stop transition, including std::thread ownership.
+  mutable std::mutex state_mutex_;
   std::condition_variable queue_cv_;
   std::thread worker_thread_;
+  WorkerThreadFactory worker_thread_factory_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stopped_{false};  ///< Set by Stop(), prevents post-shutdown enqueues
 

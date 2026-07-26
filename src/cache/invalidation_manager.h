@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <shared_mutex>
@@ -47,6 +48,7 @@ struct InvalidationMetadata {
   bool has_filters = false;           ///< Whether the cached query used filter conditions
   bool has_not_terms = false;         ///< Whether the cached query used NOT terms
   bool invalidate_on_any_text_change = false;
+  size_t estimated_bytes = 0;  ///< Incremental memory charge for this registration
 };
 
 class InvalidationManager {
@@ -153,6 +155,14 @@ class InvalidationManager {
    */
   [[nodiscard]] size_t MemoryUsage() const;
 
+  /**
+   * @brief Perform a full diagnostic walk of all tracking structures
+   *
+   * This is intentionally separate from MemoryUsage(): it is O(N) and must
+   * not be called from the cache insertion hot path.
+   */
+  [[nodiscard]] size_t DiagnosticMemoryUsage() const;
+
  private:
   QueryCache* cache_;  ///< Pointer to query cache
 
@@ -178,6 +188,11 @@ class InvalidationManager {
   // Per-table ngram settings reference count: table -> (ngram_size, kanji_ngram_size, cross_boundary) -> count
   // Enables O(1) lookup of distinct historical ngram settings instead of O(N) scan over cache_metadata_
   std::unordered_map<std::string, std::map<std::tuple<int, int, bool>, size_t>> table_ngram_settings_;
+
+  // Hot-path memory estimate. Each registration receives a conservative,
+  // self-contained charge and unregister subtracts the same charge, making
+  // MemoryUsage() O(1) without walking the reverse index.
+  std::atomic<size_t> estimated_bytes_{0};
 
   // Thread safety
   mutable std::shared_mutex mutex_;

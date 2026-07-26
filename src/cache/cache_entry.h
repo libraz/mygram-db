@@ -48,6 +48,7 @@ struct CacheMetadata {
   CacheKey key;                                         ///< Cache key (MD5 hash)
   uint64_t entry_generation = 0;                        ///< Concrete incarnation of this logical cache key
   uint64_t data_version = 0;                            ///< Table generation used to compute this result
+  std::string cache_discriminator;                      ///< Canonical query used to reject MD5 collisions
   std::string table;                                    ///< Table name
   std::vector<std::string> ngrams;                      ///< All ngrams used in this query (sorted)
   std::vector<query::FilterCondition> filters;          ///< Filter conditions (for future optimization)
@@ -72,6 +73,7 @@ struct CacheMetadata {
       : key(other.key),
         entry_generation(other.entry_generation),
         data_version(other.data_version),
+        cache_discriminator(other.cache_discriminator),
         table(other.table),
         ngrams(other.ngrams),
         filters(other.filters),
@@ -90,6 +92,7 @@ struct CacheMetadata {
       : key(other.key),
         entry_generation(other.entry_generation),
         data_version(other.data_version),
+        cache_discriminator(std::move(other.cache_discriminator)),
         table(std::move(other.table)),
         ngrams(std::move(other.ngrams)),
         filters(std::move(other.filters)),
@@ -109,6 +112,7 @@ struct CacheMetadata {
       key = other.key;
       entry_generation = other.entry_generation;
       data_version = other.data_version;
+      cache_discriminator = other.cache_discriminator;
       table = other.table;
       ngrams = other.ngrams;
       filters = other.filters;
@@ -131,6 +135,7 @@ struct CacheMetadata {
       key = other.key;
       entry_generation = other.entry_generation;
       data_version = other.data_version;
+      cache_discriminator = std::move(other.cache_discriminator);
       table = std::move(other.table);
       ngrams = std::move(other.ngrams);
       filters = std::move(other.filters);
@@ -237,7 +242,8 @@ struct CacheEntry {
       size += ngram.capacity();
     }
 
-    // Table string heap allocation
+    // Canonical query discriminator and table string heap allocations
+    size += metadata.cache_discriminator.capacity();
     size += metadata.table.capacity();
 
     // Filters vector buffer + each FilterCondition's string heap allocations

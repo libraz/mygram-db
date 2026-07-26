@@ -7,6 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <stdexcept>
 #include <thread>
 
 #include "cache/cache_key.h"
@@ -789,6 +793,64 @@ TEST(InvalidationQueueTest, ConcurrentStartCallsThreadSafe) {
   EXPECT_FALSE(queue.IsRunning());
 }
 
+TEST(InvalidationQueueTest, WorkerThreadCreationFailureIsReturnedAndQueueRemainsStopped) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, CreateTestNgramConfigs(3, 2), [](std::function<void()>) -> std::thread {
+    throw std::runtime_error("deterministic thread factory failure");
+  });
+
+  const auto result = queue.Start();
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kCacheWorkerStartFailed);
+  EXPECT_NE(result.error().message().find("deterministic thread factory failure"), std::string::npos);
+  EXPECT_FALSE(queue.IsRunning());
+  queue.Stop();
+}
+
+TEST(InvalidationQueueTest, StartAndStopSerializeCompleteThreadOwnershipTransition) {
+  QueryCache cache(1024 * 1024, 10.0);
+  InvalidationManager mgr(&cache);
+  std::mutex gate_mutex;
+  std::condition_variable gate_cv;
+  bool factory_entered = false;
+  bool release_factory = false;
+
+  InvalidationQueue queue(&cache, &mgr, CreateTestNgramConfigs(3, 2), [&](std::function<void()> worker) {
+    {
+      std::unique_lock<std::mutex> lock(gate_mutex);
+      factory_entered = true;
+      gate_cv.notify_all();
+      gate_cv.wait(lock, [&] { return release_factory; });
+    }
+    return std::thread(std::move(worker));
+  });
+
+  auto start_result = std::async(std::launch::async, [&] { return queue.Start(); });
+  {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    gate_cv.wait(lock, [&] { return factory_entered; });
+  }
+
+  std::promise<void> stop_invoked;
+  auto stop_result = std::async(std::launch::async, [&] {
+    stop_invoked.set_value();
+    queue.Stop();
+  });
+  stop_invoked.get_future().wait();
+
+  {
+    std::lock_guard<std::mutex> lock(gate_mutex);
+    release_factory = true;
+  }
+  gate_cv.notify_all();
+
+  EXPECT_TRUE(start_result.get().has_value());
+  stop_result.get();
+  EXPECT_FALSE(queue.IsRunning());
+}
+
 /**
  * @brief Test concurrent Stop() calls are thread-safe
  * Regression test for: running_ flag was not atomically checked-and-cleared
@@ -880,8 +942,7 @@ TEST(InvalidationQueueTest, ConcurrentStartThenStop) {
 TEST(InvalidationQueueTest, TOCTOURaceConditionFix) {
   QueryCache cache(1024 * 1024, 1.0);
   InvalidationManager invalidation_mgr(&cache);
-  NgramConfigMap empty_configs;
-  InvalidationQueue queue(&cache, &invalidation_mgr, std::move(empty_configs));
+  InvalidationQueue queue(&cache, &invalidation_mgr, CreateTestNgramConfigs());
 
   // Insert initial cache entry
   auto key = CacheKeyGenerator::Generate("test query");
@@ -946,28 +1007,29 @@ TEST(InvalidationQueueTest, EnqueueWhenNotRunning) {
   CacheMetadata meta;
   meta.table = "posts";
   meta.ngrams = {"que", "uer", "ery"};
+  meta.invalidate_on_any_text_change = true;
+  CacheMetadata unrelated_meta = meta;
+  unrelated_meta.ngrams = {"oth", "the", "her"};
+  unrelated_meta.invalidate_on_any_text_change = false;
 
   cache.Insert(key1, result, meta, 10.0);
-  cache.Insert(key2, result, meta, 10.0);
+  cache.Insert(key2, result, unrelated_meta, 10.0);
 
   invalidation_mgr.RegisterCacheEntry(key1, meta);
-  invalidation_mgr.RegisterCacheEntry(key2, meta);
+  invalidation_mgr.RegisterCacheEntry(key2, unrelated_meta);
+  EXPECT_EQ(invalidation_mgr.GetTrackedEntryCount(), 2u);
 
   // Worker is NOT started - Enqueue should process immediately
 
   // Enqueue invalidation (old text matches the ngrams we registered)
   queue.Enqueue("posts", "query1", "different text");
+  EXPECT_EQ(invalidation_mgr.GetTrackedEntryCount(), 1u);
 
-  // The fix ensures that when worker is not running, Enqueue processes immediately
-  // and calls UnregisterCacheEntry, preventing metadata leak
-  // The test passes if no crash/assertion occurs
-
-  // Verify cache entries still exist (they were only invalidated, not erased)
-  // This is expected behavior - invalidation marks entries, erase happens separately
+  // Immediate processing erases only the affected entry.
   auto result1 = cache.Lookup(key1);
   auto result2 = cache.Lookup(key2);
-
-  // The important part is that no metadata leak occurred (verified by no crash)
+  EXPECT_FALSE(result1.has_value());
+  EXPECT_TRUE(result2.has_value());
 }
 
 /**

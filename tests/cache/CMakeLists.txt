@@ -87,45 +87,53 @@ target_link_libraries(query_cache_test PRIVATE
   GTest::gtest_main
 )
 
-# Fast query_cache_test (non-TTL tests run quickly)
-#
-# SLOW filter rationale: tests that use std::this_thread::sleep_for() with
-# durations >50ms must be in the SLOW suite so they are excluded from the
-# fast (PR-CI) test pass. The patterns below match every test that sleeps:
-#   *TTL*               -- TTL expiration tests (1-3 second sleeps)
-#   *LRU*               -- LRU eviction/refresh tests (background-thread sleeps)
-#   ConcurrentLookup*   -- concurrent access stress tests with 100ms run windows
-#   ConcurrentSetMin*   -- runtime setter stress test with 200ms run window
-#   *Bug0070_Approx*    -- LRU approximation regression (200ms sleep)
-#   *Bug0070_Access*    -- access count regression (200ms sleep)
-# Keep this list in sync with sleep_for occurrences. Run:
-#   grep -nE "sleep_for" tests/cache/query_cache_test.cpp
-# whenever adding a new test that sleeps.
-gtest_discover_tests(query_cache_test
-  TEST_PREFIX "QueryCache."
-  # gtest --gtest_filter syntax: <positive_patterns>-<negative_patterns>,
-  # with multiple patterns colon-separated. To exclude N patterns, the
-  # filter takes the form "*-pat1:pat2:...:patN" (positive list is the
-  # explicit "*" wildcard, then a single "-" introduces the negative list).
-  # Patterns match the FULL TestSuite.TestName, so each pattern needs a
-  # leading "*" if it should match by test-name suffix only.
-  TEST_FILTER "*-*TTL*:*LRU*:*ConcurrentLookup*:*ConcurrentSetMin*:*Bug0070_Approx*:*Bug0070_Access*"
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK cache_state
-)
-
-# Sleep-based tests (TTL expiration, LRU refresh, concurrent stress).
-# Each can sleep from 100ms (concurrent stress) to 3s (TTL expiration).
-gtest_discover_tests(query_cache_test
-  TEST_PREFIX "QueryCacheSlow."
-  TEST_FILTER "*TTL*:*LRU*:*ConcurrentLookup*:*ConcurrentSetMin*:*Bug0070_Approx*:*Bug0070_Access*"
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES
-    LABELS "SLOW"
-    RESOURCE_LOCK cache_state
-    TIMEOUT 30
+# Register once and label only the exact TTL, LRU, and concurrency cases.
+mygramdb_add_split_gtests(query_cache_test
+  SOURCE query_cache_test.cpp
+  RESOURCE_LOCK cache_state
+  SLOW_TIMEOUT 30
+  CONCURRENCY_TESTS
+    QueryCacheTest.LRUEviction
+    QueryCacheTest.ConcurrentAccess
+    QueryCacheTest.ConcurrentLookupAndErase
+    QueryCacheTest.LockUpgradeRaceCondition
+    QueryCacheTest.ConcurrentLookupsNoMetadataCorruption
+    QueryCacheTest.ConcurrentQueryCountAccuracy
+    QueryCacheTest.ABAProofLockUpgrade
+    QueryCacheTest.ConcurrentLookupEvictionABA
+    QueryCacheTest.Bug0070_ConcurrentLookupsNoLockUpgrade
+    QueryCacheTest.Bug0070_ApproximateLRUStillEvictsOldEntries
+    QueryCacheTest.Bug0070_AccessCountIncrement
+    QueryCacheTest.RefreshLRUStatsAlwaysUpdated
+    QueryCacheTest.ConcurrentSetMinQueryCostAndSetTtlWithLookupInsert
+    QueryCacheTest.EvictionCallbackFiresWithoutHoldingCacheLock
+    QueryCacheTest.StaleLruCounterStartsAtZeroAndStaysZeroUnderNormalOps
+    QueryCacheTest.EvictionCallbackCanCallGetMetadataWithoutDeadlock
+  SLOW_TESTS
+    QueryCacheTest.LRUEviction
+    QueryCacheTest.ConcurrentLookupAndErase
+    QueryCacheTest.ConcurrentLookupsNoMetadataCorruption
+    QueryCacheTest.ConcurrentLookupEvictionABA
+    QueryCacheTest.TTLBasicExpiration
+    QueryCacheTest.TTLDisabled
+    QueryCacheTest.TTLRuntimeUpdate
+    QueryCacheTest.TTLWithMetadataLookup
+    QueryCacheTest.TTLMultipleEntriesExpiration
+    QueryCacheTest.Bug0070_ConcurrentLookupsNoLockUpgrade
+    QueryCacheTest.Bug0070_ApproximateLRUStillEvictsOldEntries
+    QueryCacheTest.Bug0070_AccessCountIncrement
+    QueryCacheTest.RefreshLRUStatsAlwaysUpdated
+    QueryCacheTest.TTLExpiredEntryCleanedUp
+    QueryCacheTest.TTLExpiredEntryNotReturned
+    QueryCacheTest.TTLExpiredEntryRemovalUpdatesStatsImmediately
+    QueryCacheTest.TTLExpiredMemoryReclaimed
+    QueryCacheTest.TTLExpirationStats
+    QueryCacheTest.M4_TTLExpirationCountedAtLookupTime
+    QueryCacheTest.M4_TTLExpirationCountedAtLookupWithMetadataTime
+    QueryCacheTest.M4_TTLExpirationNoDoubleCounting
+    QueryCacheTest.TTLExpiredIncrementsTTLExpiredCounter
+    QueryCacheTest.TTLExpiredWithMetadataIncrementsTTLExpiredCounter
+    QueryCacheTest.ConcurrentSetMinQueryCostAndSetTtlWithLookupInsert
 )
 
 # CacheManager test
@@ -138,14 +146,20 @@ target_link_libraries(cache_manager_test PRIVATE
   GTest::gtest_main
 )
 
-# CacheManager tests include sleep-based enable/disable tests
-gtest_discover_tests(cache_manager_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-  PROPERTIES
-    LABELS "SLOW"
-    RESOURCE_LOCK cache_state
-    TIMEOUT 30
+mygramdb_add_split_gtests(cache_manager_test
+  SOURCE cache_manager_test.cpp
+  RESOURCE_LOCK cache_state
+  SLOW_TIMEOUT 30
+  ALL_CONCURRENCY
+  SLOW_TESTS
+    CacheManagerTest.PerTableNgramSettings
+    CacheManagerTest.LRUEvictionCleansUpMetadata
+    CacheManagerTest.DestructorSafeWithShortTTLEntries
+    CacheManagerTest.ClearDoesNotLeavePhantomInvalidationMetadata
+    CacheManagerTest.ClearWaitsForAtomicInsertRegistrationBoundary
+    CacheManagerTest.DisableConcurrentInsertNoResidualEntries
+    CacheManagerTest.EnableThenImmediateInvalidateDelivers
+    CacheManagerTest.DisableEnableCycleInvalidationStillWorks
 )
 
 # InvalidationQueue test
@@ -162,7 +176,10 @@ target_link_libraries(invalidation_queue_test PRIVATE
 gtest_discover_tests(invalidation_queue_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK cache_state
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK cache_state
+    TIMEOUT 30
 )
 
 # CacheThreadSafety test

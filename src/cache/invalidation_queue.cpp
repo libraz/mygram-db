@@ -6,6 +6,7 @@
 #include "cache/invalidation_queue.h"
 
 #include <exception>
+#include <future>
 
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
@@ -17,8 +18,15 @@
 namespace mygramdb::cache {
 
 InvalidationQueue::InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr,
-                                     NgramConfigMap ngram_configs)
-    : cache_(cache), invalidation_mgr_(invalidation_mgr), ngram_configs_(std::move(ngram_configs)) {}
+                                     NgramConfigMap ngram_configs, WorkerThreadFactory worker_thread_factory)
+    : cache_(cache),
+      invalidation_mgr_(invalidation_mgr),
+      ngram_configs_(std::move(ngram_configs)),
+      worker_thread_factory_(std::move(worker_thread_factory)) {
+  if (!worker_thread_factory_) {
+    worker_thread_factory_ = [](std::function<void()> worker) { return std::thread(std::move(worker)); };
+  }
+}
 
 InvalidationQueue::~InvalidationQueue() {
   Stop();
@@ -140,55 +148,61 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> InvalidationQueue::Start() {
-  // Atomically check and set running_ to prevent concurrent Start() calls
-  bool expected = false;
-  if (!running_.compare_exchange_strong(expected, true)) {
+  // Protect the complete transition, not just the flags. In particular,
+  // std::thread assignment must never race with Stop() joining the same object.
+  std::lock_guard<std::mutex> state_lock(state_mutex_);
+  if (running_.load(std::memory_order_acquire)) {
     return {};  // Already running
   }
 
-  // reset stopped_ on every successful Start() so that a Stop()/Start()
-  // cycle (e.g. CacheManager::Disable() followed by Enable()) does not leave
-  // stopped_ permanently set, which would cause every subsequent Enqueue to
-  // be silently dropped at the early-out below in Enqueue.
-  //
-  // Ordering: stopped_ is reset BEFORE the worker thread starts so that any
-  // Enqueue that races with Start() and observes running_ == true after the
-  // CAS above also observes stopped_ == false (release/acquire pair via the
-  // queue_mutex_ in Enqueue).
-  stopped_.store(false, std::memory_order_release);
-
+  // The new thread waits until construction has succeeded and the state is
+  // published. Without this gate, publishing running_ first exposes a
+  // non-existent worker if std::thread construction throws; publishing it
+  // afterwards lets WorkerLoop observe false and exit before Start returns.
+  std::promise<void> start_promise;
+  const std::shared_future<void> start_ready = start_promise.get_future().share();
   try {
-    worker_thread_ = std::thread(&InvalidationQueue::WorkerLoop, this);
+    worker_thread_ = worker_thread_factory_([this, start_ready] {
+      start_ready.wait();
+      WorkerLoop();
+    });
   } catch (const std::exception& e) {
-    running_.store(false, std::memory_order_release);
-    stopped_.store(true, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> queue_lock(queue_mutex_);
+      running_.store(false, std::memory_order_release);
+      stopped_.store(true, std::memory_order_release);
+    }
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kCacheWorkerStartFailed,
                                  std::string("Failed to start invalidation queue worker: ") + e.what()));
   }
 
+  {
+    // Publish both flags under the mutex used by Enqueue and WorkerLoop.
+    std::lock_guard<std::mutex> queue_lock(queue_mutex_);
+    stopped_.store(false, std::memory_order_release);
+    running_.store(true, std::memory_order_release);
+  }
+  start_promise.set_value();
+
   return {};
 }
 
 void InvalidationQueue::Stop() {
-  // stopped_ is stored *before* acquiring queue_mutex_ on purpose: callers
-  // that already completed Step 1 (the lockless preparation in Enqueue) will
-  // then try to acquire queue_mutex_, observe stopped_ == true, log a warning,
-  // and return without enqueueing. Moving this store inside the lock would
-  // open a window where late Phase-1 callers acquire the lock before stopped_
-  // is set and enqueue post-shutdown work into a doomed queue. This is the
-  // documented shutdown contract — do not move the store inside the lock.
-  stopped_.store(true);
+  // Start and Stop own worker_thread_ only while holding state_mutex_. This
+  // prevents a concurrent restart from assigning to a still-joinable thread.
+  std::lock_guard<std::mutex> state_lock(state_mutex_);
 
   // Publish the wait predicate while holding the same mutex used by
   // WorkerLoop's condition-variable wait. Updating only the atomic and then
   // notifying can lose the wakeup between predicate evaluation and sleep.
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    bool expected = true;
-    if (!running_.compare_exchange_strong(expected, false)) {
+    stopped_.store(true, std::memory_order_release);
+    if (!running_.load(std::memory_order_acquire)) {
       return;  // Already stopped
     }
+    running_.store(false, std::memory_order_release);
   }
 
   queue_cv_.notify_all();

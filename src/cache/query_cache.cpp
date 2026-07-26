@@ -35,11 +35,13 @@ constexpr size_t kHashMapNodeOverhead = 32;
 
 }  // namespace
 
-QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds, bool compression_enabled)
+QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds, bool compression_enabled,
+                       size_t eviction_batch_size)
     : max_memory_bytes_(max_memory_bytes),
       min_query_cost_ms_(min_query_cost_ms),
       ttl_seconds_(ttl_seconds),
-      compression_enabled_(compression_enabled) {
+      compression_enabled_(compression_enabled),
+      eviction_batch_size_(std::max<size_t>(1, eviction_batch_size)) {
   // Lower the load factor and pre-reserve buckets to minimize cache_map_
   // rehashing under the steady-state working set. Rehash cost aside, this is
   // also a defense-in-depth measure for the iterator-stability contract used
@@ -74,14 +76,25 @@ QueryCache::~QueryCache() {
 }
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
-  return LookupInternal(key, nullptr);
+  return LookupInternal(key, std::nullopt, nullptr);
+}
+
+std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key, std::string_view discriminator) {
+  return LookupInternal(key, discriminator, nullptr);
 }
 
 std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey& key, LookupMetadata& metadata) {
-  return LookupInternal(key, &metadata);
+  return LookupInternal(key, std::nullopt, &metadata);
 }
 
-std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key, LookupMetadata* metadata) {
+std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey& key, std::string_view discriminator,
+                                                                 LookupMetadata& metadata) {
+  return LookupInternal(key, discriminator, &metadata);
+}
+
+std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key,
+                                                             std::optional<std::string_view> discriminator,
+                                                             LookupMetadata* metadata) {
   // Start timing
   auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -115,6 +128,14 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
 
   auto iter = cache_map_.find(key);
   if (iter == cache_map_.end()) {
+    stats_.cache_misses++;
+    stats_.cache_misses_not_found++;
+    return record_miss();
+  }
+
+  // The MD5 digest is an index accelerator, not the cache identity. Compare
+  // the canonical query before serving data so a collision fails closed.
+  if (discriminator.has_value() && iter->second.first.metadata.cache_discriminator != *discriminator) {
     stats_.cache_misses++;
     stats_.cache_misses_not_found++;
     return record_miss();
@@ -165,11 +186,6 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
     metadata->data_version = entry.metadata.data_version;
   }
 
-  // Lock-free access tracking (no lock upgrade needed)
-  // Atomic increment of access count and set dirty flag for background LRU refresh
-  iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
-  iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
-
   // Release shared lock before decompression
   lock.unlock();
 
@@ -212,11 +228,24 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
     std::memcpy(result.data(), compressed_ptr->data(), compressed_ptr->size());
   }
 
+  // Publish access only after the payload decoded successfully. Reacquire a
+  // shared lock and verify the generation because the entry may have been
+  // erased/replaced while decompression ran outside mutex_.
+  {
+    std::shared_lock access_lock(mutex_);
+    auto access_iter = cache_map_.find(key);
+    if (access_iter != cache_map_.end() &&
+        access_iter->second.first.metadata.entry_generation == entry_identity.generation) {
+      access_iter->second.first.metadata.access_count.fetch_add(1, std::memory_order_relaxed);
+      access_iter->second.first.metadata.accessed_since_refresh.store(true, std::memory_order_relaxed);
+    }
+  }
+
   // Incremented outside the shared lock (after decompression) to avoid holding
   // the lock during CPU-intensive work. This creates a brief window where
   // cache_hits + cache_misses may transiently exceed total_queries in a
   // concurrent Reset() scenario, which is acceptable for monitoring counters
-  // (reviewed: no correctness invariant depends on exact counter consistency).
+  // No correctness invariant depends on exact counter consistency.
   //
   // The acceptable transient drift is covered by the
   // ConcurrentQueryCountAccuracy regression test in cache_thread_safety_test
@@ -659,8 +688,12 @@ bool QueryCache::EvictLeastRecentlyUsed() {
 }
 
 bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheEntryIdentity>* evicted_entries) {
-  // Evict from LRU tail until enough space is available
-  while (total_memory_bytes_ + required_bytes > max_memory_bytes_ && !lru_list_.empty()) {
+  // Evict from the LRU tail until enough space is available, then finish the
+  // configured batch. Batching amortizes reverse-index callback/locking costs
+  // during sustained memory pressure.
+  size_t removed_count = 0;
+  while ((total_memory_bytes_ + required_bytes > max_memory_bytes_ || removed_count < eviction_batch_size_) &&
+         !lru_list_.empty()) {
     // Get least recently used key
     const CacheKey lru_key = lru_list_.back();
 
@@ -686,6 +719,7 @@ bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheEntryIden
     }
 
     RemoveEntryLocked(iter, RemovalReason::kLRUEviction, evicted_entries);
+    ++removed_count;
   }
 
   stats_.current_memory_bytes = total_memory_bytes_;
@@ -737,6 +771,9 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
       break;
     case RemovalReason::kDecompressionFailureAlreadyCounted:
       // Stats already incremented by Lookup() at detection time
+      break;
+    case RemovalReason::kInvalidated:
+      stats_.invalidations_deferred++;
       break;
     case RemovalReason::kTableClear:
       // No additional counter (existing behavior)
@@ -799,15 +836,21 @@ void QueryCache::RefreshLRU() {
     // Track keys detected as expired during Lookup (stats already counted)
     // Scan-detected expired keys will be collected separately
     std::unordered_set<CacheEntryIdentity> scan_expired_entries;
+    std::unordered_set<CacheEntryIdentity> invalidated_entries;
 
     // Update LRU for entries that were accessed since last refresh
     for (auto& [key, entry_pair] : cache_map_) {
+      const CacheEntryIdentity identity{key, entry_pair.first.metadata.entry_generation};
+      if (entry_pair.first.invalidated.load(std::memory_order_relaxed)) {
+        invalidated_entries.insert(identity);
+        continue;
+      }
+
       // Check TTL expiration
       if (current_ttl > 0) {
         auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry_pair.first.metadata.created_at).count();
         if (age >= current_ttl) {
           // Only add to scan set if not already detected by Lookup
-          const CacheEntryIdentity identity{key, entry_pair.first.metadata.entry_generation};
           if (lookup_expired_entries.find(identity) == lookup_expired_entries.end()) {
             scan_expired_entries.insert(identity);
           }
@@ -819,6 +862,16 @@ void QueryCache::RefreshLRU() {
         // Entry was accessed, move to front of LRU list
         Touch(key);
         entry_pair.first.metadata.last_accessed = now;
+      }
+    }
+
+    // Queue overflow can drop deferred Step 2 erasure. The invalidated flag is
+    // authoritative, so the periodic scan purges such entries instead of
+    // leaving a permanently-missing duplicate key resident until TTL expiry.
+    for (const auto& identity : invalidated_entries) {
+      auto iter = cache_map_.find(identity.key);
+      if (iter != cache_map_.end() && iter->second.first.metadata.entry_generation == identity.generation) {
+        RemoveEntryLocked(iter, RemovalReason::kInvalidated, &evicted_entries);
       }
     }
 

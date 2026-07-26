@@ -35,6 +35,21 @@ TEST(QueryNormalizerTest, WhitespaceNormalization) {
   EXPECT_EQ(normalized1, normalized2);
 }
 
+TEST(QueryNormalizerTest, FacetSharesSearchDocIdCacheNamespace) {
+  query::Query search;
+  search.type = query::QueryType::SEARCH;
+  search.table = "posts";
+  search.search_text = "hello world";
+  search.filters = {{"status", query::FilterOp::EQ, "active"}};
+
+  query::Query facet = search;
+  facet.type = query::QueryType::FACET;
+  facet.facet_column = "category";
+
+  EXPECT_EQ(QueryNormalizer::Normalize(search), QueryNormalizer::Normalize(facet));
+  EXPECT_FALSE(QueryNormalizer::Normalize(facet).empty());
+}
+
 /**
  * @brief Test tab character normalization
  */

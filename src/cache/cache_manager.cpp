@@ -8,18 +8,21 @@
 #include <algorithm>
 
 #include "cache/cache_key.h"
+#include "utils/structured_log.h"
 
 namespace mygramdb::cache {
 
-CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs)
-    : enabled_(cache_config.enabled),
+CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigMap ngram_configs,
+                           InvalidationQueue::WorkerThreadFactory worker_thread_factory)
+    : enabled_(false),
       max_memory_bytes_(cache_config.max_memory_bytes),
       ttl_seconds_(cache_config.ttl_seconds),
       table_invalidation_strategy_(cache_config.invalidation_strategy == "table") {
   // Create the cache internals even when runtime enforcement starts disabled.
   // That lets SET cache.enabled=true enable caching without a server restart.
   query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms,
-                                              ttl_seconds_, cache_config.compression_enabled);
+                                              ttl_seconds_, cache_config.compression_enabled,
+                                              static_cast<size_t>(cache_config.eviction_batch_size));
 
   // Create invalidation manager
   invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
@@ -44,12 +47,20 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
   });
 
   // Create invalidation queue with per-table ngram settings
-  invalidation_queue_ =
-      std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(), std::move(ngram_configs));
+  invalidation_queue_ = std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(),
+                                                            std::move(ngram_configs), std::move(worker_thread_factory));
   invalidation_queue_->SetBatchSize(cache_config.invalidation.batch_size);
   invalidation_queue_->SetMaxDelay(cache_config.invalidation.max_delay_ms);
-  if (enabled_) {
-    invalidation_queue_->Start();
+  if (cache_config.enabled) {
+    const auto start_result = invalidation_queue_->Start();
+    if (start_result.has_value()) {
+      enabled_.store(true, std::memory_order_release);
+    } else {
+      mygram::utils::StructuredLog()
+          .Event("cache_invalidation_worker_start_failed")
+          .Field("error", start_result.error().message())
+          .Error();
+    }
   }
 }
 
@@ -65,23 +76,27 @@ CacheManager::~CacheManager() {
   query_cache_.reset();
 }
 
-std::optional<CacheKey> CacheManager::ResolveCacheKey(const query::Query& query) const {
+std::optional<CacheManager::ResolvedCacheKey> CacheManager::ResolveCacheKey(const query::Query& query) const {
   if (!enabled_ || !query_cache_) {
     return std::nullopt;
   }
 
-  // Only cache SEARCH and COUNT queries
-  if (query.type != query::QueryType::SEARCH && query.type != query::QueryType::COUNT) {
+  // FACET caches its underlying DocId set and shares SEARCH's key namespace.
+  if (query.type != query::QueryType::SEARCH && query.type != query::QueryType::COUNT &&
+      query.type != query::QueryType::FACET) {
     return std::nullopt;
   }
 
   // Trust only table/index-aware canonical keys produced by search_pipeline.
   // Parser/default keys lack primary-key and normalization context.
   if (query.cache_key.has_value() && query.cache_key_is_canonical) {
+    if (query.cache_key_discriminator.empty()) {
+      return std::nullopt;
+    }
     CacheKey key;
     key.hash_high = query.cache_key.value().first;
     key.hash_low = query.cache_key.value().second;
-    return key;
+    return ResolvedCacheKey{key, query.cache_key_discriminator};
   }
 
   // Fallback: compute cache key on-the-fly (for backwards compatibility)
@@ -89,7 +104,7 @@ std::optional<CacheKey> CacheManager::ResolveCacheKey(const query::Query& query)
   if (normalized.empty()) {
     return std::nullopt;
   }
-  return CacheKeyGenerator::Generate(normalized);
+  return ResolvedCacheKey{CacheKeyGenerator::Generate(normalized), normalized};
 }
 
 std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query) {
@@ -98,7 +113,7 @@ std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query
     return std::nullopt;
   }
 
-  return query_cache_->Lookup(key.value());
+  return query_cache_->Lookup(key->key, key->discriminator);
 }
 
 std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Query& query) {
@@ -113,7 +128,7 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
   // precise invalidation without turning every table mutation into a full
   // table-cache miss.
   QueryCache::LookupMetadata metadata;
-  auto result = query_cache_->LookupWithMetadata(key.value(), metadata);
+  auto result = query_cache_->LookupWithMetadata(key->key, key->discriminator, metadata);
   if (!result.has_value()) {
     return std::nullopt;
   }
@@ -122,8 +137,18 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
   lookup_result.results = std::move(result.value());
   lookup_result.query_cost_ms = metadata.query_cost_ms;
   lookup_result.created_at = metadata.created_at;
+  lookup_result.entry_generation = metadata.entry_generation;
 
   return lookup_result;
+}
+
+bool CacheManager::Erase(const query::Query& query, uint64_t expected_entry_generation) {
+  auto key = ResolveCacheKey(query);
+  if (!key.has_value()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  return query_cache_ != nullptr && query_cache_->Erase(CacheEntryIdentity{key->key, expected_entry_generation});
 }
 
 bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& result,
@@ -150,8 +175,9 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
     return false;
   }
 
-  // Only cache SEARCH and COUNT queries
-  if (query.type != query::QueryType::SEARCH && query.type != query::QueryType::COUNT) {
+  // FACET caches its underlying DocId set and shares SEARCH's key namespace.
+  if (query.type != query::QueryType::SEARCH && query.type != query::QueryType::COUNT &&
+      query.type != query::QueryType::FACET) {
     return false;
   }
 
@@ -160,7 +186,7 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   if (!resolved_key.has_value()) {
     return false;
   }
-  const CacheKey key = resolved_key.value();
+  const CacheKey key = resolved_key->key;
 
   // Prepare metadata for invalidation tracking.
   //
@@ -173,6 +199,7 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   // it does not depend on created_at on this path.
   CacheMetadata metadata;
   metadata.key = key;
+  metadata.cache_discriminator = resolved_key->discriminator;
   metadata.table = query.table;
   metadata.ngrams.assign(ngrams.begin(), ngrams.end());
   metadata.filters = query.filters;
@@ -314,6 +341,8 @@ CacheStatisticsSnapshot CacheManager::GetStatistics() const {
 }
 
 bool CacheManager::Enable() {
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+
   // Cache can only be enabled if it was initialized at startup
   if (!query_cache_ || !invalidation_mgr_ || !invalidation_queue_) {
     return false;
@@ -330,7 +359,15 @@ bool CacheManager::Enable() {
   // Symmetric with Disable(), which stops the queue first and then flips
   // enabled_ to false.
   if (!invalidation_queue_->IsRunning()) {
-    invalidation_queue_->Start();
+    const auto start_result = invalidation_queue_->Start();
+    if (!start_result.has_value()) {
+      enabled_.store(false, std::memory_order_release);
+      mygram::utils::StructuredLog()
+          .Event("cache_invalidation_worker_start_failed")
+          .Field("error", start_result.error().message())
+          .Error();
+      return false;
+    }
   }
 
   enabled_.store(true, std::memory_order_release);
@@ -339,6 +376,10 @@ bool CacheManager::Enable() {
 }
 
 void CacheManager::Disable() {
+  // Serialize the entire lifecycle transition with Enable and cache mutation.
+  // This keeps enabled_ and the invalidation worker in one coherent state.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+
   // Disable race: flip enabled_ to false BEFORE Clear() so that any
   // concurrent Insert observing the post-flip state short-circuits at the
   // enabled_ check and never inserts after Clear() has finished. The previous
@@ -369,7 +410,6 @@ void CacheManager::Disable() {
   // that already passed the enabled_ check before we flipped it. Insert()
   // re-checks enabled_ after acquiring the same mutex, so a caller that was
   // queued behind this Clear exits without adding post-disable metadata.
-  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
   last_global_clear_version_ = data_version_.fetch_add(1, std::memory_order_acq_rel) + 1;
   table_data_versions_.clear();
   if (query_cache_) {

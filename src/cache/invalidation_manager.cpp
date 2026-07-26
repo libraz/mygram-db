@@ -14,6 +14,30 @@
 
 namespace mygramdb::cache {
 
+namespace {
+
+size_t EstimateRegistrationBytes(const InvalidationMetadata& metadata) {
+  size_t total = sizeof(CacheKey) + sizeof(InvalidationMetadata) + sizeof(void*) + sizeof(size_t);
+  total += metadata.table.capacity();
+  total += metadata.ngrams.capacity() * sizeof(std::string);
+  total += sizeof(std::string) + metadata.table.capacity() + sizeof(void*) + sizeof(size_t);
+  total += sizeof(CacheKey) + sizeof(void*) + sizeof(size_t);
+  if (metadata.ngram_size > 0) {
+    total += sizeof(std::tuple<int, int, bool>) + sizeof(size_t) + (3 * sizeof(void*));
+  }
+  for (const auto& ngram : metadata.ngrams) {
+    total += ngram.capacity();
+    // Reverse-index ngram node plus this cache-key membership. Charging the
+    // node per membership is conservative and, importantly, independently
+    // subtractable when registrations are removed in any order.
+    total += sizeof(std::string) + ngram.capacity() + sizeof(void*) + sizeof(size_t);
+    total += sizeof(CacheKey) + sizeof(void*) + sizeof(size_t);
+  }
+  return total;
+}
+
+}  // namespace
+
 InvalidationManager::InvalidationManager(QueryCache* cache) : cache_(cache) {}
 
 void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMetadata& metadata) {
@@ -37,9 +61,11 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
   inv_meta.has_filters = !metadata.filters.empty();
   inv_meta.has_not_terms = metadata.has_not_terms;
   inv_meta.invalidate_on_any_text_change = metadata.invalidate_on_any_text_change;
+  inv_meta.estimated_bytes = EstimateRegistrationBytes(inv_meta);
   cache_metadata_[key] = std::move(inv_meta);
 
   const auto& stored_meta = cache_metadata_[key];
+  estimated_bytes_.fetch_add(stored_meta.estimated_bytes, std::memory_order_relaxed);
 
   // Update reverse index: ngram -> cache keys
   for (const auto& ngram : stored_meta.ngrams) {
@@ -195,6 +221,7 @@ void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key, cons
   }
 
   const auto& metadata = metadata_it->second;
+  const size_t removed_estimate = metadata.estimated_bytes;
 
   // Remove from reverse index
   auto table_it = ngram_to_cache_keys_.find(metadata.table);
@@ -245,6 +272,7 @@ void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key, cons
 
   // Remove metadata
   cache_metadata_.erase(metadata_it);
+  estimated_bytes_.fetch_sub(removed_estimate, std::memory_order_relaxed);
 }
 
 void InvalidationManager::UnregisterCacheEntry(const CacheKey& key) {
@@ -317,6 +345,7 @@ void InvalidationManager::Clear() {
   decltype(cache_metadata_)().swap(cache_metadata_);
   decltype(table_ngram_settings_)().swap(table_ngram_settings_);
   decltype(table_to_cache_keys_)().swap(table_to_cache_keys_);
+  estimated_bytes_.store(0, std::memory_order_relaxed);
 }
 
 size_t InvalidationManager::GetTrackedEntryCount() const {
@@ -336,6 +365,10 @@ size_t InvalidationManager::GetTrackedNgramCount(const std::string& table_name) 
 }
 
 size_t InvalidationManager::MemoryUsage() const {
+  return estimated_bytes_.load(std::memory_order_relaxed);
+}
+
+size_t InvalidationManager::DiagnosticMemoryUsage() const {
   std::shared_lock lock(mutex_);
 
   size_t total = 0;

@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -36,8 +37,8 @@ namespace mygramdb::cache {
  *   1. Mirror the change on the other struct.
  *   2. Update QueryCache::GetStatistics() to copy the new field.
  *   3. Bump kCacheStatsFieldVersion (below) to keep the static_assert wedge
- *      green — the assert is a deliberate tripwire that forces reviewers to
- *      look at the mirror struct and the GetStatistics() copy.
+ *      green — the assert is a deliberate tripwire for the mirror struct and
+ *      the GetStatistics() copy.
  */
 struct CacheStatisticsSnapshot {
   // Query statistics
@@ -109,8 +110,8 @@ struct CacheStatisticsSnapshot {
  * @brief Schema version for CacheStatistics / CacheStatisticsSnapshot.
  *
  * Bumped whenever fields are added / removed / renamed on either struct so
- * that the static_assert at the bottom of this file trips and forces the
- * reviewer to keep both structs and QueryCache::GetStatistics() in sync.
+ * that the static_assert at the bottom of this file trips when either struct
+ * or QueryCache::GetStatistics() is not kept in sync.
  *
  * Current schema (must match exactly):
  *   19 atomic uint64_t counters in CacheStatistics
@@ -171,6 +172,7 @@ enum class RemovalReason : std::uint8_t {
   kTTLExpiredAlreadyCounted,  ///< TTL expired, stats already counted by Lookup
   kDecompressionFailure,
   kDecompressionFailureAlreadyCounted,  ///< Decompression failed, stats already counted by Lookup
+  kInvalidated,
   kTableClear,
   kClear  ///< Whole-cache Clear() (no per-reason counter increment)
 };
@@ -211,7 +213,7 @@ class QueryCache {
    * @param compression_enabled Enable LZ4 compression for cached results (default: true)
    */
   explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0,
-                      bool compression_enabled = true);
+                      bool compression_enabled = true, size_t eviction_batch_size = 1);
 
   /**
    * @brief Destructor - stops background LRU refresh thread
@@ -240,6 +242,7 @@ class QueryCache {
    * @return Decompressed result if found and not invalidated, nullopt otherwise
    */
   [[nodiscard]] std::optional<std::vector<DocId>> Lookup(const CacheKey& key);
+  [[nodiscard]] std::optional<std::vector<DocId>> Lookup(const CacheKey& key, std::string_view discriminator);
 
   /**
    * @brief Lookup cache entry with metadata
@@ -248,6 +251,9 @@ class QueryCache {
    * @return Decompressed result if found and not invalidated, nullopt otherwise
    */
   [[nodiscard]] std::optional<std::vector<DocId>> LookupWithMetadata(const CacheKey& key, LookupMetadata& metadata);
+  [[nodiscard]] std::optional<std::vector<DocId>> LookupWithMetadata(const CacheKey& key,
+                                                                     std::string_view discriminator,
+                                                                     LookupMetadata& metadata);
 
   /**
    * @brief Insert cache entry
@@ -460,6 +466,7 @@ class QueryCache {
   std::atomic<double> min_query_cost_ms_;
   std::atomic<int> ttl_seconds_;  ///< Time-to-live in seconds (0 = no expiration)
   bool compression_enabled_;      ///< Enable LZ4 compression for cached results
+  size_t eviction_batch_size_;    ///< Minimum entries removed per memory-pressure eviction batch
 
   // Memory tracking
   size_t total_memory_bytes_ = 0;
@@ -561,7 +568,8 @@ class QueryCache {
    * @param metadata If non-null, populated with cache entry metadata on hit
    * @return Decompressed result if found and not invalidated, nullopt otherwise
    */
-  std::optional<std::vector<DocId>> LookupInternal(const CacheKey& key, LookupMetadata* metadata);
+  std::optional<std::vector<DocId>> LookupInternal(const CacheKey& key, std::optional<std::string_view> discriminator,
+                                                   LookupMetadata* metadata);
 };
 
 // ---------------------------------------------------------------------------

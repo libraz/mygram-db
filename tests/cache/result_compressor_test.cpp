@@ -109,6 +109,19 @@ TEST(ResultCompressorTest, RepetitiveData) {
   EXPECT_LT(compressed_bytes, original_bytes * 1.1);
 }
 
+TEST(ResultCompressorTest, CompressedBufferDoesNotRetainCompressBoundCapacity) {
+  std::vector<DocId> original(10000, 42);
+
+  auto compressed = ResultCompressor::Compress(original);
+
+  ASSERT_TRUE(compressed.has_value());
+  ASSERT_FALSE(compressed->empty());
+  // The returned vector must own only the useful compressed payload, not the
+  // much larger LZ4_compressBound() scratch allocation.
+  EXPECT_LE(compressed->capacity(), compressed->size() + 64);
+  EXPECT_LT(compressed->capacity(), original.size() * sizeof(DocId) / 10);
+}
+
 /**
  * @brief Test non-sequential data
  */
