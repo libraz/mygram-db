@@ -10,9 +10,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-07-27
+
+### Breaking Change
+
+- **Legacy bare `SAVE`/`LOAD` rejected** — `SAVE <path>` and `LOAD <path>` return a migration error instead of executing; use `DUMP SAVE` and `DUMP LOAD`.
+- **Configured column types and collations validated** — `BINARY`/`VARBINARY`/`BLOB` columns are rejected, and character columns must use a `utf8mb4`, `utf8`/`utf8mb3`, or `ascii` collation. A configuration that previously started (for example one indexing a `latin1` column) now fails closed.
+- **Configuration identifiers validated** — table, database, primary key, filter, and text-source names are validated as SQL identifiers while the configuration is parsed.
+
 ### Added
 
-- **Cross-surface search parity** — HTTP search/count/facet now treat `q` as literal text by default and accept explicit `"mode": "boolean"` expressions; C and C++ typed search options expose comparison filters, fuzzy distance, custom highlighting, and pagination.
+- **Cross-surface search parity** — HTTP search/count/facet now treat `q` as literal text by default and accept explicit `"mode": "boolean"` expressions; both transports route through the shared parser. `FACET` executes on the search pipeline with typed unknown-column errors and offset support.
+- **Typed search options** — `SearchOptions` and `MygramSearchOptions_C` expose comparison filters, fuzzy distance, highlight tags and limits, and pagination, with the new `mygramclient_search_with_options()` and `mygramclient_convert_search_expression()` entry points.
+- **New runtime knobs** — TCP idle-connection reaping (`idle_timeout_sec`, `reaper_interval_sec`), per-connection pending-frame limits (`max_pending_frames`, `max_pending_frame_bytes`), and the `mediumint` filter type.
+- **SQL generation helpers** — `QuoteSQLIdentifier`, `QuoteQualifiedSQLIdentifier`, and hex `EncodeMySQLStringLiteral` keep generated statements semantically identical under `NO_BACKSLASH_ESCAPES`.
+- **Docker environment surface** — BM25, cache, rate-limit, and TLS variables are exposed; the entrypoint validates typed environment values, quotes generated YAML, and never overwrites an existing bind-mounted configuration file.
+- **Build options** — `ENABLE_UBSAN` for UndefinedBehaviorSanitizer builds and opt-in `BUILD_FUZZERS` for a local binlog and dump-header fuzz harness.
+
+### Fixed
+
+- **Binlog value decoding** — MySQL binary JSON, ENUM/SET labels, and negative TIME2 fractional seconds are decoded instead of forwarded as raw bytes, DECIMAL precision/scale metadata is bounded, and a shared value canonicalizer makes binlog TIMESTAMP and DECIMAL text match the snapshot representation.
+- **Replication position tracking** — `ReplicationPositionState` separates received from pending-applied GTIDs and fails closed when a COMMIT GTID does not match the pending one; reconnect backoff is cancellable and resets only after an event is fetched from a reopened stream.
+- **MariaDB event handling** — standalone transactions, GTID list events, and annotate-rows events are handled explicitly, and the server flavor is detected with a capability probe instead of version-string parsing.
+- **Cache key collisions** — each entry stores a canonical query discriminator compared on lookup, so a digest collision fails closed instead of serving another query's result; `FACET` queries are cached in the SEARCH DocId namespace.
+- **Cache lifecycle** — the whole Start/Stop and Enable/Disable transition is serialized under the state mutex, invalidation worker thread creation failure is reported, stale entries are evicted after a staleness check, and the configured `eviction_batch_size` is enforced.
+- **Reactor EOF coherence** — events queued before EOF or a read pause are discarded, EOF is published and read interest disarmed under the frame mutex, the resume path re-extracts buffered frames before restarting kernel reads, and `EPOLLRDHUP` is armed only together with read interest so epoll matches kqueue `EV_EOF` semantics.
+- **Boolean term parsing** — all non-delimiter characters are treated as term characters, so `c++`, e-mail addresses, version strings, and hyphenated terms parse as single terms; the term-count limit is enforced during parsing and a leading `NOT` parses as a boolean expression.
+- **Highlight windows** — merged windows are clamped to the documented snippet length, and highlights can be generated from pre-normalization text.
+- **Dump load safety** — a `DUMP LOAD` that would wipe a non-empty replication position is refused, and the loaded configuration and GTID are validated together before any live store is replaced.
+- **Posting list deserialization** — `PostingList::Deserialize` is overflow-safe and commits strategy and payload only after the full body validates; the V4 index term count is validated against the remaining payload before it is read.
+- **Portable primitives** — datetime conversion uses signed epoch seconds with a portable civil-date algorithm preserving valid pre-1970 values, CIDR matching covers IPv6 and IPv4-mapped IPv6 peers, `AF_UNIX` connections report a stable `unix` peer identity, and a failure to open the parent directory during a durability sync is reported instead of silently ignored.
+- **Startup signals** — a signal received during initialization or server startup is reported as an orderly shutdown instead of a startup failure, and the rotating log sink appends across restarts and SIGHUP reopen instead of truncating.
+
+### Changed
+
+- **Streaming initial load** — the initial snapshot is fetched with an unbuffered streaming result, checking cancellation between rows; transaction ownership moved to the caller, and primary key, filter, and text values are canonicalized to match the binlog representation.
+- **Shared dump internals** — the streambufs, CRC helpers, and pending-section logic duplicated between dump v1 and v2 moved into `dump_format_internal`, with sections read through a bounded stream under a shared `RestoreLimits` budget. The document store keeps pre-normalization text (format v3; v1 and v2 dumps still load).
+- **`SHOW VARIABLES` surface** — generated from the configuration projection instead of a hand-maintained map, with knobs that are parsed but not yet enforced labelled as such. `SHOW VARIABLES LIKE` requires exactly one pattern.
+- **`CONFIG VERIFY` paths** — resolved against the active configuration file's directory rather than the process working directory.
+- **`SYNC` cancellation** — `SYNC STOP` is an asynchronous cancellation, each `SYNC` gets a coherent configuration snapshot, and the shutdown flag no longer lets replication workers restart.
+- **Denial logging and listener** — attacker-driven denial logging is bounded on both transports, and the TCP listener binds over IPv6 as well as IPv4.
+- **Docker environment names** — the stale `SNAPSHOT_DIR`, `SNAPSHOT_INTERVAL_SEC`, and `SNAPSHOT_RETAIN` entries were removed from the sample environment and compose file; the entrypoint has read `DUMP_DIR`, `DUMP_INTERVAL_SEC`, and `DUMP_RETAIN` since v1.8.1.
+
+### Performance
+
+- **In-place posting mutation** — documents are inserted and removed by patching neighbouring deltas instead of decoding and re-encoding the whole posting list.
+- **Reduced index/search contention** — adding to an existing term takes only a shared map lock, so indexing no longer blocks unrelated searches.
+- **Automatic Roaring conversion** — a posting list converts to Roaring once it exceeds the entry threshold, and a restored index preserves the configured threshold instead of falling back to the default.
+
+### Testing
+
+- The E2E interpreter is provisioned through a shared `python-env.sh` with rye as the project standard and a lockfile-based venv fallback; the benchmark seed project carries its own lockfiles.
+- Added an autouse fixture restoring the tracked table shape and re-syncing after every DDL test, a `verify_text` post-filter regression test with fixtures in both the MySQL and MariaDB init SQL, MariaDB non-transactional GTID and checksum-recovery coverage, and a service-independent unit test directory for the wait helpers.
+- Sleeps and magic numbers in the dump, reconnect, memory, and health tests were replaced with polling on observed events, and Makefile targets were added for MySQL-backed tests, the large dump restore test, and the matrix and failover E2E suites.
+
+**Detailed Release Notes**: [docs/releases/v1.9.0.md](docs/releases/v1.9.0.md)
 
 ## [1.8.1] - 2026-07-16
 
@@ -759,7 +811,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/libraz/mygram-db/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/libraz/mygram-db/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/libraz/mygram-db/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/libraz/mygram-db/compare/v1.6.1...v1.7.0
