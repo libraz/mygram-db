@@ -20,6 +20,20 @@ TEST(NetworkACLSecurityTest, EmptyACLDeniesAll) {
   EXPECT_FALSE(IsIPAllowed("192.168.1.1", empty_acl));
   EXPECT_FALSE(IsIPAllowed("10.0.0.1", empty_acl));
   EXPECT_FALSE(IsIPAllowed("8.8.8.8", empty_acl));  // Google DNS (external)
+  EXPECT_FALSE(IsIPAllowed("::1", empty_acl));
+}
+
+TEST(NetworkACLSecurityTest, IPv6LoopbackAndSubnetAcl) {
+  auto loopback = CIDR::Parse("::1/128");
+  auto documentation = CIDR::Parse("2001:db8::/32");
+  ASSERT_TRUE(loopback.has_value());
+  ASSERT_TRUE(documentation.has_value());
+  const std::vector<CIDR> acl = {*loopback, *documentation};
+
+  EXPECT_TRUE(IsIPAllowed("::1", acl));
+  EXPECT_TRUE(IsIPAllowed("2001:db8:1234::1", acl));
+  EXPECT_FALSE(IsIPAllowed("::2", acl));
+  EXPECT_FALSE(IsIPAllowed("2001:db9::1", acl));
 }
 
 /**

@@ -6,9 +6,7 @@
 #include "utils/datetime_converter.h"
 
 #include <algorithm>
-#include <ctime>
 #include <iomanip>
-#include <regex>
 #include <sstream>
 
 #include "utils/constants.h"
@@ -66,9 +64,6 @@ constexpr int kMinDay = 1;      // Minimum day value
 constexpr int kMaxDay = 31;     // Maximum day value
 constexpr int kMaxSecond = 59;  // Maximum second value (same as kMaxMinute)
 
-// std::tm epoch constants
-constexpr int kTmEpochYear = 1900;  // std::tm year offset (years since 1900)
-
 // Leap year calculation constants
 constexpr int kLeapYearDivisor4 = 4;      // Divisible by 4
 constexpr int kLeapYearDivisor100 = 100;  // Not divisible by 100 (unless 400)
@@ -112,7 +107,7 @@ inline bool IsValidCalendarDate(int year, int month, int day) {
   return day <= DaysInMonth(year, month);
 }
 
-std::optional<uint64_t> ParseEpochSeconds(std::string_view value_str);
+std::optional<int64_t> ParseEpochSeconds(std::string_view value_str);
 
 // ============================================================================
 // TimezoneOffset implementation
@@ -177,7 +172,7 @@ std::string TimezoneOffset::ToString() const {
 // DateTimeProcessor implementation
 // ============================================================================
 
-Expected<uint64_t, Error> DateTimeProcessor::DateTimeToEpoch(std::string_view datetime_str) const {
+Expected<int64_t, Error> DateTimeProcessor::DateTimeToEpoch(std::string_view datetime_str) const {
   // Use the legacy ConvertToEpoch function
   auto result = ConvertToEpoch(datetime_str, timezone_.GetOffsetSeconds());
   if (!result) {
@@ -187,7 +182,7 @@ Expected<uint64_t, Error> DateTimeProcessor::DateTimeToEpoch(std::string_view da
   return *result;
 }
 
-Expected<uint64_t, Error> DateTimeProcessor::TimestampToEpoch(std::string_view timestamp_str) {
+Expected<int64_t, Error> DateTimeProcessor::TimestampToEpoch(std::string_view timestamp_str) {
   auto epoch = ParseEpochSeconds(timestamp_str);
   if (!epoch.has_value()) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid timestamp"));
@@ -278,10 +273,9 @@ Expected<int64_t, Error> DateTimeProcessor::TimeToSeconds(std::string_view time_
   return total_seconds;
 }
 
-Expected<uint64_t, Error> DateTimeProcessor::ParseDateTimeValue(std::string_view value_str) const {
-  // If numeric, treat as epoch seconds
-  if (IsNumericString(value_str)) {
-    return TimestampToEpoch(value_str);
+Expected<int64_t, Error> DateTimeProcessor::ParseDateTimeValue(std::string_view value_str) const {
+  if (auto epoch = ParseEpochSeconds(value_str)) {
+    return *epoch;
   }
 
   // Otherwise treat as datetime string
@@ -308,9 +302,11 @@ bool IsNumericString(std::string_view str) {
   return std::all_of(str.begin(), str.end(), [](char character) { return character >= '0' && character <= '9'; });
 }
 
-std::optional<uint64_t> ParseEpochSeconds(std::string_view value_str) {
-  if (IsNumericString(value_str)) {
-    return ParseNumeric<uint64_t>(value_str);
+std::optional<int64_t> ParseEpochSeconds(std::string_view value_str) {
+  const bool negative = !value_str.empty() && value_str.front() == '-';
+  const std::string_view magnitude = negative ? value_str.substr(1) : value_str;
+  if (IsNumericString(magnitude)) {
+    return ParseNumeric<int64_t>(value_str);
   }
 
   const size_t dot_pos = value_str.find('.');
@@ -319,13 +315,14 @@ std::optional<uint64_t> ParseEpochSeconds(std::string_view value_str) {
   }
   const auto seconds = value_str.substr(0, dot_pos);
   const auto fractional = value_str.substr(dot_pos + 1);
-  if (!IsNumericString(seconds) || !IsNumericString(fractional)) {
+  const std::string_view seconds_magnitude = !seconds.empty() && seconds.front() == '-' ? seconds.substr(1) : seconds;
+  if (!IsNumericString(seconds_magnitude) || !IsNumericString(fractional)) {
     return std::nullopt;
   }
-  return ParseNumeric<uint64_t>(seconds);
+  return ParseNumeric<int64_t>(seconds);
 }
 
-std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t timezone_offset_sec) {
+std::optional<int64_t> ConvertToEpoch(std::string_view datetime_str, int32_t timezone_offset_sec) {
   // Expected formats:
   // - "YYYY-MM-DD"
   // - "YYYY-MM-DD HH:MM:SS"
@@ -434,62 +431,19 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
     return std::nullopt;
   }
 
-  // Convert to epoch seconds using standard library
-  // Note: std::tm uses month as 0-11, year as years since 1900
-  std::tm tm_struct = {};
-  tm_struct.tm_year = year - kTmEpochYear;
-  tm_struct.tm_mon = month - 1;
-  tm_struct.tm_mday = day;
-  tm_struct.tm_hour = hour;
-  tm_struct.tm_min = minute;
-  tm_struct.tm_sec = second;
-  // Thread-safe approach: Use timegm if available, otherwise calculate manually
-#if defined(__GLIBC__) || defined(__APPLE__)
-  // timegm is available on Linux and macOS
-  tm_struct.tm_isdst = 0;  // UTC has no DST
-  std::time_t utc_time = timegm(&tm_struct);
-  if (utc_time == -1) {
-    return std::nullopt;
-  }
-#else
-  tm_struct.tm_isdst = -1;  // Let mktime determine DST
-  // Fallback: Calculate epoch manually (simplified, assumes Gregorian calendar)
-  // This is less accurate but portable
-  // Days since epoch calculation
-  // Note: Uses IsLeapYear() function defined at the top of this file
-  constexpr int days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-
-  int days_since_epoch = 0;
-  // Count years
-  for (int y = 1970; y < year; ++y) {
-    days_since_epoch += IsLeapYear(y) ? 366 : 365;
-  }
-  // Count months
-  for (int m = 1; m < month; ++m) {
-    days_since_epoch += days_in_month[m - 1];
-    if (m == 2 && IsLeapYear(year)) {
-      days_since_epoch += 1;  // Leap year February
-    }
-  }
-  // Add days
-  days_since_epoch += day - 1;
-
-  std::time_t utc_time = static_cast<std::time_t>(days_since_epoch) * 86400 + hour * 3600 + minute * 60 + second;
-#endif
-
-  // Now we have the datetime interpreted as UTC
-  // Apply the timezone offset: datetime is in timezone_offset_sec timezone,
-  // so to get UTC, we subtract the offset
-  int64_t epoch_seconds = static_cast<int64_t>(utc_time) - static_cast<int64_t>(timezone_offset_sec);
-
-  if (epoch_seconds < 0) {
-    return std::nullopt;  // Dates before 1970-01-01 are not supported
-  }
-
-  return static_cast<uint64_t>(epoch_seconds);
+  // Gregorian civil date to days since 1970-01-01. This is independent of
+  // time_t width and preserves valid pre-1970 MySQL DATE/DATETIME values.
+  int adjusted_year = year - (month <= 2 ? 1 : 0);
+  const int era = (adjusted_year >= 0 ? adjusted_year : adjusted_year - 399) / 400;
+  const unsigned year_of_era = static_cast<unsigned>(adjusted_year - era * 400);
+  const unsigned adjusted_month = static_cast<unsigned>(month + (month > 2 ? -3 : 9));
+  const unsigned day_of_year = (153 * adjusted_month + 2) / 5 + static_cast<unsigned>(day - 1);
+  const unsigned day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+  const int64_t days_since_epoch = static_cast<int64_t>(era) * 146097 + day_of_era - 719468;
+  return days_since_epoch * 86400 + hour * 3600 + minute * 60 + second - static_cast<int64_t>(timezone_offset_sec);
 }
 
-std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::string_view timezone_str) {
+std::optional<int64_t> ParseDatetimeValue(std::string_view value_str, std::string_view timezone_str) {
   // If numeric, treat as epoch seconds. Fractional epoch strings from
   // TIMESTAMP2 are accepted and truncated to whole seconds.
   if (auto epoch_seconds = ParseEpochSeconds(value_str)) {

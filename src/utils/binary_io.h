@@ -7,7 +7,7 @@
  * cross-platform compatibility.
  *
  * This header consolidates duplicate WriteBinary/ReadBinary implementations
- * from document_store.cpp and dump_format_v1.cpp (REF-0006).
+ * from document_store.cpp and dump_format_v1.cpp.
  */
 
 #pragma once

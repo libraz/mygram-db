@@ -157,18 +157,19 @@ enum class ErrorCode : std::uint16_t {
   kServerShuttingDown = 6027,            ///< Server is shutting down; new long-running operations are rejected
 
   // ===== Client Errors (7000-7999) =====
-  kClientNotConnected = 7000,      ///< Client not connected
-  kClientConnectionFailed = 7001,  ///< Failed to connect to server
-  kClientSendFailed = 7002,        ///< Failed to send request
-  kClientReceiveFailed = 7003,     ///< Failed to receive response
-  kClientInvalidResponse = 7004,   ///< Invalid response from server
-  kClientTimeout = 7005,           ///< Client operation timed out
-  kClientAlreadyConnected = 7006,  ///< Already connected
-  kClientCommandFailed = 7007,     ///< Command execution failed
-  kClientConnectionClosed = 7008,  ///< Connection closed by server
-  kClientInvalidArgument = 7009,   ///< Invalid argument provided
-  kClientServerError = 7010,       ///< Server returned an error
-  kClientProtocolError = 7011,     ///< Protocol error or unexpected response format
+  kClientNotConnected = 7000,          ///< Client not connected
+  kClientConnectionFailed = 7001,      ///< Failed to connect to server
+  kClientSendFailed = 7002,            ///< Failed to send request
+  kClientReceiveFailed = 7003,         ///< Failed to receive response
+  kClientInvalidResponse = 7004,       ///< Invalid response from server
+  kClientTimeout = 7005,               ///< Client operation timed out
+  kClientAlreadyConnected = 7006,      ///< Already connected
+  kClientCommandFailed = 7007,         ///< Command execution failed
+  kClientConnectionClosed = 7008,      ///< Connection closed by server
+  kClientInvalidArgument = 7009,       ///< Invalid argument provided
+  kClientServerError = 7010,           ///< Server returned an error
+  kClientProtocolError = 7011,         ///< Protocol error or unexpected response format
+  kClientExpressionParseError = 7012,  ///< Client-side search expression parsing failed
 
   // ===== Cache Errors (8000-8999) =====
   kCacheMiss = 8000,                 ///< Cache miss (not an error, but informational)
@@ -436,6 +437,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Server error";
     case ErrorCode::kClientProtocolError:
       return "Protocol error";
+    case ErrorCode::kClientExpressionParseError:
+      return "Expression parse error";
 
     // Cache
     case ErrorCode::kCacheMiss:

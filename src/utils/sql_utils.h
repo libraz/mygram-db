@@ -6,10 +6,49 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
+#include "utils/error.h"
+#include "utils/expected.h"
 #include "utils/namespace_compat.h"
 
 namespace mygramdb::utils {
+
+/**
+ * @brief Backtick-quote a MySQL identifier.
+ *
+ * Embedded backticks are escaped by doubling them. MySQL permits a broad
+ * range of characters in quoted identifiers, so only values that cannot form
+ * a valid identifier string (empty or containing NUL) are rejected.
+ *
+ * @param identifier Identifier to quote.
+ * @return Quoted identifier, or kInvalidArgument for an invalid identifier.
+ */
+Expected<std::string, Error> QuoteSQLIdentifier(std::string_view identifier);
+
+/**
+ * @brief Backtick-quote a possibly database-qualified MySQL identifier.
+ *
+ * When database is empty, only identifier is quoted. Otherwise both
+ * components are quoted independently and joined with a period.
+ *
+ * @param database Optional database/schema name.
+ * @param identifier Table or other identifier within the database.
+ * @return Quoted qualified identifier, or kInvalidArgument if either supplied
+ *         component is empty or contains NUL.
+ */
+Expected<std::string, Error> QuoteQualifiedSQLIdentifier(std::string_view database, std::string_view identifier);
+
+/**
+ * @brief Encode a UTF-8 string as a MySQL string expression.
+ *
+ * Hex encoding avoids backslash and quote interpretation entirely, so the
+ * expression has identical semantics with and without NO_BACKSLASH_ESCAPES.
+ *
+ * @param value UTF-8 string value.
+ * @return `CONVERT(X'...' USING utf8mb4)` expression.
+ */
+std::string EncodeMySQLStringLiteral(std::string_view value);
 
 /// @brief Remove SQL comments (/* ... */ and -- ...) from a query string.
 /// @param sql SQL query string

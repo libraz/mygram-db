@@ -15,6 +15,14 @@
 namespace mygramdb::utils {
 
 /**
+ * @brief Fsync the parent directory of a committed path.
+ *
+ * Exposed separately so callers and tests can verify that inability to open
+ * the directory is reported instead of silently weakening durability.
+ */
+Expected<void, Error> SyncParentDirectory(const std::string& filepath);
+
+/**
  * @brief RAII helper for atomic file writes via temp-file + fsync + rename.
  *
  * Usage:

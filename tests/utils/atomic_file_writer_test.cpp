@@ -162,6 +162,17 @@ TEST_F(AtomicFileWriterTest, CommitWithNoTempFileWritten) {
 }
 
 #ifndef _WIN32
+TEST_F(AtomicFileWriterTest, ParentDirectoryOpenFailureIsReported) {
+  const std::string missing_parent_path = TestPath("missing/output.dat");
+  auto result = SyncParentDirectory(missing_parent_path);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageWriteError);
+  EXPECT_NE(result.error().message().find("open output directory"), std::string::npos);
+}
+#endif
+
+#ifndef _WIN32
 TEST_F(AtomicFileWriterTest, CommitRejectsSymlinkTempFile) {
   std::string final_path = TestPath("output.dat");
   std::string target_path = TestPath("target.dat");

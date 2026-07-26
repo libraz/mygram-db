@@ -324,6 +324,16 @@ TEST(ConvertToEpochBugFixTest, KnownUTCEpochValue) {
   EXPECT_EQ(*epoch0, 0);
 }
 
+TEST(ConvertToEpochBugFixTest, PreservesPre1970DatesAsSignedEpoch) {
+  auto epoch = ConvertToEpoch("1960-01-01 00:00:00", 0);
+  ASSERT_TRUE(epoch.has_value());
+  EXPECT_EQ(*epoch, -315619200);
+
+  auto before_epoch = ConvertToEpoch("1969-12-31 23:59:59", 0);
+  ASSERT_TRUE(before_epoch.has_value());
+  EXPECT_EQ(*before_epoch, -1);
+}
+
 TEST(ConvertToEpochBugFixTest, DateOnlyStringUsesMidnight) {
   auto epoch = ConvertToEpoch("2024-01-02", 0);
   ASSERT_TRUE(epoch.has_value());

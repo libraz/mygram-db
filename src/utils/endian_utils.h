@@ -25,10 +25,15 @@ namespace detail {
  * The result is computed at compile time via constexpr.
  */
 constexpr bool IsLittleEndian() {
-  // Use a known pattern that differs between big and little endian
-  constexpr uint32_t test_value = 0x01020304;
-  constexpr auto first_byte = static_cast<uint8_t>(test_value & 0xFF);
-  return first_byte == 0x04;  // Little-endian stores LSB first
+#if defined(_WIN32)
+  return true;
+#elif defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__)
+  static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__,
+                "Unsupported mixed-endian target");
+  return __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__;
+#else
+#error "Compiler does not expose target byte order"
+#endif
 }
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers) - Bit manipulation constants

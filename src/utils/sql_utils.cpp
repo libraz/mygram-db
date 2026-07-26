@@ -5,9 +5,62 @@
 
 #include "utils/sql_utils.h"
 
+#include <array>
 #include <cctype>
 
 namespace mygramdb::utils {
+
+Expected<std::string, Error> QuoteSQLIdentifier(std::string_view identifier) {
+  if (identifier.empty()) {
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "SQL identifier must not be empty"));
+  }
+  if (identifier.find('\0') != std::string_view::npos) {
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "SQL identifier must not contain NUL"));
+  }
+
+  std::string quoted;
+  quoted.reserve(identifier.size() + 2);
+  quoted.push_back('`');
+  for (char chr : identifier) {
+    quoted.push_back(chr);
+    if (chr == '`') {
+      quoted.push_back('`');
+    }
+  }
+  quoted.push_back('`');
+  return quoted;
+}
+
+Expected<std::string, Error> QuoteQualifiedSQLIdentifier(std::string_view database, std::string_view identifier) {
+  auto quoted_identifier = QuoteSQLIdentifier(identifier);
+  if (!quoted_identifier) {
+    return MakeUnexpected(quoted_identifier.error());
+  }
+  if (database.empty()) {
+    return quoted_identifier;
+  }
+
+  auto quoted_database = QuoteSQLIdentifier(database);
+  if (!quoted_database) {
+    return MakeUnexpected(quoted_database.error());
+  }
+  return *quoted_database + "." + *quoted_identifier;
+}
+
+std::string EncodeMySQLStringLiteral(std::string_view value) {
+  constexpr std::array<char, 16> kHex = {
+      '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
+  };
+  std::string encoded;
+  encoded.reserve(30 + value.size() * 2);
+  encoded.append("CONVERT(X'");
+  for (unsigned char byte : value) {
+    encoded.push_back(kHex[byte >> 4U]);
+    encoded.push_back(kHex[byte & 0x0FU]);
+  }
+  encoded.append("' USING utf8mb4)");
+  return encoded;
+}
 
 std::string StripSQLComments(const std::string& query) {
   std::string result;

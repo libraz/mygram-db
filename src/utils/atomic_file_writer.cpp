@@ -32,6 +32,40 @@ namespace mygramdb::utils {
 #endif
 #endif
 
+Expected<void, Error> SyncParentDirectory(const std::string& filepath) {
+#ifndef _WIN32
+  const auto parent_dir = std::filesystem::path(filepath).parent_path();
+  const std::string directory = parent_dir.empty() ? "." : parent_dir.string();
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
+  const int dir_file_desc = open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_file_desc < 0) {
+    const int saved_errno = errno;
+    StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "open_output_directory")
+        .Field("filepath", directory)
+        .Field("errno", static_cast<int64_t>(saved_errno))
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to open output directory", filepath));
+  }
+  if (fsync(dir_file_desc) != 0) {
+    const int saved_errno = errno;
+    close(dir_file_desc);
+    StructuredLog()
+        .Event("storage_error")
+        .Field("operation", "fsync_directory")
+        .Field("filepath", directory)
+        .Field("errno", static_cast<int64_t>(saved_errno))
+        .Error();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to fsync output directory", filepath));
+  }
+  close(dir_file_desc);
+#else
+  (void)filepath;
+#endif
+  return {};
+}
+
 AtomicFileWriter::AtomicFileWriter(std::string filepath, bool unique_suffix) : filepath_(std::move(filepath)) {
   if (unique_suffix) {
     static thread_local std::mt19937 rng(std::random_device{}());
@@ -120,28 +154,9 @@ Expected<void, Error> AtomicFileWriter::Commit() {
 
   committed_ = true;
 
-#ifndef _WIN32
-  // Sync the directory to ensure the rename is durable
-  {
-    auto parent_dir = std::filesystem::path(filepath_).parent_path();
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-    int dir_file_desc = open(parent_dir.empty() ? "." : parent_dir.c_str(), O_RDONLY | O_DIRECTORY);
-    if (dir_file_desc >= 0) {
-      if (fsync(dir_file_desc) != 0) {
-        const int saved_errno = errno;
-        close(dir_file_desc);
-        StructuredLog()
-            .Event("storage_error")
-            .Field("operation", "fsync_directory")
-            .Field("filepath", parent_dir.empty() ? "." : parent_dir.string())
-            .Field("errno", static_cast<int64_t>(saved_errno))
-            .Error();
-        return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to fsync output directory", filepath_));
-      }
-      close(dir_file_desc);
-    }
+  if (auto sync_result = SyncParentDirectory(filepath_); !sync_result) {
+    return sync_result;
   }
-#endif
 
   return {};
 }

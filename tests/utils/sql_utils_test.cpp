@@ -11,6 +11,83 @@
 
 using namespace mygramdb::utils;
 
+// --- Identifier quoting tests ---
+
+TEST(QuoteSQLIdentifierTest, QuotesOrdinaryIdentifier) {
+  auto result = QuoteSQLIdentifier("articles");
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "`articles`");
+}
+
+TEST(QuoteSQLIdentifierTest, DoublesEmbeddedBackticks) {
+  auto result = QuoteSQLIdentifier("column` FROM mysql.user; --");
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "`column`` FROM mysql.user; --`");
+}
+
+TEST(QuoteSQLIdentifierTest, AllowsNonNulQuotedIdentifierCharacters) {
+  auto result = QuoteSQLIdentifier("résumé column-$");
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "`résumé column-$`");
+}
+
+TEST(QuoteSQLIdentifierTest, RejectsEmptyIdentifier) {
+  auto result = QuoteSQLIdentifier("");
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(QuoteSQLIdentifierTest, RejectsEmbeddedNul) {
+  const std::string identifier("safe\0injected", 13);
+  auto result = QuoteSQLIdentifier(identifier);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument);
+}
+
+TEST(QuoteQualifiedSQLIdentifierTest, QuotesBothComponents) {
+  auto result = QuoteQualifiedSQLIdentifier("archive`db", "article`table");
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "`archive``db`.`article``table`");
+}
+
+TEST(QuoteQualifiedSQLIdentifierTest, EmptyDatabaseFallsBackToBareIdentifier) {
+  auto result = QuoteQualifiedSQLIdentifier("", "articles");
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(*result, "`articles`");
+}
+
+TEST(QuoteQualifiedSQLIdentifierTest, RejectsInvalidComponent) {
+  const std::string database("db\0suffix", 9);
+
+  EXPECT_FALSE(QuoteQualifiedSQLIdentifier(database, "articles"));
+  EXPECT_FALSE(QuoteQualifiedSQLIdentifier("database", ""));
+}
+
+TEST(EncodeMySQLStringLiteralTest, EncodesEmptyAndAsciiValues) {
+  EXPECT_EQ(EncodeMySQLStringLiteral(""), "CONVERT(X'' USING utf8mb4)");
+  EXPECT_EQ(EncodeMySQLStringLiteral("O'Reilly"), "CONVERT(X'4F275265696C6C79' USING utf8mb4)");
+}
+
+TEST(EncodeMySQLStringLiteralTest, IsIndependentOfBackslashEscapingMode) {
+  const std::string value = "line\\n'quoted'\nnext";
+  const std::string encoded = EncodeMySQLStringLiteral(value);
+
+  EXPECT_EQ(encoded, "CONVERT(X'6C696E655C6E2771756F746564270A6E657874' USING utf8mb4)");
+  EXPECT_EQ(encoded.find('\\'), std::string::npos);
+  EXPECT_EQ(encoded.find("quoted"), std::string::npos);
+}
+
+TEST(EncodeMySQLStringLiteralTest, EncodesUtf8BytesWithoutLoss) {
+  EXPECT_EQ(EncodeMySQLStringLiteral("日本語"), "CONVERT(X'E697A5E69CACE8AA9E' USING utf8mb4)");
+}
+
 // --- StripSQLComments Tests ---
 
 TEST(StripSQLCommentsTest, NoComments) {

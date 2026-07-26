@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -33,6 +34,14 @@ inline struct sockaddr* ToSockaddr(struct sockaddr_in* addr) {
 }
 
 /**
+ * @brief Helper to safely cast sockaddr_storage* to sockaddr* for socket APIs
+ */
+// NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+inline struct sockaddr* ToSockaddrStorage(struct sockaddr_storage* addr) {
+  return reinterpret_cast<struct sockaddr*>(addr);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+}
+
+/**
  * @brief Helper to safely cast sockaddr_un* to sockaddr* for socket API
  *
  * @param addr Pointer to sockaddr_un structure
@@ -47,9 +56,11 @@ inline struct sockaddr* ToSockaddrUn(struct sockaddr_un* addr) {
  * @brief CIDR (Classless Inter-Domain Routing) representation
  */
 struct CIDR {
-  uint32_t network;   // Network address in host byte order
-  uint32_t netmask;   // Network mask in host byte order
-  int prefix_length;  // Prefix length (0-32)
+  uint32_t network = 0;   // Network address in host byte order
+  uint32_t netmask = 0;   // Network mask in host byte order
+  int prefix_length = 0;  // Prefix length (0-32 for IPv4, 0-128 for IPv6)
+  int family = AF_INET;
+  std::array<uint8_t, 16> network_bytes{};
 
   /**
    * @brief Check if an IP address is within this CIDR range
@@ -57,6 +68,15 @@ struct CIDR {
    * @return True if IP is within CIDR range
    */
   [[nodiscard]] bool Contains(uint32_t ip_addr) const;
+
+  /**
+   * @brief Check whether an IPv4 or IPv6 literal is within this range
+   *
+   * IPv4-mapped IPv6 peers (for example ::ffff:127.0.0.1) also match an
+   * equivalent IPv4 CIDR. This is important for dual-stack listeners, whose
+   * kernel may report IPv4 peers using mapped IPv6 addresses.
+   */
+  [[nodiscard]] bool Contains(const std::string& ip_str) const;
 
   /**
    * @brief Parse CIDR notation string

@@ -3,7 +3,7 @@
  * @brief Common constants used across the codebase
  *
  * This header consolidates commonly used constants to avoid duplication
- * and ensure consistency (REF-0008).
+ * and ensure consistency.
  */
 
 #pragma once

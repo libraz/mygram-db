@@ -6,6 +6,7 @@
 #include "utils/network_utils.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 namespace mygramdb::utils {
 
@@ -83,6 +84,23 @@ TEST(NetworkUtilsTest, CIDR_Parse_Invalid) {
   EXPECT_FALSE(CIDR::Parse("192.168.1.0/-1").has_value());  // Negative prefix
   EXPECT_FALSE(CIDR::Parse("not-an-ip/24").has_value());
   EXPECT_FALSE(CIDR::Parse("192.168.1.256/24").has_value());
+}
+
+TEST(NetworkUtilsTest, CIDR_ParseAndContainsIPv6) {
+  auto cidr = CIDR::Parse("2001:db8:abcd::/48");
+  ASSERT_TRUE(cidr.has_value());
+  EXPECT_EQ(cidr->family, AF_INET6);
+  EXPECT_EQ(cidr->prefix_length, 48);
+  EXPECT_TRUE(cidr->Contains("2001:db8:abcd::1"));
+  EXPECT_TRUE(cidr->Contains("2001:db8:abcd:ffff::1"));
+  EXPECT_FALSE(cidr->Contains("2001:db8:abce::1"));
+  EXPECT_FALSE(cidr->Contains("192.0.2.1"));
+
+  auto loopback = CIDR::Parse("::1/128");
+  ASSERT_TRUE(loopback.has_value());
+  EXPECT_TRUE(loopback->Contains("::1"));
+  EXPECT_FALSE(loopback->Contains("::2"));
+  EXPECT_FALSE(CIDR::Parse("2001:db8::/129").has_value());
 }
 
 TEST(NetworkUtilsTest, CIDR_Contains) {
@@ -212,6 +230,15 @@ TEST(NetworkUtilsTest, IsIPAllowed_InvalidCIDR) {
   EXPECT_FALSE(IsIPAllowed("172.16.0.1", allow_cidrs));
 }
 
+TEST(NetworkUtilsTest, IsIPAllowedSupportsIPv6AndMappedIPv4) {
+  const std::vector<std::string> cidrs = {"::1/128", "2001:db8::/32", "127.0.0.0/8"};
+  EXPECT_TRUE(IsIPAllowed("::1", cidrs));
+  EXPECT_TRUE(IsIPAllowed("2001:db8:1::42", cidrs));
+  EXPECT_FALSE(IsIPAllowed("2001:db9::1", cidrs));
+  EXPECT_TRUE(IsIPAllowed("::ffff:127.0.0.1", cidrs));
+  EXPECT_FALSE(IsIPAllowed("::ffff:192.0.2.1", cidrs));
+}
+
 TEST(NetworkUtilsTest, ParseAllowCidrs_ValidEntries) {
   std::vector<std::string> cidrs = {"192.168.1.0/24", "10.0.0.0/8"};
   auto parsed = ParseAllowCidrs(cidrs);
@@ -257,6 +284,17 @@ TEST(NetworkUtilsTest, GetPeerIP_NonSocketFd) {
   // A valid fd that is not a socket should return "unknown"
   // (stdout is fd 1, not a socket)
   EXPECT_EQ(GetPeerIP(1), "unknown");
+}
+
+TEST(NetworkUtilsTest, GetPeerIP_UnixSocketReturnsStableRateLimitKey) {
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+  EXPECT_EQ(GetPeerIP(fds[0]), "unix");
+  EXPECT_EQ(GetPeerIP(fds[1]), "unix");
+
+  ::close(fds[0]);
+  ::close(fds[1]);
 }
 
 }  // namespace mygramdb::utils

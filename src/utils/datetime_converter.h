@@ -75,16 +75,16 @@ class DateTimeProcessor {
   /**
    * @brief Convert DATETIME string to epoch seconds
    * @param datetime_str String in format "YYYY-MM-DD HH:MM:SS[.ffffff]"
-   * @return Unix epoch seconds (UTC), or Error if invalid
+   * @return Signed Unix epoch seconds (UTC), or Error if invalid
    */
-  Expected<uint64_t, Error> DateTimeToEpoch(std::string_view datetime_str) const;
+  Expected<int64_t, Error> DateTimeToEpoch(std::string_view datetime_str) const;
 
   /**
    * @brief Convert TIMESTAMP string (already in epoch) to uint64_t
    * @param timestamp_str Numeric string representing epoch seconds
-   * @return Unix epoch seconds, or Error if invalid
+   * @return Signed Unix epoch seconds, or Error if invalid
    */
-  static Expected<uint64_t, Error> TimestampToEpoch(std::string_view timestamp_str);
+  static Expected<int64_t, Error> TimestampToEpoch(std::string_view timestamp_str);
 
   /**
    * @brief Convert TIME string to seconds since midnight
@@ -96,9 +96,9 @@ class DateTimeProcessor {
   /**
    * @brief Parse datetime/timestamp value (auto-detect format)
    * @param value_str Either epoch seconds (numeric) or ISO8601 datetime string
-   * @return Unix epoch seconds (UTC), or Error if invalid
+   * @return Signed Unix epoch seconds (UTC), or Error if invalid
    */
-  Expected<uint64_t, Error> ParseDateTimeValue(std::string_view value_str) const;
+  Expected<int64_t, Error> ParseDateTimeValue(std::string_view value_str) const;
 
   /**
    * @brief Get configured timezone
@@ -143,13 +143,13 @@ bool IsNumericString(std::string_view str);
  *
  * @param datetime_str DateTime string in ISO8601 format
  * @param timezone_offset_sec Timezone offset in seconds (0 for UTC)
- * @return Unix epoch seconds (UTC), or std::nullopt if invalid format
+ * @return Signed Unix epoch seconds (UTC), or std::nullopt if invalid format
  *
  * Example:
  * - "2024-11-22 10:00:00" with timezone_offset_sec=32400 (+09:00)
  *   → 1732240800 (2024-11-22 01:00:00 UTC)
  */
-std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t timezone_offset_sec);
+std::optional<int64_t> ConvertToEpoch(std::string_view datetime_str, int32_t timezone_offset_sec);
 
 /**
  * @brief Parse datetime value (either epoch seconds or ISO8601 string)
@@ -161,8 +161,8 @@ std::optional<uint64_t> ConvertToEpoch(std::string_view datetime_str, int32_t ti
  *
  * @param value_str DateTime value (either "1732240800" or "2024-11-22 10:00:00")
  * @param timezone_str Timezone offset string (e.g., "+09:00")
- * @return Unix epoch seconds (UTC), or std::nullopt if invalid
+ * @return Signed Unix epoch seconds (UTC), or std::nullopt if invalid
  */
-std::optional<uint64_t> ParseDatetimeValue(std::string_view value_str, std::string_view timezone_str);
+std::optional<int64_t> ParseDatetimeValue(std::string_view value_str, std::string_view timezone_str);
 
 }  // namespace mygramdb::utils
