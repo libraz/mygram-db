@@ -91,6 +91,22 @@ class BinlogEventParser {
   static QueryTransactionBoundary ClassifyQueryTransactionBoundary(std::string_view query);
 
   /**
+   * @brief Whether a MariaDB GTID event starts a transaction that needs a later COMMIT/XID.
+   *
+   * MariaDB sets FL_STANDALONE when the GTID event itself represents a
+   * statement with no terminating COMMIT event.
+   */
+  static bool IsMariaDBGtidTransactionOpen(uint8_t flags);
+
+  /**
+   * @brief Whether a row event is the final event for its SQL statement.
+   *
+   * MariaDB standalone non-transactional groups have no XID/COMMIT event, so
+   * the reader uses the row-event STMT_END_F flag as their commit boundary.
+   */
+  static bool IsRowsStatementEnd(const unsigned char* buffer, unsigned long length);
+
+  /**
    * @brief Whether an ignored standalone QUERY_EVENT is proven not to mutate table rows.
    *
    * Statement-based DML and unknown statements must never advance the applied

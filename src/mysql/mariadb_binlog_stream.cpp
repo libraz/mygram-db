@@ -34,11 +34,14 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum)
-  // Query the server's checksum setting and mirror it
-  if (mysql_query(conn.GetHandle(), "SET @master_binlog_checksum = @@global.binlog_checksum") != 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kMariaDBProtocolError,
-                                    std::string("Failed to set binlog checksum: ") + CurrentConnectionError(conn)));
+  // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum).
+  // Request CRC32 explicitly: the reader always validates and strips a
+  // four-byte checksum trailer, so mirroring a dynamically changed NONE
+  // setting would make every subsequent event look corrupt.
+  if (mysql_query(conn.GetHandle(), "SET @master_binlog_checksum = 'CRC32'") != 0) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMariaDBProtocolError,
+                  std::string("Failed to require CRC32 binlog checksums: ") + CurrentConnectionError(conn)));
   }
   mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "mariadb_checksum_configured").Debug();
 
@@ -104,7 +107,9 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
 
   // Set MariaDB GTID position via session variable BEFORE COM_BINLOG_DUMP.
   // MariaDB reads @slave_connect_state to know which GTIDs the replica already has.
-  // Empty string means "start from current binlog position" (receive all new events).
+  // Empty @slave_connect_state means the replica reports no executed MariaDB
+  // GTIDs. COM_BINLOG_DUMP then starts from the server-selected live position;
+  // callers must establish a snapshot position before relying on continuity.
   std::string gtid_query = "SET @slave_connect_state = '" + gtid + "'";
   if (mysql_query(conn.GetHandle(), gtid_query.c_str()) != 0) {
     return MakeUnexpected(MakeError(ErrorCode::kMariaDBProtocolError,

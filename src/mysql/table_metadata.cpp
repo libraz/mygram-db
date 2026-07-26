@@ -7,7 +7,101 @@
 
 #ifdef USE_MYSQL
 
+#include <cctype>
+
 namespace mygramdb::mysql {
+
+void TableMetadata::RebuildColumnOrdinals() {
+  column_ordinals.clear();
+  column_ordinals.reserve(columns.size());
+  for (size_t index = 0; index < columns.size(); ++index) {
+    column_ordinals.emplace(columns[index].name, index);
+  }
+}
+
+std::optional<size_t> TableMetadata::FindColumnOrdinal(std::string_view name) const {
+  if (column_ordinals.size() == columns.size()) {
+    const auto iterator = column_ordinals.find(std::string(name));
+    if (iterator != column_ordinals.end()) {
+      return iterator->second;
+    }
+    return std::nullopt;
+  }
+  for (size_t index = 0; index < columns.size(); ++index) {
+    if (columns[index].name == name) {
+      return index;
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<std::string> ParseEnumSetColumnValues(const std::string& column_type) {
+  size_t prefix_length = 0;
+  if (column_type.size() >= 5) {
+    std::string prefix = column_type.substr(0, 5);
+    for (char& chr : prefix) {
+      chr = static_cast<char>(std::tolower(static_cast<unsigned char>(chr)));
+    }
+    if (prefix == "enum(") {
+      prefix_length = 5;
+    }
+  }
+  if (prefix_length == 0 && column_type.size() >= 4) {
+    std::string prefix = column_type.substr(0, 4);
+    for (char& chr : prefix) {
+      chr = static_cast<char>(std::tolower(static_cast<unsigned char>(chr)));
+    }
+    if (prefix == "set(") {
+      prefix_length = 4;
+    }
+  }
+  if (prefix_length == 0 || column_type.back() != ')') {
+    return {};
+  }
+
+  std::vector<std::string> values;
+  size_t pos = prefix_length;
+  const size_t end = column_type.size() - 1;
+  while (pos < end) {
+    if (column_type[pos] != '\'') {
+      return {};
+    }
+    ++pos;
+    std::string value;
+    bool closed = false;
+    while (pos < end) {
+      const char chr = column_type[pos++];
+      if (chr == '\\') {
+        if (pos >= end) {
+          return {};
+        }
+        value.push_back(column_type[pos++]);
+      } else if (chr == '\'') {
+        if (pos < end && column_type[pos] == '\'') {
+          value.push_back('\'');
+          ++pos;
+        } else {
+          closed = true;
+          break;
+        }
+      } else {
+        value.push_back(chr);
+      }
+    }
+    if (!closed) {
+      return {};
+    }
+    values.push_back(std::move(value));
+    if (pos == end) {
+      break;
+    }
+    if (column_type[pos] != ',') {
+      return {};
+    }
+    ++pos;
+  }
+  return values;
+}
 
 TableMetadataCache::AddResult TableMetadataCache::AddOrUpdate(uint64_t table_id, const TableMetadata& metadata) {
   auto iterator = cache_.find(table_id);
@@ -74,6 +168,10 @@ bool TableMetadataCache::SchemaEquals(const TableMetadata& lhs, const TableMetad
 
     // Check name (might change after ALTER TABLE)
     if (col_lhs.name != col_rhs.name) {
+      return false;
+    }
+
+    if (col_lhs.enum_set_values != col_rhs.enum_set_values) {
       return false;
     }
   }

@@ -325,30 +325,21 @@ TEST(MariaDBGTIDTest, EqualityDifferentServer) {
 
 #include "mysql/server_flavor.h"
 
-TEST(ServerFlavorTest, DetectMySQL) {
-  EXPECT_EQ(DetectServerFlavor("8.4.7"), ServerFlavor::kMySQL);
-  EXPECT_EQ(DetectServerFlavor("9.0.1"), ServerFlavor::kMySQL);
-  EXPECT_EQ(DetectServerFlavor("5.7.44"), ServerFlavor::kMySQL);
-}
-
-TEST(ServerFlavorTest, DetectMariaDB) {
-  EXPECT_EQ(DetectServerFlavor("10.11.6-MariaDB"), ServerFlavor::kMariaDB);
-  EXPECT_EQ(DetectServerFlavor("11.4.0-MariaDB-1:11.4.0+maria~ubu2404"), ServerFlavor::kMariaDB);
-  EXPECT_EQ(DetectServerFlavor("10.6.12-MariaDB-log"), ServerFlavor::kMariaDB);
-}
-
-TEST(ServerFlavorTest, DetectMariaDBLowercase) {
-  // Robustness: handle unlikely lowercase
-  EXPECT_EQ(DetectServerFlavor("10.11.6-mariadb"), ServerFlavor::kMariaDB);
-}
-
-TEST(ServerFlavorTest, DetectEmpty) {
-  EXPECT_EQ(DetectServerFlavor(""), ServerFlavor::kMySQL);
+TEST(ServerFlavorTest, ClassifiesCapabilityProbeOutcomes) {
+  EXPECT_EQ(ClassifyServerFlavorCapabilityProbe(true, true, 0), ServerFlavor::kMariaDB);
+  EXPECT_EQ(ClassifyServerFlavorCapabilityProbe(false, false, kMySQLUnknownSystemVariableError), ServerFlavor::kMySQL);
+  EXPECT_FALSE(ClassifyServerFlavorCapabilityProbe(true, false, 0).has_value());
+  EXPECT_FALSE(ClassifyServerFlavorCapabilityProbe(false, false, 1045).has_value());
 }
 
 TEST(ServerFlavorTest, GetFlavorName) {
   EXPECT_STREQ(GetServerFlavorName(ServerFlavor::kMySQL), "MySQL");
   EXPECT_STREQ(GetServerFlavorName(ServerFlavor::kMariaDB), "MariaDB");
+}
+
+TEST(ServerFlavorTest, ExecutedPositionComesFromTheSourceBinlog) {
+  EXPECT_STREQ(GetBinlogExecutedPositionQuery(ServerFlavor::kMariaDB), "SELECT @@GLOBAL.gtid_binlog_pos");
+  EXPECT_STREQ(GetBinlogExecutedPositionQuery(ServerFlavor::kMySQL), "SELECT @@GLOBAL.gtid_executed");
 }
 
 // ===========================================================================
@@ -363,6 +354,12 @@ TEST(BinlogEventTypesTest, MariaDBEventValues) {
   EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_GTID_EVENT), 162);
   EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT), 163);
   EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT), 164);
+  EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1), 166);
+  EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1), 167);
+  EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1), 168);
+  EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT), 169);
+  EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT), 170);
+  EXPECT_EQ(static_cast<uint8_t>(MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT), 171);
 }
 
 TEST(BinlogEventTypesTest, MariaDBEventNames) {

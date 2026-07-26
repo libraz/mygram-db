@@ -16,6 +16,7 @@
 #include "mysql/rows_parser_internal.h"
 #include "mysql/table_metadata.h"
 #include "mysql/text_materializer.h"
+#include "mysql/value_canonicalizer.h"
 
 #ifdef USE_MYSQL
 
@@ -368,6 +369,8 @@ TEST_F(RowsParserTest, ParseTextRow) {
   EXPECT_EQ("100", row.primary_key);
   EXPECT_EQ("Hello, World!", row.text);
   EXPECT_EQ("Hello, World!", row.GetColumnValue("content"));
+  EXPECT_EQ(row.FindColumnValue("content"), &row.text);
+  EXPECT_TRUE(row.column_values[1].empty()) << "The text column must not be duplicated in column_values";
 }
 
 TEST_F(RowsParserTest, ParseMultipleRows) {
@@ -612,6 +615,18 @@ TEST_F(RowsParserTest, ExtractFiltersDateAndFractionalTimestamp) {
   EXPECT_EQ(std::get<uint64_t>(filters["updated_at"]), 1704153600);
 }
 
+TEST_F(RowsParserTest, ExtractFiltersPreservesPreEpochDateAsSignedEpoch) {
+  RowData row_data;
+  row_data.columns["born_on"] = "1960-01-01";
+  std::vector<mygramdb::config::FilterConfig> configs = {{"born_on", "date", false, false, ""}};
+
+  auto filters = ExtractFilters(row_data, configs, "+00:00");
+
+  ASSERT_EQ(filters.size(), 1);
+  ASSERT_TRUE(std::holds_alternative<int64_t>(filters["born_on"]));
+  EXPECT_EQ(std::get<int64_t>(filters["born_on"]), -315619200);
+}
+
 // =============================================================================
 // Date/Time Type Parsing Tests
 // =============================================================================
@@ -684,31 +699,35 @@ class DateTimeParsingTest : public RowsParserTest {
                                          bool negative = false, uint8_t precision = 0, uint32_t microseconds = 0) {
     std::vector<unsigned char> result;
 
-    // Calculate packed time value
-    int32_t intpart = (static_cast<int32_t>(hour) << 12) | (minute << 6) | second;
+    const int64_t hms = (static_cast<int64_t>(hour) << 12) | (minute << 6) | second;
+    int64_t packed_time = (hms << 24) + microseconds;
     if (negative) {
-      intpart = -intpart;
+      packed_time = -packed_time;
     }
 
-    // Add offset (TIMEF_INT_OFS)
     constexpr int32_t kTimefIntOfs = 0x800000;
+    const int64_t intpart = packed_time >> 24;
     uint32_t packed = static_cast<uint32_t>(intpart + kTimefIntOfs);
 
-    // Write 3 bytes in big-endian
-    result.push_back((packed >> 16) & 0xFF);
-    result.push_back((packed >> 8) & 0xFF);
-    result.push_back(packed & 0xFF);
-
-    // Add fractional seconds if precision > 0
-    if (precision > 0) {
-      int frac_bytes = (precision + 1) / 2;
-      uint32_t frac = ScaleMicrosecondsForStoredFraction(precision, microseconds);
-      if (negative) {
-        const uint32_t mask = (1u << (frac_bytes * 8)) - 1;
-        frac = static_cast<uint32_t>(-static_cast<int32_t>(frac)) & mask;
+    if (precision >= 5) {
+      constexpr int64_t kTimefOfs = 0x800000000000LL;
+      const uint64_t stored = static_cast<uint64_t>(packed_time + kTimefOfs);
+      for (int shift = 40; shift >= 0; shift -= 8) {
+        result.push_back(static_cast<unsigned char>((stored >> shift) & 0xFF));
       }
-      for (int i = frac_bytes - 1; i >= 0; i--) {
-        result.push_back((frac >> (i * 8)) & 0xFF);
+    } else {
+      result.push_back((packed >> 16) & 0xFF);
+      result.push_back((packed >> 8) & 0xFF);
+      result.push_back(packed & 0xFF);
+      if (precision > 0) {
+        const int frac_bytes = (precision + 1) / 2;
+        const int64_t frac = packed_time % (int64_t{1} << 24);
+        const int64_t divisor = precision <= 2 ? 10000 : 100;
+        const uint32_t mask = (uint32_t{1} << (frac_bytes * 8)) - 1;
+        const uint32_t stored_frac = static_cast<uint32_t>(frac / divisor) & mask;
+        for (int i = frac_bytes - 1; i >= 0; i--) {
+          result.push_back((stored_frac >> (i * 8)) & 0xFF);
+        }
       }
     }
 
@@ -1124,7 +1143,7 @@ TEST_F(DateTimeParsingTest, Timestamp2BasicParsing) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("1732545600", result->front().GetColumnValue("dt_col"));
+  EXPECT_EQ("2024-11-25 14:40:00", result->front().GetColumnValue("dt_col"));
 }
 
 /**
@@ -1140,7 +1159,7 @@ TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("1732545600.123456", result->front().GetColumnValue("dt_col"));
+  EXPECT_EQ("2024-11-25 14:40:00.123456", result->front().GetColumnValue("dt_col"));
 }
 
 TEST_F(DateTimeParsingTest, Timestamp2Precision1UsesMySQLStoredByteScale) {
@@ -1153,7 +1172,29 @@ TEST_F(DateTimeParsingTest, Timestamp2Precision1UsesMySQLStoredByteScale) {
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
   ASSERT_TRUE(result.has_value());
-  EXPECT_EQ("1732545600.100000", result->front().GetColumnValue("dt_col"));
+  EXPECT_EQ("2024-11-25 14:40:00.100000", result->front().GetColumnValue("dt_col"));
+}
+
+TEST_F(DateTimeParsingTest, TemporalBinlogValuesMatchCanonicalSnapshotText) {
+  struct Case {
+    ColumnType type;
+    uint16_t metadata;
+    std::vector<unsigned char> encoded;
+    std::string snapshot;
+  };
+  const std::vector<Case> cases = {
+      {ColumnType::DATETIME2, 6, EncodeDatetime2(1960, 1, 1, 0, 0, 0, 6, 123456), "1960-01-01 00:00:00.123456"},
+      {ColumnType::TIMESTAMP2, 6, EncodeTimestamp2(1704153600, 6, 654321), "2024-01-02 00:00:00.654321"},
+      {ColumnType::TIME2, 6, EncodeTime2(10, 20, 30, true, 6, 654321), "-10:20:30.654321"},
+  };
+
+  for (const auto& test_case : cases) {
+    auto decoded =
+        internal::DecodeFieldValue(static_cast<uint8_t>(test_case.type), test_case.encoded.data(), test_case.metadata,
+                                   false, test_case.encoded.data() + test_case.encoded.size(), false);
+    ASSERT_TRUE(decoded.has_value()) << test_case.snapshot;
+    EXPECT_EQ(*decoded, CanonicalizeColumnValue(test_case.snapshot, mygramdb::mysql::CanonicalValueKind::kTemporal));
+  }
 }
 
 /**
@@ -2766,6 +2807,46 @@ TEST_F(RowsParserTest, DecimalWithFraction) {
   EXPECT_EQ("12345678.90", decimal_value) << "DECIMAL with fraction should be parsed correctly";
 }
 
+TEST_F(RowsParserTest, DecimalLeadingZeroPartialGroupMatchesSnapshotText) {
+  const struct {
+    const char* value;
+    uint8_t precision;
+    uint8_t scale;
+  } cases[] = {
+      {"1234.56", 15, 2},
+      {"1234", 10, 0},
+      {"0.00", 15, 2},
+  };
+
+  for (const auto& test_case : cases) {
+    auto encoded = EncodeDecimalValue(test_case.value, test_case.precision, test_case.scale);
+    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), encoded.data(),
+                                              static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
+                                              false, encoded.data() + encoded.size(), false);
+    ASSERT_TRUE(decoded.has_value()) << test_case.value;
+    EXPECT_EQ(*decoded, test_case.value) << test_case.value;
+  }
+}
+
+TEST_F(RowsParserTest, DecimalRejectsOutOfRangeMetadata) {
+  const unsigned char data[] = {0x80};
+
+  auto zero_precision =
+      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data, 0, false, data + sizeof(data));
+  auto excessive_precision = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data,
+                                                        static_cast<uint16_t>(66U << 8U), false, data + sizeof(data));
+  auto excessive_scale =
+      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data,
+                                 static_cast<uint16_t>((40U << 8U) | 31U), false, data + sizeof(data));
+
+  ASSERT_FALSE(zero_precision.has_value());
+  ASSERT_FALSE(excessive_precision.has_value());
+  ASSERT_FALSE(excessive_scale.has_value());
+  EXPECT_EQ(zero_precision.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
+  EXPECT_EQ(excessive_precision.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
+  EXPECT_EQ(excessive_scale.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
+}
+
 /**
  * @test DECIMAL negative with fractional part
  */
@@ -2952,6 +3033,33 @@ inline std::vector<unsigned char> CreateWriteRowsEventWithBitmap(const TableMeta
   buffer[12] = (event_size >> 24) & 0xFF;
 
   return buffer;
+}
+
+TEST_F(RowsParserTest, RejectsTruncatedTrailingWriteRow) {
+  TableMetadata table_meta;
+  table_meta.table_id = 599;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "truncated_rows";
+  for (size_t index = 0; index < 9; ++index) {
+    table_meta.columns.push_back(
+        {ColumnType::LONG, index == 0 ? "id" : "col_" + std::to_string(index), 0, false, false});
+  }
+
+  std::vector<unsigned char> first_row;
+  for (uint32_t value = 1; value <= 9; ++value) {
+    auto encoded = EncodeInt32(value);
+    first_row.insert(first_row.end(), encoded.begin(), encoded.end());
+  }
+  first_row.push_back(0x00);  // only half of the next row's two-byte NULL bitmap
+  const std::vector<unsigned char> columns_present = {0xFF, 0x01};
+  const std::vector<unsigned char> null_bitmap = {0x00, 0x00};
+  auto buffer = CreateWriteRowsEventWithBitmap(table_meta, first_row, null_bitmap, columns_present);
+
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLFieldTruncated);
 }
 
 /**

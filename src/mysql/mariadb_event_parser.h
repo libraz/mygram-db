@@ -31,6 +31,8 @@ namespace mygramdb::mysql {
  */
 class MariaDBEventParser {
  public:
+  /** GTID event is a complete standalone (non-transactional) event group. */
+  static constexpr uint8_t kStandaloneFlag = 0x01;
   static constexpr uint8_t kPreparedXaFlag = 0x40;
   static constexpr uint8_t kCompletedXaFlag = 0x80;
   static constexpr uint8_t kXaFlagMask = kPreparedXaFlag | kCompletedXaFlag;

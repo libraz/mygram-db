@@ -196,13 +196,11 @@ mygram::utils::Expected<internal::RowsEventHeader, mygram::utils::Error> interna
   // Find PK and text column indices (one-time lookup)
   int pk_col_idx = -1;
   int text_col_idx = -1;
-  for (size_t i = 0; i < column_count; i++) {
-    if (table_metadata->columns[i].name == pk_column_name) {
-      pk_col_idx = static_cast<int>(i);
-    }
-    if (table_metadata->columns[i].name == text_column_name) {
-      text_col_idx = static_cast<int>(i);
-    }
+  if (const auto ordinal = table_metadata->FindColumnOrdinal(pk_column_name); ordinal.has_value()) {
+    pk_col_idx = static_cast<int>(*ordinal);
+  }
+  if (const auto ordinal = table_metadata->FindColumnOrdinal(text_column_name); ordinal.has_value()) {
+    text_col_idx = static_cast<int>(*ordinal);
   }
 
   return RowsEventHeader{
@@ -317,7 +315,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
 
     // Decode field value
     auto value_result = DecodeFieldValue(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, is_null, end,
-                                         col_meta.is_unsigned);
+                                         col_meta.is_unsigned, &col_meta.enum_set_values);
     if (!value_result) {
       mygram::utils::StructuredLog()
           .Event("mysql_binlog_error")
@@ -328,8 +326,6 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
           .Error();
       return MakeUnexpected(value_result.error());
     }
-    std::string value = *value_result;
-
     // Check pointer validity after decode
     if (ptr > end) {
       std::string msg =
@@ -340,13 +336,23 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
       return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, msg));
     }
 
-    row.column_values[col_idx] = std::move(value);
+    const bool is_text_column = static_cast<int>(col_idx) == text_col_idx;
+    if (is_text_column) {
+      // Keep the decoded text in exactly one owning string. FindColumnValue()
+      // routes this ordinal back to row.text, so filters and concatenated text
+      // sources still observe the column without duplicating a potentially
+      // multi-megabyte value in column_values.
+      row.text = std::move(*value_result);
+      row.text_column_index = col_idx;
+    } else {
+      row.column_values[col_idx] = std::move(*value_result);
+    }
     row.column_values_present[col_idx] = true;
     row.column_values_null[col_idx] = is_null;
     if (is_null) {
       row.null_columns.insert(col_meta.name);
     }
-    const std::string& stored_value = row.column_values[col_idx];
+    const std::string& stored_value = is_text_column ? row.text : row.column_values[col_idx];
 
     // Check if this is the primary key or text column (using cached indices)
     if (static_cast<int>(col_idx) == pk_col_idx) {
@@ -359,10 +365,6 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
             .Debug();
       }
     }
-    if (static_cast<int>(col_idx) == text_col_idx) {
-      row.text = stored_value;
-    }
-
     // Advance pointer by field size (if not NULL)
     if (!is_null) {
       uint32_t field_size = binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
@@ -451,10 +453,6 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRo
           internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->bitmap_size,
                                    header->column_count, header->pk_col_idx, header->text_col_idx, "WRITE_ROWS", "");
       if (!result) {
-        // Truncation at null bitmap boundary means we reached end of rows
-        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->bitmap_size > end) {
-          break;
-        }
         return MakeUnexpected(result.error());
       }
       ptr = result->next_ptr;
@@ -654,10 +652,6 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteR
           internal::ParseSingleRow(ptr, end, table_metadata, header->columns_present, header->bitmap_size,
                                    header->column_count, header->pk_col_idx, header->text_col_idx, "DELETE_ROWS", "");
       if (!result) {
-        // Truncation at null bitmap boundary means we reached end of rows
-        if (result.error().code() == ErrorCode::kMySQLFieldTruncated && ptr + header->bitmap_size > end) {
-          break;
-        }
         return MakeUnexpected(result.error());
       }
       ptr = result->next_ptr;

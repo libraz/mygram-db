@@ -80,8 +80,24 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
 
   // Compare based on type
   if (std::holds_alternative<int64_t>(value)) {
-    // Integer comparison
     int64_t val = std::get<int64_t>(value);
+    if (filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp") {
+      auto target = mygram::utils::ParseDatetimeValue(filter.value, datetime_timezone);
+      if (!target) {
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_warning")
+            .Field("type", "invalid_datetime_filter")
+            .Field("reason", "parse_error")
+            .Field("value", filter.value)
+            .Field("column_name", filter.name)
+            .Field("timezone", datetime_timezone)
+            .Warn();
+        return false;
+      }
+      return mygram::utils::CompareValues(val, *target, filter.op);
+    }
+
+    // Integer comparison
     int64_t target = 0;
     // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
     auto [ptr, ec] = std::from_chars(filter.value.data(), filter.value.data() + filter.value.size(), target);

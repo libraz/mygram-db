@@ -82,13 +82,19 @@ std::optional<storage::FilterValue> ConvertFilterValue(std::string_view value, b
   }
   if (filter_type == "datetime" || filter_type == "date") {
     auto epoch = mygram::utils::ParseDatetimeValue(std::string(value), datetime_timezone);
-    return epoch ? std::optional<storage::FilterValue>{storage::FilterValue{*epoch}} : std::nullopt;
+    if (!epoch) {
+      return std::nullopt;
+    }
+    return *epoch < 0 ? storage::FilterValue{*epoch} : storage::FilterValue{static_cast<uint64_t>(*epoch)};
   }
   if (filter_type == "timestamp") {
     // TIMESTAMP is selected in UTC (Connection pins @@session.time_zone) and
     // decoded from binlog as UTC. DATETIME alone uses datetime_timezone.
     auto epoch = mygram::utils::ParseDatetimeValue(std::string(value), "+00:00");
-    return epoch ? std::optional<storage::FilterValue>{storage::FilterValue{*epoch}} : std::nullopt;
+    if (!epoch) {
+      return std::nullopt;
+    }
+    return *epoch < 0 ? storage::FilterValue{*epoch} : storage::FilterValue{static_cast<uint64_t>(*epoch)};
   }
   if (filter_type == "time") {
     auto seconds = mygram::utils::DateTimeProcessor::TimeToSeconds(std::string(value));

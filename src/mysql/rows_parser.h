@@ -33,16 +33,19 @@ struct RowData {
   std::vector<std::string> column_values;                // Values indexed by TableMetadata::columns ordinal
   std::vector<bool> column_values_present;               // True when the row image included the ordinal
   std::vector<bool> column_values_null;                  // True when the row image included an explicit NULL
+  std::optional<size_t> text_column_index;               // text owns this column's decoded value
   std::unordered_map<std::string, std::string> columns;  // All column values as strings
   std::unordered_set<std::string> null_columns;          // Explicit NULLs for map-backed/manual RowData
 
   [[nodiscard]] const std::string* FindColumnValue(const std::string& column_name) const {
     if (table_metadata != nullptr && column_values.size() == table_metadata->columns.size() &&
         column_values_present.size() == table_metadata->columns.size()) {
-      for (size_t i = 0; i < table_metadata->columns.size(); ++i) {
-        if (column_values_present[i] && table_metadata->columns[i].name == column_name) {
-          return &column_values[i];
+      const auto ordinal = table_metadata->FindColumnOrdinal(column_name);
+      if (ordinal.has_value() && column_values_present[*ordinal]) {
+        if (text_column_index.has_value() && *text_column_index == *ordinal) {
+          return &text;
         }
+        return &column_values[*ordinal];
       }
     }
     auto it = columns.find(column_name);
@@ -52,10 +55,9 @@ struct RowData {
   [[nodiscard]] bool IsColumnNull(const std::string& column_name) const {
     if (table_metadata != nullptr && column_values_present.size() == table_metadata->columns.size() &&
         column_values_null.size() == table_metadata->columns.size()) {
-      for (size_t i = 0; i < table_metadata->columns.size(); ++i) {
-        if (column_values_present[i] && table_metadata->columns[i].name == column_name) {
-          return column_values_null[i];
-        }
+      const auto ordinal = table_metadata->FindColumnOrdinal(column_name);
+      if (ordinal.has_value() && column_values_present[*ordinal]) {
+        return column_values_null[*ordinal];
       }
     }
     return null_columns.find(column_name) != null_columns.end();

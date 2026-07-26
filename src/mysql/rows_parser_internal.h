@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "mysql/binlog_event_types.h"
 #include "mysql/rows_parser.h"
@@ -82,10 +83,9 @@ uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision);
  * @param is_unsigned Whether the field is unsigned
  * @return String representation of the value
  */
-mygram::utils::Expected<std::string, mygram::utils::Error> DecodeFieldValue(uint8_t col_type, const unsigned char* data,
-                                                                            uint16_t metadata, bool is_null,
-                                                                            const unsigned char* end,
-                                                                            bool is_unsigned = false);
+mygram::utils::Expected<std::string, mygram::utils::Error> DecodeFieldValue(
+    uint8_t col_type, const unsigned char* data, uint16_t metadata, bool is_null, const unsigned char* end,
+    bool is_unsigned = false, const std::vector<std::string>* enum_set_values = nullptr);
 
 /**
  * @brief Result of parsing a single row from a ROWS event

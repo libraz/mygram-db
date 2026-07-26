@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -27,6 +28,7 @@
 #include "mysql/connection.h"
 #include "mysql/connection_validator.h"
 #include "mysql/ddl_schema_validator.h"
+#include "mysql/replication_position_state.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 #include "mysql/text_materializer.h"
@@ -62,7 +64,7 @@ enum class BinlogEventType : uint8_t {
  *
  * Classifies the DDL operation for structured handling in the event processor.
  */
-enum class DDLType : uint8_t { kUnknown = 0, kTruncate, kAlter, kDrop, kRename };
+enum class DDLType : uint8_t { kUnknown = 0, kTruncate, kCreate, kAlter, kDrop, kRename };
 
 /**
  * @brief Binlog event
@@ -221,6 +223,19 @@ struct BinlogEvent {
       if (first == "TRUNCATE" && (second.empty() || second == "TABLE")) {
         return DDLType::kTruncate;
       }
+      if (first == "CREATE") {
+        size_t index = 1;
+        if (index + 1 < statement_tokens.size() && statement_tokens[index] == "OR" &&
+            statement_tokens[index + 1] == "REPLACE") {
+          index += 2;
+        }
+        if (index < statement_tokens.size() && statement_tokens[index] == "TEMPORARY") {
+          ++index;
+        }
+        if (index < statement_tokens.size() && statement_tokens[index] == "TABLE") {
+          return DDLType::kCreate;
+        }
+      }
       if (first == "ALTER" && second == "TABLE") {
         return DDLType::kAlter;
       }
@@ -330,9 +345,15 @@ class BinlogReader final : public IBinlogReader {
   void Stop() override;
 
   /**
-   * @brief Check if reader is running
+   * @brief Check whether the reader lifecycle is active
+   *
+   * Remains true while either background thread can still mutate replication
+   * state. It becomes false after both threads have actually exited, even
+   * before Stop() joins their thread objects.
    */
-  bool IsRunning() const override { return running_.load() && !should_stop_.load(); }
+  bool IsRunning() const override {
+    return running_.load(std::memory_order_acquire) && active_threads_.load(std::memory_order_acquire) != 0;
+  }
 
   /**
    * @brief Get current GTID
@@ -400,6 +421,12 @@ class BinlogReader final : public IBinlogReader {
     cache_manager_.store(cache_manager, std::memory_order_release);
   }
 
+  /** Test seam invoked after publishing a worker processing failure. */
+  void SetAfterProcessingFailurePublishedHookForTest(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(processing_failure_hook_mutex_);
+    after_processing_failure_published_hook_for_test_ = std::move(hook);
+  }
+
  private:
   Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
   std::unique_ptr<Connection> binlog_connection_;    // Dedicated connection for binlog reading (internally owned)
@@ -426,6 +453,7 @@ class BinlogReader final : public IBinlogReader {
   Config config_;
 
   std::atomic<bool> running_{false};
+  std::atomic<uint8_t> active_threads_{0};
   std::atomic<bool> should_stop_{false};
   std::atomic<bool> processing_failure_reconnect_requested_{false};
   std::atomic<bool> schema_incompatible_{false};
@@ -436,6 +464,8 @@ class BinlogReader final : public IBinlogReader {
   mutable std::mutex queue_mutex_;
   std::condition_variable queue_cv_;
   std::condition_variable queue_full_cv_;
+  std::mutex processing_failure_hook_mutex_;
+  std::function<void()> after_processing_failure_published_hook_for_test_;
 
   enum class StreamStartupState : uint8_t { kIdle, kPending, kOpened, kFailed };
   StreamStartupState stream_startup_state_{StreamStartupState::kIdle};
@@ -450,7 +480,7 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<uint64_t> processed_events_{0};
   std::atomic<uint64_t> crc_errors_{0};
   std::string current_gtid_;
-  std::string pending_commit_gtid_;
+  ReplicationPositionState position_state_;
   std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
   std::atomic<server::ServerStats*> server_stats_{nullptr};   // Optional server statistics tracker
@@ -482,6 +512,7 @@ class BinlogReader final : public IBinlogReader {
   struct ColumnDefinition {
     std::string name;
     bool is_unsigned = false;
+    std::vector<std::string> enum_set_values;
   };
 
   // Column definition cache: key = "database.table", value = column definitions in ordinal order
@@ -535,11 +566,20 @@ class BinlogReader final : public IBinlogReader {
    */
   void WorkerThreadFunc();
 
+  /** Mark one background thread exited without underflowing test-only direct calls. */
+  void MarkThreadExited();
+
   /**
    * @brief Process one queued worker event and update replication position when safe.
    * @return false when processing failed and reconnect is required
    */
   bool ProcessQueuedEvent(const BinlogEvent& event);
+
+  /**
+   * @brief Fail closed for an event type that cannot be decoded safely.
+   * @return true when replication was stopped for an unsupported event
+   */
+  bool RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type);
 
   /**
    * @brief Return whether a table event is already represented by its SYNC snapshot.
@@ -575,6 +615,9 @@ class BinlogReader final : public IBinlogReader {
 
   enum class DDLSchemaCheck : uint8_t { kCompatible, kRetryableFailure, kIncompatible };
 
+  /** Only transport failures can be retried after a post-DDL schema check. */
+  static bool IsRetryableSchemaValidationError(mygram::utils::ErrorCode code);
+
   /** Validate a monitored DDL before mutating state or advancing its GTID. */
   DDLSchemaCheck ValidateSchemaAfterDDL(const BinlogEvent& event);
 
@@ -585,10 +628,32 @@ class BinlogReader final : public IBinlogReader {
    */
   bool FetchColumnNames(TableMetadata& metadata);
 
+  /** Remove stale column definitions before refreshing a changed table map. */
+  void InvalidateColumnNamesForSchemaChange(const TableMetadata& metadata);
+
+  /** A reconnect already owns an open transport for the next outer-loop iteration. */
+  [[nodiscard]] static bool ShouldCloseStreamAfterReadLoop(bool connection_was_reestablished) {
+    return !connection_was_reestablished;
+  }
+
   /**
    * @brief Update current GTID
    */
-  void UpdateCurrentGTID(const std::string& gtid);
+  mygram::utils::Expected<void, mygram::utils::Error> UpdateCurrentGTID(const std::string& gtid);
+
+  /** Advance current_gtid_ while gtid_mutex_ is held and return the merged position. */
+  mygram::utils::Expected<std::string, mygram::utils::Error> UpdateCurrentGTIDLocked(const std::string& gtid);
+
+  /**
+   * @brief Calculate the bounded reconnect backoff delay.
+   */
+  [[nodiscard]] int64_t ReconnectBackoffDelayMs(int reconnect_attempt) const;
+
+  /**
+   * @brief Wait for a reconnect backoff interval, cancellable by Stop().
+   * @return true after the full delay, false when shutdown was requested
+   */
+  bool WaitForReconnectBackoff(int reconnect_attempt);
 
   /** Clear each table replay fence once the applied reader position reaches it. */
   void ClearReachedReplayWatermarks(const std::string& applied_gtid);

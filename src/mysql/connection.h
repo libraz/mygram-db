@@ -149,6 +149,19 @@ class Connection {
   mygram::utils::Expected<MySQLResult, mygram::utils::Error> Execute(const std::string& query);
 
   /**
+   * @brief Execute a query and retrieve its result one row at a time
+   *
+   * Unlike Execute(), this does not buffer the complete result in client
+   * memory. The caller must fetch rows sequentially until mysql_fetch_row()
+   * returns nullptr before issuing another query on this connection. If the
+   * caller abandons the stream early, it must discard the connection.
+   *
+   * @param query SQL query string
+   * @return Expected<MySQLResult, Error> - RAII-managed unbuffered result
+   */
+  mygram::utils::Expected<MySQLResult, mygram::utils::Error> ExecuteStreaming(const std::string& query);
+
+  /**
    * @brief Execute SQL query without result set (INSERT/UPDATE/DELETE)
    * @param query SQL query string
    * @return Expected<void, Error> - success or query execution error

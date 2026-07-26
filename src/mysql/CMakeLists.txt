@@ -4,6 +4,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
   add_library(mygramdb_mysql
     connection.cpp
     connection_validator.cpp
+    binary_json.cpp
     ddl_schema_validator.cpp
     binlog_stream.cpp
     binlog_reader.cpp
@@ -13,6 +14,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
     binlog_filter_evaluator.cpp
     binlog_event_processor.cpp
     table_metadata.cpp
+    value_canonicalizer.cpp
     rows_parser.cpp
     rows_parser_field_decoder.cpp
     rows_parser_filter.cpp

@@ -53,6 +53,9 @@ bool IsRowsEventType(MySQLBinlogEventType event_type) {
     case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT:
     case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT:
     case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT:
+    case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
+    case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
+    case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
       return true;
     default:
       return false;
@@ -98,6 +101,60 @@ uint64_t ExtractRowsEventTableId(const unsigned char* buffer) {
   return table_id;
 }
 
+int64_t BinlogReader::ReconnectBackoffDelayMs(int reconnect_attempt) const {
+  const auto bounded_attempt = std::clamp(reconnect_attempt, 1, 10);
+  const auto base_delay = std::max(config_.reconnect_delay_ms, 0);
+  return static_cast<int64_t>(base_delay) * bounded_attempt;
+}
+
+bool BinlogReader::WaitForReconnectBackoff(int reconnect_attempt) {
+  const auto delay = std::chrono::milliseconds(ReconnectBackoffDelayMs(reconnect_attempt));
+  std::unique_lock<std::mutex> lock(queue_mutex_);
+  return !queue_cv_.wait_for(lock, delay, [this] { return should_stop_.load(std::memory_order_acquire); });
+}
+
+bool BinlogReader::RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type) {
+  std::string remediation;
+  if (event_type == MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT) {
+    remediation =
+        "Received TRANSACTION_PAYLOAD_EVENT: binlog_transaction_compression was enabled "
+        "on the server after initial validation. Compressed events cannot be decoded. "
+        "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF";
+  } else if (event_type == MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT) {
+    remediation =
+        "Received PARTIAL_UPDATE_ROWS_EVENT: binlog_row_value_options=PARTIAL_JSON was enabled "
+        "on the server after initial validation. Partial JSON updates cannot be decoded. "
+        "Disable with: SET GLOBAL binlog_row_value_options=''";
+  } else if (event_type == MySQLBinlogEventType::XA_PREPARE_LOG_EVENT) {
+    remediation =
+        "Received XA_PREPARE_LOG_EVENT. XA transactions are unsupported because prepared rows cannot be "
+        "published before a later XA COMMIT or discarded on XA ROLLBACK.";
+  } else if (IsUnsupportedMariaDBCompressedEvent(event_type)) {
+    remediation =
+        "Received a MariaDB compressed binlog event while log_bin_compress is enabled. "
+        "Compressed events cannot be decoded; disable log_bin_compress and run SYNC.";
+  } else {
+    return false;
+  }
+
+  SetLastError(remediation);
+  mygram::utils::StructuredLog()
+      .Event("binlog_fatal_error")
+      .Field("type", "unsupported_runtime_event")
+      .Field("event_type", GetEventTypeName(event_type))
+      .Error();
+  // Fail closed before a following XID can advance current_gtid_.
+  should_stop_.store(true, std::memory_order_release);
+  return true;
+}
+
+void BinlogReader::MarkThreadExited() {
+  uint8_t active = active_threads_.load(std::memory_order_acquire);
+  while (active != 0 && !active_threads_.compare_exchange_weak(active, static_cast<uint8_t>(active - 1),
+                                                               std::memory_order_acq_rel, std::memory_order_acquire)) {
+  }
+}
+
 void BinlogReader::ReaderThreadFunc() {
   mygram::utils::StructuredLog().Event("binlog_reader_thread_started").Info();
 
@@ -114,22 +171,22 @@ void BinlogReader::ReaderThreadFunc() {
   // Local GTID tracking for reader thread only - NOT used for reconnection.
   // Only the worker thread updates current_gtid_ (via UpdateCurrentGTID) to
   // ensure reconnection uses the last *processed* position, not the last *received* position.
-  std::string reader_last_gtid;
-  {
-    std::scoped_lock lock(gtid_mutex_);
-    reader_last_gtid = current_gtid_;
-  }
+  // This is the position attached to the transaction currently being read,
+  // not the accumulated applied set used to open the stream. It intentionally
+  // starts empty so an event received before a GTID event can never publish
+  // the saved multi-source position as if it were one completed transaction.
+  position_state_.ResetReceived();
   // QUERY_EVENT is the commit boundary for standalone transactions, while
   // row transactions start with BEGIN and finish at XID/COMMIT. Track that
   // distinction locally so ignored/non-target standalone statements still
   // advance the worker-owned applied GTID without publishing a received-but-
   // unapplied position.
-  bool reader_transaction_open = false;
   replay_suppressed_table_ids_.clear();
 
   // Main reconnection loop (infinite retries)
   int reconnect_attempt = 0;
   bool idle_timeout_reconnect = false;  // Track if reconnecting due to idle timeout
+  bool validate_before_stream_reopen = false;
   bool initial_stream_open_pending = true;
   auto publish_initial_stream_state = [this](StreamStartupState state) {
     {
@@ -142,11 +199,11 @@ void BinlogReader::ReaderThreadFunc() {
     stream_startup_cv_.notify_all();
   };
 
-  // Helper lambda: sleep with backoff, check should_stop_, reconnect, validate.
+  // Helper lambda: wait with cancellable backoff, reconnect, validate.
   // Returns: 1 = success, 0 = reconnect failed (retry), -1 = should stop
   auto reconnect_with_backoff = [this, &reconnect_attempt](const std::string& reason, bool silent) -> int {
     reconnect_attempt = std::min(reconnect_attempt + 1, 10);
-    int delay_ms = config_.reconnect_delay_ms * reconnect_attempt;
+    const int64_t delay_ms = ReconnectBackoffDelayMs(reconnect_attempt);
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "retry_connection")
@@ -154,9 +211,7 @@ void BinlogReader::ReaderThreadFunc() {
         .Field("delay_ms", static_cast<int64_t>(delay_ms))
         .Field("attempt", static_cast<int64_t>(reconnect_attempt))
         .Debug();
-    std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-    if (should_stop_) {
+    if (!WaitForReconnectBackoff(reconnect_attempt)) {
       mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "stop_requested_during_retry").Debug();
       return -1;
     }
@@ -182,11 +237,23 @@ void BinlogReader::ReaderThreadFunc() {
         .Event("binlog_debug")
         .Field("action", "connection_validated_after_reconnect")
         .Debug();
-    reconnect_attempt = 0;
     return 1;  // Success
   };
 
   while (!should_stop_) {
+    if (validate_before_stream_reopen) {
+      validate_before_stream_reopen = false;
+      if (!ValidateConnection()) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "processing_failure_recovery_validation_failed")
+            .Field("error", GetLastError())
+            .Error();
+        should_stop_.store(true, std::memory_order_release);
+        break;
+      }
+    }
+
     // Setup session (CRC32 checksum, heartbeat, etc.) via protocol-specific stream
     auto setup_result = binlog_stream_->SetupSession(*binlog_connection_);
     if (!setup_result) {
@@ -265,6 +332,10 @@ void BinlogReader::ReaderThreadFunc() {
       publish_initial_stream_state(StreamStartupState::kOpened);
     }
 
+    // A reopened stream starts from the worker-owned applied position. Never
+    // carry an in-flight received GTID or transaction boundary across it.
+    position_state_.ResetReceived();
+
     // Reset no-data counter on successful stream open (reconnection)
     no_data_log_count_.store(0);
 
@@ -275,13 +346,13 @@ void BinlogReader::ReaderThreadFunc() {
     } else {
       mygram::utils::StructuredLog().Event("binlog_stream_opened").Field("gtid", GetCurrentGTID()).Info();
     }
-    reconnect_attempt = 0;
-
     // Read binlog events
     int event_count = 0;
     bool connection_lost = false;
+    bool connection_was_reestablished = false;
     auto request_processing_failure_reconnect = [&]() {
       processing_failure_reconnect_requested_.store(true, std::memory_order_release);
+      validate_before_stream_reopen = true;
       connection_lost = true;
       if (binlog_stream_ != nullptr && binlog_connection_ != nullptr && binlog_connection_->IsConnected()) {
         binlog_stream_->Close(*binlog_connection_);
@@ -294,6 +365,7 @@ void BinlogReader::ReaderThreadFunc() {
             .Event("binlog_processing_failure_reconnect")
             .Field("gtid", GetCurrentGTID())
             .Warn();
+        validate_before_stream_reopen = true;
         connection_lost = true;
         binlog_stream_->Close(*binlog_connection_);
         break;
@@ -338,25 +410,12 @@ void BinlogReader::ReaderThreadFunc() {
 
         case BinlogFetchResult::Status::kConnectionLost: {
           SetLastError(fetch.error_message);
-          // Read timeout - full reconnect (do NOT close stream, handle may be invalid)
-          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "read_timeout_full_reconnect").Debug();
-          auto reconnect_result = binlog_connection_->Reconnect(true /* silent */);
-          if (!reconnect_result) {
-            mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), reconnect_result.error().message(), 1);
-            std::this_thread::sleep_for(std::chrono::milliseconds(config_.reconnect_delay_ms));
-          } else if (!ValidateConnection()) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_error")
-                .Field("type", "connection_validation_failed")
-                .Field("context", "after_idle_timeout_reconnect")
-                .Field("error", GetLastError())
-                .Error();
+          mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "connection_lost_reconnect").Debug();
+          const int rc = reconnect_with_backoff("connection_lost", true);
+          if (rc == -1) {
             should_stop_.store(true, std::memory_order_release);
-          } else {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "connection_validated_after_idle_timeout_reconnect")
-                .Debug();
+          } else if (rc == 1) {
+            connection_was_reestablished = true;
           }
           idle_timeout_reconnect = true;
           // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop
@@ -378,6 +437,7 @@ void BinlogReader::ReaderThreadFunc() {
           if (rc == -1) {
             should_stop_.store(true, std::memory_order_release);
           } else if (rc == 1) {
+            connection_was_reestablished = true;
             mygram::utils::StructuredLog().Event("binlog_connection_restored").Info();
           }
           break;
@@ -412,6 +472,10 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         case BinlogFetchResult::Status::kOK:
+          // Only a successfully fetched stream event proves the connection is
+          // stable. Opening a stream that is immediately lost must continue
+          // escalating the reconnect backoff.
+          reconnect_attempt = 0;
           break;  // Process event below
       }
 
@@ -446,7 +510,7 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("computed_crc", static_cast<uint64_t>(computed_crc))
               .Field("stored_crc", static_cast<uint64_t>(stored_crc))
               .Field("event_length", static_cast<uint64_t>(event_length))
-              .Field("gtid", reader_last_gtid)
+              .Field("gtid", position_state_.received_gtid())
               .Error();
           request_processing_failure_reconnect();
           break;
@@ -462,25 +526,30 @@ void BinlogReader::ReaderThreadFunc() {
         if (event_type == MySQLBinlogEventType::GTID_LOG_EVENT) {
           auto gtid_opt = BinlogEventParser::ExtractGTID(event_buffer, event_length);
           if (gtid_opt) {
-            reader_last_gtid = gtid_opt.value();
+            position_state_.ObserveReceivedGTID(*gtid_opt, false, false);
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
                 .Field("action", "reader_gtid_received")
-                .Field("gtid", reader_last_gtid)
+                .Field("gtid", position_state_.received_gtid())
                 .Debug();
           }
           continue;
         }
 
         if (event_type == MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT) {
+          const auto tagged_gtid = BinlogEventParser::ExtractTaggedGTID(event_buffer, event_length);
           SetLastError(
               "Received GTID_TAGGED_LOG_EVENT. Tagged GTIDs are not supported because reconnect cannot encode "
-              "UUID:TAG:GNO positions safely.");
-          mygram::utils::StructuredLog()
-              .Event("binlog_fatal_error")
+              "UUID:TAG:GNO positions safely." +
+              (tagged_gtid.has_value() ? " Received position: " + *tagged_gtid : " The event payload was malformed."));
+          mygram::utils::StructuredLog log;
+          log.Event("binlog_fatal_error")
               .Field("type", "unsupported_runtime_event")
-              .Field("event_type", "GTID_TAGGED_LOG_EVENT")
-              .Error();
+              .Field("event_type", "GTID_TAGGED_LOG_EVENT");
+          if (tagged_gtid.has_value()) {
+            log.Field("gtid", *tagged_gtid);
+          }
+          log.Error();
           should_stop_.store(true, std::memory_order_release);
           break;
         }
@@ -503,20 +572,47 @@ void BinlogReader::ReaderThreadFunc() {
           }
           auto gtid_opt = MariaDBEventParser::ExtractGTID(event_buffer, event_length);
           if (gtid_opt) {
-            reader_last_gtid = gtid_opt.value();
+            const bool transaction_open = flags.has_value() && BinlogEventParser::IsMariaDBGtidTransactionOpen(*flags);
+            const bool standalone = flags.has_value() && ((*flags & MariaDBEventParser::kStandaloneFlag) != 0U);
+            position_state_.ObserveReceivedGTID(*gtid_opt, transaction_open, standalone);
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
                 .Field("action", "reader_mariadb_gtid_received")
-                .Field("gtid", reader_last_gtid)
+                .Field("gtid", position_state_.received_gtid())
                 .Debug();
           }
           continue;
         }
 
-        // Skip other MariaDB-specific events that don't need processing
-        if (event_type == MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT ||
-            event_type == MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT ||
-            event_type == MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT ||
+        if (event_type == MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT) {
+          const auto positions = MariaDBEventParser::ParseGTIDList(event_buffer, event_length);
+          if (!positions.has_value()) {
+            SetLastError("Malformed MariaDB GTID_LIST_EVENT; reconnecting from last processed GTID");
+            request_processing_failure_reconnect();
+            break;
+          }
+          mygram::utils::StructuredLog()
+              .Event("binlog_debug")
+              .Field("action", "mariadb_gtid_list_received")
+              .Field("domain_count", static_cast<uint64_t>(positions->size()))
+              .Debug();
+          continue;
+        }
+
+        if (event_type == MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT) {
+          const auto annotation = MariaDBEventParser::ExtractAnnotateRows(event_buffer, event_length);
+          if (annotation.has_value()) {
+            mygram::utils::StructuredLog()
+                .Event("binlog_debug")
+                .Field("action", "mariadb_rows_annotation")
+                .Field("query", *annotation)
+                .Debug();
+          }
+          continue;
+        }
+
+        // Skip other MariaDB-specific events that don't need processing.
+        if (event_type == MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT ||
             event_type == MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT) {
           continue;
         }
@@ -556,14 +652,14 @@ void BinlogReader::ReaderThreadFunc() {
 
             const std::string qualified_table =
                 config::QualifiedTableName(metadata_opt->database_name, metadata_opt->table_name);
-            auto suppress_replay = ShouldSuppressTableReplay(qualified_table, reader_last_gtid);
+            auto suppress_replay = ShouldSuppressTableReplay(qualified_table, position_state_.received_gtid());
             if (!suppress_replay) {
               SetLastError("Cannot evaluate per-table SYNC replay watermark: " + suppress_replay.error().message());
               mygram::utils::StructuredLog()
                   .Event("binlog_fatal_error")
                   .Field("type", "invalid_table_replay_watermark")
                   .Field("table", qualified_table)
-                  .Field("gtid", reader_last_gtid)
+                  .Field("gtid", position_state_.received_gtid())
                   .FieldError(suppress_replay.error())
                   .Error();
               should_stop_.store(true, std::memory_order_release);
@@ -574,7 +670,7 @@ void BinlogReader::ReaderThreadFunc() {
               mygram::utils::StructuredLog()
                   .Event("binlog_replay_suppressed")
                   .Field("table", qualified_table)
-                  .Field("gtid", reader_last_gtid)
+                  .Field("gtid", position_state_.received_gtid())
                   .Field("reason", "covered_by_sync_snapshot")
                   .Debug();
               continue;
@@ -608,13 +704,16 @@ void BinlogReader::ReaderThreadFunc() {
             auto add_result = table_metadata_cache_.AddOrUpdate(metadata_opt->table_id, metadata_opt.value());
 
             if (add_result == TableMetadataCache::AddResult::kSchemaChanged) {
-              {
-                std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
-                std::string cache_key = metadata_opt->database_name + "." + metadata_opt->table_name;
-                column_names_cache_.erase(cache_key);
-              }
+              InvalidateColumnNamesForSchemaChange(metadata_opt.value());
               if (is_monitored_table) {
-                FetchColumnNames(metadata_opt.value());
+                if (!FetchColumnNames(metadata_opt.value())) {
+                  SetLastError(
+                      "Failed to refresh column names after monitored schema change; reconnecting from last "
+                      "processed GTID");
+                  request_processing_failure_reconnect();
+                  break;
+                }
+                table_metadata_cache_.AddOrUpdate(metadata_opt->table_id, metadata_opt.value());
               }
               mygram::utils::StructuredLog()
                   .Event("binlog_schema_change")
@@ -638,6 +737,13 @@ void BinlogReader::ReaderThreadFunc() {
           continue;
         }
 
+        // Reject unsupported wire formats before replay suppression. A SYNC
+        // watermark may justify skipping a decoded row, but it must never turn
+        // an event format we cannot decode into an accepted transaction.
+        if (RejectUnsupportedRuntimeEvent(event_type)) {
+          break;
+        }
+
         // A preceding TABLE_MAP established that this target-table row event
         // is already included in its isolated SYNC snapshot. Consume the
         // transaction's eventual COMMIT for GTID progress, but do not parse or
@@ -648,66 +754,10 @@ void BinlogReader::ReaderThreadFunc() {
                 replay_suppressed_table_ids_.end()) {
           continue;
         }
-
-        // Detect unsupported event types that cause silent data loss at runtime
-        if (event_type == MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT) {
-          SetLastError(
-              "Received TRANSACTION_PAYLOAD_EVENT: binlog_transaction_compression was enabled "
-              "on the server after initial validation. Compressed events cannot be decoded. "
-              "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF");
-          mygram::utils::StructuredLog()
-              .Event("binlog_fatal_error")
-              .Field("type", "unsupported_runtime_event")
-              .Field("event_type", "TRANSACTION_PAYLOAD_EVENT")
-              .Error();
-          should_stop_.store(true, std::memory_order_release);
-          break;
-        }
-
-        if (event_type == MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT) {
-          SetLastError(
-              "Received PARTIAL_UPDATE_ROWS_EVENT: binlog_row_value_options=PARTIAL_JSON was enabled "
-              "on the server after initial validation. Partial JSON updates cannot be decoded. "
-              "Disable with: SET GLOBAL binlog_row_value_options=''");
-          mygram::utils::StructuredLog()
-              .Event("binlog_fatal_error")
-              .Field("type", "unsupported_runtime_event")
-              .Field("event_type", "PARTIAL_UPDATE_ROWS_EVENT")
-              .Error();
-          should_stop_.store(true, std::memory_order_release);
-          break;
-        }
-
-        if (event_type == MySQLBinlogEventType::XA_PREPARE_LOG_EVENT) {
-          SetLastError(
-              "Received XA_PREPARE_LOG_EVENT. XA transactions are unsupported because prepared rows cannot be "
-              "published before a later XA COMMIT or discarded on XA ROLLBACK.");
-          mygram::utils::StructuredLog()
-              .Event("binlog_fatal_error")
-              .Field("type", "unsupported_runtime_event")
-              .Field("event_type", "XA_PREPARE_LOG_EVENT")
-              .Error();
-          should_stop_.store(true, std::memory_order_release);
-          break;
-        }
-
-        if (IsUnsupportedMariaDBCompressedEvent(event_type)) {
-          SetLastError(
-              "Received a MariaDB compressed binlog event while log_bin_compress is enabled. "
-              "Compressed events cannot be decoded; disable log_bin_compress and run SYNC.");
-          mygram::utils::StructuredLog()
-              .Event("binlog_fatal_error")
-              .Field("type", "unsupported_runtime_event")
-              .Field("event_type", GetEventTypeName(event_type))
-              .Error();
-          // Fail closed before the following XID can advance current_gtid_.
-          should_stop_.store(true, std::memory_order_release);
-          break;
-        }
       }
 
       auto query_boundary = BinlogEventParser::QueryTransactionBoundary::kNone;
-      const bool query_was_inside_transaction = reader_transaction_open;
+      const bool query_was_inside_transaction = position_state_.reader_transaction_open();
       bool query_parsed = false;
       std::string query_text;
       if (event_type == MySQLBinlogEventType::QUERY_EVENT) {
@@ -717,7 +767,7 @@ void BinlogReader::ReaderThreadFunc() {
           mygram::utils::StructuredLog()
               .Event("binlog_fatal_error")
               .Field("type", "malformed_query_event")
-              .Field("gtid", reader_last_gtid)
+              .Field("gtid", position_state_.received_gtid())
               .Error();
           should_stop_.store(true, std::memory_order_release);
           break;
@@ -738,14 +788,14 @@ void BinlogReader::ReaderThreadFunc() {
           break;
         }
         if (query_boundary == BinlogEventParser::QueryTransactionBoundary::kBegin) {
-          reader_transaction_open = true;
+          position_state_.BeginReaderTransaction();
         }
       }
 
       // Parse the binlog event using BinlogEventParser
-      auto events =
-          BinlogEventParser::ParseBinlogEvent(event_buffer, event_length, reader_last_gtid, table_metadata_cache_,
-                                              table_contexts_, nullptr, true, mysql_config_.datetime_timezone);
+      auto events = BinlogEventParser::ParseBinlogEvent(event_buffer, event_length, position_state_.received_gtid(),
+                                                        table_metadata_cache_, table_contexts_, nullptr, true,
+                                                        mysql_config_.datetime_timezone);
 
       if (!events.empty()) {
         mygram::utils::StructuredLog()
@@ -780,7 +830,7 @@ void BinlogReader::ReaderThreadFunc() {
         }
         if (event_type == MySQLBinlogEventType::QUERY_EVENT &&
             query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd) {
-          reader_transaction_open = false;
+          position_state_.EndReaderTransaction();
         }
       } else if (IsMonitoredRowsEventParseFailure(event_type, event_buffer, event_length)) {
         SetLastError("Failed to parse monitored ROWS_EVENT from binlog; reconnecting from last processed GTID");
@@ -788,7 +838,7 @@ void BinlogReader::ReaderThreadFunc() {
             .Event("binlog_error")
             .Field("type", "rows_event_parse_failed")
             .Field("event_type", GetEventTypeName(event_type))
-            .Field("reader_gtid", reader_last_gtid)
+            .Field("reader_gtid", position_state_.received_gtid())
             .Field("current_gtid", GetCurrentGTID())
             .Error();
         request_processing_failure_reconnect();
@@ -801,14 +851,15 @@ void BinlogReader::ReaderThreadFunc() {
         // Never do this for BEGIN or for statements inside an explicit
         // transaction; those advance only at COMMIT/XID.
         const bool standalone_query_completed =
-            event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed && !reader_last_gtid.empty() &&
+            event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
+            !position_state_.received_gtid().empty() &&
             (query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd ||
              (query_boundary == BinlogEventParser::QueryTransactionBoundary::kNone && !query_was_inside_transaction &&
               BinlogEventParser::IsSafeIgnoredQuery(query_text)));
         if (standalone_query_completed) {
           auto progress = std::make_unique<BinlogEvent>();
           progress->type = BinlogEventType::COMMIT;
-          progress->gtid = reader_last_gtid;
+          progress->gtid = position_state_.received_gtid();
           PushEvent(std::move(progress));
         } else if (event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
                    query_boundary == BinlogEventParser::QueryTransactionBoundary::kNone &&
@@ -820,25 +871,38 @@ void BinlogReader::ReaderThreadFunc() {
               .Event("binlog_fatal_error")
               .Field("type", "unsafe_query_event")
               .Field("query", query_text)
-              .Field("gtid", reader_last_gtid)
+              .Field("gtid", position_state_.received_gtid())
               .Error();
           should_stop_.store(true, std::memory_order_release);
           break;
         }
         if (event_type == MySQLBinlogEventType::QUERY_EVENT &&
             query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd) {
-          reader_transaction_open = false;
+          position_state_.EndReaderTransaction();
         }
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "event_skipped").Debug();
       }
 
       if (event_type == MySQLBinlogEventType::XID_EVENT) {
-        reader_transaction_open = false;
+        position_state_.EndReaderTransaction();
+      }
+      if (position_state_.mariadb_standalone_group_open() &&
+          BinlogEventParser::IsRowsStatementEnd(event_buffer, static_cast<unsigned long>(event_length))) {
+        auto progress = std::make_unique<BinlogEvent>();
+        progress->type = BinlogEventType::COMMIT;
+        progress->gtid = position_state_.received_gtid();
+        PushEvent(std::move(progress));
+        position_state_.CloseMariaDBStandaloneGroup();
+      } else if (position_state_.mariadb_standalone_group_open() && event_type == MySQLBinlogEventType::QUERY_EVENT) {
+        // Standalone QUERY_EVENT completion is handled above. Clear the group
+        // marker so a later row event cannot publish the query's GTID.
+        position_state_.CloseMariaDBStandaloneGroup();
       }
     }
 
     // Close binlog stream
-    if (binlog_connection_ && binlog_connection_->IsConnected()) {
+    if (ShouldCloseStreamAfterReadLoop(connection_was_reestablished) && binlog_connection_ &&
+        binlog_connection_->IsConnected()) {
       binlog_stream_->Close(*binlog_connection_);
     }
 
@@ -853,6 +917,7 @@ void BinlogReader::ReaderThreadFunc() {
   // no more events will ever be pushed and the predicate would never flip.
   queue_cv_.notify_all();
 
+  MarkThreadExited();
   mygram::utils::StructuredLog().Event("binlog_reader_thread_stopped").Info();
 }
 
@@ -877,37 +942,71 @@ void BinlogReader::WorkerThreadFunc() {
           .Field("primary_key", event->primary_key)
           .Field("gtid", event->gtid)
           .Error();
+      const bool schema_incompatible = schema_incompatible_.load(std::memory_order_acquire);
       {
         std::scoped_lock lock(queue_mutex_);
         while (!event_queue_.empty()) {
           event_queue_.pop();
         }
+        if (schema_incompatible) {
+          // A schema mismatch is persistent. Reconnecting would replay the
+          // same DDL forever, so stop and expose not-ready until SYNC/config
+          // action.
+          should_stop_.store(true, std::memory_order_release);
+        } else {
+          // GTID is not updated on a retryable failure. Publish the reconnect
+          // request while holding queue_mutex_ so PushEvent cannot enqueue a
+          // later commit between queue draining and failure publication.
+          processing_failure_reconnect_requested_.store(true, std::memory_order_release);
+        }
+      }
+      {
+        std::scoped_lock lock(gtid_mutex_);
+        position_state_.ResetApplied();
+      }
+      std::function<void()> after_failure_published_hook;
+      {
+        std::lock_guard<std::mutex> lock(processing_failure_hook_mutex_);
+        after_failure_published_hook = after_processing_failure_published_hook_for_test_;
+      }
+      if (after_failure_published_hook) {
+        after_failure_published_hook();
       }
       queue_full_cv_.notify_all();
-      if (schema_incompatible_.load(std::memory_order_acquire)) {
-        // A schema mismatch is persistent. Reconnecting would replay the same
-        // DDL forever, so stop and expose not-ready until SYNC/config action.
-        should_stop_.store(true, std::memory_order_release);
+      if (schema_incompatible) {
         queue_cv_.notify_all();
-        queue_full_cv_.notify_all();
-      } else {
-        processing_failure_reconnect_requested_.store(true, std::memory_order_release);
-        // GTID is not updated on a retryable failure. Reconnect from the last
-        // processed position and discard later queued events.
       }
     }
   }
 
+  MarkThreadExited();
   mygram::utils::StructuredLog().Event("binlog_worker_thread_stopped").Info();
 }
 
 bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
   if (event.type == BinlogEventType::COMMIT) {
-    std::string commit_gtid = event.gtid.empty() ? pending_commit_gtid_ : event.gtid;
-    if (!commit_gtid.empty()) {
-      UpdateCurrentGTID(commit_gtid);
-      pending_commit_gtid_.clear();
+    mygram::utils::Expected<std::string, mygram::utils::Error> advanced = mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "GTID commit was not attempted"));
+    {
+      std::scoped_lock lock(gtid_mutex_);
+      if (!position_state_.CommitGTIDMatchesPending(event.gtid)) {
+        SetLastError("COMMIT GTID does not match the applied transaction; refusing to advance replication position");
+        return false;
+      }
+      const std::string& commit_gtid = position_state_.ResolveCommitGTID(event.gtid);
+      if (commit_gtid.empty()) {
+        return true;
+      }
+      advanced = UpdateCurrentGTIDLocked(commit_gtid);
+      if (advanced) {
+        position_state_.ClearPendingAppliedGTID();
+      }
     }
+    if (!advanced) {
+      SetLastError(advanced.error());
+      return false;
+    }
+    ClearReachedReplayWatermarks(*advanced);
     return true;
   }
 
@@ -927,9 +1026,14 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
   if (*suppress_replay) {
     processed_events_++;
     if (event.type == BinlogEventType::DDL) {
-      UpdateCurrentGTID(event.gtid);
+      auto advanced = UpdateCurrentGTID(event.gtid);
+      if (!advanced) {
+        SetLastError(advanced.error());
+        return false;
+      }
     } else if (!event.gtid.empty()) {
-      pending_commit_gtid_ = event.gtid;
+      std::scoped_lock lock(gtid_mutex_);
+      position_state_.RecordAppliedMutation(event.gtid);
     }
     return true;
   }
@@ -949,13 +1053,18 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
 
   if (event.type == BinlogEventType::DDL) {
     if (!event.gtid.empty()) {
-      UpdateCurrentGTID(event.gtid);
+      auto advanced = UpdateCurrentGTID(event.gtid);
+      if (!advanced) {
+        SetLastError(advanced.error());
+        return false;
+      }
     }
     return true;
   }
 
   if (!event.gtid.empty()) {
-    pending_commit_gtid_ = event.gtid;
+    std::scoped_lock lock(gtid_mutex_);
+    position_state_.RecordAppliedMutation(event.gtid);
   }
   return true;
 }

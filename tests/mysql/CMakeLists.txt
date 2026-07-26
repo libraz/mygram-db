@@ -178,12 +178,18 @@ if(USE_MYSQL AND MYSQL_FOUND)
     GTest::gmock
   )
 
-  # LABELS SLOW: Contains sleep_for-based timing assertions (e.g., PushBlocksWhenQueueFull)
-  gtest_discover_tests(binlog_reader_core_test
-    DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-    PROPERTIES RESOURCE_LOCK mysql_connection
-    LABELS "SLOW"
+  mygramdb_add_split_gtests(binlog_reader_core_test
+    SOURCE binlog_reader_core_test.cpp
+    RESOURCE_LOCK mysql_connection
+    SLOW_TIMEOUT 30
+    ALL_CONCURRENCY
+    SLOW_TESTS
+      BinlogReaderFixture.PushBlocksWhenQueueFull
+      BinlogReaderFixture.PopBlocksUntilEventArrives
+      BinlogReaderFixture.PopReturnsFalseWhenStopping
+      BinlogReaderFixture.ShutdownUnblocksQueueOperations
+      BinlogReaderFixture.ProcessingFailureRequestsReconnectAndDropsQueuedEvents
+      BinlogReaderFixture.MidTransactionFailureDoesNotAdvanceGtidToFailedTransaction
   )
 
   add_executable(binlog_reader_events_test

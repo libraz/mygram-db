@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include "mysql/connection.h"
+#include "utils/sql_utils.h"
 
 namespace mygramdb::mysql {
 namespace {
@@ -39,6 +40,48 @@ std::string BaseType(const std::string& column_type) {
 
 bool IsUnsigned(const std::string& column_type) {
   return Lower(column_type).find("unsigned") != std::string::npos;
+}
+
+bool IsBinaryStringType(const std::string& column_type) {
+  static const std::unordered_set<std::string> kBinaryTypes = {
+      "binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob",
+  };
+  return kBinaryTypes.find(BaseType(column_type)) != kBinaryTypes.end();
+}
+
+bool IsCharacterStringType(const std::string& column_type) {
+  static const std::unordered_set<std::string> kCharacterTypes = {
+      "char", "varchar", "tinytext", "text", "mediumtext", "longtext", "enum", "set",
+  };
+  return kCharacterTypes.find(BaseType(column_type)) != kCharacterTypes.end();
+}
+
+bool IsSupportedTextCollation(const std::string& collation) {
+  const std::string lower = Lower(collation);
+  return lower.rfind("utf8mb4_", 0) == 0 || lower.rfind("utf8mb3_", 0) == 0 || lower.rfind("utf8_", 0) == 0 ||
+         lower.rfind("ascii_", 0) == 0;
+}
+
+Expected<void, Error> ValidateConfiguredColumnEncoding(const DDLColumnMetadata& column, const std::string& table_name) {
+  const std::string context = table_name + "." + column.name;
+  if (IsBinaryStringType(column.column_type)) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kMySQLInvalidSchema,
+        "Configured column '" + column.name + "' in '" + table_name + "' uses binary type '" + column.column_type +
+            "'. BINARY, VARBINARY, and BLOB columns are unsupported because the snapshot and binlog paths do not "
+            "currently share a lossless representation",
+        context));
+  }
+  if (IsCharacterStringType(column.column_type) && !IsSupportedTextCollation(column.collation)) {
+    const std::string reported_collation = column.collation.empty() ? "<none>" : column.collation;
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLInvalidSchema,
+                  "Configured text column '" + column.name + "' in '" + table_name + "' uses unsupported collation '" +
+                      reported_collation +
+                      "'. Only utf8mb4, utf8/utf8mb3, and ascii character sets are supported for binlog replication",
+                  context));
+  }
+  return {};
 }
 
 bool IsFilterTypeCompatible(const std::string& configured_type, const std::string& column_type) {
@@ -94,17 +137,6 @@ bool IsFilterTypeCompatible(const std::string& configured_type, const std::strin
   return false;
 }
 
-std::string EscapeIdentifier(const std::string& identifier) {
-  std::string escaped;
-  escaped.reserve(identifier.size());
-  for (char chr : identifier) {
-    escaped += chr;
-    if (chr == '`')
-      escaped += '`';
-  }
-  return escaped;
-}
-
 std::string Field(MYSQL_ROW row, unsigned long* lengths, size_t index) {
   if (row[index] == nullptr)
     return {};
@@ -120,8 +152,14 @@ bool SameColumn(const DDLColumnMetadata& lhs, const DDLColumnMetadata& rhs) {
 
 Expected<ConfiguredTableSchema, Error> DDLSchemaValidator::Capture(Connection& connection,
                                                                    const config::TableConfig& table_config) {
-  const std::string query = "SHOW FULL COLUMNS FROM `" + EscapeIdentifier(table_config.database) + "`.`" +
-                            EscapeIdentifier(table_config.name) + "`";
+  auto quoted_table = mygramdb::utils::QuoteQualifiedSQLIdentifier(table_config.database, table_config.name);
+  if (!quoted_table) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
+                                    "Invalid configured table identifier '" + config::QualifiedTableName(table_config) +
+                                        "': " + quoted_table.error().message(),
+                                    config::QualifiedTableName(table_config)));
+  }
+  const std::string query = "SHOW FULL COLUMNS FROM " + *quoted_table;
   auto result = connection.Execute(query);
   if (!result) {
     auto reconnect = connection.Reconnect(true /* silent */);
@@ -129,6 +167,11 @@ Expected<ConfiguredTableSchema, Error> DDLSchemaValidator::Capture(Connection& c
       result = connection.Execute(query);
   }
   if (!result) {
+    if (result.error().code() == ErrorCode::kMySQLTableNotFound ||
+        result.error().code() == ErrorCode::kMySQLColumnNotFound ||
+        result.error().code() == ErrorCode::kPermissionDenied) {
+      return MakeUnexpected(result.error());
+    }
     return MakeUnexpected(MakeError(
         ErrorCode::kMySQLQueryFailed,
         "Failed to read schema for '" + config::QualifiedTableName(table_config) + "': " + result.error().message(),
@@ -200,6 +243,10 @@ Expected<ConfiguredTableSchema, Error> DDLSchemaValidator::ValidateMetadata(
       return MakeUnexpected(MakeError(ErrorCode::kMySQLColumnNotFound,
                                       "Configured column '" + name + "' is missing from '" + table_name + "'",
                                       table_name + "." + name));
+    }
+    auto encoding = ValidateConfiguredColumnEncoding(*it->second, table_name);
+    if (!encoding) {
+      return MakeUnexpected(encoding.error());
     }
     schema.columns.push_back(*it->second);
   }

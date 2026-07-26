@@ -9,6 +9,8 @@
 
 #ifdef USE_MYSQL
 
+#include "mysql_test_helpers.h"
+
 using namespace mygramdb::mysql;
 
 /**
@@ -281,6 +283,40 @@ TEST(MySQLConnectionTest, GTIDValidationEdgeCases) {
   EXPECT_FALSE(conn.SetGTIDNext("SELECT"));
   EXPECT_FALSE(conn.SetGTIDNext("DROP"));
   EXPECT_FALSE(conn.SetGTIDNext("INSERT"));
+}
+
+TEST(MySQLConnectionIntegrationTest, ExecuteStreamingDoesNotMaterializeRowsClientSide) {
+  if (!mygramdb::mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  Connection connection(mygramdb::mysql::testing::GetMySQLTestConfig());
+  auto connect_result = connection.Connect("streaming-result-test");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+
+  auto result = connection.ExecuteStreaming("SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3");
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_NE(result->get(), nullptr);
+
+  // mysql_use_result() cannot know the row count before rows are fetched.
+  // mysql_store_result() would report all three rows at this point.
+  EXPECT_EQ(mysql_num_rows(result->get()), 0U);
+
+  size_t rows = 0;
+  while (mysql_fetch_row(result->get()) != nullptr) {
+    ++rows;
+  }
+  EXPECT_EQ(mysql_errno(connection.GetHandle()), 0U) << mysql_error(connection.GetHandle());
+  EXPECT_EQ(rows, 3U);
+  EXPECT_EQ(mysql_num_rows(result->get()), 3U);
+  result->reset();
+
+  // Exhausting and releasing the stream must leave the connection reusable.
+  auto followup = connection.Execute("SELECT 4");
+  ASSERT_TRUE(followup) << followup.error().message();
+  ASSERT_NE(mysql_fetch_row(followup->get()), nullptr);
 }
 
 #endif  // USE_MYSQL

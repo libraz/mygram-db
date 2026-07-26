@@ -17,6 +17,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_ast.h"
+#include "server/server_types.h"
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 
@@ -64,6 +65,7 @@ TEST_F(BinlogEventProcessorTest, InsertIsAtomic) {
   auto doc_id_opt = doc_store_->GetDocId("pk1");
   ASSERT_TRUE(doc_id_opt.has_value());
   storage::DocId doc_id = *doc_id_opt;
+  EXPECT_EQ(doc_store_->GetOriginalText(doc_id), std::optional<std::string>("test document text"));
 
   // Verify document is in index (search for bigram "te" from "test")
   auto results = index_->SearchAnd({"te"});
@@ -137,6 +139,7 @@ TEST_F(BinlogEventProcessorTest, UpdateIsAtomic) {
   auto doc_id_opt = doc_store_->GetDocId("pk1");
   ASSERT_TRUE(doc_id_opt.has_value());
   storage::DocId doc_id = *doc_id_opt;
+  EXPECT_EQ(doc_store_->GetOriginalText(doc_id), std::optional<std::string>("new document text"));
 
   // Verify old text is NOT in index (search for "ol" bigram)
   auto old_results = index_->SearchAnd({"ol"});
@@ -146,6 +149,28 @@ TEST_F(BinlogEventProcessorTest, UpdateIsAtomic) {
   auto new_results = index_->SearchAnd({"ne"});
   ASSERT_EQ(new_results.size(), 1);
   EXPECT_EQ(new_results[0], doc_id);
+}
+
+TEST_F(BinlogEventProcessorTest, CaseOnlyUpdateRefreshesOriginalText) {
+  BinlogEvent insert_event;
+  insert_event.type = BinlogEventType::INSERT;
+  insert_event.primary_key = "pk-case";
+  insert_event.text = "Tokyo Tower";
+  insert_event.table_name = "test_table";
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  BinlogEvent update_event = insert_event;
+  update_event.type = BinlogEventType::UPDATE;
+  update_event.old_text = insert_event.text;
+  update_event.text = "TOKYO TOWER";
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(update_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  auto doc_id = doc_store_->GetDocId("pk-case");
+  ASSERT_TRUE(doc_id.has_value());
+  EXPECT_EQ(doc_store_->GetNormalizedText(*doc_id), std::optional<std::string>("tokyo tower"));
+  EXPECT_EQ(doc_store_->GetOriginalText(*doc_id), std::optional<std::string>("TOKYO TOWER"));
 }
 
 /**
@@ -851,6 +876,8 @@ TEST_F(BinlogEventProcessorTest, DeleteWithCorrectTextRemovesAllNgrams) {
  * @brief Test that TRUNCATE TABLE DDL clears all data from store and index
  */
 TEST_F(BinlogEventProcessorTest, TruncateClearsAllData) {
+  server::BM25Stats bm25_stats;
+
   // INSERT 3 documents
   for (const auto& [pk, text] :
        std::vector<std::pair<std::string, std::string>>{{"pk1", "alpha"}, {"pk2", "beta"}, {"pk3", "gamma"}}) {
@@ -860,16 +887,19 @@ TEST_F(BinlogEventProcessorTest, TruncateClearsAllData) {
     event.text = text;
     event.table_name = "test_table";
 
-    ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+    ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr,
+                                                   nullptr, &bm25_stats));
   }
 
   ASSERT_EQ(doc_store_->Size(), 3);
+  ASSERT_EQ(bm25_stats.doc_count.load(std::memory_order_relaxed), 3);
+  ASSERT_GT(bm25_stats.total_doc_length.load(std::memory_order_relaxed), 0);
 
   // Process TRUNCATE DDL event
   BinlogEvent ddl_event = BinlogEvent::CreateDDL("test_table", "TRUNCATE TABLE test_table");
 
-  bool result =
-      BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr);
+  bool result = BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                   nullptr, nullptr, &bm25_stats);
   EXPECT_TRUE(result);
 
   // doc_store should be empty
@@ -879,12 +909,17 @@ TEST_F(BinlogEventProcessorTest, TruncateClearsAllData) {
   EXPECT_EQ(index_->SearchAnd({"al"}).size(), 0);  // "alpha"
   EXPECT_EQ(index_->SearchAnd({"be"}).size(), 0);  // "beta"
   EXPECT_EQ(index_->SearchAnd({"ga"}).size(), 0);  // "gamma"
+  EXPECT_EQ(bm25_stats.doc_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(bm25_stats.total_doc_length.load(std::memory_order_relaxed), 0);
+  EXPECT_DOUBLE_EQ(bm25_stats.avg_doc_length(), 0.0);
 }
 
 /**
  * @brief Test that DROP TABLE DDL clears all data from store and index
  */
 TEST_F(BinlogEventProcessorTest, DropClearsAllData) {
+  server::BM25Stats bm25_stats;
+
   // INSERT 3 documents
   for (const auto& [pk, text] :
        std::vector<std::pair<std::string, std::string>>{{"pk1", "alpha"}, {"pk2", "beta"}, {"pk3", "gamma"}}) {
@@ -894,16 +929,19 @@ TEST_F(BinlogEventProcessorTest, DropClearsAllData) {
     event.text = text;
     event.table_name = "test_table";
 
-    ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+    ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr,
+                                                   nullptr, &bm25_stats));
   }
 
   ASSERT_EQ(doc_store_->Size(), 3);
+  ASSERT_EQ(bm25_stats.doc_count.load(std::memory_order_relaxed), 3);
+  ASSERT_GT(bm25_stats.total_doc_length.load(std::memory_order_relaxed), 0);
 
   // Process DROP DDL event
   BinlogEvent ddl_event = BinlogEvent::CreateDDL("test_table", "DROP TABLE test_table");
 
-  bool result =
-      BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr);
+  bool result = BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                   nullptr, nullptr, &bm25_stats);
   EXPECT_TRUE(result);
 
   // doc_store should be empty
@@ -913,6 +951,9 @@ TEST_F(BinlogEventProcessorTest, DropClearsAllData) {
   EXPECT_EQ(index_->SearchAnd({"al"}).size(), 0);  // "alpha"
   EXPECT_EQ(index_->SearchAnd({"be"}).size(), 0);  // "beta"
   EXPECT_EQ(index_->SearchAnd({"ga"}).size(), 0);  // "gamma"
+  EXPECT_EQ(bm25_stats.doc_count.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(bm25_stats.total_doc_length.load(std::memory_order_relaxed), 0);
+  EXPECT_DOUBLE_EQ(bm25_stats.avg_doc_length(), 0.0);
 }
 
 /**
@@ -1221,6 +1262,9 @@ TEST_F(BinlogEventProcessorTest, DDLTypeClassification) {
   // ALTER
   auto alter_event = BinlogEvent::CreateDDL("t", "ALTER TABLE t ADD COLUMN x INT");
   EXPECT_EQ(alter_event.ddl_type, DDLType::kAlter);
+
+  auto create_event = BinlogEvent::CreateDDL("t", "CREATE TABLE IF NOT EXISTS t (id BIGINT PRIMARY KEY)");
+  EXPECT_EQ(create_event.ddl_type, DDLType::kCreate);
 
   // DROP
   auto drop_event = BinlogEvent::CreateDDL("t", "DROP TABLE t");

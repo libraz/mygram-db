@@ -9,6 +9,7 @@
 
 #include <vector>
 
+#include "mysql/binlog_event_parser.h"
 #include "mysql/mariadb_gtid.h"
 #include "utils/constants.h"
 
@@ -152,6 +153,39 @@ TEST_F(MariaDBEventParserGTIDTest, XaFlagsAreExposedBeforeRowEvents) {
   ASSERT_TRUE(MariaDBEventParser::ExtractGTIDFlags(completed.data(), completed.size()).has_value());
   EXPECT_NE(*MariaDBEventParser::ExtractGTIDFlags(completed.data(), completed.size()) & MariaDBEventParser::kXaFlagMask,
             0U);
+}
+
+TEST_F(MariaDBEventParserGTIDTest, StandaloneFlagControlsReaderTransactionState) {
+  auto transactional = BuildGTIDEvent(0, 1, 42, 0);
+  auto standalone = BuildGTIDEvent(0, 1, 43, MariaDBEventParser::kStandaloneFlag);
+
+  const auto transactional_flags = MariaDBEventParser::ExtractGTIDFlags(transactional.data(), transactional.size());
+  const auto standalone_flags = MariaDBEventParser::ExtractGTIDFlags(standalone.data(), standalone.size());
+  ASSERT_TRUE(transactional_flags.has_value());
+  ASSERT_TRUE(standalone_flags.has_value());
+
+  EXPECT_TRUE(BinlogEventParser::IsMariaDBGtidTransactionOpen(*transactional_flags));
+  EXPECT_FALSE(BinlogEventParser::IsMariaDBGtidTransactionOpen(*standalone_flags));
+  EXPECT_FALSE(BinlogEventParser::IsMariaDBGtidTransactionOpen(MariaDBEventParser::kStandaloneFlag |
+                                                               MariaDBEventParser::kPreparedXaFlag));
+}
+
+TEST(MariaDBStandaloneGroupTest, RowsStatementEndFlagDefinesImplicitCommitBoundary) {
+  constexpr size_t kRowsFlagsOffset = mygram::constants::kBinlogEventHeaderLen + 6;
+  constexpr size_t kRowsEventLength = kRowsFlagsOffset + 2;
+  auto rows_event = MakeEventHeader(static_cast<uint8_t>(MySQLBinlogEventType::WRITE_ROWS_EVENT), 1,
+                                    static_cast<uint32_t>(kRowsEventLength));
+  rows_event.resize(kRowsEventLength, 0);
+
+  EXPECT_FALSE(BinlogEventParser::IsRowsStatementEnd(rows_event.data(), rows_event.size()));
+
+  rows_event[kRowsFlagsOffset] = 0x01;
+  EXPECT_TRUE(BinlogEventParser::IsRowsStatementEnd(rows_event.data(), rows_event.size()));
+
+  rows_event[4] = static_cast<uint8_t>(MySQLBinlogEventType::TABLE_MAP_EVENT);
+  EXPECT_FALSE(BinlogEventParser::IsRowsStatementEnd(rows_event.data(), rows_event.size()));
+  EXPECT_FALSE(BinlogEventParser::IsRowsStatementEnd(rows_event.data(), kRowsEventLength - 1));
+  EXPECT_FALSE(BinlogEventParser::IsRowsStatementEnd(nullptr, rows_event.size()));
 }
 
 TEST_F(MariaDBEventParserGTIDTest, NullBuffer) {

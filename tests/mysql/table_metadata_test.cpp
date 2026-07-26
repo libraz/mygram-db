@@ -210,6 +210,28 @@ TEST_F(TableMetadataCacheTest, ColumnBitmaps) {
   EXPECT_EQ(retrieved->columns_after_image[1], 0xFF);
 }
 
+TEST(TableMetadataTest, RebuildsConstantTimeColumnOrdinalLookup) {
+  TableMetadata metadata;
+  metadata.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  metadata.columns.push_back({ColumnType::VARCHAR, "title", 255, false, false});
+  metadata.columns.push_back({ColumnType::BLOB, "body", 4, true, false});
+
+  metadata.RebuildColumnOrdinals();
+
+  EXPECT_EQ(metadata.FindColumnOrdinal("id"), 0U);
+  EXPECT_EQ(metadata.FindColumnOrdinal("title"), 1U);
+  EXPECT_EQ(metadata.FindColumnOrdinal("body"), 2U);
+  EXPECT_FALSE(metadata.FindColumnOrdinal("missing").has_value());
+}
+
+TEST(TableMetadataTest, ParsesEnumAndSetDeclarationLabels) {
+  EXPECT_EQ(ParseEnumSetColumnValues("enum('draft','published','can''t')"),
+            (std::vector<std::string>{"draft", "published", "can't"}));
+  EXPECT_EQ(ParseEnumSetColumnValues("set('red','green','blue')"), (std::vector<std::string>{"red", "green", "blue"}));
+  EXPECT_TRUE(ParseEnumSetColumnValues("varchar(20)").empty());
+  EXPECT_TRUE(ParseEnumSetColumnValues("enum('unterminated)").empty());
+}
+
 // ===========================================================================
 // Large table ID tests
 // ===========================================================================

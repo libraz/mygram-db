@@ -28,6 +28,7 @@
 #include "mysql/mariadb_gtid.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/numeric_parse.h"
+#include "utils/sql_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -108,6 +109,12 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
                                             cache_manager_.load(std::memory_order_acquire), bm25_stats);
 }
 
+bool BinlogReader::IsRetryableSchemaValidationError(mygram::utils::ErrorCode code) {
+  using mygram::utils::ErrorCode;
+  return code == ErrorCode::kMySQLConnectionFailed || code == ErrorCode::kMySQLDisconnected ||
+         code == ErrorCode::kMySQLTimeout;
+}
+
 BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEvent& event) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -139,7 +146,7 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
   if (event.ddl_type == DDLType::kRename) {
     return incompatible("configured table was renamed; aliases are not followed automatically");
   }
-  if (event.ddl_type != DDLType::kAlter) {
+  if (event.ddl_type != DDLType::kAlter && event.ddl_type != DDLType::kCreate) {
     return incompatible("unclassified DDL affected a configured table");
   }
 
@@ -162,8 +169,7 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
   auto current = DDLSchemaValidator::Capture(*metadata_connection_, table_iter->second->config);
   if (!current) {
     const ErrorCode code = current.error().code();
-    if (code == ErrorCode::kMySQLConnectionFailed || code == ErrorCode::kMySQLDisconnected ||
-        code == ErrorCode::kMySQLTimeout || code == ErrorCode::kMySQLQueryFailed) {
+    if (IsRetryableSchemaValidationError(code)) {
       SetLastError(current.error());
       return DDLSchemaCheck::kRetryableFailure;
     }
@@ -191,7 +197,9 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
         for (size_t i = 0; i < metadata.columns.size(); i++) {
           metadata.columns[i].name = column_definitions[i].name;
           metadata.columns[i].is_unsigned = column_definitions[i].is_unsigned;
+          metadata.columns[i].enum_set_values = column_definitions[i].enum_set_values;
         }
+        metadata.RebuildColumnOrdinals();
         mygram::utils::StructuredLog()
             .Event("binlog_debug")
             .Field("action", "column_names_cache_hit")
@@ -215,22 +223,18 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   }
 
   // Cache miss or stale: use SHOW COLUMNS (faster than INFORMATION_SCHEMA)
-  // Escape backticks in identifier names
-  auto escape_identifier = [](const std::string& identifier) {
-    std::string escaped;
-    escaped.reserve(identifier.length());
-    for (char chr : identifier) {
-      if (chr == '`') {
-        escaped += "``";  // Double backtick for escaping
-      } else {
-        escaped += chr;
-      }
-    }
-    return escaped;
-  };
-
-  std::string query = "SHOW COLUMNS FROM `" + escape_identifier(metadata.database_name) + "`.`" +
-                      escape_identifier(metadata.table_name) + "`";
+  auto quoted_table = mygramdb::utils::QuoteQualifiedSQLIdentifier(metadata.database_name, metadata.table_name);
+  if (!quoted_table) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "invalid_metadata_identifier")
+        .Field("database", metadata.database_name)
+        .Field("table", metadata.table_name)
+        .Field("error", quoted_table.error().message())
+        .Error();
+    return false;
+  }
+  std::string query = "SHOW COLUMNS FROM " + *quoted_table;
 
   // Use dedicated metadata connection to avoid thread safety issues (#1)
   // The main connection_ must not be used from the reader thread.
@@ -293,6 +297,8 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
     BinlogReader::ColumnDefinition column_definition;
     column_definition.name = row[0] == nullptr ? std::string{} : std::string(row[0]);
     column_definition.is_unsigned = is_unsigned_type(row[1]);
+    column_definition.enum_set_values =
+        row[1] == nullptr ? std::vector<std::string>{} : ParseEnumSetColumnValues(row[1]);
     column_definitions.push_back(std::move(column_definition));
   }
 
@@ -314,7 +320,9 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   for (size_t i = 0; i < metadata.columns.size(); i++) {
     metadata.columns[i].name = column_definitions[i].name;
     metadata.columns[i].is_unsigned = column_definitions[i].is_unsigned;
+    metadata.columns[i].enum_set_values = column_definitions[i].enum_set_values;
   }
+  metadata.RebuildColumnOrdinals();
 
   // Store in cache
   {
@@ -331,6 +339,11 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
       .Debug();
 
   return true;
+}
+
+void BinlogReader::InvalidateColumnNamesForSchemaChange(const TableMetadata& metadata) {
+  std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
+  column_names_cache_.erase(metadata.database_name + "." + metadata.table_name);
 }
 
 std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
@@ -390,54 +403,67 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
   return uuid + ":1-" + after_colon;
 }
 
-void BinlogReader::UpdateCurrentGTID(const std::string& gtid) {
-  std::string applied_gtid;
+mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::UpdateCurrentGTID(const std::string& gtid) {
+  mygram::utils::Expected<std::string, mygram::utils::Error> advanced = mygram::utils::MakeUnexpected(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "GTID update was not attempted"));
   {
     std::scoped_lock lock(gtid_mutex_);
-    bool updated_as_mariadb = false;
+    advanced = UpdateCurrentGTIDLocked(gtid);
+  }
+  if (!advanced) {
+    return mygram::utils::MakeUnexpected(advanced.error());
+  }
+  ClearReachedReplayWatermarks(*advanced);
+  return {};
+}
 
-    if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
-      auto parsed = MariaDBGTID::Parse(gtid);
-      if (parsed) {
-        std::map<uint32_t, MariaDBGTID> by_domain;
+mygram::utils::Expected<std::string, mygram::utils::Error> BinlogReader::UpdateCurrentGTIDLocked(
+    const std::string& gtid) {
+  if (gtid.empty()) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLInvalidGTID, "Cannot advance an empty GTID"));
+  }
+  std::string applied_gtid;
+  if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
+    auto parsed = MariaDBGTID::Parse(gtid);
+    auto current_set = MariaDBGTID::ParseSet(current_gtid_);
+    if (!parsed || !current_set) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kMySQLInvalidGTID,
+          "Cannot merge MariaDB GTID '" + gtid + "' into applied position '" + current_gtid_ + "'"));
+    }
 
-        auto current_set = MariaDBGTID::ParseSet(current_gtid_);
-        if (current_set) {
-          for (const auto& existing : *current_set) {
-            auto iter = by_domain.find(existing.domain_id);
-            if (iter == by_domain.end() || existing.sequence_no > iter->second.sequence_no) {
-              by_domain[existing.domain_id] = existing;
-            }
-          }
-        }
-
-        auto iter = by_domain.find(parsed->domain_id);
-        if (iter == by_domain.end() || parsed->sequence_no >= iter->second.sequence_no) {
-          by_domain[parsed->domain_id] = *parsed;
-        }
-
-        std::vector<MariaDBGTID> merged;
-        merged.reserve(by_domain.size());
-        for (const auto& [domain_id, domain_gtid] : by_domain) {
-          (void)domain_id;
-          merged.push_back(domain_gtid);
-        }
-        current_gtid_ = MariaDBGTID::SetToString(merged);
-        updated_as_mariadb = true;
+    std::map<uint32_t, MariaDBGTID> by_domain;
+    for (const auto& existing : *current_set) {
+      auto iter = by_domain.find(existing.domain_id);
+      if (iter == by_domain.end() || existing.sequence_no > iter->second.sequence_no) {
+        by_domain[existing.domain_id] = existing;
       }
     }
 
-    if (!updated_as_mariadb) {
-      auto merged = GtidEncoder::MergeSingleGtidIntoSet(current_gtid_, gtid);
-      current_gtid_ = merged.has_value() ? *merged : gtid;
+    auto iter = by_domain.find(parsed->domain_id);
+    if (iter == by_domain.end() || parsed->sequence_no >= iter->second.sequence_no) {
+      by_domain[parsed->domain_id] = *parsed;
     }
-    applied_gtid = current_gtid_;
-  }
 
-  // Note: executed_gtid_set_ is intentionally NOT updated here.
-  // UpdateCurrentGTID is called with single GTIDs from binlog events (e.g., "uuid:101").
-  // The full GTID set for reconnection is maintained separately.
-  ClearReachedReplayWatermarks(applied_gtid);
+    std::vector<MariaDBGTID> merged;
+    merged.reserve(by_domain.size());
+    for (const auto& [domain_id, domain_gtid] : by_domain) {
+      (void)domain_id;
+      merged.push_back(domain_gtid);
+    }
+    applied_gtid = MariaDBGTID::SetToString(merged);
+  } else {
+    auto merged = GtidEncoder::MergeSingleGtidIntoSet(current_gtid_, gtid);
+    if (!merged.has_value()) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kMySQLInvalidGTID,
+          "Cannot merge MySQL GTID '" + gtid + "' into applied position '" + current_gtid_ + "'"));
+    }
+    applied_gtid = *merged;
+  }
+  current_gtid_ = applied_gtid;
+  return applied_gtid;
 }
 
 void BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid) {

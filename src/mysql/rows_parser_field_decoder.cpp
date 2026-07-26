@@ -12,9 +12,11 @@
 #include <limits>
 #include <sstream>
 
+#include "mysql/binary_json.h"
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
 #include "mysql/table_metadata.h"
+#include "mysql/value_canonicalizer.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/string_utils.h"
@@ -38,19 +40,6 @@ uint32_t FractionalToMicroseconds(int32_t frac, uint8_t precision) {
     return 0;
   }
   return static_cast<uint32_t>(std::abs(frac)) * kMultipliers[precision];
-}
-
-int32_t ReadSignedBigEndian(const unsigned char* data, int bytes) {
-  int32_t value = 0;
-  for (int i = 0; i < bytes; i++) {
-    value = (value << 8) | data[i];
-  }
-  const int bits = bytes * 8;
-  const int32_t sign_bit = 1 << (bits - 1);
-  if ((value & sign_bit) != 0) {
-    value -= (1 << bits);
-  }
-  return value;
 }
 
 bool IsValidDateComponents(uint64_t year, uint64_t month, uint64_t day) {
@@ -84,7 +73,9 @@ std::string FormatFloatingPoint(T value) {
 }
 
 Expected<size_t, Error> DecimalBinarySize(uint8_t precision, uint8_t scale) {
-  if (scale > precision) {
+  constexpr uint8_t kMaxDecimalPrecision = 65;
+  constexpr uint8_t kMaxDecimalScale = 30;
+  if (precision == 0 || precision > kMaxDecimalPrecision || scale > precision || scale > kMaxDecimalScale) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DECIMAL metadata"));
   }
 
@@ -98,7 +89,8 @@ Expected<size_t, Error> DecimalBinarySize(uint8_t precision, uint8_t scale) {
 }
 
 Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata,
-                                              bool is_null, const unsigned char* end, bool is_unsigned) {
+                                              bool is_null, const unsigned char* end, bool is_unsigned,
+                                              const std::vector<std::string>* enum_set_values) {
   constexpr uint32_t kMaxFieldLength = 256 * 1024 * 1024;  // 256MB max for any field
   if (is_null) {
     return std::string{};  // NULL values represented as empty string
@@ -328,7 +320,38 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
         for (uint8_t i = 0; i < pack_length; ++i) {
           value |= static_cast<uint64_t>(data[i]) << (i * 8);
         }
-        return std::to_string(value);
+        if (enum_set_values == nullptr) {
+          return std::to_string(value);
+        }
+        if (enum_set_values->empty()) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM/SET labels are unavailable"));
+        }
+        if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM)) {
+          if (value == 0) {
+            return std::string{};
+          }
+          if (value > enum_set_values->size()) {
+            return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
+          }
+          return (*enum_set_values)[value - 1];
+        }
+        if (enum_set_values->size() > 64) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET has more than 64 labels"));
+        }
+        std::string labels;
+        for (size_t index = 0; index < enum_set_values->size(); ++index) {
+          if ((value & (uint64_t{1} << index)) == 0) {
+            continue;
+          }
+          if (!labels.empty()) {
+            labels.push_back(',');
+          }
+          labels += (*enum_set_values)[index];
+        }
+        if (enum_set_values->size() < 64 && (value >> enum_set_values->size()) != 0) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET bitmask is outside label table"));
+        }
+        return labels;
       }
       uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
       uint32_t str_len = 0;
@@ -404,7 +427,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
-      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(json_data), json_len});
+      return DecodeBinaryJson(json_data, json_len);
     }
 
     // Date/Time types (simple representation as strings)
@@ -430,9 +453,8 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       if (auto available = RequireBytes(data, end, 4); !available) {
         return MakeUnexpected(available.error());
       }
-      // Unix timestamp (seconds since 1970-01-01), no fractional seconds
       uint32_t timestamp = binlog_util::uint4korr(data);
-      return std::to_string(timestamp);
+      return FormatUtcTimestamp(timestamp);
     }
 
     case 17: {  // MYSQL_TYPE_TIMESTAMP2 (4+ bytes)
@@ -463,12 +485,10 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
         uint32_t usec = FractionalToMicroseconds(frac, metadata);
 
-        std::ostringstream oss;
-        oss << timestamp << '.' << std::setfill('0') << std::setw(6) << usec;
-        return oss.str();
+        return FormatUtcTimestamp(timestamp, usec, metadata);
       }
 
-      return std::to_string(timestamp);
+      return FormatUtcTimestamp(timestamp);
     }
 
     case 12: {  // MYSQL_TYPE_DATETIME (8 bytes, old format)
@@ -630,19 +650,47 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       constexpr int32_t kTimefIntOfs = 0x800000;
       int32_t intpart = static_cast<int32_t>(packed) - kTimefIntOfs;
 
-      // Handle negative time values
-      bool negative = intpart < 0;
+      constexpr int64_t kPackedFractionBase = int64_t{1} << 24;
+      int64_t packed_time = 0;
+      if (metadata >= 5) {
+        uint64_t stored = 0;
+        for (int index = 0; index < 6; ++index) {
+          stored = (stored << 8) | data[index];
+        }
+        constexpr int64_t kTimefOfs = 0x800000000000LL;
+        packed_time = static_cast<int64_t>(stored) - kTimefOfs;
+      } else {
+        int32_t frac = 0;
+        if (metadata == 1 || metadata == 2) {
+          frac = data[3];
+          if (intpart < 0 && frac != 0) {
+            ++intpart;
+            frac -= 0x100;
+          }
+          frac *= 10000;
+        } else if (metadata == 3 || metadata == 4) {
+          frac = (static_cast<int32_t>(data[3]) << 8) | data[4];
+          if (intpart < 0 && frac != 0) {
+            ++intpart;
+            frac -= 0x10000;
+          }
+          frac *= 100;
+        }
+        packed_time = static_cast<int64_t>(intpart) * kPackedFractionBase + frac;
+      }
+      const bool negative = packed_time < 0;
       if (negative) {
-        intpart = -intpart;
+        packed_time = -packed_time;
       }
 
       // Extract time parts per MySQL format:
       // hour = hms >> 12
       // minute = (hms >> 6) & 0x3F (6 bits)
       // second = hms & 0x3F (6 bits)
-      unsigned int hour = intpart >> 12;
-      unsigned int minute = (intpart >> 6) & 0x3F;
-      unsigned int second = intpart & 0x3F;
+      const auto hms = static_cast<uint64_t>(packed_time / kPackedFractionBase);
+      unsigned int hour = hms >> 12;
+      unsigned int minute = (hms >> 6) & 0x3F;
+      unsigned int second = hms & 0x3F;
 
       if (!IsValidTimeComponents(hour, minute, second)) {
         return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid TIME2 component value"));
@@ -657,15 +705,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
       // Process fractional seconds if present
       if (metadata > 0) {
-        int frac_bytes = (metadata + 1) / 2;
-        int32_t frac = negative ? ReadSignedBigEndian(data + 3, frac_bytes) : 0;
-        if (!negative) {
-          for (int i = 0; i < frac_bytes; i++) {
-            frac = (frac << 8) | data[3 + i];
-          }
-        }
-
-        uint32_t usec = FractionalToMicroseconds(frac, metadata);
+        uint32_t usec = static_cast<uint32_t>(packed_time % kPackedFractionBase);
 
         oss << '.' << std::setw(6) << usec;
       }
@@ -684,7 +724,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       if (auto available = RequireBytes(data, end, *decimal_size); !available) {
         return MakeUnexpected(available.error());
       }
-      return binlog_util::decode_decimal(data, precision, scale);
+      return CanonicalizeColumnValue(binlog_util::decode_decimal(data, precision, scale), CanonicalValueKind::kDecimal);
     }
 
     case 242: {  // MYSQL_TYPE_VECTOR (same encoding as BLOB, binary float data)
@@ -808,12 +848,36 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
         if (data + 1 > end)
           return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         uint8_t val = *data;
-        return std::to_string(val);
+        if (enum_set_values == nullptr) {
+          return std::to_string(val);
+        }
+        if (enum_set_values->empty()) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM labels are unavailable"));
+        }
+        if (val == 0) {
+          return std::string{};
+        }
+        if (val > enum_set_values->size()) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
+        }
+        return (*enum_set_values)[val - 1];
       } else {
         if (data + 2 > end)
           return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
         uint16_t val = data[0] | (static_cast<uint16_t>(data[1]) << 8);
-        return std::to_string(val);
+        if (enum_set_values == nullptr) {
+          return std::to_string(val);
+        }
+        if (enum_set_values->empty()) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM labels are unavailable"));
+        }
+        if (val == 0) {
+          return std::string{};
+        }
+        if (val > enum_set_values->size()) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
+        }
+        return (*enum_set_values)[val - 1];
       }
     }
     case 248: {  // MYSQL_TYPE_SET
@@ -831,7 +895,29 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       for (uint8_t i = 0; i < set_size; i++) {
         val |= static_cast<uint64_t>(data[i]) << (i * 8);
       }
-      return std::to_string(val);
+      if (enum_set_values == nullptr) {
+        return std::to_string(val);
+      }
+      if (enum_set_values->empty()) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET labels are unavailable"));
+      }
+      if (enum_set_values->size() > 64) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET has more than 64 labels"));
+      }
+      std::string labels;
+      for (size_t index = 0; index < enum_set_values->size(); ++index) {
+        if ((val & (uint64_t{1} << index)) == 0) {
+          continue;
+        }
+        if (!labels.empty()) {
+          labels.push_back(',');
+        }
+        labels += (*enum_set_values)[index];
+      }
+      if (enum_set_values->size() < 64 && (val >> enum_set_values->size()) != 0) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET bitmask is outside label table"));
+      }
+      return labels;
     }
 
     default:

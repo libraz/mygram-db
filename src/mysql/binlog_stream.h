@@ -86,7 +86,7 @@ class IBinlogStream {
    * @brief Configure session variables for binlog replication
    *
    * For MySQL: SET @source_binlog_checksum='CRC32', SET @master_heartbeat_period
-   * For MariaDB: SET @slave_connect_state, SET @slave_gtid_strict_mode, etc.
+   * For MariaDB: require CRC32, SET @slave_gtid_strict_mode, etc.
    *
    * @param conn Connection to configure
    * @return Success or error
@@ -100,7 +100,9 @@ class IBinlogStream {
    * For MariaDB: Sends COM_BINLOG_DUMP packet
    *
    * @param conn Connection to use
-   * @param gtid GTID position to start from (empty = current position)
+   * @param gtid Last applied GTID position. An empty value reports no applied
+   *             position; callers must establish a snapshot watermark before
+   *             relying on continuous replication.
    * @param server_id Replica server ID
    * @return Success or error (includes binlog purged as specific error)
    */

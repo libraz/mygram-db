@@ -3,7 +3,9 @@
  * @brief Unit tests for binlog reader - Core lifecycle and queue operations
  */
 
+#include "binlog_event_builder.h"
 #include "binlog_test_fixtures.h"
+#include "support/deterministic_gate.h"
 
 #ifdef USE_MYSQL
 
@@ -35,29 +37,134 @@ TEST_F(BinlogReaderFixture, RejectsDoubleStart) {
   EXPECT_NE(reader_->GetLastError().find("already running"), std::string::npos);
 }
 
-/**
- * @brief Verify IsRunning returns false when should_stop_ is true
- *
- * This tests the fix for the REPLICATION STATUS bug where status would show
- * "running" even when Stop() was requested but threads hadn't finished yet.
- */
-TEST_F(BinlogReaderFixture, IsRunningReturnsFalseWhenShouldStopIsTrue) {
+TEST_F(BinlogReaderFixture, IsRunningTracksActiveMutatingThreadsBeforeJoin) {
   // Initially not running
   EXPECT_FALSE(reader_->IsRunning());
 
   // Simulate running state
   reader_->running_ = true;
+  reader_->active_threads_ = 2;
   EXPECT_TRUE(reader_->IsRunning());
 
-  // Set should_stop_ flag (simulating Stop() was called)
+  // A fatal worker exit requests stop while the reader can still mutate state.
   reader_->should_stop_ = true;
+  reader_->active_threads_ = 1;
+  EXPECT_TRUE(reader_->IsRunning());
 
-  // IsRunning should now return false (stopping state)
+  // Once both threads have actually exited, status is stopped even though
+  // Stop() still owns the responsibility to join their thread objects.
+  reader_->active_threads_ = 0;
   EXPECT_FALSE(reader_->IsRunning());
 
-  // Cleanup
-  reader_->running_ = false;
-  reader_->should_stop_ = false;
+  reader_->Stop();
+  EXPECT_FALSE(reader_->IsRunning());
+  EXPECT_FALSE(reader_->should_stop_.load());
+}
+
+TEST_F(BinlogReaderFixture, ReconnectBackoffEscalatesAndIsBounded) {
+  reader_->config_.reconnect_delay_ms = 25;
+  EXPECT_EQ(reader_->ReconnectBackoffDelayMs(1), 25);
+  EXPECT_EQ(reader_->ReconnectBackoffDelayMs(2), 50);
+  EXPECT_EQ(reader_->ReconnectBackoffDelayMs(9), 225);
+  EXPECT_EQ(reader_->ReconnectBackoffDelayMs(10), 250);
+  EXPECT_EQ(reader_->ReconnectBackoffDelayMs(11), 250);
+}
+
+TEST_F(BinlogReaderFixture, ReconnectBackoffCanBeCancelledByShutdown) {
+  reader_->config_.reconnect_delay_ms = 1000;
+  mygramdb::testing::DeterministicGate about_to_wait;
+  std::atomic<bool> completed_full_delay{true};
+
+  std::thread waiter([&] {
+    about_to_wait.ArriveAndWait();
+    completed_full_delay.store(reader_->WaitForReconnectBackoff(10), std::memory_order_release);
+  });
+
+  ASSERT_TRUE(about_to_wait.WaitUntilArrived(std::chrono::seconds(2)));
+  about_to_wait.Release();
+  reader_->should_stop_.store(true, std::memory_order_release);
+  reader_->queue_cv_.notify_all();
+  waiter.join();
+
+  EXPECT_FALSE(completed_full_delay.load(std::memory_order_acquire));
+  reader_->should_stop_.store(false, std::memory_order_release);
+}
+
+TEST_F(BinlogReaderFixture, UnsupportedRuntimeEventsStopBeforeGtidAdvance) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  const std::array unsupported_types{
+      MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT,
+      MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT,
+      MySQLBinlogEventType::XA_PREPARE_LOG_EVENT,
+      MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT,
+  };
+
+  for (const auto expected_type : unsupported_types) {
+    SCOPED_TRACE(GetEventTypeName(expected_type));
+    auto wire_event = BinlogEventBuilder::BuildHeader(expected_type);
+    BinlogEventBuilder::AppendLittleEndian32(wire_event, 0);
+    BinlogEventBuilder::FixEventSizeWithChecksum(wire_event);
+    const auto decoded_type = static_cast<MySQLBinlogEventType>(wire_event[4]);
+
+    reader_->should_stop_.store(false, std::memory_order_release);
+    reader_->SetCurrentGTID("uuid:17");
+    ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(decoded_type));
+    EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:17");
+    EXPECT_FALSE(reader_->GetLastError().empty());
+  }
+}
+
+TEST(ReplicationPositionStateTest, ReceivedAppliedAndCommittedPositionsRemainDistinct) {
+  ReplicationPositionState state;
+  state.ObserveReceivedGTID("uuid:41", true, false);
+
+  EXPECT_EQ(state.received_gtid(), "uuid:41");
+  EXPECT_TRUE(state.reader_transaction_open());
+  EXPECT_TRUE(state.TakeCommitGTID("").empty())
+      << "A received GTID must never become committed before a mutation or explicit commit";
+
+  state.RecordAppliedMutation("uuid:41");
+  EXPECT_EQ(state.TakeCommitGTID(""), "uuid:41");
+  EXPECT_TRUE(state.TakeCommitGTID("").empty());
+
+  state.ObserveReceivedGTID("1-2-9", false, true);
+  EXPECT_TRUE(state.mariadb_standalone_group_open());
+  state.CloseMariaDBStandaloneGroup();
+  EXPECT_FALSE(state.mariadb_standalone_group_open());
+  EXPECT_EQ(state.TakeCommitGTID("1-2-9"), "1-2-9");
+}
+
+TEST_F(BinlogReaderFixture, StreamStartClearsReceivedGtidWithoutReplacingMultiUuidPosition) {
+  const std::string applied_position =
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-50";
+  reader_->SetCurrentGTID(applied_position);
+
+  reader_->position_state_.ObserveReceivedGTID("cccccccc-cccc-cccc-cccc-cccccccccccc:7", true, false);
+  reader_->position_state_.ResetReceived();
+
+  EXPECT_TRUE(reader_->position_state_.received_gtid().empty());
+  EXPECT_FALSE(reader_->position_state_.reader_transaction_open());
+  EXPECT_EQ(reader_->GetCurrentGTID(), applied_position)
+      << "a saved multi-source position must not become a received transaction GTID";
+}
+
+TEST_F(BinlogReaderFixture, ReestablishedConnectionIsNotClosedBeforeNextStreamOpen) {
+  EXPECT_FALSE(BinlogReader::ShouldCloseStreamAfterReadLoop(true));
+  EXPECT_TRUE(BinlogReader::ShouldCloseStreamAfterReadLoop(false));
+}
+
+TEST_F(BinlogReaderFixture, SchemaChangeInvalidatesStaleColumnNamesBeforeRefresh) {
+  TableMetadata metadata;
+  metadata.database_name = "app";
+  metadata.table_name = "articles";
+  reader_->column_names_cache_["app.articles"] = {{"old_content", false, {}}};
+  reader_->column_names_cache_["app.other"] = {{"other", false, {}}};
+
+  reader_->InvalidateColumnNamesForSchemaChange(metadata);
+
+  EXPECT_EQ(reader_->column_names_cache_.count("app.articles"), 0U);
+  EXPECT_EQ(reader_->column_names_cache_.count("app.other"), 1U);
 }
 
 /**
@@ -630,6 +737,17 @@ TEST_F(BinlogReaderFixture, MariaDbCurrentGtidDoesNotRegressDomainSequence) {
   EXPECT_EQ(reader_->GetCurrentGTID(), "0-1-10,1-2-20");
 }
 
+TEST_F(BinlogReaderFixture, InvalidGtidMergeReturnsErrorWithoutAdvancingAppliedPosition) {
+  const std::string initial = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-50";
+  reader_->SetCurrentGTID(initial);
+
+  auto result = reader_->UpdateCurrentGTID("not-a-gtid");
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidGTID);
+  EXPECT_EQ(reader_->GetCurrentGTID(), initial);
+}
+
 /**
  * @brief Reconnection always uses current_gtid_ regardless of executed_gtid_set_
  */
@@ -787,6 +905,55 @@ TEST_F(BinlogReaderFixture, DmlGtidAdvancesOnlyAtCommitBoundary) {
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
 }
 
+TEST_F(BinlogReaderFixture, MismatchedCommitDoesNotDiscardPendingAppliedPosition) {
+  reader_->SetCurrentGTID("uuid:50");
+  BinlogEvent event = MakeEvent(BinlogEventType::INSERT, "51", 1, "text");
+  event.gtid = "uuid:51";
+  ASSERT_TRUE(reader_->ProcessQueuedEvent(event));
+
+  BinlogEvent mismatched_commit;
+  mismatched_commit.type = BinlogEventType::COMMIT;
+  mismatched_commit.gtid = "uuid:52";
+  EXPECT_FALSE(reader_->ProcessQueuedEvent(mismatched_commit));
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50");
+
+  BinlogEvent matching_commit;
+  matching_commit.type = BinlogEventType::COMMIT;
+  matching_commit.gtid = "uuid:51";
+  EXPECT_TRUE(reader_->ProcessQueuedEvent(matching_commit));
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
+}
+
+TEST_F(BinlogReaderFixture, PendingCommitPositionIsSerializedWithExplicitPositionReset) {
+  BinlogEvent event = MakeEvent(BinlogEventType::DELETE, "missing", 1, "text");
+  std::atomic<bool> processing_succeeded{true};
+
+  std::thread worker([&] {
+    for (int sequence = 1; sequence <= 20; ++sequence) {
+      event.gtid = "uuid:" + std::to_string(sequence);
+      if (!reader_->ProcessQueuedEvent(event)) {
+        processing_succeeded.store(false, std::memory_order_release);
+        return;
+      }
+    }
+  });
+  std::thread position_resetter([&] {
+    for (int sequence = 1000; sequence < 1020; ++sequence) {
+      reader_->SetCurrentGTID("uuid:" + std::to_string(sequence));
+    }
+  });
+  worker.join();
+  position_resetter.join();
+  ASSERT_TRUE(processing_succeeded.load(std::memory_order_acquire));
+
+  reader_->SetCurrentGTID("uuid:2000");
+  BinlogEvent commit;
+  commit.type = BinlogEventType::COMMIT;
+  ASSERT_TRUE(reader_->ProcessQueuedEvent(commit));
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:2000")
+      << "SetCurrentGTID must atomically clear any worker-owned pending transaction";
+}
+
 TEST_F(BinlogReaderFixture, DdlGtidAdvancesImmediatelyAfterSuccess) {
   reader_->SetCurrentGTID("uuid:50");
 
@@ -814,6 +981,17 @@ TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecove
   reader_->SetCurrentGTID("uuid:60");
   EXPECT_FALSE(reader_->HasSchemaIncompatibleError());
   EXPECT_TRUE(reader_->GetLastError().empty());
+}
+
+TEST_F(BinlogReaderFixture, PermanentSchemaReadFailureIsNotRetried) {
+  using mygram::utils::ErrorCode;
+
+  EXPECT_TRUE(reader_->IsRetryableSchemaValidationError(ErrorCode::kMySQLConnectionFailed));
+  EXPECT_TRUE(reader_->IsRetryableSchemaValidationError(ErrorCode::kMySQLDisconnected));
+  EXPECT_TRUE(reader_->IsRetryableSchemaValidationError(ErrorCode::kMySQLTimeout));
+  EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ErrorCode::kMySQLQueryFailed));
+  EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ErrorCode::kMySQLTableNotFound));
+  EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ErrorCode::kPermissionDenied));
 }
 
 /**
@@ -1126,11 +1304,73 @@ TEST_F(BinlogReaderFixture, MidTransactionFailureDoesNotAdvanceGtidToFailedTrans
     std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
     EXPECT_TRUE(reader_->event_queue_.empty()) << "commit marker and later rows must be discarded after failure";
   }
+  {
+    std::scoped_lock lock(reader_->gtid_mutex_);
+    EXPECT_TRUE(reader_->position_state_.TakeCommitGTID("").empty())
+        << "a partially applied transaction must not leave a commit candidate across reconnect";
+  }
 
   reader_->should_stop_ = true;
   reader_->queue_cv_.notify_all();
   worker.join();
   reader_->should_stop_ = false;
+}
+
+TEST_F(BinlogReaderFixture, ProcessingFailureRejectsConcurrentCommitBeforeWorkerContinues) {
+  server::TableContext broken_context;
+  broken_context.name = "broken";
+  broken_context.config = table_config_;
+  broken_context.config.name = "broken";
+  broken_context.index.reset();
+  broken_context.doc_store.reset();
+
+  reader_->table_contexts_["broken"] = &broken_context;
+  reader_->SetCurrentGTID("uuid:1");
+
+  mygramdb::testing::DeterministicGate failure_published;
+  reader_->SetAfterProcessingFailurePublishedHookForTest([&]() { failure_published.ArriveAndWait(); });
+
+  auto first_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1, "first row"));
+  first_event->gtid = "uuid:2";
+  auto failing_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "3", 1, "second row"));
+  failing_event->table_name = "broken";
+  failing_event->gtid = "uuid:2";
+
+  {
+    std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
+    reader_->event_queue_.push(std::move(first_event));
+    reader_->event_queue_.push(std::move(failing_event));
+  }
+  reader_->queue_cv_.notify_one();
+
+  std::thread worker([this]() { reader_->WorkerThreadFunc(); });
+  if (!failure_published.WaitUntilArrived(std::chrono::seconds(2))) {
+    failure_published.Release();
+    reader_->should_stop_.store(true, std::memory_order_release);
+    reader_->queue_cv_.notify_all();
+    worker.join();
+    reader_->SetAfterProcessingFailurePublishedHookForTest({});
+    FAIL() << "worker did not publish the processing failure";
+  }
+
+  auto commit_event = std::make_unique<BinlogEvent>();
+  commit_event->type = BinlogEventType::COMMIT;
+  commit_event->gtid = "uuid:2";
+  std::thread producer([this, event = std::move(commit_event)]() mutable { reader_->PushEvent(std::move(event)); });
+  producer.join();
+
+  EXPECT_EQ(reader_->GetQueueSize(), 0U) << "COMMIT must be rejected after failure publication";
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:1");
+
+  failure_published.Release();
+  reader_->should_stop_.store(true, std::memory_order_release);
+  reader_->queue_cv_.notify_all();
+  worker.join();
+  reader_->SetAfterProcessingFailurePublishedHookForTest({});
+  reader_->should_stop_.store(false, std::memory_order_release);
+
+  EXPECT_TRUE(doc_store_.GetDocId("2").has_value()) << "the transaction was partially applied before failure";
+  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:1") << "rejected COMMIT must not advance the failed transaction GTID";
 }
 
 // ===========================================================================

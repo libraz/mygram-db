@@ -35,6 +35,17 @@ TEST_F(EnumSetDecodeTest, Enum1ByteValue) {
   EXPECT_EQ(*result, "42");
 }
 
+TEST_F(EnumSetDecodeTest, EnumUsesDeclarationLabelWhenMetadataIsAvailable) {
+  uint16_t metadata = 1;
+  unsigned char data[] = {2};
+  const std::vector<std::string> labels = {"draft", "published"};
+
+  auto result = DecodeFieldValue(247, data, metadata, false, data + sizeof(data), false, &labels);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "published");
+}
+
 TEST_F(EnumSetDecodeTest, Enum1ByteZero) {
   uint16_t metadata = 1;
   unsigned char data[] = {0};
@@ -127,6 +138,31 @@ TEST_F(EnumSetDecodeTest, Set1ByteValue) {
   auto result = DecodeFieldValue(248, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "5");
+}
+
+TEST_F(EnumSetDecodeTest, SetUsesCommaSeparatedDeclarationLabels) {
+  uint16_t metadata = 1;
+  unsigned char data[] = {0x05};
+  const std::vector<std::string> labels = {"red", "green", "blue"};
+
+  auto result = DecodeFieldValue(248, data, metadata, false, data + sizeof(data), false, &labels);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "red,blue");
+}
+
+TEST_F(EnumSetDecodeTest, EnumAndSetBinlogValuesMatchSnapshotLabels) {
+  const std::vector<std::string> enum_labels = {"draft", "published"};
+  unsigned char enum_data[] = {2};
+  auto enum_value = DecodeFieldValue(247, enum_data, 1, false, enum_data + sizeof(enum_data), false, &enum_labels);
+  ASSERT_TRUE(enum_value.has_value());
+  EXPECT_EQ(*enum_value, "published");
+
+  const std::vector<std::string> set_labels = {"red", "green", "blue"};
+  unsigned char set_data[] = {0x05};
+  auto set_value = DecodeFieldValue(248, set_data, 1, false, set_data + sizeof(set_data), false, &set_labels);
+  ASSERT_TRUE(set_value.has_value());
+  EXPECT_EQ(*set_value, "red,blue");
 }
 
 TEST_F(EnumSetDecodeTest, Set2ByteValue) {

@@ -94,6 +94,28 @@ class GtidWaiterReader final : public IBinlogReader {
   std::string gtid_ = "0-1-2,2-1-1";
 };
 
+class GtidWaiterFakeRuntime {
+ public:
+  GtidWaitRuntime MakeRuntime() {
+    return {
+        [this]() { return now_; },
+        [this](std::chrono::milliseconds duration) {
+          now_ += duration;
+          ++sleep_calls_;
+          if (on_sleep_) {
+            on_sleep_(sleep_calls_);
+          }
+        },
+    };
+  }
+
+  std::function<void(int)> on_sleep_;
+  int sleep_calls_ = 0;
+
+ private:
+  GtidWaitRuntime::Clock::time_point now_{};
+};
+
 TEST(GtidWaiterTest, WaitsForMariaDbMultiDomainTarget) {
   GtidWaiterReader reader;
   std::thread advance([&reader]() {
@@ -111,6 +133,85 @@ TEST(GtidWaiterTest, FailsClosedWhenReaderStopsBeforeTarget) {
   auto result = WaitForAppliedPosition(reader, "0-9-5,2-7-3", std::chrono::milliseconds(200));
   ASSERT_FALSE(result.has_value());
   EXPECT_NE(result.error().message().find("stopped"), std::string::npos);
+}
+
+TEST(GtidWaiterTest, MonotonicProgressExtendsStallTimeout) {
+  GtidWaiterReader reader;
+  reader.SetCurrentGTID("0-1-1");
+  GtidWaiterFakeRuntime fake;
+  fake.on_sleep_ = [&reader](int sleep_calls) { reader.SetCurrentGTID("0-1-" + std::to_string(sleep_calls + 1)); };
+  auto runtime = fake.MakeRuntime();
+
+  auto result =
+      WaitForAppliedPosition(reader, "0-1-4", std::chrono::milliseconds(10), std::chrono::milliseconds(6), {}, runtime);
+
+  EXPECT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(fake.sleep_calls_, 3);
+}
+
+TEST(GtidWaiterTest, TimesOutAfterProgressStalls) {
+  GtidWaiterReader reader;
+  reader.SetCurrentGTID("0-1-1");
+  GtidWaiterFakeRuntime fake;
+  fake.on_sleep_ = [&reader](int sleep_calls) {
+    if (sleep_calls == 1) {
+      reader.SetCurrentGTID("0-1-2");
+    }
+  };
+  auto runtime = fake.MakeRuntime();
+
+  auto result =
+      WaitForAppliedPosition(reader, "0-1-3", std::chrono::milliseconds(10), std::chrono::milliseconds(6), {}, runtime);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("no GTID progress"), std::string::npos);
+  EXPECT_EQ(fake.sleep_calls_, 3);
+}
+
+TEST(GtidWaiterTest, OscillationDoesNotResetStallTimeout) {
+  GtidWaiterReader reader;
+  reader.SetCurrentGTID("0-1-2");
+  GtidWaiterFakeRuntime fake;
+  fake.on_sleep_ = [&reader](int sleep_calls) { reader.SetCurrentGTID(sleep_calls % 2 == 1 ? "0-1-1" : "0-1-2"); };
+  auto runtime = fake.MakeRuntime();
+
+  auto result =
+      WaitForAppliedPosition(reader, "0-1-3", std::chrono::milliseconds(10), std::chrono::milliseconds(6), {}, runtime);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("no GTID progress"), std::string::npos);
+  EXPECT_EQ(fake.sleep_calls_, 2);
+}
+
+TEST(GtidWaiterTest, CancellationInterruptsWait) {
+  GtidWaiterReader reader;
+  reader.SetCurrentGTID("0-1-1");
+  GtidWaiterFakeRuntime fake;
+  bool cancelled = false;
+  fake.on_sleep_ = [&cancelled](int) { cancelled = true; };
+  auto runtime = fake.MakeRuntime();
+
+  auto result = WaitForAppliedPosition(
+      reader, "0-1-2", std::chrono::seconds(60), std::chrono::milliseconds(10), [&cancelled]() { return cancelled; },
+      runtime);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kCancelled);
+  EXPECT_EQ(fake.sleep_calls_, 1);
+}
+
+TEST(GtidWaiterTest, FailsClosedOnMalformedCurrentPosition) {
+  GtidWaiterReader reader;
+  reader.SetCurrentGTID("not-a-gtid");
+  GtidWaiterFakeRuntime fake;
+  auto runtime = fake.MakeRuntime();
+
+  auto result =
+      WaitForAppliedPosition(reader, "0-1-3", std::chrono::seconds(60), std::chrono::milliseconds(10), {}, runtime);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidGTID);
+  EXPECT_EQ(fake.sleep_calls_, 0);
 }
 
 class GtidEncoderTest : public ::testing::Test {};

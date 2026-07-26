@@ -50,7 +50,7 @@ class IBinlogReader {
    * state immediately after Stop(). A non-synchronous Stop would leave a
    * window where binlog worker threads continue mutating the index and
    * document store while the caller assumes quiescence — a data race that
-   * silently corrupts dumps and SYNC rebuilds (see CR-9 audit, May 2026).
+   * silently corrupts dumps and SYNC rebuilds.
    *
    * @note Stop() MUST be idempotent: calling Stop() on an already-stopped
    * reader is a no-op success.

@@ -17,12 +17,38 @@
 #include <utility>
 
 #include "mysql/gtid_encoder.h"
+#include "server/log_field_names.h"
 #include "utils/numeric_parse.h"
+#include "utils/sql_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic) - UUID binary parsing
 
 namespace mygramdb::mysql {
+namespace {
+
+mygram::utils::ErrorCode QueryErrorCode(unsigned int native_error) {
+  // Stable server error numbers from the MySQL/MariaDB client protocol.
+  constexpr unsigned int kAccessDeniedDatabase = 1044;
+  constexpr unsigned int kAccessDeniedUser = 1045;
+  constexpr unsigned int kUnknownColumn = 1054;
+  constexpr unsigned int kCommandDenied = 1142;
+  constexpr unsigned int kNoSuchTable = 1146;
+  switch (native_error) {
+    case kNoSuchTable:
+      return mygram::utils::ErrorCode::kMySQLTableNotFound;
+    case kUnknownColumn:
+      return mygram::utils::ErrorCode::kMySQLColumnNotFound;
+    case kAccessDeniedDatabase:
+    case kAccessDeniedUser:
+    case kCommandDenied:
+      return mygram::utils::ErrorCode::kPermissionDenied;
+    default:
+      return mygram::utils::ErrorCode::kMySQLQueryFailed;
+  }
+}
+
+}  // namespace
 
 // GTID implementation
 
@@ -157,7 +183,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         mygram::utils::StructuredLog()
             .Event("mysql_options_warning")
             .Field("option", "MYSQL_OPT_SSL_CA")
-            .Field("path", config_.ssl_ca)
+            .Field(server::log_fields::kFieldFilepath, config_.ssl_ca)
             .Warn();
       }
     }
@@ -166,7 +192,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         mygram::utils::StructuredLog()
             .Event("mysql_options_warning")
             .Field("option", "MYSQL_OPT_SSL_CERT")
-            .Field("path", config_.ssl_cert)
+            .Field(server::log_fields::kFieldFilepath, config_.ssl_cert)
             .Warn();
       }
     }
@@ -175,7 +201,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         mygram::utils::StructuredLog()
             .Event("mysql_options_warning")
             .Field("option", "MYSQL_OPT_SSL_KEY")
-            .Field("path", config_.ssl_key)
+            .Field(server::log_fields::kFieldFilepath, config_.ssl_key)
             .Warn();
       }
     }
@@ -261,12 +287,33 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         .Debug();
   }
 
-  // Detect server flavor (MySQL vs MariaDB) from version string
-  {
-    const char* server_info = mysql_get_server_info(mysql_);
-    if (server_info != nullptr) {
-      server_version_ = server_info;
-      flavor_ = DetectServerFlavor(server_version_);
+  // Keep the version for diagnostics, but determine flavor from a protocol
+  // capability. Version strings are presentation data and may be rewritten by
+  // proxies or compatibility layers.
+  const char* server_info = mysql_get_server_info(mysql_);
+  if (server_info != nullptr) {
+    server_version_ = server_info;
+  }
+  const int flavor_query_result = mysql_query(mysql_, "SELECT @@GLOBAL.gtid_binlog_pos");
+  if (flavor_query_result == 0) {
+    MySQLResult flavor_probe(mysql_store_result(mysql_));
+    const bool result_read_succeeded = flavor_probe != nullptr || mysql_field_count(mysql_) == 0;
+    const auto detected_flavor = ClassifyServerFlavorCapabilityProbe(true, result_read_succeeded, mysql_errno(mysql_));
+    if (!detected_flavor.has_value()) {
+      const std::string error = GetMySQLErrorMessage();
+      Close();
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLQueryFailed, "Failed to read server flavor capability: " + error));
+    }
+    flavor_ = *detected_flavor;
+  } else {
+    const auto detected_flavor = ClassifyServerFlavorCapabilityProbe(false, false, mysql_errno(mysql_));
+    if (detected_flavor.has_value()) {
+      flavor_ = *detected_flavor;
+    } else {
+      const std::string error = GetMySQLErrorMessage();
+      Close();
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to probe server flavor: " + error));
     }
   }
 
@@ -374,15 +421,48 @@ mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::Execute(c
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "execute_query").Field("query", query).Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
+    const auto code = QueryErrorCode(mysql_errno(mysql_));
     std::string error = GetMySQLErrorMessage();
     mygram::utils::LogMySQLQueryError(query, error);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
+    return MakeUnexpected(MakeError(code, error, query));
   }
 
   MYSQL_RES* result = mysql_store_result(mysql_);
   if ((result == nullptr) && mysql_field_count(mysql_) > 0) {
     std::string error = GetMySQLErrorMessage();
     mygram::utils::LogMySQLQueryError(query, "Failed to store result: " + error);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
+  }
+
+  return MySQLResult(result);
+}
+
+mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::ExecuteStreaming(const std::string& query) {
+  using mygram::utils::Error;
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  if (mysql_ == nullptr) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Not connected"));
+  }
+
+  mygram::utils::StructuredLog()
+      .Event("mysql_debug")
+      .Field("action", "execute_streaming_query")
+      .Field("query", query)
+      .Debug();
+
+  if (mysql_query(mysql_, query.c_str()) != 0) {
+    std::string error = GetMySQLErrorMessage();
+    mygram::utils::LogMySQLQueryError(query, error);
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
+  }
+
+  MYSQL_RES* result = mysql_use_result(mysql_);
+  if ((result == nullptr) && mysql_field_count(mysql_) > 0) {
+    std::string error = GetMySQLErrorMessage();
+    mygram::utils::LogMySQLQueryError(query, "Failed to start streaming result: " + error);
     return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
   }
 
@@ -418,9 +498,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(co
 mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetExecutedGTID() {
   using mygram::utils::MakeUnexpected;
 
-  const char* query =
-      (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.gtid_current_pos" : "SELECT @@GLOBAL.gtid_executed";
-  auto result = Execute(query);
+  auto result = Execute(GetBinlogExecutedPositionQuery(flavor_));
   if (!result) {
     return MakeUnexpected(result.error());
   }
@@ -688,32 +766,23 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
     return MakeUnexpected(MakeError(ErrorCode::kMySQLDisconnected, "Not connected to MySQL"));
   }
 
-  // Escape parameters to prevent SQL injection
-  std::vector<char> escaped_db(database.length() * 2 + 1);
-  std::vector<char> escaped_table(table.length() * 2 + 1);
-  std::vector<char> escaped_column(column.length() * 2 + 1);
-  mysql_real_escape_string(mysql_, escaped_db.data(), database.c_str(), database.length());
-  mysql_real_escape_string(mysql_, escaped_table.data(), table.c_str(), table.length());
-  mysql_real_escape_string(mysql_, escaped_column.data(), column.c_str(), column.length());
-
-  // Cache escaped strings to avoid redundant std::string constructions
-  std::string esc_db_str(escaped_db.data());
-  std::string esc_table_str(escaped_table.data());
-  std::string esc_column_str(escaped_column.data());
+  const std::string database_literal = mygram::utils::EncodeMySQLStringLiteral(database);
+  const std::string table_literal = mygram::utils::EncodeMySQLStringLiteral(table);
+  const std::string column_literal = mygram::utils::EncodeMySQLStringLiteral(column);
 
   // Query to check if the column is part of a PRIMARY KEY or UNIQUE KEY
   std::string query =
       "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
-      "WHERE TABLE_SCHEMA = '" +
-      esc_db_str + "' AND TABLE_NAME = '" + esc_table_str + "' AND COLUMN_NAME = '" + esc_column_str +
-      "' AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
+      "WHERE TABLE_SCHEMA = " +
+      database_literal + " AND TABLE_NAME = " + table_literal + " AND COLUMN_NAME = " + column_literal +
+      " AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS "
-      "WHERE TABLE_SCHEMA = '" +
-      esc_db_str + "' AND TABLE_NAME = '" + esc_table_str +
-      "' AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
+      "WHERE TABLE_SCHEMA = " +
+      database_literal + " AND TABLE_NAME = " + table_literal +
+      " AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
-      "WHERE TABLE_SCHEMA = '" +
-      esc_db_str + "' AND TABLE_NAME = '" + esc_table_str + "' GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
+      "WHERE TABLE_SCHEMA = " +
+      database_literal + " AND TABLE_NAME = " + table_literal + " GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
 
   auto result_exp = Execute(query);
   if (!result_exp) {
@@ -741,8 +810,8 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
     // Check if column exists and provide more specific error
     std::string column_check_query =
         "SELECT COUNT(*) FROM information_schema.COLUMNS "
-        "WHERE TABLE_SCHEMA = '" +
-        esc_db_str + "' AND TABLE_NAME = '" + esc_table_str + "' AND COLUMN_NAME = '" + esc_column_str + "'";
+        "WHERE TABLE_SCHEMA = " +
+        database_literal + " AND TABLE_NAME = " + table_literal + " AND COLUMN_NAME = " + column_literal;
 
     auto col_result_exp = Execute(column_check_query);
     if (col_result_exp) {

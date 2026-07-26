@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <unordered_map>
@@ -225,6 +226,19 @@ TEST(BinlogParsingTest, ExtractGTIDFromRealEvent) {
   // Verify GNO (little-endian 100)
   EXPECT_EQ(buffer[36], 0x64);
   EXPECT_EQ(buffer[37], 0x00);
+}
+
+TEST(BinlogParsingTest, ExtractGTIDRejectsBuffersTruncatedBeforeGno) {
+  constexpr size_t kHeaderLength = mygram::constants::kBinlogEventHeaderLen;
+  constexpr size_t kGtidPayloadLength = 1 + 16 + 8;
+  std::array<unsigned char, kHeaderLength + kGtidPayloadLength> event{};
+
+  // The UUID is complete at offset 36, but ExtractGTID also reads the full
+  // eight-byte GNO that follows it. Reject both formerly accepted lengths.
+  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::GTID_LOG_EVENT);
+  EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 2).has_value());
+  EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 1).has_value());
+  EXPECT_TRUE(BinlogEventParser::ExtractGTID(event.data(), event.size()).has_value());
 }
 
 /**
@@ -790,6 +804,65 @@ TEST(BinlogParsingTest, QueryEventMultiStatementClassifiesMatchingDdlStatement) 
   }
   EXPECT_EQ(types_by_table["users"], DDLType::kAlter);
   EXPECT_EQ(types_by_table["articles"], DDLType::kDrop);
+}
+
+TEST(BinlogParsingTest, QueryEventDetectsAlterRenameDestinationForConfiguredTable) {
+  server::TableContext ctx;
+  ctx.name = "articles";
+  ctx.config.name = "articles";
+  ctx.config.database = "app";
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("articles", &ctx);
+  TableMetadataCache metadata_cache;
+
+  auto event = BuildQueryEvent("staging", "ALTER TABLE staging.rebuilt ADD COLUMN marker INT, RENAME TO app.articles");
+  auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:4", metadata_cache,
+                                                    table_contexts, nullptr, true);
+
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0].type, BinlogEventType::DDL);
+  EXPECT_EQ(events[0].ddl_type, DDLType::kAlter);
+  EXPECT_EQ(events[0].table_name, "articles");
+
+  auto literal_only =
+      BuildQueryEvent("staging", "ALTER TABLE rebuilt ADD COLUMN note VARCHAR(255) DEFAULT 'RENAME TO app.articles'");
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(literal_only.data(), literal_only.size(), "uuid:5", metadata_cache,
+                                                  table_contexts, nullptr, true)
+                  .empty());
+}
+
+TEST(BinlogParsingTest, QueryEventDetectsCreateTableDestinationForConfiguredTable) {
+  server::TableContext ctx;
+  ctx.name = "articles";
+  ctx.config.name = "articles";
+  ctx.config.database = "app";
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("articles", &ctx);
+  TableMetadataCache metadata_cache;
+
+  const std::vector<std::string> target_queries = {
+      "CREATE TABLE app.articles (id BIGINT PRIMARY KEY)",
+      "CREATE TABLE IF NOT EXISTS `app`.`articles` LIKE staging.rebuilt",
+      "CREATE TABLE app.articles AS SELECT * FROM staging.rebuilt",
+      "CREATE OR REPLACE TABLE app.articles LIKE staging.rebuilt",
+      "CREATE TEMPORARY TABLE app.articles SELECT * FROM staging.rebuilt",
+  };
+  for (const auto& query : target_queries) {
+    auto event = BuildQueryEvent("staging", query);
+    auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:6", metadata_cache,
+                                                      table_contexts, nullptr, true);
+    ASSERT_EQ(events.size(), 1U) << query;
+    EXPECT_EQ(events[0].type, BinlogEventType::DDL) << query;
+    EXPECT_EQ(events[0].ddl_type, DDLType::kCreate) << query;
+    EXPECT_EQ(events[0].table_name, "articles") << query;
+  }
+
+  auto other_database = BuildQueryEvent("staging", "CREATE TABLE analytics.articles LIKE staging.rebuilt");
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(other_database.data(), other_database.size(), "uuid:7",
+                                                  metadata_cache, table_contexts, nullptr, true)
+                  .empty());
 }
 
 /**
@@ -1518,6 +1591,10 @@ TEST(BinlogParsingTest, IgnoredStandaloneQueryProgressIsFailClosed) {
   EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("LOAD DATA INFILE '/tmp/x' INTO TABLE articles"));
   EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("FLUSH TABLES WITH READ LOCK"));
   EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CALL mutate_articles()"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE IF EXISTS articles (id BIGINT)"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TEMPORARY TABLE articles (id BIGINT)"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE OR REPLACE TABLE articles (id BIGINT)"));
   // The reader calls this only after ParseBinlogEvent has already emitted
   // configured-table DDL. Reaching it for CREATE TABLE therefore means that
   // the statement concerns no configured table.
@@ -1773,6 +1850,26 @@ TEST(BinlogParsingTest, MariaDBGtidEventWithValidChecksum) {
   uint32_t stored_crc = 0;
   std::memcpy(&stored_crc, buffer.data() + data_len, sizeof(stored_crc));
   EXPECT_EQ(computed_crc, stored_crc) << "CRC32 should be valid for builder-generated MariaDB GTID event";
+}
+
+TEST(BinlogParsingTest, TruncatedRowsEventsBeforeCompleteTableIdAreRejected) {
+  const std::vector<MySQLBinlogEventType> row_event_types = {
+      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1,  MySQLBinlogEventType::WRITE_ROWS_EVENT,
+      MySQLBinlogEventType::OBSOLETE_UPDATE_ROWS_EVENT_V1, MySQLBinlogEventType::UPDATE_ROWS_EVENT,
+      MySQLBinlogEventType::OBSOLETE_DELETE_ROWS_EVENT_V1, MySQLBinlogEventType::DELETE_ROWS_EVENT,
+  };
+
+  TableMetadataCache cache;
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  for (const auto event_type : row_event_types) {
+    for (size_t length = 19; length < 25; ++length) {
+      std::vector<uint8_t> buffer(length, 0);
+      buffer[4] = static_cast<uint8_t>(event_type);
+      auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:1", cache, table_contexts,
+                                                        nullptr, false);
+      EXPECT_TRUE(events.empty()) << "event_type=" << static_cast<int>(event_type) << " length=" << length;
+    }
+  }
 }
 
 // ============================================================================

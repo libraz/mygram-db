@@ -78,9 +78,12 @@ enum class MySQLBinlogEventType : uint8_t {
   MARIADB_GTID_LIST_EVENT = 163,          ///< List of GTIDs at binlog start
   MARIADB_START_ENCRYPTION_EVENT = 164,   ///< Binlog encryption marker
   MARIADB_QUERY_COMPRESSED_EVENT = 165,   ///< zlib-compressed QUERY_EVENT
-  MARIADB_WRITE_ROWS_COMPRESSED_EVENT = 166,
-  MARIADB_UPDATE_ROWS_COMPRESSED_EVENT = 167,
-  MARIADB_DELETE_ROWS_COMPRESSED_EVENT = 168,
+  MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1 = 166,
+  MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1 = 167,
+  MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1 = 168,
+  MARIADB_WRITE_ROWS_COMPRESSED_EVENT = 169,
+  MARIADB_UPDATE_ROWS_COMPRESSED_EVENT = 170,
+  MARIADB_DELETE_ROWS_COMPRESSED_EVENT = 171,
 
   ENUM_END_EVENT = 255  // End marker
 };
@@ -146,6 +149,12 @@ inline const char* GetEventTypeName(MySQLBinlogEventType type) {
       return "MARIADB_START_ENCRYPTION_EVENT";
     case MySQLBinlogEventType::MARIADB_QUERY_COMPRESSED_EVENT:
       return "MARIADB_QUERY_COMPRESSED_EVENT";
+    case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
+      return "MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1";
+    case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
+      return "MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1";
+    case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
+      return "MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1";
     case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT:
       return "MARIADB_WRITE_ROWS_COMPRESSED_EVENT";
     case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT:
@@ -158,12 +167,15 @@ inline const char* GetEventTypeName(MySQLBinlogEventType type) {
 }
 
 /**
- * MariaDB emits event IDs 165-168 when log_bin_compress is enabled. MygramDB
+ * MariaDB emits event IDs 165-171 when log_bin_compress is enabled. MygramDB
  * does not currently implement their zlib payload format, so every such event
  * must stop replication before an XID can advance the processed GTID.
  */
 inline bool IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType type) {
   return type == MySQLBinlogEventType::MARIADB_QUERY_COMPRESSED_EVENT ||
+         type == MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1 ||
+         type == MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1 ||
+         type == MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1 ||
          type == MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT ||
          type == MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT ||
          type == MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT;

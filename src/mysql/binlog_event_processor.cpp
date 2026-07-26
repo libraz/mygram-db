@@ -81,7 +81,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         // Condition satisfied -> add to index
         std::string normalized = index.NormalizeText(event.text);
 
-        auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized);
+        auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized, event.text);
         if (!doc_id_result) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
@@ -169,7 +169,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         // Transitioned into required conditions -> INSERT into index
         std::string normalized = index.NormalizeText(event.text);
 
-        auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized);
+        auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized, event.text);
         if (!doc_id_result) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
@@ -230,6 +230,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         bool text_changed = false;
         if (HasMaterializedAfterText(event)) {
           new_normalized = index.NormalizeText(event.text);
+          doc_store.SetOriginalText(doc_id, event.text);
           if (old_normalized != new_normalized) {
             index.UpdateDocument(doc_id, old_normalized, new_normalized);
             doc_store.SetNormalizedText(doc_id, new_normalized);
@@ -338,17 +339,21 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Warn();
           index.Clear();
           doc_store.Clear();
+          if (bm25_stats != nullptr) {
+            bm25_stats->Reset();
+          }
           if (cache_manager != nullptr) {
             cache_manager->ClearTable(event.table_name);
           }
           mygram::utils::StructuredLog().Event("binlog_truncate_applied").Field("table", event.table_name).Info();
           break;
         }
+        case DDLType::kCreate:
         case DDLType::kAlter: {
-          // ALTER TABLE - log warning about potential schema mismatch
+          // CREATE/ALTER TABLE has already passed configured-schema validation.
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_warning")
-              .Field("type", "alter_table_detected")
+              .Field("type", event.ddl_type == DDLType::kCreate ? "create_table_detected" : "alter_table_detected")
               .Field("table_name", event.table_name)
               .Field("query", query)
               .Warn();
@@ -374,6 +379,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Error();
           index.Clear();
           doc_store.Clear();
+          if (bm25_stats != nullptr) {
+            bm25_stats->Reset();
+          }
           if (cache_manager != nullptr) {
             cache_manager->ClearTable(event.table_name);
           }

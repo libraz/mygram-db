@@ -194,6 +194,9 @@ TEST(ConnectionValidatorUnitTest, MariaDBCompressedEventsAreExplicitlyFailClosed
   using mygramdb::mysql::MySQLBinlogEventType;
 
   EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_QUERY_COMPRESSED_EVENT));
+  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1));
+  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1));
+  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1));
   EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT));
   EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT));
   EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT));
@@ -202,6 +205,8 @@ TEST(ConnectionValidatorUnitTest, MariaDBCompressedEventsAreExplicitlyFailClosed
 
   EXPECT_STREQ(mygramdb::mysql::GetEventTypeName(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT),
                "MARIADB_WRITE_ROWS_COMPRESSED_EVENT");
+  EXPECT_STREQ(mygramdb::mysql::GetEventTypeName(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1),
+               "MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1");
 }
 
 TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsOnlyTaggedEntries) {

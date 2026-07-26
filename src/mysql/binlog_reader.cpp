@@ -321,8 +321,12 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   }
 
   should_stop_.store(false, std::memory_order_relaxed);
+  active_threads_.store(2, std::memory_order_release);
   processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
-  pending_commit_gtid_.clear();
+  {
+    std::scoped_lock lock(gtid_mutex_);
+    position_state_.ResetApplied();
+  }
   // Note: running_ is already set to true by compare_exchange_strong above
 
   // Reset debug log counters for this run
@@ -397,8 +401,11 @@ void BinlogReader::Stop() {
   // callers wait for the first to complete rather than racing on should_stop_.
   std::lock_guard<std::mutex> lock(stop_mutex_);
 
-  // Check if already stopped or never started
-  if (!running_.load()) {
+  const bool reader_joinable = reader_thread_ != nullptr && reader_thread_->joinable();
+  const bool worker_joinable = worker_thread_ != nullptr && worker_thread_->joinable();
+  // Even after both threads self-exit and IsRunning() becomes false, their
+  // std::thread objects remain joinable and must be joined here.
+  if (!running_.load(std::memory_order_acquire) && !reader_joinable && !worker_joinable) {
     return;
   }
 
@@ -434,6 +441,7 @@ void BinlogReader::Stop() {
   metadata_connection_.reset();
 
   running_ = false;
+  active_threads_.store(0, std::memory_order_release);
   should_stop_.store(false, std::memory_order_relaxed);  // Reset for next Start()
   processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
   mygram::utils::StructuredLog()
@@ -451,7 +459,7 @@ void BinlogReader::SetCurrentGTID(const std::string& gtid) {
   {
     std::scoped_lock lock(gtid_mutex_);
     current_gtid_ = gtid;
-    pending_commit_gtid_.clear();
+    position_state_.ResetApplied();
     // Update executed_gtid_set_ for REPLICATION STATUS display only.
     // Reconnection always uses current_gtid_ (via ConvertSingleGtidToRange),
     // never executed_gtid_set_, to prevent skipping undelivered events.

@@ -9,7 +9,10 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace mygramdb::mysql {
@@ -61,7 +64,16 @@ struct ColumnMetadata {
   uint16_t metadata = 0;  // Type-specific metadata
   bool is_nullable = false;
   bool is_unsigned = false;
+  std::vector<std::string> enum_set_values;  // ENUM labels or SET members in declaration order
 };
+
+/**
+ * @brief Parse ENUM/SET member labels from a SHOW COLUMNS type definition.
+ *
+ * @param column_type MySQL type string such as enum('draft','published')
+ * @return Labels in declaration order, or an empty vector for non-ENUM/SET or malformed input
+ */
+[[nodiscard]] std::vector<std::string> ParseEnumSetColumnValues(const std::string& column_type);
 
 /**
  * @brief Table metadata extracted from TABLE_MAP event
@@ -71,10 +83,14 @@ struct TableMetadata {
   std::string database_name;
   std::string table_name;
   std::vector<ColumnMetadata> columns;
+  std::unordered_map<std::string, size_t> column_ordinals;
 
   // Bitmap indicating which columns are used
   std::vector<uint8_t> columns_before_image;  // For UPDATE: old values
   std::vector<uint8_t> columns_after_image;   // For INSERT/UPDATE: new values
+
+  void RebuildColumnOrdinals();
+  [[nodiscard]] std::optional<size_t> FindColumnOrdinal(std::string_view name) const;
 };
 
 /**

@@ -6,7 +6,7 @@
  *   SET @slave_connect_state = 'domain-server-seq,...'
  *   SET @slave_gtid_strict_mode = 1
  *   SET @master_heartbeat_period = N
- *   SET @master_binlog_checksum = @@global.binlog_checksum
+ *   SET @master_binlog_checksum = 'CRC32'
  *   COM_BINLOG_DUMP (pos=4, flags=0, server_id, filename="")
  *
  * Implementation reuses MYSQL_RPL / mysql_binlog_open() in non-GTID mode:

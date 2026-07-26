@@ -20,104 +20,129 @@ using mygramdb::mysql::internal::DecodeFieldValue;
 
 class JsonDecodeTest : public ::testing::Test {};
 
+namespace {
+
+std::vector<unsigned char> LengthPrefixed(uint32_t width, const std::vector<unsigned char>& binary_json) {
+  std::vector<unsigned char> data;
+  for (uint32_t index = 0; index < width; ++index) {
+    data.push_back(static_cast<unsigned char>((binary_json.size() >> (index * 8)) & 0xFFU));
+  }
+  data.insert(data.end(), binary_json.begin(), binary_json.end());
+  return data;
+}
+
+const std::vector<unsigned char> kTrue = {0x04, 0x01};
+
+}  // namespace
+
 // ============================================================================
 // JSON with valid metadata (1, 2, 3, 4) tests
 // ============================================================================
 
 TEST_F(JsonDecodeTest, JsonMetadata1ByteLength) {
-  // metadata=1: 1-byte length prefix
-  uint16_t metadata = 1;
-  // JSON payload: {"a":1} (7 bytes)
-  std::string json_str = R"({"a":1})";
-  std::vector<unsigned char> data;
-  data.push_back(static_cast<unsigned char>(json_str.size()));  // 1-byte length
-  data.insert(data.end(), json_str.begin(), json_str.end());
+  constexpr uint16_t metadata = 1;
+  auto data = LengthPrefixed(metadata, kTrue);
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
   ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
-  EXPECT_EQ(*result, json_str);
+  EXPECT_EQ(*result, "true");
 }
 
 TEST_F(JsonDecodeTest, JsonMetadata2ByteLength) {
-  // metadata=2: 2-byte length prefix (little-endian)
-  uint16_t metadata = 2;
-  std::string json_str = R"({"key":"value"})";
-  std::vector<unsigned char> data;
-  uint16_t len = static_cast<uint16_t>(json_str.size());
-  data.push_back(len & 0xFF);
-  data.push_back((len >> 8) & 0xFF);
-  data.insert(data.end(), json_str.begin(), json_str.end());
+  constexpr uint16_t metadata = 2;
+  auto data = LengthPrefixed(metadata, kTrue);
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
   ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
-  EXPECT_EQ(*result, json_str);
+  EXPECT_EQ(*result, "true");
 }
 
 TEST_F(JsonDecodeTest, JsonMetadata3ByteLength) {
-  // metadata=3: 3-byte length prefix (little-endian)
-  uint16_t metadata = 3;
-  std::string json_str = R"([1,2,3])";
-  std::vector<unsigned char> data;
-  uint32_t len = static_cast<uint32_t>(json_str.size());
-  data.push_back(len & 0xFF);
-  data.push_back((len >> 8) & 0xFF);
-  data.push_back((len >> 16) & 0xFF);
-  data.insert(data.end(), json_str.begin(), json_str.end());
+  constexpr uint16_t metadata = 3;
+  auto data = LengthPrefixed(metadata, kTrue);
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
   ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
-  EXPECT_EQ(*result, json_str);
+  EXPECT_EQ(*result, "true");
 }
 
 TEST_F(JsonDecodeTest, JsonMetadata4ByteLength) {
-  // metadata=4: 4-byte length prefix (little-endian)
-  uint16_t metadata = 4;
-  std::string json_str = R"({"nested":{"x":true}})";
-  std::vector<unsigned char> data;
-  uint32_t len = static_cast<uint32_t>(json_str.size());
-  data.push_back(len & 0xFF);
-  data.push_back((len >> 8) & 0xFF);
-  data.push_back((len >> 16) & 0xFF);
-  data.push_back((len >> 24) & 0xFF);
-  data.insert(data.end(), json_str.begin(), json_str.end());
+  constexpr uint16_t metadata = 4;
+  auto data = LengthPrefixed(metadata, kTrue);
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
   ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
-  EXPECT_EQ(*result, json_str);
+  EXPECT_EQ(*result, "true");
 }
 
 TEST_F(JsonDecodeTest, JsonDefaultMetadata0Uses4Bytes) {
-  // metadata=0 should default to 4-byte length prefix
-  uint16_t metadata = 0;
-  std::string json_str = R"({"default":true})";
-  std::vector<unsigned char> data;
-  uint32_t len = static_cast<uint32_t>(json_str.size());
-  data.push_back(len & 0xFF);
-  data.push_back((len >> 8) & 0xFF);
-  data.push_back((len >> 16) & 0xFF);
-  data.push_back((len >> 24) & 0xFF);
-  data.insert(data.end(), json_str.begin(), json_str.end());
+  constexpr uint16_t metadata = 0;
+  auto data = LengthPrefixed(4, kTrue);
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
   ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
-  EXPECT_EQ(*result, json_str);
+  EXPECT_EQ(*result, "true");
 }
 
-TEST_F(JsonDecodeTest, JsonEmptyPayload) {
-  // Zero-length JSON with metadata=1
-  uint16_t metadata = 1;
-  std::vector<unsigned char> data;
-  data.push_back(0);  // length = 0
+TEST_F(JsonDecodeTest, JsonEmptyPayloadIsRejected) {
+  constexpr uint16_t metadata = 1;
+  std::vector<unsigned char> data = {0};
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
-  ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
-  EXPECT_EQ(*result, "");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLFieldTruncated);
+}
+
+TEST_F(JsonDecodeTest, DecodesSmallObject) {
+  const std::vector<unsigned char> object = {
+      0x00,              // small object
+      0x01, 0x00,        // element count
+      0x10, 0x00,        // encoded byte size
+      0x0B, 0x00,        // key offset
+      0x01, 0x00,        // key length
+      0x07, 0x0C, 0x00,  // int32 value at offset 12
+      'a',  0x01, 0x00, 0x00, 0x00,
+  };
+  auto data = LengthPrefixed(1, object);
+
+  auto result = DecodeFieldValue(245, data.data(), 1, false, data.data() + data.size(), false);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(*result, R"({"a":1})");
+}
+
+TEST_F(JsonDecodeTest, DecodesSmallArrayWithInlineAndStringValues) {
+  const std::vector<unsigned char> array = {
+      0x02,              // small array
+      0x03, 0x00,        // element count
+      0x0F, 0x00,        // encoded byte size
+      0x04, 0x01, 0x00,  // true
+      0x05, 0xFE, 0xFF,  // int16 -2
+      0x0C, 0x0D, 0x00,  // string at offset 13
+      0x01, 'x',
+  };
+  auto data = LengthPrefixed(1, array);
+
+  auto result = DecodeFieldValue(245, data.data(), 1, false, data.data() + data.size(), false);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(*result, R"([true,-2,"x"])");
+}
+
+TEST_F(JsonDecodeTest, RejectsTextJsonInsteadOfReturningBinaryGarbage) {
+  const std::vector<unsigned char> text = {'{', '"', 'a', '"', ':', '1', '}'};
+  auto data = LengthPrefixed(1, text);
+
+  auto result = DecodeFieldValue(245, data.data(), 1, false, data.data() + data.size(), false);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
 }
 
 TEST_F(JsonDecodeTest, JsonNullField) {
