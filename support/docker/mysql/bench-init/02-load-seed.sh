@@ -10,8 +10,10 @@ set -e
 SEED_URL="https://dl.libraz.net/mygram-bench-seed.sql.zst"
 MYSQL_CMD="mysql -u root -p${MYSQL_ROOT_PASSWORD:-mygramdb}"
 
-# Switch repl_user to mysql_native_password for libmysqlclient compatibility
-$MYSQL_CMD -e "ALTER USER 'repl_user'@'%' IDENTIFIED WITH mysql_native_password BY '${MYSQL_PASSWORD:-mygramdb}'; GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%'; GRANT SELECT ON mydb.* TO 'repl_user'@'%'; FLUSH PRIVILEGES;"
+# MySQL 8.4 no longer loads mysql_native_password by default. The image-created
+# account uses the server default authentication plugin, which MygramDB supports.
+# Grant the privileges needed for the GTID snapshot and binlog replication.
+$MYSQL_CMD -e "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%'; GRANT SELECT ON mydb.* TO 'repl_user'@'%'; FLUSH PRIVILEGES;"
 
 echo ""
 echo "┌─────────────────────────────────────────────────────────┐"

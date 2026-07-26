@@ -415,6 +415,8 @@ docker-test:
 
 bench-up:
 	@docker compose version >/dev/null 2>&1 || { echo "Error: 'docker compose' is required. Install Docker Desktop: https://docs.docker.com/get-docker/"; exit 1; }
+	@echo "Pulling the latest benchmark images..."
+	docker compose -f docker-compose.bench.yml pull
 	@echo "Starting benchmark environment (1.1M Wikipedia dataset)..."
 	@echo "First run downloads a 225MB seed file. This may take a few minutes."
 	@echo ""

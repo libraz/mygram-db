@@ -32,7 +32,7 @@ services:
       - ./support/docker/mysql/init/01-create-tables.sql:/docker-entrypoint-initdb.d/01-create-tables.sql:ro
       - ./support/docker/mysql/bench-init/02-load-seed.sh:/docker-entrypoint-initdb.d/02-load-seed.sh:ro
     healthcheck:
-      test: ["CMD", "mysql", "-u", "root", "-pmygramdb", "-h", "127.0.0.1", "-P", "3306", "-e", "SELECT COUNT(*) FROM mydb.articles HAVING COUNT(*) >= 1100000"]
+      test: ["CMD-SHELL", "test \"$$(mysql -u root -pmygramdb -h 127.0.0.1 -P 3306 -Nse 'SELECT COUNT(*) FROM mydb.articles')\" -ge 1100000"]
       interval: 10s
       timeout: 5s
       retries: 60
