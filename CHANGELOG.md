@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cross-surface search parity** — HTTP search/count/facet now treat `q` as literal text by default and accept explicit `"mode": "boolean"` expressions; C and C++ typed search options expose comparison filters, fuzzy distance, custom highlighting, and pagination.
+
 ## [1.8.1] - 2026-07-16
 
 ### Added
@@ -64,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Critical: table-key resolution could route a request to the wrong table** — An exact match on a registered table key now always takes priority over qualified-name fallback scanning.
 - **Binlog fail-fast hardening** — CRC32 checksum mismatches, `TABLE_MAP_EVENT` parse failures, missing column metadata, and tagged GTIDs now trigger a reconnect or hard failure instead of continuing on inconsistent state; truncated UPDATE row images are now always propagated as an error.
 - **TIMESTAMP/DATE filter values** — Binlog and initial-load filter extraction now decode these through the datetime parser instead of as raw integers.
-- **HTTP query construction rebuilt** — `q` is now always treated as literal search text (no reserved-keyword smuggling); filter/sort/facet column names resolve case-insensitively while preserving original casing; `SORT _score` is rejected explicitly when normalized text storage is disabled.
+- **HTTP query construction rebuilt** — `q` is treated as literal search text by default (no reserved-keyword smuggling), with explicit boolean mode available; filter/sort/facet column names resolve case-insensitively while preserving original casing; `SORT _score` is rejected explicitly when normalized text storage is disabled.
 - **HTTP reads rejected during table synchronization** — Search/count/facet/get now return `503` while a table is synchronizing; `/health/ready` surfaces `sync_in_progress`.
 - **Boolean query AST fixes** — Correct substring fallback for terms too short for n-grams, literal-phrase handling for quoted `AND`/`OR`/`NOT`, the `<>` filter operator, filter/sort column-case preservation, `FUZZY` distance validation, `NOT`-term cache-invalidation registration, and `SearchRaw` boolean-expression transport/parsing for nested `OR` groups.
 - **Query-length error message** — HTTP now includes the configured limit value, matching the TCP/parser path.
@@ -151,7 +155,7 @@ Migration:
 - **HTTP search input validation** — `IsValidTableName` and `ValidateQueryTextNoReservedClauses` reject smuggled clauses (LIMIT/OFFSET/etc.) and unsafe table names with HTTP 400
 - **HTTP search raw error response** — Sort/pagination failures now route through `ResponseFormatter::FormatError` for the standard ERROR prefix
 - **HTTP `/health/*` not counted in `total_requests`** — Probes no longer distort QPS metrics (H-N7)
-- **SYNC_STOP registration** — `SYNC_STOP` was missing from `InitDispatcher`, causing `"Unknown query type"`; fail-fast handler-table validation added (CR-8)
+- **SYNC_STOP registration** — `SYNC_STOP` was missing from `InitDispatcher`, causing `"Unknown query type"`; fail-fast handler-table validation added
 - **`sync_mutex_` released before `join()`** — `StartSync` switched to `unique_lock` to avoid deadlock with `BuildSnapshotAsync`'s terminal `update_state` lambda
 - **CacheManager Disable/Enable order** — `enabled_=false` set before `Clear`; queue started before `enabled_=true`
 - **InvalidationQueue restart** — `Start()` resets `stopped_=false` so Stop/Start cycles do not silently drop Enqueues
@@ -242,7 +246,7 @@ Migration:
 
 - New test files: `bm25_scorer_test`, `highlighter_test`, `synonym_dictionary_test`, `edit_distance_test`, `filter_index_facet_test`, `dump_format_v2_test`, `mariadb_gtid_test`, `mariadb_event_parser_test`, `search_pipeline_test`, `bm25_sort_test`, `index_serialization_test`
 - E2E: Stale process cleanup, MariaDB replication timing race fix
-- Full matrix: 3026 unit tests, 4 e2e targets (MySQL 8.4/9.4, MariaDB 10.11/11.4)
+- Full unit and end-to-end matrix across supported MySQL and MariaDB versions
 
 **Detailed Release Notes**: [docs/releases/v1.6.0.md](docs/releases/v1.6.0.md)
 

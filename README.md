@@ -30,7 +30,7 @@ Benchmarked on 1.1M Wikipedia articles (EN + JA), comparing MygramDB v1.5.0 with
 | **Concurrent** (4 connections) | 8 QPS | 11,766 QPS | 1,400x |
 
 - Sub-millisecond latency for most queries with no cache warmup required
-- v1.5.0 `verify_text` removes n-gram false positives and returns results consistent with MySQL
+- `memory.verify_text: ascii|all` removes n-gram false positives and returns results consistent with MySQL
 - Reproducible: `make bench-up && make bench-run` ([details](https://mygramdb.libraz.net/docs/performance))
 
 ## Quick Start
@@ -81,6 +81,14 @@ docker exec mygramdb mygram-cli -p 11016 SEARCH articles "hello world"
 
 **Security note:** `NETWORK_ALLOW_CIDRS=0.0.0.0/0` allows connections from any IP address. In production, restrict this to only the application servers or management networks that need access. An empty, omitted, or invalid `network.allow_cidrs` denies all TCP and non-probe HTTP access; only `/health/live` and `/health/ready` bypass this ACL.
 
+For settings that are not represented by the simple Docker environment
+surface (including multiple tables, filters, required filters, and synonyms),
+bind-mount a complete YAML/JSON file and set `CONFIG_FILE` to its container
+path. The entrypoint never overwrites an existing `CONFIG_FILE`, including a
+read-only bind mount. `SKIP_CONFIG_GEN=true` bypasses all entrypoint config
+handling; when using it, pass `mygramdb -c /path/to/config.yaml` as the
+container command explicitly.
+
 ```bash
 # Production example: Allow only from application servers
 -e NETWORK_ALLOW_CIDRS=10.0.0.0/8,172.16.0.0/12
@@ -91,20 +99,27 @@ docker exec mygramdb mygram-cli -p 11016 SEARCH articles "hello world"
 ```bash
 git clone https://github.com/libraz/mygram-db.git
 cd mygram-db
-docker-compose up -d
+cp .env.example .env
+# Edit .env and replace MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD before starting.
+docker compose up -d
 
-# Wait for MySQL to be ready (check with docker-compose logs -f)
+# Wait for MySQL to be ready (check with docker compose logs -f)
 
 # Trigger initial data sync
-docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
+docker compose exec mygramdb mygram-cli -p 11016 SYNC articles
 
 # Try searching
-docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "hello"
+docker compose exec mygramdb mygram-cli -p 11016 SEARCH articles "hello"
 ```
 
 This setup includes MySQL 8.4 with sample data, so you can validate behavior locally. MygramDB is also tested with MySQL 9.4 and MariaDB 10.11/11.4.
 
 ## Basic Usage
+
+`HIGHLIGHT` needs stored normalized text (`memory.verify_text: "ascii"` or
+`"all"`). `SORT _score` additionally needs `bm25.enable: true`. With Docker
+Compose, set `MEMORY_VERIFY_TEXT=ascii` and `BM25_ENABLE=true` in `.env` before
+using the two examples below.
 
 ```bash
 # Search with pagination
@@ -140,8 +155,8 @@ See [Protocol Reference](https://mygramdb.libraz.net/docs/protocol) for all comm
 ## Features
 
 - **Fast Search**: In-memory index designed for sub-millisecond search on million-row datasets
-- **BM25 Relevance**: `SORT _score` for TF-IDF based relevance ranking
-- **Highlighting**: `HIGHLIGHT` returns snippets with matched terms tagged
+- **BM25 Relevance**: `SORT _score` for TF-IDF based relevance ranking (`bm25.enable: true` and stored text required)
+- **Highlighting**: `HIGHLIGHT` returns snippets with matched terms tagged (`memory.verify_text: ascii|all` required)
 - **Fuzzy Search**: `FUZZY` clause for Levenshtein edit distance matching
 - **Synonyms**: Automatic query expansion from TSV synonym dictionaries
 - **Faceted Search**: `FACET` command aggregates filter column values with counts
@@ -152,7 +167,7 @@ See [Protocol Reference](https://mygramdb.libraz.net/docs/protocol) for all comm
 - **Dual Protocol**: TCP (memcached-style) for search and operational commands, HTTP/REST API for search and status checks
 - **High Concurrency**: Thread pool built to handle 10,000+ concurrent connections
 - **Unicode**: ICU-based normalization for CJK/multilingual text
-- **Compression**: Hybrid Delta encoding + Roaring bitmaps
+- **Posting Storage**: Fixed-width delta encoding + Roaring bitmaps
 - **Easy Deploy**: Run as a single binary or Docker container
 
 ## Architecture
@@ -223,6 +238,41 @@ HTTP exposes search, document lookup, health checks, metrics, and read-only stat
 - Replication privileges: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
 See [Installation Guide](https://mygramdb.libraz.net/docs/installation) for details.
+
+## Testing
+
+The default test target omits `SLOW` and `LOAD` labels. Use the explicit
+targets below when changing replication, dump, or integration code.
+
+```bash
+# Unit and integration tests
+make test
+make test-all
+
+# Opt-in tests that need Docker and a real MySQL server
+make test-mysql
+make test-large-dump
+
+# End-to-end suites
+make e2e-test                 # MySQL 8.4 default suite
+make e2e-matrix               # MySQL 8.4/9.4 and MariaDB 10.11/11.4
+make e2e-failover             # two-server MySQL failover suite
+```
+
+Sanitizer builds and the fuzz workflow are local opt-in; they do not add CI
+gates. The fuzz harness itself is not a CTest target. `CONCURRENCY` tests can
+be selected explicitly when checking a thread-safety change. Replace
+`ENABLE_ASAN` with `ENABLE_TSAN` or `ENABLE_UBSAN` for the other sanitizers.
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+cmake --build build-asan -j
+ctest --test-dir build-asan -L CONCURRENCY -LE LOAD --output-on-failure
+
+cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DBUILD_FUZZERS=ON
+cmake --build build-fuzz --target binary_input_fuzz -j
+./build-fuzz/bin/binary_input_fuzz 100000
+```
 
 ## License
 

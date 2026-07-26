@@ -30,7 +30,7 @@ MySQL FULLTEXT は手軽ですが、ヒット数の多い語句、CJK の n-gram
 | **並列**（4接続） | 8 QPS | 11,766 QPS | 1,400倍 |
 
 - ほとんどのクエリでサブミリ秒のレイテンシを維持し、キャッシュの事前ウォームアップも不要
-- v1.5.0 の `verify_text` により n-gram の偽陽性を除去し、MySQL と一致する検索結果を返却
+- `memory.verify_text: ascii|all` により n-gram の偽陽性を除去し、MySQL と一致する検索結果を返却
 - 再現可能: `make bench-up && make bench-run`（[詳細](https://mygramdb.libraz.net/ja/docs/performance)）
 
 ## クイックスタート
@@ -81,6 +81,13 @@ docker exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
 
 **セキュリティ上の注意:** `NETWORK_ALLOW_CIDRS=0.0.0.0/0` は任意の IP アドレスからの接続を許可します。本番環境では、アプリケーションサーバーや管理用ネットワークなど、必要な送信元だけに制限してください。`network.allow_cidrs` が空・未指定・不正な場合は TCP と probe 以外の HTTP をすべて拒否し、`/health/live` と `/health/ready` だけが ACL を迂回します。
 
+単純なDocker環境変数では表現できない設定（複数テーブル、filter、
+required filter、synonymなど）には、完全なYAML/JSON設定をbind mountし、
+コンテナ内のパスを `CONFIG_FILE` に指定してください。entrypointは既存の
+`CONFIG_FILE`（read-only mountを含む）を上書きしません。
+`SKIP_CONFIG_GEN=true` を使う場合は、コンテナのcommandに
+`mygramdb -c /path/to/config.yaml` を明示します。
+
 ```bash
 # 本番環境の例: アプリケーションサーバーからのみ許可
 -e NETWORK_ALLOW_CIDRS=10.0.0.0/8,172.16.0.0/12
@@ -91,20 +98,27 @@ docker exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
 ```bash
 git clone https://github.com/libraz/mygram-db.git
 cd mygram-db
-docker-compose up -d
+cp .env.example .env
+# 起動前に.envのMYSQL_ROOT_PASSWORDとMYSQL_PASSWORDを変更してください。
+docker compose up -d
 
-# MySQL の準備完了を待つ（docker-compose logs -f で確認）
+# MySQL の準備完了を待つ（docker compose logs -f で確認）
 
 # 初回データ同期を実行
-docker-compose exec mygramdb mygram-cli -p 11016 SYNC articles
+docker compose exec mygramdb mygram-cli -p 11016 SYNC articles
 
 # 検索を試す
-docker-compose exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
+docker compose exec mygramdb mygram-cli -p 11016 SEARCH articles "こんにちは"
 ```
 
 この構成にはサンプルデータ入りの MySQL 8.4 が含まれるため、ローカルで動作確認できます。MySQL 9.4 および MariaDB 10.11/11.4 でもテスト済みです。
 
 ## 基本的な使い方
+
+`HIGHLIGHT` には正規化済みtextの保存（`memory.verify_text: "ascii"`
+または `"all"`）が必要です。`SORT _score` にはさらに
+`bm25.enable: true` が必要です。Docker Composeでは、次の2例を使う前に
+`.env` の `MEMORY_VERIFY_TEXT=ascii` と `BM25_ENABLE=true` を設定します。
 
 ```bash
 # ページネーション付き検索
@@ -140,8 +154,8 @@ GET articles 12345
 ## 特徴
 
 - **高速検索**: 100万行規模でもサブミリ秒級の検索を目指せるインメモリインデックス
-- **BM25 関連度スコアリング**: `SORT _score` で TF-IDF ベースの関連度ランキング
-- **ハイライト**: `HIGHLIGHT` 句で、マッチした語句をタグ付きスニペットとして返却
+- **BM25 関連度スコアリング**: `SORT _score` で TF-IDF ベースの関連度ランキング（`bm25.enable: true` とtext保存が必要）
+- **ハイライト**: `HIGHLIGHT` 句で、マッチした語句をタグ付きスニペットとして返却（`memory.verify_text: ascii|all` が必要）
 - **あいまい検索**: `FUZZY` 句で、レーベンシュタイン編集距離にもとづくマッチング
 - **類義語辞書**: TSV ファイルを使った自動クエリ展開
 - **ファセット検索**: `FACET` コマンドでフィルター列の値を集計し、件数を返却
@@ -223,6 +237,37 @@ HTTP API は、検索、ドキュメント取得、ヘルスチェック、メ�
 - レプリケーション権限: `REPLICATION SLAVE`, `REPLICATION CLIENT`
 
 詳細は [インストールガイド](https://mygramdb.libraz.net/ja/docs/installation) を参照してください。
+
+## テスト
+
+通常の `make test` は `SLOW` と `LOAD` のラベルを除外します。レプリケーション、ダンプ、統合経路を変更した場合は、対象に応じて次の明示的な入口を使います。
+
+```bash
+# unit / integration テスト
+make test
+make test-all
+
+# Docker と実 MySQL を使う opt-in テスト
+make test-mysql
+make test-large-dump
+
+# E2E スイート
+make e2e-test                 # MySQL 8.4 の既定スイート
+make e2e-matrix               # MySQL 8.4/9.4、MariaDB 10.11/11.4
+make e2e-failover             # 2台の MySQL による failover スイート
+```
+
+sanitizer build と fuzz 実行はローカルで明示的に行い、CI ゲートは増やしません。fuzz harness 自体は CTest に登録しません。スレッド安全性を確認する場合は `CONCURRENCY` ラベルを指定します。ASan 以外は `ENABLE_ASAN` を `ENABLE_TSAN` または `ENABLE_UBSAN` に置き換えます。
+
+```bash
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
+cmake --build build-asan -j
+ctest --test-dir build-asan -L CONCURRENCY -LE LOAD --output-on-failure
+
+cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DBUILD_FUZZERS=ON
+cmake --build build-fuzz --target binary_input_fuzz -j
+./build-fuzz/bin/binary_input_fuzz 100000
+```
 
 ## ライセンス
 
