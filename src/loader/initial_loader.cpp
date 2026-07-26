@@ -28,7 +28,9 @@
 #include <vector>
 
 #include "mysql/rows_parser.h"
+#include "mysql/value_canonicalizer.h"
 #include "utils/datetime_converter.h"
+#include "utils/sql_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -37,6 +39,28 @@ namespace mygramdb::loader {
 namespace {
 // Default batch size for initial loading
 constexpr size_t kDefaultBatchSize = 1000;
+
+mysql::CanonicalValueKind CanonicalKind(enum_field_types type) {
+  switch (type) {
+    case MYSQL_TYPE_DECIMAL:
+    case MYSQL_TYPE_NEWDECIMAL:
+      return mysql::CanonicalValueKind::kDecimal;
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_DATETIME:
+    case MYSQL_TYPE_TIMESTAMP:
+      return mysql::CanonicalValueKind::kTemporal;
+    default:
+      return mysql::CanonicalValueKind::kText;
+  }
+}
+
+std::string CanonicalizeSnapshotField(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields, int index) {
+  if (row[index] == nullptr) {
+    return {};
+  }
+  return mysql::CanonicalizeColumnValue(std::string_view(row[index], lengths[index]),
+                                        CanonicalKind(fields[index].type));
+}
 }  // namespace
 
 InitialLoader::InitialLoader(mysql::Connection& connection, index::Index& index, storage::DocumentStore& doc_store,
@@ -64,6 +88,10 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
+
+  if (cancelled_.load(std::memory_order_acquire)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, "Load cancelled"));
+  }
 
   auto rollback_if_managed = [&]() {
     if (!manage_transaction) {
@@ -198,10 +226,15 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 
   mygram::utils::StructuredLog().Event("initial_load_starting").Field("gtid", start_gtid_).Info();
 
+  if (cancelled_.load(std::memory_order_acquire)) {
+    rollback_if_managed();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, "Load cancelled"));
+  }
+
   // Build SELECT query
   std::string query = BuildSelectQuery();
   if (query.empty()) {
-    std::string error_msg = "Invalid required filter value in initial load query";
+    std::string error_msg = "Invalid identifier or required filter value in initial load query";
     rollback_if_managed();
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
@@ -210,12 +243,20 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   auto start_time = std::chrono::steady_clock::now();
 
   // Execute query (within the consistent snapshot transaction)
-  auto result_exp = connection_.Execute(query);
+  auto result_exp = connection_.ExecuteStreaming(query);
   if (!result_exp) {
     std::string error_msg = "Failed to execute SELECT query: " + result_exp.error().message();
     rollback_if_managed();
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
+
+  // mysql_use_result() keeps unread rows on the wire. No other statement may
+  // run on this connection until EOF, so cancellation and mid-stream failures
+  // discard this dedicated load connection instead of trying to ROLLBACK it.
+  auto abort_stream = [&]() {
+    result_exp->reset();
+    connection_.Close();
+  };
 
   // Get field metadata
   unsigned int num_fields = mysql_num_fields(result_exp->get());
@@ -224,8 +265,9 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   // Build field-name-to-index map once to avoid O(N) FindFieldIndex per column per row
   FieldIndexMap field_map = BuildFieldIndexMap(fields, num_fields);
 
-  // Get total row count (approximate from result)
-  uint64_t total_rows = mysql_num_rows(result_exp->get());
+  // An unbuffered result cannot know its row count before EOF. Report an
+  // indeterminate total (zero) while continuing to publish processed rows.
+  constexpr uint64_t total_rows = 0;
 
   // Process rows in batches
   MYSQL_ROW row = nullptr;
@@ -246,7 +288,17 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   doc_batch.reserve(batch_size);
   index_batch.reserve(batch_size);
 
-  while ((row = mysql_fetch_row(result_exp->get())) != nullptr && !cancelled_) {
+  bool stream_exhausted = false;
+  while (!cancelled_.load(std::memory_order_relaxed)) {
+    row = mysql_fetch_row(result_exp->get());
+    if (row == nullptr) {
+      stream_exhausted = true;
+      break;
+    }
+    if (cancelled_.load(std::memory_order_relaxed)) {
+      break;
+    }
+
     const unsigned long* lengths = mysql_fetch_lengths(result_exp->get());
     if (lengths == nullptr) {
       const std::string error_msg = "mysql_fetch_lengths failed while reading initial snapshot";
@@ -256,12 +308,12 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
           .Field("type", "row_lengths_unavailable")
           .Field("table", table_config_.name)
           .Error();
-      rollback_if_managed();
+      abort_stream();
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
     // Extract primary key (using pre-built field index map for O(1) lookup)
-    std::string primary_key = ExtractPrimaryKey(row, lengths, field_map);
+    std::string primary_key = ExtractPrimaryKey(row, lengths, fields, field_map);
     if (primary_key.empty()) {
       std::string error_msg = "Failed to extract primary key";
       mygram::utils::StructuredLog()
@@ -272,7 +324,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
           .Field("error", error_msg)
           .Error();
       // result automatically freed by MySQLResult destructor
-      rollback_if_managed();
+      abort_stream();
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
 
@@ -286,7 +338,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
           .Field("type", "text_source_absent")
           .Field("primary_key", primary_key)
           .Error();
-      rollback_if_managed();
+      abort_stream();
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
     std::string text = std::move(materialized_text.value);
@@ -295,16 +347,17 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     std::string normalized_text = index_.NormalizeText(text);
 
     // Extract filters (using pre-built field index map for O(1) lookup)
-    auto filters = ExtractFilters(row, lengths, field_map);
+    auto filters = ExtractFilters(row, lengths, fields, field_map);
 
     // Add to batch
-    doc_batch.push_back({primary_key, filters, normalized_text});
+    doc_batch.push_back({primary_key, filters, normalized_text, text});
     index_batch.push_back({0, normalized_text});  // DocId will be set after AddDocumentBatch
 
     // Process batch when full
     if (doc_batch.size() >= batch_size) {
-      auto flush_result = FlushBatch(doc_batch, index_batch, manage_transaction);
+      auto flush_result = FlushBatch(doc_batch, index_batch);
       if (!flush_result) {
+        abort_stream();
         return MakeUnexpected(flush_result.error());
       }
 
@@ -325,19 +378,31 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     }
   }
 
+  if (stream_exhausted && mysql_errno(connection_.GetHandle()) != 0) {
+    const std::string error_msg =
+        "Failed while streaming initial snapshot rows: " + std::string(mysql_error(connection_.GetHandle()));
+    abort_stream();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+  }
+
   // Process remaining rows in batch
-  if (!doc_batch.empty() && !index_batch.empty() && !cancelled_) {
-    auto flush_result = FlushBatch(doc_batch, index_batch, manage_transaction);
+  if (!doc_batch.empty() && !index_batch.empty() && !cancelled_.load(std::memory_order_relaxed)) {
+    auto flush_result = FlushBatch(doc_batch, index_batch);
     if (!flush_result) {
+      result_exp->reset();
+      rollback_if_managed();
       return MakeUnexpected(flush_result.error());
     }
   }
 
-  // result automatically freed by MySQLResult destructor
+  // Release the stream before COMMIT/ROLLBACK. At EOF the connection remains
+  // reusable; an early cancellation leaves unread protocol data and therefore
+  // requires discarding the load connection.
+  result_exp->reset();
 
   // Check cancellation before committing to avoid unnecessary COMMIT
-  if (cancelled_) {
-    rollback_if_managed();
+  if (cancelled_.load(std::memory_order_relaxed)) {
+    connection_.Close();
     std::string error_msg = "Load cancelled";
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
@@ -377,24 +442,10 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
-    std::vector<storage::DocumentStore::DocumentItem>& doc_batch, std::vector<index::Index::DocumentItem>& index_batch,
-    bool manage_transaction) {
+    std::vector<storage::DocumentStore::DocumentItem>& doc_batch,
+    std::vector<index::Index::DocumentItem>& index_batch) {
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
-
-  auto rollback_if_managed = [&]() {
-    if (!manage_transaction) {
-      return;
-    }
-    auto rollback_result = connection_.ExecuteUpdate("ROLLBACK");
-    if (!rollback_result) {
-      mygram::utils::StructuredLog()
-          .Event("loader_warning")
-          .Field("operation", "rollback")
-          .Field("error", rollback_result.error().message())
-          .Warn();
-    }
-  };
 
   // Verify batch sizes match (defensive check)
   if (doc_batch.size() != index_batch.size()) {
@@ -407,7 +458,6 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
         .Field("doc_batch_size", static_cast<uint64_t>(doc_batch.size()))
         .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
         .Error();
-    rollback_if_managed();
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -415,7 +465,6 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
   std::unordered_set<storage::DocId> existing_doc_ids;
   auto doc_ids_result = doc_store_.AddDocumentBatch(doc_batch, &existing_doc_ids);
   if (!doc_ids_result) {
-    rollback_if_managed();
     return MakeUnexpected(doc_ids_result.error());
   }
   std::vector<storage::DocId> doc_ids = *doc_ids_result;
@@ -431,7 +480,6 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
         .Field("doc_ids_size", static_cast<uint64_t>(doc_ids.size()))
         .Field("index_batch_size", static_cast<uint64_t>(index_batch.size()))
         .Error();
-    rollback_if_managed();
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
@@ -491,8 +539,7 @@ std::string InitialLoader::BuildSelectQuery() const {
   std::ostringstream query;
   query << "SELECT ";
 
-  // Helper to backtick-quote SQL identifiers (column/table names)
-  auto quote_identifier = [](const std::string& name) -> std::string { return "`" + name + "`"; };
+  auto quote_identifier = [](const std::string& name) { return mygramdb::utils::QuoteSQLIdentifier(name); };
 
   // Collect all columns to SELECT (avoiding duplicates, preserving order)
   std::vector<std::string> selected_columns;
@@ -534,47 +581,22 @@ std::string InitialLoader::BuildSelectQuery() const {
     if (!first_select_column) {
       query << ", ";
     }
-    query << quote_identifier(col);
+    auto quoted_column = quote_identifier(col);
+    if (!quoted_column) {
+      return "";
+    }
+    query << *quoted_column;
     first_select_column = false;
   }
 
-  query << " FROM " << quote_identifier(table_config_.name);
+  auto quoted_table = mygramdb::utils::QuoteQualifiedSQLIdentifier(table_config_.database, table_config_.name);
+  if (!quoted_table) {
+    return "";
+  }
+  query << " FROM " << *quoted_table;
 
   // Add WHERE clause from required_filters
   if (!table_config_.required_filters.empty()) {
-    // Defense-in-depth: escape filter values to prevent SQL injection.
-    // These values come from configuration, but we escape them as a safety measure.
-    auto escape_sql_value = [](const std::string& value) -> std::string {
-      std::string escaped;
-      escaped.reserve(value.size() + value.size() / 8);  // slight overalloc for safety
-      for (char chr : value) {
-        switch (chr) {
-          case '\0':
-            escaped += "\\0";
-            break;
-          case '\'':
-            escaped += "''";
-            break;
-          case '\\':
-            escaped += "\\\\";
-            break;
-          case '\n':
-            escaped += "\\n";
-            break;
-          case '\r':
-            escaped += "\\r";
-            break;
-          case '\x1a':
-            escaped += "\\Z";
-            break;  // Ctrl+Z (EOF on Windows)
-          default:
-            escaped += chr;
-            break;
-        }
-      }
-      return escaped;
-    };
-
     query << " WHERE ";
     bool first_required_filter = true;
     for (const auto& filter : table_config_.required_filters) {
@@ -583,7 +605,11 @@ std::string InitialLoader::BuildSelectQuery() const {
       }
       first_required_filter = false;
 
-      query << quote_identifier(filter.name) << " ";
+      auto quoted_filter = quote_identifier(filter.name);
+      if (!quoted_filter) {
+        return "";
+      }
+      query << *quoted_filter << " ";
 
       if (filter.op == "IS NULL" || filter.op == "IS NOT NULL") {
         query << filter.op;
@@ -614,7 +640,7 @@ std::string InitialLoader::BuildSelectQuery() const {
           }
           query << "FROM_UNIXTIME(" << *epoch << ")";
         } else if (requires_quoting()) {
-          query << "'" << escape_sql_value(filter.value) << "'";
+          query << mygramdb::utils::EncodeMySQLStringLiteral(filter.value);
         } else {
           // Validate numeric values to prevent SQL injection
           if (!IsValidNumericValue(filter.value)) {
@@ -634,7 +660,11 @@ std::string InitialLoader::BuildSelectQuery() const {
   }
 
   // Add ORDER BY for efficient processing
-  query << " ORDER BY " << quote_identifier(table_config_.primary_key);
+  auto quoted_primary_key = quote_identifier(table_config_.primary_key);
+  if (!quoted_primary_key) {
+    return "";
+  }
+  query << " ORDER BY " << *quoted_primary_key;
 
   return query.str();
 }
@@ -688,7 +718,7 @@ mysql::MaterializedText InitialLoader::ExtractText(MYSQL_ROW row, const unsigned
       source_row.columns[column] = "";
       source_row.null_columns.insert(column);
     } else {
-      source_row.columns[column] = std::string(row[idx], lengths[idx]);
+      source_row.columns[column] = CanonicalizeSnapshotField(row, lengths, fields, idx);
     }
     return true;
   };
@@ -707,16 +737,16 @@ mysql::MaterializedText InitialLoader::ExtractText(MYSQL_ROW row, const unsigned
   return mysql::MaterializeTextSource(source_row, table_config_.text_source);
 }
 
-std::string InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths,
+std::string InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
                                              const FieldIndexMap& field_map) const {
   auto it = field_map.find(table_config_.primary_key);
   if (it != field_map.end() && row[it->second] != nullptr) {
-    return {row[it->second], lengths[it->second]};
+    return CanonicalizeSnapshotField(row, lengths, fields, it->second);
   }
   return "";
 }
 
-storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, const unsigned long* lengths,
+storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
                                                  const FieldIndexMap& field_map) const {
   storage::FilterMap filters;
 
@@ -728,7 +758,7 @@ storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, const unsigned l
     int idx = it->second;
 
     const bool is_null = row[idx] == nullptr;
-    std::string value_str = is_null ? std::string{} : std::string(row[idx], lengths[idx]);
+    std::string value_str = is_null ? std::string{} : CanonicalizeSnapshotField(row, lengths, fields, idx);
     const std::string& type = filter_config.type;
 
     auto converted = mysql::ConvertFilterValue(value_str, is_null, type, mysql_config_.datetime_timezone);

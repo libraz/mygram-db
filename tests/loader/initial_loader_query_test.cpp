@@ -32,6 +32,7 @@
 #include "mysql_test_helpers.h"
 #include "storage/document_store.h"
 #include "utils/datetime_converter.h"
+#include "utils/sql_utils.h"
 
 namespace mygramdb::loader {
 
@@ -260,36 +261,17 @@ TEST_F(SelectQueryLogicTest, CollectColumns_NoDuplicatesWithConcat) {
 }
 
 // ===========================================================================
-// SQL escaping tests for filter values
+// SQL literal encoding tests for filter values
 // ===========================================================================
 
 /**
  * @brief Test fixture for SQL value escaping logic
  *
- * These tests verify the defense-in-depth escaping applied to filter values
- * in BuildSelectQuery(). The escaping function doubles single quotes and
- * escapes backslashes.
+ * These tests verify the mode-independent encoding applied to filter values
+ * in BuildSelectQuery().
  */
 class SqlEscapingTest : public ::testing::Test {
  protected:
-  /**
-   * @brief Mirror of the escape_sql_value lambda in BuildSelectQuery
-   */
-  static std::string EscapeSqlValue(const std::string& value) {
-    std::string escaped;
-    escaped.reserve(value.size());
-    for (char chr : value) {
-      if (chr == '\'') {
-        escaped += "''";
-      } else if (chr == '\\') {
-        escaped += "\\\\";
-      } else {
-        escaped += chr;
-      }
-    }
-    return escaped;
-  }
-
   /**
    * @brief Build WHERE clause from required_filters (mirrors BuildSelectQuery logic)
    */
@@ -316,7 +298,7 @@ class SqlEscapingTest : public ::testing::Test {
                  filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
         };
         if (requires_quoting()) {
-          query << "'" << EscapeSqlValue(filter.value) << "'";
+          query << mygramdb::utils::EncodeMySQLStringLiteral(filter.value);
         } else {
           query << filter.value;
         }
@@ -365,29 +347,12 @@ class SqlEscapingTest : public ::testing::Test {
 };
 
 /**
- * @brief Test that single quotes in filter values are properly escaped
+ * @brief Test that quotes and backslashes are encoded without SQL-mode semantics
  */
-TEST_F(SqlEscapingTest, SingleQuotesEscaped) {
-  EXPECT_EQ(EscapeSqlValue("it's"), "it''s");
-  EXPECT_EQ(EscapeSqlValue("O'Brien"), "O''Brien");
-  EXPECT_EQ(EscapeSqlValue("''"), "''''");
-}
-
-/**
- * @brief Test that backslashes in filter values are properly escaped
- */
-TEST_F(SqlEscapingTest, BackslashesEscaped) {
-  EXPECT_EQ(EscapeSqlValue("path\\to"), "path\\\\to");
-  EXPECT_EQ(EscapeSqlValue("\\"), "\\\\");
-}
-
-/**
- * @brief Test that normal values pass through unchanged
- */
-TEST_F(SqlEscapingTest, NormalValuesUnchanged) {
-  EXPECT_EQ(EscapeSqlValue("active"), "active");
-  EXPECT_EQ(EscapeSqlValue("2024-01-01"), "2024-01-01");
-  EXPECT_EQ(EscapeSqlValue(""), "");
+TEST_F(SqlEscapingTest, StringValuesUseModeIndependentHexEncoding) {
+  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("it's"), "CONVERT(X'69742773' USING utf8mb4)");
+  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("path\\to"), "CONVERT(X'706174685C746F' USING utf8mb4)");
+  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("\n"), "CONVERT(X'0A' USING utf8mb4)");
 }
 
 TEST_F(SqlEscapingTest, EmptyStringRequiredFilterBuildsQuotedEmptyLiteral) {
@@ -397,7 +362,7 @@ TEST_F(SqlEscapingTest, EmptyStringRequiredFilterBuildsQuotedEmptyLiteral) {
   filter.op = "=";
   filter.value = "";
 
-  EXPECT_EQ(BuildWhereClause({filter}), " WHERE status = ''");
+  EXPECT_EQ(BuildWhereClause({filter}), " WHERE status = CONVERT(X'' USING utf8mb4)");
 }
 
 /**
@@ -411,8 +376,7 @@ TEST_F(SqlEscapingTest, SqlInjectionInFilterValue) {
   filter.value = "'; DROP TABLE articles; --";
 
   std::string clause = BuildWhereClause({filter});
-  // The injected quote should be doubled, preventing SQL injection
-  EXPECT_EQ(clause, " WHERE status = '''; DROP TABLE articles; --'");
+  EXPECT_EQ(clause, " WHERE status = CONVERT(X'273B2044524F50205441424C452061727469636C65733B202D2D' USING utf8mb4)");
 }
 
 /**
@@ -670,6 +634,134 @@ TEST_F(BatchProcessingTest, PreSnapshotGtidAllowsIdempotentReplay) {
   EXPECT_EQ(doc_store_->Size(), 1);
   auto results = index_->SearchAnd({"te"});
   EXPECT_EQ(results.size(), 1);
+}
+
+TEST(InitialLoaderIntegrationTest, LoadsConfiguredDatabaseWhenSameTableExistsInDefaultDatabase) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection loader_connection(connection_config);
+  auto loader_connect = loader_connection.Connect("initial-loader-cross-database-test");
+  if (!loader_connect) {
+    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
+  }
+
+  mysql::Connection writer_connection(connection_config);
+  auto writer_connect = writer_connection.Connect("initial-loader-cross-database-writer");
+  ASSERT_TRUE(writer_connect) << writer_connect.error().message();
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string database = "mygram_it_source_db_" + suffix;
+  const std::string table = "same_articles_" + suffix;
+  const std::string qualified_source = "`" + database + "`.`" + table + "`";
+  const std::string default_table = "`" + table + "`";
+
+  auto cleanup = [&]() {
+    (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS " + default_table);
+    (void)writer_connection.ExecuteUpdate("DROP DATABASE IF EXISTS `" + database + "`");
+  };
+  cleanup();
+
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE DATABASE `" + database + "`"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE " + default_table +
+                                              " (id VARCHAR(32) PRIMARY KEY, content TEXT) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE " + qualified_source +
+                                              " (id VARCHAR(32) PRIMARY KEY, content TEXT) ENGINE=InnoDB"));
+  ASSERT_TRUE(
+      writer_connection.ExecuteUpdate("INSERT INTO " + default_table + " VALUES ('wrong', 'default database row')"));
+  ASSERT_TRUE(
+      writer_connection.ExecuteUpdate("INSERT INTO " + qualified_source + " VALUES ('right', 'configured source')"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+
+  index::Index index(1);
+  storage::DocumentStore store;
+  InitialLoader loader(loader_connection, index, store, table_config);
+  auto load_result = loader.Load();
+  ASSERT_TRUE(load_result) << load_result.error().message();
+
+  EXPECT_EQ(store.Size(), 1);
+  EXPECT_TRUE(store.GetDocId("right").has_value());
+  EXPECT_FALSE(store.GetDocId("wrong").has_value());
+  auto source_doc_id = store.GetDocId("right");
+  ASSERT_TRUE(source_doc_id.has_value());
+  EXPECT_EQ(store.GetNormalizedText(*source_doc_id), std::optional<std::string>{"configured source"});
+
+  cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, CanonicalizesEnumSetDecimalAndTemporalValues) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection connection(connection_config);
+  auto connect = connection.Connect("initial-loader-canonical-values-test");
+  if (!connect) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect.error().message();
+  }
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "canonical_values_" + suffix;
+  const std::string quoted_table = "`" + table + "`";
+  auto cleanup = [&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table); };
+  cleanup();
+
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
+                                       " (amount DECIMAL(15,2) PRIMARY KEY, status ENUM('draft','published') NOT NULL,"
+                                       " tags SET('red','green','blue') NOT NULL, born_on DATE NOT NULL,"
+                                       " happened_at DATETIME(6) NOT NULL, published_at TIMESTAMP(6) NOT NULL,"
+                                       " elapsed TIME(6) NOT NULL) ENGINE=InnoDB"));
+  ASSERT_TRUE(
+      connection.ExecuteUpdate("INSERT INTO " + quoted_table +
+                               " VALUES (1234.56, 'published', 'red,blue', '1960-01-01',"
+                               " '1960-01-01 00:00:00.123456', '2024-01-02 00:00:00.654321', '-10:20:30.654321')"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "amount";
+  table_config.text_source.concat = {"status", "tags"};
+  table_config.text_source.delimiter = "|";
+  table_config.ngram_size = 1;
+  table_config.filters = {
+      {"born_on", "date", false, false, ""},
+      {"happened_at", "datetime", false, false, ""},
+      {"published_at", "timestamp", false, false, ""},
+      {"elapsed", "time", false, false, ""},
+  };
+
+  config::MysqlConfig mysql_config;
+  mysql_config.datetime_timezone = "+00:00";
+  index::Index index(1);
+  storage::DocumentStore store;
+  InitialLoader loader(connection, index, store, table_config, mysql_config);
+  auto load = loader.Load();
+  ASSERT_TRUE(load) << load.error().message();
+
+  auto doc_id = store.GetDocId("1234.56");
+  ASSERT_TRUE(doc_id.has_value());
+  EXPECT_EQ(store.GetNormalizedText(*doc_id), std::optional<std::string>{"published|red,blue"});
+
+  auto born_on = store.GetFilterValue(*doc_id, "born_on");
+  ASSERT_TRUE(born_on.has_value());
+  ASSERT_TRUE(std::holds_alternative<int64_t>(*born_on));
+  EXPECT_EQ(std::get<int64_t>(*born_on), -315619200);
+
+  auto elapsed = store.GetFilterValue(*doc_id, "elapsed");
+  ASSERT_TRUE(elapsed.has_value());
+  ASSERT_TRUE(std::holds_alternative<storage::TimeValue>(*elapsed));
+  EXPECT_EQ(std::get<storage::TimeValue>(*elapsed).seconds, -(10 * 3600 + 20 * 60 + 30));
+
+  cleanup();
 }
 
 TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGtid) {
@@ -1154,6 +1246,74 @@ TEST(InitialLoaderIntegrationTest, EmptyStringRequiredFilterLoadsOnlyMatchingRow
   EXPECT_EQ(store.Size(), 1);
   EXPECT_TRUE(store.GetDocId("1").has_value());
   EXPECT_FALSE(store.GetDocId("2").has_value());
+  cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, CancellationStopsStreamingLoadWithoutDrainingWholeTable) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection loader_connection(connection_config);
+  auto loader_connect = loader_connection.Connect("initial-loader-stream-cancel-test");
+  if (!loader_connect) {
+    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
+  }
+  auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
+    GTEST_SKIP() << "MySQL GTID mode is not enabled";
+  }
+
+  mysql::Connection writer_connection(connection_config);
+  ASSERT_TRUE(writer_connection.Connect("initial-loader-stream-cancel-writer"));
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_stream_cancel_" + suffix;
+  auto cleanup = [&]() { (void)writer_connection.ExecuteUpdate("DROP TABLE IF EXISTS `" + table + "`"); };
+  cleanup();
+
+  ASSERT_TRUE(writer_connection.ExecuteUpdate("CREATE TABLE `" + table +
+                                              "` (id INT PRIMARY KEY, content TEXT NOT NULL) ENGINE=InnoDB"));
+  std::ostringstream insert;
+  insert << "INSERT INTO `" << table << "` VALUES ";
+  constexpr int kRows = 50;
+  for (int row = 1; row <= kRows; ++row) {
+    if (row > 1) {
+      insert << ",";
+    }
+    insert << "(" << row << ",'streamed row " << row << "')";
+  }
+  ASSERT_TRUE(writer_connection.ExecuteUpdate(insert.str()));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+  config::BuildConfig build_config;
+  build_config.batch_size = 10;
+
+  index::Index index(1);
+  storage::DocumentStore store;
+  InitialLoader loader(loader_connection, index, store, table_config, {}, build_config);
+  size_t progress_calls = 0;
+  auto load_result = loader.Load([&](const LoadProgress& progress) {
+    ++progress_calls;
+    EXPECT_EQ(progress.total_rows, 0U);
+    loader.Cancel();
+  });
+
+  ASSERT_FALSE(load_result);
+  EXPECT_NE(load_result.error().message().find("cancelled"), std::string::npos);
+  EXPECT_TRUE(loader.IsCancelled());
+  EXPECT_EQ(progress_calls, 1U);
+  EXPECT_EQ(loader.GetProcessedRows(), 10U);
+  EXPECT_EQ(store.Size(), 10U);
+  EXPECT_FALSE(loader_connection.IsConnected())
+      << "An abandoned unbuffered result must discard its connection instead of issuing commands out of sync";
+
   cleanup();
 }
 

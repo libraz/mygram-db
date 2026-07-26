@@ -132,16 +132,16 @@ class InitialLoader {
    *
    * Validates batch consistency, adds documents to the document store,
    * assigns doc IDs, and indexes the batch. On error, rolls back the
-   * MySQL transaction only when this loader owns it.
+   * MySQL transaction cleanup remains the caller's responsibility so an
+   * unbuffered result can be released before any ROLLBACK is issued.
    *
    * @param doc_batch Documents to store (cleared on success)
    * @param index_batch Corresponding index entries (cleared on success)
-   * @param manage_transaction Whether this loader owns the MySQL transaction
    * @return Expected<void, Error> on success or error
    */
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> FlushBatch(
       std::vector<storage::DocumentStore::DocumentItem>& doc_batch,
-      std::vector<index::Index::DocumentItem>& index_batch, bool manage_transaction);
+      std::vector<index::Index::DocumentItem>& index_batch);
 
   /**
    * @brief Build SELECT query for initial load
@@ -173,12 +173,14 @@ class InitialLoader {
   /**
    * @brief Extract primary key from row using pre-built field index map
    */
-  std::string ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths, const FieldIndexMap& field_map) const;
+  std::string ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
+                                const FieldIndexMap& field_map) const;
 
   /**
    * @brief Extract filter values from row using pre-built field index map
    */
-  storage::FilterMap ExtractFilters(MYSQL_ROW row, const unsigned long* lengths, const FieldIndexMap& field_map) const;
+  storage::FilterMap ExtractFilters(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
+                                    const FieldIndexMap& field_map) const;
 };
 
 }  // namespace mygramdb::loader
