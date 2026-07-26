@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 
+#include "server/log_field_names.h"
 #include "utils/daemon_utils.h"
 #include "utils/structured_log.h"
 #include "version.h"
@@ -20,6 +21,10 @@
 #endif
 
 namespace mygramdb::app {
+
+bool IsGracefulStartupCancellation(const mygram::utils::Error& error, bool shutdown_requested) {
+  return shutdown_requested && error.code() == mygram::utils::ErrorCode::kCancelled;
+}
 
 namespace {
 constexpr int kShutdownCheckIntervalMs = 100;  // Shutdown check interval (ms)
@@ -154,6 +159,14 @@ int Application::Run() {
   // Initialize components
   auto init_result = Initialize();
   if (!init_result) {
+    if (IsGracefulStartupCancellation(init_result.error(), SignalManager::IsShutdownRequested())) {
+      mygram::utils::StructuredLog()
+          .Event("application_startup_cancelled")
+          .Field("phase", "initialization")
+          .Field("reason", "shutdown_requested")
+          .Info();
+      return 0;
+    }
     mygram::utils::StructuredLog()
         .Event("application_error")
         .Field("type", "initialization_failed")
@@ -166,6 +179,14 @@ int Application::Run() {
   // Start servers
   auto start_result = Start();
   if (!start_result) {
+    if (IsGracefulStartupCancellation(start_result.error(), SignalManager::IsShutdownRequested())) {
+      mygram::utils::StructuredLog()
+          .Event("application_startup_cancelled")
+          .Field("phase", "server_startup")
+          .Field("reason", "shutdown_requested")
+          .Info();
+      return 0;
+    }
     mygram::utils::StructuredLog()
         .Event("application_error")
         .Field("type", "server_startup_failed")
@@ -275,16 +296,15 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::Stop() {
     return {};  // Nothing to stop
   }
 
+  mygram::utils::Expected<void, mygram::utils::Error> stop_result;
+
   // Stop server orchestrator (stops all servers in reverse order)
   if (server_orchestrator_) {
-    auto stop_result = server_orchestrator_->Stop();
-    if (!stop_result) {
-      return mygram::utils::MakeUnexpected(stop_result.error());
-    }
+    stop_result = server_orchestrator_->Stop();
   }
 
   started_ = false;
-  return {};
+  return stop_result;
 }
 
 int Application::HandleSpecialModes() {
@@ -339,7 +359,10 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
 
     // Create directory if it doesn't exist
     if (!std::filesystem::exists(dump_path)) {
-      mygram::utils::StructuredLog().Event("dump_directory_creating").Field("path", dump_dir).Info();
+      mygram::utils::StructuredLog()
+          .Event("dump_directory_creating")
+          .Field(server::log_fields::kFieldFilepath, dump_dir)
+          .Info();
       std::filesystem::create_directories(dump_path);
     }
 
@@ -369,7 +392,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::VerifyDumpDirec
 
     mygram::utils::StructuredLog()
         .Event("dump_directory_verified")
-        .Field("path", dump_dir)
+        .Field(server::log_fields::kFieldFilepath, dump_dir)
         .Field("canonical_path", canonical_dump.string())
         .Debug();
   } catch (const std::exception& e) {

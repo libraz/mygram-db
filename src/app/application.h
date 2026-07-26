@@ -22,6 +22,14 @@ using mygram::utils::Error;
 using mygram::utils::Expected;
 
 /**
+ * @brief Return true when startup stopped only because shutdown was requested.
+ *
+ * A SIGTERM/SIGINT arriving during initial snapshot construction is an
+ * orderly operator-requested shutdown, not a startup failure.
+ */
+[[nodiscard]] bool IsGracefulStartupCancellation(const mygram::utils::Error& error, bool shutdown_requested);
+
+/**
  * @brief Main application class
  *
  * Orchestrates the entire application lifecycle:

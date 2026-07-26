@@ -9,9 +9,11 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "config/config.h"
@@ -42,6 +44,27 @@ using mygram::utils::Expected;
 class SignalManager;
 
 /**
+ * @brief Tracks whether every configured table has an initialized snapshot.
+ *
+ * Startup snapshot construction initializes all tables at once. With
+ * auto_initial_snapshot disabled, successful per-table SYNC operations mark
+ * tables individually and readiness becomes true only after all configured
+ * tables have completed.
+ */
+class InitialDataReadinessTracker {
+ public:
+  InitialDataReadinessTracker(const std::vector<config::TableConfig>& tables, bool initialized);
+
+  void MarkTableInitialized(const std::string& table_name);
+  [[nodiscard]] bool IsReady() const;
+
+ private:
+  mutable std::mutex mutex_;
+  std::unordered_set<std::string> required_tables_;
+  std::unordered_set<std::string> initialized_tables_;
+};
+
+/**
  * @brief Decide whether server startup should invoke BinlogReader::Start().
  *
  * Empty GTID is a valid replication start position for a fresh MySQL instance,
@@ -57,6 +80,28 @@ class SignalManager;
     const std::unordered_map<std::string, std::unique_ptr<server::TableContext>>& table_contexts);
 
 using LatestGtidProvider = std::function<Expected<std::string, mygram::utils::Error>()>;
+
+/**
+ * @brief Shutdown callbacks used to preserve teardown ordering after failures.
+ *
+ * Empty callbacks represent components that were not initialized or are
+ * already stopped.
+ */
+struct ServerShutdownActions {
+  std::function<void()> stop_http_server;
+  std::function<Expected<void, mygram::utils::Error>()> stop_tcp_server;
+  std::function<void()> stop_binlog_reader;
+  std::function<void()> close_mysql_connection;
+};
+
+/**
+ * @brief Run every configured shutdown action in dependency-safe order.
+ *
+ * TCP shutdown currently supplies the only fallible action. Its first error
+ * is retained, but later actions still execute so replication and MySQL
+ * resources never remain live solely because TCP draining failed.
+ */
+Expected<void, mygram::utils::Error> StopServerComponentsBestEffort(const ServerShutdownActions& actions);
 
 /**
  * @brief Bounded retry policy for the initial startup MySQL connection.
@@ -203,6 +248,10 @@ class ServerOrchestrator {
    * 3. BinlogReader (if running)
    * 4. MySQL connection
    * 5. Table contexts (Index, DocumentStore)
+   *
+   * Every initialized component is given a shutdown attempt even if an
+   * earlier component reports an error. The first error is returned after all
+   * teardown actions complete.
    */
   Expected<void, mygram::utils::Error> Stop();
 
@@ -234,6 +283,7 @@ class ServerOrchestrator {
 #endif
   std::unique_ptr<server::TcpServer> tcp_server_;
   std::unique_ptr<server::HttpServer> http_server_;
+  InitialDataReadinessTracker initial_data_readiness_;
 
   // State
   std::string snapshot_gtid_;                 ///< Captured during snapshot build

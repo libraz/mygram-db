@@ -45,12 +45,58 @@ mygram::utils::Expected<std::unique_ptr<ServerOrchestrator>, mygram::utils::Erro
   return orchestrator;
 }
 
-ServerOrchestrator::ServerOrchestrator(Dependencies deps) : deps_(deps) {}
+ServerOrchestrator::ServerOrchestrator(Dependencies deps)
+    : deps_(deps), initial_data_readiness_(deps.config.tables, deps.config.replication.auto_initial_snapshot) {}
+
+InitialDataReadinessTracker::InitialDataReadinessTracker(const std::vector<config::TableConfig>& tables,
+                                                         bool initialized) {
+  for (const auto& table : tables) {
+    required_tables_.insert(config::QualifiedTableName(table));
+  }
+  if (initialized) {
+    initialized_tables_ = required_tables_;
+  }
+}
+
+void InitialDataReadinessTracker::MarkTableInitialized(const std::string& table_name) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (required_tables_.find(table_name) != required_tables_.end()) {
+    initialized_tables_.insert(table_name);
+  }
+}
+
+bool InitialDataReadinessTracker::IsReady() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return initialized_tables_.size() == required_tables_.size();
+}
 
 ServerOrchestrator::~ServerOrchestrator() {
   if (started_) {
     (void)Stop();
   }
+}
+
+Expected<void, mygram::utils::Error> StopServerComponentsBestEffort(const ServerShutdownActions& actions) {
+  if (actions.stop_http_server) {
+    actions.stop_http_server();
+  }
+
+  Expected<void, mygram::utils::Error> first_error;
+  if (actions.stop_tcp_server) {
+    auto tcp_stop = actions.stop_tcp_server();
+    if (!tcp_stop) {
+      first_error = mygram::utils::MakeUnexpected(tcp_stop.error());
+    }
+  }
+
+  if (actions.stop_binlog_reader) {
+    actions.stop_binlog_reader();
+  }
+  if (actions.close_mysql_connection) {
+    actions.close_mysql_connection();
+  }
+
+  return first_error;
 }
 
 bool ShouldStartBinlogReaderOnServerStart(const mysql::IBinlogReader* binlog_reader, std::string_view start_gtid) {
@@ -176,8 +222,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
     binlog_started = true;
     mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
 
-    auto catchup_result =
-        mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_, kSnapshotCatchupTimeout);
+    auto catchup_result = mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_,
+                                                        kSnapshotCatchupTimeout, std::chrono::milliseconds(10),
+                                                        []() { return SignalManager::IsShutdownRequested(); });
     if (!catchup_result) {
       binlog_reader_->Stop();
       mygram::utils::StructuredLog()
@@ -237,40 +284,41 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
 Expected<void, mygram::utils::Error> ServerOrchestrator::Stop() {
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_components").Debug();
 
-  // Stop HTTP server first (depends on TCP server's cache manager)
+  ServerShutdownActions actions;
   if (http_server_ && http_server_->IsRunning()) {
-    mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_http_server").Debug();
-    http_server_->Stop();
+    actions.stop_http_server = [this]() {
+      mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_http_server").Debug();
+      http_server_->Stop();
+    };
   }
-
-  // Stop TCP server
   if (tcp_server_) {
-    auto tcp_stop = tcp_server_->Stop();
-    if (!tcp_stop) {
-      mygram::utils::StructuredLog()
-          .Event("server_stop_incomplete")
-          .Field("component", "tcp_server")
-          .FieldError(tcp_stop.error())
-          .Error();
-      return mygram::utils::MakeUnexpected(tcp_stop.error());
-    }
+    actions.stop_tcp_server = [this]() { return tcp_server_->Stop(); };
   }
-
 #ifdef USE_MYSQL
-  // Stop BinlogReader
   if (binlog_reader_ && binlog_reader_->IsRunning()) {
-    mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_binlog_reader").Debug();
-    binlog_reader_->Stop();
+    actions.stop_binlog_reader = [this]() {
+      mygram::utils::StructuredLog().Event("server_debug").Field("action", "stopping_binlog_reader").Debug();
+      binlog_reader_->Stop();
+    };
   }
-
-  // Close MySQL connection
   if (mysql_connection_) {
-    mysql_connection_->Close();
+    actions.close_mysql_connection = [this]() { mysql_connection_->Close(); };
   }
 #endif
 
+  auto stop_result = StopServerComponentsBestEffort(actions);
+
   // Table contexts will be automatically destroyed
   started_ = false;
+  if (!stop_result) {
+    mygram::utils::StructuredLog()
+        .Event("server_stop_incomplete")
+        .Field("component", "tcp_server")
+        .FieldError(stop_result.error())
+        .Error();
+    return mygram::utils::MakeUnexpected(stop_result.error());
+  }
+
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "all_components_stopped").Debug();
   return {};
 }
@@ -588,8 +636,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
           ++doc_count;
         }
       }
-      ctx->bm25_stats.total_doc_length.store(total_length, std::memory_order_relaxed);
-      ctx->bm25_stats.doc_count.store(doc_count, std::memory_order_relaxed);
+      ctx->bm25_stats.SetCorpusStats(total_length, doc_count);
       mygram::utils::StructuredLog()
           .Event("bm25_stats_initialized")
           .Field("table", table_config.name)
@@ -733,8 +780,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   auto server_config = server::ServerConfig::FromConfig(deps_.config);
 
 #ifdef USE_MYSQL
-  tcp_server_ = std::make_unique<server::TcpServer>(server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config,
-                                                    binlog_reader_.get());
+  tcp_server_ = std::make_unique<server::TcpServer>(
+      server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config, binlog_reader_.get(),
+      [this](const std::string& table_name) { initial_data_readiness_.MarkTableInitialized(table_name); });
 
   // Set server statistics for binlog reader
   if (binlog_reader_) {
@@ -755,12 +803,26 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
     http_server_ = std::make_unique<server::HttpServer>(
         http_config, table_contexts_ptrs, &deps_.config, binlog_reader_.get(), tcp_server_->GetCacheManager(),
         tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), tcp_server_->GetSharedRateLimiter(),
-        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetSyncManager());
+        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetSyncManager(),
+        [tcp_server = tcp_server_.get()](const std::string& table_name) {
+          auto* manager = tcp_server->GetSyncManager();
+          if (manager == nullptr) {
+            return false;
+          }
+          const auto syncing_tables = manager->GetSyncingTables();
+          return syncing_tables.find(table_name) != syncing_tables.end();
+        },
+        [tcp_server = tcp_server_.get()]() {
+          auto* manager = tcp_server->GetSyncManager();
+          return manager != nullptr && manager->IsAnySyncing();
+        },
+        [this]() { return initial_data_readiness_.IsReady(); });
 #else
     http_server_ = std::make_unique<server::HttpServer>(
         http_config, table_contexts_ptrs, &deps_.config, nullptr, tcp_server_->GetCacheManager(),
         tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), tcp_server_->GetSharedRateLimiter(),
-        tcp_server_->GetReplicationPausedForDumpFlag());
+        tcp_server_->GetReplicationPausedForDumpFlag(), nullptr, std::function<bool(const std::string&)>{},
+        std::function<bool()>{}, [this]() { return initial_data_readiness_.IsReady(); });
 #endif
 
     mygram::utils::StructuredLog()

@@ -363,6 +363,58 @@ TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigInvalidPath) {
   std::filesystem::remove(config_path);
 }
 
+TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigAppendsToExistingLogFile) {
+  const std::string log_file = "/tmp/mygramdb_existing_log_" + std::to_string(getpid()) + ".log";
+  std::filesystem::remove(log_file);
+  {
+    std::ofstream existing(log_file);
+    existing << "preexisting_startup_diagnostic\n";
+  }
+  const std::string config_path = CreateTempConfig("info", "text", log_file);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result) << config_mgr_result.error().to_string();
+  auto config_mgr = std::move(*config_mgr_result);
+
+  auto apply_result = config_mgr->ApplyLoggingConfig();
+  ASSERT_TRUE(apply_result) << apply_result.error().to_string();
+  spdlog::info("new_startup_message");
+  spdlog::default_logger()->flush();
+
+  const std::string contents = ReadFile(log_file);
+  EXPECT_NE(contents.find("preexisting_startup_diagnostic"), std::string::npos);
+  EXPECT_NE(contents.find("new_startup_message"), std::string::npos);
+
+  std::filesystem::remove(config_path);
+  std::filesystem::remove(log_file);
+}
+
+TEST_F(ConfigurationManagerTestFixture, ReopenLogFileAppendsWhenPathStillExists) {
+  const std::string log_file = "/tmp/mygramdb_reopen_append_" + std::to_string(getpid()) + ".log";
+  std::filesystem::remove(log_file);
+  const std::string config_path = CreateTempConfig("info", "text", log_file);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result) << config_mgr_result.error().to_string();
+  auto config_mgr = std::move(*config_mgr_result);
+  ASSERT_TRUE(config_mgr->ApplyLoggingConfig().has_value());
+
+  spdlog::info("message_before_same_path_reopen");
+  spdlog::default_logger()->flush();
+  auto reopen_result = config_mgr->ReopenLogFile();
+  ASSERT_TRUE(reopen_result) << reopen_result.error().to_string();
+  spdlog::info("message_after_same_path_reopen");
+  spdlog::default_logger()->flush();
+
+  const std::string contents = ReadFile(log_file);
+  EXPECT_NE(contents.find("message_before_same_path_reopen"), std::string::npos);
+  EXPECT_NE(contents.find("message_after_same_path_reopen"), std::string::npos);
+  EXPECT_NE(contents.find("log_file_reopened"), std::string::npos);
+
+  std::filesystem::remove(config_path);
+  std::filesystem::remove(log_file);
+}
+
 /**
  * @brief Test that ReopenLogFile successfully reopens log file for rotation
  */

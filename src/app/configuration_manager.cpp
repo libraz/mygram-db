@@ -5,18 +5,22 @@
 
 #include "app/configuration_manager.h"
 
-#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
 #include <iostream>
 #include <mutex>
 
+#include "server/log_field_names.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
 
 namespace {
+
+constexpr size_t kMaxLogFileBytes = 100U * 1024U * 1024U;
+constexpr size_t kMaxRotatedLogFiles = 5;
 
 std::mutex& LoggerReconfigurationMutex() {
   static std::mutex mutex;
@@ -24,7 +28,10 @@ std::mutex& LoggerReconfigurationMutex() {
 }
 
 std::shared_ptr<spdlog::logger> CreateFileLogger(const std::string& path) {
-  auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path, true);
+  // rotate_on_open=false preserves the existing audit trail across startup
+  // and SIGHUP reopen while bounding the total log volume.
+  auto sink =
+      std::make_shared<spdlog::sinks::rotating_file_sink_mt>(path, kMaxLogFileBytes, kMaxRotatedLogFiles, false);
   return std::make_shared<spdlog::logger>("mygramdb", std::move(sink));
 }
 
@@ -119,7 +126,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
 
   // Log confirmation message (after logger is configured)
   if (!config_.logging.file.empty()) {
-    mygram::utils::StructuredLog().Event("logging_to_file").Field("path", config_.logging.file).Info();
+    mygram::utils::StructuredLog()
+        .Event("logging_to_file")
+        .Field(server::log_fields::kFieldFilepath, config_.logging.file)
+        .Info();
   }
 
   return {};

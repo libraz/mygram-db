@@ -10,6 +10,7 @@
 #endif
 
 #include "app/application.h"
+#include "app/application_lifecycle.h"
 
 /**
  * @brief Main entry point
@@ -27,18 +28,9 @@ int main(int argc, char* argv[]) {
   }
 #endif
 
-  // Create application
-  auto app = mygramdb::app::Application::Create(argc, argv);
-  if (!app) {
-    std::cerr << "Failed to create application: " << app.error().to_string() << "\n";
-#ifdef USE_MYSQL
-    mysql_library_end();
-#endif
-    return 1;
-  }
-
-  // Run application
-  int result = (*app)->Run();
+  // Keep the Application (and every MYSQL* it owns) inside a scope that ends
+  // before the process-wide MySQL client library is torn down.
+  const int result = mygramdb::app::RunApplicationInScope(mygramdb::app::Application::Create(argc, argv));
 
 #ifdef USE_MYSQL
   mysql_library_end();

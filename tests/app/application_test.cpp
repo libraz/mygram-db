@@ -15,10 +15,12 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "app/application_lifecycle.h"
 #include "app/configuration_manager.h"
 #include "app/mysql_reconnection_handler.h"
 #include "app/server_orchestrator.h"
@@ -30,6 +32,59 @@
 #include "utils/expected.h"
 
 namespace {
+
+class LifecycleProbeApplication {
+ public:
+  LifecycleProbeApplication(bool& destroyed, int exit_code) : destroyed_(destroyed), exit_code_(exit_code) {}
+  ~LifecycleProbeApplication() { destroyed_ = true; }
+
+  int Run() {
+    EXPECT_FALSE(destroyed_);
+    return exit_code_;
+  }
+
+ private:
+  bool& destroyed_;
+  int exit_code_;
+};
+
+TEST(ApplicationLifecycleTest, DestroysApplicationBeforeReturningToGlobalLibraryTeardown) {
+  bool application_destroyed = false;
+  mygram::utils::Expected<std::unique_ptr<LifecycleProbeApplication>, mygram::utils::Error> application(
+      std::make_unique<LifecycleProbeApplication>(application_destroyed, 23));
+
+  const int result = mygramdb::app::RunApplicationInScope(std::move(application));
+
+  EXPECT_EQ(result, 23);
+  EXPECT_TRUE(application_destroyed)
+      << "global library teardown runs after this call, so application-owned handles must already be destroyed";
+}
+
+TEST(ApplicationLifecycleTest, CreationFailureReturnsBeforeGlobalLibraryTeardown) {
+  auto application = mygram::utils::Expected<std::unique_ptr<LifecycleProbeApplication>, mygram::utils::Error>(
+      mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kConfigParseError, "invalid configuration")));
+  std::ostringstream errors;
+
+  const int result = mygramdb::app::RunApplicationInScope(std::move(application), errors);
+
+  EXPECT_EQ(result, 1);
+  EXPECT_NE(errors.str().find("invalid configuration"), std::string::npos);
+}
+
+TEST(ApplicationLifecycleTest, ShutdownCancellationDuringStartupIsSuccessfulExit) {
+  const auto cancelled =
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kCancelled, "Initial load cancelled by shutdown");
+
+  EXPECT_TRUE(mygramdb::app::IsGracefulStartupCancellation(cancelled, true));
+  EXPECT_FALSE(mygramdb::app::IsGracefulStartupCancellation(cancelled, false));
+}
+
+TEST(ApplicationLifecycleTest, NonCancellationStartupErrorRemainsFailureDuringShutdown) {
+  const auto failed = mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed, "connect failed");
+
+  EXPECT_FALSE(mygramdb::app::IsGracefulStartupCancellation(failed, true));
+}
 
 /**
  * @brief Validates a dump directory path using the same logic as Application::VerifyDumpDirectory.
@@ -387,6 +442,33 @@ TEST(ServerOrchestratorMysqlStartupTest, RequiresMysqlForReplicationOrAutoSnapsh
   EXPECT_TRUE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
 }
 
+TEST(InitialDataReadinessTrackerTest, ManualSyncRequiresEveryConfiguredTable) {
+  mygramdb::config::TableConfig first;
+  first.database = "catalog";
+  first.name = "products";
+  mygramdb::config::TableConfig second;
+  second.database = "catalog";
+  second.name = "categories";
+
+  mygramdb::app::InitialDataReadinessTracker tracker({first, second}, false);
+  EXPECT_FALSE(tracker.IsReady());
+
+  tracker.MarkTableInitialized("catalog.products");
+  EXPECT_FALSE(tracker.IsReady());
+
+  tracker.MarkTableInitialized("catalog.categories");
+  EXPECT_TRUE(tracker.IsReady());
+}
+
+TEST(InitialDataReadinessTrackerTest, StartupSnapshotInitializesAllTablesIncludingEmptyTables) {
+  mygramdb::config::TableConfig table;
+  table.database = "catalog";
+  table.name = "empty_source";
+
+  mygramdb::app::InitialDataReadinessTracker tracker({table}, true);
+  EXPECT_TRUE(tracker.IsReady());
+}
+
 TEST(ServerOrchestratorStartupTest, MissingEnabledSynonymFileFailsInitialization) {
   auto signal_manager = mygramdb::app::SignalManager::Create();
   ASSERT_TRUE(signal_manager) << signal_manager.error().to_string();
@@ -489,6 +571,44 @@ TEST(ServerOrchestratorStartupRetryTest, AppliesBoundedExponentialBackoff) {
   // 5 attempts -> 4 backoff sleeps: 500, 1000, 2000, 4000 (all below the 5000 cap).
   const std::vector<int> expected_delays{500, 1000, 2000, 4000};
   EXPECT_EQ(delays, expected_delays);
+}
+
+TEST(ServerOrchestratorShutdownTest, TcpFailureStillTearsDownEveryDependentComponentInOrder) {
+  std::vector<std::string> calls;
+  const auto tcp_error = mygram::utils::MakeError(mygram::utils::ErrorCode::kTimeout, "TCP connections did not drain");
+  mygramdb::app::ServerShutdownActions actions{
+      [&calls]() { calls.emplace_back("http"); },
+      [&calls, &tcp_error]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        calls.emplace_back("tcp");
+        return mygram::utils::MakeUnexpected(tcp_error);
+      },
+      [&calls]() { calls.emplace_back("binlog"); },
+      [&calls]() { calls.emplace_back("mysql"); },
+  };
+
+  auto result = mygramdb::app::StopServerComponentsBestEffort(actions);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kTimeout);
+  EXPECT_EQ(calls, (std::vector<std::string>{"http", "tcp", "binlog", "mysql"}));
+}
+
+TEST(ServerOrchestratorShutdownTest, MissingComponentsAreSkippedAndSuccessfulShutdownReturnsSuccess) {
+  std::vector<std::string> calls;
+  mygramdb::app::ServerShutdownActions actions{
+      {},
+      [&calls]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        calls.emplace_back("tcp");
+        return {};
+      },
+      {},
+      [&calls]() { calls.emplace_back("mysql"); },
+  };
+
+  auto result = mygramdb::app::StopServerComponentsBestEffort(actions);
+
+  ASSERT_TRUE(result.has_value()) << result.error().to_string();
+  EXPECT_EQ(calls, (std::vector<std::string>{"tcp", "mysql"}));
 }
 
 #ifdef USE_MYSQL
