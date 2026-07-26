@@ -19,3 +19,7 @@ target_link_libraries(mygramdb_query PUBLIC
   mygramdb_utils
   spdlog::spdlog
 )
+
+if(BUILD_TESTS)
+  target_compile_definitions(mygramdb_query PUBLIC MYGRAMDB_QUERY_TEST_HOOKS)
+endif()

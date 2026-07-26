@@ -36,12 +36,14 @@ inline bool EqualsIgnoreCase(std::string_view lhs, std::string_view rhs) {
 
 /**
  * @brief Check if token is a query clause keyword
- * @param token Token to check (should be uppercase)
+ * @param token Token to check
  * @return true if token is a clause keyword (AND, OR, NOT, FILTER, SORT, LIMIT, OFFSET)
  */
-inline bool IsClauseKeyword(const std::string& token) {
-  return token == "AND" || token == "OR" || token == "NOT" || token == "FILTER" || token == "SORT" ||
-         token == "LIMIT" || token == "OFFSET" || token == "HIGHLIGHT" || token == "FUZZY" || token == "FACET";
+inline bool IsClauseKeyword(std::string_view token) {
+  return EqualsIgnoreCase(token, "AND") || EqualsIgnoreCase(token, "OR") || EqualsIgnoreCase(token, "NOT") ||
+         EqualsIgnoreCase(token, "FILTER") || EqualsIgnoreCase(token, "SORT") || EqualsIgnoreCase(token, "LIMIT") ||
+         EqualsIgnoreCase(token, "OFFSET") || EqualsIgnoreCase(token, "HIGHLIGHT") ||
+         EqualsIgnoreCase(token, "FUZZY") || EqualsIgnoreCase(token, "FACET");
 }
 
 }  // namespace mygramdb::query::internal

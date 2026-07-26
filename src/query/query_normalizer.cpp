@@ -66,13 +66,17 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const TextNorm
   uint8_t command = 0;
   switch (query.type) {
     case query::QueryType::SEARCH:
+    case query::QueryType::FACET:
+      // FACET caches the underlying DocId set, not the aggregated facet
+      // values. Share the SEARCH namespace so identical predicates reuse the
+      // same posting-list result regardless of which surface warmed it.
       command = 1;
       break;
     case query::QueryType::COUNT:
       command = 2;
       break;
     default:
-      // Only SEARCH and COUNT queries are cacheable.
+      // Only SEARCH, FACET, and COUNT queries are cacheable.
       return "";
   }
 

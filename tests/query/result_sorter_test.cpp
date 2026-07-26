@@ -1337,3 +1337,34 @@ TEST_F(ResultSorterTest, SchwartzianTransformThresholdBoundary) {
         << "Position " << i << " should have primary key " << (150 - static_cast<int>(i));
   }
 }
+
+#ifdef MYGRAMDB_QUERY_TEST_HOOKS
+TEST_F(ResultSorterTest, SchwartzianPartialFailureFallsBackToSortedResults) {
+  std::vector<DocId> doc_ids;
+  for (int i = 150; i >= 1; --i) {
+    auto result = doc_store_.AddDocument(std::to_string(i), {{"rank", int32_t(i)}});
+    ASSERT_TRUE(result.has_value());
+    doc_ids.push_back(*result);
+  }
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.offset = 5;
+  query.order_by = OrderByClause{"rank", SortOrder::ASC};
+
+  ResultSorter::ForceSchwartzianPartialFailureForTesting(true);
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ResultSorter::ForceSchwartzianPartialFailureForTesting(false);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(result->size(), 10);
+  for (size_t i = 0; i < result->size(); ++i) {
+    auto rank = doc_store_.GetFilterValue((*result)[i], "rank");
+    ASSERT_TRUE(rank.has_value());
+    EXPECT_EQ(std::get<int32_t>(*rank), static_cast<int32_t>(i + 6));
+  }
+}
+#endif

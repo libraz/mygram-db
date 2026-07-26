@@ -188,6 +188,7 @@ class QueryASTParser {
   size_t pos_ = 0;
   std::string error_;
   int recursion_depth_ = 0;
+  size_t term_count_ = 0;
 
   /**
    * @brief Get current token
@@ -235,11 +236,6 @@ class QueryASTParser {
    * @brief Parse primary expression (term or parenthesized expression)
    */
   std::unique_ptr<QueryNode> ParsePrimary();
-
-  /**
-   * @brief Count TERM nodes in a parsed AST.
-   */
-  static size_t CountTerms(const QueryNode& node);
 
   /**
    * @brief Set error message

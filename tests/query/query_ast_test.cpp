@@ -8,11 +8,28 @@
 #include <gtest/gtest.h>
 
 #include "index/index.h"
+#include "query/substring_search.h"
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb {
 namespace query {
+
+TEST(NormalizedSubstringSearchTest, StreamsMultipleChunksAndReturnsSortedMatches) {
+  storage::DocumentStore store;
+  auto first = store.AddDocument("1", {}, "alpha");
+  auto second = store.AddDocument("2", {}, "beta alpha");
+  auto third = store.AddDocument("3", {}, "beta");
+  auto fourth = store.AddDocument("4", {}, "alphabet");
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(third.has_value());
+  ASSERT_TRUE(fourth.has_value());
+
+  EXPECT_EQ(SearchNormalizedSubstring("alpha", store, 2), (std::vector<storage::DocId>{*first, *second, *fourth}));
+  EXPECT_TRUE(SearchNormalizedSubstring("", store, 2).empty());
+  EXPECT_TRUE(SearchNormalizedSubstring("alpha", store, 0).empty());
+}
 
 // ============================================================================
 // Basic Term Tests
@@ -413,6 +430,46 @@ TEST(QueryASTTest, RejectsMoreThanSixtyFourTerms) {
   for (int i = 0; i < 65; ++i) {
     if (!query.empty()) {
       query += " OR ";
+    }
+    query += "term" + std::to_string(i);
+  }
+
+  QueryASTParser parser;
+  auto ast = parser.Parse(query);
+
+  EXPECT_EQ(ast, nullptr);
+  EXPECT_NE(parser.GetError().find("Too many boolean search terms"), std::string::npos);
+}
+
+TEST(QueryASTTest, PunctuationIsAcceptedInBooleanOperands) {
+  const std::vector<std::string> expressions = {
+      "e-mail OR email",
+      "foo@example.com OR bar@example.com",
+      "v1.2 OR v1.3",
+      "c++ OR rust",
+  };
+
+  for (const auto& expression : expressions) {
+    QueryASTParser parser;
+    auto ast = parser.Parse(expression);
+    ASSERT_NE(ast, nullptr) << expression << ": " << parser.GetError();
+    EXPECT_EQ(ast->type, NodeType::OR) << expression;
+  }
+}
+
+TEST(QueryASTTest, ControlCharactersRemainInvalidInTerms) {
+  QueryASTParser parser;
+  auto ast = parser.Parse(std::string("foo") + '\x01' + "bar OR baz");
+
+  EXPECT_EQ(ast, nullptr);
+  EXPECT_NE(parser.GetError().find("Unexpected character"), std::string::npos);
+}
+
+TEST(QueryASTTest, VeryLongImplicitAndIsRejectedBeforeBuildingDeepAst) {
+  std::string query;
+  for (int i = 0; i < 100000; ++i) {
+    if (!query.empty()) {
+      query += " ";
     }
     query += "term" + std::to_string(i);
   }

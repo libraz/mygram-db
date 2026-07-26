@@ -78,6 +78,37 @@ TEST(QueryParserTest, TableCommandsAcceptDatabaseQualifiedTableName) {
   EXPECT_EQ(sync_stop->table, "app_db.articles");
 }
 
+TEST(QueryParserTest, ShowVariablesLikeRequiresExactlyOnePattern) {
+  QueryParser parser;
+
+  const auto missing = parser.Parse("SHOW VARIABLES LIKE");
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(missing.error().code(), ErrorCode::kQuerySyntaxError);
+  EXPECT_NE(missing.error().message().find("exactly one pattern"), std::string::npos);
+
+  const auto extra = parser.Parse("SHOW VARIABLES LIKE cache extra");
+  ASSERT_FALSE(extra.has_value());
+  EXPECT_EQ(extra.error().code(), ErrorCode::kQuerySyntaxError);
+
+  const auto valid = parser.Parse("SHOW VARIABLES LIKE cache");
+  ASSERT_TRUE(valid.has_value()) << valid.error().message();
+  EXPECT_EQ(valid->variable_like_pattern, "cache");
+}
+
+TEST(QueryParserTest, LegacySaveAndLoadReturnMigrationErrors) {
+  QueryParser parser;
+
+  const auto save = parser.Parse("SAVE old.dump");
+  ASSERT_FALSE(save.has_value());
+  EXPECT_EQ(save.error().code(), ErrorCode::kQuerySyntaxError);
+  EXPECT_NE(save.error().message().find("use DUMP SAVE"), std::string::npos);
+
+  const auto load = parser.Parse("LOAD old.dump");
+  ASSERT_FALSE(load.has_value());
+  EXPECT_EQ(load.error().code(), ErrorCode::kQuerySyntaxError);
+  EXPECT_NE(load.error().message().find("use DUMP LOAD"), std::string::npos);
+}
+
 /**
  * @brief Test SEARCH with LIMIT
  */
@@ -250,6 +281,16 @@ TEST(QueryParserTest, GetBasic) {
   EXPECT_EQ(query->type, QueryType::GET);
   EXPECT_EQ(query->table, "articles");
   EXPECT_EQ(query->primary_key, "12345");
+  EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, GetDecodesReversiblyEscapedPrimaryKey) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(GET articles "a b\tc\x01")");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::GET);
+  EXPECT_EQ(query->primary_key, std::string("a b\tc") + '\x01');
   EXPECT_TRUE(query->IsValid());
 }
 
@@ -626,6 +667,16 @@ TEST(QueryParserTest, SearchWithNot) {
   EXPECT_TRUE(query->IsValid());
 }
 
+TEST(QueryParserTest, SearchStartingWithNotPreservesBooleanExpression) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles NOT world");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->search_text, "NOT world");
+  EXPECT_EQ(query->search_expression, "NOT world");
+  EXPECT_TRUE(query->not_terms.empty());
+}
+
 /**
  * @brief Test SEARCH with multiple NOT clauses
  */
@@ -774,9 +825,19 @@ TEST(QueryParserTest, QuotedBooleanKeywordPhrasePreservesBoundaryForAst) {
 
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
-  EXPECT_EQ(query->search_text, R"("hello OR world")");
+  EXPECT_EQ(query->search_text, "hello OR world");
+  EXPECT_EQ(query->search_expression, R"("hello OR world")");
   EXPECT_EQ(query->limit, 10);
   EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, QuotedPhraseWithBooleanWordKeepsLiteralFlatText) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles "rock and roll")");
+
+  ASSERT_TRUE(query) << query.error().message();
+  EXPECT_EQ(query->search_text, "rock and roll");
+  EXPECT_EQ(query->search_expression, R"("rock and roll")");
 }
 
 /**
@@ -1593,7 +1654,7 @@ TEST(QueryParserTest, SearchComplexNestedParenthesesBalanced) {
 // ============================================================================
 
 /**
- * @brief Test DUMP SAVE without table (regression test for Issue #63)
+ * @brief Test DUMP SAVE without table
  *
  * Previously, DUMP_SAVE was not in the table-not-required list, causing
  * Query::IsValid() to return false even though the command doesn't need a table.
@@ -2834,6 +2895,31 @@ TEST(QueryParserFuzzyTest, FuzzyWithOtherClauses) {
   EXPECT_EQ(*result->fuzzy_max_distance, 1);
   EXPECT_FALSE(result->filters.empty());
   EXPECT_EQ(result->limit, 10);
+}
+
+TEST(QueryParserFuzzyTest, FuzzyRecognizesLowercaseFollowingClause) {
+  QueryParser parser;
+  auto result = parser.Parse("SEARCH t hello FUZZY limit 10");
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_TRUE(result->fuzzy_max_distance.has_value());
+  EXPECT_EQ(*result->fuzzy_max_distance, 1u);
+  EXPECT_EQ(result->limit, 10u);
+  EXPECT_TRUE(result->limit_explicit);
+}
+
+TEST(QueryParserTest, FilterValueParenthesesAreNotTreatedAsSearchExpressionSyntax) {
+  QueryParser parser;
+
+  auto closing = parser.Parse("SEARCH t hello FILTER title = smile:)");
+  ASSERT_TRUE(closing.has_value()) << closing.error().message();
+  ASSERT_EQ(closing->filters.size(), 1u);
+  EXPECT_EQ(closing->filters[0].value, "smile:)");
+
+  auto opening = parser.Parse("SEARCH t hello FILTER title = smile:(");
+  ASSERT_TRUE(opening.has_value()) << opening.error().message();
+  ASSERT_EQ(opening->filters.size(), 1u);
+  EXPECT_EQ(opening->filters[0].value, "smile:(");
 }
 
 TEST(QueryParserFuzzyTest, FuzzyWithHighlight) {

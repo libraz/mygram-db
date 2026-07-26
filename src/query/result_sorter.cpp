@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <charconv>
 #include <cstring>
 #include <iterator>
@@ -39,6 +40,10 @@ constexpr size_t kFromCharsBufferSize = 21;
 
 // Partial sort threshold: use partial_sort when needed elements < 50% of total
 constexpr double kPartialSortThreshold = 0.5;
+
+#ifdef MYGRAMDB_QUERY_TEST_HOOKS
+std::atomic<bool> g_force_schwartzian_partial_failure{false};
+#endif
 
 bool CompareDocIdTie(DocId lhs, DocId rhs, bool ascending) {
   return ascending ? (lhs < rhs) : (lhs > rhs);
@@ -370,6 +375,12 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::
     return {};
   }
 
+#ifdef MYGRAMDB_QUERY_TEST_HOOKS
+  if (g_force_schwartzian_partial_failure.load(std::memory_order_relaxed)) {
+    return {};
+  }
+#endif
+
   // Clamp top_k to results size
   top_k = std::min(top_k, results.size());
 
@@ -647,6 +658,14 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
         .Event("result_sort_strategy")
         .Field("strategy", "schwartzian_failed_fallback")
         .Trace();
+    try {
+      SortComparator comparator(doc_store, order_by, primary_key_column);
+      std::partial_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(total_needed), results.end(),
+                        comparator);
+    } catch (const std::bad_alloc&) {
+      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Insufficient memory to sort search results"));
+    }
+    return ApplyOffsetLimit(results, query.offset, query.limit);
   } else if (use_schwartzian) {
     // Schwartzian Transform: Pre-compute sort keys, then full sort
     // Expected: 30-50% reduction in sort time for N >= 10,000
@@ -699,6 +718,12 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
   // Apply OFFSET and LIMIT after sorting
   return ApplyOffsetLimit(results, query.offset, query.limit);
 }
+
+#ifdef MYGRAMDB_QUERY_TEST_HOOKS
+void ResultSorter::ForceSchwartzianPartialFailureForTesting(bool force) {
+  g_force_schwartzian_partial_failure.store(force, std::memory_order_relaxed);
+}
+#endif
 
 std::vector<DocId> ResultSorter::SortByScore(const std::vector<DocId>& results, const std::vector<double>& scores,
                                              SortOrder order, uint32_t limit, uint32_t offset) {

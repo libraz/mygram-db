@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include "utils/string_utils.h"
+
 namespace mygramdb::query {
 namespace {
 
@@ -152,8 +154,61 @@ TEST_F(HighlighterTest, Generate_MaxFragmentsLimit) {
   // Two matches far apart, but only 1 fragment allowed
   std::string text = "alpha " + std::string(200, 'x') + " beta";
   auto result = Highlighter::Generate(text, {"alpha", "beta"}, opts);
-  // Should only contain the first match's fragment
-  EXPECT_NE(result.snippet.find("<em>alpha</em>"), std::string::npos);
+  // Should only contain the bounded portion of the first match's fragment.
+  EXPECT_NE(result.snippet.find("<em>alph</em>"), std::string::npos);
+  EXPECT_EQ(result.snippet.find("beta"), std::string::npos);
+}
+
+TEST_F(HighlighterTest, Generate_DenseMatchesRespectSnippetLengthBound) {
+  HighlightOptions opts;
+  opts.snippet_length = 20;
+  opts.max_fragments = 3;
+  const std::string text = "hit " + std::string(200, 'x') + " hit";
+  std::string dense_text;
+  for (int i = 0; i < 100; ++i) {
+    dense_text += "hit ";
+  }
+
+  auto result = Highlighter::Generate(dense_text, {"hit"}, opts);
+
+  std::string without_tags = result.snippet;
+  for (const std::string tag : {"<em>", "</em>", "..."}) {
+    size_t pos = 0;
+    while ((pos = without_tags.find(tag, pos)) != std::string::npos) {
+      without_tags.erase(pos, tag.size());
+    }
+  }
+  EXPECT_LE(mygram::utils::CountCodePoints(without_tags), opts.snippet_length);
+}
+
+TEST_F(HighlighterTest, Generate_DenseUtf8MatchesRespectCodePointBound) {
+  HighlightOptions opts;
+  opts.snippet_length = 8;
+  opts.max_fragments = 1;
+  const std::string text = "東京東京東京東京東京東京東京東京東京東京";
+
+  auto result = Highlighter::Generate(text, {"東京"}, opts);
+
+  std::string without_tags = result.snippet;
+  for (const std::string tag : {"<em>", "</em>", "..."}) {
+    size_t pos = 0;
+    while ((pos = without_tags.find(tag, pos)) != std::string::npos) {
+      without_tags.erase(pos, tag.size());
+    }
+  }
+  EXPECT_LE(mygram::utils::CountCodePoints(without_tags), opts.snippet_length);
+}
+
+TEST_F(HighlighterTest, GenerateOriginalPreservesCaseAndWidth) {
+  HighlightOptions opts;
+  opts.snippet_length = 40;
+  auto normalizer = [](std::string_view text) { return mygram::utils::NormalizeText(text, true, "narrow", true); };
+  const std::string original = "Tokyo ＴＯＷＥＲ";
+  const std::vector<std::string> terms = {normalizer("tokyo"), normalizer("tower")};
+
+  auto result = Highlighter::GenerateOriginal(original, terms, normalizer, opts);
+
+  EXPECT_EQ(result.snippet, "<em>Tokyo</em> <em>ＴＯＷＥＲ</em>");
 }
 
 TEST_F(HighlighterTest, Generate_MatchAtBeginning) {

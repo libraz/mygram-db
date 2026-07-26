@@ -178,25 +178,26 @@ struct CacheDebugInfo {
  * @brief Debug information for query execution
  */
 struct DebugInfo {
-  double query_time_ms = 0.0;              // Total query execution time
-  double parse_time_ms = 0.0;              // Query parsing time
-  double index_time_ms = 0.0;              // Index search time
-  double filter_time_ms = 0.0;             // Filter application time
-  std::vector<std::string> search_terms;   // Search terms used
-  std::vector<std::string> ngrams_used;    // N-grams generated
-  std::vector<size_t> posting_list_sizes;  // Size of each posting list
-  size_t total_candidates = 0;             // Total candidates before filtering
-  size_t after_intersection = 0;           // Results after term intersection
-  size_t after_not = 0;                    // Results after NOT filtering
-  size_t after_filters = 0;                // Results after filter conditions
-  size_t final_results = 0;                // Final result count
-  std::string optimization_used;           // Optimization strategy used
-  std::string order_by_applied;            // ORDER BY applied (e.g., "id DESC")
-  uint32_t limit_applied = 0;              // LIMIT value applied
-  uint32_t offset_applied = 0;             // OFFSET value applied
-  bool limit_explicit = false;             // True if LIMIT was explicitly specified
-  bool offset_explicit = false;            // True if OFFSET was explicitly specified
-  CacheDebugInfo cache_info;               // Cache debug information
+  double query_time_ms = 0.0;                   // Total query execution time
+  double parse_time_ms = 0.0;                   // Query parsing time
+  double index_time_ms = 0.0;                   // Index search time
+  double filter_time_ms = 0.0;                  // Filter application time
+  std::vector<std::string> search_terms;        // Search terms used
+  std::vector<std::string> ngrams_used;         // N-grams generated
+  std::vector<size_t> posting_list_sizes;       // Size of each posting list
+  size_t total_candidates = 0;                  // Total candidates before filtering
+  size_t after_intersection = 0;                // Results after term intersection
+  size_t after_not = 0;                         // Results after NOT filtering
+  size_t after_filters = 0;                     // Results after filter conditions
+  size_t final_results = 0;                     // Final result count
+  bool pipeline_stage_counts_available = true;  // False when a cache hit bypassed the search stages
+  std::string optimization_used;                // Optimization strategy used
+  std::string order_by_applied;                 // ORDER BY applied (e.g., "id DESC")
+  uint32_t limit_applied = 0;                   // LIMIT value applied
+  uint32_t offset_applied = 0;                  // OFFSET value applied
+  bool limit_explicit = false;                  // True if LIMIT was explicitly specified
+  bool offset_explicit = false;                 // True if OFFSET was explicitly specified
+  CacheDebugInfo cache_info;                    // Cache debug information
 };
 
 /**
@@ -238,6 +239,7 @@ struct Query {
   // Canonical cache key set by search_pipeline after table/index-aware
   // normalization. Parser-created keys are intentionally not used.
   std::optional<std::pair<uint64_t, uint64_t>> cache_key;
+  std::string cache_key_discriminator;
   bool cache_key_is_canonical = false;
 
   /**
@@ -271,6 +273,9 @@ struct Query {
  */
 class QueryParser {
  public:
+  /// Maximum number of AND terms, NOT terms, or FILTER conditions accepted
+  /// by a single query across all protocol surfaces.
+  static constexpr size_t kMaxTermCount = 64;
   static constexpr size_t kMaxFilterColumnNameLength = 128;
   static constexpr size_t kMaxFilterValueLength = 1024;
 

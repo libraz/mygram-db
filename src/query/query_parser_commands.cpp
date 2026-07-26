@@ -3,11 +3,6 @@
  * @brief Query parser command implementations (SEARCH, COUNT, GET)
  */
 
-#include <spdlog/spdlog.h>
-
-#include <algorithm>
-#include <cctype>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -25,28 +20,11 @@ using internal::EqualsIgnoreCase;
 using internal::IsClauseKeyword;
 using internal::kMaxLimit;
 
-constexpr size_t kMaxTermCount = 64;
 using mygram::utils::ToUpper;
 
 static bool IsNonExpressionClauseKeyword(const std::string& token) {
   return token == "FILTER" || token == "SORT" || token == "LIMIT" || token == "OFFSET" || token == "HIGHLIGHT" ||
          token == "FUZZY" || token == "FACET";
-}
-
-static bool ContainsWhitespace(const std::string& token) {
-  return std::any_of(token.begin(), token.end(), [](unsigned char c) { return std::isspace(c) != 0; });
-}
-
-static bool ContainsStandaloneBooleanKeyword(const std::string& token) {
-  std::istringstream stream(token);
-  std::string part;
-  while (stream >> part) {
-    const std::string upper = ToUpper(part);
-    if (upper == "AND" || upper == "OR" || upper == "NOT") {
-      return true;
-    }
-  }
-  return false;
 }
 
 static std::string EscapeQuotedSearchToken(const std::string& token) {
@@ -64,9 +42,6 @@ static std::string EscapeQuotedSearchToken(const std::string& token) {
 }
 
 static std::string SearchTokenForFlatExpression(const std::string& token) {
-  if (ContainsWhitespace(token) && ContainsStandaloneBooleanKeyword(token)) {
-    return EscapeQuotedSearchToken(token);
-  }
   return token;
 }
 
@@ -99,30 +74,6 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
     error_msg =
         "Multiple tables not supported. Hint: MygramDB searches a single table at a time. Use separate queries "
         "for multiple tables.";
-    query.type = QueryType::UNKNOWN;
-    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
-  }
-
-  // First pass: check parentheses balance across ALL tokens
-  int total_paren_depth = 0;
-  for (size_t i = start_pos; i < tokens.size(); ++i) {
-    if (i < token_was_quoted.size() && token_was_quoted[i]) {
-      continue;
-    }
-    auto [open, close] = detail::CountParensInToken(tokens[i]);
-    total_paren_depth += open - close;
-
-    // Check for unmatched closing parentheses
-    if (total_paren_depth < 0) {
-      error_msg = "Unmatched closing parenthesis";
-      query.type = QueryType::UNKNOWN;
-      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
-    }
-  }
-
-  // Check for unclosed parentheses
-  if (total_paren_depth > 0) {
-    error_msg = "Unclosed parenthesis";
     query.type = QueryType::UNKNOWN;
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
   }
@@ -167,7 +118,10 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
       }
     }
   }
-  const bool is_boolean_expression = has_top_level_or || has_grouped_operand;
+  const bool starts_with_unary_not = start_pos < tokens.size() &&
+                                     !(start_pos < token_was_quoted.size() && token_was_quoted[start_pos]) &&
+                                     EqualsIgnoreCase(tokens[start_pos], "NOT");
+  const bool is_boolean_expression = has_top_level_or || has_grouped_operand || starts_with_unary_not;
 
   // Extract search text: consume tokens until we hit a command clause keyword.
   // Handle parentheses by tracking nesting level - but respect quoted strings.
@@ -182,6 +136,11 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
     // Track parentheses depth (respecting quotes)
     auto [open, close] = was_quoted ? std::pair<int, int>{0, 0} : detail::CountParensInToken(token);
     paren_depth += open - close;
+    if (paren_depth < 0) {
+      error_msg = "Unmatched closing parenthesis";
+      query.type = QueryType::UNKNOWN;
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
+    }
 
     const std::string upper_token = ToUpper(token);
 
@@ -200,6 +159,12 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
 
     search_tokens.push_back(token);
     pos++;
+  }
+
+  if (paren_depth > 0) {
+    error_msg = "Unclosed parenthesis";
+    query.type = QueryType::UNKNOWN;
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kQuerySyntaxError, error_msg));
   }
 
   if (search_tokens.empty() && !require_search_text) {

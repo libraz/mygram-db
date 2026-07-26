@@ -22,26 +22,32 @@ namespace mygramdb::query {
  * @brief Sort query results with performance optimization
  *
  * This class provides optimized sorting for query results:
- * - Uses partial_sort when LIMIT is specified (only sorts top N)
+ * - Chooses full sort or partial sort from the requested page size
+ * - Precomputes sort keys for sufficiently large result sets
  * - Supports sorting by primary key or filter columns
  * - Applies LIMIT and OFFSET after sorting
  */
 class ResultSorter {
  public:
+#ifdef MYGRAMDB_QUERY_TEST_HOOKS
+  static void ForceSchwartzianPartialFailureForTesting(bool force);
+#endif
+
   /**
    * @brief Sort and apply LIMIT/OFFSET to results
    *
    * Performance optimization:
-   * - If LIMIT is specified: uses partial_sort (O(N*logK) where K=LIMIT)
-   * - If no LIMIT: uses full sort (O(N*logN))
+   * - Uses partial_sort when OFFSET + LIMIT is less than half of the input
+   * - Uses a Schwartzian transform for sufficiently large inputs, bounded by
+   *   the internal memory ceiling
    * - Sorting happens BEFORE applying OFFSET/LIMIT
-   * - Memory: in-place sorting, no additional memory allocation
+   * - May allocate O(N) temporary sort-key storage
    * - Thread-safe: uses read locks on DocumentStore
    *
    * Column validation:
    * - PRIMARY KEY: always valid
-   * - Filter columns: sample-based validation (first 100 documents)
-   * - Non-existent columns: treated as NULL values (logs warning)
+   * - Filter columns: validated with DocumentStore::HasFilterColumn
+   * - Non-existent columns: return kInvalidArgument
    *
    * @param results Document IDs to sort (modified in-place)
    * @param doc_store Document store for retrieving sort values

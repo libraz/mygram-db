@@ -10,35 +10,13 @@
 #include <sstream>
 
 #include "index/index.h"
+#include "query/substring_search.h"
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::query {
 
 using mygram::utils::ToUpper;
-
-namespace {
-
-std::vector<index::DocId> SearchNormalizedSubstring(const std::string& normalized_term,
-                                                    const storage::DocumentStore& doc_store) {
-  if (normalized_term.empty()) {
-    return {};
-  }
-
-  auto candidates = doc_store.GetAllDocIds();
-  auto texts = doc_store.GetNormalizedTextBatch(candidates);
-
-  std::vector<index::DocId> matches;
-  matches.reserve(candidates.size());
-  for (size_t i = 0; i < candidates.size(); ++i) {
-    if (texts[i].has_value() && texts[i]->find(normalized_term) != std::string::npos) {
-      matches.push_back(candidates[i]);
-    }
-  }
-  return matches;
-}
-
-}  // namespace
 
 // ============================================================================
 // QueryNode
@@ -194,12 +172,13 @@ void Tokenizer::SkipWhitespace() {
   }
 }
 
-constexpr unsigned char kMaxAsciiValue = 127;
-
 bool Tokenizer::IsTermChar(char character) {
-  // Allow alphanumeric, underscore, and non-ASCII characters
-  return std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_' ||
-         static_cast<unsigned char>(character) > kMaxAsciiValue;
+  // Boolean syntax is delimited only by whitespace, parentheses, and quotes.
+  // All other characters, including ASCII punctuation in e-mail addresses,
+  // versions, and language names such as "c++", are literal term characters.
+  const auto byte = static_cast<unsigned char>(character);
+  return std::isspace(byte) == 0 && std::iscntrl(byte) == 0 && character != '(' && character != ')' &&
+         character != '"' && character != '\'';
 }
 
 std::string Tokenizer::ReadQuotedString(char quote_char) {
@@ -338,6 +317,7 @@ std::unique_ptr<QueryNode> QueryASTParser::Parse(const std::string& query_str) {
   error_.clear();
   pos_ = 0;
   recursion_depth_ = 0;
+  term_count_ = 0;
 
   // Tokenize input
   Tokenizer tokenizer(query_str);
@@ -366,27 +346,7 @@ std::unique_ptr<QueryNode> QueryASTParser::Parse(const std::string& query_str) {
     return nullptr;
   }
 
-  const size_t term_count = CountTerms(*root);
-  if (term_count > kMaxTermCount) {
-    SetError("Too many boolean search terms (maximum: " + std::to_string(kMaxTermCount) + ")");
-    return nullptr;
-  }
-
   return root;
-}
-
-size_t QueryASTParser::CountTerms(const QueryNode& node) {
-  if (node.type == NodeType::TERM) {
-    return 1;
-  }
-
-  size_t count = 0;
-  for (const auto& child : node.children) {
-    if (child != nullptr) {
-      count += CountTerms(*child);
-    }
-  }
-  return count;
 }
 
 const Token& QueryASTParser::CurrentToken() const {
@@ -504,6 +464,11 @@ std::unique_ptr<QueryNode> QueryASTParser::ParsePrimary() {
   // primary → TERM | '(' or_expr ')'
 
   if (Match(TokenType::TERM)) {
+    ++term_count_;
+    if (term_count_ > kMaxTermCount) {
+      SetError("Too many boolean search terms (maximum: " + std::to_string(kMaxTermCount) + ")");
+      return nullptr;
+    }
     std::string term = CurrentToken().value;
     Advance();
     return std::make_unique<QueryNode>(term);

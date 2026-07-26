@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -52,6 +53,17 @@ class Highlighter {
    */
   static HighlightResult Generate(std::string_view normalized_text, const std::vector<std::string>& search_terms,
                                   const HighlightOptions& options);
+
+  /**
+   * @brief Highlight original source text using normalized matching semantics.
+   *
+   * The normalizer must use the same settings as the index. Match offsets are
+   * translated back to original-text code-point offsets before rendering.
+   */
+  static HighlightResult GenerateOriginal(std::string_view original_text,
+                                          const std::vector<std::string>& normalized_search_terms,
+                                          const std::function<std::string(std::string_view)>& normalizer,
+                                          const HighlightOptions& options);
 
   /**
    * @brief Find all non-overlapping match positions (in code points) for terms in text

@@ -197,26 +197,12 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     return query;
   }
   if (EqualsIgnoreCase(command, "SAVE")) {
-    Query query;
-    query.type = QueryType::SAVE;
-    query.table = "";  // SAVE doesn't need a table
-    // Optional filepath argument
-    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    if (tokens.size() > 1) {  // 1: Check for optional filepath after SAVE
-      query.filepath = tokens[1];
-    }
-    return query;
+    SetError("SAVE is no longer supported; use DUMP SAVE");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
   if (EqualsIgnoreCase(command, "LOAD")) {
-    Query query;
-    query.type = QueryType::LOAD;
-    query.table = "";  // LOAD doesn't need a table
-    // Optional filepath argument
-    // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    if (tokens.size() > 1) {  // 1: Check for optional filepath after LOAD
-      query.filepath = tokens[1];
-    }
-    return query;
+    SetError("LOAD is no longer supported; use DUMP LOAD");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
   if (EqualsIgnoreCase(command, "DUMP")) {
     // DUMP SAVE | LOAD | VERIFY | INFO
@@ -526,10 +512,18 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       Query query;
       query.type = QueryType::SHOW_VARIABLES;
 
-      // Check for LIKE clause
-      if (tokens.size() >= 4 && EqualsIgnoreCase(tokens[2], "LIKE")) {
-        query.variable_like_pattern = tokens[3];
+      if (tokens.size() == 2) {
+        return query;
       }
+      if (!EqualsIgnoreCase(tokens[2], "LIKE")) {
+        SetError("SHOW VARIABLES: Expected LIKE 'pattern'");
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+      if (tokens.size() != 4) {
+        SetError("SHOW VARIABLES LIKE: Expected exactly one pattern");
+        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+      }
+      query.variable_like_pattern = tokens[3];
 
       return query;
     }
@@ -598,6 +592,30 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
           break;
         case '\'':
           token += '\'';
+          break;
+        case 'x':
+          if (i + 2 < str.length()) {
+            const auto hex_value = [](char ch) -> int {
+              if (ch >= '0' && ch <= '9') {
+                return ch - '0';
+              }
+              if (ch >= 'a' && ch <= 'f') {
+                return 10 + (ch - 'a');
+              }
+              if (ch >= 'A' && ch <= 'F') {
+                return 10 + (ch - 'A');
+              }
+              return -1;
+            };
+            const int high = hex_value(str[i + 1]);
+            const int low = hex_value(str[i + 2]);
+            if (high >= 0 && low >= 0) {
+              token += static_cast<char>((high << 4) | low);
+              i += 2;
+              break;
+            }
+          }
+          token += 'x';
           break;
         default:
           token += character;
