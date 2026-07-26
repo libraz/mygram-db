@@ -108,7 +108,7 @@ void IoReactor::Stop() {
   // which is consistent with the global ordering
   // start_stop_mutex_ -> mux_lifecycle_ -> connections_mutex_.
   //
-  // CR-3 caller contract: when this reactor is owned by a TcpServer, the
+  // When this reactor is owned by a TcpServer, the
   // owner MUST shut down `thread_pool_` AFTER reactor_->Stop() returns. The
   // reactor's close_callback_ may capture pointers (`accept_ptr`,
   // `close_stats_ptr`) that point at TcpServer-owned objects; drain tasks
@@ -518,7 +518,7 @@ void IoReactor::DispatchEvent(const reactor::ReadyEvent& ev) {
     // any pending frames, flushes the response via the drain task, and
     // only then unregisters. Treating kHangup as a fatal error here causes
     // the server to drop half-closed clients' responses on the floor.
-    if ((ev.events & (reactor::event::kReadable | reactor::event::kHangup)) != 0 && keep) {
+    if ((ev.events & (reactor::event::kReadable | reactor::event::kHangup)) != 0 && keep && !conn->HasReadEof()) {
       keep = conn->OnReadable();
     }
     if ((ev.events & reactor::event::kWritable) != 0 && keep) {

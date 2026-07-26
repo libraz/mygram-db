@@ -16,6 +16,10 @@ target_include_directories(event_multiplexer_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+target_compile_definitions(event_multiplexer_test PRIVATE
+  MYGRAMDB_EVENT_MULTIPLEXER_TEST_HOOKS
+)
+
 gtest_discover_tests(event_multiplexer_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30

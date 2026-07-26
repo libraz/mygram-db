@@ -36,6 +36,7 @@
 #include <sys/event.h>
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -72,7 +73,9 @@ namespace mygramdb::server::reactor {
  */
 class KqueueMultiplexer final : public EventMultiplexer {
  public:
-  KqueueMultiplexer();
+  using DeleteFilterFn = std::function<int(int, int16_t)>;
+
+  explicit KqueueMultiplexer(DeleteFilterFn delete_filter = {});
   ~KqueueMultiplexer() override;
 
   KqueueMultiplexer(const KqueueMultiplexer&) = delete;
@@ -109,6 +112,11 @@ class KqueueMultiplexer final : public EventMultiplexer {
    */
   mygram::utils::Expected<void, mygram::utils::Error> Wake() override;
 
+#ifdef MYGRAMDB_EVENT_MULTIPLEXER_TEST_HOOKS
+  [[nodiscard]] int BackendFdForTest() const { return kqueue_fd_; }
+  [[nodiscard]] std::size_t RegistrationCountForTest() const { return interest_.size(); }
+#endif
+
  private:
   /**
    * @brief Diff `old_interest` against `new_interest` and apply the delta.
@@ -119,7 +127,7 @@ class KqueueMultiplexer final : public EventMultiplexer {
    * @param applied_interest  Out-param: on return, set to the interest mask
    *                          that is actually armed in the kernel. On a fully
    *                          successful call this equals `new_interest`. On
-   *                          partial failure (CR-4) it reflects only the
+   *                          partial failure it reflects only the
    *                          filters whose individual kevent() call succeeded
    *                          before the failure, so the caller can keep its
    *                          in-process `interest_` map in lockstep with the
@@ -177,6 +185,7 @@ class KqueueMultiplexer final : public EventMultiplexer {
     RegistrationToken token = kInvalidRegistrationToken;
   };
   std::unordered_map<int, Registration> interest_;
+  DeleteFilterFn delete_filter_;
 };
 
 }  // namespace mygramdb::server::reactor

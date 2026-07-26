@@ -21,9 +21,13 @@ TEST(ServerConfigTest, FromConfigCopiesTcpSettings) {
   cfg.api.tcp.max_connections = 500;
   cfg.api.tcp.worker_threads = 8;
   cfg.api.tcp.recv_timeout_sec = 30;
+  cfg.api.tcp.idle_timeout_sec = 45;
+  cfg.api.tcp.reaper_interval_sec = 3;
   cfg.api.tcp.thread_pool_queue_size = 2000;
   cfg.api.tcp.max_write_queue_bytes = 32LL * 1024 * 1024;
   cfg.api.tcp.max_total_buffered_bytes = 512LL * 1024 * 1024;
+  cfg.api.tcp.max_pending_frames = 2048;
+  cfg.api.tcp.max_pending_frame_bytes = 8LL * 1024 * 1024;
 
   auto sc = ServerConfig::FromConfig(cfg);
 
@@ -32,9 +36,13 @@ TEST(ServerConfigTest, FromConfigCopiesTcpSettings) {
   EXPECT_EQ(sc.max_connections, 500);
   EXPECT_EQ(sc.worker_threads, 8);
   EXPECT_EQ(sc.recv_timeout_sec, 30);
+  EXPECT_EQ(sc.idle_timeout_sec, 45);
+  EXPECT_EQ(sc.reaper_interval_sec, 3);
   EXPECT_EQ(sc.thread_pool_queue_size, 2000);
   EXPECT_EQ(sc.max_write_queue_bytes, 32LL * 1024 * 1024);
   EXPECT_EQ(sc.max_total_buffered_bytes, 512LL * 1024 * 1024);
+  EXPECT_EQ(sc.max_pending_frames, 2048);
+  EXPECT_EQ(sc.max_pending_frame_bytes, 8LL * 1024 * 1024);
 }
 
 /**

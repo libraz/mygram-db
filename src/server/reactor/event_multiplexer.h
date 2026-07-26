@@ -112,8 +112,11 @@ class EventMultiplexer {
    * @brief Register a new fd with the given interest set.
    *
    * The multiplexer does NOT take ownership of the fd. `interest` is a bit-OR
-   * of `event::kReadable` and `event::kWritable`; `kError` and `kHangup` are
-   * always reported and cannot be masked. Returns
+   * of `event::kReadable` and `event::kWritable`. Orderly read-side EOF
+   * (`EPOLLRDHUP` / `EV_EOF`) follows `kReadable` interest so callers can
+   * disarm the permanently level-ready condition after recv() returns zero.
+   * Terminal backend errors may still be reported independent of interest.
+   * Returns
    * `kNetworkReactorRegisterFailed` on syscall failure.
    */
   virtual mygram::utils::Expected<void, mygram::utils::Error> Add(

@@ -72,12 +72,17 @@ struct ServerConfig {
 
   // Connection I/O tunables.
   int recv_timeout_sec = 60;          ///< Initial first-frame timeout seconds (0 = disabled)
+  int idle_timeout_sec = 300;         ///< General idle timeout seconds (0 = disabled)
+  int reaper_interval_sec = 5;        ///< Idle reaper sweep interval seconds
   int thread_pool_queue_size = 1000;  ///< ThreadPool task queue bound; 0 = unbounded
   int64_t max_write_queue_bytes =
       16LL *
       static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  ///< Per-connection slow-reader cap; see config.h
   int64_t max_total_buffered_bytes =
       256LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  ///< Shared reactor request/write budget
+  int max_pending_frames = 1024;                                           ///< Completed request-frame queue hard cap
+  int64_t max_pending_frame_bytes =
+      4LL * static_cast<int64_t>(mygram::constants::kBytesPerMegabyte);  ///< Completed frame byte hard cap
 
   // TCP keepalive applied per-accepted client socket. See
   // config.h ApiConfig::tcp::keepalive for rationale.
@@ -108,6 +113,8 @@ struct ServerConfig {
     sc.max_connections = cfg.api.tcp.max_connections;
     sc.worker_threads = cfg.api.tcp.worker_threads;
     sc.recv_timeout_sec = cfg.api.tcp.recv_timeout_sec;
+    sc.idle_timeout_sec = cfg.api.tcp.idle_timeout_sec;
+    sc.reaper_interval_sec = cfg.api.tcp.reaper_interval_sec;
     sc.thread_pool_queue_size = cfg.api.tcp.thread_pool_queue_size;
     sc.keepalive.enabled = cfg.api.tcp.keepalive.enabled;
     sc.keepalive.idle_sec = cfg.api.tcp.keepalive.idle_sec;
@@ -115,6 +122,8 @@ struct ServerConfig {
     sc.keepalive.probe_count = cfg.api.tcp.keepalive.probe_count;
     sc.max_write_queue_bytes = cfg.api.tcp.max_write_queue_bytes;
     sc.max_total_buffered_bytes = cfg.api.tcp.max_total_buffered_bytes;
+    sc.max_pending_frames = cfg.api.tcp.max_pending_frames;
+    sc.max_pending_frame_bytes = cfg.api.tcp.max_pending_frame_bytes;
     sc.default_limit = cfg.api.default_limit;
     sc.max_query_length = cfg.api.max_query_length;
     sc.allow_cidrs = cfg.network.allow_cidrs;
@@ -179,6 +188,15 @@ struct BM25Stats {
     total_doc_length.fetch_add(doc_length, std::memory_order_relaxed);
     doc_count.fetch_add(1, std::memory_order_relaxed);
   }
+
+  /// Replace the complete corpus statistics with a recomputed snapshot.
+  void SetCorpusStats(uint64_t total_length, uint64_t count) {
+    total_doc_length.store(total_length, std::memory_order_relaxed);
+    doc_count.store(count, std::memory_order_relaxed);
+  }
+
+  /// Reset the corpus to an empty state.
+  void Reset() { SetCorpusStats(0, 0); }
 
   /// Remove a document with given length
   void RemoveDocument(uint32_t doc_length) {
@@ -446,7 +464,7 @@ struct HandlerContext {
   /// long-running workers (DumpSaveWorker / DumpLoadWorker) skip
   /// auto-restarting replication after their in-flight operation completes,
   /// because the binlog_reader is about to be torn down by TcpServer::Stop()
-  /// (see CR-3 / CR-10 audit, May 2026). Tests may leave this null; in that
+  /// Tests may leave this null; in that
   /// case the worker behaves as before (always attempts auto-restart).
   std::atomic<bool>* shutdown_flag = nullptr;
 

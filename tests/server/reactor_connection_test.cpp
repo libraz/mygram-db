@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -181,6 +182,10 @@ class ReactorConnectionNoDispatcherTest : public ::testing::Test {
   int rc_fd_ = -1;
   std::shared_ptr<ReactorConnection> conn_;
 };
+
+TEST_F(ReactorConnectionNoDispatcherTest, UnixPeerGetsStableRateLimitIdentity) {
+  EXPECT_EQ(conn_->ClientIdentityForTest(), "unix");
+}
 
 // ---------------------------------------------------------------------------
 // Step 3 stubs
@@ -380,10 +385,11 @@ TEST_F(ReactorConnectionNoDispatcherTest, PendingFrameAdmissionIsBoundedBeforeAl
   }
 
   size_t enqueued = 0;
-  EXPECT_FALSE(conn_->AppendReadBytesForTest(payload, enqueued));
-  EXPECT_EQ(enqueued, ReactorConnection::kMaxPendingFrames);
-  EXPECT_EQ(conn_->PendingFrameCountForTest(), ReactorConnection::kMaxPendingFrames);
+  EXPECT_TRUE(conn_->AppendReadBytesForTest(payload, enqueued));
+  EXPECT_EQ(enqueued, ReactorConnection::kPendingFramesHighWatermark);
+  EXPECT_EQ(conn_->PendingFrameCountForTest(), ReactorConnection::kPendingFramesHighWatermark);
   EXPECT_LE(conn_->PendingFrameBytesForTest(), ReactorConnection::kMaxPendingFrameBytes);
+  EXPECT_TRUE(conn_->ReadPausedForTest());
 }
 
 TEST_F(ReactorConnectionNoDispatcherTest, PendingFrameWatermarksPauseAndResumeReads) {
@@ -401,6 +407,35 @@ TEST_F(ReactorConnectionNoDispatcherTest, PendingFrameWatermarksPauseAndResumeRe
                                    ReactorConnection::kPendingFramesLowWatermark);
   EXPECT_FALSE(conn_->ReadPausedForTest());
   EXPECT_EQ(conn_->PendingFrameCountForTest(), ReactorConnection::kPendingFramesLowWatermark);
+}
+
+TEST(ReactorConnectionBackpressureTest, ConfiguredHighWatermarkBackpressuresSingleBurstWithoutClosing) {
+  auto conn = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
+                                        ReactorConnection::kDefaultMaxWriteQueueBytes, nullptr,
+                                        /*max_pending_frames=*/8, /*max_pending_frame_bytes=*/4096);
+
+  std::string payload;
+  for (size_t i = 0; i < 20; ++i) {
+    payload += "x\r\n";
+  }
+
+  size_t enqueued = 0;
+  EXPECT_TRUE(conn->AppendReadBytesForTest(payload, enqueued));
+  EXPECT_EQ(enqueued, 6U);
+  EXPECT_EQ(conn->PendingFrameCountForTest(), 6U);
+  EXPECT_TRUE(conn->ReadPausedForTest());
+  EXPECT_GT(conn->ReadBufferSizeForTest(), 0U);
+  EXPECT_FALSE(conn->IsClosing());
+
+  // Each low-watermark drain refills from the already-received suffix rather
+  // than treating the legitimate burst as a fatal queue overflow.
+  for (int iteration = 0; iteration < 10 && conn->ReadPausedForTest(); ++iteration) {
+    conn->DrainPendingFramesForTest(3);
+    EXPECT_FALSE(conn->IsClosing());
+    EXPECT_LE(conn->PendingFrameCountForTest(), 6U);
+  }
+  EXPECT_FALSE(conn->ReadPausedForTest());
+  EXPECT_EQ(conn->ReadBufferSizeForTest(), 0U);
 }
 
 TEST_F(ReactorConnectionNoDispatcherTest, OversizedCompletedFrameIsRejectedBeforeQueueAllocation) {
@@ -423,6 +458,86 @@ TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowDoesNotInlineErrorAheadOfP
 
   EXPECT_FALSE(conn_->ShouldSendReadOverflowErrorForTest())
       << "read overflow must not send ERROR ahead of already queued response";
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowErrorHoldsWriteMutexAcrossSend) {
+  std::promise<void> entered;
+  auto entered_future = entered.get_future();
+  std::promise<void> release;
+  auto release_future = release.get_future().share();
+
+  auto error_sender = std::async(std::launch::async, [this, &entered, release_future]() {
+    return conn_->SendReadOverflowErrorForTest("request too large", [&entered, release_future]() {
+      entered.set_value();
+      release_future.wait();
+    });
+  });
+  ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+
+  auto response_sender = std::async(std::launch::async, [this]() { return conn_->EnqueueResponse("OK response"); });
+  EXPECT_EQ(response_sender.wait_for(std::chrono::milliseconds(25)), std::future_status::timeout)
+      << "normal response write must wait until the locked error send completes";
+
+  release.set_value();
+  EXPECT_TRUE(error_sender.get());
+  EXPECT_TRUE(response_sender.get());
+
+  const std::string expected = "ERROR request too large\r\nOK response\r\n";
+  std::string received;
+  while (received.size() < expected.size() && WaitReadable(peer_fd_, 1000)) {
+    char response[128]{};
+    const ssize_t n = ::recv(peer_fd_, response, sizeof(response), 0);
+    if (n <= 0) {
+      break;
+    }
+    received.append(response, static_cast<size_t>(n));
+  }
+  EXPECT_EQ(received, expected);
+}
+
+TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClosing) {
+  conn_.reset();
+  ::close(peer_fd_);
+  peer_fd_ = -1;
+  pool_.reset();
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  peer_fd_ = fds[0];
+  rc_fd_ = fds[1];
+  SetNonBlocking(rc_fd_);
+
+  pool_ = std::make_unique<ThreadPool>(1, 1);
+  std::promise<void> worker_started;
+  auto worker_started_future = worker_started.get_future();
+  std::promise<void> release_worker;
+  auto release_worker_future = release_worker.get_future().share();
+
+  ASSERT_TRUE(pool_->Submit([&worker_started, release_worker_future]() {
+    worker_started.set_value();
+    release_worker_future.wait();
+  }));
+  ASSERT_EQ(worker_started_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  ASSERT_TRUE(pool_->Submit([] {})) << "fill the only queued task slot";
+
+  conn_ = ReactorConnection::Create(rc_fd_, nullptr, harness_.dispatcher.get(), pool_.get());
+  WriteAll(peer_fd_, "INFO\r\n");
+  EXPECT_FALSE(conn_->OnReadable());
+  EXPECT_TRUE(conn_->IsClosing());
+
+  const std::string expected = "ERROR SERVER_BUSY Server is too busy, please try again later\r\n";
+  std::string received;
+  while (received.size() < expected.size() && WaitReadable(peer_fd_, 1000)) {
+    char response[128]{};
+    const ssize_t n = ::recv(peer_fd_, response, sizeof(response), 0);
+    if (n <= 0) {
+      break;
+    }
+    received.append(response, static_cast<size_t>(n));
+  }
+  EXPECT_EQ(received, expected);
+
+  release_worker.set_value();
 }
 
 TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {

@@ -45,14 +45,15 @@ constexpr std::size_t kInitialEventsCapacity = 64;
 constexpr std::size_t kMaxEventsCapacity = 4096;
 
 /// Translate the reactor-level interest bitmask to an `epoll_event.events`
-/// mask. `EPOLLRDHUP | EPOLLERR | EPOLLHUP` are always armed so the reactor
-/// can observe peer-initiated shutdowns even when neither read nor write
-/// interest is set (e.g. a fully idle connection that the peer closes).
+/// mask. `EPOLLERR | EPOLLHUP` remain armed for terminal socket failures.
+/// `EPOLLRDHUP`, like kqueue's EV_EOF on EVFILT_READ, follows readable
+/// interest: leaving it armed after recv() reports EOF would make a
+/// level-triggered epoll fd fire forever while queued responses drain.
 /// Explicitly level-triggered — no `EPOLLET`.
 uint32_t InterestToEpollEvents(uint8_t interest) {
-  uint32_t events = EPOLLRDHUP | EPOLLERR | EPOLLHUP;
+  uint32_t events = EPOLLERR | EPOLLHUP;
   if ((interest & event::kReadable) != 0U) {
-    events |= EPOLLIN;
+    events |= EPOLLIN | EPOLLRDHUP;
   }
   if ((interest & event::kWritable) != 0U) {
     events |= EPOLLOUT;
@@ -205,19 +206,26 @@ Expected<void, Error> EpollMultiplexer::Remove(int fd) {
   if (token_it == tokens_by_fd_.end()) {
     return {};
   }
+  const RegistrationToken token = token_it->second;
   if (::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) != 0) {
     const int en = errno;
+    // Removing a registration is a terminal userspace operation even when
+    // epoll rejects the DEL. Keeping these maps populated makes a later fd
+    // reuse look registered and retains an unreachable token forever. The
+    // kernel entry, if it still exists, is harmless: Poll drops events whose
+    // token is no longer present, and closing fd tears the entry down.
+    fds_by_token_.erase(token);
+    tokens_by_fd_.erase(token_it);
+
     // Idempotent teardown race: the fd may have been closed (EBADF) or never
     // actually registered (ENOENT) by the time IoReactor::Stop() reaches us.
     // Swallow those two cases; everything else is a real failure.
     if (en == ENOENT || en == EBADF) {
-      fds_by_token_.erase(token_it->second);
-      tokens_by_fd_.erase(token_it);
       return {};
     }
     return MakeUnexpected(MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno("epoll_ctl(DEL)", en)));
   }
-  fds_by_token_.erase(token_it->second);
+  fds_by_token_.erase(token);
   tokens_by_fd_.erase(token_it);
   return {};
 }

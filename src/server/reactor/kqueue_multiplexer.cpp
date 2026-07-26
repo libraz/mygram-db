@@ -16,6 +16,7 @@
 #include <array>
 #include <cerrno>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "utils/constants.h"
@@ -53,7 +54,7 @@ constexpr int64_t kMillisPerSecond = mygram::constants::kMillisecondsPerSecond;
 
 }  // namespace
 
-KqueueMultiplexer::KqueueMultiplexer() {
+KqueueMultiplexer::KqueueMultiplexer(DeleteFilterFn delete_filter) : delete_filter_(std::move(delete_filter)) {
   // Size the output buffer once up front so the steady-state Poll() path does
   // not allocate. We use resize() (not reserve()) because kevent() writes into
   // [data(), data() + size()); the actual returned count is what we iterate.
@@ -138,7 +139,7 @@ Expected<void, Error> KqueueMultiplexer::ApplyInterest(int fd, uint8_t new_inter
   // previously-armed interest and emit at most two change records: one per
   // filter (EVFILT_READ, EVFILT_WRITE).
   //
-  // CR-4 (audit, May 2026): kevent(2) does not report partial application of
+  // kevent(2) does not report partial application of
   // the change list. If the syscall is invoked with two change records and
   // the first succeeds while the second fails, the kernel returns -1 with
   // `errno` set from the failing entry but the first entry remains armed in
@@ -250,7 +251,7 @@ Expected<void, Error> KqueueMultiplexer::Add(int fd, uint8_t interest, Registrat
   uint8_t applied = 0U;
   auto result = ApplyInterest(fd, interest, &applied, /*old_interest=*/0U, /*is_add=*/true, registration_token);
   if (!result.has_value()) {
-    // CR-4: a partial Add can leave one filter armed in the kernel while the
+    // A partial Add can leave one filter armed in the kernel while the
     // other failed. Record exactly what the kernel knows about so a follow-up
     // Remove() can clean it up. If nothing was applied we omit the entry
     // entirely so Remove() remains a no-op.
@@ -297,7 +298,7 @@ Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest, Regist
   uint8_t applied = old_interest;
   auto result = ApplyInterest(fd, interest, &applied, old_interest, /*is_add=*/false, it->second.token);
   if (!result.has_value()) {
-    // CR-4: serialised kevent() calls mean we know exactly which filters were
+    // Serialised kevent() calls mean we know exactly which filters were
     // updated before the failure. Persist that partial state so `interest_`
     // matches the kernel; otherwise a follow-up Remove() would emit the wrong
     // EV_DELETE set and leak a filter (or invent a phantom one).
@@ -310,23 +311,23 @@ Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest, Regist
 
 Expected<void, Error> KqueueMultiplexer::Remove(int fd) {
   // Hold the lock across the kevent() teardown so that nothing else can
-  // re-register the fd in between erasing from `interest_` and clearing the
-  // kernel filters. This matches the new locking discipline in Add/Modify.
+  // modify or re-register the fd while its filters are being cleared. This
+  // matches the locking discipline in Add/Modify.
   std::lock_guard<std::mutex> lock(interest_mutex_);
   const auto it = interest_.find(fd);
   if (it == interest_.end()) {
     // Idempotent: never-added or already-removed fds are a no-op success.
     return {};
   }
-  const uint8_t old_interest = it->second.interest;
-  interest_.erase(it);
+  uint8_t remaining_interest = it->second.interest;
 
   if (kqueue_fd_ < 0) {
     // Multiplexer already torn down; nothing to unregister.
+    interest_.erase(it);
     return {};
   }
 
-  // CR-4: emit each EV_DELETE in its own kevent() call so a mid-list failure
+  // Emit each EV_DELETE in its own kevent() call so a mid-list failure
   // cannot leave one filter still armed in the kernel while we believe the fd
   // is fully removed. The number of syscalls here is bounded at two and only
   // happens on connection teardown — well off the hot path.
@@ -335,8 +336,8 @@ Expected<void, Error> KqueueMultiplexer::Remove(int fd) {
     bool present;
   };
   const std::array<DeleteRec, 2> deletes{
-      DeleteRec{EVFILT_READ, (old_interest & event::kReadable) != 0U},
-      DeleteRec{EVFILT_WRITE, (old_interest & event::kWritable) != 0U},
+      DeleteRec{EVFILT_READ, (remaining_interest & event::kReadable) != 0U},
+      DeleteRec{EVFILT_WRITE, (remaining_interest & event::kWritable) != 0U},
   };
 
   for (const auto& d : deletes) {
@@ -345,21 +346,32 @@ Expected<void, Error> KqueueMultiplexer::Remove(int fd) {
     }
     struct kevent kev {};
     EV_SET(&kev, static_cast<uintptr_t>(fd), d.filter, EV_DELETE, 0, 0, nullptr);
-    if (::kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr) < 0) {
+    const int delete_result =
+        delete_filter_ ? delete_filter_(fd, d.filter) : ::kevent(kqueue_fd_, &kev, 1, nullptr, 0, nullptr);
+    if (delete_result < 0) {
       const int en = errno;
       // Idempotent teardown race: kqueue auto-removes filters on close (EBADF),
       // and the filter may already be gone from an earlier path (ENOENT).
       // Everything else is a real failure.
       if (en == ENOENT || en == EBADF) {
+        remaining_interest = static_cast<uint8_t>(remaining_interest &
+                                                  ~((d.filter == EVFILT_READ) ? event::kReadable : event::kWritable));
         continue;
       }
+      // Preserve the filters that have not been proven removed so a later
+      // Remove() can retry them. Erasing the map before the syscalls loses
+      // this only record and leaves a permanently armed stale filter.
+      it->second.interest = remaining_interest;
       const char* label =
           (d.filter == EVFILT_READ) ? "kevent(EV_DELETE,EVFILT_READ)" : "kevent(EV_DELETE,EVFILT_WRITE)";
       return MakeUnexpected(
           MakeError(ErrorCode::kNetworkReactorRemoveFailed, FormatErrno(label, en), "fd=" + std::to_string(fd)));
     }
+    remaining_interest =
+        static_cast<uint8_t>(remaining_interest & ~((d.filter == EVFILT_READ) ? event::kReadable : event::kWritable));
   }
 
+  interest_.erase(it);
   return {};
 }
 

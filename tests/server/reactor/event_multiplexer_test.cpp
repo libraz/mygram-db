@@ -11,6 +11,7 @@
 
 #include "server/reactor/event_multiplexer.h"
 
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -198,7 +199,42 @@ TYPED_TEST(EventMultiplexerTest, PollDetectsHangupOnPeerClose) {
 }
 
 // ---------------------------------------------------------------------------
-// 8. LevelTriggeredRefires
+// 8. DisarmingReadAfterEofDoesNotRefire
+// ---------------------------------------------------------------------------
+TYPED_TEST(EventMultiplexerTest, DisarmingReadAfterEofDoesNotRefire) {
+  if constexpr (std::is_same_v<TypeParam, MockEventMultiplexer>) {
+    GTEST_SKIP() << "Kernel level-trigger behaviour is not modelled by the mock";
+  } else {
+    auto [server_end, peer_end] = this->MakeSocketPair();
+    ASSERT_TRUE(this->mux->Add(server_end, event::kReadable).has_value());
+    ASSERT_EQ(::shutdown(peer_end, SHUT_WR), 0);
+
+    std::vector<ReadyEvent> out;
+    ASSERT_TRUE(this->mux->Poll(500, out).has_value());
+    ASSERT_FALSE(out.empty());
+    bool saw_eof = false;
+    for (const auto& ready : out) {
+      if (ready.fd == server_end && (ready.events & (event::kReadable | event::kHangup)) != event::kNone) {
+        saw_eof = true;
+      }
+    }
+    ASSERT_TRUE(saw_eof);
+
+    char byte = 0;
+    ASSERT_EQ(::recv(server_end, &byte, 1, 0), 0);
+    ASSERT_TRUE(this->mux->Modify(server_end, event::kNone).has_value());
+
+    // EOF is level-ready. If the backend leaves its EOF source armed, every
+    // non-blocking poll below returns immediately with the same fd.
+    for (int iteration = 0; iteration < 100; ++iteration) {
+      ASSERT_TRUE(this->mux->Poll(0, out).has_value()) << "iteration " << iteration;
+      EXPECT_TRUE(out.empty()) << "EOF re-fired after read disarm at iteration " << iteration;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 9. LevelTriggeredRefires
 // ---------------------------------------------------------------------------
 TYPED_TEST(EventMultiplexerTest, LevelTriggeredRefires) {
   std::vector<ReadyEvent> out;
@@ -655,6 +691,28 @@ TEST(KqueueMultiplexerTest, RemoveAfterPartialModifyTolerated) {
   ::close(w);
 }
 
+TEST(KqueueMultiplexerTest, RemoveFailurePreservesRegistrationForRetry) {
+  KqueueMultiplexer mux([](int /*fd*/, int16_t /*filter*/) {
+    errno = EIO;
+    return -1;
+  });
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  ASSERT_TRUE(mux.Add(fds[0], event::kReadable | event::kWritable).has_value());
+  ASSERT_EQ(mux.RegistrationCountForTest(), 1U);
+
+  const auto remove = mux.Remove(fds[0]);
+  ASSERT_FALSE(remove.has_value());
+  EXPECT_EQ(remove.error().code(), mygram::utils::ErrorCode::kNetworkReactorRemoveFailed);
+  EXPECT_EQ(mux.RegistrationCountForTest(), 1U)
+      << "failed EV_DELETE must retain bookkeeping for the filters that may still be armed";
+
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
 TEST(KqueueMultiplexerTest, ConcurrentModifyDoesNotRace) {
   KqueueMultiplexer mux;
   ASSERT_TRUE(mux.Open().has_value());
@@ -716,5 +774,33 @@ TEST(KqueueMultiplexerTest, ConcurrentModifyDoesNotRace) {
 }
 
 #endif  // __APPLE__ || BSD family
+
+#if defined(__linux__)
+
+TEST(EpollMultiplexerTest, RemoveFailureClearsUserspaceRegistrationMaps) {
+  EpollMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  ASSERT_TRUE(mux.Add(fds[0], event::kReadable).has_value());
+  ASSERT_EQ(mux.RegistrationCountForTest(), 1U);
+
+  const int null_fd = ::open("/dev/null", O_RDONLY);
+  ASSERT_GE(null_fd, 0);
+  ASSERT_EQ(::dup2(null_fd, mux.BackendFdForTest()), mux.BackendFdForTest());
+  ::close(null_fd);
+
+  const auto remove = mux.Remove(fds[0]);
+  ASSERT_FALSE(remove.has_value());
+  EXPECT_EQ(remove.error().code(), mygram::utils::ErrorCode::kNetworkReactorRemoveFailed);
+  EXPECT_EQ(mux.RegistrationCountForTest(), 0U)
+      << "unexpected epoll_ctl errors must not retain unreachable fd/token mappings";
+
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
+#endif
 
 }  // namespace mygramdb::server::reactor

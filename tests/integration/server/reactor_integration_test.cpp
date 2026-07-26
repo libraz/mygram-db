@@ -104,8 +104,6 @@ class ReactorIntegrationTest : public ::testing::Test {
     auto s = std::make_unique<TcpServer>(cfg, table_contexts_);
     auto res = s->Start();
     EXPECT_TRUE(res) << "Failed to start TcpServer: " << (res ? std::string{} : res.error().to_string());
-    // Give the accept loop a moment to reach its main loop.
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
     return s;
   }
 
@@ -1358,24 +1356,7 @@ TEST_F(ReactorIntegrationTest, HalfCloseStillReceivesResponse) {
   ASSERT_EQ(::send(s, wire.data(), wire.size(), 0), static_cast<ssize_t>(wire.size()));
   ASSERT_EQ(::shutdown(s, SHUT_WR), 0) << "shutdown(SHUT_WR) failed: " << strerror(errno);
 
-  // Read raw bytes until the server closes or we time out. We cannot use
-  // RecvMultilineResponse here because it returns "" on EOF even if bytes
-  // were already accumulated — in the half-close scenario the server closes
-  // after flushing the response, so we must retain whatever we read before
-  // the EOF.
-  struct timeval io {};
-  io.tv_sec = 3;
-  io.tv_usec = 0;
-  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof(io));
-
-  std::string out;
-  std::array<char, 4096> buf{};
-  while (out.size() < 256 * 1024) {
-    ssize_t n = recv(s, buf.data(), buf.size(), 0);
-    if (n <= 0)
-      break;  // EOF or timeout — keep whatever we already buffered
-    out.append(buf.data(), static_cast<size_t>(n));
-  }
+  const std::string out = RecvMultilineResponse(s);
   close(s);
 
   EXPECT_FALSE(out.empty()) << "Server did not send any bytes after client half-closed write side "

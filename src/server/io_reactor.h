@@ -131,7 +131,7 @@ class IoReactor {
    * the drain task finishes writing its final response). Registered
    * connections receive their close callback exactly once during mass stop.
    *
-   * @note CR-3 caller contract: callers (e.g., TcpServer::Stop) MUST shut
+   * @note Callers (e.g., TcpServer::Stop) MUST shut
    * down their thread pool AFTER reactor_->Stop() returns. Drain tasks
    * queued on the pool may capture pointers via close_callback_ that
    * reference caller-owned objects (ServerStats, ConnectionAcceptor); those

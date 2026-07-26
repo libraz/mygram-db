@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -441,6 +442,58 @@ TEST_F(IoReactorTest, ReadAndWriteInterestUpdatesDoNotClobberEachOther) {
   ASSERT_TRUE(reactor_->DisarmWrite(client_fd, conn.get()));
   EXPECT_NE(mock->InterestFor(client_fd) & kReadable, 0U);
   EXPECT_EQ(mock->InterestFor(client_fd) & kWritable, 0U);
+}
+
+TEST_F(IoReactorTest, EofDisarmsReadBeforeBufferedWorkCompletes) {
+  auto* mock = StartWithMock();
+  SocketPair sp;
+  const int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(conn));
+
+  // Keep one frame pending without scheduling a worker. This makes the
+  // connection remain registered after EOF so the interest transition can
+  // be observed deterministically.
+  size_t enqueued = 0;
+  ASSERT_TRUE(conn->AppendReadBytesForTest("queued\r\n", enqueued));
+  ASSERT_EQ(enqueued, 1U);
+  ASSERT_EQ(::shutdown(sp.Peer(), SHUT_WR), 0);
+
+  const int polls_before = mock->PollCallCount();
+  mock->InjectReadable(client_fd);
+  ASSERT_TRUE(mock->WaitForPollCalled(polls_before + 2, std::chrono::milliseconds(2000)));
+
+  EXPECT_TRUE(conn->HasReadEof());
+  EXPECT_EQ(mock->InterestFor(client_fd) & kReadable, 0U);
+  EXPECT_EQ(reactor_->ConnectionCount(), 1U);
+}
+
+TEST_F(IoReactorTest, HangupCannotBypassPausedReadBackpressure) {
+  auto* mock = StartWithMock();
+  SocketPair sp;
+  const int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(conn));
+
+  std::string frames;
+  frames.reserve(ReactorConnection::kPendingFramesHighWatermark * 2);
+  for (size_t i = 0; i < ReactorConnection::kPendingFramesHighWatermark; ++i) {
+    frames.append("\r\n");
+  }
+  size_t enqueued = 0;
+  ASSERT_TRUE(conn->AppendReadBytesForTest(frames, enqueued));
+  ASSERT_EQ(enqueued, ReactorConnection::kPendingFramesHighWatermark);
+  ASSERT_TRUE(conn->ReadPausedForTest());
+  ASSERT_EQ(mock->InterestFor(client_fd) & kReadable, 0U);
+
+  const std::string late_frame = "late\r\n";
+  ASSERT_EQ(::send(sp.Peer(), late_frame.data(), late_frame.size(), 0), static_cast<ssize_t>(late_frame.size()));
+  const int polls_before = mock->PollCallCount();
+  mock->InjectHangup(client_fd);
+  ASSERT_TRUE(mock->WaitForPollCalled(polls_before + 2, std::chrono::milliseconds(2000)));
+
+  EXPECT_EQ(conn->PendingFrameCountForTest(), ReactorConnection::kPendingFramesHighWatermark);
+  EXPECT_EQ(conn->ReadBufferSizeForTest(), 0U);
 }
 
 TEST_F(IoReactorTest, StaleOwnerCannotModifyOrUnregisterReusedFd) {

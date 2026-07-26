@@ -47,7 +47,7 @@ namespace mygramdb::server::reactor {
  *
  *  Note: unlike `KqueueMultiplexer`, this backend does not need an
  *  internal mutex because there is no shared in-process state to guard.
- *  See `epoll_ctl` is unaffected by CR-4 because it operates on a single fd
+ *  `epoll_ctl` is unaffected because it operates on a single fd
  *  per call; the multi-record race that motivates kqueue's serialised
  *  ApplyInterest does not apply here.
  */
@@ -78,6 +78,11 @@ class EpollMultiplexer : public EventMultiplexer {
    * output vector so callers never see the wake fd as a real ready event.
    */
   mygram::utils::Expected<void, mygram::utils::Error> Wake() override;
+
+#ifdef MYGRAMDB_EVENT_MULTIPLEXER_TEST_HOOKS
+  [[nodiscard]] int BackendFdForTest() const { return epoll_fd_; }
+  [[nodiscard]] std::size_t RegistrationCountForTest() const { return tokens_by_fd_.size(); }
+#endif
 
  private:
   /// File descriptor returned by `epoll_create1`. -1 until `Open()` succeeds.

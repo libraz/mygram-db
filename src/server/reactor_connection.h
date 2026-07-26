@@ -53,6 +53,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -170,7 +171,9 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   static std::shared_ptr<ReactorConnection> Create(int fd, IoReactor* reactor, RequestDispatcher* dispatcher,
                                                    ThreadPool* thread_pool, ServerStats* stats = nullptr,
                                                    size_t max_write_queue_bytes = kDefaultMaxWriteQueueBytes,
-                                                   std::shared_ptr<ReactorMemoryBudget> memory_budget = nullptr);
+                                                   std::shared_ptr<ReactorMemoryBudget> memory_budget = nullptr,
+                                                   size_t max_pending_frames = kMaxPendingFrames,
+                                                   size_t max_pending_frame_bytes = kMaxPendingFrameBytes);
 
   /**
    * @brief Public constructor (required by `std::make_shared`). Prefer
@@ -178,7 +181,9 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    */
   ReactorConnection(int fd, IoReactor* reactor, RequestDispatcher* dispatcher, ThreadPool* thread_pool,
                     ServerStats* stats, size_t max_write_queue_bytes,
-                    std::shared_ptr<ReactorMemoryBudget> memory_budget = nullptr);
+                    std::shared_ptr<ReactorMemoryBudget> memory_budget = nullptr,
+                    size_t max_pending_frames = kMaxPendingFrames,
+                    size_t max_pending_frame_bytes = kMaxPendingFrameBytes);
 
   ~ReactorConnection();
 
@@ -255,6 +260,14 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /// Whether this connection has completed at least one CRLF-delimited frame.
   [[nodiscard]] bool HasReceivedFrame() const { return received_frame_.load(std::memory_order_acquire); }
 
+  /// Whether recv() has observed an orderly EOF from the peer.
+  ///
+  /// IoReactor uses this to discard stale readable/hangup notifications
+  /// already returned by the kernel before OnReadable() disarmed read
+  /// interest. The write side may still be active while queued responses
+  /// drain, so EOF is deliberately distinct from IsClosing().
+  [[nodiscard]] bool HasReadEof() const { return read_eof_.load(std::memory_order_acquire); }
+
   /// Returns the number of frames currently in `pending_frames_`. Exposed for tests only.
   [[nodiscard]] size_t PendingFrameCountForTest() const {
     std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -289,6 +302,8 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   }
 
 #ifdef MYGRAMDB_REACTOR_CONNECTION_TEST_HOOKS
+  [[nodiscard]] const std::string& ClientIdentityForTest() const { return conn_ctx_.client_ip; }
+
   [[nodiscard]] bool AppendReadBytesForTest(std::string_view bytes, size_t& enqueued) {
     return AppendReadBytes(bytes.data(), bytes.size(), enqueued);
   }
@@ -296,6 +311,11 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   [[nodiscard]] size_t ReadBufferSizeForTest() const { return read_buf_.size(); }
 
   [[nodiscard]] bool ShouldSendReadOverflowErrorForTest() { return ShouldSendReadOverflowError(); }
+
+  [[nodiscard]] bool SendReadOverflowErrorForTest(std::string_view message,
+                                                  const std::function<void()>& under_lock_hook = {}) {
+    return TrySendErrorIfWriteQueueEmpty(message, under_lock_hook);
+  }
 
   void DrainPendingFramesForTest(size_t count) {
     std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -339,7 +359,11 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
  private:
   bool AppendReadBytes(const char* data, size_t len, size_t& enqueued);
   bool ShouldSendReadOverflowError();
+  bool TrySendErrorIfWriteQueueEmpty(std::string_view message, const std::function<void()>& under_lock_hook = {});
+  [[nodiscard]] bool CloseWithServerBusy();
   bool MaybeResumeReadsLocked();
+  bool PublishReadEofLocked();
+  bool SubmitDrainTaskToPool(std::string_view failure_event);
 
   /**
    * @brief Attempt to submit a drain task to the thread pool.
@@ -391,6 +415,12 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   int fd_;
   bool closed_ = false;  // destructor close(2) guard
   const size_t max_write_queue_bytes_;
+  const size_t max_pending_frames_;
+  const size_t max_pending_frame_bytes_;
+  const size_t pending_frames_high_watermark_;
+  const size_t pending_frames_low_watermark_;
+  const size_t pending_frame_bytes_high_watermark_;
+  const size_t pending_frame_bytes_low_watermark_;
   std::shared_ptr<ReactorMemoryBudget> memory_budget_;
 
   // Non-owning collaborators. Set at construction, read-only afterwards.
@@ -405,7 +435,9 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   // cross-thread reads (event-loop) and writes (drain task / command handler).
   ConnectionContext conn_ctx_{};
 
-  // Read-side state — touched only by the event-loop thread.
+  // Read-side state. The event loop owns it while reads are enabled. Once
+  // read_paused_ is published under frame_mutex_, the drain worker may extract
+  // already-buffered frames before re-enabling kernel read interest.
   std::vector<char> read_buf_;
   size_t read_buffer_budget_bytes_ = 0;
 
@@ -447,7 +479,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   // Mirror of `write_queue_bytes_` for lock-free metric readers.
   std::atomic<size_t> pending_write_bytes_{0};
 
-  // Last-activity timestamp for idle reaping (Fix N-3). Initialised to
+  // Last-activity timestamp for idle reaping. Initialised to
   // construction time; refreshed at the start of OnReadable/OnWritable so a
   // connection that is actively performing I/O is never reaped, while a
   // connection that connected but never sent or read a byte ages out after

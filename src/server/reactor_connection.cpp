@@ -70,19 +70,28 @@ void BestEffortSendError(int fd, std::string_view message) {
 std::shared_ptr<ReactorConnection> ReactorConnection::Create(int fd, IoReactor* reactor, RequestDispatcher* dispatcher,
                                                              ThreadPool* thread_pool, ServerStats* stats,
                                                              size_t max_write_queue_bytes,
-                                                             std::shared_ptr<ReactorMemoryBudget> memory_budget) {
+                                                             std::shared_ptr<ReactorMemoryBudget> memory_budget,
+                                                             size_t max_pending_frames,
+                                                             size_t max_pending_frame_bytes) {
   if (memory_budget == nullptr && reactor != nullptr) {
     memory_budget = reactor->MemoryBudget();
   }
   return std::make_shared<ReactorConnection>(fd, reactor, dispatcher, thread_pool, stats, max_write_queue_bytes,
-                                             std::move(memory_budget));
+                                             std::move(memory_budget), max_pending_frames, max_pending_frame_bytes);
 }
 
 ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatcher* dispatcher, ThreadPool* thread_pool,
                                      ServerStats* stats, size_t max_write_queue_bytes,
-                                     std::shared_ptr<ReactorMemoryBudget> memory_budget)
+                                     std::shared_ptr<ReactorMemoryBudget> memory_budget, size_t max_pending_frames,
+                                     size_t max_pending_frame_bytes)
     : fd_(fd),
       max_write_queue_bytes_(max_write_queue_bytes),
+      max_pending_frames_(std::max<size_t>(max_pending_frames, 1)),
+      max_pending_frame_bytes_(std::max<size_t>(max_pending_frame_bytes, 1)),
+      pending_frames_high_watermark_(std::max<size_t>(max_pending_frames_ * 3 / 4, 1)),
+      pending_frames_low_watermark_(max_pending_frames_ / 2),
+      pending_frame_bytes_high_watermark_(std::max<size_t>(max_pending_frame_bytes_ * 3 / 4, 1)),
+      pending_frame_bytes_low_watermark_(max_pending_frame_bytes_ / 2),
       memory_budget_(std::move(memory_budget)),
       reactor_(reactor),
       dispatcher_(dispatcher),
@@ -132,12 +141,14 @@ bool ReactorConnection::OnReadable() {
     return false;
   }
 
-  // If the peer already half-closed (we saw recv()==0 on a previous readable
-  // event), suppress further recv() calls. The write side may still be open
-  // while the drain task flushes responses, so we remain registered until
-  // DrainTask finishes and marks us closing_.
-  if (read_eof_.load(std::memory_order_acquire)) {
-    return true;
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    // A readiness result can become stale before the event loop dispatches
+    // it. Never bypass frame-queue backpressure, and never issue recv() after
+    // EOF even if such an event was already present in the poll batch.
+    if (read_paused_ || read_eof_.load(std::memory_order_acquire)) {
+      return true;
+    }
   }
 
   // 1. Drain the socket until EAGAIN / EWOULDBLOCK.
@@ -157,9 +168,7 @@ bool ReactorConnection::OnReadable() {
             .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
             .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
             .Warn();
-        if (ShouldSendReadOverflowError()) {
-          BestEffortSendError(fd_, frame_queue_overflow_ ? "server busy" : "request too large");
-        }
+        (void)TrySendErrorIfWriteQueueEmpty(frame_queue_overflow_ ? "server busy" : "request too large");
         closing_.store(true, std::memory_order_release);
         return false;
       }
@@ -179,7 +188,20 @@ bool ReactorConnection::OnReadable() {
       // OnReadable calls short-circuit, then fall through to frame
       // extraction + drain task scheduling below. The drain task closes the
       // connection after the last response has been queued for send.
-      read_eof_.store(true, std::memory_order_release);
+      //
+      // Publish EOF and remove read interest while holding frame_mutex_.
+      // DrainTask takes the same lock before MaybeResumeReadsLocked(), so it
+      // can neither miss EOF nor re-arm a permanently-readable EOF socket
+      // between these two operations.
+      bool interest_update_ok = false;
+      {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        interest_update_ok = PublishReadEofLocked();
+      }
+      if (!interest_update_ok) {
+        closing_.store(true, std::memory_order_release);
+        return false;
+      }
       break;
     }
     // n < 0
@@ -245,7 +267,7 @@ bool ReactorConnection::OnReadable() {
 }
 
 bool ReactorConnection::OnWritable() {
-  // Outbound progress also resets the idle-timer (Fix N-3): a slow client
+  // Outbound progress also resets the idle-timer: a slow client
   // that is steadily draining its socket is not "idle" even if it never
   // sends another request.
   last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
@@ -326,8 +348,8 @@ bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& en
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     enqueued += ExtractFramesLocked();
-    if (!read_paused_ && (pending_frames_.size() >= kPendingFramesHighWatermark ||
-                          pending_frame_bytes_ >= kPendingFrameBytesHighWatermark)) {
+    if (!read_paused_ && (pending_frames_.size() >= pending_frames_high_watermark_ ||
+                          pending_frame_bytes_ >= pending_frame_bytes_high_watermark_)) {
       // Serialize the state transition and mux update with DrainTask's low-
       // watermark rearm so a fast drain cannot re-enable reads before this
       // disarm reaches the kernel.
@@ -350,9 +372,67 @@ bool ReactorConnection::ShouldSendReadOverflowError() {
   return write_queue_.empty();
 }
 
+bool ReactorConnection::TrySendErrorIfWriteQueueEmpty(std::string_view message,
+                                                      const std::function<void()>& under_lock_hook) {
+  std::lock_guard<std::mutex> lock(write_mutex_);
+  if (!write_queue_.empty()) {
+    return false;
+  }
+  if (under_lock_hook) {
+    under_lock_hook();
+  }
+  BestEffortSendError(fd_, message);
+  return true;
+}
+
+bool ReactorConnection::CloseWithServerBusy() {
+  // Route overload errors through the normal write queue so they cannot
+  // splice into a response being drained by another thread. EnqueueResponse
+  // attempts the small error inline; if it has to arm writable interest, the
+  // queued bytes remain ordered ahead of teardown.
+  (void)EnqueueResponse("ERROR SERVER_BUSY Server is too busy, please try again later");
+  closing_.store(true, std::memory_order_release);
+  std::lock_guard<std::mutex> lock(write_mutex_);
+  return !write_queue_.empty();
+}
+
+bool ReactorConnection::SubmitDrainTaskToPool(std::string_view failure_event) {
+  auto self = shared_from_this();
+  if (thread_pool_->Submit([self]() { self->DrainTask(); })) {
+    return true;
+  }
+
+  drain_scheduled_.store(false, std::memory_order_release);
+  mygram::utils::StructuredLog().Event(std::string(failure_event)).Field("fd", static_cast<int64_t>(fd_)).Warn();
+  const bool response_pending = CloseWithServerBusy();
+  if (!response_pending && reactor_ != nullptr) {
+    reactor_->Unregister(fd_, this);
+  }
+  return false;
+}
+
 bool ReactorConnection::MaybeResumeReadsLocked() {
-  if (!read_paused_ || pending_frames_.size() > kPendingFramesLowWatermark ||
-      pending_frame_bytes_ > kPendingFrameBytesLowWatermark) {
+  // EOF sockets remain level-readable forever. OnReadable publishes EOF and
+  // disarms reads under frame_mutex_, so observing EOF here means the disarm
+  // happened-before this drain-side low-watermark check.
+  if (read_eof_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  if (!read_paused_ || pending_frames_.size() > pending_frames_low_watermark_ ||
+      pending_frame_bytes_ > pending_frame_bytes_low_watermark_) {
+    return true;
+  }
+
+  // A single recv() chunk can contain more complete tiny frames than the
+  // high watermark. ExtractFramesLocked deliberately leaves that suffix in
+  // read_buf_. While reads are disarmed, this drain worker owns the buffer;
+  // refill the pending queue before deciding whether kernel reads may resume.
+  (void)ExtractFramesLocked();
+  if (frame_queue_overflow_) {
+    return false;
+  }
+  if (pending_frames_.size() >= pending_frames_high_watermark_ ||
+      pending_frame_bytes_ >= pending_frame_bytes_high_watermark_) {
     return true;
   }
   if (reactor_ != nullptr) {
@@ -365,11 +445,26 @@ bool ReactorConnection::MaybeResumeReadsLocked() {
   return true;
 }
 
+bool ReactorConnection::PublishReadEofLocked() {
+  if (read_eof_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  read_eof_.store(true, std::memory_order_release);
+  if (reactor_ == nullptr) {
+    return true;
+  }
+  return reactor_->SetReadEnabled(fd_, this, false).has_value();
+}
+
 size_t ReactorConnection::ExtractFramesLocked() {
   size_t enqueued = 0;
   size_t scan_start = 0;
   size_t consumed = 0;
   while (scan_start + kFrameDelimiterLen <= read_buf_.size()) {
+    if (pending_frames_.size() >= pending_frames_high_watermark_ ||
+        pending_frame_bytes_ >= pending_frame_bytes_high_watermark_) {
+      break;
+    }
     // Search for the next delimiter.
     const char* begin = read_buf_.data() + scan_start;
     const size_t remaining = read_buf_.size() - scan_start;
@@ -388,8 +483,8 @@ size_t ReactorConnection::ExtractFramesLocked() {
     }
     // Frame is [consumed, found_off); delimiter is [found_off, found_off+2).
     const size_t frame_len = found_off - consumed;
-    if (frame_len > kMaxReadBufferBytes || pending_frames_.size() >= kMaxPendingFrames ||
-        frame_len > kMaxPendingFrameBytes - std::min(pending_frame_bytes_, kMaxPendingFrameBytes)) {
+    if (frame_len > kMaxReadBufferBytes || pending_frames_.size() >= max_pending_frames_ ||
+        frame_len > max_pending_frame_bytes_ - std::min(pending_frame_bytes_, max_pending_frame_bytes_)) {
       frame_queue_overflow_ = true;
       break;
     }
@@ -470,15 +565,7 @@ bool ReactorConnection::ScheduleDrainTask() {
     return false;
   }
 
-  auto self = shared_from_this();
-  const bool submitted = thread_pool_->Submit([self]() { self->DrainTask(); });
-  if (!submitted) {
-    drain_scheduled_.store(false, std::memory_order_release);
-    mygram::utils::StructuredLog().Event("reactor_drain_submit_failed").Field("fd", static_cast<int64_t>(fd_)).Warn();
-    closing_.store(true, std::memory_order_release);
-    return false;
-  }
-  return true;
+  return SubmitDrainTaskToPool("reactor_drain_submit_failed");
 }
 
 void ReactorConnection::DrainTask() {
@@ -563,16 +650,7 @@ void ReactorConnection::DrainTask() {
       drain_scheduled_.store(false, std::memory_order_release);
       closing_.store(true, std::memory_order_release);
     } else {
-      auto self = shared_from_this();
-      const bool submitted = thread_pool_->Submit([self]() { self->DrainTask(); });
-      if (!submitted) {
-        drain_scheduled_.store(false, std::memory_order_release);
-        mygram::utils::StructuredLog()
-            .Event("reactor_drain_resubmit_failed")
-            .Field("fd", static_cast<int64_t>(fd_))
-            .Warn();
-        closing_.store(true, std::memory_order_release);
-      }
+      (void)SubmitDrainTaskToPool("reactor_drain_resubmit_failed");
     }
     return;
   }
