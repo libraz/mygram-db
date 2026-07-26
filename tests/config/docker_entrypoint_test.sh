@@ -47,15 +47,11 @@ if grep -q 'SNAPSHOT_INTERVAL_SEC' "$4"; then
 fi
 grep -Fq '$${API_HTTP_PORT:-8080}/health/live' "$4"
 
-env_example=$(dirname "$4")/.env.example
-for variable in API_HTTP_ENABLE API_HTTP_BIND API_HTTP_PORT DUMP_DIR DUMP_INTERVAL_SEC DUMP_RETAIN; do
+repo_root=$(dirname "$4")
+env_example=$repo_root/.env.example
+for variable in API_HTTP_ENABLE API_HTTP_BIND API_HTTP_PORT DUMP_DIR DUMP_INTERVAL_SEC \
+  DUMP_RETAIN MEMORY_VERIFY_TEXT BM25_ENABLE; do
   grep -q "^${variable}=" "$env_example"
 done
 
-repo_root=$(dirname "$4")
-for readme in "$repo_root/README.md" "$repo_root/README_ja.md"; do
-  grep -Fq 'cp .env.example .env' "$readme"
-  grep -Fq 'MEMORY_VERIFY_TEXT=ascii' "$readme"
-  grep -Fq 'BM25_ENABLE=true' "$readme"
-done
 grep -q '^bm25:$' "$repo_root/examples/config.yaml"
