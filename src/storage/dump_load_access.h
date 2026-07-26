@@ -58,6 +58,7 @@ struct DumpLoadAccess {
       replacement.target_doc_store->pk_to_doc_id_ = std::move(replacement.loaded_doc_store->pk_to_doc_id_);
       replacement.target_doc_store->doc_filters_ = std::move(replacement.loaded_doc_store->doc_filters_);
       replacement.target_doc_store->doc_texts_ = std::move(replacement.loaded_doc_store->doc_texts_);
+      replacement.target_doc_store->original_texts_ = std::move(replacement.loaded_doc_store->original_texts_);
       replacement.target_doc_store->filter_index_ = std::move(replacement.loaded_doc_store->filter_index_);
       replacement.target_doc_store->next_doc_id_ = replacement.loaded_doc_store->next_doc_id_;
       replacement.target_doc_store->primary_key_doc_id_order_valid_ =

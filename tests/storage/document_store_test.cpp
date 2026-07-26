@@ -1352,13 +1352,13 @@ TEST(DocumentStoreTest, FileRoundTrip_PreservesDocTexts) {
   EXPECT_TRUE(store2.GetDocId("pk1").has_value());
   EXPECT_TRUE(store2.GetDocId("pk2").has_value());
 
-  // doc_texts_ are preserved (SaveToFile uses v2 format)
+  // doc_texts_ are preserved (SaveToFile uses the current format)
   auto text1 = store2.GetNormalizedText(doc_id1);
-  ASSERT_TRUE(text1.has_value()) << "v2 file format should serialize doc_texts_";
+  ASSERT_TRUE(text1.has_value()) << "current file format should serialize doc_texts_";
   EXPECT_EQ(*text1, "normalized text for doc1");
 
   auto text2 = store2.GetNormalizedText(doc_id2);
-  ASSERT_TRUE(text2.has_value()) << "v2 file format should serialize doc_texts_";
+  ASSERT_TRUE(text2.has_value()) << "current file format should serialize doc_texts_";
   EXPECT_EQ(*text2, "日本語テキスト");
 
   std::remove(filepath.c_str());
@@ -1377,18 +1377,44 @@ TEST(DocumentStoreTest, LoadFromStream_V1BackwardCompatibility) {
   auto doc_id1 = *store.AddDocument("pk1");
   store.SetNormalizedText(doc_id1, "some text");
 
-  // Save normally (v2 format)
-  std::stringstream v2_stream;
-  auto save_result = store.SaveToStream(v2_stream);
+  // Save and load the current format.
+  std::stringstream current_stream;
+  auto save_result = store.SaveToStream(current_stream);
   ASSERT_TRUE(save_result.has_value());
 
-  // Load it back to verify v2 works
+  DocumentStore current_store;
+  auto load_current = current_store.LoadFromStream(current_stream);
+  ASSERT_TRUE(load_current.has_value());
+  EXPECT_EQ(current_store.GetNormalizedText(doc_id1), std::optional<std::string>("some text"));
+
+  // Create a v2 stream manually: normalized text is present, original text is not.
+  std::stringstream v2_stream;
+  v2_stream.write("MGDS", 4);
+  uint32_t v2_version = 2;
+  v2_stream.write(reinterpret_cast<const char*>(&v2_version), sizeof(v2_version));
+  uint32_t v2_next_id = 2;
+  v2_stream.write(reinterpret_cast<const char*>(&v2_next_id), sizeof(v2_next_id));
+  uint32_t v2_gtid_len = 0;
+  v2_stream.write(reinterpret_cast<const char*>(&v2_gtid_len), sizeof(v2_gtid_len));
+  uint64_t v2_doc_count = 1;
+  v2_stream.write(reinterpret_cast<const char*>(&v2_doc_count), sizeof(v2_doc_count));
+  uint32_t v2_doc_id = 1;
+  v2_stream.write(reinterpret_cast<const char*>(&v2_doc_id), sizeof(v2_doc_id));
+  uint32_t v2_pk_len = 3;
+  v2_stream.write(reinterpret_cast<const char*>(&v2_pk_len), sizeof(v2_pk_len));
+  v2_stream.write("pk1", 3);
+  uint32_t v2_filter_count = 0;
+  v2_stream.write(reinterpret_cast<const char*>(&v2_filter_count), sizeof(v2_filter_count));
+  const std::string v2_text = "some text";
+  auto v2_text_len = static_cast<uint32_t>(v2_text.size());
+  v2_stream.write(reinterpret_cast<const char*>(&v2_text_len), sizeof(v2_text_len));
+  v2_stream.write(v2_text.data(), static_cast<std::streamsize>(v2_text.size()));
+
   DocumentStore store_v2;
   auto load_v2 = store_v2.LoadFromStream(v2_stream);
   ASSERT_TRUE(load_v2.has_value());
-  auto text_v2 = store_v2.GetNormalizedText(doc_id1);
-  ASSERT_TRUE(text_v2.has_value());
-  EXPECT_EQ(*text_v2, "some text");
+  EXPECT_EQ(store_v2.GetNormalizedText(doc_id1), std::optional<std::string>("some text"));
+  EXPECT_FALSE(store_v2.GetOriginalText(doc_id1).has_value());
 
   // Now create a v1-format stream manually
   // v1 format: [magic "MGDS"][version=1][next_doc_id][gtid_len=0][doc_count=1]
@@ -1778,6 +1804,27 @@ TEST(DocumentStoreTest, AddDocumentWithNormalizedTextConsistency) {
   EXPECT_EQ(std::get<int64_t>(*status), 1);
 }
 
+TEST(DocumentStoreTest, OriginalTextSurvivesBatchLookupAndSerialization) {
+  DocumentStore store;
+  auto doc_id = store.AddDocument("pk-original", {}, "tokyo tower", "Tokyo ＴＯＷＥＲ");
+  ASSERT_TRUE(doc_id.has_value());
+
+  EXPECT_EQ(store.GetOriginalText(*doc_id), std::optional<std::string>("Tokyo ＴＯＷＥＲ"));
+  auto batch = store.GetOriginalTextBatch({*doc_id, 999});
+  ASSERT_EQ(batch.size(), 2);
+  EXPECT_EQ(batch[0], std::optional<std::string>("Tokyo ＴＯＷＥＲ"));
+  EXPECT_FALSE(batch[1].has_value());
+
+  std::stringstream stream;
+  ASSERT_TRUE(store.SaveToStream(stream, "gtid-original"));
+  DocumentStore restored;
+  std::string gtid;
+  ASSERT_TRUE(restored.LoadFromStream(stream, &gtid).has_value());
+  EXPECT_EQ(gtid, "gtid-original");
+  EXPECT_EQ(restored.GetNormalizedText(*doc_id), std::optional<std::string>("tokyo tower"));
+  EXPECT_EQ(restored.GetOriginalText(*doc_id), std::optional<std::string>("Tokyo ＴＯＷＥＲ"));
+}
+
 TEST(DocumentStoreTest, PrimaryKeyDocIdOrderValidForMonotonicNumericKeys) {
   DocumentStore store;
 
@@ -1820,4 +1867,53 @@ TEST(DocumentStoreTest, PrimaryKeyDocIdOrderInvalidatedByRemoveAndResetByClear) 
   EXPECT_TRUE(store.IsPrimaryKeyDocIdOrderValid());
   ASSERT_TRUE(store.AddDocument("1").has_value());
   EXPECT_TRUE(store.IsPrimaryKeyDocIdOrderValid());
+}
+
+TEST(DocumentStoreTest, VisitNormalizedTextChunksBoundsChunkSizeAndPreservesDocIdOrder) {
+  DocumentStore store;
+  constexpr size_t kDocumentCount = 4097;
+  constexpr size_t kChunkSize = 31;
+
+  std::vector<DocumentStore::DocumentItem> documents;
+  documents.reserve(kDocumentCount);
+  for (size_t i = 0; i < kDocumentCount; ++i) {
+    documents.push_back({std::to_string(i + 1), {}, "normalized-" + std::to_string(i), ""});
+  }
+  auto added = store.AddDocumentBatch(documents);
+  ASSERT_TRUE(added.has_value());
+  ASSERT_EQ(added->size(), kDocumentCount);
+
+  std::vector<DocId> visited;
+  size_t callback_count = 0;
+  store.VisitNormalizedTextChunks(kChunkSize, [&](const std::vector<DocumentStore::NormalizedTextEntry>& chunk) {
+    ++callback_count;
+    EXPECT_LE(chunk.size(), kChunkSize);
+    for (const auto& entry : chunk) {
+      visited.push_back(entry.doc_id);
+    }
+    return true;
+  });
+
+  EXPECT_GT(callback_count, 1);
+  EXPECT_EQ(visited, *added);
+}
+
+TEST(DocumentStoreTest, VisitNormalizedTextChunksInvokesVisitorWithoutStoreLock) {
+  DocumentStore store;
+  auto first = store.AddDocument("1", {}, "before");
+  ASSERT_TRUE(first.has_value());
+
+  size_t callback_count = 0;
+  store.VisitNormalizedTextChunks(1, [&](const std::vector<DocumentStore::NormalizedTextEntry>& chunk) {
+    ++callback_count;
+    EXPECT_EQ(chunk.size(), 1);
+    if (chunk.empty()) {
+      return false;
+    }
+    store.SetNormalizedText(chunk.front().doc_id, "after");
+    return false;
+  });
+
+  EXPECT_EQ(callback_count, 1);
+  EXPECT_EQ(store.GetNormalizedText(*first), std::optional<std::string>("after"));
 }

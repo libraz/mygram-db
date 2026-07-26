@@ -25,6 +25,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "storage/dump_format_internal.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v1_internal.h"
 #include "storage/dump_load_access.h"
@@ -53,148 +54,18 @@ namespace mygramdb::storage::dump_v2 {
 
 using namespace mygram::utils;
 
-// Forward declaration
-uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset);
-
 namespace {
 
+using dump_internal::ApplyPendingTableLoads;
+using dump_internal::BoundedInputStream;
+using dump_internal::LoadPendingDocumentStore;
+using dump_internal::LoadPendingIndex;
+using dump_internal::PendingTableLoad;
+using dump_internal::ValidateDumpTableSet;
 using dump_v1::internal::ReadString;
 using dump_v1::internal::WriteString;
 using mygram::utils::ReadBinary;
 using mygram::utils::WriteBinary;
-
-struct PendingTableLoad {
-  std::string table_name;
-  index::Index* index = nullptr;
-  DocumentStore* doc_store = nullptr;
-  std::unique_ptr<index::Index> loaded_index;
-  std::unique_ptr<DocumentStore> loaded_doc_store;
-};
-
-class BoundedInputStreambuf : public std::streambuf {
- public:
-  BoundedInputStreambuf(std::istream& source, uint64_t length) : source_(source), source_remaining_(length) {
-    setg(buffer_.data(), buffer_.data(), buffer_.data());
-  }
-
-  [[nodiscard]] uint64_t Remaining() const { return source_remaining_ + static_cast<uint64_t>(egptr() - gptr()); }
-
- protected:
-  int_type underflow() override {
-    if (gptr() < egptr())
-      return traits_type::to_int_type(*gptr());
-    if (source_remaining_ == 0)
-      return traits_type::eof();
-    const size_t requested = static_cast<size_t>(std::min<uint64_t>(buffer_.size(), source_remaining_));
-    source_.read(buffer_.data(), static_cast<std::streamsize>(requested));
-    const auto count = source_.gcount();
-    if (count <= 0)
-      return traits_type::eof();
-    source_remaining_ -= static_cast<uint64_t>(count);
-    setg(buffer_.data(), buffer_.data(), buffer_.data() + count);
-    return traits_type::to_int_type(*gptr());
-  }
-
-  std::streamsize xsgetn(char* destination, std::streamsize count) override {
-    if (count <= 0)
-      return 0;
-    std::streamsize copied = 0;
-    const std::streamsize buffered = egptr() - gptr();
-    const std::streamsize from_buffer = std::min(count, buffered);
-    if (from_buffer > 0) {
-      std::memcpy(destination, gptr(), static_cast<size_t>(from_buffer));
-      gbump(static_cast<int>(from_buffer));
-      copied += from_buffer;
-    }
-    const uint64_t wanted = std::min<uint64_t>(static_cast<uint64_t>(count - copied), source_remaining_);
-    if (wanted > 0) {
-      source_.read(destination + copied, static_cast<std::streamsize>(wanted));
-      const auto read = source_.gcount();
-      if (read > 0) {
-        source_remaining_ -= static_cast<uint64_t>(read);
-        copied += read;
-      }
-    }
-    return copied;
-  }
-
- private:
-  static constexpr size_t kBufferSize = 64 * 1024;
-  std::istream& source_;
-  uint64_t source_remaining_;
-  std::vector<char> buffer_ = std::vector<char>(kBufferSize);
-};
-
-class BoundedInputStream : public std::istream {
- public:
-  BoundedInputStream(std::istream& source, uint64_t length) : std::istream(nullptr), buffer_(source, length) {
-    rdbuf(&buffer_);
-  }
-
-  [[nodiscard]] uint64_t Remaining() const { return buffer_.Remaining(); }
-
-  bool Drain() {
-    std::vector<char> discard(64 * 1024);
-    while (Remaining() > 0) {
-      const auto chunk = static_cast<std::streamsize>(std::min<uint64_t>(discard.size(), Remaining()));
-      read(discard.data(), chunk);
-      if (gcount() != chunk)
-        return false;
-    }
-    return true;
-  }
-
- private:
-  BoundedInputStreambuf buffer_;
-};
-
-Expected<uint32_t, Error> CalculateSectionCRC32(std::ifstream& input, std::streampos start, uint64_t length) {
-  input.clear();
-  input.seekg(start);
-  if (!input.good()) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to seek to section data"));
-  }
-  BoundedInputStream section(input, length);
-  std::vector<char> buffer(1024 * 1024);
-  uint32_t crc = 0;
-  while (section.Remaining() > 0) {
-    const auto chunk = static_cast<std::streamsize>(std::min<uint64_t>(buffer.size(), section.Remaining()));
-    section.read(buffer.data(), chunk);
-    if (section.gcount() != chunk) {
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read section for CRC32"));
-    }
-    crc = static_cast<uint32_t>(crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()),
-                                      static_cast<uInt>(chunk)));  // NOLINT
-  }
-  input.clear();
-  input.seekg(start);
-  if (!input.good()) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to rewind section data"));
-  }
-  return crc;
-}
-
-Expected<void, Error> LoadPendingIndex(PendingTableLoad& pending, std::istream& index_stream) {
-  auto loaded_index = std::make_unique<index::Index>(
-      pending.index->GetNgramSize(), pending.index->GetKanjiNgramSize(), index::kDefaultRoaringThreshold,
-      pending.index->GetCrossBoundaryNgrams(), pending.index->GetNormalizeNfkc(), pending.index->GetNormalizeWidth(),
-      pending.index->GetNormalizeLower());
-  if (auto index_result = loaded_index->LoadFromStream(index_stream); !index_result) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kStorageDumpReadError, "LoadFromStream failed for index", index_result.error().message()));
-  }
-
-  pending.loaded_index = std::move(loaded_index);
-  return {};
-}
-
-Expected<void, Error> LoadPendingDocumentStore(PendingTableLoad& pending, std::istream& doc_stream) {
-  auto loaded_doc_store = std::make_unique<DocumentStore>();
-  if (auto result = loaded_doc_store->LoadFromStream(doc_stream, nullptr); !result)
-    return result;
-  pending.loaded_doc_store = std::move(loaded_doc_store);
-  return {};
-}
 
 uint32_t ExpectedHeaderSizeV2(const HeaderV2& header) {
   return static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + 4 + header.gtid.size());
@@ -218,223 +89,6 @@ Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV2& header) {
   }
   return {};
 }
-
-Expected<void, Error> ApplyPendingTableLoads(const std::vector<PendingTableLoad>& pending_loads) {
-  std::vector<DumpLoadAccess::LoadedTableReplacement> replacements;
-  replacements.reserve(pending_loads.size());
-  for (const auto& pending : pending_loads) {
-    replacements.push_back(DumpLoadAccess::LoadedTableReplacement{pending.table_name, pending.index,
-                                                                  pending.loaded_index.get(), pending.doc_store,
-                                                                  pending.loaded_doc_store.get()});
-  }
-
-  if (!DumpLoadAccess::ReplaceLoadedTables(std::move(replacements))) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kStorageDumpReadError, "Duplicate or invalid table replacement in V2 dump"));
-  }
-
-  for (const auto& pending : pending_loads) {
-    StructuredLog().Event("dump_v2_table_loaded").Field("table", pending.table_name).Info();
-  }
-
-  return {};
-}
-
-Expected<void, Error> ValidateDumpTableSet(
-    const std::unordered_set<std::string>& dump_tables,
-    const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts) {
-  std::vector<std::string> missing_tables;
-  std::vector<std::string> unexpected_tables;
-
-  for (const auto& [table_name, unused_context] : table_contexts) {
-    if (dump_tables.count(table_name) == 0) {
-      missing_tables.push_back(table_name);
-    }
-  }
-  for (const auto& table_name : dump_tables) {
-    if (table_contexts.count(table_name) == 0) {
-      unexpected_tables.push_back(table_name);
-    }
-  }
-
-  if (missing_tables.empty() && unexpected_tables.empty()) {
-    return {};
-  }
-
-  auto join_names = [](const std::vector<std::string>& names) {
-    std::ostringstream joined;
-    for (size_t i = 0; i < names.size(); ++i) {
-      if (i > 0) {
-        joined << ",";
-      }
-      joined << names[i];
-    }
-    return joined.str();
-  };
-
-  StructuredLog()
-      .Event("dump_v2_table_set_mismatch")
-      .Field("missing_configured_tables", join_names(missing_tables))
-      .Field("unexpected_dump_tables", join_names(unexpected_tables))
-      .Error();
-  return MakeUnexpected(MakeError(
-      ErrorCode::kStorageDumpReadError,
-      "Dump table set does not match configured tables. Missing configured tables: " + join_names(missing_tables) +
-          "; unexpected dump tables: " + join_names(unexpected_tables)));
-}
-
-#ifndef _WIN32
-class FdStreambuf : public std::streambuf {
- public:
-  explicit FdStreambuf(int fd) : fd_(fd) { setp(buffer_, buffer_ + kBufferSize); }
-  ~FdStreambuf() override { sync(); }
-
-  FdStreambuf(const FdStreambuf&) = delete;
-  FdStreambuf& operator=(const FdStreambuf&) = delete;
-  FdStreambuf(FdStreambuf&&) = delete;
-  FdStreambuf& operator=(FdStreambuf&&) = delete;
-
- protected:
-  int overflow(int ch) override {
-    if (ch != traits_type::eof()) {
-      *pptr() = static_cast<char>(ch);
-      pbump(1);
-    }
-    return FlushBuffer() < 0 ? traits_type::eof() : ch;
-  }
-
-  int sync() override { return FlushBuffer(); }
-
- private:
-  static constexpr size_t kBufferSize = 8192;
-
-  int FlushBuffer() {
-    size_t bytes = static_cast<size_t>(pptr() - pbase());
-    if (bytes == 0) {
-      return 0;
-    }
-    const char* ptr = pbase();
-    while (bytes > 0) {
-      ssize_t written = write(fd_, ptr, bytes);
-      if (written < 0) {
-        if (errno == EINTR) {
-          continue;
-        }
-        return -1;
-      }
-      if (written == 0) {
-        return -1;
-      }
-      ptr += written;
-      bytes -= static_cast<size_t>(written);
-    }
-    setp(buffer_, buffer_ + kBufferSize);
-    return 0;
-  }
-
-  int fd_;
-  char buffer_[kBufferSize]{};
-};
-
-bool WriteAllAt(int fd, const void* data, size_t size, off_t offset) {
-  const auto* current = static_cast<const char*>(data);
-  size_t remaining = size;
-  off_t current_offset = offset;
-  while (remaining > 0) {
-    ssize_t written = pwrite(fd, current, remaining, current_offset);
-    if (written < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return false;
-    }
-    if (written == 0) {
-      return false;
-    }
-    current += written;
-    remaining -= static_cast<size_t>(written);
-    current_offset += written;
-  }
-  return true;
-}
-
-template <typename T>
-bool WriteBinaryAt(int fd, T value, off_t offset) {
-  if constexpr (std::is_integral_v<T>) {
-    value = mygram::utils::ToLittleEndian(value);
-  }
-  return WriteAllAt(fd, &value, sizeof(value), offset);
-}
-
-Expected<uint32_t, Error> CalculateCRC32StreamingFd(int fd, uint64_t file_size, size_t crc_offset) {
-  constexpr size_t kChunkSize = 1024 * 1024;
-  constexpr size_t kCrcFieldSize = 4;
-
-  uint32_t crc = 0;
-  std::vector<char> buffer(kChunkSize);
-  uint64_t bytes_read = 0;
-
-  while (bytes_read < file_size) {
-    size_t to_read = std::min(kChunkSize, static_cast<size_t>(file_size - bytes_read));
-    ssize_t actually_read = pread(fd, buffer.data(), to_read, static_cast<off_t>(bytes_read));
-    if (actually_read < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to read file for CRC32"));
-    }
-    if (actually_read == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Unexpected EOF while calculating CRC32"));
-    }
-
-    auto chunk_size = static_cast<size_t>(actually_read);
-    if (crc_offset >= bytes_read && crc_offset < bytes_read + chunk_size) {
-      size_t offset_in_chunk = crc_offset - bytes_read;
-      size_t zero_bytes = std::min(kCrcFieldSize, chunk_size - offset_in_chunk);
-      std::memset(&buffer[offset_in_chunk], 0, zero_bytes);
-    }
-    if (crc_offset + kCrcFieldSize > bytes_read && crc_offset < bytes_read) {
-      size_t zero_end = std::min<size_t>(kCrcFieldSize - (bytes_read - crc_offset), chunk_size);
-      std::memset(buffer.data(), 0, zero_end);
-    }
-
-    crc = static_cast<uint32_t>(
-        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(chunk_size)));  // NOLINT
-    bytes_read += chunk_size;
-  }
-
-  return crc;
-}
-
-Expected<uint32_t, Error> CalculateCRC32RangeFd(int fd, off_t start_offset, uint64_t length) {
-  constexpr size_t kChunkSize = 1024 * 1024;
-
-  uint32_t crc = 0;
-  std::vector<char> buffer(kChunkSize);
-  uint64_t bytes_read = 0;
-
-  while (bytes_read < length) {
-    size_t to_read = std::min(kChunkSize, static_cast<size_t>(length - bytes_read));
-    ssize_t actually_read = pread(fd, buffer.data(), to_read, start_offset + static_cast<off_t>(bytes_read));
-    if (actually_read < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to read section for CRC32"));
-    }
-    if (actually_read == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Unexpected EOF while calculating CRC32"));
-    }
-
-    auto chunk_size = static_cast<size_t>(actually_read);
-    crc = static_cast<uint32_t>(
-        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(chunk_size)));  // NOLINT
-    bytes_read += chunk_size;
-  }
-
-  return crc;
-}
-#endif
 
 /**
  * @brief Compute CRC32 of a data buffer
@@ -496,7 +150,7 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
                                                  const std::string& table_name, index::Index* index,
                                                  DocumentStore* doc_store,
                                                  const std::unordered_map<std::string, TableStatistics>* table_stats,
-                                                 const std::string& temp_filepath) {
+                                                 const std::string& temp_filepath, uint64_t max_section_bytes) {
   output_stream.flush();
   if (!output_stream.good()) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -568,7 +222,7 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to locate payload end"));
     }
     payload_length = static_cast<uint64_t>(payload_end - payload_start);
-    if (!WriteBinaryAt(file_descriptor, payload_length, length_offset)) {
+    if (!dump_internal::WriteBinaryAt(file_descriptor, payload_length, length_offset)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write payload length"));
     }
     return {};
@@ -612,16 +266,21 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
   if (!section_stream.good() || !output_stream.good()) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
   }
+  if (counting_streambuf.bytes_written() > max_section_bytes) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError,
+                  "Table section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+  }
 
-  auto section_crc = CalculateCRC32RangeFd(file_descriptor, section_start + dump_format::kSectionEnvelopeSize,
-                                           counting_streambuf.bytes_written());
+  auto section_crc = dump_internal::CalculateCRC32RangeFd(
+      file_descriptor, section_start + dump_format::kSectionEnvelopeSize, counting_streambuf.bytes_written());
   if (!section_crc) {
     return MakeUnexpected(section_crc.error());
   }
-  if (!WriteBinaryAt(file_descriptor, section_crc.value(), section_start + 4)) {
+  if (!dump_internal::WriteBinaryAt(file_descriptor, section_crc.value(), section_start + 4)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write section CRC32"));
   }
-  if (!WriteBinaryAt(file_descriptor, counting_streambuf.bytes_written(), section_start + 8)) {
+  if (!dump_internal::WriteBinaryAt(file_descriptor, counting_streambuf.bytes_written(), section_start + 8)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write section length"));
   }
   return {};
@@ -765,10 +424,35 @@ Expected<void, Error> WriteDumpV2(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats,
-    const DumpTableProgressCallback& table_progress_callback) {
+    const DumpTableProgressCallback& table_progress_callback, const RestoreLimits& restore_limits) {
   if (gtid.size() > kMaxGtidLength) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
                                     "V2 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
+  }
+  if (restore_limits.memory_budget_bytes == 0 || restore_limits.max_section_bytes == 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    "dump.restore_memory_budget_mb and dump.restore_max_section_mb must be positive"));
+  }
+
+  uint64_t live_memory_bytes = 0;
+  for (const auto& [table_name, context] : table_contexts) {
+    if (context.first == nullptr || context.second == nullptr) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageDumpWriteError, "Cannot save null table context: " + table_name));
+    }
+    const uint64_t index_memory = context.first->MemoryUsage();
+    const uint64_t document_memory = context.second->MemoryUsage();
+    if (index_memory > std::numeric_limits<uint64_t>::max() - document_memory) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Live table memory size overflow"));
+    }
+    const uint64_t table_memory = index_memory + document_memory;
+    if (live_memory_bytes > restore_limits.memory_budget_bytes ||
+        table_memory > restore_limits.memory_budget_bytes - live_memory_bytes) {
+      return MakeUnexpected(MakeError(
+          ErrorCode::kStorageDumpWriteError,
+          "Dump cannot be restored within dump.restore_memory_budget_mb; increase the limit before DUMP SAVE"));
+    }
+    live_memory_bytes += table_memory;
   }
 
   AtomicFileWriter writer(filepath, true);
@@ -831,7 +515,7 @@ Expected<void, Error> WriteDumpV2(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
-    FdStreambuf fd_streambuf(file_descriptor);
+    dump_internal::FdStreambuf fd_streambuf(file_descriptor);
     std::ostream ofs(&fd_streambuf);
     if (!ofs) {
       LogStorageError("create_stream", temp_filepath, "Failed to create stream from file descriptor");
@@ -883,6 +567,11 @@ Expected<void, Error> WriteDumpV2(
         LogStorageError("serialize_config", temp_filepath, result.error().message());
         return result;
       }
+      if (static_cast<uint64_t>(config_stream.tellp()) > restore_limits.max_section_bytes) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpWriteError,
+                      "Config section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+      }
       if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kConfig, config_stream); !result) {
         LogStorageError("write_config_section", temp_filepath, result.error().message());
         return result;
@@ -900,6 +589,11 @@ Expected<void, Error> WriteDumpV2(
         LogStorageError("serialize_compatibility_metadata", temp_filepath, result.error().message());
         return result;
       }
+      if (static_cast<uint64_t>(compatibility_stream.tellp()) > restore_limits.max_section_bytes) {
+        return MakeUnexpected(MakeError(
+            ErrorCode::kStorageDumpWriteError,
+            "Compatibility section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+      }
       if (auto result =
               WriteSectionEnvelope(ofs, dump_format::SectionType::kCompatibilityMetadata, compatibility_stream);
           !result) {
@@ -915,6 +609,11 @@ Expected<void, Error> WriteDumpV2(
       if (auto result = dump_v1::SerializeStatistics(stats_stream, *stats); !result) {
         LogStorageError("serialize_statistics", temp_filepath, result.error().message());
         return result;
+      }
+      if (static_cast<uint64_t>(stats_stream.tellp()) > restore_limits.max_section_bytes) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpWriteError,
+                      "Statistics section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
       }
       if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kStatistics, stats_stream); !result) {
         LogStorageError("write_stats_section", temp_filepath, result.error().message());
@@ -934,7 +633,7 @@ Expected<void, Error> WriteDumpV2(
 
 #ifndef _WIN32
       if (auto result = WriteStreamingTableSection(ofs, file_descriptor, table_name, index, doc_store, table_stats,
-                                                   temp_filepath);
+                                                   temp_filepath, restore_limits.max_section_bytes);
           !result) {
         LogStorageError("write_table_section", temp_filepath, result.error().message());
         return result;
@@ -1009,6 +708,11 @@ Expected<void, Error> WriteDumpV2(
       }
 
       // Write entire table as one section envelope
+      if (static_cast<uint64_t>(table_stream.tellp()) > restore_limits.max_section_bytes) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpWriteError,
+                      "Table section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+      }
       if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kTableData, table_stream); !result) {
         LogStorageError("write_table_section", temp_filepath, result.error().message());
         return result;
@@ -1036,23 +740,23 @@ Expected<void, Error> WriteDumpV2(
     uint64_t file_size = static_cast<uint64_t>(file_stat.st_size);
 
     // Update header: total_file_size, section_count
-    if (!WriteBinaryAt(file_descriptor, file_size, kV2HeaderTotalFileSizeOffset)) {
+    if (!dump_internal::WriteBinaryAt(file_descriptor, file_size, kV2HeaderTotalFileSizeOffset)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write total_file_size"));
     }
-    if (!WriteBinaryAt(file_descriptor, section_count, kV2HeaderSectionCountOffset)) {
+    if (!dump_internal::WriteBinaryAt(file_descriptor, section_count, kV2HeaderSectionCountOffset)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write section_count"));
     }
 
     // Calculate and update file CRC32
     const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
-    auto crc_result = CalculateCRC32StreamingFd(file_descriptor, file_size, crc_offset);
+    auto crc_result = dump_internal::CalculateCRC32StreamingFd(file_descriptor, file_size, crc_offset);
     if (!crc_result) {
       LogStorageError("calculate_crc32", temp_filepath, crc_result.error().message());
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
     uint32_t calculated_crc = crc_result.value();
 
-    if (!WriteBinaryAt(file_descriptor, calculated_crc, kV2HeaderFileCRC32Offset)) {
+    if (!dump_internal::WriteBinaryAt(file_descriptor, calculated_crc, kV2HeaderFileCRC32Offset)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write file CRC32"));
     }
 #else
@@ -1095,7 +799,7 @@ Expected<void, Error> WriteDumpV2(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
     const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
-    uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
+    uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs, file_size, crc_offset);
     ifs.close();
 
     {
@@ -1200,8 +904,6 @@ Expected<void, Error> ReadDumpV2(
       }
       return result;
     }
-    gtid = header.gtid;
-
     // Verify file size
     uint64_t actual_file_size = 0;
     {
@@ -1233,7 +935,7 @@ Expected<void, Error> ReadDumpV2(
       auto file_size = static_cast<uint64_t>(ifs.tellg());
 
       const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
-      uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
+      uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs, file_size, crc_offset);
 
       if (calculated_crc != header.file_crc32) {
         StructuredLog()
@@ -1258,6 +960,9 @@ Expected<void, Error> ReadDumpV2(
     bool compatibility_metadata_found = false;
     bool statistics_found = false;
     uint32_t sections_read = 0;
+    config::Config loaded_config;
+    DumpStatistics loaded_stats;
+    std::unordered_map<std::string, TableStatistics> loaded_table_stats;
     std::vector<PendingTableLoad> pending_table_loads;
     std::unordered_set<std::string> dump_tables;
     uint64_t staged_memory_bytes = 0;
@@ -1279,34 +984,22 @@ Expected<void, Error> ReadDumpV2(
       }
       if (envelope.data_length > restore_limits.max_section_bytes) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
-                                        "Section data length exceeds configured restore section limit"));
+                                        "Section data length exceeds configured restore section limit "
+                                        "(dump.restore_max_section_mb)"));
       }
       if (envelope.data_length > restore_limits.memory_budget_bytes ||
           (envelope.type == dump_format::SectionType::kTableData &&
            (staged_memory_bytes > restore_limits.memory_budget_bytes ||
             envelope.data_length > restore_limits.memory_budget_bytes - staged_memory_bytes))) {
         return MakeUnexpected(
-            MakeError(ErrorCode::kStorageDumpReadError, "Section exceeds configured V2 restore memory budget"));
+            MakeError(ErrorCode::kStorageDumpReadError,
+                      "Section exceeds configured V2 restore memory budget (dump.restore_memory_budget_mb)"));
       }
 
-      auto crc_result = CalculateSectionCRC32(ifs, section_start, envelope.data_length);
-      if (!crc_result)
-        return MakeUnexpected(crc_result.error());
-      if (*crc_result != envelope.crc32) {
-        StructuredLog()
-            .Event("storage_validation_error")
-            .Field("type", "section_crc32_mismatch")
-            .Field("filepath", filepath)
-            .Field("section_type", static_cast<uint64_t>(static_cast<uint32_t>(envelope.type)))
-            .Field("expected_crc", static_cast<uint64_t>(envelope.crc32))
-            .Field("actual_crc", static_cast<uint64_t>(*crc_result))
-            .Error();
-        if (integrity_error != nullptr) {
-          integrity_error->type = dump_format::CRCErrorType::SectionCRC;
-          integrity_error->message = "Section CRC32 mismatch";
-        }
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Section CRC32 verification failed"));
-      }
+      // Hash bytes while the decoder consumes them. This keeps file-level CRC
+      // as the first pass and combines section CRC + decode into the second,
+      // instead of reading every section once for CRC and again for decode.
+      BoundedInputStream section_stream(ifs, envelope.data_length, true);
 
       // Dispatch by section type
       switch (envelope.type) {
@@ -1315,8 +1008,8 @@ Expected<void, Error> ReadDumpV2(
             return MakeUnexpected(
                 MakeError(ErrorCode::kStorageDumpReadError, "V2 dump contains duplicate Config sections"));
           }
-          BoundedInputStream config_stream(ifs, envelope.data_length);
-          if (auto result = dump_v1::DeserializeConfig(config_stream, config); !result) {
+          BoundedInputStream config_stream(section_stream, envelope.data_length);
+          if (auto result = dump_v1::DeserializeConfig(config_stream, loaded_config); !result) {
             LogStorageError("deserialize_config_v2", filepath, result.error().message());
             return result;
           }
@@ -1337,8 +1030,8 @@ Expected<void, Error> ReadDumpV2(
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
                                             "V2 CompatibilityMetadata section must follow the Config section"));
           }
-          BoundedInputStream compatibility_stream(ifs, envelope.data_length);
-          if (auto result = dump_v1::DeserializeCompatibilityMetadata(compatibility_stream, config); !result) {
+          BoundedInputStream compatibility_stream(section_stream, envelope.data_length);
+          if (auto result = dump_v1::DeserializeCompatibilityMetadata(compatibility_stream, loaded_config); !result) {
             LogStorageError("deserialize_compatibility_metadata_v2", filepath, result.error().message());
             return result;
           }
@@ -1355,9 +1048,9 @@ Expected<void, Error> ReadDumpV2(
             return MakeUnexpected(
                 MakeError(ErrorCode::kStorageDumpReadError, "V2 dump contains duplicate Statistics sections"));
           }
-          BoundedInputStream stats_stream(ifs, envelope.data_length);
+          BoundedInputStream stats_stream(section_stream, envelope.data_length);
           if (stats != nullptr) {
-            if (auto result = dump_v1::DeserializeStatistics(stats_stream, *stats); !result) {
+            if (auto result = dump_v1::DeserializeStatistics(stats_stream, loaded_stats); !result) {
               LogStorageError("deserialize_statistics_v2", filepath, result.error().message());
               return result;
             }
@@ -1373,7 +1066,7 @@ Expected<void, Error> ReadDumpV2(
         }
 
         case dump_format::SectionType::kTableData: {
-          BoundedInputStream table_stream(ifs, envelope.data_length);
+          BoundedInputStream table_stream(section_stream, envelope.data_length);
 
           // Read table name
           std::string table_name;
@@ -1394,13 +1087,17 @@ Expected<void, Error> ReadDumpV2(
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
                                             "Table statistics length exceeds table section bytes remaining"));
           }
+          if (table_stats_len > kMaxStatsSectionLength) {
+            return MakeUnexpected(
+                MakeError(ErrorCode::kStorageDumpReadError, "Table statistics section exceeds maximum size"));
+          }
           if (table_stats_len > 0) {
             BoundedInputStream ts_stream(table_stream, table_stats_len);
             TableStatistics table_stat;
             if (table_stats != nullptr) {
               if (auto result = dump_v1::DeserializeTableStatistics(ts_stream, table_stat); !result)
                 return result;
-              table_stats->emplace(table_name, std::move(table_stat));
+              loaded_table_stats.emplace(table_name, std::move(table_stat));
             } else if (!ts_stream.Drain()) {
               return MakeUnexpected(
                   MakeError(ErrorCode::kStorageDumpReadError, "Failed to skip table Statistics data"));
@@ -1460,7 +1157,8 @@ Expected<void, Error> ReadDumpV2(
           if (staged_memory_bytes > restore_limits.memory_budget_bytes ||
               index_memory > restore_limits.memory_budget_bytes - staged_memory_bytes) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
-                                            "Loaded index exceeds configured V2 restore memory budget"));
+                                            "Loaded index exceeds configured V2 restore memory budget "
+                                            "(dump.restore_memory_budget_mb)"));
           }
 
           // Read docstore data
@@ -1494,7 +1192,8 @@ Expected<void, Error> ReadDumpV2(
           if (staged_memory_bytes > restore_limits.memory_budget_bytes ||
               table_memory > restore_limits.memory_budget_bytes - staged_memory_bytes) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
-                                            "Loaded tables exceed configured V2 restore memory budget"));
+                                            "Loaded tables exceed configured V2 restore memory budget "
+                                            "(dump.restore_memory_budget_mb)"));
           }
           staged_memory_bytes += table_memory;
           pending_table_loads.push_back(std::move(pending));
@@ -1508,12 +1207,31 @@ Expected<void, Error> ReadDumpV2(
               .Field("section_type", static_cast<uint64_t>(static_cast<uint32_t>(envelope.type)))
               .Field("data_length", envelope.data_length)
               .Warn();
-          ifs.clear();
-          ifs.seekg(section_start + static_cast<std::streamoff>(envelope.data_length));
-          if (!ifs.good()) {
+          if (!section_stream.Drain()) {
             return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to skip unknown section"));
           }
           break;
+      }
+
+      if (section_stream.Remaining() != 0) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpReadError, "Section decoder did not consume its bounded payload"));
+      }
+      const uint32_t actual_section_crc = section_stream.Crc32();
+      if (actual_section_crc != envelope.crc32) {
+        StructuredLog()
+            .Event("storage_validation_error")
+            .Field("type", "section_crc32_mismatch")
+            .Field("filepath", filepath)
+            .Field("section_type", static_cast<uint64_t>(static_cast<uint32_t>(envelope.type)))
+            .Field("expected_crc", static_cast<uint64_t>(envelope.crc32))
+            .Field("actual_crc", static_cast<uint64_t>(actual_section_crc))
+            .Error();
+        if (integrity_error != nullptr) {
+          integrity_error->type = dump_format::CRCErrorType::SectionCRC;
+          integrity_error->message = "Section CRC32 mismatch";
+        }
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Section CRC32 verification failed"));
       }
 
       ++sections_read;
@@ -1543,18 +1261,26 @@ Expected<void, Error> ReadDumpV2(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "V2 dump missing required Config section"));
     }
 
-    if (config_validator) {
-      if (auto result = config_validator(config); !result) {
-        return result;
-      }
-    }
-
     if (auto result = ValidateDumpTableSet(dump_tables, table_contexts); !result) {
       return result;
     }
 
+    if (config_validator) {
+      if (auto result = config_validator(loaded_config, header.gtid); !result) {
+        return result;
+      }
+    }
+
     if (auto result = ApplyPendingTableLoads(pending_table_loads); !result) {
       return result;
+    }
+    gtid = header.gtid;
+    config = std::move(loaded_config);
+    if (stats != nullptr && statistics_found) {
+      *stats = loaded_stats;
+    }
+    if (table_stats != nullptr) {
+      *table_stats = std::move(loaded_table_stats);
     }
 
     StructuredLog()
@@ -1572,51 +1298,6 @@ Expected<void, Error> ReadDumpV2(
 }
 
 // ============================================================================
-// CRC32 Streaming Calculation
-// ============================================================================
-
-uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset) {
-  constexpr size_t kChunkSize = 1024 * 1024;  // 1MB chunks
-  constexpr size_t kCrcFieldSize = 4;
-
-  ifs.seekg(0, std::ios::beg);
-
-  uint32_t crc = 0;
-  std::vector<char> buffer(kChunkSize);
-  uint64_t bytes_read = 0;
-
-  while (bytes_read < file_size) {
-    size_t to_read = std::min(kChunkSize, static_cast<size_t>(file_size - bytes_read));
-    ifs.read(buffer.data(), static_cast<std::streamsize>(to_read));
-    auto actually_read = static_cast<size_t>(ifs.gcount());
-
-    if (actually_read == 0) {
-      break;
-    }
-
-    // Zero out the CRC field if it falls within this chunk
-    if (crc_offset >= bytes_read && crc_offset < bytes_read + actually_read) {
-      size_t offset_in_chunk = crc_offset - bytes_read;
-      size_t zero_bytes = std::min(kCrcFieldSize, actually_read - offset_in_chunk);
-      std::memset(&buffer[offset_in_chunk], 0, zero_bytes);
-    }
-    if (crc_offset + kCrcFieldSize > bytes_read && crc_offset < bytes_read) {
-      size_t zero_start = 0;
-      size_t zero_end = std::min<size_t>(kCrcFieldSize - (bytes_read - crc_offset), actually_read);
-      std::memset(&buffer[zero_start], 0, zero_end);
-    }
-
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for zlib crc32 API
-    crc = static_cast<uint32_t>(
-        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(actually_read)));  // NOLINT
-
-    bytes_read += actually_read;
-  }
-
-  return crc;
-}
-
-// ============================================================================
 // Version Dispatch Functions
 // ============================================================================
 
@@ -1624,9 +1305,10 @@ Expected<void, Error> WriteDump(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats,
-    const DumpTableProgressCallback& table_progress_callback) {
+    const DumpTableProgressCallback& table_progress_callback, const RestoreLimits& restore_limits) {
   // Always write in the latest format (V2)
-  return WriteDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, table_progress_callback);
+  return WriteDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, table_progress_callback,
+                     restore_limits);
 }
 
 Expected<void, Error> ReadDump(
@@ -1665,7 +1347,7 @@ Expected<void, Error> ReadDump(
 
   if (version == static_cast<uint32_t>(dump_format::FormatVersion::V1)) {
     return dump_v1::ReadDumpV1(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error,
-                               config_validator);
+                               config_validator, restore_limits);
   }
 
   return ReadDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error, config_validator,
@@ -1748,7 +1430,7 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       ifs2.seekg(0, std::ios::end);
       auto file_size = static_cast<uint64_t>(ifs2.tellg());
       const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
-      uint32_t calculated_crc = CalculateCRC32Streaming(ifs2, file_size, crc_offset);
+      uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs2, file_size, crc_offset);
 
       if (calculated_crc != header.file_crc32) {
         integrity_error.type = dump_format::CRCErrorType::FileCRC;

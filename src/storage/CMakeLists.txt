@@ -2,6 +2,7 @@ add_library(mygramdb_storage STATIC
   document_store.cpp
   document_store_persistence.cpp
   document_store_retrieval.cpp
+  dump_format_internal.cpp
   dump_format_v1.cpp
   dump_format_v1_config.cpp
   dump_format_v1_integrity.cpp

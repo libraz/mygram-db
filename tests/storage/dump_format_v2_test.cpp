@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "storage/dump_format_internal.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v1_internal.h"
 #include "utils/binary_io.h"
@@ -220,6 +221,84 @@ void RewriteFileCrc(std::vector<char>& file_data) {
   std::memcpy(&file_data[file_crc_offset], &crc, sizeof(crc));
 }
 
+void RewriteV1FileCrc(std::vector<char>& file_data) {
+  const size_t file_crc_offset = static_cast<size_t>(dump_v1::kHeaderFileCRC32Offset);
+  std::memset(&file_data[file_crc_offset], 0, sizeof(uint32_t));
+  const auto crc = static_cast<uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_data.size())));
+  std::memcpy(&file_data[file_crc_offset], &crc, sizeof(crc));
+}
+
+struct V1SectionLengthOffsets {
+  size_t config = 0;
+  size_t statistics = 0;
+  size_t table_statistics = 0;
+  size_t index = 0;
+  size_t document_store = 0;
+};
+
+V1SectionLengthOffsets LocateV1SectionLengths(const std::vector<char>& file_data) {
+  std::istringstream input(std::string(file_data.begin(), file_data.end()));
+  input.seekg(8);
+  dump_v1::HeaderV1 header;
+  EXPECT_TRUE(dump_v1::ReadHeaderV1(input, header).has_value());
+
+  auto current_offset = [&input]() {
+    const auto position = input.tellg();
+    EXPECT_GE(position, std::streampos{0});
+    return static_cast<size_t>(position);
+  };
+  auto skip_payload = [&input](uint64_t length) {
+    input.seekg(static_cast<std::streamoff>(length), std::ios::cur);
+    EXPECT_TRUE(input.good());
+  };
+
+  V1SectionLengthOffsets offsets;
+  offsets.config = current_offset();
+  uint32_t config_len = 0;
+  EXPECT_TRUE(ReadBinary(input, config_len));
+  skip_payload(config_len);
+
+  offsets.statistics = current_offset();
+  uint32_t statistics_len = 0;
+  EXPECT_TRUE(ReadBinary(input, statistics_len));
+  skip_payload(statistics_len);
+
+  uint32_t table_count = 0;
+  EXPECT_TRUE(ReadBinary(input, table_count));
+  EXPECT_EQ(table_count, 1U);
+  std::string table_name;
+  EXPECT_TRUE(dump_v1::internal::ReadString(input, table_name, dump_v1::kMaxIdentifierLength));
+
+  offsets.table_statistics = current_offset();
+  uint32_t table_statistics_len = 0;
+  EXPECT_TRUE(ReadBinary(input, table_statistics_len));
+  skip_payload(table_statistics_len);
+
+  offsets.index = current_offset();
+  uint64_t index_len = 0;
+  EXPECT_TRUE(ReadBinary(input, index_len));
+  skip_payload(index_len);
+
+  offsets.document_store = current_offset();
+  uint64_t document_store_len = 0;
+  EXPECT_TRUE(ReadBinary(input, document_store_len));
+  skip_payload(document_store_len);
+  EXPECT_EQ(current_offset(), file_data.size());
+  return offsets;
+}
+
+void WriteTestV1Dump(const std::string& filepath) {
+  Config config = MakeTestConfig();
+  Index index;
+  index.AddDocument(1, "dump text");
+  DocumentStore document_store;
+  ASSERT_TRUE(document_store.AddDocument("dump", {}, "dump text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&index, &document_store}}};
+  auto result = dump_v1::WriteDumpV1(filepath, "GTID:v1", config, contexts);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+}
+
 void WriteCustomV2Dump(const std::string& filepath,
                        const std::vector<std::pair<dump_format::SectionType, std::string>>& sections) {
   std::ofstream out(filepath, std::ios::binary);
@@ -366,9 +445,12 @@ TEST(DumpFormatV2Test, FullDumpRoundTrip) {
   Config write_config = MakeTestConfig();
   std::string write_gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:100";
 
-  // Create empty index and docstore
+  // Create an index and docstore containing both normalized and original text.
   Index write_index;
   DocumentStore write_doc_store;
+  auto write_doc_id = write_doc_store.AddDocument("article-1", {}, "tokyo tower", "Tokyo ＴＯＷＥＲ");
+  ASSERT_TRUE(write_doc_id.has_value());
+  ASSERT_TRUE(write_index.AddDocument(*write_doc_id, "tokyo tower"));
 
   std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> write_contexts;
   write_contexts["articles"] = {&write_index, &write_doc_store};
@@ -402,6 +484,11 @@ TEST(DumpFormatV2Test, FullDumpRoundTrip) {
   EXPECT_EQ(read_config.tables[0].database, write_config.mysql.database);
   EXPECT_EQ(read_config.api.max_query_length, write_config.api.max_query_length);
   EXPECT_EQ(read_config.memory.verify_text, write_config.memory.verify_text);
+  auto read_doc_id = read_doc_store.GetDocId("article-1");
+  ASSERT_TRUE(read_doc_id.has_value());
+  EXPECT_EQ(read_doc_store.GetNormalizedText(*read_doc_id), std::optional<std::string>("tokyo tower"));
+  EXPECT_EQ(read_doc_store.GetOriginalText(*read_doc_id), std::optional<std::string>("Tokyo ＴＯＷＥＲ"));
+  EXPECT_EQ(read_index.Count("to"), 1u);
 }
 
 TEST(DumpFormatV2Test, GtidAboveV1PathLimitRoundTrips) {
@@ -1005,6 +1092,27 @@ TEST(DumpFormatV2Test, IntegrityVerificationPasses) {
   EXPECT_EQ(error.type, dump_format::CRCErrorType::None);
 }
 
+TEST(DumpFormatV2Test, V1OnlyMetadataApisRejectV2WithoutMisparsingHeader) {
+  const auto filepath = TempFilePath("v1_api_rejects_v2");
+  ScopedCleanup cleanup(filepath);
+  Config cfg = MakeTestConfig();
+  Index idx;
+  DocumentStore store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&idx, &store}}};
+  ASSERT_TRUE(WriteDumpV2(filepath, "GTID:v2", cfg, contexts).has_value());
+
+  dump_format::IntegrityError integrity_error;
+  auto verify = dump_v1::VerifyDumpIntegrity(filepath, integrity_error);
+  ASSERT_FALSE(verify.has_value());
+  EXPECT_EQ(verify.error().code(), mygramdb::utils::ErrorCode::kStorageVersionMismatch);
+  EXPECT_NE(integrity_error.message.find("cannot read dump version 2"), std::string::npos);
+
+  dump_v1::DumpInfo info;
+  auto get_info = dump_v1::GetDumpInfo(filepath, info);
+  ASSERT_FALSE(get_info.has_value());
+  EXPECT_EQ(get_info.error().code(), mygramdb::utils::ErrorCode::kStorageVersionMismatch);
+}
+
 TEST(DumpFormatV2Test, IntegrityVerificationV1) {
   auto filepath = TempFilePath("integrity_v1");
   auto cleanup = [&]() { CleanupFile(filepath); };
@@ -1243,8 +1351,9 @@ TEST(DumpFormatV2Test, SectionCRCCorruptionDetected) {
     fs2.close();
   }
 
-  // Now try to read — should fail at section CRC level
-  std::string read_gtid;
+  // Now try to read — should fail at section CRC level without publishing the
+  // unvalidated header GTID to the caller.
+  std::string read_gtid = "unchanged";
   Config read_config;
   Index read_idx;
   DocumentStore read_ds;
@@ -1255,6 +1364,7 @@ TEST(DumpFormatV2Test, SectionCRCCorruptionDetected) {
   auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts, nullptr, nullptr, &error);
   EXPECT_FALSE(read_result.has_value());
   EXPECT_EQ(error.type, dump_format::CRCErrorType::SectionCRC);
+  EXPECT_EQ(read_gtid, "unchanged");
 
   cleanup();
 }
@@ -1533,6 +1643,81 @@ TEST(DumpFormatV2Test, TinyFileWithHugeSectionLengthFailsBeforePayloadAllocation
   CleanupFile(filepath);
 }
 
+TEST(DumpFormatV2Test, V1AllSectionLengthsAreCheckedAgainstBytesRemainingBeforeRestore) {
+  const auto base_filepath = TempFilePath("v1_section_bounds_base");
+  ScopedCleanup base_cleanup(base_filepath);
+  WriteTestV1Dump(base_filepath);
+  const auto base_bytes = ReadFileBytes(base_filepath);
+  const auto offsets = LocateV1SectionLengths(base_bytes);
+
+  struct LengthField {
+    const char* name;
+    size_t offset;
+    size_t width;
+  };
+  const std::array<LengthField, 5> fields{{
+      {"config", offsets.config, sizeof(uint32_t)},
+      {"statistics", offsets.statistics, sizeof(uint32_t)},
+      {"table_statistics", offsets.table_statistics, sizeof(uint32_t)},
+      {"index", offsets.index, sizeof(uint64_t)},
+      {"document_store", offsets.document_store, sizeof(uint64_t)},
+  }};
+
+  for (const auto& field : fields) {
+    const auto filepath = TempFilePath(std::string("v1_section_bounds_") + field.name);
+    ScopedCleanup cleanup(filepath);
+    auto bytes = base_bytes;
+    const uint64_t impossible_length = static_cast<uint64_t>(bytes.size()) + 1024;
+    if (field.width == sizeof(uint32_t)) {
+      const auto length = static_cast<uint32_t>(impossible_length);
+      std::memcpy(&bytes[field.offset], &length, sizeof(length));
+    } else {
+      std::memcpy(&bytes[field.offset], &impossible_length, sizeof(impossible_length));
+    }
+    RewriteV1FileCrc(bytes);
+    WriteFileBytes(filepath, bytes);
+
+    std::string gtid = "unchanged";
+    Config loaded_config;
+    Index live_index;
+    live_index.AddDocument(1, "live text");
+    DocumentStore live_store;
+    ASSERT_TRUE(live_store.AddDocument("live", {}, "live text"));
+    std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{
+        {"articles", {&live_index, &live_store}}};
+
+    auto result = ReadDump(filepath, gtid, loaded_config, contexts);
+    ASSERT_FALSE(result.has_value()) << field.name;
+    EXPECT_NE(result.error().message().find("bytes remaining"), std::string::npos)
+        << field.name << ": " << result.error().message();
+    EXPECT_EQ(gtid, "unchanged") << field.name;
+    EXPECT_TRUE(live_store.GetDocId("live").has_value()) << field.name;
+    EXPECT_FALSE(live_store.GetDocId("dump").has_value()) << field.name;
+  }
+}
+
+TEST(DumpFormatV2Test, V1DispatchAppliesConfiguredRestoreLimitsBeforeLiveReplacement) {
+  const auto filepath = TempFilePath("v1_restore_limits");
+  ScopedCleanup cleanup(filepath);
+  WriteTestV1Dump(filepath);
+
+  std::string gtid = "unchanged";
+  Config loaded_config;
+  Index live_index;
+  live_index.AddDocument(1, "live text");
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live", {}, "live text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  const RestoreLimits limits{1, 1};
+
+  auto result = ReadDump(filepath, gtid, loaded_config, contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("configured restore section limit"), std::string::npos);
+  EXPECT_EQ(gtid, "unchanged");
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+  EXPECT_FALSE(live_store.GetDocId("dump").has_value());
+}
+
 TEST(DumpFormatV2Test, HugeInnerLengthFailsBeforeAllocationAndPreservesLiveStore) {
   const auto filepath = TempFilePath("huge_inner_length");
   CleanupFile(filepath);
@@ -1681,4 +1866,141 @@ TEST(DumpFormatV2Test, LargeRestoreStaysWithinConfiguredStagingBudget) {
   EXPECT_EQ(loaded_store.Size(), kDocumentCount);
   EXPECT_LT(loaded_store.MemoryUsage() + loaded_index.MemoryUsage(), kBudget);
   CleanupFile(filepath);
+}
+
+TEST(DumpFormatV2Test, V1RejectsTableStatisticsAboveDedicatedCeilingBeforeAllocation) {
+  const auto base_filepath = TempFilePath("v1_table_stats_ceiling_base");
+  ScopedCleanup base_cleanup(base_filepath);
+  WriteTestV1Dump(base_filepath);
+  auto bytes = ReadFileBytes(base_filepath);
+  const auto offsets = LocateV1SectionLengths(bytes);
+  const uint32_t oversized_length = dump_v1::kMaxStatsSectionLength + 1;
+  std::memcpy(bytes.data() + offsets.table_statistics, &oversized_length, sizeof(oversized_length));
+  RewriteV1FileCrc(bytes);
+
+  const auto filepath = TempFilePath("v1_table_stats_ceiling");
+  ScopedCleanup cleanup(filepath);
+  WriteFileBytes(filepath, bytes);
+
+  std::string gtid;
+  Config loaded_config;
+  Index live_index;
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live", {}, "live"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  auto result = ReadDump(filepath, gtid, loaded_config, contexts);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Table statistics section exceeds maximum size"), std::string::npos);
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+}
+
+TEST(DumpFormatV2Test, SaveRejectsLiveDatasetAboveRestoreBudgetWithoutReplacingTarget) {
+  const auto filepath = TempFilePath("save_memory_ceiling");
+  ScopedCleanup cleanup(filepath);
+  const std::string previous_contents = "previous-good-dump";
+  WriteFileBytes(filepath, std::vector<char>(previous_contents.begin(), previous_contents.end()));
+
+  Index index;
+  DocumentStore store;
+  ASSERT_TRUE(store.AddDocument("large", {}, std::string(4096, 'x')));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&index, &store}}};
+  const RestoreLimits limits{1, 1024 * 1024};
+  auto result = WriteDump(filepath, "", MakeTestConfig(), contexts, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("dump.restore_memory_budget_mb"), std::string::npos);
+  const auto bytes = ReadFileBytes(filepath);
+  EXPECT_EQ(std::string(bytes.begin(), bytes.end()), previous_contents);
+}
+
+TEST(DumpFormatV2Test, SaveRejectsEncodedTableAboveSectionCeilingWithoutReplacingTarget) {
+  const auto filepath = TempFilePath("save_section_ceiling");
+  ScopedCleanup cleanup(filepath);
+  const std::string previous_contents = "previous-good-dump";
+  WriteFileBytes(filepath, std::vector<char>(previous_contents.begin(), previous_contents.end()));
+
+  Index index;
+  DocumentStore store;
+  ASSERT_TRUE(store.AddDocument("large", {}, std::string(128 * 1024, 'x')));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&index, &store}}};
+  const RestoreLimits limits{16 * 1024 * 1024, 64 * 1024};
+  auto result = WriteDump(filepath, "", MakeTestConfig(), contexts, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Table section"), std::string::npos);
+  EXPECT_NE(result.error().message().find("dump.restore_max_section_mb"), std::string::npos);
+  const auto bytes = ReadFileBytes(filepath);
+  EXPECT_EQ(std::string(bytes.begin(), bytes.end()), previous_contents);
+}
+
+TEST(DumpFormatV2Test, DumpSavedWithinLimitsRestoresWithTheSameLimits) {
+  const auto filepath = TempFilePath("save_restore_same_limits");
+  ScopedCleanup cleanup(filepath);
+  Index source_index;
+  DocumentStore source_store;
+  ASSERT_TRUE(source_store.AddDocument("article", {}, std::string(32 * 1024, 'x')));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+  const RestoreLimits limits{8 * 1024 * 1024, 1024 * 1024};
+  auto write_result =
+      WriteDump(filepath, "GTID:same-limits", MakeTestConfig(), source_contexts, nullptr, nullptr, {}, limits);
+  ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+  std::string gtid;
+  Config loaded_config;
+  Index loaded_index;
+  DocumentStore loaded_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> loaded_contexts{
+      {"articles", {&loaded_index, &loaded_store}}};
+  auto read_result = ReadDump(filepath, gtid, loaded_config, loaded_contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+  EXPECT_EQ(gtid, "GTID:same-limits");
+  EXPECT_TRUE(loaded_store.GetDocId("article").has_value());
+}
+
+TEST(DumpFormatV2Test, SharedFdStreambufHandlesEveryEightKiBBoundaryForV1AndV2) {
+  Index source_index;
+  DocumentStore source_store;
+  const std::string payload(64 * 1024 + 17, 'z');
+  ASSERT_TRUE(source_store.AddDocument("boundary", {}, payload));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+
+  for (const bool write_v1 : {true, false}) {
+    const auto filepath = TempFilePath(write_v1 ? "fd_boundary_v1" : "fd_boundary_v2");
+    ScopedCleanup cleanup(filepath);
+    auto write_result = write_v1 ? dump_v1::WriteDumpV1(filepath, "", MakeTestConfig(), source_contexts)
+                                 : WriteDumpV2(filepath, "", MakeTestConfig(), source_contexts);
+    ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+    std::string gtid;
+    Config loaded_config;
+    Index loaded_index;
+    DocumentStore loaded_store;
+    std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> loaded_contexts{
+        {"articles", {&loaded_index, &loaded_store}}};
+    auto read_result = ReadDump(filepath, gtid, loaded_config, loaded_contexts);
+    ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+    const auto doc_id = loaded_store.GetDocId("boundary");
+    ASSERT_TRUE(doc_id.has_value());
+    EXPECT_EQ(loaded_store.GetNormalizedText(*doc_id), std::optional<std::string>(payload));
+  }
+}
+
+TEST(DumpFormatV2Test, BoundedDecodeStreamTracksSectionCrcWithoutASeparatePass) {
+  std::string payload(200 * 1024 + 17, '\0');
+  for (size_t i = 0; i < payload.size(); ++i) {
+    payload[i] = static_cast<char>(i % 251);
+  }
+  std::istringstream source(payload);
+  mygramdb::storage::dump_internal::BoundedInputStream section(source, payload.size(), true);
+
+  EXPECT_EQ(section.get(), std::char_traits<char>::to_int_type(payload.front()));
+  std::vector<char> middle(70 * 1024);
+  section.read(middle.data(), static_cast<std::streamsize>(middle.size()));
+  ASSERT_EQ(section.gcount(), static_cast<std::streamsize>(middle.size()));
+  ASSERT_TRUE(section.Drain());
+  EXPECT_EQ(section.Remaining(), 0U);
+
+  const uint32_t expected = static_cast<uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(payload.data()), static_cast<uInt>(payload.size())));
+  EXPECT_EQ(section.Crc32(), expected);
 }

@@ -30,7 +30,9 @@ target_link_libraries(document_store_concurrent_test
 gtest_discover_tests(document_store_concurrent_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
-  PROPERTIES RESOURCE_LOCK storage_io
+  PROPERTIES
+    LABELS "CONCURRENCY"
+    RESOURCE_LOCK storage_io
 )
 
 # DocumentStore stress tests (marked as SLOW for CI)
@@ -49,7 +51,7 @@ gtest_discover_tests(document_store_stress_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES
-    LABELS "SLOW"
+    LABELS "SLOW\\;CONCURRENCY"
     RESOURCE_LOCK storage_io
     TIMEOUT 60
 )
@@ -231,9 +233,21 @@ target_link_libraries(filter_index_test
   GTest::gtest_main
 )
 
-gtest_discover_tests(filter_index_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
+gtest_add_tests(
+  TARGET filter_index_test
+  SOURCES filter_index_test.cpp
+  TEST_LIST filter_index_tests
+)
+list(FIND filter_index_tests "FilterIndexTest.ConcurrentReadWriteSafety"
+  filter_index_concurrency_test_index)
+if(filter_index_concurrency_test_index EQUAL -1)
+  message(FATAL_ERROR
+    "filter_index_test: exact CONCURRENCY test not found: FilterIndexTest.ConcurrentReadWriteSafety")
+endif()
+set_tests_properties(FilterIndexTest.ConcurrentReadWriteSafety
+  PROPERTIES
+    LABELS "CONCURRENCY"
+    RESOURCE_LOCK index_concurrent_lock
 )
 
 # FilterIndex facet API tests

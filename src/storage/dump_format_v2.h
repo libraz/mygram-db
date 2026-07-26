@@ -78,7 +78,7 @@ using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
 using DumpTableProgressCallback = std::function<void(const std::string& table_name, size_t tables_processed)>;
-using DumpConfigValidationCallback = std::function<Expected<void, Error>(const config::Config& loaded_config)>;
+using DumpConfigValidationCallback = dump_v1::DumpConfigValidationCallback;
 
 // Reuse string limits from V1
 using dump_v1::kMaxConfigSectionLength;
@@ -95,13 +95,7 @@ constexpr uint32_t kMaxGtidLength = 64 * 1024;
 /// Maximum allowed section data length (4 GB - prevents OOM from malicious files)
 constexpr uint64_t kMaxSectionDataLength = 4ULL * 1024 * 1024 * 1024;
 
-/** Resource limits for a V2 restore. The memory budget applies to encoded
- * payload being decoded plus the staged Index/DocumentStore objects that are
- * held before the atomic replacement. */
-struct RestoreLimits {
-  uint64_t memory_budget_bytes = 4ULL * 1024 * 1024 * 1024;
-  uint64_t max_section_bytes = 2ULL * 1024 * 1024 * 1024;
-};
+using RestoreLimits = dump_format::RestoreLimits;
 
 /**
  * @brief Version 2 dump header
@@ -200,6 +194,8 @@ Expected<void, Error> ReadSectionEnvelope(std::istream& input_stream, dump_forma
  * @param table_contexts Map of table name to (Index*, DocumentStore*) pairs
  * @param stats Optional dump-level statistics
  * @param table_stats Optional per-table statistics map
+ * @param table_progress_callback Optional callback invoked as each table begins
+ * @param restore_limits Ceilings the resulting artifact must satisfy when restored
  * @return Expected<void, Error>
  */
 Expected<void, Error> WriteDumpV2(
@@ -207,7 +203,7 @@ Expected<void, Error> WriteDumpV2(
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats = nullptr,
     const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    const DumpTableProgressCallback& table_progress_callback = {});
+    const DumpTableProgressCallback& table_progress_callback = {}, const RestoreLimits& restore_limits = {});
 
 /**
  * @brief Read complete dump from file (Version 2 format)
@@ -222,6 +218,7 @@ Expected<void, Error> WriteDumpV2(
  * @param stats Optional output for dump-level statistics
  * @param table_stats Optional output for per-table statistics map
  * @param integrity_error Optional output for detailed integrity error information
+ * @param config_validator Optional callback to validate loaded config and GTID before applying table data
  * @return Expected<void, Error>
  */
 Expected<void, Error> ReadDumpV2(
@@ -245,7 +242,7 @@ Expected<void, Error> WriteDump(
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats = nullptr,
     const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    const DumpTableProgressCallback& table_progress_callback = {});
+    const DumpTableProgressCallback& table_progress_callback = {}, const RestoreLimits& restore_limits = {});
 
 /**
  * @brief Read dump from file (auto-detects V1 or V2 format)

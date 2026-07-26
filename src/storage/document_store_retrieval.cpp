@@ -186,7 +186,7 @@ std::vector<std::vector<std::optional<FilterValue>>> DocumentStore::GetFilterVal
   // Outer loop over doc_ids to avoid redundant doc_filters_ lookups per column.
   // Each doc_id lookup is O(1) amortized for flat_hash_map, but doing it once
   // Fetching once per doc instead of once per (doc, column) pair saves repeated lookups per doc.
-  // (reviewed: result layout [column][doc_index] is preserved).
+  // The result layout is preserved as [column][doc_index].
   for (size_t di = 0; di < doc_ids.size(); ++di) {
     auto doc_it = doc_filters_.find(doc_ids[di]);
     if (doc_it == doc_filters_.end()) {
@@ -278,6 +278,66 @@ std::vector<std::optional<std::string>> DocumentStore::GetNormalizedTextBatch(co
   for (const auto& doc_id : doc_ids) {
     auto it = doc_texts_.find(doc_id);
     if (it != doc_texts_.end()) {
+      results.push_back(it->second);
+    } else {
+      results.emplace_back(std::nullopt);
+    }
+  }
+  return results;
+}
+
+void DocumentStore::VisitNormalizedTextChunks(size_t max_doc_ids_per_chunk,
+                                              const NormalizedTextChunkVisitor& visitor) const {
+  if (max_doc_ids_per_chunk == 0 || !visitor) {
+    return;
+  }
+
+  uint64_t end_doc_id_exclusive;
+  {
+    std::shared_lock lock(mutex_);
+    end_doc_id_exclusive =
+        next_doc_id_ == 0 ? static_cast<uint64_t>(UINT32_MAX) + 1 : static_cast<uint64_t>(next_doc_id_);
+  }
+
+  for (uint64_t begin_doc_id = 1; begin_doc_id < end_doc_id_exclusive;) {
+    const uint64_t range_size =
+        std::min<uint64_t>(static_cast<uint64_t>(max_doc_ids_per_chunk), end_doc_id_exclusive - begin_doc_id);
+    const uint64_t end_doc_id = begin_doc_id + range_size;
+    std::vector<NormalizedTextEntry> chunk;
+    chunk.reserve(static_cast<size_t>(end_doc_id - begin_doc_id));
+    {
+      std::shared_lock lock(mutex_);
+      for (uint64_t doc_id = begin_doc_id; doc_id < end_doc_id; ++doc_id) {
+        auto it = doc_texts_.find(static_cast<DocId>(doc_id));
+        if (it != doc_texts_.end()) {
+          chunk.push_back({it->first, it->second});
+        }
+      }
+    }
+
+    if (!chunk.empty() && !visitor(chunk)) {
+      return;
+    }
+    begin_doc_id = end_doc_id;
+  }
+}
+
+std::optional<std::string> DocumentStore::GetOriginalText(DocId doc_id) const {
+  std::shared_lock lock(mutex_);
+  auto it = original_texts_.find(doc_id);
+  if (it == original_texts_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::vector<std::optional<std::string>> DocumentStore::GetOriginalTextBatch(const std::vector<DocId>& doc_ids) const {
+  std::shared_lock lock(mutex_);
+  std::vector<std::optional<std::string>> results;
+  results.reserve(doc_ids.size());
+  for (const auto doc_id : doc_ids) {
+    auto it = original_texts_.find(doc_id);
+    if (it != original_texts_.end()) {
       results.push_back(it->second);
     } else {
       results.emplace_back(std::nullopt);

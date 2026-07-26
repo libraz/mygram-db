@@ -10,6 +10,8 @@
 #include <fstream>
 #include <vector>
 
+#include "server/log_field_names.h"
+#include "storage/dump_format_internal.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v1_internal.h"
 #include "utils/binary_io.h"
@@ -19,62 +21,6 @@ namespace mygramdb::storage::dump_v1 {
 
 using namespace mygram::utils;
 using internal::ReadString;
-
-// ============================================================================
-// CRC32 Calculation
-// ============================================================================
-
-/**
- * @brief Calculate CRC32 of a file using streaming (chunked) reads
- *
- * This avoids loading the entire file into memory, preventing OOM for large files.
- *
- * @param ifs Input file stream (must be seekable)
- * @param file_size Total file size to read
- * @param crc_offset Position of the CRC field to zero out during calculation
- * @return CRC32 checksum of the file
- */
-uint32_t CalculateCRC32Streaming(std::ifstream& ifs, uint64_t file_size, size_t crc_offset) {
-  constexpr size_t kChunkSize = 1024 * 1024;  // 1MB chunks
-  constexpr size_t kCrcFieldSize = 4;
-
-  ifs.seekg(0, std::ios::beg);
-
-  uint32_t crc = 0;
-  std::vector<char> buffer(kChunkSize);
-  uint64_t bytes_read = 0;
-
-  while (bytes_read < file_size) {
-    size_t to_read = std::min(kChunkSize, static_cast<size_t>(file_size - bytes_read));
-    ifs.read(buffer.data(), static_cast<std::streamsize>(to_read));
-    auto actually_read = static_cast<size_t>(ifs.gcount());
-
-    if (actually_read == 0) {
-      break;  // EOF or error
-    }
-
-    // Zero out the CRC field if it falls within this chunk
-    if (crc_offset >= bytes_read && crc_offset < bytes_read + actually_read) {
-      size_t offset_in_chunk = crc_offset - bytes_read;
-      size_t zero_bytes = std::min(kCrcFieldSize, actually_read - offset_in_chunk);
-      std::memset(&buffer[offset_in_chunk], 0, zero_bytes);
-    }
-    // Handle case where CRC field spans chunk boundary
-    if (crc_offset + kCrcFieldSize > bytes_read && crc_offset < bytes_read) {
-      size_t zero_start = 0;
-      size_t zero_end = std::min<size_t>(kCrcFieldSize - (bytes_read - crc_offset), actually_read);
-      std::memset(&buffer[zero_start], 0, zero_end);
-    }
-
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for zlib crc32 API
-    crc = static_cast<uint32_t>(
-        crc32(crc, reinterpret_cast<const Bytef*>(buffer.data()), static_cast<uInt>(actually_read)));  // NOLINT
-
-    bytes_read += actually_read;
-  }
-
-  return crc;
-}
 
 // ============================================================================
 // Snapshot Integrity Verification
@@ -118,6 +64,11 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
                                 std::to_string(dump_format::kMinSupportedVersion);
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
+    if (version != static_cast<uint32_t>(dump_format::FormatVersion::V1)) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "V1 integrity API cannot read dump version " + std::to_string(version);
+      return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch, integrity_error.message));
+    }
 
     // Read V1 header
     HeaderV1 header;
@@ -155,7 +106,7 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       // CRC field offset: magic + version + header_size + flags + timestamp + total_file_size
       const auto crc_offset = static_cast<size_t>(kHeaderFileCRC32Offset);
 
-      uint32_t calculated_crc = CalculateCRC32Streaming(ifs, file_size, crc_offset);
+      uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs, file_size, crc_offset);
 
       if (calculated_crc != header.file_crc32) {
         integrity_error.type = dump_format::CRCErrorType::FileCRC;
@@ -163,16 +114,24 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
         StructuredLog()
             .Event("storage_validation_error")
             .Field("type", "crc32_verification_failed")
-            .Field("filepath", filepath)
+            .Field(server::log_fields::kFieldFilepath, filepath)
             .Field("expected_crc", static_cast<uint64_t>(header.file_crc32))
             .Field("actual_crc", static_cast<uint64_t>(calculated_crc))
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
       }
 
-      StructuredLog().Event("dump_verification_passed").Field("path", filepath).Field("crc_verified", true).Info();
+      StructuredLog()
+          .Event("dump_verification_passed")
+          .Field(server::log_fields::kFieldFilepath, filepath)
+          .Field("crc_verified", true)
+          .Info();
     } else {
-      StructuredLog().Event("dump_verification_passed").Field("path", filepath).Field("crc_verified", false).Info();
+      StructuredLog()
+          .Event("dump_verification_passed")
+          .Field(server::log_fields::kFieldFilepath, filepath)
+          .Field("crc_verified", false)
+          .Info();
     }
 
     integrity_error.type = dump_format::CRCErrorType::None;
@@ -209,8 +168,8 @@ Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpInfo& info) {
       StructuredLog()
           .Event("storage_validation_error")
           .Field("type", "invalid_magic_number")
-          .Field("filepath", filepath)
-          .Field("operation", "get_dump_info")
+          .Field(server::log_fields::kFieldFilepath, filepath)
+          .Field(server::log_fields::kFieldOperation, "get_dump_info")
           .Error();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
     }
@@ -225,8 +184,8 @@ Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpInfo& info) {
       StructuredLog()
           .Event("storage_validation_error")
           .Field("type", "version_too_new")
-          .Field("filepath", filepath)
-          .Field("operation", "get_dump_info")
+          .Field(server::log_fields::kFieldFilepath, filepath)
+          .Field(server::log_fields::kFieldOperation, "get_dump_info")
           .Field("version", static_cast<uint64_t>(info.version))
           .Field("max_supported", static_cast<uint64_t>(dump_format::kMaxSupportedVersion))
           .Error();
@@ -236,12 +195,16 @@ Expected<void, Error> GetDumpInfo(const std::string& filepath, DumpInfo& info) {
       StructuredLog()
           .Event("storage_validation_error")
           .Field("type", "version_too_old")
-          .Field("filepath", filepath)
-          .Field("operation", "get_dump_info")
+          .Field(server::log_fields::kFieldFilepath, filepath)
+          .Field(server::log_fields::kFieldOperation, "get_dump_info")
           .Field("version", static_cast<uint64_t>(info.version))
           .Field("min_supported", static_cast<uint64_t>(dump_format::kMinSupportedVersion))
           .Error();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Get dump info failed"));
+    }
+    if (info.version != static_cast<uint32_t>(dump_format::FormatVersion::V1)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch,
+                                      "V1 dump info API cannot read dump version " + std::to_string(info.version)));
     }
 
     // Read V1 header

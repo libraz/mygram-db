@@ -58,7 +58,9 @@
 #include <iosfwd>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "config/config.h"
@@ -75,7 +77,45 @@ using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
-using DumpConfigValidationCallback = std::function<Expected<void, Error>(const config::Config& loaded_config)>;
+/**
+ * @brief Validates dump metadata after the complete dump has been decoded but
+ * before any live table state is replaced.
+ *
+ * The two-argument form receives both the loaded configuration and the GTID
+ * from the same open/read operation, avoiding a metadata pre-read TOCTOU
+ * window. One-argument callbacks remain source-compatible for callers that
+ * only validate configuration.
+ */
+class DumpConfigValidationCallback {
+ public:
+  using Result = Expected<void, Error>;
+
+  DumpConfigValidationCallback() = default;
+
+  template <typename Callback,
+            std::enable_if_t<!std::is_same_v<std::decay_t<Callback>, DumpConfigValidationCallback>, int> = 0>
+  DumpConfigValidationCallback(Callback&& callback) {
+    if constexpr (std::is_invocable_r_v<Result, Callback&, const config::Config&, const std::string&>) {
+      callback_ = std::forward<Callback>(callback);
+    } else {
+      static_assert(std::is_invocable_r_v<Result, Callback&, const config::Config&>,
+                    "Dump validator must accept (Config, GTID) or Config");
+      callback_ = [legacy_callback = std::forward<Callback>(callback)](const config::Config& loaded_config,
+                                                                       const std::string&) mutable {
+        return legacy_callback(loaded_config);
+      };
+    }
+  }
+
+  [[nodiscard]] explicit operator bool() const { return static_cast<bool>(callback_); }
+
+  Result operator()(const config::Config& loaded_config, const std::string& loaded_gtid) const {
+    return callback_(loaded_config, loaded_gtid);
+  }
+
+ private:
+  std::function<Result(const config::Config&, const std::string&)> callback_;
+};
 
 /// @name Field-type-specific maximum string lengths for dump deserialization
 /// These limits prevent OOM attacks from malicious dump files that specify
@@ -104,6 +144,8 @@ constexpr uint32_t kMaxConfigSectionLength = 16 * 1024 * 1024;  // 16 MB
 constexpr uint32_t kMaxStatsSectionLength = 16 * 1024 * 1024;  // 16 MB
 
 /// @}
+
+using RestoreLimits = dump_format::RestoreLimits;
 
 /// @name Header field offsets for V1 format
 /// These offsets are relative to the start of the file and used for seeking
@@ -297,7 +339,8 @@ Expected<void, Error> WriteDumpV1(
  * @param stats Optional output for dump-level statistics
  * @param table_stats Optional output for per-table statistics map
  * @param integrity_error Optional output for detailed integrity error information
- * @param config_validator Optional callback to validate loaded config before applying table data
+ * @param config_validator Optional callback to validate loaded config and GTID before applying table data
+ * @param restore_limits Resource limits applied before decoding any length-prefixed section
  * @return Expected<void, Error> Success or error with details (context: filepath, section)
  *
  * @note table_contexts MUST contain pre-allocated Index and DocumentStore objects
@@ -309,7 +352,8 @@ Expected<void, Error> ReadDumpV1(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {});
+    dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {},
+    const RestoreLimits& restore_limits = {});
 
 /**
  * @brief Verify dump file integrity without loading

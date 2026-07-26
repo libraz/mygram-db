@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
@@ -64,7 +65,7 @@ struct TimeValue {
  * - int32_t: INT/MEDIUMINT (-2B to 2B)
  * - uint32_t: INT UNSIGNED (0 to 4B)
  * - int64_t: BIGINT
- * - uint64_t: BIGINT UNSIGNED or DATETIME/TIMESTAMP (epoch timestamp)
+ * - uint64_t: BIGINT UNSIGNED (legacy dumps may also contain non-negative datetime values)
  * - TimeValue: TIME (seconds since midnight, -3020399 to 3020399)
  * - double: FLOAT/DOUBLE
  * - std::string: VARCHAR/TEXT
@@ -78,7 +79,7 @@ using FilterValue = std::variant<std::monostate,  // NULL value
                                  int32_t,         // INT/MEDIUMINT
                                  uint32_t,        // INT UNSIGNED
                                  int64_t,         // BIGINT
-                                 uint64_t,        // BIGINT UNSIGNED or DATETIME/TIMESTAMP (epoch timestamp)
+                                 uint64_t,        // BIGINT UNSIGNED (or legacy non-negative DATETIME/TIMESTAMP)
                                  TimeValue,       // TIME (seconds since midnight)
                                  std::string,     // VARCHAR/TEXT
                                  double           // FLOAT/DOUBLE
@@ -107,6 +108,13 @@ struct Document {
  */
 class DocumentStore {
  public:
+  struct NormalizedTextEntry {
+    DocId doc_id;
+    std::string text;
+  };
+
+  using NormalizedTextChunkVisitor = std::function<bool(const std::vector<NormalizedTextEntry>&)>;
+
   DocumentStore();
   ~DocumentStore();
 
@@ -123,6 +131,7 @@ class DocumentStore {
     std::string primary_key;
     FilterMap filters;
     std::string normalized_text;  ///< Normalized text for n-gram verification
+    std::string original_text;    ///< Original source text for user-facing highlights
   };
 
   /**
@@ -138,7 +147,8 @@ class DocumentStore {
    *         or error (e.g., DocID exhausted)
    */
   [[nodiscard]] Expected<DocId, Error> AddDocument(std::string_view primary_key, const FilterMap& filters = {},
-                                                   std::string_view normalized_text = "");
+                                                   std::string_view normalized_text = "",
+                                                   std::string_view original_text = "");
 
   /**
    * @brief Add multiple documents (batch operation, thread-safe, insert-or-ignore semantic)
@@ -350,6 +360,27 @@ class DocumentStore {
    */
   [[nodiscard]] std::vector<std::optional<std::string>> GetNormalizedTextBatch(const std::vector<DocId>& doc_ids) const;
 
+  /**
+   * @brief Visit stored normalized texts in bounded DocID chunks
+   *
+   * Each chunk owns at most @p max_doc_ids_per_chunk texts and the visitor runs
+   * without holding the store mutex. Returning false stops iteration.
+   * The DocID high-water mark is captured when iteration starts.
+   *
+   * @param max_doc_ids_per_chunk Maximum DocID range copied per lock acquisition
+   * @param visitor Callback invoked for each non-empty chunk
+   */
+  void VisitNormalizedTextChunks(size_t max_doc_ids_per_chunk, const NormalizedTextChunkVisitor& visitor) const;
+
+  /// Set original, non-normalized source text for user-facing highlights.
+  void SetOriginalText(DocId doc_id, std::string_view text);
+
+  /// Get original, non-normalized source text for one document.
+  [[nodiscard]] std::optional<std::string> GetOriginalText(DocId doc_id) const;
+
+  /// Batch-get original, non-normalized source text in DocId order.
+  [[nodiscard]] std::vector<std::optional<std::string>> GetOriginalTextBatch(const std::vector<DocId>& doc_ids) const;
+
   /// Get a snapshot of the filter index (thread-safe, caller holds shared_ptr)
   [[nodiscard]] std::shared_ptr<const FilterIndex> GetFilterIndex() const;
 
@@ -448,6 +479,8 @@ class DocumentStore {
 
   // DocID -> Normalized text (for n-gram post-filter verification)
   absl::flat_hash_map<DocId, std::string> doc_texts_;
+  // DocID -> Original source text (for user-facing highlights)
+  absl::flat_hash_map<DocId, std::string> original_texts_;
 
   // Whether to store normalized text in doc_texts_ (disabled saves memory when verify_text is off).
   // memory_order_relaxed is correct here because this flag is set during initialization

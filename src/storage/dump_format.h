@@ -171,6 +171,17 @@ struct IntegrityError {
   [[nodiscard]] bool HasError() const { return type != CRCErrorType::None; }
 };
 
+/**
+ * @brief Resource limits applied while restoring any supported dump format.
+ *
+ * The memory budget covers staged table state held before atomic replacement;
+ * max_section_bytes limits each encoded length-delimited section.
+ */
+struct RestoreLimits {
+  uint64_t memory_budget_bytes = 4ULL * 1024 * 1024 * 1024;
+  uint64_t max_section_bytes = 2ULL * 1024 * 1024 * 1024;
+};
+
 }  // namespace dump_format
 
 /**

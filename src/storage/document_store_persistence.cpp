@@ -12,6 +12,7 @@
 #include <fstream>
 #include <memory>
 
+#include "server/log_field_names.h"
 #include "storage/document_store.h"
 #include "storage/document_store_internal.h"
 #include "storage/filter_index.h"
@@ -62,12 +63,13 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   // [8 bytes: doc_count] [doc_id -> pk mappings...]
   // [filters...]
   // v2+: [4 bytes: normalized_text_length] [normalized_text_length bytes: text]
+  // v3+: [4 bytes: original_text_length] [original_text_length bytes: text]
 
   // Write magic number
   out.write("MGDS", 4);
 
-  // Write version (v2 adds doc_texts_ serialization)
-  uint32_t version = 2;
+  // Write version (v3 adds original_texts_ serialization)
+  uint32_t version = 3;
   WriteBinary(out, version);
 
   // Write GTID (for replication position)
@@ -152,6 +154,16 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
         WriteBinary(out, text_len);
       }
 
+      auto original_it = original_texts_.find(doc_id);
+      if (original_it != original_texts_.end()) {
+        auto text_len = static_cast<uint32_t>(original_it->second.size());
+        WriteBinary(out, text_len);
+        out.write(original_it->second.data(), static_cast<std::streamsize>(text_len));
+      } else {
+        uint32_t text_len = 0;
+        WriteBinary(out, text_len);
+      }
+
       // Periodic check to detect write failures early (e.g., disk full)
       if (!out.good())
         return false;
@@ -177,7 +189,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     return MakeUnexpected(
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read document store version", context));
   }
-  if (version < 1 || version > 2) {
+  if (version < 1 || version > 3) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                     "Unsupported document store file version: " + std::to_string(version), context));
   }
@@ -234,6 +246,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
       new_pk_to_doc_id;
   absl::flat_hash_map<DocId, FilterMap> new_doc_filters;
   absl::flat_hash_map<DocId, std::string> new_doc_texts;
+  absl::flat_hash_map<DocId, std::string> new_original_texts;
   DocId max_loaded_doc_id = 0;
 
   // Reserve capacity to avoid rehashing during bulk insertion
@@ -246,6 +259,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
   new_pk_to_doc_id.reserve(initial_reserve);
   new_doc_filters.reserve(initial_reserve);
   new_doc_texts.reserve(initial_reserve);
+  new_original_texts.reserve(initial_reserve);
 
   // Read doc_id -> pk mappings and filters
   for (uint64_t i = 0; i < doc_count; ++i) {
@@ -503,6 +517,30 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
         new_doc_texts.emplace(doc_id, std::move(text));
       }
     }
+    if (version >= 3) {
+      uint32_t text_len = 0;
+      if (!ReadBinary(in, text_len)) {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                                        "Failed to read original text length for doc_id " + std::to_string(doc_id),
+                                        context));
+      }
+      if (text_len > kMaxNormalizedTextLength) {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                        "Original text length " + std::to_string(text_len) +
+                                            " exceeds maximum allowed " + std::to_string(kMaxNormalizedTextLength),
+                                        context));
+      }
+      if (text_len > 0) {
+        std::string text(text_len, '\0');
+        in.read(text.data(), static_cast<std::streamsize>(text_len));
+        if (in.gcount() != static_cast<std::streamsize>(text_len)) {
+          return MakeUnexpected(
+              MakeError(mygram::utils::ErrorCode::kStorageReadError,
+                        "Stream error while reading original text for doc_id " + std::to_string(doc_id), context));
+        }
+        new_original_texts.emplace(doc_id, std::move(text));
+      }
+    }
   }
 
   if (in.bad() || in.fail()) {
@@ -539,6 +577,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     pk_to_doc_id_ = std::move(new_pk_to_doc_id);
     doc_filters_ = std::move(new_doc_filters);
     doc_texts_ = std::move(new_doc_texts);
+    original_texts_ = std::move(new_original_texts);
     filter_index_ = std::move(new_filter_index);
     next_doc_id_ = next_id;
     RecomputePrimaryKeyDocIdOrderLocked();
@@ -572,7 +611,7 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
 
     mygram::utils::StructuredLog()
         .Event("document_store_saved")
-        .Field("path", filepath)
+        .Field(server::log_fields::kFieldFilepath, filepath)
         .Field("documents", static_cast<uint64_t>(Size()))
         .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / kBytesPerMegabyte))
         .Info();
@@ -599,7 +638,7 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 
     mygram::utils::StructuredLog()
         .Event("document_store_loaded")
-        .Field("path", filepath)
+        .Field(server::log_fields::kFieldFilepath, filepath)
         .Field("documents", static_cast<uint64_t>(Size()))
         .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / kBytesPerMegabyte))
         .Info();

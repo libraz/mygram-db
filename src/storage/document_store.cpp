@@ -43,7 +43,7 @@ DocumentStore::DocumentStore() : filter_index_(std::make_shared<FilterIndex>()) 
 DocumentStore::~DocumentStore() = default;
 
 Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, const FilterMap& filters,
-                                                  std::string_view normalized_text) {
+                                                  std::string_view normalized_text, std::string_view original_text) {
   std::unique_lock lock(mutex_);
 
   // Check if primary key already exists (heterogeneous lookup via TransparentStringHash)
@@ -103,6 +103,9 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
   // Store normalized text for n-gram post-filter verification
   if (store_texts_.load(std::memory_order_relaxed) && !normalized_text.empty()) {
     doc_texts_[doc_id] = std::string(normalized_text);
+  }
+  if (store_texts_.load(std::memory_order_relaxed) && !original_text.empty()) {
+    original_texts_[doc_id] = std::string(original_text);
   }
 
   RecordPrimaryKeyForDocIdOrder(primary_key);
@@ -192,6 +195,9 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     if (store_texts_.load(std::memory_order_relaxed) && !doc.normalized_text.empty()) {
       doc_texts_[doc_id] = doc.normalized_text;
     }
+    if (store_texts_.load(std::memory_order_relaxed) && !doc.original_text.empty()) {
+      original_texts_[doc_id] = doc.original_text;
+    }
 
     RecordPrimaryKeyForDocIdOrder(doc.primary_key);
     doc_ids.push_back(doc_id);
@@ -221,8 +227,8 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
 
   // Call UpdateDocument before overwriting doc_filters_ to avoid copying old_filters.
   // filter_index_->UpdateDocument reads old_filters by const&, so passing the
-  // iterator's value directly is safe (reviewed: no aliasing — doc_filters_
-  // is not accessed inside UpdateDocument).
+  // iterator's value directly is safe: UpdateDocument does not access
+  // doc_filters_.
   auto old_filter_it = doc_filters_.find(doc_id);
   if (old_filter_it != doc_filters_.end()) {
     filter_index_->UpdateDocument(doc_id, old_filter_it->second, filters);
@@ -268,6 +274,7 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
 
   // Remove normalized text
   doc_texts_.erase(doc_id);
+  original_texts_.erase(doc_id);
   primary_key_doc_id_order_valid_ = false;
 
   mygram::utils::StructuredLog()
@@ -288,6 +295,15 @@ void DocumentStore::SetNormalizedText(DocId doc_id, std::string_view text) {
   }
 }
 
+void DocumentStore::SetOriginalText(DocId doc_id, std::string_view text) {
+  std::unique_lock lock(mutex_);
+  if (text.empty()) {
+    original_texts_.erase(doc_id);
+  } else {
+    original_texts_[doc_id] = std::string(text);
+  }
+}
+
 void DocumentStore::Clear() {
   std::unique_lock lock(mutex_);
 
@@ -296,6 +312,7 @@ void DocumentStore::Clear() {
   decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);
   decltype(doc_filters_)().swap(doc_filters_);
   decltype(doc_texts_)().swap(doc_texts_);
+  decltype(original_texts_)().swap(original_texts_);
   filter_index_ = std::make_shared<FilterIndex>();
 
   next_doc_id_ = 1;
@@ -317,6 +334,7 @@ void DocumentStore::ReplaceWithLoaded(DocumentStore& loaded) {
   pk_to_doc_id_.swap(loaded.pk_to_doc_id_);
   doc_filters_.swap(loaded.doc_filters_);
   doc_texts_.swap(loaded.doc_texts_);
+  original_texts_.swap(loaded.original_texts_);
   filter_index_.swap(loaded.filter_index_);
   std::swap(next_doc_id_, loaded.next_doc_id_);
   std::swap(primary_key_doc_id_order_valid_, loaded.primary_key_doc_id_order_valid_);
@@ -393,6 +411,10 @@ void DocumentStore::Compact() {
     decltype(doc_texts_) tmp(doc_texts_.begin(), doc_texts_.end());
     doc_texts_.swap(tmp);
   }
+  {
+    decltype(original_texts_) tmp(original_texts_.begin(), original_texts_.end());
+    original_texts_.swap(tmp);
+  }
 
   // Also compact inner filter maps
   for (auto& [doc_id, filters] : doc_filters_) {
@@ -456,6 +478,10 @@ size_t DocumentStore::MemoryUsage() const {
   for (const auto& [doc_id, text] : doc_texts_) {
     // Only count heap allocation; slot overhead (sizeof(DocId) + sizeof(std::string))
     // is already counted above via capacity()
+    total += text.capacity();
+  }
+  total += original_texts_.capacity() * (sizeof(std::pair<DocId, std::string>) + kControlByteSize);
+  for (const auto& [doc_id, text] : original_texts_) {
     total += text.capacity();
   }
 

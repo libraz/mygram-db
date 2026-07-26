@@ -13,7 +13,9 @@
 #include <sstream>
 #include <unordered_map>
 
+#include "index/index.h"
 #include "storage/dump_format.h"
+#include "storage/dump_format_internal.h"
 #include "utils/binary_io.h"
 #include "utils/error.h"
 
@@ -21,6 +23,26 @@ using namespace mygramdb::storage::dump_v1;
 using mygram::utils::WriteBinary;
 using mygramdb::config::Config;
 using mygramdb::config::TableConfig;
+
+TEST(DumpFormatV1Test, PendingIndexRestorePreservesConfiguredRoaringThreshold) {
+  mygramdb::index::Index serialized_index(2, 1, 0.11);
+  ASSERT_TRUE(serialized_index.AddDocument(1, "hello world"));
+  std::ostringstream serialized;
+  ASSERT_TRUE(serialized_index.SaveToStream(serialized).has_value());
+
+  mygramdb::index::Index live_index(2, 1, 0.73);
+  mygramdb::storage::dump_internal::PendingTableLoad pending;
+  pending.table_name = "articles";
+  pending.index = &live_index;
+
+  std::istringstream input(serialized.str());
+  auto result = mygramdb::storage::dump_internal::LoadPendingIndex(pending, input);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_NE(pending.loaded_index, nullptr);
+  EXPECT_DOUBLE_EQ(pending.loaded_index->GetRoaringThreshold(), 0.73);
+  EXPECT_EQ(pending.loaded_index->SearchAnd({"he"}), (std::vector<mygramdb::index::DocId>{1}));
+}
 
 /**
  * @brief Test that header_size is non-zero after write
