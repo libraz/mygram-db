@@ -105,6 +105,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 option(BUILD_TESTS "Build tests" ON)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(BUILD_FUZZERS "Build local randomized fuzz targets (not registered with CTest)" OFF)
 option(ENABLE_COVERAGE "Enable code coverage" OFF)
 option(USE_ICU "Use ICU for Unicode normalization" ON)
 
@@ -118,6 +120,12 @@ endif()
 if(ENABLE_TSAN)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=thread")
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=thread")
+endif()
+
+# UndefinedBehaviorSanitizer
+if(ENABLE_UBSAN)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=undefined -fno-sanitize-recover=undefined")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=undefined")
 endif()
 
 # Code Coverage
@@ -399,6 +407,12 @@ endif()
 
 # Source
 add_subdirectory(src)
+
+# Fuzzers are opt-in local tools. They deliberately are not CTest targets and
+# therefore do not alter the CI test gate.
+if(BUILD_FUZZERS)
+  add_subdirectory(tests/fuzz)
+endif()
 
 # Tests
 if(BUILD_TESTS)
