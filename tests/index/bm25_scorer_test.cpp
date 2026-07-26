@@ -98,8 +98,9 @@ TEST(BM25ScorerTest, ScoreDocumentsSingleDocSingleTerm) {
   double avgdl = 3.0;
 
   auto scored = BM25Scorer::ScoreDocuments(candidates, terms, dfs, store, 1, avgdl, params);
-  ASSERT_EQ(scored.size(), 1);
-  EXPECT_GT(scored[0].score, 0.0);
+  ASSERT_TRUE(scored.has_value()) << scored.error().message();
+  ASSERT_EQ(scored->size(), 1);
+  EXPECT_GT((*scored)[0].score, 0.0);
 }
 
 TEST(BM25ScorerTest, ScoreDocumentsHigherTFScoresHigher) {
@@ -116,8 +117,9 @@ TEST(BM25ScorerTest, ScoreDocumentsHigherTFScoresHigher) {
   double avgdl = 10.0;
 
   auto scored = BM25Scorer::ScoreDocuments(candidates, terms, dfs, store, 2, avgdl, params);
-  ASSERT_EQ(scored.size(), 2);
-  EXPECT_LT(scored[0].score, scored[1].score);  // doc2 has higher TF
+  ASSERT_TRUE(scored.has_value()) << scored.error().message();
+  ASSERT_EQ(scored->size(), 2);
+  EXPECT_LT((*scored)[0].score, (*scored)[1].score);  // doc2 has higher TF
 }
 
 TEST(BM25ScorerTest, ScoreDocumentsMissingText) {
@@ -131,8 +133,9 @@ TEST(BM25ScorerTest, ScoreDocumentsMissingText) {
   BM25Params params;
 
   auto scored = BM25Scorer::ScoreDocuments(candidates, terms, dfs, store, 1, 10.0, params);
-  ASSERT_EQ(scored.size(), 1);
-  EXPECT_DOUBLE_EQ(scored[0].score, 0.0);
+  ASSERT_TRUE(scored.has_value()) << scored.error().message();
+  ASSERT_EQ(scored->size(), 1);
+  EXPECT_DOUBLE_EQ((*scored)[0].score, 0.0);
 }
 
 TEST(BM25ScorerTest, ScoreDocumentsEmptyCandidates) {
@@ -143,7 +146,8 @@ TEST(BM25ScorerTest, ScoreDocumentsEmptyCandidates) {
   BM25Params params;
 
   auto scored = BM25Scorer::ScoreDocuments(candidates, terms, dfs, store, 0, 0.0, params);
-  EXPECT_TRUE(scored.empty());
+  ASSERT_TRUE(scored.has_value()) << scored.error().message();
+  EXPECT_TRUE(scored->empty());
 }
 
 TEST(BM25ScorerTest, ScoreDocumentsK1ZeroIsPureIDF) {
@@ -160,8 +164,21 @@ TEST(BM25ScorerTest, ScoreDocumentsK1ZeroIsPureIDF) {
   double avgdl = 10.0;
 
   auto scored = BM25Scorer::ScoreDocuments(candidates, terms, dfs, store, 2, avgdl, params);
-  ASSERT_EQ(scored.size(), 2);
+  ASSERT_TRUE(scored.has_value()) << scored.error().message();
+  ASSERT_EQ(scored->size(), 2);
   // With k1=0: numerator = tf*(0+1) = tf, denominator = tf + 0*(...) = tf
   // So score = IDF * tf/tf = IDF for any tf>0. Both should be equal.
-  EXPECT_NEAR(scored[0].score, scored[1].score, 1e-10);
+  EXPECT_NEAR((*scored)[0].score, (*scored)[1].score, 1e-10);
+}
+
+TEST(BM25ScorerTest, ScoreDocumentsRejectsMismatchedTermFrequencyArray) {
+  DocumentStore store;
+  auto result = store.AddDocument("doc1", {}, "hello");
+  ASSERT_TRUE(result.has_value());
+
+  const auto scored = BM25Scorer::ScoreDocuments({*result}, {"hello", "world"}, {1}, store, 1, 1.0, {});
+
+  ASSERT_FALSE(scored.has_value());
+  EXPECT_EQ(scored.error().code(), mygram::utils::ErrorCode::kInvalidArgument);
+  EXPECT_NE(scored.error().message().find("identical lengths"), std::string::npos);
 }

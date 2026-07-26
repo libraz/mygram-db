@@ -44,11 +44,16 @@ uint32_t BM25Scorer::CountTermOccurrences(std::string_view text, std::string_vie
   return count;
 }
 
-std::vector<ScoredDoc> BM25Scorer::ScoreDocuments(const std::vector<storage::DocId>& candidates,
-                                                  const std::vector<std::string>& search_terms,
-                                                  const std::vector<uint64_t>& term_doc_freqs,
-                                                  const storage::DocumentStore& doc_store, uint64_t total_docs,
-                                                  double avg_doc_length, const BM25Params& params) {
+mygram::utils::Expected<std::vector<ScoredDoc>, mygram::utils::Error> BM25Scorer::ScoreDocuments(
+    const std::vector<storage::DocId>& candidates, const std::vector<std::string>& search_terms,
+    const std::vector<uint64_t>& term_doc_freqs, const storage::DocumentStore& doc_store, uint64_t total_docs,
+    double avg_doc_length, const BM25Params& params) {
+  if (search_terms.size() != term_doc_freqs.size()) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument,
+                                 "BM25 search_terms and term_doc_freqs must have identical lengths"));
+  }
+
   std::vector<ScoredDoc> results;
   results.reserve(candidates.size());
 
@@ -61,6 +66,11 @@ std::vector<ScoredDoc> BM25Scorer::ScoreDocuments(const std::vector<storage::Doc
 
   // Batch fetch all normalized texts in a single lock acquisition
   auto all_texts = doc_store.GetNormalizedTextBatch(candidates);
+  if (all_texts.size() != candidates.size()) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
+                                 "DocumentStore returned a normalized-text batch with an unexpected length"));
+  }
 
   for (size_t doc_idx = 0; doc_idx < candidates.size(); ++doc_idx) {
     auto doc_id = candidates[doc_idx];

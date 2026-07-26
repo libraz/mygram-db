@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "index/index.h"
+#include "utils/crc32.h"
 #include "utils/endian_utils.h"
 #include "utils/error.h"
 
@@ -232,4 +233,34 @@ TEST(IndexSerializationTest, LoadFromStreamRejectsNormalizeLowerMismatch) {
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsV4HeaderWithoutTermCount) {
+  Index source(2, 1, kDefaultRoaringThreshold, true, true, "keep", false);
+  std::ostringstream serialized;
+  ASSERT_TRUE(source.SaveToStream(serialized).has_value());
+
+  std::string data = serialized.str();
+  constexpr size_t kNormalizeWidthLengthOffset = 18;
+  constexpr size_t kNormalizeWidthDataOffset = 22;
+  constexpr size_t kCrcSize = sizeof(uint32_t);
+  ASSERT_GT(data.size(), kNormalizeWidthDataOffset + kCrcSize);
+
+  const size_t payload_size = data.size() - kCrcSize;
+  const uint32_t width_length =
+      mygram::utils::ToLittleEndian(static_cast<uint32_t>(payload_size - kNormalizeWidthDataOffset - 1));
+  std::memcpy(data.data() + kNormalizeWidthLengthOffset, &width_length, sizeof(width_length));
+
+  const uint32_t crc = mygram::utils::ToLittleEndian(mygram::utils::ComputeCRC32(data.data(), payload_size));
+  std::memcpy(data.data() + payload_size, &crc, sizeof(crc));
+
+  const std::string malicious_width(data.data() + kNormalizeWidthDataOffset,
+                                    payload_size - kNormalizeWidthDataOffset - 1);
+  Index target(2, 1, kDefaultRoaringThreshold, true, true, malicious_width, false);
+  std::istringstream input(data);
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageInvalidFormat);
+  EXPECT_NE(result.error().message().find("term count"), std::string::npos);
 }

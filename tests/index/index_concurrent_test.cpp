@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <future>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -13,6 +15,38 @@
 #include "index/index.h"
 
 using namespace mygramdb::index;
+
+TEST(IndexConcurrentTest, SearchOnUnrelatedTermContinuesDuringPausedRemove) {
+  Index index(1);
+  ASSERT_TRUE(index.AddDocument(1, "a"));
+  ASSERT_TRUE(index.AddDocument(2, "z"));
+
+  PostingList::PauseNextRemoveForTesting();
+  std::thread remover([&]() { index.RemoveDocument(1, "a"); });
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!PostingList::IsRemovePausedForTesting() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  const bool remove_paused = PostingList::IsRemovePausedForTesting();
+  if (!remove_paused) {
+    PostingList::ReleasePausedRemoveForTesting();
+    remover.join();
+    FAIL() << "Remove did not reach the deterministic pause hook";
+    return;
+  }
+
+  auto search = std::async(std::launch::async, [&]() { return index.SearchAnd({"z"}); });
+  const auto status = search.wait_for(std::chrono::milliseconds(500));
+
+  PostingList::ReleasePausedRemoveForTesting();
+  remover.join();
+  const auto results = search.get();
+
+  EXPECT_EQ(status, std::future_status::ready)
+      << "An unrelated search must not wait for another posting list's exclusive mutation";
+  EXPECT_EQ(results, (std::vector<DocId>{2}));
+}
 
 /**
  * @brief Test concurrent searches

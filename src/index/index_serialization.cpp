@@ -15,6 +15,7 @@
 #include <unistd.h>
 #endif
 
+#include "server/log_field_names.h"
 #include "utils/binary_io.h"
 #include "utils/constants.h"
 #include "utils/crc32.h"
@@ -91,7 +92,7 @@ Expected<void, Error> Index::SaveToFile(const std::string& filepath) const {
 
     mygram::utils::StructuredLog()
         .Event("index_saved")
-        .Field("path", filepath)
+        .Field(server::log_fields::kFieldFilepath, filepath)
         .Field("terms", term_count)
         .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / mygram::constants::kBytesPerMegabyte))
         .Info();
@@ -253,7 +254,7 @@ Expected<void, Error> Index::LoadFromFile(const std::string& filepath) {
     }
     mygram::utils::StructuredLog()
         .Event("index_loaded")
-        .Field("path", filepath)
+        .Field(server::log_fields::kFieldFilepath, filepath)
         .Field("terms", term_count)
         .Field("memory_mb", static_cast<uint64_t>(MemoryUsage() / mygram::constants::kBytesPerMegabyte))
         .Info();
@@ -462,6 +463,13 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
               MakeError(ErrorCode::kStorageVersionMismatch, "Index normalization configuration mismatch"));
         }
       }
+    }
+
+    // The V4 normalization header is variable-length. Validate the fixed-width
+    // term count separately so a width string that consumes the remaining
+    // payload cannot make the following memcpy read past the buffer.
+    if (pos > data_size || data_size - pos < sizeof(uint64_t)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageInvalidFormat, "Index data is truncated before term count"));
     }
 
     // Read term count

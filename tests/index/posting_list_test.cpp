@@ -19,10 +19,10 @@ class PostingListTest : public ::testing::Test {
 };
 
 /**
- * @brief Test Size() returns correct value for delta-compressed strategy
+ * @brief Test Size() returns correct value for fixed-width delta encoded strategy
  */
 TEST_F(PostingListTest, SizeDeltaCompressed) {
-  // Start with delta-compressed (small dataset)
+  // Start with fixed-width delta encoded (small dataset)
   PostingList posting(0.5);
 
   EXPECT_EQ(posting.Size(), 0);
@@ -72,6 +72,43 @@ TEST_F(PostingListTest, AddBatchSortsAndDeduplicatesInput) {
   posting.AddBatch({25, 20, 40, 25});
   EXPECT_EQ(posting.Size(), 5);
   EXPECT_EQ(posting.GetAll(), (std::vector<DocId>{10, 20, 25, 30, 40}));
+}
+
+TEST_F(PostingListTest, RemovePatchesFixedWidthDeltasWithoutReplacingStorage) {
+  PostingList posting;
+  std::vector<DocId> ids;
+  ids.reserve(1000);
+  for (DocId id = 10; id <= 10000; id += 10) {
+    ids.push_back(id);
+  }
+  posting.AddBatch(ids);
+  const void* storage_before = posting.DeltaStorageAddressForTesting();
+
+  posting.Remove(10);
+  posting.Remove(5000);
+  posting.Remove(10000);
+
+  EXPECT_EQ(posting.DeltaStorageAddressForTesting(), storage_before);
+  EXPECT_EQ(posting.Size(), 997);
+  EXPECT_FALSE(posting.Contains(10));
+  EXPECT_FALSE(posting.Contains(5000));
+  EXPECT_FALSE(posting.Contains(10000));
+  EXPECT_EQ(posting.GetAll().front(), 20);
+  EXPECT_EQ(posting.GetAll().back(), 9990);
+}
+
+TEST_F(PostingListTest, LargeFixedWidthDeltaSelfConvertsToRoaring) {
+  PostingList posting;
+  std::vector<DocId> ids;
+  ids.reserve(4097);
+  for (DocId id = 1; id <= 4097; ++id) {
+    ids.push_back(id * 100);
+  }
+
+  posting.AddBatch(ids);
+
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  EXPECT_EQ(posting.GetAll(), ids);
 }
 
 /**
@@ -139,7 +176,7 @@ TEST_F(PostingListTest, RoaringCreateFailureKeepsDeltaData) {
   PostingList::FailNextRoaringOperationForTest(PostingList::TestRoaringFault::kCreate);
   posting.Optimize(50);
 
-  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
   EXPECT_EQ(posting.Size(), 50);
   EXPECT_EQ(posting.GetAll(), ids);
 
@@ -162,7 +199,7 @@ TEST_F(PostingListTest, RoaringIntersectFailureFallsBackToExactDeltaResult) {
   auto result = left.Intersect(right);
 
   ASSERT_NE(result, nullptr);
-  EXPECT_EQ(result->GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(result->GetStrategy(), PostingStrategy::kFixedWidthDelta);
   EXPECT_EQ(result->GetAll(), (std::vector<DocId>{4, 5, 6}));
   EXPECT_EQ(result->Size(), 3);
 }
@@ -181,13 +218,13 @@ TEST_F(PostingListTest, RoaringUnionFailureFallsBackToExactDeltaResult) {
   auto result = left.Union(right);
 
   ASSERT_NE(result, nullptr);
-  EXPECT_EQ(result->GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(result->GetStrategy(), PostingStrategy::kFixedWidthDelta);
   EXPECT_EQ(result->GetAll(), (std::vector<DocId>{1, 2, 3, 4, 5, 6, 7, 8}));
   EXPECT_EQ(result->Size(), 8);
 }
 
 /**
- * @brief Test Contains() for small delta-compressed arrays (linear search path)
+ * @brief Test Contains() for small fixed-width delta encoded arrays (linear search path)
  */
 TEST_F(PostingListTest, ContainsSmallDeltaArray) {
   PostingList posting(0.5);
@@ -212,7 +249,7 @@ TEST_F(PostingListTest, ContainsSmallDeltaArray) {
 }
 
 /**
- * @brief Test Contains() for large delta-compressed arrays (binary search path)
+ * @brief Test Contains() for large fixed-width delta encoded arrays (binary search path)
  */
 TEST_F(PostingListTest, ContainsLargeDeltaArray) {
   PostingList posting(0.5);
@@ -341,7 +378,7 @@ TEST_F(PostingListTest, GetTopNForward) {
 }
 
 /**
- * @brief Test Add() maintains sorted order for delta-compressed
+ * @brief Test Add() maintains sorted order for fixed-width delta encoded
  */
 TEST_F(PostingListTest, AddMaintainsSortedOrder) {
   PostingList posting(0.5);
@@ -485,7 +522,7 @@ TEST_F(PostingListTest, ContainsAfterMixedOperations) {
 }
 
 /**
- * @brief Test Contains() with small delta-compressed list (streaming decode)
+ * @brief Test Contains() with small fixed-width delta encoded list (streaming decode)
  *
  * This test verifies that Contains() uses streaming decode with early exit
  * for small lists.
@@ -514,7 +551,7 @@ TEST_F(PostingListTest, ContainsSmallListOptimization) {
 }
 
 /**
- * @brief Test Contains() with large delta-compressed list (streaming decode)
+ * @brief Test Contains() with large fixed-width delta encoded list (streaming decode)
  *
  * This test verifies that Contains() uses streaming decode with early exit
  * for large lists, avoiding O(n) memory allocation from full decode.
@@ -659,7 +696,7 @@ TEST_F(PostingListTest, OptimizeRoaringToDeltaNoDeadlock) {
   // 0.0005 < 0.005, so this should trigger ConvertToDelta()
   // Before the fix, this would deadlock due to recursive lock acquisition
   posting.Optimize(100000);
-  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
 
   // Verify all data is preserved after the conversion
   EXPECT_EQ(posting.Size(), 50);
@@ -686,7 +723,7 @@ TEST_F(PostingListTest, OptimizeRoundTripPreservesData) {
   std::vector<DocId> original_ids = {1, 5, 10, 100, 500, 1000, 5000, 10000, 50000, 100000};
   posting.AddBatch(original_ids);
 
-  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
 
   // Convert to Roaring (density = 10/20 = 0.5 >> 0.01)
   posting.Optimize(20);
@@ -700,7 +737,7 @@ TEST_F(PostingListTest, OptimizeRoundTripPreservesData) {
 
   // Convert back to Delta (density = 10/10000000 ≈ 0)
   posting.Optimize(10000000);
-  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
 
   // Verify data after Roaring -> Delta
   EXPECT_EQ(posting.Size(), original_ids.size());
@@ -867,11 +904,11 @@ TEST_F(PostingListTest, IterationLargeRoaringPartialRetrieval) {
 }
 
 // =============================================================================
-// Contains() optimization tests for large delta-compressed lists
+// Contains() optimization tests for large fixed-width delta encoded lists
 // =============================================================================
 
 /**
- * @brief Test Contains() correctness on large sparse delta-compressed list
+ * @brief Test Contains() correctness on large sparse fixed-width delta encoded list
  *
  * Verifies that the streaming decode with early exit correctly handles
  * a large list with sparse (non-contiguous) doc IDs.
@@ -886,7 +923,7 @@ TEST_F(PostingListTest, ContainsLargeSparseList) {
   }
   posting.AddBatch(ids);
 
-  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
 
   // Test Contains for existing elements
   EXPECT_TRUE(posting.Contains(1));
@@ -901,25 +938,25 @@ TEST_F(PostingListTest, ContainsLargeSparseList) {
 }
 
 /**
- * @brief Benchmark Contains() on large delta-compressed list
+ * @brief Benchmark Contains() on the largest bounded fixed-width delta list
  *
- * Measures that 1000 Contains() calls on a 10K-element delta list complete
+ * Measures that 1000 Contains() calls on a 4K-element delta list complete
  * within a reasonable time, validating the streaming decode optimization
  * avoids unnecessary memory allocation.
  */
 TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
   PostingList posting;
 
-  // Add 10000 elements (even numbers)
+  // Stay immediately below the absolute auto-Roaring threshold.
   std::vector<DocId> ids;
-  ids.reserve(10000);
-  for (DocId i = 1; i <= 10000; ++i) {
+  ids.reserve(4000);
+  for (DocId i = 1; i <= 4000; ++i) {
     ids.push_back(i * 2);
   }
   posting.AddBatch(ids);
 
-  // Ensure still delta-compressed (not Roaring)
-  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  // Ensure still fixed-width delta encoded (not Roaring)
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
 
   // Run 1000 Contains() calls and measure time
   auto start = std::chrono::steady_clock::now();
@@ -932,7 +969,7 @@ TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
   auto end = std::chrono::steady_clock::now();
   auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 
-  std::cout << "1000 Contains() on 10K delta list: " << duration_us << "us, found=" << found << std::endl;
+  std::cout << "1000 Contains() on 4K fixed-width delta list: " << duration_us << "us, found=" << found << std::endl;
 
   // Should complete in reasonable time (< 100ms)
   EXPECT_LT(duration_us, 100000);
@@ -946,7 +983,7 @@ TEST_F(PostingListTest, ContainsLargeListPerformanceNoAllocation) {
  * @brief Test MemoryUsageApprox returns 0 when bitmap is null (default state)
  *
  * A freshly constructed PostingList has roaring_bitmap_ == nullptr and uses
- * delta-compressed strategy. MemoryUsage should return the delta vector size.
+ * fixed-width delta encoded strategy. MemoryUsage should return the delta vector size.
  */
 TEST_F(PostingListTest, MemoryUsageApproxDeltaReturnsValue) {
   PostingList posting(0.5);
@@ -1461,14 +1498,14 @@ TEST_F(PostingListTest, UnionRoaringBitmapReturnsValidResult) {
 /**
  * @brief Test Intersect of one delta + one Roaring PostingList
  *
- * Tests cross-strategy intersection where one list uses delta-compressed
+ * Tests cross-strategy intersection where one list uses fixed-width delta encoded
  * storage and the other uses Roaring bitmap.
  */
 TEST_F(PostingListTest, IntersectDeltaAndRoaringReturnsValidResult) {
   PostingList pl_delta(0.5);     // High threshold to stay delta
   PostingList pl_roaring(0.01);  // Low threshold to trigger Roaring
 
-  // pl_delta: small list, stays delta-compressed
+  // pl_delta: small list, stays fixed-width delta encoded
   for (DocId i = 1; i <= 100; ++i) {
     pl_delta.Add(i);
   }
@@ -1479,7 +1516,7 @@ TEST_F(PostingListTest, IntersectDeltaAndRoaringReturnsValidResult) {
   }
   pl_roaring.Optimize(10000);
 
-  EXPECT_EQ(pl_delta.GetStrategy(), PostingStrategy::kDeltaCompressed);
+  EXPECT_EQ(pl_delta.GetStrategy(), PostingStrategy::kFixedWidthDelta);
   EXPECT_EQ(pl_roaring.GetStrategy(), PostingStrategy::kRoaringBitmap);
 
   auto result = pl_delta.Intersect(pl_roaring);
@@ -1502,7 +1539,7 @@ TEST_F(PostingListTest, IntersectDeltaAndRoaringReturnsValidResult) {
  * @brief Test MemoryUsageApprox returns reasonable values for delta strategy
  *
  * After adding documents, MemoryUsageApprox should return a positive value
- * reflecting the delta-compressed storage overhead.
+ * reflecting the fixed-width delta encoded storage overhead.
  */
 TEST_F(PostingListTest, MemoryUsageApproxCachedDelta) {
   PostingList pl;

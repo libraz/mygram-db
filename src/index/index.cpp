@@ -55,13 +55,9 @@ bool Index::AddDocument(DocId doc_id, std::string_view text) {
     return false;
   }
 
-  // Acquire exclusive lock for modifying posting lists
-  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
-
   // Add document to posting list for each unique n-gram
   for (const auto& ngram : ngrams) {
-    auto* posting = GetOrCreatePostingList(ngram);
-    posting->Add(doc_id);
+    AddToPostingList(ngram, doc_id);
   }
 
   const char* mode = (ngram_size_ == 0) ? "hybrid" : "regular";
@@ -93,6 +89,16 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     // Remove duplicates by sorting and using unique (more efficient than unordered_set)
     mygram::utils::DeduplicateSorted(ngrams);
 
+    if (ngrams.empty()) {
+      mygram::utils::StructuredLog()
+          .Event("empty_document_skipped")
+          .Field("doc_id", static_cast<uint64_t>(doc.doc_id))
+          .Field("text_length", static_cast<uint64_t>(doc.text.size()))
+          .Message("Document has no indexable n-grams; it will not appear in search results")
+          .Warn();
+      continue;
+    }
+
     // Build term->docs mapping
     for (const auto& ngram : ngrams) {
       term_to_docs[ngram].push_back(doc.doc_id);
@@ -104,13 +110,10 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     std::sort(doc_ids.begin(), doc_ids.end());
   }
 
-  // Step 3: Add to posting lists (with exclusive lock, minimal lock time)
-  // Use PostingList::AddBatch() for better performance
-  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
-
+  // Step 3: Existing terms take only the shared map lock and serialize at the
+  // individual posting list.
   for (const auto& [term, doc_ids] : term_to_docs) {
-    auto* posting = GetOrCreatePostingList(term);
-    posting->AddBatch(doc_ids);
+    AddBatchToPostingList(term, doc_ids);
   }
 }
 
@@ -133,27 +136,17 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
   std::set_difference(new_ngrams.begin(), new_ngrams.end(), old_ngrams.begin(), old_ngrams.end(),
                       std::back_inserter(to_add));
 
-  // Acquire exclusive lock for modifying posting lists
-  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
-
   // Remove doc from n-grams that are no longer present
   size_t empty_lists_removed = 0;
   for (const auto& ngram : to_remove) {
-    auto posting_iter = term_postings_.find(ngram);
-    if (posting_iter != term_postings_.end()) {
-      posting_iter->second->Remove(doc_id);
-      // Remove empty posting lists to prevent memory leak
-      if (posting_iter->second->SizeApprox() == 0) {
-        term_postings_.erase(posting_iter);
-        empty_lists_removed++;
-      }
+    if (RemoveFromPostingList(ngram, doc_id)) {
+      empty_lists_removed++;
     }
   }
 
   // Add doc to new n-grams
   for (const auto& ngram : to_add) {
-    auto* posting = GetOrCreatePostingList(ngram);
-    posting->Add(doc_id);
+    AddToPostingList(ngram, doc_id);
   }
 
   mygram::utils::StructuredLog()
@@ -173,20 +166,11 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
   // Remove duplicates by sorting and using unique (more efficient than unordered_set)
   mygram::utils::DeduplicateSorted(ngrams);
 
-  // Acquire exclusive lock for modifying posting lists
-  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
-
   // Remove document from posting list for each n-gram
   size_t empty_lists_removed = 0;
   for (const auto& ngram : ngrams) {
-    auto posting_iter = term_postings_.find(ngram);
-    if (posting_iter != term_postings_.end()) {
-      posting_iter->second->Remove(doc_id);
-      // Remove empty posting lists to prevent memory leak
-      if (posting_iter->second->SizeApprox() == 0) {
-        term_postings_.erase(posting_iter);
-        empty_lists_removed++;
-      }
+    if (RemoveFromPostingList(ngram, doc_id)) {
+      empty_lists_removed++;
     }
   }
 
@@ -388,9 +372,9 @@ std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const 
   // GetAll() + set_union is used here because PostingList::Union() operates
   // on the internal bitmap in-place, which is not suitable for read-only
   // snapshots. The snapshot-based approach ensures thread safety without
-  // modifying the original posting lists (reviewed: Roaring native OR
-  // would require creating a temporary bitmap, which isn't clearly faster
-  // for the typical number of OR terms).
+  // modifying the original posting lists. Roaring native OR would require a
+  // temporary bitmap and is not clearly faster for the typical number of OR
+  // terms.
   std::vector<DocId> result;
   std::vector<DocId> temp;
 
@@ -419,9 +403,9 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
   // GetAll() + set_union is used here because PostingList::Union() operates
   // on the internal bitmap in-place, which is not suitable for read-only
   // snapshots. The snapshot-based approach ensures thread safety without
-  // modifying the original posting lists (reviewed: Roaring native OR
-  // would require creating a temporary bitmap, which isn't clearly faster
-  // for the typical number of OR terms).
+  // modifying the original posting lists. Roaring native OR would require a
+  // temporary bitmap and is not clearly faster for the typical number of OR
+  // terms.
   // Get union of all documents containing any of the NOT terms
   std::vector<DocId> excluded_docs;
   std::vector<DocId> temp;
@@ -568,7 +552,7 @@ Index::IndexStatistics Index::GetStatistics() const {
     stats.total_postings += posting->SizeApprox();
 
     // Count strategy types
-    if (posting->GetStrategy() == PostingStrategy::kDeltaCompressed) {
+    if (posting->GetStrategy() == PostingStrategy::kFixedWidthDelta) {
       stats.delta_encoded_lists++;
     } else if (posting->GetStrategy() == PostingStrategy::kRoaringBitmap) {
       stats.roaring_bitmap_lists++;
@@ -606,18 +590,64 @@ void Index::ReplaceWithLoaded(Index& loaded) {
   load_generation_.fetch_add(1, std::memory_order_acq_rel);
 }
 
-PostingList* Index::GetOrCreatePostingList(std::string_view term) {
-  // absl::flat_hash_map with TransparentStringHash supports heterogeneous lookup
-  auto iterator = term_postings_.find(term);
-  if (iterator != term_postings_.end()) {
-    return iterator->second.get();
+void Index::AddToPostingList(std::string_view term, DocId doc_id) {
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    auto iterator = term_postings_.find(term);
+    if (iterator != term_postings_.end()) {
+      iterator->second->Add(doc_id);
+      return;
+    }
   }
 
-  // Create new posting list - only allocate std::string on the insert path
-  auto posting = std::make_shared<PostingList>(roaring_threshold_);
-  auto* ptr = posting.get();
-  term_postings_[std::string(term)] = std::move(posting);
-  return ptr;
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
+  auto [iterator, inserted] =
+      term_postings_.try_emplace(std::string(term), std::make_shared<PostingList>(roaring_threshold_));
+  (void)inserted;
+  iterator->second->Add(doc_id);
+}
+
+void Index::AddBatchToPostingList(std::string_view term, const std::vector<DocId>& doc_ids) {
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    auto iterator = term_postings_.find(term);
+    if (iterator != term_postings_.end()) {
+      iterator->second->AddBatch(doc_ids);
+      return;
+    }
+  }
+
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
+  auto [iterator, inserted] =
+      term_postings_.try_emplace(std::string(term), std::make_shared<PostingList>(roaring_threshold_));
+  (void)inserted;
+  iterator->second->AddBatch(doc_ids);
+}
+
+bool Index::RemoveFromPostingList(std::string_view term, DocId doc_id) {
+  std::shared_ptr<PostingList> posting;
+  {
+    // Holding the shared map lock through the per-list mutation prevents an
+    // empty-list cleanup from orphaning a concurrent Add on the same object.
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    auto iterator = term_postings_.find(term);
+    if (iterator == term_postings_.end()) {
+      return false;
+    }
+    posting = iterator->second;
+    posting->Remove(doc_id);
+    if (posting->SizeApprox() != 0) {
+      return false;
+    }
+  }
+
+  std::unique_lock<std::shared_mutex> lock(postings_mutex_);
+  auto iterator = term_postings_.find(term);
+  if (iterator != term_postings_.end() && iterator->second == posting && posting->SizeApprox() == 0) {
+    term_postings_.erase(iterator);
+    return true;
+  }
+  return false;
 }
 
 const PostingList* Index::GetPostingList(std::string_view term) const {

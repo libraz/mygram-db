@@ -6,7 +6,7 @@
 
 using namespace mygramdb::index;
 
-TEST(PostingListSerializationTest, RoundTripDeltaCompressed) {
+TEST(PostingListSerializationTest, RoundTripFixedWidthDelta) {
   PostingList pl;
   pl.Add(10);
   pl.Add(20);
@@ -35,7 +35,7 @@ TEST(PostingListSerializationTest, LittleEndianByteOrder) {
   std::vector<uint8_t> buffer;
   ASSERT_TRUE(pl.Serialize(buffer));
 
-  // byte 0: strategy (kDeltaCompressed = 0)
+  // byte 0: strategy (kFixedWidthDelta = 0)
   EXPECT_EQ(buffer[0], 0);
 
   // bytes 1-4: size = 2 in little-endian
@@ -43,6 +43,10 @@ TEST(PostingListSerializationTest, LittleEndianByteOrder) {
   EXPECT_EQ(buffer[2], 0);
   EXPECT_EQ(buffer[3], 0);
   EXPECT_EQ(buffer[4], 0);  // MSB
+
+  // The format is deliberately honest: two fixed-width uint32_t deltas, not
+  // a claimed varint representation.
+  EXPECT_EQ(buffer.size(), 1 + sizeof(uint32_t) + (2 * sizeof(uint32_t)));
 }
 
 TEST(PostingListSerializationTest, RoundTripEmpty) {
@@ -98,7 +102,7 @@ TEST(PostingListSerializationTest, RejectsInternallyInvalidRoaringBitmap) {
 
 TEST(PostingListSerializationTest, RejectsZeroDeltaAfterFirstEntry) {
   std::vector<uint8_t> buffer;
-  buffer.push_back(static_cast<uint8_t>(PostingStrategy::kDeltaCompressed));
+  buffer.push_back(static_cast<uint8_t>(PostingStrategy::kFixedWidthDelta));
   buffer.push_back(3);
   buffer.push_back(0);
   buffer.push_back(0);
@@ -122,7 +126,7 @@ TEST(PostingListSerializationTest, RejectsZeroDeltaAfterFirstEntry) {
 
 TEST(PostingListSerializationTest, RejectsDeltaCumulativeOverflow) {
   std::vector<uint8_t> buffer;
-  buffer.push_back(static_cast<uint8_t>(PostingStrategy::kDeltaCompressed));
+  buffer.push_back(static_cast<uint8_t>(PostingStrategy::kFixedWidthDelta));
   buffer.push_back(2);
   buffer.push_back(0);
   buffer.push_back(0);
@@ -141,4 +145,20 @@ TEST(PostingListSerializationTest, RejectsDeltaCumulativeOverflow) {
   size_t offset = 0;
   EXPECT_FALSE(deserialized.Deserialize(buffer, offset));
   EXPECT_EQ(deserialized.Size(), 0u);
+}
+
+TEST(PostingListSerializationTest, InvalidBodyDoesNotMutateExistingListOrOffset) {
+  PostingList deserialized;
+  deserialized.Add(10);
+  deserialized.Add(20);
+
+  std::vector<uint8_t> truncated_roaring = {
+      static_cast<uint8_t>(PostingStrategy::kRoaringBitmap), 4, 0, 0, 0, 0x01,
+  };
+  size_t offset = 0;
+
+  EXPECT_FALSE(deserialized.Deserialize(truncated_roaring, offset));
+  EXPECT_EQ(offset, 0u);
+  EXPECT_EQ(deserialized.GetStrategy(), PostingStrategy::kFixedWidthDelta);
+  EXPECT_EQ(deserialized.GetAll(), (std::vector<DocId>{10, 20}));
 }

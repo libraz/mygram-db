@@ -346,7 +346,8 @@ class Index {
 
   // Shared mutex for read/write protection
   // - Readers (Search): shared_lock (multiple concurrent readers allowed)
-  // - Writers (Add/Update/Remove/Optimize): unique_lock (exclusive access)
+  // - Existing-list mutations: shared_lock plus the PostingList's exclusive lock
+  // - Map insert/erase/Optimize: unique_lock
   // Lock ordering (acquire in this order to prevent deadlock):
   //   postings_mutex_ → PostingList::mutex_
   // When postings_mutex_ is held (shared or exclusive), it is safe to call
@@ -376,10 +377,9 @@ class Index {
    */
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromData(std::string data);
 
-  /**
-   * @brief Get or create posting list for term
-   */
-  PostingList* GetOrCreatePostingList(std::string_view term);
+  void AddToPostingList(std::string_view term, DocId doc_id);
+  void AddBatchToPostingList(std::string_view term, const std::vector<DocId>& doc_ids);
+  [[nodiscard]] bool RemoveFromPostingList(std::string_view term, DocId doc_id);
 
   /**
    * @brief RCU snapshot helpers for lock-free search

@@ -12,6 +12,8 @@
 
 #include "storage/document_store.h"
 #include "types/doc_id.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::index {
 
@@ -71,13 +73,13 @@ class BM25Scorer {
    * @param total_docs Total documents in corpus
    * @param avg_doc_length Average document length (code points)
    * @param params BM25 parameters (k1, b)
-   * @return Scored documents (same order as candidates)
+   * @return Scored documents (same order as candidates), or kInvalidArgument
+   *         when search_terms and term_doc_freqs are not parallel arrays
    */
-  static std::vector<ScoredDoc> ScoreDocuments(const std::vector<storage::DocId>& candidates,
-                                               const std::vector<std::string>& search_terms,
-                                               const std::vector<uint64_t>& term_doc_freqs,
-                                               const storage::DocumentStore& doc_store, uint64_t total_docs,
-                                               double avg_doc_length, const BM25Params& params);
+  static mygram::utils::Expected<std::vector<ScoredDoc>, mygram::utils::Error> ScoreDocuments(
+      const std::vector<storage::DocId>& candidates, const std::vector<std::string>& search_terms,
+      const std::vector<uint64_t>& term_doc_freqs, const storage::DocumentStore& doc_store, uint64_t total_docs,
+      double avg_doc_length, const BM25Params& params);
 };
 
 }  // namespace mygramdb::index

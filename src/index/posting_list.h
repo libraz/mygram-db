@@ -30,7 +30,7 @@ constexpr double kDefaultRoaringThreshold = config::defaults::kRoaringThreshold;
  * @brief Posting list storage strategies
  */
 enum class PostingStrategy : uint8_t {
-  kDeltaCompressed,  // Delta-encoded varint array (sparse)
+  kFixedWidthDelta,  // Fixed-width uint32_t deltas (sparse)
   kRoaringBitmap     // Roaring bitmap (dense)
 };
 
@@ -38,7 +38,7 @@ enum class PostingStrategy : uint8_t {
  * @brief Posting list for a single term
  *
  * Stores document IDs in one of two formats:
- * - Delta-compressed varint array for sparse postings
+ * - Fixed-width delta-encoded array for sparse postings
  * - Roaring bitmap for dense postings (auto-selected based on threshold)
  */
 class PostingList {
@@ -102,7 +102,7 @@ class PostingList {
    * - Returns up to 'limit' document IDs
    * - Reverse order enables efficient "ORDER BY primary_key DESC LIMIT N" queries
    * - For Roaring bitmaps: uses reverse iterator (no full materialization)
-   * - For delta-compressed: decodes delta-compressed list and returns the last N elements
+   * - For fixed-width delta encoded: decodes fixed-width delta encoded list and returns the last N elements
    *
    * @param limit Maximum number of documents to return (0 = all documents)
    * @param reverse If true, returns highest DocIds first (descending order)
@@ -216,14 +216,26 @@ class PostingList {
    * cases. Production code never calls this method.
    */
   static void FailNextRoaringOperationForTest(TestRoaringFault fault);
+
+  /**
+   * @brief Test hook: identify the fixed-width delta allocation.
+   *
+   * Tests compare this opaque address before and after an in-place mutation;
+   * callers must not dereference it.
+   */
+  [[nodiscard]] const void* DeltaStorageAddressForTesting() const;
+
+  static void PauseNextRemoveForTesting();
+  [[nodiscard]] static bool IsRemovePausedForTesting();
+  static void ReleasePausedRemoveForTesting();
 #endif
 
  private:
-  std::atomic<PostingStrategy> strategy_{PostingStrategy::kDeltaCompressed};
+  std::atomic<PostingStrategy> strategy_{PostingStrategy::kFixedWidthDelta};
   double roaring_threshold_;
 
-  // Delta-compressed storage
-  std::vector<uint32_t> delta_compressed_;
+  // Fixed-width delta encoded storage
+  std::vector<uint32_t> delta_encoded_;
 
   // Cached last DocId for O(1) fast-path append in Add()
   DocId last_doc_id_ = 0;
@@ -259,7 +271,7 @@ class PostingList {
   void UpdateCountsAndVersion();
 
   /**
-   * @brief Recompute and cache last_doc_id_ from delta_compressed_
+   * @brief Recompute and cache last_doc_id_ from delta_encoded_
    * @note Caller must already hold mutex_ exclusively
    */
   void RecomputeLastDocId();
@@ -275,12 +287,18 @@ class PostingList {
   void ConvertToDelta();
 
   /**
-   * @brief Encode document IDs with delta compression
+   * @brief Bound linear mutation cost by switching large sparse arrays to Roaring
+   * @note Caller must already hold mutex_ exclusively
+   */
+  void MaybeConvertLargeDeltaToRoaring();
+
+  /**
+   * @brief Encode document IDs with fixed-width delta encoding
    */
   static std::vector<uint32_t> EncodeDelta(const std::vector<DocId>& doc_ids);
 
   /**
-   * @brief Decode delta-compressed document IDs
+   * @brief Decode fixed-width delta encoded document IDs
    */
   static std::vector<DocId> DecodeDelta(const std::vector<uint32_t>& encoded);
 };

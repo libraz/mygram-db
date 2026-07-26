@@ -2,9 +2,8 @@
  * @file index_empty_doc_and_search_test.cpp
  * @brief Tests for empty document handling and SearchOr correctness
  *
- * Covers:
- * - Issue #6: Empty document silent success (observability)
- * - Issue #5: SearchOrInternal lock precondition (tested via public SearchOr API)
+ * Covers empty-document observability and SearchOr correctness through the
+ * public API.
  */
 
 #include <gtest/gtest.h>
@@ -14,7 +13,7 @@
 using namespace mygramdb::index;
 
 // =============================================================================
-// Issue #6: Empty document handling
+// Empty document handling
 // =============================================================================
 
 /**
@@ -104,7 +103,7 @@ TEST(IndexEmptyDocTest, WhitespaceOnlyDocumentProducesNoNgrams) {
 }
 
 // =============================================================================
-// Issue #5: SearchOr correctness (exercises SearchOrInternal's logic path)
+// SearchOr correctness (exercises SearchOrInternal's logic path)
 // =============================================================================
 
 /**

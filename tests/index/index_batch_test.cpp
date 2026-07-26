@@ -4,7 +4,10 @@
  */
 
 #include <gtest/gtest.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 
+#include <sstream>
 #include <unordered_set>
 
 #include "index/index.h"
@@ -53,6 +56,24 @@ TEST(IndexTest, AddDocumentBatchEmpty) {
   index.AddDocumentBatch(batch);  // Should not crash
 
   EXPECT_EQ(index.TermCount(), 0);
+}
+
+TEST(IndexTest, AddDocumentBatchReportsDocumentsWithoutIndexableNgrams) {
+  Index index(1);
+  std::ostringstream log_stream;
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_stream);
+  auto logger = std::make_shared<spdlog::logger>("index_batch_capture", sink);
+  logger->set_level(spdlog::level::trace);
+  const auto previous_logger = spdlog::default_logger();
+  spdlog::set_default_logger(logger);
+
+  index.AddDocumentBatch({{41, ""}, {42, "abc"}});
+  logger->flush();
+  spdlog::set_default_logger(previous_logger);
+
+  EXPECT_NE(log_stream.str().find("empty_document_skipped"), std::string::npos);
+  EXPECT_NE(log_stream.str().find("\"doc_id\":41"), std::string::npos);
+  EXPECT_EQ(index.Count("a"), 1u);
 }
 
 /**

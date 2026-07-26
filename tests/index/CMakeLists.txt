@@ -71,7 +71,7 @@ gtest_discover_tests(index_concurrent_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES
-    LABELS "SLOW"
+    LABELS "SLOW\\;CONCURRENCY"
     RESOURCE_LOCK index_concurrent_lock
     TIMEOUT 60
 )
@@ -174,7 +174,7 @@ gtest_discover_tests(posting_list_thread_safety_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 60
   PROPERTIES
-    LABELS "SLOW"
+    LABELS "SLOW\\;CONCURRENCY"
     RESOURCE_LOCK posting_list_concurrent_lock
     TIMEOUT 60
 )
@@ -197,7 +197,7 @@ if(APPLE)
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES
-      LABELS "SLOW"
+      LABELS "SLOW\\;CONCURRENCY"
       RESOURCE_LOCK optimize_concurrent_lock
       RUN_SERIAL TRUE
       TIMEOUT 120
@@ -208,7 +208,7 @@ else()
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
     PROPERTIES
-      LABELS "SLOW"
+      LABELS "SLOW\\;CONCURRENCY"
       RESOURCE_LOCK optimize_concurrent_lock
       TIMEOUT 120
   )
@@ -221,7 +221,7 @@ gtest_discover_tests(optimize_concurrency_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
   PROPERTIES
-    LABELS "LOAD"
+    LABELS "LOAD\\;CONCURRENCY"
     RESOURCE_LOCK optimize_concurrent_lock
     RUN_SERIAL TRUE
     TIMEOUT 300
