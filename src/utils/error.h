@@ -14,7 +14,7 @@
 #include <string>
 #include <utility>
 
-#include "utils/namespace_compat.h"
+#include "namespace_compat.h"
 
 namespace mygramdb::utils {
 
@@ -154,6 +154,8 @@ enum class ErrorCode : std::uint16_t {
   kServerInitMissingDependency = 6026,   ///< Server initialization missing required dependency
   kServerShuttingDown = 6027,            ///< Server is shutting down; new long-running operations are rejected
   kServerLoading = 6028,                 ///< Server is temporarily unavailable while loading a dump
+  kServerNotReady = 6029,                ///< Server is not ready to serve the requested operation
+  kServerBusy = 6030,                    ///< Server request capacity is temporarily exhausted
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,          ///< Client not connected
@@ -408,6 +410,10 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Server is shutting down";
     case ErrorCode::kServerLoading:
       return "Server is loading";
+    case ErrorCode::kServerNotReady:
+      return "Server is not ready";
+    case ErrorCode::kServerBusy:
+      return "Server is busy";
 
     // Client
     case ErrorCode::kClientNotConnected:

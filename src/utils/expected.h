@@ -32,7 +32,7 @@
 #include <utility>
 #include <variant>
 
-#include "utils/namespace_compat.h"
+#include "namespace_compat.h"
 
 namespace mygramdb::utils {
 
