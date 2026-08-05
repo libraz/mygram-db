@@ -56,6 +56,7 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
                                                             std::move(ngram_configs), std::move(worker_thread_factory));
   invalidation_queue_->SetBatchSize(cache_config.invalidation.batch_size);
   invalidation_queue_->SetMaxDelay(cache_config.invalidation.max_delay_ms);
+  invalidation_queue_->SetMaxQueueSize(cache_config.invalidation.max_queue_size);
   if (cache_config.enabled) {
     const auto start_result = invalidation_queue_->Start();
     if (start_result.has_value()) {
@@ -239,7 +240,8 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   // Register with invalidation manager
   if (inserted) {
     invalidation_mgr_->RegisterCacheEntry(key, metadata);
-    while (query_cache_->MemoryUsage() + invalidation_mgr_->MemoryUsage() > max_memory_bytes_) {
+    while (query_cache_->MemoryUsage() + invalidation_mgr_->MemoryUsage() + invalidation_queue_->MemoryUsage() >
+           max_memory_bytes_) {
       if (!query_cache_->EvictLeastRecentlyUsed()) {
         query_cache_->IncrementMemoryBudgetRejection();
         return false;
@@ -336,8 +338,12 @@ CacheStatisticsSnapshot CacheManager::GetStatistics() const {
   if (invalidation_mgr_) {
     snapshot.invalidation_index_memory_bytes = invalidation_mgr_->MemoryUsage();
   }
+  if (invalidation_queue_) {
+    snapshot.invalidation_queue_memory_bytes = invalidation_queue_->MemoryUsage();
+  }
   if (query_cache_) {
-    snapshot.accounted_memory_bytes = query_cache_->MemoryUsage() + snapshot.invalidation_index_memory_bytes;
+    snapshot.accounted_memory_bytes = query_cache_->MemoryUsage() + snapshot.invalidation_index_memory_bytes +
+                                      snapshot.invalidation_queue_memory_bytes;
   }
 
   return snapshot;

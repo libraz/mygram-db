@@ -1568,4 +1568,30 @@ TEST(InvalidationQueueTest, DeferredOldGenerationDoesNotEraseReinsertedEntry) {
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
 }
 
+TEST(InvalidationQueueTest, ConfiguredMaximumCapsSingleLargeEnqueueAndAccountsMemory) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  InvalidationQueue queue(&cache, &mgr, CreateTestNgramConfigs(2, 1));
+  queue.SetBatchSize(1000);
+  queue.SetMaxDelay(60000);
+  queue.SetMaxQueueSize(2);
+
+  for (uint64_t generation = 1; generation <= 3; ++generation) {
+    const auto key = CacheKeyGenerator::Generate("queue_limit_" + std::to_string(generation));
+    CacheMetadata metadata;
+    metadata.table = "posts";
+    metadata.ngrams = {"go"};
+    metadata.entry_generation = generation;
+    ASSERT_TRUE(cache.Insert(key, {static_cast<DocId>(generation)}, metadata, 1.0));
+    mgr.RegisterCacheEntry(key, metadata);
+  }
+
+  ASSERT_TRUE(queue.Start().has_value());
+  queue.Enqueue("posts", "", "golang");
+
+  EXPECT_EQ(queue.GetPendingCount(), 2U);
+  EXPECT_GT(queue.MemoryUsage(), 0U);
+  queue.Stop();
+}
+
 }  // namespace mygramdb::cache

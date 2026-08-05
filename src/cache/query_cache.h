@@ -58,7 +58,8 @@ struct CacheStatisticsSnapshot {
   uint64_t current_entries = 0;
   uint64_t current_memory_bytes = 0;
   uint64_t invalidation_index_memory_bytes = 0;  ///< Memory used by InvalidationManager's tracking structures
-  uint64_t accounted_memory_bytes = 0;           ///< QueryCache containers + invalidation index (shared budget total)
+  uint64_t invalidation_queue_memory_bytes = 0;  ///< Memory retained by pending/deferred invalidation batches
+  uint64_t accounted_memory_bytes = 0;           ///< QueryCache + all invalidation memory (shared budget total)
   uint64_t evictions = 0;
   uint64_t ttl_expirations = 0;         ///< TTL-expired entries removed
   uint64_t decompression_failures = 0;  ///< Entries removed due to decompression failure
@@ -120,15 +121,14 @@ struct CacheStatisticsSnapshot {
  *   21 atomic uint64_t counters in CacheStatistics
  *   3 timing doubles guarded by timing_mutex_ in CacheStatistics
  *   21 plain uint64_t counters in CacheStatisticsSnapshot
- *   1 invalidation_index_memory_bytes counter (snapshot only, populated by
- *     CacheManager from InvalidationManager)
+ *   2 invalidation memory counters (snapshot only, populated by CacheManager)
  *   4 configuration snapshot fields (max_memory_bytes, min_query_cost_ms,
  *     ttl_seconds, compression_enabled) — snapshot only
  *   3 timing doubles in CacheStatisticsSnapshot
  *   3 helper methods on snapshot (HitRate, AverageCacheHitLatency,
  *     AverageCacheMissLatency) and 1 accessor (TotalTimeSaved)
  */
-inline constexpr uint32_t kCacheStatsFieldVersion = 4;
+inline constexpr uint32_t kCacheStatsFieldVersion = 5;
 
 /**
  * @brief Internal cache statistics (thread-safe, non-copyable)
@@ -608,7 +608,7 @@ class QueryCache {
 // contains a std::mutex whose size is implementation-defined and would make
 // the assertion brittle.
 // ---------------------------------------------------------------------------
-inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 240;
+inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 248;
 static_assert(sizeof(CacheStatisticsSnapshot) == kExpectedCacheStatisticsSnapshotSize,
               "CacheStatisticsSnapshot layout changed: also update CacheStatistics, "
               "QueryCache::GetStatistics(), and bump kCacheStatsFieldVersion.");

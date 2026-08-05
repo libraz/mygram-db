@@ -204,4 +204,29 @@ TEST_F(CacheMetricsTest, InvalidationIndexMemoryInStatistics) {
   EXPECT_GT(stats.invalidation_index_memory_bytes, 0);
 }
 
+TEST_F(CacheMetricsTest, PendingInvalidationQueueMemoryIsIncludedInAccountedTotal) {
+  cache_config_.invalidation.batch_size = 1000;
+  cache_config_.invalidation.max_delay_ms = 60000;
+  cache_config_.invalidation.max_queue_size = 1;
+  CacheManager manager(cache_config_, ngram_configs_);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test_table";
+  query.search_text = "golang";
+  const std::string normalized = QueryNormalizer::Normalize(query);
+  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+  query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  query.cache_key_discriminator = normalized;
+  query.cache_key_is_canonical = true;
+  ASSERT_TRUE(manager.Insert(query, {1, 2, 3}, {"go", "ol"}, 1.0));
+
+  manager.Invalidate("test_table", "", "golang");
+  const auto stats = manager.GetStatistics();
+
+  EXPECT_GT(stats.invalidation_queue_memory_bytes, 0U);
+  EXPECT_GE(stats.accounted_memory_bytes,
+            stats.invalidation_index_memory_bytes + stats.invalidation_queue_memory_bytes);
+}
+
 }  // namespace mygramdb::cache

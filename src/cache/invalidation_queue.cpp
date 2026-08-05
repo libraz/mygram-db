@@ -5,6 +5,7 @@
 
 #include "cache/invalidation_queue.h"
 
+#include <algorithm>
 #include <exception>
 #include <future>
 
@@ -83,26 +84,38 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
       // nested lock acquisition (queue_mutex_ -> InvalidationManager::mutex_ -> QueryCache::mutex_)
       process_immediately = true;
     } else {
-      // Worker is running, add to queue with backpressure check
-      if (pending_cache_keys_.size() >= max_queue_size_) {
-        // Queue full - drop new entries (Step 1 already marked entries as invalidated,
-        // so correctness is preserved; Step 2 erasure will happen on next RefreshLRU/eviction)
+      // Worker is running, add to queue with per-entry backpressure. Checking
+      // only once before the loop allowed one large invalidation result to
+      // overshoot max_queue_size_ by an arbitrary amount.
+      size_t dropped_count = 0;
+      auto now = std::chrono::steady_clock::now();
+      bool inserted_any = false;
+      for (const auto& identity : affected_entries) {
+        PendingKey pending_key{table_name, identity};
+        if (pending_cache_keys_.size() >= max_queue_size_ &&
+            pending_cache_keys_.find(pending_key) == pending_cache_keys_.end()) {
+          ++dropped_count;
+          continue;
+        }
+        auto [iter, inserted] = pending_cache_keys_.emplace(std::move(pending_key), now);
+        if (inserted) {
+          pending_entry_memory_bytes_ += PendingEntryMemoryUsage(iter->first);
+          inserted_any = true;
+        }
+      }
+      if (dropped_count > 0) {
+        // Step 1 already marked entries as invalidated, so correctness is
+        // preserved; deferred erasure will happen on RefreshLRU/eviction.
         mygram::utils::StructuredLog()
             .Event("cache_invalidation_queue_overflow")
             .Field("queue_size", static_cast<uint64_t>(pending_cache_keys_.size()))
             .Field("max_queue_size", static_cast<uint64_t>(max_queue_size_))
-            .Field("dropped_count", static_cast<uint64_t>(affected_entries.size()))
+            .Field("dropped_count", static_cast<uint64_t>(dropped_count))
             .Warn();
-      } else {
-        // Use emplace to preserve existing entries' original timestamps,
-        // preventing oldest_timestamp_ from becoming stale after re-enqueue.
-        // Composite key uses a typed pair (table + CacheKey) to avoid the
-        // hex round-trip that the previous string-based encoding required
-        // on the invalidation hot path.
-        auto now = std::chrono::steady_clock::now();
-        for (const auto& identity : affected_entries) {
-          pending_cache_keys_.emplace(PendingKey{table_name, identity}, now);
-        }
+      }
+      if (inserted_any) {
+        // Preserve existing entries' original timestamps so the oldest
+        // timestamp cannot move forward after a duplicate enqueue.
         if (now < oldest_timestamp_) {
           oldest_timestamp_ = now;
         }
@@ -221,6 +234,24 @@ size_t InvalidationQueue::GetPendingCount() const {
   return pending_cache_keys_.size();
 }
 
+void InvalidationQueue::SetMaxQueueSize(size_t max_queue_size) {
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  max_queue_size_ = std::max<size_t>(1, max_queue_size);
+}
+
+size_t InvalidationQueue::MemoryUsage() const {
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  return pending_entry_memory_bytes_ + pending_cache_keys_.bucket_count() * sizeof(void*) +
+         processing_memory_bytes_.load(std::memory_order_relaxed);
+}
+
+size_t InvalidationQueue::PendingEntryMemoryUsage(const PendingKey& key) {
+  // value_type already contains the string object and identity. Add the
+  // table's dynamic allocation plus conservative hash-node/allocator links.
+  using ValueType = decltype(pending_cache_keys_)::value_type;
+  return sizeof(ValueType) + key.table.capacity() + (2 * sizeof(void*)) + sizeof(size_t);
+}
+
 void InvalidationQueue::WorkerLoop() {
   while (running_.load()) {
     std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -264,6 +295,7 @@ void InvalidationQueue::WorkerLoop() {
 
 void InvalidationQueue::ProcessBatch() {
   std::unordered_map<PendingKey, std::chrono::steady_clock::time_point, PendingKeyHash> batch;
+  size_t batch_memory = 0;
 
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -275,15 +307,10 @@ void InvalidationQueue::ProcessBatch() {
     // std::move leaves pending_cache_keys_ in a valid but empty state for
     // std::unordered_map, so explicit clear() is unnecessary
     batch = std::move(pending_cache_keys_);
+    batch_memory = pending_entry_memory_bytes_ + batch.bucket_count() * sizeof(void*);
+    processing_memory_bytes_.fetch_add(batch_memory, std::memory_order_relaxed);
+    pending_entry_memory_bytes_ = 0;
     oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
-  }
-
-  // Process batch: erase invalidated entries from cache.
-  // Typed PendingKey (table + CacheKey) is consumed directly — no string
-  // parsing, no hex round-trip.
-  std::unordered_set<CacheEntryIdentity> entries_to_erase;
-  for (const auto& [pending_key, timestamp] : batch) {
-    entries_to_erase.insert(pending_key.identity);
   }
 
   // Erase entries from cache and clean up their metadata.
@@ -304,7 +331,11 @@ void InvalidationQueue::ProcessBatch() {
   // Invariant: "On the invalidation-queue cleanup path, UnregisterCacheEntry
   // fires exactly once per affected key — directly from the queue, never via
   // eviction_callback_."
-  for (const auto& identity : entries_to_erase) {
+  // A cache entry belongs to exactly one table, so PendingKey identities are
+  // already unique. Processing the map directly avoids materializing a second
+  // unordered_set whose peak memory would duplicate the batch.
+  for (const auto& [pending_key, timestamp] : batch) {
+    const auto& identity = pending_key.identity;
     if (cache_ != nullptr) {
       cache_->EraseWithoutCallback(identity);
     }
@@ -317,6 +348,9 @@ void InvalidationQueue::ProcessBatch() {
   if (cache_ != nullptr) {
     cache_->IncrementInvalidationBatches();
   }
+  batch.clear();
+  batch.rehash(0);
+  processing_memory_bytes_.fetch_sub(batch_memory, std::memory_order_relaxed);
 }
 
 }  // namespace mygramdb::cache

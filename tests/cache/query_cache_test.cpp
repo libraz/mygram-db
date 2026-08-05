@@ -1849,6 +1849,16 @@ TEST(QueryCacheTest, TTLExpirationStats) {
  * which requires internal access (the fix ensures such entries are cleaned up
  * by RefreshLRU via pending_decompression_keys_).
  */
+TEST(QueryCacheTest, LargeConfiguredBudgetDoesNotPreallocateHashBucketsAtStartup) {
+  constexpr size_t kEightGiB = 8ULL * 1024 * 1024 * 1024;
+  QueryCache cache(kEightGiB, 0.0, 3600, true, 10, false);
+
+  // An empty cache should retain only tiny baseline container state. Before
+  // the regression fix, the constructor reserved about 33 million buckets
+  // from the configured ceiling and consumed roughly 536 MiB immediately.
+  EXPECT_LT(cache.MemoryUsage(), 1024U * 1024U);
+}
+
 TEST(QueryCacheTest, DecompressionFailureStatInitialized) {
   QueryCache cache(1024 * 1024, 10.0, 0, true);
 
@@ -2537,29 +2547,20 @@ TEST_F(QueryCacheNoCompressionTest, LookupOfMissingEntryReturnsMissNotFound) {
 }
 
 // =============================================================================
-// CR-5 regression: cache_map_ rehash suppression
+// CR-5 regression: cache_map_ rehash safety
 // =============================================================================
 
 /**
- * @brief CR-5 regression: constructor reserves enough buckets that the
- *        steady-state working set does not trigger rehash.
+ * @brief CR-5 regression: incremental bucket growth preserves all entries.
  *
- * The QueryCache constructor pre-reserves the cache_map_ to a multiple of
- * (max_memory_bytes / kAverageEntryBytes) and caps the load factor at 0.5.
- * For the configured 4 MiB cache below, that yields room for at least
- * 4 MiB / 256 B = 16384 estimated entries, which is comfortably more than
- * the 1024 entries we insert here. Bucket count must NOT change across the
- * whole insert sequence; if it does, the iterator-stability defense
- * documented in LookupInternal weakens.
+ * QueryCache deliberately does not reserve buckets from the configured byte
+ * ceiling at construction. The shared mutex must therefore make ordinary
+ * unordered_map growth safe while the working set fills incrementally.
  */
-TEST(QueryCacheTest, ConstructorReservesSoStableInsertSequenceDoesNotRehash) {
+TEST(QueryCacheTest, IncrementalBucketGrowthPreservesStableInsertSequence) {
   QueryCache cache(/*max_memory_bytes=*/4 * 1024 * 1024, /*min_query_cost_ms=*/0.0);
 
-  // Sanity: the constructor must have lowered max_load_factor below 1.0.
-  // (We don't have direct access to cache_map_'s load factor from outside,
-  // so we exercise the invariant through bucket_count behavior below.)
-
-  // Insert one entry to capture the post-construction bucket count.
+  // Insert one entry before growing through several normal rehash points.
   CacheMetadata meta;
   meta.table = "posts";
   meta.ngrams = {"abc"};

@@ -42,24 +42,13 @@ QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int tt
       ttl_seconds_(ttl_seconds),
       compression_enabled_(compression_enabled),
       eviction_batch_size_(std::max<size_t>(1, eviction_batch_size)) {
-  // Lower the load factor and pre-reserve buckets to minimize cache_map_
-  // rehashing under the steady-state working set. Rehash cost aside, this is
-  // also a defense-in-depth measure for the iterator-stability contract used
-  // by Lookup/MarkInvalidated (see iterator-validity note in LookupInternal): the
-  // shared_mutex contract already serializes Insert against in-flight Lookups,
-  // but keeping rehash rare also keeps invalidation checks cheap.
-  //
-  // Capacity heuristic: assume an average compressed entry occupies ~256 B
-  // including bookkeeping. This is a coarse estimate; the value is only used
-  // to size the initial bucket array and the load_factor() invariant guards
-  // correctness if it is wrong.
-  constexpr size_t kAverageEntryBytes = 256;
+  // Keep a conservative load factor, but let the map grow with actual entries.
+  // Reserving from max_memory_bytes_ made an empty 8 GiB cache allocate roughly
+  // 536 MiB of buckets during startup. The shared mutex already serializes
+  // inserts/rehashes against lookups, so correctness does not depend on a
+  // speculative full-budget reserve.
   constexpr float kLoadFactor = 0.5F;
-  const size_t estimated_entries = max_memory_bytes_ > 0 ? (max_memory_bytes_ / kAverageEntryBytes) : 0;
   cache_map_.max_load_factor(kLoadFactor);
-  if (estimated_entries > 0) {
-    cache_map_.reserve(estimated_entries);
-  }
 
   if (start_background_worker) {
     // Start failure here is logged by PeriodicWorker. The interval is fixed

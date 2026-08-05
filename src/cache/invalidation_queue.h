@@ -132,12 +132,17 @@ class InvalidationQueue {
    * @brief Set maximum queue size for backpressure
    * @param max_queue_size Max pending entries before dropping new ones
    */
-  void SetMaxQueueSize(size_t max_queue_size) { max_queue_size_ = max_queue_size; }
+  void SetMaxQueueSize(size_t max_queue_size);
 
   /**
    * @brief Get pending invalidation count
    */
   [[nodiscard]] size_t GetPendingCount() const;
+
+  /**
+   * @brief Estimated dynamic memory retained by pending and in-flight batches
+   */
+  [[nodiscard]] size_t MemoryUsage() const;
 
  private:
   QueryCache* cache_;                      ///< Pointer to query cache
@@ -205,6 +210,10 @@ class InvalidationQueue {
 
   size_t max_queue_size_ = kDefaultMaxQueueSize;  ///< Max pending entries (backpressure)
 
+  // O(1) accounting for unordered_map nodes and their table-name allocations.
+  size_t pending_entry_memory_bytes_ = 0;
+  std::atomic<size_t> processing_memory_bytes_{0};
+
   /// Oldest timestamp in pending_cache_keys_ (avoids O(n) scan in WorkerLoop)
   std::chrono::steady_clock::time_point oldest_timestamp_{std::chrono::steady_clock::time_point::max()};
 
@@ -217,6 +226,8 @@ class InvalidationQueue {
    * @brief Process batch of pending invalidations
    */
   void ProcessBatch();
+
+  [[nodiscard]] static size_t PendingEntryMemoryUsage(const PendingKey& key);
 };
 
 }  // namespace mygramdb::cache
