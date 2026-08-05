@@ -47,6 +47,38 @@ class StdoutCapture {
   std::streambuf* old_buf_{nullptr};
 };
 
+class StderrCapture {
+ public:
+  StderrCapture() { old_buf_ = std::cerr.rdbuf(capture_.rdbuf()); }
+  ~StderrCapture() { std::cerr.rdbuf(old_buf_); }
+
+  StderrCapture(const StderrCapture&) = delete;
+  StderrCapture& operator=(const StderrCapture&) = delete;
+  StderrCapture(StderrCapture&&) = delete;
+  StderrCapture& operator=(StderrCapture&&) = delete;
+
+  [[nodiscard]] std::string GetOutput() const { return capture_.str(); }
+
+ private:
+  std::ostringstream capture_;
+  std::streambuf* old_buf_{nullptr};
+};
+
+class StdinRedirect {
+ public:
+  explicit StdinRedirect(std::string input) : input_(std::move(input)) { old_buf_ = std::cin.rdbuf(input_.rdbuf()); }
+  ~StdinRedirect() { std::cin.rdbuf(old_buf_); }
+
+  StdinRedirect(const StdinRedirect&) = delete;
+  StdinRedirect& operator=(const StdinRedirect&) = delete;
+  StdinRedirect(StdinRedirect&&) = delete;
+  StdinRedirect& operator=(StdinRedirect&&) = delete;
+
+ private:
+  std::istringstream input_;
+  std::streambuf* old_buf_{nullptr};
+};
+
 // =============================================================================
 // Config defaults
 // =============================================================================
@@ -61,6 +93,13 @@ TEST_F(CliConfigTest, DefaultValues) {
   EXPECT_FALSE(config.wait_ready);
   EXPECT_EQ(config.retry_count, 0);
   EXPECT_EQ(config.retry_interval, 3);
+  EXPECT_FALSE(config.retry_count_explicit);
+  EXPECT_EQ(config.timeout_ms, kInteractiveTimeoutMs);
+  EXPECT_EQ(config.connect_timeout_ms, kInteractiveTimeoutMs);
+  EXPECT_EQ(config.dump_save_timeout_ms, kLongOperationTimeoutMs);
+  EXPECT_EQ(config.dump_load_timeout_ms, kLongOperationTimeoutMs);
+  EXPECT_EQ(config.dump_verify_timeout_ms, kLongOperationTimeoutMs);
+  EXPECT_EQ(config.optimize_timeout_ms, kLongOperationTimeoutMs);
   EXPECT_TRUE(config.socket_path.empty());
 }
 
@@ -76,6 +115,22 @@ TEST_F(CliConfigTest, WaitReadyRetrySetsMaxRetries) {
   config.retry_count = kMaxWaitReadyRetries;
   EXPECT_TRUE(config.wait_ready);
   EXPECT_EQ(config.retry_count, 100);
+}
+
+TEST_F(CliConfigTest, InteractiveBannerAndPromptUseStderr) {
+  Config config;
+  MygramClient client(config);
+  StdinRedirect input("exit\n");
+  StdoutCapture stdout_capture;
+  StderrCapture stderr_capture;
+
+  client.RunInteractive();
+
+  EXPECT_TRUE(stdout_capture.GetOutput().empty());
+  const std::string diagnostics = stderr_capture.GetOutput();
+  EXPECT_NE(diagnostics.find("mygram-cli 127.0.0.1:11016"), std::string::npos);
+  EXPECT_NE(diagnostics.find("127.0.0.1:11016>"), std::string::npos);
+  EXPECT_NE(diagnostics.find("Bye!"), std::string::npos);
 }
 
 // =============================================================================
@@ -100,13 +155,45 @@ TEST_F(CliConstantsTest, MaxWaitReadyRetries) {
 }
 
 TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
-  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("ERROR Server is loading, please try again later"));
-  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("(error) status not_ready"));
-  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("ERROR Replication is not running"));
-  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("(error) SERVER_DISCONNECTED: Server closed"));
-  EXPECT_TRUE(MygramClient::IsWaitReadyRetryableResponse("(error) SERVER_TIMEOUT: Server did not respond"));
-  EXPECT_FALSE(MygramClient::IsWaitReadyRetryableResponse("OK INFO\r\nstatus: ready\r\nEND"));
-  EXPECT_FALSE(MygramClient::IsWaitReadyRetryableResponse("ERROR Unknown table"));
+  struct TestCase {
+    const char* response;
+    bool expected;
+  };
+  constexpr std::array<TestCase, 11> cases = {{
+      {"ERROR 6028 Server is loading, please try again later", true},
+      {"ERROR 6029 Replication is not running", true},
+      {"ERROR 4000 Server is loading", false},
+      {"ERROR 7005 Server-defined error must not look like a local timeout", false},
+      {"ERROR Server is loading, please try again later", true},
+      {"(error) status not_ready", true},
+      {"ERROR Replication is not running", true},
+      {"(error) SERVER_DISCONNECTED: Server closed", true},
+      {"(error) SERVER_TIMEOUT: Server did not respond", true},
+      {"OK INFO\r\nstatus: ready\r\nEND", false},
+      {"OK RESULTS 1 SERVER_DISCONNECTED SERVER_TIMEOUT NOT_READY", false},
+  }};
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.response);
+    EXPECT_EQ(MygramClient::IsWaitReadyRetryableResponse(test_case.response), test_case.expected);
+  }
+}
+
+TEST_F(CliConstantsTest, ConnectionFailureClassificationUsesErrorCodes) {
+  using mygram::utils::ErrorCode;
+  constexpr std::array<std::pair<ErrorCode, bool>, 8> cases = {{
+      {ErrorCode::kClientNotConnected, true},
+      {ErrorCode::kClientConnectionFailed, true},
+      {ErrorCode::kClientSendFailed, true},
+      {ErrorCode::kClientReceiveFailed, true},
+      {ErrorCode::kClientTimeout, true},
+      {ErrorCode::kClientConnectionClosed, true},
+      {ErrorCode::kClientCommandFailed, false},
+      {ErrorCode::kIndexNotFound, false},
+  }};
+  for (const auto& [code, expected] : cases) {
+    SCOPED_TRACE(static_cast<int>(code));
+    EXPECT_EQ(MygramClient::IsConnectionFailureCode(code), expected);
+  }
 }
 
 TEST_F(CliConstantsTest, WaitReadyReconnectsAfterDroppedConnection) {
@@ -152,6 +239,29 @@ TEST_F(CliConstantsTest, WaitReadyReconnectsAfterDroppedConnection) {
   server.join();
   close(listener);
   EXPECT_EQ(served.load(), 2);
+}
+
+TEST_F(CliConstantsTest, WaitReadyRetriesNameResolutionFailures) {
+  Config config;
+  config.host = "invalid.invalid";
+  config.wait_ready = true;
+  config.retry_count = 2;
+  config.retry_interval = 0;
+  MygramClient client(config);
+  StderrCapture stderr_capture;
+
+  EXPECT_FALSE(client.Connect());
+
+  const std::string diagnostics = stderr_capture.GetOutput();
+  size_t retry_messages = 0;
+  size_t offset = 0;
+  constexpr std::string_view kRetryMessage = "Retrying in";
+  while ((offset = diagnostics.find(kRetryMessage, offset)) != std::string::npos) {
+    ++retry_messages;
+    offset += kRetryMessage.size();
+  }
+  EXPECT_EQ(retry_messages, 2U);
+  EXPECT_NE(diagnostics.find("Hostname resolution failed"), std::string::npos);
 }
 
 // =============================================================================
@@ -222,6 +332,16 @@ TEST_F(CliStringHelperTest, JoinArgsForCommand) {
   EXPECT_EQ(JoinArgsForCommand({"INFO\r\nSHUTDOWN"}), "INFOSHUTDOWN");
   EXPECT_EQ(JoinArgsForCommand({}), "");
   EXPECT_EQ(JoinArgsForCommand({"INFO"}), "INFO");
+}
+
+TEST_F(CliStringHelperTest, ParsesDumpSaveFilepath) {
+  ASSERT_TRUE(ParseDumpSaveFilepath("DUMP SAVE").has_value());
+  EXPECT_TRUE(ParseDumpSaveFilepath("DUMP SAVE")->empty());
+  EXPECT_EQ(ParseDumpSaveFilepath("dump save /tmp/a b.dmp"), "/tmp/a b.dmp");
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE "/tmp/a b.dmp")"), "/tmp/a b.dmp");
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE '/tmp/a b.dmp')"), "/tmp/a b.dmp");
+  EXPECT_FALSE(ParseDumpSaveFilepath("DUMP STATUS").has_value());
+  EXPECT_FALSE(ParseDumpSaveFilepath("DUMP SAVER /tmp/a.dmp").has_value());
 }
 
 TEST_F(CliStringHelperTest, HelpMatchesImplementedRuntimeSyntax) {
@@ -643,19 +763,30 @@ TEST_F(CliPrintResponseTest, LoadResponse) {
 // =============================================================================
 
 TEST_F(CliPrintResponseTest, ErrorResponse) {
-  StdoutCapture capture;
+  StdoutCapture stdout_capture;
+  StderrCapture stderr_capture;
   MygramClient::PrintResponse("ERROR Unknown command");
-  std::string output = capture.GetOutput();
 
-  EXPECT_NE(output.find("(error) Unknown command"), std::string::npos);
+  EXPECT_TRUE(stdout_capture.GetOutput().empty());
+  EXPECT_NE(stderr_capture.GetOutput().find("(error) Unknown command"), std::string::npos);
 }
 
 TEST_F(CliPrintResponseTest, ErrorResponseWithCode) {
-  StdoutCapture capture;
+  StdoutCapture stdout_capture;
+  StderrCapture stderr_capture;
   MygramClient::PrintResponse("ERROR 3001 Invalid query syntax");
-  std::string output = capture.GetOutput();
 
-  EXPECT_NE(output.find("(error) 3001 Invalid query syntax"), std::string::npos);
+  EXPECT_TRUE(stdout_capture.GetOutput().empty());
+  EXPECT_NE(stderr_capture.GetOutput().find("(error) 3001 Invalid query syntax"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, ClientErrorGoesToStderr) {
+  StdoutCapture stdout_capture;
+  StderrCapture stderr_capture;
+  MygramClient::PrintResponse("(error) SERVER_TIMEOUT: request timed out");
+
+  EXPECT_TRUE(stdout_capture.GetOutput().empty());
+  EXPECT_NE(stderr_capture.GetOutput().find("SERVER_TIMEOUT"), std::string::npos);
 }
 
 TEST_F(CliPrintResponseTest, UnknownResponseFallbackNormalizesCrlf) {
@@ -701,6 +832,63 @@ TEST_F(CliSingleCommandExitStatusTest, ClientErrorsExitNonZero) {
 TEST_F(CliSingleCommandExitStatusTest, PayloadContainingDisconnectWordsStillExitsZero) {
   EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("OK DOC 1 note=\"SERVER_DISCONNECTED\""), 0);
   EXPECT_EQ(MygramClient::ExitCodeForSingleCommandResponse("OK RESULTS 1 SERVER_TIMEOUT"), 0);
+}
+
+TEST_F(CliSingleCommandExitStatusTest, DumpSaveWaitsForCompletion) {
+  const int listener = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(listen(listener, 1), 0);
+  socklen_t address_size = sizeof(address);
+  ASSERT_EQ(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size), 0);
+
+  Config config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.timeout_ms = 1000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::vector<std::string> requests;
+  std::thread server([&]() {
+    const int connection = accept(listener, nullptr, nullptr);
+    if (connection >= 0) {
+      timeval receive_timeout{};
+      receive_timeout.tv_sec = 1;
+      (void)setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout));
+      constexpr std::array<std::string_view, 2> responses = {
+          "OK DUMP_STARTED /tmp/cli-dump.dmp\r\n",
+          "OK DUMP_STATUS\r\nstatus: COMPLETED\r\nresult_filepath: /tmp/cli-dump.dmp\r\nEND\r\n",
+      };
+      for (const auto response : responses) {
+        std::array<char, 256> request{};
+        const auto received = recv(connection, request.data(), request.size(), 0);
+        if (received <= 0) {
+          break;
+        }
+        requests.emplace_back(request.data(), static_cast<size_t>(received));
+        if (send(connection, response.data(), response.size(), 0) <= 0) {
+          break;
+        }
+      }
+      close(connection);
+    }
+    close(listener);
+  });
+
+  StdoutCapture capture;
+  const int exit_code = client.RunSingleCommand("DUMP SAVE /tmp/cli-dump.dmp");
+  server.join();
+
+  EXPECT_EQ(exit_code, 0);
+  EXPECT_NE(capture.GetOutput().find("Snapshot saved to: /tmp/cli-dump.dmp"), std::string::npos);
+  ASSERT_EQ(requests.size(), 2U);
+  EXPECT_EQ(requests[0], "DUMP SAVE /tmp/cli-dump.dmp\r\n");
+  EXPECT_EQ(requests[1], "DUMP STATUS\r\n");
 }
 
 // =============================================================================
@@ -836,6 +1024,41 @@ TEST_F(CliArgumentParsingTest, RetryFlagAccepted) {
   EXPECT_EQ(result.config.retry_count, 5);
 }
 
+TEST_F(CliArgumentParsingTest, TimeoutFlagsConfigureRequestAndConnectionDeadlines) {
+  char arg0[] = "mygram-cli";
+  char arg1[] = "--timeout";
+  char arg2[] = "750";
+  char arg3[] = "--connect-timeout";
+  char arg4[] = "125";
+  char* argv[] = {arg0, arg1, arg2, arg3, arg4};
+
+  ParseResult result = ParseArguments(5, argv);
+  EXPECT_FALSE(result.exit_now);
+  EXPECT_EQ(result.config.timeout_ms, 750U);
+  EXPECT_EQ(result.config.connect_timeout_ms, 125U);
+  EXPECT_EQ(result.config.dump_save_timeout_ms, 750U);
+  EXPECT_EQ(result.config.dump_load_timeout_ms, 750U);
+  EXPECT_EQ(result.config.dump_verify_timeout_ms, 750U);
+  EXPECT_EQ(result.config.optimize_timeout_ms, 750U);
+}
+
+TEST_F(CliArgumentParsingTest, TimeoutFlagsRejectMissingZeroAndInvalidValues) {
+  char arg0[] = "mygram-cli";
+  char timeout[] = "--timeout";
+  char connect_timeout[] = "--connect-timeout";
+  char zero[] = "0";
+  char invalid[] = "invalid";
+
+  char* missing_timeout[] = {arg0, timeout};
+  EXPECT_TRUE(ParseArguments(2, missing_timeout).exit_now);
+  char* zero_timeout[] = {arg0, timeout, zero};
+  EXPECT_TRUE(ParseArguments(3, zero_timeout).exit_now);
+  char* missing_connect_timeout[] = {arg0, connect_timeout};
+  EXPECT_TRUE(ParseArguments(2, missing_connect_timeout).exit_now);
+  char* invalid_connect_timeout[] = {arg0, connect_timeout, invalid};
+  EXPECT_TRUE(ParseArguments(3, invalid_connect_timeout).exit_now);
+}
+
 TEST_F(CliArgumentParsingTest, RetryFlagRejectsNegative) {
   char arg0[] = "mygram-cli";
   char arg1[] = "--retry";
@@ -858,7 +1081,7 @@ TEST_F(CliArgumentParsingTest, WaitReadyFlag) {
   EXPECT_EQ(result.config.retry_count, kMaxWaitReadyRetries);
 }
 
-TEST_F(CliArgumentParsingTest, WaitReadyRetryFloorIsIndependentOfArgumentOrder) {
+TEST_F(CliArgumentParsingTest, WaitReadyRespectsExplicitRetryIndependentOfArgumentOrder) {
   char arg0[] = "mygram-cli";
   char wait_ready[] = "--wait-ready";
   char retry[] = "--retry";
@@ -868,13 +1091,32 @@ TEST_F(CliArgumentParsingTest, WaitReadyRetryFloorIsIndependentOfArgumentOrder) 
   ParseResult result1 = ParseArguments(4, wait_then_retry);
   EXPECT_FALSE(result1.exit_now);
   EXPECT_TRUE(result1.config.wait_ready);
-  EXPECT_EQ(result1.config.retry_count, kMaxWaitReadyRetries);
+  EXPECT_EQ(result1.config.retry_count, 5);
+  EXPECT_TRUE(result1.config.retry_count_explicit);
 
   char* retry_then_wait[] = {arg0, retry, retry_count, wait_ready};
   ParseResult result2 = ParseArguments(4, retry_then_wait);
   EXPECT_FALSE(result2.exit_now);
   EXPECT_TRUE(result2.config.wait_ready);
-  EXPECT_EQ(result2.config.retry_count, kMaxWaitReadyRetries);
+  EXPECT_EQ(result2.config.retry_count, 5);
+  EXPECT_TRUE(result2.config.retry_count_explicit);
+}
+
+TEST_F(CliArgumentParsingTest, RetryIntervalFlagAcceptsZeroAndRejectsInvalidValues) {
+  char arg0[] = "mygram-cli";
+  char retry_interval[] = "--retry-interval";
+  char zero[] = "0";
+  char negative[] = "-1";
+
+  char* valid[] = {arg0, retry_interval, zero};
+  ParseResult valid_result = ParseArguments(3, valid);
+  EXPECT_FALSE(valid_result.exit_now);
+  EXPECT_EQ(valid_result.config.retry_interval, 0);
+
+  char* missing[] = {arg0, retry_interval};
+  EXPECT_TRUE(ParseArguments(2, missing).exit_now);
+  char* invalid[] = {arg0, retry_interval, negative};
+  EXPECT_TRUE(ParseArguments(3, invalid).exit_now);
 }
 
 TEST_F(CliArgumentParsingTest, SingleCommandModeSetsInteractiveFalse) {
@@ -907,7 +1149,10 @@ TEST_F(CliArgumentParsingTest, HelpFlagExits) {
   EXPECT_NE(output.find("-h HOST"), std::string::npos);
   EXPECT_NE(output.find("-p PORT"), std::string::npos);
   EXPECT_NE(output.find("--retry"), std::string::npos);
+  EXPECT_NE(output.find("--retry-interval"), std::string::npos);
   EXPECT_NE(output.find("--wait-ready"), std::string::npos);
+  EXPECT_NE(output.find("--timeout"), std::string::npos);
+  EXPECT_NE(output.find("--connect-timeout"), std::string::npos);
   EXPECT_NE(output.find("SEARCH app.articles hello"), std::string::npos);
 }
 

@@ -5,7 +5,7 @@
  * This file is a thin CLI wrapper around mygramdb::client::MygramClient.
  * The library handles socket I/O, hostname resolution, response framing,
  * and timeouts; the CLI adds:
- *   - Argument parsing for -h/-p/-s/--retry/--wait-ready/--help/--version
+ *   - Argument parsing for connection, timeout, retry, and display options
  *   - Connect-with-retry semantics and helpful error hints
  *   - Pretty-printing of protocol responses
  *   - Optional readline-based tab completion
@@ -22,6 +22,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -60,7 +61,8 @@ constexpr int kMaxWaitReadyRetries = 100;  // ~5 minutes at 3s interval
 constexpr int kExitSuccess = 0;
 constexpr int kExitFailure = 1;
 constexpr uint16_t kDefaultPort = static_cast<uint16_t>(mygramdb::config::defaults::kTcpPort);
-constexpr uint32_t kInteractiveTimeoutMs = 30000;  // 30 seconds for interactive sessions
+constexpr uint32_t kInteractiveTimeoutMs = 30000;     // 30 seconds for interactive sessions
+constexpr uint32_t kLongOperationTimeoutMs = 300000;  // 5 minutes for synchronous maintenance operations
 constexpr int kMinTcpPort = 1;
 constexpr int kMaxTcpPort = 65535;
 constexpr unsigned char kAsciiPrintableMin = 0x20;  // First printable ASCII codepoint
@@ -75,7 +77,7 @@ using mygram::utils::TrimAsciiWhitespace;
 /**
  * @brief Helper: case-sensitive prefix check.
  */
-bool StartsWith(const std::string& str, std::string_view prefix) {
+bool StartsWith(std::string_view str, std::string_view prefix) {
   return str.size() >= prefix.size() && str.compare(0, prefix.size(), prefix) == 0;
 }
 
@@ -246,6 +248,36 @@ std::string JoinArgsForCommand(const std::vector<std::string>& args) {
     }
   }
   return result;
+}
+
+std::optional<std::string> ParseDumpSaveFilepath(std::string_view command) {
+  const std::string trimmed = TrimAsciiWhitespace(command);
+  constexpr std::string_view kDumpSave = "DUMP SAVE";
+  const std::string upper = ToUpper(trimmed);
+  if (upper == kDumpSave) {
+    return std::string{};
+  }
+  if (upper.size() <= kDumpSave.size() || upper.compare(0, kDumpSave.size(), kDumpSave) != 0 ||
+      std::isspace(static_cast<unsigned char>(upper[kDumpSave.size()])) == 0) {
+    return std::nullopt;
+  }
+
+  std::string filepath = TrimAsciiWhitespace(std::string_view(trimmed).substr(kDumpSave.size()));
+  if (filepath.size() >= 2 && (filepath.front() == '"' || filepath.front() == '\'') &&
+      filepath.back() == filepath.front()) {
+    const char quote = filepath.front();
+    std::string decoded;
+    decoded.reserve(filepath.size() - 2);
+    for (size_t index = 1; index + 1 < filepath.size(); ++index) {
+      if (filepath[index] == '\\' && index + 2 < filepath.size() &&
+          (filepath[index + 1] == quote || filepath[index + 1] == '\\')) {
+        ++index;
+      }
+      decoded += filepath[index];
+    }
+    filepath = std::move(decoded);
+  }
+  return filepath;
 }
 
 // =============================================================================
@@ -474,6 +506,13 @@ struct Config {
   bool wait_ready = false;
   int retry_count = 0;     // Number of retries (0 = no retry)
   int retry_interval = 3;  // Seconds between retries
+  bool retry_count_explicit = false;
+  uint32_t timeout_ms = kInteractiveTimeoutMs;
+  uint32_t connect_timeout_ms = kInteractiveTimeoutMs;
+  uint32_t dump_save_timeout_ms = kLongOperationTimeoutMs;
+  uint32_t dump_load_timeout_ms = kLongOperationTimeoutMs;
+  uint32_t dump_verify_timeout_ms = kLongOperationTimeoutMs;
+  uint32_t optimize_timeout_ms = kLongOperationTimeoutMs;
   std::string socket_path;
 };
 
@@ -515,7 +554,12 @@ class MygramClient {
     lib_cfg.host = config_.host;
     lib_cfg.port = config_.port;
     lib_cfg.unix_socket_path = config_.socket_path;
-    lib_cfg.timeout_ms = kInteractiveTimeoutMs;
+    lib_cfg.timeout_ms = config_.timeout_ms;
+    lib_cfg.connect_timeout_ms = config_.connect_timeout_ms;
+    lib_cfg.dump_save_timeout_ms = config_.dump_save_timeout_ms;
+    lib_cfg.dump_load_timeout_ms = config_.dump_load_timeout_ms;
+    lib_cfg.dump_verify_timeout_ms = config_.dump_verify_timeout_ms;
+    lib_cfg.optimize_timeout_ms = config_.optimize_timeout_ms;
     lib_cfg.recv_buffer_size = proto::kDefaultClientRecvBufferSize;
     client_ = std::make_unique<lib::MygramClient>(std::move(lib_cfg));
   }
@@ -556,7 +600,7 @@ class MygramClient {
       std::cerr << message << '\n';
       PrintConnectionHints(message);
 
-      if (!refused) {
+      if (!refused && !config_.wait_ready) {
         return false;  // Not retriable
       }
       // Otherwise loop and retry
@@ -597,18 +641,42 @@ class MygramClient {
    * errors include the SERVER_DISCONNECTED / SERVER_TIMEOUT keyword so the
    * interactive loop can detect them.
    */
-  [[nodiscard]] std::string SendCommand(const std::string& command) const {
+  [[nodiscard]] std::string SendCommand(const std::string& command,
+                                        std::optional<mygram::utils::ErrorCode>* returned_error_code = nullptr) const {
+    if (returned_error_code != nullptr) {
+      returned_error_code->reset();
+    }
     if (!IsConnected()) {
+      if (returned_error_code != nullptr) {
+        *returned_error_code = mygram::utils::ErrorCode::kClientNotConnected;
+      }
       return "(error) Not connected";
     }
 
-    auto result = client_->SendCommand(command);
+    auto result = [this, &command]() -> mygram::utils::Expected<std::string, mygram::utils::Error> {
+      if (auto filepath = ParseDumpSaveFilepath(command); filepath.has_value()) {
+        auto save_result = client_->Save(*filepath);
+        if (!save_result) {
+          return mygram::utils::MakeUnexpected(save_result.error());
+        }
+        return std::string(proto::kOkSavedPrefix) + *save_result;
+      }
+      return client_->SendCommand(command);
+    }();
     if (result) {
+      if (returned_error_code != nullptr) {
+        if (auto server_error = lib::ParseServerErrorResponse(*result); server_error.has_value()) {
+          *returned_error_code = server_error->code();
+        }
+      }
       return *result;
     }
 
     using mygram::utils::ErrorCode;
     const auto& err = result.error();
+    if (returned_error_code != nullptr) {
+      *returned_error_code = err.code();
+    }
     switch (err.code()) {
       case ErrorCode::kClientNotConnected:
         return "(error) Not connected";
@@ -618,19 +686,12 @@ class MygramClient {
                "  2. Server crashed or encountered a fatal error\n"
                "  3. Server restarted and dropped all connections\n"
                "\nTry reconnecting to check if the server is still running.";
-      case ErrorCode::kClientCommandFailed: {
-        const std::string& message = err.message();
-        if (message.find("Broken pipe") != std::string::npos || message.find("Connection reset") != std::string::npos) {
-          return "(error) SERVER_DISCONNECTED: Connection lost while sending command. The server may "
-                 "have crashed or been shut down.";
-        }
-        if (message.find("Resource temporarily unavailable") != std::string::npos ||
-            message.find("Operation timed out") != std::string::npos) {
-          return "(error) SERVER_TIMEOUT: Server did not respond in time. It may be under heavy load or "
-                 "frozen.";
-        }
-        return "(error) " + message;
-      }
+      case ErrorCode::kClientConnectionFailed:
+      case ErrorCode::kClientSendFailed:
+      case ErrorCode::kClientReceiveFailed:
+        return "(error) SERVER_DISCONNECTED: " + err.message();
+      case ErrorCode::kClientTimeout:
+        return "(error) SERVER_TIMEOUT: " + err.message();
       default:
         return "(error) " + err.message();
     }
@@ -638,19 +699,20 @@ class MygramClient {
 
   void RunInteractive() const {
     if (!config_.socket_path.empty()) {
-      std::cout << "mygram-cli " << config_.socket_path << '\n';
+      std::cerr << "mygram-cli " << config_.socket_path << '\n';
     } else {
-      std::cout << "mygram-cli " << config_.host << ":" << config_.port << '\n';
+      std::cerr << "mygram-cli " << config_.host << ":" << config_.port << '\n';
     }
-    std::cout << "Type 'quit' or 'exit' to exit, 'help' for help\n";
+    std::cerr << "Type 'quit' or 'exit' to exit, 'help' for help\n";
 #ifdef USE_READLINE
-    std::cout << "Use TAB for context-aware command completion\n";
+    std::cerr << "Use TAB for context-aware command completion\n";
 #endif
-    std::cout << '\n';
+    std::cerr << '\n';
 
 #ifdef USE_READLINE
     FetchTableNames();
     rl_attempted_completion_function = CommandCompletion;
+    rl_outstream = stderr;
 #endif
 
     while (true) {
@@ -663,7 +725,7 @@ class MygramClient {
       char* raw_input = readline(prompt.c_str());
       if (raw_input == nullptr) {
         // EOF (Ctrl-D)
-        std::cout << '\n';
+        std::cerr << '\n';
         break;
       }
       // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory)
@@ -675,8 +737,8 @@ class MygramClient {
         add_history(line.c_str());
       }
 #else
-      std::cout << config_.host << ":" << config_.port << "> ";
-      std::cout.flush();
+      std::cerr << config_.host << ":" << config_.port << "> ";
+      std::cerr.flush();
       if (!std::getline(std::cin, line)) {
         break;
       }
@@ -688,7 +750,7 @@ class MygramClient {
       }
 
       if (line == "quit" || line == "exit") {
-        std::cout << "Bye!" << '\n';
+        std::cerr << "Bye!" << '\n';
         break;
       }
 
@@ -697,13 +759,14 @@ class MygramClient {
         continue;
       }
 
-      std::string response = SendCommand(line);
+      std::optional<mygram::utils::ErrorCode> error_code;
+      std::string response = SendCommand(line, &error_code);
 
-      bool disconnected = response.find("SERVER_DISCONNECTED") != std::string::npos ||
-                          response.find("SERVER_TIMEOUT") != std::string::npos;
+      const bool disconnected =
+          error_code.has_value() && !StartsWith(response, proto::kErrorPrefix) && IsConnectionFailureCode(*error_code);
       PrintResponse(response);
       if (disconnected) {
-        std::cout << "\nConnection to server lost. Exiting...\n";
+        std::cerr << "\nConnection to server lost. Exiting...\n";
         break;
       }
     }
@@ -711,6 +774,7 @@ class MygramClient {
 
   [[nodiscard]] int RunSingleCommand(const std::string& command) {
     std::string response;
+    std::optional<mygram::utils::ErrorCode> error_code;
     const int max_attempts = config_.wait_ready ? (1 + config_.retry_count) : 1;
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
       if (attempt > 0) {
@@ -721,13 +785,14 @@ class MygramClient {
           auto reconnect = client_->Connect();
           if (!reconnect) {
             response = "(error) SERVER_DISCONNECTED: " + reconnect.error().message();
+            error_code = reconnect.error().code();
             continue;
           }
         }
       }
 
-      response = SendCommand(command);
-      if (!IsWaitReadyRetryableResponse(response)) {
+      response = SendCommand(command, &error_code);
+      if (!IsWaitReadyRetryableResponse(response, error_code)) {
         break;
       }
     }
@@ -834,7 +899,11 @@ class MygramClient {
       return;
     }
     if (StartsWith(response, proto::kErrorPrefix)) {
-      std::cout << "(error) " << response.substr(kErrorPrefixLength) << '\n';
+      std::cerr << "(error) " << response.substr(kErrorPrefixLength) << '\n';
+      return;
+    }
+    if (StartsWith(response, "(error) ")) {
+      std::cerr << NormalizeCrlf(response) << '\n';
       return;
     }
 
@@ -855,9 +924,43 @@ class MygramClient {
   }
 
   [[nodiscard]] static bool IsWaitReadyRetryableResponse(std::string_view response) {
+    std::optional<mygram::utils::ErrorCode> code;
+    if (auto server_error = lib::ParseServerErrorResponse(response); server_error.has_value()) {
+      code = server_error->code();
+    }
+    return IsWaitReadyRetryableResponse(response, code);
+  }
+
+  [[nodiscard]] static bool IsConnectionFailureCode(mygram::utils::ErrorCode code) {
+    using mygram::utils::ErrorCode;
+    switch (code) {
+      case ErrorCode::kClientNotConnected:
+      case ErrorCode::kClientConnectionFailed:
+      case ErrorCode::kClientSendFailed:
+      case ErrorCode::kClientReceiveFailed:
+      case ErrorCode::kClientTimeout:
+      case ErrorCode::kClientConnectionClosed:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  [[nodiscard]] static bool IsWaitReadyRetryableResponse(std::string_view response,
+                                                         std::optional<mygram::utils::ErrorCode> error_code) {
+    using mygram::utils::ErrorCode;
+    if (error_code.has_value() && *error_code != ErrorCode::kClientServerError) {
+      if (StartsWith(response, proto::kErrorPrefix)) {
+        return *error_code == ErrorCode::kServerLoading || *error_code == ErrorCode::kServerNotReady;
+      }
+      return IsConnectionFailureCode(*error_code);
+    }
+
+    // Compatibility path for untyped ERROR replies from pre-code servers and
+    // legacy locally formatted client errors.
     std::string upper_response = ToUpper(std::string(response));
-    if (upper_response.find("SERVER_DISCONNECTED") != std::string::npos ||
-        upper_response.find("SERVER_TIMEOUT") != std::string::npos) {
+    if (upper_response.rfind("(ERROR) SERVER_DISCONNECTED", 0) == 0 ||
+        upper_response.rfind("(ERROR) SERVER_TIMEOUT", 0) == 0) {
       return true;
     }
     const bool error_response =
@@ -1068,8 +1171,13 @@ void PrintUsage(const char* program_name) {
             << "  -h HOST         Server hostname (default: 127.0.0.1)\n"
             << "  -p PORT         Server port (default: " << kDefaultPort << ")\n"
             << "  -s SOCKET_PATH  Unix domain socket path (overrides -h/-p)\n"
+            << "  --timeout MS    Command timeout (default: " << kInteractiveTimeoutMs
+            << "; long operations: " << kLongOperationTimeoutMs << ")\n"
+            << "  --connect-timeout MS  Connection timeout (default: " << kInteractiveTimeoutMs << ")\n"
             << "  --retry N       Retry connection N times if refused (default: 0)\n"
-            << "  --wait-ready    Keep retrying until server is ready (max " << kMaxWaitReadyRetries << " attempts)\n"
+            << "  --retry-interval SEC  Seconds between retries (default: 3)\n"
+            << "  --wait-ready    Keep retrying until server is ready (default: " << kMaxWaitReadyRetries
+            << " retries)\n"
             << "  --version       Show client version and exit\n"
             << "  --help          Show this help\n"
             << '\n'
@@ -1146,6 +1254,42 @@ ParseResult ParseArguments(int argc, char* argv[]) {
       }
       // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       result.config.socket_path = argv[++i];
+    } else if (arg == "--timeout") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --timeout requires an argument\n";
+        result.exit_now = true;
+        result.exit_code = 1;
+        return result;
+      }
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      auto timeout = mygram::utils::ParseNumeric<uint32_t>(argv[++i]);
+      if (!timeout.has_value() || *timeout == 0) {
+        std::cerr << "Error: --timeout value must be a positive integer number of milliseconds\n";
+        result.exit_now = true;
+        result.exit_code = 1;
+        return result;
+      }
+      result.config.timeout_ms = *timeout;
+      result.config.dump_save_timeout_ms = *timeout;
+      result.config.dump_load_timeout_ms = *timeout;
+      result.config.dump_verify_timeout_ms = *timeout;
+      result.config.optimize_timeout_ms = *timeout;
+    } else if (arg == "--connect-timeout") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --connect-timeout requires an argument\n";
+        result.exit_now = true;
+        result.exit_code = 1;
+        return result;
+      }
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      auto timeout = mygram::utils::ParseNumeric<uint32_t>(argv[++i]);
+      if (!timeout.has_value() || *timeout == 0) {
+        std::cerr << "Error: --connect-timeout value must be a positive integer number of milliseconds\n";
+        result.exit_now = true;
+        result.exit_code = 1;
+        return result;
+      }
+      result.config.connect_timeout_ms = *timeout;
     } else if (arg == "--retry") {
       if (i + 1 >= argc) {
         std::cerr << "Error: --retry requires an argument\n";
@@ -1162,6 +1306,23 @@ ParseResult ParseArguments(int argc, char* argv[]) {
         return result;
       }
       result.config.retry_count = *count;
+      result.config.retry_count_explicit = true;
+    } else if (arg == "--retry-interval") {
+      if (i + 1 >= argc) {
+        std::cerr << "Error: --retry-interval requires an argument\n";
+        result.exit_now = true;
+        result.exit_code = 1;
+        return result;
+      }
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+      auto interval = mygram::utils::ParseNumeric<int32_t>(argv[++i]);
+      if (!interval.has_value() || *interval < 0) {
+        std::cerr << "Error: --retry-interval value must be a non-negative integer\n";
+        result.exit_now = true;
+        result.exit_code = 1;
+        return result;
+      }
+      result.config.retry_interval = *interval;
     } else if (arg == "--wait-ready") {
       result.config.wait_ready = true;
     } else {
@@ -1174,7 +1335,7 @@ ParseResult ParseArguments(int argc, char* argv[]) {
       break;
     }
   }
-  if (result.config.wait_ready && result.config.retry_count < kMaxWaitReadyRetries) {
+  if (result.config.wait_ready && !result.config.retry_count_explicit) {
     result.config.retry_count = kMaxWaitReadyRetries;
   }
   return result;
