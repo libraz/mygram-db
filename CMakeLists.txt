@@ -490,6 +490,13 @@ install(FILES examples/config.yaml DESTINATION etc/mygramdb RENAME config.yaml.e
 install(FILES examples/config-minimal.yaml DESTINATION etc/mygramdb)
 install(FILES examples/config.json DESTINATION etc/mygramdb RENAME config.json.example)
 install(FILES examples/config-minimal.json DESTINATION etc/mygramdb)
+install(FILES
+  examples/client/CMakeLists.txt
+  examples/client/README.md
+  examples/client/c_search.c
+  examples/client/cpp_search.cpp
+  DESTINATION share/doc/mygramdb/examples/client
+)
 
 # Install JSON Schema (for reference - embedded in binary)
 install(FILES src/config/config-schema.json DESTINATION share/mygramdb)

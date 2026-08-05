@@ -8,13 +8,15 @@
  * All functions return 0 on success, non-zero on error.
  * Use mygramclient_get_last_error() to retrieve error messages.
  *
- * A handle may be shared by threads. Error-state access is synchronized and
- * mygramclient_get_last_error() returns a thread-local snapshot that remains
- * valid until that thread calls it again. On failure, writable pointer
- * out-parameters are set to NULL and numeric out-parameters are set to zero.
- * No C++ exception crosses this C ABI: unexpected failures are translated to
- * the documented failure return, safe output values, and last_error when a
- * client handle is available.
+ * A handle may be shared by threads. Connection lifecycle calls and commands
+ * are serialized; disconnect waits for an in-flight command and does not
+ * cancel it. mygramclient_destroy() must not race with another handle call.
+ * Error-state access is synchronized and mygramclient_get_last_error() returns
+ * a thread-local snapshot that remains valid until that thread calls it again.
+ * On failure, writable pointer out-parameters are set to NULL and numeric
+ * out-parameters are set to zero. No C++ exception crosses this C ABI:
+ * unexpected failures are translated to the documented failure return, safe
+ * output values, and last_error when a client handle is available.
  *
  * Note: This is a C API header, so typedef is used instead of using declarations
  * for C compatibility. The modernize-use-using check is disabled for this file.
@@ -57,15 +59,19 @@ typedef struct {
  * this structure grows.
  */
 typedef struct {
-  uint32_t struct_size;           // Size known by the caller
-  uint32_t version;               // MYGRAMCLIENT_CONFIG_V2_VERSION
-  const char* host;               // TCP host (default: "127.0.0.1")
-  uint16_t port;                  // TCP port (default: 11016)
-  uint32_t timeout_ms;            // Per-request timeout (default: 5000)
-  uint32_t recv_buffer_size;      // Receive buffer size (default: 65536)
-  const char* unix_socket_path;   // UDS path; takes precedence over TCP when non-NULL
-  uint32_t dump_save_timeout_ms;  // Async DUMP SAVE deadline (0 = client default)
-  uint64_t max_response_bytes;    // Maximum response frame size (0 = client default 64 MiB)
+  uint32_t struct_size;             // Size known by the caller
+  uint32_t version;                 // MYGRAMCLIENT_CONFIG_V2_VERSION
+  const char* host;                 // TCP host (default: "127.0.0.1")
+  uint16_t port;                    // TCP port (default: 11016)
+  uint32_t timeout_ms;              // Per-request timeout (default: 5000)
+  uint32_t recv_buffer_size;        // Receive buffer size (default: 65536)
+  const char* unix_socket_path;     // UDS path; takes precedence over TCP when non-NULL
+  uint32_t dump_save_timeout_ms;    // Async DUMP SAVE deadline (0 = client default)
+  uint64_t max_response_bytes;      // Maximum response frame size (0 = client default 64 MiB)
+  uint32_t connect_timeout_ms;      // Connect deadline (0 = timeout_ms)
+  uint32_t dump_load_timeout_ms;    // DUMP LOAD deadline (0 = client default)
+  uint32_t dump_verify_timeout_ms;  // DUMP VERIFY deadline (0 = client default)
+  uint32_t optimize_timeout_ms;     // OPTIMIZE deadline (0 = client default)
 } MygramClientConfigV2_C;
 
 /**
@@ -81,9 +87,10 @@ typedef struct {
  * @brief Facet result
  */
 typedef struct {
-  char** values;     // Array of facet values
-  uint64_t* counts;  // Array of facet counts, aligned with values
-  size_t count;      // Number of facet values
+  char** values;         // Array of facet values
+  uint64_t* counts;      // Array of facet counts, aligned with values
+  size_t count;          // Number of facet values in this page
+  uint64_t total_count;  // Total distinct values before OFFSET/LIMIT
 } MygramFacetResult_C;
 
 /**
@@ -104,6 +111,11 @@ typedef enum {
   MYGRAM_FILTER_LT = 4,
   MYGRAM_FILTER_LTE = 5,
 } MygramFilterOp_C;
+
+typedef enum {
+  MYGRAM_QUERY_LITERAL = 0,
+  MYGRAM_QUERY_BOOLEAN = 1,
+} MygramQueryMode_C;
 
 typedef struct {
   const char* key;
@@ -132,6 +144,7 @@ typedef struct {
   const char* highlight_close_tag;
   uint32_t highlight_snippet_length;  // 0 = server default
   uint32_t highlight_max_fragments;   // 0 = server default
+  MygramQueryMode_C query_mode;       // Literal by default; boolean sends query as an expression
 } MygramSearchOptions_C;
 
 /**
@@ -339,6 +352,21 @@ int mygramclient_facet(MygramClient_C* client, const char* table, const char* co
                        MygramFacetResult_C** result);
 
 /**
+ * @brief Count matching documents by facet value with pagination
+ *
+ * @param client Client handle
+ * @param table Table name
+ * @param column Facet column name
+ * @param query Optional search query text (can be empty)
+ * @param limit Maximum number of facet values (0 for server default)
+ * @param offset Number of facet values to skip before applying limit
+ * @param result Output facet page and total count
+ * @return 0 on success, -1 on error
+ */
+int mygramclient_facet_paged(MygramClient_C* client, const char* table, const char* column, const char* query,
+                             uint32_t limit, uint32_t offset, MygramFacetResult_C** result);
+
+/**
  * @brief Count matching documents by facet column value with AND/NOT/FILTER clauses
  *
  * @param client Client handle
@@ -360,6 +388,16 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
                                 uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
                                 size_t not_count, const char** filter_keys, const char** filter_values,
                                 size_t filter_count, MygramFacetResult_C** result);
+
+/**
+ * @brief Facet pagination with AND/NOT/FILTER clauses
+ *
+ * This is the paginated counterpart of mygramclient_facet_advanced.
+ */
+int mygramclient_facet_advanced_paged(MygramClient_C* client, const char* table, const char* column, const char* query,
+                                      uint32_t limit, uint32_t offset, const char** and_terms, size_t and_count,
+                                      const char** not_terms, size_t not_count, const char** filter_keys,
+                                      const char** filter_values, size_t filter_count, MygramFacetResult_C** result);
 
 /**
  * @brief Get document by primary key
@@ -614,12 +652,30 @@ typedef struct {
 int mygramclient_parse_search_expression(const char* expression, MygramParsedExpression_C** parsed);
 
 /**
+ * @brief Parse a search expression and return a concrete failure diagnostic.
+ *
+ * On failure, diagnostic receives an allocated message when possible. The
+ * caller must release it with mygramclient_free_string(). Both output pointers
+ * are initialized to NULL before validation.
+ */
+int mygramclient_parse_search_expression_ex(const char* expression, MygramParsedExpression_C** parsed,
+                                            char** diagnostic);
+
+/**
  * @brief Convert web-style input to a lossless raw server expression.
  *
  * The returned string is suitable for mygramclient_search_raw() and must be
  * released with mygramclient_free_string().
  */
 int mygramclient_convert_search_expression(const char* expression, char** converted);
+
+/**
+ * @brief Convert a search expression and return a concrete failure diagnostic.
+ *
+ * The diagnostic ownership contract matches
+ * mygramclient_parse_search_expression_ex().
+ */
+int mygramclient_convert_search_expression_ex(const char* expression, char** converted, char** diagnostic);
 
 /**
  * @brief Free parsed expression

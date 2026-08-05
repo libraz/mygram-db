@@ -13,14 +13,21 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "config/config.h"
-#include "server/protocol_constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
 namespace mygramdb::client {
+
+/**
+ * @brief Parse a TCP ERROR response, including its optional numeric code.
+ *
+ * New servers emit `ERROR <code> <message>`. Responses from older servers
+ * that omit the numeric token are mapped to kClientServerError.
+ */
+[[nodiscard]] std::optional<mygram::utils::Error> ParseServerErrorResponse(std::string_view response);
 
 /**
  * @brief Search result document
@@ -94,7 +101,13 @@ struct HighlightOptions {
   uint32_t max_fragments = 0;   // 0 = server default
 };
 
+enum class QueryMode : uint8_t {
+  kLiteral = 0,
+  kBoolean,
+};
+
 struct SearchOptions {
+  QueryMode query_mode = QueryMode::kLiteral;
   uint32_t limit = 0;
   uint32_t offset = 0;
   std::vector<std::string> and_terms;
@@ -126,7 +139,8 @@ struct FacetValue {
  * @brief Facet query response
  */
 struct FacetResponse {
-  std::vector<FacetValue> facets;  // Facet value counts
+  std::vector<FacetValue> facets;  // Facet value counts in this page
+  uint64_t total_count = 0;        // Total distinct values before OFFSET/LIMIT
 };
 
 /**
@@ -154,6 +168,7 @@ struct CacheStatistics {
   uint64_t current_entries = 0;
   uint64_t current_memory_bytes = 0;
   uint64_t invalidation_index_memory_bytes = 0;
+  uint64_t invalidation_queue_memory_bytes = 0;
   uint64_t accounted_memory_bytes = 0;
   uint64_t evictions = 0;
   uint64_t ttl_expirations = 0;
@@ -193,12 +208,15 @@ struct ReplicationStatus {
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers) - Default MygramDB
 // client settings
 struct ClientConfig {
-  std::string host = "127.0.0.1";                                     // Server hostname
-  uint16_t port = static_cast<uint16_t>(config::defaults::kTcpPort);  // Default port for MygramDB protocol
-  uint32_t timeout_ms = 5000;                                         // Default timeout in milliseconds (0 = default)
-  uint32_t dump_save_timeout_ms = 300000;  // Max wait for async DUMP SAVE completion (0 = timeout_ms)
-  uint32_t recv_buffer_size =
-      server::protocol::kDefaultClientRecvBufferSize;       // Default buffer size (64KB; 0 = default, max 16 MiB)
+  std::string host = "127.0.0.1";                           // Server hostname
+  uint16_t port = 11016;                                    // Default port for MygramDB protocol
+  uint32_t timeout_ms = 5000;                               // Ordinary request timeout (0 = default)
+  uint32_t connect_timeout_ms = 0;                          // Connect timeout (0 = timeout_ms)
+  uint32_t dump_save_timeout_ms = 300000;                   // Max wait for async DUMP SAVE completion (0 = timeout_ms)
+  uint32_t dump_load_timeout_ms = 300000;                   // DUMP LOAD request timeout (0 = timeout_ms)
+  uint32_t dump_verify_timeout_ms = 300000;                 // DUMP VERIFY request timeout (0 = timeout_ms)
+  uint32_t optimize_timeout_ms = 300000;                    // OPTIMIZE request timeout (0 = timeout_ms)
+  uint32_t recv_buffer_size = 64U * 1024U;                  // Default buffer size (64KB; 0 = default, max 16 MiB)
   uint64_t max_response_bytes = 64ULL * 1024ULL * 1024ULL;  // Maximum response frame size (0 = default 64 MiB)
   std::string unix_socket_path;                             // Unix socket path (empty = use TCP)
 };
@@ -216,12 +234,10 @@ struct ClientConfig {
  * single-command-at-a-time per instance — for higher throughput, use
  * multiple `MygramClient` instances (e.g. one per worker thread).
  *
- * Connect() / Disconnect() are NOT meant to race with in-flight
- * SendCommand() calls; calling Disconnect() while another thread is
- * blocked in SendCommand() is a logic error. The implementation closes
- * the socket without taking the command lock, so it cannot deadlock —
- * the in-flight recv() will simply return EBADF / EOF and SendCommand()
- * will surface a connection-closed error.
+ * Connect(), Disconnect(), IsConnected(), and all commands are serialized on
+ * the same internal mutex. Disconnect() waits for an in-flight command to
+ * finish; it does not cancel that command. Object lifetime operations
+ * (destruction and move) must not race with any member call.
  *
  * Example usage:
  * @code
@@ -368,12 +384,13 @@ class MygramClient {
    * @param and_terms Additional required terms
    * @param not_terms Excluded terms
    * @param filters Filter conditions (key=value pairs)
+   * @param offset Number of facet values to skip before applying limit
    * @return Expected<FacetResponse, Error>
    */
   mygram::utils::Expected<FacetResponse, mygram::utils::Error> Facet(
       const std::string& table, const std::string& column, const std::string& query = "", uint32_t limit = 0,
       const std::vector<std::string>& and_terms = {}, const std::vector<std::string>& not_terms = {},
-      const std::vector<std::pair<std::string, std::string>>& filters = {}) const;
+      const std::vector<std::pair<std::string, std::string>>& filters = {}, uint32_t offset = 0) const;
 
   /**
    * @brief Get document by primary key

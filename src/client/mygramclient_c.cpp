@@ -317,7 +317,9 @@ namespace {
 #define mygramclient_count mygramclient_count_impl
 #define mygramclient_count_advanced mygramclient_count_advanced_impl
 #define mygramclient_facet mygramclient_facet_impl
+#define mygramclient_facet_paged mygramclient_facet_paged_impl
 #define mygramclient_facet_advanced mygramclient_facet_advanced_impl
+#define mygramclient_facet_advanced_paged mygramclient_facet_advanced_paged_impl
 #define mygramclient_get mygramclient_get_impl
 #define mygramclient_info mygramclient_info_impl
 #define mygramclient_get_config mygramclient_get_config_impl
@@ -352,7 +354,9 @@ namespace {
 #define mygramclient_free_server_info mygramclient_free_server_info_impl
 #define mygramclient_free_string mygramclient_free_string_impl
 #define mygramclient_parse_search_expression mygramclient_parse_search_expression_impl
+#define mygramclient_parse_search_expression_ex mygramclient_parse_search_expression_ex_impl
 #define mygramclient_convert_search_expression mygramclient_convert_search_expression_impl
+#define mygramclient_convert_search_expression_ex mygramclient_convert_search_expression_ex_impl
 #define mygramclient_free_parsed_expression mygramclient_free_parsed_expression_impl
 
 int mygramclient_search_advanced_impl(MygramClient_C* client, const char* table, const char* query, uint32_t limit,
@@ -370,10 +374,17 @@ int mygramclient_count_advanced_impl(MygramClient_C* client, const char* table, 
                                      const char** and_terms, size_t and_count, const char** not_terms, size_t not_count,
                                      const char** filter_keys, const char** filter_values, size_t filter_count,
                                      uint64_t* count);
+int mygramclient_facet_paged_impl(MygramClient_C* client, const char* table, const char* column, const char* query,
+                                  uint32_t limit, uint32_t offset, MygramFacetResult_C** result);
 int mygramclient_facet_advanced_impl(MygramClient_C* client, const char* table, const char* column, const char* query,
                                      uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
                                      size_t not_count, const char** filter_keys, const char** filter_values,
                                      size_t filter_count, MygramFacetResult_C** result);
+int mygramclient_facet_advanced_paged_impl(MygramClient_C* client, const char* table, const char* column,
+                                           const char* query, uint32_t limit, uint32_t offset, const char** and_terms,
+                                           size_t and_count, const char** not_terms, size_t not_count,
+                                           const char** filter_keys, const char** filter_values, size_t filter_count,
+                                           MygramFacetResult_C** result);
 void mygramclient_free_parsed_expression_impl(MygramParsedExpression_C* parsed);
 
 MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
@@ -383,7 +394,7 @@ MygramClient_C* mygramclient_create(const MygramClientConfig_C* config) {
 
   ClientConfig cpp_config;
   cpp_config.host = (config->host != nullptr) ? config->host : "127.0.0.1";
-  cpp_config.port = config->port != 0 ? config->port : static_cast<uint16_t>(mygramdb::config::defaults::kTcpPort);
+  cpp_config.port = config->port != 0 ? config->port : ClientConfig{}.port;
   cpp_config.timeout_ms = config->timeout_ms != 0 ? config->timeout_ms : 5000;
   cpp_config.recv_buffer_size = config->recv_buffer_size != 0 ? config->recv_buffer_size : 65536;
   return CreateClient(std::move(cpp_config));
@@ -431,6 +442,26 @@ MygramClient_C* mygramclient_create_v2(const MygramClientConfigV2_C* config) {
                        sizeof(config->max_response_bytes)) &&
       config->max_response_bytes != 0) {
     cpp_config.max_response_bytes = config->max_response_bytes;
+  }
+  if (V2FieldAvailable(config->struct_size, offsetof(MygramClientConfigV2_C, connect_timeout_ms),
+                       sizeof(config->connect_timeout_ms)) &&
+      config->connect_timeout_ms != 0) {
+    cpp_config.connect_timeout_ms = config->connect_timeout_ms;
+  }
+  if (V2FieldAvailable(config->struct_size, offsetof(MygramClientConfigV2_C, dump_load_timeout_ms),
+                       sizeof(config->dump_load_timeout_ms)) &&
+      config->dump_load_timeout_ms != 0) {
+    cpp_config.dump_load_timeout_ms = config->dump_load_timeout_ms;
+  }
+  if (V2FieldAvailable(config->struct_size, offsetof(MygramClientConfigV2_C, dump_verify_timeout_ms),
+                       sizeof(config->dump_verify_timeout_ms)) &&
+      config->dump_verify_timeout_ms != 0) {
+    cpp_config.dump_verify_timeout_ms = config->dump_verify_timeout_ms;
+  }
+  if (V2FieldAvailable(config->struct_size, offsetof(MygramClientConfigV2_C, optimize_timeout_ms),
+                       sizeof(config->optimize_timeout_ms)) &&
+      config->optimize_timeout_ms != 0) {
+    cpp_config.optimize_timeout_ms = config->optimize_timeout_ms;
   }
 
   return CreateClient(std::move(cpp_config));
@@ -676,6 +707,12 @@ int mygramclient_search_with_options(MygramClient_C* client, const char* table, 
     }
     cpp_options.highlight = std::move(highlight);
   }
+  if (field_available(offsetof(MygramSearchOptions_C, query_mode), sizeof(options->query_mode))) {
+    if (options->query_mode != MYGRAM_QUERY_LITERAL && options->query_mode != MYGRAM_QUERY_BOOLEAN) {
+      return invalid_argument(client, "Invalid argument: query_mode must be literal or boolean");
+    }
+    cpp_options.query_mode = options->query_mode == MYGRAM_QUERY_BOOLEAN ? QueryMode::kBoolean : QueryMode::kLiteral;
+  }
   cpp_options.filters.reserve(filter_count);
   for (size_t i = 0; i < filter_count; ++i) {
     const auto& filter = filters[i];
@@ -844,14 +881,27 @@ int mygramclient_count_advanced(MygramClient_C* client, const char* table, const
 
 int mygramclient_facet(MygramClient_C* client, const char* table, const char* column, const char* query, uint32_t limit,
                        MygramFacetResult_C** result) {
-  return mygramclient_facet_advanced(client, table, column, query, limit, nullptr, 0, nullptr, 0, nullptr, nullptr, 0,
-                                     result);
+  return mygramclient_facet_paged(client, table, column, query, limit, 0, result);
+}
+
+int mygramclient_facet_paged(MygramClient_C* client, const char* table, const char* column, const char* query,
+                             uint32_t limit, uint32_t offset, MygramFacetResult_C** result) {
+  return mygramclient_facet_advanced_paged(client, table, column, query, limit, offset, nullptr, 0, nullptr, 0, nullptr,
+                                           nullptr, 0, result);
 }
 
 int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const char* column, const char* query,
                                 uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
                                 size_t not_count, const char** filter_keys, const char** filter_values,
                                 size_t filter_count, MygramFacetResult_C** result) {
+  return mygramclient_facet_advanced_paged(client, table, column, query, limit, 0, and_terms, and_count, not_terms,
+                                           not_count, filter_keys, filter_values, filter_count, result);
+}
+
+int mygramclient_facet_advanced_paged(MygramClient_C* client, const char* table, const char* column, const char* query,
+                                      uint32_t limit, uint32_t offset, const char** and_terms, size_t and_count,
+                                      const char** not_terms, size_t not_count, const char** filter_keys,
+                                      const char** filter_values, size_t filter_count, MygramFacetResult_C** result) {
   if (result != nullptr) {
     *result = nullptr;
   }
@@ -882,7 +932,8 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
   auto not_terms_vec = CArrayToVector(not_terms, not_count);
   auto filters_vec = CFilterArraysToVector(filter_keys, filter_values, filter_count);
 
-  auto facet_result = client->client->Facet(table, column, query, limit, and_terms_vec, not_terms_vec, filters_vec);
+  auto facet_result =
+      client->client->Facet(table, column, query, limit, and_terms_vec, not_terms_vec, filters_vec, offset);
   if (!facet_result) {
     set_last_error(client, facet_result.error());
     return -1;
@@ -896,6 +947,7 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
   }
 
   result_c->count = resp.facets.size();
+  result_c->total_count = resp.total_count;
   result_c->values = nullptr;
   result_c->counts = nullptr;
 
@@ -1370,22 +1422,34 @@ void mygramclient_free_string(char* str) {
   free(str);
 }
 
-int mygramclient_parse_search_expression(const char* expression, MygramParsedExpression_C** parsed) {
+int mygramclient_parse_search_expression_ex(const char* expression, MygramParsedExpression_C** parsed,
+                                            char** diagnostic) {
   if (parsed != nullptr) {
     *parsed = nullptr;
   }
+  if (diagnostic != nullptr) {
+    *diagnostic = nullptr;
+  }
+  const auto set_diagnostic = [diagnostic](const std::string& message) {
+    if (diagnostic != nullptr) {
+      *diagnostic = strdup_safe(message);
+    }
+  };
   if (expression == nullptr || parsed == nullptr) {
+    set_diagnostic("Invalid argument: expression and parsed must not be NULL");
     return -1;
   }
 
   auto simplified = SimplifySearchExpression(expression);
   if (!simplified) {
+    set_diagnostic(simplified.error().message());
     return -1;
   }
 
   // Allocate result
   auto* result = static_cast<MygramParsedExpression_C*>(malloc(sizeof(MygramParsedExpression_C)));
   if (result == nullptr) {
+    set_diagnostic("Memory allocation failed");
     return -1;
   }
   result->main_term = nullptr;
@@ -1400,12 +1464,14 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
   result->main_term = strdup_safe(simplified->main_term);
   if (result->main_term == nullptr) {
     free(result);
+    set_diagnostic("Memory allocation failed");
     return -1;
   }
 
   // Copy AND terms
   if (!string_vector_to_c_array_checked(simplified->and_terms, &result->and_terms)) {
     mygramclient_free_parsed_expression(result);
+    set_diagnostic("Memory allocation failed");
     return -1;
   }
   result->and_count = simplified->and_terms.size();
@@ -1413,6 +1479,7 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
   // Copy NOT terms
   if (!string_vector_to_c_array_checked(simplified->not_terms, &result->not_terms)) {
     mygramclient_free_parsed_expression(result);
+    set_diagnostic("Memory allocation failed");
     return -1;
   }
   result->not_count = simplified->not_terms.size();
@@ -1428,19 +1495,41 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
   return 0;
 }
 
-int mygramclient_convert_search_expression(const char* expression, char** converted) {
+int mygramclient_parse_search_expression(const char* expression, MygramParsedExpression_C** parsed) {
+  return mygramclient_parse_search_expression_ex(expression, parsed, nullptr);
+}
+
+int mygramclient_convert_search_expression_ex(const char* expression, char** converted, char** diagnostic) {
   if (converted != nullptr) {
     *converted = nullptr;
   }
+  if (diagnostic != nullptr) {
+    *diagnostic = nullptr;
+  }
+  const auto set_diagnostic = [diagnostic](const std::string& message) {
+    if (diagnostic != nullptr) {
+      *diagnostic = strdup_safe(message);
+    }
+  };
   if (expression == nullptr || converted == nullptr) {
+    set_diagnostic("Invalid argument: expression and converted must not be NULL");
     return -1;
   }
   auto result = ConvertSearchExpression(expression);
   if (!result) {
+    set_diagnostic(result.error().message());
     return -1;
   }
   *converted = strdup_safe(*result);
-  return *converted == nullptr ? -1 : 0;
+  if (*converted == nullptr) {
+    set_diagnostic("Memory allocation failed");
+    return -1;
+  }
+  return 0;
+}
+
+int mygramclient_convert_search_expression(const char* expression, char** converted) {
+  return mygramclient_convert_search_expression_ex(expression, converted, nullptr);
 }
 
 void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
@@ -1473,7 +1562,9 @@ void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
 #undef mygramclient_count
 #undef mygramclient_count_advanced
 #undef mygramclient_facet
+#undef mygramclient_facet_paged
 #undef mygramclient_facet_advanced
+#undef mygramclient_facet_advanced_paged
 #undef mygramclient_get
 #undef mygramclient_info
 #undef mygramclient_get_config
@@ -1508,7 +1599,9 @@ void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
 #undef mygramclient_free_server_info
 #undef mygramclient_free_string
 #undef mygramclient_parse_search_expression
+#undef mygramclient_parse_search_expression_ex
 #undef mygramclient_convert_search_expression
+#undef mygramclient_convert_search_expression_ex
 #undef mygramclient_free_parsed_expression
 
 #define DEFINE_C_INT_WRAPPER(name, client_expr, call_args, ...)                   \
@@ -1613,6 +1706,11 @@ DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_facet, client, result, (client, ta
                                  MygramClient_C* client, const char* table, const char* column, const char* query,
                                  uint32_t limit, MygramFacetResult_C** result)
 
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_facet_paged, client, result,
+                                 (client, table, column, query, limit, offset, result), MygramClient_C* client,
+                                 const char* table, const char* column, const char* query, uint32_t limit,
+                                 uint32_t offset, MygramFacetResult_C** result)
+
 DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_facet_advanced, client, result,
                                  (client, table, column, query, limit, and_terms, and_count, not_terms, not_count,
                                   filter_keys, filter_values, filter_count, result),
@@ -1620,6 +1718,14 @@ DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_facet_advanced, client, result,
                                  uint32_t limit, const char** and_terms, size_t and_count, const char** not_terms,
                                  size_t not_count, const char** filter_keys, const char** filter_values,
                                  size_t filter_count, MygramFacetResult_C** result)
+
+DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_facet_advanced_paged, client, result,
+                                 (client, table, column, query, limit, offset, and_terms, and_count, not_terms,
+                                  not_count, filter_keys, filter_values, filter_count, result),
+                                 MygramClient_C* client, const char* table, const char* column, const char* query,
+                                 uint32_t limit, uint32_t offset, const char** and_terms, size_t and_count,
+                                 const char** not_terms, size_t not_count, const char** filter_keys,
+                                 const char** filter_values, size_t filter_count, MygramFacetResult_C** result)
 
 DEFINE_C_INT_POINTER_OUT_WRAPPER(mygramclient_get, client, doc, (client, table, primary_key, doc),
                                  MygramClient_C* client, const char* table, const char* primary_key,
@@ -1716,12 +1822,36 @@ int mygramclient_parse_search_expression(const char* expression, MygramParsedExp
                      [&]() { return mygramclient_parse_search_expression_impl(expression, parsed); });
 }
 
+int mygramclient_parse_search_expression_ex(const char* expression, MygramParsedExpression_C** parsed,
+                                            char** diagnostic) {
+  if (parsed != nullptr) {
+    *parsed = nullptr;
+  }
+  if (diagnostic != nullptr) {
+    *diagnostic = nullptr;
+  }
+  return c_api_guard(static_cast<MygramClient_C*>(nullptr), -1,
+                     [&]() { return mygramclient_parse_search_expression_ex_impl(expression, parsed, diagnostic); });
+}
+
 int mygramclient_convert_search_expression(const char* expression, char** converted) {
   if (converted != nullptr) {
     *converted = nullptr;
   }
   return c_api_guard(static_cast<MygramClient_C*>(nullptr), -1,
                      [&]() { return mygramclient_convert_search_expression_impl(expression, converted); });
+}
+
+int mygramclient_convert_search_expression_ex(const char* expression, char** converted, char** diagnostic) {
+  if (converted != nullptr) {
+    *converted = nullptr;
+  }
+  if (diagnostic != nullptr) {
+    *diagnostic = nullptr;
+  }
+  return c_api_guard(static_cast<MygramClient_C*>(nullptr), -1, [&]() {
+    return mygramclient_convert_search_expression_ex_impl(expression, converted, diagnostic);
+  });
 }
 
 void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {

@@ -12,7 +12,7 @@ target_include_directories(mygramclient_static_testing
   PRIVATE ${CMAKE_SOURCE_DIR}/src/client
 )
 target_compile_definitions(mygramclient_static_testing PRIVATE MYGRAMCLIENT_C_TEST_HOOKS)
-target_link_libraries(mygramclient_static_testing PUBLIC mygramdb_utils)
+target_link_libraries(mygramclient_static_testing PUBLIC Threads::Threads)
 
 add_executable(mygramclient_test
   mygramclient_test.cpp
@@ -36,6 +36,21 @@ add_executable(c_api_v2_smoke c_api_v2_smoke.c)
 set_target_properties(c_api_v2_smoke PROPERTIES LINKER_LANGUAGE CXX)
 target_link_libraries(c_api_v2_smoke PRIVATE mygramclient_static)
 add_test(NAME CApiV2CompileLinkSmokeTest COMMAND c_api_v2_smoke)
+
+# Validate the installed SDK from a separate consumer project. This catches
+# missing transitive headers, broken CMake exports, and unusable pkg-config
+# metadata that build-tree targets cannot expose.
+add_test(
+  NAME MygramClientInstalledConsumerTest
+  COMMAND ${CMAKE_COMMAND}
+    -DMYGRAMDB_BUILD_DIR=${CMAKE_BINARY_DIR}
+    -DMYGRAMDB_BUILD_CONFIG=$<CONFIG>
+    -DMYGRAMDB_C_COMPILER=${CMAKE_C_COMPILER}
+    -DMYGRAMDB_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DMYGRAMDB_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/install_consumer_test.cmake
+)
+set_tests_properties(MygramClientInstalledConsumerTest PROPERTIES RUN_SERIAL TRUE)
 
 # Search expression parser tests
 

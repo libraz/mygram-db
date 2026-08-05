@@ -14,10 +14,14 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <future>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -33,6 +37,34 @@
 
 using namespace mygramdb::client;
 using namespace mygramdb;
+
+TEST(MygramClientErrorProtocolTest, ParsesCodedAndLegacyErrorsTable) {
+  struct TestCase {
+    const char* response;
+    bool is_error;
+    mygram::utils::ErrorCode expected_code;
+    const char* expected_message;
+  };
+  constexpr std::array<TestCase, 6> cases = {{
+      {"ERROR 3010 Invalid boolean expression", true, mygram::utils::ErrorCode::kQueryExpressionParseError,
+       "Invalid boolean expression"},
+      {"ERROR 6028 Server is loading", true, mygram::utils::ErrorCode::kServerLoading, "Server is loading"},
+      {"ERROR 6030 SERVER_BUSY", true, mygram::utils::ErrorCode::kServerBusy, "SERVER_BUSY"},
+      {"ERROR 65000 Future server error", true, static_cast<mygram::utils::ErrorCode>(65000), "Future server error"},
+      {"ERROR legacy response", true, mygram::utils::ErrorCode::kClientServerError, "legacy response"},
+      {"OK COUNT 0", false, mygram::utils::ErrorCode::kSuccess, ""},
+  }};
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.response);
+    const auto parsed = ParseServerErrorResponse(test_case.response);
+    EXPECT_EQ(parsed.has_value(), test_case.is_error);
+    if (parsed.has_value()) {
+      EXPECT_EQ(parsed->code(), test_case.expected_code);
+      EXPECT_EQ(parsed->message(), test_case.expected_message);
+    }
+  }
+}
 
 /**
  * @brief Test fixture for MygramClient tests
@@ -632,6 +664,23 @@ TEST_F(MygramClientTest, TypedSearchOptionsExposeFilterFuzzyAndHighlight) {
   EXPECT_EQ(result->total_count, 2U);
 }
 
+TEST_F(MygramClientTest, TypedBooleanSearchCombinesExpressionFilterAndSort) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  SearchOptions options;
+  options.query_mode = QueryMode::kBoolean;
+  options.filters.push_back({"status", FilterOp::kEqual, "active"});
+  options.sort_desc = false;
+
+  auto result = client_->Search("testdb.test", "(hello OR news)", options);
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_EQ(result->results.size(), 2U);
+  EXPECT_EQ(result->total_count, 2U);
+  EXPECT_EQ(result->results[0].primary_key, "1");
+  EXPECT_EQ(result->results[1].primary_key, "2");
+}
+
 TEST_F(MygramClientTest, CApiTypedSearchOptionsExposeCompleteSurface) {
   AddTestDocuments();
   MygramClientConfig_C config = {};
@@ -654,14 +703,21 @@ TEST_F(MygramClientTest, CApiTypedSearchOptionsExposeCompleteSurface) {
   options.highlight_close_tag = "</mark>";
   options.highlight_snippet_length = 128;
   options.highlight_max_fragments = 2;
+  options.query_mode = MYGRAM_QUERY_BOOLEAN;
 
   MygramSearchResultWithHighlights_C* result = nullptr;
-  ASSERT_EQ(mygramclient_search_with_options(c_client, "testdb.test", "hello", &options, &result), 0)
+  ASSERT_EQ(mygramclient_search_with_options(c_client, "testdb.test", "(hello OR news)", &options, &result), 0)
       << mygramclient_get_last_error(c_client);
   ASSERT_NE(result, nullptr);
   EXPECT_EQ(result->count, 1U);
   EXPECT_EQ(result->total_count, 2U);
   mygramclient_free_search_result_with_highlights(result);
+
+  options.query_mode = static_cast<MygramQueryMode_C>(99);
+  result = nullptr;
+  EXPECT_EQ(mygramclient_search_with_options(c_client, "testdb.test", "hello", &options, &result), -1);
+  EXPECT_EQ(result, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("query_mode"), std::string::npos);
   mygramclient_destroy(c_client);
 }
 
@@ -783,8 +839,72 @@ TEST_F(MygramClientTest, FacetWithSearchAndLimit) {
 
   const auto& resp = *result;
   ASSERT_EQ(resp.facets.size(), 1u);
+  EXPECT_EQ(resp.total_count, 1u);
   EXPECT_EQ(resp.facets[0].value, "active");
   EXPECT_EQ(resp.facets[0].count, 2u);
+}
+
+TEST_F(MygramClientTest, FacetExposesOffsetAndTotalCount) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  const auto result = client_->Facet("testdb.test", "status", "", 1, {}, {}, {}, 1);
+  ASSERT_TRUE(result) << "Facet error: " << result.error().message();
+  ASSERT_EQ(result->facets.size(), 1u);
+  EXPECT_EQ(result->total_count, 2u);
+  EXPECT_EQ(result->facets[0].value, "inactive");
+  EXPECT_EQ(result->facets[0].count, 1u);
+}
+
+TEST_F(MygramClientTest, FacetAcceptsLegacyHeaderWithoutTotalCount) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+
+  std::thread responder([listen_fd]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+      char request[128];
+      (void)recv(client_fd, request, sizeof(request), 0);
+      static constexpr char kLegacyResponse[] = "OK FACET 1\r\nlegacy\t7\r\n\r\n";
+      (void)send(client_fd, kLegacyResponse, sizeof(kLegacyResponse) - 1, 0);
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(addr.sin_port);
+  config.timeout_ms = 1000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  const auto result = client.Facet("testdb.test", "status");
+  responder.join();
+
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_EQ(result->facets.size(), 1u);
+  EXPECT_EQ(result->total_count, 1u);
+  EXPECT_EQ(result->facets[0].value, "legacy");
+  EXPECT_EQ(result->facets[0].count, 7u);
+}
+
+TEST_F(MygramClientTest, RestoresTypedServerErrorCode) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  const auto result = client_->Facet("testdb.test", "missing_column", "hello", 1);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kIndexNotFound);
+  EXPECT_NE(result.error().message().find("missing_column"), std::string::npos);
 }
 
 TEST_F(MygramClientTest, FacetValueStartingWithHashIsDataRow) {
@@ -841,10 +961,28 @@ TEST_F(MygramClientTest, CApiFacetReturnsValueCounts) {
   ASSERT_EQ(facet_result->count, 1u);
   ASSERT_NE(facet_result->values, nullptr);
   ASSERT_NE(facet_result->counts, nullptr);
+  EXPECT_EQ(facet_result->total_count, 1u);
   EXPECT_STREQ(facet_result->values[0], "active");
   EXPECT_EQ(facet_result->counts[0], 2u);
 
   mygramclient_free_facet_result(facet_result);
+
+  facet_result = nullptr;
+  ASSERT_EQ(mygramclient_facet_paged(c_client, "testdb.test", "status", "", 1, 1, &facet_result), 0)
+      << mygramclient_get_last_error(c_client);
+  ASSERT_NE(facet_result, nullptr);
+  ASSERT_EQ(facet_result->count, 1u);
+  EXPECT_EQ(facet_result->total_count, 2u);
+  EXPECT_STREQ(facet_result->values[0], "inactive");
+  EXPECT_EQ(facet_result->counts[0], 1u);
+  mygramclient_free_facet_result(facet_result);
+
+  facet_result = nullptr;
+  result = mygramclient_facet(c_client, "testdb.test", "missing_column", "hello", 0, &facet_result);
+  EXPECT_EQ(result, -1);
+  EXPECT_EQ(facet_result, nullptr);
+  EXPECT_EQ(mygramclient_get_last_error_code(c_client), static_cast<int>(mygram::utils::ErrorCode::kIndexNotFound));
+
   mygramclient_disconnect(c_client);
   mygramclient_destroy(c_client);
 }
@@ -870,8 +1008,20 @@ TEST_F(MygramClientTest, CApiFacetAdvancedCoversFiltersAndArrayContracts) {
       << mygramclient_get_last_error(c_client);
   ASSERT_NE(result, nullptr);
   ASSERT_EQ(result->count, 1u);
+  EXPECT_EQ(result->total_count, 1u);
   EXPECT_STREQ(result->values[0], "inactive");
   EXPECT_EQ(result->counts[0], 1u);
+  mygramclient_free_facet_result(result);
+
+  result = nullptr;
+  ASSERT_EQ(mygramclient_facet_advanced_paged(c_client, "testdb.test", "status", "", 1, 1, nullptr, 0, nullptr, 0,
+                                              nullptr, nullptr, 0, &result),
+            0)
+      << mygramclient_get_last_error(c_client);
+  ASSERT_NE(result, nullptr);
+  ASSERT_EQ(result->count, 1u);
+  EXPECT_EQ(result->total_count, 2u);
+  EXPECT_STREQ(result->values[0], "inactive");
   mygramclient_free_facet_result(result);
 
   result = reinterpret_cast<MygramFacetResult_C*>(static_cast<uintptr_t>(1));
@@ -1367,6 +1517,88 @@ TEST_F(MygramClientTest, SendCommandDisconnectsAfterReceiveFailure) {
   closer.join();
 }
 
+TEST_F(MygramClientTest, ConcurrentDisconnectWaitsForInFlightCommand) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+
+  std::mutex response_mutex;
+  std::condition_variable response_condition;
+  bool request_received = false;
+  bool response_allowed = false;
+  std::thread responder([&]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+      char request[128];
+      (void)recv(client_fd, request, sizeof(request), 0);
+      {
+        std::lock_guard<std::mutex> lock(response_mutex);
+        request_received = true;
+      }
+      response_condition.notify_all();
+      {
+        std::unique_lock<std::mutex> lock(response_mutex);
+        response_condition.wait(lock, [&]() { return response_allowed; });
+      }
+      static constexpr char kResponse[] = "OK\r\n";
+      (void)send(client_fd, kResponse, sizeof(kResponse) - 1, 0);
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(addr.sin_port);
+  config.timeout_ms = 2000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::optional<mygram::utils::Expected<std::string, mygram::utils::Error>> command_result;
+  std::thread command_thread([&]() { command_result = client.SendCommand("PING"); });
+
+  {
+    std::unique_lock<std::mutex> lock(response_mutex);
+    EXPECT_TRUE(response_condition.wait_for(lock, std::chrono::seconds(1), [&]() { return request_received; }));
+  }
+
+  std::promise<void> disconnect_started;
+  std::promise<void> disconnect_finished;
+  auto disconnect_started_future = disconnect_started.get_future();
+  auto disconnect_finished_future = disconnect_finished.get_future();
+  std::thread disconnect_thread([&]() {
+    disconnect_started.set_value();
+    client.Disconnect();
+    disconnect_finished.set_value();
+  });
+  disconnect_started_future.wait();
+
+  EXPECT_EQ(disconnect_finished_future.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  {
+    std::lock_guard<std::mutex> lock(response_mutex);
+    response_allowed = true;
+  }
+  response_condition.notify_all();
+
+  command_thread.join();
+  disconnect_thread.join();
+  responder.join();
+
+  ASSERT_TRUE(command_result.has_value());
+  ASSERT_TRUE(*command_result) << command_result->error().message();
+  EXPECT_EQ(**command_result, "OK");
+  EXPECT_FALSE(client.IsConnected());
+}
+
 TEST_F(MygramClientTest, SendCommandUsesTotalDeadlineAcrossPartialReceives) {
   const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   ASSERT_GE(listen_fd, 0);
@@ -1422,6 +1654,71 @@ TEST_F(MygramClientTest, SendCommandUsesTotalDeadlineAcrossPartialReceives) {
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientTimeout);
   EXPECT_LT(elapsed.count(), 300);
   EXPECT_FALSE(client.IsConnected());
+}
+
+TEST_F(MygramClientTest, LongOperationsUseDedicatedTimeouts) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(addr.sin_port);
+  config.timeout_ms = 30;
+  config.optimize_timeout_ms = 500;
+  config.dump_load_timeout_ms = 500;
+  config.dump_verify_timeout_ms = 500;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::thread responder([listen_fd]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+#ifdef SO_NOSIGPIPE
+      int enabled = 1;
+      (void)setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#endif
+      constexpr std::array<std::string_view, 3> kResponses = {
+          "OK OPTIMIZED terms=0 delta=0\r\n",
+          "OK LOADED /tmp/client-timeout-test.dmp\r\n",
+          "OK DUMP_VERIFIED /tmp/client-timeout-test.dmp\r\n",
+      };
+      for (const auto response : kResponses) {
+        char request[256];
+        if (recv(client_fd, request, sizeof(request), 0) <= 0) {
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+#ifdef MSG_NOSIGNAL
+        constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+        constexpr int kSendFlags = 0;
+#endif
+        if (send(client_fd, response.data(), response.size(), kSendFlags) <= 0) {
+          break;
+        }
+      }
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  const auto optimize = client.Optimize();
+  const auto load = client.Load("/tmp/client-timeout-test.dmp");
+  const auto verify = client.DumpVerify("/tmp/client-timeout-test.dmp");
+  responder.join();
+
+  ASSERT_TRUE(optimize) << optimize.error().message();
+  ASSERT_TRUE(load) << load.error().message();
+  EXPECT_EQ(*load, "/tmp/client-timeout-test.dmp");
+  ASSERT_TRUE(verify) << verify.error().message();
 }
 
 TEST_F(MygramClientTest, SendCommandRejectsResponseLargerThanConfiguredLimit) {
@@ -1761,11 +2058,19 @@ TEST_F(MygramClientTest, CApiTypedAdminWrappersUseProtocolCommands) {
   mygramclient_free_string(response);
 
   response = nullptr;
-  ASSERT_EQ(mygramclient_sync_stop(c_client, "testdb.test", &response), 0)
-      << "SYNC STOP error: " << mygramclient_get_last_error(c_client);
-  ASSERT_NE(response, nullptr);
-  EXPECT_TRUE(std::string(response).find("OK SYNC") == 0) << response;
-  mygramclient_free_string(response);
+  const int sync_stop_result = mygramclient_sync_stop(c_client, "testdb.test", &response);
+  if (sync_stop_result == 0) {
+    ASSERT_NE(response, nullptr);
+    EXPECT_TRUE(std::string(response).find("OK SYNC") == 0) << response;
+    mygramclient_free_string(response);
+  } else {
+    // SYNC runs asynchronously and may finish before this request when the
+    // configured MySQL endpoint is unavailable. The protocol wrapper still
+    // exercised SYNC STOP; only that specific completed-operation response is
+    // valid here.
+    EXPECT_EQ(sync_stop_result, -1);
+    EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("No active SYNC operation"), std::string::npos);
+  }
 
   EXPECT_EQ(mygramclient_replication_stop(c_client), -1);
   EXPECT_STRNE(mygramclient_get_last_error(c_client), "");
@@ -2099,6 +2404,48 @@ TEST_F(MygramClientCApiTest, ParseSearchExpression_UnrepresentableComplexExpress
 
   EXPECT_EQ(result, -1);
   EXPECT_EQ(parsed, nullptr);
+}
+
+TEST_F(MygramClientCApiTest, ParseSearchExpressionExReturnsEveryConcreteDiagnostic) {
+  constexpr std::array<std::pair<const char*, const char*>, 10> kCases = {{
+      {"+", "Expected term after '+'"},
+      {"-", "Expected term after '-'"},
+      {"(", "Unbalanced parentheses"},
+      {"OR x", "Unexpected 'OR' operator"},
+      {")", "Unexpected ')'"},
+      {"x OR (", "Unbalanced parentheses after 'OR'"},
+      {"x OR", "Expected term after 'OR'"},
+      {"", "Empty search expression"},
+      {"+golang (tutorial OR guide)", "Expression cannot be represented by the simplified client API"},
+      {"-old", "No search terms found"},
+  }};
+
+  for (const auto& [expression, expected_diagnostic] : kCases) {
+    SCOPED_TRACE(expression);
+    auto* parsed = reinterpret_cast<MygramParsedExpression_C*>(uintptr_t{1});
+    char* diagnostic = reinterpret_cast<char*>(uintptr_t{1});
+    EXPECT_EQ(mygramclient_parse_search_expression_ex(expression, &parsed, &diagnostic), -1);
+    EXPECT_EQ(parsed, nullptr);
+    ASSERT_NE(diagnostic, nullptr);
+    EXPECT_STREQ(diagnostic, expected_diagnostic);
+    mygramclient_free_string(diagnostic);
+  }
+}
+
+TEST_F(MygramClientCApiTest, ExpressionExClearsDiagnosticOnSuccess) {
+  MygramParsedExpression_C* parsed = nullptr;
+  char* diagnostic = reinterpret_cast<char*>(uintptr_t{1});
+  ASSERT_EQ(mygramclient_parse_search_expression_ex("golang tutorial", &parsed, &diagnostic), 0);
+  ASSERT_NE(parsed, nullptr);
+  EXPECT_EQ(diagnostic, nullptr);
+  mygramclient_free_parsed_expression(parsed);
+
+  char* converted = nullptr;
+  diagnostic = reinterpret_cast<char*>(uintptr_t{1});
+  ASSERT_EQ(mygramclient_convert_search_expression_ex("golang OR rust", &converted, &diagnostic), 0);
+  ASSERT_NE(converted, nullptr);
+  EXPECT_EQ(diagnostic, nullptr);
+  mygramclient_free_string(converted);
 }
 
 /**
@@ -2559,6 +2906,8 @@ TEST_F(MygramClientTest, CApiExceptionBarrierReturnsSafeValuesForEveryResultShap
   char* response = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
   auto* parsed = reinterpret_cast<MygramParsedExpression_C*>(static_cast<uintptr_t>(1));
   char* converted = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+  char* parse_diagnostic = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
+  char* convert_diagnostic = reinterpret_cast<char*>(static_cast<uintptr_t>(1));
 
   client::testing::SetThrowOnCApiEntry(true);
   const int connect_result = mygramclient_connect(c_client);
@@ -2568,6 +2917,8 @@ TEST_F(MygramClientTest, CApiExceptionBarrierReturnsSafeValuesForEveryResultShap
   const int command_result = mygramclient_send_command(c_client, "INFO", &response);
   const int parse_result = mygramclient_parse_search_expression("hello", &parsed);
   const int convert_result = mygramclient_convert_search_expression("hello", &converted);
+  const int parse_ex_result = mygramclient_parse_search_expression_ex("hello", &parsed, &parse_diagnostic);
+  const int convert_ex_result = mygramclient_convert_search_expression_ex("hello", &converted, &convert_diagnostic);
   const char* guarded_error = mygramclient_get_last_error(c_client);
   const int guarded_error_code = mygramclient_get_last_error_code(c_client);
   MygramClient_C* guarded_create = mygramclient_create(&config);
@@ -2588,6 +2939,10 @@ TEST_F(MygramClientTest, CApiExceptionBarrierReturnsSafeValuesForEveryResultShap
   EXPECT_EQ(parsed, nullptr);
   EXPECT_EQ(convert_result, -1);
   EXPECT_EQ(converted, nullptr);
+  EXPECT_EQ(parse_ex_result, -1);
+  EXPECT_EQ(parse_diagnostic, nullptr);
+  EXPECT_EQ(convert_ex_result, -1);
+  EXPECT_EQ(convert_diagnostic, nullptr);
   EXPECT_STREQ(guarded_error, "C API exception");
   EXPECT_EQ(guarded_error_code, static_cast<int>(mygram::utils::ErrorCode::kClientCommandFailed));
   EXPECT_EQ(guarded_create, nullptr);
@@ -2761,13 +3116,10 @@ TEST_F(MygramClientTest, SearchEmptyQueryReturnsError) {
   auto result = client_->Search("testdb.test", "", 100);
   ASSERT_FALSE(result) << "Expected an error for empty query";
 
-  // The error must originate from the server (kClientServerError), not from
-  // a protocol-level parsing failure on the client side. Either kind would
-  // be acceptable behavior, but the fix specifically targets server-side
-  // rejection of an unambiguously-empty token.
+  // The error originates from the server and retains its query-syntax code
+  // across the TCP protocol boundary.
   using mygram::utils::ErrorCode;
-  EXPECT_TRUE(result.error().code() == ErrorCode::kClientServerError ||
-              result.error().code() == ErrorCode::kClientInvalidArgument)
+  EXPECT_EQ(result.error().code(), ErrorCode::kQuerySyntaxError)
       << "Unexpected error code: " << static_cast<int>(result.error().code())
       << ", message: " << result.error().message();
 }

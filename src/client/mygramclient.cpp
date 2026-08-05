@@ -15,6 +15,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -32,7 +33,6 @@
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/numeric_parse.h"
-#include "utils/string_utils.h"
 
 using namespace mygram::utils;
 
@@ -40,6 +40,17 @@ namespace mygramdb::client {
 
 // Protocol constants alias - 1:1 reuse of shared protocol header.
 namespace proto = mygramdb::server::protocol;
+
+std::optional<mygram::utils::Error> ParseServerErrorResponse(std::string_view response) {
+  const auto frame = proto::ParseErrorFrame(response);
+  if (!frame.has_value()) {
+    return std::nullopt;
+  }
+  if (!frame->code.has_value()) {
+    return MakeError(ErrorCode::kClientServerError, std::string(frame->message));
+  }
+  return MakeError(static_cast<ErrorCode>(*frame->code), std::string(frame->message));
+}
 
 namespace {
 
@@ -50,6 +61,54 @@ constexpr unsigned char kAsciiSpace = 0x20;
 constexpr uint32_t kDefaultClientTimeoutMs = 5000;
 constexpr uint32_t kMaxClientRecvBufferSize = 16U * 1024U * 1024U;
 constexpr uint64_t kDefaultMaxClientResponseBytes = 64ULL * 1024ULL * 1024ULL;
+
+std::string TrimAsciiWhitespace(std::string_view value) {
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+    value.remove_prefix(1);
+  }
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+    value.remove_suffix(1);
+  }
+  return std::string(value);
+}
+
+std::string ToAsciiUpper(std::string_view value) {
+  std::string result(value);
+  std::transform(result.begin(), result.end(), result.begin(),
+                 [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
+  return result;
+}
+
+// NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
+bool IsUnicodeWhitespace(std::string_view text, size_t pos) {
+  if (pos >= text.size()) {
+    return false;
+  }
+  const auto byte = static_cast<unsigned char>(text[pos]);
+  if (std::isspace(byte) != 0) {
+    return true;
+  }
+  if (byte == 0xC2 && pos + 1 < text.size() && static_cast<unsigned char>(text[pos + 1]) == 0xA0) {
+    return true;
+  }
+  if (pos + 2 >= text.size()) {
+    return false;
+  }
+  const auto byte2 = static_cast<unsigned char>(text[pos + 1]);
+  const auto byte3 = static_cast<unsigned char>(text[pos + 2]);
+  if (byte == 0xE1 && byte2 == 0x9A && byte3 == 0x80) {
+    return true;
+  }
+  if (byte == 0xE2 && byte2 == 0x80 &&
+      ((byte3 >= 0x80 && byte3 <= 0x8B) || byte3 == 0xA8 || byte3 == 0xA9 || byte3 == 0xAF)) {
+    return true;
+  }
+  if (byte == 0xE2 && byte2 == 0x81 && byte3 == 0x9F) {
+    return true;
+  }
+  return byte == 0xE3 && byte2 == 0x80 && byte3 == 0x80;
+}
+// NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
 std::string_view FilterOpToWire(FilterOp op) {
   switch (op) {
@@ -90,8 +149,7 @@ std::string EscapeProtocolToken(const std::string& value) {
       needs_quotes = true;
       break;
     }
-    size_t whitespace_length = 0;
-    if (mygram::utils::IsUnicodeWhitespace(value, i, whitespace_length)) {
+    if (IsUnicodeWhitespace(value, i)) {
       needs_quotes = true;
       break;
     }
@@ -239,8 +297,8 @@ std::string QuoteCommandArgumentIfNeeded(const std::string& arg) {
  * @brief Check if response is an error and return appropriate Expected
  */
 Expected<void, Error> CheckErrorResponse(const std::string& response) {
-  if (response.compare(0, proto::kErrorPrefix.size(), proto::kErrorPrefix) == 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kClientServerError, response.substr(proto::kErrorPrefixLen)));
+  if (auto error = ParseServerErrorResponse(response); error.has_value()) {
+    return MakeUnexpected(std::move(*error));
   }
   return {};
 }
@@ -279,8 +337,8 @@ std::vector<std::pair<std::string, std::string>> ParseColonKeyValueLines(const s
     if (colon == std::string_view::npos) {
       continue;
     }
-    std::string key = mygram::utils::TrimAsciiWhitespace(line.substr(0, colon));
-    std::string value = mygram::utils::TrimAsciiWhitespace(line.substr(colon + 1));
+    std::string key = TrimAsciiWhitespace(line.substr(0, colon));
+    std::string value = TrimAsciiWhitespace(line.substr(colon + 1));
     if (key.empty()) {
       continue;
     }
@@ -311,13 +369,14 @@ Expected<CacheStatistics, Error> ParseCacheStatisticsResponse(const std::string&
     return *parsed;
   };
   using UintField = uint64_t CacheStatistics::*;
-  static constexpr std::array<std::pair<std::string_view, UintField>, 19> kUintFields{{
+  static constexpr std::array<std::pair<std::string_view, UintField>, 20> kUintFields{{
       {"total_queries", &CacheStatistics::total_queries},
       {"cache_hits", &CacheStatistics::cache_hits},
       {"cache_misses", &CacheStatistics::cache_misses},
       {"current_entries", &CacheStatistics::current_entries},
       {"current_memory_bytes", &CacheStatistics::current_memory_bytes},
       {"invalidation_index_memory_bytes", &CacheStatistics::invalidation_index_memory_bytes},
+      {"invalidation_queue_memory_bytes", &CacheStatistics::invalidation_queue_memory_bytes},
       {"accounted_memory_bytes", &CacheStatistics::accounted_memory_bytes},
       {"evictions", &CacheStatistics::evictions},
       {"ttl_expirations", &CacheStatistics::ttl_expirations},
@@ -396,7 +455,7 @@ Expected<CacheStatistics, Error> ParseCacheStatisticsResponse(const std::string&
 std::string StripMillisecondSuffix(const std::string& value) {
   constexpr std::string_view kMs = "ms";
   if (value.size() >= kMs.size() && value.compare(value.size() - kMs.size(), kMs.size(), kMs) == 0) {
-    return mygram::utils::TrimAsciiWhitespace(std::string_view(value).substr(0, value.size() - kMs.size()));
+    return TrimAsciiWhitespace(std::string_view(value).substr(0, value.size() - kMs.size()));
   }
   return value;
 }
@@ -599,7 +658,7 @@ std::string EscapeQueryString(const std::string& str) {
   }
 
   // Check if string needs quoting (contains spaces or special chars)
-  const std::string upper = ToUpper(str);
+  const std::string upper = ToAsciiUpper(str);
   bool needs_quotes = upper == "AND" || upper == "OR" || upper == "NOT" || upper == "FILTER" || upper == "SORT" ||
                       upper == "LIMIT" || upper == "OFFSET" || upper == "HIGHLIGHT" || upper == "FUZZY" ||
                       upper == "FACET" || upper == "ORDER";
@@ -839,6 +898,18 @@ class MygramClient::Impl {
     if (config_.timeout_ms == 0) {
       config_.timeout_ms = kDefaultClientTimeoutMs;
     }
+    if (config_.connect_timeout_ms == 0) {
+      config_.connect_timeout_ms = config_.timeout_ms;
+    }
+    if (config_.dump_load_timeout_ms == 0) {
+      config_.dump_load_timeout_ms = config_.timeout_ms;
+    }
+    if (config_.dump_verify_timeout_ms == 0) {
+      config_.dump_verify_timeout_ms = config_.timeout_ms;
+    }
+    if (config_.optimize_timeout_ms == 0) {
+      config_.optimize_timeout_ms = config_.timeout_ms;
+    }
     if (config_.recv_buffer_size == 0) {
       config_.recv_buffer_size = server::protocol::kDefaultClientRecvBufferSize;
     } else if (config_.recv_buffer_size > kMaxClientRecvBufferSize) {
@@ -860,6 +931,7 @@ class MygramClient::Impl {
   Impl& operator=(Impl&&) = delete;
 
   Expected<void, Error> Connect() {
+    std::lock_guard<std::mutex> lock(command_mutex_);
     if (sock_ >= 0) {
       return MakeUnexpected(MakeError(ErrorCode::kClientAlreadyConnected, "Already connected"));
     }
@@ -878,7 +950,7 @@ class MygramClient::Impl {
       // Bounded-timeout connect (non-blocking + poll).
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for socket API
       auto connect_result = ConnectWithTimeout(sock_, reinterpret_cast<const sockaddr*>(&server_addr),
-                                               sizeof(server_addr), config_.timeout_ms);
+                                               sizeof(server_addr), config_.connect_timeout_ms);
       if (!connect_result) {
         close(sock_);
         sock_ = -1;
@@ -929,7 +1001,7 @@ class MygramClient::Impl {
     // Bounded-timeout connect (non-blocking + poll).
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for socket API
     auto connect_result = ConnectWithTimeout(sock_, reinterpret_cast<const sockaddr*>(&server_addr),
-                                             sizeof(server_addr), config_.timeout_ms);
+                                             sizeof(server_addr), config_.connect_timeout_ms);
     if (!connect_result) {
       close(sock_);
       sock_ = -1;
@@ -942,9 +1014,15 @@ class MygramClient::Impl {
     return {};
   }
 
-  void Disconnect() { DisconnectSocket(); }
+  void Disconnect() {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    DisconnectSocket();
+  }
 
-  [[nodiscard]] bool IsConnected() const { return sock_ >= 0; }
+  [[nodiscard]] bool IsConnected() const {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    return sock_ >= 0;
+  }
 
   /**
    * @brief Send a command and validate that the response begins with @p expected_prefix.
@@ -985,18 +1063,19 @@ class MygramClient::Impl {
     // observes a complete request/response transaction.
     std::lock_guard<std::mutex> lock(command_mutex_);
 
-    if (!IsConnected()) {
+    if (sock_ < 0) {
       return MakeUnexpected(MakeError(ErrorCode::kClientNotConnected, "Not connected"));
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.timeout_ms);
+    const uint32_t command_timeout_ms = TimeoutForCommand(command);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(command_timeout_ms);
     auto wait_until_ready = [&](short events, ErrorCode failure_code,
                                 std::string_view operation) -> Expected<void, Error> {
       while (true) {
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
           return MakeUnexpected(MakeError(ErrorCode::kClientTimeout,
-                                          "Request timed out after " + std::to_string(config_.timeout_ms) + " ms"));
+                                          "Request timed out after " + std::to_string(command_timeout_ms) + " ms"));
         }
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
         if (remaining <= 0) {
@@ -1008,7 +1087,7 @@ class MygramClient::Impl {
         const int poll_result = poll(&descriptor, 1, poll_timeout);
         if (poll_result == 0) {
           return MakeUnexpected(MakeError(ErrorCode::kClientTimeout,
-                                          "Request timed out after " + std::to_string(config_.timeout_ms) + " ms"));
+                                          "Request timed out after " + std::to_string(command_timeout_ms) + " ms"));
         }
         if (poll_result < 0) {
           if (errno == EINTR) {
@@ -1225,6 +1304,9 @@ class MygramClient::Impl {
     if (auto err = ValidateSearchInputs(table, query, options.and_terms, options.not_terms, validation_filters)) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
+    if (options.query_mode != QueryMode::kLiteral && options.query_mode != QueryMode::kBoolean) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "Invalid query mode"));
+    }
     if (!options.sort_column.empty()) {
       // sort_column is an identifier sent unquoted on the wire.
       if (auto err = ValidateIdentifier(options.sort_column, "sort column")) {
@@ -1250,7 +1332,12 @@ class MygramClient::Impl {
 
     // Build command
     std::ostringstream cmd;
-    cmd << "SEARCH " << table << " " << EscapeQueryString(query);
+    cmd << "SEARCH " << table << " ";
+    if (options.query_mode == QueryMode::kBoolean) {
+      cmd << query;
+    } else {
+      cmd << EscapeQueryString(query);
+    }
 
     for (const auto& term : options.and_terms) {
       cmd << " AND " << EscapeQueryString(term);
@@ -1376,7 +1463,8 @@ class MygramClient::Impl {
   Expected<FacetResponse, Error> Facet(const std::string& table, const std::string& column, const std::string& query,
                                        uint32_t limit, const std::vector<std::string>& and_terms,
                                        const std::vector<std::string>& not_terms,
-                                       const std::vector<std::pair<std::string, std::string>>& filters) const {
+                                       const std::vector<std::pair<std::string, std::string>>& filters,
+                                       uint32_t offset) const {
     if (auto err = ValidateSearchInputs(table, query, and_terms, not_terms, filters)) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
@@ -1402,6 +1490,9 @@ class MygramClient::Impl {
       cmd << " FILTER " << key << " = " << EscapeQueryString(value);
     }
 
+    if (offset > 0) {
+      cmd << " OFFSET " << offset;
+    }
     if (limit > 0) {
       cmd << " LIMIT " << limit;
     }
@@ -1424,10 +1515,27 @@ class MygramClient::Impl {
     std::istringstream header(line);
     std::string ok;
     std::string facet;
-    uint64_t expected_count = 0;
-    header >> ok >> facet >> expected_count;
-    if (ok != "OK" || facet != "FACET") {
+    std::string expected_count_token;
+    std::string total_count_token;
+    std::string trailing;
+    if (!(header >> ok >> facet >> expected_count_token) || ok != "OK" || facet != "FACET") {
       return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET response header"));
+    }
+    const auto expected_count = mygram::utils::ParseNumeric<uint64_t>(expected_count_token);
+    if (!expected_count) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET response count"));
+    }
+    if (header >> total_count_token) {
+      const auto total_count = mygram::utils::ParseNumeric<uint64_t>(total_count_token);
+      if (!total_count || (header >> trailing) || *total_count < *expected_count) {
+        return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed FACET response total count"));
+      }
+      resp.total_count = *total_count;
+    } else {
+      // Servers before the paginated FACET protocol only returned the page
+      // size. Keep those servers usable, while exposing the best available
+      // total to callers.
+      resp.total_count = *expected_count;
     }
 
     while (std::getline(stream, line)) {
@@ -1450,7 +1558,7 @@ class MygramClient::Impl {
       resp.facets.push_back({line.substr(0, tab_pos), *parsed_count});
     }
 
-    if (resp.facets.size() != expected_count) {
+    if (resp.facets.size() != *expected_count) {
       return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "FACET response count mismatch"));
     }
 
@@ -1794,6 +1902,23 @@ class MygramClient::Impl {
   }
 
  private:
+  [[nodiscard]] uint32_t TimeoutForCommand(std::string_view command) const {
+    const auto is_command = [command](std::string_view name) {
+      return command == name || (command.size() > name.size() && command.compare(0, name.size(), name) == 0 &&
+                                 command[name.size()] == ' ');
+    };
+    if (is_command("OPTIMIZE")) {
+      return config_.optimize_timeout_ms;
+    }
+    if (is_command("DUMP LOAD")) {
+      return config_.dump_load_timeout_ms;
+    }
+    if (is_command("DUMP VERIFY")) {
+      return config_.dump_verify_timeout_ms;
+    }
+    return config_.timeout_ms;
+  }
+
   void DisconnectSocket() const {
     if (sock_ >= 0) {
       close(sock_);
@@ -1803,12 +1928,10 @@ class MygramClient::Impl {
 
   ClientConfig config_;
   mutable int sock_{-1};
-  // Serializes SendCommand() calls so concurrent threads do not interleave
-  // send/recv on the same socket. Connect()/Disconnect() are intentionally
-  // not protected by this mutex; concurrent Disconnect() during an in-flight
-  // SendCommand() is a logic error from the caller (documented in the
-  // public MygramClient class) but cannot deadlock because Disconnect()
-  // never acquires this mutex.
+  // Serializes the entire connection lifecycle and each request/response.
+  // Disconnect() waits for an in-flight command instead of closing a descriptor
+  // that the command still owns, eliminating both the data race and fd-reuse
+  // window.
   mutable std::mutex command_mutex_;
 };
 
@@ -1877,8 +2000,8 @@ mygram::utils::Expected<CountResponse, mygram::utils::Error> MygramClient::Count
 mygram::utils::Expected<FacetResponse, mygram::utils::Error> MygramClient::Facet(
     const std::string& table, const std::string& column, const std::string& query, uint32_t limit,
     const std::vector<std::string>& and_terms, const std::vector<std::string>& not_terms,
-    const std::vector<std::pair<std::string, std::string>>& filters) const {
-  return impl_->Facet(table, column, query, limit, and_terms, not_terms, filters);
+    const std::vector<std::pair<std::string, std::string>>& filters, uint32_t offset) const {
+  return impl_->Facet(table, column, query, limit, and_terms, not_terms, filters, offset);
 }
 
 mygram::utils::Expected<Document, mygram::utils::Error> MygramClient::Get(const std::string& table,

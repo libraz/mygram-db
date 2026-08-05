@@ -11,6 +11,10 @@ int main(void) {
   config.port = 11016;
   config.timeout_ms = 100;
   config.dump_save_timeout_ms = 600000;
+  config.connect_timeout_ms = 100;
+  config.dump_load_timeout_ms = 600000;
+  config.dump_verify_timeout_ms = 600000;
+  config.optimize_timeout_ms = 600000;
 
   MygramClient_C* client = mygramclient_create_v2(&config);
   if (client == NULL) {
