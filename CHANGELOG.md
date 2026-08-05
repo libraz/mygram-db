@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Change
+
+- **Runtime MySQL endpoint changes removed** — `mysql.host` and `mysql.port` are startup-only and `SET` returns an immutable-variable error. Automatic reconnects stay on the configured endpoint and reject a changed source-server UUID; deployments that previously used runtime failover must update configuration and restart MygramDB.
+
 ## [1.9.0] - 2026-07-27
 
 ### Breaking Change

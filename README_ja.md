@@ -24,10 +24,14 @@
 
 - GTID ベースの MySQL 8.4+/9.x、MariaDB 10.6+/11.x レプリケーション
 - TCP プロトコル、HTTP API、C/C++ クライアントライブラリ
-- 複数テーブルの index、runtime configuration、DUMP save/load、MySQL failover
+- 複数テーブルの index、runtime configuration、DUMP save/load、設定済み MySQL 接続先への自動再接続
 - CJK を含む多言語テキストの ICU 正規化
 
 インストール、設定、デプロイ、プロトコルと HTTP API、レプリケーション要件、性能データは [ドキュメント](https://mygramdb.libraz.net/ja/) にあります。
+
+MySQL の接続設定は起動時のみ変更できます。`mysql.host` または `mysql.port`
+を変更するには再起動が必要です。自動再接続が別の接続先へ切り替わることはなく、
+接続元サーバーの UUID が変わった場合は拒否します。
 
 ## ネットワークの安全性
 

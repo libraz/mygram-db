@@ -26,12 +26,16 @@ traffic to MygramDB.
 
 - GTID-based MySQL 8.4+/9.x and MariaDB 10.6+/11.x replication
 - TCP protocol, HTTP API, and C/C++ client libraries
-- Multi-table indexing, runtime configuration, DUMP save/load, and MySQL failover support
+- Multi-table indexing, runtime configuration, DUMP save/load, and automatic reconnection to the configured MySQL endpoint
 - ICU normalization for CJK and other multilingual text
 
 See the [documentation](https://mygramdb.libraz.net) for installation,
 configuration, deployment, protocol and HTTP API references, replication
 requirements, and performance data.
+
+MySQL connection settings are startup-only. Changing `mysql.host` or
+`mysql.port` requires a restart; automatic reconnection never switches to a
+different endpoint, and a source-server UUID change is rejected.
 
 ## Network safety
 

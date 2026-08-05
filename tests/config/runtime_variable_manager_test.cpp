@@ -637,11 +637,6 @@ TEST(RuntimeVariableManagerTest, SetImmutableVariable) {
 
   // MySQL endpoints are startup-only: accepting either would let a remote
   // client redirect stored credentials to an attacker-controlled server.
-  bool reconnect_called = false;
-  manager->SetMysqlReconnectCallback([&](const std::string&, int) -> Expected<void, Error> {
-    reconnect_called = true;
-    return {};
-  });
   for (const auto& [name, value] :
        std::vector<std::pair<std::string, std::string>>{{"mysql.host", "192.0.2.10"}, {"mysql.port", "3307"}}) {
     auto result = manager->SetVariable(name, value);
@@ -649,8 +644,6 @@ TEST(RuntimeVariableManagerTest, SetImmutableVariable) {
     EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument) << name;
     EXPECT_NE(result.error().message().find("immutable"), std::string::npos) << name;
   }
-  EXPECT_FALSE(reconnect_called);
-
   // Original values should remain unchanged
   auto user_result = manager->GetVariable("mysql.user");
   ASSERT_TRUE(user_result);

@@ -28,7 +28,6 @@ using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
 namespace {
-constexpr int kMaxPortNumber = 65535;  // Maximum valid TCP/UDP port number
 constexpr int kMaxRuntimeQueryLength = 4096;
 
 std::string JoinStrings(const std::vector<std::string>& values, const std::string& delimiter) {
@@ -95,8 +94,7 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
   // but we still hold it to update runtime_values_ atomically.
 
   // For logging variables: lock -> update runtime_values_ -> unlock -> apply side effect.
-  // This matches the pattern used by other Apply* methods (e.g., ApplyMysqlHost) and
-  // ensures GetVariable() sees the new value promptly. The side effect
+  // This ensures GetVariable() sees the new value promptly. The side effect
   // (spdlog level / StructuredLog format) is an atomic/thread-safe global,
   // so applying it after unlock is safe. On validation failure, rollback.
   if (variable_name == "logging.level") {
@@ -252,12 +250,6 @@ bool RuntimeVariableManager::IsMutable(const std::string& variable_name) {
   return kMutableVariables.find(variable_name) != kMutableVariables.end();
 }
 
-void RuntimeVariableManager::SetMysqlReconnectCallback(
-    std::function<Expected<void, Error>(const std::string& host, int port)> callback) {
-  std::unique_lock lock(mutex_);
-  mysql_reconnect_callback_ = std::move(callback);
-}
-
 void RuntimeVariableManager::SetCacheToggleCallback(std::function<Expected<void, Error>(bool enabled)> callback) {
   std::unique_lock lock(mutex_);
   cache_toggle_callback_ = std::move(callback);
@@ -329,89 +321,6 @@ Expected<void, Error> RuntimeVariableManager::ApplyLoggingFormat(const std::stri
   // spdlog's native format is not affected - this only controls StructuredLog output format.
   mygram::utils::LogFormat format = (value == "json") ? mygram::utils::LogFormat::JSON : mygram::utils::LogFormat::TEXT;
   mygram::utils::StructuredLog::SetFormat(format);
-
-  return {};
-}
-
-Expected<void, Error> RuntimeVariableManager::ApplyMysqlHost(const std::string& value) {
-  if (value.empty()) {
-    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "mysql.host cannot be empty"));
-  }
-  std::lock_guard<std::mutex> transaction_lock(mysql_reconnect_transaction_mutex_);
-
-  // Lock → update runtime_values_ → capture callback data → unlock → call callback
-  int current_port = 0;
-  std::string old_host;
-  std::function<Expected<void, Error>(const std::string&, int)> callback_copy;
-  {
-    std::unique_lock lock(mutex_);
-    auto port_iter = runtime_values_.find("mysql.port");
-    if (port_iter == runtime_values_.end()) {
-      return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "mysql.port not found in runtime values"));
-    }
-    auto port_result = ParseInt(port_iter->second);
-    if (!port_result) {
-      return MakeUnexpected(port_result.error());
-    }
-    current_port = *port_result;
-    old_host = runtime_values_["mysql.host"];
-    runtime_values_["mysql.host"] = value;
-    base_config_.mysql.host = value;
-    callback_copy = mysql_reconnect_callback_;
-  }
-
-  // Trigger reconnection outside lock
-  if (callback_copy) {
-    auto result = callback_copy(value, current_port);
-    if (!result) {
-      // Rollback: restore previous value
-      std::unique_lock lock(mutex_);
-      runtime_values_["mysql.host"] = old_host;
-      base_config_.mysql.host = old_host;
-      return result;
-    }
-  }
-
-  return {};
-}
-
-Expected<void, Error> RuntimeVariableManager::ApplyMysqlPort(int value) {
-  if (value <= 0 || value > kMaxPortNumber) {
-    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Invalid port number (must be 1-65535)"));
-  }
-  std::lock_guard<std::mutex> transaction_lock(mysql_reconnect_transaction_mutex_);
-
-  // Lock → update runtime_values_ → capture callback data → unlock → call callback
-  std::string current_host;
-  std::string old_port_str;
-  std::function<Expected<void, Error>(const std::string&, int)> callback_copy;
-  {
-    std::unique_lock lock(mutex_);
-    auto host_iter = runtime_values_.find("mysql.host");
-    if (host_iter == runtime_values_.end()) {
-      return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "mysql.host not found in runtime values"));
-    }
-    current_host = host_iter->second;
-    old_port_str = runtime_values_["mysql.port"];
-    runtime_values_["mysql.port"] = std::to_string(value);
-    base_config_.mysql.port = value;
-    callback_copy = mysql_reconnect_callback_;
-  }
-
-  // Trigger reconnection outside lock
-  if (callback_copy) {
-    auto result = callback_copy(current_host, value);
-    if (!result) {
-      // Rollback
-      std::unique_lock lock(mutex_);
-      runtime_values_["mysql.port"] = old_port_str;
-      auto old_port = ParseInt(old_port_str);
-      if (old_port) {
-        base_config_.mysql.port = *old_port;
-      }
-      return result;
-    }
-  }
 
   return {};
 }

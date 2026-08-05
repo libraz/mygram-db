@@ -22,7 +22,6 @@
 
 #include "app/application_lifecycle.h"
 #include "app/configuration_manager.h"
-#include "app/mysql_reconnection_handler.h"
 #include "app/server_orchestrator.h"
 #include "app/signal_manager.h"
 #include "mysql/null_binlog_reader.h"
@@ -686,74 +685,6 @@ TEST(ServerOrchestratorShutdownTest, MissingComponentsAreSkippedAndSuccessfulShu
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
   EXPECT_EQ(calls, (std::vector<std::string>{"tcp", "mysql"}));
 }
-
-#ifdef USE_MYSQL
-TEST(MysqlReconnectionHandlerTest, RejectsBeforeTouchingConnectionDuringDumpSave) {
-  std::atomic<bool> reconnecting{false};
-  std::atomic<bool> dump_save_in_progress{true};
-  std::atomic<bool> replication_paused_for_dump{false};
-  mygramdb::server::replication_pause::Counter pause_counter;
-
-  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
-                                                  &replication_paused_for_dump, &pause_counter);
-
-  auto result = handler.Reconnect("127.0.0.2", 3307);
-
-  ASSERT_FALSE(result);
-  EXPECT_NE(result.error().message().find("DUMP SAVE is in progress"), std::string::npos);
-  EXPECT_FALSE(reconnecting.load(std::memory_order_acquire));
-}
-
-TEST(MysqlReconnectionHandlerTest, RejectsBeforeTouchingConnectionWhileReplicationPaused) {
-  std::atomic<bool> reconnecting{false};
-  std::atomic<bool> dump_save_in_progress{false};
-  std::atomic<bool> replication_paused_for_dump{true};
-  mygramdb::server::replication_pause::Counter pause_counter;
-
-  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
-                                                  &replication_paused_for_dump, &pause_counter);
-
-  auto result = handler.Reconnect("127.0.0.2", 3307);
-
-  ASSERT_FALSE(result);
-  EXPECT_NE(result.error().message().find("replication is paused for DUMP/SNAPSHOT"), std::string::npos);
-  EXPECT_FALSE(reconnecting.load(std::memory_order_acquire));
-}
-
-TEST(MysqlReconnectionHandlerTest, RejectsWhenReconnectAlreadyInProgress) {
-  std::atomic<bool> reconnecting{true};
-  std::atomic<bool> dump_save_in_progress{false};
-  std::atomic<bool> replication_paused_for_dump{false};
-  mygramdb::server::replication_pause::Counter pause_counter;
-
-  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
-                                                  &replication_paused_for_dump, &pause_counter);
-
-  auto result = handler.Reconnect("127.0.0.2", 3307);
-
-  ASSERT_FALSE(result);
-  EXPECT_NE(result.error().message().find("already in progress"), std::string::npos);
-  EXPECT_TRUE(reconnecting.load(std::memory_order_acquire));
-}
-
-TEST(MysqlReconnectionHandlerTest, OperationCoordinatorRejectsReconnectDuringLongOperation) {
-  std::atomic<bool> reconnecting{false};
-  std::atomic<bool> dump_save_in_progress{false};
-  std::atomic<bool> replication_paused_for_dump{false};
-  mygramdb::server::replication_pause::Counter pause_counter;
-  mygramdb::server::OperationCoordinator coordinator;
-  auto dump_token = coordinator.TryAcquire(mygramdb::server::LongOperation::kDumpSave, "test");
-  ASSERT_TRUE(dump_token.has_value());
-
-  mygramdb::app::MysqlReconnectionHandler handler(nullptr, nullptr, &reconnecting, {}, &dump_save_in_progress,
-                                                  &replication_paused_for_dump, &pause_counter, &coordinator);
-  auto result = handler.Reconnect("127.0.0.2", 3307);
-
-  ASSERT_FALSE(result.has_value());
-  EXPECT_NE(result.error().message().find("DUMP SAVE"), std::string::npos);
-  EXPECT_FALSE(reconnecting.load());
-}
-#endif
 
 TEST_F(DumpDirectoryValidationTest, ReopenLogFileSwapsDefaultLoggerForRotatedFile) {
   std::filesystem::path log_path = base_dir_ / "mygramdb.log";

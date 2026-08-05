@@ -132,16 +132,6 @@ class RuntimeVariableManager {
   static bool IsMutable(const std::string& variable_name);
 
   /**
-   * @brief Set the internal MySQL reconnection callback
-   *
-   * Runtime endpoint mutation is intentionally unsupported. This callback is
-   * retained for in-process failover orchestration and is never invoked by a
-   * client-issued SET command.
-   */
-  void SetMysqlReconnectCallback(
-      std::function<mygram::utils::Expected<void, mygram::utils::Error>(const std::string& host, int port)> callback);
-
-  /**
    * @brief Set cache toggle callback
    * @param callback Function to call when cache.enabled changes
    */
@@ -180,9 +170,6 @@ class RuntimeVariableManager {
  private:
   RuntimeVariableManager() = default;
 
-  // Serializes in-process reconnection orchestration.
-  std::mutex mysql_reconnect_transaction_mutex_;
-
   // Thread-safe storage (readers-writer lock)
   mutable std::shared_mutex mutex_;
 
@@ -193,8 +180,6 @@ class RuntimeVariableManager {
   Config base_config_;
 
   // Callbacks and component references
-  std::function<mygram::utils::Expected<void, mygram::utils::Error>(const std::string& host, int port)>
-      mysql_reconnect_callback_;
   std::function<mygram::utils::Expected<void, mygram::utils::Error>(bool enabled)> cache_toggle_callback_;
   std::function<void(bool enabled, size_t capacity, size_t refill_rate)> rate_limiter_callback_;
   std::vector<std::function<void(int default_limit, int max_query_length)>> api_config_callbacks_;
@@ -213,16 +198,6 @@ class RuntimeVariableManager {
    * @brief Apply logging.format change
    */
   static mygram::utils::Expected<void, mygram::utils::Error> ApplyLoggingFormat(const std::string& value);
-
-  /**
-   * @brief Apply mysql.host change (triggers reconnection)
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyMysqlHost(const std::string& value);
-
-  /**
-   * @brief Apply mysql.port change (triggers reconnection)
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyMysqlPort(int value);
 
   /**
    * @brief Apply api.default_limit change

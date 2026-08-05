@@ -14,7 +14,6 @@
 #include <thread>
 #include <unordered_map>
 
-#include "app/mysql_reconnection_handler.h"
 #include "app/signal_manager.h"
 #include "cache/cache_manager.h"
 #include "config/runtime_variable_manager.h"
@@ -869,22 +868,6 @@ void ServerOrchestrator::RegisterRuntimeCallbacks() {
   if (variable_manager == nullptr) {
     return;
   }
-
-#ifdef USE_MYSQL
-  if (mysql_connection_ && binlog_reader_) {
-    auto required_tables = CollectRequiredTables(table_contexts_);
-    auto reconnection_handler = std::make_shared<MysqlReconnectionHandler>(
-        mysql_connection_.get(), binlog_reader_.get(), tcp_server_->GetMysqlReconnectingFlag(),
-        std::move(required_tables), tcp_server_->GetDumpSaveInProgressFlag(),
-        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetReplicationPauseCounter(),
-        tcp_server_->GetOperationCoordinator());
-
-    variable_manager->SetMysqlReconnectCallback(
-        [handler = reconnection_handler](const std::string& host, int port) { return handler->Reconnect(host, port); });
-
-    mygram::utils::StructuredLog().Event("mysql_reconnection_callback_registered").Info();
-  }
-#endif
 
   if (auto* rate_limiter = tcp_server_->GetRateLimiter(); rate_limiter != nullptr) {
     variable_manager->SetRateLimiterCallback([rate_limiter](bool enabled, size_t capacity, size_t refill_rate) {

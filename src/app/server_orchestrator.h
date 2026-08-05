@@ -108,8 +108,8 @@ Expected<void, mygram::utils::Error> StopServerComponentsBestEffort(const Server
  *
  * Applies only to the eager connection performed during server startup, to
  * absorb the two-phase-startup timing gap where MySQL reports healthy but is
- * not yet accepting new connections. Ongoing replication reconnection is
- * handled separately by BinlogReader / MysqlReconnectionHandler.
+ * not yet accepting new connections. Ongoing replication reconnection to the
+ * configured endpoint is handled separately by BinlogReader.
  */
 struct StartupConnectRetryPolicy {
   int max_attempts;      ///< Total number of connection attempts (clamped to >= 1)

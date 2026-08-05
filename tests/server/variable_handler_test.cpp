@@ -248,138 +248,34 @@ TEST_F(VariableHandlerTest, SetMultipleVariablesRollsBackOnFailure) {
   EXPECT_EQ(*after, *before);
 }
 
-// ============================================================================
-// SYNC Blocking Tests (MySQL connection changes)
-// ============================================================================
+// MySQL endpoints are a startup-only contract. Operation state must not change
+// the error or accidentally make either endpoint mutable.
+TEST_F(VariableHandlerTest, SetMysqlEndpointsAlwaysRequiresRestart) {
+  for (const auto& [name, value] :
+       std::vector<std::pair<std::string, std::string>>{{"mysql.host", "newhost"}, {"mysql.port", "3307"}}) {
+    query::Query query;
+    query.type = query::QueryType::SET;
+    query.variable_assignments.push_back({name, value});
 
-#ifdef USE_MYSQL
+    const std::string response = handler_->Handle(query, conn_ctx_);
 
-// Note: Full integration tests for SYNC blocking are in tests/integration/server/variable_handler_test.cpp
-// These unit tests verify the logic path when sync_manager is nullptr
-
-TEST_F(VariableHandlerTest, SetMysqlHostAllowedWhenSyncManagerNull) {
-  // sync_manager is nullptr, so no SYNC in progress
-  query::Query query;
-  query.type = query::QueryType::SET;
-  query.variable_assignments.push_back({"mysql.host", "newhost"});
-
-  std::string response = handler_->Handle(query, conn_ctx_);
-
-  // Should not contain SYNC blocking message
-  EXPECT_TRUE(response.find("SYNC is in progress") == std::string::npos) << "Response: " << response;
-  // May succeed or fail for other reasons (e.g., no reconnect callback), but not blocked by SYNC
-}
-
-TEST_F(VariableHandlerTest, SetMysqlPortAllowedWhenSyncManagerNull) {
-  // sync_manager is nullptr, so no SYNC in progress
-  query::Query query;
-  query.type = query::QueryType::SET;
-  query.variable_assignments.push_back({"mysql.port", "3307"});
-
-  std::string response = handler_->Handle(query, conn_ctx_);
-
-  // Should not contain SYNC blocking message
-  EXPECT_TRUE(response.find("SYNC is in progress") == std::string::npos) << "Response: " << response;
-  // May succeed or fail for other reasons, but not blocked by SYNC
-}
-
-TEST_F(VariableHandlerTest, SetMysqlVariableRejectedDuringDumpSave) {
-  dump_save_in_progress_.store(true);
-
-  query::Query query;
-  query.type = query::QueryType::SET;
-  query.variable_assignments.push_back({"mysql.host", "newhost"});
-
-  std::string response = handler_->Handle(query, conn_ctx_);
-
-  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
-  EXPECT_TRUE(response.find("DUMP SAVE is in progress") != std::string::npos) << "Response: " << response;
-}
-
-TEST_F(VariableHandlerTest, SetMysqlVariableRejectedDuringDumpLoad) {
-  dump_load_in_progress_.store(true);
-
-  query::Query query;
-  query.type = query::QueryType::SET;
-  query.variable_assignments.push_back({"mysql.host", "newhost"});
-
-  std::string response = handler_->Handle(query, conn_ctx_);
-
-  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
-  EXPECT_TRUE(response.find("DUMP LOAD is in progress") != std::string::npos) << "Response: " << response;
-}
-
-TEST_F(VariableHandlerTest, SetMysqlVariableRejectedWhileReplicationPausedForDump) {
-  replication_paused_for_dump_.store(true);
-
-  query::Query query;
-  query.type = query::QueryType::SET;
-  query.variable_assignments.push_back({"mysql.host", "newhost"});
-
-  std::string response = handler_->Handle(query, conn_ctx_);
-
-  EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
-  EXPECT_TRUE(response.find("replication is paused for DUMP/SNAPSHOT") != std::string::npos)
-      << "Response: " << response;
+    EXPECT_TRUE(response.find("ERROR") == 0) << response;
+    EXPECT_NE(response.find("immutable (requires restart)"), std::string::npos) << response;
+  }
 }
 
 TEST_F(VariableHandlerTest, SetNonMysqlVariablesAlwaysAllowed) {
-  // Even if sync_manager were set, non-MySQL variables should be allowed
   query::Query query;
   query.type = query::QueryType::SET;
   query.variable_assignments.push_back({"logging.level", "debug"});
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Should succeed
   EXPECT_TRUE(response.find("+OK") == 0) << "Response: " << response;
-  EXPECT_TRUE(response.find("SYNC is in progress") == std::string::npos) << "Response: " << response;
 }
 
 /**
- * @brief Prefix-match guard logic must catch every mysql.* variable name.
- *
- * Regression test for H-4: previously the SYNC guard only checked the exact
- * names "mysql.host" and "mysql.port", so changes to mysql.user and
- * mysql.password slipped through silently. The fix expands the guard to a
- * `rfind("mysql.", 0) == 0` prefix match. This test pins down the
- * prefix-match contract independently of the runtime SYNC state (which
- * requires a real MySQL connection to set true).
- */
-TEST(VariableHandlerPrefixMatchTest, MysqlPrefixCatchesAllSubvariables) {
-  // The same string predicate the handler uses.
-  auto is_mysql_variable = [](const std::string& name) { return name.rfind("mysql.", 0) == 0; };
-
-  EXPECT_TRUE(is_mysql_variable("mysql.host"));
-  EXPECT_TRUE(is_mysql_variable("mysql.port"));
-  EXPECT_TRUE(is_mysql_variable("mysql.user"));
-  EXPECT_TRUE(is_mysql_variable("mysql.password"));
-  EXPECT_TRUE(is_mysql_variable("mysql.database"));
-  EXPECT_TRUE(is_mysql_variable("mysql.something_new"));
-
-  // Non-mysql.* names must NOT be caught by the guard.
-  EXPECT_FALSE(is_mysql_variable("logging.level"));
-  EXPECT_FALSE(is_mysql_variable("cache.enabled"));
-  EXPECT_FALSE(is_mysql_variable("api.default_limit"));
-  // "mysql" without trailing dot must not match (would otherwise catch a
-  // hypothetical top-level scalar variable named just "mysql").
-  EXPECT_FALSE(is_mysql_variable("mysql"));
-  // Names containing "mysql" but not at the start must not match.
-  EXPECT_FALSE(is_mysql_variable("not_mysql.host"));
-}
-
-/**
- * @brief mysql.user and mysql.password reach SetVariable when no SYNC is
- *        active, proving the prefix guard is not over-blocking.
- *
- * Without an active SyncOperationManager, the prefix guard short-circuits
- * (because IsAnySyncing() returns false) and the immutability check inside
- * SetVariable fires. If the guard incorrectly blocked the call regardless
- * of sync state, the response would say "SYNC is in progress" and the
- * immutability error would never surface. Existing test
- * `SetVariableImmutable` already covers mysql.user; this test pins the
- * same guarantee for mysql.password to make the prefix-expansion contract
- * explicit at the unit-test surface.
+ * @brief mysql.password is also startup-only at the command surface.
  */
 TEST_F(VariableHandlerTest, SetMysqlPasswordReachesSetVariableWhenSyncIdle) {
   query::Query query;
@@ -388,12 +284,8 @@ TEST_F(VariableHandlerTest, SetMysqlPasswordReachesSetVariableWhenSyncIdle) {
 
   std::string response = handler_->Handle(query, conn_ctx_);
 
-  // Must NOT be the SYNC blocking message: that would mean the prefix guard
-  // fired when no sync was in progress (over-blocking).
-  EXPECT_TRUE(response.find("SYNC is in progress") == std::string::npos) << "Response: " << response;
-  // Should reach SetVariable, which rejects mysql.password as immutable.
   EXPECT_TRUE(response.find("ERROR") == 0) << "Response: " << response;
+  EXPECT_NE(response.find("immutable (requires restart)"), std::string::npos) << response;
 }
-#endif
 
 }  // namespace mygramdb::server

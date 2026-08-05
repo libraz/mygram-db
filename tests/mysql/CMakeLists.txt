@@ -15,21 +15,6 @@ gtest_discover_tests(gtid_encoder_test
   DISCOVERY_TIMEOUT 30
 )
 
-# RuntimeVariableManager MySQL reconnection callback tests (no MySQL dependency)
-add_executable(runtime_variable_manager_mysql_test
-  runtime_variable_manager_test.cpp
-)
-
-target_link_libraries(runtime_variable_manager_mysql_test
-  mygramdb_runtime_config
-  GTest::gtest_main
-)
-
-gtest_discover_tests(runtime_variable_manager_mysql_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-)
-
 # Binlog CRC32 verification tests (no MySQL dependency)
 add_executable(binlog_crc32_test
   binlog_crc32_test.cpp
