@@ -69,6 +69,7 @@ nlohmann::json ConfigToJson(const Config& config) {
       {"ssl_cert", config.mysql.ssl_cert},
       {"ssl_key", config.mysql.ssl_key},
       {"ssl_verify_server_cert", config.mysql.ssl_verify_server_cert},
+      {"ignored_ddl_prefixes", config.mysql.ignored_ddl_prefixes},
       {"datetime_timezone", config.mysql.datetime_timezone},
   };
 
@@ -196,6 +197,7 @@ nlohmann::json ConfigToJson(const Config& config) {
 
   // API configuration
   json["api"] = {
+      {"admin_token", config.api.admin_token.empty() ? "" : "***"},
       {"tcp",
        {
            {"bind", config.api.tcp.bind},
@@ -223,6 +225,8 @@ nlohmann::json ConfigToJson(const Config& config) {
            {"enable", config.api.http.enable},
            {"bind", config.api.http.bind},
            {"port", config.api.http.port},
+           {"max_connections", config.api.http.max_connections},
+           {"trusted_proxies", config.api.http.trusted_proxies},
            {"enable_cors", config.api.http.enable_cors},
            {"cors_allow_origin", config.api.http.cors_allow_origin},
            {"read_timeout_sec", config.api.http.read_timeout_sec},
@@ -479,7 +483,31 @@ std::optional<ConfigHelpInfo> ConfigSchemaExplorer::GetHelp(const std::string& p
     return std::nullopt;
   }
 
-  return ExtractHelpInfo(path, node.value());
+  auto info = ExtractHelpInfo(path, node.value());
+  if (path.empty()) {
+    return info;
+  }
+
+  // JSON Schema expresses requiredness on the parent object, not on the
+  // property itself. Traverse the path again to inspect the final property's
+  // parent (including array item schemas for paths such as tables.name).
+  nlohmann::json parent = schema_;
+  const auto parts = SplitPath(path);
+  for (size_t i = 0; i < parts.size(); ++i) {
+    if (parent.value("type", nlohmann::json{}) == "array" && parent.contains("items")) {
+      parent = parent["items"];
+    }
+    if (!parent.contains("properties") || !parent["properties"].contains(parts[i])) {
+      return std::nullopt;
+    }
+    if (i + 1 == parts.size() && parent.contains("required") && parent["required"].is_array()) {
+      info.required = std::any_of(
+          parent["required"].begin(), parent["required"].end(),
+          [&](const nlohmann::json& field) { return field.is_string() && field.get<std::string>() == parts[i]; });
+    }
+    parent = parent["properties"][parts[i]];
+  }
+  return info;
 }
 
 std::map<std::string, std::string> ConfigSchemaExplorer::ListPaths(const std::string& parent_path) const {
@@ -700,9 +728,6 @@ ConfigHelpInfo ConfigSchemaExplorer::ExtractHelpInfo(const std::string& path, co
     }
   }
 
-  // Note: required flag detection requires parent node analysis
-  // This is complex and may need to be handled by the caller
-
   return info;
 }
 
@@ -748,8 +773,14 @@ mygram::utils::Expected<std::string, mygram::utils::Error> FormatConfigForDispla
     config_json = node.value();
   }
 
-  // Mask sensitive fields
-  MaskSensitiveFieldsRecursive(config_json, path);
+  // A scalar CONFIG SHOW path has no child key for the recursive walker to
+  // inspect. Mask it directly before formatting so `CONFIG SHOW
+  // mysql.password` cannot reveal the raw value.
+  if (!path.empty() && IsSensitiveField(path)) {
+    config_json = "***";
+  } else {
+    MaskSensitiveFieldsRecursive(config_json, path);
+  }
 
   // Convert to YAML format
   return JsonToYaml(config_json);

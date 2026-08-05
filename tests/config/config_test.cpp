@@ -318,6 +318,8 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   f << "    max_pending_frame_bytes: 8388608\n";
   f << "  http:\n";
   f << "    enable: true\n";
+  f << "    max_connections: 123\n";
+  f << "    trusted_proxies: [127.0.0.1, '2001:db8::1']\n";
   f << "    max_body_bytes: 1048576\n";
   f << "  unix_socket:\n";
   f << "    path: /tmp/mygramdb-test.sock\n";
@@ -344,6 +346,8 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   EXPECT_EQ(config.api.tcp.max_pending_frames, 2048);
   EXPECT_EQ(config.api.tcp.max_pending_frame_bytes, 8388608);
   EXPECT_TRUE(config.api.http.enable);
+  EXPECT_EQ(config.api.http.max_connections, 123);
+  EXPECT_EQ(config.api.http.trusted_proxies, (std::vector<std::string>{"127.0.0.1", "2001:db8::1"}));
   EXPECT_EQ(config.api.http.max_body_bytes, 1048576);
   EXPECT_EQ(config.api.unix_socket.path, "/tmp/mygramdb-test.sock");
   EXPECT_EQ(config.api.max_query_length, 0);
@@ -375,6 +379,18 @@ TEST(ConfigTest, GlobalNgramSizeAlsoAppliesToImplicitKanjiNgramSize) {
   ASSERT_EQ(config_result->tables.size(), 1);
   EXPECT_EQ(config_result->tables[0].ngram_size, 3);
   EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 3);
+}
+
+TEST(ConfigTest, ImplicitGlobalNgramSizeMatchesSchemaDefault) {
+  json config_json = {
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  const auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+  ASSERT_EQ(config_result->tables.size(), 1U);
+  EXPECT_EQ(config_result->tables[0].ngram_size, 2);
+  EXPECT_EQ(config_result->tables[0].kanji_ngram_size, 2);
 }
 
 TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
@@ -432,6 +448,115 @@ TEST(ConfigTest, IPv6NetworkAllowCidrsAreAcceptedSemantically) {
   auto config_result = internal::ParseConfigFromJson(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
   EXPECT_EQ(config_result->network.allow_cidrs, (std::vector<std::string>{"::1/128", "2001:db8::/32"}));
+}
+
+TEST(ConfigTest, RejectsEnabledCorsWithoutExplicitOrigin) {
+  json config_json = {
+      {"api", {{"http", {{"enable", true}, {"enable_cors", true}}}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("api.http.cors_allow_origin"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsNonNumericTrustedProxyAddress) {
+  json config_json = {
+      {"api", {{"http", {{"trusted_proxies", json::array({"proxy.internal"})}}}}},
+  };
+
+  const auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("trusted_proxies"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsDisabledGtidReplicationMode) {
+  json config_json = {
+      {"mysql", {{"use_gtid", false}}},
+  };
+
+  const auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+}
+
+TEST(ConfigTest, RejectsPendingFrameLimitBelowValidQueryLimit) {
+  json config_json = {
+      {"api", {{"max_query_length", 65536}, {"tcp", {{"max_pending_frame_bytes", 4096}}}}},
+  };
+
+  const auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("max_pending_frame_bytes"), std::string::npos);
+}
+
+TEST(ConfigTest, AllowsPendingFrameLimitEqualToQueryLimit) {
+  json config_json = {
+      {"api", {{"max_query_length", 65536}, {"tcp", {{"max_pending_frame_bytes", 65536}}}}},
+  };
+
+  const auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+}
+
+TEST(ConfigTest, RejectsUniversalAclWithPublicTcpBind) {
+  json config_json = {
+      {"api", {{"tcp", {{"bind", "0.0.0.0"}}}, {"admin_token", "test-admin-token"}}},
+      {"network", {{"allow_cidrs", json::array({"0.0.0.0/0"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("network.allow_cidrs"), std::string::npos);
+  EXPECT_NE(config_result.error().message().find("api.tcp.bind"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsUniversalIpv6AclWithPublicHttpBind) {
+  json config_json = {
+      {"api", {{"http", {{"enable", true}, {"bind", "::"}}}}},
+      {"network", {{"allow_cidrs", json::array({"::/0"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("network.allow_cidrs"), std::string::npos);
+  EXPECT_NE(config_result.error().message().find("api.http.bind"), std::string::npos);
+}
+
+TEST(ConfigTest, AllowsUniversalAclForLoopbackBinds) {
+  json config_json = {
+      {"api", {{"tcp", {{"bind", "127.0.0.1"}}}, {"http", {{"enable", true}, {"bind", "::1"}}}}},
+      {"network", {{"allow_cidrs", json::array({"0.0.0.0/0", "::/0"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+}
+
+TEST(ConfigTest, AllowsPublicBindWithRestrictiveAcl) {
+  json config_json = {
+      {"api", {{"tcp", {{"bind", "0.0.0.0"}}}, {"admin_token", "test-admin-token"}}},
+      {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+}
+
+TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminToken) {
+  json config_json = {
+      {"api", {{"tcp", {{"bind", "0.0.0.0"}}}}},
+      {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
 }
 
 TEST(ConfigTest, TableDatabaseDefaultsToMysqlDatabaseAndCanOverride) {
@@ -811,6 +936,18 @@ TEST(ConfigTest, BinlogSchemaAllowsOnlyRequiredValues) {
   EXPECT_EQ(row_image["enum"][0].get<std::string>(), "FULL");
 }
 
+TEST(ConfigTest, NetworkAclSchemaDoesNotExcludeIpv6Cidrs) {
+  std::ifstream schema_file(SourcePath("src/config/config-schema.json"));
+  ASSERT_TRUE(schema_file.is_open());
+  const json schema = json::parse(schema_file);
+
+  const auto& cidr_items = schema["properties"]["network"]["properties"]["allow_cidrs"]["items"];
+  EXPECT_EQ(cidr_items["type"], "string");
+  EXPECT_FALSE(cidr_items.contains("pattern"));
+  EXPECT_NE(schema["properties"]["network"]["properties"]["allow_cidrs"]["description"].get<std::string>().find("IPv6"),
+            std::string::npos);
+}
+
 TEST(ConfigTest, CMakeRequiresIcuWhenEnabled) {
   std::ifstream f(SourcePath("CMakeLists.txt"));
   ASSERT_TRUE(f.is_open());
@@ -1185,6 +1322,26 @@ TEST(ConfigTest, MysqlSslConfiguration) {
   EXPECT_FALSE(config.mysql.ssl_verify_server_cert);
 }
 
+TEST(ConfigTest, MysqlIgnoredDdlPrefixesRejectDml) {
+  std::ofstream valid("ignored_ddl_prefixes.yaml");
+  valid << "mysql:\n  host: localhost\n  user: root\n  password: pass\n  database: testdb\n";
+  valid << "  ignored_ddl_prefixes: [\"CREATE OR REPLACE TABLE\", \"ANALYZE TABLE\"]\n";
+  valid << "tables:\n  - name: test\n    text_source:\n      column: text\n";
+  valid.close();
+  auto valid_result = LoadConfig("ignored_ddl_prefixes.yaml");
+  ASSERT_TRUE(valid_result) << valid_result.error().to_string();
+  EXPECT_EQ(valid_result->mysql.ignored_ddl_prefixes.size(), 2U);
+
+  std::ofstream invalid("ignored_ddl_prefixes_dml.yaml");
+  invalid << "mysql:\n  host: localhost\n  user: root\n  password: pass\n  database: testdb\n";
+  invalid << "  ignored_ddl_prefixes: [\"UPDATE posts\"]\n";
+  invalid << "tables:\n  - name: test\n    text_source:\n      column: text\n";
+  invalid.close();
+  auto invalid_result = LoadConfig("ignored_ddl_prefixes_dml.yaml");
+  ASSERT_FALSE(invalid_result);
+  EXPECT_EQ(invalid_result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
+}
+
 /**
  * @brief Test MySQL SSL/TLS with partial configuration
  */
@@ -1212,6 +1369,25 @@ TEST(ConfigTest, MysqlSslPartialConfiguration) {
   EXPECT_TRUE(config.mysql.ssl_cert.empty());
   EXPECT_TRUE(config.mysql.ssl_key.empty());
   EXPECT_TRUE(config.mysql.ssl_verify_server_cert);  // default
+}
+
+TEST(ConfigTest, MysqlTlsVerificationRequiresCaCertificate) {
+  std::ofstream f("ssl_missing_ca.yaml");
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "  ssl_enable: true\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: text\n";
+  f.close();
+
+  auto result = LoadConfig("ssl_missing_ca.yaml");
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
 }
 
 /**
@@ -1684,6 +1860,48 @@ TEST(ConfigTest, RuntimeRateLimitBoundsMatchSchema) {
   const auto& rate_limiting = schema["properties"]["api"]["properties"]["rate_limiting"]["properties"];
   EXPECT_EQ(rate_limiting["capacity"]["maximum"].get<int>(), ApiConfig::kMaxRateLimitCapacity);
   EXPECT_EQ(rate_limiting["refill_rate"]["maximum"].get<int>(), ApiConfig::kMaxRateLimitRefillRate);
+}
+
+TEST(ConfigTest, CustomSchemaCannotRelaxBuiltInRangeOrEnumConstraints) {
+  const json permissive_schema = {{"type", "object"}};
+  const json base_config = {
+      {"mysql", {{"user", "test"}, {"database", "test"}}},
+      {"tables", json::array({{{"name", "docs"}, {"text_source", {{"column", "body"}}}}})},
+  };
+
+  json invalid_port = base_config;
+  invalid_port["mysql"]["port"] = 70000;
+  auto port_result = ValidateConfigJson(invalid_port.dump(), permissive_schema.dump());
+  ASSERT_FALSE(port_result);
+  EXPECT_EQ(port_result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
+  EXPECT_NE(port_result.error().message().find("built-in schema"), std::string::npos);
+
+  json invalid_log_level = base_config;
+  invalid_log_level["logging"]["level"] = "trace";
+  auto enum_result = ValidateConfigJson(invalid_log_level.dump(), permissive_schema.dump());
+  ASSERT_FALSE(enum_result);
+  EXPECT_EQ(enum_result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
+  EXPECT_NE(enum_result.error().message().find("built-in schema"), std::string::npos);
+}
+
+TEST(ConfigTest, CustomSchemaAddsConstraintsAfterBuiltInValidation) {
+  const json config_json = {
+      {"mysql", {{"user", "test"}, {"database", "test"}}},
+      {"tables", json::array({{{"name", "docs"}, {"text_source", {{"column", "body"}}}}})},
+  };
+  const json custom_schema = {
+      {"type", "object"},
+      {"properties",
+       {{"mysql",
+         {{"type", "object"},
+          {"properties", {{"user", {{"const", "deployment-user"}}}}},
+          {"required", json::array({"user"})}}}}},
+  };
+
+  const auto result = ValidateConfigJson(config_json.dump(), custom_schema.dump());
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigValidationError);
+  EXPECT_NE(result.error().message().find("custom schema"), std::string::npos);
 }
 
 /**

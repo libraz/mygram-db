@@ -63,6 +63,31 @@ std::string CreateMinimalConfig(const std::string& extra_yaml = "") {
   return temp_path;
 }
 
+std::string CreateConfigWithoutMysqlIdentity() {
+  char temp_buffer[256];
+  std::snprintf(temp_buffer, sizeof(temp_buffer), "/tmp/mygramdb_env_identity_test_XXXXXX");
+  int fd = mkstemp(temp_buffer);
+  if (fd == -1) {
+    throw std::runtime_error("Failed to create temporary file");
+  }
+  close(fd);
+
+  std::string temp_path = std::string(temp_buffer) + ".yaml";
+  std::filesystem::rename(temp_buffer, temp_path);
+  std::ofstream output(temp_path);
+  output << "mysql:\n"
+         << "  host: \"127.0.0.1\"\n"
+         << "  password: \"test\"\n"
+         << "tables:\n"
+         << "  - name: \"test_table\"\n"
+         << "    text_source:\n"
+         << "      column: \"content\"\n"
+         << "replication:\n"
+         << "  enable: false\n";
+  output.close();
+  return temp_path;
+}
+
 /**
  * @brief RAII helper to set/unset an environment variable for a test scope
  */
@@ -187,6 +212,22 @@ TEST(ConfigSecurityTest, EnvVarOverridesMySQLDatabase) {
 
   ASSERT_TRUE(result.has_value()) << result.error().to_string();
   EXPECT_EQ(result->mysql.database, "env_database");
+}
+
+TEST(ConfigSecurityTest, MysqlUserAndDatabaseCanComeOnlyFromEnvironment) {
+  ScopedEnvVar user_env("MYGRAM_MYSQL_USER", "env_only_user");
+  ScopedEnvVar database_env("MYGRAM_MYSQL_DATABASE", "env_only_database");
+  const std::string path = CreateConfigWithoutMysqlIdentity();
+
+  auto runtime_result = LoadConfig(path);
+  ASSERT_TRUE(runtime_result) << runtime_result.error().to_string();
+  EXPECT_EQ(runtime_result->mysql.user, "env_only_user");
+  EXPECT_EQ(runtime_result->mysql.database, "env_only_database");
+
+  auto validation_result = LoadConfigForValidation(path);
+  EXPECT_FALSE(validation_result) << "Validation-only loads must inspect the file without process environment";
+
+  std::filesystem::remove(path);
 }
 
 TEST(ConfigSecurityTest, EnvVarOverridesMySQLPort) {

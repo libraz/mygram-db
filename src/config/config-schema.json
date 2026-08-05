@@ -10,7 +10,6 @@
     "mysql": {
       "type": "object",
       "description": "MySQL connection settings. Values can be overridden via environment variables: MYGRAM_MYSQL_USER, MYGRAM_MYSQL_PASSWORD, MYGRAM_MYSQL_HOST, MYGRAM_MYSQL_DATABASE (env vars take precedence over config file values)",
-      "required": ["user", "database"],
       "additionalProperties": false,
       "properties": {
         "host": {
@@ -42,7 +41,8 @@
         },
         "use_gtid": {
           "type": "boolean",
-          "description": "Enable GTID-based replication",
+          "description": "GTID-based replication is mandatory. This compatibility field must remain true.",
+          "const": true,
           "default": true
         },
         "binlog_format": {
@@ -106,6 +106,12 @@
           "type": "boolean",
           "description": "Verify server certificate during SSL/TLS connection",
           "default": true
+        },
+        "ignored_ddl_prefixes": {
+          "type": "array",
+          "description": "Explicit DDL-only QUERY_EVENT prefixes that may be skipped after review. DML prefixes are rejected.",
+          "items": { "type": "string", "minLength": 1 },
+          "default": []
         },
         "datetime_timezone": {
           "type": "string",
@@ -352,7 +358,7 @@
         "ngram_size": {
           "type": "integer",
           "description": "Legacy global n-gram size applied to tables without per-table ngram_size",
-          "default": 1,
+          "default": 2,
           "minimum": 1,
           "maximum": 10
         }
@@ -683,7 +689,7 @@
             },
             "max_pending_frame_bytes": {
               "type": "integer",
-              "description": "Per-connection hard cap on bytes held by completed request frames awaiting worker dispatch. Reads pause at 75% of this limit.",
+              "description": "Per-connection hard cap on bytes held by completed request frames awaiting worker dispatch. Must be at least api.max_query_length (capped by the reactor's 1 MiB frame limit) so a valid request is not rejected as SERVER_BUSY. Reads pause at 75% of this limit.",
               "default": 4194304,
               "minimum": 4096,
               "maximum": 1073741824
@@ -711,6 +717,19 @@
               "default": 8080,
               "minimum": 1,
               "maximum": 65535
+            },
+            "max_connections": {
+              "type": "integer",
+              "description": "Maximum number of concurrently admitted HTTP connections, including sockets waiting for workers.",
+              "default": 10000,
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "trusted_proxies": {
+              "type": "array",
+              "description": "Numeric reverse-proxy IP addresses whose X-Forwarded-For header may determine the client identity for ACL and rate limiting.",
+              "items": { "type": "string" },
+              "default": []
             },
             "enable_cors": {
               "type": "boolean",
@@ -803,6 +822,11 @@
               "default": ""
             }
           }
+        },
+        "admin_token": {
+          "type": "string",
+          "description": "Shared secret required by TCP clients before administrative commands. Set through MYGRAM_API_ADMIN_TOKEN in production.",
+          "default": ""
         }
       }
     },
@@ -830,10 +854,9 @@
       "properties": {
         "allow_cidrs": {
           "type": "array",
-          "description": "IPv4 CIDR allow list applied to TCP and HTTP. Empty or omitted denies all non-probe requests (fail-closed); use 0.0.0.0/0 to explicitly allow all.",
+          "description": "IPv4 or IPv6 CIDR allow list applied to TCP and HTTP. Empty or omitted denies all non-probe requests (fail-closed); use 0.0.0.0/0 or ::/0 to explicitly allow all.",
           "items": {
-            "type": "string",
-            "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+            "type": "string"
           }
         }
       }

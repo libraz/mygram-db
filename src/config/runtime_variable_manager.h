@@ -47,8 +47,6 @@ struct VariableInfo {
  * Mutable Variables (can be changed at runtime):
  * - logging.level (debug/info/warn/error)
  * - logging.format (json/text)
- * - mysql.host (triggers reconnection)
- * - mysql.port (triggers reconnection)
  * - api.default_limit (5-1000)
  * - api.max_query_length (>=0, 0 = unlimited)
  * - api.rate_limiting.enable (true/false)
@@ -59,7 +57,7 @@ struct VariableInfo {
  * - cache.ttl_seconds (>=0)
  *
  * Immutable Variables (require restart):
- * - mysql.user, mysql.password, mysql.database
+ * - mysql.host, mysql.port, mysql.user, mysql.password, mysql.database
  * - mysql.use_gtid, mysql.ssl_*
  * - tables[*].* (index structure)
  * - memory.* (allocator initialization)
@@ -98,7 +96,6 @@ class RuntimeVariableManager {
    *
    * Examples:
    * - SetVariable("logging.level", "debug")
-   * - SetVariable("mysql.host", "192.168.1.20")
    * - SetVariable("cache.enabled", "true")
    */
   mygram::utils::Expected<void, mygram::utils::Error> SetVariable(const std::string& variable_name,
@@ -135,11 +132,11 @@ class RuntimeVariableManager {
   static bool IsMutable(const std::string& variable_name);
 
   /**
-   * @brief Set MySQL reconnection callback
-   * @param callback Function to call when mysql.host or mysql.port changes
+   * @brief Set the internal MySQL reconnection callback
    *
-   * The callback should perform the reconnection and return success/error.
-   * It will be called from SetVariable() when mysql.host or mysql.port changes.
+   * Runtime endpoint mutation is intentionally unsupported. This callback is
+   * retained for in-process failover orchestration and is never invoked by a
+   * client-issued SET command.
    */
   void SetMysqlReconnectCallback(
       std::function<mygram::utils::Expected<void, mygram::utils::Error>(const std::string& host, int port)> callback);
@@ -183,8 +180,7 @@ class RuntimeVariableManager {
  private:
   RuntimeVariableManager() = default;
 
-  // Serializes the state-update -> reconnect-callback -> optional-rollback
-  // transaction across concurrent mysql.host/mysql.port SET operations.
+  // Serializes in-process reconnection orchestration.
   std::mutex mysql_reconnect_transaction_mutex_;
 
   // Thread-safe storage (readers-writer lock)

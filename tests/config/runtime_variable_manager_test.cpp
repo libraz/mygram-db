@@ -90,7 +90,7 @@ TEST(RuntimeVariableManagerTest, GetMutableVariables) {
   ASSERT_TRUE(format_result);
   EXPECT_EQ(*format_result, "json");
 
-  // MySQL variables
+  // MySQL variables are readable but immutable.
   auto host_result = manager->GetVariable("mysql.host");
   ASSERT_TRUE(host_result);
   EXPECT_EQ(*host_result, "127.0.0.1");
@@ -152,6 +152,8 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
   config.api.http.enable = true;
   config.api.http.bind = "0.0.0.0";
   config.api.http.port = 18080;
+  config.api.http.max_connections = 99;
+  config.api.http.trusted_proxies = {"127.0.0.1", "2001:db8::1"};
   config.api.http.enable_cors = true;
   config.api.http.cors_allow_origin = "https://example.test";
   config.api.http.read_timeout_sec = 7;
@@ -196,6 +198,8 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
       {"api.http.enable", "true"},
       {"api.http.bind", "0.0.0.0"},
       {"api.http.port", "18080"},
+      {"api.http.max_connections", "99"},
+      {"api.http.trusted_proxies", "127.0.0.1,2001:db8::1"},
       {"api.http.enable_cors", "true"},
       {"api.http.cors_allow_origin", "https://example.test"},
       {"api.http.read_timeout_sec", "7"},
@@ -317,8 +321,8 @@ TEST(RuntimeVariableManagerTest, IsMutable) {
   // Mutable variables
   EXPECT_TRUE(manager->IsMutable("logging.level"));
   EXPECT_TRUE(manager->IsMutable("logging.format"));
-  EXPECT_TRUE(manager->IsMutable("mysql.host"));
-  EXPECT_TRUE(manager->IsMutable("mysql.port"));
+  EXPECT_FALSE(manager->IsMutable("mysql.host"));
+  EXPECT_FALSE(manager->IsMutable("mysql.port"));
   EXPECT_TRUE(manager->IsMutable("api.default_limit"));
   EXPECT_TRUE(manager->IsMutable("api.max_query_length"));
   EXPECT_TRUE(manager->IsMutable("cache.enabled"));
@@ -356,7 +360,7 @@ TEST(RuntimeVariableManagerTest, GetAllVariablesNoPrefix) {
 
   ASSERT_NE(all_vars.find("mysql.host"), all_vars.end());
   EXPECT_EQ(all_vars["mysql.host"].value, "127.0.0.1");
-  EXPECT_TRUE(all_vars["mysql.host"].mutable_);
+  EXPECT_FALSE(all_vars["mysql.host"].mutable_);
 
   ASSERT_NE(all_vars.find("mysql.user"), all_vars.end());
   EXPECT_EQ(all_vars["mysql.user"].value, "test_user");
@@ -595,11 +599,8 @@ TEST(RuntimeVariableManagerTest, RuntimeSetEnforcesSchemaUpperBoundsAndConfigErr
   auto manager = std::move(*RuntimeVariableManager::Create(CreateTestConfig()));
 
   const std::vector<std::pair<std::string, std::string>> invalid = {
-      {"api.rate_limiting.capacity", "10001"},
-      {"api.rate_limiting.refill_rate", "1001"},
-      {"cache.min_query_cost_ms", "-0.1"},
-      {"cache.ttl_seconds", "-1"},
-      {"mysql.port", "65536"},
+      {"api.rate_limiting.capacity", "10001"}, {"api.rate_limiting.refill_rate", "1001"},
+      {"cache.min_query_cost_ms", "-0.1"},     {"cache.ttl_seconds", "-1"},
       {"api.default_limit", "1001"},
   };
   for (const auto& [name, value] : invalid) {
@@ -634,6 +635,22 @@ TEST(RuntimeVariableManagerTest, SetImmutableVariable) {
   EXPECT_FALSE(result4);
   EXPECT_EQ(static_cast<int>(result4.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
 
+  // MySQL endpoints are startup-only: accepting either would let a remote
+  // client redirect stored credentials to an attacker-controlled server.
+  bool reconnect_called = false;
+  manager->SetMysqlReconnectCallback([&](const std::string&, int) -> Expected<void, Error> {
+    reconnect_called = true;
+    return {};
+  });
+  for (const auto& [name, value] :
+       std::vector<std::pair<std::string, std::string>>{{"mysql.host", "192.0.2.10"}, {"mysql.port", "3307"}}) {
+    auto result = manager->SetVariable(name, value);
+    ASSERT_FALSE(result) << name;
+    EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument) << name;
+    EXPECT_NE(result.error().message().find("immutable"), std::string::npos) << name;
+  }
+  EXPECT_FALSE(reconnect_called);
+
   // Original values should remain unchanged
   auto user_result = manager->GetVariable("mysql.user");
   ASSERT_TRUE(user_result);
@@ -650,70 +667,6 @@ TEST(RuntimeVariableManagerTest, SetUnknownVariable) {
   auto result = manager->SetVariable("unknown.variable", "value");
   EXPECT_FALSE(result);
   EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
-}
-
-/**
- * @brief Test SetVariable for mysql.host (with callback)
- */
-TEST(RuntimeVariableManagerTest, SetMysqlHost) {
-  Config config = CreateTestConfig();
-  auto manager = std::move(*RuntimeVariableManager::Create(config));
-
-  bool callback_called = false;
-  std::string callback_host;
-  int callback_port = 0;
-
-  // Set reconnection callback
-  manager->SetMysqlReconnectCallback([&](const std::string& host, int port) -> Expected<void, Error> {
-    callback_called = true;
-    callback_host = host;
-    callback_port = port;
-    return {};
-  });
-
-  // Change host
-  callback_called = false;
-  auto result = manager->SetVariable("mysql.host", "192.168.1.100");
-  EXPECT_TRUE(result);
-  EXPECT_TRUE(callback_called);
-  EXPECT_EQ(callback_host, "192.168.1.100");
-  EXPECT_EQ(callback_port, 3306);  // Port should remain unchanged
-
-  auto get_result = manager->GetVariable("mysql.host");
-  ASSERT_TRUE(get_result);
-  EXPECT_EQ(*get_result, "192.168.1.100");
-}
-
-/**
- * @brief Test SetVariable for mysql.port (with callback)
- */
-TEST(RuntimeVariableManagerTest, SetMysqlPort) {
-  Config config = CreateTestConfig();
-  auto manager = std::move(*RuntimeVariableManager::Create(config));
-
-  bool callback_called = false;
-  std::string callback_host;
-  int callback_port = 0;
-
-  // Set reconnection callback
-  manager->SetMysqlReconnectCallback([&](const std::string& host, int port) -> Expected<void, Error> {
-    callback_called = true;
-    callback_host = host;
-    callback_port = port;
-    return {};
-  });
-
-  // Change port
-  callback_called = false;
-  auto result = manager->SetVariable("mysql.port", "3307");
-  EXPECT_TRUE(result);
-  EXPECT_TRUE(callback_called);
-  EXPECT_EQ(callback_host, "127.0.0.1");  // Host should remain unchanged
-  EXPECT_EQ(callback_port, 3307);
-
-  auto get_result = manager->GetVariable("mysql.port");
-  ASSERT_TRUE(get_result);
-  EXPECT_EQ(*get_result, "3307");
 }
 
 /**
@@ -872,29 +825,6 @@ TEST(RuntimeVariableManagerTest, ConcurrentReadWriteAccess) {
   int final_value = std::stoi(*final_result);
   EXPECT_GE(final_value, 50);
   EXPECT_LE(final_value, 100);
-}
-
-/**
- * @brief Test MySQL reconnection callback failure
- */
-TEST(RuntimeVariableManagerTest, MysqlReconnectCallbackFailure) {
-  Config config = CreateTestConfig();
-  auto manager = std::move(*RuntimeVariableManager::Create(config));
-
-  // Set callback that always fails
-  manager->SetMysqlReconnectCallback([](const std::string& /*host*/, int /*port*/) -> Expected<void, Error> {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, "Simulated connection failure"));
-  });
-
-  // Try to change host (should fail)
-  auto result = manager->SetVariable("mysql.host", "192.168.1.100");
-  EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kMySQLConnectionFailed));
-
-  // Original value should remain unchanged
-  auto get_result = manager->GetVariable("mysql.host");
-  ASSERT_TRUE(get_result);
-  EXPECT_EQ(*get_result, "127.0.0.1");
 }
 
 /**
@@ -1118,90 +1048,6 @@ TEST(RuntimeVariableManagerTest, SetCacheMinQueryCostZero) {
 }
 
 /**
- * @brief Test simultaneous MySQL host and port change
- */
-TEST(RuntimeVariableManagerTest, SetMysqlHostAndPortSimultaneous) {
-  Config config = CreateTestConfig();
-  auto manager = std::move(*RuntimeVariableManager::Create(config));
-
-  int callback_count = 0;
-  std::string last_host;
-  int last_port = 0;
-
-  // Set reconnection callback
-  manager->SetMysqlReconnectCallback([&](const std::string& host, int port) -> Expected<void, Error> {
-    callback_count++;
-    last_host = host;
-    last_port = port;
-    return {};
-  });
-
-  // Change host first
-  auto result1 = manager->SetVariable("mysql.host", "192.168.1.100");
-  EXPECT_TRUE(result1);
-  EXPECT_EQ(callback_count, 1);
-  EXPECT_EQ(last_host, "192.168.1.100");
-  EXPECT_EQ(last_port, 3306);  // Port unchanged
-
-  // Then change port (should trigger reconnection with new host and new port)
-  auto result2 = manager->SetVariable("mysql.port", "3307");
-  EXPECT_TRUE(result2);
-  EXPECT_EQ(callback_count, 2);
-  EXPECT_EQ(last_host, "192.168.1.100");  // Host from previous change
-  EXPECT_EQ(last_port, 3307);
-
-  // Verify both values updated
-  auto host_result = manager->GetVariable("mysql.host");
-  ASSERT_TRUE(host_result);
-  EXPECT_EQ(*host_result, "192.168.1.100");
-
-  auto port_result = manager->GetVariable("mysql.port");
-  ASSERT_TRUE(port_result);
-  EXPECT_EQ(*port_result, "3307");
-}
-
-TEST(RuntimeVariableManagerTest, ConcurrentMysqlEndpointChangesPublishCallbacksInCommittedOrder) {
-  Config config = CreateTestConfig();
-  auto manager = std::move(*RuntimeVariableManager::Create(config));
-
-  std::mutex callback_mutex;
-  std::condition_variable callback_entered;
-  bool first_callback_blocked = false;
-  bool release_first_callback = false;
-  std::vector<std::pair<std::string, int>> endpoints;
-  manager->SetMysqlReconnectCallback([&](const std::string& host, int port) -> Expected<void, Error> {
-    std::unique_lock lock(callback_mutex);
-    endpoints.emplace_back(host, port);
-    if (endpoints.size() == 1) {
-      first_callback_blocked = true;
-      callback_entered.notify_all();
-      callback_entered.wait(lock, [&] { return release_first_callback; });
-    }
-    return {};
-  });
-
-  std::thread host_setter([&] { EXPECT_TRUE(manager->SetVariable("mysql.host", "db.internal")); });
-  {
-    std::unique_lock lock(callback_mutex);
-    ASSERT_TRUE(callback_entered.wait_for(lock, std::chrono::seconds(2), [&] { return first_callback_blocked; }));
-  }
-  std::thread port_setter([&] { EXPECT_TRUE(manager->SetVariable("mysql.port", "3307")); });
-  {
-    std::lock_guard lock(callback_mutex);
-    release_first_callback = true;
-  }
-  callback_entered.notify_all();
-  host_setter.join();
-  port_setter.join();
-
-  ASSERT_EQ(endpoints.size(), 2U);
-  EXPECT_EQ(endpoints[0], std::make_pair(std::string("db.internal"), 3306));
-  EXPECT_EQ(endpoints[1], std::make_pair(std::string("db.internal"), 3307));
-  EXPECT_EQ(*manager->GetVariable("mysql.host"), "db.internal");
-  EXPECT_EQ(*manager->GetVariable("mysql.port"), "3307");
-}
-
-/**
  * @brief Test partial failure in rate limiting parameters
  */
 TEST(RuntimeVariableManagerTest, SetRateLimitingPartialFailure) {
@@ -1292,30 +1138,6 @@ TEST(RuntimeVariableManagerTest, ErrorMessageRangeValidation) {
 }
 
 /**
- * @brief Test idempotent variable setting (same value)
- */
-TEST(RuntimeVariableManagerTest, SetVariableIdempotent) {
-  Config config = CreateTestConfig();
-  auto manager = std::move(*RuntimeVariableManager::Create(config));
-
-  int callback_count = 0;
-  manager->SetMysqlReconnectCallback([&](const std::string& /*host*/, int /*port*/) -> Expected<void, Error> {
-    callback_count++;
-    return {};
-  });
-
-  // Set to same value as current
-  auto result = manager->SetVariable("mysql.host", "127.0.0.1");
-  EXPECT_TRUE(result);
-
-  // Implementation may or may not call callback for idempotent change
-  // Just verify it doesn't fail
-  auto get_result = manager->GetVariable("mysql.host");
-  ASSERT_TRUE(get_result);
-  EXPECT_EQ(*get_result, "127.0.0.1");
-}
-
-/**
  * @brief Test GetAllVariables returns mutable flag correctly
  */
 TEST(RuntimeVariableManagerTest, GetAllVariablesMutableFlag) {
@@ -1326,7 +1148,7 @@ TEST(RuntimeVariableManagerTest, GetAllVariablesMutableFlag) {
 
   // Mutable variables should have mutable_ = true
   EXPECT_TRUE(all_vars["logging.level"].mutable_);
-  EXPECT_TRUE(all_vars["mysql.host"].mutable_);
+  EXPECT_FALSE(all_vars["mysql.host"].mutable_);
   EXPECT_TRUE(all_vars["cache.enabled"].mutable_);
 
   // Immutable variables should have mutable_ = false
@@ -1522,11 +1344,6 @@ TEST(RuntimeVariableManagerTest, GetCurrentConfigReflectsMutableRuntimeValues) {
   Config config = CreateTestConfig();
   auto manager = std::move(*RuntimeVariableManager::Create(config));
 
-  manager->SetMysqlReconnectCallback(
-      [](const std::string&, int) -> Expected<void, Error> { return Expected<void, Error>{}; });
-
-  ASSERT_TRUE(manager->SetVariable("mysql.host", "192.0.2.10"));
-  ASSERT_TRUE(manager->SetVariable("mysql.port", "3307"));
   ASSERT_TRUE(manager->SetVariable("api.default_limit", "50"));
   ASSERT_TRUE(manager->SetVariable("api.max_query_length", "512"));
   ASSERT_TRUE(manager->SetVariable("api.rate_limiting.enable", "false"));
@@ -1535,8 +1352,8 @@ TEST(RuntimeVariableManagerTest, GetCurrentConfigReflectsMutableRuntimeValues) {
   ASSERT_TRUE(manager->SetVariable("logging.format", "text"));
 
   Config snapshot = manager->GetCurrentConfig();
-  EXPECT_EQ(snapshot.mysql.host, "192.0.2.10");
-  EXPECT_EQ(snapshot.mysql.port, 3307);
+  EXPECT_EQ(snapshot.mysql.host, "127.0.0.1");
+  EXPECT_EQ(snapshot.mysql.port, 3306);
   EXPECT_EQ(snapshot.api.default_limit, 50);
   EXPECT_EQ(snapshot.api.max_query_length, 512);
   EXPECT_FALSE(snapshot.api.rate_limiting.enable);

@@ -50,6 +50,12 @@ std::string VariablePathForSchemaLeaf(std::string path) {
   if (path == "network.allow_cidrs[]") {
     return "network.allow_cidrs";
   }
+  if (path == "api.http.trusted_proxies[]") {
+    return "api.http.trusted_proxies";
+  }
+  if (path == "mysql.ignored_ddl_prefixes[]") {
+    return "mysql.ignored_ddl_prefixes";
+  }
   size_t array_pos = 0;
   while ((array_pos = path.find("[]", array_pos)) != std::string::npos) {
     path.replace(array_pos, 2, "[0]");
@@ -77,6 +83,7 @@ std::string ConfigShowPath(std::string variable_path) {
 Config FullyPopulatedConfig() {
   Config config;
   config.mysql.password = "secret";
+  config.mysql.ignored_ddl_prefixes = {"ANALYZE TABLE"};
   config.network.allow_cidrs = {"127.0.0.1/32"};
 
   TableConfig column_table;
@@ -138,6 +145,24 @@ TEST_F(ConfigSchemaExplorerTest, GetHelpForSimpleProperty) {
   EXPECT_TRUE(help->maximum.has_value());
   EXPECT_EQ(help->maximum.value(), 65535);
   EXPECT_FALSE(help->description.empty());
+  EXPECT_FALSE(help->required);
+}
+
+TEST_F(ConfigSchemaExplorerTest, GetHelpReportsParentRequiredFields) {
+  auto mysql_user = explorer().GetHelp("mysql.user");
+  auto mysql_host = explorer().GetHelp("mysql.host");
+  auto table_name = explorer().GetHelp("tables.name");
+
+  ASSERT_TRUE(mysql_user);
+  ASSERT_TRUE(mysql_host);
+  ASSERT_TRUE(table_name);
+  // mysql.user may be supplied entirely through MYGRAM_MYSQL_USER, so the
+  // file schema must not mark it required. Array item fields such as a table
+  // name still inherit their parent's required contract.
+  EXPECT_FALSE(mysql_user->required);
+  EXPECT_FALSE(mysql_host->required);
+  EXPECT_TRUE(table_name->required);
+  EXPECT_NE(ConfigSchemaExplorer::FormatHelp(*table_name).find("Required: yes"), std::string::npos);
 }
 
 // Test GetHelp for nested property
@@ -428,6 +453,19 @@ TEST(ConfigHelpTest, ConfigToJsonMasksNonEmptyPassword) {
   // Other fields should be visible
   EXPECT_NE(output.find("db.example.com"), std::string::npos);
   EXPECT_NE(output.find("admin"), std::string::npos);
+}
+
+TEST(ConfigHelpTest, ConfigToJsonMasksAdminToken) {
+  Config config;
+  config.api.admin_token = "top-secret-admin-token";
+
+  auto result = FormatConfigForDisplay(config, "api");
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  const auto& output = *result;
+
+  EXPECT_NE(output.find("admin_token"), std::string::npos);
+  EXPECT_NE(output.find("***"), std::string::npos);
+  EXPECT_EQ(output.find("top-secret-admin-token"), std::string::npos);
 }
 
 /**

@@ -54,6 +54,7 @@ std::string CreateBindAddressConfig(const std::string& tcp_bind, const std::stri
       << "  enable: false\n"
       << "\n"
       << "api:\n"
+      << "  admin_token: \"test-admin-token\"\n"
       << "  tcp:\n";
 
   if (!tcp_bind.empty()) {
@@ -111,6 +112,8 @@ std::string CreateLegacyServerConfig(const std::string& host) {
       << "replication:\n"
       << "  enable: false\n"
       << "\n"
+      << "api:\n"
+      << "  admin_token: \"test-admin-token\"\n"
       << "server:\n"
       << "  host: \"" << host << "\"\n"
       << "  port: 11016\n";

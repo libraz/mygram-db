@@ -74,6 +74,8 @@ struct MysqlConfig {
   std::string user;
   std::string password;
   std::string database;
+  /// Kept in dump metadata for backward compatibility. GTID replication is
+  /// mandatory, and configuration loading rejects false.
   bool use_gtid = true;
   std::string binlog_format = "ROW";
   std::string binlog_row_image = "FULL";
@@ -87,6 +89,10 @@ struct MysqlConfig {
   std::string ssl_cert;
   std::string ssl_key;
   bool ssl_verify_server_cert = true;
+
+  // Explicit, DDL-only prefixes whose standalone QUERY_EVENT may advance the
+  // GTID when MygramDB does not otherwise recognize the statement.
+  std::vector<std::string> ignored_ddl_prefixes;
 
   // Timezone for interpreting DATETIME columns (default: UTC)
   // TIMESTAMP columns are always in UTC regardless of this setting
@@ -412,6 +418,13 @@ struct ApiConfig {
     bool enable = false;  // Disabled by default (set to true to enable HTTP API)
     std::string bind = "127.0.0.1";
     int port = defaults::kHttpPort;
+    /// Maximum number of concurrently admitted HTTP connections. This counts
+    /// both sockets currently being handled and sockets waiting for the HTTP
+    /// worker pool, so idle clients cannot exhaust file descriptors.
+    int max_connections = kDefaultMaxConnections;
+    /// Numeric IP addresses of reverse proxies allowed to supply
+    /// X-Forwarded-For. Headers from all other peers are ignored.
+    std::vector<std::string> trusted_proxies;
     bool enable_cors = false;
     std::string cors_allow_origin;
 
@@ -439,6 +452,11 @@ struct ApiConfig {
   struct {
     std::string path;  // Unix socket path (empty = disabled)
   } unix_socket;
+
+  /// Shared secret required by TCP clients before issuing administration
+  /// commands. Empty keeps loopback-only development deployments usable, but
+  /// public TCP binds are rejected at configuration load time.
+  std::string admin_token;
 
   /**
    * @brief Default LIMIT for SEARCH queries when not explicitly specified

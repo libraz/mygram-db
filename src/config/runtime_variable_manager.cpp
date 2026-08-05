@@ -49,8 +49,6 @@ std::string JoinStrings(const std::vector<std::string>& values, const std::strin
 static const std::set<std::string> kMutableVariables = {
     "logging.level",
     "logging.format",
-    "mysql.host",
-    "mysql.port",
     "api.default_limit",
     "api.max_query_length",
     "api.rate_limiting.enable",
@@ -72,8 +70,6 @@ void RuntimeVariableManager::InitializeRuntimeValues() {
   // Initialize only mutable variables
   runtime_values_["logging.level"] = base_config_.logging.level;
   runtime_values_["logging.format"] = base_config_.logging.format;
-  runtime_values_["mysql.host"] = base_config_.mysql.host;
-  runtime_values_["mysql.port"] = std::to_string(base_config_.mysql.port);
   runtime_values_["api.default_limit"] = std::to_string(base_config_.api.default_limit);
   runtime_values_["api.max_query_length"] = std::to_string(base_config_.api.max_query_length);
   runtime_values_["api.rate_limiting.enable"] = base_config_.api.rate_limiting.enable ? "true" : "false";
@@ -133,20 +129,6 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
       std::unique_lock lock(mutex_);
       runtime_values_[variable_name] = old_value;
       base_config_.logging.format = old_value;
-      return result;
-    }
-  } else if (variable_name == "mysql.host") {
-    auto result = ApplyMysqlHost(value);
-    if (!result) {
-      return result;
-    }
-  } else if (variable_name == "mysql.port") {
-    auto port = ParseInt(value);
-    if (!port) {
-      return MakeUnexpected(port.error());
-    }
-    auto result = ApplyMysqlPort(*port);
-    if (!result) {
       return result;
     }
   } else if (variable_name == "api.default_limit") {
@@ -767,6 +749,9 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   }
   if (variable_name == "api.http.port") {
     return std::to_string(base_config_.api.http.port);
+  }
+  if (variable_name == "api.http.max_connections") {
+    return std::to_string(base_config_.api.http.max_connections);
   }
   if (variable_name == "api.http.enable_cors") {
     return base_config_.api.http.enable_cors ? "true" : "false";

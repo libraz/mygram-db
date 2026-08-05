@@ -123,6 +123,8 @@
       "enable": false,
       "bind": "127.0.0.1",
       "port": 8080,
+      "max_connections": 10000,
+      "trusted_proxies": [],
       "enable_cors": false,
       "cors_allow_origin": ""
     },

@@ -103,7 +103,9 @@ TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesTableError) {
 
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesMysqlSslPathError) {
   // JSON with path traversal in mysql.ssl_ca
-  json config_json = {{"mysql", {{"ssl_ca", "/../../../etc/passwd"}}}};
+  // Supply the post-environment required values so parsing reaches the SSL
+  // path check instead of correctly stopping at the earlier semantic guard.
+  json config_json = {{"mysql", {{"user", "replicator"}, {"database", "testdb"}, {"ssl_ca", "/../../../etc/passwd"}}}};
 
   auto result = internal::ParseConfigFromJson(config_json);
   ASSERT_FALSE(result.has_value()) << "ParseConfigFromJson should fail for path traversal in ssl_ca";

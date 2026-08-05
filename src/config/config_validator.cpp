@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include "config/config.h"
 #include "config/config_internal.h"
@@ -179,31 +180,44 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigJson(const std
   try {
     json config_json = json::parse(config_json_str);
 
-    // Use embedded schema if no custom schema provided
-    std::string schema_to_use = schema_json_str.empty() ? std::string(kConfigSchemaJson) : schema_json_str;
+    auto validate_against = [&](std::string_view schema_text,
+                                const std::string& schema_name) -> mygram::utils::Expected<void, Error> {
+      json_validator validator;
+      validator.set_root_schema(json::parse(schema_text.begin(), schema_text.end()));
 
-    json schema_json = json::parse(schema_to_use);
+      try {
+        validator.validate(config_json);
+      } catch (const std::exception& e) {
+        std::stringstream err_msg;
+        err_msg << "Configuration validation failed (" << schema_name << "):\n";
+        err_msg << "  " << e.what() << "\n\n";
+        err_msg << "  Common configuration issues:\n";
+        err_msg << "    - Missing required fields (mysql.host, mysql.user, tables, etc.)\n";
+        err_msg << "    - Invalid data types (string instead of number, etc.)\n";
+        err_msg << "    - Invalid enum values (check allowed values)\n";
+        err_msg << "    - Table configuration missing 'name' or 'text_source'\n";
+        err_msg << "    - Invalid filter operators or types\n\n";
+        err_msg << "  Please check your configuration against the schema.\n";
+        err_msg << "  Example config: examples/config.yaml";
+        return MakeUnexpected(MakeError(ErrorCode::kConfigValidationError, err_msg.str()));
+      }
+      return {};
+    };
 
-    json_validator validator;
-    validator.set_root_schema(schema_json);
-
-    try {
-      validator.validate(config_json);
-      mygram::utils::StructuredLog().Event("config_validation_passed").Debug();
-    } catch (const std::exception& e) {
-      std::stringstream err_msg;
-      err_msg << "Configuration validation failed:\n";
-      err_msg << "  " << e.what() << "\n\n";
-      err_msg << "  Common configuration issues:\n";
-      err_msg << "    - Missing required fields (mysql.host, mysql.user, tables, etc.)\n";
-      err_msg << "    - Invalid data types (string instead of number, etc.)\n";
-      err_msg << "    - Invalid enum values (check allowed values)\n";
-      err_msg << "    - Table configuration missing 'name' or 'text_source'\n";
-      err_msg << "    - Invalid filter operators or types\n\n";
-      err_msg << "  Please check your configuration against the schema.\n";
-      err_msg << "  Example config: examples/config.yaml";
-      return MakeUnexpected(MakeError(ErrorCode::kConfigValidationError, err_msg.str()));
+    // A custom schema adds deployment-specific constraints; it must never
+    // replace the built-in safety contract and relax ranges, enums, required
+    // fields, or additionalProperties checks understood by the executable.
+    auto built_in_result = validate_against(kConfigSchemaJson, "built-in schema");
+    if (!built_in_result) {
+      return MakeUnexpected(built_in_result.error());
     }
+    if (!schema_json_str.empty()) {
+      auto custom_result = validate_against(schema_json_str, "custom schema");
+      if (!custom_result) {
+        return MakeUnexpected(custom_result.error());
+      }
+    }
+    mygram::utils::StructuredLog().Event("config_validation_passed").Debug();
   } catch (const json::parse_error& e) {
     return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, std::string("JSON parse error: ") + e.what()));
   }

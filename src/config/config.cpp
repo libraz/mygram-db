@@ -5,11 +5,14 @@
 
 #include "config/config.h"
 
+#include <arpa/inet.h>
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
+#include <cstring>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
@@ -60,6 +63,121 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateSQLIdentifier(const 
 
 bool IsRequiredFilterValueKey(const std::string& key) {
   return key == "value";
+}
+
+bool IsUniversalCidr(const std::string& cidr_string) {
+  const auto cidr = mygram::utils::CIDR::Parse(cidr_string);
+  return cidr.has_value() && cidr->prefix_length == 0;
+}
+
+bool IsLoopbackBind(const std::string& bind) {
+  if (bind == "localhost") {
+    return true;
+  }
+
+  struct in_addr ipv4 = {};
+  if (inet_pton(AF_INET, bind.c_str(), &ipv4) == 1) {
+    return (ntohl(ipv4.s_addr) & 0xFF000000U) == 0x7F000000U;
+  }
+
+  const auto scope_pos = bind.find('%');
+  const std::string ipv6_text = bind.substr(0, scope_pos);
+  struct in6_addr ipv6 = {};
+  if (inet_pton(AF_INET6, ipv6_text.c_str(), &ipv6) != 1) {
+    return false;
+  }
+  if (IN6_IS_ADDR_LOOPBACK(&ipv6) != 0) {
+    return true;
+  }
+
+  // Treat an IPv4-mapped loopback address as loopback as well. Dual-stack
+  // listeners often use this spelling when IPv4 peers share an IPv6 socket.
+  bool is_ipv4_mapped = true;
+  for (size_t i = 0; i < 10; ++i) {
+    is_ipv4_mapped = is_ipv4_mapped && ipv6.s6_addr[i] == 0;
+  }
+  is_ipv4_mapped = is_ipv4_mapped && ipv6.s6_addr[10] == 0xFF && ipv6.s6_addr[11] == 0xFF;
+  if (!is_ipv4_mapped) {
+    return false;
+  }
+
+  uint32_t mapped_ipv4 = 0;
+  std::memcpy(&mapped_ipv4, &ipv6.s6_addr[12], sizeof(mapped_ipv4));
+  return (ntohl(mapped_ipv4) & 0xFF000000U) == 0x7F000000U;
+}
+
+bool IsNumericIpAddress(const std::string& address) {
+  struct in_addr ipv4 = {};
+  if (inet_pton(AF_INET, address.c_str(), &ipv4) == 1) {
+    return true;
+  }
+  struct in6_addr ipv6 = {};
+  return inet_pton(AF_INET6, address.c_str(), &ipv6) == 1;
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateNetworkExposure(const Config& config) {
+  if (config.api.http.enable && config.api.http.enable_cors && config.api.http.cors_allow_origin.empty()) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kConfigInvalidValue,
+        "api.http.cors_allow_origin must be set when api.http.enable_cors is true; refusing to default to '*'"));
+  }
+
+  if (config.api.unix_socket.path.empty() && !IsLoopbackBind(config.api.tcp.bind) && config.api.admin_token.empty()) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                 "api.admin_token must be configured when api.tcp.bind is not loopback; use a Unix "
+                                 "socket for local-only administration"));
+  }
+
+  const bool allows_everywhere =
+      std::any_of(config.network.allow_cidrs.begin(), config.network.allow_cidrs.end(), IsUniversalCidr);
+  if (!allows_everywhere) {
+    return {};
+  }
+
+  const auto reject_public_bind =
+      [](const std::string& bind,
+         const std::string& field_name) -> mygram::utils::Expected<void, mygram::utils::Error> {
+    if (IsLoopbackBind(bind)) {
+      return {};
+    }
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                 "network.allow_cidrs must not allow every address when " + field_name + " binds to '" +
+                                     bind + "'. Bind the API to loopback or configure a restrictive CIDR allow list."));
+  };
+
+  // A configured Unix socket replaces the TCP listener, so its TCP bind is
+  // not externally reachable.
+  if (config.api.unix_socket.path.empty()) {
+    if (auto result = reject_public_bind(config.api.tcp.bind, "api.tcp.bind"); !result) {
+      return result;
+    }
+  }
+  if (config.api.http.enable) {
+    if (auto result = reject_public_bind(config.api.http.bind, "api.http.bind"); !result) {
+      return result;
+    }
+  }
+  return {};
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateReactorFrameLimits(const Config& config) {
+  // ReactorConnection permits one unframed request up to 1 MiB. A smaller
+  // completed-frame queue would turn a valid request into a queue-overflow
+  // close before QueryParser can apply api.max_query_length and return a
+  // normal client error. Keep the queue capable of holding one valid frame.
+  constexpr int64_t kReactorReadBufferLimit = mygram::constants::kBytesPerMegabyte;
+  const int64_t effective_query_limit = config.api.max_query_length > 0
+                                            ? std::min<int64_t>(config.api.max_query_length, kReactorReadBufferLimit)
+                                            : kReactorReadBufferLimit;
+  if (config.api.tcp.max_pending_frame_bytes < effective_query_limit) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kConfigInvalidValue,
+        "api.tcp.max_pending_frame_bytes must be at least the effective api.max_query_length (" +
+            std::to_string(effective_query_limit) + ") so one valid request can be queued"));
+  }
+  return {};
 }
 
 bool IsSupportedFilterType(const std::string& type) {
@@ -331,6 +449,10 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
                       ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_MYSQL_USER", config.user)
                       : json_value.value_or(config.user);
   }
+  if (config.user.empty()) {
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigMissingRequired,
+                                    "mysql.user is required in the configuration or MYGRAM_MYSQL_USER"));
+  }
 
   // Password: environment variable takes precedence (security best practice)
   {
@@ -358,6 +480,10 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
   }
   if (json_obj.contains("use_gtid")) {
     config.use_gtid = json_obj["use_gtid"].get<bool>();
+    if (!config.use_gtid) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                      "mysql.use_gtid=false is unsupported: MygramDB replication requires GTID"));
+    }
   }
   if (json_obj.contains("binlog_format")) {
     config.binlog_format = json_obj["binlog_format"].get<std::string>();
@@ -411,8 +537,35 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
   if (json_obj.contains("ssl_verify_server_cert")) {
     config.ssl_verify_server_cert = json_obj["ssl_verify_server_cert"].get<bool>();
   }
+  if (json_obj.contains("ignored_ddl_prefixes")) {
+    config.ignored_ddl_prefixes = json_obj["ignored_ddl_prefixes"].get<std::vector<std::string>>();
+    for (const auto& prefix : config.ignored_ddl_prefixes) {
+      const auto first = prefix.find_first_not_of(" \t\r\n");
+      const auto last = prefix.find_last_not_of(" \t\r\n");
+      if (first == std::string::npos || prefix.find(';') != std::string::npos) {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                        "mysql.ignored_ddl_prefixes entries must be non-empty, single statements"));
+      }
+      std::string verb = prefix.substr(first, last - first + 1);
+      const auto space = verb.find_first_of(" \t\r\n");
+      if (space != std::string::npos)
+        verb.resize(space);
+      std::transform(verb.begin(), verb.end(), verb.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+      if (verb != "ALTER" && verb != "ANALYZE" && verb != "CHECK" && verb != "CREATE" && verb != "DROP" &&
+          verb != "OPTIMIZE" && verb != "RENAME" && verb != "REPAIR" && verb != "TRUNCATE") {
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                        "mysql.ignored_ddl_prefixes permits DDL prefixes only"));
+      }
+    }
+  }
   if (json_obj.contains("datetime_timezone")) {
     config.datetime_timezone = json_obj["datetime_timezone"].get<std::string>();
+  }
+  if (config.ssl_enable && config.ssl_verify_server_cert && config.ssl_ca.empty()) {
+    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                    "mysql.ssl_ca is required when mysql.ssl_enable and "
+                                    "mysql.ssl_verify_server_cert are both true"));
   }
 
   return config;
@@ -1080,6 +1233,18 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       if (http.contains("port")) {
         config.api.http.port = http["port"].get<int>();
       }
+      if (http.contains("max_connections")) {
+        config.api.http.max_connections = http["max_connections"].get<int>();
+      }
+      if (http.contains("trusted_proxies")) {
+        config.api.http.trusted_proxies = http["trusted_proxies"].get<std::vector<std::string>>();
+        for (const auto& proxy : config.api.http.trusted_proxies) {
+          if (!IsNumericIpAddress(proxy)) {
+            return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
+                                            "api.http.trusted_proxies entries must be numeric IP addresses"));
+          }
+        }
+      }
       if (http.contains("enable_cors")) {
         config.api.http.enable_cors = http["enable_cors"].get<bool>();
       }
@@ -1126,6 +1291,15 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         }
       }
     }
+    {
+      std::optional<std::string> json_value;
+      if (api.contains("admin_token")) {
+        json_value = api["admin_token"].get<std::string>();
+      }
+      config.api.admin_token = apply_environment_overrides
+                                   ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_API_ADMIN_TOKEN")
+                                   : json_value.value_or(config.api.admin_token);
+    }
   }
 
   // Parse network config
@@ -1140,6 +1314,13 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         }
       }
     }
+  }
+
+  if (auto v = ValidateNetworkExposure(config); !v) {
+    return MakeUnexpected(v.error());
+  }
+  if (auto v = ValidateReactorFrameLimits(config); !v) {
+    return MakeUnexpected(v.error());
   }
 
   // Parse logging config
