@@ -1,162 +1,78 @@
-#!/bin/bash
-# Test script for daemon mode functionality
-#
-# This test verifies that MygramDB can run in daemon mode
+#!/usr/bin/env bash
+# Verify that the real server reaches the post-fork daemon process.
 
-set -e
+set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-MYGRAMDB_BIN="$PROJECT_ROOT/build/bin/mygramdb"
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 /path/to/mygramdb" >&2
+  exit 2
+fi
 
-# Color codes
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-NC='\033[0m'
-
-# Test config and log files
-TEST_CONFIG="/tmp/mygramdb_daemon_test_config.yaml"
-TEST_LOG="/tmp/mygramdb_daemon_test.log"
-TEST_PID_FILE="/tmp/mygramdb_daemon_test.pid"
-
-cleanup() {
-  echo "Cleaning up..."
-  rm -f "$TEST_CONFIG" "$TEST_LOG" "$TEST_PID_FILE"
-
-  # Kill any test mygramdb processes
-  pkill -f "mygramdb.*$TEST_CONFIG" 2>/dev/null || true
-  sleep 1
-}
-
-trap cleanup EXIT
-
-echo "Testing daemon mode functionality..."
-
-# Check if binary exists
-if [ ! -x "$MYGRAMDB_BIN" ]; then
-  echo -e "${RED}ERROR: mygramdb binary not found at $MYGRAMDB_BIN${NC}"
+MYGRAMDB_BIN=$1
+if [[ ! -x "$MYGRAMDB_BIN" ]]; then
+  echo "mygramdb binary is not executable: $MYGRAMDB_BIN" >&2
   exit 1
 fi
 
-# Create minimal test config with file logging
-cat > "$TEST_CONFIG" << 'EOF'
+TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/mygramdb-daemon-test.XXXXXX")
+TEST_CONFIG="$TEST_DIR/config.yaml"
+TEST_LOG="$TEST_DIR/mygramdb.log"
+TEST_DUMP_DIR="$TEST_DIR/dumps"
+TEST_PORT=$((20000 + $$ % 20000))
+
+cleanup() {
+  local pids
+  pids=$(pgrep -f "$MYGRAMDB_BIN.*$TEST_CONFIG" 2>/dev/null || true)
+  if [[ -n "$pids" ]]; then
+    # shellcheck disable=SC2086 # pgrep intentionally returns a whitespace-separated PID list.
+    kill $pids 2>/dev/null || true
+  fi
+  rm -rf "$TEST_DIR"
+}
+trap cleanup EXIT HUP INT TERM
+
+cat >"$TEST_CONFIG" <<EOF
 mysql:
   host: "127.0.0.1"
-  port: 3306
-  user: "test"
-  password: "test"
-  database: "test"
-  use_gtid: true
-
+  port: 1
+  user: "daemon_test"
+  password: "daemon_test"
+  database: "daemon_test"
+  connect_timeout_ms: 100
 tables:
-  - name: "test_table"
+  - name: "daemon_test"
     primary_key: "id"
     text_source:
       column: "content"
-
 replication:
   enable: false
+  auto_initial_snapshot: false
   server_id: 99999
-
 api:
   tcp:
     bind: "127.0.0.1"
-    port: 11099
-
+    port: $TEST_PORT
+dump:
+  dir: "$TEST_DUMP_DIR"
 logging:
   level: "info"
   format: "json"
-  file: "/tmp/mygramdb_daemon_test.log"
+  file: "$TEST_LOG"
 EOF
 
-echo "Test 1: Daemon mode with file logging..."
+"$MYGRAMDB_BIN" --daemon --config "$TEST_CONFIG"
 
-# Start in daemon mode
-$MYGRAMDB_BIN -d -c "$TEST_CONFIG" 2>&1 &
-DAEMON_PID=$!
-echo "$DAEMON_PID" > "$TEST_PID_FILE"
-
-# Wait a moment for daemon to start
-sleep 2
-
-# Check if log file was created
-if [ -f "$TEST_LOG" ]; then
-  echo -e "${GREEN}✓ PASS: Log file created${NC}"
-
-  # Check log content
-  if grep -q "Daemonizing process" "$TEST_LOG"; then
-    echo -e "${GREEN}✓ PASS: Daemon mode initiated${NC}"
-  else
-    echo -e "${YELLOW}⚠ WARNING: No daemonize message in log${NC}"
+for _ in {1..100}; do
+  DAEMON_PIDS=$(pgrep -f "$MYGRAMDB_BIN.*$TEST_CONFIG" 2>/dev/null || true)
+  if [[ -n "$DAEMON_PIDS" ]]; then
+    echo "daemon grandchild is running: $DAEMON_PIDS"
+    exit 0
   fi
-else
-  echo -e "${RED}✗ FAIL: Log file not created${NC}"
-  exit 1
+  sleep 0.05
+done
+
+echo "daemon grandchild was not observed after the launcher exited" >&2
+if [[ -f "$TEST_LOG" ]]; then
+  sed -n '1,120p' "$TEST_LOG" >&2
 fi
-
-# Check if process is still running (or exited cleanly)
-# Note: It might exit if MySQL is not available, which is expected
-if ps -p $DAEMON_PID > /dev/null 2>&1; then
-  echo -e "${GREEN}✓ PASS: Daemon process running${NC}"
-  kill $DAEMON_PID 2>/dev/null || true
-  sleep 1
-else
-  # Process exited - check if it was due to expected reasons (no MySQL)
-  if grep -qE "Failed to connect|Connection refused|MySQL" "$TEST_LOG" 2>/dev/null; then
-    echo -e "${GREEN}✓ PASS: Daemon started and exited cleanly (no MySQL server, expected)${NC}"
-  else
-    echo -e "${YELLOW}⚠ WARNING: Daemon exited (check log: $TEST_LOG)${NC}"
-  fi
-fi
-
-echo ""
-echo "Test 2: Daemon mode without file logging (should work but output lost)..."
-
-# Create config without file logging
-cat > "$TEST_CONFIG" << 'EOF'
-mysql:
-  host: "127.0.0.1"
-  port: 3306
-  user: "test"
-  password: "test"
-  database: "test"
-  use_gtid: true
-
-tables:
-  - name: "test_table"
-    primary_key: "id"
-    text_source:
-      column: "content"
-
-replication:
-  enable: false
-  server_id: 99999
-
-api:
-  tcp:
-    bind: "127.0.0.1"
-    port: 11099
-
-logging:
-  level: "info"
-  file: ""
-EOF
-
-rm -f "$TEST_LOG"
-
-# Start daemon without file logging
-$MYGRAMDB_BIN -d -c "$TEST_CONFIG" 2>&1 &
-DAEMON_PID2=$!
-
-sleep 2
-
-# Process should have started (and likely exited due to no MySQL)
-echo -e "${GREEN}✓ PASS: Daemon mode works without file logging${NC}"
-echo -e "${YELLOW}  Note: Logs go to /dev/null in daemon mode without file logging${NC}"
-
-kill $DAEMON_PID2 2>/dev/null || true
-
-echo ""
-echo -e "${GREEN}All daemon mode tests passed!${NC}"
-exit 0
+exit 1
