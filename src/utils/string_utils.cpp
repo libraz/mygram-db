@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <memory>
 
 #include "utils/constants.h"
 #include "utils/structured_log.h"
@@ -60,7 +61,6 @@ constexpr uint32_t kSurrogateStart = 0xD800;
 constexpr uint32_t kSurrogateEnd = 0xDFFF;
 
 // Minimum codepoint values for each UTF-8 encoding length (to detect overlong encoding)
-constexpr uint32_t kMinTwoByteCodepoint = 0x80;
 constexpr uint32_t kMinThreeByteCodepoint = 0x800;
 constexpr uint32_t kMinFourByteCodepoint = 0x10000;
 
@@ -75,6 +75,8 @@ void RecordTextNormalizationFailure(std::string_view reason, std::string_view st
       .Field("input_size", input_size)
       .Warn();
 }
+
+}  // namespace
 
 /**
  * @brief Try to parse a single UTF-8 character from a byte sequence.
@@ -161,12 +163,7 @@ int TryParseUtf8Char(const unsigned char* data, size_t available, uint32_t* out_
   return -1;
 }
 
-/**
- * @brief Check if a byte is a valid UTF-8 continuation byte (10xxxxxx)
- */
-inline bool IsValidContinuationByte(unsigned char byte) {
-  return (byte & kUtf8ContinuationCheckMask) == kUtf8ContinuationPattern;
-}
+namespace {
 
 /**
  * @brief Check if codepoint is in UTF-16 surrogate range (invalid in UTF-8)
@@ -197,25 +194,6 @@ constexpr double kMediumUnitThreshold = 10.0;
 // Stack buffer size for codepoint conversion in GenerateNgrams/GenerateHybridNgrams.
 // 128 codepoints covers most practical text inputs without heap allocation.
 constexpr size_t kStackBufSize = 128;
-
-/**
- * @brief Get number of bytes in UTF-8 character from first byte
- */
-int Utf8CharLength(unsigned char first_byte) {
-  if ((first_byte & kUtf8OneByteMask) == 0) {
-    return 1;  // 0xxxxxxx
-  }
-  if ((first_byte & kUtf8TwoByteMask) == kUtf8TwoBytePattern) {
-    return 2;  // 110xxxxx
-  }
-  if ((first_byte & kUtf8ThreeByteMask) == kUtf8ThreeBytePattern) {
-    return 3;  // 1110xxxx
-  }
-  if ((first_byte & kUtf8FourByteMask) == kUtf8FourBytePattern) {
-    return 4;  // 11110xxx
-  }
-  return 1;  // Invalid, treat as 1 byte
-}
 
 }  // namespace
 
@@ -306,6 +284,26 @@ void ResetTextNormalizationFailureCountForTesting() {
 }
 
 #ifdef USE_ICU
+struct CachedTransliterator {
+  explicit CachedTransliterator(const char* identifier) {
+    status = U_ZERO_ERROR;
+    instance.reset(icu::Transliterator::createInstance(identifier, UTRANS_FORWARD, status));
+  }
+
+  UErrorCode status = U_ZERO_ERROR;
+  std::unique_ptr<icu::Transliterator> instance;
+};
+
+CachedTransliterator& NarrowTransliterator() {
+  thread_local CachedTransliterator transliterator("Fullwidth-Halfwidth");
+  return transliterator;
+}
+
+CachedTransliterator& WideTransliterator() {
+  thread_local CachedTransliterator transliterator("Halfwidth-Fullwidth");
+  return transliterator;
+}
+
 std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view width, bool lower) {
   UErrorCode status = U_ZERO_ERROR;
 
@@ -334,25 +332,19 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
 
   // Width conversion
   if (width == "narrow") {
-    // Full-width to half-width conversion
-    status = U_ZERO_ERROR;
-    std::unique_ptr<icu::Transliterator> trans(
-        icu::Transliterator::createInstance("Fullwidth-Halfwidth", UTRANS_FORWARD, status));
-    if (U_FAILURE(status) || trans == nullptr) {
-      RecordTextNormalizationFailure("width_narrow", u_errorName(status), text.size());
+    auto& transliterator = NarrowTransliterator();
+    if (U_FAILURE(transliterator.status) || transliterator.instance == nullptr) {
+      RecordTextNormalizationFailure("width_narrow", u_errorName(transliterator.status), text.size());
       return {};
     }
-    trans->transliterate(ustr);
+    transliterator.instance->transliterate(ustr);
   } else if (width == "wide") {
-    // Half-width to full-width conversion
-    status = U_ZERO_ERROR;
-    std::unique_ptr<icu::Transliterator> trans(
-        icu::Transliterator::createInstance("Halfwidth-Fullwidth", UTRANS_FORWARD, status));
-    if (U_FAILURE(status) || trans == nullptr) {
-      RecordTextNormalizationFailure("width_wide", u_errorName(status), text.size());
+    auto& transliterator = WideTransliterator();
+    if (U_FAILURE(transliterator.status) || transliterator.instance == nullptr) {
+      RecordTextNormalizationFailure("width_wide", u_errorName(transliterator.status), text.size());
       return {};
     }
-    trans->transliterate(ustr);
+    transliterator.instance->transliterate(ustr);
   }
 
   // Lowercase conversion
@@ -662,24 +654,15 @@ std::vector<std::string> GenerateQueryNgrams(std::string_view normalized, int ng
 
 size_t CountCodePoints(std::string_view text) {
   size_t count = 0;
+  const auto* data = reinterpret_cast<const unsigned char*>(text.data());
   for (size_t i = 0; i < text.size();) {
-    auto byte = static_cast<unsigned char>(text[i]);
-    if (byte < 0x80) {
-      i += 1;
-    } else if ((byte & 0xC0) == 0x80) {
-      // Bare continuation byte — skip without counting
-      i += 1;
-      continue;
-    } else if ((byte & 0xE0) == 0xC0) {
-      i += 2;
-    } else if ((byte & 0xF0) == 0xE0) {
-      i += 3;
-    } else if ((byte & 0xF8) == 0xF0) {
-      i += 4;
-    } else {
-      i += 1;  // Invalid byte, skip without counting
+    uint32_t codepoint = 0;
+    const int char_length = TryParseUtf8Char(data + i, text.size() - i, &codepoint);
+    if (char_length < 0) {
+      ++i;
       continue;
     }
+    i += static_cast<size_t>(char_length);
     ++count;
   }
   return count;

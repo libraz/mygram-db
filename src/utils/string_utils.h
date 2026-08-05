@@ -31,6 +31,12 @@ namespace mygramdb::utils {
 std::string NormalizeText(std::string_view text, bool nfkc = true, std::string_view width = "narrow",
                           bool lower = false);
 
+/**
+ * @brief Decode one strictly valid UTF-8 character.
+ * @return Bytes consumed (1-4), or -1 for an invalid/truncated sequence.
+ */
+int TryParseUtf8Char(const unsigned char* data, size_t available, uint32_t* out_codepoint);
+
 /// @brief Number of text normalization failures observed in this process.
 uint64_t GetTextNormalizationFailureCount();
 
