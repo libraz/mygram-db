@@ -479,6 +479,15 @@ struct HandlerContext {
   // operations. Production wires this to SyncOperationManager ownership;
   // legacy/unit contexts may leave it null and use the existing flags.
   OperationCoordinator* operation_coordinator = nullptr;
+
+  /// Marks one table as containing a complete initial data generation. Both
+  /// SYNC and DUMP LOAD use this hook so readiness cannot remain stale after
+  /// data has been restored successfully.
+  std::function<void(const std::string&)> table_initialized_callback;
+
+  /// Returns whether every configured table has received an initial data
+  /// generation. TCP INFO exposes this alongside its overall readiness.
+  std::function<bool()> initial_data_ready_checker;
 };
 
 }  // namespace mygramdb::server

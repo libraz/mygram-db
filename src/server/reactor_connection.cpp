@@ -26,6 +26,7 @@
 
 #include "server/io_reactor.h"
 #include "server/request_dispatcher.h"
+#include "server/response_formatter.h"
 #include "server/server_stats.h"
 #include "server/thread_pool.h"
 #include "utils/fd_guard.h"
@@ -48,8 +49,7 @@ constexpr int kSendFlags = 0;
 #endif
 
 void BestEffortSendError(int fd, std::string_view message) {
-  std::string response = "ERROR ";
-  response.append(message);
+  std::string response = ResponseFormatter::FormatError(message);
   response.append(kResponseTerminator, kResponseTerminatorLen);
 
   size_t sent = 0;
@@ -406,7 +406,8 @@ bool ReactorConnection::CloseWithServerBusy() {
   // splice into a response being drained by another thread. EnqueueResponse
   // attempts the small error inline; if it has to arm writable interest, the
   // queued bytes remain ordered ahead of teardown.
-  (void)EnqueueResponse("ERROR SERVER_BUSY Server is too busy, please try again later");
+  (void)EnqueueResponse(ResponseFormatter::FormatError("SERVER_BUSY Server is too busy, please try again later",
+                                                       mygram::utils::ErrorCode::kServerBusy));
   closing_.store(true, std::memory_order_release);
   std::lock_guard<std::mutex> lock(write_mutex_);
   return !write_queue_.empty();

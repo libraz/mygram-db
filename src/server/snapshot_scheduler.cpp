@@ -342,7 +342,7 @@ void SnapshotScheduler::TakeSnapshot() {
       mygram::utils::StructuredLog()
           .Event("snapshot_save_failed")
           .Field(log_fields::kFieldFilepath, dump_path.string())
-          .Field(log_fields::kFieldError, result.error().message())
+          .FieldError(result.error())
           .Error();
       if (dump_progress_ != nullptr) {
         dump_progress_->Fail("Scheduled snapshot failed: " + result.error().message());

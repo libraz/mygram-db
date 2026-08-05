@@ -25,6 +25,7 @@
 #include "query/result_sorter.h"
 #include "server/handlers/search_handler.h"
 #include "server/log_field_names.h"
+#include "server/protocol_constants.h"
 #include "server/response_formatter.h"
 #include "server/search_pipeline.h"
 #include "server/statistics_service.h"
@@ -801,10 +802,7 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
 
   if (lifecycle_state_ == LifecycleState::kStarting || lifecycle_state_ == LifecycleState::kRunning) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
-    mygram::utils::StructuredLog()
-        .Event("http_server_start_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("http_server_start_failed").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -910,10 +908,7 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
     ++stop_completion_epoch_;
     lifecycle_cv_.notify_all();
     auto error = MakeError(ErrorCode::kNetworkBindFailed, "HTTP server did not become ready before timeout");
-    mygram::utils::StructuredLog()
-        .Event("http_server_ready_timeout")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("http_server_ready_timeout").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -1045,7 +1040,8 @@ std::optional<HttpServer::PreparedHttpRequest> HttpServer::PrepareHttpJsonReques
     return std::nullopt;
   }
   if (loading_ != nullptr && loading_->load()) {
-    SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+    SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later",
+              mygram::utils::ErrorCode::kServerLoading);
     return std::nullopt;
   }
 
@@ -1119,26 +1115,26 @@ bool HttpServer::ApplyHttpQueryOptions(const json& body, httplib::Response& res,
   }
   if (body.contains("filters")) {
     if (auto result = ParseFiltersFromJson(body["filters"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
+      SendError(res, kHttpBadRequest, result.error());
       return false;
     }
   }
 
   if (apply_ranked_options && body.contains("sort")) {
     if (auto result = ParseSortFromJson(body["sort"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
+      SendError(res, kHttpBadRequest, result.error());
       return false;
     }
   }
   if (apply_ranked_options && body.contains("highlight")) {
     if (auto result = ParseHighlightFromJson(body["highlight"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
+      SendError(res, kHttpBadRequest, result.error());
       return false;
     }
   }
   if (apply_ranked_options && body.contains("fuzzy")) {
     if (auto result = ParseFuzzyFromJson(body["fuzzy"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
+      SendError(res, kHttpBadRequest, result.error());
       return false;
     }
   }
@@ -1146,7 +1142,7 @@ bool HttpServer::ApplyHttpQueryOptions(const json& body, httplib::Response& res,
   query::QueryParser length_validator;
   length_validator.SetMaxQueryLength(max_query_length_.load(std::memory_order_acquire));
   if (auto result = length_validator.ValidateQueryLength(parsed_query); !result) {
-    SendError(res, kHttpBadRequest, result.error().message());
+    SendError(res, kHttpBadRequest, result.error());
     return false;
   }
   return true;
@@ -1219,7 +1215,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
   auto boolean_mode = ParseHttpQueryMode(body);
   if (!boolean_mode) {
-    SendError(res, kHttpBadRequest, boolean_mode.error().message());
+    SendError(res, kHttpBadRequest, boolean_mode.error());
     return std::nullopt;
   }
 
@@ -1237,7 +1233,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     parser.SetMaxQueryLength(max_query_length);
     auto base_query = parser.Parse(command + " " + request->table_key + " " + QuoteLiteralSearchExpression(query_text));
     if (!base_query) {
-      SendError(res, kHttpBadRequest, base_query.error().message());
+      SendError(res, kHttpBadRequest, base_query.error());
       return std::nullopt;
     }
     parsed_query = std::move(*base_query);
@@ -1293,7 +1289,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
 
   auto boolean_mode = ParseHttpQueryMode(body);
   if (!boolean_mode) {
-    SendError(res, kHttpBadRequest, boolean_mode.error().message());
+    SendError(res, kHttpBadRequest, boolean_mode.error());
     return std::nullopt;
   }
 
@@ -1350,7 +1346,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
     if (!pipeline_output) {
-      SendError(res, HttpStatusForQueryError(pipeline_output.error()), pipeline_output.error().to_string());
+      SendError(res, HttpStatusForQueryError(pipeline_output.error()), pipeline_output.error());
       return;
     }
 
@@ -1367,7 +1363,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     auto sorted_result =
         SortHttpResults(results, *query, *table_ctx, *pipeline_output, full_config_, params.primary_key_column);
     if (!sorted_result.has_value()) {
-      SendError(res, HttpStatusForQueryError(sorted_result.error()), sorted_result.error().message());
+      SendError(res, HttpStatusForQueryError(sorted_result.error()), sorted_result.error());
       return;
     }
     auto sorted_results = std::move(sorted_result.value());
@@ -1460,7 +1456,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
     if (!pipeline_output) {
-      SendError(res, HttpStatusForQueryError(pipeline_output.error()), pipeline_output.error().to_string());
+      SendError(res, HttpStatusForQueryError(pipeline_output.error()), pipeline_output.error());
       return;
     }
 
@@ -1502,7 +1498,7 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
     params.load_in_progress = [this]() { return loading_ != nullptr && loading_->load(std::memory_order_acquire); };
     auto facet_output = search_pipeline::ExecuteFacetPipeline(*query, params);
     if (!facet_output) {
-      SendError(res, HttpStatusForQueryError(facet_output.error()), facet_output.error().to_string());
+      SendError(res, HttpStatusForQueryError(facet_output.error()), facet_output.error());
       return;
     }
 
@@ -1517,6 +1513,7 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
     json response;
     response["column"] = query->facet_column;
     response["count"] = facets.size();
+    response["total_count"] = facet_output->total_values;
     response["facets"] = std::move(facets);
 
     SendJson(res, kHttpOk, response);
@@ -1536,7 +1533,8 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
   try {
     // Check if server is loading
     if (loading_ != nullptr && loading_->load()) {
-      SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+      SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later",
+                mygram::utils::ErrorCode::kServerLoading);
       return;
     }
 
@@ -1559,13 +1557,13 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 
     auto doc_id = current_doc_store->GetDocId(primary_key);
     if (!doc_id.has_value()) {
-      SendError(res, kHttpNotFound, "Document not found");
+      SendError(res, kHttpNotFound, "Document not found", mygram::utils::ErrorCode::kNotFound);
       return;
     }
 
     auto doc = current_doc_store->GetDocument(*doc_id);
     if (!doc) {
-      SendError(res, kHttpNotFound, "Document not found");
+      SendError(res, kHttpNotFound, "Document not found", mygram::utils::ErrorCode::kNotFound);
       return;
     }
 
@@ -1610,54 +1608,41 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     response["total_requests"] = srv_stats.total_requests;
     response["total_commands_processed"] = srv_stats.total_commands_processed;
 
-    // Aggregate memory and index statistics across all tables
-    size_t total_index_memory = 0;
-    size_t total_doc_memory = 0;
-    size_t total_documents = 0;
-    size_t total_terms = 0;
-    size_t total_postings = 0;
-    size_t total_delta_encoded = 0;
-    size_t total_roaring_bitmap = 0;
+    // INFO and /metrics share a bounded snapshot because memory accounting
+    // traverses retained document/index data and is intentionally expensive.
+    const auto aggregated_metrics = statistics_snapshot_cache_.Get(table_contexts_);
 
     json tables_obj;
     for (const auto& [table_name, ctx] : table_contexts_) {
-      std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
-      size_t index_mem = ctx->index->MemoryUsage();
-      size_t doc_mem = ctx->doc_store->MemoryUsage();
-      auto idx_stats = ctx->index->GetStatistics();
-
-      total_index_memory += index_mem;
-      total_doc_memory += doc_mem;
-      total_documents += ctx->doc_store->Size();
-      total_terms += idx_stats.total_terms;
-      total_postings += idx_stats.total_postings;
-      total_delta_encoded += idx_stats.delta_encoded_lists;
-      total_roaring_bitmap += idx_stats.roaring_bitmap_lists;
+      const auto metrics_iter = aggregated_metrics.tables.find(table_name);
+      if (metrics_iter == aggregated_metrics.tables.end()) {
+        continue;
+      }
+      const auto& table_metrics = metrics_iter->second;
 
       // Per-table stats
       json table_obj;
-      table_obj["documents"] = ctx->doc_store->Size();
-      table_obj["terms"] = idx_stats.total_terms;
-      table_obj["postings"] = idx_stats.total_postings;
+      table_obj["documents"] = table_metrics.documents;
+      table_obj["terms"] = table_metrics.terms;
+      table_obj["postings"] = table_metrics.postings;
       table_obj["ngram_size"] = ctx->config.ngram_size;
-      table_obj["memory_bytes"] = index_mem + doc_mem;
-      table_obj["memory_human"] = mygram::utils::FormatBytes(index_mem + doc_mem);
+      table_obj["memory_bytes"] = table_metrics.index_memory + table_metrics.document_memory;
+      table_obj["memory_human"] =
+          mygram::utils::FormatBytes(table_metrics.index_memory + table_metrics.document_memory);
       tables_obj[table_name] = table_obj;
     }
 
-    size_t total_memory = total_index_memory + total_doc_memory;
-
     // Update memory usage on the effective stats instance
-    effective_stats.UpdateMemoryUsage(total_memory);
+    StatisticsService::UpdateServerStatistics(effective_stats, aggregated_metrics);
 
     json memory_obj;
-    memory_obj["used_memory_bytes"] = total_memory;
-    memory_obj["used_memory_human"] = mygram::utils::FormatBytes(total_memory);
+    memory_obj["used_memory_bytes"] = aggregated_metrics.total_memory;
+    memory_obj["used_memory_human"] = mygram::utils::FormatBytes(aggregated_metrics.total_memory);
     const auto peak_memory = effective_stats.GetPeakMemoryUsage();
     memory_obj["peak_memory_bytes"] = peak_memory;
     memory_obj["peak_memory_human"] = mygram::utils::FormatBytes(peak_memory);
-    memory_obj["used_memory_index"] = mygram::utils::FormatBytes(total_index_memory);
-    memory_obj["used_memory_documents"] = mygram::utils::FormatBytes(total_doc_memory);
+    memory_obj["used_memory_index"] = mygram::utils::FormatBytes(aggregated_metrics.total_index_memory);
+    memory_obj["used_memory_documents"] = mygram::utils::FormatBytes(aggregated_metrics.total_doc_memory);
 
     // System memory information
     auto sys_info = mygram::utils::GetSystemMemoryInfo();
@@ -1690,14 +1675,15 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
 
     // Aggregated index statistics
     json index_obj;
-    index_obj["total_documents"] = total_documents;
-    index_obj["total_terms"] = total_terms;
-    index_obj["total_postings"] = total_postings;
-    if (total_terms > 0) {
-      index_obj["avg_postings_per_term"] = static_cast<double>(total_postings) / static_cast<double>(total_terms);
+    index_obj["total_documents"] = aggregated_metrics.total_documents;
+    index_obj["total_terms"] = aggregated_metrics.total_terms;
+    index_obj["total_postings"] = aggregated_metrics.total_postings;
+    if (aggregated_metrics.total_terms > 0) {
+      index_obj["avg_postings_per_term"] =
+          static_cast<double>(aggregated_metrics.total_postings) / static_cast<double>(aggregated_metrics.total_terms);
     }
-    index_obj["delta_encoded_lists"] = total_delta_encoded;
-    index_obj["roaring_bitmap_lists"] = total_roaring_bitmap;
+    index_obj["delta_encoded_lists"] = aggregated_metrics.total_delta_encoded;
+    index_obj["roaring_bitmap_lists"] = aggregated_metrics.total_roaring_bitmap;
     response["index"] = index_obj;
 
     // Per-table breakdown
@@ -1719,6 +1705,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["memory_bytes"] = cache_stats.current_memory_bytes;
       cache_obj["memory_human"] = mygram::utils::FormatBytes(cache_stats.current_memory_bytes);
       cache_obj["invalidation_index_memory_bytes"] = cache_stats.invalidation_index_memory_bytes;
+      cache_obj["invalidation_queue_memory_bytes"] = cache_stats.invalidation_queue_memory_bytes;
       cache_obj["accounted_memory_bytes"] = cache_stats.accounted_memory_bytes;
       cache_obj["accounted_memory_human"] = mygram::utils::FormatBytes(cache_stats.accounted_memory_bytes);
       cache_obj["evictions"] = cache_stats.evictions;
@@ -2102,7 +2089,6 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
   RecordCommand(query::QueryType::OPTIMIZE);
   const std::string result = optimize_callback_(table);
   constexpr std::string_view kOkPrefix = "OK ";
-  constexpr std::string_view kErrorPrefix = "ERROR ";
   if (result.rfind(kOkPrefix, 0) == 0) {
     json response;
     response["status"] = "ok";
@@ -2111,8 +2097,13 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
     return;
   }
 
-  const std::string message = result.rfind(kErrorPrefix, 0) == 0 ? result.substr(kErrorPrefix.size()) : result;
-  SendError(res, kHttpServiceUnavailable, message);
+  if (const auto error_frame = protocol::ParseErrorFrame(result); error_frame.has_value()) {
+    const auto code = error_frame->code.has_value() ? static_cast<mygram::utils::ErrorCode>(*error_frame->code)
+                                                    : mygram::utils::ErrorCode::kUnknown;
+    SendError(res, kHttpServiceUnavailable, std::string(error_frame->message), code);
+    return;
+  }
+  SendError(res, kHttpServiceUnavailable, result);
 }
 
 void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Response& res) {
@@ -2122,7 +2113,7 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
     ServerStats& effective_stats = GetEffectiveStats();
 
     // Aggregate metrics
-    auto aggregated_metrics = StatisticsService::AggregateMetrics(table_contexts_);
+    auto aggregated_metrics = statistics_snapshot_cache_.Get(table_contexts_);
 
     // Update server statistics
     StatisticsService::UpdateServerStatistics(effective_stats, aggregated_metrics);
@@ -2147,10 +2138,16 @@ void HttpServer::SendJson(httplib::Response& res, int status_code, const nlohman
   res.set_content(body.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace), "application/json");
 }
 
-void HttpServer::SendError(httplib::Response& res, int status_code, const std::string& message) {
+void HttpServer::SendError(httplib::Response& res, int status_code, const std::string& message,
+                           mygram::utils::ErrorCode code) {
   json error_obj;
   error_obj["error"] = message;
+  error_obj["error_code"] = static_cast<std::uint16_t>(code);
   SendJson(res, status_code, error_obj);
+}
+
+void HttpServer::SendError(httplib::Response& res, int status_code, const mygram::utils::Error& error) {
+  SendError(res, status_code, error.message(), error.code());
 }
 
 }  // namespace mygramdb::server

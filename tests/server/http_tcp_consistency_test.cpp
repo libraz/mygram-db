@@ -27,6 +27,7 @@
 #include "client/mygramclient_c.h"
 #include "config/config.h"
 #include "server/http_server.h"
+#include "server/response_formatter.h"
 #include "server/tcp_server.h"
 #include "support/network_test_utils.h"
 #include "tcp_server_test_helpers.h"
@@ -277,6 +278,23 @@ TEST_F(HttpTcpConsistencyTest, HttpOptimizeUsesSharedMaintenanceHandler) {
   EXPECT_NE(one_body["result"].get<std::string>().find("OPTIMIZED tables=1"), std::string::npos);
 
   EXPECT_EQ(http_server_->GetStats().GetCommandCount(query::QueryType::OPTIMIZE), 2U);
+}
+
+TEST_F(HttpTcpConsistencyTest, HttpOptimizePreservesCodedCallbackError) {
+  http_server_->SetOptimizeCallback([](const std::string&) {
+    return ResponseFormatter::FormatError(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "Optimization failed"));
+  });
+
+  httplib::Client client("127.0.0.1", http_port_);
+  httplib::Headers headers{{"Authorization", "Bearer maintenance-secret"}};
+  auto response = client.Post("/optimize", headers, "{}", "application/json");
+
+  ASSERT_TRUE(response);
+  ASSERT_EQ(response->status, 503);
+  const auto body = json::parse(response->body);
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kInternalError));
+  EXPECT_EQ(body["error"], "Optimization failed");
 }
 
 TEST_F(HttpTcpConsistencyTest, HttpOptimizeValidatesPayloadAndAdminToken) {
@@ -670,7 +688,7 @@ TEST_F(HttpTcpConsistencyTest, FacetMatches) {
 
 TEST_F(HttpTcpConsistencyTest, FacetOffsetAndLimitMatch) {
   const auto tcp_response = SendTcpRequest(tcp_port_, "FACET app.articles category OFFSET 1 LIMIT 1");
-  ASSERT_EQ(tcp_response.rfind("OK FACET", 0), 0U) << tcp_response;
+  ASSERT_EQ(tcp_response.rfind("OK FACET 1 3", 0), 0U) << tcp_response;
   const auto tcp_facets = ParseTcpFacetValues(tcp_response);
 
   httplib::Client http_client("http://127.0.0.1:" + std::to_string(http_port_));
@@ -686,6 +704,8 @@ TEST_F(HttpTcpConsistencyTest, FacetOffsetAndLimitMatch) {
   }
   EXPECT_EQ(tcp_facets, http_facets);
   EXPECT_EQ(http_facets.size(), 1U);
+  EXPECT_EQ(body["count"], 1U);
+  EXPECT_EQ(body["total_count"], 3U);
 }
 
 TEST_F(HttpTcpConsistencyTest, HttpFacetUsesConfiguredDefaultLimit) {

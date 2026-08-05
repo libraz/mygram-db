@@ -32,7 +32,7 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   // Get table context
   auto table_ctx = GetTableContext(query.table);
   if (!table_ctx) {
-    return ResponseFormatter::FormatError(table_ctx.error().message());
+    return ResponseFormatter::FormatError(table_ctx.error());
   }
   auto* current_doc_store = table_ctx->doc_store;
   search_pipeline::FacetPipelineParams params;
@@ -71,11 +71,11 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     query::DebugInfo debug_info;
     debug_info.query_time_ms = facet_output->query_time_ms;
     debug_info.total_candidates = facet_output->matched_documents;
-    debug_info.final_results = display_counts.size();
-    return ResponseFormatter::FormatFacetResponse(display_counts, &debug_info);
+    debug_info.final_results = facet_output->total_values;
+    return ResponseFormatter::FormatFacetResponse(display_counts, facet_output->total_values, &debug_info);
   }
 
-  return ResponseFormatter::FormatFacetResponse(display_counts);
+  return ResponseFormatter::FormatFacetResponse(display_counts, facet_output->total_values);
 }
 
 }  // namespace mygramdb::server

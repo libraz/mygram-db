@@ -21,7 +21,7 @@ std::string DocumentHandler::Handle(const query::Query& query, ConnectionContext
   // Get table context
   auto table_ctx = GetTableContext(query.table);
   if (!table_ctx) {
-    return ResponseFormatter::FormatError(table_ctx.error().message());
+    return ResponseFormatter::FormatError(table_ctx.error());
   }
 
   auto* current_doc_store = table_ctx->doc_store;
@@ -33,7 +33,7 @@ std::string DocumentHandler::Handle(const query::Query& query, ConnectionContext
 
   auto doc_id_opt = current_doc_store->GetDocId(query.primary_key);
   if (!doc_id_opt) {
-    return ResponseFormatter::FormatError("Document not found");
+    return ResponseFormatter::FormatError("Document not found", mygram::utils::ErrorCode::kNotFound);
   }
 
   auto doc = current_doc_store->GetDocument(doc_id_opt.value());

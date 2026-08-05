@@ -86,6 +86,45 @@ void WriteEscapedGetStringValue(std::ostream& oss, std::string_view value) {
   oss << '"';
 }
 
+void AppendEscapedGetStringValue(std::string& output, std::string_view value) {
+  if (!NeedsGetValueQuoting(value)) {
+    output.append(value);
+    return;
+  }
+
+  static constexpr std::string_view kHexDigits = "0123456789ABCDEF";
+  output += '"';
+  for (unsigned char ch : value) {
+    switch (ch) {
+      case '\\':
+        output += "\\\\";
+        break;
+      case '"':
+        output += "\\\"";
+        break;
+      case '\r':
+        output += "\\r";
+        break;
+      case '\n':
+        output += "\\n";
+        break;
+      case '\t':
+        output += "\\t";
+        break;
+      default:
+        if (std::iscntrl(ch) != 0) {
+          output += "\\x";
+          output += kHexDigits[ch >> 4U];
+          output += kHexDigits[ch & 0x0FU];
+        } else {
+          output += static_cast<char>(ch);
+        }
+        break;
+    }
+  }
+  output += '"';
+}
+
 std::string EscapePrometheusLabelValue(std::string_view value) {
   std::string escaped;
   escaped.reserve(value.size());
@@ -267,9 +306,7 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   for (const auto& primary_key : primary_keys) {
     if (primary_key.has_value()) {
       response += ' ';
-      std::ostringstream escaped_primary_key;
-      WriteEscapedGetStringValue(escaped_primary_key, *primary_key);
-      response += escaped_primary_key.str();
+      AppendEscapedGetStringValue(response, *primary_key);
     } else {
       // Doc ID exists in index but not in document store - data inconsistency
       missing_count++;
@@ -323,9 +360,7 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
       continue;  // Skip missing documents
     }
     response += "\r\n";
-    std::ostringstream escaped_primary_key;
-    WriteEscapedGetStringValue(escaped_primary_key, *primary_keys[i]);
-    response += escaped_primary_key.str();
+    AppendEscapedGetStringValue(response, *primary_keys[i]);
     response += '\t';
     if (i < snippets.size()) {
       response += SanitizeDelimitedFieldForResponse(snippets[i]);
@@ -371,10 +406,12 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
 }
 
 std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<std::string, uint64_t>>& value_counts,
-                                                   const query::DebugInfo* debug_info) {
+                                                   size_t total_values, const query::DebugInfo* debug_info) {
   std::string response;
   response.append(protocol::kOkFacetWithSpacePrefix);
   response += std::to_string(value_counts.size());
+  response += ' ';
+  response += std::to_string(total_values);
   response += "\r\n";
 
   for (const auto& [value, count] : value_counts) {
@@ -396,7 +433,7 @@ std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<s
 
 std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Document>& doc) {
   if (!doc) {
-    return FormatError("Document not found");
+    return FormatError("Document not found", mygram::utils::ErrorCode::kNotFound);
   }
 
   std::ostringstream oss;
@@ -438,7 +475,8 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
 std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
                                                   const std::unordered_map<std::string, TableContext*>& table_contexts,
                                                   mysql::IBinlogReader* binlog_reader,
-                                                  cache::CacheManager* cache_manager) {
+                                                  cache::CacheManager* cache_manager, bool data_initialized,
+                                                  bool ready) {
   std::ostringstream oss;
   oss << protocol::kOkInfoPrefix << "\r\n\r\n";
 
@@ -446,6 +484,8 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
   oss << "# Server\r\n";
   oss << "version: " << ::mygramdb::Version::FullString() << "\r\n";
   oss << "uptime_seconds: " << stats.GetUptimeSeconds() << "\r\n";
+  oss << "data_initialized: " << (data_initialized ? "true" : "false") << "\r\n";
+  oss << "readiness: " << (ready ? "ready" : "not_ready") << "\r\n";
   oss << "\r\n";
 
   // Stats - Command counters
@@ -453,6 +493,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
   oss << "total_commands_processed: " << stats.GetTotalCommands() << "\r\n";
   oss << "total_connections_received: " << stats.GetStatistics().total_connections_received << "\r\n";
   oss << "total_requests: " << stats.GetTotalRequests() << "\r\n";
+  oss << "text_normalization_failures: " << mygram::utils::GetTextNormalizationFailureCount() << "\r\n";
   oss << "\r\n";
 
   // Command counters
@@ -616,6 +657,7 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_current_entries: " << cache_stats.current_entries << "\r\n";
     oss << "cache_memory_bytes: " << cache_stats.current_memory_bytes << "\r\n";
     oss << "cache_memory_human: " << mygram::utils::FormatBytes(cache_stats.current_memory_bytes) << "\r\n";
+    oss << "cache_invalidation_queue_memory_bytes: " << cache_stats.invalidation_queue_memory_bytes << "\r\n";
     oss << "cache_accounted_memory_bytes: " << cache_stats.accounted_memory_bytes << "\r\n";
     oss << "cache_accounted_memory_human: " << mygram::utils::FormatBytes(cache_stats.accounted_memory_bytes) << "\r\n";
     oss << "cache_evictions: " << cache_stats.evictions << "\r\n";
@@ -707,6 +749,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     const AggregatedMetrics& metrics, const ServerStats& stats,
     const std::unordered_map<std::string, TableContext*>& table_contexts, mysql::IBinlogReader* binlog_reader,
     cache::CacheManager* cache_manager, const ThreadPool* thread_pool) {
+  (void)table_contexts;  // Per-table values are already part of the immutable aggregate snapshot.
   std::ostringstream oss;
 
   // Server info (version as label)
@@ -726,6 +769,11 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "# HELP mygramdb_server_commands_total Total number of commands processed\n";
   oss << "# TYPE mygramdb_server_commands_total counter\n";
   oss << "mygramdb_server_commands_total " << stats.GetTotalCommands() << "\n";
+  oss << "\n";
+
+  oss << "# HELP mygramdb_text_normalization_failures_total Total failed text normalization operations\n";
+  oss << "# TYPE mygramdb_text_normalization_failures_total counter\n";
+  oss << "mygramdb_text_normalization_failures_total " << mygram::utils::GetTextNormalizationFailureCount() << "\n";
   oss << "\n";
 
   // Command counters by type
@@ -856,44 +904,34 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   // Aggregated index statistics
   oss << "# HELP mygramdb_index_documents_total Total number of documents in the index\n";
   oss << "# TYPE mygramdb_index_documents_total gauge\n";
-  for (const auto& [table_name, ctx] : table_contexts) {
-    std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
+  for (const auto& [table_name, table_metrics] : metrics.tables) {
     const std::string table_label = EscapePrometheusLabelValue(table_name);
-    oss << "mygramdb_index_documents_total{table=\"" << table_label << "\"} " << ctx->doc_store->Size() << "\n";
+    oss << "mygramdb_index_documents_total{table=\"" << table_label << "\"} " << table_metrics.documents << "\n";
   }
   oss << "\n";
 
-  // Cache GetStatistics() per table to avoid repeated shared_lock acquisitions
-  // and posting list iterations (was called 5 times per table before).
-  std::unordered_map<std::string, index::Index::IndexStatistics> cached_stats;
-  cached_stats.reserve(table_contexts.size());
-  for (const auto& [table_name, ctx] : table_contexts) {
-    std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
-    cached_stats.emplace(table_name, ctx->index->GetStatistics());
-  }
-
   oss << "# HELP mygramdb_index_terms_total Total number of unique terms\n";
   oss << "# TYPE mygramdb_index_terms_total gauge\n";
-  for (const auto& [table_name, stats_entry] : cached_stats) {
+  for (const auto& [table_name, table_metrics] : metrics.tables) {
     const std::string table_label = EscapePrometheusLabelValue(table_name);
-    oss << "mygramdb_index_terms_total{table=\"" << table_label << "\"} " << stats_entry.total_terms << "\n";
+    oss << "mygramdb_index_terms_total{table=\"" << table_label << "\"} " << table_metrics.terms << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_postings_total Total number of postings\n";
   oss << "# TYPE mygramdb_index_postings_total gauge\n";
-  for (const auto& [table_name, stats_entry] : cached_stats) {
+  for (const auto& [table_name, table_metrics] : metrics.tables) {
     const std::string table_label = EscapePrometheusLabelValue(table_name);
-    oss << "mygramdb_index_postings_total{table=\"" << table_label << "\"} " << stats_entry.total_postings << "\n";
+    oss << "mygramdb_index_postings_total{table=\"" << table_label << "\"} " << table_metrics.postings << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_postings_per_term_avg Average postings per term\n";
   oss << "# TYPE mygramdb_index_postings_per_term_avg gauge\n";
-  for (const auto& [table_name, stats_entry] : cached_stats) {
-    if (stats_entry.total_terms > 0) {
+  for (const auto& [table_name, table_metrics] : metrics.tables) {
+    if (table_metrics.terms > 0) {
       const std::string table_label = EscapePrometheusLabelValue(table_name);
-      double avg = static_cast<double>(stats_entry.total_postings) / static_cast<double>(stats_entry.total_terms);
+      double avg = static_cast<double>(table_metrics.postings) / static_cast<double>(table_metrics.terms);
       oss << "mygramdb_index_postings_per_term_avg{table=\"" << table_label << "\"} " << std::fixed
           << std::setprecision(2) << avg << "\n";
     }
@@ -902,27 +940,26 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
 
   oss << "# HELP mygramdb_index_delta_encoded_lists Delta-encoded posting lists count\n";
   oss << "# TYPE mygramdb_index_delta_encoded_lists gauge\n";
-  for (const auto& [table_name, stats_entry] : cached_stats) {
+  for (const auto& [table_name, table_metrics] : metrics.tables) {
     const std::string table_label = EscapePrometheusLabelValue(table_name);
-    oss << "mygramdb_index_delta_encoded_lists{table=\"" << table_label << "\"} " << stats_entry.delta_encoded_lists
+    oss << "mygramdb_index_delta_encoded_lists{table=\"" << table_label << "\"} " << table_metrics.delta_encoded
         << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_roaring_bitmap_lists Roaring bitmap posting lists count\n";
   oss << "# TYPE mygramdb_index_roaring_bitmap_lists gauge\n";
-  for (const auto& [table_name, stats_entry] : cached_stats) {
+  for (const auto& [table_name, table_metrics] : metrics.tables) {
     const std::string table_label = EscapePrometheusLabelValue(table_name);
-    oss << "mygramdb_index_roaring_bitmap_lists{table=\"" << table_label << "\"} " << stats_entry.roaring_bitmap_lists
+    oss << "mygramdb_index_roaring_bitmap_lists{table=\"" << table_label << "\"} " << table_metrics.roaring_bitmap
         << "\n";
   }
   oss << "\n";
 
   oss << "# HELP mygramdb_index_optimization_in_progress Index optimization in progress (0=idle, 1=running)\n";
   oss << "# TYPE mygramdb_index_optimization_in_progress gauge\n";
-  for (const auto& [table_name, ctx] : table_contexts) {
-    std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
-    int optimizing = ctx->index->IsOptimizing() ? 1 : 0;
+  for (const auto& [table_name, table_metrics] : metrics.tables) {
+    int optimizing = table_metrics.optimizing ? 1 : 0;
     const std::string table_label = EscapePrometheusLabelValue(table_name);
     oss << "mygramdb_index_optimization_in_progress{table=\"" << table_label << "\"} " << optimizing << "\n";
   }
@@ -1087,6 +1124,8 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "mygramdb_cache_memory_bytes{type=\"cache\"} " << cache_stats.current_memory_bytes << "\n";
     oss << "mygramdb_cache_memory_bytes{type=\"invalidation_index\"} " << cache_stats.invalidation_index_memory_bytes
         << "\n";
+    oss << "mygramdb_cache_memory_bytes{type=\"invalidation_queue\"} " << cache_stats.invalidation_queue_memory_bytes
+        << "\n";
     oss << "mygramdb_cache_memory_bytes{type=\"accounted_total\"} " << cache_stats.accounted_memory_bytes << "\n";
     oss << "\n";
 
@@ -1170,9 +1209,11 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   return oss.str();
 }
 
-std::string ResponseFormatter::FormatError(std::string_view message) {
+std::string ResponseFormatter::FormatError(std::string_view message, mygram::utils::ErrorCode code) {
   std::string result(protocol::kErrorPrefix);
-  result.reserve(protocol::kErrorPrefix.size() + message.size());
+  result += std::to_string(static_cast<std::uint16_t>(code));
+  result += ' ';
+  result.reserve(result.size() + message.size());
   for (unsigned char ch : message) {
     if (ch == '\r' || ch == '\n' || ch == '\t' || std::iscntrl(ch) != 0) {
       result += ' ';
@@ -1184,7 +1225,13 @@ std::string ResponseFormatter::FormatError(std::string_view message) {
 }
 
 std::string ResponseFormatter::FormatError(const mygram::utils::Error& error) {
-  return FormatError(error.to_string());
+  std::string message = error.message();
+  if (!error.context().empty()) {
+    message += " (context: ";
+    message += error.context();
+    message += ')';
+  }
+  return FormatError(message, error.code());
 }
 
 std::string ResponseFormatter::FormatOk(std::string_view body) {

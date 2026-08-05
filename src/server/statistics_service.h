@@ -5,7 +5,10 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -16,6 +19,17 @@
 
 namespace mygramdb::server {
 
+struct TableAggregatedMetrics {
+  size_t index_memory = 0;
+  size_t document_memory = 0;
+  size_t documents = 0;
+  size_t terms = 0;
+  size_t postings = 0;
+  size_t delta_encoded = 0;
+  size_t roaring_bitmap = 0;
+  bool optimizing = false;
+};
+
 /**
  * @brief Aggregated metrics across all tables
  *
@@ -23,6 +37,8 @@ namespace mygramdb::server {
  * It separates state aggregation (domain logic) from presentation (formatting).
  */
 struct AggregatedMetrics {
+  std::unordered_map<std::string, TableAggregatedMetrics> tables;
+
   // Memory metrics
   size_t total_index_memory = 0;
   size_t total_doc_memory = 0;
@@ -84,25 +100,63 @@ class StatisticsService {
   static void UpdateServerStatistics(ServerStats& stats, const AggregatedMetrics& metrics);
 };
 
+/**
+ * @brief Short-lived shared snapshot for expensive INFO and /metrics scans.
+ *
+ * DocumentStore::MemoryUsage() traverses retained document data and is not a
+ * per-request primitive. This cache serializes refreshes and lets INFO and
+ * Prometheus scrapes reuse the same table snapshot for a bounded interval.
+ */
+class StatisticsSnapshotCache {
+ public:
+  explicit StatisticsSnapshotCache(std::chrono::steady_clock::duration max_age = std::chrono::seconds(30))
+      : max_age_(max_age) {}
+
+  template <typename MapT>
+  AggregatedMetrics Get(const MapT& tables,
+                        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
+    std::lock_guard lock(mutex_);
+    if (!snapshot_.has_value() || now - captured_at_ >= max_age_) {
+      snapshot_ = StatisticsService::AggregateMetrics(tables);
+      captured_at_ = now;
+    }
+    return *snapshot_;
+  }
+
+ private:
+  std::mutex mutex_;
+  std::optional<AggregatedMetrics> snapshot_;
+  std::chrono::steady_clock::time_point captured_at_{};
+  std::chrono::steady_clock::duration max_age_;
+};
+
 template <typename MapT>
 AggregatedMetrics StatisticsService::AggregateMetrics(const MapT& tables) {
   AggregatedMetrics metrics;
 
   for (const auto& [table_name, ctx] : tables) {
     std::shared_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
-    metrics.total_index_memory += ctx->index->MemoryUsage();
-    metrics.total_doc_memory += ctx->doc_store->MemoryUsage();
-    metrics.total_documents += ctx->doc_store->Size();
+    TableAggregatedMetrics table_metrics;
+    table_metrics.index_memory = ctx->index->MemoryUsage();
+    table_metrics.document_memory = ctx->doc_store->MemoryUsage();
+    table_metrics.documents = ctx->doc_store->Size();
 
     auto idx_stats = ctx->index->GetStatistics();
-    metrics.total_terms += idx_stats.total_terms;
-    metrics.total_postings += idx_stats.total_postings;
-    metrics.total_delta_encoded += idx_stats.delta_encoded_lists;
-    metrics.total_roaring_bitmap += idx_stats.roaring_bitmap_lists;
+    table_metrics.terms = idx_stats.total_terms;
+    table_metrics.postings = idx_stats.total_postings;
+    table_metrics.delta_encoded = idx_stats.delta_encoded_lists;
+    table_metrics.roaring_bitmap = idx_stats.roaring_bitmap_lists;
+    table_metrics.optimizing = ctx->index->IsOptimizing();
 
-    if (ctx->index->IsOptimizing()) {
-      metrics.any_table_optimizing = true;
-    }
+    metrics.total_index_memory += table_metrics.index_memory;
+    metrics.total_doc_memory += table_metrics.document_memory;
+    metrics.total_documents += table_metrics.documents;
+    metrics.total_terms += table_metrics.terms;
+    metrics.total_postings += table_metrics.postings;
+    metrics.total_delta_encoded += table_metrics.delta_encoded;
+    metrics.total_roaring_bitmap += table_metrics.roaring_bitmap;
+    metrics.any_table_optimizing = metrics.any_table_optimizing || table_metrics.optimizing;
+    metrics.tables.emplace(table_name, std::move(table_metrics));
   }
 
   metrics.total_memory = metrics.total_index_memory + metrics.total_doc_memory;

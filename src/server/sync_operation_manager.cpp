@@ -694,8 +694,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       mygram::utils::StructuredLog()
           .Event("sync_failed")
           .Field("table", table_name)
-          .Field("error", error_msg)
-          .Field("error_code", static_cast<int64_t>(connect_result.error().code()))
+          .FieldError(mygram::utils::MakeError(connect_result.error().code(), error_msg))
           .Error();
       return;
     }
@@ -1106,8 +1105,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       mygram::utils::StructuredLog()
           .Event("sync_failed")
           .Field("table", table_name)
-          .Field("error", error_msg)
-          .Field("error_code", static_cast<int64_t>(result.error().code()))
+          .FieldError(mygram::utils::MakeError(result.error().code(), error_msg))
           .Error();
 
       // Restart replication from the saved GTID position (before SYNC started).

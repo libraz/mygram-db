@@ -144,7 +144,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
   auto query = parser.Parse(request);
 
   if (!query) {
-    return ResponseFormatter::FormatError(query.error().message());
+    return ResponseFormatter::FormatError(query.error());
   }
 
   if (query->type == query::QueryType::AUTH) {

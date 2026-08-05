@@ -61,6 +61,7 @@ class RuntimeVariableManager;
 namespace mygramdb::server {
 
 using SyncCompletionCallback = std::function<void(const std::string&)>;
+using InitialDataReadyChecker = std::function<bool()>;
 
 /**
  * @brief Simple TCP server for text protocol
@@ -81,7 +82,8 @@ class TcpServer {
    */
   TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
             std::string dump_dir = "./dumps", const config::Config* full_config = nullptr,
-            mysql::IBinlogReader* binlog_reader = nullptr, SyncCompletionCallback sync_completion_callback = {});
+            mysql::IBinlogReader* binlog_reader = nullptr, SyncCompletionCallback sync_completion_callback = {},
+            InitialDataReadyChecker initial_data_ready_checker = {});
 
   ~TcpServer();
 
@@ -250,9 +252,10 @@ class TcpServer {
   std::shared_ptr<RateLimiter> rate_limiter_;
 #ifdef USE_MYSQL
   std::unique_ptr<SyncOperationManager> sync_manager_;
-  SyncCompletionCallback sync_completion_callback_;
   std::function<bool(int)> sync_shutdown_wait_hook_for_test_;
 #endif
+  SyncCompletionCallback sync_completion_callback_;
+  InitialDataReadyChecker initial_data_ready_checker_;
 
   // Legacy fields (for backward compatibility during migration)
   std::unordered_map<std::string, TableContext*> table_contexts_;

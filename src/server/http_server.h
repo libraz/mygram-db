@@ -32,6 +32,7 @@
 #include "server/denial_log_limiter.h"
 #include "server/rate_limiter.h"
 #include "server/server_stats.h"
+#include "server/statistics_service.h"
 #include "storage/document_store.h"
 #include "utils/constants.h"
 #include "utils/error.h"
@@ -257,6 +258,7 @@ class HttpServer {
 
   // Statistics
   ServerStats stats_;
+  StatisticsSnapshotCache statistics_snapshot_cache_;
   std::atomic<size_t> active_connections_{0};
 
   std::unique_ptr<httplib::Server> server_;
@@ -494,7 +496,9 @@ class HttpServer {
   /**
    * @brief Send error response
    */
-  static void SendError(httplib::Response& res, int status_code, const std::string& message);
+  static void SendError(httplib::Response& res, int status_code, const std::string& message,
+                        mygram::utils::ErrorCode code = mygram::utils::ErrorCode::kUnknown);
+  static void SendError(httplib::Response& res, int status_code, const mygram::utils::Error& error);
 
   /**
    * @brief CORS middleware

@@ -120,7 +120,7 @@ TEST(TcpServerMultiTableTest, MultiTableSearch) {
   buffer3[received3] = '\0';
   std::string response3(buffer3);
 
-  EXPECT_TRUE(response3.find("ERROR Table not found") == 0);
+  EXPECT_TRUE(response3.find("ERROR 4007 Table not found") == 0) << response3;
 
   close(sock);
   server.Stop();

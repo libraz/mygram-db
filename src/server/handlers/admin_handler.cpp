@@ -12,7 +12,11 @@
 
 #include "config/config_help.h"
 #include "config/runtime_variable_manager.h"
+#include "mysql/binlog_reader_interface.h"
 #include "server/statistics_service.h"
+#ifdef USE_MYSQL
+#include "server/sync_operation_manager.h"
+#endif
 #include "server/table_catalog.h"
 #include "utils/safe_path.h"
 #include "utils/structured_log.h"
@@ -49,8 +53,24 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
       // 2. Update stats (domain layer, explicit side effect)
       StatisticsService::UpdateServerStatistics(ctx_.stats, metrics);
 
-      // 3. Format response (presentation layer, pure function)
-      return ResponseFormatter::FormatInfoResponse(metrics, ctx_.stats, tables, ctx_.binlog_reader, ctx_.cache_manager);
+      // 3. Evaluate the same readiness inputs exposed by HTTP, then format
+      // them for TCP clients that do not have an HTTP health endpoint.
+      const bool data_initialized = ctx_.initial_data_ready_checker ? ctx_.initial_data_ready_checker() : true;
+      const bool is_loading = ctx_.dump_load_in_progress.load(std::memory_order_acquire);
+      const bool replication_paused = ctx_.replication_paused_for_dump.load(std::memory_order_acquire);
+#ifdef USE_MYSQL
+      const bool sync_in_progress = ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing();
+      const bool replication_unavailable = ctx_.binlog_reader != nullptr && !ctx_.binlog_reader->IsRunning() &&
+                                           !ctx_.binlog_reader->IsStarting() && !replication_paused &&
+                                           !sync_in_progress;
+#else
+      const bool sync_in_progress = false;
+      const bool replication_unavailable = false;
+      (void)replication_paused;
+#endif
+      const bool ready = data_initialized && !is_loading && !sync_in_progress && !replication_unavailable;
+      return ResponseFormatter::FormatInfoResponse(metrics, ctx_.stats, tables, ctx_.binlog_reader, ctx_.cache_manager,
+                                                   data_initialized, ready);
     }
 
     case query::QueryType::CONFIG_HELP:

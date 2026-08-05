@@ -84,14 +84,15 @@ class ResponseFormatter {
    * @brief Format FACET response
    *
    * Format:
-   *   OK FACET <num_values>\r\n<value>\t<count>\r\n<value>\t<count>\r\n...
+   *   OK FACET <num_values> <total_values>\r\n<value>\t<count>\r\n<value>\t<count>\r\n...
    *
    * @param value_counts Vector of (display_value, count) pairs (already sorted)
+   * @param total_values Total distinct values before OFFSET/LIMIT
    * @param debug_info Optional debug information
    * @return Formatted response
    */
   static std::string FormatFacetResponse(const std::vector<std::pair<std::string, uint64_t>>& value_counts,
-                                         const query::DebugInfo* debug_info = nullptr);
+                                         size_t total_values, const query::DebugInfo* debug_info = nullptr);
 
   /**
    * @brief Format GET response
@@ -112,7 +113,8 @@ class ResponseFormatter {
   static std::string FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
                                         const std::unordered_map<std::string, TableContext*>& table_contexts,
                                         mysql::IBinlogReader* binlog_reader = nullptr,
-                                        cache::CacheManager* cache_manager = nullptr);
+                                        cache::CacheManager* cache_manager = nullptr, bool data_initialized = true,
+                                        bool ready = true);
 
   /**
    * @brief Format SAVE response
@@ -167,7 +169,8 @@ class ResponseFormatter {
    * @param message Error message
    * @return Formatted response
    */
-  static std::string FormatError(std::string_view message);
+  static std::string FormatError(std::string_view message,
+                                 mygram::utils::ErrorCode code = mygram::utils::ErrorCode::kUnknown);
   static std::string FormatError(const mygram::utils::Error& error);
 
   /**

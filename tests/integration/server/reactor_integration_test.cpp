@@ -1176,7 +1176,7 @@ TEST_F(ReactorIntegrationTest, RateLimitConsumesTokensAcrossCommandsOnOneTcpConn
 
   ASSERT_TRUE(SendLine(s, "INFO"));
   std::string r2 = RecvLine(s, /*timeout_ms=*/2000);
-  EXPECT_EQ(r2, "ERROR Rate limit exceeded") << "third command on the same TCP connection must be rate limited";
+  EXPECT_EQ(r2, "ERROR 1 Rate limit exceeded") << "third command on the same TCP connection must be rate limited";
 
   close(s);
   server->Stop();

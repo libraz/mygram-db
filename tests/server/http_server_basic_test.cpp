@@ -368,6 +368,7 @@ TEST_F(HttpServerTest, InfoEndpointExposesAccountedCacheMemoryAndRejectionReason
   ASSERT_TRUE(body["cache"]["enabled"]);
   EXPECT_TRUE(body["cache"].contains("memory_bytes"));
   EXPECT_TRUE(body["cache"].contains("invalidation_index_memory_bytes"));
+  EXPECT_TRUE(body["cache"].contains("invalidation_queue_memory_bytes"));
   EXPECT_TRUE(body["cache"].contains("accounted_memory_bytes"));
   EXPECT_TRUE(body["cache"].contains("accounted_memory_human"));
   EXPECT_TRUE(body["cache"].contains("rejection_count"));

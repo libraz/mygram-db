@@ -252,7 +252,7 @@ TEST_F(FacetHandlerTest, FacetAppliesOffsetBeforeLimit) {
 
   const std::string response = handler_->Handle(query, conn_ctx_);
 
-  EXPECT_EQ(response.find("OK FACET 1"), 0U) << response;
+  EXPECT_EQ(response.find("OK FACET 1 2"), 0U) << response;
   EXPECT_EQ(response.find("alpha"), std::string::npos) << response;
   EXPECT_NE(response.find("beta\t1"), std::string::npos) << response;
 }
@@ -267,7 +267,7 @@ TEST_F(FacetHandlerTest, UnknownFacetColumnReturnsTypedError) {
 
   const std::string response = handler_->Handle(query, conn_ctx_);
 
-  EXPECT_EQ(response.find("ERROR [Index not found (4000)] Facet column \"catgeory\" not found"), 0U) << response;
+  EXPECT_EQ(response.find("ERROR 4000 Facet column \"catgeory\" not found"), 0U) << response;
 }
 
 TEST_F(FacetHandlerTest, FacetDebugUsesMatchedDocumentAndDistinctValueLabels) {

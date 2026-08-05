@@ -12,7 +12,10 @@
 
 #pragma once
 
+#include <charconv>
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace mygramdb::server {
@@ -56,6 +59,37 @@ constexpr size_t kErrorPrefixLen = kErrorPrefix.size();
 constexpr size_t kOkSavedPrefixLen = kOkSavedPrefix.size();
 constexpr size_t kOkLoadedPrefixLen = kOkLoadedPrefix.size();
 constexpr size_t kDefaultClientRecvBufferSize = 65536;  // 64KB client receive buffer
+
+struct ParsedErrorFrame {
+  std::optional<std::uint16_t> code;
+  std::string_view message;
+};
+
+/**
+ * @brief Parse a coded or legacy single-line ERROR frame.
+ *
+ * A decimal uint16 token is treated as a code only when it is non-zero and
+ * consumes the complete first token. Otherwise the payload remains a legacy
+ * message, preserving compatibility with pre-code servers.
+ */
+inline std::optional<ParsedErrorFrame> ParseErrorFrame(std::string_view response) {
+  if (response.size() < kErrorPrefix.size() || response.compare(0, kErrorPrefix.size(), kErrorPrefix) != 0) {
+    return std::nullopt;
+  }
+
+  const std::string_view payload = response.substr(kErrorPrefixLen);
+  const size_t separator = payload.find(' ');
+  const std::string_view code_token = separator == std::string_view::npos ? payload : payload.substr(0, separator);
+  std::uint16_t code = 0;
+  const auto [end, error] = std::from_chars(code_token.data(), code_token.data() + code_token.size(), code);
+  if (error != std::errc() || end != code_token.data() + code_token.size() || code == 0) {
+    return ParsedErrorFrame{std::nullopt, payload};
+  }
+
+  const std::string_view message =
+      separator == std::string_view::npos ? std::string_view{} : payload.substr(separator + 1);
+  return ParsedErrorFrame{code, message};
+}
 
 }  // namespace protocol
 }  // namespace mygramdb::server

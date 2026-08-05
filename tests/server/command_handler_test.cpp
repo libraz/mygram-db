@@ -33,7 +33,7 @@
 namespace mygramdb::server {
 
 namespace {
-constexpr const char* kLoadingError = "ERROR Server is loading, please try again later";
+constexpr const char* kLoadingError = "ERROR 6028 Server is loading, please try again later";
 }  // namespace
 
 class CommandHandlerLoadingTest : public ::testing::Test {

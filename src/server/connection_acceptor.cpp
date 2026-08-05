@@ -26,6 +26,7 @@
 #include <thread>
 
 #include "server/log_field_names.h"
+#include "server/response_formatter.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
 #include "server/socket_utils.h"
@@ -63,10 +64,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
 
   if (running_.load(std::memory_order_acquire)) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "ConnectionAcceptor already running");
-    mygram::utils::StructuredLog()
-        .Event("connection_acceptor_start_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("connection_acceptor_start_failed").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -82,7 +80,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       mygram::utils::StructuredLog()
           .Event("unix_socket_validate_failed")
           .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
-          .Field(log_fields::kFieldError, error.to_string())
+          .FieldError(error)
           .Error();
       return MakeUnexpected(error);
     }
@@ -97,7 +95,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
         mygram::utils::StructuredLog()
             .Event("unix_socket_probe_create_failed")
             .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
-            .Field(log_fields::kFieldError, error.to_string())
+            .FieldError(error)
             .Error();
         return MakeUnexpected(error);
       }
@@ -113,7 +111,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
         mygram::utils::StructuredLog()
             .Event("unix_socket_stale_check_failed")
             .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
-            .Field(log_fields::kFieldError, error.to_string())
+            .FieldError(error)
             .Error();
         return MakeUnexpected(error);
       }
@@ -135,10 +133,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     if (sfd < 0) {
       auto error = MakeError(ErrorCode::kNetworkSocketCreationFailed,
                              "Failed to create unix socket: " + std::string(strerror(errno)));
-      mygram::utils::StructuredLog()
-          .Event("unix_socket_create_failed")
-          .Field(log_fields::kFieldError, error.to_string())
-          .Error();
+      mygram::utils::StructuredLog().Event("unix_socket_create_failed").FieldError(error).Error();
       return MakeUnexpected(error);
     }
 
@@ -155,7 +150,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       mygram::utils::StructuredLog()
           .Event("unix_socket_bind_failed")
           .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
-          .Field(log_fields::kFieldError, error.to_string())
+          .FieldError(error)
           .Error();
       return MakeUnexpected(error);
     }
@@ -169,7 +164,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       mygram::utils::StructuredLog()
           .Event("unix_socket_chmod_failed")
           .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
-          .Field(log_fields::kFieldError, error.to_string())
+          .FieldError(error)
           .Error();
       return MakeUnexpected(error);
     }
@@ -180,10 +175,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       unlink(config_.unix_socket_path.c_str());
       auto error = MakeError(ErrorCode::kNetworkListenFailed,
                              "Failed to listen on unix socket: " + std::string(strerror(errno)));
-      mygram::utils::StructuredLog()
-          .Event("unix_socket_listen_failed")
-          .Field(log_fields::kFieldError, error.to_string())
-          .Error();
+      mygram::utils::StructuredLog().Event("unix_socket_listen_failed").FieldError(error).Error();
       return MakeUnexpected(error);
     }
 
@@ -224,7 +216,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
     mygram::utils::StructuredLog()
         .Event("socket_bind_failed")
         .Field("bind_address", config_.host)
-        .Field(log_fields::kFieldError, error.to_string())
+        .FieldError(error)
         .Error();
     return MakeUnexpected(error);
   }
@@ -266,7 +258,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
         .Event("socket_bind_failed")
         .Field("bind_address", config_.host)
         .Field("port", static_cast<uint64_t>(config_.port))
-        .Field(log_fields::kFieldError, error.to_string())
+        .FieldError(error)
         .Error();
     return MakeUnexpected(error);
   }
@@ -292,10 +284,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
   if (listen(sfd, config_.max_connections) < 0) {
     close(sfd);
     auto error = MakeError(ErrorCode::kNetworkListenFailed, "Failed to listen: " + std::string(strerror(errno)));
-    mygram::utils::StructuredLog()
-        .Event("socket_listen_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("socket_listen_failed").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -327,10 +316,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::StartAcc
   if (!running_.load(std::memory_order_acquire)) {
     auto error = MakeError(ErrorCode::kNetworkServerNotStarted,
                            "ConnectionAcceptor::StartAccepting called before Start (no listening socket)");
-    mygram::utils::StructuredLog()
-        .Event("connection_acceptor_start_accepting_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("connection_acceptor_start_accepting_failed").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -341,10 +327,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::StartAcc
   if (!reactor_handler_) {
     auto error = MakeError(ErrorCode::kNetworkAcceptorNoHandler,
                            "ConnectionAcceptor::StartAccepting called before SetReactorHandler");
-    mygram::utils::StructuredLog()
-        .Event("connection_acceptor_start_accepting_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("connection_acceptor_start_accepting_failed").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -352,10 +335,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::StartAcc
   // The accept thread, if started, exists until Stop() joins+resets it.
   if (accept_thread_) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "ConnectionAcceptor accept thread already started");
-    mygram::utils::StructuredLog()
-        .Event("connection_acceptor_start_accepting_failed")
-        .Field(log_fields::kFieldError, error.to_string())
-        .Error();
+    mygram::utils::StructuredLog().Event("connection_acceptor_start_accepting_failed").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -607,16 +587,18 @@ void ConnectionAcceptor::AcceptLoop() {
           .Event("reactor_register_rejected")
           .Field(log_fields::kFieldFd, static_cast<int64_t>(client_fd))
           .Warn();
-      static constexpr std::string_view kBusyResponse =
-          "ERROR SERVER_BUSY Server is too busy, please try again later\r\n";
+      const std::string busy_response =
+          ResponseFormatter::FormatError("SERVER_BUSY Server is too busy, please try again later",
+                                         mygram::utils::ErrorCode::kServerBusy) +
+          "\r\n";
       // Best-effort BUSY notification: the fd is closed immediately after, so a
       // partial write or a peer that has already closed (EPIPE/ECONNRESET) is
       // acceptable. MSG_NOSIGNAL prevents SIGPIPE on Linux when the peer is gone;
       // on macOS the SO_NOSIGPIPE socket option set in SetSocketOptions handles it.
 #ifdef MSG_NOSIGNAL
-      const ssize_t sent = send(client_fd, kBusyResponse.data(), kBusyResponse.size(), MSG_NOSIGNAL);
+      const ssize_t sent = send(client_fd, busy_response.data(), busy_response.size(), MSG_NOSIGNAL);
 #else
-      const ssize_t sent = send(client_fd, kBusyResponse.data(), kBusyResponse.size(), 0);
+      const ssize_t sent = send(client_fd, busy_response.data(), busy_response.size(), 0);
 #endif
       (void)sent;
       close(client_fd);

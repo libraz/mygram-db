@@ -231,7 +231,7 @@ TEST_F(ReactorConnectionTest, ThrowingHandlerReturnsErrorAndDoesNotWedgeDrainSlo
   char response[128] = {};
   const ssize_t received = ::read(peer_fd_, response, sizeof(response));
   ASSERT_GT(received, 0);
-  EXPECT_NE(std::string_view(response, static_cast<size_t>(received)).find("ERROR internal server error"),
+  EXPECT_NE(std::string_view(response, static_cast<size_t>(received)).find("ERROR 1 internal server error"),
             std::string_view::npos);
 
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -409,7 +409,7 @@ TEST_F(ReactorConnectionNoDispatcherTest, OnReadableRespectsMaxReadBuffer) {
   char response[128]{};
   ssize_t n = ::recv(peer_fd_, response, sizeof(response) - 1, 0);
   ASSERT_GT(n, 0) << "Expected request-too-large error response";
-  EXPECT_NE(std::string(response, static_cast<size_t>(n)).find("ERROR request too large"), std::string::npos);
+  EXPECT_NE(std::string(response, static_cast<size_t>(n)).find("ERROR 1 request too large"), std::string::npos);
 }
 
 TEST_F(ReactorConnectionNoDispatcherTest, ReadBufferCapAppliesOnlyToUnframedTail) {
@@ -567,7 +567,7 @@ TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowErrorHoldsWriteMutexAcross
   EXPECT_TRUE(error_sender.get());
   EXPECT_TRUE(response_sender.get());
 
-  const std::string expected = "ERROR request too large\r\nOK response\r\n";
+  const std::string expected = "ERROR 1 request too large\r\nOK response\r\n";
   std::string received;
   while (received.size() < expected.size() && WaitReadable(peer_fd_, 1000)) {
     char response[128]{};
@@ -611,7 +611,7 @@ TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClos
   EXPECT_FALSE(conn_->OnReadable());
   EXPECT_TRUE(conn_->IsClosing());
 
-  const std::string expected = "ERROR SERVER_BUSY Server is too busy, please try again later\r\n";
+  const std::string expected = "ERROR 6030 SERVER_BUSY Server is too busy, please try again later\r\n";
   std::string received;
   while (received.size() < expected.size() && WaitReadable(peer_fd_, 1000)) {
     char response[128]{};

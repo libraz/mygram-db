@@ -88,6 +88,7 @@ std::string CacheHandler::HandleStats() {
   oss << "current_entries: " << stats.current_entries << "\r\n";
   oss << "current_memory_bytes: " << stats.current_memory_bytes << "\r\n";
   oss << "invalidation_index_memory_bytes: " << stats.invalidation_index_memory_bytes << "\r\n";
+  oss << "invalidation_queue_memory_bytes: " << stats.invalidation_queue_memory_bytes << "\r\n";
   oss << "accounted_memory_bytes: " << stats.accounted_memory_bytes << "\r\n";
   oss << "evictions: " << stats.evictions << "\r\n";
   oss << "ttl_expirations: " << stats.ttl_expirations << "\r\n";

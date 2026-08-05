@@ -65,20 +65,15 @@ constexpr int kDefaultSyncShutdownTimeoutSec = 30;
 
 TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableContext*> table_contexts,
                      std::string dump_dir, const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
-                     SyncCompletionCallback sync_completion_callback)
+                     SyncCompletionCallback sync_completion_callback,
+                     InitialDataReadyChecker initial_data_ready_checker)
     : config_(std::move(config)),
       full_config_(full_config),
       dump_dir_(std::move(dump_dir)),
+      sync_completion_callback_(std::move(sync_completion_callback)),
+      initial_data_ready_checker_(std::move(initial_data_ready_checker)),
       table_contexts_(std::move(table_contexts)),
-      binlog_reader_(binlog_reader)
-#ifdef USE_MYSQL
-      ,
-      sync_completion_callback_(std::move(sync_completion_callback))
-#endif
-{
-#ifndef USE_MYSQL
-  (void)sync_completion_callback;
-#endif
+      binlog_reader_(binlog_reader) {
   config_.parsed_allow_cidrs = mygram::utils::ParseAllowCidrs(config_.allow_cidrs);
   // NOTE: Component initialization moved to Start() method
   // This allows for better error handling and resource cleanup
@@ -118,7 +113,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Check if already running
   if (acceptor_ && acceptor_->IsRunning()) {
     auto error = MakeError(ErrorCode::kNetworkAlreadyRunning, "Server already running");
-    mygram::utils::StructuredLog().Event("tcp_server_start_failed").Field("error", error.to_string()).Error();
+    mygram::utils::StructuredLog().Event("tcp_server_start_failed").FieldError(error).Error();
     return MakeUnexpected(error);
   }
 
@@ -209,6 +204,8 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // acceptor/reactor start ensures the flag is observable by any worker
   // started via the first DUMP SAVE request.
   handler_context_->shutdown_flag = &shutdown_in_progress_;
+  handler_context_->table_initialized_callback = sync_completion_callback_;
+  handler_context_->initial_data_ready_checker = initial_data_ready_checker_;
 
   search_handler_ = std::move(components.search_handler);
   document_handler_ = std::move(components.document_handler);

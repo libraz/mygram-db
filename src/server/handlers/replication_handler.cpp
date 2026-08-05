@@ -33,7 +33,8 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
           ctx_.binlog_reader->Stop();
           return ResponseFormatter::FormatReplicationStopResponse();
         }
-        return ResponseFormatter::FormatError("Replication is not running");
+        return ResponseFormatter::FormatError(
+            mygram::utils::MakeError(mygram::utils::ErrorCode::kServerNotReady, "Replication is not running"));
       }
       return ResponseFormatter::FormatError("Replication is not configured");
 #else
@@ -61,7 +62,7 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
       if (ctx_.sync_manager != nullptr) {
         auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kStartReplication);
         if (!check) {
-          return ResponseFormatter::FormatError(check.error().message());
+          return ResponseFormatter::FormatError(check.error());
         }
       }
 

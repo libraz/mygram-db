@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <chrono>
 #include <future>
 
 #include "cache/cache_manager.h"
@@ -96,6 +98,21 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseNoCacheManager) {
   EXPECT_TRUE(response.find("cache_misses:") == std::string::npos);
 }
 
+TEST_F(ResponseFormatterTest, FormatInfoResponseExposesDataInitializationAndReadiness) {
+  ServerStats stats;
+  auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+
+  const std::string not_ready =
+      ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, nullptr, false, false);
+  EXPECT_NE(not_ready.find("data_initialized: false\r\n"), std::string::npos);
+  EXPECT_NE(not_ready.find("readiness: not_ready\r\n"), std::string::npos);
+
+  const std::string ready =
+      ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, nullptr, true, true);
+  EXPECT_NE(ready.find("data_initialized: true\r\n"), std::string::npos);
+  EXPECT_NE(ready.find("readiness: ready\r\n"), std::string::npos);
+}
+
 /**
  * @brief Test INFO response with cache manager enabled
  */
@@ -136,6 +153,7 @@ TEST_F(ResponseFormatterTest, FormatInfoResponseWithCacheManager) {
   EXPECT_TRUE(response.find("cache_memory_bytes: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_memory_human: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_accounted_memory_bytes: ") != std::string::npos);
+  EXPECT_TRUE(response.find("cache_invalidation_queue_memory_bytes: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_rejection_oversize: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_rejection_duplicate: ") != std::string::npos);
   EXPECT_TRUE(response.find("cache_decompression_failures: ") != std::string::npos);
@@ -228,6 +246,17 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseEscapesPrimaryKeyDelimitersRev
   EXPECT_EQ(response, "OK RESULTS 1 \"pk with\\r\\nnewline\\tand tab\"");
 }
 
+TEST_F(ResponseFormatterTest, FormatSearchResponseDirectAppendPreservesQuoteSlashAndHexEscapes) {
+  std::string primary_key = "quoted\"slash\\control";
+  primary_key.push_back('\x01');
+  auto doc_id = table_context_.doc_store->AddDocument(primary_key);
+  ASSERT_TRUE(doc_id.has_value());
+
+  std::string response = ResponseFormatter::FormatSearchResponse({*doc_id}, 1, table_context_.doc_store.get());
+
+  EXPECT_EQ(response, "OK RESULTS 1 \"quoted\\\"slash\\\\control\\x01\"");
+}
+
 TEST_F(ResponseFormatterTest, FormatSearchResponseDoesNotCollapseSpaceAndUnderscorePrimaryKeys) {
   auto spaced_doc_id = table_context_.doc_store->AddDocument("a b");
   auto underscored_doc_id = table_context_.doc_store->AddDocument("a_b");
@@ -292,15 +321,15 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseWithHighlightsEscapesPrimaryKe
 TEST_F(ResponseFormatterTest, FormatFacetResponseSanitizesLineDelimiters) {
   std::vector<std::pair<std::string, uint64_t>> value_counts = {{"value\r\nnext\tpart", 3}};
 
-  std::string response = ResponseFormatter::FormatFacetResponse(value_counts);
+  std::string response = ResponseFormatter::FormatFacetResponse(value_counts, 4);
 
-  EXPECT_EQ(response, "OK FACET 1\r\nvalue  next part\t3\r\n\r\n");
+  EXPECT_EQ(response, "OK FACET 1 4\r\nvalue  next part\t3\r\n\r\n");
 }
 
 TEST_F(ResponseFormatterTest, FormatFacetResponseTerminatesTransportFrame) {
   std::vector<std::pair<std::string, uint64_t>> value_counts = {{"alpha", 2}, {"beta", 1}};
 
-  std::string response = ResponseFormatter::FormatFacetResponse(value_counts);
+  std::string response = ResponseFormatter::FormatFacetResponse(value_counts, value_counts.size());
 
   EXPECT_TRUE(client::detail::IsResponseComplete(response)) << response;
 }
@@ -571,10 +600,24 @@ TEST_F(ResponseFormatterTest, FormatError) {
 }
 
 TEST_F(ResponseFormatterTest, FormatTypedErrorIncludesStableNumericCode) {
-  const auto error =
-      mygram::utils::MakeError(mygram::utils::ErrorCode::kQueryExpressionParseError, "Invalid boolean expression");
+  struct TestCase {
+    mygram::utils::ErrorCode code;
+    const char* message;
+    const char* expected;
+  };
+  constexpr std::array<TestCase, 4> cases = {{
+      {mygram::utils::ErrorCode::kUnknown, "Unclassified", "ERROR 1 Unclassified"},
+      {mygram::utils::ErrorCode::kQueryExpressionParseError, "Invalid boolean expression",
+       "ERROR 3010 Invalid boolean expression"},
+      {mygram::utils::ErrorCode::kServerLoading, "Server is loading", "ERROR 6028 Server is loading"},
+      {mygram::utils::ErrorCode::kServerBusy, "SERVER_BUSY", "ERROR 6030 SERVER_BUSY"},
+  }};
 
-  EXPECT_EQ(ResponseFormatter::FormatError(error), "ERROR [Expression parse error (3010)] Invalid boolean expression");
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.expected);
+    const auto error = mygram::utils::MakeError(test_case.code, test_case.message);
+    EXPECT_EQ(ResponseFormatter::FormatError(error), test_case.expected);
+  }
 }
 
 /**
@@ -667,6 +710,47 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetrics) {
   EXPECT_TRUE(response.find("mygramdb_") != std::string::npos || response.find("mygram_") != std::string::npos);
 }
 
+TEST_F(ResponseFormatterTest, StatisticsSnapshotIsSharedUntilBoundedRefresh) {
+  StatisticsSnapshotCache cache(std::chrono::seconds(30));
+  const auto initial_time = std::chrono::steady_clock::time_point(std::chrono::seconds(100));
+
+  const auto initial = cache.Get(table_contexts_, initial_time);
+  ASSERT_EQ(initial.tables.at("test").documents, 0U);
+
+  const auto doc_id = table_context_.doc_store->AddDocument("pk", {}, "searchable");
+  ASSERT_TRUE(doc_id.has_value());
+  table_context_.index->AddDocument(*doc_id, "searchable");
+
+  const auto cached = cache.Get(table_contexts_, initial_time + std::chrono::seconds(29));
+  EXPECT_EQ(cached.tables.at("test").documents, 0U);
+  EXPECT_EQ(cached.tables.at("test").terms, 0U);
+
+  ServerStats stats;
+  const std::string cached_response =
+      ResponseFormatter::FormatPrometheusMetrics(cached, stats, table_contexts_, nullptr);
+  EXPECT_NE(cached_response.find("mygramdb_index_documents_total{table=\"test\"} 0"), std::string::npos);
+
+  const auto refreshed = cache.Get(table_contexts_, initial_time + std::chrono::seconds(30));
+  EXPECT_EQ(refreshed.tables.at("test").documents, 1U);
+  EXPECT_GT(refreshed.tables.at("test").terms, 0U);
+}
+
+TEST_F(ResponseFormatterTest, FormatInfoAndPrometheusExposeTextNormalizationFailures) {
+  mygram::utils::ResetTextNormalizationFailureCountForTesting();
+  const std::string invalid_utf8(1, static_cast<char>(0xFF));
+  EXPECT_TRUE(mygram::utils::NormalizeText(invalid_utf8).empty());
+
+  ServerStats stats;
+  const auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+  const std::string info = ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, nullptr);
+  const std::string prometheus =
+      ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, nullptr, nullptr);
+
+  EXPECT_NE(info.find("text_normalization_failures: 1"), std::string::npos) << info;
+  EXPECT_NE(prometheus.find("mygramdb_text_normalization_failures_total 1"), std::string::npos) << prometheus;
+  mygram::utils::ResetTextNormalizationFailureCountForTesting();
+}
+
 TEST_F(ResponseFormatterTest, FormatInfoAndPrometheusExposeOtherAndUnknownCommandCounters) {
   ServerStats stats;
   stats.IncrementCommand(query::QueryType::FACET);
@@ -731,6 +815,7 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsWithCache) {
   // Should contain cache-specific Prometheus metrics
   EXPECT_TRUE(response.find("mygramdb_cache_hits_total") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_memory_bytes") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_memory_bytes{type=\"invalidation_queue\"}") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_entries") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_evictions_total") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_invalidations_total") != std::string::npos);

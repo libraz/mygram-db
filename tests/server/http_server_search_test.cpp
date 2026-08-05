@@ -344,6 +344,8 @@ TEST_F(HttpServerTest, FacetSupportsOffsetAndAppliesItBeforeLimit) {
   ASSERT_EQ(all_res->status, 200) << all_res->body;
   const auto all_body = json::parse(all_res->body);
   ASSERT_EQ(all_body["facets"].size(), 2);
+  EXPECT_EQ(all_body["count"], 2);
+  EXPECT_EQ(all_body["total_count"], 2);
 
   json page_request = {{"column", "category"}, {"offset", 1}, {"limit", 1}};
   auto page_res = client.Post("/tables/test/facet", page_request.dump(), "application/json");
@@ -351,6 +353,8 @@ TEST_F(HttpServerTest, FacetSupportsOffsetAndAppliesItBeforeLimit) {
   ASSERT_EQ(page_res->status, 200) << page_res->body;
   const auto page_body = json::parse(page_res->body);
   ASSERT_EQ(page_body["facets"].size(), 1);
+  EXPECT_EQ(page_body["count"], 1);
+  EXPECT_EQ(page_body["total_count"], 2);
   EXPECT_EQ(page_body["facets"][0], all_body["facets"][1]);
 }
 
@@ -364,7 +368,7 @@ TEST_F(HttpServerTest, FacetUnknownColumnReturnsTypedError) {
   ASSERT_TRUE(res);
   ASSERT_EQ(res->status, 400);
   const auto body = json::parse(res->body);
-  EXPECT_NE(body["error"].get<std::string>().find("(4000)"), std::string::npos);
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kIndexNotFound));
   EXPECT_NE(body["error"].get<std::string>().find("Facet column \"catgeory\" not found"), std::string::npos);
 }
 
@@ -753,6 +757,7 @@ TEST_F(HttpServerTest, SearchCountsJsonFiltersAndHighlightTagsTowardQueryLength)
 
   const auto body = json::parse(res->body);
   ASSERT_TRUE(body.contains("error"));
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQueryTooLong));
   EXPECT_NE(body["error"].get<std::string>().find("Query expression length"), std::string::npos);
 }
 
@@ -772,6 +777,7 @@ TEST_F(HttpServerTest, SearchInvalidBooleanExpressionReturnsBadRequest) {
 
   auto body = json::parse(res->body);
   ASSERT_TRUE(body.contains("error"));
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQueryExpressionParseError));
   EXPECT_NE(body["error"].get<std::string>().find("Invalid boolean search expression"), std::string::npos);
 }
 
