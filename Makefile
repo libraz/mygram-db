@@ -66,7 +66,6 @@ help:
 	@echo "  make e2e-test-smoke   - Run only smoke tests"
 	@echo "  make e2e-test-load    - Run only load tests"
 	@echo "  make e2e-matrix       - Run MySQL/MariaDB E2E version matrix"
-	@echo "  make e2e-failover     - Run two-server MySQL failover E2E suite"
 	@echo "  make e2e-test-cleanup - Clean up E2E test environment"
 	@echo "  make e2e-lint         - Lint E2E Python code"
 	@echo "  make e2e-format       - Format E2E Python code"
@@ -303,7 +302,7 @@ quick-test: build
 # E2E Integration Tests
 # ============================================================================
 
-.PHONY: e2e-test e2e-test-smoke e2e-test-load e2e-matrix e2e-failover e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark e2e-benchmark-full e2e-benchmark-saturation
+.PHONY: e2e-test e2e-test-smoke e2e-test-load e2e-matrix e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark e2e-benchmark-full e2e-benchmark-saturation
 
 # Run full e2e test suite (requires Docker)
 e2e-test:
@@ -325,12 +324,6 @@ e2e-test-load:
 e2e-matrix:
 	@echo "Running MySQL/MariaDB E2E matrix..."
 	@bash e2e/run-matrix.sh
-
-# Run the GTID-validated MySQL failover suite. The default e2e-test target
-# skips tests marked failover because it has no secondary server.
-e2e-failover:
-	@echo "Running MySQL failover E2E suite..."
-	@bash e2e/run-failover.sh
 
 # Clean up e2e test environment
 e2e-test-cleanup:

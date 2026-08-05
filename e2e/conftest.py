@@ -38,14 +38,6 @@ MYGRAMDB_DUMP_DIR = Path(
 )
 
 
-def pytest_report_header(config: pytest.Config) -> str:
-    """Make the dedicated failover suite's inclusion state impossible to miss."""
-    del config
-    if os.environ.get("ENABLE_FAILOVER_TESTS") == "1":
-        return "failover e2e: ENABLED (dedicated two-server fixture)"
-    return "failover e2e: SKIPPED (run `make e2e-failover` for the two-server suite)"
-
-
 def _mysql_major_minor(version_str: str) -> tuple[int, int]:
     """Parse MySQL version string (e.g. '9.6.0') into (major, minor)."""
     parts = version_str.split(".")
@@ -62,15 +54,11 @@ def pytest_collection_modifyitems(config, items):
     """Apply environment-dependent skips for specialized database fixtures."""
     skip_mysql_only = pytest.mark.skip(reason="MySQL-only test (requires ngram FULLTEXT)")
     skip_mariadb_only = pytest.mark.skip(reason="MariaDB-only test")
-    skip_failover = pytest.mark.skip(reason="Failover test requires e2e/run-failover.sh")
-    failover_enabled = os.environ.get("ENABLE_FAILOVER_TESTS") == "1"
     for item in items:
         if DB_FLAVOR == "mariadb" and "mysql_only" in item.keywords:
             item.add_marker(skip_mysql_only)
         if DB_FLAVOR != "mariadb" and "mariadb_only" in item.keywords:
             item.add_marker(skip_mariadb_only)
-        if not failover_enabled and "failover" in item.keywords:
-            item.add_marker(skip_failover)
 
 
 @pytest.fixture(scope="session")

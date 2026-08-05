@@ -59,7 +59,6 @@ markers = [
     "load: Load and performance tests",
     "persistence: Dump/restore",
     "resilience: Fault recovery",
-    "failover: Requires the dedicated two-server failover fixture",
     "multi_table: Multiple table tests",
 ]
 timeout = 120

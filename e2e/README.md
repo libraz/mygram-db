@@ -17,9 +17,6 @@ make e2e-test-load
 # Full database-version matrix
 make e2e-matrix
 
-# Two-server MySQL failover suite
-make e2e-failover
-
 # Focused MariaDB replication check
 bash e2e/test_mariadb_replication.sh
 
@@ -67,9 +64,8 @@ e2e/
 ├── benchmark.py                # CLI benchmark tool
 ├── conftest.py                 # pytest fixtures
 ├── pyproject.toml              # Python dependencies, pytest/ruff/mypy config
-├── run-all.sh                  # Default MySQL entry point (skips mariadb_only/failover)
+├── run-all.sh                  # Default MySQL entry point (skips mariadb_only)
 ├── run-matrix.sh               # MySQL/MariaDB version matrix entry point
-├── run-failover.sh             # GTID-validated MySQL failover entry point
 ├── test_mariadb_replication.sh # Focused MariaDB replication entry point
 ├── python-env.sh               # Shared interpreter provisioning (rye, or venv fallback)
 └── results/                    # Generated at runtime
@@ -98,7 +94,6 @@ The table intentionally omits hand-maintained test counts. Use
 | `load` | Load Testing | Concurrent load and performance regression detection |
 | `persistence` | Persistence | DUMP SAVE/LOAD round-trip |
 | `resilience` | Failure Recovery | Reconnection after MySQL restart |
-| `failover` | Failover | Dedicated two-server GTID failover checks |
 | `multi_table` | Multi-table | Table independence |
 
 ### Running by Category
