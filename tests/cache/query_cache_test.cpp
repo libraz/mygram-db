@@ -37,6 +37,19 @@ TEST(QueryCacheTest, BasicInsertLookup) {
   EXPECT_EQ(result, cached.value());
 }
 
+TEST(QueryCacheTest, BackgroundWorkerCanBeStartedAfterCallbacksAreInstalled) {
+  QueryCache cache(1024 * 1024, 0.0, 0, true, 1, false);
+  EXPECT_FALSE(cache.IsBackgroundWorkerRunningForTesting());
+
+  std::atomic<size_t> callback_count{0};
+  cache.SetEvictionCallback([&callback_count](const CacheKey&) { callback_count.fetch_add(1); });
+  auto start_result = cache.StartBackgroundWorker();
+
+  ASSERT_TRUE(start_result) << start_result.error().to_string();
+  EXPECT_TRUE(cache.IsBackgroundWorkerRunningForTesting());
+  EXPECT_EQ(callback_count.load(), 0U);
+}
+
 TEST(QueryCacheTest, DigestCollisionDoesNotReturnAnotherQueryResult) {
   QueryCache cache(1024 * 1024, 0.0, 0, false);
   const CacheKey colliding_digest(0x1234, 0x5678);
@@ -2379,6 +2392,19 @@ TEST(QueryCacheTest, DedicatedRejectionCountersTrackOversizeAndDuplicateInserts)
   EXPECT_EQ(after_oversize.rejection_duplicate, after_duplicate.rejection_duplicate);
   EXPECT_EQ(after_oversize.rejection_count, baseline.rejection_count);
   EXPECT_FALSE(cache.Lookup(oversize_key).has_value());
+}
+
+TEST(QueryCacheTest, SharedMemoryBudgetRejectionIsSeparateFromOversize) {
+  QueryCache cache(/* max_memory_bytes= */ 4096, /* min_query_cost_ms= */ 0.0,
+                   /* ttl_seconds= */ 0, /* compression_enabled= */ false);
+
+  const auto before = cache.GetStatistics();
+  cache.IncrementMemoryBudgetRejection();
+  const auto after = cache.GetStatistics();
+
+  EXPECT_EQ(after.rejection_memory_budget - before.rejection_memory_budget, 1U);
+  EXPECT_EQ(after.rejection_oversize, before.rejection_oversize);
+  EXPECT_EQ(after.rejection_duplicate, before.rejection_duplicate);
 }
 
 /**

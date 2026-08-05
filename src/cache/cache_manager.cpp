@@ -22,7 +22,7 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
   // That lets SET cache.enabled=true enable caching without a server restart.
   query_cache_ = std::make_unique<QueryCache>(cache_config.max_memory_bytes, cache_config.min_query_cost_ms,
                                               ttl_seconds_, cache_config.compression_enabled,
-                                              static_cast<size_t>(cache_config.eviction_batch_size));
+                                              static_cast<size_t>(cache_config.eviction_batch_size), false);
 
   // Create invalidation manager
   invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
@@ -45,6 +45,11 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
       invalidation_mgr_->UnregisterCacheEntryIdentities(entries);
     }
   });
+
+  // Only publish the maintenance worker after all callbacks it can invoke are
+  // installed. This removes the construction-time window where an eviction
+  // could bypass InvalidationManager cleanup.
+  (void)query_cache_->StartBackgroundWorker();
 
   // Create invalidation queue with per-table ngram settings
   invalidation_queue_ = std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(),
@@ -99,12 +104,10 @@ std::optional<CacheManager::ResolvedCacheKey> CacheManager::ResolveCacheKey(cons
     return ResolvedCacheKey{key, query.cache_key_discriminator};
   }
 
-  // Fallback: compute cache key on-the-fly (for backwards compatibility)
-  const std::string normalized = QueryNormalizer::Normalize(query);
-  if (normalized.empty()) {
-    return std::nullopt;
-  }
-  return ResolvedCacheKey{CacheKeyGenerator::Generate(normalized), normalized};
+  // CacheManager cannot reconstruct the index-specific text normalizer or the
+  // boolean/fuzzy/synonym/verification semantic context. A parser-only
+  // fallback key would therefore be ambiguous even if it included the table.
+  return std::nullopt;
 }
 
 std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query) {
@@ -323,7 +326,7 @@ void CacheManager::ClearTable(const std::string& table_name) {
 }
 
 CacheStatisticsSnapshot CacheManager::GetStatistics() const {
-  if (!enabled_ || !query_cache_) {
+  if (!query_cache_) {
     return CacheStatisticsSnapshot{};
   }
 

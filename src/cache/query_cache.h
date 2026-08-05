@@ -64,9 +64,12 @@ struct CacheStatisticsSnapshot {
   uint64_t decompression_failures = 0;  ///< Entries removed due to decompression failure
   uint64_t rejection_count = 0;         ///< Inserts rejected for being below min_query_cost_ms threshold
   uint64_t rejection_oversize = 0;      ///< Inserts rejected because the entry exceeds max_memory_bytes
-  uint64_t rejection_duplicate = 0;     ///< Inserts rejected because the cache key is already present
-  uint64_t forced_clears = 0;           ///< Bulk Clear()/ClearTable() invocations (count of bulk operations)
-  uint64_t stale_lru_entries = 0;       ///< LRU-list keys that were missing from cache_map_ (defensive counter)
+  uint64_t rejection_memory_budget =
+      0;  ///< Inserts rejected because cache + invalidation metadata exceed the shared budget
+  uint64_t rejection_duplicate = 0;   ///< Inserts rejected because the cache key is already present
+  uint64_t stale_entry_removals = 0;  ///< Entries removed after a caller detected a stale payload
+  uint64_t forced_clears = 0;         ///< Bulk Clear()/ClearTable() invocations (count of bulk operations)
+  uint64_t stale_lru_entries = 0;     ///< LRU-list keys that were missing from cache_map_ (defensive counter)
 
   // Configuration snapshot (constants taken from QueryCache constructor)
   size_t max_memory_bytes = 0;       ///< Configured cache memory ceiling
@@ -114,9 +117,9 @@ struct CacheStatisticsSnapshot {
  * or QueryCache::GetStatistics() is not kept in sync.
  *
  * Current schema (must match exactly):
- *   19 atomic uint64_t counters in CacheStatistics
+ *   21 atomic uint64_t counters in CacheStatistics
  *   3 timing doubles guarded by timing_mutex_ in CacheStatistics
- *   19 plain uint64_t counters in CacheStatisticsSnapshot
+ *   21 plain uint64_t counters in CacheStatisticsSnapshot
  *   1 invalidation_index_memory_bytes counter (snapshot only, populated by
  *     CacheManager from InvalidationManager)
  *   4 configuration snapshot fields (max_memory_bytes, min_query_cost_ms,
@@ -125,7 +128,7 @@ struct CacheStatisticsSnapshot {
  *   3 helper methods on snapshot (HitRate, AverageCacheHitLatency,
  *     AverageCacheMissLatency) and 1 accessor (TotalTimeSaved)
  */
-inline constexpr uint32_t kCacheStatsFieldVersion = 3;
+inline constexpr uint32_t kCacheStatsFieldVersion = 4;
 
 /**
  * @brief Internal cache statistics (thread-safe, non-copyable)
@@ -152,11 +155,13 @@ struct CacheStatistics {
   std::atomic<uint64_t> evictions{0};
   std::atomic<uint64_t> ttl_expirations{0};
   std::atomic<uint64_t> decompression_failures{0};
-  std::atomic<uint64_t> rejection_count{0};      ///< Inserts rejected for being below min_query_cost_ms threshold
-  std::atomic<uint64_t> rejection_oversize{0};   ///< Inserts rejected because the entry exceeds max_memory_bytes
-  std::atomic<uint64_t> rejection_duplicate{0};  ///< Inserts rejected because cache key is already present
-  std::atomic<uint64_t> forced_clears{0};        ///< Bulk Clear()/ClearTable() invocations
-  std::atomic<uint64_t> stale_lru_entries{0};    ///< LRU keys not found in cache_map_ during EvictForSpace
+  std::atomic<uint64_t> rejection_count{0};          ///< Inserts rejected for being below min_query_cost_ms threshold
+  std::atomic<uint64_t> rejection_oversize{0};       ///< Inserts rejected because the entry exceeds max_memory_bytes
+  std::atomic<uint64_t> rejection_memory_budget{0};  ///< Inserts rejected because the shared budget cannot retain them
+  std::atomic<uint64_t> rejection_duplicate{0};      ///< Inserts rejected because cache key is already present
+  std::atomic<uint64_t> stale_entry_removals{0};     ///< Entries removed after caller-detected stale payload
+  std::atomic<uint64_t> forced_clears{0};            ///< Bulk Clear()/ClearTable() invocations
+  std::atomic<uint64_t> stale_lru_entries{0};        ///< LRU keys not found in cache_map_ during EvictForSpace
 
   // Timing statistics (protected by mutex)
   mutable std::mutex timing_mutex_;
@@ -211,9 +216,12 @@ class QueryCache {
    * @param min_query_cost_ms Minimum query cost to cache (ms)
    * @param ttl_seconds Time-to-live for cache entries in seconds (0 = no expiration)
    * @param compression_enabled Enable LZ4 compression for cached results (default: true)
+   * @param start_background_worker Start periodic LRU maintenance immediately. Owners that
+   * install callbacks after construction must pass false and call StartBackgroundWorker().
    */
   explicit QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds = 0,
-                      bool compression_enabled = true, size_t eviction_batch_size = 1);
+                      bool compression_enabled = true, size_t eviction_batch_size = 1,
+                      bool start_background_worker = true);
 
   /**
    * @brief Destructor - stops background LRU refresh thread
@@ -225,6 +233,12 @@ class QueryCache {
   QueryCache& operator=(const QueryCache&) = delete;
   QueryCache(QueryCache&&) = delete;
   QueryCache& operator=(QueryCache&&) = delete;
+
+  /** Start periodic LRU maintenance after all eviction callbacks are installed. */
+  mygram::utils::Expected<void, mygram::utils::Error> StartBackgroundWorker();
+
+  /** Test-only lifecycle observation. */
+  [[nodiscard]] bool IsBackgroundWorkerRunningForTesting() const { return lru_refresh_worker_.IsRunning(); }
 
   /**
    * @brief Cache lookup result with metadata
@@ -333,7 +347,9 @@ class QueryCache {
     snapshot.decompression_failures = stats_.decompression_failures.load();
     snapshot.rejection_count = stats_.rejection_count.load();
     snapshot.rejection_oversize = stats_.rejection_oversize.load();
+    snapshot.rejection_memory_budget = stats_.rejection_memory_budget.load();
     snapshot.rejection_duplicate = stats_.rejection_duplicate.load();
+    snapshot.stale_entry_removals = stats_.stale_entry_removals.load();
     snapshot.forced_clears = stats_.forced_clears.load();
     snapshot.stale_lru_entries = stats_.stale_lru_entries.load();
     // Configuration snapshot. max_memory_bytes_ and compression_enabled_ are
@@ -367,7 +383,7 @@ class QueryCache {
   bool EvictLeastRecentlyUsed();
 
   /** Record a CacheManager shared-budget rejection. */
-  void IncrementMemoryBudgetRejection() { stats_.rejection_oversize.fetch_add(1, std::memory_order_relaxed); }
+  void IncrementMemoryBudgetRejection() { stats_.rejection_memory_budget.fetch_add(1, std::memory_order_relaxed); }
 
   /**
    * @brief Increment invalidation batch counter
@@ -592,7 +608,7 @@ class QueryCache {
 // contains a std::mutex whose size is implementation-defined and would make
 // the assertion brittle.
 // ---------------------------------------------------------------------------
-inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 224;
+inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 240;
 static_assert(sizeof(CacheStatisticsSnapshot) == kExpectedCacheStatisticsSnapshotSize,
               "CacheStatisticsSnapshot layout changed: also update CacheStatistics, "
               "QueryCache::GetStatistics(), and bump kCacheStatsFieldVersion.");

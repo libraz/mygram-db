@@ -13,10 +13,12 @@
 #include <thread>
 #include <vector>
 
+#include "cache/cache_key.h"
 #include "cache/cache_manager.h"
 #include "cache/cache_types.h"
 #include "cache/query_cache.h"
 #include "config/config.h"
+#include "query/query_normalizer.h"
 #include "query/query_parser.h"
 
 namespace mygramdb::cache {
@@ -47,6 +49,11 @@ query::Query CreateQuery(const std::string& table, const std::string& search_tex
   query.search_text = search_text;
   query.limit = 100;
   query.limit_explicit = false;
+  const std::string normalized = QueryNormalizer::Normalize(query);
+  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+  query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  query.cache_key_discriminator = normalized;
+  query.cache_key_is_canonical = true;
   return query;
 }
 

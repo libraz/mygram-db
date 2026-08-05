@@ -24,8 +24,10 @@
 #include <fstream>
 #endif
 
+#include "cache/cache_key.h"
 #include "cache/cache_types.h"
 #include "config/config.h"
+#include "query/query_normalizer.h"
 #include "query/query_parser.h"
 #include "support/deterministic_gate.h"
 
@@ -98,6 +100,11 @@ query::Query CreateQuery(const std::string& table, const std::string& search_tex
   query.search_text = search_text;
   query.limit = 100;
   query.limit_explicit = false;
+  const std::string normalized = QueryNormalizer::Normalize(query);
+  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+  query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  query.cache_key_discriminator = normalized;
+  query.cache_key_is_canonical = true;
   return query;
 }
 
@@ -172,6 +179,9 @@ TEST(CacheManagerTest, ConditionalEraseDoesNotRemoveReinsertedGeneration) {
   ASSERT_NE(old->entry_generation, 0U);
 
   ASSERT_TRUE(mgr.Erase(query, old->entry_generation));
+  const auto after_stale_erase = mgr.GetStatistics();
+  EXPECT_EQ(after_stale_erase.stale_entry_removals, 1U);
+  EXPECT_EQ(after_stale_erase.invalidations_deferred, 0U);
   ASSERT_TRUE(mgr.Insert(query, {2}, {"sta", "tal", "ale"}, 1.0));
   EXPECT_FALSE(mgr.Erase(query, old->entry_generation));
 
@@ -566,6 +576,29 @@ TEST(CacheManagerTest, EnableDisable) {
   // Re-inserting should succeed and be visible
   mgr.Insert(query, {1, 2}, ngrams, 15.0);
   EXPECT_TRUE(mgr.Lookup(query).has_value());
+}
+
+TEST(CacheManagerTest, DisableRetainsDiagnosticStatistics) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+  const auto query = CreateQuery("posts", "test");
+  const std::vector<std::string> ngrams = {"est", "tes"};
+  ASSERT_TRUE(mgr.Insert(query, {1, 2}, ngrams, 15.0));
+  ASSERT_TRUE(mgr.Lookup(query).has_value());
+  const auto stats_before_disable = mgr.GetStatistics();
+  ASSERT_GT(stats_before_disable.total_queries, 0U);
+  ASSERT_GT(stats_before_disable.cache_hits, 0U);
+
+  mgr.Disable();
+  const auto stats_after_disable = mgr.GetStatistics();
+
+  EXPECT_EQ(stats_after_disable.current_entries, 0U);
+  EXPECT_EQ(stats_after_disable.current_memory_bytes, 0U);
+  EXPECT_EQ(stats_after_disable.total_queries, stats_before_disable.total_queries);
+  EXPECT_EQ(stats_after_disable.cache_hits, stats_before_disable.cache_hits);
 }
 
 /**
@@ -1021,7 +1054,7 @@ TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {
   SUCCEED();
 }
 
-TEST(CacheManagerTest, IgnoresNonCanonicalPrecomputedCacheKey) {
+TEST(CacheManagerTest, RejectsNonCanonicalPrecomputedCacheKey) {
   config::CacheConfig config;
   config.enabled = true;
   config.max_memory_bytes = 10 * 1024 * 1024;
@@ -1030,24 +1063,20 @@ TEST(CacheManagerTest, IgnoresNonCanonicalPrecomputedCacheKey) {
 
   CacheManager mgr(config, std::move(ngram_configs));
 
-  // Simulate a stale parser/default precomputed key. It must not override the
-  // canonical normalized key unless explicitly marked canonical.
-  auto query = CreateQuery("posts", "test");
+  auto canonical_query = CreateQuery("posts", "test");
+  auto query = canonical_query;
   query.cache_key = std::make_pair(uint64_t{12345}, uint64_t{67890});
+  query.cache_key_discriminator = "parser-only-key";
+  query.cache_key_is_canonical = false;
 
   std::vector<DocId> results = {1, 2, 3};
   std::vector<std::string> ngrams = {"tes", "est"};
-  bool inserted = mgr.Insert(query, results, ngrams, 15.0, 3, 2, true);
-  ASSERT_TRUE(inserted);
+  EXPECT_FALSE(mgr.Insert(query, results, ngrams, 15.0, 3, 2, true));
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
 
-  auto lookup = mgr.Lookup(query);
-  ASSERT_TRUE(lookup.has_value()) << "Lookup should use the normalized key, not the stale precomputed key";
-  EXPECT_EQ(lookup.value().size(), 3u);
-
-  query::Query canonical_query = query;
-  canonical_query.cache_key_is_canonical = true;
-  auto canonical_lookup = mgr.Lookup(canonical_query);
-  EXPECT_FALSE(canonical_lookup.has_value()) << "Canonical-marked stale keys should be trusted and miss";
+  ASSERT_TRUE(mgr.Insert(canonical_query, results, ngrams, 15.0, 3, 2, true));
+  ASSERT_TRUE(mgr.Lookup(canonical_query).has_value());
+  EXPECT_EQ(*mgr.Lookup(canonical_query), results);
 }
 
 TEST(CacheManagerTest, ExactCaseTableIdentitiesDoNotShareEntries) {

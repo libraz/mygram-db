@@ -36,7 +36,7 @@ constexpr size_t kHashMapNodeOverhead = 32;
 }  // namespace
 
 QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int ttl_seconds, bool compression_enabled,
-                       size_t eviction_batch_size)
+                       size_t eviction_batch_size, bool start_background_worker)
     : max_memory_bytes_(max_memory_bytes),
       min_query_cost_ms_(min_query_cost_ms),
       ttl_seconds_(ttl_seconds),
@@ -61,18 +61,20 @@ QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int tt
     cache_map_.reserve(estimated_entries);
   }
 
-  // Start background LRU refresh worker. The 100ms cadence (10 Hz) is the
-  // same value the hand-rolled loop used; PeriodicWorker handles the
-  // shutdown-aware cv-wake so we no longer carry a dedicated stop flag.
-  // Start failure here is logged by PeriodicWorker; we ignore the return
-  // because realistic failure modes (interval<=0, already-running) cannot
-  // fire on a fresh PeriodicWorker.
-  constexpr auto kRefreshInterval = std::chrono::milliseconds(100);
-  (void)lru_refresh_worker_.Start([this] { RefreshLRU(); }, kRefreshInterval);
+  if (start_background_worker) {
+    // Start failure here is logged by PeriodicWorker. The interval is fixed
+    // and this is a fresh worker, so the expected failure modes cannot occur.
+    (void)StartBackgroundWorker();
+  }
 }
 
 QueryCache::~QueryCache() {
   lru_refresh_worker_.Stop();
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> QueryCache::StartBackgroundWorker() {
+  constexpr auto kRefreshInterval = std::chrono::milliseconds(100);
+  return lru_refresh_worker_.Start([this] { RefreshLRU(); }, kRefreshInterval);
 }
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
@@ -446,7 +448,7 @@ bool QueryCache::Erase(const CacheKey& key) {
     total_memory_bytes_ -= entry_memory;
     stats_.current_entries--;
     stats_.current_memory_bytes = total_memory_bytes_;
-    stats_.invalidations_deferred++;
+    stats_.stale_entry_removals++;
     RemoveTableIndexEntryLocked(key, iter->second.first.metadata.table);
 
     // Remove from cache map
@@ -477,7 +479,7 @@ bool QueryCache::Erase(const CacheEntryIdentity& identity) {
     total_memory_bytes_ -= entry_memory;
     stats_.current_entries--;
     stats_.current_memory_bytes = total_memory_bytes_;
-    stats_.invalidations_deferred++;
+    stats_.stale_entry_removals++;
     RemoveTableIndexEntryLocked(identity.key, iter->second.first.metadata.table);
     cache_map_.erase(iter);
   }

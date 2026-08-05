@@ -10,10 +10,12 @@
 
 #include <thread>
 
+#include "cache/cache_key.h"
 #include "cache/cache_manager.h"
 #include "cache/cache_types.h"
 #include "cache/query_cache.h"
 #include "config/config.h"
+#include "query/query_normalizer.h"
 
 namespace mygramdb::cache {
 
@@ -186,6 +188,11 @@ TEST_F(CacheMetricsTest, InvalidationIndexMemoryInStatistics) {
   query.type = query::QueryType::SEARCH;
   query.table = "test_table";
   query.search_text = "golang";
+  const std::string normalized = QueryNormalizer::Normalize(query);
+  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+  query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  query.cache_key_discriminator = normalized;
+  query.cache_key_is_canonical = true;
 
   std::vector<DocId> result = {1, 2, 3};
   std::vector<std::string> ngrams = {"ang", "gol", "lan", "ola"};
