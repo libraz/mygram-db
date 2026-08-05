@@ -6,42 +6,88 @@
 #include "query/highlighter.h"
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 #include "utils/string_utils.h"
+
+#ifdef USE_ICU
+#include <unicode/brkiter.h>
+#include <unicode/locid.h>
+#include <unicode/unistr.h>
+#endif
 
 namespace mygramdb::query {
 
 namespace {
 
+struct OriginalSegment {
+  size_t byte_start;
+  size_t byte_end;
+  uint32_t cp_start;
+  uint32_t cp_end;
+};
+
+std::vector<OriginalSegment> SegmentOriginalText(std::string_view text) {
+  std::vector<OriginalSegment> segments;
+#ifdef USE_ICU
+  UErrorCode status = U_ZERO_ERROR;
+  std::unique_ptr<icu::BreakIterator> iterator(
+      icu::BreakIterator::createCharacterInstance(icu::Locale::getRoot(), status));
+  if (U_SUCCESS(status) && iterator != nullptr) {
+    const icu::UnicodeString unicode_text =
+        icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), static_cast<int32_t>(text.size())));
+    iterator->setText(unicode_text);
+    int32_t utf16_start = iterator->first();
+    size_t byte_start = 0;
+    uint32_t cp_start = 0;
+    for (int32_t utf16_end = iterator->next(); utf16_end != icu::BreakIterator::DONE;
+         utf16_start = utf16_end, utf16_end = iterator->next()) {
+      const icu::UnicodeString cluster = unicode_text.tempSubStringBetween(utf16_start, utf16_end);
+      std::string utf8_cluster;
+      cluster.toUTF8String(utf8_cluster);
+      const size_t byte_end = byte_start + utf8_cluster.size();
+      const uint32_t cp_end = cp_start + static_cast<uint32_t>(cluster.countChar32());
+      segments.push_back({byte_start, byte_end, cp_start, cp_end});
+      byte_start = byte_end;
+      cp_start = cp_end;
+    }
+    if (byte_start == text.size()) {
+      return segments;
+    }
+    segments.clear();
+  }
+#endif
+
+  const auto* data = reinterpret_cast<const unsigned char*>(text.data());
+  size_t byte_offset = 0;
+  uint32_t cp_offset = 0;
+  while (byte_offset < text.size()) {
+    uint32_t codepoint = 0;
+    const int parsed_length =
+        mygram::utils::TryParseUtf8Char(data + byte_offset, text.size() - byte_offset, &codepoint);
+    const size_t char_length = parsed_length < 0 ? 1 : static_cast<size_t>(parsed_length);
+    segments.push_back({byte_offset, byte_offset + char_length, cp_offset, cp_offset + 1});
+    byte_offset += char_length;
+    ++cp_offset;
+  }
+  return segments;
+}
+
 /// @brief Convert a code-point offset to a byte offset in UTF-8 text
 size_t CpToByte(std::string_view text, uint32_t cp_offset) {
   size_t byte_pos = 0;
   uint32_t cp_count = 0;
+  const auto* data = reinterpret_cast<const unsigned char*>(text.data());
   while (byte_pos < text.size() && cp_count < cp_offset) {
-    auto byte = static_cast<unsigned char>(text[byte_pos]);
-    if (byte < 0x80) {
-      byte_pos += 1;
-    } else if ((byte & 0xE0) == 0xC0) {
-      byte_pos += 2;
-    } else if (byte < 0xC0) {
-      // Continuation byte (0x80-0xBF) encountered as start byte — skip it.
-      // NOTE: This does not fully validate UTF-8 (e.g., overlong encodings,
-      // missing continuation bytes). A more robust approach would use
-      // TryParseUtf8Char() from string_utils.cpp, but that function is not
-      // currently exposed in the header. For highlighter purposes, this
-      // simple heuristic is sufficient since input is pre-validated.
-      byte_pos += 1;
-    } else if (byte < 0xF0) {
-      byte_pos += 3;
-    } else {
-      byte_pos += 4;
+    uint32_t codepoint = 0;
+    const int char_length = mygram::utils::TryParseUtf8Char(data + byte_pos, text.size() - byte_pos, &codepoint);
+    if (char_length < 0) {
+      ++byte_pos;
+      continue;
     }
-    if (byte_pos > text.size()) {
-      byte_pos = text.size();
-      break;
-    }
-    cp_count++;
+    byte_pos += static_cast<size_t>(char_length);
+    ++cp_count;
   }
   return byte_pos;
 }
@@ -178,19 +224,6 @@ HighlightResult GenerateWithPositions(std::string_view text,
   return result;
 }
 
-size_t Utf8CodePointByteLength(unsigned char leading_byte) {
-  if (leading_byte < 0x80) {
-    return 1;
-  }
-  if ((leading_byte & 0xE0) == 0xC0) {
-    return 2;
-  }
-  if ((leading_byte & 0xF0) == 0xE0) {
-    return 3;
-  }
-  return 4;
-}
-
 std::vector<std::pair<uint32_t, uint32_t>> RemoveOverlappingMatchPositions(
     std::vector<std::pair<uint32_t, uint32_t>> positions) {
   // Keep the longest match for a shared start, then retain only the first
@@ -291,21 +324,23 @@ HighlightResult Highlighter::GenerateOriginal(std::string_view original_text,
     return GenerateWithPositions(original_text, {}, options);
   }
 
-  std::string normalized_text;
+  const std::string normalized_text = normalizer(original_text);
   std::vector<std::pair<uint32_t, uint32_t>> normalized_to_original;
-  size_t byte_offset = 0;
-  uint32_t original_cp = 0;
-  while (byte_offset < original_text.size()) {
-    const size_t cp_bytes = std::min(Utf8CodePointByteLength(static_cast<unsigned char>(original_text[byte_offset])),
-                                     original_text.size() - byte_offset);
-    const std::string normalized_piece = normalizer(original_text.substr(byte_offset, cp_bytes));
+  for (const auto& segment : SegmentOriginalText(original_text)) {
+    const std::string normalized_piece =
+        normalizer(original_text.substr(segment.byte_start, segment.byte_end - segment.byte_start));
     const size_t normalized_cp_count = mygram::utils::CountCodePoints(normalized_piece);
-    normalized_text += normalized_piece;
     for (size_t i = 0; i < normalized_cp_count; ++i) {
-      normalized_to_original.emplace_back(original_cp, original_cp + 1);
+      normalized_to_original.emplace_back(segment.cp_start, segment.cp_end);
     }
-    byte_offset += cp_bytes;
-    ++original_cp;
+  }
+
+  // The full normalized string is authoritative for matching. A custom
+  // normalizer that composes across grapheme boundaries cannot be mapped
+  // safely; fall back to the bounded no-match snippet instead of highlighting
+  // the wrong original bytes.
+  if (normalized_to_original.size() != mygram::utils::CountCodePoints(normalized_text)) {
+    return GenerateWithPositions(original_text, {}, options);
   }
 
   const auto normalized_matches = FindMatchPositions(normalized_text, normalized_search_terms);

@@ -228,10 +228,41 @@ TEST_F(HighlighterTest, GenerateOriginalPreservesCaseAndWidth) {
   EXPECT_EQ(result.snippet, "<em>Tokyo</em> <em>ＴＯＷＥＲ</em>");
 }
 
+#ifdef USE_ICU
+TEST_F(HighlighterTest, GenerateOriginalMapsNfdCompositionBackToWholeGrapheme) {
+  HighlightOptions opts;
+  opts.snippet_length = 40;
+  const auto normalizer = [](std::string_view text) {
+    return mygram::utils::NormalizeText(text, true, "narrow", true);
+  };
+  const std::string original = "Cafe\xCC\x81 noir";
+  const std::vector<std::string> terms = {normalizer("CAFÉ")};
+
+  const auto result = Highlighter::GenerateOriginal(original, terms, normalizer, opts);
+
+  EXPECT_EQ(result.snippet, "<em>Cafe\xCC\x81</em> noir");
+}
+
+TEST_F(HighlighterTest, GenerateOriginalMapsHalfwidthKanaDakutenAsOneGrapheme) {
+  HighlightOptions opts;
+  opts.snippet_length = 40;
+  const auto normalizer = [](std::string_view text) { return mygram::utils::NormalizeText(text, true, "wide", false); };
+  const std::string original = "商品: ｶﾞﾗｽ";
+  const std::vector<std::string> terms = {normalizer("ガラス")};
+
+  const auto result = Highlighter::GenerateOriginal(original, terms, normalizer, opts);
+
+  EXPECT_EQ(result.snippet, "商品: <em>ｶﾞﾗｽ</em>");
+}
+#endif
+
 TEST_F(HighlighterTest, GenerateOriginalDoesNotDuplicateOverlappingMappedRanges) {
   HighlightOptions opts;
   opts.snippet_length = 20;
   const auto expanding_normalizer = [](std::string_view text) {
+    if (text == "abc") {
+      return std::string("abbcc");
+    }
     if (text == "a") {
       return std::string("ab");
     }
