@@ -228,7 +228,7 @@ class TestDDLEdgeCases:
         try:
             mysql.execute("ALTER TABLE articles MODIFY COLUMN content MEDIUMTEXT NOT NULL")
             wait_until(
-                lambda: _replication_status_value(mygramdb, "status") == "stopped",
+                lambda: _replication_status_value(mygramdb, "status") == "failed",
                 timeout=20,
                 interval=0.2,
                 description="replication to fail closed on configured text type change",
@@ -236,6 +236,10 @@ class TestDDLEdgeCases:
 
             assert mygramdb.ping(), "Server should remain live after incompatible ALTER"
             assert not mygramdb.health_ready(), "Incompatible schema must make readiness fail"
+            assert _replication_status_value(mygramdb, "last_error_code") == "2012"
+            assert "Configured column 'content' changed" in _replication_status_value(
+                mygramdb, "last_error"
+            )
             assert _replication_status_value(mygramdb, "current_gtid") == before_gtid
 
             # This row must not be silently acknowledged while replication is
@@ -275,10 +279,14 @@ class TestDDLEdgeCases:
 
             mysql.execute("DROP TABLE articles")
             wait_until(
-                lambda: _replication_status_value(mygramdb, "status") == "stopped",
+                lambda: _replication_status_value(mygramdb, "status") == "failed",
                 timeout=20,
                 interval=0.2,
                 description="replication to fail closed on configured table DROP",
+            )
+            assert _replication_status_value(mygramdb, "last_error_code") == "2012"
+            assert "configured table was dropped" in _replication_status_value(
+                mygramdb, "last_error"
             )
             assert _replication_status_value(mygramdb, "current_gtid") == before_gtid
             assert not mygramdb.health_ready()
