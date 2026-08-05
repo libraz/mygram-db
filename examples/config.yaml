@@ -184,6 +184,7 @@ dump:
                                      # - Created automatically if doesn't exist
                                      # - Write permissions verified at startup
   default_filename: "mygramdb.dmp"  # Default filename for manual DUMP SAVE (default: mygramdb.dmp)
+  load_on_startup: false             # Restore default_filename first; fall back to MySQL snapshot on failure
   interval_sec: 0                   # Auto-save interval in seconds (0 = disabled, default: 0)
                                      # - Set to 7200 for 120-minute intervals (recommended)
                                      # - Auto-saved files: auto_YYYYMMDD_HHMMSS.dmp
@@ -275,5 +276,6 @@ cache:
 
   # Invalidation queue settings (optional)
   invalidation:
-    batch_size: 1000                # Process invalidation after N unique (table, ngram) pairs (default: 1000)
+    batch_size: 1000                # Process invalidation after N unique cache-entry identities (default: 1000)
     max_delay_ms: 100               # Maximum delay before processing invalidation in milliseconds (default: 100)
+    max_queue_size: 100000          # Maximum pending identities before deferred cleanup backpressure (default: 100000)

@@ -539,6 +539,11 @@
           "description": "Default filename for manual DUMP SAVE",
           "default": "mygramdb.dmp"
         },
+        "load_on_startup": {
+          "type": "boolean",
+          "description": "Restore default_filename at startup; fall back to an initial MySQL snapshot if restore fails",
+          "default": false
+        },
         "interval_sec": {
           "type": "integer",
           "description": "Dump interval in seconds (0 = disabled, 7200 = 120 minutes recommended)",
@@ -897,7 +902,7 @@
         },
         "max_memory_mb": {
           "type": "integer",
-          "description": "Shared cache budget in MB, including entry payloads, cache containers, LRU/table indexes, and invalidation metadata. The accounted total is exported by INFO and Prometheus metrics.",
+          "description": "Shared cache budget in MB, including entry payloads, cache containers, LRU/table indexes, invalidation metadata, and the deferred invalidation queue. The accounted total is exported by INFO and Prometheus metrics.",
           "default": 32,
           "minimum": 1
         },
@@ -946,6 +951,12 @@
               "description": "Max delay before processing (ms)",
               "default": 100,
               "minimum": 0
+            },
+            "max_queue_size": {
+              "type": "integer",
+              "description": "Maximum pending cache-entry identities before new deferred cleanup records are dropped; immediate invalidation still preserves correctness",
+              "default": 100000,
+              "minimum": 1
             }
           }
         }

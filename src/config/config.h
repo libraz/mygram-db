@@ -335,6 +335,7 @@ struct MemoryConfig {
 struct DumpConfig {
   std::string dir = "/var/lib/mygramdb/dumps";
   std::string default_filename = defaults::kDumpDefaultFilename;
+  bool load_on_startup = false;  ///< Restore the default dump before falling back to a MySQL snapshot
   int interval_sec = defaults::kDumpIntervalSec;
   int retain = 3;
   int restore_memory_budget_mb = 4096;  ///< Maximum aggregate memory of staged V2 restore data
@@ -513,8 +514,9 @@ struct CacheConfig {
 
   // Invalidation queue settings
   struct {
-    int batch_size = 1000;   ///< Process after N unique (table, ngram) pairs  // NOLINT
-    int max_delay_ms = 100;  ///< Max delay before processing (ms)  // NOLINT
+    int batch_size = 1000;           ///< Process after N unique cache-entry identities  // NOLINT
+    int max_delay_ms = 100;          ///< Max delay before processing (ms)  // NOLINT
+    size_t max_queue_size = 100000;  ///< Maximum pending identities before backpressure  // NOLINT
   } invalidation;
 };
 

@@ -189,6 +189,7 @@ nlohmann::json ConfigToJson(const Config& config) {
   json["dump"] = {
       {"dir", config.dump.dir},
       {"default_filename", config.dump.default_filename},
+      {"load_on_startup", config.dump.load_on_startup},
       {"interval_sec", config.dump.interval_sec},
       {"retain", config.dump.retain},
       {"restore_memory_budget_mb", config.dump.restore_memory_budget_mb},
@@ -270,6 +271,7 @@ nlohmann::json ConfigToJson(const Config& config) {
        {
            {"batch_size", config.cache.invalidation.batch_size},
            {"max_delay_ms", config.cache.invalidation.max_delay_ms},
+           {"max_queue_size", config.cache.invalidation.max_queue_size},
        }},
   };
 

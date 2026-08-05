@@ -165,6 +165,7 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
   config.cache.compression_enabled = false;
   config.cache.invalidation.batch_size = 345;
   config.cache.invalidation.max_delay_ms = 67;
+  config.cache.invalidation.max_queue_size = 890;
   config.memory.arena_chunk_mb = 128;
   config.memory.roaring_threshold = 0.25;
   config.memory.minute_epoch = false;
@@ -184,6 +185,7 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
   config.build.throttle_ms = 77;
   config.dump.dir = "/tmp/dumps";
   config.dump.default_filename = "snapshot.dmp";
+  config.dump.load_on_startup = true;
   config.dump.interval_sec = 888;
   config.dump.retain = 9;
   config.network.allow_cidrs = {"127.0.0.1/32", "10.0.0.0/8"};
@@ -212,6 +214,7 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
       {"cache.compression_enabled", "false"},
       {"cache.invalidation.batch_size", "345"},
       {"cache.invalidation.max_delay_ms", "67"},
+      {"cache.invalidation.max_queue_size", "890"},
       {"memory.arena_chunk_mb", "128"},
       {"memory.minute_epoch", "false"},
       {"memory.normalize.nfkc", "false"},
@@ -230,6 +233,7 @@ TEST(RuntimeVariableManagerTest, GetVariableCoversRegisteredImmutableConfig) {
       {"build.throttle_ms", "77"},
       {"dump.dir", "/tmp/dumps"},
       {"dump.default_filename", "snapshot.dmp"},
+      {"dump.load_on_startup", "true"},
       {"dump.interval_sec", "888"},
       {"dump.retain", "9"},
       {"network.allow_cidrs", "127.0.0.1/32,10.0.0.0/8"},

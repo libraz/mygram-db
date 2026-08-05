@@ -128,6 +128,7 @@ TEST(ConfigTest, LoadValidConfig) {
     << "    lower: false\n"
     << "dump:\n"
     << "  dir: \"/tmp/test_dumps\"\n"
+    << "  load_on_startup: true\n"
     << "  interval_sec: 300\n"
     << "  retain: 2\n"
     << "api:\n"
@@ -211,6 +212,7 @@ TEST(ConfigTest, LoadValidConfig) {
 
   // Dump config
   EXPECT_EQ(config.dump.dir, "/tmp/test_dumps");
+  EXPECT_TRUE(config.dump.load_on_startup);
   EXPECT_EQ(config.dump.interval_sec, 300);
   EXPECT_EQ(config.dump.retain, 2);
 
@@ -308,6 +310,7 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   f << "      file: synonyms.tsv\n";
   f << "dump:\n";
   f << "  default_filename: custom.dmp\n";
+  f << "  load_on_startup: true\n";
   f << "  restore_memory_budget_mb: 8192\n";
   f << "  restore_max_section_mb: 1024\n";
   f << "api:\n";
@@ -339,6 +342,7 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   EXPECT_TRUE(config.tables[0].synonyms.enable);
   EXPECT_EQ(config.tables[0].synonyms.file, "synonyms.tsv");
   EXPECT_EQ(config.dump.default_filename, "custom.dmp");
+  EXPECT_TRUE(config.dump.load_on_startup);
   EXPECT_EQ(config.dump.restore_memory_budget_mb, 8192);
   EXPECT_EQ(config.dump.restore_max_section_mb, 1024);
   EXPECT_EQ(config.api.tcp.idle_timeout_sec, 45);

@@ -703,6 +703,9 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   if (variable_name == "cache.invalidation.max_delay_ms") {
     return std::to_string(base_config_.cache.invalidation.max_delay_ms);
   }
+  if (variable_name == "cache.invalidation.max_queue_size") {
+    return std::to_string(base_config_.cache.invalidation.max_queue_size);
+  }
 
   // Memory config
   if (variable_name == "memory.hard_limit_mb") {
@@ -776,6 +779,9 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   }
   if (variable_name == "dump.default_filename") {
     return base_config_.dump.default_filename;
+  }
+  if (variable_name == "dump.load_on_startup") {
+    return base_config_.dump.load_on_startup ? "true" : "false";
   }
   if (variable_name == "dump.interval_sec") {
     return std::to_string(base_config_.dump.interval_sec);

@@ -86,3 +86,4 @@ cache:
   invalidation:
     batch_size: 1000
     max_delay_ms: 100
+    max_queue_size: 100000

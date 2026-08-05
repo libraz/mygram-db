@@ -1132,6 +1132,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         return MakeUnexpected(v.error());
       }
     }
+    if (dmp.contains("load_on_startup")) {
+      config.dump.load_on_startup = dmp["load_on_startup"].get<bool>();
+    }
     if (dmp.contains("interval_sec")) {
       config.dump.interval_sec = dmp["interval_sec"].get<int>();
     }
@@ -1388,6 +1391,9 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       }
       if (invalidation.contains("max_delay_ms")) {
         config.cache.invalidation.max_delay_ms = invalidation["max_delay_ms"].get<int>();
+      }
+      if (invalidation.contains("max_queue_size")) {
+        config.cache.invalidation.max_queue_size = invalidation["max_queue_size"].get<size_t>();
       }
     }
 
