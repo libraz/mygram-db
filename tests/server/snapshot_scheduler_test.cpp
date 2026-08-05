@@ -856,6 +856,7 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartWhenAnotherOperationHold
   // the shared counter and stopping the stub reader.
   replication_pause::Counter counter;
   ASSERT_TRUE(counter.RequestPause()) << "Test pre-condition: counter should start at 0";
+  counter.PublishDrainedGTID("00000000-0000-0000-0000-000000000000:1-1");
 
   StubBinlogReader stub;
   stub.SetGtidForTest("00000000-0000-0000-0000-000000000000:1-1");

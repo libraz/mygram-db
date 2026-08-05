@@ -14,6 +14,7 @@ add_library(mygramdb_server STATIC
   reactor_connection.cpp
   io_reactor.cpp
   operation_coordinator.cpp
+  replication_pause_guard.cpp
   reactor/event_multiplexer.cpp
   reactor/epoll_multiplexer.cpp
   reactor/kqueue_multiplexer.cpp

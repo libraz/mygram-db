@@ -1579,8 +1579,8 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRestoresGtidAndRestartsReplication) {
   EXPECT_TRUE(mock_binlog_reader_->WasStartCalled()) << "Replication should be restarted after load";
 }
 
-TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMismatchedMySQLSource) {
-  const std::string original_database = config_->mysql.database;
+TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMismatchedMySQLSourceFields) {
+  const config::MysqlConfig original_mysql = config_->mysql;
   mock_binlog_reader_->SetGtidForTest("uuid:mysql-source-check");
 
   query::Query save_query;
@@ -1589,7 +1589,44 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMismatchedMySQLSource) {
   const std::string save_response = handler_->Handle(save_query, conn_ctx_);
   ASSERT_TRUE(save_response.find("OK SAVED") == 0) << save_response;
 
-  config_->mysql.database = original_database + "_different";
+  mock_binlog_reader_->SetRunningForTest(false);
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+
+  const std::vector<std::pair<std::string, std::function<void(config::MysqlConfig&)>>> mismatches = {
+      {"host", [](config::MysqlConfig& mysql) { mysql.host += "-different"; }},
+      {"port", [](config::MysqlConfig& mysql) { ++mysql.port; }},
+      {"database", [](config::MysqlConfig& mysql) { mysql.database += "_different"; }},
+  };
+  for (const auto& [field, mutate] : mismatches) {
+    SCOPED_TRACE(field);
+    config_->mysql = original_mysql;
+    mutate(config_->mysql);
+    mock_binlog_reader_->ResetTestFlags();
+
+    const std::string response = handler_->Handle(load_query, conn_ctx_);
+
+    EXPECT_TRUE(response.find("ERROR") == 0) << response;
+    EXPECT_NE(response.find("configured host/port/database"), std::string::npos) << response;
+    EXPECT_FALSE(mock_binlog_reader_->WasStopCalled());
+    EXPECT_FALSE(mock_binlog_reader_->WasStartCalled());
+    EXPECT_FALSE(dump_load_in_progress_.load());
+  }
+  config_->mysql = original_mysql;
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMissingMySQLSourceServerUuid) {
+  mock_binlog_reader_->SetGtidForTest("uuid:missing-source-uuid-check");
+  mock_binlog_reader_->SetSourceServerUUIDForTest("");
+
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  ASSERT_TRUE(handler_->Handle(save_query, conn_ctx_).find("OK SAVED") == 0);
+
+  mock_binlog_reader_->SetSourceServerUUIDForTest("running-source-server");
   mock_binlog_reader_->SetRunningForTest(false);
   mock_binlog_reader_->ResetTestFlags();
 
@@ -1599,7 +1636,7 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMismatchedMySQLSource) {
   const std::string response = handler_->Handle(load_query, conn_ctx_);
 
   EXPECT_TRUE(response.find("ERROR") == 0) << response;
-  EXPECT_NE(response.find("configured host/port/database"), std::string::npos) << response;
+  EXPECT_NE(response.find("does not record its MySQL source server UUID"), std::string::npos) << response;
   EXPECT_FALSE(mock_binlog_reader_->WasStopCalled());
   EXPECT_FALSE(mock_binlog_reader_->WasStartCalled());
   EXPECT_FALSE(dump_load_in_progress_.load());
