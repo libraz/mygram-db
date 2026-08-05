@@ -14,7 +14,7 @@ import uuid
 import pytest
 
 from lib.data_generator import DataGenerator
-from lib.wait import wait_until_gte
+from lib.wait import wait_until_gte, wait_until_value
 
 
 @pytest.mark.concurrency
@@ -141,9 +141,9 @@ class TestDDLDuringQueries:
         mysql.insert_rows("articles", rows)
         mygramdb.sync("testdb.articles", timeout=15)
 
-        wait_until_gte(
+        wait_until_value(
             lambda: mygramdb.count("testdb.articles", marker),
-            minimum=40,
+            expected=50,
             timeout=15,
             interval=0.5,
             description=f"{marker} sync",
@@ -177,6 +177,10 @@ class TestDDLDuringQueries:
 
         assert mygramdb.ping(), "Server unresponsive after bulk delete"
 
-        # Final count should reflect deletions
-        final_count = mygramdb.count("testdb.articles", marker)
-        assert final_count <= 15, f"Expected <=15 results after deleting 40/50, got {final_count}"
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", marker),
+            expected=10,
+            timeout=15,
+            interval=0.5,
+            description=f"exact {marker} count after deleting 40/50 rows",
+        )

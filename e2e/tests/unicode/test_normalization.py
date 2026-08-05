@@ -1,8 +1,10 @@
 """Test Unicode normalization (NFKC, fullwidth/halfwidth, etc.)."""
 
+import uuid
+
 import pytest
 
-from lib.wait import wait_until_gte
+from lib.wait import wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.unicode
 
@@ -59,13 +61,14 @@ class TestNormalization:
         )
 
     def test_zero_width_characters(self, mysql, mygramdb, seed_data):
-        """Zero-width characters should not affect search."""
+        """A zero-width separator should normalize like searchable whitespace."""
+        marker = f"zwprobe_{uuid.uuid4().hex[:8]}"
         mysql.insert_rows(
             "articles",
             [
                 {
                     "title": "Zero Width Test",
-                    "content": "zero\u200bwidth\u200bcharacter\u200btest for search",
+                    "content": f"{marker}\u200bneedle",
                     "status": 1,
                     "category": "tech",
                     "enabled": 1,
@@ -73,9 +76,10 @@ class TestNormalization:
             ],
         )
 
-        # Should be searchable despite zero-width chars
-        import time
-
-        time.sleep(3)
-        # Just verify no crash - zero-width handling is implementation-dependent
-        mygramdb.count("testdb.articles", "zero")
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", f"{marker} needle"),
+            expected=1,
+            timeout=10,
+            interval=0.5,
+            description="zero-width separator normalization",
+        )

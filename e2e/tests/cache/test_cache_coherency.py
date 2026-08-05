@@ -13,7 +13,7 @@ import uuid
 import pytest
 
 from lib.data_generator import DataGenerator
-from lib.wait import wait_until_gte
+from lib.wait import wait_until_value
 
 
 @pytest.mark.cache
@@ -77,18 +77,19 @@ class TestCacheCoherency:
 
         # Wait for inserter to finish
         insert_thread.join(timeout=30)
-        time.sleep(2)  # Allow replication lag
+        assert not insert_thread.is_alive(), "inserter did not finish"
         stop_event.set()
         for t in search_threads:
             t.join(timeout=10)
 
         # Sync and verify final state
         mygramdb.sync("testdb.articles", timeout=15)
-        final_count = mygramdb.count("testdb.articles", marker)
-
-        # Final count should reflect all inserts (eventually consistent)
-        assert final_count >= insert_count * 0.8, (
-            f"Expected ~{insert_count} results, got {final_count}"
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", marker),
+            expected=insert_count,
+            timeout=15,
+            interval=0.5,
+            description=f"all {marker} inserts",
         )
         assert not errors, f"Search errors: {errors}"
 
@@ -110,30 +111,39 @@ class TestCacheCoherency:
         mysql.insert_rows("articles", rows)
         mygramdb.sync("testdb.articles", timeout=15)
 
-        wait_until_gte(
+        wait_until_value(
             lambda: mygramdb.count("testdb.articles", marker),
-            minimum=5,
+            expected=5,
             timeout=15,
             interval=0.5,
             description=f"initial {marker} sync",
         )
 
         # Cache the search result
-        result1 = mygramdb.count("testdb.articles", f"{marker} original")
-        assert result1 >= 5
+        cache_key = f"{marker} original"
+        assert mygramdb.count("testdb.articles", cache_key) == 5
 
         # Update content via MySQL
         new_marker = f"updated_{uuid.uuid4().hex[:8]}"
         mysql.execute(
-            f"UPDATE articles SET content = REPLACE(content, '{marker}', '{new_marker}') "
-            f"WHERE content LIKE '%{marker}%'"
+            f"UPDATE articles SET title = REPLACE(title, '{marker}', '{new_marker}'), "
+            f"content = REPLACE(content, '{marker}', '{new_marker}') "
+            f"WHERE title LIKE '%{marker}%'"
         )
-        mygramdb.sync("testdb.articles", timeout=15)
-        time.sleep(2)  # Allow replication and cache invalidation
-
-        # Search with new content
-        result2 = mygramdb.count("testdb.articles", new_marker)
-        assert result2 >= 3, f"Expected updated content in results, got count={result2}"
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", cache_key),
+            expected=0,
+            timeout=15,
+            interval=0.5,
+            description=f"cached {cache_key} invalidation after UPDATE",
+        )
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", new_marker),
+            expected=5,
+            timeout=15,
+            interval=0.5,
+            description=f"updated {new_marker} visibility",
+        )
 
     def test_delete_then_search_cache_stale(self, mysql, mygramdb, seed_data, clear_cache):
         """Cache search result, DELETE rows, verify results decrease."""
@@ -152,27 +162,25 @@ class TestCacheCoherency:
         mysql.insert_rows("articles", rows)
         mygramdb.sync("testdb.articles", timeout=15)
 
-        wait_until_gte(
+        wait_until_value(
             lambda: mygramdb.count("testdb.articles", marker),
-            minimum=10,
+            expected=10,
             timeout=15,
             interval=0.5,
             description=f"{marker} sync",
         )
 
         # Cache the result
-        initial_count = mygramdb.count("testdb.articles", marker)
-        assert initial_count >= 10
+        assert mygramdb.count("testdb.articles", marker) == 10
 
         # Delete via MySQL
         mysql.delete("articles", f"content LIKE '%{marker}%'")
-        mygramdb.sync("testdb.articles", timeout=15)
-        time.sleep(2)
-
-        # Eventually the count should drop
-        final_count = mygramdb.count("testdb.articles", marker)
-        assert final_count < initial_count, (
-            f"Expected count to decrease after DELETE: initial={initial_count}, final={final_count}"
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", marker),
+            expected=0,
+            timeout=15,
+            interval=0.5,
+            description=f"cached {marker} invalidation after DELETE",
         )
 
     def test_concurrent_cache_clear_and_search(self, mygramdb, seed_data):

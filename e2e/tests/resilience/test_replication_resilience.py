@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from lib.wait import wait_until_gte
+from lib.wait import wait_until, wait_until_gte
 
 pytestmark = pytest.mark.resilience
 
@@ -92,35 +92,68 @@ class TestReplicationResilience:
             self._ensure_replication_running(mygramdb)
 
     def test_health_endpoints_after_stop_start(self, mygramdb, seed_data):
-        """Health endpoints should reflect replication state after stop/start."""
+        """A manual STOP makes readiness fail with actionable replication diagnostics."""
         try:
             # Initially healthy
             assert mygramdb.health_live(), "Should be live initially"
+            assert mygramdb.health_ready(), "Should be ready while replication is running"
 
             # Stop replication (may take up to 60s due to binlog read_timeout)
             resp = mygramdb.tcp_command("REPLICATION STOP", timeout=10.0)
             assert resp is not None and ("STOPPED" in resp or "stopped" in resp)
-            time.sleep(1)
 
             # Server should still be live (liveness != replication)
             assert mygramdb.health_live(), "Should still be live after STOP"
 
-            # Check detail endpoint
+            def _readiness_is_unavailable() -> bool:
+                status, _body = mygramdb.http_get_with_status("/health/ready")
+                return status == 503
+
+            wait_until(
+                _readiness_is_unavailable,
+                timeout=15,
+                interval=0.25,
+                description="readiness to become unavailable after replication STOP",
+            )
+            ready_status, ready = mygramdb.http_get_with_status("/health/ready")
+            assert ready_status == 503
+            assert isinstance(ready, dict)
+            assert ready["status"] == "not_ready"
+            assert ready["replication_running"] is False
+            assert ready["reason"] == "Replication is not running"
+            assert "replication_last_error_code" in ready
+            assert "replication_seconds_since_last_applied" in ready
+
+            # Detail and replication endpoints remain observable and identify
+            # the stopped lifecycle state rather than reporting a false-ready.
             detail = mygramdb.health_detail()
-            if detail:
-                # The detail should be accessible regardless of replication state
-                assert isinstance(detail, dict), "Health detail should be a dict"
+            assert isinstance(detail, dict)
+            assert detail["status"] == "degraded"
+            binlog = detail["components"]["binlog"]
+            assert binlog["replication_state"] == "stopped"
+            assert "crc_errors" in binlog
+            assert "last_error_code" in binlog
+
+            replication_status, replication = mygramdb.http_get_with_status("/replication/status")
+            assert replication_status == 200
+            assert isinstance(replication, dict)
+            assert replication["status"] == "stopped"
+            assert "seconds_since_last_applied" in replication
+
+            metrics = mygramdb.metrics()
+            assert 'mygramdb_replication_state{state="stopped"} 1' in metrics
+            assert "mygramdb_replication_crc_errors_total" in metrics
 
             # Restart (with retry for stopping race)
-            time.sleep(2)
             self._ensure_replication_running(mygramdb)
-            time.sleep(1)
 
-            # Still live
+            wait_until(
+                mygramdb.health_ready,
+                timeout=15,
+                interval=0.25,
+                description="readiness to recover after replication START",
+            )
             assert mygramdb.health_live(), "Should be live after START"
-
-            detail_after = mygramdb.health_detail()
-            if detail_after:
-                assert isinstance(detail_after, dict), "Health detail should be a dict after START"
+            assert mygramdb.health_ready(), "Should be ready after START"
         finally:
             self._ensure_replication_running(mygramdb)

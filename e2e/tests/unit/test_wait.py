@@ -2,7 +2,15 @@
 
 import pytest
 
-from lib.wait import WaitTimeoutError, wait_until_gte, wait_until_value
+from lib.wait import WaitTimeoutError, wait_until, wait_until_gte, wait_until_value
+
+
+def test_wait_until_reports_last_exception() -> None:
+    def failing_predicate() -> bool:
+        raise RuntimeError("health response malformed")
+
+    with pytest.raises(WaitTimeoutError, match="last error: health response malformed"):
+        wait_until(failing_predicate, timeout=0.01, interval=0)
 
 
 def test_wait_until_value_reports_last_exception() -> None:

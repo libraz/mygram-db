@@ -38,6 +38,14 @@ MYGRAMDB_DUMP_DIR = Path(
 )
 
 
+def pytest_report_header(config: pytest.Config) -> str:
+    """Make the dedicated failover suite's inclusion state impossible to miss."""
+    del config
+    if os.environ.get("ENABLE_FAILOVER_TESTS") == "1":
+        return "failover e2e: ENABLED (dedicated two-server fixture)"
+    return "failover e2e: SKIPPED (run `make e2e-failover` for the two-server suite)"
+
+
 def _mysql_major_minor(version_str: str) -> tuple[int, int]:
     """Parse MySQL version string (e.g. '9.6.0') into (major, minor)."""
     parts = version_str.split(".")

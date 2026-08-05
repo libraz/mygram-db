@@ -12,7 +12,7 @@ import pytest
 
 from lib.mysql_client import MysqlClient
 
-pytestmark = pytest.mark.mysql
+pytestmark = [pytest.mark.mysql, pytest.mark.usefixtures("mygramdb")]
 
 
 class TestServerValidation:

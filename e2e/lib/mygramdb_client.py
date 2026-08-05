@@ -384,19 +384,26 @@ class MygramdbClient:
         resp = self.tcp_command(f"DUMP LOAD {filepath}", timeout=60.0)
         return resp is not None and "OK" in resp
 
-    def http_get(self, path: str, timeout: float = 10.0) -> dict[str, Any] | str:
-        """HTTP GET request to MygramDB."""
+    def http_get_with_status(
+        self, path: str, timeout: float = 10.0
+    ) -> tuple[int, dict[str, Any] | str]:
+        """HTTP GET request returning its status code and decoded response body."""
         url = f"http://{self.host}:{self.http_port}{path}"
         try:
             req = Request(url)
             with urlopen(req, timeout=timeout) as resp:
                 body = resp.read().decode("utf-8")
-                try:
-                    return json.loads(body)
-                except json.JSONDecodeError:
-                    return body
-        except URLError:
-            return {}
+                return resp.status, self._parse_json_or_text(body)
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            return exc.code, self._parse_json_or_text(body)
+        except URLError as exc:
+            return 0, str(exc)
+
+    def http_get(self, path: str, timeout: float = 10.0) -> dict[str, Any] | str:
+        """HTTP GET request to MygramDB, returning only its decoded response body."""
+        _status, body = self.http_get_with_status(path, timeout)
+        return body
 
     def http_post(
         self, path: str, payload: dict[str, Any], timeout: float = 10.0

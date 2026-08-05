@@ -37,10 +37,8 @@ def wait_until(
             last_error = e
         time.sleep(interval)
 
-    msg = f"Timed out waiting for {description} after {timeout}s"
-    if last_error:
-        msg += f" (last error: {last_error})"
-    raise WaitTimeoutError(description, timeout)
+    error_detail = f" (last error: {last_error})" if last_error else ""
+    raise WaitTimeoutError(f"{description}{error_detail}", timeout)
 
 
 def wait_until_value(
