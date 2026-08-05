@@ -207,6 +207,10 @@ TEST_F(DumpHandlerTest, DumpSaveSetsReadOnlyMode) {
 // ============================================================================
 
 TEST_F(DumpHandlerTest, DumpLoadBasic) {
+  std::vector<std::string> initialized_tables;
+  handler_ctx_->table_initialized_callback = [&initialized_tables](const std::string& table_name) {
+    initialized_tables.push_back(table_name);
+  };
   // First save
   query::Query save_query;
   save_query.type = query::QueryType::DUMP_SAVE;
@@ -244,6 +248,7 @@ TEST_F(DumpHandlerTest, DumpLoadBasic) {
 
   // Verify document count
   EXPECT_EQ(3u, table_ctx_->doc_store->Size()) << "Document count mismatch";
+  EXPECT_EQ(initialized_tables, (std::vector<std::string>{"test_table"}));
 }
 
 TEST_F(DumpHandlerTest, DumpLoadWaitsForExistingGenerationReadersBeforeReplacingState) {
@@ -350,6 +355,8 @@ TEST_F(DumpHandlerTest, DumpLoadRequiresFilepath) {
 }
 
 TEST_F(DumpHandlerTest, DumpLoadNonExistentFile) {
+  size_t callback_count = 0;
+  handler_ctx_->table_initialized_callback = [&callback_count](const std::string&) { ++callback_count; };
   query::Query query;
   query.type = query::QueryType::DUMP_LOAD;
   query.filepath = "/tmp/nonexistent.dmp";
@@ -357,6 +364,7 @@ TEST_F(DumpHandlerTest, DumpLoadNonExistentFile) {
   std::string response = handler_->Handle(query, conn_ctx_);
 
   EXPECT_TRUE(response.find("ERROR") == 0);
+  EXPECT_EQ(callback_count, 0U);
 }
 
 TEST_F(DumpHandlerTest, DumpLoadSetsLoadingMode) {
@@ -1669,6 +1677,8 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMismatchedMySQLSourceServerUuid) {
 
 TEST_F(DumpHandlerGtidTest, DumpLoadReportsErrorWhenReplicationRestartFails) {
   const std::string original_gtid = "uuid:restart-failure";
+  size_t callback_count = 0;
+  handler_ctx_->table_initialized_callback = [&callback_count](const std::string&) { ++callback_count; };
 
   mock_binlog_reader_->SetGtidForTest(original_gtid);
   query::Query save_query;
@@ -1693,6 +1703,7 @@ TEST_F(DumpHandlerGtidTest, DumpLoadReportsErrorWhenReplicationRestartFails) {
   EXPECT_FALSE(mock_binlog_reader_->IsRunning());
   EXPECT_FALSE(replication_paused_for_dump_.load());
   EXPECT_FALSE(dump_load_in_progress_.load());
+  EXPECT_EQ(callback_count, 1U) << "data was restored even though replication restart failed";
 }
 
 TEST_F(DumpHandlerGtidTest, DumpLoadV1RejectsEmptyGtidWithoutMutatingLiveState) {

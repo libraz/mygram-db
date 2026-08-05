@@ -17,6 +17,7 @@
 #include <sstream>
 
 #include "cache/cache_manager.h"
+#include "server/dump_config_validator.h"
 #include "server/log_field_names.h"
 #include "server/operation_coordinator.h"
 #include "server/operation_names.h"
@@ -47,54 +48,6 @@ mygram::utils::Expected<std::string, mygram::utils::Error> ResolveDumpFilepath(c
                                                                                const std::string& dump_dir) {
   return mygram::utils::ResolveSafePath(input, dump_dir, /*allowed_extensions=*/{},
                                         /*base_dir_label=*/"dump directory");
-}
-
-const config::TableConfig* FindTableConfigByName(const config::Config& config, const std::string& table_name) {
-  for (const auto& table : config.tables) {
-    if (table.name == table_name) {
-      return &table;
-    }
-  }
-  return nullptr;
-}
-
-std::optional<std::string> FindTokenizerConfigMismatch(const config::Config& loaded_config,
-                                                       const config::Config& live_config) {
-  if (loaded_config.memory.verify_text.empty()) {
-    if (live_config.memory.verify_text != "off") {
-      return "legacy dump is missing memory.verify_text compatibility metadata; load with verify_text=off or rebuild "
-             "the dump from the source database";
-    }
-  } else if (loaded_config.memory.verify_text != live_config.memory.verify_text) {
-    return "memory.verify_text mismatch between dump and running config";
-  }
-  if (loaded_config.memory.normalize.nfkc != live_config.memory.normalize.nfkc) {
-    return "memory.normalize.nfkc mismatch between dump and running config";
-  }
-  if (loaded_config.memory.normalize.width != live_config.memory.normalize.width) {
-    return "memory.normalize.width mismatch between dump and running config";
-  }
-  if (loaded_config.memory.normalize.lower != live_config.memory.normalize.lower) {
-    return "memory.normalize.lower mismatch between dump and running config";
-  }
-
-  for (const auto& loaded_table : loaded_config.tables) {
-    const auto* live_table = FindTableConfigByName(live_config, loaded_table.name);
-    if (live_table == nullptr) {
-      continue;
-    }
-    if (loaded_table.ngram_size != live_table->ngram_size) {
-      return "table '" + loaded_table.name + "' ngram_size mismatch between dump and running config";
-    }
-    if (loaded_table.kanji_ngram_size != live_table->kanji_ngram_size) {
-      return "table '" + loaded_table.name + "' kanji_ngram_size mismatch between dump and running config";
-    }
-    if (loaded_table.cross_boundary_ngrams != live_table->cross_boundary_ngrams) {
-      return "table '" + loaded_table.name + "' cross_boundary_ngrams mismatch between dump and running config";
-    }
-  }
-
-  return std::nullopt;
 }
 
 }  // namespace
@@ -564,7 +517,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         if (ctx_.full_config == nullptr) {
           // GTID validation below does not depend on the server config.
         } else {
-          if (auto mismatch = FindTokenizerConfigMismatch(dump_config, *ctx_.full_config); mismatch.has_value()) {
+          if (auto mismatch = FindDumpConfigMismatch(dump_config, *ctx_.full_config); mismatch.has_value()) {
             mygram::utils::StructuredLog()
                 .Event("dump_load_rejected")
                 .Field("reason", "tokenizer_config_mismatch")
@@ -690,6 +643,17 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         table_ctx->bm25_stats.SetCorpusStats(total_length, doc_count);
       }
     }
+
+    // The complete table generation is now installed even if replication
+    // cannot be restarted below. Overall readiness will still report that
+    // replication failure separately, while data_initialized accurately
+    // reflects the successful restore.
+    if (ctx_.table_initialized_callback) {
+      for (const auto& [table_name, table_ctx] : ctx_.table_catalog->GetTables()) {
+        (void)table_ctx;
+        ctx_.table_initialized_callback(table_name);
+      }
+    }
   }
 
 #ifdef USE_MYSQL
@@ -732,8 +696,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   mygram::utils::StructuredLog()
       .Event("dump_load_failed")
       .Field("filepath", filepath)
-      .Field("error", error_msg)
-      .Field("error_code", static_cast<int64_t>(result.error().code()))
+      .FieldError(mygram::utils::MakeError(result.error().code(), error_msg))
       .Error();
   if (ctx_.dump_progress != nullptr) {
     ctx_.dump_progress->Fail(error_msg);
@@ -754,7 +717,13 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
   mygram::utils::StructuredLog().Event("dump_verify_starting").Field(log_fields::kFieldFilepath, filepath).Info();
 
   storage::dump_format::IntegrityError integrity_error;
-  auto result = storage::dump_v2::VerifyDumpIntegrity(filepath, integrity_error);
+  const auto restore_limits =
+      ctx_.full_config == nullptr
+          ? storage::dump_v2::RestoreLimits{}
+          : storage::dump_v2::RestoreLimits{
+                static_cast<uint64_t>(ctx_.full_config->dump.restore_memory_budget_mb) * 1024ULL * 1024ULL,
+                static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) * 1024ULL * 1024ULL};
+  auto result = storage::dump_v2::VerifyDumpIntegrity(filepath, integrity_error, restore_limits);
 
   if (result) {
     mygram::utils::StructuredLog().Event("dump_verify_succeeded").Field(log_fields::kFieldFilepath, filepath).Info();
@@ -769,8 +738,7 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
   mygram::utils::StructuredLog()
       .Event("dump_verify_failed")
       .Field("filepath", filepath)
-      .Field("error", error_msg)
-      .Field("error_code", static_cast<int64_t>(result.error().code()))
+      .FieldError(mygram::utils::MakeError(result.error().code(), error_msg))
       .Error();
   return ResponseFormatter::FormatError(error_msg);
 }

@@ -506,7 +506,7 @@ TEST(ServerOrchestratorMysqlStartupTest, SkipsMysqlWhenReplicationAndAutoSnapsho
   EXPECT_FALSE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
 }
 
-TEST(ServerOrchestratorMysqlStartupTest, RequiresMysqlForReplicationOrAutoSnapshot) {
+TEST(ServerOrchestratorMysqlStartupTest, RequiresMysqlForReplicationAutoSnapshotOrStartupDumpFallback) {
   mygramdb::config::Config config;
   config.replication.enable = true;
   config.replication.auto_initial_snapshot = false;
@@ -514,6 +514,10 @@ TEST(ServerOrchestratorMysqlStartupTest, RequiresMysqlForReplicationOrAutoSnapsh
 
   config.replication.enable = false;
   config.replication.auto_initial_snapshot = true;
+  EXPECT_TRUE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
+
+  config.replication.auto_initial_snapshot = false;
+  config.dump.load_on_startup = true;
   EXPECT_TRUE(mygramdb::app::RequiresMysqlConnectionForStartup(config));
 }
 

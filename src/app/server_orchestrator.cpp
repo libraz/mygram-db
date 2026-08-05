@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <thread>
 #include <unordered_map>
@@ -21,9 +22,11 @@
 #include "mysql/connection_validator.h"
 #include "mysql/gtid_waiter.h"
 #include "query/synonym_dictionary.h"
+#include "server/dump_config_validator.h"
 #include "server/http_server.h"
 #include "server/request_dispatcher.h"
 #include "server/tcp_server.h"
+#include "storage/dump_format_v2.h"
 #include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -159,7 +162,7 @@ bool ShouldStoreNormalizedTexts(const config::Config& config, const config::Tabl
 }
 
 bool RequiresMysqlConnectionForStartup(const config::Config& config) {
-  return config.replication.enable || config.replication.auto_initial_snapshot;
+  return config.replication.enable || config.replication.auto_initial_snapshot || config.dump.load_on_startup;
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initialize() {
@@ -509,7 +512,110 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSnapshots() {
 #ifdef USE_MYSQL
-  if (!deps_.config.replication.auto_initial_snapshot) {
+  if (deps_.config.dump.load_on_startup) {
+    const std::string filepath = (std::filesystem::path(deps_.dump_dir) / deps_.config.dump.default_filename).string();
+    mygram::utils::StructuredLog().Event("startup_dump_load_starting").Field("filepath", filepath).Info();
+
+    auto expected_uuid_result = mysql_connection_->GetServerUUID();
+    if (expected_uuid_result) {
+      std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> dump_contexts;
+      dump_contexts.reserve(table_contexts_.size());
+      for (const auto& [table_name, table_ctx] : table_contexts_) {
+        dump_contexts.emplace(table_name, std::make_pair(table_ctx->index.get(), table_ctx->doc_store.get()));
+      }
+
+      std::string loaded_gtid;
+      std::string loaded_source_server_uuid;
+      config::Config loaded_config;
+      storage::dump_format::IntegrityError integrity_error;
+      const std::string expected_source_server_uuid = *expected_uuid_result;
+      auto restore_result = storage::dump_v2::ReadDump(
+          filepath, loaded_gtid, loaded_config, dump_contexts, nullptr, nullptr, &integrity_error,
+          [this, &expected_source_server_uuid, &loaded_source_server_uuid](
+              const config::Config& dump_config,
+              const std::string& dump_gtid) -> mygram::utils::Expected<void, mygram::utils::Error> {
+            if (auto mismatch = server::FindDumpConfigMismatch(dump_config, deps_.config); mismatch.has_value()) {
+              return mygram::utils::MakeUnexpected(
+                  mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, *mismatch));
+            }
+            if (dump_config.mysql.host != deps_.config.mysql.host ||
+                dump_config.mysql.port != deps_.config.mysql.port ||
+                dump_config.mysql.database != deps_.config.mysql.database) {
+              return mygram::utils::MakeUnexpected(
+                  mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch,
+                                           "dump MySQL source does not match the configured host/port/database"));
+            }
+            if (loaded_source_server_uuid.empty()) {
+              return mygram::utils::MakeUnexpected(
+                  mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch,
+                                           "dump does not record its MySQL source server UUID"));
+            }
+            if (loaded_source_server_uuid != expected_source_server_uuid) {
+              return mygram::utils::MakeUnexpected(
+                  mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch,
+                                           "dump MySQL source server UUID does not match the configured source"));
+            }
+            if (deps_.config.replication.enable && dump_gtid.empty()) {
+              return mygram::utils::MakeUnexpected(
+                  mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageDumpReadError,
+                                           "startup dump has no GTID from which replication can resume"));
+            }
+            return {};
+          },
+          storage::dump_v2::RestoreLimits{
+              static_cast<uint64_t>(deps_.config.dump.restore_memory_budget_mb) * mygram::constants::kBytesPerMegabyte,
+              static_cast<uint64_t>(deps_.config.dump.restore_max_section_mb) * mygram::constants::kBytesPerMegabyte},
+          &loaded_source_server_uuid);
+
+      if (restore_result) {
+        snapshot_gtid_ = loaded_gtid;
+        for (const auto& [table_name, table_ctx] : table_contexts_) {
+          auto all_doc_ids = table_ctx->doc_store->GetAllDocIds();
+          auto all_texts = table_ctx->doc_store->GetNormalizedTextBatch(all_doc_ids);
+          uint64_t total_length = 0;
+          uint64_t doc_count = 0;
+          for (const auto& text : all_texts) {
+            if (text.has_value() && !text->empty()) {
+              total_length += mygram::utils::CountCodePoints(*text);
+              ++doc_count;
+            }
+          }
+          table_ctx->bm25_stats.SetCorpusStats(total_length, doc_count);
+          initial_data_readiness_.MarkTableInitialized(table_name);
+        }
+
+        if (deps_.config.replication.enable && !table_contexts_.empty()) {
+          auto catchup_target = mysql_connection_->GetLatestGTID();
+          if (!catchup_target) {
+            return mygram::utils::MakeUnexpected(catchup_target.error());
+          }
+          snapshot_catchup_target_gtid_ = *catchup_target;
+        }
+        mygram::utils::StructuredLog()
+            .Event("startup_dump_load_completed")
+            .Field("filepath", filepath)
+            .Field("gtid", snapshot_gtid_)
+            .Info();
+        return {};
+      }
+
+      mygram::utils::StructuredLog()
+          .Event("startup_dump_load_failed")
+          .Field("filepath", filepath)
+          .FieldError(restore_result.error())
+          .Field("action", "fallback_to_mysql_snapshot")
+          .Warn();
+    } else {
+      mygram::utils::StructuredLog()
+          .Event("startup_dump_load_failed")
+          .Field("filepath", filepath)
+          .FieldError(expected_uuid_result.error())
+          .Field("action", "fallback_to_mysql_snapshot")
+          .Warn();
+    }
+  }
+
+  if (!deps_.config.replication.auto_initial_snapshot && !deps_.config.dump.load_on_startup) {
     mygram::utils::StructuredLog()
         .Event("server_debug")
         .Field("action", "skip_auto_snapshot")
@@ -630,6 +736,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
         .Field("table", table_config.name)
         .Field("documents", initial_loader.GetProcessedRows())
         .Info();
+    initial_data_readiness_.MarkTableInitialized(table_key);
 
     // Rebuild BM25 corpus statistics from loaded documents
     {
@@ -791,15 +898,18 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 #ifdef USE_MYSQL
   tcp_server_ = std::make_unique<server::TcpServer>(
       server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config, binlog_reader_.get(),
-      [this](const std::string& table_name) { initial_data_readiness_.MarkTableInitialized(table_name); });
+      [this](const std::string& table_name) { initial_data_readiness_.MarkTableInitialized(table_name); },
+      [this]() { return initial_data_readiness_.IsReady(); });
 
   // Set server statistics for binlog reader
   if (binlog_reader_) {
     binlog_reader_->SetServerStats(tcp_server_->GetMutableStats());
   }
 #else
-  tcp_server_ =
-      std::make_unique<server::TcpServer>(server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config, nullptr);
+  tcp_server_ = std::make_unique<server::TcpServer>(
+      server_config, table_contexts_ptrs, deps_.dump_dir, &deps_.config, nullptr,
+      [this](const std::string& table_name) { initial_data_readiness_.MarkTableInitialized(table_name); },
+      [this]() { return initial_data_readiness_.IsReady(); });
 #endif
 
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "tcp_server_initialized").Debug();
