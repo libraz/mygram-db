@@ -289,7 +289,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
-      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
+      return CanonicalizeColumnValue({reinterpret_cast<const char*>(str_data), str_len}, CanonicalValueKind::kText);
     }
 
     case 249:    // MYSQL_TYPE_TINY_BLOB
@@ -354,7 +354,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
-      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(blob_data), blob_len});
+      return CanonicalizeColumnValue({reinterpret_cast<const char*>(blob_data), blob_len}, CanonicalValueKind::kText);
     }
 
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
@@ -389,7 +389,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
-      return mygram::utils::SanitizeUtf8({reinterpret_cast<const char*>(str_data), str_len});
+      return CanonicalizeColumnValue({reinterpret_cast<const char*>(str_data), str_len}, CanonicalValueKind::kText);
     }
 
     // JSON type

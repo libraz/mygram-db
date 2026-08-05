@@ -17,6 +17,7 @@
 #include "mysql/table_metadata.h"
 #include "mysql/text_materializer.h"
 #include "mysql/value_canonicalizer.h"
+#include "utils/string_utils.h"
 
 #ifdef USE_MYSQL
 
@@ -1204,6 +1205,14 @@ TEST_F(DateTimeParsingTest, ZeroTimestampMatchesSnapshotCanonicalText) {
                                            false, zero_timestamp2.data() + zero_timestamp2.size(), false);
   ASSERT_TRUE(modern.has_value()) << modern.error().message();
   EXPECT_EQ(*modern, CanonicalizeColumnValue("0000-00-00 00:00:00.000000", CanonicalValueKind::kTemporal));
+}
+
+TEST(ValueCanonicalizerTest, TextSanitizationIsSharedBySnapshotAndBinlogInputs) {
+  const std::string invalid_utf8 = std::string("left") + static_cast<char>(0xC0) + static_cast<char>(0xAF) + "right";
+
+  EXPECT_EQ(CanonicalizeColumnValue(invalid_utf8, CanonicalValueKind::kText),
+            mygram::utils::SanitizeUtf8(invalid_utf8));
+  EXPECT_EQ(CanonicalizeColumnValue("valid text", CanonicalValueKind::kText), "valid text");
 }
 
 TEST_F(DateTimeParsingTest, ZeroTimestampRejectsNonZeroFraction) {

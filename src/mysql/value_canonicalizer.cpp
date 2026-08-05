@@ -12,6 +12,8 @@
 #include <limits>
 #include <sstream>
 
+#include "utils/string_utils.h"
+
 namespace mygramdb::mysql {
 
 namespace {
@@ -38,7 +40,10 @@ std::string CanonicalizeFloatingPoint(std::string_view value) {
 }  // namespace
 
 std::string CanonicalizeColumnValue(std::string_view value, CanonicalValueKind kind) {
-  if (value.empty() || kind == CanonicalValueKind::kText) {
+  if (kind == CanonicalValueKind::kText) {
+    return mygram::utils::SanitizeUtf8(value);
+  }
+  if (value.empty()) {
     return std::string(value);
   }
 
