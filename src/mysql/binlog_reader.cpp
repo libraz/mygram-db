@@ -326,7 +326,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   should_stop_.store(false, std::memory_order_relaxed);
   active_threads_.store(2, std::memory_order_release);
-  processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
+  processing_failure_reconnect_requested_.store(ProcessingFailureKind::kNone, std::memory_order_relaxed);
   {
     std::scoped_lock lock(gtid_mutex_);
     position_state_.ResetApplied();
@@ -449,7 +449,7 @@ void BinlogReader::Stop() {
   starting_.store(false, std::memory_order_release);
   active_threads_.store(0, std::memory_order_release);
   should_stop_.store(false, std::memory_order_relaxed);  // Reset for next Start()
-  processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
+  processing_failure_reconnect_requested_.store(ProcessingFailureKind::kNone, std::memory_order_relaxed);
   mygram::utils::StructuredLog()
       .Event("binlog_reader_stopped")
       .Field("events_processed", static_cast<int64_t>(processed_events_.load()))

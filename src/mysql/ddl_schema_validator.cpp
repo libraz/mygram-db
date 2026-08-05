@@ -162,20 +162,7 @@ Expected<ConfiguredTableSchema, Error> DDLSchemaValidator::Capture(Connection& c
   const std::string query = "SHOW FULL COLUMNS FROM " + *quoted_table;
   auto result = connection.Execute(query);
   if (!result) {
-    auto reconnect = connection.Reconnect(true /* silent */);
-    if (reconnect)
-      result = connection.Execute(query);
-  }
-  if (!result) {
-    if (result.error().code() == ErrorCode::kMySQLTableNotFound ||
-        result.error().code() == ErrorCode::kMySQLColumnNotFound ||
-        result.error().code() == ErrorCode::kPermissionDenied) {
-      return MakeUnexpected(result.error());
-    }
-    return MakeUnexpected(MakeError(
-        ErrorCode::kMySQLQueryFailed,
-        "Failed to read schema for '" + config::QualifiedTableName(table_config) + "': " + result.error().message(),
-        config::QualifiedTableName(table_config)));
+    return MakeUnexpected(result.error());
   }
 
   std::vector<DDLColumnMetadata> columns;

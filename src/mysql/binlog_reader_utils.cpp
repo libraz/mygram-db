@@ -183,7 +183,10 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
   return DDLSchemaCheck::kCompatible;
 }
 
-bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
+bool BinlogReader::FetchColumnNames(TableMetadata& metadata, ProcessingFailureKind* failure_kind) {
+  if (failure_kind != nullptr) {
+    *failure_kind = ProcessingFailureKind::kDeterministic;
+  }
   std::string cache_key = metadata.database_name + "." + metadata.table_name;
 
   // Check cache first
@@ -225,6 +228,7 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   // Cache miss or stale: use SHOW COLUMNS (faster than INFORMATION_SCHEMA)
   auto quoted_table = mygramdb::utils::QuoteQualifiedSQLIdentifier(metadata.database_name, metadata.table_name);
   if (!quoted_table) {
+    SetLastError(quoted_table.error());
     mygram::utils::StructuredLog()
         .Event("binlog_error")
         .Field("type", "invalid_metadata_identifier")
@@ -240,6 +244,12 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   // The main connection_ must not be used from the reader thread.
   std::lock_guard<std::mutex> metadata_lock(metadata_connection_mutex_);
   if (!metadata_connection_) {
+    const auto error = mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLDisconnected,
+                                                "Metadata connection is not initialized", cache_key);
+    SetLastError(error);
+    if (failure_kind != nullptr) {
+      *failure_kind = ClassifyProcessingFailure(error.code());
+    }
     mygram::utils::StructuredLog()
         .Event("binlog_error")
         .Field("type", "metadata_connection_null")
@@ -251,32 +261,18 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
 
   auto result_exp = metadata_connection_->Execute(query);
   if (!result_exp) {
-    std::string first_error = result_exp.error().message();
-    // Connection may have been lost (e.g., after MySQL restart).
-    // Try to reconnect the metadata connection and retry once.
+    SetLastError(result_exp.error());
+    if (failure_kind != nullptr) {
+      *failure_kind = ClassifyProcessingFailure(result_exp.error().code());
+    }
     mygram::utils::StructuredLog()
-        .Event("binlog_warning")
-        .Field("type", "column_query_failed_retrying")
+        .Event("binlog_error")
+        .Field("type", "column_query_failed")
         .Field("database", metadata.database_name)
         .Field("table", metadata.table_name)
-        .Field("error", first_error)
-        .Warn();
-
-    auto reconnect_result = metadata_connection_->Reconnect(true /* silent */);
-    if (reconnect_result) {
-      result_exp = metadata_connection_->Execute(query);
-    }
-
-    if (!result_exp) {
-      mygram::utils::StructuredLog()
-          .Event("binlog_error")
-          .Field("type", "column_query_failed")
-          .Field("database", metadata.database_name)
-          .Field("table", metadata.table_name)
-          .Field("error", result_exp.error().message())
-          .Error();
-      return false;
-    }
+        .FieldError(result_exp.error())
+        .Error();
+    return false;
   }
 
   auto is_unsigned_type = [](const char* column_type) {
@@ -305,6 +301,9 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata) {
   // result automatically freed by MySQLResult destructor
 
   if (column_definitions.size() != metadata.columns.size()) {
+    SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLInvalidMetadata,
+                                          "SHOW COLUMNS count does not match TABLE_MAP metadata for " + cache_key,
+                                          cache_key));
     mygram::utils::StructuredLog()
         .Event("binlog_error")
         .Field("type", "column_count_mismatch")

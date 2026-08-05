@@ -197,6 +197,8 @@ TEST(ConnectionValidatorErrorTest, ValidateServerNotConnected) {
   EXPECT_FALSE(result.valid);
   EXPECT_FALSE(result.error_message.empty());
   EXPECT_THAT(result.error_message, ::testing::HasSubstr("Connection is not active"));
+  ASSERT_TRUE(result.error_code.has_value());
+  EXPECT_EQ(*result.error_code, mygram::utils::ErrorCode::kMySQLDisconnected);
 }
 
 TEST(ConnectionValidatorErrorTest, ValidateServerAcceptsDatabaseQualifiedRequiredTables) {

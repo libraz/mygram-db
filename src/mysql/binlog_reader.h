@@ -471,6 +471,9 @@ class BinlogReader final : public IBinlogReader {
   }
 
  private:
+  /** Recovery class published by reader/worker processing paths. */
+  enum class ProcessingFailureKind : uint8_t { kNone = 0, kTransientTransport = 1, kDeterministic = 2 };
+
   Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
   std::unique_ptr<Connection> binlog_connection_;    // Dedicated connection for binlog reading (internally owned)
   std::unique_ptr<Connection> metadata_connection_;  // Dedicated connection for metadata queries (internally owned)
@@ -499,7 +502,7 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<bool> starting_{false};
   std::atomic<uint8_t> active_threads_{0};
   std::atomic<bool> should_stop_{false};
-  std::atomic<bool> processing_failure_reconnect_requested_{false};
+  std::atomic<ProcessingFailureKind> processing_failure_reconnect_requested_{ProcessingFailureKind::kNone};
   std::atomic<bool> schema_incompatible_{false};
   std::mutex stop_mutex_;  ///< Serializes Stop() calls to prevent concurrent join races
 
@@ -617,7 +620,7 @@ class BinlogReader final : public IBinlogReader {
    * @brief Process one queued worker event and update replication position when safe.
    * @return false when processing failed and reconnect is required
    */
-  bool ProcessQueuedEvent(const BinlogEvent& event);
+  bool ProcessQueuedEvent(const BinlogEvent& event, ProcessingFailureKind* failure_kind = nullptr);
 
   /**
    * @brief Fail closed for an event type that cannot be decoded safely.
@@ -662,6 +665,16 @@ class BinlogReader final : public IBinlogReader {
   /** Only transport failures can be retried after a post-DDL schema check. */
   static bool IsRetryableSchemaValidationError(mygram::utils::ErrorCode code);
 
+  /** Map a preserved error code to its processing recovery class. */
+  static ProcessingFailureKind ClassifyProcessingFailure(mygram::utils::ErrorCode code);
+
+  /** Publish a request without allowing transient failure to replace deterministic failure. */
+  void PublishProcessingFailure(ProcessingFailureKind kind);
+
+  /** Reset processing backoff only when the worker-owned applied position advances. */
+  static void ResetProcessingBackoffAfterProgress(const std::string& applied_gtid, std::string& last_recovery_gtid,
+                                                  int& reconnect_attempt);
+
   /** Validate a monitored DDL before mutating state or advancing its GTID. */
   DDLSchemaCheck ValidateSchemaAfterDDL(const BinlogEvent& event);
 
@@ -670,7 +683,7 @@ class BinlogReader final : public IBinlogReader {
    * @param metadata Table metadata to update with actual column names
    * @return true if successful, false otherwise
    */
-  bool FetchColumnNames(TableMetadata& metadata);
+  bool FetchColumnNames(TableMetadata& metadata, ProcessingFailureKind* failure_kind = nullptr);
 
   /** Remove stale column definitions before refreshing a changed table map. */
   void InvalidateColumnNamesForSchemaChange(const TableMetadata& metadata);
@@ -708,6 +721,10 @@ class BinlogReader final : public IBinlogReader {
    */
   static bool ShouldStopForRepeatedProcessingFailure(const std::string& applied_gtid, std::string& last_failure_gtid,
                                                      int& consecutive_failures);
+
+  /** Apply the same-GTID replay limit only to deterministic processing failures. */
+  static bool ShouldStopForProcessingFailure(ProcessingFailureKind kind, const std::string& applied_gtid,
+                                             std::string& last_failure_gtid, int& consecutive_failures);
 
   /** Clear each table replay fence once the applied reader position reaches it. */
   void ClearReachedReplayWatermarks(const std::string& applied_gtid);

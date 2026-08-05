@@ -114,6 +114,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   // Check connection status
   if (!conn.IsConnected()) {
     result.error_message = "Connection is not active";
+    result.error_code = mygram::utils::ErrorCode::kMySQLDisconnected;
     return result;
   }
 
@@ -121,6 +122,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto gtid_check = CheckGTIDEnabled(conn);
   if (!gtid_check) {
     result.error_message = gtid_check.error().message();
+    result.error_code = gtid_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "gtid_disabled")
@@ -159,6 +161,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto gtid_consistency_check = CheckGTIDConsistency(conn, last_gtid);
   if (!gtid_consistency_check) {
     result.error_message = "GTID consistency check failed: " + gtid_consistency_check.error().message();
+    result.error_code = gtid_consistency_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "gtid_consistency")
@@ -171,6 +174,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto compression_check = CheckBinlogCompression(conn);
   if (!compression_check) {
     result.error_message = compression_check.error().message();
+    result.error_code = compression_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "binlog_compression_enabled")
@@ -182,6 +186,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto row_image_check = CheckBinlogRowImage(conn);
   if (!row_image_check) {
     result.error_message = row_image_check.error().message();
+    result.error_code = row_image_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "binlog_row_image_not_full")
@@ -193,6 +198,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto format_check = CheckBinlogFormat(conn);
   if (!format_check) {
     result.error_message = format_check.error().message();
+    result.error_code = format_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "binlog_format_not_row")
@@ -204,6 +210,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto checksum_check = CheckBinlogChecksum(conn);
   if (!checksum_check) {
     result.error_message = checksum_check.error().message();
+    result.error_code = checksum_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "binlog_checksum_not_crc32")
@@ -215,6 +222,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto partial_json_check = CheckPartialJsonMode(conn);
   if (!partial_json_check) {
     result.error_message = partial_json_check.error().message();
+    result.error_code = partial_json_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "partial_json_enabled")
@@ -226,6 +234,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
   auto tagged_gtid_check = CheckTaggedGTIDSupport(conn);
   if (!tagged_gtid_check) {
     result.error_message = tagged_gtid_check.error().message();
+    result.error_code = tagged_gtid_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "tagged_gtid_unsupported")
@@ -541,10 +550,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBi
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogChecksum(Connection& conn) {
   auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_checksum'");
   if (!result) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError,
-        "Unable to determine binlog_checksum. MygramDB requires binlog_checksum=CRC32 because binlog event parsing "
-        "expects a trailing 4-byte CRC32 checksum."));
+    return mygram::utils::MakeUnexpected(result.error());
   }
 
   MYSQL_ROW row = mysql_fetch_row(result->get());

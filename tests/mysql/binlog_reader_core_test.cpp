@@ -899,6 +899,59 @@ TEST_F(BinlogReaderFixture, PermanentSchemaReadFailureIsNotRetried) {
   EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ErrorCode::kPermissionDenied));
 }
 
+TEST_F(BinlogReaderFixture, ProcessingFailureClassificationPreservesTransportFailures) {
+  using ErrorCode = mygram::utils::ErrorCode;
+  using FailureKind = BinlogReader::ProcessingFailureKind;
+
+  EXPECT_EQ(reader_->ClassifyProcessingFailure(ErrorCode::kMySQLConnectionFailed), FailureKind::kTransientTransport);
+  EXPECT_EQ(reader_->ClassifyProcessingFailure(ErrorCode::kMySQLDisconnected), FailureKind::kTransientTransport);
+  EXPECT_EQ(reader_->ClassifyProcessingFailure(ErrorCode::kMySQLTimeout), FailureKind::kTransientTransport);
+  EXPECT_EQ(reader_->ClassifyProcessingFailure(ErrorCode::kMySQLQueryFailed), FailureKind::kDeterministic);
+  EXPECT_EQ(reader_->ClassifyProcessingFailure(ErrorCode::kInternalError), FailureKind::kDeterministic);
+}
+
+TEST_F(BinlogReaderFixture, TransientProcessingFailuresDoNotConsumeDeterministicReplayBudget) {
+  using FailureKind = BinlogReader::ProcessingFailureKind;
+  std::string last_failure_gtid;
+  int consecutive_failures = 0;
+
+  EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(FailureKind::kDeterministic, "uuid:10", last_failure_gtid,
+                                                       consecutive_failures));
+  EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(FailureKind::kDeterministic, "uuid:10", last_failure_gtid,
+                                                       consecutive_failures));
+  for (int attempt = 0; attempt < 5; ++attempt) {
+    EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(FailureKind::kTransientTransport, "uuid:10", last_failure_gtid,
+                                                         consecutive_failures));
+  }
+  EXPECT_EQ(last_failure_gtid, "uuid:10");
+  EXPECT_EQ(consecutive_failures, 2);
+
+  EXPECT_TRUE(reader_->ShouldStopForProcessingFailure(FailureKind::kDeterministic, "uuid:10", last_failure_gtid,
+                                                      consecutive_failures));
+}
+
+TEST_F(BinlogReaderFixture, ProcessingRecoveryBackoffResetsOnlyAfterAppliedGtidProgress) {
+  std::string last_recovery_gtid = "uuid:10";
+  int reconnect_attempt = 4;
+
+  reader_->ResetProcessingBackoffAfterProgress("uuid:10", last_recovery_gtid, reconnect_attempt);
+  EXPECT_EQ(reconnect_attempt, 4);
+
+  reader_->ResetProcessingBackoffAfterProgress("uuid:11", last_recovery_gtid, reconnect_attempt);
+  EXPECT_EQ(last_recovery_gtid, "uuid:11");
+  EXPECT_EQ(reconnect_attempt, 0);
+}
+
+TEST_F(BinlogReaderFixture, PublishedDeterministicFailureIsNotDowngradedByTransientFailure) {
+  using FailureKind = BinlogReader::ProcessingFailureKind;
+
+  reader_->PublishProcessingFailure(FailureKind::kDeterministic);
+  reader_->PublishProcessingFailure(FailureKind::kTransientTransport);
+
+  EXPECT_EQ(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire),
+            FailureKind::kDeterministic);
+}
+
 /**
  * @brief Pending events are processed during shutdown
  *
@@ -1075,12 +1128,14 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRequestsReconnectAndDropsQueuedEven
   std::thread worker([this]() { reader_->WorkerThreadFunc(); });
 
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (!reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire) &&
+  while (reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire) ==
+             BinlogReader::ProcessingFailureKind::kNone &&
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
-  EXPECT_TRUE(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire));
+  EXPECT_EQ(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire),
+            BinlogReader::ProcessingFailureKind::kDeterministic);
   EXPECT_EQ(reader_->current_gtid_, "uuid:1");
   {
     std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
@@ -1153,12 +1208,14 @@ TEST_F(BinlogReaderFixture, MidTransactionFailureDoesNotAdvanceGtidToFailedTrans
   std::thread worker([this]() { reader_->WorkerThreadFunc(); });
 
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-  while (!reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire) &&
+  while (reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire) ==
+             BinlogReader::ProcessingFailureKind::kNone &&
          std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
-  EXPECT_TRUE(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire));
+  EXPECT_EQ(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire),
+            BinlogReader::ProcessingFailureKind::kDeterministic);
   EXPECT_TRUE(doc_store_.GetDocId("2").has_value()) << "first row was applied before the mid-transaction failure";
   EXPECT_EQ(reader_->current_gtid_, "uuid:1") << "failed transaction GTID must not be persisted before XID";
   {

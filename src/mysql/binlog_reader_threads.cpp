@@ -155,6 +155,35 @@ bool BinlogReader::ShouldStopForRepeatedProcessingFailure(const std::string& app
   return consecutive_failures >= kMaxConsecutiveProcessingFailuresAtSameGtid;
 }
 
+bool BinlogReader::ShouldStopForProcessingFailure(ProcessingFailureKind kind, const std::string& applied_gtid,
+                                                  std::string& last_failure_gtid, int& consecutive_failures) {
+  if (kind != ProcessingFailureKind::kDeterministic) {
+    return false;
+  }
+  return ShouldStopForRepeatedProcessingFailure(applied_gtid, last_failure_gtid, consecutive_failures);
+}
+
+BinlogReader::ProcessingFailureKind BinlogReader::ClassifyProcessingFailure(mygram::utils::ErrorCode code) {
+  return IsRetryableSchemaValidationError(code) ? ProcessingFailureKind::kTransientTransport
+                                                : ProcessingFailureKind::kDeterministic;
+}
+
+void BinlogReader::PublishProcessingFailure(ProcessingFailureKind kind) {
+  auto current = processing_failure_reconnect_requested_.load(std::memory_order_acquire);
+  while (static_cast<uint8_t>(current) < static_cast<uint8_t>(kind) &&
+         !processing_failure_reconnect_requested_.compare_exchange_weak(current, kind, std::memory_order_release,
+                                                                        std::memory_order_acquire)) {
+  }
+}
+
+void BinlogReader::ResetProcessingBackoffAfterProgress(const std::string& applied_gtid, std::string& last_recovery_gtid,
+                                                       int& reconnect_attempt) {
+  if (applied_gtid != last_recovery_gtid) {
+    last_recovery_gtid = applied_gtid;
+    reconnect_attempt = 0;
+  }
+}
+
 bool BinlogReader::RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type) {
   std::string remediation;
   if (event_type == MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT) {
@@ -229,10 +258,11 @@ void BinlogReader::ReaderThreadFunc() {
     // Main reconnection loop (infinite retries)
     int reconnect_attempt = 0;
     bool idle_timeout_reconnect = false;  // Track if reconnecting due to idle timeout
-    bool validate_before_stream_reopen = false;
     bool initial_stream_open_pending = true;
     std::string last_processing_failure_gtid;
+    std::string last_processing_recovery_gtid;
     int consecutive_processing_failures = 0;
+    int processing_reconnect_attempt = 0;
     auto publish_initial_stream_state = [this](StreamStartupState state) {
       {
         std::lock_guard<std::mutex> lock(stream_startup_mutex_);
@@ -246,26 +276,44 @@ void BinlogReader::ReaderThreadFunc() {
 
     // Helper lambda: wait with cancellable backoff, reconnect, validate.
     // Returns: 1 = success, 0 = reconnect failed (retry), -1 = should stop
-    auto reconnect_with_backoff = [this, &reconnect_attempt](const std::string& reason, bool silent) -> int {
-      reconnect_attempt = std::min(reconnect_attempt + 1, 10);
-      const int64_t delay_ms = ReconnectBackoffDelayMs(reconnect_attempt);
+    auto reconnect_with_backoff = [this](const std::string& reason, bool silent, int& attempt) -> int {
+      attempt = std::min(attempt + 1, 10);
+      const int64_t delay_ms = ReconnectBackoffDelayMs(attempt);
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
           .Field("action", "retry_connection")
           .Field("reason", reason)
           .Field("delay_ms", static_cast<int64_t>(delay_ms))
-          .Field("attempt", static_cast<int64_t>(reconnect_attempt))
+          .Field("attempt", static_cast<int64_t>(attempt))
           .Debug();
-      if (!WaitForReconnectBackoff(reconnect_attempt)) {
+      if (!WaitForReconnectBackoff(attempt)) {
         mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "stop_requested_during_retry").Debug();
         return -1;
       }
 
       auto result = binlog_connection_->Reconnect(silent);
       if (!result) {
-        mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), result.error().message(),
-                                      reconnect_attempt);
+        mygram::utils::LogBinlogError("reconnect_failed", GetCurrentGTID(), result.error().message(), attempt);
         return 0;  // Retry in next iteration
+      }
+
+      // Metadata queries participate in the same recovery attempt. Reconnect
+      // this dedicated handle here, under its serialization lock, instead of
+      // letting individual metadata helpers retry without backoff.
+      {
+        std::lock_guard<std::mutex> metadata_lock(metadata_connection_mutex_);
+        if (metadata_connection_ == nullptr) {
+          SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLDisconnected,
+                                                "Metadata connection is unavailable during recovery"));
+          return -1;
+        }
+        auto metadata_result = metadata_connection_->Reconnect(true);
+        if (!metadata_result) {
+          SetLastError(metadata_result.error());
+          mygram::utils::LogBinlogError("metadata_reconnect_failed", GetCurrentGTID(),
+                                        metadata_result.error().message(), attempt);
+          return 0;
+        }
       }
 
       // Validate connection after reconnection (detect failover, invalid servers)
@@ -290,19 +338,6 @@ void BinlogReader::ReaderThreadFunc() {
     };
 
     while (!should_stop_) {
-      if (validate_before_stream_reopen) {
-        validate_before_stream_reopen = false;
-        if (!ValidateConnection()) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_error")
-              .Field("type", "processing_failure_recovery_validation_failed")
-              .Field("error", GetLastError())
-              .Error();
-          should_stop_.store(true, std::memory_order_release);
-          break;
-        }
-      }
-
       // Setup session (CRC32 checksum, heartbeat, etc.) via protocol-specific stream
       auto setup_result = binlog_stream_->SetupSession(*binlog_connection_);
       if (!setup_result) {
@@ -326,7 +361,7 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         bool silent = (reconnect_attempt == 0);
-        int rc = reconnect_with_backoff("session_setup_failed", silent);
+        int rc = reconnect_with_backoff("session_setup_failed", silent, reconnect_attempt);
         if (rc == -1) {
           should_stop_.store(true, std::memory_order_release);
           break;
@@ -367,7 +402,7 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         mygram::utils::LogBinlogError("stream_open_failed", GetCurrentGTID(), GetLastError(), reconnect_attempt + 1);
-        int rc = reconnect_with_backoff("stream_open_failed", false);
+        int rc = reconnect_with_backoff("stream_open_failed", false, reconnect_attempt);
         if (rc == -1) {
           should_stop_.store(true, std::memory_order_release);
           break;
@@ -398,11 +433,12 @@ void BinlogReader::ReaderThreadFunc() {
       int event_count = 0;
       bool connection_lost = false;
       bool connection_was_reestablished = false;
-      bool processing_failure_reconnect = false;
-      auto request_processing_failure_reconnect = [&]() {
-        processing_failure_reconnect_requested_.store(true, std::memory_order_release);
-        processing_failure_reconnect = true;
-        validate_before_stream_reopen = true;
+      ProcessingFailureKind processing_failure = ProcessingFailureKind::kNone;
+      auto request_processing_failure_reconnect = [&](ProcessingFailureKind kind) {
+        PublishProcessingFailure(kind);
+        if (static_cast<uint8_t>(kind) > static_cast<uint8_t>(processing_failure)) {
+          processing_failure = kind;
+        }
         connection_lost = true;
         if (binlog_stream_ != nullptr && binlog_connection_ != nullptr && binlog_connection_->IsConnected()) {
           binlog_stream_->Close(*binlog_connection_);
@@ -410,13 +446,14 @@ void BinlogReader::ReaderThreadFunc() {
       };
 
       while (!should_stop_ && !connection_lost) {
-        if (processing_failure_reconnect_requested_.exchange(false, std::memory_order_acq_rel)) {
+        const auto requested =
+            processing_failure_reconnect_requested_.exchange(ProcessingFailureKind::kNone, std::memory_order_acq_rel);
+        if (requested != ProcessingFailureKind::kNone) {
           mygram::utils::StructuredLog()
               .Event("binlog_processing_failure_reconnect")
               .Field("gtid", GetCurrentGTID())
               .Warn();
-          validate_before_stream_reopen = true;
-          processing_failure_reconnect = true;
+          processing_failure = requested;
           connection_lost = true;
           binlog_stream_->Close(*binlog_connection_);
           break;
@@ -439,8 +476,12 @@ void BinlogReader::ReaderThreadFunc() {
           mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "stop_requested_exiting").Debug();
           break;
         }
-        if (processing_failure_reconnect_requested_.exchange(false, std::memory_order_acq_rel)) {
-          processing_failure_reconnect = true;
+        const auto requested_after_fetch =
+            processing_failure_reconnect_requested_.exchange(ProcessingFailureKind::kNone, std::memory_order_acq_rel);
+        if (requested_after_fetch != ProcessingFailureKind::kNone) {
+          if (static_cast<uint8_t>(requested_after_fetch) > static_cast<uint8_t>(processing_failure)) {
+            processing_failure = requested_after_fetch;
+          }
           connection_lost = true;
           binlog_stream_->Close(*binlog_connection_);
           break;
@@ -463,7 +504,7 @@ void BinlogReader::ReaderThreadFunc() {
           case BinlogFetchResult::Status::kConnectionLost: {
             SetLastError(fetch.error_message);
             mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "connection_lost_reconnect").Debug();
-            const int rc = reconnect_with_backoff("connection_lost", true);
+            const int rc = reconnect_with_backoff("connection_lost", true, reconnect_attempt);
             if (rc == -1) {
               should_stop_.store(true, std::memory_order_release);
             } else if (rc == 1) {
@@ -485,7 +526,7 @@ void BinlogReader::ReaderThreadFunc() {
             // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores) - Documents intent; break exits to outer loop
             connection_lost = true;
             binlog_stream_->Close(*binlog_connection_);
-            int rc = reconnect_with_backoff("server_gone_away", false);
+            int rc = reconnect_with_backoff("server_gone_away", false, reconnect_attempt);
             if (rc == -1) {
               should_stop_.store(true, std::memory_order_release);
             } else if (rc == 1) {
@@ -560,7 +601,7 @@ void BinlogReader::ReaderThreadFunc() {
                 .Field("gtid", position_state_.received_gtid())
                 .FieldError(checksum_result.error())
                 .Error();
-            request_processing_failure_reconnect();
+            request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
             break;
           }
         }
@@ -638,7 +679,7 @@ void BinlogReader::ReaderThreadFunc() {
             const auto positions = MariaDBEventParser::ParseGTIDList(event_buffer, event_length);
             if (!positions.has_value()) {
               SetLastError("Malformed MariaDB GTID_LIST_EVENT; reconnecting from last processed GTID");
-              request_processing_failure_reconnect();
+              request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
               break;
             }
             mygram::utils::StructuredLog()
@@ -681,7 +722,7 @@ void BinlogReader::ReaderThreadFunc() {
                   .Field("type", "table_map_parse_failed")
                   .Field("event_num", static_cast<int64_t>(event_count))
                   .Error();
-              request_processing_failure_reconnect();
+              request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
               break;
             } else {
               mygram::utils::StructuredLog()
@@ -728,10 +769,8 @@ void BinlogReader::ReaderThreadFunc() {
               replay_suppressed_table_ids_.erase(metadata_opt->table_id);
 
               if (is_monitored_table) {
-                if (!FetchColumnNames(metadata_opt.value())) {
-                  SetLastError(
-                      "Failed to fetch column names for monitored TABLE_MAP_EVENT; reconnecting from last "
-                      "processed GTID");
+                ProcessingFailureKind failure_kind = ProcessingFailureKind::kDeterministic;
+                if (!FetchColumnNames(metadata_opt.value(), &failure_kind)) {
                   mygram::utils::StructuredLog()
                       .Event("binlog_error")
                       .Field("type", "column_fetch_failed")
@@ -739,7 +778,7 @@ void BinlogReader::ReaderThreadFunc() {
                       .Field("table", metadata_opt->table_name)
                       .Field("gtid", GetCurrentGTID())
                       .Error();
-                  request_processing_failure_reconnect();
+                  request_processing_failure_reconnect(failure_kind);
                   break;
                 }
               } else {
@@ -760,11 +799,9 @@ void BinlogReader::ReaderThreadFunc() {
               if (add_result == TableMetadataCache::AddResult::kSchemaChanged) {
                 InvalidateColumnNamesForSchemaChange(metadata_opt.value());
                 if (is_monitored_table) {
-                  if (!FetchColumnNames(metadata_opt.value())) {
-                    SetLastError(
-                        "Failed to refresh column names after monitored schema change; reconnecting from last "
-                        "processed GTID");
-                    request_processing_failure_reconnect();
+                  ProcessingFailureKind failure_kind = ProcessingFailureKind::kDeterministic;
+                  if (!FetchColumnNames(metadata_opt.value(), &failure_kind)) {
+                    request_processing_failure_reconnect(failure_kind);
                     break;
                   }
                   table_metadata_cache_.AddOrUpdate(metadata_opt->table_id, metadata_opt.value());
@@ -895,7 +932,7 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("reader_gtid", position_state_.received_gtid())
               .Field("current_gtid", GetCurrentGTID())
               .Error();
-          request_processing_failure_reconnect();
+          request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
           break;
         } else {
           // A standalone QUERY_EVENT has no following XID. Even when the query
@@ -978,15 +1015,20 @@ void BinlogReader::ReaderThreadFunc() {
         break;
       }
 
-      if (processing_failure_reconnect) {
+      if (processing_failure != ProcessingFailureKind::kNone) {
         // The request can originate in this reader thread (malformed wire
         // event) or in the worker. Consume its publication before reopening so
         // this recovery is counted exactly once; a concurrent later failure can
         // publish a new request after this exchange.
-        processing_failure_reconnect_requested_.exchange(false, std::memory_order_acq_rel);
+        const auto published =
+            processing_failure_reconnect_requested_.exchange(ProcessingFailureKind::kNone, std::memory_order_acq_rel);
+        if (static_cast<uint8_t>(published) > static_cast<uint8_t>(processing_failure)) {
+          processing_failure = published;
+        }
         const std::string applied_gtid = GetCurrentGTID();
-        if (ShouldStopForRepeatedProcessingFailure(applied_gtid, last_processing_failure_gtid,
-                                                   consecutive_processing_failures)) {
+        ResetProcessingBackoffAfterProgress(applied_gtid, last_processing_recovery_gtid, processing_reconnect_attempt);
+        if (ShouldStopForProcessingFailure(processing_failure, applied_gtid, last_processing_failure_gtid,
+                                           consecutive_processing_failures)) {
           SetLastError("Repeatedly failed to process the binlog event at applied GTID " + applied_gtid +
                        "; stopping replication to avoid an infinite replay loop");
           mygram::utils::StructuredLog()
@@ -1001,11 +1043,9 @@ void BinlogReader::ReaderThreadFunc() {
 
         // A processing failure can leave the transport healthy, but replaying
         // from the worker-owned applied position still requires a full reconnect
-        // and its cancellable backoff. Do not revalidate a possibly stale
-        // connection on the next outer iteration: reconnect_with_backoff()
-        // validates successful reconnects itself.
-        validate_before_stream_reopen = false;
-        const int rc = reconnect_with_backoff("event_processing_failed", false);
+        // and its cancellable backoff. reconnect_with_backoff() validates the
+        // newly established connection before the stream can reopen.
+        const int rc = reconnect_with_backoff("event_processing_failed", false, processing_reconnect_attempt);
         if (rc == -1) {
           should_stop_.store(true, std::memory_order_release);
           break;
@@ -1053,7 +1093,8 @@ void BinlogReader::WorkerThreadFunc() {
         break;
       }
 
-      if (!ProcessQueuedEvent(*event)) {
+      ProcessingFailureKind failure_kind = ProcessingFailureKind::kDeterministic;
+      if (!ProcessQueuedEvent(*event, &failure_kind)) {
         mygram::utils::StructuredLog()
             .Event("binlog_error")
             .Field("type", "event_processing_failed")
@@ -1076,7 +1117,7 @@ void BinlogReader::WorkerThreadFunc() {
             // GTID is not updated on a retryable failure. Publish the reconnect
             // request while holding queue_mutex_ so PushEvent cannot enqueue a
             // later commit between queue draining and failure publication.
-            processing_failure_reconnect_requested_.store(true, std::memory_order_release);
+            PublishProcessingFailure(failure_kind);
           }
         }
         {
@@ -1117,7 +1158,10 @@ void BinlogReader::WorkerThreadFunc() {
   mygram::utils::StructuredLog().Event("binlog_worker_thread_stopped").Info();
 }
 
-bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
+bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event, ProcessingFailureKind* failure_kind) {
+  if (failure_kind != nullptr) {
+    *failure_kind = ProcessingFailureKind::kDeterministic;
+  }
   if (event.type == BinlogEventType::COMMIT) {
     mygram::utils::Expected<std::string, mygram::utils::Error> advanced = mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "GTID commit was not attempted"));
@@ -1175,6 +1219,9 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event) {
   if (event.type == BinlogEventType::DDL) {
     const DDLSchemaCheck schema_check = ValidateSchemaAfterDDL(event);
     if (schema_check != DDLSchemaCheck::kCompatible) {
+      if (failure_kind != nullptr && schema_check == DDLSchemaCheck::kRetryableFailure) {
+        *failure_kind = ProcessingFailureKind::kTransientTransport;
+      }
       return false;
     }
   }
@@ -1237,7 +1284,8 @@ void BinlogReader::PushEvent(std::unique_ptr<BinlogEvent> event) {
   // Wait if queue is full
   queue_full_cv_.wait(lock, [this] { return should_stop_ || event_queue_.size() < config_.queue_size; });
 
-  if (should_stop_ || processing_failure_reconnect_requested_.load(std::memory_order_acquire)) {
+  if (should_stop_ ||
+      processing_failure_reconnect_requested_.load(std::memory_order_acquire) != ProcessingFailureKind::kNone) {
     return;
   }
 
