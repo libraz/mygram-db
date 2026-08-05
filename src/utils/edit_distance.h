@@ -27,10 +27,11 @@ namespace mygramdb::utils {
 uint32_t LevenshteinDistance(std::string_view a, std::string_view b, uint32_t max_distance);
 
 /**
- * @brief Check if any whitespace-delimited word in text is within edit distance
- * of term
+ * @brief Check if text contains a word or CJK window within edit distance of term
  *
- * Splits text by whitespace, checks each word against term.
+ * Splits text by whitespace and checks each ASCII word against the whole term.
+ * For continuous non-ASCII words, checks term-sized codepoint windows so CJK
+ * sentences do not require artificial whitespace segmentation.
  * Optimized with length-difference pre-filter (skips words where
  * |len(word) - len(term)| > max_distance).
  *

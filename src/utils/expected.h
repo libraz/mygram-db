@@ -26,8 +26,6 @@
 
 #pragma once
 
-#include <cstdio>
-#include <cstdlib>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>
@@ -73,6 +71,18 @@ class BadExpectedAccess : public std::exception {
 
  private:
   E error_;
+};
+
+/**
+ * @brief Exception thrown when error() is called on a successful Expected
+ *
+ * Unlike the value-access exception, there is no error payload to preserve.
+ * A dedicated exception keeps this caller contract violation diagnosable and
+ * testable instead of terminating after a single stderr line.
+ */
+class BadExpectedErrorAccess : public std::logic_error {
+ public:
+  BadExpectedErrorAccess() : std::logic_error("Expected::error() called on a value") {}
 };
 
 /**
@@ -290,48 +300,44 @@ class [[nodiscard]] Expected {
 
   /**
    * @brief Access the contained error (const lvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] const E& error() const& {
     if (has_value()) {
-      std::fputs("Expected::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return std::get<1>(storage_);
   }
 
   /**
    * @brief Access the contained error (lvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] E& error() & {
     if (has_value()) {
-      std::fputs("Expected::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return std::get<1>(storage_);
   }
 
   /**
    * @brief Access the contained error (const rvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] const E&& error() const&& {
     if (has_value()) {
-      std::fputs("Expected::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return std::move(std::get<1>(storage_));
   }
 
   /**
    * @brief Access the contained error (rvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] E&& error() && {
     if (has_value()) {
-      std::fputs("Expected::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return std::move(std::get<1>(storage_));
   }
@@ -589,48 +595,44 @@ class [[nodiscard]] Expected<void, E> {
 
   /**
    * @brief Access the contained error (const lvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] const E& error() const& {
     if (has_value_) {
-      std::fputs("Expected<void>::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return *error_;
   }
 
   /**
    * @brief Access the contained error (lvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] E& error() & {
     if (has_value_) {
-      std::fputs("Expected<void>::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return *error_;
   }
 
   /**
    * @brief Access the contained error (const rvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] const E&& error() const&& {
     if (has_value_) {
-      std::fputs("Expected<void>::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return std::move(*error_);
   }
 
   /**
    * @brief Access the contained error (rvalue reference)
-   * @note Terminates the program if Expected contains a value
+   * @throws BadExpectedErrorAccess if Expected contains a value
    */
   [[nodiscard]] E&& error() && {
     if (has_value_) {
-      std::fputs("Expected<void>::error() called on a value\n", stderr);
-      std::abort();
+      throw BadExpectedErrorAccess();
     }
     return std::move(*error_);
   }

@@ -14,8 +14,6 @@
 #define MYGRAMDB_TYPES_DOC_ID_H_
 
 #include <cstdint>
-#include <functional>
-#include <limits>
 
 namespace mygramdb {
 
@@ -32,62 +30,23 @@ namespace mygramdb {
  */
 using DocId = uint32_t;
 
-/**
- * @brief Invalid/sentinel DocId value
- *
- * Used to indicate an invalid or uninitialized DocId.
- */
-constexpr DocId kInvalidDocId = std::numeric_limits<DocId>::max();
-
-/**
- * @brief Maximum valid DocId value
- *
- * The maximum DocId that can be assigned (one less than kInvalidDocId).
- */
-constexpr DocId kMaxValidDocId = kInvalidDocId - 1;
-
-/**
- * @brief Check if a DocId is valid
- *
- * @param doc_id The DocId to check
- * @return true if valid, false otherwise
- */
-inline bool IsValidDocId(DocId doc_id) {
-  return doc_id != kInvalidDocId;
-}
-
 }  // namespace mygramdb
 
 // Re-export to namespace aliases for backward compatibility
 namespace mygramdb::storage {
 using mygramdb::DocId;
-using mygramdb::IsValidDocId;
-using mygramdb::kInvalidDocId;
-using mygramdb::kMaxValidDocId;
 }  // namespace mygramdb::storage
 
 namespace mygramdb::index {
 using mygramdb::DocId;
-using mygramdb::IsValidDocId;
-using mygramdb::kInvalidDocId;
-using mygramdb::kMaxValidDocId;
 }  // namespace mygramdb::index
 
 namespace mygramdb::query {
 using mygramdb::DocId;
-using mygramdb::IsValidDocId;
-using mygramdb::kInvalidDocId;
-using mygramdb::kMaxValidDocId;
 }  // namespace mygramdb::query
 
 namespace mygramdb::cache {
 using mygramdb::DocId;
-using mygramdb::IsValidDocId;
-using mygramdb::kInvalidDocId;
-using mygramdb::kMaxValidDocId;
 }  // namespace mygramdb::cache
-
-// Note: std::hash<DocId> is not needed because DocId is a type alias for uint32_t,
-// and std::hash<uint32_t> is already defined by the standard library.
 
 #endif  // MYGRAMDB_TYPES_DOC_ID_H_

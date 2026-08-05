@@ -64,6 +64,18 @@ TEST(ExpectedTest, ErrorAccess) {
   EXPECT_EQ(result.error().message(), "Operation timed out");
 }
 
+TEST(ExpectedTest, ErrorAccessorOnSuccessThrowsDiagnosableException) {
+  Expected<int, Error> success(42);
+
+  EXPECT_THROW({ (void)success.error(); }, BadExpectedErrorAccess);
+  try {
+    (void)success.error();
+    FAIL() << "Expected error() contract violation to throw";
+  } catch (const BadExpectedErrorAccess& error) {
+    EXPECT_STREQ(error.what(), "Expected::error() called on a value");
+  }
+}
+
 TEST(ExpectedTest, AssignUnexpectedReplacesValueWithError) {
   Expected<int, Error> result(42);
 
@@ -123,16 +135,15 @@ TEST(ExpectedVoidTest, ValueAccess) {
 }
 
 /**
- * @brief Test that calling error() on a successful Expected<void, E> aborts
+ * @brief Test that calling error() on a successful Expected<void, E> throws
  *
- * The error() method terminates the program in all build modes (debug and
- * release) when called on an Expected that contains a value.
+ * The error() method reports a catchable contract violation in all build modes.
  */
-TEST(ExpectedVoidDeathTest, ErrorAccessorOnSuccessAborts) {
+TEST(ExpectedVoidTest, ErrorAccessorOnSuccessThrowsDiagnosableException) {
   Expected<void, Error> success;
   EXPECT_TRUE(success.has_value());
 
-  EXPECT_DEATH({ (void)success.error(); }, "error\\(\\) called on a value");
+  EXPECT_THROW({ (void)success.error(); }, BadExpectedErrorAccess);
 }
 
 /**
@@ -486,30 +497,35 @@ TEST(ExpectedTest, BadExpectedAccessException) {
   }
 }
 
-// ========== Death tests for misuse of value()/error() ==========
+// ========== error() contract violations across value categories ==========
 
 /**
- * @brief Test that calling error() on a success Expected<T, E> aborts
+ * @brief Test that calling error() on a success Expected<T, E> rvalue throws
  */
-TEST(ExpectedDeathTest, ErrorOnSuccessAborts) {
+TEST(ExpectedTest, ErrorOnSuccessRvalueThrows) {
   Expected<int, Error> success(42);
-  EXPECT_DEATH({ (void)success.error(); }, "error\\(\\) called on a value");
+  EXPECT_THROW({ (void)std::move(success).error(); }, BadExpectedErrorAccess);
 }
 
 /**
- * @brief Test that calling error() on a success Expected<T, E> via rvalue aborts
+ * @brief Test that const Expected<T, E> error access throws for both ref qualifiers
  */
-TEST(ExpectedDeathTest, ErrorOnSuccessRvalueAborts) {
-  Expected<int, Error> success(42);
-  EXPECT_DEATH({ (void)std::move(success).error(); }, "error\\(\\) called on a value");
+TEST(ExpectedTest, ErrorOnSuccessConstAccessThrows) {
+  const Expected<int, Error> success(42);
+  EXPECT_THROW({ (void)success.error(); }, BadExpectedErrorAccess);
+  EXPECT_THROW({ (void)std::move(success).error(); }, BadExpectedErrorAccess);
 }
 
 /**
- * @brief Test that calling error() on a success Expected<void, E> via rvalue aborts
+ * @brief Test Expected<void, E> error access for rvalue and const overloads
  */
-TEST(ExpectedVoidDeathTest, ErrorOnSuccessRvalueAborts) {
+TEST(ExpectedVoidTest, ErrorOnSuccessRvalueAndConstAccessThrow) {
   Expected<void, Error> success;
-  EXPECT_DEATH({ (void)std::move(success).error(); }, "error\\(\\) called on a value");
+  EXPECT_THROW({ (void)std::move(success).error(); }, BadExpectedErrorAccess);
+
+  const Expected<void, Error> const_success;
+  EXPECT_THROW({ (void)const_success.error(); }, BadExpectedErrorAccess);
+  EXPECT_THROW({ (void)std::move(const_success).error(); }, BadExpectedErrorAccess);
 }
 
 /**

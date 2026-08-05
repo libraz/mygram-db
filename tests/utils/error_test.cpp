@@ -35,6 +35,7 @@ TEST(ErrorCodeTest, ErrorCodeToString) {
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kIndexNotFound), "Index not found");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kStorageFileNotFound), "Storage file not found");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkBindFailed), "Bind failed");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kServerLoading), "Server is loading");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kClientNotConnected), "Not connected");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheMiss), "Cache miss");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kCacheWorkerStartFailed), "Cache worker start failed");
@@ -187,12 +188,10 @@ TEST(ErrorTest, NetworkErrorCodes) {
   Error bind_failed(ErrorCode::kNetworkBindFailed);
   Error connection_refused(ErrorCode::kNetworkConnectionRefused);
   Error protocol_error(ErrorCode::kNetworkProtocolError);
-  Error ip_not_allowed(ErrorCode::kNetworkIPNotAllowed);
 
   EXPECT_EQ(bind_failed.message(), "Bind failed");
   EXPECT_EQ(connection_refused.message(), "Connection refused");
   EXPECT_EQ(protocol_error.message(), "Protocol error");
-  EXPECT_EQ(ip_not_allowed.message(), "IP not allowed");
 }
 
 TEST(ErrorTest, ClientErrorCodes) {
@@ -302,7 +301,6 @@ TEST(ErrorCodeTest, AllNetworkErrorCodes) {
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReceiveFailed), "Receive failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkInvalidRequest), "Invalid request");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkProtocolError), "Protocol error");
-  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkIPNotAllowed), "IP not allowed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkServerNotStarted), "Server not started");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkAlreadyRunning), "Server already running");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkSocketCreationFailed), "Socket creation failed");
@@ -319,7 +317,6 @@ TEST(ErrorCodeTest, AllReactorErrorCodes) {
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorModifyFailed), "Event multiplexer modify failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorRemoveFailed), "Event multiplexer remove failed");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorPollFailed), "Event multiplexer poll failed");
-  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorQueueFull), "Reactor per-connection write queue full");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kNetworkReactorAlreadyOpen), "Event multiplexer already opened");
 }
 
@@ -330,7 +327,6 @@ TEST(ErrorCodeTest, ReactorErrorCodeValues) {
   EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorModifyFailed), 6019);
   EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorRemoveFailed), 6020);
   EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorPollFailed), 6021);
-  EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorQueueFull), 6022);
   EXPECT_EQ(static_cast<int>(ErrorCode::kNetworkReactorAlreadyOpen), 6023);
 }
 

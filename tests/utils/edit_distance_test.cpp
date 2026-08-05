@@ -119,6 +119,18 @@ TEST_F(EditDistanceTest, UTF8Words) {
   EXPECT_TRUE(ContainsFuzzyMatch("東京都 大阪府", "東京市", 1));
 }
 
+TEST_F(EditDistanceTest, CjkMatchInsideContinuousText) {
+  EXPECT_TRUE(ContainsFuzzyMatch("私は東京都に住む", "東京市", 1));
+}
+
+TEST_F(EditDistanceTest, CjkContinuousTextRejectsBeyondDistance) {
+  EXPECT_FALSE(ContainsFuzzyMatch("私は東西京に住む", "東京市", 1));
+}
+
+TEST_F(EditDistanceTest, AsciiMatchStillRequiresWordBoundary) {
+  EXPECT_FALSE(ContainsFuzzyMatch("concatenate", "cat", 0));
+}
+
 TEST_F(EditDistanceTest, NoWordsCloseEnough) {
   EXPECT_FALSE(ContainsFuzzyMatch("alpha beta gamma", "zzzzz", 2));
 }

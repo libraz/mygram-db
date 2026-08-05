@@ -219,32 +219,56 @@ class StructuredLog {
   /**
    * @brief Log as error level
    */
-  void Error() { spdlog::error("{}", Build()); }
+  void Error() {
+    if (spdlog::should_log(spdlog::level::err)) {
+      spdlog::error("{}", Build());
+    }
+  }
 
   /**
    * @brief Log as warning level
    */
-  void Warn() { spdlog::warn("{}", Build()); }
+  void Warn() {
+    if (spdlog::should_log(spdlog::level::warn)) {
+      spdlog::warn("{}", Build());
+    }
+  }
 
   /**
    * @brief Log as info level
    */
-  void Info() { spdlog::info("{}", Build()); }
+  void Info() {
+    if (spdlog::should_log(spdlog::level::info)) {
+      spdlog::info("{}", Build());
+    }
+  }
 
   /**
    * @brief Log as debug level
    */
-  void Debug() { spdlog::debug("{}", Build()); }
+  void Debug() {
+    if (spdlog::should_log(spdlog::level::debug)) {
+      spdlog::debug("{}", Build());
+    }
+  }
 
   /**
    * @brief Log as trace level
    */
-  void Trace() { spdlog::trace("{}", Build()); }
+  void Trace() {
+    if (spdlog::should_log(spdlog::level::trace)) {
+      spdlog::trace("{}", Build());
+    }
+  }
 
   /**
    * @brief Log as critical level
    */
-  void Critical() { spdlog::critical("{}", Build()); }
+  void Critical() {
+    if (spdlog::should_log(spdlog::level::critical)) {
+      spdlog::critical("{}", Build());
+    }
+  }
 
  private:
   std::string event_;

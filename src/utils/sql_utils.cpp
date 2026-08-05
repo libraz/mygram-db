@@ -52,13 +52,19 @@ std::string EncodeMySQLStringLiteral(std::string_view value) {
       '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
   };
   std::string encoded;
-  encoded.reserve(30 + value.size() * 2);
-  encoded.append("CONVERT(X'");
+  encoded.reserve(14 + value.size() * 2);
+  // Keep this a literal (coercibility 4) rather than a CONVERT expression
+  // (coercibility 2). The latter forces the connection's default utf8mb4
+  // collation and can make comparison with an explicitly collated column fail
+  // with "Illegal mix of collations". The character-set introducer preserves
+  // byte-exact, SQL-mode-independent encoding while allowing the column's
+  // implicit collation to win.
+  encoded.append("_utf8mb4 X'");
   for (unsigned char byte : value) {
     encoded.push_back(kHex[byte >> 4U]);
     encoded.push_back(kHex[byte & 0x0FU]);
   }
-  encoded.append("' USING utf8mb4)");
+  encoded.push_back('\'');
   return encoded;
 }
 

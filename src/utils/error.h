@@ -136,7 +136,6 @@ enum class ErrorCode : std::uint16_t {
   kNetworkReceiveFailed = 6006,          ///< Failed to receive data
   kNetworkInvalidRequest = 6007,         ///< Invalid request received
   kNetworkProtocolError = 6008,          ///< Protocol error
-  kNetworkIPNotAllowed = 6009,           ///< IP address not in allowed CIDRs
   kNetworkServerNotStarted = 6010,       ///< Server not started
   kNetworkAlreadyRunning = 6011,         ///< Server already running
   kNetworkSocketCreationFailed = 6012,   ///< Failed to create socket
@@ -149,12 +148,12 @@ enum class ErrorCode : std::uint16_t {
   kNetworkReactorModifyFailed = 6019,    ///< epoll_ctl MOD / kevent update failed
   kNetworkReactorRemoveFailed = 6020,    ///< epoll_ctl DEL / kevent EV_DELETE failed
   kNetworkReactorPollFailed = 6021,      ///< epoll_wait / kevent poll failed
-  kNetworkReactorQueueFull = 6022,       ///< Per-connection write queue cap exceeded (slow reader)
   kNetworkReactorAlreadyOpen = 6023,     ///< Multiplexer already opened
   kNetworkNullDependency = 6024,         ///< Required dependency pointer is null
   kNetworkAcceptorNoHandler = 6025,      ///< Acceptor reactor handler not installed before StartAccepting
   kServerInitMissingDependency = 6026,   ///< Server initialization missing required dependency
   kServerShuttingDown = 6027,            ///< Server is shutting down; new long-running operations are rejected
+  kServerLoading = 6028,                 ///< Server is temporarily unavailable while loading a dump
 
   // ===== Client Errors (7000-7999) =====
   kClientNotConnected = 7000,          ///< Client not connected
@@ -373,8 +372,6 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Invalid request";
     case ErrorCode::kNetworkProtocolError:
       return "Protocol error";
-    case ErrorCode::kNetworkIPNotAllowed:
-      return "IP not allowed";
     case ErrorCode::kNetworkServerNotStarted:
       return "Server not started";
     case ErrorCode::kNetworkAlreadyRunning:
@@ -399,8 +396,6 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Event multiplexer remove failed";
     case ErrorCode::kNetworkReactorPollFailed:
       return "Event multiplexer poll failed";
-    case ErrorCode::kNetworkReactorQueueFull:
-      return "Reactor per-connection write queue full";
     case ErrorCode::kNetworkReactorAlreadyOpen:
       return "Event multiplexer already opened";
     case ErrorCode::kNetworkNullDependency:
@@ -411,6 +406,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Server initialization missing required dependency";
     case ErrorCode::kServerShuttingDown:
       return "Server is shutting down";
+    case ErrorCode::kServerLoading:
+      return "Server is loading";
 
     // Client
     case ErrorCode::kClientNotConnected:

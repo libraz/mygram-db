@@ -71,21 +71,21 @@ TEST(QuoteQualifiedSQLIdentifierTest, RejectsInvalidComponent) {
 }
 
 TEST(EncodeMySQLStringLiteralTest, EncodesEmptyAndAsciiValues) {
-  EXPECT_EQ(EncodeMySQLStringLiteral(""), "CONVERT(X'' USING utf8mb4)");
-  EXPECT_EQ(EncodeMySQLStringLiteral("O'Reilly"), "CONVERT(X'4F275265696C6C79' USING utf8mb4)");
+  EXPECT_EQ(EncodeMySQLStringLiteral(""), "_utf8mb4 X''");
+  EXPECT_EQ(EncodeMySQLStringLiteral("O'Reilly"), "_utf8mb4 X'4F275265696C6C79'");
 }
 
 TEST(EncodeMySQLStringLiteralTest, IsIndependentOfBackslashEscapingMode) {
   const std::string value = "line\\n'quoted'\nnext";
   const std::string encoded = EncodeMySQLStringLiteral(value);
 
-  EXPECT_EQ(encoded, "CONVERT(X'6C696E655C6E2771756F746564270A6E657874' USING utf8mb4)");
+  EXPECT_EQ(encoded, "_utf8mb4 X'6C696E655C6E2771756F746564270A6E657874'");
   EXPECT_EQ(encoded.find('\\'), std::string::npos);
   EXPECT_EQ(encoded.find("quoted"), std::string::npos);
 }
 
 TEST(EncodeMySQLStringLiteralTest, EncodesUtf8BytesWithoutLoss) {
-  EXPECT_EQ(EncodeMySQLStringLiteral("日本語"), "CONVERT(X'E697A5E69CACE8AA9E' USING utf8mb4)");
+  EXPECT_EQ(EncodeMySQLStringLiteral("日本語"), "_utf8mb4 X'E697A5E69CACE8AA9E'");
 }
 
 // --- StripSQLComments Tests ---

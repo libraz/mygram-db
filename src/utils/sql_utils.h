@@ -46,7 +46,7 @@ Expected<std::string, Error> QuoteQualifiedSQLIdentifier(std::string_view databa
  * expression has identical semantics with and without NO_BACKSLASH_ESCAPES.
  *
  * @param value UTF-8 string value.
- * @return `CONVERT(X'...' USING utf8mb4)` expression.
+ * @return `_utf8mb4 X'...'` character-set-introduced hex literal.
  */
 std::string EncodeMySQLStringLiteral(std::string_view value);
 

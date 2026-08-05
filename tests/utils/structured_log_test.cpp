@@ -67,6 +67,18 @@ TEST_F(StructuredLogTest, EventAndMessage) {
   EXPECT_NE(output.find("\"message\":\"Test message\""), std::string::npos);
 }
 
+TEST_F(StructuredLogTest, DebugLevelLoggingUsesCurrentLoggerLevel) {
+  const auto previous_level = spdlog::get_level();
+  spdlog::set_level(spdlog::level::info);
+  StructuredLog().Event("debug_event").Debug();
+  EXPECT_TRUE(GetLogOutput().empty());
+
+  spdlog::set_level(spdlog::level::debug);
+  StructuredLog().Event("debug_event").Debug();
+  EXPECT_NE(GetLogOutput().find("\"event\":\"debug_event\""), std::string::npos);
+  spdlog::set_level(previous_level);
+}
+
 /**
  * @brief Test structured log with string fields
  */

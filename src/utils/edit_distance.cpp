@@ -126,6 +126,33 @@ uint32_t ComputeDistanceImpl(const CharT* a_data, uint32_t a_len, const CharT* b
   return dp[a_len] <= max_distance ? dp[a_len] : max_distance + 1;
 }
 
+/// @brief Check term-sized codepoint windows inside a continuous Unicode word
+///
+/// CJK text commonly has no whitespace between words. Comparing the whole
+/// whitespace-delimited segment would therefore reject a valid fuzzy match in
+/// a sentence such as "私は東京都に住む". Candidate window lengths vary by
+/// max_distance so insertions and deletions remain detectable.
+bool ContainsFuzzyCodepointWindow(const uint32_t* word_data, uint32_t word_len, const uint32_t* term_data,
+                                  uint32_t term_len, uint32_t max_distance) {
+  const uint64_t minimum_length = term_len > max_distance ? term_len - max_distance : 1;
+  const uint64_t maximum_length = std::min<uint64_t>(word_len, static_cast<uint64_t>(term_len) + max_distance);
+  if (minimum_length > maximum_length) {
+    return false;
+  }
+
+  for (uint32_t start = 0; start < word_len; ++start) {
+    const uint64_t remaining = word_len - start;
+    const uint64_t last_length = std::min(maximum_length, remaining);
+    for (uint64_t candidate_length = minimum_length; candidate_length <= last_length; ++candidate_length) {
+      if (ComputeDistanceImpl(word_data + start, static_cast<uint32_t>(candidate_length), term_data, term_len,
+                              max_distance) <= max_distance) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 uint32_t LevenshteinDistance(std::string_view a, std::string_view b, uint32_t max_distance) {
@@ -172,12 +199,11 @@ bool ContainsFuzzyMatch(std::string_view text, std::string_view term, uint32_t m
   std::string normalized_text = NormalizeUnicodeWhitespace(text);
   std::string_view normalized_view = normalized_text;
 
-  // Pre-decode term once to avoid repeated UTF-8 scanning
+  // Pre-decode term once to avoid repeated UTF-8 scanning. The uint32_t form
+  // is also used when a non-ASCII word is compared with an ASCII term.
   bool term_is_ascii = IsAscii(term);
-  std::vector<uint32_t> term_codepoints;
-  if (!term_is_ascii) {
-    term_codepoints = Utf8ToCodepoints(term);
-  }
+  std::vector<uint32_t> term_codepoints =
+      term_is_ascii ? std::vector<uint32_t>(term.begin(), term.end()) : Utf8ToCodepoints(term);
   uint32_t term_len =
       term_is_ascii ? static_cast<uint32_t>(term.size()) : static_cast<uint32_t>(term_codepoints.size());
 
@@ -229,20 +255,14 @@ bool ContainsFuzzyMatch(std::string_view text, std::string_view term, uint32_t m
       word_data = word_codepoints.data();
       word_len = static_cast<uint32_t>(word_codepoints.size());
 
-      // Term data: use pre-decoded codepoints, or convert ASCII term on the fly
-      const uint32_t* term_data = nullptr;
-      std::vector<uint32_t> term_ascii_codepoints;
-      if (term_is_ascii) {
-        term_ascii_codepoints.assign(term.begin(), term.end());
-        term_data = term_ascii_codepoints.data();
+      if (!word_is_ascii) {
+        if (ContainsFuzzyCodepointWindow(word_data, word_len, term_codepoints.data(), term_len, max_distance)) {
+          return true;
+        }
       } else {
-        term_data = term_codepoints.data();
-      }
-
-      uint32_t len_diff = (word_len > term_len) ? (word_len - term_len) : (term_len - word_len);
-      if (len_diff <= max_distance) {
-        uint32_t distance = ComputeDistanceImpl(word_data, word_len, term_data, term_len, max_distance);
-        if (distance <= max_distance) {
+        uint32_t len_diff = (word_len > term_len) ? (word_len - term_len) : (term_len - word_len);
+        if (len_diff <= max_distance &&
+            ComputeDistanceImpl(word_data, word_len, term_codepoints.data(), term_len, max_distance) <= max_distance) {
           return true;
         }
       }
