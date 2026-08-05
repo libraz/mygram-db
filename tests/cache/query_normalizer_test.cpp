@@ -15,7 +15,7 @@ namespace mygramdb::cache {
 /**
  * @brief Test whitespace normalization
  */
-TEST(QueryNormalizerTest, WhitespaceNormalization) {
+TEST(QueryNormalizerTest, ConsecutiveSpacesRemainDistinctWhenExecutionTreatsThemAsDistinct) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -31,8 +31,7 @@ TEST(QueryNormalizerTest, WhitespaceNormalization) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  // Multiple spaces should be normalized to single space
-  EXPECT_EQ(normalized1, normalized2);
+  EXPECT_NE(normalized1, normalized2);
 }
 
 TEST(QueryNormalizerTest, FacetSharesSearchDocIdCacheNamespace) {
@@ -53,7 +52,7 @@ TEST(QueryNormalizerTest, FacetSharesSearchDocIdCacheNamespace) {
 /**
  * @brief Test tab character normalization
  */
-TEST(QueryNormalizerTest, TabNormalization) {
+TEST(QueryNormalizerTest, TabsRemainDistinctWhenExecutionTreatsThemAsDistinct) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -76,15 +75,14 @@ TEST(QueryNormalizerTest, TabNormalization) {
   std::string normalized2 = QueryNormalizer::Normalize(query2);
   std::string normalized3 = QueryNormalizer::Normalize(query3);
 
-  // Tabs should be normalized to single space
-  EXPECT_EQ(normalized1, normalized2);
-  EXPECT_EQ(normalized2, normalized3);
+  EXPECT_NE(normalized1, normalized2);
+  EXPECT_NE(normalized2, normalized3);
 }
 
 /**
  * @brief Test full-width space (U+3000) normalization
  */
-TEST(QueryNormalizerTest, FullWidthSpaceNormalization) {
+TEST(QueryNormalizerTest, FullWidthSpacesRemainDistinctWithoutAnIndexNormalizer) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -107,15 +105,14 @@ TEST(QueryNormalizerTest, FullWidthSpaceNormalization) {
   std::string normalized2 = QueryNormalizer::Normalize(query2);
   std::string normalized3 = QueryNormalizer::Normalize(query3);
 
-  // Full-width spaces should be normalized to single half-width space
-  EXPECT_EQ(normalized1, normalized2);
-  EXPECT_EQ(normalized2, normalized3);
+  EXPECT_NE(normalized1, normalized2);
+  EXPECT_NE(normalized2, normalized3);
 }
 
 /**
  * @brief Test mixed whitespace normalization
  */
-TEST(QueryNormalizerTest, MixedWhitespaceNormalization) {
+TEST(QueryNormalizerTest, LeadingTrailingAndMixedWhitespaceRemainDistinct) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -131,8 +128,27 @@ TEST(QueryNormalizerTest, MixedWhitespaceNormalization) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  // All whitespace types should be normalized and trimmed
-  EXPECT_EQ(normalized1, normalized2);
+  EXPECT_NE(normalized1, normalized2);
+}
+
+TEST(QueryNormalizerTest, CacheWhitespaceUsesOnlyTheSameNormalizerAsExecution) {
+  query::Query ascii_space;
+  ascii_space.type = query::QueryType::SEARCH;
+  ascii_space.table = "posts";
+  ascii_space.search_text = "hello world";
+
+  query::Query fullwidth_space = ascii_space;
+  fullwidth_space.search_text = "hello　world";
+  query::Query repeated_space = ascii_space;
+  repeated_space.search_text = "hello   world";
+
+  const auto index_normalizer = [](std::string_view text) {
+    return mygram::utils::NormalizeText(text, true, "narrow", true);
+  };
+  EXPECT_EQ(QueryNormalizer::Normalize(ascii_space, index_normalizer),
+            QueryNormalizer::Normalize(fullwidth_space, index_normalizer));
+  EXPECT_NE(QueryNormalizer::Normalize(ascii_space, index_normalizer),
+            QueryNormalizer::Normalize(repeated_space, index_normalizer));
 }
 
 /**
@@ -565,13 +581,13 @@ TEST(QueryNormalizerTest, LongNormalizedQuery) {
 }
 
 // =============================================================================
-// M7: Unicode space normalization
+// Unicode whitespace identity follows execution semantics
 // =============================================================================
 
 /**
- * @brief Test No-Break Space (U+00A0) normalization
+ * @brief No-Break Space stays distinct when execution preserves it
  */
-TEST(QueryNormalizerTest, NoBreakingSpaceNormalized) {
+TEST(QueryNormalizerTest, NoBreakingSpaceRemainsDistinctWithoutAnIndexNormalizer) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -588,13 +604,13 @@ TEST(QueryNormalizerTest, NoBreakingSpaceNormalized) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  EXPECT_EQ(normalized1, normalized2) << "No-Break Space (U+00A0) should be normalized to regular space";
+  EXPECT_NE(normalized1, normalized2);
 }
 
 /**
- * @brief Test various Unicode spaces normalization
+ * @brief Distinct Unicode spaces do not collide without an index normalizer
  */
-TEST(QueryNormalizerTest, VariousUnicodeSpacesNormalized) {
+TEST(QueryNormalizerTest, VariousUnicodeSpacesRemainDistinctWithoutAnIndexNormalizer) {
   // U+2003 (Em Space) = 0xE2 0x80 0x83
   query::Query query_em;
   query_em.type = query::QueryType::SEARCH;
@@ -639,17 +655,17 @@ TEST(QueryNormalizerTest, VariousUnicodeSpacesNormalized) {
 
   std::string ref = QueryNormalizer::Normalize(query_ref);
 
-  EXPECT_EQ(QueryNormalizer::Normalize(query_em), ref) << "Em Space (U+2003) should normalize";
-  EXPECT_EQ(QueryNormalizer::Normalize(query_en), ref) << "En Space (U+2002) should normalize";
-  EXPECT_EQ(QueryNormalizer::Normalize(query_zw), ref) << "Zero Width Space (U+200B) should normalize";
-  EXPECT_EQ(QueryNormalizer::Normalize(query_nnbs), ref) << "Narrow No-Break Space (U+202F) should normalize";
-  EXPECT_EQ(QueryNormalizer::Normalize(query_mms), ref) << "Medium Mathematical Space (U+205F) should normalize";
+  EXPECT_NE(QueryNormalizer::Normalize(query_em), ref);
+  EXPECT_NE(QueryNormalizer::Normalize(query_en), ref);
+  EXPECT_NE(QueryNormalizer::Normalize(query_zw), ref);
+  EXPECT_NE(QueryNormalizer::Normalize(query_nnbs), ref);
+  EXPECT_NE(QueryNormalizer::Normalize(query_mms), ref);
 }
 
 /**
- * @brief Test Ogham Space Mark (U+1680) normalization
+ * @brief Ogham Space Mark stays distinct when execution preserves it
  */
-TEST(QueryNormalizerTest, OghamSpaceMarkNormalized) {
+TEST(QueryNormalizerTest, OghamSpaceMarkRemainsDistinctWithoutAnIndexNormalizer) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -666,13 +682,13 @@ TEST(QueryNormalizerTest, OghamSpaceMarkNormalized) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  EXPECT_EQ(normalized1, normalized2) << "Ogham Space Mark (U+1680) should be normalized to regular space";
+  EXPECT_NE(normalized1, normalized2);
 }
 
 /**
- * @brief Test Line Separator (U+2028) normalization
+ * @brief Line Separator stays distinct when execution preserves it
  */
-TEST(QueryNormalizerTest, LineSeparatorNormalized) {
+TEST(QueryNormalizerTest, LineSeparatorRemainsDistinctWithoutAnIndexNormalizer) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -689,13 +705,13 @@ TEST(QueryNormalizerTest, LineSeparatorNormalized) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  EXPECT_EQ(normalized1, normalized2) << "Line Separator (U+2028) should be normalized to regular space";
+  EXPECT_NE(normalized1, normalized2);
 }
 
 /**
- * @brief Test Paragraph Separator (U+2029) normalization
+ * @brief Paragraph Separator stays distinct when execution preserves it
  */
-TEST(QueryNormalizerTest, ParagraphSeparatorNormalized) {
+TEST(QueryNormalizerTest, ParagraphSeparatorRemainsDistinctWithoutAnIndexNormalizer) {
   query::Query query1;
   query1.type = query::QueryType::SEARCH;
   query1.table = "posts";
@@ -712,7 +728,7 @@ TEST(QueryNormalizerTest, ParagraphSeparatorNormalized) {
   std::string normalized1 = QueryNormalizer::Normalize(query1);
   std::string normalized2 = QueryNormalizer::Normalize(query2);
 
-  EXPECT_EQ(normalized1, normalized2) << "Paragraph Separator (U+2029) should be normalized to regular space";
+  EXPECT_NE(normalized1, normalized2);
 }
 
 // =============================================================================
@@ -900,7 +916,7 @@ TEST(QueryNormalizerTest, EquivalentProtocolQueriesShareOnlyCanonicalStructure) 
   query::Query http_query;
   http_query.type = query::QueryType::SEARCH;
   http_query.table = "db.posts";
-  http_query.search_text = "hello   world";
+  http_query.search_text = "hello world";
   http_query.and_terms = {"second", "first"};
   http_query.filters = {{"status", query::FilterOp::EQ, "active"}, {"tenant", query::FilterOp::EQ, "7"}};
   http_query.limit = 25;
@@ -914,6 +930,10 @@ TEST(QueryNormalizerTest, EquivalentProtocolQueriesShareOnlyCanonicalStructure) 
   tcp_query.offset = 0;
 
   EXPECT_EQ(QueryNormalizer::Normalize(http_query), QueryNormalizer::Normalize(tcp_query));
+
+  tcp_query.search_text = "hello   world";
+  EXPECT_NE(QueryNormalizer::Normalize(http_query), QueryNormalizer::Normalize(tcp_query));
+  tcp_query.search_text = http_query.search_text;
 
   tcp_query.filters.front().value = "8";
   EXPECT_NE(QueryNormalizer::Normalize(http_query), QueryNormalizer::Normalize(tcp_query));

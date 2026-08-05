@@ -30,10 +30,10 @@ struct CacheSemanticContext {
  * representation, while structural boundaries remain unambiguous.
  *
  * Normalization rules:
- * 1. Whitespace: Normalize to single spaces
+ * 1. Whitespace: Preserve execution-significant multiplicity and boundaries
  * 2. Structure: Encode every field with a type tag and byte length
  * 3. Table identity: Preserve the exact canonical table key supplied by the catalog
- * 4. Search text: Normalize whitespace, then apply the optional index text normalizer
+ * 4. Search text: Apply only the same optional text normalizer used by the index
  * 5. Clause order: Canonicalize to fixed order
  * 6. Filter order: Sort by the complete (column, operator, value) tuple
  * 7. Presentation clauses: Exclude LIMIT/OFFSET/SORT from the key
@@ -60,7 +60,7 @@ class QueryNormalizer {
 
  private:
   /**
-   * @brief Normalize search text whitespace and apply optional index text normalization
+   * @brief Apply optional index text normalization without changing query whitespace semantics
    */
   static std::string NormalizeSearchText(const std::string& text, const TextNormalizer& text_normalizer);
 };

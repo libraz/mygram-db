@@ -13,8 +13,6 @@
 #include <tuple>
 #include <vector>
 
-#include "utils/string_utils.h"
-
 namespace mygramdb::cache {
 
 namespace {
@@ -22,7 +20,7 @@ namespace {
 // Bumping this prefix creates a new cache namespace. Query cache entries are
 // currently process-local, but keeping the version in the hashed material also
 // makes future persistence safe across serializer changes.
-constexpr std::array<char, 5> kSerializerPrefix = {'M', 'G', 'Q', 'K', '\x03'};
+constexpr std::array<char, 5> kSerializerPrefix = {'M', 'G', 'Q', 'K', '\x04'};
 
 enum class FieldTag : uint8_t {
   kCommand = 1,
@@ -147,38 +145,10 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const TextNorm
 }
 
 std::string QueryNormalizer::NormalizeSearchText(const std::string& text, const TextNormalizer& text_normalizer) {
-  // Normalize whitespace: collapse multiple spaces (including Unicode spaces) to single space
-  std::string normalized;
-  normalized.reserve(text.size());
-
-  bool prev_was_space = false;
-  for (size_t i = 0; i < text.size(); ++i) {
-    size_t ws_len = 0;
-    bool is_space = mygram::utils::IsUnicodeWhitespace(text, i, ws_len);
-
-    if (is_space) {
-      // Skip extra bytes of multi-byte whitespace character (loop will ++i)
-      i += ws_len - 1;
-      if (!prev_was_space && !normalized.empty()) {
-        normalized += ' ';
-        prev_was_space = true;
-      }
-    } else {
-      normalized += text[i];
-      prev_was_space = false;
-    }
-  }
-
-  // Remove trailing space if any
-  if (!normalized.empty() && normalized.back() == ' ') {
-    normalized.pop_back();
-  }
-
   if (text_normalizer) {
-    return text_normalizer(normalized);
+    return text_normalizer(text);
   }
-
-  return normalized;
+  return text;
 }
 
 }  // namespace mygramdb::cache
