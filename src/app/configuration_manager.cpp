@@ -9,10 +9,13 @@
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 
+#include "query/synonym_dictionary.h"
 #include "server/log_field_names.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
@@ -46,6 +49,60 @@ std::string AbsolutePathString(const std::string& path) {
   return std::filesystem::absolute(fs_path).lexically_normal().string();
 }
 
+mygram::utils::Expected<void, mygram::utils::Error> ValidateReadableFile(const std::string& path,
+                                                                         const std::string& setting_name) {
+  std::error_code status_error;
+  const auto status = std::filesystem::status(path, status_error);
+  if (status_error || !std::filesystem::is_regular_file(status)) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kIOError, setting_name + " does not reference a readable regular file: " + path));
+  }
+
+  std::ifstream input(path, std::ios::binary);
+  if (!input.is_open() || input.peek() == std::ifstream::traits_type::eof()) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kIOError, setting_name + " references an unreadable or empty file: " + path));
+  }
+
+  return {};
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigTestReferences(const config::Config& config) {
+  if (config.mysql.ssl_enable) {
+    const std::pair<const std::string&, const char*> tls_files[] = {
+        {config.mysql.ssl_ca, "mysql.ssl_ca"},
+        {config.mysql.ssl_cert, "mysql.ssl_cert"},
+        {config.mysql.ssl_key, "mysql.ssl_key"},
+    };
+    for (const auto& [path, setting_name] : tls_files) {
+      if (!path.empty()) {
+        if (auto result = ValidateReadableFile(path, setting_name); !result) {
+          return result;
+        }
+      }
+    }
+  }
+
+  for (const auto& table : config.tables) {
+    if (!table.synonyms.enable) {
+      continue;
+    }
+
+    query::SynonymDictionary dictionary;
+    const auto normalizer = [&config](std::string_view text) {
+      return mygram::utils::NormalizeText(text, config.memory.normalize.nfkc, config.memory.normalize.width,
+                                          config.memory.normalize.lower);
+    };
+    auto result = dictionary.LoadFromFile(table.synonyms.file, normalizer);
+    if (!result) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          result.error().code(), "tables['" + table.name + "'].synonyms.file: " + result.error().message()));
+    }
+  }
+
+  return {};
+}
+
 }  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ConfigurationManager>, mygram::utils::Error> ConfigurationManager::Create(
@@ -68,6 +125,11 @@ ConfigurationManager::ConfigurationManager(std::string config_file, std::string 
     : config_file_(std::move(config_file)), schema_file_(std::move(schema_file)), config_(std::move(initial_config)) {}
 
 int ConfigurationManager::PrintConfigTest() const {
+  if (auto result = ValidateConfigTestReferences(config_); !result) {
+    std::cerr << "Configuration reference validation failed: " << result.error().message() << "\n";
+    return 1;
+  }
+
   std::cout << "Configuration file syntax is OK\n";
   std::cout << "Configuration details:\n";
   std::cout << "  MySQL: " << config_.mysql.user << "@" << config_.mysql.host << ":" << config_.mysql.port << "\n";
@@ -139,6 +201,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::Absolu
   try {
     config_.dump.dir = AbsolutePathString(config_.dump.dir);
     config_.logging.file = AbsolutePathString(config_.logging.file);
+    config_.mysql.ssl_ca = AbsolutePathString(config_.mysql.ssl_ca);
+    config_.mysql.ssl_cert = AbsolutePathString(config_.mysql.ssl_cert);
+    config_.mysql.ssl_key = AbsolutePathString(config_.mysql.ssl_key);
+    config_.api.unix_socket.path = AbsolutePathString(config_.api.unix_socket.path);
+    for (auto& table : config_.tables) {
+      table.synonyms.file = AbsolutePathString(table.synonyms.file);
+    }
   } catch (const std::exception& ex) {
     return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
         mygram::utils::ErrorCode::kIOError, "Failed to absolutize daemon paths: " + std::string(ex.what())));

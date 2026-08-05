@@ -15,6 +15,30 @@
 namespace mygramdb::app {
 
 /**
+ * @brief Run checks that must complete before any configured file is opened.
+ *
+ * Root rejection deliberately precedes daemon path resolution and logging
+ * setup so a forbidden root invocation cannot create operator-controlled
+ * directories or files.
+ */
+template <typename PrivilegeCheck, typename DaemonPathResolver>
+mygram::utils::Expected<void, mygram::utils::Error> RunPreFileStartupChecks(bool daemon_mode,
+                                                                            PrivilegeCheck&& privilege_check,
+                                                                            DaemonPathResolver&& daemon_path_resolver) {
+  auto privilege_result = privilege_check();
+  if (!privilege_result) {
+    return mygram::utils::MakeUnexpected(privilege_result.error());
+  }
+  if (daemon_mode) {
+    auto path_result = daemon_path_resolver();
+    if (!path_result) {
+      return mygram::utils::MakeUnexpected(path_result.error());
+    }
+  }
+  return {};
+}
+
+/**
  * @brief Run an application while keeping its ownership inside this scope.
  *
  * The application is destroyed before this function returns. Process entry

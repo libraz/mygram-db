@@ -108,6 +108,63 @@ std::string CreateTempConfig(const std::string& log_level, const std::string& lo
   return temp_path;
 }
 
+std::string CreateTempTextFile(const std::string& suffix, const std::string& contents) {
+  char temp_buffer[256];
+  std::snprintf(temp_buffer, sizeof(temp_buffer), "/tmp/mygramdb_reference_test_XXXXXX");
+
+  int fd = mkstemp(temp_buffer);
+  if (fd == -1) {
+    throw std::runtime_error("Failed to create temporary reference file");
+  }
+  close(fd);
+
+  std::string path = std::string(temp_buffer) + suffix;
+  std::filesystem::rename(temp_buffer, path);
+  std::ofstream output(path, std::ios::binary);
+  output << contents;
+  output.close();
+  return path;
+}
+
+std::string CreateConfigWithReferences(const std::string& ssl_ca, const std::string& ssl_cert,
+                                       const std::string& ssl_key, const std::string& synonym_file) {
+  const std::string config_path = CreateTempTextFile(".yaml", "");
+  std::ofstream output(config_path);
+  output << "mysql:\n"
+         << "  host: \"127.0.0.1\"\n"
+         << "  port: 3306\n"
+         << "  user: \"test\"\n"
+         << "  password: \"test\"\n"
+         << "  database: \"test\"\n";
+  if (!ssl_ca.empty() || !ssl_cert.empty() || !ssl_key.empty()) {
+    output << "  ssl_enable: true\n";
+    if (!ssl_ca.empty()) {
+      output << "  ssl_ca: \"" << ssl_ca << "\"\n";
+    }
+    if (!ssl_cert.empty()) {
+      output << "  ssl_cert: \"" << ssl_cert << "\"\n";
+    }
+    if (!ssl_key.empty()) {
+      output << "  ssl_key: \"" << ssl_key << "\"\n";
+    }
+  }
+  output << "tables:\n"
+         << "  - name: \"test_table\"\n"
+         << "    primary_key: \"id\"\n"
+         << "    text_source:\n"
+         << "      column: \"content\"\n";
+  if (!synonym_file.empty()) {
+    output << "    synonyms:\n"
+           << "      enable: true\n"
+           << "      file: \"" << synonym_file << "\"\n";
+  }
+  output << "replication:\n"
+         << "  enable: false\n"
+         << "  server_id: 12345\n";
+  output.close();
+  return config_path;
+}
+
 /**
  * @brief Helper to read file contents
  */
@@ -558,4 +615,65 @@ TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigUnknownLevelRejectedBy
 
   // Cleanup
   std::filesystem::remove(config_path);
+}
+
+TEST_F(ConfigurationManagerTestFixture, PrintConfigTestRejectsMissingTlsReference) {
+  const std::string missing_ca = CreateTempTextFile(".pem", "temporary");
+  std::filesystem::remove(missing_ca);
+  const std::string config_path = CreateConfigWithReferences(missing_ca, "", "", "");
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result) << config_mgr_result.error().to_string();
+  auto config_mgr = std::move(*config_mgr_result);
+
+  testing::internal::CaptureStdout();
+  testing::internal::CaptureStderr();
+  EXPECT_EQ(config_mgr->PrintConfigTest(), 1);
+  const std::string stderr_output = testing::internal::GetCapturedStderr();
+  const std::string stdout_output = testing::internal::GetCapturedStdout();
+  EXPECT_NE(stderr_output.find("mysql.ssl_ca"), std::string::npos);
+  EXPECT_EQ(stdout_output.find("Configuration file syntax is OK"), std::string::npos);
+
+  std::filesystem::remove(config_path);
+}
+
+TEST_F(ConfigurationManagerTestFixture, PrintConfigTestRejectsMissingEnabledSynonymFile) {
+  const std::string missing_synonyms = CreateTempTextFile(".tsv", "temporary");
+  std::filesystem::remove(missing_synonyms);
+  const std::string config_path = CreateConfigWithReferences("", "", "", missing_synonyms);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result) << config_mgr_result.error().to_string();
+  auto config_mgr = std::move(*config_mgr_result);
+
+  testing::internal::CaptureStderr();
+  EXPECT_EQ(config_mgr->PrintConfigTest(), 1);
+  const std::string stderr_output = testing::internal::GetCapturedStderr();
+  EXPECT_NE(stderr_output.find("test_table"), std::string::npos);
+  EXPECT_NE(stderr_output.find("Cannot open synonym file"), std::string::npos);
+
+  std::filesystem::remove(config_path);
+}
+
+TEST_F(ConfigurationManagerTestFixture, PrintConfigTestAcceptsReadableTlsAndSynonymReferences) {
+  const std::string ca_path = CreateTempTextFile("-ca.pem", "test CA\n");
+  const std::string cert_path = CreateTempTextFile("-cert.pem", "test certificate\n");
+  const std::string key_path = CreateTempTextFile("-key.pem", "test private key\n");
+  const std::string synonym_path = CreateTempTextFile(".tsv", "car\tautomobile\n");
+  const std::string config_path = CreateConfigWithReferences(ca_path, cert_path, key_path, synonym_path);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result) << config_mgr_result.error().to_string();
+  auto config_mgr = std::move(*config_mgr_result);
+
+  testing::internal::CaptureStdout();
+  EXPECT_EQ(config_mgr->PrintConfigTest(), 0);
+  const std::string stdout_output = testing::internal::GetCapturedStdout();
+  EXPECT_NE(stdout_output.find("Configuration file syntax is OK"), std::string::npos);
+
+  std::filesystem::remove(config_path);
+  std::filesystem::remove(ca_path);
+  std::filesystem::remove(cert_path);
+  std::filesystem::remove(key_path);
+  std::filesystem::remove(synonym_path);
 }

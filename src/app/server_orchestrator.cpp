@@ -122,7 +122,15 @@ Expected<std::string, mygram::utils::Error> ResolveReplicationStartGtid(std::str
                                                                         std::string_view snapshot_gtid,
                                                                         const LatestGtidProvider& latest_provider) {
   if (start_from == "snapshot") {
-    return std::string(snapshot_gtid);
+    if (!snapshot_gtid.empty()) {
+      return std::string(snapshot_gtid);
+    }
+    if (!latest_provider) {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLQueryFailed,
+                                   "latest GTID provider is not configured for missing snapshot position"));
+    }
+    return latest_provider();
   }
 
   if (start_from == "latest") {
@@ -699,6 +707,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
   std::string start_gtid;
   const std::string& start_from = deps_.config.replication.start_from;
+  const bool snapshot_gtid_available = !snapshot_gtid_.empty();
   auto start_gtid_result =
       ResolveReplicationStartGtid(start_from, snapshot_gtid_, [this]() { return mysql_connection_->GetLatestGTID(); });
   if (!start_gtid_result) {
@@ -711,11 +720,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   start_gtid = *start_gtid_result;
 
   if (start_from == "snapshot") {
-    // Use GTID captured during snapshot build
-    if (start_gtid.empty()) {
+    if (!snapshot_gtid_available) {
       mygram::utils::StructuredLog()
           .Event("snapshot_gtid_unavailable")
-          .Field("warning", "replication may miss changes")
+          .Field("action", "replication_from_latest_gtid")
+          .Field("gtid", start_gtid)
+          .Field("warning", "no snapshot position is available; initial data remains unready until SYNC completes")
           .Warn();
     } else {
       mygram::utils::StructuredLog()
@@ -816,14 +826,18 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
           auto* manager = tcp_server->GetSyncManager();
           return manager != nullptr && manager->IsAnySyncing();
         },
-        [this]() { return initial_data_readiness_.IsReady(); });
+        [this]() { return initial_data_readiness_.IsReady(); }, tcp_server_->GetThreadPool());
 #else
     http_server_ = std::make_unique<server::HttpServer>(
         http_config, table_contexts_ptrs, &deps_.config, nullptr, tcp_server_->GetCacheManager(),
         tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), tcp_server_->GetSharedRateLimiter(),
         tcp_server_->GetReplicationPausedForDumpFlag(), nullptr, std::function<bool(const std::string&)>{},
-        std::function<bool()>{}, [this]() { return initial_data_readiness_.IsReady(); });
+        std::function<bool()>{}, [this]() { return initial_data_readiness_.IsReady(); }, tcp_server_->GetThreadPool());
 #endif
+
+    http_server_->SetOptimizeCallback([tcp_server = tcp_server_.get()](const std::string& table) {
+      return tcp_server->HandleOptimizeRequest(table);
+    });
 
     mygram::utils::StructuredLog()
         .Event("http_server_initialized")

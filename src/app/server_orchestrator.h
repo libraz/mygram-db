@@ -137,8 +137,10 @@ Expected<void, mygram::utils::Error> ConnectWithStartupRetry(
 /**
  * @brief Resolve the configured replication start GTID.
  *
- * Query failures for `replication.start_from=latest` are fatal; an empty
- * returned GTID remains a valid start position for fresh servers.
+ * Query failures while resolving the latest position are fatal. `snapshot`
+ * falls back to that latest position when no snapshot GTID is available, so
+ * an uninitialized server never replays retained history from an empty set.
+ * An empty returned GTID remains valid for a genuinely fresh server.
  */
 Expected<std::string, mygram::utils::Error> ResolveReplicationStartGtid(std::string_view start_from,
                                                                         std::string_view snapshot_gtid,

@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 
+#include "app/application_lifecycle.h"
 #include "server/log_field_names.h"
 #include "utils/daemon_utils.h"
 #include "utils/structured_log.h"
@@ -92,17 +93,20 @@ int Application::Run() {
     return special_exit_code;  // Early exit
   }
 
-  if (args_.daemon_mode) {
-    auto path_result = config_manager_->AbsolutizeDaemonPaths();
-    if (!path_result) {
-      mygram::utils::StructuredLog()
-          .Event("application_error")
-          .Field("type", "daemon_path_resolution_failed")
-          .Field("phase", "startup")
-          .Field("error", path_result.error().to_string())
-          .Error();
-      return 1;
-    }
+  // Reject forbidden identities before resolving paths or opening the
+  // configured log file. This keeps root invocations side-effect free.
+  auto pre_file_result = RunPreFileStartupChecks(
+      args_.daemon_mode, [] { return CheckRootPrivilege(); },
+      [this] { return config_manager_->AbsolutizeDaemonPaths(); });
+  if (!pre_file_result) {
+    const bool root_rejected = pre_file_result.error().code() == mygram::utils::ErrorCode::kPermissionDenied;
+    mygram::utils::StructuredLog()
+        .Event("application_error")
+        .Field("type", root_rejected ? "root_privilege_check_failed" : "daemon_path_resolution_failed")
+        .Field("phase", "startup")
+        .Field("error", pre_file_result.error().to_string())
+        .Error();
+    return 1;
   }
 
   // Apply logging configuration
@@ -119,18 +123,6 @@ int Application::Run() {
 
   // Log startup message after applying the configured logger.
   mygram::utils::StructuredLog().Event("application_starting").Field("version", Version::FullString()).Info();
-
-  // Check root privilege
-  auto root_check = CheckRootPrivilege();
-  if (!root_check) {
-    mygram::utils::StructuredLog()
-        .Event("application_error")
-        .Field("type", "root_privilege_check_failed")
-        .Field("phase", "startup")
-        .Field("error", root_check.error().to_string())
-        .Error();
-    return 1;
-  }
 
   // Daemonize if requested (must be done before opening files/sockets)
   auto daemon_result = DaemonizeIfRequested();

@@ -69,7 +69,8 @@ class ConfigurationManager {
    * @brief Test mode: Print configuration details and exit
    * @return Exit code (0 = success)
    *
-   * This method prints configuration details to stdout:
+   * This method validates referenced TLS and enabled synonym files, then
+   * prints configuration details to stdout:
    * - MySQL connection settings
    * - Table configurations
    * - API endpoints
@@ -97,8 +98,8 @@ class ConfigurationManager {
   /**
    * @brief Convert daemon-sensitive relative paths to absolute paths.
    *
-   * Daemonization changes the process working directory to `/`, so paths that
-   * must remain stable after daemonization need to be resolved before logging
+   * Daemonization changes the process working directory to `/`, so dump/log,
+   * MySQL TLS, synonym, and Unix socket paths must be resolved before logging
    * is opened and before daemonize runs.
    */
   Expected<void, mygram::utils::Error> AbsolutizeDaemonPaths();

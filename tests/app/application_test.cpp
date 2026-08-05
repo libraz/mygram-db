@@ -86,6 +86,41 @@ TEST(ApplicationLifecycleTest, NonCancellationStartupErrorRemainsFailureDuringSh
   EXPECT_FALSE(mygramdb::app::IsGracefulStartupCancellation(failed, true));
 }
 
+TEST(ApplicationLifecycleTest, RootRejectionStopsBeforeDaemonPathOrFilePreparation) {
+  std::vector<std::string> calls;
+  const auto result = mygramdb::app::RunPreFileStartupChecks(
+      true,
+      [&]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        calls.push_back("privilege");
+        return mygram::utils::MakeUnexpected(
+            mygram::utils::MakeError(mygram::utils::ErrorCode::kPermissionDenied, "root rejected"));
+      },
+      [&]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        calls.push_back("paths");
+        return {};
+      });
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(calls, (std::vector<std::string>{"privilege"}));
+}
+
+TEST(ApplicationLifecycleTest, DaemonPathsResolveOnlyAfterPrivilegeCheck) {
+  std::vector<std::string> calls;
+  const auto result = mygramdb::app::RunPreFileStartupChecks(
+      true,
+      [&]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        calls.push_back("privilege");
+        return {};
+      },
+      [&]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        calls.push_back("paths");
+        return {};
+      });
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(calls, (std::vector<std::string>{"privilege", "paths"}));
+}
+
 /**
  * @brief Validates a dump directory path using the same logic as Application::VerifyDumpDirectory.
  *
@@ -223,18 +258,28 @@ TEST_F(DumpDirectoryValidationTest, DaemonPathsAreAbsolutizedBeforeChdir) {
          << "  user: \"test\"\n"
          << "  password: \"test\"\n"
          << "  database: \"test\"\n"
+         << "  ssl_enable: true\n"
+         << "  ssl_ca: \"tls/ca.pem\"\n"
+         << "  ssl_cert: \"tls/client.pem\"\n"
+         << "  ssl_key: \"tls/client.key\"\n"
          << "tables:\n"
          << "  - name: \"test_table\"\n"
          << "    primary_key: \"id\"\n"
          << "    text_source:\n"
          << "      column: \"content\"\n"
+         << "    synonyms:\n"
+         << "      enable: true\n"
+         << "      file: \"dictionaries/test.tsv\"\n"
          << "replication:\n"
          << "  enable: false\n"
          << "  server_id: 12345\n"
          << "dump:\n"
          << "  dir: \"relative_dumps\"\n"
          << "logging:\n"
-         << "  file: \"logs/mygramdb.log\"\n";
+         << "  file: \"logs/mygramdb.log\"\n"
+         << "api:\n"
+         << "  unix_socket:\n"
+         << "    path: \"run/mygramdb.sock\"\n";
   config.close();
 
   auto manager = mygramdb::app::ConfigurationManager::Create(config_path.string());
@@ -246,6 +291,15 @@ TEST_F(DumpDirectoryValidationTest, DaemonPathsAreAbsolutizedBeforeChdir) {
   EXPECT_EQ((*manager)->GetConfig().dump.dir, std::filesystem::absolute("relative_dumps").lexically_normal().string());
   EXPECT_EQ((*manager)->GetConfig().logging.file,
             std::filesystem::absolute("logs/mygramdb.log").lexically_normal().string());
+  EXPECT_EQ((*manager)->GetConfig().mysql.ssl_ca, std::filesystem::absolute("tls/ca.pem").lexically_normal().string());
+  EXPECT_EQ((*manager)->GetConfig().mysql.ssl_cert,
+            std::filesystem::absolute("tls/client.pem").lexically_normal().string());
+  EXPECT_EQ((*manager)->GetConfig().mysql.ssl_key,
+            std::filesystem::absolute("tls/client.key").lexically_normal().string());
+  EXPECT_EQ((*manager)->GetConfig().tables[0].synonyms.file,
+            std::filesystem::absolute("dictionaries/test.tsv").lexically_normal().string());
+  EXPECT_EQ((*manager)->GetConfig().api.unix_socket.path,
+            std::filesystem::absolute("run/mygramdb.sock").lexically_normal().string());
 
   (void)cwd_guard;
 }
@@ -347,6 +401,28 @@ TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidAllowsEmptyLa
 
   ASSERT_TRUE(result) << result.error().to_string();
   EXPECT_EQ(*result, "");
+}
+
+TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidUsesLatestWhenSnapshotGtidIsUnavailable) {
+  bool latest_called = false;
+  auto result = mygramdb::app::ResolveReplicationStartGtid("snapshot", "", [&latest_called]() {
+    latest_called = true;
+    return mygram::utils::Expected<std::string, mygram::utils::Error>("uuid:1-10");
+  });
+
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_TRUE(latest_called);
+  EXPECT_EQ(*result, "uuid:1-10");
+}
+
+TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidPropagatesMissingSnapshotLatestQueryError) {
+  auto result = mygramdb::app::ResolveReplicationStartGtid("snapshot", "", []() {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLQueryFailed, "GTID query failed"));
+  });
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLQueryFailed);
 }
 
 TEST(ServerOrchestratorReplicationTest, ResolveReplicationStartGtidPropagatesLatestQueryError) {
