@@ -976,6 +976,11 @@ Expected<void, Error> ReadDumpV1(
           !result) {
         return result;
       }
+      if (auto result = dump_internal::ValidateRestoreMaterializationBudget(
+              staged_memory_bytes, index_len, restore_limits.memory_budget_bytes, "Index data", "V1");
+          !result) {
+        return result;
+      }
       {
         BoundedInputStream index_stream(ifs, index_len);
         if (auto result = LoadPendingIndex(pending, index_stream); !result) {

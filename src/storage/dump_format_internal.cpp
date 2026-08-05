@@ -270,6 +270,20 @@ bool BoundedInputStream::Drain() {
   return true;
 }
 
+Expected<void, Error> ValidateRestoreMaterializationBudget(uint64_t staged_memory_bytes, uint64_t encoded_length,
+                                                           uint64_t memory_budget_bytes, std::string_view section_name,
+                                                           std::string_view format_name) {
+  constexpr uint64_t kMaterializationFactor = 3;
+  if (staged_memory_bytes > memory_budget_bytes ||
+      encoded_length > (memory_budget_bytes - staged_memory_bytes) / kMaterializationFactor) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                    std::string(section_name) + " materialization estimate exceeds configured " +
+                                        std::string(format_name) +
+                                        " restore memory budget (dump.restore_memory_budget_mb)"));
+  }
+  return {};
+}
+
 Expected<void, Error> LoadPendingIndex(PendingTableLoad& pending, std::istream& index_stream) {
   auto loaded_index = std::make_unique<index::Index>(
       pending.index->GetNgramSize(), pending.index->GetKanjiNgramSize(), pending.index->GetRoaringThreshold(),

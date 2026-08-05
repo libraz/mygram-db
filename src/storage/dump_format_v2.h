@@ -262,7 +262,8 @@ Expected<void, Error> ReadDump(
 /**
  * @brief Verify dump file integrity (auto-detects V1 or V2 format)
  */
-Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error);
+Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error,
+                                          const RestoreLimits& restore_limits = {});
 
 /**
  * @brief Dump file metadata for V2 format

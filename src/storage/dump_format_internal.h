@@ -14,6 +14,7 @@
 #include <ostream>
 #include <streambuf>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -109,6 +110,16 @@ class BoundedInputStream : public std::istream {
  private:
   BoundedInputStreambuf buffer_;
 };
+
+/**
+ * Bound the peak working set before Index::LoadFromStream materializes its
+ * length-delimited payload. Serialized bytes may coexist with decoded index
+ * containers and their growth slack, so reserve three times the encoded
+ * length conservatively.
+ */
+Expected<void, Error> ValidateRestoreMaterializationBudget(uint64_t staged_memory_bytes, uint64_t encoded_length,
+                                                           uint64_t memory_budget_bytes, std::string_view section_name,
+                                                           std::string_view format_name);
 
 struct PendingTableLoad {
   std::string table_name;

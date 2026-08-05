@@ -1157,6 +1157,11 @@ Expected<void, Error> ReadDumpV2(
             return MakeUnexpected(
                 MakeError(ErrorCode::kStorageDumpReadError, "Index length exceeds table section bytes remaining"));
           }
+          if (auto result = dump_internal::ValidateRestoreMaterializationBudget(
+                  staged_memory_bytes, index_len, restore_limits.memory_budget_bytes, "Index data", "V2");
+              !result) {
+            return result;
+          }
           {
             BoundedInputStream index_stream(table_stream, index_len);
             if (auto result = LoadPendingIndex(pending, index_stream); !result)
@@ -1372,7 +1377,13 @@ Expected<void, Error> ReadDump(
                     restore_limits, source_server_uuid);
 }
 
-Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error) {
+Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error,
+                                          const RestoreLimits& restore_limits) {
+  if (restore_limits.memory_budget_bytes == 0 || restore_limits.max_section_bytes == 0) {
+    integrity_error.type = dump_format::CRCErrorType::FileCRC;
+    integrity_error.message = "Dump verification limits must be greater than zero";
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+  }
   // Read version and dispatch
   std::ifstream ifs(filepath, std::ios::binary);
   if (!ifs) {
@@ -1476,18 +1487,21 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
         integrity_error.message = "Section data extends beyond end of file";
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
       }
-
-      std::string section_data(envelope.data_length, '\0');
-      if (envelope.data_length > 0) {
-        ifs2.read(section_data.data(), static_cast<std::streamsize>(envelope.data_length));
-        if (!ifs2.good()) {
-          integrity_error.type = dump_format::CRCErrorType::SectionCRC;
-          integrity_error.message = "Failed to read section data";
-          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
-        }
+      if (envelope.data_length > restore_limits.max_section_bytes) {
+        integrity_error.type = dump_format::CRCErrorType::SectionCRC;
+        integrity_error.message =
+            "Section data length exceeds configured restore section limit (dump.restore_max_section_mb)";
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
       }
 
-      uint32_t actual_crc = ComputeCRC32(section_data);
+      BoundedInputStream section_stream(ifs2, envelope.data_length, true);
+      if (!section_stream.Drain()) {
+        integrity_error.type = dump_format::CRCErrorType::SectionCRC;
+        integrity_error.message = "Failed to read section data";
+        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
+      }
+
+      const uint32_t actual_crc = section_stream.Crc32();
       if (actual_crc != envelope.crc32) {
         integrity_error.type = dump_format::CRCErrorType::SectionCRC;
         integrity_error.message = "Section CRC32 mismatch";

@@ -1092,6 +1092,22 @@ TEST(DumpFormatV2Test, IntegrityVerificationPasses) {
   EXPECT_EQ(error.type, dump_format::CRCErrorType::None);
 }
 
+TEST(DumpFormatV2Test, VerifyRejectsSectionAboveConfiguredRestoreLimitBeforeMaterializingIt) {
+  const auto filepath = TempFilePath("verify_section_restore_limit");
+  ScopedCleanup cleanup(filepath);
+  const std::vector<std::pair<dump_format::SectionType, std::string>> sections = {
+      {dump_format::SectionType::kConfig, std::string(4096, 'x')}};
+  WriteCustomV2Dump(filepath, sections);
+
+  dump_format::IntegrityError error;
+  const RestoreLimits limits{/*memory_budget_bytes=*/8192, /*max_section_bytes=*/1024};
+  const auto result = VerifyDumpIntegrity(filepath, error, limits);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(error.type, dump_format::CRCErrorType::SectionCRC);
+  EXPECT_NE(error.message.find("dump.restore_max_section_mb"), std::string::npos) << error.message;
+}
+
 TEST(DumpFormatV2Test, V1OnlyMetadataApisRejectV2WithoutMisparsingHeader) {
   const auto filepath = TempFilePath("v1_api_rejects_v2");
   ScopedCleanup cleanup(filepath);
@@ -1784,6 +1800,90 @@ TEST(DumpFormatV2Test, ConfiguredSectionAndMemoryLimitsRejectBeforeLiveReplaceme
   ASSERT_FALSE(result.has_value());
   EXPECT_TRUE(live_store.GetDocId("live").has_value());
   CleanupFile(filepath);
+}
+
+TEST(DumpFormatV2Test, RestoreMaterializationBudgetUsesOverflowSafeThreeTimesEstimate) {
+  auto boundary = dump_internal::ValidateRestoreMaterializationBudget(
+      /*staged_memory_bytes=*/100, /*encoded_length=*/200, /*memory_budget_bytes=*/700, "Index data", "V2");
+  EXPECT_TRUE(boundary.has_value());
+
+  auto above_boundary = dump_internal::ValidateRestoreMaterializationBudget(
+      /*staged_memory_bytes=*/101, /*encoded_length=*/200, /*memory_budget_bytes=*/700, "Index data", "V2");
+  ASSERT_FALSE(above_boundary.has_value());
+  EXPECT_NE(above_boundary.error().message().find("materialization estimate"), std::string::npos);
+  EXPECT_NE(above_boundary.error().message().find("dump.restore_memory_budget_mb"), std::string::npos);
+
+  auto huge_length = dump_internal::ValidateRestoreMaterializationBudget(
+      /*staged_memory_bytes=*/0, std::numeric_limits<uint64_t>::max(), std::numeric_limits<uint64_t>::max(),
+      "Index data", "V1");
+  ASSERT_FALSE(huge_length.has_value());
+  EXPECT_NE(huge_length.error().message().find("V1"), std::string::npos);
+}
+
+TEST(DumpFormatV2Test, V2RejectsIndexMaterializationEstimateBeforeLiveReplacement) {
+  const auto filepath = TempFilePath("v2_index_materialization_budget");
+  ScopedCleanup cleanup(filepath);
+
+  Index source_index;
+  for (uint32_t doc_id = 1; doc_id <= 128; ++doc_id) {
+    source_index.AddDocument(doc_id, "unique index text " + std::to_string(doc_id));
+  }
+  DocumentStore source_store;
+  const std::string index_data = SerializeIndex(source_index);
+  const std::string table_section = BuildTableSectionData("articles", index_data, SerializeDocStore(source_store));
+  const uint64_t budget = static_cast<uint64_t>(index_data.size()) * 3 - 1;
+  ASSERT_LT(table_section.size(), budget);
+  WriteManualV2Dump(filepath, MakeTestConfig(), {table_section});
+
+  std::string gtid = "unchanged";
+  Config loaded_config;
+  Index live_index;
+  live_index.AddDocument(1, "live text");
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live", {}, "live text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  const RestoreLimits limits{budget, budget};
+
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("materialization estimate"), std::string::npos) << result.error().message();
+  EXPECT_EQ(gtid, "unchanged");
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+}
+
+TEST(DumpFormatV2Test, V1RejectsIndexMaterializationEstimateBeforeLiveReplacement) {
+  const auto filepath = TempFilePath("v1_index_materialization_budget");
+  ScopedCleanup cleanup(filepath);
+
+  Index source_index;
+  for (uint32_t doc_id = 1; doc_id <= 128; ++doc_id) {
+    source_index.AddDocument(doc_id, "unique index text " + std::to_string(doc_id));
+  }
+  DocumentStore source_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+  ASSERT_TRUE(dump_v1::WriteDumpV1(filepath, "GTID:v1", MakeTestConfig(), source_contexts).has_value());
+
+  const auto dump_bytes = ReadFileBytes(filepath);
+  const auto offsets = LocateV1SectionLengths(dump_bytes);
+  uint64_t index_length = 0;
+  std::memcpy(&index_length, dump_bytes.data() + offsets.index, sizeof(index_length));
+  const uint64_t budget = index_length * 3 - 1;
+
+  std::string gtid = "unchanged";
+  Config loaded_config;
+  Index live_index;
+  live_index.AddDocument(1, "live text");
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live", {}, "live text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  const RestoreLimits limits{budget, budget};
+
+  auto result = dump_v1::ReadDumpV1(filepath, gtid, loaded_config, contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("materialization estimate"), std::string::npos) << result.error().message();
+  EXPECT_EQ(gtid, "unchanged");
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
 }
 
 TEST(DumpFormatV2Test, DuplicateSingletonSectionsAreRejected) {
