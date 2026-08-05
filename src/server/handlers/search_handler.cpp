@@ -202,7 +202,7 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   // bookkeeping that follows.
   auto table_ctx = GetTableContext(query.table);
   if (!table_ctx) {
-    return ResponseFormatter::FormatError(table_ctx.error().message());
+    return ResponseFormatter::FormatError(table_ctx.error());
   }
   output.current_index = table_ctx->index;
   output.current_doc_store = table_ctx->doc_store;
@@ -240,6 +240,11 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   // set of debug fields than the cache-miss paths.
   if (conn_ctx.debug_mode) {
     if (pipeline_output->cache_hit) {
+      if (output.term_infos.empty() && !output.all_search_terms.empty()) {
+        output.term_infos =
+            search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
+                                               output.current_kanji_ngram_size, output.current_cross_boundary);
+      }
       PopulateCacheHitDebugInfo(*pipeline_output, output);
     } else {
       PopulateInputDebugInfo(pipeline_output->path_taken, params, output);
@@ -314,7 +319,7 @@ mygram::utils::Expected<query::Query, mygram::utils::Error> SearchHandler::Canon
 std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionContext& conn_ctx) {
   auto canonical_query = CanonicalizeQueryTable(query);
   if (!canonical_query) {
-    return ResponseFormatter::FormatError(canonical_query.error().message());
+    return ResponseFormatter::FormatError(canonical_query.error());
   }
 
   PipelineOutput output;
@@ -485,7 +490,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
                                                             primary_key_column);
 
   if (!sorted_result.has_value()) {
-    return ResponseFormatter::FormatError(sorted_result.error().message());
+    return ResponseFormatter::FormatError(sorted_result.error());
   }
 
   auto sorted_results = std::move(sorted_result.value());
@@ -513,7 +518,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 std::string SearchHandler::HandleCount(const query::Query& query, ConnectionContext& conn_ctx) {
   auto canonical_query = CanonicalizeQueryTable(query);
   if (!canonical_query) {
-    return ResponseFormatter::FormatError(canonical_query.error().message());
+    return ResponseFormatter::FormatError(canonical_query.error());
   }
 
   PipelineOutput output;

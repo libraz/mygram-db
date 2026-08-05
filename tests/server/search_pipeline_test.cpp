@@ -292,6 +292,14 @@ TEST_F(SearchPipelineFilterTest, CacheNotStaleForEmpty) {
   EXPECT_FALSE(IsCacheStale({}, doc_store_.get()));
 }
 
+TEST(SearchPipelineCacheTest, CacheStalenessSamplingIsBoundedForWideResults) {
+  EXPECT_EQ(CacheStaleSampleSize(0), 0U);
+  EXPECT_EQ(CacheStaleSampleSize(5), 5U);
+  EXPECT_EQ(CacheStaleSampleSize(100), 10U);
+  EXPECT_EQ(CacheStaleSampleSize(10000), 1000U);
+  EXPECT_EQ(CacheStaleSampleSize(1000000), 1024U);
+}
+
 // --- InsertToCache with null manager ---
 
 TEST_F(SearchPipelineFilterTest, InsertToCacheWithNullManagerIsNoop) {
@@ -472,6 +480,25 @@ TEST(SearchPipelineBM25Test, CjkDocumentFrequencyExcludesUnorderedUnigramCandida
   ASSERT_EQ(term_infos.size(), 1);
   EXPECT_EQ(term_infos[0].term_doc_freq, 1U);
   EXPECT_TRUE(term_infos[0].term_doc_freq_computed);
+}
+
+TEST(SearchPipelineBM25Test, SynonymExpansionDoesNotComputeUnusedVariantDocumentFrequency) {
+  index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
+  index.AddDocument(1, "car handbook");
+  index.AddDocument(2, "automobile handbook");
+  auto synonyms = MakeSynonymDictionary({{"car", "automobile"}});
+  ASSERT_NE(synonyms, nullptr);
+
+  auto groups = ExpandTermsWithSynonyms({"car"}, synonyms.get(), &index, /* ngram_size= */ 2,
+                                        /* kanji_ngram_size= */ 1, /* cross_boundary_ngrams= */ true);
+
+  ASSERT_EQ(groups.size(), 1U);
+  ASSERT_EQ(groups[0].variants.size(), 2U);
+  for (const auto& variant : groups[0].variants) {
+    EXPECT_GT(variant.estimated_size, 0U);
+    EXPECT_EQ(variant.term_doc_freq, 0U);
+    EXPECT_FALSE(variant.term_doc_freq_computed);
+  }
 }
 
 // =============================================================================
@@ -1273,6 +1300,24 @@ TEST_F(FullPipelineTest, LowercaseBooleanWordsEnableBooleanMode) {
   EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[2]}));
 }
 
+TEST_F(FullPipelineTest, DuplicateBooleanTermsPreserveScoringShapeAfterMetadataDeduplication) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning OR learning";
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[1]}));
+  ASSERT_EQ(output->all_search_terms, (std::vector<std::string>{"learning", "learning"}));
+  ASSERT_EQ(output->term_infos.size(), 2U);
+  EXPECT_EQ(output->term_infos[0].normalized_term, output->term_infos[1].normalized_term);
+  EXPECT_EQ(output->term_infos[0].ngrams, output->term_infos[1].ngrams);
+  EXPECT_EQ(output->term_infos[0].estimated_size, output->term_infos[1].estimated_size);
+}
+
 TEST_F(FullPipelineTest, BooleanParenthesizedOrAndLegacyAndClause) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
@@ -2002,6 +2047,44 @@ TEST_F(FullPipelineCacheTest, CacheHitFlagSetRegardlessOfDebugMode) {
   EXPECT_EQ(second_output->cache_miss_reason, CacheMissReason::kHit);
   EXPECT_EQ(second_output->path_taken, PipelinePath::CACHE_HIT);
   EXPECT_EQ(second_output->results, first_output->results);
+  EXPECT_TRUE(second_output->term_infos.empty());
+}
+
+TEST_F(FullPipelineCacheTest, ExecutionSignificantWhitespaceDoesNotShareCacheEntries) {
+  const auto single_space_doc = doc_store_->AddDocument("pk_single_space", {}, "hello world");
+  const auto repeated_space_doc = doc_store_->AddDocument("pk_repeated_space", {}, "hello   world");
+  ASSERT_TRUE(single_space_doc.has_value());
+  ASSERT_TRUE(repeated_space_doc.has_value());
+  index_->AddDocument(*single_space_doc, "hello world");
+  index_->AddDocument(*repeated_space_doc, "hello   world");
+
+  config::Config config;
+  config.memory.verify_text = "all";
+  auto params = MakeParams();
+  params.full_config = &config;
+
+  query::Query single_space;
+  single_space.type = query::QueryType::SEARCH;
+  single_space.table = "test";
+  single_space.search_text = "hello world";
+  single_space.limit = 100;
+  auto repeated_space = single_space;
+  repeated_space.search_text = "hello   world";
+
+  const auto first = ExecuteFullPipeline(single_space, params);
+  ASSERT_TRUE(first.has_value()) << (first ? "" : first.error().message());
+  EXPECT_FALSE(first->cache_hit);
+  EXPECT_EQ(first->results, (std::vector<storage::DocId>{*single_space_doc}));
+
+  const auto second = ExecuteFullPipeline(repeated_space, params);
+  ASSERT_TRUE(second.has_value()) << (second ? "" : second.error().message());
+  EXPECT_FALSE(second->cache_hit);
+  EXPECT_EQ(second->results, (std::vector<storage::DocId>{*repeated_space_doc}));
+
+  const auto repeated_hit = ExecuteFullPipeline(repeated_space, params);
+  ASSERT_TRUE(repeated_hit.has_value()) << (repeated_hit ? "" : repeated_hit.error().message());
+  EXPECT_TRUE(repeated_hit->cache_hit);
+  EXPECT_EQ(repeated_hit->results, second->results);
 }
 
 TEST_F(FullPipelineCacheTest, BooleanCacheHitPreservesPositiveHighlightTerms) {
@@ -2022,7 +2105,7 @@ TEST_F(FullPipelineCacheTest, BooleanCacheHitPreservesPositiveHighlightTerms) {
   ASSERT_TRUE(hit->cache_hit);
   EXPECT_EQ(hit->all_search_terms, miss->all_search_terms);
   EXPECT_EQ(hit->all_search_terms, (std::vector<std::string>{"learning"}));
-  EXPECT_FALSE(hit->term_infos.empty());
+  EXPECT_TRUE(hit->term_infos.empty());
 
   const auto miss_highlight_terms = BuildHighlightTerms(miss->all_search_terms, index_.get(), nullptr);
   const auto hit_highlight_terms = BuildHighlightTerms(hit->all_search_terms, index_.get(), nullptr);

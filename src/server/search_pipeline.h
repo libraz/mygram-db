@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "index/index.h"
@@ -135,11 +136,11 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 /// @param kanji_ngram_size N-gram size for CJK characters
 /// @param cross_boundary_ngrams Generate n-grams spanning CJK/non-CJK boundaries
 /// @return Filtered results with NOT-matching documents removed
-std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& results,
-                                           const std::vector<std::string>& not_terms, index::Index* current_index,
-                                           storage::DocumentStore* current_doc_store, int ngram_size,
-                                           int kanji_ngram_size, bool cross_boundary_ngrams,
-                                           const query::SynonymDictionary* synonym_dict = nullptr);
+std::vector<storage::DocId> ApplyNotFilter(
+    const std::vector<storage::DocId>& results, const std::vector<std::string>& not_terms, index::Index* current_index,
+    storage::DocumentStore* current_doc_store, int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams,
+    const query::SynonymDictionary* synonym_dict = nullptr,
+    const std::unordered_map<std::string, SearchTermInfo>* precomputed_infos = nullptr);
 
 /// @brief Apply filter conditions using bitmap intersection (fast path) with fallback
 ///
@@ -231,6 +232,9 @@ std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache
 /// @param doc_store Document store for existence check
 /// @return true if cache contains stale DocIds
 bool IsCacheStale(const std::vector<storage::DocId>& results, storage::DocumentStore* doc_store);
+
+/// @brief Number of cached result IDs sampled by IsCacheStale (bounded for wide queries)
+[[nodiscard]] size_t CacheStaleSampleSize(size_t result_count);
 
 /// @brief Insert search results into query cache
 ///
@@ -414,6 +418,7 @@ struct FacetPipelineParams {
 
 struct FacetPipelineOutput {
   std::vector<std::pair<std::string, uint64_t>> value_counts;
+  size_t total_values = 0;
   size_t matched_documents = 0;
   double query_time_ms = 0.0;
 };
