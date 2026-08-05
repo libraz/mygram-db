@@ -29,6 +29,12 @@
 
 インストール、設定、デプロイ、プロトコルと HTTP API、レプリケーション要件、性能データは [ドキュメント](https://mygramdb.libraz.net/ja/) にあります。
 
+## ネットワークの安全性
+
+同梱の Docker 環境は既定で localhost のみに公開します。非ループバックの TCP bind を使う場合は、高エントロピーの `API_ADMIN_TOKEN` が必須です。未設定なら MygramDB は設定を拒否します。TCP 接続では、管理コマンド（`SET`、`DUMP`、`SYNC`、`REPLICATION`、`OPTIMIZE`、`CACHE`、`CONFIG`、`DEBUG`）の前に、同一接続で `AUTH <token>` を実行してください。HTTP の `POST /optimize` は同じトークンを `Authorization: Bearer <token>` として受け取ります。Docker Compose も `.env` のプレースホルダーを置換するまで起動を拒否します。
+
+TCP ポートは必ず限定した `NETWORK_ALLOW_CIDRS` と、プライベートまたは暗号化されたネットワークの内側に置いてください。TCP プロトコル自体は `AUTH` トークンを暗号化しません。IPv4/IPv6 の全許可リストと public bind の組み合わせは、設定読み込み時にも拒否します。
+
 ## 開発
 
 ```bash

@@ -33,6 +33,22 @@ See the [documentation](https://mygramdb.libraz.net) for installation,
 configuration, deployment, protocol and HTTP API references, replication
 requirements, and performance data.
 
+## Network safety
+
+The shipped Docker environment is localhost-only by default. For a
+non-loopback TCP bind, set a high-entropy `API_ADMIN_TOKEN`; MygramDB rejects
+the configuration when it is absent. Before a TCP connection can use an
+administrative command (`SET`, `DUMP`, `SYNC`, `REPLICATION`, `OPTIMIZE`,
+`CACHE`, `CONFIG`, or `DEBUG`), it must send `AUTH <token>` on that same
+connection. The HTTP `POST /optimize` endpoint uses the same token as an
+`Authorization: Bearer <token>` credential. Docker Compose deliberately refuses
+to start until the placeholder token in `.env` is replaced.
+
+Keep the TCP port behind a restrictive `NETWORK_ALLOW_CIDRS` list and a private
+or encrypted network. The TCP protocol itself does not encrypt the `AUTH`
+token. Configuration also rejects a universal IPv4 or IPv6 allow list with a
+public bind.
+
 ## Development
 
 ```bash
