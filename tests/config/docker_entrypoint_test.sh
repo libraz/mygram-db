@@ -21,6 +21,7 @@ MYSQL_DATABASE=testdb \
 TABLE_NAME=docs \
 TABLE_TEXT_COLUMN=body \
 NETWORK_ALLOW_CIDRS=127.0.0.1/32 \
+API_ADMIN_TOKEN='test-admin-token' \
 sh "$entrypoint" test-config > "$test_dir/startup.log"
 
 test -s "$generated_config"
@@ -30,6 +31,7 @@ grep -q '^[[:space:]]*kanji_ngram_size: 0$' "$generated_config"
 grep -q '^bm25:$' "$generated_config"
 grep -q '^cache:$' "$generated_config"
 grep -q '^  rate_limiting:$' "$generated_config"
+grep -Fq '  admin_token: "test-admin-token"' "$generated_config"
 
 printf '%s\n' '# operator-owned sentinel' > "$existing_config"
 CONFIG_FILE=$existing_config \
@@ -53,5 +55,13 @@ for variable in API_HTTP_ENABLE API_HTTP_BIND API_HTTP_PORT DUMP_DIR DUMP_INTERV
   DUMP_RETAIN MEMORY_VERIFY_TEXT BM25_ENABLE; do
   grep -q "^${variable}=" "$env_example"
 done
+grep -q '^API_ADMIN_TOKEN=CHANGE_ME_GENERATE_RANDOM_SECRET$' "$env_example"
+grep -q '^API_BIND=127\.0\.0\.1$' "$env_example"
+grep -q '^API_HTTP_BIND=127\.0\.0\.1$' "$env_example"
+grep -q '^NETWORK_ALLOW_CIDRS=127\.0\.0\.1/32$' "$env_example"
+grep -Fq 'API_BIND: ${API_CONTAINER_BIND:-0.0.0.0}' "$4"
+grep -Fq 'API_HTTP_BIND: ${API_HTTP_CONTAINER_BIND:-0.0.0.0}' "$4"
+grep -Fq '127.0.0.1:${API_PORT:-11016}:${API_PORT:-11016}' "$4"
+grep -Fq '127.0.0.1:${API_HTTP_PORT:-8080}:${API_HTTP_PORT:-8080}' "$4"
 
 grep -q '^bm25:$' "$repo_root/examples/config.yaml"
