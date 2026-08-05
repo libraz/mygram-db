@@ -44,15 +44,17 @@ std::string ConnectionValidator::RequiredTable::DisplayName() const {
 }
 
 bool ConnectionValidator::IsValidIdentifier(std::string_view identifier) {
-  if (identifier.empty()) {
-    return false;
-  }
-  for (char chr : identifier) {
-    if (chr == '\0' || (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-')) {
-      return false;
-    }
-  }
-  return true;
+  // MySQL permits quoted identifiers containing spaces, dots, non-ASCII
+  // characters, and punctuation. These names are used as escaped string
+  // values in the INFORMATION_SCHEMA query below, not interpolated as SQL
+  // identifiers, so only empty and NUL-containing values are invalid here.
+  return !identifier.empty() && identifier.find('\0') == std::string_view::npos;
+}
+
+bool ConnectionValidator::IsSupportedBinlogFormatValue(std::string_view value) {
+  std::string upper_value(value);
+  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
+  return upper_value == "ROW";
 }
 
 bool ConnectionValidator::IsSupportedBinlogChecksumValue(std::string_view value) {
@@ -127,25 +129,24 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
     return result;
   }
 
-  // 2. Check server UUID and detect failover
+  // 2. Check server UUID. A changed upstream is never accepted implicitly:
+  // credentials and replication state belong to the originally validated
+  // server, and explicit operator reconfiguration is required for failover.
   auto uuid_check = CheckServerUUID(conn, expected_uuid, result.warnings);
   if (!uuid_check) {
     result.error_message = uuid_check.error().message();
+    result.error_code = uuid_check.error().code();
     mygram::utils::StructuredLog().Event("connection_validation_failed").Field("reason", "uuid_check_failed").Error();
     return result;
   }
   std::string actual_uuid = *uuid_check;
   result.server_uuid = actual_uuid;
 
-  // Detect failover (server UUID/ID changed)
-  if (expected_uuid && *expected_uuid != actual_uuid) {
-    result.failover_detected = true;
-  }
-
   // 3. Check required tables exist
   auto tables_check = CheckTablesExist(conn, required_tables);
   if (!tables_check) {
     result.error_message = tables_check.error().message();
+    result.error_code = tables_check.error().code();
     mygram::utils::StructuredLog()
         .Event("connection_validation_failed")
         .Field("reason", "missing_tables")
@@ -262,9 +263,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTa
   std::vector<std::string> missing_tables;
 
   for (const auto& table : tables) {
-    // Validate identifiers to prevent SQL injection
-    // MySQL table names can contain: letters, digits, underscore, dollar sign, hyphen
-    // Also reject null bytes which could truncate the name
+    // Reject only values that cannot represent a MySQL name. Punctuation and
+    // non-ASCII names are safe because both values are escaped below before
+    // being embedded as INFORMATION_SCHEMA string literals.
     if (!IsValidIdentifier(table.database) || !IsValidIdentifier(table.name)) {
       mygram::utils::StructuredLog()
           .Event("connection_validation_warning")
@@ -292,9 +293,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTa
 
     auto result = conn.Execute(query);
     if (!result) {
-      // Query failed - consider table as missing
-      missing_tables.push_back(table.DisplayName());
-      continue;
+      // A transport/query failure says nothing about table existence. Preserve
+      // it so reconnect recovery can retry instead of declaring the schema
+      // permanently invalid.
+      return mygram::utils::MakeUnexpected(result.error());
     }
 
     // Check if result has rows
@@ -322,6 +324,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTa
 
 mygram::utils::Expected<std::string, mygram::utils::Error> ConnectionValidator::CheckServerUUID(
     Connection& conn, const std::optional<std::string>& expected_uuid, std::vector<std::string>& warnings) {
+  static_cast<void>(warnings);
   auto uuid_result = conn.GetServerUUID();
   if (!uuid_result) {
     return mygram::utils::MakeUnexpected(uuid_result.error());
@@ -329,16 +332,17 @@ mygram::utils::Expected<std::string, mygram::utils::Error> ConnectionValidator::
 
   std::string actual_uuid = *uuid_result;
 
-  // Check if UUID matches expected (failover detection)
+  // A UUID mismatch proves this is a different MySQL server. Do not continue
+  // with the existing credential set or apply its binlog to this index.
   if (expected_uuid && *expected_uuid != actual_uuid) {
-    std::string warning = "Server UUID changed: " + *expected_uuid + " -> " + actual_uuid + " (failover detected)";
-    warnings.push_back(warning);
-
     mygram::utils::StructuredLog()
-        .Event("mysql_failover_detected")
+        .Event("mysql_server_uuid_mismatch")
         .Field("old_uuid", *expected_uuid)
         .Field("new_uuid", actual_uuid)
-        .Warn();
+        .Error();
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kMySQLReplicationError,
+        "MySQL server UUID changed from " + *expected_uuid + " to " + actual_uuid + "; refusing implicit failover"));
   }
 
   return actual_uuid;
@@ -522,9 +526,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBi
   }
 
   std::string value(row[1]);
-  std::string upper_value = value;
-  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
-  if (upper_value != "ROW") {
+  if (!IsSupportedBinlogFormatValue(value)) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
                                  "binlog_format=" + value +

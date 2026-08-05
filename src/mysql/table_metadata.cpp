@@ -7,6 +7,7 @@
 
 #ifdef USE_MYSQL
 
+#include <algorithm>
 #include <cctype>
 
 namespace mygramdb::mysql {
@@ -106,6 +107,18 @@ std::vector<std::string> ParseEnumSetColumnValues(const std::string& column_type
 TableMetadataCache::AddResult TableMetadataCache::AddOrUpdate(uint64_t table_id, const TableMetadata& metadata) {
   auto iterator = cache_.find(table_id);
   if (iterator == cache_.end()) {
+    // TABLE_MAP ids are connection/session scoped and may change after a
+    // reconnect or table reopen. Keep only the newest mapping for a logical
+    // table so stale ids cannot accumulate for the lifetime of the process.
+    auto same_table = std::find_if(cache_.begin(), cache_.end(), [&metadata](const auto& entry) {
+      return entry.second.database_name == metadata.database_name && entry.second.table_name == metadata.table_name;
+    });
+    if (same_table != cache_.end()) {
+      const bool schema_changed = !SchemaEquals(same_table->second, metadata);
+      cache_.erase(same_table);
+      cache_[table_id] = metadata;
+      return schema_changed ? AddResult::kSchemaChanged : AddResult::kUpdated;
+    }
     cache_[table_id] = metadata;
     return AddResult::kAdded;
   }

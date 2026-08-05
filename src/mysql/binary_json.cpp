@@ -7,6 +7,7 @@
 
 #ifdef USE_MYSQL
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include <limits>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 #include "utils/error.h"
 
@@ -69,8 +71,43 @@ Expected<std::pair<uint64_t, size_t>, Error> ReadVariableLength(const unsigned c
   return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid binary JSON variable-length integer"));
 }
 
-void AppendEscapedString(std::string_view value, std::string& output) {
+Expected<void, Error> OutputLimitExceeded() {
+  return MakeUnexpected(
+      MakeError(ErrorCode::kMySQLInvalidMetadata, "Binary JSON decoded output exceeds configured limit"));
+}
+
+Expected<void, Error> AppendText(std::string_view value, std::string& output, size_t max_output_bytes) {
+  if (value.size() > max_output_bytes - std::min(output.size(), max_output_bytes)) {
+    return OutputLimitExceeded();
+  }
+  output.append(value);
+  return {};
+}
+
+Expected<void, Error> AppendCharacter(char value, std::string& output, size_t max_output_bytes) {
+  if (output.size() >= max_output_bytes) {
+    return OutputLimitExceeded();
+  }
+  output.push_back(value);
+  return {};
+}
+
+Expected<void, Error> AppendEscapedString(std::string_view value, std::string& output, size_t max_output_bytes) {
   static constexpr char kHex[] = "0123456789abcdef";
+  size_t encoded_size = 2;
+  for (const unsigned char byte : value) {
+    const size_t increment =
+        byte < 0x20U ? ((byte == '\b' || byte == '\f' || byte == '\n' || byte == '\r' || byte == '\t') ? 2 : 6)
+                     : ((byte == '"' || byte == '\\') ? 2 : 1);
+    if (increment > max_output_bytes - std::min(encoded_size, max_output_bytes)) {
+      return OutputLimitExceeded();
+    }
+    encoded_size += increment;
+  }
+  if (encoded_size > max_output_bytes - std::min(output.size(), max_output_bytes)) {
+    return OutputLimitExceeded();
+  }
+
   output.push_back('"');
   for (const unsigned char byte : value) {
     switch (byte) {
@@ -106,10 +143,35 @@ void AppendEscapedString(std::string_view value, std::string& output) {
     }
   }
   output.push_back('"');
+  return {};
+}
+
+Expected<void, Error> AppendOpaquePlaceholder(const unsigned char* data, size_t size, std::string& output,
+                                              size_t max_output_bytes) {
+  // MySQL encodes opaque JSON values as: field type (1 byte), variable-length
+  // payload length, then the raw value. DATE/TIME and DECIMAL are common
+  // examples. We do not yet reconstruct every MySQL field type, but must
+  // validate the envelope before emitting a JSON string; otherwise a malformed
+  // opaque value could silently desynchronise a containing JSON document.
+  if (size < 2) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Binary JSON value is truncated"));
+  }
+  auto payload_length = ReadVariableLength(data + 1, size - 1);
+  if (!payload_length) {
+    return MakeUnexpected(payload_length.error());
+  }
+  const size_t header_size = 1 + payload_length->second;
+  if (payload_length->first > size - header_size) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Binary JSON value is truncated"));
+  }
+
+  return AppendEscapedString("__mygramdb_opaque_json_type_" + std::to_string(data[0]) + "__", output, max_output_bytes);
 }
 
 class Decoder {
  public:
+  explicit Decoder(size_t max_output_bytes) : max_output_bytes_(max_output_bytes) {}
+
   Expected<std::string, Error> Decode(const unsigned char* data, size_t size) {
     if (data == nullptr || size == 0) {
       return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Binary JSON value is empty"));
@@ -130,27 +192,26 @@ class Decoder {
     }
     switch (type) {
       case kSmallObject:
-        return DecodeContainer(data, size, false, false, depth, output);
+        return DecodeContainer(type, data, size, false, false, depth, output);
       case kLargeObject:
-        return DecodeContainer(data, size, true, false, depth, output);
+        return DecodeContainer(type, data, size, true, false, depth, output);
       case kSmallArray:
-        return DecodeContainer(data, size, false, true, depth, output);
+        return DecodeContainer(type, data, size, false, true, depth, output);
       case kLargeArray:
-        return DecodeContainer(data, size, true, true, depth, output);
+        return DecodeContainer(type, data, size, true, true, depth, output);
       case kLiteral:
         if (size < 1) {
           return Truncated();
         }
         if (data[0] == 0) {
-          output += "null";
+          return AppendText("null", output, max_output_bytes_);
         } else if (data[0] == 1) {
-          output += "true";
+          return AppendText("true", output, max_output_bytes_);
         } else if (data[0] == 2) {
-          output += "false";
+          return AppendText("false", output, max_output_bytes_);
         } else {
           return Invalid("Unknown binary JSON literal");
         }
-        return {};
       case kInt16:
         return AppendSigned(data, size, 2, output);
       case kUint16:
@@ -168,14 +229,24 @@ class Decoder {
       case kString:
         return AppendString(data, size, output);
       case kOpaque:
-        return Invalid("MySQL opaque binary JSON values are not supported");
+        return AppendOpaquePlaceholder(data, size, output, max_output_bytes_);
       default:
         return Invalid("Unknown binary JSON type");
     }
   }
 
-  Expected<void, Error> DecodeContainer(const unsigned char* data, size_t size, bool large, bool array, size_t depth,
-                                        std::string& output) {
+  Expected<void, Error> DecodeContainer(uint8_t container_type, const unsigned char* data, size_t size, bool large,
+                                        bool array, size_t depth, std::string& output) {
+    const auto identity = std::pair<uint8_t, const unsigned char*>{container_type, data};
+    if (std::find(active_containers_.begin(), active_containers_.end(), identity) != active_containers_.end()) {
+      return Invalid("Binary JSON container cycle detected");
+    }
+    active_containers_.push_back(identity);
+    struct ActiveContainerGuard {
+      std::vector<std::pair<uint8_t, const unsigned char*>>& active;
+      ~ActiveContainerGuard() { active.pop_back(); }
+    } active_guard{active_containers_};
+
     const size_t offset_width = large ? 4 : 2;
     const size_t header_size = offset_width * 2;
     if (size < header_size) {
@@ -201,10 +272,14 @@ class Decoder {
     const size_t key_table = header_size;
     const size_t value_table = header_size + static_cast<size_t>(count) * (array ? 0 : key_entry_size);
 
-    output.push_back(array ? '[' : '{');
+    if (auto appended = AppendCharacter(array ? '[' : '{', output, max_output_bytes_); !appended) {
+      return appended;
+    }
     for (uint64_t index = 0; index < count; ++index) {
       if (index != 0) {
-        output.push_back(',');
+        if (auto appended = AppendCharacter(',', output, max_output_bytes_); !appended) {
+          return appended;
+        }
       }
       if (!array) {
         const unsigned char* key_entry = data + key_table + static_cast<size_t>(index) * key_entry_size;
@@ -213,10 +288,15 @@ class Decoder {
         if (!key_offset || !key_length || *key_offset > encoded_size || *key_length > encoded_size - *key_offset) {
           return Invalid("Binary JSON key exceeds container");
         }
-        AppendEscapedString(
-            {reinterpret_cast<const char*>(data + static_cast<size_t>(*key_offset)), static_cast<size_t>(*key_length)},
-            output);
-        output.push_back(':');
+        if (auto appended = AppendEscapedString({reinterpret_cast<const char*>(data + static_cast<size_t>(*key_offset)),
+                                                 static_cast<size_t>(*key_length)},
+                                                output, max_output_bytes_);
+            !appended) {
+          return appended;
+        }
+        if (auto appended = AppendCharacter(':', output, max_output_bytes_); !appended) {
+          return appended;
+        }
       }
 
       const unsigned char* value_entry = data + value_table + static_cast<size_t>(index) * value_entry_size;
@@ -238,25 +318,22 @@ class Decoder {
         return value_result;
       }
     }
-    output.push_back(array ? ']' : '}');
-    return {};
+    return AppendCharacter(array ? ']' : '}', output, max_output_bytes_);
   }
 
   static bool IsInline(uint8_t type, bool large) {
     return type == kLiteral || type == kInt16 || type == kUint16 || (large && (type == kInt32 || type == kUint32));
   }
 
-  static Expected<void, Error> AppendUnsigned(const unsigned char* data, size_t size, size_t width,
-                                              std::string& output) {
+  Expected<void, Error> AppendUnsigned(const unsigned char* data, size_t size, size_t width, std::string& output) {
     auto value = ReadLittleEndian(data, size, width);
     if (!value) {
       return MakeUnexpected(value.error());
     }
-    output += std::to_string(*value);
-    return {};
+    return AppendText(std::to_string(*value), output, max_output_bytes_);
   }
 
-  static Expected<void, Error> AppendSigned(const unsigned char* data, size_t size, size_t width, std::string& output) {
+  Expected<void, Error> AppendSigned(const unsigned char* data, size_t size, size_t width, std::string& output) {
     auto value = ReadLittleEndian(data, size, width);
     if (!value) {
       return MakeUnexpected(value.error());
@@ -269,11 +346,10 @@ class Decoder {
     } else {
       std::memcpy(&signed_value, &*value, sizeof(signed_value));
     }
-    output += std::to_string(signed_value);
-    return {};
+    return AppendText(std::to_string(signed_value), output, max_output_bytes_);
   }
 
-  static Expected<void, Error> AppendDouble(const unsigned char* data, size_t size, std::string& output) {
+  Expected<void, Error> AppendDouble(const unsigned char* data, size_t size, std::string& output) {
     auto bits = ReadLittleEndian(data, size, 8);
     if (!bits) {
       return MakeUnexpected(bits.error());
@@ -285,18 +361,17 @@ class Decoder {
     }
     std::ostringstream stream;
     stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
-    output += stream.str();
-    return {};
+    return AppendText(stream.str(), output, max_output_bytes_);
   }
 
-  static Expected<void, Error> AppendString(const unsigned char* data, size_t size, std::string& output) {
+  Expected<void, Error> AppendString(const unsigned char* data, size_t size, std::string& output) {
     auto length = ReadVariableLength(data, size);
     if (!length || length->first > size - length->second) {
       return length ? Truncated() : MakeUnexpected(length.error());
     }
-    AppendEscapedString({reinterpret_cast<const char*>(data + length->second), static_cast<size_t>(length->first)},
-                        output);
-    return {};
+    return AppendEscapedString(
+        {reinterpret_cast<const char*>(data + length->second), static_cast<size_t>(length->first)}, output,
+        max_output_bytes_);
   }
 
   static Expected<void, Error> Truncated() {
@@ -306,12 +381,19 @@ class Decoder {
   static Expected<void, Error> Invalid(const std::string& message) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, message));
   }
+
+  size_t max_output_bytes_;
+  std::vector<std::pair<uint8_t, const unsigned char*>> active_containers_;
 };
 
 }  // namespace
 
 Expected<std::string, Error> DecodeBinaryJson(const unsigned char* data, size_t size) {
-  return Decoder{}.Decode(data, size);
+  return DecodeBinaryJson(data, size, kMaxBinaryJsonOutputBytes);
+}
+
+Expected<std::string, Error> DecodeBinaryJson(const unsigned char* data, size_t size, size_t max_output_bytes) {
+  return Decoder{max_output_bytes}.Decode(data, size);
 }
 
 }  // namespace mygramdb::mysql

@@ -28,7 +28,9 @@ namespace mygramdb::mysql {
  */
 struct RowData {
   std::string primary_key;
-  std::string text;  // Extracted text for full-text search
+  bool primary_key_present = false;  // Configured key column was present in this row image
+  bool primary_key_null = false;     // Configured key column was explicitly NULL
+  std::string text;                  // Extracted text for full-text search
   const TableMetadata* table_metadata = nullptr;
   std::vector<std::string> column_values;                // Values indexed by TableMetadata::columns ordinal
   std::vector<bool> column_values_present;               // True when the row image included the ordinal

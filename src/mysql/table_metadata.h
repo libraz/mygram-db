@@ -143,6 +143,14 @@ class TableMetadataCache {
    */
   [[nodiscard]] bool Contains(uint64_t table_id) const;
 
+  /**
+   * @brief Number of cached table identities.
+   *
+   * A new TABLE_MAP id for the same database/table replaces the previous id,
+   * so production cache growth is bounded by the configured table set.
+   */
+  [[nodiscard]] size_t Size() const { return cache_.size(); }
+
  private:
   /**
    * @brief Compare two metadata entries for schema equality

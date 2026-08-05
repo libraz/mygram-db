@@ -8,8 +8,12 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "mysql/connection.h"
+#include "mysql_test_helpers.h"
 #include "utils/error.h"
+#include "utils/fd_guard.h"
 
 namespace mygramdb::mysql {
 
@@ -58,138 +62,44 @@ TEST(ConnectionValidateUnitTest, NullHandleDoesNotCrash) {
   EXPECT_FALSE(result.error().message().empty());
 }
 
-// Unit test: Query construction logic verification
-TEST(ConnectionValidateUnitTest, QueryConstructionLogic) {
-  // Test the expected query structure by validating key components
-  // This tests the logic without requiring a MySQL connection
-
-  std::string database = "mydb";
-  std::string table = "users";
-  std::string column = "user_id";
-
-  // The query should check:
-  // 1. Column is in KEY_COLUMN_USAGE
-  // 2. Either CONSTRAINT_NAME = 'PRIMARY' or in single-column UNIQUE constraints
-  // 3. Using information_schema tables
-
-  // Expected query components:
-  std::vector<std::string> expected_components = {
-      "information_schema.KEY_COLUMN_USAGE",
-      "TABLE_SCHEMA = 'mydb'",
-      "TABLE_NAME = 'users'",
-      "COLUMN_NAME = 'user_id'",
-      "CONSTRAINT_NAME = 'PRIMARY'",
-      "information_schema.TABLE_CONSTRAINTS",
-      "CONSTRAINT_TYPE = 'UNIQUE'",
-      "COUNT(*) = 1",  // Ensures single-column constraint
-  };
-
-  // Simulate query validation - in real implementation these checks would be in the query
-  for (const auto& component : expected_components) {
-    // This validates that our implementation concept includes these key elements
-    EXPECT_FALSE(component.empty()) << "Query should include: " << component;
+TEST(ConnectionValidateIntegrationTest, ValidatesRealKeyMetadataAndEncodesInputs) {
+  if (!testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
   }
 
-  // Verify all expected components exist
-  EXPECT_EQ(expected_components.size(), 8) << "Query should have 8 key components";
-}
+  const auto config = testing::GetMySQLTestConfig();
+  Connection connection(config);
+  auto connect = connection.Connect("validate-unique-column-integration-test");
+  ASSERT_TRUE(connect) << connect.error().message();
 
-// Unit test: Error message content validation
-TEST(ConnectionValidateUnitTest, ErrorMessageFormats) {
-  // Test expected error message formats for different failure scenarios
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "validate_unique_" + suffix;
+  const std::string quoted_table = "`" + table + "`";
+  auto cleanup = utils::ScopeGuard([&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table); });
 
-  // Scenario 1: Column doesn't exist
-  {
-    std::string expected_error = "Column 'invalid_col' does not exist in table 'db.table'";
-    EXPECT_THAT(expected_error, ::testing::HasSubstr("does not exist"));
-    EXPECT_THAT(expected_error, ::testing::HasSubstr("invalid_col"));
-    EXPECT_THAT(expected_error, ::testing::HasSubstr("db.table"));
+  ASSERT_TRUE(
+      connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
+                               " (id BIGINT PRIMARY KEY, email VARCHAR(255) UNIQUE, part_a INT, part_b INT, plain INT,"
+                               " UNIQUE KEY pair_key (part_a, part_b)) ENGINE=InnoDB"));
+
+  EXPECT_TRUE(connection.ValidateUniqueColumn(config.database, table, "id"));
+  EXPECT_TRUE(connection.ValidateUniqueColumn(config.database, table, "email"));
+
+  for (const std::string& column : {"part_a", "part_b", "plain"}) {
+    auto result = connection.ValidateUniqueColumn(config.database, table, column);
+    ASSERT_FALSE(result) << column;
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLDuplicateColumn) << column;
+    EXPECT_THAT(result.error().message(), ::testing::HasSubstr("must be a single-column PRIMARY KEY or UNIQUE KEY"));
   }
 
-  // Scenario 2: Column exists but not unique
-  {
-    std::string expected_error =
-        "Column 'col' in table 'db.table' must be a single-column PRIMARY KEY or UNIQUE KEY. "
-        "Composite keys are not supported.";
-    EXPECT_THAT(expected_error, ::testing::HasSubstr("must be a single-column PRIMARY KEY or UNIQUE KEY"));
-    EXPECT_THAT(expected_error, ::testing::HasSubstr("Composite keys are not supported"));
-  }
+  auto missing = connection.ValidateUniqueColumn(config.database, table, "missing");
+  ASSERT_FALSE(missing);
+  EXPECT_EQ(missing.error().code(), mygram::utils::ErrorCode::kMySQLColumnNotFound);
+  EXPECT_THAT(missing.error().message(), ::testing::HasSubstr("does not exist"));
 
-  // Scenario 3: Query execution failure
-  {
-    std::string expected_error = "Failed to query table schema: some error";
-    EXPECT_THAT(expected_error, ::testing::HasSubstr("Failed to query table schema"));
-  }
-}
-
-// Unit test: Validation logic for different key types
-TEST(ConnectionValidateUnitTest, KeyTypeValidationLogic) {
-  // Test the conceptual logic for different key configurations
-
-  // Case 1: Single-column PRIMARY KEY - should return COUNT = 1
-  {
-    int primary_key_count = 1;  // Simulates: PRIMARY KEY (id)
-    EXPECT_EQ(primary_key_count, 1) << "Single-column PRIMARY KEY should be valid";
-  }
-
-  // Case 2: Single-column UNIQUE KEY - should return COUNT = 1
-  {
-    int unique_key_count = 1;  // Simulates: UNIQUE KEY (email)
-    EXPECT_EQ(unique_key_count, 1) << "Single-column UNIQUE KEY should be valid";
-  }
-
-  // Case 3: Composite PRIMARY KEY - should return COUNT = 0 (filtered by HAVING COUNT(*) = 1)
-  {
-    int composite_key_count = 0;  // Simulates: PRIMARY KEY (id, created_at) - filtered out
-    EXPECT_EQ(composite_key_count, 0) << "Composite PRIMARY KEY should be rejected";
-  }
-
-  // Case 4: Non-unique column - should return COUNT = 0
-  {
-    int no_key_count = 0;  // Simulates: Regular column with no constraint
-    EXPECT_EQ(no_key_count, 0) << "Non-unique column should be rejected";
-  }
-
-  // Case 5: Column in composite UNIQUE KEY - should return COUNT = 0
-  {
-    int composite_unique_count = 0;  // Simulates: UNIQUE KEY (col1, col2) - filtered out
-    EXPECT_EQ(composite_unique_count, 0) << "Column in composite UNIQUE KEY should be rejected";
-  }
-}
-
-/**
- * @brief Test SQL injection protection in ValidateUniqueColumn
- * Regression test for: database, table, column parameters were not escaped
- */
-TEST(ConnectionValidateSecurityTest, SQLInjectionProtection) {
-  Connection::Config config;
-  config.host = "127.0.0.1";
-  config.user = "test";
-  config.password = "test";
-  config.database = "test";
-  Connection conn(config);
-
-  // Test SQL injection attempts in database parameter
-  auto result = conn.ValidateUniqueColumn("test' OR '1'='1", "users", "id");
-  // Should fail (either due to validation or no connection)
-  // The important part is it doesn't cause SQL injection
-  EXPECT_FALSE(result.has_value());
-
-  // Test SQL injection attempts in table parameter
-  result = conn.ValidateUniqueColumn("test", "users'; DROP TABLE users--", "id");
-  EXPECT_FALSE(result.has_value());
-
-  // Test SQL injection attempts in column parameter
-  result = conn.ValidateUniqueColumn("test", "users", "id' UNION SELECT * FROM passwords--");
-  EXPECT_FALSE(result.has_value());
-
-  // Test with backtick escape attempts
-  result = conn.ValidateUniqueColumn("test`; DROP TABLE users--", "users", "id");
-  EXPECT_FALSE(result.has_value());
-
-  // Test with single quote escape attempts
-  result = conn.ValidateUniqueColumn("test", "users", "id\\'");
-  EXPECT_FALSE(result.has_value());
+  auto injection = connection.ValidateUniqueColumn(config.database + "' OR '1'='1", table, "id");
+  ASSERT_FALSE(injection);
+  EXPECT_EQ(injection.error().code(), mygram::utils::ErrorCode::kMySQLColumnNotFound);
 }
 
 /**

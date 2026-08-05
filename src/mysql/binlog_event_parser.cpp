@@ -321,6 +321,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         event.type = BinlogEventType::INSERT;
         event.table_name = ctx.table_key;
         event.primary_key = row.primary_key;
+        event.primary_key_present = row.primary_key_present;
+        event.primary_key_null = row.primary_key_null;
         event.text = std::move(materialized_text->value);
         event.text_state = materialized_text->state;
         event.gtid = current_gtid;
@@ -381,7 +383,11 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         event.type = BinlogEventType::UPDATE;
         event.table_name = ctx.table_key;
         event.primary_key = after_row.primary_key;
+        event.primary_key_present = after_row.primary_key_present;
+        event.primary_key_null = after_row.primary_key_null;
         event.old_primary_key = before_row.primary_key;
+        event.old_primary_key_present = before_row.primary_key_present;
+        event.old_primary_key_null = before_row.primary_key_null;
         event.text = std::move(after_text->value);
         event.old_text = std::move(before_text->value);
         event.text_state = after_text->state;
@@ -439,6 +445,8 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         event.type = BinlogEventType::DELETE;
         event.table_name = ctx.table_key;
         event.primary_key = row.primary_key;
+        event.primary_key_present = row.primary_key_present;
+        event.primary_key_null = row.primary_key_null;
         event.text = std::move(materialized_text->value);
         event.text_state = materialized_text->state;
         event.gtid = current_gtid;
@@ -1274,62 +1282,55 @@ bool BinlogEventParser::IsSafeIgnoredQuery(std::string_view query) {
   std::string second;
   tokens >> first >> second;
 
-  // These statements affect session/account/server metadata, not configured
-  // table rows. They commonly appear in initialization binlogs that a
-  // complete GTID set must still cover.
-  if (first == "GRANT" || first == "REVOKE" || first == "SET" || first == "USE") {
-    return true;
-  }
-  if (first == "FLUSH" && second == "PRIVILEGES") {
-    return true;
-  }
-  if (first == "SAVEPOINT" || (first == "ROLLBACK" && second == "TO") ||
-      (first == "RELEASE" && second == "SAVEPOINT")) {
-    return true;
-  }
-  if (first == "CREATE" && (second == "DATABASE" || second == "SCHEMA" || second == "USER" || second == "ROLE")) {
-    return true;
-  }
-  if ((first == "ALTER" || first == "DROP") && (second == "USER" || second == "ROLE")) {
-    return true;
-  }
-
-  // ParseBinlogEvent emits an event when these understood forms affect a
-  // configured table. Require the minimum grammar here too: a malformed or
-  // unsupported DDL prefix must fail closed instead of advancing its GTID.
-  if ((first == "ALTER" || first == "TRUNCATE") && second == "TABLE") {
-    std::string table;
-    return static_cast<bool>(tokens >> table);
-  }
-  if (first == "DROP" && second == "TABLE") {
-    std::string table;
-    tokens >> table;
-    if (table == "IF") {
-      std::string exists;
-      tokens >> exists >> table;
-      return exists == "EXISTS" && !table.empty();
-    }
-    return !table.empty();
+  if (first == "FLUSH") {
+    return second == "PRIVILEGES";
   }
   if (first == "CREATE" && second == "TABLE") {
     std::string table;
-    tokens >> table;
-    if (table == "IF") {
-      std::string not_keyword;
-      std::string exists;
-      tokens >> not_keyword >> exists >> table;
-      return not_keyword == "NOT" && exists == "EXISTS" && !table.empty();
+    return static_cast<bool>(tokens >> table);
+  }
+
+  // Fail closed only for statements that can carry row data. The reader has
+  // already emitted configured-table DDL above this point, and separately
+  // rejects a DROP DATABASE/SCHEMA for a configured database. Treating every
+  // unfamiliar DDL form as unsafe otherwise makes unrelated CREATE INDEX,
+  // ANALYZE TABLE, VIEW, TRIGGER, and routine maintenance halt replication.
+  return first != "INSERT" && first != "UPDATE" && first != "DELETE" && first != "REPLACE" && first != "LOAD" &&
+         first != "CALL" && first != "DO" && first != "HANDLER";
+}
+
+bool BinlogEventParser::IsDatabaseAffectingDDL(std::string_view query, std::string_view database) {
+  std::string normalized = mygram::utils::StripSQLComments(std::string(query));
+  normalized = mygram::utils::NormalizeWhitespace(normalized);
+  normalized = std::string(mygram::utils::TrimAsciiWhitespaceView(normalized));
+  while (!normalized.empty() && normalized.back() == ';') {
+    normalized.pop_back();
+    normalized = std::string(mygram::utils::TrimAsciiWhitespaceView(normalized));
+  }
+
+  std::istringstream tokens(normalized);
+  std::string first;
+  std::string second;
+  std::string target;
+  tokens >> first >> second;
+  first = mygram::utils::ToUpper(first);
+  second = mygram::utils::ToUpper(second);
+  if (first != "DROP" || (second != "DATABASE" && second != "SCHEMA")) {
+    return false;
+  }
+
+  tokens >> target;
+  if (mygram::utils::ToUpper(target) == "IF") {
+    std::string exists;
+    tokens >> exists >> target;
+    if (mygram::utils::ToUpper(exists) != "EXISTS") {
+      return false;
     }
-    return !table.empty();
   }
-  if (first == "RENAME" && second == "TABLE") {
-    std::string source;
-    std::string to;
-    std::string target;
-    tokens >> source >> to >> target;
-    return !source.empty() && to == "TO" && !target.empty();
+  if (target.size() >= 2 && target.front() == '`' && target.back() == '`') {
+    target = target.substr(1, target.size() - 2);
   }
-  return false;
+  return !target.empty() && target == database;
 }
 
 /**

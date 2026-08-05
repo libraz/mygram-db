@@ -13,6 +13,24 @@
 
 namespace mygramdb::mysql {
 
+enum class ReplicationState : uint8_t {
+  kRunning,
+  kStopped,
+  kFailed,
+};
+
+inline const char* ToString(ReplicationState state) {
+  switch (state) {
+    case ReplicationState::kRunning:
+      return "running";
+    case ReplicationState::kStopped:
+      return "stopped";
+    case ReplicationState::kFailed:
+      return "failed";
+  }
+  return "failed";
+}
+
 /**
  * @brief Abstract interface for BinlogReader
  *
@@ -63,6 +81,29 @@ class IBinlogReader {
   virtual bool IsRunning() const = 0;
 
   /**
+   * @brief Check whether Start() has reserved the lifecycle but has not yet
+   * opened the initial binlog stream.
+   *
+   * The default keeps lightweight implementations source-compatible. Health
+   * checks use this state to avoid a transient readiness failure while a
+   * synchronous Start() is validating the source server.
+   */
+  virtual bool IsStarting() const { return false; }
+
+  /**
+   * @brief Lifecycle state for diagnostics.
+   *
+   * IsRunning() retains its thread-liveness contract. Consumers that need to
+   * distinguish an operator stop from an error use this three-state view.
+   */
+  virtual ReplicationState GetReplicationState() const {
+    if (IsRunning()) {
+      return ReplicationState::kRunning;
+    }
+    return GetLastError().empty() ? ReplicationState::kStopped : ReplicationState::kFailed;
+  }
+
+  /**
    * @brief Get current GTID
    */
   virtual std::string GetCurrentGTID() const = 0;
@@ -92,6 +133,25 @@ class IBinlogReader {
    * @brief Get queue size
    */
   virtual size_t GetQueueSize() const = 0;
+
+  /** Diagnostics consumed by the TCP, HTTP, and Prometheus surfaces. */
+  virtual uint64_t GetCRCErrors() const { return 0; }
+  virtual bool HasSchemaIncompatibleError() const { return false; }
+  virtual mygram::utils::ErrorCode GetLastErrorCode() const { return mygram::utils::ErrorCode::kSuccess; }
+
+  /** Unix timestamp of the most recent successfully applied position, or 0 when unknown. */
+  virtual int64_t GetLastAppliedUnixTime() const { return 0; }
+
+  /** Seconds elapsed since the most recently applied position, or -1 when unknown. */
+  virtual int64_t GetSecondsSinceLastApplied() const { return -1; }
+
+  /**
+   * @brief Return the UUID of the source server currently validated by this reader.
+   *
+   * An empty value means that the implementation has not established a source
+   * identity yet. This default preserves lightweight test and no-op readers.
+   */
+  virtual std::string GetSourceServerUUID() const { return {}; }
 
  protected:
   IBinlogReader() = default;

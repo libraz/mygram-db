@@ -85,7 +85,10 @@ std::optional<storage::FilterValue> ConvertFilterValue(std::string_view value, b
     if (!epoch) {
       return std::nullopt;
     }
-    return *epoch < 0 ? storage::FilterValue{*epoch} : storage::FilterValue{static_cast<uint64_t>(*epoch)};
+    // Keep every calendar timestamp in the signed epoch domain. Mixing
+    // int64_t before 1970 with uint64_t after it makes lexicographic sort
+    // keys use different zero points and breaks paginated ordering.
+    return storage::FilterValue{*epoch};
   }
   if (filter_type == "timestamp") {
     // TIMESTAMP is selected in UTC (Connection pins @@session.time_zone) and
@@ -94,7 +97,7 @@ std::optional<storage::FilterValue> ConvertFilterValue(std::string_view value, b
     if (!epoch) {
       return std::nullopt;
     }
-    return *epoch < 0 ? storage::FilterValue{*epoch} : storage::FilterValue{static_cast<uint64_t>(*epoch)};
+    return storage::FilterValue{*epoch};
   }
   if (filter_type == "time") {
     auto seconds = mygram::utils::DateTimeProcessor::TimeToSeconds(std::string(value));

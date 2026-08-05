@@ -3,9 +3,8 @@
  * @brief BinlogReader utility functions
  *
  * Contains ProcessEvent, FetchColumnNames, ValidateConnection,
- * ConvertSingleGtidToRange, FixGtidSetCallback, UpdateCurrentGTID,
- * and RefreshExecutedGtidSet, extracted from binlog_reader.cpp for
- * translation unit splitting.
+ * ConvertSingleGtidToRange, FixGtidSetCallback, and UpdateCurrentGTID,
+ * extracted from binlog_reader.cpp for translation unit splitting.
  */
 
 #include "mysql/binlog_reader.h"
@@ -14,6 +13,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <chrono>
 #include <cstring>
 #include <map>
 #include <optional>
@@ -413,6 +413,9 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::UpdateCurrentG
   if (!advanced) {
     return mygram::utils::MakeUnexpected(advanced.error());
   }
+  last_applied_unix_time_.store(
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
+      std::memory_order_release);
   ClearReachedReplayWatermarks(*advanced);
   return {};
 }
@@ -500,28 +503,6 @@ void BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid)
   }
 }
 
-bool BinlogReader::RefreshExecutedGtidSet() {
-  auto gtid_set = binlog_connection_->GetExecutedGTID();
-  if (!gtid_set) {
-    mygram::utils::StructuredLog()
-        .Event("binlog_warning")
-        .Field("type", "refresh_executed_gtid_failed")
-        .Field("error", gtid_set.error().message())
-        .Warn();
-    return false;
-  }
-  {
-    std::scoped_lock lock(gtid_mutex_);
-    executed_gtid_set_ = *gtid_set;
-  }
-  mygram::utils::StructuredLog()
-      .Event("binlog_debug")
-      .Field("action", "refreshed_executed_gtid_set")
-      .Field("gtid_set", *gtid_set)
-      .Debug();
-  return true;
-}
-
 bool BinlogReader::ValidateConnection() {
   // Collect required table identities from configuration.
   std::vector<ConnectionValidator::RequiredTable> required_tables;
@@ -557,7 +538,11 @@ bool BinlogReader::ValidateConnection() {
 
   if (!result.valid) {
     // Validation failed - server is invalid
-    SetLastError("Connection validation failed: " + result.error_message);
+    if (result.error_code.has_value()) {
+      SetLastError(mygram::utils::Error(*result.error_code, "Connection validation failed: " + result.error_message));
+    } else {
+      SetLastError("Connection validation failed: " + result.error_message);
+    }
     mygram::utils::StructuredLog()
         .Event("binlog_connection_validation_failed")
         .Field("gtid", GetCurrentGTID())

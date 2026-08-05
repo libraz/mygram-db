@@ -19,6 +19,14 @@
 
 namespace mygramdb::mysql {
 
+namespace internal {
+
+/// Classify a native MySQL query error into the stable application error
+/// domain. Kept visible for unit tests and connection-validator retry policy.
+mygram::utils::ErrorCode ClassifyQueryErrorCode(unsigned int native_error);
+
+}  // namespace internal
+
 /**
  * @brief MySQL GTID representation
  */

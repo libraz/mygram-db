@@ -109,12 +109,21 @@ class BinlogEventParser {
   /**
    * @brief Whether an ignored standalone QUERY_EVENT is proven not to mutate table rows.
    *
-   * Statement-based DML and unknown statements must never advance the applied
-   * GTID because the row materializer has not applied their effects. This is
-   * intentionally an allowlist of administrative statements and supported
-   * non-target table DDL emitted while the server remains in ROW mode.
+   * Statement-based DML must never advance the applied GTID because the row
+   * materializer has not applied its effects. Non-row DDL and administrative
+   * statements are safe once configured-table and configured-schema changes
+   * have been handled separately by the reader.
    */
   static bool IsSafeIgnoredQuery(std::string_view query);
+
+  /**
+   * @brief Whether a query drops the specified database/schema.
+   *
+   * This is kept separate from IsSafeIgnoredQuery because a database-level
+   * statement is harmless for an unmonitored schema but destructive for every
+   * configured table contained by the named schema.
+   */
+  static bool IsDatabaseAffectingDDL(std::string_view query, std::string_view database);
 
   /**
    * @brief Check if DDL affects target table

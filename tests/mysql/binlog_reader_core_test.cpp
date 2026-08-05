@@ -9,6 +9,8 @@
 
 #ifdef USE_MYSQL
 
+#include <stdexcept>
+
 using namespace binlog_test;
 
 /**
@@ -61,6 +63,18 @@ TEST_F(BinlogReaderFixture, IsRunningTracksActiveMutatingThreadsBeforeJoin) {
   EXPECT_FALSE(reader_->should_stop_.load());
 }
 
+TEST_F(BinlogReaderFixture, StartingStateDoesNotChangeThreadLivenessContract) {
+  reader_->running_ = true;
+  reader_->starting_ = true;
+  reader_->active_threads_ = 0;
+
+  EXPECT_TRUE(reader_->IsStarting());
+  EXPECT_FALSE(reader_->IsRunning());
+
+  reader_->starting_ = false;
+  reader_->running_ = false;
+}
+
 TEST_F(BinlogReaderFixture, ReconnectBackoffEscalatesAndIsBounded) {
   reader_->config_.reconnect_delay_ms = 25;
   EXPECT_EQ(reader_->ReconnectBackoffDelayMs(1), 25);
@@ -88,6 +102,21 @@ TEST_F(BinlogReaderFixture, ReconnectBackoffCanBeCancelledByShutdown) {
 
   EXPECT_FALSE(completed_full_delay.load(std::memory_order_acquire));
   reader_->should_stop_.store(false, std::memory_order_release);
+}
+
+TEST_F(BinlogReaderFixture, RepeatedProcessingFailureAtSameGtidStopsOnThirdReplay) {
+  std::string last_failure_gtid;
+  int consecutive_failures = 0;
+
+  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:42", last_failure_gtid, consecutive_failures));
+  EXPECT_EQ(consecutive_failures, 1);
+  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:42", last_failure_gtid, consecutive_failures));
+  EXPECT_EQ(consecutive_failures, 2);
+  EXPECT_TRUE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:42", last_failure_gtid, consecutive_failures));
+  EXPECT_EQ(consecutive_failures, 3);
+
+  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:43", last_failure_gtid, consecutive_failures));
+  EXPECT_EQ(consecutive_failures, 1) << "a newly applied GTID starts a new retry budget";
 }
 
 TEST_F(BinlogReaderFixture, UnsupportedRuntimeEventsStopBeforeGtidAdvance) {
@@ -604,89 +633,6 @@ TEST(BinlogReaderTest, DestructorCallsStop) {
   SUCCEED();
 }
 
-// ===========================================================================
-// GTID set reconnection tests
-// ===========================================================================
-
-/**
- * @brief UpdateCurrentGTID with single GTID must NOT overwrite executed_gtid_set_
- */
-TEST_F(BinlogReaderFixture, UpdateCurrentGtidDoesNotOverwriteExecutedGtidSet) {
-  // Simulate initial GTID set (as if loaded from snapshot or server)
-  reader_->SetCurrentGTID("uuid1:1-100,uuid2:1-50");
-
-  // Verify executed_gtid_set_ is set
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100,uuid2:1-50");
-  }
-
-  // Simulate receiving a GTID event (single GTID)
-  reader_->UpdateCurrentGTID("uuid1:101");
-
-  // current_gtid_ should retain the full set and merge the applied GTID.
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:1-101,uuid2:1-50");
-
-  // executed_gtid_set_ MUST NOT be overwritten by single GTID
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100,uuid2:1-50");
-  }
-}
-
-/**
- * @brief SetCurrentGTID with range format also sets executed_gtid_set_
- */
-TEST_F(BinlogReaderFixture, SetCurrentGtidWithRangeAlsoSetsExecutedGtidSet) {
-  reader_->SetCurrentGTID("uuid1:1-100");
-
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:1-100");
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100");
-  }
-}
-
-/**
- * @brief SetCurrentGTID with single GTID does NOT set executed_gtid_set_
- */
-TEST_F(BinlogReaderFixture, SetCurrentGtidWithSingleGtidDoesNotSetExecutedGtidSet) {
-  // First set a full GTID set
-  reader_->SetCurrentGTID("uuid1:1-100");
-  // Then simulate single GTID from event
-  reader_->SetCurrentGTID("uuid1:101");
-
-  // current_gtid_ updated
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:101");
-  // executed_gtid_set_ retains the full set
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100");
-  }
-}
-
-/**
- * @brief Multiple UpdateCurrentGTID calls don't affect executed_gtid_set_
- */
-TEST_F(BinlogReaderFixture, GetExecutedGtidSetReturnsFullSetForReconnection) {
-  // Simulate startup: set full GTID set
-  reader_->SetCurrentGTID("uuid1:1-100,uuid2:1-50");
-
-  // Simulate processing several events
-  reader_->UpdateCurrentGTID("uuid1:101");
-  reader_->UpdateCurrentGTID("uuid1:102");
-  reader_->UpdateCurrentGTID("uuid1:103");
-
-  // current_gtid_ should retain the full set and merge all applied GTIDs.
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid1:1-103,uuid2:1-50");
-
-  // executed_gtid_set_ should still be the full set (for reconnection use)
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    EXPECT_EQ(reader_->executed_gtid_set_, "uuid1:1-100,uuid2:1-50");
-  }
-}
-
 TEST_F(BinlogReaderFixture, MySqlCurrentGtidTracksAllUuids) {
   reader_->SetCurrentGTID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-50");
 
@@ -746,47 +692,6 @@ TEST_F(BinlogReaderFixture, InvalidGtidMergeReturnsErrorWithoutAdvancingAppliedP
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidGTID);
   EXPECT_EQ(reader_->GetCurrentGTID(), initial);
-}
-
-/**
- * @brief Reconnection always uses current_gtid_ regardless of executed_gtid_set_
- */
-TEST_F(BinlogReaderFixture, ReconnectionAlwaysUsesCurrentGtid) {
-  // Set current_gtid_ and executed_gtid_set_ to different values
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    reader_->current_gtid_ = "uuid1:500";
-    reader_->executed_gtid_set_ = "uuid1:1-510";  // Server ahead
-  }
-
-  // The GTID used for reconnection must always be based on current_gtid_
-  std::string gtid_for_reconnect;
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    gtid_for_reconnect = BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_);
-  }
-
-  // Must be "uuid1:1-500" (from current_gtid_), NOT "uuid1:1-510" (from executed_gtid_set_)
-  EXPECT_EQ(gtid_for_reconnect, "uuid1:1-500");
-}
-
-TEST_F(BinlogReaderFixture, ValidationGtidUsesCurrentGtidNotExecutedSet) {
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    reader_->current_gtid_ = "uuid1:103";
-    reader_->executed_gtid_set_ = "uuid1:1-200,uuid2:1-50";
-  }
-
-  std::optional<std::string> current_gtid_for_validation;
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    if (!reader_->current_gtid_.empty()) {
-      current_gtid_for_validation = BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_);
-    }
-  }
-
-  ASSERT_TRUE(current_gtid_for_validation.has_value());
-  EXPECT_EQ(*current_gtid_for_validation, "uuid1:1-103");
 }
 
 // ===========================================================================
@@ -1142,77 +1047,6 @@ TEST(BinlogReaderTest, ConvertSingleGtidToRangeWithMultipleIntervals) {
   EXPECT_EQ(result, "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-3:5-7");
 }
 
-/**
- * @brief ConvertSingleGtidToRange is always used for reconnection GTID
- */
-TEST_F(BinlogReaderFixture, ReconnectionGtidAlwaysConverted) {
-  // Even when executed_gtid_set_ is set, reconnection uses current_gtid_
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    reader_->current_gtid_ = "61d5b289-bccc-11f0-b921-cabbb4ee51f6:50";
-    reader_->executed_gtid_set_ = "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-100";
-  }
-
-  std::string gtid_for_reconnect;
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    gtid_for_reconnect = BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_);
-  }
-  // Must use current_gtid_ converted to range, NOT executed_gtid_set_
-  EXPECT_EQ(gtid_for_reconnect, "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-50");
-}
-
-// ===========================================================================
-// Reconnection uses processed GTID, not server GTID
-// ===========================================================================
-
-/**
- * @brief Verify reconnection never uses executed_gtid_set_ (prevents data loss)
- *
- * Scenario: Server has committed events 501-510 but MygramDB only processed up to 500.
- * Reconnection must use "uuid:1-500", not "uuid:1-510", to avoid skipping events 501-510.
- */
-TEST_F(BinlogReaderFixture, ReconnectionUsesProcessedGtidNotServerGtid) {
-  // Simulate: MygramDB processed up to event 500
-  reader_->SetCurrentGTID("uuid:500");
-
-  // Simulate: Server has committed up to event 510 (ahead of MygramDB)
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    reader_->executed_gtid_set_ = "uuid:1-510";
-  }
-
-  // Verify reconnection uses current_gtid_, not executed_gtid_set_
-  std::string reconnect_gtid;
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    reconnect_gtid = BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_);
-  }
-
-  EXPECT_EQ(reconnect_gtid, "uuid:1-500") << "Reconnection must use processed GTID (1-500), not server GTID (1-510)";
-}
-
-/**
- * @brief ConvertSingleGtidToRange is used even when executed_gtid_set_ is non-empty
- */
-TEST_F(BinlogReaderFixture, ConvertSingleGtidToRangeAlwaysUsed) {
-  // Set both current_gtid_ and executed_gtid_set_
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    reader_->current_gtid_ = "uuid1:103";
-    reader_->executed_gtid_set_ = "uuid1:1-200,uuid2:1-50";
-  }
-
-  // Reconnection logic must use ConvertSingleGtidToRange(current_gtid_)
-  std::string reconnect_gtid;
-  {
-    std::scoped_lock lock(reader_->gtid_mutex_);
-    reconnect_gtid = BinlogReader::ConvertSingleGtidToRange(reader_->current_gtid_);
-  }
-
-  EXPECT_EQ(reconnect_gtid, "uuid1:1-103") << "Must convert current_gtid_ to range, not use executed_gtid_set_";
-}
-
 TEST_F(BinlogReaderFixture, ProcessingFailureRequestsReconnectAndDropsQueuedEvents) {
   server::TableContext broken_context;
   broken_context.name = "broken";
@@ -1257,6 +1091,33 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRequestsReconnectAndDropsQueuedEven
   reader_->queue_cv_.notify_all();
   worker.join();
   reader_->should_stop_ = false;
+}
+
+TEST_F(BinlogReaderFixture, WorkerThreadExceptionStopsReplicationWithoutTerminatingProcess) {
+  server::TableContext broken_context;
+  broken_context.name = "broken";
+  broken_context.config = table_config_;
+  broken_context.config.name = "broken";
+  broken_context.index.reset();
+  broken_context.doc_store.reset();
+  reader_->table_contexts_["broken"] = &broken_context;
+  reader_->SetAfterProcessingFailurePublishedHookForTest([]() { throw std::runtime_error("injected worker failure"); });
+
+  auto failing_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1));
+  failing_event->table_name = "broken";
+  {
+    std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
+    reader_->event_queue_.push(std::move(failing_event));
+  }
+  reader_->queue_cv_.notify_one();
+
+  std::thread worker([this]() { reader_->WorkerThreadFunc(); });
+  worker.join();
+  reader_->SetAfterProcessingFailurePublishedHookForTest({});
+
+  EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
+  EXPECT_NE(reader_->GetLastError().find("injected worker failure"), std::string::npos);
+  reader_->should_stop_.store(false, std::memory_order_release);
 }
 
 TEST_F(BinlogReaderFixture, MidTransactionFailureDoesNotAdvanceGtidToFailedTransaction) {

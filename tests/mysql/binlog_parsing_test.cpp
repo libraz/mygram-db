@@ -1578,6 +1578,11 @@ TEST(BinlogParsingTest, IgnoredStandaloneQueryProgressIsFailClosed) {
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("GRANT SELECT ON db.* TO 'reader'@'%'"));
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE DATABASE IF NOT EXISTS testdb"));
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE IF NOT EXISTS unrelated (id BIGINT PRIMARY KEY)"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE INDEX lookup_idx ON unrelated (value)"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("ANALYZE TABLE unrelated"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE VIEW unrelated_view AS SELECT value FROM unrelated"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery(
+      "CREATE TRIGGER unrelated_trigger BEFORE INSERT ON unrelated FOR EACH ROW SET NEW.value = NEW.value"));
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("FLUSH PRIVILEGES"));
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("ALTER TABLE unrelated ADD COLUMN value INT"));
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("SAVEPOINT before_optional_work"));
@@ -1592,13 +1597,18 @@ TEST(BinlogParsingTest, IgnoredStandaloneQueryProgressIsFailClosed) {
   EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("FLUSH TABLES WITH READ LOCK"));
   EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CALL mutate_articles()"));
   EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE"));
-  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE IF EXISTS articles (id BIGINT)"));
-  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TEMPORARY TABLE articles (id BIGINT)"));
-  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE OR REPLACE TABLE articles (id BIGINT)"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE IF EXISTS articles (id BIGINT)"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TEMPORARY TABLE articles (id BIGINT)"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE OR REPLACE TABLE articles (id BIGINT)"));
   // The reader calls this only after ParseBinlogEvent has already emitted
   // configured-table DDL. Reaching it for CREATE TABLE therefore means that
   // the statement concerns no configured table.
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE articles (id BIGINT PRIMARY KEY)"));
+
+  EXPECT_TRUE(BinlogEventParser::IsDatabaseAffectingDDL("DROP DATABASE indexed", "indexed"));
+  EXPECT_TRUE(BinlogEventParser::IsDatabaseAffectingDDL("DROP SCHEMA IF EXISTS `indexed`", "indexed"));
+  EXPECT_FALSE(BinlogEventParser::IsDatabaseAffectingDDL("DROP DATABASE unrelated", "indexed"));
+  EXPECT_FALSE(BinlogEventParser::IsDatabaseAffectingDDL("CREATE DATABASE indexed", "indexed"));
 }
 
 /**

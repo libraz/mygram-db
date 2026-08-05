@@ -357,6 +357,8 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
     // Check if this is the primary key or text column (using cached indices)
     if (static_cast<int>(col_idx) == pk_col_idx) {
       row.primary_key = stored_value;
+      row.primary_key_present = true;
+      row.primary_key_null = is_null;
       if (mygram::utils::IsDebugLogEnabled()) {
         mygram::utils::StructuredLog()
             .Event("binlog_debug")

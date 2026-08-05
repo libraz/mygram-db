@@ -72,6 +72,64 @@ std::string FormatFloatingPoint(T value) {
   return oss.str();
 }
 
+enum class EnumSetKind : uint8_t { kEnum, kSet };
+
+Expected<std::string, Error> DecodeEnumSetValue(EnumSetKind kind, const unsigned char* data, const unsigned char* end,
+                                                uint8_t pack_length, const std::vector<std::string>* labels) {
+  if (pack_length == 0) {
+    pack_length = 1;
+  }
+  const uint8_t max_pack_length = kind == EnumSetKind::kEnum ? 2 : 8;
+  const char* kind_name = kind == EnumSetKind::kEnum ? "ENUM" : "SET";
+  if (pack_length > max_pack_length) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLInvalidMetadata, std::string("Invalid ") + kind_name + " metadata"));
+  }
+  if (auto available = RequireBytes(data, end, pack_length); !available) {
+    return MakeUnexpected(available.error());
+  }
+
+  uint64_t value = 0;
+  for (uint8_t index = 0; index < pack_length; ++index) {
+    value |= static_cast<uint64_t>(data[index]) << (index * 8);
+  }
+  if (labels == nullptr) {
+    return std::to_string(value);
+  }
+  if (labels->empty()) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLInvalidMetadata, std::string(kind_name) + " labels are unavailable"));
+  }
+
+  if (kind == EnumSetKind::kEnum) {
+    if (value == 0) {
+      return std::string{};
+    }
+    if (value > labels->size()) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
+    }
+    return (*labels)[value - 1];
+  }
+
+  if (labels->size() > 64) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET has more than 64 labels"));
+  }
+  std::string decoded_labels;
+  for (size_t index = 0; index < labels->size(); ++index) {
+    if ((value & (uint64_t{1} << index)) == 0) {
+      continue;
+    }
+    if (!decoded_labels.empty()) {
+      decoded_labels.push_back(',');
+    }
+    decoded_labels += (*labels)[index];
+  }
+  if (labels->size() < 64 && (value >> labels->size()) != 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET bitmask is outside label table"));
+  }
+  return decoded_labels;
+}
+
 Expected<size_t, Error> DecimalBinarySize(uint8_t precision, uint8_t scale) {
   constexpr uint8_t kMaxDecimalPrecision = 65;
   constexpr uint8_t kMaxDecimalScale = 30;
@@ -303,55 +361,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       unsigned char type = metadata >> 8;
       if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM) ||
           type == static_cast<unsigned char>(mysql::ColumnType::SET)) {
-        uint8_t pack_length = metadata & 0xFF;
-        if (pack_length == 0) {
-          pack_length = 1;
-        }
-        if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM) && pack_length > 2) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid ENUM metadata"));
-        }
-        if (type == static_cast<unsigned char>(mysql::ColumnType::SET) && pack_length > 8) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid SET metadata"));
-        }
-        if (data + pack_length > end) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
-        }
-        uint64_t value = 0;
-        for (uint8_t i = 0; i < pack_length; ++i) {
-          value |= static_cast<uint64_t>(data[i]) << (i * 8);
-        }
-        if (enum_set_values == nullptr) {
-          return std::to_string(value);
-        }
-        if (enum_set_values->empty()) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM/SET labels are unavailable"));
-        }
-        if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM)) {
-          if (value == 0) {
-            return std::string{};
-          }
-          if (value > enum_set_values->size()) {
-            return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
-          }
-          return (*enum_set_values)[value - 1];
-        }
-        if (enum_set_values->size() > 64) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET has more than 64 labels"));
-        }
-        std::string labels;
-        for (size_t index = 0; index < enum_set_values->size(); ++index) {
-          if ((value & (uint64_t{1} << index)) == 0) {
-            continue;
-          }
-          if (!labels.empty()) {
-            labels.push_back(',');
-          }
-          labels += (*enum_set_values)[index];
-        }
-        if (enum_set_values->size() < 64 && (value >> enum_set_values->size()) != 0) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET bitmask is outside label table"));
-        }
-        return labels;
+        const auto kind =
+            type == static_cast<unsigned char>(mysql::ColumnType::ENUM) ? EnumSetKind::kEnum : EnumSetKind::kSet;
+        return DecodeEnumSetValue(kind, data, end, metadata & 0xFF, enum_set_values);
       }
       uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
       uint32_t str_len = 0;
@@ -838,86 +850,10 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     case 247: {  // MYSQL_TYPE_ENUM
-      // ENUM values are stored as 1 or 2 byte integers
-      // The metadata byte tells us the size
-      uint8_t enum_size = metadata & 0xFF;
-      if (enum_size == 0) {
-        enum_size = 1;  // default to 1 byte if metadata not available
-      }
-      if (enum_size == 1) {
-        if (data + 1 > end)
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
-        uint8_t val = *data;
-        if (enum_set_values == nullptr) {
-          return std::to_string(val);
-        }
-        if (enum_set_values->empty()) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM labels are unavailable"));
-        }
-        if (val == 0) {
-          return std::string{};
-        }
-        if (val > enum_set_values->size()) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
-        }
-        return (*enum_set_values)[val - 1];
-      } else {
-        if (data + 2 > end)
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
-        uint16_t val = data[0] | (static_cast<uint16_t>(data[1]) << 8);
-        if (enum_set_values == nullptr) {
-          return std::to_string(val);
-        }
-        if (enum_set_values->empty()) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM labels are unavailable"));
-        }
-        if (val == 0) {
-          return std::string{};
-        }
-        if (val > enum_set_values->size()) {
-          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
-        }
-        return (*enum_set_values)[val - 1];
-      }
+      return DecodeEnumSetValue(EnumSetKind::kEnum, data, end, metadata & 0xFF, enum_set_values);
     }
     case 248: {  // MYSQL_TYPE_SET
-      // SET values are stored as 1-8 byte bitmask
-      uint8_t set_size = metadata & 0xFF;
-      if (set_size == 0) {
-        set_size = 1;
-      }
-      if (set_size > 8) {
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid SET metadata"));
-      }
-      if (data + set_size > end)
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
-      uint64_t val = 0;
-      for (uint8_t i = 0; i < set_size; i++) {
-        val |= static_cast<uint64_t>(data[i]) << (i * 8);
-      }
-      if (enum_set_values == nullptr) {
-        return std::to_string(val);
-      }
-      if (enum_set_values->empty()) {
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET labels are unavailable"));
-      }
-      if (enum_set_values->size() > 64) {
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET has more than 64 labels"));
-      }
-      std::string labels;
-      for (size_t index = 0; index < enum_set_values->size(); ++index) {
-        if ((val & (uint64_t{1} << index)) == 0) {
-          continue;
-        }
-        if (!labels.empty()) {
-          labels.push_back(',');
-        }
-        labels += (*enum_set_values)[index];
-      }
-      if (enum_set_values->size() < 64 && (val >> enum_set_values->size()) != 0) {
-        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET bitmask is outside label table"));
-      }
-      return labels;
+      return DecodeEnumSetValue(EnumSetKind::kSet, data, end, metadata & 0xFF, enum_set_values);
     }
 
     default:

@@ -350,9 +350,9 @@ class SqlEscapingTest : public ::testing::Test {
  * @brief Test that quotes and backslashes are encoded without SQL-mode semantics
  */
 TEST_F(SqlEscapingTest, StringValuesUseModeIndependentHexEncoding) {
-  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("it's"), "CONVERT(X'69742773' USING utf8mb4)");
-  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("path\\to"), "CONVERT(X'706174685C746F' USING utf8mb4)");
-  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("\n"), "CONVERT(X'0A' USING utf8mb4)");
+  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("it's"), "_utf8mb4 X'69742773'");
+  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("path\\to"), "_utf8mb4 X'706174685C746F'");
+  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("\n"), "_utf8mb4 X'0A'");
 }
 
 TEST_F(SqlEscapingTest, EmptyStringRequiredFilterBuildsQuotedEmptyLiteral) {
@@ -362,7 +362,7 @@ TEST_F(SqlEscapingTest, EmptyStringRequiredFilterBuildsQuotedEmptyLiteral) {
   filter.op = "=";
   filter.value = "";
 
-  EXPECT_EQ(BuildWhereClause({filter}), " WHERE status = CONVERT(X'' USING utf8mb4)");
+  EXPECT_EQ(BuildWhereClause({filter}), " WHERE status = _utf8mb4 X''");
 }
 
 /**
@@ -376,7 +376,7 @@ TEST_F(SqlEscapingTest, SqlInjectionInFilterValue) {
   filter.value = "'; DROP TABLE articles; --";
 
   std::string clause = BuildWhereClause({filter});
-  EXPECT_EQ(clause, " WHERE status = CONVERT(X'273B2044524F50205441424C452061727469636C65733B202D2D' USING utf8mb4)");
+  EXPECT_EQ(clause, " WHERE status = _utf8mb4 X'273B2044524F50205441424C452061727469636C65733B202D2D'");
 }
 
 /**
@@ -1064,6 +1064,52 @@ TEST(InitialLoaderIntegrationTest, EmbeddedNulValuesAreLoadedWithoutTruncation) 
   cleanup();
 }
 
+TEST(InitialLoaderIntegrationTest, EmptyStringPrimaryKeyIsLoaded) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection connection(connection_config);
+  auto connect_result = connection.Connect("initial-loader-empty-primary-key-test");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+  auto gtid_mode_enabled = connection.IsGTIDModeEnabled();
+  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
+    GTEST_SKIP() << "MySQL GTID mode is required";
+  }
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "mygram_it_empty_primary_key_" + suffix;
+  auto cleanup = [&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table); };
+  cleanup();
+
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + table +
+                                       " (id VARCHAR(32) PRIMARY KEY, content TEXT NOT NULL) ENGINE=InnoDB"));
+  ASSERT_TRUE(connection.ExecuteUpdate("INSERT INTO " + table + " VALUES ('', 'empty primary key document')"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+
+  index::Index index(1);
+  storage::DocumentStore store;
+  InitialLoader loader(connection, index, store, table_config);
+  auto load_result = loader.Load();
+  ASSERT_TRUE(load_result) << load_result.error().message();
+
+  auto doc_id = store.GetDocId("");
+  ASSERT_TRUE(doc_id.has_value());
+  EXPECT_EQ(store.GetPrimaryKey(*doc_id), "");
+  EXPECT_EQ(store.GetOriginalText(*doc_id), std::optional<std::string>("empty primary key document"));
+
+  cleanup();
+}
+
 TEST(InitialLoaderIntegrationTest, SessionTimezoneAndTimestampFilterUseOneEpochContract) {
   if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
     GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
@@ -1127,8 +1173,8 @@ TEST(InitialLoaderIntegrationTest, SessionTimezoneAndTimestampFilterUseOneEpochC
   ASSERT_TRUE(doc_id.has_value());
   auto snapshot_value = store.GetFilterValue(*doc_id, "published_at");
   ASSERT_TRUE(snapshot_value.has_value());
-  ASSERT_TRUE(std::holds_alternative<uint64_t>(*snapshot_value));
-  EXPECT_EQ(std::get<uint64_t>(*snapshot_value), *expected_epoch);
+  ASSERT_TRUE(std::holds_alternative<int64_t>(*snapshot_value));
+  EXPECT_EQ(std::get<int64_t>(*snapshot_value), *expected_epoch);
 
   mysql::RowData binlog_row;
   binlog_row.primary_key = "1";

@@ -49,6 +49,10 @@ mysql::CanonicalValueKind CanonicalKind(enum_field_types type) {
     case MYSQL_TYPE_DATETIME:
     case MYSQL_TYPE_TIMESTAMP:
       return mysql::CanonicalValueKind::kTemporal;
+    case MYSQL_TYPE_FLOAT:
+      return mysql::CanonicalValueKind::kFloat;
+    case MYSQL_TYPE_DOUBLE:
+      return mysql::CanonicalValueKind::kDouble;
     default:
       return mysql::CanonicalValueKind::kText;
   }
@@ -313,14 +317,16 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     }
 
     // Extract primary key (using pre-built field index map for O(1) lookup)
-    std::string primary_key = ExtractPrimaryKey(row, lengths, fields, field_map);
-    if (primary_key.empty()) {
-      std::string error_msg = "Failed to extract primary key";
+    auto primary_key = ExtractPrimaryKey(row, lengths, fields, field_map);
+    if (!primary_key.has_value()) {
+      std::string error_msg = "Primary key column '" + table_config_.primary_key +
+                              "' is missing or NULL in initial snapshot for table '" + table_config_.name + "'";
       mygram::utils::StructuredLog()
           .Event("loader_error")
           .Field("operation", "initial_load")
           .Field("type", "primary_key_extraction_failed")
           .Field("table", table_config_.name)
+          .Field("primary_key_column", table_config_.primary_key)
           .Field("error", error_msg)
           .Error();
       // result automatically freed by MySQLResult destructor
@@ -336,7 +342,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
           .Event("loader_error")
           .Field("operation", "initial_load")
           .Field("type", "text_source_absent")
-          .Field("primary_key", primary_key)
+          .Field("primary_key", *primary_key)
           .Error();
       abort_stream();
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
@@ -350,7 +356,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     auto filters = ExtractFilters(row, lengths, fields, field_map);
 
     // Add to batch
-    doc_batch.push_back({primary_key, filters, normalized_text, text});
+    doc_batch.push_back({std::move(*primary_key), filters, normalized_text, text});
     index_batch.push_back({0, normalized_text});  // DocId will be set after AddDocumentBatch
 
     // Process batch when full
@@ -737,13 +743,13 @@ mysql::MaterializedText InitialLoader::ExtractText(MYSQL_ROW row, const unsigned
   return mysql::MaterializeTextSource(source_row, table_config_.text_source);
 }
 
-std::string InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
-                                             const FieldIndexMap& field_map) const {
+std::optional<std::string> InitialLoader::ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths,
+                                                            MYSQL_FIELD* fields, const FieldIndexMap& field_map) const {
   auto it = field_map.find(table_config_.primary_key);
   if (it != field_map.end() && row[it->second] != nullptr) {
     return CanonicalizeSnapshotField(row, lengths, fields, it->second);
   }
-  return "";
+  return std::nullopt;
 }
 
 storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,

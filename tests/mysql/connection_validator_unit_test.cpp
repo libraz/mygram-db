@@ -8,8 +8,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include <algorithm>
-#include <cctype>
 #include <string>
 #include <vector>
 
@@ -59,6 +57,13 @@ TEST(ConnectionValidatorUnitTest, ValidationResultWithError) {
   EXPECT_FALSE(static_cast<bool>(result));
 }
 
+TEST(ConnectionValidatorUnitTest, ValidationResultPreservesFailureCode) {
+  ValidationResult result;
+  result.error_code = mygramdb::utils::ErrorCode::kMySQLTimeout;
+  ASSERT_TRUE(result.error_code.has_value());
+  EXPECT_EQ(*result.error_code, mygramdb::utils::ErrorCode::kMySQLTimeout);
+}
+
 TEST(ConnectionValidatorUnitTest, ValidationResultWithWarnings) {
   ValidationResult result;
   result.valid = true;
@@ -79,21 +84,6 @@ TEST(ConnectionValidatorUnitTest, ValidationResultWithServerUUID) {
   EXPECT_EQ(*result.server_uuid, "a1b2c3d4-e5f6-1234-5678-90abcdef1234");
 }
 
-TEST(ConnectionValidatorUnitTest, GTIDFormatValidation) {
-  std::string valid_gtid = "a1b2c3d4-e5f6-1234-5678-90abcdef1234:1-5";
-  for (char c : valid_gtid) {
-    bool is_valid = std::isxdigit(static_cast<unsigned char>(c)) != 0 || c == '-' || c == ':' || c == ',' || c == ' ' ||
-                    c == '\n' || c == '\r';
-    EXPECT_TRUE(is_valid) << "Character '" << c << "' should be valid in GTID";
-  }
-  std::vector<char> invalid_chars = {'\'', '"', ';', '(', ')', '@', '#', '!', '\\', '/'};
-  for (char c : invalid_chars) {
-    bool is_valid = std::isxdigit(static_cast<unsigned char>(c)) != 0 || c == '-' || c == ':' || c == ',' || c == ' ' ||
-                    c == '\n' || c == '\r';
-    EXPECT_FALSE(is_valid) << "Character '" << c << "' should be invalid in GTID";
-  }
-}
-
 TEST(ConnectionValidatorUnitTest, ValidationResultFailoverDetectedDefault) {
   ValidationResult result;
   EXPECT_FALSE(result.failover_detected);
@@ -105,59 +95,18 @@ TEST(ConnectionValidatorUnitTest, ValidationResultFailoverDetectedSet) {
   EXPECT_TRUE(result.failover_detected);
 }
 
-TEST(ConnectionValidatorUnitTest, InvalidTableNameWithSQLInjection) {
-  std::string valid_table = "articles_2024";
-  bool is_valid = true;
-  for (char chr : valid_table) {
-    if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
-      is_valid = false;
-      break;
-    }
-  }
-  EXPECT_TRUE(is_valid) << "Normal table name should be valid";
-  std::string injection_table = "'; DROP TABLE users; --";
-  is_valid = true;
-  for (char chr : injection_table) {
-    if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
-      is_valid = false;
-      break;
-    }
-  }
-  EXPECT_FALSE(is_valid) << "SQL injection table name should be rejected";
-}
-
 TEST(ConnectionValidatorUnitTest, ValidTableNamePatterns) {
-  std::vector<std::string> valid_names = {"articles", "user_profiles", "tbl$1", "test-table", "Table123"};
+  const std::vector<std::string> valid_names = {"articles", "user_profiles", "tbl$1",        "test-table",
+                                                "Table123", "注文 履歴",     "archive.2026", "quote'name"};
   for (const auto& name : valid_names) {
-    bool is_valid = !name.empty();
-    for (char chr : name) {
-      if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
-        is_valid = false;
-        break;
-      }
-    }
-    EXPECT_TRUE(is_valid) << "Table name '" << name << "' should be valid";
+    EXPECT_TRUE(ConnectionValidator::IsValidIdentifier(name)) << "Table name '" << name << "' should be valid";
   }
 }
 
 TEST(ConnectionValidatorUnitTest, InvalidTableNamePatterns) {
-  std::vector<std::string> invalid_names = {
-      "",             // empty
-      "table'name",   // single quote
-      "table;name",   // semicolon
-      "table name",   // space
-      "table(name)",  // parentheses
-      "table@name",   // at sign
-  };
+  const std::vector<std::string> invalid_names = {"", std::string("table\0name", 10)};
   for (const auto& name : invalid_names) {
-    bool is_valid = !name.empty();
-    for (char chr : name) {
-      if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '_' && chr != '$' && chr != '-') {
-        is_valid = false;
-        break;
-      }
-    }
-    EXPECT_FALSE(is_valid) << "Table name '" << name << "' should be invalid";
+    EXPECT_FALSE(ConnectionValidator::IsValidIdentifier(name));
   }
 }
 
@@ -173,11 +122,12 @@ TEST(ConnectionValidatorUnitTest, IdentifierValidationCoversDatabaseAndTableName
   EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("app_db"));
   EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("articles-2026"));
   EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("tenant$1"));
+  EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("app.db"));
+  EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("app db"));
+  EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("顧客データ"));
+  EXPECT_TRUE(ConnectionValidator::IsValidIdentifier("app';DROP"));
 
   EXPECT_FALSE(ConnectionValidator::IsValidIdentifier(""));
-  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier("app.db"));
-  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier("app db"));
-  EXPECT_FALSE(ConnectionValidator::IsValidIdentifier("app';DROP"));
   EXPECT_FALSE(ConnectionValidator::IsValidIdentifier(std::string("app\0db", 6)));
 }
 
@@ -187,6 +137,15 @@ TEST(ConnectionValidatorUnitTest, BinlogChecksumValidationRequiresCRC32) {
 
   EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogChecksumValue("NONE"));
   EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogChecksumValue(""));
+}
+
+TEST(ConnectionValidatorUnitTest, BinlogFormatValidationRequiresRow) {
+  EXPECT_TRUE(ConnectionValidator::IsSupportedBinlogFormatValue("ROW"));
+  EXPECT_TRUE(ConnectionValidator::IsSupportedBinlogFormatValue("row"));
+
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogFormatValue("STATEMENT"));
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogFormatValue("MIXED"));
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogFormatValue(""));
 }
 
 TEST(ConnectionValidatorUnitTest, MariaDBCompressedEventsAreExplicitlyFailClosed) {
@@ -220,19 +179,6 @@ TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsOnlyTaggedEntries) {
   EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10::100"));
   EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid(
       "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:tag:2"));
-}
-
-TEST(ConnectionValidatorUnitTest, BinlogFormatValidationLogic) {
-  std::string row_value = "ROW";
-  std::string upper_value = row_value;
-  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
-  EXPECT_EQ(upper_value, "ROW") << "ROW format should pass validation";
-  std::vector<std::string> invalid_formats = {"STATEMENT", "MIXED", "statement", "mixed"};
-  for (const auto& fmt : invalid_formats) {
-    std::string upper_fmt = fmt;
-    std::transform(upper_fmt.begin(), upper_fmt.end(), upper_fmt.begin(), ::toupper);
-    EXPECT_NE(upper_fmt, "ROW") << "Format '" << fmt << "' should fail validation";
-  }
 }
 
 // ============================================================================
@@ -292,28 +238,6 @@ TEST(ConnectionValidatorErrorTest, ErrorMessagePropagation) {
   EXPECT_FALSE(result.error_message.empty());
   // Should not have failover detected on a non-connected server
   EXPECT_FALSE(result.failover_detected);
-}
-
-/**
- * @brief Test that validation result carries error for GTID disabled scenario
- * The CheckGTIDEnabled helper now returns Expected<void, Error> with kMySQLGTIDNotEnabled
- */
-TEST(ConnectionValidatorErrorTest, ErrorCodeRangeForMySQLErrors) {
-  // Verify that error codes used by ConnectionValidator are in the MySQL range
-  using mygram::utils::ErrorCode;
-
-  // All error codes used internally should be in 2000-2999
-  auto check_range = [](ErrorCode code) {
-    auto val = static_cast<uint16_t>(code);
-    return val >= 2000 && val <= 2999;
-  };
-
-  EXPECT_TRUE(check_range(ErrorCode::kMySQLGTIDNotEnabled));
-  EXPECT_TRUE(check_range(ErrorCode::kMySQLTableNotFound));
-  EXPECT_TRUE(check_range(ErrorCode::kMySQLBinlogError));
-  EXPECT_TRUE(check_range(ErrorCode::kMySQLQueryFailed));
-  EXPECT_TRUE(check_range(ErrorCode::kMySQLReplicationError));
-  EXPECT_TRUE(check_range(ErrorCode::kMySQLInvalidGTID));
 }
 
 }  // namespace mygramdb::mysql

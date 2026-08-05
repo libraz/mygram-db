@@ -477,57 +477,6 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
   }
 }
 
-/**
- * @brief ROWS event flags (from post-header)
- */
-constexpr uint16_t ROWS_EVENT_END_OF_STATEMENT = 0x0001;
-constexpr uint16_t ROWS_EVENT_EXTRA_DATA_PRESENT = 0x0002;
-
-/**
- * @brief Extra row info type codes
- */
-enum class ExtraRowInfoType : uint8_t {
-  NDB = 0,       // MySQL Cluster (NDB) info
-  PART = 1,      // Partition info
-  JSON_DIFF = 2  // JSON partial update diff
-};
-
-/**
- * @brief Parse extra_row_info section
- *
- * Format: [length: 2 bytes][data: length-2 bytes]
- * Data contains TLV (Type-Length-Value) encoded sections
- *
- * @param ptr Pointer to extra_row_info start (will be updated)
- * @param end Pointer to buffer end
- * @param flags ROWS event flags
- * @return Size of extra_row_info section (including length field)
- */
-inline size_t skip_extra_row_info(const unsigned char** ptr, const unsigned char* end, uint16_t flags) {
-  // Check if extra_row_info is present
-  if (!(flags & ROWS_EVENT_EXTRA_DATA_PRESENT)) {
-    return 0;  // No extra data
-  }
-
-  // Read length field (2 bytes)
-  if (*ptr + 2 > end) {
-    return 0;  // Invalid
-  }
-
-  uint16_t extra_data_len = uint2korr(*ptr);
-  *ptr += 2;
-
-  // extra_data_len includes the 2-byte length field itself
-  if (extra_data_len < 2 || *ptr + (extra_data_len - 2) > end) {
-    return 0;  // Invalid length
-  }
-
-  // Skip the extra data (we don't parse it for now)
-  *ptr += (extra_data_len - 2);
-
-  return extra_data_len;
-}
-
 }  // namespace mygramdb::mysql::binlog_util
 
 // NOLINTEND(cppcoreguidelines-pro-bounds-*,cppcoreguidelines-avoid-*,cppcoreguidelines-pro-type-vararg,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return,readability-redundant-casting,readability-math-missing-parentheses,readability-implicit-bool-conversion,modernize-avoid-c-arrays)

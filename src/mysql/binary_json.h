@@ -15,6 +15,8 @@
 
 namespace mygramdb::mysql {
 
+constexpr size_t kMaxBinaryJsonOutputBytes = 64U * 1024U * 1024U;
+
 /**
  * Decode one MySQL binary-JSON value to canonical JSON text.
  *
@@ -22,6 +24,10 @@ namespace mygramdb::mysql {
  * unsupported values are rejected instead of being exposed as binary text.
  */
 mygram::utils::Expected<std::string, mygram::utils::Error> DecodeBinaryJson(const unsigned char* data, size_t size);
+
+/** Decode with an explicit output budget (primarily for bounded callers and tests). */
+mygram::utils::Expected<std::string, mygram::utils::Error> DecodeBinaryJson(const unsigned char* data, size_t size,
+                                                                            size_t max_output_bytes);
 
 }  // namespace mygramdb::mysql
 

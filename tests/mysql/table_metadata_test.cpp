@@ -68,6 +68,34 @@ TEST_F(TableMetadataCacheTest, AddMultipleTables) {
   EXPECT_EQ(cache_.Get(3)->database_name, "db2");
 }
 
+TEST_F(TableMetadataCacheTest, NewTableMapIdReplacesStaleIdForSameTable) {
+  auto first = CreateTestMetadata(1, "db1", "table1");
+  first.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  auto replacement = first;
+  replacement.table_id = 99;
+
+  EXPECT_EQ(cache_.AddOrUpdate(1, first), TableMetadataCache::AddResult::kAdded);
+  EXPECT_EQ(cache_.AddOrUpdate(99, replacement), TableMetadataCache::AddResult::kUpdated);
+
+  EXPECT_EQ(cache_.Size(), 1U);
+  EXPECT_EQ(cache_.Get(1), nullptr);
+  ASSERT_NE(cache_.Get(99), nullptr);
+  EXPECT_EQ(cache_.Get(99)->table_name, "table1");
+}
+
+TEST_F(TableMetadataCacheTest, NewTableMapIdPreservesSchemaChangeDetection) {
+  auto first = CreateTestMetadata(1, "db1", "table1");
+  first.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  auto changed = CreateTestMetadata(99, "db1", "table1");
+  changed.columns.push_back({ColumnType::LONGLONG, "id", 0, false, false});
+
+  cache_.AddOrUpdate(1, first);
+  EXPECT_EQ(cache_.AddOrUpdate(99, changed), TableMetadataCache::AddResult::kSchemaChanged);
+  EXPECT_EQ(cache_.Size(), 1U);
+  EXPECT_EQ(cache_.Get(1), nullptr);
+  ASSERT_NE(cache_.Get(99), nullptr);
+}
+
 TEST_F(TableMetadataCacheTest, UpdateExistingEntry) {
   cache_.Add(1, CreateTestMetadata(1, "db1", "old_name"));
   EXPECT_EQ(cache_.Get(1)->table_name, "old_name");

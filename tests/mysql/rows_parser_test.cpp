@@ -335,6 +335,35 @@ TEST_F(RowsParserTest, ParseVarcharRow) {
   EXPECT_EQ("test", row.GetColumnValue("name"));
 }
 
+TEST_F(RowsParserTest, EmptyStringPrimaryKeyIsPresentAndNotNull) {
+  TableMetadata table_meta;
+  table_meta.table_id = 101;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "test_table";
+
+  ColumnMetadata col_id;
+  col_id.type = ColumnType::VARCHAR;
+  col_id.name = "id";
+  col_id.metadata = 255;
+  table_meta.columns.push_back(col_id);
+
+  ColumnMetadata col_content;
+  col_content.type = ColumnType::VARCHAR;
+  col_content.name = "content";
+  col_content.metadata = 255;
+  table_meta.columns.push_back(col_content);
+
+  auto buffer = CreateWriteRowsEvent(table_meta, {{"", "empty primary key document"}});
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "content",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(result->size(), 1U);
+  EXPECT_EQ(result->front().primary_key, "");
+  EXPECT_TRUE(result->front().primary_key_present);
+  EXPECT_FALSE(result->front().primary_key_null);
+}
+
 TEST_F(RowsParserTest, ParseTextRow) {
   // Create table metadata
   TableMetadata table_meta;
@@ -609,10 +638,10 @@ TEST_F(RowsParserTest, ExtractFiltersDateAndFractionalTimestamp) {
   auto filters = ExtractFilters(row_data, filter_configs, "+00:00");
 
   ASSERT_EQ(filters.size(), 2);
-  ASSERT_TRUE(std::holds_alternative<uint64_t>(filters["published_on"]));
-  ASSERT_TRUE(std::holds_alternative<uint64_t>(filters["updated_at"]));
-  EXPECT_EQ(std::get<uint64_t>(filters["published_on"]), 1704153600);
-  EXPECT_EQ(std::get<uint64_t>(filters["updated_at"]), 1704153600);
+  ASSERT_TRUE(std::holds_alternative<int64_t>(filters["published_on"]));
+  ASSERT_TRUE(std::holds_alternative<int64_t>(filters["updated_at"]));
+  EXPECT_EQ(std::get<int64_t>(filters["published_on"]), 1704153600);
+  EXPECT_EQ(std::get<int64_t>(filters["updated_at"]), 1704153600);
 }
 
 TEST_F(RowsParserTest, ExtractFiltersPreservesPreEpochDateAsSignedEpoch) {
@@ -1162,6 +1191,32 @@ TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
   EXPECT_EQ("2024-11-25 14:40:00.123456", result->front().GetColumnValue("dt_col"));
 }
 
+TEST_F(DateTimeParsingTest, ZeroTimestampMatchesSnapshotCanonicalText) {
+  const std::array<unsigned char, 4> zero_timestamp{};
+
+  auto legacy = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIMESTAMP), zero_timestamp.data(), 0, false,
+                                           zero_timestamp.data() + zero_timestamp.size(), false);
+  ASSERT_TRUE(legacy.has_value()) << legacy.error().message();
+  EXPECT_EQ(*legacy, CanonicalizeColumnValue("0000-00-00 00:00:00", CanonicalValueKind::kTemporal));
+
+  std::array<unsigned char, 7> zero_timestamp2{};
+  auto modern = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIMESTAMP2), zero_timestamp2.data(), 6,
+                                           false, zero_timestamp2.data() + zero_timestamp2.size(), false);
+  ASSERT_TRUE(modern.has_value()) << modern.error().message();
+  EXPECT_EQ(*modern, CanonicalizeColumnValue("0000-00-00 00:00:00.000000", CanonicalValueKind::kTemporal));
+}
+
+TEST_F(DateTimeParsingTest, ZeroTimestampRejectsNonZeroFraction) {
+  std::array<unsigned char, 7> invalid_timestamp2{};
+  invalid_timestamp2.back() = 1;
+
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIMESTAMP2), invalid_timestamp2.data(), 6,
+                                           false, invalid_timestamp2.data() + invalid_timestamp2.size(), false);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
+}
+
 TEST_F(DateTimeParsingTest, Timestamp2Precision1UsesMySQLStoredByteScale) {
   auto timestamp_bytes = EncodeTimestamp2(1732545600);
   timestamp_bytes.push_back(0x0A);  // MySQL stores .1 as 10 in the single fractional byte.
@@ -1654,6 +1709,16 @@ TEST_F(RowsParserTest, FloatTypeUsesRoundTripPrecision) {
   EXPECT_FLOAT_EQ(std::stof(*decoded), value);
 }
 
+TEST_F(RowsParserTest, FloatBinlogValueMatchesCanonicalSnapshotText) {
+  const float value = 3.14f;
+  const auto bytes = EncodeFloat(value);
+  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::FLOAT), bytes.data(), 0, false,
+                                                  bytes.data() + bytes.size());
+
+  ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
+  EXPECT_EQ(*decoded, CanonicalizeColumnValue("3.14", mygramdb::mysql::CanonicalValueKind::kFloat));
+}
+
 /**
  * @test DOUBLE type should be parsed correctly
  */
@@ -1717,6 +1782,16 @@ TEST_F(RowsParserTest, DoubleTypeUsesRoundTripPrecision) {
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
   EXPECT_NE(*decoded, std::to_string(value));
   EXPECT_DOUBLE_EQ(std::stod(*decoded), value);
+}
+
+TEST_F(RowsParserTest, DoubleBinlogValueMatchesCanonicalSnapshotText) {
+  const double value = 0.12345678901234566;
+  const auto bytes = EncodeDouble(value);
+  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DOUBLE), bytes.data(), 0, false,
+                                                  bytes.data() + bytes.size());
+
+  ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
+  EXPECT_EQ(*decoded, CanonicalizeColumnValue("0.12345678901234566", mygramdb::mysql::CanonicalValueKind::kDouble));
 }
 
 /**

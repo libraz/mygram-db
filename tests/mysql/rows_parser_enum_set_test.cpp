@@ -269,6 +269,30 @@ TEST_F(EnumSetDecodeTest, StringEncodedEnumReportsTruncatedPackLength) {
   EXPECT_FALSE(result.has_value());
 }
 
+TEST_F(EnumSetDecodeTest, NativeAndStringEncodedEnumRejectTheSameInvalidPackLength) {
+  unsigned char data[] = {0x01, 0x02, 0x03};
+  const auto native = DecodeFieldValue(247, data, 3, false, data + sizeof(data), false);
+  const auto string_encoded =
+      DecodeFieldValue(254, data, static_cast<uint16_t>((247 << 8) | 3), false, data + sizeof(data), false);
+
+  ASSERT_FALSE(native.has_value());
+  ASSERT_FALSE(string_encoded.has_value());
+  EXPECT_EQ(native.error().code(), string_encoded.error().code());
+  EXPECT_EQ(native.error().message(), string_encoded.error().message());
+}
+
+TEST_F(EnumSetDecodeTest, NativeAndStringEncodedSetRejectTheSameInvalidPackLength) {
+  unsigned char data[] = {0};
+  const auto native = DecodeFieldValue(248, data, 9, false, data + sizeof(data), false);
+  const auto string_encoded =
+      DecodeFieldValue(254, data, static_cast<uint16_t>((248 << 8) | 9), false, data + sizeof(data), false);
+
+  ASSERT_FALSE(native.has_value());
+  ASSERT_FALSE(string_encoded.has_value());
+  EXPECT_EQ(native.error().code(), string_encoded.error().code());
+  EXPECT_EQ(native.error().message(), string_encoded.error().message());
+}
+
 TEST_F(EnumSetDecodeTest, TinyMediumAndLongBlobTypesFallbackToBlobDecoder) {
   {
     unsigned char data[] = {3, 'a', 'b', 'c'};

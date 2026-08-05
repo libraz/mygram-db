@@ -20,6 +20,8 @@ enum class CanonicalValueKind : uint8_t {
   kText,
   kDecimal,
   kTemporal,
+  kFloat,
+  kDouble,
 };
 
 /**

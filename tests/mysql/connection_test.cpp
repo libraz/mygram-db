@@ -167,6 +167,23 @@ TEST(MySQLConnectionTest, IsGTIDModeEnabledWithoutConnection) {
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLDisconnected);
 }
 
+TEST(MySQLConnectionTest, QueryErrorClassificationPreservesRetryableTransportFailures) {
+  using mygram::utils::ErrorCode;
+
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(2006), ErrorCode::kMySQLDisconnected);  // CR_SERVER_GONE_ERROR
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(2013), ErrorCode::kMySQLDisconnected);  // CR_SERVER_LOST/read timeout
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(2055), ErrorCode::kMySQLDisconnected);  // CR_SERVER_LOST_EXTENDED
+}
+
+TEST(MySQLConnectionTest, QueryErrorClassificationKeepsSemanticFailuresTerminal) {
+  using mygram::utils::ErrorCode;
+
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(1146), ErrorCode::kMySQLTableNotFound);
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(1054), ErrorCode::kMySQLColumnNotFound);
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(1045), ErrorCode::kPermissionDenied);
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(1064), ErrorCode::kMySQLQueryFailed);
+}
+
 /**
  * @brief Test MySQLResult RAII wrapper prevents memory leak
  *

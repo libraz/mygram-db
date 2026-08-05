@@ -218,8 +218,10 @@ TEST_F(BinlogReaderFixture, SkipsEventsMissingRequiredFilters) {
 TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
   reader_->SetCurrentGTID("uuid:10");
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10");
+  EXPECT_GT(reader_->GetLastAppliedUnixTime(), 0);
   reader_->UpdateCurrentGTID("uuid:11");
   EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10-11");
+  EXPECT_GT(reader_->GetLastAppliedUnixTime(), 0);
 }
 
 TEST_F(BinlogReaderFixture, EmptyParseForMonitoredRowsEventIsFailure) {

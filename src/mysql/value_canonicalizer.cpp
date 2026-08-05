@@ -9,9 +9,33 @@
 
 #include <ctime>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace mygramdb::mysql {
+
+namespace {
+
+template <typename T>
+std::string CanonicalizeFloatingPoint(std::string_view value) {
+  std::istringstream input{std::string(value)};
+  input.imbue(std::locale::classic());
+  T parsed{};
+  if (!(input >> parsed)) {
+    return std::string(value);
+  }
+  input >> std::ws;
+  if (!input.eof()) {
+    return std::string(value);
+  }
+
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << std::setprecision(std::numeric_limits<T>::max_digits10) << parsed;
+  return output.str();
+}
+
+}  // namespace
 
 std::string CanonicalizeColumnValue(std::string_view value, CanonicalValueKind kind) {
   if (value.empty() || kind == CanonicalValueKind::kText) {
@@ -28,6 +52,13 @@ std::string CanonicalizeColumnValue(std::string_view value, CanonicalValueKind k
     canonical.append(fractional.substr(0, 6));
     canonical.append(6 - std::min<size_t>(fractional.size(), 6), '0');
     return canonical;
+  }
+
+  if (kind == CanonicalValueKind::kFloat) {
+    return CanonicalizeFloatingPoint<float>(value);
+  }
+  if (kind == CanonicalValueKind::kDouble) {
+    return CanonicalizeFloatingPoint<double>(value);
   }
 
   size_t sign_length = (value.front() == '-' || value.front() == '+') ? 1 : 0;
@@ -68,6 +99,21 @@ mygram::utils::Expected<std::string, mygram::utils::Error> FormatUtcTimestamp(ui
 
   if (precision > 6 || microseconds >= 1000000) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid TIMESTAMP fractional value"));
+  }
+
+  // MySQL reserves an all-zero binary TIMESTAMP for the legacy zero temporal
+  // value. The snapshot connection renders it as zero calendar text, so keep
+  // the binlog path identical instead of interpreting it as the Unix epoch.
+  if (epoch_seconds == 0) {
+    if (microseconds != 0) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLInvalidMetadata, "Zero TIMESTAMP has a non-zero fractional value"));
+    }
+    std::string zero_timestamp = "0000-00-00 00:00:00";
+    if (precision > 0) {
+      zero_timestamp += ".000000";
+    }
+    return zero_timestamp;
   }
 
   const std::time_t timestamp = static_cast<std::time_t>(epoch_seconds);

@@ -41,8 +41,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
                                         storage::DocumentStore& doc_store, const config::TableConfig& table_config,
                                         const config::MysqlConfig& mysql_config, server::ServerStats* stats,
                                         cache::CacheManager* cache_manager, server::BM25Stats* bm25_stats) {
-  if (event.type == BinlogEventType::UPDATE && !event.old_primary_key.empty() &&
-      event.old_primary_key != event.primary_key) {
+  if (event.type == BinlogEventType::UPDATE && event.HasOldPrimaryKey() && event.old_primary_key != event.primary_key) {
     BinlogEvent delete_event = BinlogEvent::CreateDelete(
         event.table_name, event.old_primary_key, event.old_text.empty() ? event.text : event.old_text, event.gtid);
     delete_event.text_state = event.old_text_state;

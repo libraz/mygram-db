@@ -27,6 +27,7 @@ struct ValidationResult {
   bool valid = false;
   bool failover_detected = false;  ///< True when server UUID changed
   std::string error_message;
+  std::optional<mygram::utils::ErrorCode> error_code;
   std::vector<std::string> warnings;
   std::optional<std::string> server_uuid;  ///< Detected server UUID
 
@@ -53,6 +54,7 @@ class ConnectionValidator {
   };
 
   static bool IsValidIdentifier(std::string_view identifier);
+  static bool IsSupportedBinlogFormatValue(std::string_view value);
   static bool IsSupportedBinlogChecksumValue(std::string_view value);
   static bool ContainsTaggedGtid(std::string_view gtid_set);
 

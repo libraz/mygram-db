@@ -114,10 +114,12 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     SetLastError(MakeError(ErrorCode::kMySQLBinlogError, "Binlog reader is already running"));
     return MakeUnexpected(GetLastErrorObject());
   }
+  starting_.store(true, std::memory_order_release);
 
   // RAII guard to manage all resources on failure
   struct StartupGuard {
     std::atomic<bool>& running_flag;
+    std::atomic<bool>& starting_flag;
     std::unique_ptr<std::thread>& worker_thread;
     std::unique_ptr<std::thread>& reader_thread;
     std::unique_ptr<Connection>& binlog_conn;
@@ -128,11 +130,12 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     std::condition_variable& queue_full_cv;
     bool success = false;
 
-    StartupGuard(std::atomic<bool>& running, std::unique_ptr<std::thread>& worker, std::unique_ptr<std::thread>& reader,
-                 std::unique_ptr<Connection>& conn, std::unique_ptr<Connection>& meta_conn,
-                 std::unique_ptr<IBinlogStream>& binlog_stream, std::atomic<bool>& stop,
-                 std::condition_variable& event_cv, std::condition_variable& event_full_cv)
+    StartupGuard(std::atomic<bool>& running, std::atomic<bool>& starting, std::unique_ptr<std::thread>& worker,
+                 std::unique_ptr<std::thread>& reader, std::unique_ptr<Connection>& conn,
+                 std::unique_ptr<Connection>& meta_conn, std::unique_ptr<IBinlogStream>& binlog_stream,
+                 std::atomic<bool>& stop, std::condition_variable& event_cv, std::condition_variable& event_full_cv)
         : running_flag(running),
+          starting_flag(starting),
           worker_thread(worker),
           reader_thread(reader),
           binlog_conn(conn),
@@ -173,6 +176,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       // Note: should_stop is NOT reset here — the next Start() call
       // sets should_stop_ = false explicitly before launching threads.
       running_flag = false;
+      starting_flag.store(false, std::memory_order_release);
     }
 
     StartupGuard(const StartupGuard&) = delete;
@@ -181,8 +185,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     StartupGuard& operator=(StartupGuard&&) = delete;
   };
 
-  StartupGuard guard(running_, worker_thread_, reader_thread_, binlog_connection_, metadata_connection_, binlog_stream_,
-                     should_stop_, queue_cv_, queue_full_cv_);
+  StartupGuard guard(running_, starting_, worker_thread_, reader_thread_, binlog_connection_, metadata_connection_,
+                     binlog_stream_, should_stop_, queue_cv_, queue_full_cv_);
 
   // Validate server_id (must be non-zero for replication)
   if (config_.server_id == 0) {
@@ -377,6 +381,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
         .Field("gtid", current_gtid_)
         .Field("server_id", static_cast<int64_t>(config_.server_id))
         .Info();
+    starting_.store(false, std::memory_order_release);
     guard.success = true;  // Mark start as successful - StartupGuard won't clean up
     return {};
   } catch (const std::exception& e) {
@@ -441,6 +446,7 @@ void BinlogReader::Stop() {
   metadata_connection_.reset();
 
   running_ = false;
+  starting_.store(false, std::memory_order_release);
   active_threads_.store(0, std::memory_order_release);
   should_stop_.store(false, std::memory_order_relaxed);  // Reset for next Start()
   processing_failure_reconnect_requested_.store(false, std::memory_order_relaxed);
@@ -460,19 +466,27 @@ void BinlogReader::SetCurrentGTID(const std::string& gtid) {
     std::scoped_lock lock(gtid_mutex_);
     current_gtid_ = gtid;
     position_state_.ResetApplied();
-    // Update executed_gtid_set_ for REPLICATION STATUS display only.
-    // Reconnection always uses current_gtid_ (via ConvertSingleGtidToRange),
-    // never executed_gtid_set_, to prevent skipping undelivered events.
-    if (gtid.find('-') != std::string::npos || gtid.find(',') != std::string::npos) {
-      executed_gtid_set_ = gtid;
-    }
   }
   // SetCurrentGTID is used after SYNC/DUMP LOAD has replaced the indexed
   // state. That explicit operator action is the only in-process recovery from
   // a persistent schema incompatibility.
   schema_incompatible_.store(false, std::memory_order_release);
   SetLastError(mygram::utils::Error{});
+  last_applied_unix_time_.store(
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
+      std::memory_order_release);
   mygram::utils::StructuredLog().Event("binlog_gtid_set").Field("gtid", gtid).Info();
+}
+
+int64_t BinlogReader::GetSecondsSinceLastApplied() const {
+  const int64_t last_applied = GetLastAppliedUnixTime();
+  if (last_applied <= 0) {
+    return -1;
+  }
+
+  const int64_t now =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  return std::max<int64_t>(0, now - last_applied);
 }
 
 size_t BinlogReader::GetQueueSize() const {

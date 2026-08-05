@@ -25,15 +25,17 @@
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic) - UUID binary parsing
 
 namespace mygramdb::mysql {
-namespace {
 
-mygram::utils::ErrorCode QueryErrorCode(unsigned int native_error) {
+mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_error) {
   // Stable server error numbers from the MySQL/MariaDB client protocol.
   constexpr unsigned int kAccessDeniedDatabase = 1044;
   constexpr unsigned int kAccessDeniedUser = 1045;
   constexpr unsigned int kUnknownColumn = 1054;
   constexpr unsigned int kCommandDenied = 1142;
   constexpr unsigned int kNoSuchTable = 1146;
+  constexpr unsigned int kServerGoneAway = 2006;      // CR_SERVER_GONE_ERROR
+  constexpr unsigned int kServerLost = 2013;          // CR_SERVER_LOST (includes read timeout)
+  constexpr unsigned int kServerLostExtended = 2055;  // CR_SERVER_LOST_EXTENDED
   switch (native_error) {
     case kNoSuchTable:
       return mygram::utils::ErrorCode::kMySQLTableNotFound;
@@ -43,12 +45,18 @@ mygram::utils::ErrorCode QueryErrorCode(unsigned int native_error) {
     case kAccessDeniedUser:
     case kCommandDenied:
       return mygram::utils::ErrorCode::kPermissionDenied;
+    case kServerGoneAway:
+    case kServerLost:
+    case kServerLostExtended:
+      // Schema validation runs after reconnect. A metadata query can lose its
+      // transport (including a read timeout) even though Connect() succeeded;
+      // preserving this as a retryable transport error prevents a transient
+      // lock wait or proxy reset from permanently stopping replication.
+      return mygram::utils::ErrorCode::kMySQLDisconnected;
     default:
       return mygram::utils::ErrorCode::kMySQLQueryFailed;
   }
 }
-
-}  // namespace
 
 // GTID implementation
 
@@ -130,10 +138,10 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, "MySQL handle not initialized"));
   }
 
-  // Enable RSA public key retrieval for caching_sha2_password without SSL.
+  // Enable RSA public key retrieval only for caching_sha2_password without SSL.
   // Required for MySQL 8.4+ where caching_sha2_password is the default plugin
   // and mysql_native_password may be unavailable (removed in MySQL 9.x).
-  bool get_pubkey = true;
+  bool get_pubkey = !config_.ssl_enable;
   mysql_options(mysql_, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &get_pubkey);
 
   // Set connection timeouts (with error checking)
@@ -167,7 +175,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     // Set SSL mode to REQUIRED
     unsigned int ssl_mode = SSL_MODE_REQUIRED;
     if (config_.ssl_verify_server_cert) {
-      ssl_mode = SSL_MODE_VERIFY_CA;  // Verify CA certificate
+      ssl_mode = SSL_MODE_VERIFY_IDENTITY;  // Verify CA chain and server hostname
     }
     if (mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode) != 0) {
       mygram::utils::StructuredLog()
@@ -421,7 +429,7 @@ mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::Execute(c
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "execute_query").Field("query", query).Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
-    const auto code = QueryErrorCode(mysql_errno(mysql_));
+    const auto code = internal::ClassifyQueryErrorCode(mysql_errno(mysql_));
     std::string error = GetMySQLErrorMessage();
     mygram::utils::LogMySQLQueryError(query, error);
     return MakeUnexpected(MakeError(code, error, query));
@@ -429,9 +437,10 @@ mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::Execute(c
 
   MYSQL_RES* result = mysql_store_result(mysql_);
   if ((result == nullptr) && mysql_field_count(mysql_) > 0) {
+    const auto code = internal::ClassifyQueryErrorCode(mysql_errno(mysql_));
     std::string error = GetMySQLErrorMessage();
     mygram::utils::LogMySQLQueryError(query, "Failed to store result: " + error);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
+    return MakeUnexpected(MakeError(code, error, query));
   }
 
   return MySQLResult(result);
@@ -454,16 +463,18 @@ mygram::utils::Expected<MySQLResult, mygram::utils::Error> Connection::ExecuteSt
       .Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
+    const auto code = internal::ClassifyQueryErrorCode(mysql_errno(mysql_));
     std::string error = GetMySQLErrorMessage();
     mygram::utils::LogMySQLQueryError(query, error);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
+    return MakeUnexpected(MakeError(code, error, query));
   }
 
   MYSQL_RES* result = mysql_use_result(mysql_);
   if ((result == nullptr) && mysql_field_count(mysql_) > 0) {
+    const auto code = internal::ClassifyQueryErrorCode(mysql_errno(mysql_));
     std::string error = GetMySQLErrorMessage();
     mygram::utils::LogMySQLQueryError(query, "Failed to start streaming result: " + error);
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
+    return MakeUnexpected(MakeError(code, error, query));
   }
 
   return MySQLResult(result);
@@ -482,6 +493,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(co
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "execute_update").Field("query", query).Debug();
 
   if (mysql_query(mysql_, query.c_str()) != 0) {
+    const auto code = internal::ClassifyQueryErrorCode(mysql_errno(mysql_));
     std::string error = GetMySQLErrorMessage();
     mygram::utils::StructuredLog()
         .Event("mysql_error")
@@ -489,7 +501,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ExecuteUpdate(co
         .Field("query", query)
         .Field("error", error)
         .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, error, query));
+    return MakeUnexpected(MakeError(code, error, query));
   }
 
   return {};

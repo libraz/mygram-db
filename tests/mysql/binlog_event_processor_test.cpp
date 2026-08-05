@@ -13,15 +13,30 @@
 #include <chrono>
 #include <thread>
 
+#include "cache/cache_key.h"
 #include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_ast.h"
+#include "query/query_normalizer.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
+
+namespace {
+
+void AttachCanonicalCacheKey(query::Query& query, const index::Index& index) {
+  const auto text_normalizer = [&index](std::string_view text) { return index.NormalizeText(text); };
+  const std::string normalized = cache::QueryNormalizer::Normalize(query, text_normalizer);
+  const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
+  query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  query.cache_key_discriminator = normalized;
+  query.cache_key_is_canonical = true;
+}
+
+}  // namespace
 
 /**
  * @brief Test fixture for BinlogEventProcessor
@@ -71,6 +86,35 @@ TEST_F(BinlogEventProcessorTest, InsertIsAtomic) {
   auto results = index_->SearchAnd({"te"});
   ASSERT_EQ(results.size(), 1);
   EXPECT_EQ(results[0], doc_id);
+}
+
+TEST_F(BinlogEventProcessorTest, EmptyStringPrimaryKeyIsProcessed) {
+  BinlogEvent event = BinlogEvent::CreateInsert("test_table", "", "empty primary key document");
+  ASSERT_TRUE(event.IsValid());
+
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  auto doc_id = doc_store_->GetDocId("");
+  ASSERT_TRUE(doc_id.has_value());
+  EXPECT_EQ(doc_store_->GetPrimaryKey(*doc_id), "");
+  EXPECT_EQ(doc_store_->GetOriginalText(*doc_id), std::optional<std::string>("empty primary key document"));
+}
+
+TEST_F(BinlogEventProcessorTest, PrimaryKeyChangeFromEmptyStringRemovesOldDocument) {
+  BinlogEvent insert_event = BinlogEvent::CreateInsert("test_table", "", "old document");
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  BinlogEvent update_event = BinlogEvent::CreateUpdate("test_table", "new-key", "new document", "old document");
+  update_event.old_primary_key = "";
+  update_event.old_primary_key_present = true;
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(update_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  EXPECT_FALSE(doc_store_->GetDocId("").has_value());
+  auto new_doc_id = doc_store_->GetDocId("new-key");
+  ASSERT_TRUE(new_doc_id.has_value());
+  EXPECT_EQ(doc_store_->GetOriginalText(*new_doc_id), std::optional<std::string>("new document"));
 }
 
 /**
@@ -1202,6 +1246,7 @@ TEST_F(BinlogEventProcessorTest, CacheInvalidationUsesNormalizedBinlogText) {
   query.search_text = "abc";
   query.limit = 100;
   query.limit_explicit = false;
+  AttachCanonicalCacheKey(query, *index_);
 
   ASSERT_TRUE(cache_manager.Insert(query, {1}, {"ab", "bc"}, 15.0, index_->GetNgramSize(), index_->GetKanjiNgramSize(),
                                    index_->GetCrossBoundaryNgrams()));
@@ -1238,6 +1283,7 @@ TEST_F(BinlogEventProcessorTest, AlterTableClearsTableCacheWithoutClearingData) 
   query.table = table_config_.name;
   query.search_text = "alpha";
   query.limit = 100;
+  AttachCanonicalCacheKey(query, *index_);
   ASSERT_TRUE(cache_manager.Insert(query, {1}, {"al", "lp", "ph", "ha"}, 15.0, index_->GetNgramSize(),
                                    index_->GetKanjiNgramSize(), index_->GetCrossBoundaryNgrams()));
   ASSERT_TRUE(cache_manager.Lookup(query).has_value());

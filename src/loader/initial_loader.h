@@ -10,6 +10,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 
@@ -173,8 +174,8 @@ class InitialLoader {
   /**
    * @brief Extract primary key from row using pre-built field index map
    */
-  std::string ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
-                                const FieldIndexMap& field_map) const;
+  std::optional<std::string> ExtractPrimaryKey(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields,
+                                               const FieldIndexMap& field_map) const;
 
   /**
    * @brief Extract filter values from row using pre-built field index map

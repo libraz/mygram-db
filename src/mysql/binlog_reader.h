@@ -78,9 +78,15 @@ struct BinlogEvent {
   DDLType ddl_type = DDLType::kUnknown;  // DDL sub-type (only meaningful when type == DDL)
   std::string table_name;
   std::string primary_key;
+  // Explicit presence keeps an empty-string key distinct from a key column
+  // omitted by a minimal row image or represented as SQL NULL.
+  bool primary_key_present = false;
+  bool primary_key_null = false;
   std::string old_primary_key;  // Before-image PK for UPDATE events that change the primary key
-  std::string text;             // Normalized text for INSERT/UPDATE (after image for UPDATE)
-  std::string old_text;         // Before image text for UPDATE events (empty for INSERT/DELETE)
+  bool old_primary_key_present = false;
+  bool old_primary_key_null = false;
+  std::string text;      // Normalized text for INSERT/UPDATE (after image for UPDATE)
+  std::string old_text;  // Before image text for UPDATE events (empty for INSERT/DELETE)
   TextValueState text_state = TextValueState::kAbsent;
   TextValueState old_text_state = TextValueState::kAbsent;
   storage::FilterMap filters;
@@ -103,7 +109,7 @@ struct BinlogEvent {
       case BinlogEventType::INSERT:
       case BinlogEventType::UPDATE:
       case BinlogEventType::DELETE:
-        return !table_name.empty() && !primary_key.empty();
+        return !table_name.empty() && HasPrimaryKey();
       case BinlogEventType::DDL:
         return !table_name.empty();
       case BinlogEventType::COMMIT:
@@ -112,6 +118,14 @@ struct BinlogEvent {
       default:
         return false;
     }
+  }
+
+  [[nodiscard]] bool HasPrimaryKey() const {
+    return (primary_key_present || !primary_key.empty()) && !primary_key_null;
+  }
+
+  [[nodiscard]] bool HasOldPrimaryKey() const {
+    return (old_primary_key_present || !old_primary_key.empty()) && !old_primary_key_null;
   }
 
   /**
@@ -129,6 +143,7 @@ struct BinlogEvent {
     event.type = BinlogEventType::INSERT;
     event.table_name = table;
     event.primary_key = primary_key_val;
+    event.primary_key_present = true;
     event.text = txt;
     event.text_state = TextValueState::kPresent;
     event.gtid = gtid_val;
@@ -152,6 +167,7 @@ struct BinlogEvent {
     event.type = BinlogEventType::UPDATE;
     event.table_name = table;
     event.primary_key = primary_key_val;
+    event.primary_key_present = true;
     event.text = new_txt;
     event.old_text = old_txt;
     event.text_state = TextValueState::kPresent;
@@ -175,6 +191,7 @@ struct BinlogEvent {
     event.type = BinlogEventType::DELETE;
     event.table_name = table;
     event.primary_key = primary_key_val;
+    event.primary_key_present = true;
     event.text = txt;
     event.text_state = txt.empty() ? TextValueState::kAbsent : TextValueState::kPresent;
     event.gtid = gtid_val;
@@ -355,6 +372,18 @@ class BinlogReader final : public IBinlogReader {
     return running_.load(std::memory_order_acquire) && active_threads_.load(std::memory_order_acquire) != 0;
   }
 
+  bool IsStarting() const override { return starting_.load(std::memory_order_acquire); }
+
+  ReplicationState GetReplicationState() const override {
+    if (IsRunning()) {
+      return ReplicationState::kRunning;
+    }
+    if (schema_incompatible_.load(std::memory_order_acquire) || !GetLastError().empty()) {
+      return ReplicationState::kFailed;
+    }
+    return ReplicationState::kStopped;
+  }
+
   /**
    * @brief Get current GTID
    */
@@ -371,6 +400,11 @@ class BinlogReader final : public IBinlogReader {
    */
   size_t GetQueueSize() const override;
 
+  std::string GetSourceServerUUID() const override {
+    std::lock_guard<std::mutex> lock(uuid_mutex_);
+    return last_server_uuid_;
+  }
+
   /**
    * @brief Get total events processed
    */
@@ -379,10 +413,19 @@ class BinlogReader final : public IBinlogReader {
   /**
    * @brief Get total CRC32 checksum errors detected
    */
-  uint64_t GetCRCErrors() const { return crc_errors_; }
+  uint64_t GetCRCErrors() const override { return crc_errors_; }
 
   /** True after a configured table DDL changed a monitored schema contract. */
-  bool HasSchemaIncompatibleError() const { return schema_incompatible_.load(std::memory_order_acquire); }
+  bool HasSchemaIncompatibleError() const override { return schema_incompatible_.load(std::memory_order_acquire); }
+
+  mygram::utils::ErrorCode GetLastErrorCode() const override {
+    std::lock_guard<std::mutex> lock(last_error_mutex_);
+    return last_error_.code();
+  }
+
+  int64_t GetLastAppliedUnixTime() const override { return last_applied_unix_time_.load(std::memory_order_acquire); }
+
+  int64_t GetSecondsSinceLastApplied() const override;
 
   /**
    * @brief Get last error message (IBinlogReader interface)
@@ -453,6 +496,7 @@ class BinlogReader final : public IBinlogReader {
   Config config_;
 
   std::atomic<bool> running_{false};
+  std::atomic<bool> starting_{false};
   std::atomic<uint8_t> active_threads_{0};
   std::atomic<bool> should_stop_{false};
   std::atomic<bool> processing_failure_reconnect_requested_{false};
@@ -481,8 +525,8 @@ class BinlogReader final : public IBinlogReader {
   std::atomic<uint64_t> crc_errors_{0};
   std::string current_gtid_;
   ReplicationPositionState position_state_;
-  std::string executed_gtid_set_;  ///< Full GTID set for COM_BINLOG_DUMP_GTID (protected by gtid_mutex_)
   mutable std::mutex gtid_mutex_;
+  std::atomic<int64_t> last_applied_unix_time_{0};
   std::atomic<server::ServerStats*> server_stats_{nullptr};   // Optional server statistics tracker
   std::atomic<cache::CacheManager*> cache_manager_{nullptr};  // Optional cache manager for invalidation
 
@@ -655,14 +699,18 @@ class BinlogReader final : public IBinlogReader {
    */
   bool WaitForReconnectBackoff(int reconnect_attempt);
 
+  /**
+   * @brief Record a retryable processing failure and stop after repeated replay at one position.
+   *
+   * A processing failure leaves the applied GTID unchanged so the event is
+   * replayed after reconnect. Bound repeated failure at that same position to
+   * avoid a healthy connection spinning forever on an unprocessable event.
+   */
+  static bool ShouldStopForRepeatedProcessingFailure(const std::string& applied_gtid, std::string& last_failure_gtid,
+                                                     int& consecutive_failures);
+
   /** Clear each table replay fence once the applied reader position reaches it. */
   void ClearReachedReplayWatermarks(const std::string& applied_gtid);
-
-  /**
-   * @brief Refresh executed GTID set from server
-   * @return true if successful
-   */
-  bool RefreshExecutedGtidSet();
 
   /**
    * @brief Validate binlog connection after (re)connect
