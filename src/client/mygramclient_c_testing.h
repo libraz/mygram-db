@@ -1,5 +1,9 @@
 #pragma once
 
+#ifndef MYGRAMCLIENT_C_TEST_HOOKS
+#error "mygramclient_c_testing.h is available only to test targets"
+#endif
+
 #include <atomic>
 #include <cstdint>
 #include <stdexcept>

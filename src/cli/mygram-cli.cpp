@@ -926,6 +926,8 @@ class MygramClient {
     }
   }
 
+ public:
+  /** Print the interactive command reference. */
   static void PrintHelp() {
     std::cout << "Available commands:\n"
               << "  SEARCH <db.table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
@@ -956,6 +958,7 @@ class MygramClient {
               << "  help - Show this help\n";
   }
 
+ private:
   /**
    * @brief Format the body of a multi-line response by stripping the leading
    *        status line (up to the first newline), normalizing CRLF→LF, and

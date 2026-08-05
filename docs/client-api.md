@@ -12,6 +12,7 @@ The C and C++ clients use the same wire protocol. The table below is the public 
 | TCP host, port, request timeout, receive buffer | `ClientConfig` | `MygramClientConfig_C` or `MygramClientConfigV2_C` |
 | Unix domain socket | `ClientConfig::unix_socket_path` | `MygramClientConfigV2_C::unix_socket_path` |
 | Asynchronous DUMP SAVE completion timeout | `ClientConfig::dump_save_timeout_ms` | `MygramClientConfigV2_C::dump_save_timeout_ms` |
+| Maximum response frame size | `ClientConfig::max_response_bytes` | `MygramClientConfigV2_C::max_response_bytes` |
 
 Use `Search` for literal user text. It quotes standalone reserved words such as `AND`, `FILTER`, and `LIMIT`. Use `SearchRaw` only when the input is an intentional protocol expression such as `alpha AND (xqz OR jkv)`.
 
@@ -42,11 +43,12 @@ config.host = "127.0.0.1";
 config.port = 11016;
 config.timeout_ms = 5000;
 config.dump_save_timeout_ms = 600000;
+config.max_response_bytes = 64 * 1024 * 1024;
 
 MygramClient_C *client = mygramclient_create_v2(&config);
 ```
 
-Set `unix_socket_path` to use a Unix domain socket; it takes precedence over the TCP host and port. `dump_save_timeout_ms` controls the total polling deadline for an asynchronous DUMP SAVE. A zero field uses the C++ client default. The legacy `MygramClientConfig_C` and `mygramclient_create` remain ABI-compatible and support the original TCP fields.
+Set `unix_socket_path` to use a Unix domain socket; it takes precedence over the TCP host and port. `timeout_ms` is a total command deadline, not a timeout reset by each partial receive. `dump_save_timeout_ms` controls the total polling deadline for an asynchronous DUMP SAVE, and `max_response_bytes` bounds one response frame. A zero field uses the C++ client default. The legacy `MygramClientConfig_C` and `mygramclient_create` remain ABI-compatible and support the original TCP fields.
 
 `timeout_ms == 0` and `recv_buffer_size == 0` select the defaults on both the C
 and C++ APIs. Receive buffers larger than 16 MiB are clamped to 16 MiB.

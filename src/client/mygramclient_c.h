@@ -65,6 +65,7 @@ typedef struct {
   uint32_t recv_buffer_size;      // Receive buffer size (default: 65536)
   const char* unix_socket_path;   // UDS path; takes precedence over TCP when non-NULL
   uint32_t dump_save_timeout_ms;  // Async DUMP SAVE deadline (0 = client default)
+  uint64_t max_response_bytes;    // Maximum response frame size (0 = client default 64 MiB)
 } MygramClientConfigV2_C;
 
 /**
@@ -111,6 +112,9 @@ typedef struct {
 } MygramFilter_C;
 
 typedef struct {
+  // Size known by the caller. The prefix through offset is mandatory; fields
+  // beyond struct_size are ignored and receive library defaults so future
+  // appended fields remain ABI-compatible with older callers.
   uint32_t struct_size;
   uint32_t limit;   // 0 = server default
   uint32_t offset;  // 0 = first result

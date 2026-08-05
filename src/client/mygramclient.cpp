@@ -15,6 +15,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -48,6 +49,7 @@ constexpr std::chrono::milliseconds kDumpStatusPollInterval{100};
 constexpr unsigned char kAsciiSpace = 0x20;
 constexpr uint32_t kDefaultClientTimeoutMs = 5000;
 constexpr uint32_t kMaxClientRecvBufferSize = 16U * 1024U * 1024U;
+constexpr uint64_t kDefaultMaxClientResponseBytes = 64ULL * 1024ULL * 1024ULL;
 
 std::string_view FilterOpToWire(FilterOp op) {
   switch (op) {
@@ -285,6 +287,104 @@ std::vector<std::pair<std::string, std::string>> ParseColonKeyValueLines(const s
     pairs.emplace_back(std::move(key), std::move(value));
   }
   return pairs;
+}
+
+Expected<CacheStatistics, Error> ParseCacheStatisticsResponse(const std::string& response) {
+  CacheStatistics stats;
+  bool saw_enabled = false;
+  bool saw_total_queries = false;
+
+  auto parse_uint = [](const std::string& key, const std::string& value) -> Expected<uint64_t, Error> {
+    auto parsed = mygram::utils::ParseNumeric<uint64_t>(value);
+    if (!parsed) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kClientInvalidResponse, "Invalid CACHE STATS integer for '" + key + "': " + value));
+    }
+    return *parsed;
+  };
+  auto parse_double = [](const std::string& key, const std::string& value) -> Expected<double, Error> {
+    auto parsed = mygram::utils::ParseNumeric<double>(value);
+    if (!parsed) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kClientInvalidResponse, "Invalid CACHE STATS number for '" + key + "': " + value));
+    }
+    return *parsed;
+  };
+  using UintField = uint64_t CacheStatistics::*;
+  static constexpr std::array<std::pair<std::string_view, UintField>, 19> kUintFields{{
+      {"total_queries", &CacheStatistics::total_queries},
+      {"cache_hits", &CacheStatistics::cache_hits},
+      {"cache_misses", &CacheStatistics::cache_misses},
+      {"current_entries", &CacheStatistics::current_entries},
+      {"current_memory_bytes", &CacheStatistics::current_memory_bytes},
+      {"invalidation_index_memory_bytes", &CacheStatistics::invalidation_index_memory_bytes},
+      {"accounted_memory_bytes", &CacheStatistics::accounted_memory_bytes},
+      {"evictions", &CacheStatistics::evictions},
+      {"ttl_expirations", &CacheStatistics::ttl_expirations},
+      {"rejection_count", &CacheStatistics::rejection_count},
+      {"rejection_oversize", &CacheStatistics::rejection_oversize},
+      {"rejection_memory_budget", &CacheStatistics::rejection_memory_budget},
+      {"rejection_duplicate", &CacheStatistics::rejection_duplicate},
+      {"stale_entry_removals", &CacheStatistics::stale_entry_removals},
+      {"decompression_failures", &CacheStatistics::decompression_failures},
+      {"stale_lru_entries", &CacheStatistics::stale_lru_entries},
+      {"invalidations_immediate", &CacheStatistics::invalidations_immediate},
+      {"invalidations_deferred", &CacheStatistics::invalidations_deferred},
+      {"invalidations_batches", &CacheStatistics::invalidations_batches},
+  }};
+
+  for (const auto& [key, value] : ParseColonKeyValueLines(response)) {
+    if (key == "enabled") {
+      if (value != "true" && value != "false") {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kClientInvalidResponse, "Invalid CACHE STATS boolean for 'enabled': " + value));
+      }
+      stats.enabled = value == "true";
+      saw_enabled = true;
+      continue;
+    }
+
+    bool parsed_uint = false;
+    for (const auto& [field_name, member] : kUintFields) {
+      if (key != field_name) {
+        continue;
+      }
+      auto parsed = parse_uint(key, value);
+      if (!parsed) {
+        return MakeUnexpected(parsed.error());
+      }
+      stats.*member = *parsed;
+      saw_total_queries = saw_total_queries || key == "total_queries";
+      parsed_uint = true;
+      break;
+    }
+    if (parsed_uint) {
+      continue;
+    }
+
+    if (key == "hit_rate" || key == "avg_cache_hit_time_ms" || key == "avg_cache_miss_time_ms" ||
+        key == "total_time_saved_ms") {
+      auto parsed = parse_double(key, value);
+      if (!parsed) {
+        return MakeUnexpected(parsed.error());
+      }
+      if (key == "hit_rate") {
+        stats.hit_rate = *parsed;
+      } else if (key == "avg_cache_hit_time_ms") {
+        stats.avg_cache_hit_time_ms = *parsed;
+      } else if (key == "avg_cache_miss_time_ms") {
+        stats.avg_cache_miss_time_ms = *parsed;
+      } else {
+        stats.total_time_saved_ms = *parsed;
+      }
+    }
+  }
+
+  if (!saw_enabled || !saw_total_queries) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kClientInvalidResponse, "CACHE STATS response is missing required fields"));
+  }
+  return stats;
 }
 
 /**
@@ -533,11 +633,11 @@ std::string EscapeQueryString(const std::string& str) {
 }
 
 /**
- * @brief Validate that an identifier-like value is non-empty and has no whitespace/control chars
+ * @brief Validate an identifier that will be emitted as a bare protocol token
  *
  * Used for unquoted identifiers (table names, primary keys, sort columns, filter keys)
- * that are sent on the wire without quoting. Embedded whitespace would break the protocol
- * by splitting the value into multiple tokens.
+ * that are sent on the wire without quoting. Whitespace splits tokens, while
+ * quotes and backslashes alter the protocol tokenizer's quote/escape state.
  *
  * @param value Identifier value
  * @param field_name Human-readable field name for error messages
@@ -559,6 +659,12 @@ std::optional<std::string> ValidateIdentifier(const std::string& value, const ch
     if (std::isspace(character) != 0) {
       std::ostringstream oss;
       oss << "Input for " << field_name << " contains whitespace, which is not allowed in identifiers";
+      return oss.str();
+    }
+    if (character == '"' || character == '\'' || character == '\\') {
+      std::ostringstream oss;
+      oss << "Input for " << field_name << " contains protocol delimiter '" << static_cast<char>(character)
+          << "', which is not allowed in identifiers";
       return oss.str();
     }
   }
@@ -738,6 +844,9 @@ class MygramClient::Impl {
     } else if (config_.recv_buffer_size > kMaxClientRecvBufferSize) {
       config_.recv_buffer_size = kMaxClientRecvBufferSize;
     }
+    if (config_.max_response_bytes == 0) {
+      config_.max_response_bytes = kDefaultMaxClientResponseBytes;
+    }
   }
 
   ~Impl() { Disconnect(); }
@@ -862,6 +971,14 @@ class MygramClient::Impl {
   }
 
   Expected<std::string, Error> SendCommand(const std::string& command) const {
+    // SendCommand is public for advanced callers, but it still emits one
+    // CRLF-delimited protocol frame. Reject embedded delimiters and every
+    // other ASCII control byte before appending the terminator so callers
+    // cannot smuggle a second command onto the wire.
+    if (auto err = ValidateNoControlCharacters(command, "command"); err.has_value()) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientCommandFailed, *err));
+    }
+
     // Serialize concurrent SendCommand() calls so multiple threads do not
     // interleave send()/recv() byte streams on the same socket. The lock
     // is held across both send() and the full recv() loop, so each command
@@ -872,10 +989,50 @@ class MygramClient::Impl {
       return MakeUnexpected(MakeError(ErrorCode::kClientNotConnected, "Not connected"));
     }
 
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.timeout_ms);
+    auto wait_until_ready = [&](short events, ErrorCode failure_code,
+                                std::string_view operation) -> Expected<void, Error> {
+      while (true) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+          return MakeUnexpected(MakeError(ErrorCode::kClientTimeout,
+                                          "Request timed out after " + std::to_string(config_.timeout_ms) + " ms"));
+        }
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        if (remaining <= 0) {
+          remaining = 1;
+        }
+        const int poll_timeout =
+            remaining > std::numeric_limits<int>::max() ? std::numeric_limits<int>::max() : static_cast<int>(remaining);
+        pollfd descriptor{sock_, events, 0};
+        const int poll_result = poll(&descriptor, 1, poll_timeout);
+        if (poll_result == 0) {
+          return MakeUnexpected(MakeError(ErrorCode::kClientTimeout,
+                                          "Request timed out after " + std::to_string(config_.timeout_ms) + " ms"));
+        }
+        if (poll_result < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          return MakeUnexpected(
+              MakeError(failure_code, "Failed while waiting to " + std::string(operation) + ": " + strerror(errno)));
+        }
+        if ((descriptor.revents & POLLNVAL) != 0) {
+          return MakeUnexpected(
+              MakeError(failure_code, "Socket became invalid while waiting to " + std::string(operation)));
+        }
+        return {};
+      }
+    };
+
     // Send command with \r\n terminator
     std::string msg = command + "\r\n";
     size_t total_sent = 0;
     while (total_sent < msg.size()) {
+      if (auto ready = wait_until_ready(POLLOUT, ErrorCode::kClientSendFailed, "send command"); !ready) {
+        DisconnectSocket();
+        return MakeUnexpected(ready.error());
+      }
       ssize_t sent = send(sock_, msg.c_str() + total_sent, msg.size() - total_sent, 0);
       if (sent < 0) {
         if (errno == EINTR) {
@@ -894,7 +1051,14 @@ class MygramClient::Impl {
     detail::ResponseCompletionState completion_state;
 
     while (true) {
-      ssize_t received = recv(sock_, buffer.data(), buffer.size() - 1, 0);
+      if (auto ready = wait_until_ready(POLLIN, ErrorCode::kClientReceiveFailed, "receive response"); !ready) {
+        DisconnectSocket();
+        return MakeUnexpected(ready.error());
+      }
+      // response is appended with an explicit length below, so this buffer
+      // does not require a spare byte for NUL termination. Reading its full
+      // configured size also keeps recv_buffer_size=1 functional.
+      ssize_t received = recv(sock_, buffer.data(), buffer.size(), 0);
       if (received <= 0) {
         if (received == 0) {
           DisconnectSocket();
@@ -908,7 +1072,14 @@ class MygramClient::Impl {
             MakeError(ErrorCode::kClientReceiveFailed, std::string("Failed to receive response: ") + strerror(errno)));
       }
 
-      response.append(buffer.data(), static_cast<size_t>(received));
+      const size_t received_size = static_cast<size_t>(received);
+      if (received_size > config_.max_response_bytes || response.size() > config_.max_response_bytes - received_size) {
+        DisconnectSocket();
+        return MakeUnexpected(MakeError(
+            ErrorCode::kClientInvalidResponse,
+            "Response exceeds configured max_response_bytes (" + std::to_string(config_.max_response_bytes) + ")"));
+      }
+      response.append(buffer.data(), received_size);
 
       // Check if the accumulated response is complete
       if (detail::IsResponseComplete(response, completion_state)) {
@@ -1055,7 +1226,7 @@ class MygramClient::Impl {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
     if (!options.sort_column.empty()) {
-      // sort_column is an identifier sent unquoted on the wire; reject whitespace.
+      // sort_column is an identifier sent unquoted on the wire.
       if (auto err = ValidateIdentifier(options.sort_column, "sort column")) {
         return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
       }
@@ -1187,7 +1358,10 @@ class MygramClient::Impl {
     std::string status;
     std::string count_str;
     uint64_t count = 0;
-    iss >> status >> count_str >> count;
+    std::string trailing;
+    if (!(iss >> status >> count_str >> count) || (iss >> trailing) || status != "OK" || count_str != "COUNT") {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Invalid COUNT response format"));
+    }
 
     CountResponse resp;
     resp.count = count;
@@ -1411,6 +1585,14 @@ class MygramClient::Impl {
 
   Expected<std::string, Error> CacheStats() const {
     return SendAndExpectPrefix("CACHE STATS", proto::kOkCacheStatsPrefix);
+  }
+
+  Expected<CacheStatistics, Error> GetCacheStatistics() const {
+    auto response = CacheStats();
+    if (!response) {
+      return MakeUnexpected(response.error());
+    }
+    return ParseCacheStatisticsResponse(*response);
   }
 
   Expected<void, Error> CacheEnable() const {
@@ -1728,6 +1910,10 @@ mygram::utils::Expected<void, mygram::utils::Error> MygramClient::CacheClear(con
 
 mygram::utils::Expected<std::string, mygram::utils::Error> MygramClient::CacheStats() const {
   return impl_->CacheStats();
+}
+
+mygram::utils::Expected<CacheStatistics, mygram::utils::Error> MygramClient::GetCacheStatistics() const {
+  return impl_->GetCacheStatistics();
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> MygramClient::CacheEnable() const {

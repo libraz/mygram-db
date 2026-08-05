@@ -143,6 +143,36 @@ struct ServerInfo {
 };
 
 /**
+ * @brief Parsed CACHE STATS response.
+ */
+struct CacheStatistics {
+  bool enabled = false;
+  uint64_t total_queries = 0;
+  uint64_t cache_hits = 0;
+  uint64_t cache_misses = 0;
+  double hit_rate = 0.0;
+  uint64_t current_entries = 0;
+  uint64_t current_memory_bytes = 0;
+  uint64_t invalidation_index_memory_bytes = 0;
+  uint64_t accounted_memory_bytes = 0;
+  uint64_t evictions = 0;
+  uint64_t ttl_expirations = 0;
+  uint64_t rejection_count = 0;
+  uint64_t rejection_oversize = 0;
+  uint64_t rejection_memory_budget = 0;
+  uint64_t rejection_duplicate = 0;
+  uint64_t stale_entry_removals = 0;
+  uint64_t decompression_failures = 0;
+  uint64_t stale_lru_entries = 0;
+  uint64_t invalidations_immediate = 0;
+  uint64_t invalidations_deferred = 0;
+  uint64_t invalidations_batches = 0;
+  std::optional<double> avg_cache_hit_time_ms;
+  std::optional<double> avg_cache_miss_time_ms;
+  double total_time_saved_ms = 0.0;
+};
+
+/**
  * @brief Replication status
  *
  * Reflects the contents of the server's "OK REPLICATION" multi-line response.
@@ -168,8 +198,9 @@ struct ClientConfig {
   uint32_t timeout_ms = 5000;                                         // Default timeout in milliseconds (0 = default)
   uint32_t dump_save_timeout_ms = 300000;  // Max wait for async DUMP SAVE completion (0 = timeout_ms)
   uint32_t recv_buffer_size =
-      server::protocol::kDefaultClientRecvBufferSize;  // Default buffer size (64KB; 0 = default, max 16 MiB)
-  std::string unix_socket_path;                        // Unix socket path (empty = use TCP)
+      server::protocol::kDefaultClientRecvBufferSize;       // Default buffer size (64KB; 0 = default, max 16 MiB)
+  uint64_t max_response_bytes = 64ULL * 1024ULL * 1024ULL;  // Maximum response frame size (0 = default 64 MiB)
+  std::string unix_socket_path;                             // Unix socket path (empty = use TCP)
 };
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
@@ -370,7 +401,10 @@ class MygramClient {
                                                                   const std::string& value) const;
   mygram::utils::Expected<std::string, mygram::utils::Error> ShowVariables(const std::string& like_pattern = "") const;
   mygram::utils::Expected<void, mygram::utils::Error> CacheClear(const std::string& table = "") const;
+  /** Raw protocol response retained for source and ABI compatibility. */
   mygram::utils::Expected<std::string, mygram::utils::Error> CacheStats() const;
+  /** Parsed CACHE STATS response. */
+  mygram::utils::Expected<CacheStatistics, mygram::utils::Error> GetCacheStatistics() const;
   mygram::utils::Expected<void, mygram::utils::Error> CacheEnable() const;
   mygram::utils::Expected<void, mygram::utils::Error> CacheDisable() const;
   mygram::utils::Expected<std::string, mygram::utils::Error> Optimize(const std::string& table = "") const;

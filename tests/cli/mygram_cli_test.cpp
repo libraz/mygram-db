@@ -4,9 +4,8 @@
  *
  * The CLI source is monolithic (single file with an anonymous namespace and
  * main()). To exercise the internal helpers we include the source file
- * directly with main() renamed to avoid linker conflicts. We also #define
- * private public so we can call MygramClient::PrintResponse, which is a
- * private static.
+ * directly with main() renamed to avoid linker conflicts. Formatting and
+ * exit-status helpers are exercised through MygramClient's public API.
  */
 
 #include <arpa/inet.h>
@@ -21,12 +20,9 @@
 #include <thread>
 #include <vector>
 
-// Rename main() to avoid clashing with gtest's main, and unprivate
-// MygramClient::PrintResponse for direct test access.
+// Rename main() to avoid clashing with gtest's main.
 #define main cli_main
-#define private public         // NOLINT(cppcoreguidelines-macro-usage)
 #include "cli/mygram-cli.cpp"  // NOLINT(bugprone-suspicious-include)
-#undef private
 #undef main
 
 namespace {

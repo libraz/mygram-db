@@ -21,7 +21,9 @@
 #include <vector>
 
 #include "client/mygramclient.h"
+#ifdef MYGRAMCLIENT_C_TEST_HOOKS
 #include "client/mygramclient_c_testing.h"
+#endif
 #include "client/search_expression.h"
 #include "utils/error.h"
 
@@ -39,9 +41,11 @@ struct MygramClient_C {
 // Helper: Allocate C string copy
 // cppcoreguidelines-no-malloc)
 static char* strdup_safe(const std::string& str) {
+#ifdef MYGRAMCLIENT_C_TEST_HOOKS
   if (mygramdb::client::testing::ShouldFailCStringAllocation()) {
     return nullptr;
   }
+#endif
   char* result = static_cast<char*>(malloc(str.size() + 1));
   if (result != nullptr) {
     std::memcpy(result, str.c_str(), str.size() + 1);
@@ -267,7 +271,9 @@ static void record_c_api_exception(MygramClient_C* client, const char* message) 
 template <typename Result, typename Fn>
 static Result c_api_guard(MygramClient_C* client, Result failure, Fn&& fn) noexcept {
   try {
+#ifdef MYGRAMCLIENT_C_TEST_HOOKS
     mygramdb::client::testing::ThrowOnCApiEntryIfRequested();
+#endif
     return fn();
   } catch (const std::exception& exception) {
     record_c_api_exception(client, exception.what());
@@ -280,7 +286,9 @@ static Result c_api_guard(MygramClient_C* client, Result failure, Fn&& fn) noexc
 template <typename Fn>
 static void c_api_guard_void(MygramClient_C* client, Fn&& fn) noexcept {
   try {
+#ifdef MYGRAMCLIENT_C_TEST_HOOKS
     mygramdb::client::testing::ThrowOnCApiEntryIfRequested();
+#endif
     fn();
   } catch (const std::exception& exception) {
     record_c_api_exception(client, exception.what());
@@ -418,6 +426,11 @@ MygramClient_C* mygramclient_create_v2(const MygramClientConfigV2_C* config) {
                        sizeof(config->dump_save_timeout_ms)) &&
       config->dump_save_timeout_ms != 0) {
     cpp_config.dump_save_timeout_ms = config->dump_save_timeout_ms;
+  }
+  if (V2FieldAvailable(config->struct_size, offsetof(MygramClientConfigV2_C, max_response_bytes),
+                       sizeof(config->max_response_bytes)) &&
+      config->max_response_bytes != 0) {
+    cpp_config.max_response_bytes = config->max_response_bytes;
   }
 
   return CreateClient(std::move(cpp_config));
@@ -593,40 +606,79 @@ int mygramclient_search_with_options(MygramClient_C* client, const char* table, 
       result == nullptr) {
     return invalid_argument(client, "Invalid argument: client, table, query, options, and result must not be NULL");
   }
-  if (options->struct_size < sizeof(MygramSearchOptions_C)) {
+  constexpr size_t kMinimumSize = offsetof(MygramSearchOptions_C, offset) + sizeof(uint32_t);
+  if (options->struct_size < kMinimumSize) {
     return invalid_argument(client, "Invalid argument: search options struct_size is too small");
   }
-  if ((options->and_count > 0 && options->and_terms == nullptr) ||
-      (options->not_count > 0 && options->not_terms == nullptr) ||
-      (options->filter_count > 0 && options->filters == nullptr)) {
+
+  const auto field_available = [options](size_t offset, size_t size) {
+    return V2FieldAvailable(options->struct_size, offset, size);
+  };
+  const auto and_terms = field_available(offsetof(MygramSearchOptions_C, and_count), sizeof(options->and_count))
+                             ? options->and_terms
+                             : nullptr;
+  const size_t and_count = and_terms != nullptr ? options->and_count : 0;
+  const auto not_terms = field_available(offsetof(MygramSearchOptions_C, not_count), sizeof(options->not_count))
+                             ? options->not_terms
+                             : nullptr;
+  const size_t not_count = not_terms != nullptr ? options->not_count : 0;
+  const auto filters = field_available(offsetof(MygramSearchOptions_C, filter_count), sizeof(options->filter_count))
+                           ? options->filters
+                           : nullptr;
+  const size_t filter_count = filters != nullptr ? options->filter_count : 0;
+
+  if ((field_available(offsetof(MygramSearchOptions_C, and_count), sizeof(options->and_count)) &&
+       options->and_count > 0 && options->and_terms == nullptr) ||
+      (field_available(offsetof(MygramSearchOptions_C, not_count), sizeof(options->not_count)) &&
+       options->not_count > 0 && options->not_terms == nullptr) ||
+      (field_available(offsetof(MygramSearchOptions_C, filter_count), sizeof(options->filter_count)) &&
+       options->filter_count > 0 && options->filters == nullptr)) {
     return invalid_argument(client, "Invalid argument: option array is NULL while its count is non-zero");
   }
-  if (CArrayContainsNull(options->and_terms, options->and_count) ||
-      CArrayContainsNull(options->not_terms, options->not_count)) {
+  if (CArrayContainsNull(and_terms, and_count) || CArrayContainsNull(not_terms, not_count)) {
     return invalid_argument(client, "Invalid argument: option term arrays must not contain NULL");
   }
 
   SearchOptions cpp_options;
   cpp_options.limit = options->limit;
   cpp_options.offset = options->offset;
-  cpp_options.and_terms = CArrayToVector(options->and_terms, options->and_count);
-  cpp_options.not_terms = CArrayToVector(options->not_terms, options->not_count);
-  cpp_options.sort_column = options->sort_column != nullptr ? options->sort_column : "";
-  cpp_options.sort_desc = options->sort_desc != 0;
-  if (options->fuzzy_distance != 0) {
+  cpp_options.and_terms = CArrayToVector(and_terms, and_count);
+  cpp_options.not_terms = CArrayToVector(not_terms, not_count);
+  if (field_available(offsetof(MygramSearchOptions_C, sort_column), sizeof(options->sort_column)) &&
+      options->sort_column != nullptr) {
+    cpp_options.sort_column = options->sort_column;
+  }
+  if (field_available(offsetof(MygramSearchOptions_C, sort_desc), sizeof(options->sort_desc))) {
+    cpp_options.sort_desc = options->sort_desc != 0;
+  }
+  if (field_available(offsetof(MygramSearchOptions_C, fuzzy_distance), sizeof(options->fuzzy_distance)) &&
+      options->fuzzy_distance != 0) {
     cpp_options.fuzzy_distance = options->fuzzy_distance;
   }
-  if (options->highlight != 0) {
+  if (field_available(offsetof(MygramSearchOptions_C, highlight), sizeof(options->highlight)) &&
+      options->highlight != 0) {
     HighlightOptions highlight;
-    highlight.open_tag = options->highlight_open_tag != nullptr ? options->highlight_open_tag : "";
-    highlight.close_tag = options->highlight_close_tag != nullptr ? options->highlight_close_tag : "";
-    highlight.snippet_length = options->highlight_snippet_length;
-    highlight.max_fragments = options->highlight_max_fragments;
+    if (field_available(offsetof(MygramSearchOptions_C, highlight_open_tag), sizeof(options->highlight_open_tag)) &&
+        options->highlight_open_tag != nullptr) {
+      highlight.open_tag = options->highlight_open_tag;
+    }
+    if (field_available(offsetof(MygramSearchOptions_C, highlight_close_tag), sizeof(options->highlight_close_tag)) &&
+        options->highlight_close_tag != nullptr) {
+      highlight.close_tag = options->highlight_close_tag;
+    }
+    if (field_available(offsetof(MygramSearchOptions_C, highlight_snippet_length),
+                        sizeof(options->highlight_snippet_length))) {
+      highlight.snippet_length = options->highlight_snippet_length;
+    }
+    if (field_available(offsetof(MygramSearchOptions_C, highlight_max_fragments),
+                        sizeof(options->highlight_max_fragments))) {
+      highlight.max_fragments = options->highlight_max_fragments;
+    }
     cpp_options.highlight = std::move(highlight);
   }
-  cpp_options.filters.reserve(options->filter_count);
-  for (size_t i = 0; i < options->filter_count; ++i) {
-    const auto& filter = options->filters[i];
+  cpp_options.filters.reserve(filter_count);
+  for (size_t i = 0; i < filter_count; ++i) {
+    const auto& filter = filters[i];
     if (filter.key == nullptr || filter.value == nullptr || filter.op < MYGRAM_FILTER_EQ ||
         filter.op > MYGRAM_FILTER_LTE) {
       return invalid_argument(client, "Invalid argument: malformed typed filter");

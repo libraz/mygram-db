@@ -166,6 +166,17 @@ TEST_F(MygramClientTest, ZeroAndOversizedConfigValuesUseSafeDefaults) {
   EXPECT_TRUE(oversized_client.Info());
 }
 
+TEST_F(MygramClientTest, SingleByteReceiveBufferReadsCompleteResponse) {
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.recv_buffer_size = 1;
+
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+  EXPECT_TRUE(client.Info());
+}
+
 /**
  * @brief Test connection
  */
@@ -654,6 +665,34 @@ TEST_F(MygramClientTest, CApiTypedSearchOptionsExposeCompleteSurface) {
   mygramclient_destroy(c_client);
 }
 
+TEST_F(MygramClientTest, CApiSearchOptionsAcceptsLegacyPrefixSize) {
+  AddTestDocuments();
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  MygramClient_C* c_client = mygramclient_create(&config);
+  ASSERT_NE(c_client, nullptr);
+  ASSERT_EQ(mygramclient_connect(c_client), 0);
+
+  struct LegacySearchOptions {
+    uint32_t struct_size;
+    uint32_t limit;
+    uint32_t offset;
+  } legacy_options = {sizeof(LegacySearchOptions), 1, 0};
+
+  MygramSearchResultWithHighlights_C* result = nullptr;
+  ASSERT_EQ(mygramclient_search_with_options(c_client, "testdb.test", "hello",
+                                             reinterpret_cast<const MygramSearchOptions_C*>(&legacy_options), &result),
+            0)
+      << mygramclient_get_last_error(c_client);
+  ASSERT_NE(result, nullptr);
+  EXPECT_EQ(result->count, 1U);
+  EXPECT_EQ(result->total_count, 2U);
+
+  mygramclient_free_search_result_with_highlights(result);
+  mygramclient_destroy(c_client);
+}
+
 TEST_F(MygramClientTest, SearchRawPreservesConvertedOrExpression) {
   const std::string left_text = mygram::utils::NormalizeText("alpha xqz", true, "keep", true);
   const std::string right_text = mygram::utils::NormalizeText("alpha jkv", true, "keep", true);
@@ -1077,6 +1116,14 @@ TEST_F(MygramClientTest, TypedAdminWrappersUseProtocolCommands) {
   ASSERT_TRUE(cache_stats) << "CacheStats error: " << cache_stats.error().message();
   EXPECT_TRUE(cache_stats->find("OK CACHE_STATS") == 0) << *cache_stats;
 
+  auto parsed_cache_stats = client_->GetCacheStatistics();
+  ASSERT_TRUE(parsed_cache_stats) << "GetCacheStatistics error: " << parsed_cache_stats.error().message();
+  EXPECT_TRUE(parsed_cache_stats->enabled);
+  EXPECT_LE(parsed_cache_stats->cache_hits, parsed_cache_stats->total_queries);
+  EXPECT_LE(parsed_cache_stats->cache_misses, parsed_cache_stats->total_queries);
+  EXPECT_GE(parsed_cache_stats->hit_rate, 0.0);
+  EXPECT_LE(parsed_cache_stats->hit_rate, 1.0);
+
   ASSERT_TRUE(client_->CacheDisable()) << "CacheDisable error";
   ASSERT_TRUE(client_->CacheEnable()) << "CacheEnable error";
   ASSERT_TRUE(client_->CacheClear("testdb.test")) << "CacheClear error";
@@ -1269,6 +1316,15 @@ TEST_F(MygramClientTest, SendCommand) {
   EXPECT_TRUE(response.find("OK COUNT 2") != std::string::npos);
 }
 
+TEST_F(MygramClientTest, SendCommandRejectsEmbeddedProtocolDelimiter) {
+  ASSERT_TRUE(client_->Connect());
+
+  const auto result = client_->SendCommand("INFO\r\nREPLICATION STOP");
+
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("control character"), std::string::npos);
+}
+
 TEST_F(MygramClientTest, SendCommandDisconnectsAfterReceiveFailure) {
   int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   ASSERT_GE(listen_fd, 0);
@@ -1309,6 +1365,143 @@ TEST_F(MygramClientTest, SendCommandDisconnectsAfterReceiveFailure) {
   EXPECT_FALSE(client.IsConnected());
 
   closer.join();
+}
+
+TEST_F(MygramClientTest, SendCommandUsesTotalDeadlineAcrossPartialReceives) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+
+  std::thread drip_sender([listen_fd]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+#ifdef SO_NOSIGPIPE
+      int enabled = 1;
+      (void)setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#endif
+      char request[128];
+      (void)recv(client_fd, request, sizeof(request), 0);
+      for (int i = 0; i < 20; ++i) {
+#ifdef MSG_NOSIGNAL
+        constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+        constexpr int kSendFlags = 0;
+#endif
+        if (send(client_fd, "x", 1, kSendFlags) <= 0) {
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(addr.sin_port);
+  config.timeout_ms = 100;
+  config.recv_buffer_size = 1;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  const auto started_at = std::chrono::steady_clock::now();
+  const auto result = client.SendCommand("INFO");
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_at);
+  drip_sender.join();
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientTimeout);
+  EXPECT_LT(elapsed.count(), 300);
+  EXPECT_FALSE(client.IsConnected());
+}
+
+TEST_F(MygramClientTest, SendCommandRejectsResponseLargerThanConfiguredLimit) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+
+  std::thread oversized_sender([listen_fd]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+      char request[128];
+      (void)recv(client_fd, request, sizeof(request), 0);
+      const std::string oversized_response(128, 'x');
+      (void)send(client_fd, oversized_response.data(), oversized_response.size(), 0);
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(addr.sin_port);
+  config.timeout_ms = 1000;
+  config.max_response_bytes = 32;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  const auto result = client.SendCommand("INFO");
+  oversized_sender.join();
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidResponse);
+  EXPECT_NE(result.error().message().find("max_response_bytes"), std::string::npos);
+  EXPECT_FALSE(client.IsConnected());
+}
+
+TEST_F(MygramClientTest, CountRejectsMalformedCountResponse) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+  const uint16_t port = ntohs(addr.sin_port);
+  std::thread responder([listen_fd]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+      char buffer[128];
+      (void)recv(client_fd, buffer, sizeof(buffer), 0);
+      static constexpr char kMalformedResponse[] = "OK COUNT not-a-number\r\n";
+      (void)send(client_fd, kMalformedResponse, sizeof(kMalformedResponse) - 1, 0);
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = port;
+  config.timeout_ms = 1000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  const auto result = client.Count("testdb.test", "hello");
+  responder.join();
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientProtocolError);
 }
 
 /**
@@ -1354,6 +1547,12 @@ TEST_F(MygramClientTest, CApiSendCommand) {
   ASSERT_NE(response, nullptr);
   EXPECT_TRUE(std::string(response).find("ERROR") != std::string::npos);
   mygramclient_free_string(response);
+
+  response = nullptr;
+  result = mygramclient_send_command(c_client, "INFO\r\nREPLICATION STOP", &response);
+  EXPECT_EQ(result, -1);
+  EXPECT_EQ(response, nullptr);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find("control character"), std::string::npos);
 
   // Cleanup
   mygramclient_disconnect(c_client);
@@ -2151,6 +2350,31 @@ TEST_F(MygramClientTest, RejectsWhitespaceInFilterKey) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
   EXPECT_NE(result.error().message().find("whitespace"), std::string::npos) << "Error: " << result.error().message();
+}
+
+TEST_F(MygramClientTest, RejectsProtocolDelimitersInBareIdentifiers) {
+  ASSERT_TRUE(client_->Connect());
+
+  const auto table_result = client_->Search("testdb.\"test", "hello", 100);
+  ASSERT_FALSE(table_result);
+  EXPECT_EQ(table_result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  EXPECT_NE(table_result.error().message().find("protocol delimiter"), std::string::npos);
+
+  SearchOptions options;
+  options.sort_column = "created\\at";
+  const auto sort_result = client_->Search("testdb.test", "hello", options);
+  ASSERT_FALSE(sort_result);
+  EXPECT_EQ(sort_result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+
+  options = {};
+  options.filters.push_back({.key = "status' FILTER injected", .op = FilterOp::kEqual, .value = "active"});
+  const auto filter_result = client_->Search("testdb.test", "hello", options);
+  ASSERT_FALSE(filter_result);
+  EXPECT_EQ(filter_result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+
+  const auto facet_result = client_->Facet("testdb.test", "category\"", "hello");
+  ASSERT_FALSE(facet_result);
+  EXPECT_EQ(facet_result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
 }
 
 /**

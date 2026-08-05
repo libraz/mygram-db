@@ -1,14 +1,29 @@
 # MygramClient tests
 
+# Test-only client build with C API fault injection enabled. The installed
+# mygramclient_static/mygramclient_shared targets never compile these hooks.
+add_library(mygramclient_static_testing STATIC
+  ${CMAKE_SOURCE_DIR}/src/client/mygramclient.cpp
+  ${CMAKE_SOURCE_DIR}/src/client/mygramclient_c.cpp
+  ${CMAKE_SOURCE_DIR}/src/client/search_expression.cpp
+)
+target_include_directories(mygramclient_static_testing
+  PUBLIC ${CMAKE_SOURCE_DIR}/src
+  PRIVATE ${CMAKE_SOURCE_DIR}/src/client
+)
+target_compile_definitions(mygramclient_static_testing PRIVATE MYGRAMCLIENT_C_TEST_HOOKS)
+target_link_libraries(mygramclient_static_testing PUBLIC mygramdb_utils)
+
 add_executable(mygramclient_test
   mygramclient_test.cpp
 )
 
 target_link_libraries(mygramclient_test
-  mygramclient_static
+  mygramclient_static_testing
   mygramdb_server
   GTest::gtest_main
 )
+target_compile_definitions(mygramclient_test PRIVATE MYGRAMCLIENT_C_TEST_HOOKS)
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid server connection conflicts
 gtest_discover_tests(mygramclient_test
@@ -50,4 +65,6 @@ if(Python3_Interpreter_FOUND)
     DEPENDS mygramclient_shared
     RESOURCE_LOCK client_server_connection
   )
+else()
+  message(WARNING "Python 3 interpreter not found: MygramClientCtypesSmokeTest will not be registered")
 endif()
