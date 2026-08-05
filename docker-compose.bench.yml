@@ -67,6 +67,7 @@ services:
       MEMORY_NORMALIZE_NFKC: "true"
       MEMORY_NORMALIZE_WIDTH: narrow
       MEMORY_NORMALIZE_LOWER: "true"
+      CACHE_ENABLED: "false"
       NETWORK_ALLOW_CIDRS: 0.0.0.0/0
       API_BIND: 0.0.0.0
       API_PORT: "11016"

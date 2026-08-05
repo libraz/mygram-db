@@ -14,6 +14,7 @@ CLANG_FORMAT ?= clang-format
 
 # Python tool runner for e2e. Prefer rye when installed; fall back to PATH tools.
 E2E_PY_RUN := $(shell command -v rye >/dev/null 2>&1 && echo "rye run" || true)
+E2E_PYTHON := $(if $(E2E_PY_RUN),$(E2E_PY_RUN) python,python3)
 
 # Test options (can be overridden)
 TEST_JOBS ?= 4          # Parallel jobs for tests (make test TEST_JOBS=2)
@@ -206,7 +207,7 @@ test-mysql: build
 		export MYSQL_USER=root; \
 		export MYSQL_PASSWORD="$${MYSQL_TEST_PASSWORD:-test_root_password}"; \
 		export MYSQL_DATABASE=testdb; \
-		ctest --test-dir $(BUILD_DIR) -R '^(MySQLConnectionIntegrationTest\..*|InitialLoaderIntegrationTest\..*|BinlogReaderResourceTest\..*|SyncOperationManagerTest\.ConcurrentStartSyncThreadSafe)$$' --output-on-failure
+		ctest --test-dir $(BUILD_DIR) -R '^(MySQLConnectionIntegrationTest\..*|ConnectionValidateIntegrationTest\..*|InitialLoaderIntegrationTest\..*|DDLSchemaValidatorIntegrationTest\..*|DumpSaveLoadIntegrationTest\..*|BinlogReaderResourceTest\..*|SyncOperationManagerTest\.ConcurrentStartSyncThreadSafe)$$' --output-on-failure
 	@echo "MySQL integration tests complete!"
 
 # Run the opt-in large dump restore budget test
@@ -355,17 +356,17 @@ e2e-fix:
 # Benchmark suite: quick comparison (1, 4, 16 concurrency x 5s)
 e2e-benchmark:
 	@echo "Running benchmark suite (quick mode)..."
-	cd e2e && python benchmark_suite.py --mode quick --compare
+	cd e2e && $(E2E_PYTHON) benchmark_suite.py --mode quick --compare
 
 # Benchmark suite: full comparison (7 levels x 15s)
 e2e-benchmark-full:
 	@echo "Running full benchmark suite..."
-	cd e2e && python benchmark_suite.py --mode standard --compare --json-output results/benchmark.json
+	cd e2e && $(E2E_PYTHON) benchmark_suite.py --mode standard --compare --json-output results/benchmark.json
 
 # Benchmark suite: saturation test
 e2e-benchmark-saturation:
 	@echo "Running saturation benchmark..."
-	cd e2e && python benchmark_suite.py --mode saturation --target mygramdb
+	cd e2e && $(E2E_PYTHON) benchmark_suite.py --mode saturation --target mygramdb
 
 # Docker targets
 docker-build:
