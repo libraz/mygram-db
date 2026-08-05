@@ -4,7 +4,6 @@
  */
 
 #include <array>
-#include <charconv>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -14,6 +13,7 @@
 #include "query/query_parser_internal.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/numeric_parse.h"
 
 namespace mygramdb::query {
 
@@ -51,6 +51,13 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseAnd(const 
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "AND requires a term"));
   }
 
+  // The client expression converter emits `AND NOT <term>` for exclusions.
+  // Treat it as the equivalent standalone NOT clause rather than indexing the
+  // keyword itself as a required term.
+  if (EqualsIgnoreCase(tokens[pos], "NOT")) {
+    return ParseNot(tokens, pos, query);
+  }
+
   query.and_terms.push_back(tokens[pos++]);
   return {};
 }
@@ -79,10 +86,8 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilters(co
     return result;
   }
 
-  if (filter.column.size() > kMaxFilterColumnNameLength) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kQueryInvalidFilter,
-                  "FILTER column name exceeds maximum length (" + std::to_string(kMaxFilterColumnNameLength) + ")"));
+  if (!IsSafeColumnName(filter.column)) {
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter column"));
   }
   if (filter.value.size() > kMaxFilterValueLength) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "FILTER value exceeds maximum length (" +
@@ -169,6 +174,9 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilterArgu
   filter.op = filter_op.value();
 
   filter.value = tokens[pos++];
+  if (auto result = ValidateFilterValue(filter.value); !result) {
+    return MakeUnexpected(result.error());
+  }
   return {};
 }
 
@@ -179,6 +187,10 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseLimit(cons
 
   if (pos >= tokens.size()) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT requires a number or offset,count"));
+  }
+
+  if (query.limit_explicit) {
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT specified more than once"));
   }
 
   const std::string& limit_str = tokens[pos++];
@@ -203,32 +215,24 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseLimit(cons
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT count must be positive"));
     }
 
-    uint32_t offset_val = 0;
-    auto [ptr1, ec1] = std::from_chars(offset_str.data(), offset_str.data() + offset_str.size(), offset_val);
-    if (ec1 != std::errc() || ptr1 != offset_str.data() + offset_str.size()) {
-      if (ec1 == std::errc::result_out_of_range) {
-        return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT offset value too large"));
-      }
+    const auto offset_val = mygram::utils::ParseNumeric<uint32_t>(offset_str);
+    if (!offset_val) {
       return MakeUnexpected(
           MakeError(ErrorCode::kQueryInvalidLimit, "Invalid LIMIT offset,count format: " + limit_str));
     }
 
-    uint32_t count_val = 0;
-    auto [ptr2, ec2] = std::from_chars(count_str.data(), count_str.data() + count_str.size(), count_val);
-    if (ec2 != std::errc() || ptr2 != count_str.data() + count_str.size()) {
-      if (ec2 == std::errc::result_out_of_range) {
-        return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT count value too large"));
-      }
+    const auto count_val = mygram::utils::ParseNumeric<uint32_t>(count_str);
+    if (!count_val) {
       return MakeUnexpected(
           MakeError(ErrorCode::kQueryInvalidLimit, "Invalid LIMIT offset,count format: " + limit_str));
     }
 
-    if (count_val == 0) {
+    if (*count_val == 0) {
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT count must be positive"));
     }
 
-    query.offset = offset_val;
-    query.limit = count_val;
+    query.offset = *offset_val;
+    query.limit = *count_val;
     query.offset_explicit = true;
     query.limit_explicit = true;
   } else {
@@ -238,20 +242,16 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseLimit(cons
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT must be positive"));
     }
 
-    uint32_t limit_val = 0;
-    auto [ptr, ec] = std::from_chars(limit_str.data(), limit_str.data() + limit_str.size(), limit_val);
-    if (ec != std::errc() || ptr != limit_str.data() + limit_str.size()) {
-      if (ec == std::errc::result_out_of_range) {
-        return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT value out of range: " + limit_str));
-      }
+    const auto limit_val = mygram::utils::ParseNumeric<uint32_t>(limit_str);
+    if (!limit_val) {
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "Invalid LIMIT value: " + limit_str));
     }
 
-    if (limit_val == 0) {
+    if (*limit_val == 0) {
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidLimit, "LIMIT must be positive"));
     }
 
-    query.limit = limit_val;
+    query.limit = *limit_val;
     query.limit_explicit = true;  // Mark as explicitly specified
   }
 
@@ -278,16 +278,12 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseOffset(con
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidOffset, "OFFSET must be non-negative"));
   }
 
-  uint32_t offset_val = 0;
-  auto [ptr, ec] = std::from_chars(offset_str.data(), offset_str.data() + offset_str.size(), offset_val);
-  if (ec != std::errc() || ptr != offset_str.data() + offset_str.size()) {
-    if (ec == std::errc::result_out_of_range) {
-      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidOffset, "OFFSET value out of range: " + offset_str));
-    }
+  const auto offset_val = mygram::utils::ParseNumeric<uint32_t>(offset_str);
+  if (!offset_val) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidOffset, "Invalid OFFSET value: " + offset_str));
   }
 
-  query.offset = offset_val;
+  query.offset = *offset_val;
   query.offset_explicit = true;  // Mark as explicitly specified
 
   return {};
@@ -295,12 +291,19 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseOffset(con
 
 mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseSort(const std::vector<std::string>& tokens,
                                                                            size_t& pos, Query& query) {
-  // SORT <column> [ASC|DESC]
+  // SORT [BY] <column> [ASC|DESC]
   // SORT ASC/DESC (shorthand for primary key)
   pos++;  // Skip "SORT"
 
   if (pos >= tokens.size()) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "SORT requires a column name or ASC/DESC"));
+  }
+
+  if (EqualsIgnoreCase(tokens[pos], "BY")) {
+    pos++;
+    if (pos >= tokens.size()) {
+      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "SORT BY requires a column name"));
+    }
   }
 
   OrderByClause order_by;
@@ -324,6 +327,10 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseSort(const
   if (order_by.column.find(',') != std::string::npos) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort,
                                     "Multiple column sorting is not supported. Sort by a single column only."));
+  }
+
+  if (!IsSafeColumnName(order_by.column)) {
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort column"));
   }
 
   // Check for ASC/DESC (optional, default is DESC)
@@ -380,6 +387,16 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseHighlight(
       pos++;
       opts.open_tag = tokens[pos++];
       opts.close_tag = tokens[pos++];
+      if (opts.open_tag.size() > kMaxHighlightTagLength) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kQuerySyntaxError,
+                      "HIGHLIGHT TAG open tag must be at most " + std::to_string(kMaxHighlightTagLength) + " bytes"));
+      }
+      if (opts.close_tag.size() > kMaxHighlightTagLength) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kQuerySyntaxError,
+                      "HIGHLIGHT TAG close tag must be at most " + std::to_string(kMaxHighlightTagLength) + " bytes"));
+      }
     } else if (EqualsIgnoreCase(keyword, "SNIPPET_LEN")) {
       // SNIPPET_LEN <n>
       if (pos + 1 >= tokens.size()) {
@@ -387,19 +404,15 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseHighlight(
       }
       pos++;
       const std::string& val_str = tokens[pos++];
-      uint32_t val = 0;
-      auto [ptr, ec] = std::from_chars(val_str.data(), val_str.data() + val_str.size(), val);
-      if (ec != std::errc() || ptr != val_str.data() + val_str.size()) {
-        if (ec == std::errc::result_out_of_range) {
-          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "HIGHLIGHT SNIPPET_LEN value out of range"));
-        }
+      const auto val = mygram::utils::ParseNumeric<uint32_t>(val_str);
+      if (!val) {
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Invalid HIGHLIGHT SNIPPET_LEN value"));
       }
-      if (val == 0 || val > 10000) {
+      if (*val == 0 || *val > 10000) {
         return MakeUnexpected(
             MakeError(ErrorCode::kQuerySyntaxError, "HIGHLIGHT SNIPPET_LEN must be between 1 and 10000"));
       }
-      opts.snippet_length = val;
+      opts.snippet_length = *val;
     } else if (EqualsIgnoreCase(keyword, "MAX_FRAGMENTS")) {
       // MAX_FRAGMENTS <n>
       if (pos + 1 >= tokens.size()) {
@@ -407,19 +420,15 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseHighlight(
       }
       pos++;
       const std::string& val_str = tokens[pos++];
-      uint32_t val = 0;
-      auto [ptr, ec] = std::from_chars(val_str.data(), val_str.data() + val_str.size(), val);
-      if (ec != std::errc() || ptr != val_str.data() + val_str.size()) {
-        if (ec == std::errc::result_out_of_range) {
-          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "HIGHLIGHT MAX_FRAGMENTS value out of range"));
-        }
+      const auto val = mygram::utils::ParseNumeric<uint32_t>(val_str);
+      if (!val) {
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Invalid HIGHLIGHT MAX_FRAGMENTS value"));
       }
-      if (val == 0 || val > 100) {
+      if (*val == 0 || *val > 100) {
         return MakeUnexpected(
             MakeError(ErrorCode::kQuerySyntaxError, "HIGHLIGHT MAX_FRAGMENTS must be between 1 and 100"));
       }
-      opts.max_fragments = val;
+      opts.max_fragments = *val;
     } else {
       // Not a HIGHLIGHT sub-option, stop consuming
       break;
@@ -438,16 +447,14 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFuzzy(cons
 
   // Check if next token is a number (optional distance parameter)
   if (pos < tokens.size() && !internal::IsClauseKeyword(tokens[pos])) {
-    uint32_t val = 0;
     const auto& token = tokens[pos];
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), val);
-    if (ec == std::errc() && ptr == token.data() + token.size()) {
+    const auto val = mygram::utils::ParseNumeric<uint32_t>(token);
+    if (val) {
       // Successfully parsed as number — validate range
-      if (val < 1 || val > 2) {
+      if (*val < 1 || *val > 2) {
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "FUZZY distance must be 1 or 2, got: " + token));
       }
-      max_distance = val;
+      max_distance = *val;
       ++pos;
     } else {
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "FUZZY distance must be 1 or 2, got: " + token));

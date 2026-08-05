@@ -25,7 +25,6 @@ TEST(QueryParserTest, SearchBasic) {
   EXPECT_EQ(query->offset, 0);   // Default
   EXPECT_FALSE(query->cache_key.has_value());
   EXPECT_FALSE(query->cache_key_is_canonical);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchAcceptsDatabaseQualifiedTableName) {
@@ -36,7 +35,6 @@ TEST(QueryParserTest, SearchAcceptsDatabaseQualifiedTableName) {
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->table, "app_db.articles");
   EXPECT_EQ(query->search_text, "hello");
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, TableCommandsAcceptDatabaseQualifiedTableName) {
@@ -122,7 +120,6 @@ TEST(QueryParserTest, SearchWithLimit) {
   EXPECT_EQ(query->search_text, "hello");
   EXPECT_EQ(query->limit, 50);
   EXPECT_EQ(query->offset, 0);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -136,7 +133,6 @@ TEST(QueryParserTest, SearchWithOffset) {
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->limit, 100);
   EXPECT_EQ(query->offset, 100);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -150,7 +146,6 @@ TEST(QueryParserTest, SearchWithLimitAndOffset) {
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->limit, 50);
   EXPECT_EQ(query->offset, 200);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -163,7 +158,6 @@ TEST(QueryParserTest, SearchWithMaxLimit) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->limit, 1000);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -190,7 +184,6 @@ TEST(QueryParserTest, SearchWithFilter) {
   EXPECT_EQ(query->filters[0].column, "status");
   EXPECT_EQ(query->filters[0].op, FilterOp::EQ);
   EXPECT_EQ(query->filters[0].value, "1");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -205,7 +198,24 @@ TEST(QueryParserTest, SearchWithMultipleKeywords) {
   EXPECT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->limit, 50);
   EXPECT_EQ(query->offset, 100);
-  EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, SearchAcceptsAndNotClause) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles required AND NOT excluded");
+
+  ASSERT_TRUE(query.has_value());
+  EXPECT_TRUE(query->and_terms.empty());
+  ASSERT_EQ(query->not_terms.size(), 1U);
+  EXPECT_EQ(query->not_terms.front(), "excluded");
+}
+
+TEST(QueryParserTest, SearchRejectsAndNotWithoutTerm) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles required AND NOT");
+
+  EXPECT_FALSE(query.has_value());
+  EXPECT_NE(query.error().message().find("NOT requires a term"), std::string::npos);
 }
 
 TEST(QueryParserTest, SearchExceedsDefaultQueryLengthLimit) {
@@ -227,6 +237,15 @@ TEST(QueryParserTest, SearchRespectsFilterContributionToLength) {
   EXPECT_EQ(query.error().code(), ErrorCode::kQueryTooLong);
 }
 
+TEST(QueryParserTest, SearchRespectsHighlightTagContributionToLength) {
+  QueryParser parser;
+  const std::string tag(70, 'b');
+  auto query = parser.Parse("SEARCH articles short HIGHLIGHT TAG " + tag + " " + tag);
+
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryTooLong);
+}
+
 TEST(QueryParserTest, SearchAllowsCustomQueryLengthLimit) {
   QueryParser parser;
   parser.SetMaxQueryLength(256);
@@ -236,7 +255,6 @@ TEST(QueryParserTest, SearchAllowsCustomQueryLengthLimit) {
 
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -252,7 +270,6 @@ TEST(QueryParserTest, CountBasic) {
   EXPECT_EQ(query->search_text, "hello");
   EXPECT_FALSE(query->cache_key.has_value());
   EXPECT_FALSE(query->cache_key_is_canonical);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -267,7 +284,6 @@ TEST(QueryParserTest, CountWithFilter) {
   EXPECT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].column, "status");
   EXPECT_EQ(query->filters[0].op, FilterOp::EQ);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -281,7 +297,6 @@ TEST(QueryParserTest, GetBasic) {
   EXPECT_EQ(query->type, QueryType::GET);
   EXPECT_EQ(query->table, "articles");
   EXPECT_EQ(query->primary_key, "12345");
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, GetDecodesReversiblyEscapedPrimaryKey) {
@@ -291,7 +306,6 @@ TEST(QueryParserTest, GetDecodesReversiblyEscapedPrimaryKey) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::GET);
   EXPECT_EQ(query->primary_key, std::string("a b\tc") + '\x01');
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -350,7 +364,6 @@ TEST(QueryParserTest, FilterWithoutSpacesEquals) {
   auto query = parser.Parse("SEARCH articles hello FILTER status=1");
 
   ASSERT_TRUE(query);
-  EXPECT_TRUE(query->IsValid());
   ASSERT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].column, "status");
   EXPECT_EQ(query->filters[0].op, FilterOp::EQ);
@@ -362,7 +375,6 @@ TEST(QueryParserTest, FilterWithoutSpacesNotEqualSqlStylePreservesColumnCase) {
   auto query = parser.Parse("SEARCH articles hello FILTER createdAt<>100");
 
   ASSERT_TRUE(query);
-  EXPECT_TRUE(query->IsValid());
   ASSERT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].column, "createdAt");
   EXPECT_EQ(query->filters[0].op, FilterOp::NE);
@@ -374,7 +386,6 @@ TEST(QueryParserTest, FilterPreservesColumnCase) {
   auto query = parser.Parse("SEARCH articles hello FILTER createdAt >= 100");
 
   ASSERT_TRUE(query);
-  EXPECT_TRUE(query->IsValid());
   ASSERT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].column, "createdAt");
   EXPECT_EQ(query->filters[0].op, FilterOp::GTE);
@@ -386,7 +397,6 @@ TEST(QueryParserTest, FilterWithoutSpacesGreaterEqual) {
   auto query = parser.Parse("SEARCH articles hello FILTER score>=42");
 
   ASSERT_TRUE(query);
-  EXPECT_TRUE(query->IsValid());
   ASSERT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].column, "score");
   EXPECT_EQ(query->filters[0].op, FilterOp::GTE);
@@ -398,7 +408,6 @@ TEST(QueryParserTest, FilterAttachedOperatorWithSeparateValue) {
   auto query = parser.Parse("SEARCH articles hello FILTER status= 1");
 
   ASSERT_TRUE(query);
-  EXPECT_TRUE(query->IsValid());
   ASSERT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].value, "1");
 }
@@ -559,15 +568,12 @@ TEST(QueryParserTest, InvalidCompoundFilterRejectsOperatorPrefixedValue) {
   EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidFilter);
 }
 
-TEST(QueryParserTest, FilterAllowsOperatorPrefixedValueWhenSeparated) {
+TEST(QueryParserTest, FilterRejectsOperatorPrefixedValueWhenSeparated) {
   QueryParser parser;
 
   auto query = parser.Parse("SEARCH articles hello FILTER price = >5");
-  ASSERT_TRUE(query) << query.error().message();
-  ASSERT_EQ(query->filters.size(), 1);
-  EXPECT_EQ(query->filters[0].column, "price");
-  EXPECT_EQ(query->filters[0].op, FilterOp::EQ);
-  EXPECT_EQ(query->filters[0].value, ">5");
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidFilter);
 }
 
 /**
@@ -594,7 +600,6 @@ TEST(QueryParserTest, SearchUnknownKeyword) {
 
   // UNKNOWN and keyword are treated as part of search text
   ASSERT_TRUE(query);
-  EXPECT_TRUE(query->IsValid());
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->table, "articles");
   EXPECT_EQ(query->search_text, "hello UNKNOWN keyword");
@@ -635,7 +640,6 @@ TEST(QueryParserTest, JapaneseSearchText) {
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->search_text, "ライブ");
   EXPECT_EQ(query->limit, 50);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -648,7 +652,6 @@ TEST(QueryParserTest, LargeOffsetValue) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->offset, 1000000);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -664,7 +667,6 @@ TEST(QueryParserTest, SearchWithNot) {
   EXPECT_EQ(query->search_text, "hello");
   EXPECT_EQ(query->not_terms.size(), 1);
   EXPECT_EQ(query->not_terms[0], "world");
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchStartingWithNotPreservesBooleanExpression) {
@@ -689,7 +691,6 @@ TEST(QueryParserTest, SearchWithMultipleNots) {
   EXPECT_EQ(query->not_terms.size(), 2);
   EXPECT_EQ(query->not_terms[0], "world");
   EXPECT_EQ(query->not_terms[1], "test");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -705,7 +706,6 @@ TEST(QueryParserTest, SearchWithNotAndFilter) {
   EXPECT_EQ(query->not_terms[0], "world");
   EXPECT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->filters[0].column, "status");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -722,7 +722,6 @@ TEST(QueryParserTest, SearchWithNotFilterLimitOffset) {
   EXPECT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->limit, 50);
   EXPECT_EQ(query->offset, 100);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -738,7 +737,6 @@ TEST(QueryParserTest, CountWithNot) {
   EXPECT_EQ(query->search_text, "hello");
   EXPECT_EQ(query->not_terms.size(), 1);
   EXPECT_EQ(query->not_terms[0], "world");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -752,7 +750,6 @@ TEST(QueryParserTest, CountWithNotAndFilter) {
   EXPECT_EQ(query->type, QueryType::COUNT);
   EXPECT_EQ(query->not_terms.size(), 1);
   EXPECT_EQ(query->filters.size(), 1);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -788,7 +785,6 @@ TEST(QueryParserTest, QuotedStringDouble) {
   EXPECT_EQ(query->table, "articles");
   EXPECT_EQ(query->search_text, "hello world");
   EXPECT_EQ(query->limit, 10);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -803,7 +799,6 @@ TEST(QueryParserTest, QuotedStringSingle) {
   EXPECT_EQ(query->table, "articles");
   EXPECT_EQ(query->search_text, "hello world");
   EXPECT_EQ(query->limit, 10);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -816,7 +811,6 @@ TEST(QueryParserTest, QuotedStringMixed) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->search_text, "it's working");
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, QuotedBooleanKeywordPhrasePreservesBoundaryForAst) {
@@ -828,7 +822,6 @@ TEST(QueryParserTest, QuotedBooleanKeywordPhrasePreservesBoundaryForAst) {
   EXPECT_EQ(query->search_text, "hello OR world");
   EXPECT_EQ(query->search_expression, R"("hello OR world")");
   EXPECT_EQ(query->limit, 10);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, QuotedPhraseWithBooleanWordKeepsLiteralFlatText) {
@@ -872,7 +865,6 @@ TEST(QueryParserTest, EscapedQuoteInString) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->search_text, "hello \"world\"");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -885,7 +877,15 @@ TEST(QueryParserTest, EscapedBackslash) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->search_text, "hello\\world");
-  EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, UnquotedBackslashesArePreservedLiterally) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles C:\path\to)");
+
+  ASSERT_TRUE(query.has_value());
+  EXPECT_EQ(query->search_text, R"(C:\path\to)");
+  EXPECT_EQ(query->search_expression, R"(C:\path\to)");
 }
 
 /**
@@ -913,7 +913,6 @@ TEST(QueryParserTest, SearchWithAnd) {
   EXPECT_EQ(query->search_text, "hello");
   EXPECT_EQ(query->and_terms.size(), 1);
   EXPECT_EQ(query->and_terms[0], "world");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -928,7 +927,6 @@ TEST(QueryParserTest, SearchWithMultipleAnds) {
   EXPECT_EQ(query->and_terms.size(), 2);
   EXPECT_EQ(query->and_terms[0], "world");
   EXPECT_EQ(query->and_terms[1], "test");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -944,7 +942,6 @@ TEST(QueryParserTest, SearchWithAndAndNot) {
   EXPECT_EQ(query->and_terms[0], "world");
   EXPECT_EQ(query->not_terms.size(), 1);
   EXPECT_EQ(query->not_terms[0], "test");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -960,7 +957,6 @@ TEST(QueryParserTest, CountWithAnd) {
   EXPECT_EQ(query->search_text, "hello");
   EXPECT_EQ(query->and_terms.size(), 1);
   EXPECT_EQ(query->and_terms[0], "world");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -984,7 +980,6 @@ TEST(QueryParserTest, JapaneseQuotedString) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->search_text, "漫画 アニメ");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1004,7 +999,6 @@ TEST(QueryParserTest, ComplexQueryWithQuotesAndNot) {
   EXPECT_EQ(query->filters.size(), 1);
   EXPECT_EQ(query->limit, 50);
   EXPECT_EQ(query->offset, 100);
-  EXPECT_TRUE(query->IsValid());
 }
 
 // DEBUG Command Tests
@@ -1014,7 +1008,6 @@ TEST(QueryParserTest, DebugOn) {
 
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::DEBUG_ON);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, DebugOff) {
@@ -1023,7 +1016,6 @@ TEST(QueryParserTest, DebugOff) {
 
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::DEBUG_OFF);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, DebugCaseInsensitive) {
@@ -1033,8 +1025,6 @@ TEST(QueryParserTest, DebugCaseInsensitive) {
 
   EXPECT_EQ(query1->type, QueryType::DEBUG_ON);
   EXPECT_EQ(query2->type, QueryType::DEBUG_OFF);
-  EXPECT_TRUE(query1->IsValid());
-  EXPECT_TRUE(query2->IsValid());
 }
 
 TEST(QueryParserTest, DebugMissingMode) {
@@ -1066,7 +1056,6 @@ TEST(QueryParserTest, SearchWithSortDesc) {
   EXPECT_EQ(query->order_by->column, "created_at");
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
   EXPECT_EQ(query->limit, 10);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchWithSortPreservesColumnCase) {
@@ -1077,7 +1066,6 @@ TEST(QueryParserTest, SearchWithSortPreservesColumnCase) {
   EXPECT_TRUE(query->order_by.has_value());
   EXPECT_EQ(query->order_by->column, "createdAt");
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchWithSortAsc) {
@@ -1089,7 +1077,6 @@ TEST(QueryParserTest, SearchWithSortAsc) {
   EXPECT_TRUE(query->order_by.has_value());
   EXPECT_EQ(query->order_by->column, "created_at");
   EXPECT_EQ(query->order_by->order, SortOrder::ASC);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchWithSortDefaultDesc) {
@@ -1101,7 +1088,24 @@ TEST(QueryParserTest, SearchWithSortDefaultDesc) {
   EXPECT_TRUE(query->order_by.has_value());
   EXPECT_EQ(query->order_by->column, "created_at");
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);  // Default
-  EXPECT_TRUE(query->IsValid());
+}
+
+TEST(QueryParserTest, SearchWithSortByColumn) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT BY created_at ASC");
+
+  ASSERT_TRUE(query.has_value());
+  ASSERT_TRUE(query->order_by.has_value());
+  EXPECT_EQ(query->order_by->column, "created_at");
+  EXPECT_EQ(query->order_by->order, SortOrder::ASC);
+}
+
+TEST(QueryParserTest, SearchRejectsSortByWithoutColumn) {
+  QueryParser parser;
+  auto query = parser.Parse("SEARCH articles hello SORT BY");
+
+  EXPECT_FALSE(query.has_value());
+  EXPECT_NE(query.error().message().find("SORT BY requires a column name"), std::string::npos);
 }
 
 TEST(QueryParserTest, SearchWithSortPrimaryKey) {
@@ -1113,7 +1117,6 @@ TEST(QueryParserTest, SearchWithSortPrimaryKey) {
   EXPECT_TRUE(query->order_by.has_value());
   EXPECT_EQ(query->order_by->column, "id");
   EXPECT_FALSE(query->order_by->IsPrimaryKey());  // id is a column name, not empty
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchWithSortCaseInsensitive) {
@@ -1143,7 +1146,6 @@ TEST(QueryParserTest, SearchWithSortAndFilter) {
   EXPECT_EQ(query->order_by->column, "created_at");
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
   EXPECT_EQ(query->limit, 20);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchComplexWithSort) {
@@ -1162,7 +1164,6 @@ TEST(QueryParserTest, SearchComplexWithSort) {
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
   EXPECT_EQ(query->limit, 10);
   EXPECT_EQ(query->offset, 20);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SortWithoutColumn) {
@@ -1189,7 +1190,6 @@ TEST(QueryParserTest, SearchWithSortAscShorthand) {
   EXPECT_TRUE(query->order_by->IsPrimaryKey());
   EXPECT_EQ(query->order_by->order, SortOrder::ASC);
   EXPECT_EQ(query->limit, 10);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1205,7 +1205,6 @@ TEST(QueryParserTest, SearchWithSortDescShorthand) {
   EXPECT_EQ(query->order_by->column, "");  // Empty = primary key
   EXPECT_TRUE(query->order_by->IsPrimaryKey());
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1221,7 +1220,6 @@ TEST(QueryParserTest, SearchWithSortDescShorthandAndFilter) {
   EXPECT_TRUE(query->order_by.has_value());
   EXPECT_TRUE(query->order_by->IsPrimaryKey());
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchWithoutSort) {
@@ -1231,7 +1229,6 @@ TEST(QueryParserTest, SearchWithoutSort) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_FALSE(query->order_by.has_value());  // No SORT specified
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1256,7 +1253,6 @@ TEST(QueryParserTest, SearchWithParenthesesAndSort) {
   EXPECT_EQ(query->order_by->order, SortOrder::DESC);
   EXPECT_TRUE(query->order_by->IsPrimaryKey());
   EXPECT_EQ(query->limit, 10);
-  EXPECT_TRUE(query->IsValid());
 }
 
 TEST(QueryParserTest, SearchWithTopLevelOrAndSort) {
@@ -1314,7 +1310,6 @@ TEST(QueryParserTest, SearchWithComplexExpressionAndSort) {
   EXPECT_EQ(query->order_by->column, "score");
   EXPECT_EQ(query->order_by->order, SortOrder::ASC);
   EXPECT_EQ(query->limit, 20);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1343,7 +1338,6 @@ TEST(QueryParserTest, LimitWithOffsetCountFormat) {
   EXPECT_EQ(query->limit, 50);
   EXPECT_TRUE(query->offset_explicit);
   EXPECT_TRUE(query->limit_explicit);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1357,7 +1351,6 @@ TEST(QueryParserTest, LimitWithZeroOffset) {
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->offset, 0);
   EXPECT_EQ(query->limit, 100);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1371,7 +1364,6 @@ TEST(QueryParserTest, LimitWithLargeOffsetAndMax) {
   EXPECT_EQ(query->type, QueryType::SEARCH);
   EXPECT_EQ(query->offset, 100);
   EXPECT_EQ(query->limit, 1000);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1431,7 +1423,6 @@ TEST(QueryParserTest, LimitOffsetCountWithSort) {
   EXPECT_EQ(query->limit, 100);
   EXPECT_TRUE(query->order_by.has_value());
   EXPECT_EQ(query->order_by->column, "created_at");
-  EXPECT_TRUE(query->IsValid());
 }
 
 // SQL Error Hint Tests
@@ -1547,7 +1538,6 @@ TEST(QueryParserTest, CountWithParentheses) {
   EXPECT_EQ(query->table, "threads");
   EXPECT_EQ(query->search_text, "(golang OR python)");
   EXPECT_EQ(query->filters.size(), 1);
-  EXPECT_TRUE(query->IsValid());
 }
 
 // ============================================================================
@@ -1645,7 +1635,6 @@ TEST(QueryParserTest, SearchComplexNestedParenthesesBalanced) {
 
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::SEARCH);
-  EXPECT_TRUE(query->IsValid());
   EXPECT_EQ(query->search_text, "((golang OR python) AND (rust OR cpp))");
 }
 
@@ -1653,11 +1642,26 @@ TEST(QueryParserTest, SearchComplexNestedParenthesesBalanced) {
 // DUMP Command Tests
 // ============================================================================
 
+TEST(QueryParserTest, AuthRequiresExactlyOneToken) {
+  QueryParser parser;
+
+  const auto missing = parser.Parse("AUTH");
+  EXPECT_FALSE(missing);
+
+  const auto extra = parser.Parse("AUTH one two");
+  EXPECT_FALSE(extra);
+
+  const auto valid = parser.Parse("AUTH secret-token");
+  ASSERT_TRUE(valid) << valid.error().message();
+  EXPECT_EQ(valid->type, QueryType::AUTH);
+  EXPECT_EQ(valid->auth_token, "secret-token");
+}
+
 /**
  * @brief Test DUMP SAVE without table
  *
- * Previously, DUMP_SAVE was not in the table-not-required list, causing
- * Query::IsValid() to return false even though the command doesn't need a table.
+ * Parsing succeeds without inventing a table requirement for this global
+ * command.
  */
 TEST(QueryParserTest, DumpSaveWithoutTable) {
   QueryParser parser;
@@ -1666,7 +1670,6 @@ TEST(QueryParserTest, DumpSaveWithoutTable) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->type, QueryType::DUMP_SAVE);
   EXPECT_TRUE(query->table.empty());
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1680,7 +1683,6 @@ TEST(QueryParserTest, DumpSaveWithFilepath) {
   EXPECT_EQ(query->type, QueryType::DUMP_SAVE);
   EXPECT_TRUE(query->table.empty());
   EXPECT_EQ(query->filepath, "test.dmp");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1699,16 +1701,15 @@ TEST(QueryParserTest, DumpSaveEmptyQuotedString) {
 }
 
 /**
- * @brief Test DUMP SAVE with empty token from consecutive spaces
+ * @brief DUMP SAVE must reject the unsupported statistics flag rather than
+ * silently emitting a dump without its requested data.
  */
-TEST(QueryParserTest, DumpSaveWithOnlyFlags) {
+TEST(QueryParserTest, DumpSaveRejectsUnsupportedWithStatsFlag) {
   QueryParser parser;
   auto query = parser.Parse("DUMP SAVE --with-stats");
 
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->type, QueryType::DUMP_SAVE);
-  EXPECT_TRUE(query->dump_with_stats);
-  EXPECT_TRUE(query->filepath.empty());
+  ASSERT_FALSE(query.has_value());
+  EXPECT_NE(query.error().message().find("Unknown DUMP SAVE flag"), std::string::npos);
 }
 
 /**
@@ -1736,7 +1737,6 @@ TEST(QueryParserTest, DumpLoadWithFilepath) {
   EXPECT_EQ(query->type, QueryType::DUMP_LOAD);
   EXPECT_TRUE(query->table.empty());
   EXPECT_EQ(query->filepath, "test.dmp");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1750,7 +1750,6 @@ TEST(QueryParserTest, DumpVerifyWithFilepath) {
   EXPECT_EQ(query->type, QueryType::DUMP_VERIFY);
   EXPECT_TRUE(query->table.empty());
   EXPECT_EQ(query->filepath, "test.dmp");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1764,7 +1763,6 @@ TEST(QueryParserTest, DumpInfoWithFilepath) {
   EXPECT_EQ(query->type, QueryType::DUMP_INFO);
   EXPECT_TRUE(query->table.empty());
   EXPECT_EQ(query->filepath, "test.dmp");
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -1775,19 +1773,15 @@ TEST(QueryParserTest, DumpCommandsCaseInsensitive) {
 
   auto query1 = parser.Parse("dump save test.dmp");
   EXPECT_EQ(query1->type, QueryType::DUMP_SAVE);
-  EXPECT_TRUE(query1->IsValid());
 
   auto query2 = parser.Parse("DuMp LoAd test.dmp");
   EXPECT_EQ(query2->type, QueryType::DUMP_LOAD);
-  EXPECT_TRUE(query2->IsValid());
 
   auto query3 = parser.Parse("DUMP verify test.dmp");
   EXPECT_EQ(query3->type, QueryType::DUMP_VERIFY);
-  EXPECT_TRUE(query3->IsValid());
 
   auto query4 = parser.Parse("dump INFO test.dmp");
   EXPECT_EQ(query4->type, QueryType::DUMP_INFO);
-  EXPECT_TRUE(query4->IsValid());
 }
 
 /**
@@ -1889,6 +1883,16 @@ TEST(QueryParserTest, Bug27_SetCommandValid) {
   ASSERT_EQ(query->variable_assignments.size(), 1);
   EXPECT_EQ(query->variable_assignments[0].first, "var");
   EXPECT_EQ(query->variable_assignments[0].second, "value");
+}
+
+TEST(QueryParserTest, SetCommandAcceptsCompactAssignment) {
+  QueryParser parser;
+
+  auto query = parser.Parse("SET api.default_limit=50");
+  ASSERT_TRUE(query) << query.error().message();
+  ASSERT_EQ(query->variable_assignments.size(), 1);
+  EXPECT_EQ(query->variable_assignments[0].first, "api.default_limit");
+  EXPECT_EQ(query->variable_assignments[0].second, "50");
 }
 
 /**
@@ -2044,7 +2048,6 @@ TEST(QueryParserTest, OffsetZeroAccepted) {
   auto query = parser.Parse("SEARCH articles hello OFFSET 0");
   ASSERT_TRUE(query);
   EXPECT_EQ(query->offset, 0);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -2058,7 +2061,6 @@ TEST(QueryParserTest, LargOffsetAccepted) {
   auto query = parser.Parse("SEARCH articles hello OFFSET 1000000");
   ASSERT_TRUE(query);
   EXPECT_EQ(query->offset, 1000000);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -2073,7 +2075,6 @@ TEST(QueryParserTest, LimitOffsetCountFormatValid) {
   EXPECT_EQ(query->limit, 50);
   EXPECT_TRUE(query->offset_explicit);
   EXPECT_TRUE(query->limit_explicit);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -2086,7 +2087,6 @@ TEST(QueryParserTest, LimitOffsetCountFormatZeroOffset) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->offset, 0);
   EXPECT_EQ(query->limit, 100);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -2175,7 +2175,6 @@ TEST(QueryParserTest, LimitOneAccepted) {
   auto query = parser.Parse("SEARCH articles hello LIMIT 1");
   ASSERT_TRUE(query);
   EXPECT_EQ(query->limit, 1);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -2187,7 +2186,6 @@ TEST(QueryParserTest, LimitMaxAccepted) {
   auto query = parser.Parse("SEARCH articles hello LIMIT 1000");
   ASSERT_TRUE(query);
   EXPECT_EQ(query->limit, 1000);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
@@ -2211,19 +2209,18 @@ TEST(QueryParserTest, OffsetBeforeLimitAccepted) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->offset, 20);
   EXPECT_EQ(query->limit, 10);
-  EXPECT_TRUE(query->IsValid());
 }
 
 /**
- * @test Duplicate LIMIT should use last value
+ * @test Duplicate LIMIT should be rejected
  */
-TEST(QueryParserTest, DuplicateLimitUsesLast) {
+TEST(QueryParserTest, DuplicateLimitRejected) {
   QueryParser parser;
 
   auto query = parser.Parse("SEARCH articles hello LIMIT 50 LIMIT 100");
-  ASSERT_TRUE(query);
-  EXPECT_EQ(query->limit, 100);
-  EXPECT_TRUE(query->IsValid());
+  EXPECT_FALSE(query);
+  EXPECT_EQ(query.error().code(), ErrorCode::kQueryInvalidLimit);
+  EXPECT_NE(query.error().message().find("more than once"), std::string::npos);
 }
 
 /**
@@ -2318,7 +2315,6 @@ TEST(QueryParserTest, LargeOffsetWithMaxLimit) {
   ASSERT_TRUE(query);
   EXPECT_EQ(query->offset, 100000);
   EXPECT_EQ(query->limit, 1000);
-  EXPECT_TRUE(query->IsValid());
 }
 
 // =============================================================================
@@ -2391,7 +2387,19 @@ TEST(QueryParserTest, FilterColumnNameTooLong) {
   auto query = parser.Parse("SEARCH articles hello FILTER " + long_column + " = 1");
 
   EXPECT_FALSE(query);
-  EXPECT_NE(query.error().message().find("column name exceeds maximum length"), std::string::npos);
+  EXPECT_NE(query.error().message().find("Invalid filter column"), std::string::npos);
+}
+
+TEST(QueryParserTest, SearchRejectsNonAsciiFilterAndSortColumns) {
+  QueryParser parser;
+
+  auto filter = parser.Parse("SEARCH articles hello FILTER 状態 = active");
+  EXPECT_FALSE(filter.has_value());
+  EXPECT_NE(filter.error().message().find("Invalid filter column"), std::string::npos);
+
+  auto sort = parser.Parse("SEARCH articles hello SORT 状態");
+  EXPECT_FALSE(sort.has_value());
+  EXPECT_NE(sort.error().message().find("Invalid sort column"), std::string::npos);
 }
 
 TEST(QueryParserTest, FilterValueTooLong) {
@@ -2619,6 +2627,14 @@ TEST(QueryParserTest, OptimizeCaseInsensitive) {
   EXPECT_EQ(query->type, QueryType::OPTIMIZE);
 }
 
+TEST(QueryParserTest, OptimizeWithoutTableTargetsAllTables) {
+  QueryParser parser;
+  auto query = parser.Parse("OPTIMIZE");
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->type, QueryType::OPTIMIZE);
+  EXPECT_TRUE(query->table.empty());
+}
+
 /**
  * @brief Test CountParensInToken with double-backslash before quote
  */
@@ -2817,6 +2833,31 @@ TEST(QueryParserHighlightTest, HighlightTagMissingArgs) {
   EXPECT_FALSE(result.has_value());
 }
 
+TEST(QueryParserHighlightTest, HighlightTagAcceptsMaximumLength) {
+  QueryParser parser;
+  parser.SetMaxQueryLength(0);  // Isolate the per-tag boundary from the total expression limit.
+  const std::string maximum_length_tag(QueryParser::kMaxHighlightTagLength, 'a');
+  const auto result =
+      parser.Parse("SEARCH articles hello HIGHLIGHT TAG " + maximum_length_tag + " " + maximum_length_tag);
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(result->highlight.has_value());
+  EXPECT_EQ(result->highlight->open_tag, maximum_length_tag);
+  EXPECT_EQ(result->highlight->close_tag, maximum_length_tag);
+}
+
+TEST(QueryParserHighlightTest, HighlightTagRejectsOversizedOpenOrCloseTag) {
+  QueryParser parser;
+  const std::string oversized_tag(QueryParser::kMaxHighlightTagLength + 1, 'a');
+
+  const auto oversized_open = parser.Parse("SEARCH articles hello HIGHLIGHT TAG " + oversized_tag + " </b>");
+  EXPECT_FALSE(oversized_open.has_value());
+  EXPECT_NE(oversized_open.error().message().find("open tag"), std::string::npos);
+
+  const auto oversized_close = parser.Parse("SEARCH articles hello HIGHLIGHT TAG <b> " + oversized_tag);
+  EXPECT_FALSE(oversized_close.has_value());
+  EXPECT_NE(oversized_close.error().message().find("close tag"), std::string::npos);
+}
+
 /**
  * @test HIGHLIGHT SNIPPET_LEN with floating point value is rejected
  *
@@ -3013,6 +3054,22 @@ TEST(QueryParserFacetTest, FacetWithLimit) {
   EXPECT_TRUE(result->limit_explicit);
 }
 
+TEST(QueryParserFacetTest, FacetRejectsNonAsciiColumn) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t 状態");
+
+  EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Invalid facet column"), std::string::npos);
+}
+
+TEST(QueryParserFacetTest, FacetRejectsLimitAboveMaximum) {
+  QueryParser parser;
+  auto result = parser.Parse("FACET t column LIMIT " + std::to_string(mygramdb::config::defaults::kMaxLimit + 1));
+
+  EXPECT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("LIMIT exceeds maximum"), std::string::npos);
+}
+
 TEST(QueryParserFacetTest, FacetMissingColumn) {
   QueryParser parser;
   auto result = parser.Parse("FACET t");
@@ -3076,5 +3133,5 @@ TEST(QueryParserFacetTest, FacetColumnNameTooLong) {
   std::string long_name(200, 'x');
   auto result = parser.Parse("FACET t " + long_name);
   EXPECT_FALSE(result.has_value());
-  EXPECT_NE(result.error().message().find("maximum length"), std::string::npos);
+  EXPECT_NE(result.error().message().find("Invalid facet column"), std::string::npos);
 }

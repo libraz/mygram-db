@@ -7,9 +7,7 @@
 
 #include <algorithm>
 #include <fstream>
-#include <sstream>
 
-#include "utils/binary_io.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::query {
@@ -41,7 +39,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
 
   std::ifstream file(filepath);
   if (!file.is_open()) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageReadError, "Cannot open synonym file: " + filepath));
+    return MakeUnexpected(MakeError(ErrorCode::kIOError, "Cannot open synonym file: " + filepath));
   }
 
   std::vector<std::vector<std::string>> loaded_groups;
@@ -49,13 +47,23 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
 
   std::string line;
   size_t line_num = 0;
+  size_t nonempty_data_lines = 0;
+  size_t single_term_lines = 0;
   while (std::getline(file, line)) {
     ++line_num;
+
+    // std::getline removes '\n' but retains the preceding '\r' from a
+    // Windows CRLF file. Strip it before tokenization so the final synonym is
+    // stored under the same normalized key as a query term.
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
 
     // Skip empty lines and comments
     if (line.empty() || line[0] == '#') {
       continue;
     }
+    ++nonempty_data_lines;
 
     // Collect raw tokens first (preserve original text for diagnostic logging)
     std::vector<std::string> raw_tokens;
@@ -71,6 +79,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
 
     // Single-token lines are legitimate (just a term with no synonyms) -- skip silently
     if (raw_tokens.size() < 2) {
+      ++single_term_lines;
       continue;
     }
 
@@ -84,14 +93,14 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
       }
     }
 
-    // Cap group size
+    // Deduplicate before applying the group-size cap. Capping raw tokens first
+    // could discard every distinct synonym after a run of equivalent aliases.
+    std::sort(terms.begin(), terms.end());
+    terms.erase(std::unique(terms.begin(), terms.end()), terms.end());
+
     if (terms.size() > kMaxGroupSize) {
       terms.resize(kMaxGroupSize);
     }
-
-    // Deduplicate
-    std::sort(terms.begin(), terms.end());
-    terms.erase(std::unique(terms.begin(), terms.end()), terms.end());
 
     if (terms.size() < 2) {
       // All raw tokens normalized to the same value -- the group is effectively
@@ -162,6 +171,15 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
     return MakeUnexpected(MakeError(ErrorCode::kStorageReadError, "Failed while reading synonym file: " + filepath));
   }
 
+  if (loaded_groups.empty() && nonempty_data_lines > 0 && single_term_lines == nonempty_data_lines) {
+    mygram::utils::StructuredLog()
+        .Event("synonym_file_has_no_groups")
+        .Field("filepath", filepath)
+        .Field("data_lines", static_cast<uint64_t>(nonempty_data_lines))
+        .Field("reason", "all data lines contain fewer than two tab-separated terms")
+        .Warn();
+  }
+
   {
     std::unique_lock lock(mutex_);
     groups_.swap(loaded_groups);
@@ -213,82 +231,6 @@ void SynonymDictionary::Clear() {
   groups_.clear();
   term_to_group_.clear();
   revision_.fetch_add(1, std::memory_order_acq_rel);
-}
-
-bool SynonymDictionary::SaveToStream(std::ostream& output_stream) const {
-  std::shared_lock lock(mutex_);
-
-  auto group_count = static_cast<uint32_t>(groups_.size());
-  if (!mygram::utils::WriteBinary(output_stream, group_count)) {
-    return false;
-  }
-
-  for (const auto& group : groups_) {
-    auto term_count = static_cast<uint32_t>(group.size());
-    if (!mygram::utils::WriteBinary(output_stream, term_count)) {
-      return false;
-    }
-    for (const auto& term : group) {
-      if (!mygram::utils::WriteString(output_stream, term)) {
-        return false;
-      }
-    }
-  }
-
-  return output_stream.good();
-}
-
-bool SynonymDictionary::LoadFromStream(std::istream& input_stream) {
-  std::vector<std::vector<std::string>> loaded_groups;
-  std::unordered_map<std::string, size_t> loaded_term_to_group;
-
-  uint32_t group_count = 0;
-  if (!mygram::utils::ReadBinary(input_stream, group_count)) {
-    return false;
-  }
-
-  // Safety limit
-  constexpr uint32_t kMaxGroups = 1'000'000;
-  if (group_count > kMaxGroups) {
-    return false;
-  }
-
-  loaded_groups.reserve(group_count);
-  for (uint32_t g = 0; g < group_count; ++g) {
-    uint32_t term_count = 0;
-    if (!mygram::utils::ReadBinary(input_stream, term_count)) {
-      return false;
-    }
-
-    if (term_count > kMaxGroupSize) {
-      return false;
-    }
-
-    std::vector<std::string> group;
-    group.reserve(term_count);
-    for (uint32_t t = 0; t < term_count; ++t) {
-      std::string term;
-      if (!mygram::utils::ReadString(input_stream, term)) {
-        return false;
-      }
-
-      group.push_back(std::move(term));
-    }
-
-    size_t group_index = loaded_groups.size();
-    loaded_groups.push_back(std::move(group));
-    for (const auto& term : loaded_groups.back()) {
-      loaded_term_to_group[term] = group_index;
-    }
-  }
-
-  {
-    std::unique_lock lock(mutex_);
-    groups_.swap(loaded_groups);
-    term_to_group_.swap(loaded_term_to_group);
-    revision_.fetch_add(1, std::memory_order_acq_rel);
-  }
-  return true;
 }
 
 }  // namespace mygramdb::query

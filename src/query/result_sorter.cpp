@@ -43,6 +43,7 @@ constexpr double kPartialSortThreshold = 0.5;
 
 #ifdef MYGRAMDB_QUERY_TEST_HOOKS
 std::atomic<bool> g_force_schwartzian_partial_failure{false};
+std::atomic<uint64_t> g_batched_partial_sort_invocation_count{0};
 #endif
 
 bool CompareDocIdTie(DocId lhs, DocId rhs, bool ascending) {
@@ -207,7 +208,14 @@ static std::string FilterValueToSortKey(const storage::FilterValue& val) {
           } else if constexpr (std::is_signed_v<T>) {
             return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
           } else {
-            return ToZeroPaddedString(static_cast<uint64_t>(arg), kNumericWidth);
+            // Legacy dumps can hold post-epoch timestamps as uint64_t while
+            // pre-epoch values are int64_t. Use the signed encoding whenever
+            // representable so their numeric order shares the same zero point.
+            const uint64_t value = static_cast<uint64_t>(arg);
+            if (value <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+              return ToZeroPaddedSignedString(static_cast<int64_t>(value), kNumericWidth);
+            }
+            return ToZeroPaddedString(value, kNumericWidth);
           }
         }
       },
@@ -282,8 +290,9 @@ void ResultSorter::PrecomputeSortKeys(const std::vector<DocId>& results, const s
     auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
     for (size_t i = 0; i < results.size(); ++i) {
       std::string sort_key;
-      const auto& pk_str = primary_keys[i];
-      if (!pk_str.empty()) {
+      const auto& primary_key = primary_keys[i];
+      if (primary_key.has_value()) {
+        const auto& pk_str = *primary_key;
         if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
           auto padded = ParseNumericPrimaryKey(pk_str);
           sort_key = padded.has_value() ? padded.value() : pk_str;
@@ -357,65 +366,6 @@ std::vector<DocId> ResultSorter::SortWithSchwartzianTransform(const std::vector<
   return sorted_results;
 }
 
-std::vector<DocId> ResultSorter::SortWithSchwartzianTransformPartial(const std::vector<DocId>& results,
-                                                                     const storage::DocumentStore& doc_store,
-                                                                     const OrderByClause& order_by,
-                                                                     const std::string& primary_key_column,
-                                                                     size_t top_k) {
-  // Schwartzian Transform + partial_sort: eliminates lock contention during sorting
-  //
-  // Performance improvement for parallel execution:
-  // - Before: N log K comparisons × 2 GetPrimaryKey() calls = 2N log K lock acquisitions per query
-  // - After:  1 batch lookup (1 lock) + N log K string comparisons (no locks)
-  // - For 100 parallel queries with N=10,000, K=100:
-  //   Before: ~265,000 × 100 = 26.5M lock acquisitions total
-  //   After:  100 lock acquisitions total (99.9996% reduction)
-
-  if (results.empty() || top_k == 0) {
-    return {};
-  }
-
-#ifdef MYGRAMDB_QUERY_TEST_HOOKS
-  if (g_force_schwartzian_partial_failure.load(std::memory_order_relaxed)) {
-    return {};
-  }
-#endif
-
-  // Clamp top_k to results size
-  top_k = std::min(top_k, results.size());
-
-  std::vector<SortEntry> entries;
-  try {
-    entries.reserve(results.size());
-  } catch (const std::bad_alloc&) {
-    // Memory allocation failed - OOM condition
-    mygram::utils::StructuredLog()
-        .Event("sort_fallback")
-        .Field("reason", "memory_allocation_failed")
-        .Field("size", static_cast<uint64_t>(results.size()))
-        .Error();
-    return {};  // Let caller handle fallback
-  }
-
-  // Step 1: Pre-compute sort keys for all DocIDs
-  PrecomputeSortKeys(results, doc_store, order_by, primary_key_column, entries);
-
-  // Step 2: partial_sort by pre-computed keys (O(N log K), no lock acquisitions)
-  bool ascending = (order_by.order == SortOrder::ASC);
-  std::partial_sort(
-      entries.begin(), entries.begin() + static_cast<std::ptrdiff_t>(top_k), entries.end(),
-      [ascending](const SortEntry& lhs, const SortEntry& rhs) { return CompareSortEntries(lhs, rhs, ascending); });
-
-  // Step 3: Extract top K sorted DocIDs
-  std::vector<DocId> sorted_results;
-  sorted_results.reserve(top_k);
-  for (size_t i = 0; i < top_k; ++i) {
-    sorted_results.push_back(entries[i].doc_id);
-  }
-
-  return sorted_results;
-}
-
 std::vector<DocId> ResultSorter::SortWithBatchedSchwartzianTransformPartial(const std::vector<DocId>& results,
                                                                             const storage::DocumentStore& doc_store,
                                                                             const OrderByClause& order_by,
@@ -424,6 +374,13 @@ std::vector<DocId> ResultSorter::SortWithBatchedSchwartzianTransformPartial(cons
   if (results.empty() || top_k == 0) {
     return {};
   }
+
+#ifdef MYGRAMDB_QUERY_TEST_HOOKS
+  g_batched_partial_sort_invocation_count.fetch_add(1, std::memory_order_relaxed);
+  if (g_force_schwartzian_partial_failure.load(std::memory_order_relaxed)) {
+    return {};
+  }
+#endif
 
   top_k = std::min(top_k, results.size());
   const bool ascending = (order_by.order == SortOrder::ASC);
@@ -559,7 +516,7 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
   }
 
   if (order_by.IsScoreSort()) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "SORT _score requires BM25-aware search path"));
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "SORT _score requires BM25-aware search path"));
   }
 
   if (!order_by.IsPrimaryKey() && !EqualsIgnoreCase(order_by.column, primary_key_column)) {
@@ -596,7 +553,7 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
           .Error();
 
       return MakeUnexpected(MakeError(
-          ErrorCode::kInvalidArgument,
+          ErrorCode::kQueryInvalidSort,
           "Sort column '" + order_by.column +
               "' not found. Column does not exist as filter column or primary key. Check column name spelling."));
     }
@@ -634,36 +591,33 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
   bool use_schwartzian =
       (results.size() >= kSchwartzianTransformThreshold && results.size() <= kSchwartzianTransformMaxSize);
 
-  if (use_schwartzian && use_partial_sort) {
-    // Schwartzian Transform + partial_sort: Best for parallel execution
-    // Eliminates lock contention by pre-computing all sort keys
-    // Memory: ~100 bytes per entry × N (temporary allocation)
+  if (use_partial_sort) {
+    // Bound temporary sort-key storage by processing the input in batches and
+    // retaining only the requested top K between batches.
     auto sorted_results =
-        SortWithSchwartzianTransformPartial(results, doc_store, order_by, primary_key_column, total_needed);
+        SortWithBatchedSchwartzianTransformPartial(results, doc_store, order_by, primary_key_column, total_needed);
 
     if (!sorted_results.empty()) {
-      // Success - return directly (already paginated to total_needed)
       mygram::utils::StructuredLog()
           .Event("result_sort_strategy")
-          .Field("strategy", "schwartzian_partial_sort")
+          .Field("strategy", "schwartzian_batched_partial_sort")
           .Field("needed", static_cast<uint64_t>(total_needed))
           .Field("result_count", static_cast<uint64_t>(results.size()))
           .Trace();
 
-      // Apply OFFSET within the partial-sorted results, with limit clamped to remaining size
       return ApplyOffsetLimit(sorted_results, query.offset, query.limit);
     }
-    // Fall through to traditional partial_sort if Schwartzian failed
+
     mygram::utils::StructuredLog()
         .Event("result_sort_strategy")
-        .Field("strategy", "schwartzian_failed_fallback")
+        .Field("strategy", "schwartzian_batched_failed_fallback")
         .Trace();
     try {
       SortComparator comparator(doc_store, order_by, primary_key_column);
       std::partial_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(total_needed), results.end(),
                         comparator);
     } catch (const std::bad_alloc&) {
-      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Insufficient memory to sort search results"));
+      return MakeUnexpected(MakeError(ErrorCode::kInternalError, "Insufficient memory to sort search results"));
     }
     return ApplyOffsetLimit(results, query.offset, query.limit);
   } else if (use_schwartzian) {
@@ -676,29 +630,6 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
     mygram::utils::StructuredLog()
         .Event("result_sort_strategy")
         .Field("strategy", "schwartzian_full_sort")
-        .Field("result_count", static_cast<uint64_t>(results.size()))
-        .Trace();
-  } else if (use_partial_sort) {
-    auto sorted_results =
-        SortWithBatchedSchwartzianTransformPartial(results, doc_store, order_by, primary_key_column, total_needed);
-    if (!sorted_results.empty()) {
-      mygram::utils::StructuredLog()
-          .Event("result_sort_strategy")
-          .Field("strategy", "schwartzian_batched_partial_sort")
-          .Field("needed", static_cast<uint64_t>(total_needed))
-          .Field("result_count", static_cast<uint64_t>(results.size()))
-          .Trace();
-      return ApplyOffsetLimit(sorted_results, query.offset, query.limit);
-    }
-
-    SortComparator comparator(doc_store, order_by, primary_key_column);
-    std::partial_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(total_needed), results.end(),
-                      comparator);
-
-    mygram::utils::StructuredLog()
-        .Event("result_sort_strategy")
-        .Field("strategy", "traditional_partial_sort")
-        .Field("needed", static_cast<uint64_t>(total_needed))
         .Field("result_count", static_cast<uint64_t>(results.size()))
         .Trace();
   } else {
@@ -722,6 +653,14 @@ mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::
 #ifdef MYGRAMDB_QUERY_TEST_HOOKS
 void ResultSorter::ForceSchwartzianPartialFailureForTesting(bool force) {
   g_force_schwartzian_partial_failure.store(force, std::memory_order_relaxed);
+}
+
+void ResultSorter::ResetBatchedPartialSortInvocationCountForTesting() {
+  g_batched_partial_sort_invocation_count.store(0, std::memory_order_release);
+}
+
+uint64_t ResultSorter::BatchedPartialSortInvocationCountForTesting() {
+  return g_batched_partial_sort_invocation_count.load(std::memory_order_acquire);
 }
 #endif
 

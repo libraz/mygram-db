@@ -459,8 +459,8 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
   }
   query.facet_column = tokens[pos++];
 
-  if (query.facet_column.size() > kMaxFilterColumnNameLength) {
-    SetError("FACET column name exceeds maximum length (" + std::to_string(kMaxFilterColumnNameLength) + ")");
+  if (!IsSafeColumnName(query.facet_column)) {
+    SetError("Invalid facet column");
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 
@@ -521,6 +521,13 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
   }
   if (query.filters.size() > kMaxTermCount) {
     SetError("Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")");
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  }
+
+  // Keep FACET LIMIT bounded the same way as SEARCH and the HTTP API.
+  if (query.limit > kMaxLimit) {
+    SetError("LIMIT exceeds maximum of " + std::to_string(kMaxLimit));
+    query.type = QueryType::UNKNOWN;
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
 

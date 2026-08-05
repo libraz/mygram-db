@@ -31,6 +31,8 @@ class ResultSorter {
  public:
 #ifdef MYGRAMDB_QUERY_TEST_HOOKS
   static void ForceSchwartzianPartialFailureForTesting(bool force);
+  static void ResetBatchedPartialSortInvocationCountForTesting();
+  [[nodiscard]] static uint64_t BatchedPartialSortInvocationCountForTesting();
 #endif
 
   /**
@@ -170,27 +172,6 @@ class ResultSorter {
                                                          const storage::DocumentStore& doc_store,
                                                          const OrderByClause& order_by,
                                                          const std::string& primary_key_column = "id");
-
-  /**
-   * @brief Sort using Schwartzian Transform with partial_sort
-   *
-   * Combines Schwartzian Transform with partial_sort for optimal performance:
-   * - Pre-computes sort keys once (O(N) lookups with single lock)
-   * - Uses partial_sort (O(N log K) comparisons, no lock contention)
-   *
-   * This eliminates lock contention during parallel query execution.
-   *
-   * @param results Document IDs to sort (modified in-place)
-   * @param doc_store Document store for retrieving sort keys
-   * @param order_by ORDER BY clause
-   * @param primary_key_column Primary key column name
-   * @param top_k Number of elements to partially sort
-   * @return Top K sorted document IDs
-   */
-  static std::vector<DocId> SortWithSchwartzianTransformPartial(const std::vector<DocId>& results,
-                                                                const storage::DocumentStore& doc_store,
-                                                                const OrderByClause& order_by,
-                                                                const std::string& primary_key_column, size_t top_k);
 
   static std::vector<DocId> SortWithBatchedSchwartzianTransformPartial(const std::vector<DocId>& results,
                                                                        const storage::DocumentStore& doc_store,

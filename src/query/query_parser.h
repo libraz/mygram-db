@@ -35,13 +35,14 @@ std::pair<int, int> CountParensInToken(const std::string& token);
  * @brief Query command type
  */
 enum class QueryType : uint8_t {
+  AUTH,    // AUTH <shared-secret>
   SEARCH,  // Search with limit/offset
   COUNT,   // Get total count
   GET,     // Get document by primary key
   INFO,    // Get server info (memcached-style)
 
   // Dump commands (hierarchical)
-  DUMP_SAVE,    // DUMP SAVE filepath [--with-stats]
+  DUMP_SAVE,    // DUMP SAVE [filepath]
   DUMP_LOAD,    // DUMP LOAD filepath
   DUMP_VERIFY,  // DUMP VERIFY filepath
   DUMP_INFO,    // DUMP INFO filepath
@@ -219,9 +220,7 @@ struct Query {
   bool offset_explicit = false;  // True if OFFSET was explicitly specified by user
   std::string primary_key;       // For GET command
   std::string filepath;          // For DUMP SAVE/LOAD/VERIFY/INFO commands (optional)
-
-  // DUMP command options
-  bool dump_with_stats = false;  // --with-stats flag for DUMP SAVE
+  std::string auth_token;        // For AUTH <shared-secret>
 
   // Variable commands (SET, SHOW VARIABLES)
   std::vector<std::pair<std::string, std::string>> variable_assignments;  // For SET: [(name, value), ...]
@@ -241,11 +240,6 @@ struct Query {
   std::optional<std::pair<uint64_t, uint64_t>> cache_key;
   std::string cache_key_discriminator;
   bool cache_key_is_canonical = false;
-
-  /**
-   * @brief Check if query is valid
-   */
-  [[nodiscard]] bool IsValid() const;
 };
 
 /**
@@ -278,6 +272,16 @@ class QueryParser {
   static constexpr size_t kMaxTermCount = 64;
   static constexpr size_t kMaxFilterColumnNameLength = 128;
   static constexpr size_t kMaxFilterValueLength = 1024;
+  /// Maximum UTF-8 byte length for each HIGHLIGHT TAG argument.
+  static constexpr size_t kMaxHighlightTagLength = 256;
+
+  /**
+   * @brief Whether a column name is safe for every public query surface.
+   *
+   * Column identities are intentionally ASCII-only so JSON keys and text
+   * protocol tokens have the same grammar.
+   */
+  [[nodiscard]] static bool IsSafeColumnName(std::string_view column);
 
   QueryParser() = default;
   ~QueryParser() = default;
@@ -317,6 +321,14 @@ class QueryParser {
    * @brief Get configured maximum query expression length
    */
   [[nodiscard]] size_t GetMaxQueryLength() const { return max_query_length_; }
+
+  /**
+   * @brief Validate a prepared query against the configured expression-length limit.
+   *
+   * HTTP handlers use this after applying JSON-only clauses so every protocol
+   * surface accounts for the same query components.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> ValidateQueryLength(const Query& query);
 
   /**
    * @brief Parse filter operator string to FilterOp enum
@@ -414,11 +426,6 @@ class QueryParser {
    * @brief Set error message
    */
   void SetError(std::string_view msg) { error_ = std::string(msg); }
-
-  /**
-   * @brief Validate query length against configured limit
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ValidateQueryLength(const Query& query);
 };
 
 }  // namespace mygramdb::query

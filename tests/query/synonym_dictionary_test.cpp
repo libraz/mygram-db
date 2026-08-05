@@ -14,7 +14,6 @@
 #include <fstream>
 #include <functional>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -108,18 +107,13 @@ TEST_F(SynonymDictionaryTest, LoadFromFileBasic) {
   EXPECT_EQ(dict.TermCount(), 3);
 }
 
-TEST_F(SynonymDictionaryTest, FailedStreamLoadPreservesPublishedDictionaryAndRevision) {
+TEST_F(SynonymDictionaryTest, LoadFromWindowsCrlfKeepsFinalSynonymQueryable) {
+  const auto path = CreateTempTSV("nyc\tnew york city\r\ntokyo\t東京\r\n");
   SynonymDictionary dict;
-  const auto path = CreateTempTSV("fast\tquick\n");
   ASSERT_TRUE(dict.LoadFromFile(path, IdentityNormalizer));
-  const uint64_t revision = dict.Revision();
 
-  std::string truncated(1, '\0');
-  std::istringstream input(truncated);
-  EXPECT_FALSE(dict.LoadFromStream(input));
-  EXPECT_EQ(dict.Revision(), revision);
-  const auto expanded = dict.Expand("fast");
-  EXPECT_NE(std::find(expanded.begin(), expanded.end(), "quick"), expanded.end());
+  EXPECT_EQ(dict.Expand("new york city"), (std::vector<std::string>{"new york city", "nyc"}));
+  EXPECT_EQ(dict.Expand("東京"), (std::vector<std::string>{"tokyo", "東京"}));
 }
 
 TEST_F(SynonymDictionaryTest, ExpandReturnsGroup) {
@@ -202,32 +196,11 @@ TEST_F(SynonymDictionaryTest, SingleTermLineSkipped) {
   EXPECT_TRUE(dict.IsEmpty());
 }
 
-TEST_F(SynonymDictionaryTest, SaveLoadRoundTrip) {
-  auto path = CreateTempTSV("nyc\tnew york city\ntokyo\t\xe6\x9d\xb1\xe4\xba\xac\n");
-  SynonymDictionary dict;
-  dict.LoadFromFile(path, IdentityNormalizer);
-
-  // Save
-  std::ostringstream oss;
-  ASSERT_TRUE(dict.SaveToStream(oss));
-
-  // Load into new dict
-  SynonymDictionary dict2;
-  std::istringstream iss(oss.str());
-  ASSERT_TRUE(dict2.LoadFromStream(iss));
-
-  EXPECT_EQ(dict2.GroupCount(), 2);
-  EXPECT_EQ(dict2.TermCount(), 4);
-
-  auto nyc = dict2.Expand("nyc");
-  EXPECT_EQ(nyc.size(), 2);
-  EXPECT_TRUE(std::find(nyc.begin(), nyc.end(), "new york city") != nyc.end());
-}
-
 TEST_F(SynonymDictionaryTest, FileNotFound) {
   SynonymDictionary dict;
   auto result = dict.LoadFromFile("/nonexistent/path/synonyms.tsv", IdentityNormalizer);
   EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygramdb::utils::ErrorCode::kIOError);
 }
 
 TEST_F(SynonymDictionaryTest, Clear) {
@@ -249,6 +222,20 @@ TEST_F(SynonymDictionaryTest, DuplicateTermsInGroupDeduped) {
 
   EXPECT_EQ(dict.GroupCount(), 1);
   EXPECT_EQ(dict.TermCount(), 2);
+}
+
+TEST_F(SynonymDictionaryTest, GroupCapAppliesAfterDeduplication) {
+  std::string input;
+  for (int i = 0; i < 20; ++i) {
+    input += "duplicate\t";
+  }
+  input += "alpha\tbeta\n";
+
+  SynonymDictionary dict;
+  ASSERT_TRUE(dict.LoadFromFile(CreateTempTSV(input), IdentityNormalizer));
+
+  EXPECT_EQ(dict.GroupCount(), 1u);
+  EXPECT_EQ(dict.Expand("alpha"), (std::vector<std::string>{"alpha", "beta", "duplicate"}));
 }
 
 TEST_F(SynonymDictionaryTest, MoveConstructor) {

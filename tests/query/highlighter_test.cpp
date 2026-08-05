@@ -105,6 +105,23 @@ TEST_F(HighlighterTest, Generate_EmptyTerms) {
   EXPECT_EQ(result.snippet, "hello world");
 }
 
+TEST_F(HighlighterTest, Generate_EmptyTermsRespectsSnippetLength) {
+  HighlightOptions opts;
+  opts.snippet_length = 10;
+
+  auto result = Highlighter::Generate(std::string(100, 'x'), {}, opts);
+  EXPECT_EQ(result.snippet, std::string(10, 'x') + "...");
+}
+
+TEST_F(HighlighterTest, GenerateOriginalEmptyTermsRespectsSnippetLength) {
+  HighlightOptions opts;
+  opts.snippet_length = 10;
+
+  auto result = Highlighter::GenerateOriginal(
+      std::string(100, 'x'), {}, [](std::string_view value) { return std::string(value); }, opts);
+  EXPECT_EQ(result.snippet, std::string(10, 'x') + "...");
+}
+
 TEST_F(HighlighterTest, Generate_CustomTags) {
   HighlightOptions opts;
   opts.open_tag = "<b>";
@@ -209,6 +226,24 @@ TEST_F(HighlighterTest, GenerateOriginalPreservesCaseAndWidth) {
   auto result = Highlighter::GenerateOriginal(original, terms, normalizer, opts);
 
   EXPECT_EQ(result.snippet, "<em>Tokyo</em> <em>ＴＯＷＥＲ</em>");
+}
+
+TEST_F(HighlighterTest, GenerateOriginalDoesNotDuplicateOverlappingMappedRanges) {
+  HighlightOptions opts;
+  opts.snippet_length = 20;
+  const auto expanding_normalizer = [](std::string_view text) {
+    if (text == "a") {
+      return std::string("ab");
+    }
+    if (text == "b") {
+      return std::string("bc");
+    }
+    return std::string(text);
+  };
+
+  auto result = Highlighter::GenerateOriginal("abc", {"abb", "bcc"}, expanding_normalizer, opts);
+
+  EXPECT_EQ(result.snippet, "<em>ab</em>c");
 }
 
 TEST_F(HighlighterTest, Generate_MatchAtBeginning) {

@@ -73,12 +73,6 @@ class SynonymDictionary {
 
   void Clear();
 
-  /// Serialize dictionary to stream (for dump persistence)
-  [[nodiscard]] bool SaveToStream(std::ostream& output_stream) const;
-
-  /// Deserialize dictionary from stream
-  [[nodiscard]] bool LoadFromStream(std::istream& input_stream);
-
  private:
   /// Synonym groups: each group is a vector of normalized terms
   std::vector<std::vector<std::string>> groups_;

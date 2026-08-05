@@ -39,6 +39,11 @@ size_t CalculateQueryExpressionLength(const Query& query) {
     length += query.order_by->column.size();
   }
 
+  if (query.highlight.has_value()) {
+    length += query.highlight->open_tag.size();
+    length += query.highlight->close_tag.size();
+  }
+
   return length;
 }
 
@@ -90,77 +95,6 @@ std::pair<int, int> detail::CountParensInToken(const std::string& token) {
   return {open, close};
 }
 
-bool Query::IsValid() const {
-  if (type == QueryType::UNKNOWN) {
-    return false;
-  }
-
-  // Check if this query type requires a table name
-  // Commands that do NOT require a table are listed; all others require one
-  bool requires_table = true;
-  switch (type) {
-    case QueryType::INFO:
-    case QueryType::SAVE:
-    case QueryType::LOAD:
-    case QueryType::DUMP_SAVE:
-    case QueryType::DUMP_LOAD:
-    case QueryType::DUMP_VERIFY:
-    case QueryType::DUMP_INFO:
-    case QueryType::DUMP_STATUS:
-    case QueryType::REPLICATION_STATUS:
-    case QueryType::REPLICATION_STOP:
-    case QueryType::REPLICATION_START:
-    case QueryType::SYNC_STATUS:
-    case QueryType::SYNC_STOP:
-    case QueryType::CONFIG_HELP:
-    case QueryType::CONFIG_SHOW:
-    case QueryType::CONFIG_VERIFY:
-    case QueryType::OPTIMIZE:
-    case QueryType::DEBUG_ON:
-    case QueryType::DEBUG_OFF:
-    case QueryType::CACHE_CLEAR:
-    case QueryType::CACHE_STATS:
-    case QueryType::CACHE_ENABLE:
-    case QueryType::CACHE_DISABLE:
-    case QueryType::SET:
-    case QueryType::SHOW_VARIABLES:
-      requires_table = false;
-      break;
-    default:
-      break;
-  }
-
-  if (requires_table && table.empty()) {
-    return false;
-  }
-
-  if (type == QueryType::SEARCH || type == QueryType::COUNT) {
-    if (search_text.empty()) {
-      return false;
-    }
-  }
-
-  if (type == QueryType::FACET) {
-    if (facet_column.empty()) {
-      return false;
-    }
-  }
-
-  if (type == QueryType::GET) {
-    if (primary_key.empty()) {
-      return false;
-    }
-  }
-
-  if (type == QueryType::SEARCH) {
-    if (limit == 0 || limit > internal::kMaxLimit) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::string_view query_str) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
@@ -183,6 +117,16 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
   if (EqualsIgnoreCase(command, "SEARCH")) {
     return ParseSearch(tokens);
+  }
+  if (EqualsIgnoreCase(command, "AUTH")) {
+    if (tokens.size() != 2 || tokens[1].empty()) {
+      SetError("AUTH requires exactly one non-empty token");
+      return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+    }
+    Query query;
+    query.type = QueryType::AUTH;
+    query.auth_token = tokens[1];
+    return query;
   }
   if (EqualsIgnoreCase(command, "COUNT")) {
     return ParseCount(tokens);
@@ -218,16 +162,14 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
     if (EqualsIgnoreCase(subcommand, "SAVE")) {
       query.type = QueryType::DUMP_SAVE;
-      // DUMP SAVE [filepath] [--with-stats]
+      // DUMP SAVE [filepath]
       // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
       for (size_t i = 2; i < tokens.size(); ++i) {  // 2: Start after DUMP SAVE
         const std::string& token = tokens[i];
         if (token.empty()) {
           continue;  // Skip empty tokens (e.g., from empty quoted strings)
         }
-        if (token == "--with-stats") {
-          query.dump_with_stats = true;
-        } else if (token[0] != '-') {
+        if (token[0] != '-') {
           // Filepath (not a flag)
           query.filepath = token;
         } else {
@@ -450,19 +392,36 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
     // Parse variable assignments: variable = value [, variable2 = value2 ...]
     size_t pos = 1;
     while (pos < tokens.size()) {
-      // Expect: variable_name = value
-      if (pos + 2 >= tokens.size()) {
-        SetError("SET: Expected variable = value");
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
-      }
+      std::string variable_name;
+      std::string value;
+      const auto equals_pos = tokens[pos].find('=');
+      if (equals_pos != std::string::npos) {
+        // Match the compact assignment syntax already accepted by FILTER:
+        // `SET name=value`. Tokenization intentionally leaves punctuation in
+        // bare tokens, so split this form before falling back to spaced input.
+        variable_name = tokens[pos].substr(0, equals_pos);
+        value = tokens[pos].substr(equals_pos + 1);
+        if (variable_name.empty() || value.empty()) {
+          SetError("SET: Expected variable = value");
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        }
+        ++pos;
+      } else {
+        // Expect: variable_name = value
+        if (pos + 2 >= tokens.size()) {
+          SetError("SET: Expected variable = value");
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        }
 
-      std::string variable_name = tokens[pos];
-      std::string equals_sign = tokens[pos + 1];
-      std::string value = tokens[pos + 2];
+        variable_name = tokens[pos];
+        const std::string& equals_sign = tokens[pos + 1];
+        value = tokens[pos + 2];
 
-      if (equals_sign != "=") {
-        SetError("SET: Expected '=' after variable name");
-        return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        if (equals_sign != "=") {
+          SetError("SET: Expected '=' after variable name");
+          return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+        }
+        pos += 3;
       }
 
       // Handle comma at end of value (e.g., "value1," -> "value1" with more to come)
@@ -472,7 +431,6 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
       }
 
       query.variable_assignments.emplace_back(variable_name, value);
-      pos += 3;
 
       // Check for more assignments
       if (has_trailing_comma) {
@@ -543,6 +501,21 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::Parse(std::str
 
 void QueryParser::SetMaxQueryLength(size_t max_length) {
   max_query_length_ = max_length;
+}
+
+bool QueryParser::IsSafeColumnName(std::string_view column) {
+  if (column.empty() || column.size() > kMaxFilterColumnNameLength) {
+    return false;
+  }
+  for (const auto c : column) {
+    const auto u = static_cast<unsigned char>(c);
+    const bool ascii_safe = (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' ||
+                            u == '-' || u == '.' || u == '$';
+    if (!ascii_safe) {
+      return false;
+    }
+  }
+  return true;
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateQueryLength(const Query& query) {
@@ -626,7 +599,14 @@ std::vector<std::string> QueryParser::Tokenize(std::string_view str) {
     }
 
     if (character == '\\') {
-      escape_next = true;
+      // Backslashes are escape syntax only inside quoted literals. Treating
+      // them as escapes in bare search terms silently corrupts paths such as
+      // C:\\path\\to.
+      if (quote_char == '\0') {
+        token += character;
+      } else {
+        escape_next = true;
+      }
       continue;
     }
 

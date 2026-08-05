@@ -446,7 +446,23 @@ TEST_F(ResultSorterTest, InvalidColumn) {
   EXPECT_NE(error_msg.find("nonexistent_column"), std::string::npos) << "Column name should be in error message";
 
   // Verify error code
-  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kInvalidArgument);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kQueryInvalidSort);
+}
+
+TEST_F(ResultSorterTest, ScoreSortWithoutBm25PathIsInvalidSort) {
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pk_alpha"));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.order_by = OrderByClause{"_score", SortOrder::DESC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kQueryInvalidSort);
 }
 
 // Test empty results
@@ -776,6 +792,32 @@ TEST_F(ResultSorterTest, SchwartzianTransformStringPrimaryKey) {
 
     EXPECT_LE(pk_prev.value(), pk_curr.value()) << "Sorting error at index " << i;
   }
+}
+
+TEST_F(ResultSorterTest, SchwartzianTransformPreservesEmptyPrimaryKeyOrdering) {
+  std::vector<DocId> doc_ids;
+  for (int i = 0; i < 100; ++i) {
+    auto doc_id = doc_store_.AddDocument("!key-" + std::to_string(i));
+    ASSERT_TRUE(doc_id.has_value());
+    doc_ids.push_back(*doc_id);
+  }
+  auto empty_key_doc_id = doc_store_.AddDocument("");
+  ASSERT_TRUE(empty_key_doc_id.has_value());
+  doc_ids.push_back(*empty_key_doc_id);
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = static_cast<uint32_t>(doc_ids.size());
+  query.offset = 0;
+  query.order_by = OrderByClause{"", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(result->size(), doc_ids.size());
+  EXPECT_EQ(result->front(), *empty_key_doc_id);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(result->front()), std::optional<std::string>(""));
 }
 
 // Test Schwartzian Transform falls back for filter columns
@@ -1196,6 +1238,29 @@ TEST_F(ResultSorterTest, MixedPositiveNegativeIntSort) {
   EXPECT_EQ(doc_store_.GetPrimaryKey(sorted[5]).value(), "pk4");  // 999
 }
 
+TEST_F(ResultSorterTest, MixedEpochStorageSortsAndPaginatesChronologically) {
+  // Old dumps may retain a non-negative timestamp as uint64_t while current
+  // loads store all calendar epochs as int64_t. Their order must remain
+  // chronological across the 1970 boundary.
+  std::vector<DocId> doc_ids;
+  doc_ids.push_back(*doc_store_.AddDocument("pre_epoch", {{"created_at", int64_t(-1)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("epoch", {{"created_at", uint64_t(0)}}));
+  doc_ids.push_back(*doc_store_.AddDocument("post_epoch", {{"created_at", uint64_t(1)}}));
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 1;
+  query.offset = 1;
+  query.order_by = OrderByClause{"created_at", SortOrder::ASC};
+
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(result->size(), 1U);
+  EXPECT_EQ(doc_store_.GetPrimaryKey(result->front()), "epoch");
+}
+
 /**
  * @brief Test signed int sort with Schwartzian Transform (150+ docs)
  *
@@ -1339,6 +1404,29 @@ TEST_F(ResultSorterTest, SchwartzianTransformThresholdBoundary) {
 }
 
 #ifdef MYGRAMDB_QUERY_TEST_HOOKS
+TEST_F(ResultSorterTest, NormalSizedPartialSortUsesBoundedBatchedPath) {
+  std::vector<DocId> doc_ids;
+  for (int i = 200; i >= 1; --i) {
+    auto result = doc_store_.AddDocument(std::to_string(i), {{"rank", int32_t(i)}});
+    ASSERT_TRUE(result.has_value());
+    doc_ids.push_back(*result);
+  }
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 10;
+  query.order_by = OrderByClause{"rank", SortOrder::ASC};
+
+  ResultSorter::ResetBatchedPartialSortInvocationCountForTesting();
+  auto result = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(result->size(), 10U);
+  EXPECT_EQ(ResultSorter::BatchedPartialSortInvocationCountForTesting(), 1U);
+}
+
 TEST_F(ResultSorterTest, SchwartzianPartialFailureFallsBackToSortedResults) {
   std::vector<DocId> doc_ids;
   for (int i = 150; i >= 1; --i) {

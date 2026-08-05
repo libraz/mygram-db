@@ -191,6 +191,29 @@ size_t Utf8CodePointByteLength(unsigned char leading_byte) {
   return 4;
 }
 
+std::vector<std::pair<uint32_t, uint32_t>> RemoveOverlappingMatchPositions(
+    std::vector<std::pair<uint32_t, uint32_t>> positions) {
+  // Keep the longest match for a shared start, then retain only the first
+  // non-overlapping range. GenerateWithPositions expects this invariant: a
+  // later overlapping range would otherwise append already-emitted text.
+  std::sort(positions.begin(), positions.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.first != rhs.first) {
+      return lhs.first < rhs.first;
+    }
+    return lhs.second > rhs.second;
+  });
+
+  std::vector<std::pair<uint32_t, uint32_t>> deduped;
+  deduped.reserve(positions.size());
+  for (const auto& pos : positions) {
+    if (!deduped.empty() && pos.first < deduped.back().second) {
+      continue;
+    }
+    deduped.push_back(pos);
+  }
+  return deduped;
+}
+
 }  // namespace
 
 std::vector<std::pair<uint32_t, uint32_t>> Highlighter::FindMatchPositions(
@@ -237,30 +260,12 @@ std::vector<std::pair<uint32_t, uint32_t>> Highlighter::FindMatchPositions(
     }
   }
 
-  // Sort by start position, then by end position descending so identical
-  // starts keep the longest match during overlap removal.
-  std::sort(positions.begin(), positions.end(), [](const auto& lhs, const auto& rhs) {
-    if (lhs.first != rhs.first) {
-      return lhs.first < rhs.first;
-    }
-    return lhs.second > rhs.second;
-  });
-
-  // Remove overlapping matches (keep the first one)
-  std::vector<std::pair<uint32_t, uint32_t>> deduped;
-  for (const auto& pos : positions) {
-    if (!deduped.empty() && pos.first < deduped.back().second) {
-      continue;  // Overlaps with previous match
-    }
-    deduped.push_back(pos);
-  }
-
-  return deduped;
+  return RemoveOverlappingMatchPositions(std::move(positions));
 }
 
 HighlightResult Highlighter::Generate(std::string_view normalized_text, const std::vector<std::string>& search_terms,
                                       const HighlightOptions& options) {
-  if (normalized_text.empty() || search_terms.empty()) {
+  if (normalized_text.empty()) {
     HighlightResult result;
     result.snippet = std::string(normalized_text);
     return result;
@@ -274,10 +279,16 @@ HighlightResult Highlighter::GenerateOriginal(std::string_view original_text,
                                               const std::vector<std::string>& normalized_search_terms,
                                               const std::function<std::string(std::string_view)>& normalizer,
                                               const HighlightOptions& options) {
-  if (original_text.empty() || normalized_search_terms.empty()) {
+  if (original_text.empty()) {
     HighlightResult result;
     result.snippet = std::string(original_text);
     return result;
+  }
+
+  // A negation-only query has no positive terms to highlight. It still must
+  // use the no-match snippet path, otherwise a full document is returned.
+  if (normalized_search_terms.empty()) {
+    return GenerateWithPositions(original_text, {}, options);
   }
 
   std::string normalized_text;
@@ -306,9 +317,7 @@ HighlightResult Highlighter::GenerateOriginal(std::string_view original_text,
     }
     original_matches.emplace_back(normalized_to_original[start].first, normalized_to_original[end - 1].second);
   }
-  std::sort(original_matches.begin(), original_matches.end());
-  original_matches.erase(std::unique(original_matches.begin(), original_matches.end()), original_matches.end());
-  return GenerateWithPositions(original_text, original_matches, options);
+  return GenerateWithPositions(original_text, RemoveOverlappingMatchPositions(std::move(original_matches)), options);
 }
 
 }  // namespace mygramdb::query
