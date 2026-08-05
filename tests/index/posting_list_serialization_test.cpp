@@ -79,6 +79,35 @@ TEST(PostingListSerializationTest, RoundTripLargeList) {
   }
 }
 
+TEST(PostingListSerializationTest, LargeLegacyDeltaPromotesToRoaringOnDeserialize) {
+  constexpr uint32_t kEntryCount = 5000;
+  std::vector<uint8_t> buffer;
+  buffer.reserve(1 + sizeof(uint32_t) + (kEntryCount * sizeof(uint32_t)));
+  buffer.push_back(static_cast<uint8_t>(PostingStrategy::kFixedWidthDelta));
+
+  auto append_u32 = [&buffer](uint32_t value) {
+    buffer.push_back(static_cast<uint8_t>(value & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+    buffer.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+  };
+  append_u32(kEntryCount);
+  append_u32(10);
+  for (uint32_t i = 1; i < kEntryCount; ++i) {
+    append_u32(10);
+  }
+
+  PostingList deserialized;
+  size_t offset = 0;
+  ASSERT_TRUE(deserialized.Deserialize(buffer, offset));
+
+  EXPECT_EQ(offset, buffer.size());
+  EXPECT_EQ(deserialized.Size(), kEntryCount);
+  EXPECT_EQ(deserialized.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  EXPECT_TRUE(deserialized.Contains(10));
+  EXPECT_TRUE(deserialized.Contains(kEntryCount * 10));
+}
+
 TEST(PostingListSerializationTest, RejectsInternallyInvalidRoaringBitmap) {
   PostingList pl(0.01);
   for (uint32_t i = 0; i < 200; i++) {

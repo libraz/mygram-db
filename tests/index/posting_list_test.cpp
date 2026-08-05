@@ -710,6 +710,24 @@ TEST_F(PostingListTest, OptimizeRoaringToDeltaNoDeadlock) {
   EXPECT_FALSE(posting.Contains(100));
 }
 
+TEST_F(PostingListTest, OptimizeKeepsLargeSparseListInRoaring) {
+  PostingList posting(0.01);
+  std::vector<DocId> doc_ids;
+  doc_ids.reserve(5000);
+  for (DocId id = 1; id <= 5000; ++id) {
+    doc_ids.push_back(id * 1000);
+  }
+  posting.AddBatch(doc_ids);
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  // Density is far below the hysteresis threshold, but converting more than
+  // the automatic Roaring threshold back to delta would make Contains O(n).
+  posting.Optimize(1000000000);
+
+  EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  EXPECT_EQ(posting.GetAll(), doc_ids);
+}
+
 /**
  * @brief Test Optimize() preserves data integrity through full round-trip conversion
  *
@@ -1195,6 +1213,41 @@ TEST_F(PostingListTest, UnionSetsSizeCorrectly) {
   // Union should be {1, 2, 3, 4, 5}
   EXPECT_EQ(result->Size(), 5);
   EXPECT_GT(result->Size(), 0);
+}
+
+TEST_F(PostingListTest, SetOperationsInitializeCachedMemoryAndVersion) {
+  PostingList left(0.5);
+  PostingList right(0.5);
+  left.AddBatch({1, 2, 3});
+  right.AddBatch({3, 4, 5});
+
+  auto intersection = left.Intersect(right);
+  ASSERT_NE(intersection, nullptr);
+  EXPECT_EQ(intersection->Version(), 1u);
+  EXPECT_GT(intersection->MemoryUsageApprox(), 0u);
+  EXPECT_EQ(intersection->MemoryUsage(), intersection->MemoryUsageApprox());
+
+  auto united = left.Union(right);
+  ASSERT_NE(united, nullptr);
+  EXPECT_EQ(united->Version(), 1u);
+  EXPECT_GT(united->MemoryUsageApprox(), 0u);
+  EXPECT_EQ(united->MemoryUsage(), united->MemoryUsageApprox());
+}
+
+TEST_F(PostingListTest, MovedFromRoaringListIsEmptyDeltaAndReusable) {
+  PostingList original(0.01);
+  original.AddBatch({1, 2, 3, 4, 5, 6});
+  original.Optimize(6);
+  ASSERT_EQ(original.GetStrategy(), PostingStrategy::kRoaringBitmap);
+
+  PostingList moved(std::move(original));
+  EXPECT_EQ(moved.GetAll(), (std::vector<DocId>{1, 2, 3, 4, 5, 6}));
+  EXPECT_EQ(original.GetStrategy(), PostingStrategy::kFixedWidthDelta);
+  EXPECT_EQ(original.Size(), 0u);
+  EXPECT_TRUE(original.GetAll().empty());
+
+  original.Add(99);
+  EXPECT_EQ(original.GetAll(), (std::vector<DocId>{99}));
 }
 
 /**

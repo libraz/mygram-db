@@ -76,6 +76,26 @@ TEST(IndexTest, AddDocumentBatchReportsDocumentsWithoutIndexableNgrams) {
   EXPECT_EQ(index.Count("a"), 1u);
 }
 
+TEST(IndexTest, UpdateDocumentReportsReplacementWithoutIndexableNgrams) {
+  Index index(2);
+  ASSERT_TRUE(index.AddDocument(43, "searchable"));
+
+  std::ostringstream log_stream;
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_stream);
+  auto logger = std::make_shared<spdlog::logger>("index_update_capture", sink);
+  logger->set_level(spdlog::level::trace);
+  const auto previous_logger = spdlog::default_logger();
+  spdlog::set_default_logger(logger);
+
+  index.UpdateDocument(43, "searchable", "x");
+  logger->flush();
+  spdlog::set_default_logger(previous_logger);
+
+  EXPECT_NE(log_stream.str().find("empty_document_skipped"), std::string::npos);
+  EXPECT_NE(log_stream.str().find("\"doc_id\":43"), std::string::npos);
+  EXPECT_TRUE(index.SearchAnd({"se"}).empty());
+}
+
 /**
  * @brief Test large batch addition
  */

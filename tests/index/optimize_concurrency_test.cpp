@@ -33,6 +33,10 @@ class OptimizeConcurrencyTest : public ::testing::Test {
     }
   }
 
+  void SetBeforeBatchOptimizationPublishHook(Index& index, std::function<void()> hook) {
+    index.before_batch_optimization_publish_hook_for_test_ = std::move(hook);
+  }
+
   std::unique_ptr<Index> index_;
 };
 
@@ -652,6 +656,30 @@ TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringBatchOptimizeDetectsChange) {
 
   EXPECT_TRUE(found_300) << "Document 300 (added during BatchOptimize) must be searchable";
   EXPECT_FALSE(found_50) << "Document 50 (removed during BatchOptimize) must not be searchable";
+}
+
+TEST_F(OptimizeConcurrencyTest, RecreatedPostingListIsNotOverwrittenByStaleBatchSnapshot) {
+  auto test_index = std::make_unique<Index>(2, 1);
+  test_index->AddDocument(1, "aba");
+
+  bool hook_called = false;
+  SetBeforeBatchOptimizationPublishHook(*test_index, [&] {
+    if (hook_called) {
+      return;
+    }
+    hook_called = true;
+    test_index->RemoveDocument(1, "aba");
+    test_index->AddDocument(2, "aba");
+  });
+
+  ASSERT_TRUE(test_index->OptimizeInBatches(1, 1));
+  EXPECT_TRUE(hook_called);
+
+  const auto results = test_index->SearchAnd({"ab"});
+  EXPECT_NE(std::find(results.begin(), results.end(), 2), results.end())
+      << "the recreated posting list must remain the source of truth";
+  EXPECT_EQ(std::find(results.begin(), results.end(), 1), results.end())
+      << "the stale snapshot must not resurrect the removed document";
 }
 
 /**

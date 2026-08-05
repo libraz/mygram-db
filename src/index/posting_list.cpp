@@ -26,36 +26,38 @@ namespace {
 std::atomic<bool> g_fail_next_roaring_create{false};
 std::atomic<bool> g_fail_next_roaring_and{false};
 std::atomic<bool> g_fail_next_roaring_or{false};
+std::atomic<uint64_t> g_roaring_and_operation_count{0};
 std::atomic<bool> g_pause_next_remove{false};
 std::atomic<bool> g_remove_paused{false};
 std::atomic<bool> g_release_paused_remove{false};
 #endif
 
-roaring_bitmap_t* CreateRoaringBitmap() {
+utils::RoaringBitmapPtr CreateRoaringBitmap() {
 #ifdef MYGRAMDB_INDEX_TEST_HOOKS
   if (g_fail_next_roaring_create.exchange(false, std::memory_order_acq_rel)) {
-    return nullptr;
+    return {};
   }
 #endif
-  return roaring_bitmap_create();
+  return utils::RoaringBitmapPtr(roaring_bitmap_create());
 }
 
-roaring_bitmap_t* AndRoaringBitmaps(const roaring_bitmap_t* lhs, const roaring_bitmap_t* rhs) {
+utils::RoaringBitmapPtr AndRoaringBitmaps(const roaring_bitmap_t* lhs, const roaring_bitmap_t* rhs) {
 #ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  g_roaring_and_operation_count.fetch_add(1, std::memory_order_relaxed);
   if (g_fail_next_roaring_and.exchange(false, std::memory_order_acq_rel)) {
-    return nullptr;
+    return {};
   }
 #endif
-  return roaring_bitmap_and(lhs, rhs);
+  return utils::RoaringBitmapPtr(roaring_bitmap_and(lhs, rhs));
 }
 
-roaring_bitmap_t* OrRoaringBitmaps(const roaring_bitmap_t* lhs, const roaring_bitmap_t* rhs) {
+utils::RoaringBitmapPtr OrRoaringBitmaps(const roaring_bitmap_t* lhs, const roaring_bitmap_t* rhs) {
 #ifdef MYGRAMDB_INDEX_TEST_HOOKS
   if (g_fail_next_roaring_or.exchange(false, std::memory_order_acq_rel)) {
-    return nullptr;
+    return {};
   }
 #endif
-  return roaring_bitmap_or(lhs, rhs);
+  return utils::RoaringBitmapPtr(roaring_bitmap_or(lhs, rhs));
 }
 
 /**
@@ -164,6 +166,14 @@ void PostingList::FailNextRoaringOperationForTest(TestRoaringFault fault) {
   }
 }
 
+void PostingList::ResetRoaringAndOperationCountForTesting() {
+  g_roaring_and_operation_count.store(0, std::memory_order_release);
+}
+
+uint64_t PostingList::RoaringAndOperationCountForTesting() {
+  return g_roaring_and_operation_count.load(std::memory_order_acquire);
+}
+
 const void* PostingList::DeltaStorageAddressForTesting() const {
   std::shared_lock lock(mutex_);
   return delta_encoded_.data();
@@ -184,12 +194,6 @@ void PostingList::ReleasePausedRemoveForTesting() {
 }
 #endif
 
-PostingList::~PostingList() {
-  if (roaring_bitmap_ != nullptr) {
-    roaring_bitmap_free(roaring_bitmap_);
-  }
-}
-
 // Precondition: moved-from object must not be concurrently accessed.
 // Move operations do not acquire mutex_ on either object.
 PostingList::PostingList(PostingList&& other) noexcept
@@ -197,35 +201,36 @@ PostingList::PostingList(PostingList&& other) noexcept
       roaring_threshold_(other.roaring_threshold_),
       delta_encoded_(std::move(other.delta_encoded_)),
       last_doc_id_(other.last_doc_id_),
-      roaring_bitmap_(other.roaring_bitmap_),
+      roaring_bitmap_(std::move(other.roaring_bitmap_)),
       doc_count_(other.doc_count_.load(std::memory_order_relaxed)),
       cached_memory_size_(other.cached_memory_size_.load(std::memory_order_relaxed)),
       version_(other.version_.load(std::memory_order_relaxed)) {
-  other.roaring_bitmap_ = nullptr;
+  other.strategy_.store(PostingStrategy::kFixedWidthDelta, std::memory_order_relaxed);
+  other.delta_encoded_.clear();
   other.last_doc_id_ = 0;
   other.doc_count_.store(0, std::memory_order_relaxed);
   other.cached_memory_size_.store(0, std::memory_order_relaxed);
+  other.version_.store(0, std::memory_order_relaxed);
 }
 
 // Precondition: moved-from object must not be concurrently accessed.
 // Move operations do not acquire mutex_ on either object.
 PostingList& PostingList::operator=(PostingList&& other) noexcept {
   if (this != &other) {
-    if (roaring_bitmap_ != nullptr) {
-      roaring_bitmap_free(roaring_bitmap_);
-    }
     strategy_.store(other.strategy_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     roaring_threshold_ = other.roaring_threshold_;
     delta_encoded_ = std::move(other.delta_encoded_);
     last_doc_id_ = other.last_doc_id_;
-    roaring_bitmap_ = other.roaring_bitmap_;
+    roaring_bitmap_ = std::move(other.roaring_bitmap_);
     doc_count_.store(other.doc_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     cached_memory_size_.store(other.cached_memory_size_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     version_.store(other.version_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-    other.roaring_bitmap_ = nullptr;
+    other.strategy_.store(PostingStrategy::kFixedWidthDelta, std::memory_order_relaxed);
+    other.delta_encoded_.clear();
     other.last_doc_id_ = 0;
     other.doc_count_.store(0, std::memory_order_relaxed);
     other.cached_memory_size_.store(0, std::memory_order_relaxed);
+    other.version_.store(0, std::memory_order_relaxed);
   }
   return *this;
 }
@@ -272,7 +277,7 @@ void PostingList::Add(DocId doc_id) {
     }
     MaybeConvertLargeDeltaToRoaring();
   } else {
-    roaring_bitmap_add(roaring_bitmap_, doc_id);
+    roaring_bitmap_add(roaring_bitmap_.get(), doc_id);
   }
   UpdateCountsAndVersion();
 }
@@ -307,7 +312,7 @@ void PostingList::AddBatch(const std::vector<DocId>& doc_ids) {
     }
     MaybeConvertLargeDeltaToRoaring();
   } else {
-    roaring_bitmap_add_many(roaring_bitmap_, normalized_doc_ids->size(), normalized_doc_ids->data());
+    roaring_bitmap_add_many(roaring_bitmap_.get(), normalized_doc_ids->size(), normalized_doc_ids->data());
   }
   UpdateCountsAndVersion();
 }
@@ -355,7 +360,7 @@ void PostingList::Remove(DocId doc_id) {
       }
     }
   } else {
-    roaring_bitmap_remove(roaring_bitmap_, doc_id);
+    roaring_bitmap_remove(roaring_bitmap_.get(), doc_id);
   }
   UpdateCountsAndVersion();
 }
@@ -400,7 +405,7 @@ bool PostingList::Contains(DocId doc_id) const {
 
     return false;
   }
-  return roaring_bitmap_contains(roaring_bitmap_, doc_id);
+  return roaring_bitmap_contains(roaring_bitmap_.get(), doc_id);
 }
 
 std::vector<DocId> PostingList::GetAll() const {
@@ -408,9 +413,9 @@ std::vector<DocId> PostingList::GetAll() const {
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
     return DecodeDelta(delta_encoded_);
   }
-  uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
   std::vector<DocId> result(size);
-  roaring_bitmap_to_uint32_array(roaring_bitmap_, result.data());
+  roaring_bitmap_to_uint32_array(roaring_bitmap_.get(), result.data());
   return result;
 }
 
@@ -423,9 +428,9 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
     if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
       result = DecodeDelta(delta_encoded_);
     } else {
-      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
       result.resize(size);
-      roaring_bitmap_to_uint32_array(roaring_bitmap_, result.data());
+      roaring_bitmap_to_uint32_array(roaring_bitmap_.get(), result.data());
     }
     if (reverse) {
       std::reverse(result.begin(), result.end());
@@ -455,43 +460,31 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
   }
 
   // Roaring bitmap: use iterator for efficient top-N retrieval
-  uint64_t total_size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  uint64_t total_size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
   size_t actual_limit = std::min(limit, static_cast<size_t>(total_size));
 
   std::vector<DocId> result;
   result.reserve(actual_limit);
 
-  // CRoaring iterator lifecycle: use malloc + init/init_last + free consistently
-  // for both forward and reverse directions. This avoids mixing
-  // roaring_iterator_create()/roaring_uint32_iterator_free() (which uses
-  // roaring_malloc/roaring_free internally) with malloc()/free().
-  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-  auto* raw_iter = static_cast<roaring_uint32_iterator_t*>(malloc(sizeof(roaring_uint32_iterator_t)));
-  if (raw_iter != nullptr) {
-    // RAII wrapper ensures free() is called even if push_back throws
-    auto deleter = [](roaring_uint32_iterator_t* ptr) {
-      // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-no-malloc)
-      free(ptr);
-    };
-    std::unique_ptr<roaring_uint32_iterator_t, decltype(deleter)> iter(raw_iter, deleter);
+  // CRoaring exposes an in-place iterator initializer, so use stack storage.
+  // This removes the allocation-failure path that previously returned an
+  // indistinguishable empty result for a non-empty posting list.
+  roaring_uint32_iterator_t iter;
+  if (reverse) {
+    roaring_iterator_init_last(roaring_bitmap_.get(), &iter);
+  } else {
+    roaring_iterator_init(roaring_bitmap_.get(), &iter);
+  }
 
+  size_t count = 0;
+  while (count < actual_limit && iter.has_value) {
+    result.push_back(iter.current_value);
     if (reverse) {
-      roaring_iterator_init_last(roaring_bitmap_, iter.get());
+      roaring_uint32_iterator_previous(&iter);
     } else {
-      roaring_iterator_init(roaring_bitmap_, iter.get());
+      roaring_uint32_iterator_advance(&iter);
     }
-
-    size_t count = 0;
-    while (count < actual_limit && iter->has_value) {
-      result.push_back(iter->current_value);
-      if (reverse) {
-        roaring_uint32_iterator_previous(iter.get());
-      } else {
-        roaring_uint32_iterator_advance(iter.get());
-      }
-      count++;
-    }
-    // iter automatically freed by unique_ptr destructor
+    count++;
   }
 
   return result;
@@ -526,9 +519,10 @@ void PostingList::UpdateCountsAndVersion() {
     cached_memory_size_.store(delta_encoded_.capacity() * sizeof(uint32_t) + sizeof(std::vector<uint32_t>),
                               std::memory_order_release);
   } else {
-    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_release);
-    cached_memory_size_.store(roaring_bitmap_ != nullptr ? roaring_bitmap_portable_size_in_bytes(roaring_bitmap_) : 0,
-                              std::memory_order_release);
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_.get()), std::memory_order_release);
+    cached_memory_size_.store(
+        roaring_bitmap_ != nullptr ? roaring_bitmap_portable_size_in_bytes(roaring_bitmap_.get()) : 0,
+        std::memory_order_release);
   }
   version_.fetch_add(1, std::memory_order_release);
 }
@@ -556,9 +550,9 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
       if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
         docs = DecodeDelta(delta_encoded_);
       } else {
-        uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+        uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
         docs.resize(size);
-        roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+        roaring_bitmap_to_uint32_array(roaring_bitmap_.get(), docs.data());
       }
     }  // lock released here
     if (!docs.empty()) {
@@ -577,9 +571,9 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
     if (list.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
       docs = DecodeDelta(list.delta_encoded_);
     } else {
-      uint64_t size = roaring_bitmap_get_cardinality(list.roaring_bitmap_);
+      uint64_t size = roaring_bitmap_get_cardinality(list.roaring_bitmap_.get());
       docs.resize(size);
-      roaring_bitmap_to_uint32_array(list.roaring_bitmap_, docs.data());
+      roaring_bitmap_to_uint32_array(list.roaring_bitmap_.get(), docs.data());
     }
     return docs;
   };
@@ -587,7 +581,7 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap &&
       other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap AND
-    roaring_bitmap_t* intersected = AndRoaringBitmaps(roaring_bitmap_, other.roaring_bitmap_);
+    auto intersected = AndRoaringBitmaps(roaring_bitmap_.get(), other.roaring_bitmap_.get());
     if (intersected == nullptr) {
       std::vector<DocId> docs1 = get_docs_locked(*this);
       std::vector<DocId> docs2 = get_docs_locked(other);
@@ -598,14 +592,15 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
       if (!intersection.empty()) {
         result->last_doc_id_ = intersection.back();
       }
+      result->UpdateCountsAndVersion();
       return result;
     }
     result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
-    result->roaring_bitmap_ = intersected;
-    uint64_t card = roaring_bitmap_get_cardinality(result->roaring_bitmap_);
+    result->roaring_bitmap_ = std::move(intersected);
+    uint64_t card = roaring_bitmap_get_cardinality(result->roaring_bitmap_.get());
     result->doc_count_.store(card, std::memory_order_relaxed);
     if (card > 0) {
-      result->last_doc_id_ = roaring_bitmap_maximum(result->roaring_bitmap_);
+      result->last_doc_id_ = roaring_bitmap_maximum(result->roaring_bitmap_.get());
     }
   } else {
     // At least one is delta: fall back to sorted array intersection
@@ -622,6 +617,8 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
     }
   }
 
+  result->UpdateCountsAndVersion();
+
   return result;
 }
 
@@ -636,9 +633,9 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
       if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
         docs = DecodeDelta(delta_encoded_);
       } else {
-        uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+        uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
         docs.resize(size);
-        roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+        roaring_bitmap_to_uint32_array(roaring_bitmap_.get(), docs.data());
       }
     }  // lock released here
     if (!docs.empty()) {
@@ -657,9 +654,9 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
     if (list.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
       docs = DecodeDelta(list.delta_encoded_);
     } else {
-      uint64_t size = roaring_bitmap_get_cardinality(list.roaring_bitmap_);
+      uint64_t size = roaring_bitmap_get_cardinality(list.roaring_bitmap_.get());
       docs.resize(size);
-      roaring_bitmap_to_uint32_array(list.roaring_bitmap_, docs.data());
+      roaring_bitmap_to_uint32_array(list.roaring_bitmap_.get(), docs.data());
     }
     return docs;
   };
@@ -667,7 +664,7 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap &&
       other.strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Both Roaring: use fast bitmap OR
-    roaring_bitmap_t* united = OrRoaringBitmaps(roaring_bitmap_, other.roaring_bitmap_);
+    auto united = OrRoaringBitmaps(roaring_bitmap_.get(), other.roaring_bitmap_.get());
     if (united == nullptr) {
       std::vector<DocId> docs1 = get_docs_locked(*this);
       std::vector<DocId> docs2 = get_docs_locked(other);
@@ -678,14 +675,15 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
       if (!union_result.empty()) {
         result->last_doc_id_ = union_result.back();
       }
+      result->UpdateCountsAndVersion();
       return result;
     }
     result->strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_relaxed);
-    result->roaring_bitmap_ = united;
-    uint64_t card = roaring_bitmap_get_cardinality(result->roaring_bitmap_);
+    result->roaring_bitmap_ = std::move(united);
+    uint64_t card = roaring_bitmap_get_cardinality(result->roaring_bitmap_.get());
     result->doc_count_.store(card, std::memory_order_relaxed);
     if (card > 0) {
-      result->last_doc_id_ = roaring_bitmap_maximum(result->roaring_bitmap_);
+      result->last_doc_id_ = roaring_bitmap_maximum(result->roaring_bitmap_.get());
     }
   } else {
     // At least one is delta: fall back to sorted array union
@@ -702,6 +700,8 @@ std::unique_ptr<PostingList> PostingList::Union(const PostingList& other) const 
     }
   }
 
+  result->UpdateCountsAndVersion();
+
   return result;
 }
 
@@ -716,7 +716,7 @@ void PostingList::Optimize(uint64_t total_docs) {
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
     size = delta_encoded_.size();
   } else {
-    size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+    size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
   }
 
   double density = static_cast<double>(size) / static_cast<double>(total_docs);
@@ -729,7 +729,7 @@ void PostingList::Optimize(uint64_t total_docs) {
         .Field("to", "roaring")
         .Field("density", density)
         .Debug();
-  } else if (density < roaring_threshold_ * kHysteresisFactor &&
+  } else if (size <= kAutoRoaringEntryThreshold && density < roaring_threshold_ * kHysteresisFactor &&
              strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // Convert back to delta for low density (with hysteresis)
     ConvertToDelta();
@@ -751,9 +751,9 @@ std::shared_ptr<PostingList> PostingList::Clone(uint64_t total_docs) const {
     if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kFixedWidthDelta) {
       docs = DecodeDelta(delta_encoded_);
     } else {
-      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+      uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
       docs.resize(size);
-      roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+      roaring_bitmap_to_uint32_array(roaring_bitmap_.get(), docs.data());
     }
   }
   // Lock released here
@@ -787,16 +787,16 @@ void PostingList::ConvertToRoaring() {
     return;
   }
   if (!docs.empty()) {
-    roaring_bitmap_add_many(roaring_bitmap_, docs.size(), docs.data());
+    roaring_bitmap_add_many(roaring_bitmap_.get(), docs.size(), docs.data());
   }
-  roaring_bitmap_run_optimize(roaring_bitmap_);
+  roaring_bitmap_run_optimize(roaring_bitmap_.get());
 
   delta_encoded_.clear();
   delta_encoded_.shrink_to_fit();
   last_doc_id_ = 0;  // Not used for Roaring strategy
   strategy_.store(PostingStrategy::kRoaringBitmap, std::memory_order_release);
-  doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
-  cached_memory_size_.store(roaring_bitmap_portable_size_in_bytes(roaring_bitmap_), std::memory_order_relaxed);
+  doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_.get()), std::memory_order_relaxed);
+  cached_memory_size_.store(roaring_bitmap_portable_size_in_bytes(roaring_bitmap_.get()), std::memory_order_relaxed);
 }
 
 void PostingList::ConvertToDelta() {
@@ -807,14 +807,13 @@ void PostingList::ConvertToDelta() {
   // Access roaring bitmap directly instead of calling GetAll(),
   // because the caller (Optimize()) already holds a unique_lock on mutex_.
   // Calling GetAll() would try to acquire a shared_lock, causing undefined behavior.
-  uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_);
+  uint64_t size = roaring_bitmap_get_cardinality(roaring_bitmap_.get());
   std::vector<DocId> docs(size);
-  roaring_bitmap_to_uint32_array(roaring_bitmap_, docs.data());
+  roaring_bitmap_to_uint32_array(roaring_bitmap_.get(), docs.data());
   delta_encoded_ = EncodeDelta(docs);
   last_doc_id_ = docs.empty() ? 0 : docs.back();
 
-  roaring_bitmap_free(roaring_bitmap_);
-  roaring_bitmap_ = nullptr;
+  roaring_bitmap_.reset();
   strategy_.store(PostingStrategy::kFixedWidthDelta, std::memory_order_release);
   doc_count_.store(delta_encoded_.size(), std::memory_order_relaxed);
   cached_memory_size_.store(delta_encoded_.capacity() * sizeof(uint32_t) + sizeof(std::vector<uint32_t>),
@@ -905,7 +904,7 @@ bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     }
   } else {
     // Roaring bitmap: serialize using roaring's native format
-    size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_);
+    size_t roaring_size = roaring_bitmap_portable_size_in_bytes(roaring_bitmap_.get());
 
     if (roaring_size > std::numeric_limits<uint32_t>::max()) {
       mygram::utils::StructuredLog()
@@ -923,7 +922,7 @@ bool PostingList::Serialize(std::vector<uint8_t>& buffer) const {
     // Write roaring bitmap data
     size_t old_size = buffer.size();
     buffer.resize(old_size + roaring_size);
-    roaring_bitmap_portable_serialize(roaring_bitmap_, GetSerializationPointer(buffer, old_size));
+    roaring_bitmap_portable_serialize(roaring_bitmap_.get(), GetSerializationPointer(buffer, old_size));
   }
 
   return true;
@@ -978,35 +977,29 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
     cached_memory_size_.store(delta_encoded_.capacity() * sizeof(uint32_t) + sizeof(std::vector<uint32_t>),
                               std::memory_order_relaxed);
 
-    if (roaring_bitmap_ != nullptr) {
-      roaring_bitmap_free(roaring_bitmap_);
-      roaring_bitmap_ = nullptr;
-    }
+    roaring_bitmap_.reset();
+    MaybeConvertLargeDeltaToRoaring();
   } else {
     // Read roaring bitmap
     if (static_cast<size_t>(size) > buffer.size() - cursor) {
       return false;
     }
 
-    roaring_bitmap_t* decoded_bitmap =
-        roaring_bitmap_portable_deserialize_safe(GetDeserializationPointer(buffer, cursor), size);
+    utils::RoaringBitmapPtr decoded_bitmap(
+        roaring_bitmap_portable_deserialize_safe(GetDeserializationPointer(buffer, cursor), size));
     if (decoded_bitmap == nullptr) {
       return false;
     }
-    if (!roaring_bitmap_internal_validate(decoded_bitmap, nullptr)) {
-      roaring_bitmap_free(decoded_bitmap);
+    if (!roaring_bitmap_internal_validate(decoded_bitmap.get(), nullptr)) {
       return false;
     }
 
     cursor += size;
-    if (roaring_bitmap_ != nullptr) {
-      roaring_bitmap_free(roaring_bitmap_);
-    }
     strategy_.store(parsed_strategy, std::memory_order_relaxed);
-    roaring_bitmap_ = decoded_bitmap;
+    roaring_bitmap_ = std::move(decoded_bitmap);
     delta_encoded_.clear();
-    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_), std::memory_order_relaxed);
-    cached_memory_size_.store(roaring_bitmap_portable_size_in_bytes(roaring_bitmap_), std::memory_order_relaxed);
+    doc_count_.store(roaring_bitmap_get_cardinality(roaring_bitmap_.get()), std::memory_order_relaxed);
+    cached_memory_size_.store(roaring_bitmap_portable_size_in_bytes(roaring_bitmap_.get()), std::memory_order_relaxed);
   }
 
   offset = cursor;

@@ -102,10 +102,13 @@ void Index::Optimize(uint64_t total_docs) {
           const auto& current_posting = current_it->second;
           auto snapshot_version_it = snapshot_versions.find(term);
 
-          // Check if posting list was modified during optimization
-          // IMPORTANT: Compare with snapshot VERSION, not size. Version-based detection
-          // catches balanced Remove+Add operations where size stays the same but data changed.
-          if (snapshot_version_it != snapshot_versions.end() &&
+          // The term may have been erased and recreated while we optimized its
+          // old posting list. A fresh PostingList starts its version counter at
+          // zero, so a version-only check has an ABA hole. Require both the
+          // original object identity and its captured version.
+          const auto snapshot_posting_it = snapshot.find(term);
+          if (snapshot_version_it == snapshot_versions.end() || snapshot_posting_it == snapshot.end() ||
+              current_posting != snapshot_posting_it->second ||
               current_posting->Version() != snapshot_version_it->second) {
             // Posting list was modified during optimization.
             // Keep current_posting as-is (source of truth) rather than Union,
@@ -235,6 +238,10 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
       optimized_postings[term] = std::move(optimized);
     }
 
+    if (before_batch_optimization_publish_hook_for_test_) {
+      before_batch_optimization_publish_hook_for_test_();
+    }
+
     // Step 2: Atomically swap the optimized batch (brief exclusive lock)
     {
       std::unique_lock<std::shared_mutex> lock(postings_mutex_);
@@ -268,10 +275,12 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
           const auto& current_posting = current_it->second;
           auto snapshot_version_it = batch_snapshot_versions.find(term);
 
-          // Check if posting list was modified during this batch's optimization
-          // IMPORTANT: Compare with snapshot VERSION, not size. Version-based detection
-          // catches balanced Remove+Add operations where size stays the same but data changed.
-          if (snapshot_version_it != batch_snapshot_versions.end() &&
+          // Require pointer identity as well as the captured version. A term
+          // can be erased and recreated between the snapshot and publish;
+          // the replacement's version may coincidentally match the old one.
+          const auto snapshot_posting_it = batch_snapshot_ptrs.find(term);
+          if (snapshot_version_it == batch_snapshot_versions.end() ||
+              snapshot_posting_it == batch_snapshot_ptrs.end() || current_posting != snapshot_posting_it->second ||
               current_posting->Version() != snapshot_version_it->second) {
             // Posting list was modified during optimization.
             // Keep current_posting as-is (source of truth) rather than Union,

@@ -152,3 +152,16 @@ TEST_F(SearchByThresholdTest, DelegatesToSearchAndWhenThresholdEqualsSize) {
   auto and_results = index_.SearchAnd(terms);
   EXPECT_EQ(threshold_results, and_results);
 }
+
+TEST_F(SearchByThresholdTest, DuplicateTermsDoNotCountTwiceTowardThreshold) {
+  // Each document contains at most one of these distinct terms. Before
+  // de-duplication, the repeated "he" posting list made docs 1 and 2 appear
+  // to match two terms and incorrectly pass threshold=2.
+  const auto results = index_.SearchByThreshold({"he", "he", "wo"}, 2);
+  EXPECT_TRUE(results.empty());
+}
+
+TEST_F(SearchByThresholdTest, ThresholdAboveDistinctTermCountCannotMatch) {
+  const auto results = index_.SearchByThreshold({"he", "he"}, 2);
+  EXPECT_TRUE(results.empty());
+}

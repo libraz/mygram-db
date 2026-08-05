@@ -16,6 +16,7 @@
 
 #include "config/config.h"
 #include "types/doc_id.h"
+#include "utils/roaring_bitmap_ptr.h"
 
 namespace mygramdb::index {
 
@@ -51,10 +52,7 @@ class PostingList {
    */
   explicit PostingList(double roaring_threshold = kDefaultRoaringThreshold);
 
-  /**
-   * @brief Destructor
-   */
-  ~PostingList();
+  ~PostingList() = default;
 
   // Disable copy (use move or Clone)
   PostingList(const PostingList&) = delete;
@@ -217,6 +215,9 @@ class PostingList {
    */
   static void FailNextRoaringOperationForTest(TestRoaringFault fault);
 
+  static void ResetRoaringAndOperationCountForTesting();
+  [[nodiscard]] static uint64_t RoaringAndOperationCountForTesting();
+
   /**
    * @brief Test hook: identify the fixed-width delta allocation.
    *
@@ -241,7 +242,7 @@ class PostingList {
   DocId last_doc_id_ = 0;
 
   // Roaring bitmap storage
-  roaring_bitmap_t* roaring_bitmap_ = nullptr;
+  utils::RoaringBitmapPtr roaring_bitmap_;
 
   // Approximate document count for lock-free reads (H-14).
   // Updated atomically inside mutation methods that already hold the exclusive lock.

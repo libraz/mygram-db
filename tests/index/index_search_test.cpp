@@ -487,6 +487,21 @@ TEST(IndexTest, SearchAndWithLimitCorrectResults) {
   EXPECT_EQ(results[3], 500) << "Fourth result should be DocId 500 (shell)";
 }
 
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+TEST(IndexTest, SearchAndWithoutLimitUsesNativeRoaringIntersection) {
+  Index index(/*ngram_size=*/1, /*kanji_ngram_size=*/0, /*roaring_threshold=*/0.01);
+  index.AddDocument(1, "ab");
+  index.AddDocument(2, "ab");
+  index.AddDocument(3, "a");
+  index.AddDocument(4, "b");
+  index.Optimize(4);
+
+  PostingList::ResetRoaringAndOperationCountForTesting();
+  EXPECT_EQ(index.SearchAnd({"a", "b"}), (std::vector<DocId>{1, 2}));
+  EXPECT_EQ(PostingList::RoaringAndOperationCountForTesting(), 1U);
+}
+#endif
+
 /**
  * @test SearchAnd with single term should use GetTopN optimization
  */

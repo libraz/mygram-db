@@ -128,6 +128,19 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
   mygram::utils::DeduplicateSorted(old_ngrams);
   mygram::utils::DeduplicateSorted(new_ngrams);
 
+  // Keep UPDATE observability consistent with INSERT and batch loading. A
+  // document whose replacement text produces no n-grams remains in the
+  // DocumentStore but cannot be found by n-gram search, so operators need a
+  // warning rather than a silent disappearance from search results.
+  if (new_ngrams.empty()) {
+    mygram::utils::StructuredLog()
+        .Event("empty_document_skipped")
+        .Field("doc_id", static_cast<uint64_t>(doc_id))
+        .Field("text_length", static_cast<uint64_t>(new_text.size()))
+        .Message("Updated document has no indexable n-grams; it will not appear in search results")
+        .Warn();
+  }
+
   // Calculate set differences using sorted arrays
   std::vector<std::string> to_remove;
   std::vector<std::string> to_add;
@@ -206,6 +219,23 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
   // This is common for "ORDER BY primary_key DESC LIMIT N" queries
   if (terms.size() == 1 && limit > 0 && reverse) {
     return snapshots[0]->GetTopN(limit, true);
+  }
+
+  // Roaring posting lists can be intersected without materializing each list
+  // as a vector. This is the normal search path too (limit == 0), so do not
+  // restrict the bitmap-native operation to the top-N query planner below.
+  if (terms.size() > 1 && std::all_of(snapshots.begin(), snapshots.end(), [](const auto& snapshot) {
+        return snapshot->GetStrategy() == PostingStrategy::kRoaringBitmap;
+      })) {
+    std::vector<std::shared_ptr<PostingList>> sorted_snapshots = snapshots;
+    std::sort(sorted_snapshots.begin(), sorted_snapshots.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs->SizeApprox() < rhs->SizeApprox(); });
+
+    std::unique_ptr<PostingList> intersected = sorted_snapshots[0]->Intersect(*sorted_snapshots[1]);
+    for (size_t i = 2; i < sorted_snapshots.size() && intersected->SizeApprox() != 0; ++i) {
+      intersected = intersected->Intersect(*sorted_snapshots[i]);
+    }
+    return intersected->GetTopN(limit, reverse);
   }
 
   // NEW Optimization: Multi-term with limit and reverse (for multi-ngram queries)
@@ -434,13 +464,23 @@ std::vector<DocId> Index::SearchByThreshold(const std::vector<std::string>& term
     return {};
   }
 
-  // Delegate to SearchAnd when threshold equals term count
-  if (threshold >= terms.size()) {
-    return SearchAnd(terms);
+  // A query term is a membership criterion, not a multiplicity. Repeated
+  // terms must not make one posting list contribute several matches toward a
+  // threshold. Deduplicate before both the fast path and snapshotting.
+  std::vector<std::string> unique_terms = terms;
+  mygram::utils::DeduplicateSorted(unique_terms);
+
+  if (threshold > unique_terms.size()) {
+    return {};
+  }
+
+  // Delegate to SearchAnd when every distinct term is required.
+  if (threshold == unique_terms.size()) {
+    return SearchAnd(unique_terms);
   }
 
   // RCU pattern: Take snapshot of posting lists under short lock
-  auto snapshots = TakePostingSnapshots(terms);
+  auto snapshots = TakePostingSnapshots(unique_terms);
 
   // Collect non-null snapshots (missing n-grams don't count toward threshold)
   std::vector<std::shared_ptr<PostingList>> valid_snapshots;

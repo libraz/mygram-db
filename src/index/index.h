@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <mutex>
@@ -326,6 +327,9 @@ class Index {
 #endif
 
  private:
+  // Grants the deterministic ABA regression test access to the private hook
+  // below without exposing it in the production API.
+  friend class OptimizeConcurrencyTest;
   friend struct mygramdb::storage::DumpLoadAccess;
 
   int ngram_size_;
@@ -356,6 +360,10 @@ class Index {
 
   // Flag to prevent concurrent optimization
   std::atomic<bool> is_optimizing_{false};
+
+  // Test-only synchronization point between a batch snapshot and its publish.
+  // It stays private so callers cannot alter optimization behavior.
+  std::function<void()> before_batch_optimization_publish_hook_for_test_;
 
   // Generation counter incremented by LoadFromStream.
   // Optimize checks this before applying results to detect stale data.
