@@ -6,6 +6,7 @@
 #include "storage/filter_index.h"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstring>
 #include <mutex>
@@ -21,6 +22,7 @@ FilterIndex::~FilterIndex() {
 
 void FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) {
   for (const auto& [column, value] : filters) {
+    ++column_ref_counts_[column];
     // Skip NULL values (monostate)
     if (std::holds_alternative<std::monostate>(value)) {
       continue;
@@ -45,20 +47,27 @@ void FilterIndex::AddDocument(DocId doc_id, const FilterMap& filters) {
 
 void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters) {
   for (const auto& [column, value] : filters) {
-    if (std::holds_alternative<std::monostate>(value)) {
-      continue;
-    }
-    std::string key = SerializeFilterValue(value);
-    auto col_it = eq_bitmaps_.find(column);
-    if (col_it != eq_bitmaps_.end()) {
-      auto val_it = col_it->second.find(key);
-      if (val_it != col_it->second.end()) {
-        roaring_bitmap_remove(val_it->second, doc_id);
-        if (roaring_bitmap_is_empty(val_it->second)) {
-          roaring_bitmap_free(val_it->second);
-          col_it->second.erase(val_it);
+    if (!std::holds_alternative<std::monostate>(value)) {
+      std::string key = SerializeFilterValue(value);
+      auto col_it = eq_bitmaps_.find(column);
+      if (col_it != eq_bitmaps_.end()) {
+        auto val_it = col_it->second.find(key);
+        if (val_it != col_it->second.end()) {
+          roaring_bitmap_remove(val_it->second, doc_id);
+          if (roaring_bitmap_is_empty(val_it->second)) {
+            roaring_bitmap_free(val_it->second);
+            col_it->second.erase(val_it);
+          }
+        }
+        if (col_it->second.empty()) {
+          eq_bitmaps_.erase(col_it);
         }
       }
+    }
+
+    auto count_iter = column_ref_counts_.find(column);
+    if (count_iter != column_ref_counts_.end() && --count_iter->second == 0) {
+      column_ref_counts_.erase(count_iter);
     }
   }
 }
@@ -87,9 +96,54 @@ RoaringBitmapPtr FilterIndex::GetEqBitmap(const std::string& column, const std::
   return RoaringBitmapPtr(roaring_bitmap_copy(val_it->second), roaring_bitmap_free);
 }
 
+bool FilterIndex::OrEqBitmapInto(std::string_view column, std::string_view serialized_value,
+                                 roaring_bitmap_t* destination) const {
+  if (destination == nullptr) {
+    return false;
+  }
+  std::shared_lock lock(mutex_);
+  auto column_iter = eq_bitmaps_.find(column);
+  if (column_iter == eq_bitmaps_.end()) {
+    return false;
+  }
+  auto value_iter = column_iter->second.find(serialized_value);
+  if (value_iter == column_iter->second.end()) {
+    return false;
+  }
+  roaring_bitmap_or_inplace(destination, value_iter->second);
+  return true;
+}
+
 bool FilterIndex::HasColumn(std::string_view column) const {
   std::shared_lock lock(mutex_);
-  return eq_bitmaps_.count(column) > 0;
+  return column_ref_counts_.contains(column);
+}
+
+std::optional<std::string> FilterIndex::ResolveColumnName(std::string_view column) const {
+  std::shared_lock lock(mutex_);
+  auto exact_iter = column_ref_counts_.find(column);
+  if (exact_iter != column_ref_counts_.end()) {
+    return exact_iter->first;
+  }
+
+  std::optional<std::string> resolved;
+  for (const auto& [stored_column, count] : column_ref_counts_) {
+    (void)count;
+    if (stored_column.size() != column.size()) {
+      continue;
+    }
+    const bool matches =
+        std::equal(stored_column.begin(), stored_column.end(), column.begin(),
+                   [](unsigned char lhs, unsigned char rhs) { return std::tolower(lhs) == std::tolower(rhs); });
+    if (!matches) {
+      continue;
+    }
+    if (resolved.has_value()) {
+      return std::nullopt;
+    }
+    resolved = stored_column;
+  }
+  return resolved;
 }
 
 void FilterIndex::Clear() {
@@ -100,6 +154,7 @@ void FilterIndex::Clear() {
     }
   }
   eq_bitmaps_.clear();
+  column_ref_counts_.clear();
 }
 
 size_t FilterIndex::MemoryUsage() const {
@@ -111,6 +166,10 @@ size_t FilterIndex::MemoryUsage() const {
       total += key.size() + key.capacity();
       total += roaring_bitmap_portable_size_in_bytes(bm);
     }
+  }
+  for (const auto& [column, count] : column_ref_counts_) {
+    (void)count;
+    total += sizeof(decltype(column_ref_counts_)::value_type) + column.capacity();
   }
   return total;
 }

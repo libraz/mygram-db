@@ -11,6 +11,7 @@
 #include <roaring/roaring.h>
 
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -59,8 +60,18 @@ class FilterIndex {
   /// The returned bitmap is an independent copy safe to use without holding any lock.
   [[nodiscard]] RoaringBitmapPtr GetEqBitmap(const std::string& column, const std::string& serialized_value) const;
 
+  /// OR the stored bitmap for (column, value) directly into destination.
+  /// Avoids copying a potentially large bitmap when callers probe and union
+  /// several serialized type interpretations of the same query literal.
+  /// @return true when the indexed value exists and was merged
+  bool OrEqBitmapInto(std::string_view column, std::string_view serialized_value, roaring_bitmap_t* destination) const;
+
   /// @brief Check if a column exists in the filter index
   bool HasColumn(std::string_view column) const;
+
+  /// Resolve a live column name with exact-match preference and otherwise
+  /// unambiguous ASCII case-insensitive matching.
+  [[nodiscard]] std::optional<std::string> ResolveColumnName(std::string_view column) const;
 
   /// Clear all bitmaps
   void Clear();
@@ -94,7 +105,7 @@ class FilterIndex {
   void RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters);
 
   /// Protects all bitmap data from concurrent read/write access.
-  /// Readers (GetEqBitmap, MemoryUsage) take shared_lock;
+  /// Readers (GetEqBitmap, OrEqBitmapInto, ResolveColumnName, MemoryUsage) take shared_lock;
   /// writers (AddDocument, UpdateDocument, RemoveDocument, Clear) take unique_lock.
   mutable std::shared_mutex mutex_;
 
@@ -105,6 +116,11 @@ class FilterIndex {
   absl::flat_hash_map<std::string, ValueBitmapMap, mygram::utils::TransparentStringHash,
                       mygram::utils::TransparentStringEqual>
       eq_bitmaps_;
+
+  /// Number of live documents containing each column. Unlike eq_bitmaps_,
+  /// this also tracks columns whose values are all NULL.
+  absl::flat_hash_map<std::string, size_t, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
+      column_ref_counts_;
 };
 
 }  // namespace mygramdb::storage

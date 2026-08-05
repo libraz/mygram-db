@@ -6,7 +6,6 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <cctype>
 
 #include "storage/document_store.h"
 #include "storage/filter_index.h"
@@ -120,34 +119,10 @@ std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, std::stri
 
 std::optional<std::string> DocumentStore::ResolveFilterColumnName(std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
-  std::optional<std::string> resolved;
-
-  for (const auto& [doc_id, filters] : doc_filters_) {
-    (void)doc_id;
-    auto exact_it = filters.find(filter_name);
-    if (exact_it != filters.end()) {
-      return exact_it->first;
-    }
-
-    for (const auto& [column, value] : filters) {
-      (void)value;
-      if (column.size() != filter_name.size()) {
-        continue;
-      }
-      const bool matches =
-          std::equal(column.begin(), column.end(), filter_name.begin(),
-                     [](unsigned char lhs, unsigned char rhs) { return std::tolower(lhs) == std::tolower(rhs); });
-      if (!matches) {
-        continue;
-      }
-      if (resolved.has_value() && *resolved != column) {
-        return std::nullopt;
-      }
-      resolved = column;
-    }
+  if (!filter_index_) {
+    return std::nullopt;
   }
-
-  return resolved;
+  return filter_index_->ResolveColumnName(filter_name);
 }
 
 std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(const std::vector<DocId>& doc_ids,

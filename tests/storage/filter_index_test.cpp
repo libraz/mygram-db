@@ -228,6 +228,49 @@ TEST_F(FilterIndexTest, GetEqBitmapReturnsCopy) {
   EXPECT_TRUE(roaring_bitmap_contains(bm_copy.get(), 2));
 }
 
+TEST_F(FilterIndexTest, OrEqBitmapIntoMergesWithoutReturningAnIntermediateCopy) {
+  FilterMap first_filters;
+  first_filters["category"] = std::string("news");
+  index_.AddDocument(1, first_filters);
+  FilterMap second_filters;
+  second_filters["category"] = std::string("sports");
+  index_.AddDocument(2, second_filters);
+
+  RoaringBitmapPtr destination(roaring_bitmap_create(), roaring_bitmap_free);
+  ASSERT_NE(destination, nullptr);
+  const auto news = FilterIndex::SerializeFilterValue(FilterValue{std::string("news")});
+  const auto sports = FilterIndex::SerializeFilterValue(FilterValue{std::string("sports")});
+  EXPECT_TRUE(index_.OrEqBitmapInto("category", news, destination.get()));
+  EXPECT_TRUE(index_.OrEqBitmapInto("category", sports, destination.get()));
+  EXPECT_FALSE(index_.OrEqBitmapInto("category", "missing", destination.get()));
+  EXPECT_FALSE(index_.OrEqBitmapInto("category", news, nullptr));
+
+  EXPECT_EQ(roaring_bitmap_get_cardinality(destination.get()), 2U);
+  EXPECT_TRUE(roaring_bitmap_contains(destination.get(), 1));
+  EXPECT_TRUE(roaring_bitmap_contains(destination.get(), 2));
+}
+
+TEST_F(FilterIndexTest, ResolveColumnNameUsesLiveColumnIndexIncludingNullValues) {
+  index_.AddDocument(1, {{"createdAt", FilterValue{std::monostate{}}}});
+
+  EXPECT_EQ(index_.ResolveColumnName("createdAt"), "createdAt");
+  EXPECT_EQ(index_.ResolveColumnName("CREATEDAT"), "createdAt");
+  EXPECT_TRUE(index_.HasColumn("createdAt"));
+
+  index_.RemoveDocument(1, {{"createdAt", FilterValue{std::monostate{}}}});
+  EXPECT_EQ(index_.ResolveColumnName("createdat"), std::nullopt);
+  EXPECT_FALSE(index_.HasColumn("createdAt"));
+}
+
+TEST_F(FilterIndexTest, ResolveColumnNameRejectsAmbiguousCaseOnlyDuplicatesUnlessExact) {
+  index_.AddDocument(1, {{"Status", FilterValue{std::string("ready")}}});
+  index_.AddDocument(2, {{"STATUS", FilterValue{std::string("pending")}}});
+
+  EXPECT_EQ(index_.ResolveColumnName("Status"), "Status");
+  EXPECT_EQ(index_.ResolveColumnName("STATUS"), "STATUS");
+  EXPECT_EQ(index_.ResolveColumnName("status"), std::nullopt);
+}
+
 TEST_F(FilterIndexTest, ConcurrentReadWriteSafety) {
   // Verify concurrent GetEqBitmap + AddDocument/RemoveDocument does not crash
   constexpr int kIterations = 5000;
