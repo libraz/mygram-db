@@ -266,10 +266,7 @@ gtest_discover_tests(filter_index_facet_test
 )
 
 # Dump save/load integration test (MySQL only)
-# NOTE: This is a manual integration test that requires a running MySQL instance.
-# It is not automatically run by CTest because it depends on external MySQL setup.
 if(USE_MYSQL AND MYSQL_FOUND)
-  # Dump save/load integration test
   add_executable(dump_save_load_test
     dump_save_load_test.cpp
   )
@@ -278,8 +275,18 @@ if(USE_MYSQL AND MYSQL_FOUND)
     mygramdb_cache   # Includes mygramdb_query, mygramdb_storage, mygramdb_index, mygramdb_config transitively
     mygramdb_mysql   # Needed for mysql::Connection
     mygramdb_loader  # Needed for InitialLoader
+    GTest::gtest_main
   )
 
-  # This is a manual integration test - do not add to CTest
-  # Run manually with: ./bin/dump_save_load_test
+  target_include_directories(dump_save_load_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/mysql
+  )
+
+  gtest_discover_tests(dump_save_load_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      LABELS "MYSQL_INTEGRATION"
+      RESOURCE_LOCK mysql_connection
+  )
 endif()

@@ -96,9 +96,10 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       }
     }
 
-    // Verify CRC32 if specified
+    // V1 dumps always carry a file CRC. Zero is a valid checksum value, not
+    // an "absent" sentinel.
     // Use streaming CRC to avoid loading entire file into memory (prevents OOM for large files)
-    if (header.file_crc32 != 0) {
+    {
       // Get file size
       ifs.seekg(0, std::ios::end);
       auto file_size = static_cast<uint64_t>(ifs.tellg());
@@ -125,12 +126,6 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
           .Event("dump_verification_passed")
           .Field(server::log_fields::kFieldFilepath, filepath)
           .Field("crc_verified", true)
-          .Info();
-    } else {
-      StructuredLog()
-          .Event("dump_verification_passed")
-          .Field(server::log_fields::kFieldFilepath, filepath)
-          .Field("crc_verified", false)
           .Info();
     }
 

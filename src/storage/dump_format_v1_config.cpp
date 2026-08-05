@@ -675,8 +675,9 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   return {};
 }
 
-Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config) {
-  constexpr uint32_t kCompatibilityMetadataVersion = 1;
+Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config,
+                                                     std::string_view source_server_uuid) {
+  constexpr uint32_t kCompatibilityMetadataVersion = 2;
   if (!WriteBinary(output_stream, kCompatibilityMetadataVersion)) {
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write compatibility metadata version"));
@@ -684,21 +685,38 @@ Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream
   if (!WriteString(output_stream, config.memory.verify_text)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write memory.verify_text"));
   }
+  if (!WriteString(output_stream, std::string(source_server_uuid))) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write source server UUID"));
+  }
   return {};
 }
 
-Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config) {
-  constexpr uint32_t kCompatibilityMetadataVersion = 1;
+Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config,
+                                                       std::string* source_server_uuid) {
+  constexpr uint32_t kLegacyCompatibilityMetadataVersion = 1;
+  constexpr uint32_t kCompatibilityMetadataVersion = 2;
   uint32_t version = 0;
   if (!ReadBinary(input_stream, version)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read compatibility metadata version"));
   }
-  if (version != kCompatibilityMetadataVersion) {
+  if (version != kLegacyCompatibilityMetadataVersion && version != kCompatibilityMetadataVersion) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageVersionMismatch,
                                     "Unsupported compatibility metadata version: " + std::to_string(version)));
   }
   if (!ReadString(input_stream, config.memory.verify_text, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.verify_text"));
+  }
+  if (source_server_uuid != nullptr) {
+    source_server_uuid->clear();
+  }
+  if (version == kCompatibilityMetadataVersion) {
+    std::string loaded_source_server_uuid;
+    if (!ReadString(input_stream, loaded_source_server_uuid, kMaxConfigValueLength)) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read source server UUID"));
+    }
+    if (source_server_uuid != nullptr) {
+      *source_server_uuid = std::move(loaded_source_server_uuid);
+    }
   }
   return {};
 }

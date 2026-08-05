@@ -208,9 +208,6 @@ Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV1& header) {
   if (header.total_file_size == 0) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V1 header: total_file_size is zero"));
   }
-  if (header.file_crc32 == 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V1 header: file_crc32 is zero"));
-  }
   return {};
 }
 
@@ -299,291 +296,6 @@ Expected<void, Error> DeserializeTableStatistics(std::istream& input_stream, Tab
   }
   return {};
 }
-
-// ============================================================================
-// Config Serialization
-// ============================================================================
-
-namespace {
-
-/**
- * @brief Serialize FilterConfig to stream
- */
-bool SerializeFilterConfig(std::ostream& output_stream, const config::FilterConfig& filter) {
-  if (!WriteString(output_stream, filter.name)) {
-    return false;
-  }
-  if (!WriteString(output_stream, filter.type)) {
-    return false;
-  }
-  if (!WriteBinary(output_stream, filter.dict_compress)) {
-    return false;
-  }
-  if (!WriteBinary(output_stream, filter.bitmap_index)) {
-    return false;
-  }
-  if (!WriteString(output_stream, filter.bucket)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * @brief Deserialize FilterConfig from stream
- */
-bool DeserializeFilterConfig(std::istream& input_stream, config::FilterConfig& filter) {
-  if (!ReadString(input_stream, filter.name, kMaxIdentifierLength)) {
-    return false;
-  }
-  if (!ReadString(input_stream, filter.type, kMaxIdentifierLength)) {
-    return false;
-  }
-  if (!ReadBinary(input_stream, filter.dict_compress)) {
-    return false;
-  }
-  if (!ReadBinary(input_stream, filter.bitmap_index)) {
-    return false;
-  }
-  if (!ReadString(input_stream, filter.bucket, kMaxIdentifierLength)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * @brief Serialize RequiredFilterConfig to stream
- */
-bool SerializeRequiredFilterConfig(std::ostream& output_stream, const config::RequiredFilterConfig& filter) {
-  if (!WriteString(output_stream, filter.name)) {
-    return false;
-  }
-  if (!WriteString(output_stream, filter.type)) {
-    return false;
-  }
-  if (!WriteString(output_stream, filter.op)) {
-    return false;
-  }
-  if (!WriteString(output_stream, filter.value)) {
-    return false;
-  }
-  if (!WriteBinary(output_stream, filter.bitmap_index)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * @brief Deserialize RequiredFilterConfig from stream
- */
-bool DeserializeRequiredFilterConfig(std::istream& input_stream, config::RequiredFilterConfig& filter) {
-  if (!ReadString(input_stream, filter.name, kMaxIdentifierLength)) {
-    return false;
-  }
-  if (!ReadString(input_stream, filter.type, kMaxIdentifierLength)) {
-    return false;
-  }
-  if (!ReadString(input_stream, filter.op, kMaxIdentifierLength)) {
-    return false;
-  }
-  if (!ReadString(input_stream, filter.value, kMaxConfigValueLength)) {
-    return false;
-  }
-  if (!ReadBinary(input_stream, filter.bitmap_index)) {
-    return false;
-  }
-  return true;
-}
-
-/**
- * @brief Serialize TableConfig to stream
- */
-bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig& table) {
-  if (!WriteString(output_stream, table.name)) {
-    return false;
-  }
-  if (!WriteString(output_stream, table.primary_key)) {
-    return false;
-  }
-
-  // text_source
-  if (!WriteString(output_stream, table.text_source.column)) {
-    return false;
-  }
-  auto concat_size = static_cast<uint32_t>(table.text_source.concat.size());
-  if (!WriteBinary(output_stream, concat_size)) {
-    return false;
-  }
-  for (const auto& col : table.text_source.concat) {
-    if (!WriteString(output_stream, col)) {
-      return false;
-    }
-  }
-  if (!WriteString(output_stream, table.text_source.delimiter)) {
-    return false;
-  }
-
-  // required_filters
-  auto req_filter_count = static_cast<uint32_t>(table.required_filters.size());
-  if (!WriteBinary(output_stream, req_filter_count)) {
-    return false;
-  }
-  for (const auto& filter : table.required_filters) {
-    if (!SerializeRequiredFilterConfig(output_stream, filter)) {
-      return false;
-    }
-  }
-
-  // filters
-  auto filter_count = static_cast<uint32_t>(table.filters.size());
-  if (!WriteBinary(output_stream, filter_count)) {
-    return false;
-  }
-  for (const auto& filter : table.filters) {
-    if (!SerializeFilterConfig(output_stream, filter)) {
-      return false;
-    }
-  }
-
-  // ngram sizes
-  if (!WriteBinary(output_stream, table.ngram_size)) {
-    return false;
-  }
-  if (!WriteBinary(output_stream, table.kanji_ngram_size)) {
-    return false;
-  }
-
-  // cross_boundary_ngrams
-  uint8_t cross_boundary = table.cross_boundary_ngrams ? 1 : 0;
-  if (!WriteBinary(output_stream, cross_boundary)) {
-    return false;
-  }
-
-  // posting config
-  if (!WriteBinary(output_stream, table.posting.block_size)) {
-    return false;
-  }
-  if (!WriteBinary(output_stream, table.posting.freq_bits)) {
-    return false;
-  }
-  if (!WriteString(output_stream, table.posting.use_roaring)) {
-    return false;
-  }
-
-  return true;
-}
-
-/**
- * @brief Deserialize TableConfig from stream
- */
-bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& table) {
-  if (!ReadString(input_stream, table.name, kMaxIdentifierLength)) {
-    return false;
-  }
-  if (!ReadString(input_stream, table.primary_key, kMaxIdentifierLength)) {
-    return false;
-  }
-
-  // text_source
-  constexpr uint32_t kMaxConcatColumns = 1000;
-  constexpr uint32_t kMaxFilterCount = 1000;
-  if (!ReadString(input_stream, table.text_source.column, kMaxIdentifierLength)) {
-    return false;
-  }
-  uint32_t concat_size = 0;
-  if (!ReadBinary(input_stream, concat_size)) {
-    return false;
-  }
-  if (concat_size > kMaxConcatColumns) {
-    StructuredLog()
-        .Event("storage_validation_error")
-        .Field("type", "concat_columns_exceeded")
-        .Field("count", static_cast<uint64_t>(concat_size))
-        .Field("max_count", static_cast<uint64_t>(kMaxConcatColumns))
-        .Error();
-    return false;
-  }
-  table.text_source.concat.resize(concat_size);
-  for (uint32_t i = 0; i < concat_size; ++i) {
-    if (!ReadString(input_stream, table.text_source.concat[i], kMaxIdentifierLength)) {
-      return false;
-    }
-  }
-  if (!ReadString(input_stream, table.text_source.delimiter, kMaxIdentifierLength)) {
-    return false;
-  }
-
-  // required_filters
-  uint32_t req_filter_count = 0;
-  if (!ReadBinary(input_stream, req_filter_count)) {
-    return false;
-  }
-  if (req_filter_count > kMaxFilterCount) {
-    StructuredLog()
-        .Event("storage_validation_error")
-        .Field("type", "required_filters_exceeded")
-        .Field("count", static_cast<uint64_t>(req_filter_count))
-        .Field("max_count", static_cast<uint64_t>(kMaxFilterCount))
-        .Error();
-    return false;
-  }
-  table.required_filters.resize(req_filter_count);
-  for (uint32_t i = 0; i < req_filter_count; ++i) {
-    if (!DeserializeRequiredFilterConfig(input_stream, table.required_filters[i])) {
-      return false;
-    }
-  }
-
-  // filters
-  uint32_t filter_count = 0;
-  if (!ReadBinary(input_stream, filter_count)) {
-    return false;
-  }
-  if (filter_count > kMaxFilterCount) {
-    StructuredLog()
-        .Event("storage_validation_error")
-        .Field("type", "filters_exceeded")
-        .Field("count", static_cast<uint64_t>(filter_count))
-        .Field("max_count", static_cast<uint64_t>(kMaxFilterCount))
-        .Error();
-    return false;
-  }
-  table.filters.resize(filter_count);
-  for (uint32_t i = 0; i < filter_count; ++i) {
-    if (!DeserializeFilterConfig(input_stream, table.filters[i])) {
-      return false;
-    }
-  }
-
-  // ngram sizes
-  if (!ReadBinary(input_stream, table.ngram_size)) {
-    return false;
-  }
-  if (!ReadBinary(input_stream, table.kanji_ngram_size)) {
-    return false;
-  }
-
-  // cross_boundary_ngrams
-  uint8_t cross_boundary = 1;
-  if (!ReadBinary(input_stream, cross_boundary)) {
-    return false;
-  }
-  table.cross_boundary_ngrams = (cross_boundary != 0);
-
-  // posting config
-  if (!ReadBinary(input_stream, table.posting.block_size)) {
-    return false;
-  }
-  if (!ReadBinary(input_stream, table.posting.freq_bits)) {
-    return false;
-  }
-  if (!ReadString(input_stream, table.posting.use_roaring, kMaxIdentifierLength)) {
-    return false;
-  }
-
-  return true;
-}
-
-}  // namespace
 
 // ============================================================================
 // Complete Snapshot Read/Write (Version 1)
@@ -705,7 +417,7 @@ Expected<void, Error> WriteDumpV1(
     // Calculate actual header size: header_size(4) + flags(4) + dump_timestamp(8) +
     // total_file_size(8) + file_crc32(4) + gtid_length(4) + gtid_data(N)
     header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + gtid.size());
-    header.flags = dump_format::flags_v1::kNone;
+    header.flags = dump_format::flags_v1::kNone | dump_format::flags_v1::kWithCRC;
     header.flags |= dump_format::flags_v1::kHasCompatibilityMetadata;
     if (stats != nullptr) {
       header.flags |= dump_format::flags_v1::kWithStatistics;
@@ -1051,9 +763,10 @@ Expected<void, Error> ReadDumpV1(
       }
     }
 
-    // Verify CRC32 if specified
+    // V1 dumps always carry a file CRC. Zero is a valid checksum value, not
+    // an "absent" sentinel.
     // Use streaming CRC to avoid loading entire file into memory (prevents OOM for large files)
-    if (header.file_crc32 != 0) {
+    {
       // Save current position
       std::streampos current_pos = ifs.tellg();
 

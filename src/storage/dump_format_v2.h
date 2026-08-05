@@ -203,7 +203,8 @@ Expected<void, Error> WriteDumpV2(
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats = nullptr,
     const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    const DumpTableProgressCallback& table_progress_callback = {}, const RestoreLimits& restore_limits = {});
+    const DumpTableProgressCallback& table_progress_callback = {}, const RestoreLimits& restore_limits = {},
+    std::string_view source_server_uuid = {});
 
 /**
  * @brief Read complete dump from file (Version 2 format)
@@ -226,7 +227,7 @@ Expected<void, Error> ReadDumpV2(
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
     dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {},
-    const RestoreLimits& restore_limits = {});
+    const RestoreLimits& restore_limits = {}, std::string* source_server_uuid = nullptr);
 
 // ============================================================================
 // Version dispatch functions
@@ -242,7 +243,8 @@ Expected<void, Error> WriteDump(
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats = nullptr,
     const std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
-    const DumpTableProgressCallback& table_progress_callback = {}, const RestoreLimits& restore_limits = {});
+    const DumpTableProgressCallback& table_progress_callback = {}, const RestoreLimits& restore_limits = {},
+    std::string_view source_server_uuid = {});
 
 /**
  * @brief Read dump from file (auto-detects V1 or V2 format)
@@ -255,7 +257,7 @@ Expected<void, Error> ReadDump(
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
     dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {},
-    const RestoreLimits& restore_limits = {});
+    const RestoreLimits& restore_limits = {}, std::string* source_server_uuid = nullptr);
 
 /**
  * @brief Verify dump file integrity (auto-detects V1 or V2 format)

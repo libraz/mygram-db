@@ -84,9 +84,6 @@ Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV2& header) {
   if (header.section_count == 0) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V2 header: section_count is zero"));
   }
-  if ((header.flags & dump_format::flags_v2::kWithCRC) != 0 && header.file_crc32 == 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V2 header: file_crc32 is zero"));
-  }
   return {};
 }
 
@@ -94,8 +91,15 @@ Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV2& header) {
  * @brief Compute CRC32 of a data buffer
  */
 uint32_t ComputeCRC32(const std::string& data) {
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for zlib crc32 API
-  return static_cast<uint32_t>(crc32(0, reinterpret_cast<const Bytef*>(data.data()), static_cast<uInt>(data.size())));
+  uLong checksum = crc32(0, Z_NULL, 0);
+  size_t offset = 0;
+  while (offset < data.size()) {
+    const size_t chunk_size = std::min(data.size() - offset, static_cast<size_t>(std::numeric_limits<uInt>::max()));
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for zlib crc32 API
+    checksum = crc32(checksum, reinterpret_cast<const Bytef*>(data.data() + offset), static_cast<uInt>(chunk_size));
+    offset += chunk_size;
+  }
+  return static_cast<uint32_t>(checksum);
 }
 
 class CountingStreambuf : public std::streambuf {
@@ -424,7 +428,8 @@ Expected<void, Error> WriteDumpV2(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats,
-    const DumpTableProgressCallback& table_progress_callback, const RestoreLimits& restore_limits) {
+    const DumpTableProgressCallback& table_progress_callback, const RestoreLimits& restore_limits,
+    std::string_view source_server_uuid) {
   if (gtid.size() > kMaxGtidLength) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
                                     "V2 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
@@ -585,7 +590,8 @@ Expected<void, Error> WriteDumpV2(
     // explicit "off" value.
     {
       std::ostringstream compatibility_stream;
-      if (auto result = dump_v1::SerializeCompatibilityMetadata(compatibility_stream, config); !result) {
+      if (auto result = dump_v1::SerializeCompatibilityMetadata(compatibility_stream, config, source_server_uuid);
+          !result) {
         LogStorageError("serialize_compatibility_metadata", temp_filepath, result.error().message());
         return result;
       }
@@ -851,8 +857,12 @@ Expected<void, Error> ReadDumpV2(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
     std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
-    const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits) {
+    const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits,
+    std::string* source_server_uuid) {
   try {
+    if (source_server_uuid != nullptr) {
+      source_server_uuid->clear();
+    }
     if (restore_limits.memory_budget_bytes == 0 || restore_limits.max_section_bytes == 0) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "V2 restore limits must be greater than zero"));
     }
@@ -928,8 +938,9 @@ Expected<void, Error> ReadDumpV2(
       }
     }
 
-    // Verify file-level CRC32
-    if (header.file_crc32 != 0) {
+    // Verify file-level CRC32 when the format flag declares one. A checksum
+    // value of zero is valid and must be compared normally.
+    if ((header.flags & dump_format::flags_v2::kWithCRC) != 0) {
       std::streampos current_pos = ifs.tellg();
       ifs.seekg(0, std::ios::end);
       auto file_size = static_cast<uint64_t>(ifs.tellg());
@@ -1031,7 +1042,9 @@ Expected<void, Error> ReadDumpV2(
                                             "V2 CompatibilityMetadata section must follow the Config section"));
           }
           BoundedInputStream compatibility_stream(section_stream, envelope.data_length);
-          if (auto result = dump_v1::DeserializeCompatibilityMetadata(compatibility_stream, loaded_config); !result) {
+          if (auto result =
+                  dump_v1::DeserializeCompatibilityMetadata(compatibility_stream, loaded_config, source_server_uuid);
+              !result) {
             LogStorageError("deserialize_compatibility_metadata_v2", filepath, result.error().message());
             return result;
           }
@@ -1305,17 +1318,22 @@ Expected<void, Error> WriteDump(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats,
-    const DumpTableProgressCallback& table_progress_callback, const RestoreLimits& restore_limits) {
+    const DumpTableProgressCallback& table_progress_callback, const RestoreLimits& restore_limits,
+    std::string_view source_server_uuid) {
   // Always write in the latest format (V2)
   return WriteDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, table_progress_callback,
-                     restore_limits);
+                     restore_limits, source_server_uuid);
 }
 
 Expected<void, Error> ReadDump(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
     std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
-    const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits) {
+    const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits,
+    std::string* source_server_uuid) {
+  if (source_server_uuid != nullptr) {
+    source_server_uuid->clear();
+  }
   // Read magic + version to determine format
   std::ifstream ifs(filepath, std::ios::binary);
   if (!ifs) {
@@ -1351,7 +1369,7 @@ Expected<void, Error> ReadDump(
   }
 
   return ReadDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error, config_validator,
-                    restore_limits);
+                    restore_limits, source_server_uuid);
 }
 
 Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error) {
@@ -1425,8 +1443,9 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
 
-    // Verify file-level CRC32
-    if (header.file_crc32 != 0) {
+    // Verify file-level CRC32 when the format flag declares one. A checksum
+    // value of zero is valid and must be compared normally.
+    if ((header.flags & dump_format::flags_v2::kWithCRC) != 0) {
       ifs2.seekg(0, std::ios::end);
       auto file_size = static_cast<uint64_t>(ifs2.tellg());
       const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);

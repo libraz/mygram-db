@@ -1285,7 +1285,7 @@ TEST(DumpFormatV2Test, ReadRejectsZeroFileCrcWhenCrcFlagSet) {
   auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts, nullptr, nullptr, &error);
   EXPECT_FALSE(read_result.has_value());
   EXPECT_EQ(error.type, dump_format::CRCErrorType::FileCRC);
-  EXPECT_NE(error.message.find("file_crc32 is zero"), std::string::npos);
+  EXPECT_NE(error.message.find("CRC32 checksum mismatch"), std::string::npos);
 }
 
 TEST(DumpFormatV2Test, SectionCRCCorruptionDetected) {

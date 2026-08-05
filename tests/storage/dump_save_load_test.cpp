@@ -1,176 +1,110 @@
-// Manual integration test - requires live MySQL. Not run by ctest.
 /**
- * Test snapshot save and load with id < 10000 filter
+ * @file dump_save_load_test.cpp
+ * @brief MySQL-backed snapshot component round-trip integration test
  */
 
-#include <spdlog/spdlog.h>
+#ifdef USE_MYSQL
 
-#include <cstdlib>
-#include <iostream>
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <filesystem>
+#include <string>
 
 #include "config/config.h"
 #include "index/index.h"
 #include "loader/initial_loader.h"
 #include "mysql/connection.h"
+#include "mysql_test_helpers.h"
 #include "storage/document_store.h"
+#include "utils/fd_guard.h"
 
-int main() {
-  spdlog::set_level(spdlog::level::info);
-  spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+namespace mygramdb::storage {
+namespace {
 
-  // MySQL connection config
-  mygramdb::mysql::Connection::Config mysql_config;
-  mysql_config.host = "127.0.0.1";
-  mysql_config.port = 3306;
-  mysql_config.user = "root";
-  mysql_config.password = std::getenv("MYSQL_PASSWORD") ? std::getenv("MYSQL_PASSWORD") : "change_me";
-  mysql_config.database = "test";
+TEST(DumpSaveLoadIntegrationTest, RoundTripsFilteredInitialSnapshot) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
 
-  // Table config
-  mygramdb::config::TableConfig table_config;
-  table_config.name = "threads";
+  const auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection connection(connection_config);
+  auto connect = connection.Connect("dump-save-load-integration-test");
+  ASSERT_TRUE(connect) << connect.error().message();
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "dump_roundtrip_" + suffix;
+  const std::string quoted_table = "`" + table + "`";
+  const auto temp_dir = std::filesystem::temp_directory_path();
+  const std::string index_file = (temp_dir / ("mygramdb_index_" + suffix + ".dat")).string();
+  const std::string doc_store_file = (temp_dir / ("mygramdb_docstore_" + suffix + ".dat")).string();
+
+  auto cleanup = utils::ScopeGuard([&]() {
+    (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table);
+    std::error_code error;
+    (void)std::filesystem::remove(index_file, error);
+    error.clear();
+    (void)std::filesystem::remove(doc_store_file, error);
+  });
+
+  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table));
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
+                                       " (id BIGINT PRIMARY KEY, name VARCHAR(255) NOT NULL, enabled INT NOT NULL,"
+                                       " comic_type_id INT NOT NULL) ENGINE=InnoDB"));
+  ASSERT_TRUE(connection.ExecuteUpdate("INSERT INTO " + quoted_table +
+                                       " VALUES (100, 'snapshot fixture', 1, 7), (200, 'disabled fixture', 0, 8),"
+                                       " (20000, 'outside range fixture', 1, 9)"));
+
+  config::TableConfig table_config;
+  table_config.database = connection_config.database;
+  table_config.name = table;
   table_config.primary_key = "id";
   table_config.text_source.column = "name";
   table_config.ngram_size = 2;
+  table_config.required_filters = {
+      {"enabled", "int", "=", "1", false},
+      {"id", "int", "<", "10000", false},
+  };
+  table_config.filters = {
+      {"comic_type_id", "int", true, true, ""},
+  };
 
-  // Required filters (data existence conditions)
-  mygramdb::config::RequiredFilterConfig req_filter1;
-  req_filter1.name = "enabled";
-  req_filter1.type = "int";
-  req_filter1.op = "=";
-  req_filter1.value = "1";
-  table_config.required_filters.push_back(req_filter1);
+  index::Index index(table_config.ngram_size);
+  DocumentStore doc_store;
+  loader::InitialLoader initial_loader(connection, index, doc_store, table_config);
+  auto load = initial_loader.Load();
+  ASSERT_TRUE(load) << load.error().message();
+  ASSERT_EQ(initial_loader.GetProcessedRows(), 1U);
+  ASSERT_FALSE(initial_loader.GetStartGTID().empty());
 
-  mygramdb::config::RequiredFilterConfig req_filter2;
-  req_filter2.name = "id";
-  req_filter2.type = "int";
-  req_filter2.op = "<";
-  req_filter2.value = "10000";
-  table_config.required_filters.push_back(req_filter2);
+  const auto original_doc_id = doc_store.GetDocId("100");
+  ASSERT_TRUE(original_doc_id.has_value());
+  EXPECT_FALSE(doc_store.GetDocId("200").has_value());
+  EXPECT_FALSE(doc_store.GetDocId("20000").has_value());
+  EXPECT_EQ(index.SearchAnd({"sn"}), std::vector<DocId>{*original_doc_id});
 
-  // Optional filter config (for search-time filtering)
-  mygramdb::config::FilterConfig filter;
-  filter.name = "comic_type_id";
-  filter.type = "int";
-  filter.dict_compress = true;
-  filter.bitmap_index = true;
-  table_config.filters.push_back(filter);
+  auto save_index = index.SaveToFile(index_file);
+  ASSERT_TRUE(save_index) << save_index.error().message();
+  auto save_doc_store = doc_store.SaveToFile(doc_store_file, initial_loader.GetStartGTID());
+  ASSERT_TRUE(save_doc_store) << save_doc_store.error().message();
 
-  std::cout << "\n=== Step 1: Build and Save Snapshot ===" << std::endl;
-
-  // Create index and document store
-  auto index = std::make_unique<mygramdb::index::Index>(table_config.ngram_size);
-  auto doc_store = std::make_unique<mygramdb::storage::DocumentStore>();
-
-  // Connect to MySQL
-  auto mysql_conn = std::make_unique<mygramdb::mysql::Connection>(mysql_config);
-  auto connect_result = mysql_conn->Connect();
-  if (!connect_result) {
-    std::cerr << "Failed to connect to MySQL: " << connect_result.error().message() << std::endl;
-    return 1;
-  }
-  std::cout << "✓ Connected to MySQL" << std::endl;
-
-  // Build initial data
-  mygramdb::config::MysqlConfig mysql_cfg;  // Use default timezone (+00:00)
-  mygramdb::loader::InitialLoader initial_loader(*mysql_conn, *index, *doc_store, table_config, mysql_cfg);
-
-  auto result = initial_loader.Load([](const auto& progress) {
-    if (progress.processed_rows % 5000 == 0 && progress.processed_rows > 0) {
-      std::cout << "  Processed " << progress.processed_rows << " rows (" << progress.rows_per_second << " rows/s)"
-                << std::endl;
-    }
-  });
-
-  if (!result) {
-    std::cerr << "Failed to load initial data: " << result.error().message() << std::endl;
-    return 1;
-  }
-
-  uint64_t original_rows = initial_loader.GetProcessedRows();
-  std::string start_gtid = initial_loader.GetStartGTID();
-  std::cout << "✓ Initial data loaded: " << original_rows << " rows" << std::endl;
-  std::cout << "✓ Start GTID: " << start_gtid << std::endl;
-
-  // Test GetDocId for a known document
-  auto test_doc_id = doc_store->GetDocId("100");
-  if (test_doc_id) {
-    std::cout << "✓ Test document found: id=100 -> doc_id=" << test_doc_id.value() << std::endl;
-  }
-
-  // Save to disk
-  std::string index_file = "/tmp/mygramdb_index_test.dat";
-  std::string docstore_file = "/tmp/mygramdb_docstore_test.dat";
-
-  if (!index->SaveToFile(index_file)) {
-    std::cerr << "Failed to save index" << std::endl;
-    return 1;
-  }
-  std::cout << "✓ Index saved to " << index_file << std::endl;
-
-  if (!doc_store->SaveToFile(docstore_file, start_gtid)) {
-    std::cerr << "Failed to save document store" << std::endl;
-    return 1;
-  }
-  std::cout << "✓ Document store saved to " << docstore_file << std::endl;
-
-  std::cout << "\n=== Step 2: Load from Disk ===" << std::endl;
-
-  // Create new empty index and document store
-  auto index2 = std::make_unique<mygramdb::index::Index>(table_config.ngram_size);
-  auto doc_store2 = std::make_unique<mygramdb::storage::DocumentStore>();
-
-  // Load from disk
-  if (!index2->LoadFromFile(index_file)) {
-    std::cerr << "Failed to load index" << std::endl;
-    return 1;
-  }
-  std::cout << "✓ Index loaded from " << index_file << std::endl;
-
+  index::Index loaded_index(table_config.ngram_size);
+  DocumentStore loaded_doc_store;
+  auto load_index = loaded_index.LoadFromFile(index_file);
+  ASSERT_TRUE(load_index) << load_index.error().message();
   std::string loaded_gtid;
-  if (!doc_store2->LoadFromFile(docstore_file, &loaded_gtid)) {
-    std::cerr << "Failed to load document store" << std::endl;
-    return 1;
-  }
-  std::cout << "✓ Document store loaded from " << docstore_file << std::endl;
-  std::cout << "✓ Loaded GTID: " << loaded_gtid << std::endl;
+  auto load_doc_store = loaded_doc_store.LoadFromFile(doc_store_file, &loaded_gtid);
+  ASSERT_TRUE(load_doc_store) << load_doc_store.error().message();
 
-  // Verify GTID
-  if (start_gtid != loaded_gtid) {
-    std::cerr << "✗ GTID mismatch!" << std::endl;
-    std::cerr << "  Original: " << start_gtid << std::endl;
-    std::cerr << "  Loaded: " << loaded_gtid << std::endl;
-    return 1;
-  }
-  std::cout << "✓ GTID matches: " << loaded_gtid << std::endl;
-
-  // Verify document lookup
-  auto loaded_test_doc_id = doc_store2->GetDocId("100");
-  if (!loaded_test_doc_id) {
-    std::cerr << "✗ Test document not found in loaded store!" << std::endl;
-    return 1;
-  }
-  if (test_doc_id.value() != loaded_test_doc_id.value()) {
-    std::cerr << "✗ Document ID mismatch!" << std::endl;
-    std::cerr << "  Original: " << test_doc_id.value() << std::endl;
-    std::cerr << "  Loaded: " << loaded_test_doc_id.value() << std::endl;
-    return 1;
-  }
-  std::cout << "✓ Document lookup matches: id=100 -> doc_id=" << loaded_test_doc_id.value() << std::endl;
-
-  // Verify document outside range is not present
-  auto outside_doc_id = doc_store2->GetDocId("20000");
-  if (outside_doc_id) {
-    std::cerr << "✗ Document id=20000 should not be in snapshot (id < 10000 filter)!" << std::endl;
-    return 1;
-  }
-  std::cout << "✓ Document id=20000 correctly not in snapshot (filtered out)" << std::endl;
-
-  std::cout << "\n=== ALL TESTS PASSED ===" << std::endl;
-  std::cout << "Snapshot with 'id < 10000' filter:" << std::endl;
-  std::cout << "  - Saved " << original_rows << " rows" << std::endl;
-  std::cout << "  - GTID preserved: " << loaded_gtid << std::endl;
-  std::cout << "  - Data integrity verified" << std::endl;
-
-  return 0;
+  EXPECT_EQ(loaded_gtid, initial_loader.GetStartGTID());
+  EXPECT_EQ(loaded_doc_store.Size(), 1U);
+  EXPECT_EQ(loaded_doc_store.GetDocId("100"), original_doc_id);
+  EXPECT_FALSE(loaded_doc_store.GetDocId("200").has_value());
+  EXPECT_FALSE(loaded_doc_store.GetDocId("20000").has_value());
+  EXPECT_EQ(loaded_index.SearchAnd({"sn"}), std::vector<DocId>{*original_doc_id});
 }
+
+}  // namespace
+}  // namespace mygramdb::storage
+
+#endif  // USE_MYSQL

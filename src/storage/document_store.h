@@ -223,12 +223,14 @@ class DocumentStore {
    * @brief Get primary keys for multiple DocIDs (batch operation)
    *
    * Optimized for retrieving many primary keys in a single lock acquisition.
-   * Missing documents will have empty strings in the result.
+   * Missing documents will have `std::nullopt` in the result. A present empty
+   * string is a valid primary key and remains distinguishable from a missing
+   * document.
    *
    * @param doc_ids Vector of document IDs
-   * @return Vector of primary keys (empty string if doc_id not found)
+   * @return Vector of primary keys (`std::nullopt` if doc_id not found)
    */
-  [[nodiscard]] std::vector<std::string> GetPrimaryKeysBatch(const std::vector<DocId>& doc_ids) const;
+  [[nodiscard]] std::vector<std::optional<std::string>> GetPrimaryKeysBatch(const std::vector<DocId>& doc_ids) const;
 
   /**
    * @brief Get filter value

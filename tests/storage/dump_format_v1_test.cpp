@@ -305,7 +305,7 @@ TEST(DumpFormatV1Test, RejectsZeroFileCrcHeader) {
   auto verify_result = VerifyDumpIntegrity(filepath, verify_error);
   EXPECT_FALSE(verify_result.has_value());
   EXPECT_EQ(verify_error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
-  EXPECT_NE(verify_error.message.find("file_crc32 is zero"), std::string::npos);
+  EXPECT_NE(verify_error.message.find("CRC32 checksum mismatch"), std::string::npos);
 
   std::string gtid = "unchanged";
   mygramdb::config::Config config;
@@ -314,7 +314,7 @@ TEST(DumpFormatV1Test, RejectsZeroFileCrcHeader) {
   auto read_result = ReadDumpV1(filepath, gtid, config, contexts, nullptr, nullptr, &read_error);
   EXPECT_FALSE(read_result.has_value());
   EXPECT_EQ(read_error.type, mygramdb::storage::dump_format::CRCErrorType::FileCRC);
-  EXPECT_NE(read_error.message.find("file_crc32 is zero"), std::string::npos);
+  EXPECT_NE(read_error.message.find("CRC32 checksum mismatch"), std::string::npos);
   EXPECT_EQ(gtid, "unchanged");
 
   CleanupTestFile(filepath);

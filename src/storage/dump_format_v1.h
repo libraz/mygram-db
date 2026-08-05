@@ -200,8 +200,10 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
 Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config);
 
 /** Serialize/deserialize versioned semantic compatibility metadata. */
-Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config);
-Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config);
+Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config,
+                                                     std::string_view source_server_uuid = {});
+Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config,
+                                                       std::string* source_server_uuid = nullptr);
 
 /**
  * @brief Serialize DumpStatistics to output stream
