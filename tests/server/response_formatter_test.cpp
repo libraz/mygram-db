@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <future>
+
 #include "cache/cache_manager.h"
 #include "cache/cache_types.h"
 #include "client/protocol_detection.h"
@@ -16,6 +18,7 @@
 #include "server/server_stats.h"
 #include "server/statistics_service.h"
 #include "server/tcp_server.h"  // For TableContext
+#include "server/thread_pool.h"
 #include "storage/document_store.h"
 
 using namespace mygramdb::server;
@@ -35,12 +38,22 @@ class MockResponseBinlogReader final : public mysql::IBinlogReader {
   std::string GetLastError() const override { return last_error; }
   uint64_t GetProcessedEvents() const override { return processed_events; }
   size_t GetQueueSize() const override { return queue_size; }
+  uint64_t GetCRCErrors() const override { return crc_errors; }
+  bool HasSchemaIncompatibleError() const override { return schema_incompatible; }
+  mygram::utils::ErrorCode GetLastErrorCode() const override { return last_error_code; }
+  int64_t GetLastAppliedUnixTime() const override { return last_applied_unixtime; }
+  int64_t GetSecondsSinceLastApplied() const override { return seconds_since_last_applied; }
 
   bool running = false;
   std::string current_gtid = "uuid:1-10";
   std::string last_error;
   uint64_t processed_events = 42;
   size_t queue_size = 9;
+  uint64_t crc_errors = 0;
+  bool schema_incompatible = false;
+  mygram::utils::ErrorCode last_error_code = mygram::utils::ErrorCode::kSuccess;
+  int64_t last_applied_unixtime = 0;
+  int64_t seconds_since_last_applied = -1;
 };
 #endif
 
@@ -224,6 +237,15 @@ TEST_F(ResponseFormatterTest, FormatSearchResponseDoesNotCollapseSpaceAndUndersc
   std::string response = ResponseFormatter::FormatSearchResponse(results, 2, table_context_.doc_store.get());
 
   EXPECT_EQ(response, "OK RESULTS 2 \"a b\" a_b");
+}
+
+TEST_F(ResponseFormatterTest, FormatSearchResponsePreservesEmptyPrimaryKey) {
+  auto doc_id = table_context_.doc_store->AddDocument("");
+  ASSERT_TRUE(doc_id.has_value());
+
+  std::string response = ResponseFormatter::FormatSearchResponse({*doc_id}, 1, table_context_.doc_store.get());
+
+  EXPECT_EQ(response, "OK RESULTS 1 \"\"");
 }
 
 TEST_F(ResponseFormatterTest, FormatSearchResponseQuotesUnicodeWhitespaceInPrimaryKey) {
@@ -478,13 +500,63 @@ TEST_F(ResponseFormatterTest, FormatReplicationStatusIncludesQueueSizeWhenStoppe
   reader.current_gtid = "uuid:1-100";
   reader.processed_events = 321;
   reader.queue_size = 11;
+  reader.crc_errors = 4;
+  reader.schema_incompatible = true;
+  reader.last_error_code = mygram::utils::ErrorCode::kMySQLInvalidSchema;
+  reader.last_error = "schema changed";
+  reader.last_applied_unixtime = 1722840000;
+  reader.seconds_since_last_applied = 42;
 
   std::string response = ResponseFormatter::FormatReplicationStatusResponse(&reader);
 
-  EXPECT_NE(response.find("status: stopped\r\n"), std::string::npos);
+  EXPECT_NE(response.find("status: failed\r\n"), std::string::npos);
   EXPECT_NE(response.find("current_gtid: uuid:1-100\r\n"), std::string::npos);
   EXPECT_NE(response.find("processed_events: 321\r\n"), std::string::npos);
   EXPECT_NE(response.find("queue_size: 11\r\n"), std::string::npos);
+  EXPECT_NE(response.find("crc_errors: 4\r\n"), std::string::npos);
+  EXPECT_NE(response.find("schema_incompatible: true\r\n"), std::string::npos);
+  EXPECT_NE(response.find("last_error_code: 2012\r\n"), std::string::npos);
+  EXPECT_NE(response.find("last_error: schema changed\r\n"), std::string::npos);
+  EXPECT_NE(response.find("last_applied_unixtime: 1722840000\r\n"), std::string::npos);
+  EXPECT_NE(response.find("seconds_since_last_applied: 42\r\n"), std::string::npos);
+}
+
+TEST_F(ResponseFormatterTest, FormatPrometheusMetricsExposesReplicationDiagnostics) {
+  AggregatedMetrics metrics;
+  ServerStats stats;
+  MockResponseBinlogReader reader;
+  reader.running = false;
+  reader.crc_errors = 4;
+  reader.schema_incompatible = true;
+  reader.last_error_code = mygram::utils::ErrorCode::kMySQLInvalidSchema;
+  reader.last_error = "schema changed";
+  reader.last_applied_unixtime = 1722840000;
+  reader.seconds_since_last_applied = 42;
+  stats.RecordDumpSuccess();
+  stats.IncrementDumpFailureManual();
+  stats.IncrementDumpFailureAuto();
+  stats.IncrementRequestsDeniedRateLimitTcp();
+  stats.IncrementRequestsDeniedAclHttp();
+  stats.IncrementRequestsDeniedConnectionLimitTcp();
+  stats.IncrementRequestsDeniedPoolFullTcp();
+
+  const std::string response = ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, &reader);
+
+  EXPECT_NE(response.find("mygramdb_replication_state{state=\"failed\"} 1"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_replication_crc_errors_total 4"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_replication_schema_incompatible 1"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_replication_last_error_code 2012"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_replication_last_applied_unixtime 1722840000"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_replication_seconds_since_last_applied 42"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_dump_last_success_timestamp_seconds "), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_dump_failures_total{trigger=\"manual\"} 1"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_dump_failures_total{trigger=\"auto\"} 1"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_requests_denied_total{reason=\"rate_limit\",surface=\"tcp\"} 1"),
+            std::string::npos);
+  EXPECT_NE(response.find("mygramdb_requests_denied_total{reason=\"acl\",surface=\"http\"} 1"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_requests_denied_total{reason=\"connection_limit\",surface=\"tcp\"} 1"),
+            std::string::npos);
+  EXPECT_NE(response.find("mygramdb_requests_denied_total{reason=\"pool_full\",surface=\"tcp\"} 1"), std::string::npos);
 }
 #endif
 
@@ -665,6 +737,63 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsWithCache) {
   EXPECT_TRUE(response.find("mygramdb_cache_hit_rate") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_misses_total") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_insert_rejections_total") != std::string::npos);
+  EXPECT_TRUE(response.find("reason=\"memory_budget\"") != std::string::npos);
+  EXPECT_TRUE(response.find("mygramdb_cache_stale_entry_removals_total") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_decompression_failures_total") != std::string::npos);
   EXPECT_TRUE(response.find("mygramdb_cache_stale_lru_entries_total") != std::string::npos);
+}
+
+TEST_F(ResponseFormatterTest, FormatPrometheusMetricsRetainsCacheSeriesWhenDisabled) {
+  ServerStats stats;
+
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 100 * 1024 * 1024;
+  cache::NgramConfigMap ngram_configs;
+  for (const auto& [name, ctx] : table_contexts_) {
+    ngram_configs[name] =
+        cache::NgramConfig{ctx->config.ngram_size, ctx->config.kanji_ngram_size, ctx->config.cross_boundary_ngrams};
+  }
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+  cache_manager.Disable();
+  ASSERT_FALSE(cache_manager.IsEnabled());
+
+  const auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+  const std::string response =
+      ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, nullptr, &cache_manager);
+
+  EXPECT_NE(response.find("mygramdb_cache_hits_total 0"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_cache_misses_total{reason=\"not_found\"} 0"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_cache_entries 0"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_cache_memory_bytes{type=\"cache\"} 0"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_cache_evictions_total 0"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_cache_invalidations_total{phase=\"immediate\"} 0"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_cache_hit_rate 0.0000"), std::string::npos);
+}
+
+TEST_F(ResponseFormatterTest, FormatPrometheusMetricsExposesThreadPoolSaturation) {
+  ServerStats stats;
+  ThreadPool pool(1, 7);
+  std::promise<void> worker_started;
+  std::promise<void> release_promise;
+  const std::shared_future<void> release_worker = release_promise.get_future().share();
+
+  ASSERT_TRUE(pool.Submit([&worker_started, release_worker]() {
+    worker_started.set_value();
+    release_worker.wait();
+  }));
+  worker_started.get_future().wait();
+  ASSERT_TRUE(pool.Submit([] {}));
+  ASSERT_EQ(pool.GetQueueSize(), 1U);
+
+  const auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+  const std::string response =
+      ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, nullptr, nullptr, &pool);
+
+  EXPECT_NE(response.find("mygramdb_thread_pool_queue_depth 1"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_thread_pool_queue_capacity 7"), std::string::npos);
+  EXPECT_NE(response.find("mygramdb_thread_pool_workers 1"), std::string::npos);
+
+  release_promise.set_value();
+  pool.Shutdown();
 }

@@ -101,10 +101,9 @@ ReactorConnection::ReactorConnection(int fd, IoReactor* reactor, RequestDispatch
   created_at_.store(now, std::memory_order_relaxed);
   last_active_.store(now, std::memory_order_relaxed);
   conn_ctx_.client_fd = fd_;
-  std::string client_ip = mygram::utils::GetPeerIP(fd_);
-  if (client_ip != "unknown") {
-    conn_ctx_.client_ip = std::move(client_ip);
-  }
+  // Use the stable "unknown" key when peer lookup fails. Leaving this empty
+  // would make RequestDispatcher skip rate limiting entirely (fail-open).
+  conn_ctx_.client_ip = mygram::utils::GetPeerIP(fd_);
 }
 
 ReactorConnection::~ReactorConnection() {
@@ -160,17 +159,33 @@ bool ReactorConnection::OnReadable() {
     if (n > 0) {
       received_bytes += static_cast<size_t>(n);
       if (!AppendReadBytes(chunk.data(), static_cast<size_t>(n), enqueued)) {
+        bool frame_queue_overflow = false;
+        size_t read_buffer_size = 0;
+        {
+          std::lock_guard<std::mutex> lock(frame_mutex_);
+          frame_queue_overflow = frame_queue_overflow_;
+          read_buffer_size = read_buf_.size();
+        }
         mygram::utils::StructuredLog()
-            .Event(frame_queue_overflow_ ? "reactor_pending_frames_overflow" : "reactor_read_buf_overflow")
+            .Event(frame_queue_overflow ? "reactor_pending_frames_overflow" : "reactor_read_buf_overflow")
             .Field("fd", static_cast<int64_t>(fd_))
-            .Field("buf_bytes", static_cast<uint64_t>(read_buf_.size()))
+            .Field("buf_bytes", static_cast<uint64_t>(read_buffer_size))
             .Field("cap_bytes", static_cast<uint64_t>(kMaxReadBufferBytes))
             .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
             .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
             .Warn();
-        (void)TrySendErrorIfWriteQueueEmpty(frame_queue_overflow_ ? "server busy" : "request too large");
+        (void)TrySendErrorIfWriteQueueEmpty(frame_queue_overflow ? "server busy" : "request too large");
         closing_.store(true, std::memory_order_release);
         return false;
+      }
+      {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        // Backpressure can be published by this recv() chunk. Stop draining
+        // immediately so the event loop never writes read_buf_ while the
+        // worker is allowed to extract its queued suffix.
+        if (read_paused_) {
+          break;
+        }
       }
       // epoll and kqueue are level-triggered, so yielding here cannot lose
       // unread socket data. This prevents a single hot fd from monopolizing
@@ -321,6 +336,10 @@ bool ReactorConnection::OnError() {
 }
 
 bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& enqueued) {
+  // The drain worker may call ExtractFramesLocked() while read_paused_. Keep
+  // the insert, capacity check, accounting, and extraction in one critical
+  // section so vector reallocation cannot race its data()/swap operations.
+  std::lock_guard<std::mutex> lock(frame_mutex_);
   if (len > read_buf_.max_size() - read_buf_.size()) {
     return false;
   }
@@ -345,19 +364,16 @@ bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& en
   read_buffer_budget_bytes_ += len;
   read_reservation_guard.Release();
   bool interest_update_ok = true;
-  {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    enqueued += ExtractFramesLocked();
-    if (!read_paused_ && (pending_frames_.size() >= pending_frames_high_watermark_ ||
-                          pending_frame_bytes_ >= pending_frame_bytes_high_watermark_)) {
-      // Serialize the state transition and mux update with DrainTask's low-
-      // watermark rearm so a fast drain cannot re-enable reads before this
-      // disarm reaches the kernel.
-      read_paused_ = true;
-      if (reactor_ != nullptr) {
-        auto result = reactor_->SetReadEnabled(fd_, this, false);
-        interest_update_ok = result.has_value();
-      }
+  enqueued += ExtractFramesLocked();
+  if (!read_paused_ && (pending_frames_.size() >= pending_frames_high_watermark_ ||
+                        pending_frame_bytes_ >= pending_frame_bytes_high_watermark_)) {
+    // Serialize the state transition and mux update with DrainTask's low-
+    // watermark rearm so a fast drain cannot re-enable reads before this
+    // disarm reaches the kernel.
+    read_paused_ = true;
+    if (reactor_ != nullptr) {
+      auto result = reactor_->SetReadEnabled(fd_, this, false);
+      interest_update_ok = result.has_value();
     }
   }
 
@@ -403,6 +419,9 @@ bool ReactorConnection::SubmitDrainTaskToPool(std::string_view failure_event) {
   }
 
   drain_scheduled_.store(false, std::memory_order_release);
+  if (stats_ != nullptr) {
+    stats_->IncrementRequestsDeniedPoolFullTcp();
+  }
   mygram::utils::StructuredLog().Event(std::string(failure_event)).Field("fd", static_cast<int64_t>(fd_)).Warn();
   const bool response_pending = CloseWithServerBusy();
   if (!response_pending && reactor_ != nullptr) {
@@ -458,7 +477,7 @@ bool ReactorConnection::PublishReadEofLocked() {
 
 size_t ReactorConnection::ExtractFramesLocked() {
   size_t enqueued = 0;
-  size_t scan_start = 0;
+  size_t scan_start = std::min(read_scan_start_, read_buf_.size());
   size_t consumed = 0;
   while (scan_start + kFrameDelimiterLen <= read_buf_.size()) {
     if (pending_frames_.size() >= pending_frames_high_watermark_ ||
@@ -470,10 +489,12 @@ size_t ReactorConnection::ExtractFramesLocked() {
     const size_t remaining = read_buf_.size() - scan_start;
     const char* found = static_cast<const char*>(std::memchr(begin, kFrameDelimiter[0], remaining));
     if (found == nullptr) {
+      scan_start = read_buf_.size();
       break;
     }
     const size_t found_off = static_cast<size_t>(found - read_buf_.data());
     if (found_off + kFrameDelimiterLen > read_buf_.size()) {
+      scan_start = found_off;
       break;  // delimiter straddles the buffer end; wait for more bytes
     }
     if (read_buf_[found_off + 1] != kFrameDelimiter[1]) {
@@ -514,6 +535,17 @@ size_t ReactorConnection::ExtractFramesLocked() {
     consumed = found_off + kFrameDelimiterLen;
     scan_start = consumed;
   }
+  if (scan_start + kFrameDelimiterLen > read_buf_.size() &&
+      (read_buf_.empty() || read_buf_.back() != kFrameDelimiter[0])) {
+    scan_start = read_buf_.size();
+  }
+  // Preserve the point already searched on incomplete input. Retain a final
+  // CR so a following LF appended by the next recv() can complete its frame.
+  size_t next_scan_start = scan_start;
+  if (next_scan_start == read_buf_.size() && !read_buf_.empty() && read_buf_.back() == kFrameDelimiter[0]) {
+    --next_scan_start;
+  }
+
   if (consumed > 0) {
     // Compact the unframed tail so bytes transferred to pending strings do
     // not remain hidden in vector capacity outside the global budget. Charge
@@ -543,6 +575,9 @@ size_t ReactorConnection::ExtractFramesLocked() {
       // later successful compaction or destruction.
       read_buf_.erase(read_buf_.begin(), read_buf_.begin() + static_cast<std::ptrdiff_t>(consumed));
     }
+    read_scan_start_ = next_scan_start - consumed;
+  } else {
+    read_scan_start_ = next_scan_start;
   }
   if (enqueued > 0) {
     received_frame_.store(true, std::memory_order_release);
@@ -569,45 +604,62 @@ bool ReactorConnection::ScheduleDrainTask() {
 }
 
 void ReactorConnection::DrainTask() {
-  while (!closing_.load(std::memory_order_acquire)) {
-    std::string frame;
-    size_t frame_budget_bytes = 0;
-    bool resume_failed = false;
-    {
-      std::lock_guard<std::mutex> lock(frame_mutex_);
-      if (pending_frames_.empty()) {
+  try {
+    while (!closing_.load(std::memory_order_acquire)) {
+      std::string frame;
+      size_t frame_budget_bytes = 0;
+      bool resume_failed = false;
+      {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        if (pending_frames_.empty()) {
+          break;
+        }
+        frame_budget_bytes = pending_frames_.front().size();
+        pending_frame_bytes_ -= frame_budget_bytes;
+        pending_frame_overhead_bytes_ -= kQueueEntryOverheadBytes;
+        frame = std::move(pending_frames_.front());
+        pending_frames_.pop_front();
+        resume_failed = !MaybeResumeReadsLocked();
+      }
+      auto frame_budget_guard = mygram::utils::ScopeGuard([this, frame_budget_bytes]() {
+        if (memory_budget_ != nullptr) {
+          memory_budget_->Release(frame_budget_bytes + kQueueEntryOverheadBytes);
+        }
+      });
+      if (resume_failed) {
+        closing_.store(true, std::memory_order_release);
         break;
       }
-      frame_budget_bytes = pending_frames_.front().size();
-      pending_frame_bytes_ -= frame_budget_bytes;
-      pending_frame_overhead_bytes_ -= kQueueEntryOverheadBytes;
-      frame = std::move(pending_frames_.front());
-      pending_frames_.pop_front();
-      resume_failed = !MaybeResumeReadsLocked();
-    }
-    auto frame_budget_guard = mygram::utils::ScopeGuard([this, frame_budget_bytes]() {
-      if (memory_budget_ != nullptr) {
-        memory_budget_->Release(frame_budget_bytes + kQueueEntryOverheadBytes);
+
+      // Dispatch. `Dispatch` is synchronous and returns the full response.
+      // The per-request counter is incremented inside RequestDispatcher::Dispatch
+      // so all dispatch paths agree on a single canonical site; do not call
+      // stats_->IncrementRequests() here or the request count will double.
+      std::string response = dispatcher_->Dispatch(frame, conn_ctx_);
+
+      // Enqueue the response for non-blocking send. The fast path in
+      // EnqueueResponse attempts an inline drain before returning; only on
+      // EAGAIN does it hand off to the event loop via ArmWrite.
+      if (!EnqueueResponse(std::move(response))) {
+        closing_.store(true, std::memory_order_release);
+        break;
       }
-    });
-    if (resume_failed) {
-      closing_.store(true, std::memory_order_release);
-      break;
     }
-
-    // Dispatch. `Dispatch` is synchronous and returns the full response.
-    // The per-request counter is incremented inside RequestDispatcher::Dispatch
-    // so all dispatch paths agree on a single canonical site; do not call
-    // stats_->IncrementRequests() here or the request count will double.
-    std::string response = dispatcher_->Dispatch(frame, conn_ctx_);
-
-    // Enqueue the response for non-blocking send. The fast path in
-    // EnqueueResponse attempts an inline drain before returning; only on
-    // EAGAIN does it hand off to the event loop via ArmWrite.
-    if (!EnqueueResponse(std::move(response))) {
-      closing_.store(true, std::memory_order_release);
-      break;
-    }
+  } catch (const std::exception& error) {
+    mygram::utils::StructuredLog()
+        .Event("reactor_drain_exception")
+        .Field("fd", static_cast<int64_t>(fd_))
+        .Field("error", error.what())
+        .Error();
+    (void)TrySendErrorIfWriteQueueEmpty("internal server error");
+    closing_.store(true, std::memory_order_release);
+  } catch (...) {
+    mygram::utils::StructuredLog()
+        .Event("reactor_drain_unknown_exception")
+        .Field("fd", static_cast<int64_t>(fd_))
+        .Error();
+    (void)TrySendErrorIfWriteQueueEmpty("internal server error");
+    closing_.store(true, std::memory_order_release);
   }
 
   // Netty/Vert.x "clear-then-recheck": before releasing the drain slot,

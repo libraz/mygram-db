@@ -246,6 +246,25 @@ TEST_F(RateLimiterTest, Clear) {
   }
 }
 
+TEST_F(RateLimiterTest, RuntimeUpdateReconfiguresExistingClientBuckets) {
+  RateLimiter capacity_limiter(/*capacity=*/3, /*refill_rate=*/0);
+  ASSERT_TRUE(capacity_limiter.AllowRequest("192.0.2.10"));
+
+  // The existing client still has two tokens from the original capacity. A
+  // runtime reduction must clamp that balance to the new one-token capacity.
+  capacity_limiter.UpdateParameters(/*capacity=*/1, /*refill_rate=*/0);
+  EXPECT_TRUE(capacity_limiter.AllowRequest("192.0.2.10"));
+  EXPECT_FALSE(capacity_limiter.AllowRequest("192.0.2.10"));
+
+  RateLimiter refill_limiter(/*capacity=*/1, /*refill_rate=*/0);
+  ASSERT_TRUE(refill_limiter.AllowRequest("192.0.2.20"));
+  ASSERT_FALSE(refill_limiter.AllowRequest("192.0.2.20"));
+
+  refill_limiter.UpdateParameters(/*capacity=*/1, /*refill_rate=*/100);
+  WaitForRefill(25);
+  EXPECT_TRUE(refill_limiter.AllowRequest("192.0.2.20"));
+}
+
 /**
  * @brief Test concurrent access
  */

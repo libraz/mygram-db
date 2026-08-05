@@ -122,7 +122,8 @@ class ServerLifecycleManager {
       SyncOperationManager* sync_manager
 #endif
       ,
-      RateLimiter* rate_limiter = nullptr, std::atomic<bool>* shutdown_requested = nullptr);
+      RateLimiter* rate_limiter = nullptr, std::atomic<bool>* shutdown_requested = nullptr,
+      DumpProgress* dump_progress = nullptr);
 
   ~ServerLifecycleManager() = default;
 
@@ -164,7 +165,7 @@ class ServerLifecycleManager {
                          SyncOperationManager* sync_manager
 #endif
                          ,
-                         RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested);
+                         RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress);
 
   // Configuration (const references)
   const ServerConfig& config_;
@@ -187,6 +188,7 @@ class ServerLifecycleManager {
 #endif
   RateLimiter* rate_limiter_;
   std::atomic<bool>* shutdown_requested_;
+  DumpProgress* dump_progress_;
 
   // Initialization steps (each returns Expected<unique_ptr<T>, Error>)
   mygram::utils::Expected<std::unique_ptr<ThreadPool>, mygram::utils::Error> InitThreadPool() const;

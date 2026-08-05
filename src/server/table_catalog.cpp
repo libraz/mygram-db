@@ -100,14 +100,4 @@ std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*
   return result;
 }
 
-void TableCatalog::SetReadOnly(bool read_only) {
-  read_only_ = read_only;
-  mygram::utils::StructuredLog().Event("table_catalog_read_only_changed").Field("read_only", read_only).Info();
-}
-
-void TableCatalog::SetLoading(bool loading) {
-  loading_ = loading;
-  mygram::utils::StructuredLog().Event("table_catalog_loading_changed").Field("loading", loading).Info();
-}
-
 }  // namespace mygramdb::server

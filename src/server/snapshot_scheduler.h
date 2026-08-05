@@ -27,6 +27,8 @@ namespace mygramdb::server {
 // Forward declarations
 class TableCatalog;
 class SyncOperationManager;
+class ServerStats;
+struct DumpProgress;
 
 /**
  * @brief Background snapshot scheduler
@@ -69,7 +71,8 @@ class SnapshotScheduler {
                     std::atomic<bool>* dump_load_in_progress = nullptr, SyncOperationManager* sync_manager = nullptr,
                     std::function<bool()> sync_in_progress_checker = {},
                     std::atomic<bool>* optimization_in_progress = nullptr,
-                    std::atomic<bool>* shutdown_requested = nullptr);
+                    std::atomic<bool>* shutdown_requested = nullptr, DumpProgress* dump_progress = nullptr,
+                    ServerStats* stats = nullptr);
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -148,6 +151,8 @@ class SnapshotScheduler {
   SyncOperationManager* sync_manager_;
   std::function<bool()> sync_in_progress_checker_;
   std::atomic<bool>* shutdown_requested_;
+  DumpProgress* dump_progress_;
+  ServerStats* stats_;
 };
 
 }  // namespace mygramdb::server

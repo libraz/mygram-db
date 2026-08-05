@@ -45,6 +45,13 @@ void TokenBucket::Reset() {
   last_refill_ = std::chrono::steady_clock::now();
 }
 
+void TokenBucket::UpdateParameters(size_t capacity, size_t refill_rate) {
+  Refill();
+  capacity_ = capacity;
+  refill_rate_ = refill_rate;
+  tokens_ = std::min(tokens_, static_cast<double>(capacity_));
+}
+
 void TokenBucket::RewindLastRefillForTesting(std::chrono::microseconds delta) {
   last_refill_ -= delta;
 }
@@ -242,8 +249,10 @@ void RateLimiter::UpdateParameters(size_t capacity, size_t refill_rate) {
   std::lock_guard<std::mutex> lock(mutex_);
   capacity_ = capacity;
   refill_rate_ = refill_rate;
-  // Existing client buckets keep their old parameters
-  // New clients will use the updated parameters
+  for (auto& [client_ip, client_bucket] : client_buckets_) {
+    (void)client_ip;
+    client_bucket.bucket.UpdateParameters(capacity, refill_rate);
+  }
 }
 
 void RateLimiter::SetEnabled(bool enabled) {

@@ -396,7 +396,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   }
 
   // BM25 scoring: compute scores if SORT _score is requested
-  if (is_score_sort && !output.results.empty()) {
+  if (is_score_sort) {
     // Validate BM25 is enabled
     if (ctx_.full_config == nullptr || !ctx_.full_config->bm25.enable) {
       return ResponseFormatter::FormatError("SORT _score requires BM25 to be enabled in configuration");
@@ -424,7 +424,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
       output.term_infos =
           search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
                                              output.current_kanji_ngram_size, output.current_cross_boundary,
-                                             /*compute_term_doc_freq=*/true);
+                                             /*compute_term_doc_freq=*/true, output.current_doc_store);
     }
 
     // Reuse pre-computed term_infos (already normalized and ngram-generated)

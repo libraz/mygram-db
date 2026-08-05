@@ -136,7 +136,9 @@ TEST_F(CacheHandlerTest, StatsExposeAccountedMemoryAndRejectionReasons) {
   EXPECT_NE(response.find("accounted_memory_bytes:"), std::string::npos);
   EXPECT_NE(response.find("rejection_count:"), std::string::npos);
   EXPECT_NE(response.find("rejection_oversize:"), std::string::npos);
+  EXPECT_NE(response.find("rejection_memory_budget:"), std::string::npos);
   EXPECT_NE(response.find("rejection_duplicate:"), std::string::npos);
+  EXPECT_NE(response.find("stale_entry_removals:"), std::string::npos);
   EXPECT_NE(response.find("decompression_failures:"), std::string::npos);
   EXPECT_NE(response.find("stale_lru_entries:"), std::string::npos);
 }

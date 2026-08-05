@@ -59,6 +59,8 @@ constexpr size_t kHttpDefaultMaxBodyBytes = 16 * mygram::constants::kBytesPerMeg
 struct HttpServerConfig {
   std::string bind = "127.0.0.1";
   int port = config::defaults::kHttpPort;
+  int max_connections = config::ApiConfig::kDefaultMaxConnections;
+  std::vector<std::string> trusted_proxies;
   int read_timeout_sec = config::defaults::kHttpTimeoutSec;
   int write_timeout_sec = config::defaults::kHttpTimeoutSec;
   bool enable_cors = false;
@@ -84,6 +86,8 @@ struct HttpServerConfig {
     HttpServerConfig hc;
     hc.bind = cfg.api.http.bind;
     hc.port = cfg.api.http.port;
+    hc.max_connections = cfg.api.http.max_connections;
+    hc.trusted_proxies = cfg.api.http.trusted_proxies;
     hc.enable_cors = cfg.api.http.enable_cors;
     hc.cors_allow_origin = cfg.api.http.cors_allow_origin;
     hc.allow_cidrs = cfg.network.allow_cidrs;
@@ -106,6 +110,7 @@ struct HttpServerConfig {
 // Forward declaration for TableContext
 struct TableContext;
 class SyncOperationManager;
+class ThreadPool;
 
 /**
  * @brief HTTP server for JSON API
@@ -118,6 +123,8 @@ class SyncOperationManager;
  */
 class HttpServer {
  public:
+  using OptimizeCallback = std::function<std::string(const std::string& table)>;
+
   /**
    * @brief Construct HTTP server
    * @param config Server configuration
@@ -139,7 +146,8 @@ class HttpServer {
              ServerStats* tcp_stats = nullptr, std::shared_ptr<RateLimiter> rate_limiter = nullptr,
              std::atomic<bool>* replication_paused_for_dump = nullptr, SyncOperationManager* sync_manager = nullptr,
              std::function<bool(const std::string&)> table_syncing_checker = {},
-             std::function<bool()> any_syncing_checker = {}, std::function<bool()> initial_data_ready_checker = {});
+             std::function<bool()> any_syncing_checker = {}, std::function<bool()> initial_data_ready_checker = {},
+             ThreadPool* thread_pool = nullptr);
 
   ~HttpServer();
 
@@ -187,6 +195,14 @@ class HttpServer {
   void UpdateApiConfig(int default_limit, int max_query_length);
 
   /**
+   * @brief Wire the shared TCP maintenance handler used by POST /optimize.
+   *
+   * Must be set before Start(). The callback receives an empty table name to
+   * optimize every configured table.
+   */
+  void SetOptimizeCallback(OptimizeCallback callback) { optimize_callback_ = std::move(callback); }
+
+  /**
    * @brief Get total requests handled.
    *
    * Reads through the *effective* stats source: when a `tcp_stats` pointer was
@@ -213,6 +229,10 @@ class HttpServer {
    */
   const ServerStats& GetStats() const { return GetEffectiveStats(); }
 
+  /// Number of HTTP sockets admitted to the server, including requests queued
+  /// for cpp-httplib workers.
+  size_t GetActiveConnectionCount() const { return active_connections_.load(std::memory_order_acquire); }
+
  private:
   HttpServerConfig config_;
   // Uses std::unordered_map (not absl::flat_hash_map) to match the
@@ -237,6 +257,7 @@ class HttpServer {
 
   // Statistics
   ServerStats stats_;
+  std::atomic<size_t> active_connections_{0};
 
   std::unique_ptr<httplib::Server> server_;
   std::unique_ptr<std::thread> server_thread_;
@@ -258,10 +279,12 @@ class HttpServer {
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
   ServerStats* tcp_stats_;      // Pointer to TCP server's statistics (for /info and /metrics)
   std::atomic<bool>* replication_paused_for_dump_ = nullptr;
+  ThreadPool* thread_pool_ = nullptr;
   SyncOperationManager* sync_manager_ = nullptr;
   std::function<bool(const std::string&)> table_syncing_checker_;
   std::function<bool()> any_syncing_checker_;
   std::function<bool()> initial_data_ready_checker_;
+  OptimizeCallback optimize_callback_;
 
   /**
    * @brief Setup routes
@@ -285,6 +308,13 @@ class HttpServer {
     TableContext* table_ctx = nullptr;
     nlohmann::json body;
     query::Query query;
+  };
+
+  struct PreparedHttpRequest {
+    std::shared_lock<std::shared_mutex> generation_lock;
+    TableContext* table_ctx = nullptr;
+    std::string table_key;
+    nlohmann::json body;
   };
 
   /**
@@ -327,6 +357,16 @@ class HttpServer {
    * @brief Send HTTP 503 when the resolved table is currently synchronizing.
    */
   bool RejectIfTableSyncing(const std::string& table_key, httplib::Response& res) const;
+
+  /** Validate the common JSON/table preamble shared by search, count, and facet. */
+  std::optional<PreparedHttpRequest> PrepareHttpJsonRequest(const httplib::Request& req, httplib::Response& res);
+
+  /** Apply shared pagination, filter, ranked-option, and length validation. */
+  bool ApplyHttpQueryOptions(const nlohmann::json& body, httplib::Response& res, query::Query& parsed_query,
+                             bool apply_pagination, bool apply_ranked_options);
+
+  /** Apply the common control-character, emptiness, and configured-length checks. */
+  bool ValidateHttpQueryText(const std::string& query_text, httplib::Response& res, bool allow_empty) const;
 
   /**
    * @brief Run the shared HandleSearch/HandleCount preamble.
@@ -410,6 +450,11 @@ class HttpServer {
    * @brief Handle GET /replication/status
    */
   void HandleReplicationStatus(const httplib::Request& req, httplib::Response& res);
+
+  /**
+   * @brief Handle POST /optimize.
+   */
+  void HandleOptimize(const httplib::Request& req, httplib::Response& res);
 
   /**
    * @brief Handle GET /metrics (Prometheus format)

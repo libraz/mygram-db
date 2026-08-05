@@ -24,6 +24,15 @@ class ServerStatsTest : public ::testing::Test {
   std::unique_ptr<ServerStats> stats_;
 };
 
+TEST(ServerStatsUptimeTest, UsesMonotonicStartTimeRatherThanWallClock) {
+  constexpr auto kExpectedUptime = std::chrono::seconds(42);
+  ServerStats stats(std::chrono::steady_clock::now() - kExpectedUptime);
+
+  // Supplying a monotonic start time makes this independent of wall-clock
+  // adjustments such as an NTP step backwards.
+  EXPECT_EQ(stats.GetUptimeSeconds(), static_cast<uint64_t>(kExpectedUptime.count()));
+}
+
 /**
  * @brief Test that replication statistics counters are initialized to zero
  */
@@ -39,6 +48,45 @@ TEST_F(ServerStatsTest, ReplicationStatsInitializedToZero) {
   EXPECT_EQ(stats_->GetReplDeletesSkipped(), 0);
   EXPECT_EQ(stats_->GetReplDdlExecuted(), 0);
   EXPECT_EQ(stats_->GetReplEventsSkippedOtherTables(), 0);
+}
+
+TEST_F(ServerStatsTest, DumpStatisticsTrackSuccessAndFailures) {
+  EXPECT_EQ(stats_->GetDumpLastSuccessTimestampSeconds(), 0);
+  EXPECT_EQ(stats_->GetDumpFailuresManual(), 0);
+  EXPECT_EQ(stats_->GetDumpFailuresAuto(), 0);
+
+  stats_->RecordDumpSuccess();
+  stats_->IncrementDumpFailureManual();
+  stats_->IncrementDumpFailureAuto();
+
+  EXPECT_GT(stats_->GetDumpLastSuccessTimestampSeconds(), 0);
+  EXPECT_EQ(stats_->GetDumpFailuresManual(), 1);
+  EXPECT_EQ(stats_->GetDumpFailuresAuto(), 1);
+
+  const Statistics snapshot = stats_->GetStatistics();
+  EXPECT_GT(snapshot.dump_last_success_timestamp_seconds, 0);
+  EXPECT_EQ(snapshot.dump_failures_manual, 1);
+  EXPECT_EQ(snapshot.dump_failures_auto, 1);
+}
+
+TEST_F(ServerStatsTest, DeniedRequestStatisticsTrackEveryReasonAndSurface) {
+  stats_->IncrementRequestsDeniedRateLimitTcp();
+  stats_->IncrementRequestsDeniedRateLimitHttp();
+  stats_->IncrementRequestsDeniedAclTcp();
+  stats_->IncrementRequestsDeniedAclHttp();
+  stats_->IncrementRequestsDeniedConnectionLimitTcp();
+  stats_->IncrementRequestsDeniedPoolFullTcp();
+
+  EXPECT_EQ(stats_->GetRequestsDeniedRateLimitTcp(), 1);
+  EXPECT_EQ(stats_->GetRequestsDeniedRateLimitHttp(), 1);
+  EXPECT_EQ(stats_->GetRequestsDeniedAclTcp(), 1);
+  EXPECT_EQ(stats_->GetRequestsDeniedAclHttp(), 1);
+  EXPECT_EQ(stats_->GetRequestsDeniedConnectionLimitTcp(), 1);
+  EXPECT_EQ(stats_->GetRequestsDeniedPoolFullTcp(), 1);
+
+  stats_->Reset();
+  EXPECT_EQ(stats_->GetRequestsDeniedRateLimitTcp(), 0);
+  EXPECT_EQ(stats_->GetRequestsDeniedPoolFullTcp(), 0);
 }
 
 /**

@@ -523,6 +523,28 @@ TEST_F(RequestDispatcherTest, RateLimiterConsumesTokenPerTcpRequest) {
   const std::string limited = dispatcher.Dispatch("SEARCH posts hello", conn_ctx);
   EXPECT_TRUE(limited.find("ERROR") == 0) << limited;
   EXPECT_NE(limited.find("Rate limit exceeded"), std::string::npos) << limited;
+  EXPECT_EQ(stats_->GetTotalRequests(), 3U);
+  EXPECT_EQ(stats_->GetRequestsDeniedRateLimitTcp(), 1U);
+}
+
+TEST_F(RequestDispatcherTest, RateLimiterFailsClosedWhenPeerIpIsUnavailable) {
+  RateLimiter limiter(/*capacity=*/1, /*refill_rate=*/0, /*max_clients=*/16);
+  ctx_->rate_limiter = &limiter;
+
+  ServerConfig config;
+  config.default_limit = 100;
+  config.max_query_length = 10000;
+  RequestDispatcher dispatcher(*ctx_, config);
+  RecordingHandler recording_handler(*ctx_);
+  dispatcher.RegisterHandler(QueryType::SEARCH, &recording_handler);
+
+  ConnectionContext conn_ctx;  // Empty client_ip represents a failed peer lookup.
+  EXPECT_EQ(dispatcher.Dispatch("SEARCH posts hello", conn_ctx), "OK RECORDED");
+
+  const std::string limited = dispatcher.Dispatch("SEARCH posts hello", conn_ctx);
+  EXPECT_TRUE(limited.find("ERROR") == 0) << limited;
+  EXPECT_NE(limited.find("Rate limit exceeded"), std::string::npos) << limited;
+  EXPECT_EQ(limiter.GetStats().tracked_clients, 1U);
 }
 
 /**
@@ -621,6 +643,35 @@ TEST_F(RequestDispatcherTest, LongRequestLogIsTruncated) {
       << "Expected " << expected_full_length_field << "; output: " << output;
 }
 
+TEST_F(RequestDispatcherTest, RequestLogTruncationDoesNotSplitUtf8) {
+  auto previous_logger = spdlog::default_logger();
+  auto previous_level = spdlog::get_level();
+
+  std::ostringstream log_stream;
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_stream);
+  auto capture_logger = std::make_shared<spdlog::logger>("dispatch_utf8_capture", sink);
+  capture_logger->set_pattern("%v");
+  capture_logger->set_level(spdlog::level::debug);
+  capture_logger->flush_on(spdlog::level::debug);
+  spdlog::set_default_logger(capture_logger);
+  spdlog::set_level(spdlog::level::debug);
+
+  std::string request(mygram::utils::kMaxQueryLogLength - 1, 'a');
+  request += "\xE3\x81\x82";  // U+3042, which must not be split at 200 bytes.
+  request += "tail";
+  ConnectionContext conn_ctx;
+  (void)dispatcher_->Dispatch(request, conn_ctx);
+
+  capture_logger->flush();
+  const std::string output = log_stream.str();
+  spdlog::set_default_logger(previous_logger);
+  spdlog::set_level(previous_level);
+
+  const std::string expected_request = std::string(mygram::utils::kMaxQueryLogLength - 1, 'a') + "...";
+  EXPECT_NE(output.find("\"request\":\"" + expected_request + "\""), std::string::npos) << output;
+  EXPECT_EQ(output.find("\\u00e3"), std::string::npos) << output;
+}
+
 /**
  * @brief Regression test for CR-8: HasHandler reports registered handlers.
  *
@@ -661,4 +712,68 @@ TEST_F(RequestDispatcherTest, DispatchIncrementsTotalRequests) {
   // counter tracks attempted requests, not successful ones.
   dispatcher_->Dispatch("SEARCH posts hello LIMIT 1", conn_ctx);
   EXPECT_GT(stats_->GetTotalRequests(), after_one);
+}
+
+TEST_F(RequestDispatcherTest, RejectedSyntaxStillIncrementsTotalRequests) {
+  ConnectionContext conn_ctx;
+  const uint64_t before = stats_->GetTotalRequests();
+
+  const std::string response = dispatcher_->Dispatch("not a valid command", conn_ctx);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_EQ(stats_->GetTotalRequests(), before + 1);
+}
+
+TEST_F(RequestDispatcherTest, AdministrativeCommandsRequireSuccessfulAuth) {
+  ServerConfig config;
+  config.default_limit = 100;
+  config.max_query_length = 10000;
+  config.admin_token = "correct horse battery staple";
+  RequestDispatcher dispatcher(*ctx_, config);
+  RecordingHandler recording_handler(*ctx_);
+  dispatcher.RegisterHandler(QueryType::DUMP_STATUS, &recording_handler);
+
+  ConnectionContext conn_ctx;
+  const std::string unauthenticated = dispatcher.Dispatch("DUMP STATUS", conn_ctx);
+  EXPECT_TRUE(unauthenticated.find("ERROR") == 0) << unauthenticated;
+  EXPECT_NE(unauthenticated.find("requires AUTH"), std::string::npos) << unauthenticated;
+
+  const std::string failed_auth = dispatcher.Dispatch("AUTH wrong-token", conn_ctx);
+  EXPECT_TRUE(failed_auth.find("ERROR") == 0) << failed_auth;
+  EXPECT_FALSE(conn_ctx.admin_authenticated.load());
+
+  const std::string authenticated = dispatcher.Dispatch("AUTH 'correct horse battery staple'", conn_ctx);
+  EXPECT_TRUE(authenticated.find("OK AUTHENTICATED") == 0) << authenticated;
+  EXPECT_TRUE(conn_ctx.admin_authenticated.load());
+
+  EXPECT_EQ(dispatcher.Dispatch("DUMP STATUS", conn_ctx), "OK RECORDED");
+}
+
+TEST_F(RequestDispatcherTest, AuthenticationTokenIsRedactedFromRequestLogs) {
+  auto previous_logger = spdlog::default_logger();
+  auto previous_level = spdlog::get_level();
+
+  std::ostringstream log_stream;
+  auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(log_stream);
+  auto capture_logger = std::make_shared<spdlog::logger>("auth_redaction_capture", sink);
+  capture_logger->set_pattern("%v");
+  capture_logger->set_level(spdlog::level::debug);
+  capture_logger->flush_on(spdlog::level::debug);
+  spdlog::set_default_logger(capture_logger);
+  spdlog::set_level(spdlog::level::debug);
+
+  ServerConfig config;
+  config.admin_token = "top-secret-admin-token";
+  RequestDispatcher dispatcher(*ctx_, config);
+  ConnectionContext conn_ctx;
+  const std::string response = dispatcher.Dispatch("AUTH top-secret-admin-token", conn_ctx);
+
+  capture_logger->flush();
+  const std::string output = log_stream.str();
+  spdlog::set_default_logger(previous_logger);
+  spdlog::set_level(previous_level);
+
+  EXPECT_TRUE(response.find("OK AUTHENTICATED") == 0) << response;
+  EXPECT_EQ(output.find("top-secret-admin-token"), std::string::npos) << output;
+  EXPECT_NE(output.find("AUTH <redacted>"), std::string::npos) << output;
 }

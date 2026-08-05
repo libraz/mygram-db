@@ -92,7 +92,8 @@ enum class CacheMissReason : std::uint8_t {
 /// @return Vector of term information with n-grams and size estimates
 std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
                                               int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams,
-                                              bool compute_term_doc_freq = false);
+                                              bool compute_term_doc_freq = false,
+                                              const storage::DocumentStore* current_doc_store = nullptr);
 
 /// @brief Merge already-sorted per-term n-gram lists into one sorted unique list for cache invalidation.
 std::vector<std::string> MergeSortedTermNgramsForCache(const std::vector<SearchTermInfo>& term_infos);
@@ -328,6 +329,9 @@ struct FullPipelineParams {
   std::string primary_key_column = "id";  ///< Primary key column name for this table
   bool skip_cache_lookup = false;         ///< Skip cache lookup (caller already checked)
 };
+
+/// Build the canonical, table/index/semantic-aware query identity accepted by CacheManager.
+query::Query BuildCanonicalCacheQuery(const query::Query& query, const FullPipelineParams& params);
 
 /// @brief Which search path was selected during ExecuteFullPipeline
 enum class PipelinePath : std::uint8_t {

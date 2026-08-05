@@ -29,6 +29,7 @@
 #include <cstring>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -112,6 +113,15 @@ struct DispatcherHarness {
     cfg.default_limit = 100;
     cfg.max_query_length = 10000;
     dispatcher = std::make_unique<RequestDispatcher>(*hctx, cfg);
+  }
+};
+
+class ThrowingCommandHandler final : public CommandHandler {
+ public:
+  explicit ThrowingCommandHandler(HandlerContext& context) : CommandHandler(context) {}
+
+  std::string Handle(const mygramdb::query::Query& /*query*/, ConnectionContext& /*conn_ctx*/) override {
+    throw std::runtime_error("injected handler exception");
   }
 };
 
@@ -210,6 +220,28 @@ TEST_F(ReactorConnectionTest, OnReadableParsesSingleFrame) {
   EXPECT_TRUE(WaitReadable(peer_fd_, 2000)) << "Expected response after single frame";
 }
 
+TEST_F(ReactorConnectionTest, ThrowingHandlerReturnsErrorAndDoesNotWedgeDrainSlot) {
+  ThrowingCommandHandler throwing_handler(*harness_.hctx);
+  harness_.dispatcher->RegisterHandler(mygramdb::query::QueryType::INFO, &throwing_handler);
+
+  WriteAll(peer_fd_, "INFO\r\n");
+  ASSERT_TRUE(conn_->OnReadable());
+  ASSERT_TRUE(WaitReadable(peer_fd_, 2000));
+
+  char response[128] = {};
+  const ssize_t received = ::read(peer_fd_, response, sizeof(response));
+  ASSERT_GT(received, 0);
+  EXPECT_NE(std::string_view(response, static_cast<size_t>(received)).find("ERROR internal server error"),
+            std::string_view::npos);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!conn_->IsClosing() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_TRUE(conn_->IsClosing());
+  EXPECT_FALSE(conn_->OnReadable()) << "the connection must close instead of leaving drain_scheduled_ wedged";
+}
+
 // A stricter variant: check count immediately after OnReadable before the
 // drain task can run.  We use a zero-thread pool so no drain task executes.
 
@@ -232,6 +264,23 @@ TEST_F(ReactorConnectionNoDispatcherTest, OnReadableSkipsManyLoneCRsLinearly) {
   EXPECT_FALSE(conn_->OnReadable());
   EXPECT_TRUE(conn_->IsClosing());
   EXPECT_EQ(conn_->PendingFrameCountForTest(), 1u);
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, IncompleteReadBufferRetainsScanProgressAcrossAppends) {
+  size_t enqueued = 0;
+  ASSERT_TRUE(conn_->AppendReadBytesForTest("first", enqueued));
+  EXPECT_EQ(enqueued, 0U);
+  EXPECT_EQ(conn_->ReadScanStartForTest(), 5U);
+
+  ASSERT_TRUE(conn_->AppendReadBytesForTest(" second\r", enqueued));
+  EXPECT_EQ(enqueued, 0U);
+  EXPECT_EQ(conn_->ReadScanStartForTest(), conn_->ReadBufferSizeForTest() - 1U)
+      << "the trailing CR must be revisited when its LF arrives";
+
+  ASSERT_TRUE(conn_->AppendReadBytesForTest("\n", enqueued));
+  EXPECT_EQ(enqueued, 1U);
+  EXPECT_EQ(conn_->ReadBufferSizeForTest(), 0U);
+  EXPECT_EQ(conn_->ReadScanStartForTest(), 0U);
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +487,42 @@ TEST(ReactorConnectionBackpressureTest, ConfiguredHighWatermarkBackpressuresSing
   EXPECT_EQ(conn->ReadBufferSizeForTest(), 0U);
 }
 
+TEST(ReactorConnectionBackpressureTest, PausedDrainAndAppendSerializeReadBufferAccess) {
+  auto conn = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
+                                        ReactorConnection::kDefaultMaxWriteQueueBytes, nullptr,
+                                        /*max_pending_frames=*/8, /*max_pending_frame_bytes=*/4096);
+  std::string initial_frames;
+  for (size_t i = 0; i < 20; ++i) {
+    initial_frames += "x\r\n";
+  }
+  size_t initial_enqueued = 0;
+  ASSERT_TRUE(conn->AppendReadBytesForTest(initial_frames, initial_enqueued));
+  ASSERT_TRUE(conn->ReadPausedForTest());
+
+  std::atomic<bool> append_succeeded{true};
+  std::thread drainer([&]() {
+    for (int iteration = 0; iteration < 20; ++iteration) {
+      conn->DrainPendingFramesForTest(2);
+    }
+  });
+  std::thread appender([&]() {
+    for (int iteration = 0; iteration < 20; ++iteration) {
+      size_t enqueued = 0;
+      if (!conn->AppendReadBytesForTest("y\r\n", enqueued)) {
+        append_succeeded.store(false, std::memory_order_release);
+        return;
+      }
+    }
+  });
+  drainer.join();
+  appender.join();
+
+  EXPECT_TRUE(append_succeeded.load(std::memory_order_acquire));
+  EXPECT_LE(conn->ReadBufferSizeForTest(), ReactorConnection::kMaxReadBufferBytes);
+  EXPECT_LE(conn->PendingFrameCountForTest(), 6U);
+  EXPECT_FALSE(conn->IsClosing());
+}
+
 TEST_F(ReactorConnectionNoDispatcherTest, OversizedCompletedFrameIsRejectedBeforeQueueAllocation) {
   std::string payload(ReactorConnection::kMaxReadBufferBytes + 1, 'x');
   payload += "\r\n";
@@ -520,7 +605,8 @@ TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClos
   ASSERT_EQ(worker_started_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
   ASSERT_TRUE(pool_->Submit([] {})) << "fill the only queued task slot";
 
-  conn_ = ReactorConnection::Create(rc_fd_, nullptr, harness_.dispatcher.get(), pool_.get());
+  ServerStats stats;
+  conn_ = ReactorConnection::Create(rc_fd_, nullptr, harness_.dispatcher.get(), pool_.get(), &stats);
   WriteAll(peer_fd_, "INFO\r\n");
   EXPECT_FALSE(conn_->OnReadable());
   EXPECT_TRUE(conn_->IsClosing());
@@ -536,6 +622,7 @@ TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClos
     received.append(response, static_cast<size_t>(n));
   }
   EXPECT_EQ(received, expected);
+  EXPECT_EQ(stats.GetRequestsDeniedPoolFullTcp(), 1U);
 
   release_worker.set_value();
 }

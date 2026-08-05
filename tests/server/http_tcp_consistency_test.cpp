@@ -211,6 +211,7 @@ class HttpTcpConsistencyTest : public ::testing::Test {
     config_->api.http.bind = "127.0.0.1";
     config_->api.http.port = 0;
     config_->api.default_limit = 10;
+    config_->api.admin_token = "maintenance-secret";
     config_->tables.push_back(table_ctx_.config);
 
     // TCP server (let OS pick a port).
@@ -230,6 +231,8 @@ class HttpTcpConsistencyTest : public ::testing::Test {
     http_cfg.port = http_port;
     http_cfg.allow_cidrs = {"127.0.0.1/32"};
     http_server_ = std::make_unique<HttpServer>(http_cfg, table_contexts_, config_.get(), nullptr);
+    http_server_->SetOptimizeCallback(
+        [this](const std::string& table) { return tcp_server_->HandleOptimizeRequest(table); });
     ASSERT_TRUE(http_server_->Start());
     http_port_ = http_server_->GetPort();
 
@@ -255,6 +258,48 @@ class HttpTcpConsistencyTest : public ::testing::Test {
   uint16_t tcp_port_ = 0;
   uint16_t http_port_ = 0;
 };
+
+TEST_F(HttpTcpConsistencyTest, HttpOptimizeUsesSharedMaintenanceHandler) {
+  httplib::Client client("127.0.0.1", http_port_);
+  httplib::Headers headers{{"Authorization", "Bearer maintenance-secret"}};
+
+  auto all_tables = client.Post("/optimize", headers, "{}", "application/json");
+  ASSERT_TRUE(all_tables);
+  ASSERT_EQ(all_tables->status, 200) << all_tables->body;
+  auto all_body = json::parse(all_tables->body);
+  EXPECT_EQ(all_body["status"], "ok");
+  EXPECT_NE(all_body["result"].get<std::string>().find("OPTIMIZED tables=1"), std::string::npos);
+
+  auto one_table = client.Post("/optimize", headers, R"({"table":"app.articles"})", "application/json; charset=utf-8");
+  ASSERT_TRUE(one_table);
+  ASSERT_EQ(one_table->status, 200) << one_table->body;
+  auto one_body = json::parse(one_table->body);
+  EXPECT_NE(one_body["result"].get<std::string>().find("OPTIMIZED tables=1"), std::string::npos);
+
+  EXPECT_EQ(http_server_->GetStats().GetCommandCount(query::QueryType::OPTIMIZE), 2U);
+}
+
+TEST_F(HttpTcpConsistencyTest, HttpOptimizeValidatesPayloadAndAdminToken) {
+  httplib::Client client("127.0.0.1", http_port_);
+  httplib::Headers headers{{"Authorization", "Bearer maintenance-secret"}};
+
+  auto invalid_type = client.Post("/optimize", headers, R"({"table":42})", "application/json");
+  ASSERT_TRUE(invalid_type);
+  EXPECT_EQ(invalid_type->status, 400);
+
+  auto missing_table = client.Post("/optimize", headers, R"({"table":"missing"})", "application/json");
+  ASSERT_TRUE(missing_table);
+  EXPECT_EQ(missing_table->status, 404);
+
+  auto unauthorized = client.Post("/optimize", "{}", "application/json");
+  ASSERT_TRUE(unauthorized);
+  EXPECT_EQ(unauthorized->status, 401);
+  EXPECT_EQ(unauthorized->get_header_value("WWW-Authenticate"), "Bearer");
+
+  auto authorized = client.Post("/optimize", headers, "{}", "application/json");
+  ASSERT_TRUE(authorized);
+  EXPECT_EQ(authorized->status, 200) << authorized->body;
+}
 
 TEST_F(HttpTcpConsistencyTest, SearchHitCountMatches) {
   // "machine" should match doc_1 and doc_2 -- expect identical totals.

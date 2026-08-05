@@ -179,6 +179,7 @@ class TcpServer {
    * @brief Get cache manager pointer (for HttpServer)
    */
   cache::CacheManager* GetCacheManager() { return cache_manager_.get(); }
+  ThreadPool* GetThreadPool() { return thread_pool_.get(); }
 
   /**
    * @brief Get runtime variable manager pointer (for ServerOrchestrator to set callbacks)
@@ -189,6 +190,14 @@ class TcpServer {
    * @brief Get request dispatcher pointer (for runtime API config callback)
    */
   RequestDispatcher* GetDispatcher() { return dispatcher_.get(); }
+
+  /**
+   * @brief Execute OPTIMIZE through the same handler used by the TCP protocol.
+   *
+   * This is the transport-neutral entry point used by HttpServer. Request and
+   * command accounting remain the responsibility of the calling transport.
+   */
+  std::string HandleOptimizeRequest(const std::string& table);
 
   /**
    * @brief Get rate limiter pointer (for ServerOrchestrator to set callbacks)

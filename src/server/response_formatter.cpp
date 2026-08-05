@@ -13,6 +13,7 @@
 #include "server/protocol_constants.h"
 #include "server/statistics_service.h"
 #include "server/tcp_server.h"
+#include "server/thread_pool.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -264,10 +265,10 @@ std::string ResponseFormatter::FormatSearchResponse(const std::vector<index::Doc
   // Track missing doc_ids for debugging index/store inconsistencies
   size_t missing_count = 0;
   for (const auto& primary_key : primary_keys) {
-    if (!primary_key.empty()) {
+    if (primary_key.has_value()) {
       response += ' ';
       std::ostringstream escaped_primary_key;
-      WriteEscapedGetStringValue(escaped_primary_key, primary_key);
+      WriteEscapedGetStringValue(escaped_primary_key, *primary_key);
       response += escaped_primary_key.str();
     } else {
       // Doc ID exists in index but not in document store - data inconsistency
@@ -318,12 +319,12 @@ std::string ResponseFormatter::FormatSearchResponseWithHighlights(const std::vec
 
   // Each result on its own line: pk\tsnippet
   for (size_t i = 0; i < primary_keys.size(); ++i) {
-    if (primary_keys[i].empty()) {
+    if (!primary_keys[i].has_value()) {
       continue;  // Skip missing documents
     }
     response += "\r\n";
     std::ostringstream escaped_primary_key;
-    WriteEscapedGetStringValue(escaped_primary_key, primary_keys[i]);
+    WriteEscapedGetStringValue(escaped_primary_key, *primary_keys[i]);
     response += escaped_primary_key.str();
     response += '\t';
     if (i < snippets.size()) {
@@ -621,7 +622,9 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
     oss << "cache_ttl_expirations: " << cache_stats.ttl_expirations << "\r\n";
     oss << "cache_rejections: " << cache_stats.rejection_count << "\r\n";
     oss << "cache_rejection_oversize: " << cache_stats.rejection_oversize << "\r\n";
+    oss << "cache_rejection_memory_budget: " << cache_stats.rejection_memory_budget << "\r\n";
     oss << "cache_rejection_duplicate: " << cache_stats.rejection_duplicate << "\r\n";
+    oss << "cache_stale_entry_removals: " << cache_stats.stale_entry_removals << "\r\n";
     oss << "cache_decompression_failures: " << cache_stats.decompression_failures << "\r\n";
     oss << "cache_stale_lru_entries: " << cache_stats.stale_lru_entries << "\r\n";
     oss << "cache_forced_clears: " << cache_stats.forced_clears << "\r\n";
@@ -670,11 +673,16 @@ std::string ResponseFormatter::FormatReplicationStatusResponse(mysql::IBinlogRea
   oss << protocol::kOkReplicationHeader;
 
   if (binlog_reader != nullptr) {
-    bool is_running = binlog_reader->IsRunning();
-    oss << "status: " << (is_running ? "running" : "stopped") << "\r\n";
+    oss << "status: " << mysql::ToString(binlog_reader->GetReplicationState()) << "\r\n";
     oss << "current_gtid: " << binlog_reader->GetCurrentGTID() << "\r\n";
     oss << "processed_events: " << binlog_reader->GetProcessedEvents() << "\r\n";
     oss << "queue_size: " << binlog_reader->GetQueueSize() << "\r\n";
+    oss << "crc_errors: " << binlog_reader->GetCRCErrors() << "\r\n";
+    oss << "schema_incompatible: " << (binlog_reader->HasSchemaIncompatibleError() ? "true" : "false") << "\r\n";
+    oss << "last_error_code: " << static_cast<uint16_t>(binlog_reader->GetLastErrorCode()) << "\r\n";
+    oss << "last_error: " << binlog_reader->GetLastError() << "\r\n";
+    oss << "last_applied_unixtime: " << binlog_reader->GetLastAppliedUnixTime() << "\r\n";
+    oss << "seconds_since_last_applied: " << binlog_reader->GetSecondsSinceLastApplied() << "\r\n";
   } else {
     oss << "status: not_configured\r\n";
   }
@@ -698,7 +706,7 @@ std::string ResponseFormatter::FormatReplicationStartResponse() {
 std::string ResponseFormatter::FormatPrometheusMetrics(
     const AggregatedMetrics& metrics, const ServerStats& stats,
     const std::unordered_map<std::string, TableContext*>& table_contexts, mysql::IBinlogReader* binlog_reader,
-    cache::CacheManager* cache_manager) {
+    cache::CacheManager* cache_manager, const ThreadPool* thread_pool) {
   std::ostringstream oss;
 
   // Server info (version as label)
@@ -931,6 +939,49 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "mygramdb_clients_total " << cmd_stats.total_connections_received << "\n";
   oss << "\n";
 
+  oss << "# HELP mygramdb_dump_last_success_timestamp_seconds Unix timestamp of the most recent successful dump\n";
+  oss << "# TYPE mygramdb_dump_last_success_timestamp_seconds gauge\n";
+  oss << "mygramdb_dump_last_success_timestamp_seconds " << stats.GetDumpLastSuccessTimestampSeconds() << "\n";
+  oss << "\n";
+
+  oss << "# HELP mygramdb_dump_failures_total Total failed dump attempts by trigger\n";
+  oss << "# TYPE mygramdb_dump_failures_total counter\n";
+  oss << "mygramdb_dump_failures_total{trigger=\"manual\"} " << stats.GetDumpFailuresManual() << "\n";
+  oss << "mygramdb_dump_failures_total{trigger=\"auto\"} " << stats.GetDumpFailuresAuto() << "\n";
+  oss << "\n";
+
+  oss << "# HELP mygramdb_requests_denied_total Total denied requests by reason and protocol surface\n";
+  oss << "# TYPE mygramdb_requests_denied_total counter\n";
+  oss << "mygramdb_requests_denied_total{reason=\"rate_limit\",surface=\"tcp\"} "
+      << stats.GetRequestsDeniedRateLimitTcp() << "\n";
+  oss << "mygramdb_requests_denied_total{reason=\"rate_limit\",surface=\"http\"} "
+      << stats.GetRequestsDeniedRateLimitHttp() << "\n";
+  oss << "mygramdb_requests_denied_total{reason=\"acl\",surface=\"tcp\"} " << stats.GetRequestsDeniedAclTcp() << "\n";
+  oss << "mygramdb_requests_denied_total{reason=\"acl\",surface=\"http\"} " << stats.GetRequestsDeniedAclHttp() << "\n";
+  oss << "mygramdb_requests_denied_total{reason=\"connection_limit\",surface=\"tcp\"} "
+      << stats.GetRequestsDeniedConnectionLimitTcp() << "\n";
+  oss << "mygramdb_requests_denied_total{reason=\"pool_full\",surface=\"tcp\"} " << stats.GetRequestsDeniedPoolFullTcp()
+      << "\n";
+  oss << "\n";
+
+  // SERVER_BUSY is emitted when Submit() rejects a reactor drain task. These
+  // gauges expose the queue pressure that led to the denial counter above.
+  const size_t queue_depth = thread_pool != nullptr ? thread_pool->GetQueueSize() : 0;
+  const size_t queue_capacity = thread_pool != nullptr ? thread_pool->GetMaxQueueSize() : 0;
+  const size_t worker_count = thread_pool != nullptr ? thread_pool->GetThreadCount() : 0;
+  oss << "# HELP mygramdb_thread_pool_queue_depth Current queued request-drain tasks\n";
+  oss << "# TYPE mygramdb_thread_pool_queue_depth gauge\n";
+  oss << "mygramdb_thread_pool_queue_depth " << queue_depth << "\n";
+  oss << "\n";
+  oss << "# HELP mygramdb_thread_pool_queue_capacity Configured request-drain queue capacity (0 means unbounded)\n";
+  oss << "# TYPE mygramdb_thread_pool_queue_capacity gauge\n";
+  oss << "mygramdb_thread_pool_queue_capacity " << queue_capacity << "\n";
+  oss << "\n";
+  oss << "# HELP mygramdb_thread_pool_workers Request-drain worker threads\n";
+  oss << "# TYPE mygramdb_thread_pool_workers gauge\n";
+  oss << "mygramdb_thread_pool_workers " << worker_count << "\n";
+  oss << "\n";
+
   // Replication statistics
 #ifdef USE_MYSQL
   if (binlog_reader != nullptr) {
@@ -939,9 +990,41 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "mygramdb_replication_running " << (binlog_reader->IsRunning() ? 1 : 0) << "\n";
     oss << "\n";
 
+    oss << "# HELP mygramdb_replication_state Replication lifecycle state\n";
+    oss << "# TYPE mygramdb_replication_state gauge\n";
+    oss << "mygramdb_replication_state{state=\"" << mysql::ToString(binlog_reader->GetReplicationState()) << "\"} 1\n";
+    oss << "\n";
+
     oss << "# HELP mygramdb_replication_events_processed Total number of binlog events processed\n";
     oss << "# TYPE mygramdb_replication_events_processed counter\n";
     oss << "mygramdb_replication_events_processed " << binlog_reader->GetProcessedEvents() << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_replication_crc_errors_total Total binlog event CRC errors\n";
+    oss << "# TYPE mygramdb_replication_crc_errors_total counter\n";
+    oss << "mygramdb_replication_crc_errors_total " << binlog_reader->GetCRCErrors() << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_replication_schema_incompatible Whether replication stopped for an incompatible schema\n";
+    oss << "# TYPE mygramdb_replication_schema_incompatible gauge\n";
+    oss << "mygramdb_replication_schema_incompatible " << (binlog_reader->HasSchemaIncompatibleError() ? 1 : 0) << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_replication_last_error_code Last replication error code (0 means none)\n";
+    oss << "# TYPE mygramdb_replication_last_error_code gauge\n";
+    oss << "mygramdb_replication_last_error_code " << static_cast<uint16_t>(binlog_reader->GetLastErrorCode()) << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_replication_last_applied_unixtime Unix timestamp of the last successfully applied "
+           "position\n";
+    oss << "# TYPE mygramdb_replication_last_applied_unixtime gauge\n";
+    oss << "mygramdb_replication_last_applied_unixtime " << binlog_reader->GetLastAppliedUnixTime() << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_replication_seconds_since_last_applied Seconds since the last successfully applied "
+           "position (-1 means unknown)\n";
+    oss << "# TYPE mygramdb_replication_seconds_since_last_applied gauge\n";
+    oss << "mygramdb_replication_seconds_since_last_applied " << binlog_reader->GetSecondsSinceLastApplied() << "\n";
     oss << "\n";
   }
 
@@ -975,8 +1058,11 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   (void)binlog_reader;  // Suppress unused parameter warning
 #endif
 
-  // Cache statistics
-  if (cache_manager != nullptr && cache_manager->IsEnabled()) {
+  // Cache statistics. Keep the complete metric family present while caching
+  // is disabled: CacheManager retains cumulative diagnostics after Disable(),
+  // and omitting the series would turn an operational state change into
+  // Prometheus absence (breaking rate()/absent() alerts and dashboards).
+  if (cache_manager != nullptr) {
     auto cache_stats = cache_manager->GetStatistics();
 
     oss << "# HELP mygramdb_cache_hits_total Total number of cache hits\n";
@@ -1022,7 +1108,14 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "# HELP mygramdb_cache_insert_rejections_total Cache inserts rejected by reason\n";
     oss << "# TYPE mygramdb_cache_insert_rejections_total counter\n";
     oss << "mygramdb_cache_insert_rejections_total{reason=\"oversize\"} " << cache_stats.rejection_oversize << "\n";
+    oss << "mygramdb_cache_insert_rejections_total{reason=\"memory_budget\"} " << cache_stats.rejection_memory_budget
+        << "\n";
     oss << "mygramdb_cache_insert_rejections_total{reason=\"duplicate\"} " << cache_stats.rejection_duplicate << "\n";
+    oss << "\n";
+
+    oss << "# HELP mygramdb_cache_stale_entry_removals_total Entries removed after stale-payload detection\n";
+    oss << "# TYPE mygramdb_cache_stale_entry_removals_total counter\n";
+    oss << "mygramdb_cache_stale_entry_removals_total " << cache_stats.stale_entry_removals << "\n";
     oss << "\n";
 
     oss << "# HELP mygramdb_cache_decompression_failures_total Cached payload decompression failures\n";

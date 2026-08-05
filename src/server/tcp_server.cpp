@@ -98,6 +98,18 @@ TcpServer::~TcpServer() {
 #endif
 }
 
+std::string TcpServer::HandleOptimizeRequest(const std::string& table) {
+  if (debug_handler_ == nullptr) {
+    return ResponseFormatter::FormatError("OPTIMIZE handler is not initialized");
+  }
+
+  query::Query optimize_query;
+  optimize_query.type = query::QueryType::OPTIMIZE;
+  optimize_query.table = table;
+  ConnectionContext connection_context;
+  return debug_handler_->Handle(optimize_query, connection_context);
+}
+
 mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -147,12 +159,12 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   auto lifecycle_manager_result = ServerLifecycleManager::Create(
       config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
       optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
-      binlog_reader_, sync_manager_.get(), rate_limiter_.get(), &shutdown_in_progress_);
+      binlog_reader_, sync_manager_.get(), rate_limiter_.get(), &shutdown_in_progress_, &dump_progress_);
 #else
   auto lifecycle_manager_result = ServerLifecycleManager::Create(
       config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
       optimization_in_progress_, replication_paused_for_dump_, mysql_reconnecting_, replication_pause_counter_,
-      binlog_reader_, rate_limiter_.get(), &shutdown_in_progress_);
+      binlog_reader_, rate_limiter_.get(), &shutdown_in_progress_, &dump_progress_);
 #endif
   if (!lifecycle_manager_result) {
     return MakeUnexpected(lifecycle_manager_result.error());

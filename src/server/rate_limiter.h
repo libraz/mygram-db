@@ -59,6 +59,12 @@ class TokenBucket {
   void Reset();
 
   /**
+   * @brief Apply new capacity/refill settings while preserving the current
+   *        token balance, capped at the new capacity.
+   */
+  void UpdateParameters(size_t capacity, size_t refill_rate);
+
+  /**
    * @brief Move the internal refill timestamp into the past for deterministic tests.
    */
   void RewindLastRefillForTesting(std::chrono::microseconds delta);
@@ -138,8 +144,8 @@ class RateLimiter {
    * @param capacity New maximum tokens per client (burst size)
    * @param refill_rate New tokens added per second per client
    *
-   * Note: This updates the parameters used for creating new TokenBuckets.
-   * Existing client buckets are not affected.
+   * Existing client buckets are updated atomically as well, so a runtime SET
+   * takes effect for active clients instead of waiting for inactivity cleanup.
    */
   void UpdateParameters(size_t capacity, size_t refill_rate);
 

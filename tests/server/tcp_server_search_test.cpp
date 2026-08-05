@@ -884,3 +884,14 @@ TEST_F(TcpServerTest, SearchSortByMissingColumnReturnsErrFormat) {
 
   close(sock);
 }
+
+TEST_F(TcpServerTest, SearchScoreSortRejectsDisabledBm25EvenWithoutResults) {
+  ASSERT_TRUE(server_->Start());
+  const int sock = CreateClientSocket(server_->GetPort());
+  ASSERT_GE(sock, 0);
+
+  const std::string response = SendRequest(sock, "SEARCH test no_matching_term SORT _score DESC");
+  EXPECT_NE(response.find("SORT _score requires BM25 to be enabled"), std::string::npos) << response;
+
+  close(sock);
+}

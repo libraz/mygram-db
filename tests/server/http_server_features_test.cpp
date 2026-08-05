@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -20,6 +21,7 @@
 #include "mysql/binlog_reader_interface.h"
 #include "query/query_parser.h"
 #include "server/http_server.h"
+#include "server/server_stats.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
 #include "version.h"
@@ -62,6 +64,35 @@ std::string LoopbackUrl(uint16_t port) {
   return "http://127.0.0.1:" + std::to_string(port);
 }
 
+int OpenIdleLoopbackConnection(uint16_t port) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return -1;
+  }
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = htons(port);
+  if (::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+    ::close(fd);
+    return -1;
+  }
+  return fd;
+}
+
+template <typename Predicate>
+bool WaitUntil(Predicate&& predicate, std::chrono::milliseconds timeout = std::chrono::seconds(1)) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return predicate();
+}
+
 class MockBinlogReader final : public mysql::IBinlogReader {
  public:
   mygram::utils::Expected<void, mygram::utils::Error> Start() override {
@@ -76,12 +107,22 @@ class MockBinlogReader final : public mysql::IBinlogReader {
   std::string GetLastError() const override { return last_error; }
   uint64_t GetProcessedEvents() const override { return processed_events; }
   size_t GetQueueSize() const override { return queue_size; }
+  uint64_t GetCRCErrors() const override { return crc_errors; }
+  bool HasSchemaIncompatibleError() const override { return schema_incompatible; }
+  mygram::utils::ErrorCode GetLastErrorCode() const override { return last_error_code; }
+  int64_t GetLastAppliedUnixTime() const override { return last_applied_unixtime; }
+  int64_t GetSecondsSinceLastApplied() const override { return seconds_since_last_applied; }
 
   bool running = false;
   std::string current_gtid = "uuid:1-42";
   std::string last_error;
   uint64_t processed_events = 123;
   size_t queue_size = 7;
+  uint64_t crc_errors = 0;
+  bool schema_incompatible = false;
+  mygram::utils::ErrorCode last_error_code = mygram::utils::ErrorCode::kSuccess;
+  int64_t last_applied_unixtime = 0;
+  int64_t seconds_since_last_applied = -1;
 };
 
 }  // namespace
@@ -222,9 +263,28 @@ TEST_F(HttpServerTest, CORSPreflight) {
   EXPECT_EQ(res->status, 204);
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Origin"));
   EXPECT_TRUE(res->has_header("Access-Control-Allow-Methods"));
+  EXPECT_EQ(res->get_header_value("Access-Control-Allow-Headers"), "Content-Type, Authorization");
 
   cors_server->Stop();
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+}
+
+TEST_F(HttpServerTest, CorsWithoutExplicitOriginDoesNotEmitWildcardHeader) {
+  HttpServerConfig cors_config;
+  cors_config.bind = "127.0.0.1";
+  cors_config.port = port_;
+  cors_config.allow_cidrs = {"127.0.0.1/32"};
+  cors_config.enable_cors = true;
+
+  http_server_ = std::make_unique<HttpServer>(cors_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  auto response = client.Get("/health");
+
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 200);
+  EXPECT_FALSE(response->has_header("Access-Control-Allow-Origin"));
 }
 
 TEST_F(HttpServerTest, PrometheusMetricsEndpoint) {
@@ -292,6 +352,12 @@ TEST_F(HttpServerTest, ReplicationStatusIncludesTcpParityFields) {
   reader.current_gtid = "uuid:1-100";
   reader.processed_events = 321;
   reader.queue_size = 11;
+  reader.crc_errors = 4;
+  reader.schema_incompatible = true;
+  reader.last_error_code = mygram::utils::ErrorCode::kMySQLInvalidSchema;
+  reader.last_error = "schema changed";
+  reader.last_applied_unixtime = 1722840000;
+  reader.seconds_since_last_applied = 42;
 
   uint16_t replication_port = FindAvailableLoopbackPort();
   ASSERT_GT(replication_port, 0);
@@ -311,10 +377,16 @@ TEST_F(HttpServerTest, ReplicationStatusIncludesTcpParityFields) {
 
   auto body = json::parse(res->body);
   EXPECT_EQ(body["enabled"], false);
-  EXPECT_EQ(body["status"], "stopped");
+  EXPECT_EQ(body["status"], "failed");
   EXPECT_EQ(body["current_gtid"], "uuid:1-100");
   EXPECT_EQ(body["processed_events"], 321);
   EXPECT_EQ(body["queue_size"], 11);
+  EXPECT_EQ(body["crc_errors"], 4);
+  EXPECT_EQ(body["schema_incompatible"], true);
+  EXPECT_EQ(body["last_error_code"], 2012);
+  EXPECT_EQ(body["last_error"], "schema changed");
+  EXPECT_EQ(body["last_applied_unixtime"], 1722840000);
+  EXPECT_EQ(body["seconds_since_last_applied"], 42);
 
   server->Stop();
 }
@@ -323,6 +395,7 @@ TEST_F(HttpServerTest, ReplicationStatusIncludesTcpParityFields) {
 TEST_F(HttpServerTest, SharedRateLimiterControlsHttpRequests) {
   auto shared_limiter = std::make_shared<RateLimiter>(/*capacity=*/1, /*refill_rate=*/0, /*max_clients=*/100,
                                                       /*enabled=*/true);
+  ServerStats stats;
 
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -330,7 +403,7 @@ TEST_F(HttpServerTest, SharedRateLimiterControlsHttpRequests) {
   http_config.allow_cidrs = {"127.0.0.1/32"};
 
   http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, nullptr, nullptr,
-                                              nullptr, shared_limiter);
+                                              &stats, shared_limiter);
   ASSERT_TRUE(http_server_->Start());
 
   httplib::Client client(LoopbackUrl(port_));
@@ -341,6 +414,117 @@ TEST_F(HttpServerTest, SharedRateLimiterControlsHttpRequests) {
   auto second = client.Get("/info");
   ASSERT_TRUE(second);
   EXPECT_EQ(second->status, 429);
+  EXPECT_EQ(stats.GetRequestsDeniedRateLimitHttp(), 1U);
+}
+
+TEST_F(HttpServerTest, AclDeniedRequestDoesNotConsumeSharedRateLimitBucket) {
+  auto shared_limiter = std::make_shared<RateLimiter>(/*capacity=*/1, /*refill_rate=*/0, /*max_clients=*/100,
+                                                      /*enabled=*/true);
+  ServerStats stats;
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"10.0.0.0/8"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, nullptr, nullptr,
+                                              &stats, shared_limiter);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  auto response = client.Get("/info");
+
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 403);
+  EXPECT_EQ(stats.GetRequestsDeniedAclHttp(), 1U);
+  EXPECT_EQ(shared_limiter->GetStats().total_requests, 0U);
+  EXPECT_EQ(shared_limiter->GetTrackedClientCount(), 0U);
+}
+
+TEST_F(HttpServerTest, IdleConnectionsAreCappedBeforeTheyCanExhaustDescriptors) {
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+  http_config.max_connections = 1;
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(http_server_->Start());
+
+  const int held_connection = OpenIdleLoopbackConnection(port_);
+  ASSERT_GE(held_connection, 0);
+  ASSERT_TRUE(WaitUntil([this] { return http_server_->GetActiveConnectionCount() == 1; }));
+
+  // The second TCP handshake may complete, but the HTTP accept loop must close
+  // that socket immediately instead of retaining it in an unbounded worker
+  // queue. This is deliberately an idle connection: no request handler runs.
+  const int rejected_connection = OpenIdleLoopbackConnection(port_);
+  ASSERT_GE(rejected_connection, 0);
+  const bool rejected = WaitUntil([rejected_connection] {
+    char byte = '\0';
+    const ssize_t received = ::recv(rejected_connection, &byte, sizeof(byte), MSG_DONTWAIT);
+    return received == 0 || (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
+  });
+  EXPECT_TRUE(rejected);
+  ::close(rejected_connection);
+
+  ::close(held_connection);
+  ASSERT_TRUE(WaitUntil([this] { return http_server_->GetActiveConnectionCount() == 0; }));
+
+  httplib::Client client(LoopbackUrl(port_));
+  const auto health = client.Get("/health");
+  ASSERT_TRUE(health);
+  EXPECT_EQ(health->status, 200);
+}
+
+TEST_F(HttpServerTest, TrustedProxyUsesForwardedClientForAclAndRateLimiting) {
+  auto shared_limiter = std::make_shared<RateLimiter>(/*capacity=*/1, /*refill_rate=*/0, /*max_clients=*/100,
+                                                      /*enabled=*/true);
+  ServerStats stats;
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"198.51.100.0/24"};
+  http_config.trusted_proxies = {"127.0.0.1"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, nullptr, nullptr,
+                                              &stats, shared_limiter);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  const httplib::Headers first_client = {{"X-Forwarded-For", "198.51.100.10"}};
+  const httplib::Headers second_client = {{"X-Forwarded-For", "198.51.100.11"}};
+
+  const auto first = client.Get("/info", first_client);
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->status, 200);
+
+  // A distinct forwarded address has its own rate bucket. If the server used
+  // the loopback proxy address, this request would be 429 instead.
+  const auto second = client.Get("/info", second_client);
+  ASSERT_TRUE(second);
+  EXPECT_EQ(second->status, 200);
+
+  const auto repeated_first = client.Get("/info", first_client);
+  ASSERT_TRUE(repeated_first);
+  EXPECT_EQ(repeated_first->status, 429);
+}
+
+TEST_F(HttpServerTest, UntrustedPeerCannotSpoofForwardedClientForAcl) {
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"198.51.100.0/24"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  const httplib::Headers spoofed_header = {{"X-Forwarded-For", "198.51.100.10"}};
+  const auto response = client.Get("/info", spoofed_header);
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 403);
 }
 
 TEST_F(HttpServerTest, SyncingTableRejectsHttpReadsAndReadiness) {

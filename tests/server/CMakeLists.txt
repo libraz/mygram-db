@@ -773,6 +773,7 @@ mygramdb_add_split_gtests(snapshot_scheduler_test
     SnapshotSchedulerTest.AutoSnapshotRejectsEmptyGtidAfterManualStopRace
     SnapshotSchedulerTest.AutoSnapshotDoesNotRestartWhenAnotherOperationHoldsPause
     SnapshotSchedulerTest.AutoSnapshotPauseResumeStillWorksOnCleanCounter
+    SnapshotSchedulerTest.EmptyGtidSnapshotResumesReplication
 )
 
 # SearchHandler tests

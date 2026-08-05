@@ -476,6 +476,13 @@ void IoReactor::ReapIdleConnections() {
         }
       }
       if (config_.idle_timeout_sec > 0) {
+        // A dispatched command may legitimately run longer than the socket
+        // idle timeout (for example, DUMP LOAD or OPTIMIZE). The worker owns
+        // drain_scheduled_ from frame admission until its response is queued,
+        // so it is the authoritative indication that the connection is busy.
+        if (conn->HasInFlightRequest()) {
+          continue;
+        }
         const auto idle_for = now - conn->LastActive();
         if (idle_for >= idle_deadline) {
           to_close.push_back({fd, conn, std::chrono::duration_cast<std::chrono::seconds>(idle_for), "idle_timeout",

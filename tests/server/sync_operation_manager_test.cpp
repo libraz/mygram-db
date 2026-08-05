@@ -82,7 +82,7 @@ TEST_F(SyncOperationManagerApiTest, IsAnySyncingReturnsFalseWhenIdle) {
   EXPECT_FALSE(manager_->IsAnySyncing());
 }
 
-TEST_F(SyncOperationManagerApiTest, CurrentConfigSnapshotUsesRuntimeMysqlValuesInsteadOfStartupConfig) {
+TEST_F(SyncOperationManagerApiTest, CurrentConfigSnapshotUsesRuntimeConfigurationWithoutMutableMysqlEndpoints) {
   auto variable_manager_result = config::RuntimeVariableManager::Create(*config_);
   ASSERT_TRUE(variable_manager_result.has_value());
   auto variable_manager = std::move(*variable_manager_result);
@@ -90,20 +90,23 @@ TEST_F(SyncOperationManagerApiTest, CurrentConfigSnapshotUsesRuntimeMysqlValuesI
   manager_->SetCurrentConfigProvider(
       [variable_manager_ptr = variable_manager.get()] { return variable_manager_ptr->GetCurrentConfig(); });
 
-  ASSERT_TRUE(variable_manager->SetVariable("mysql.host", "new-primary.internal").has_value());
-  ASSERT_TRUE(variable_manager->SetVariable("mysql.port", "4407").has_value());
+  ASSERT_TRUE(variable_manager->SetVariable("logging.level", "debug").has_value());
+  EXPECT_FALSE(variable_manager->SetVariable("mysql.host", "new-primary.internal").has_value());
+  EXPECT_FALSE(variable_manager->SetVariable("mysql.port", "4407").has_value());
 
   // The startup object deliberately remains stale. A SYNC snapshot must come
-  // from RuntimeVariableManager, not silently fall back to this object.
+  // from RuntimeVariableManager, while MySQL endpoints remain startup-only.
   EXPECT_EQ(config_->mysql.host, "localhost");
   EXPECT_EQ(config_->mysql.port, 3306);
+  EXPECT_EQ(config_->logging.level, "info");
 
   const auto current_config = manager_->GetCurrentConfigSnapshotForTest();
   ASSERT_TRUE(current_config.has_value());
-  EXPECT_EQ(current_config->mysql.host, "new-primary.internal");
-  EXPECT_EQ(current_config->mysql.port, 4407);
+  EXPECT_EQ(current_config->mysql.host, "localhost");
+  EXPECT_EQ(current_config->mysql.port, 3306);
   EXPECT_EQ(current_config->mysql.user, "test");
   EXPECT_EQ(current_config->mysql.database, "testdb");
+  EXPECT_EQ(current_config->logging.level, "debug");
 }
 
 TEST_F(SyncOperationManagerApiTest, ScopedLoaderRegistrationUnregistersDuringExceptionUnwind) {

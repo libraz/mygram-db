@@ -372,7 +372,9 @@ TEST_F(HttpServerTest, InfoEndpointExposesAccountedCacheMemoryAndRejectionReason
   EXPECT_TRUE(body["cache"].contains("accounted_memory_human"));
   EXPECT_TRUE(body["cache"].contains("rejection_count"));
   EXPECT_TRUE(body["cache"].contains("rejection_oversize"));
+  EXPECT_TRUE(body["cache"].contains("rejection_memory_budget"));
   EXPECT_TRUE(body["cache"].contains("rejection_duplicate"));
+  EXPECT_TRUE(body["cache"].contains("stale_entry_removals"));
   EXPECT_TRUE(body["cache"].contains("decompression_failures"));
   EXPECT_TRUE(body["cache"].contains("stale_lru_entries"));
 }
@@ -415,19 +417,18 @@ TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 403);
 
-  // Legacy and detailed health endpoints expose more than the minimal probes
-  // and therefore remain behind the ACL.
+  // Health endpoints follow the same ACL as the rest of the HTTP surface.
   auto health_res = client.Get("/health");
   ASSERT_TRUE(health_res);
   EXPECT_EQ(health_res->status, 403);
 
   auto live_res = client.Get("/health/live");
   ASSERT_TRUE(live_res);
-  EXPECT_EQ(live_res->status, 200);
+  EXPECT_EQ(live_res->status, 403);
 
   auto ready_res = client.Get("/health/ready");
   ASSERT_TRUE(ready_res);
-  EXPECT_EQ(ready_res->status, 200);
+  EXPECT_EQ(ready_res->status, 403);
 
   auto detail_res = client.Get("/health/detail");
   ASSERT_TRUE(detail_res);
@@ -436,7 +437,7 @@ TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
   restricted_server->Stop();
 }
 
-TEST_F(HttpServerTest, EmptyAndInvalidAclFailClosedForNonProbeEndpoints) {
+TEST_F(HttpServerTest, EmptyAndInvalidAclFailClosedForAllEndpoints) {
   for (const auto& cidrs : std::vector<std::vector<std::string>>{{}, {"not-a-cidr", "999.1.2.3/24"}}) {
     uint16_t port = FindAvailableLoopbackPort();
     ASSERT_GT(port, 0);
@@ -450,7 +451,7 @@ TEST_F(HttpServerTest, EmptyAndInvalidAclFailClosedForNonProbeEndpoints) {
     ASSERT_TRUE(restricted_server->Start());
 
     httplib::Client client("http://127.0.0.1:" + std::to_string(port));
-    for (const auto* path : {"/info", "/metrics", "/health", "/health/detail"}) {
+    for (const auto* path : {"/info", "/metrics", "/health", "/health/live", "/health/ready", "/health/detail"}) {
       auto response = client.Get(path);
       ASSERT_TRUE(response) << path;
       EXPECT_EQ(response->status, 403) << path;
@@ -461,10 +462,6 @@ TEST_F(HttpServerTest, EmptyAndInvalidAclFailClosedForNonProbeEndpoints) {
     auto search = client.Post("/tables/test/search", search_body.dump(), "application/json");
     ASSERT_TRUE(search);
     EXPECT_EQ(search->status, 403);
-
-    auto live = client.Get("/health/live");
-    ASSERT_TRUE(live);
-    EXPECT_EQ(live->status, 200);
 
     restricted_server->Stop();
   }

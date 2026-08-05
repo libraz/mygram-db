@@ -26,6 +26,7 @@
 #include <thread>
 
 #include "server/log_field_names.h"
+#include "server/server_stats.h"
 #include "server/server_types.h"
 #include "server/socket_utils.h"
 #include "utils/error.h"
@@ -48,7 +49,8 @@ constexpr int kFdExhaustionRetrySleepMs = 100;
 using mygram::utils::ToSockaddrStorage;
 using mygram::utils::ToSockaddrUn;
 
-ConnectionAcceptor::ConnectionAcceptor(ServerConfig config) : config_(std::move(config)) {}
+ConnectionAcceptor::ConnectionAcceptor(ServerConfig config, ServerStats* stats)
+    : config_(std::move(config)), stats_(stats) {}
 
 ConnectionAcceptor::~ConnectionAcceptor() {
   Stop();
@@ -506,6 +508,9 @@ void ConnectionAcceptor::AcceptLoop() {
     {
       std::lock_guard<std::mutex> lock(fds_mutex_);
       if (static_cast<int>(active_fds_.size()) >= config_.max_connections) {
+        if (stats_ != nullptr) {
+          stats_->IncrementRequestsDeniedConnectionLimitTcp();
+        }
         mygram::utils::StructuredLog()
             .Event("connection_limit_reached")
             .Field("active_connections", static_cast<uint64_t>(active_fds_.size()))
@@ -524,6 +529,9 @@ void ConnectionAcceptor::AcceptLoop() {
       }
 
       if (!mygram::utils::IsIPAllowed(client_ip, config_.parsed_allow_cidrs)) {
+        if (stats_ != nullptr) {
+          stats_->IncrementRequestsDeniedAclTcp();
+        }
         const auto decision = acl_denial_log_limiter_.Record(client_ip);
         if (decision.should_log) {
           mygram::utils::StructuredLog()

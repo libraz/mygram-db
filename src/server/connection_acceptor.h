@@ -21,6 +21,8 @@
 
 namespace mygramdb::server {
 
+class ServerStats;
+
 /**
  * @brief Network connection acceptor
  *
@@ -60,7 +62,7 @@ class ConnectionAcceptor {
    * @brief Construct a ConnectionAcceptor
    * @param config Server configuration
    */
-  explicit ConnectionAcceptor(ServerConfig config);
+  explicit ConnectionAcceptor(ServerConfig config, ServerStats* stats = nullptr);
 
   // Disable copy and move
   ConnectionAcceptor(const ConnectionAcceptor&) = delete;
@@ -173,6 +175,7 @@ class ConnectionAcceptor {
   void SetClientSocketOptions(int client_fd) const;
 
   ServerConfig config_;
+  ServerStats* stats_;
   ReactorHandler reactor_handler_;
 
   // The listening socket fd. Atomic because Stop() (called from any thread)

@@ -33,6 +33,7 @@ namespace mygramdb::server {
 
 // Forward declaration
 struct AggregatedMetrics;
+class ThreadPool;
 
 /**
  * @brief Utility class for formatting server responses
@@ -152,12 +153,14 @@ class ResponseFormatter {
    * @param stats Server statistics (const reference, no mutation)
    * @param table_contexts Map of table contexts (for per-table metrics)
    * @param binlog_reader Optional binlog reader for replication info
+   * @param thread_pool Optional request-execution pool for saturation gauges
    * @return Prometheus exposition format response
    */
   static std::string FormatPrometheusMetrics(const AggregatedMetrics& metrics, const ServerStats& stats,
                                              const std::unordered_map<std::string, TableContext*>& table_contexts,
                                              mysql::IBinlogReader* binlog_reader = nullptr,
-                                             cache::CacheManager* cache_manager = nullptr);
+                                             cache::CacheManager* cache_manager = nullptr,
+                                             const ThreadPool* thread_pool = nullptr);
 
   /**
    * @brief Format error response

@@ -250,7 +250,8 @@ TEST_F(DumpHandlerTest, DumpLoadWaitsForExistingGenerationReadersBeforeReplacing
   query::Query save_query;
   save_query.type = query::QueryType::DUMP_SAVE;
   save_query.filepath = test_filepath_;
-  ASSERT_TRUE(handler_->Handle(save_query, conn_ctx_).find("OK SAVED") == 0);
+  const std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << save_response;
 
   auto live_id = table_ctx_->doc_store->AddDocument("live", {{"content", "must remain visible"}});
   ASSERT_TRUE(live_id.has_value());
@@ -289,6 +290,52 @@ TEST_F(DumpHandlerTest, DumpLoadWaitsForExistingGenerationReadersBeforeReplacing
   EXPECT_TRUE(response.find("OK LOADED") == 0) << "Response: " << response;
   EXPECT_EQ(table_ctx_->doc_store->Size(), 3U);
   EXPECT_FALSE(table_ctx_->doc_store->GetDocId("live").has_value());
+}
+
+TEST_F(DumpHandlerTest, DumpLoadStatusReplacesPreviousCompletedSaveWhileWaitingForReaders) {
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  ASSERT_TRUE(handler_->Handle(save_query, conn_ctx_).find("OK SAVED") == 0);
+
+  DumpProgress progress;
+  handler_ctx_->dump_progress = &progress;
+  progress.Complete("previous-successful-save.dmp");
+
+  std::shared_lock<std::shared_mutex> in_flight_request(*table_ctx_->generation_mutex);
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+
+  std::string load_response;
+  std::thread load_thread([&]() { load_response = handler_->Handle(load_query, conn_ctx_); });
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (progress.GetSnapshot().status != DumpStatus::LOADING && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  const auto loading_snapshot = progress.GetSnapshot();
+  if (loading_snapshot.status != DumpStatus::LOADING) {
+    in_flight_request.unlock();
+    load_thread.join();
+    FAIL() << "DUMP LOAD did not publish LOADING before waiting for generation readers";
+    return;
+  }
+
+  query::Query status_query;
+  status_query.type = query::QueryType::DUMP_STATUS;
+  const std::string status_response = handler_->Handle(status_query, conn_ctx_);
+  EXPECT_TRUE(status_response.find("status: LOADING") != std::string::npos) << status_response;
+  EXPECT_TRUE(status_response.find("filepath: " + loading_snapshot.filepath) != std::string::npos) << status_response;
+  EXPECT_EQ(status_response.find("result_filepath:"), std::string::npos) << status_response;
+
+  in_flight_request.unlock();
+  load_thread.join();
+
+  EXPECT_TRUE(load_response.find("OK LOADED") == 0) << load_response;
+  const auto completed_snapshot = progress.GetSnapshot();
+  EXPECT_EQ(completed_snapshot.status, DumpStatus::COMPLETED);
+  EXPECT_EQ(completed_snapshot.last_result_filepath, completed_snapshot.filepath);
 }
 
 TEST_F(DumpHandlerTest, DumpLoadRequiresFilepath) {
@@ -1086,6 +1133,12 @@ TEST_F(DumpHandlerTest, DumpLoadClearsSearchCache) {
   search_query.type = query::QueryType::SEARCH;
   search_query.table = "test_table";
   search_query.search_text = "hello";
+  // CacheManager intentionally accepts only table/index-aware keys emitted by
+  // SearchPipeline. This test exercises DUMP LOAD invalidation, so provide a
+  // stable canonical identity without depending on parser-only key fallback.
+  search_query.cache_key = std::make_pair(1ULL, 2ULL);
+  search_query.cache_key_discriminator = "dump-handler-test:test_table:hello";
+  search_query.cache_key_is_canonical = true;
 
   std::vector<DocId> dummy_results = {1, 2, 3};
   std::set<std::string> ngram_set = {"he", "el", "ll", "lo"};
@@ -1139,7 +1192,6 @@ class MockBinlogReader : public mysql::IBinlogReader {
   MockBinlogReader() = default;
 
   mygram::utils::Expected<void, mygram::utils::Error> Start() override {
-    running_ = true;
     start_called_ = true;
     if (observed_flag_ != nullptr) {
       flag_value_at_start_ = observed_flag_->load(std::memory_order_acquire);
@@ -1147,6 +1199,11 @@ class MockBinlogReader : public mysql::IBinlogReader {
     if (on_start_) {
       on_start_();
     }
+    if (fail_start_) {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed, "mock Start failure"));
+    }
+    running_ = true;
     return {};
   }
 
@@ -1176,9 +1233,13 @@ class MockBinlogReader : public mysql::IBinlogReader {
 
   size_t GetQueueSize() const override { return queue_size_; }
 
+  std::string GetSourceServerUUID() const override { return source_server_uuid_; }
+
   // Test helpers
   void SetGtidForTest(const std::string& gtid) { current_gtid_ = gtid; }
+  void SetSourceServerUUIDForTest(std::string uuid) { source_server_uuid_ = std::move(uuid); }
   void SetRunningForTest(bool running) { running_ = running; }
+  void SetStartFailureForTest(bool fail) { fail_start_ = fail; }
   void SetIsRunningResponsesForTest(std::vector<bool> responses) {
     is_running_responses_ = std::move(responses);
     is_running_response_index_ = 0;
@@ -1205,8 +1266,10 @@ class MockBinlogReader : public mysql::IBinlogReader {
 
  private:
   std::string current_gtid_;
+  std::string source_server_uuid_;
   std::string last_error_;
   bool running_ = false;
+  bool fail_start_ = false;
   uint64_t processed_events_ = 0;
   size_t queue_size_ = 0;
 
@@ -1514,6 +1577,85 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRestoresGtidAndRestartsReplication) {
   // Verify replication was stopped then restarted
   EXPECT_TRUE(mock_binlog_reader_->WasStopCalled()) << "Replication should be stopped before load";
   EXPECT_TRUE(mock_binlog_reader_->WasStartCalled()) << "Replication should be restarted after load";
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMismatchedMySQLSource) {
+  const std::string original_database = config_->mysql.database;
+  mock_binlog_reader_->SetGtidForTest("uuid:mysql-source-check");
+
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  const std::string save_response = handler_->Handle(save_query, conn_ctx_);
+  ASSERT_TRUE(save_response.find("OK SAVED") == 0) << save_response;
+
+  config_->mysql.database = original_database + "_different";
+  mock_binlog_reader_->SetRunningForTest(false);
+  mock_binlog_reader_->ResetTestFlags();
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  const std::string response = handler_->Handle(load_query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("configured host/port/database"), std::string::npos) << response;
+  EXPECT_FALSE(mock_binlog_reader_->WasStopCalled());
+  EXPECT_FALSE(mock_binlog_reader_->WasStartCalled());
+  EXPECT_FALSE(dump_load_in_progress_.load());
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadRejectsMismatchedMySQLSourceServerUuid) {
+  mock_binlog_reader_->SetGtidForTest("uuid:source-uuid-check");
+  mock_binlog_reader_->SetSourceServerUUIDForTest("source-server-a");
+
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  ASSERT_TRUE(handler_->Handle(save_query, conn_ctx_).find("OK SAVED") == 0);
+
+  mock_binlog_reader_->SetSourceServerUUIDForTest("source-server-b");
+  mock_binlog_reader_->SetRunningForTest(false);
+  mock_binlog_reader_->ResetTestFlags();
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  const std::string response = handler_->Handle(load_query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("source server UUID"), std::string::npos) << response;
+  EXPECT_FALSE(mock_binlog_reader_->WasStopCalled());
+  EXPECT_FALSE(mock_binlog_reader_->WasStartCalled());
+  EXPECT_FALSE(dump_load_in_progress_.load());
+}
+
+TEST_F(DumpHandlerGtidTest, DumpLoadReportsErrorWhenReplicationRestartFails) {
+  const std::string original_gtid = "uuid:restart-failure";
+
+  mock_binlog_reader_->SetGtidForTest(original_gtid);
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  ASSERT_TRUE(handler_->Handle(save_query, conn_ctx_).find("OK SAVED") == 0);
+
+  mock_binlog_reader_->SetGtidForTest("");
+  mock_binlog_reader_->SetRunningForTest(true);
+  mock_binlog_reader_->ResetTestFlags();
+  mock_binlog_reader_->SetStartFailureForTest(true);
+
+  query::Query load_query;
+  load_query.type = query::QueryType::DUMP_LOAD;
+  load_query.filepath = test_filepath_;
+  const std::string response = handler_->Handle(load_query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("ERROR") == 0) << response;
+  EXPECT_NE(response.find("mock Start failure"), std::string::npos) << response;
+  EXPECT_TRUE(mock_binlog_reader_->WasStopCalled());
+  EXPECT_TRUE(mock_binlog_reader_->WasStartCalled());
+  EXPECT_FALSE(mock_binlog_reader_->IsRunning());
+  EXPECT_FALSE(replication_paused_for_dump_.load());
+  EXPECT_FALSE(dump_load_in_progress_.load());
 }
 
 TEST_F(DumpHandlerGtidTest, DumpLoadV1RejectsEmptyGtidWithoutMutatingLiveState) {

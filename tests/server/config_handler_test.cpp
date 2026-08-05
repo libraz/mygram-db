@@ -120,6 +120,17 @@ TEST_F(ConfigHandlerTest, ConfigHelpSpecificProperty) {
   EXPECT_TRUE(response.find("3306") != std::string::npos);
 }
 
+TEST_F(ConfigHandlerTest, ConfigHelpReportsRequiredProperty) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_HELP;
+  query.filepath = "tables.name";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("+OK") != std::string::npos);
+  EXPECT_TRUE(response.find("Required: yes") != std::string::npos);
+}
+
 TEST_F(ConfigHandlerTest, ConfigHelpInvalidPath) {
   query::Query query;
   query.type = query::QueryType::CONFIG_HELP;
@@ -159,6 +170,18 @@ TEST_F(ConfigHandlerTest, ConfigShowMasksSensitiveFields) {
   EXPECT_TRUE(response.find("password: \"***\"") != std::string::npos);
   EXPECT_TRUE(response.find("secret_password") == std::string::npos);
   EXPECT_TRUE(response.find("test_user") != std::string::npos);
+}
+
+TEST_F(ConfigHandlerTest, ConfigShowMasksSensitiveScalar) {
+  query::Query query;
+  query.type = query::QueryType::CONFIG_SHOW;
+  query.filepath = "mysql.password";
+
+  std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_TRUE(response.find("+OK") != std::string::npos);
+  EXPECT_TRUE(response.find("\"***\"") != std::string::npos);
+  EXPECT_EQ(response.find("secret_password"), std::string::npos);
 }
 
 TEST_F(ConfigHandlerTest, ConfigShowSpecificSection) {

@@ -24,8 +24,9 @@
  * -----------------------------------------------------------------------
  * Thread-safety contract
  * -----------------------------------------------------------------------
- *   - `read_buf_` is touched exclusively by the event-loop thread (via
- *     `OnReadable`) and requires no locking.
+ *   - `read_buf_` and the frame queue are protected by `frame_mutex_`.
+ *     Normally the event loop appends/extracts frames, but a drain worker may
+ *     extract an already-buffered suffix while reads are paused.
  *   - `pending_frames_` is shared between the event-loop thread (producer)
  *     and a worker thread (consumer) and is protected by `frame_mutex_`.
  *   - `write_queue_`, `write_queue_bytes_`, `front_offset_`, `write_armed_`
@@ -260,6 +261,11 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /// Whether this connection has completed at least one CRLF-delimited frame.
   [[nodiscard]] bool HasReceivedFrame() const { return received_frame_.load(std::memory_order_acquire); }
 
+  /// Whether a complete request is queued for, or is currently executing in,
+  /// the drain worker. Idle reaping must not close such a connection merely
+  /// because a long-running handler has not performed socket I/O recently.
+  [[nodiscard]] bool HasInFlightRequest() const { return drain_scheduled_.load(std::memory_order_acquire); }
+
   /// Whether recv() has observed an orderly EOF from the peer.
   ///
   /// IoReactor uses this to discard stale readable/hangup notifications
@@ -308,9 +314,19 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
     return AppendReadBytes(bytes.data(), bytes.size(), enqueued);
   }
 
-  [[nodiscard]] size_t ReadBufferSizeForTest() const { return read_buf_.size(); }
+  [[nodiscard]] size_t ReadBufferSizeForTest() const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    return read_buf_.size();
+  }
+
+  [[nodiscard]] size_t ReadScanStartForTest() const {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    return read_scan_start_;
+  }
 
   [[nodiscard]] bool ShouldSendReadOverflowErrorForTest() { return ShouldSendReadOverflowError(); }
+
+  void SetDrainScheduledForTest(bool value) { drain_scheduled_.store(value, std::memory_order_release); }
 
   [[nodiscard]] bool SendReadOverflowErrorForTest(std::string_view message,
                                                   const std::function<void()>& under_lock_hook = {}) {
@@ -435,11 +451,14 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   // cross-thread reads (event-loop) and writes (drain task / command handler).
   ConnectionContext conn_ctx_{};
 
-  // Read-side state. The event loop owns it while reads are enabled. Once
-  // read_paused_ is published under frame_mutex_, the drain worker may extract
-  // already-buffered frames before re-enabling kernel read interest.
+  // Read-side state, protected by frame_mutex_. The event loop normally owns
+  // appends while reads are enabled; once read_paused_ is published, the drain
+  // worker may extract already-buffered frames before re-enabling interest.
   std::vector<char> read_buf_;
   size_t read_buffer_budget_bytes_ = 0;
+  // First byte that has not yet been searched for a CRLF delimiter. Kept
+  // relative to read_buf_ and adjusted whenever a consumed prefix is erased.
+  size_t read_scan_start_ = 0;
 
   // Frame queue: event loop produces, drain task consumes.
   mutable std::mutex frame_mutex_;

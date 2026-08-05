@@ -40,7 +40,7 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
     SyncOperationManager* sync_manager
 #endif
     ,
-    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested) {
+    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -66,7 +66,7 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
                                  sync_manager
 #endif
                                  ,
-                                 rate_limiter, shutdown_requested));
+                                 rate_limiter, shutdown_requested, dump_progress));
   return manager;
 }
 
@@ -82,7 +82,7 @@ ServerLifecycleManager::ServerLifecycleManager(
     SyncOperationManager* sync_manager
 #endif
     ,
-    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested)
+    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress)
     : config_(config),
       table_contexts_(table_contexts),
       dump_dir_(dump_dir),
@@ -101,7 +101,8 @@ ServerLifecycleManager::ServerLifecycleManager(
 #endif
       ,
       rate_limiter_(rate_limiter),
-      shutdown_requested_(shutdown_requested) {
+      shutdown_requested_(shutdown_requested),
+      dump_progress_(dump_progress) {
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::Initialize() {
@@ -310,6 +311,7 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
       .cache_manager = cache_manager,
       .variable_manager = variable_manager,
       .rate_limiter = rate_limiter_,
+      .dump_progress = dump_progress_,
       .operation_coordinator = sync_manager_ != nullptr ? &sync_manager_->GetOperationCoordinator() : nullptr,
   });
   return handler_context;
@@ -449,7 +451,7 @@ mygram::utils::Expected<std::unique_ptr<ConnectionAcceptor>, mygram::utils::Erro
 ServerLifecycleManager::InitAcceptor() {
   using mygram::utils::MakeUnexpected;
 
-  auto acceptor = std::make_unique<ConnectionAcceptor>(config_);
+  auto acceptor = std::make_unique<ConnectionAcceptor>(config_, &stats_);
 
   // Start the acceptor
   auto start_result = acceptor->Start();
@@ -482,7 +484,7 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
   auto scheduler = std::make_unique<SnapshotScheduler>(
       full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_, dump_save_in_progress_,
       replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_, sync_manager_,
-      std::function<bool()>{}, &optimization_in_progress_, shutdown_requested_);
+      std::function<bool()>{}, &optimization_in_progress_, shutdown_requested_, dump_progress_, &stats_);
 
   // Start the scheduler
   auto start_result = scheduler->Start();

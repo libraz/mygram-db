@@ -83,7 +83,22 @@ class DebugHandlerTest : public ::testing::Test {
     table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id3), "another test");
   }
 
+  void AddSecondTable() {
+    second_table_ctx_ = std::make_unique<TableContext>();
+    second_table_ctx_->name = "second_table";
+    second_table_ctx_->config.ngram_size = 2;
+    second_table_ctx_->index = std::make_unique<index::Index>(2);
+    second_table_ctx_->doc_store = std::make_unique<storage::DocumentStore>();
+    const auto doc_id = second_table_ctx_->doc_store->AddDocument("1", {{"content", "second table"}});
+    second_table_ctx_->index->AddDocument(static_cast<index::DocId>(*doc_id), "second table");
+
+    table_contexts_["second_table"] = second_table_ctx_.get();
+    table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
+    handler_ctx_->table_catalog = table_catalog_.get();
+  }
+
   std::unique_ptr<TableContext> table_ctx_;
+  std::unique_ptr<TableContext> second_table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<TableCatalog> table_catalog_;
   std::unique_ptr<config::Config> config_;
@@ -201,6 +216,18 @@ TEST_F(DebugHandlerTest, OptimizeAllowedWhenNoBlockingOperations) {
   EXPECT_TRUE(response.find("DUMP SAVE") == std::string::npos) << "Response: " << response;
 
   // After completion, optimization_in_progress should be reset
+  EXPECT_FALSE(optimization_in_progress_);
+}
+
+TEST_F(DebugHandlerTest, OptimizeWithoutTableOptimizesEveryCatalogTable) {
+  AddSecondTable();
+
+  query::Query query;
+  query.type = query::QueryType::OPTIMIZE;
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_EQ(response.rfind("OK OPTIMIZED tables=2", 0), 0U) << "Response: " << response;
   EXPECT_FALSE(optimization_in_progress_);
 }
 

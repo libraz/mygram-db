@@ -60,8 +60,10 @@ namespace {
 constexpr int kHttpOk = 200;
 constexpr int kHttpNoContent = 204;
 constexpr int kHttpBadRequest = 400;
+constexpr int kHttpUnauthorized = 401;
 constexpr int kHttpForbidden = 403;
 constexpr int kHttpNotFound = 404;
+constexpr int kHttpUnsupportedMediaType = 415;
 constexpr int kHttpTooManyRequests = 429;
 constexpr int kHttpInternalServerError = 500;
 constexpr int kHttpServiceUnavailable = 503;
@@ -72,6 +74,50 @@ using mygram::utils::ErrorCode;
 using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
+
+// cpp-httplib owns the accept loop and does not expose an accept callback. Its
+// public TaskQueue seam is nevertheless exactly where a freshly accepted
+// socket is handed off. Reserve a slot before enqueueing and release it only
+// after process_and_close_socket() returns; this covers both queued and active
+// sockets, including clients that never finish an HTTP request.
+class CappedHttpTaskQueue final : public httplib::TaskQueue {
+ public:
+  CappedHttpTaskQueue(size_t max_connections, std::atomic<size_t>* active_connections)
+      : max_connections_(max_connections),
+        active_connections_(active_connections),
+        delegate_(
+            std::make_unique<httplib::ThreadPool>(CPPHTTPLIB_THREAD_POOL_COUNT, CPPHTTPLIB_THREAD_POOL_MAX_COUNT)) {}
+
+  bool enqueue(std::function<void()> task) override {
+    size_t active = active_connections_->load(std::memory_order_acquire);
+    while (active < max_connections_) {
+      if (active_connections_->compare_exchange_weak(active, active + 1, std::memory_order_acq_rel,
+                                                     std::memory_order_acquire)) {
+        const bool queued =
+            delegate_->enqueue([active_connections = active_connections_, task = std::move(task)]() mutable {
+              struct ReleaseSlot {
+                std::atomic<size_t>* active_connections;
+                ~ReleaseSlot() { active_connections->fetch_sub(1, std::memory_order_acq_rel); }
+              } release{active_connections};
+              task();
+            });
+        if (!queued) {
+          active_connections_->fetch_sub(1, std::memory_order_acq_rel);
+        }
+        return queued;
+      }
+    }
+    return false;
+  }
+
+  void shutdown() override { delegate_->shutdown(); }
+  void on_idle() override { delegate_->on_idle(); }
+
+ private:
+  size_t max_connections_;
+  std::atomic<size_t>* active_connections_;
+  std::unique_ptr<httplib::TaskQueue> delegate_;
+};
 
 std::string QuoteLiteralSearchExpression(std::string_view text) {
   std::string quoted;
@@ -248,8 +294,6 @@ std::string ExtractRoutePrimaryKey(const httplib::Request& req) {
   return req.matches[2];
 }
 
-bool IsSafeJsonColumnName(std::string_view column);
-
 /**
  * @brief Parse filter conditions from a JSON "filters" object into a query
  *
@@ -270,7 +314,7 @@ Expected<void, Error> ParseFiltersFromJson(const json& filters_json, query::Quer
   }
 
   for (const auto& [key, val] : filters_json.items()) {
-    if (!IsSafeJsonColumnName(key)) {
+    if (!query::QueryParser::IsSafeColumnName(key)) {
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter column"));
     }
 
@@ -314,21 +358,6 @@ Expected<void, Error> ParseFiltersFromJson(const json& filters_json, query::Quer
   return {};
 }
 
-bool IsSafeJsonColumnName(std::string_view column) {
-  if (column.empty() || column.size() > query::QueryParser::kMaxFilterColumnNameLength) {
-    return false;
-  }
-  for (char c : column) {
-    auto u = static_cast<unsigned char>(c);
-    const bool ascii_safe = (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' ||
-                            u == '-' || u == '.' || u == '$';
-    if (!ascii_safe) {
-      return false;
-    }
-  }
-  return true;
-}
-
 bool EqualsAsciiIgnoreCase(std::string_view lhs, std::string_view rhs) {
   if (lhs.size() != rhs.size()) {
     return false;
@@ -343,6 +372,41 @@ bool EqualsAsciiIgnoreCase(std::string_view lhs, std::string_view rhs) {
   return true;
 }
 
+bool HasJsonContentType(const httplib::Request& req) {
+  const std::string content_type = req.get_header_value("Content-Type");
+  const auto media_type_end = content_type.find(';');
+  const auto media_type_length = media_type_end == std::string::npos ? content_type.size() : media_type_end;
+  std::string_view media_type(content_type.data(), media_type_length);
+  while (!media_type.empty() && std::isspace(static_cast<unsigned char>(media_type.front()))) {
+    media_type.remove_prefix(1);
+  }
+  while (!media_type.empty() && std::isspace(static_cast<unsigned char>(media_type.back()))) {
+    media_type.remove_suffix(1);
+  }
+  return EqualsAsciiIgnoreCase(media_type, "application/json");
+}
+
+bool ConstantTimeEqual(std::string_view lhs, std::string_view rhs) {
+  size_t difference = lhs.size() ^ rhs.size();
+  const size_t length = std::max(lhs.size(), rhs.size());
+  for (size_t i = 0; i < length; ++i) {
+    const unsigned char left = i < lhs.size() ? static_cast<unsigned char>(lhs[i]) : 0;
+    const unsigned char right = i < rhs.size() ? static_cast<unsigned char>(rhs[i]) : 0;
+    difference |= static_cast<size_t>(left ^ right);
+  }
+  return difference == 0;
+}
+
+int HttpStatusForQueryError(const Error& error) {
+  if (error.code() == ErrorCode::kServerShuttingDown || error.code() == ErrorCode::kServerLoading) {
+    return kHttpServiceUnavailable;
+  }
+  if (error.code() == ErrorCode::kInternalError) {
+    return kHttpInternalServerError;
+  }
+  return kHttpBadRequest;
+}
+
 Expected<void, Error> ParseSortFromJson(const json& sort_json, query::Query& query) {
   if (!sort_json.is_object()) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort' must be an object"));
@@ -352,7 +416,7 @@ Expected<void, Error> ParseSortFromJson(const json& sort_json, query::Query& que
   }
 
   std::string column = sort_json["column"].get<std::string>();
-  if (column != "_score" && column != "id" && !IsSafeJsonColumnName(column)) {
+  if (column != "_score" && column != "id" && !query::QueryParser::IsSafeColumnName(column)) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort column"));
   }
 
@@ -398,8 +462,6 @@ Expected<void, Error> ParseHighlightUint(const json& highlight_json, const char*
   return {};
 }
 
-constexpr size_t kMaxHighlightTagLength = 256;
-
 Expected<void, Error> ParseHighlightFromJson(const json& highlight_json, query::Query& query) {
   if (!highlight_json.is_object()) {
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight' must be an object"));
@@ -411,7 +473,7 @@ Expected<void, Error> ParseHighlightFromJson(const json& highlight_json, query::
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.open_tag' must be a string"));
     }
     opts.open_tag = highlight_json["open_tag"].get<std::string>();
-    if (opts.open_tag.size() > kMaxHighlightTagLength) {
+    if (opts.open_tag.size() > query::QueryParser::kMaxHighlightTagLength) {
       return MakeUnexpected(
           MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.open_tag' must be at most 256 bytes"));
     }
@@ -421,7 +483,7 @@ Expected<void, Error> ParseHighlightFromJson(const json& highlight_json, query::
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.close_tag' must be a string"));
     }
     opts.close_tag = highlight_json["close_tag"].get<std::string>();
-    if (opts.close_tag.size() > kMaxHighlightTagLength) {
+    if (opts.close_tag.size() > query::QueryParser::kMaxHighlightTagLength) {
       return MakeUnexpected(
           MakeError(ErrorCode::kQuerySyntaxError, "Field 'highlight.close_tag' must be at most 256 bytes"));
     }
@@ -487,7 +549,7 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortH
     pipeline_output.term_infos = search_pipeline::GenerateTermInfos(
         pipeline_output.all_search_terms, table_ctx.index.get(), table_ctx.config.ngram_size,
         table_ctx.config.kanji_ngram_size, table_ctx.config.cross_boundary_ngrams,
-        /*compute_term_doc_freq=*/true);
+        /*compute_term_doc_freq=*/true, table_ctx.doc_store.get());
   }
 
   std::vector<std::string> normalized_terms;
@@ -531,7 +593,8 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
                        std::shared_ptr<RateLimiter> rate_limiter, std::atomic<bool>* replication_paused_for_dump,
                        SyncOperationManager* sync_manager,
                        std::function<bool(const std::string&)> table_syncing_checker,
-                       std::function<bool()> any_syncing_checker, std::function<bool()> initial_data_ready_checker)
+                       std::function<bool()> any_syncing_checker, std::function<bool()> initial_data_ready_checker,
+                       ThreadPool* thread_pool)
     : config_(std::move(config)),
       table_contexts_(std::move(table_contexts)),
       full_config_(full_config),
@@ -541,6 +604,7 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
       loading_(loading),
       tcp_stats_(tcp_stats),
       replication_paused_for_dump_(replication_paused_for_dump),
+      thread_pool_(thread_pool),
       sync_manager_(sync_manager),
       table_syncing_checker_(std::move(table_syncing_checker)),
       any_syncing_checker_(std::move(any_syncing_checker)),
@@ -574,6 +638,21 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
 
   server_ = std::make_unique<httplib::Server>();
 
+  // Reject at the accepted-socket boundary rather than in a request handler:
+  // an idle peer has not sent a request yet, but it already consumes an fd.
+  // Config schema validation requires a positive value; clamp direct C++ API
+  // callers as a defensive fallback.
+  const size_t max_connections = static_cast<size_t>(std::max(config_.max_connections, 1));
+  server_->new_task_queue = [max_connections, active_connections = &active_connections_]() {
+    return new CappedHttpTaskQueue(max_connections, active_connections);
+  };
+
+  // cpp-httplib only substitutes req.remote_addr from X-Forwarded-For when
+  // the direct TCP peer exactly matches this allowlist. ACL and shared rate
+  // limiting below therefore receive the original client identity without
+  // accepting spoofed forwarding headers from direct clients.
+  server_->set_trusted_proxies(config_.trusted_proxies);
+
   // Set timeouts
   server_->set_read_timeout(config_.read_timeout_sec, 0);
   server_->set_write_timeout(config_.write_timeout_sec, 0);
@@ -592,9 +671,12 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   // Setup routes
   SetupRoutes();
 
-  // Setup CORS if enabled
-  if (config_.enable_cors) {
+  // A missing origin must not silently become a wildcard. CORS is enabled
+  // only when the caller explicitly configured an allow-origin value.
+  if (config_.enable_cors && !config_.cors_allow_origin.empty()) {
     SetupCors();
+  } else if (config_.enable_cors) {
+    mygram::utils::StructuredLog().Event("http_cors_disabled_missing_allow_origin").Warn();
   }
 }
 
@@ -638,6 +720,9 @@ void HttpServer::SetupRoutes() {
   server_->Get("/replication/status",
                [this](const httplib::Request& req, httplib::Response& res) { HandleReplicationStatus(req, res); });
 
+  // POST /optimize - Optimize one table or every configured table.
+  server_->Post("/optimize", [this](const httplib::Request& req, httplib::Response& res) { HandleOptimize(req, res); });
+
   // GET /metrics - Prometheus metrics
   server_->Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) { HandleMetrics(req, res); });
 
@@ -652,32 +737,12 @@ void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
     const std::string& client_ip = req.remote_addr.empty() ? "unknown" : req.remote_addr;
 
-    // Only minimal liveness/readiness probes bypass CIDR and rate limiting.
-    // /health/detail exposes operational data and must follow the same access
-    // controls as every other non-probe endpoint.
-    if (req.path == "/health/live" || req.path == "/health/ready") {
-      return httplib::Server::HandlerResponse::Unhandled;
-    }
-
-    // Consume the shared request quota before ACL handling. Otherwise a
-    // denied source bypasses all rate-limit suppression and can turn the ACL
-    // warning itself into an unbounded disk-write primitive.
-    if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
-      RecordRequest();
-      const auto decision = rate_limiter_->RecordDenialLog("http:" + client_ip);
-      if (decision.should_log) {
-        mygram::utils::StructuredLog()
-            .Event("http_rate_limit_exceeded")
-            .Field(log_fields::kFieldClientIp, client_ip)
-            .Field("suppressed_since_last_log", decision.suppressed_count)
-            .Warn();
-      }
-      SendError(res, kHttpTooManyRequests, "Rate limit exceeded");
-      return httplib::Server::HandlerResponse::Handled;
-    }
-
+    // Reject unauthorized peers before allocating or consuming a shared rate
+    // bucket. ACL-denied traffic is already log-suppressed independently and
+    // must not evict or exhaust quota state used by allowed clients.
     if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
       RecordRequest();
+      GetEffectiveStats().IncrementRequestsDeniedAclHttp();
       const auto decision = denial_log_limiter_.Record("acl:" + client_ip);
       if (decision.should_log) {
         mygram::utils::StructuredLog()
@@ -690,21 +755,33 @@ void HttpServer::SetupAccessControl() {
       return httplib::Server::HandlerResponse::Handled;
     }
 
+    if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
+      RecordRequest();
+      GetEffectiveStats().IncrementRequestsDeniedRateLimitHttp();
+      const auto decision = rate_limiter_->RecordDenialLog("http:" + client_ip);
+      if (decision.should_log) {
+        mygram::utils::StructuredLog()
+            .Event("http_rate_limit_exceeded")
+            .Field(log_fields::kFieldClientIp, client_ip)
+            .Field("suppressed_since_last_log", decision.suppressed_count)
+            .Warn();
+      }
+      SendError(res, kHttpTooManyRequests, "Rate limit exceeded");
+      return httplib::Server::HandlerResponse::Handled;
+    }
+
     return httplib::Server::HandlerResponse::Unhandled;
   });
 }
 
 void HttpServer::SetupCors() {
-  // NOTE: Default to "*" rather than the literal "null" string. A literal "null"
-  // origin is dangerous because browsers treat null-origin requests from
-  // sandboxed iframes as matching, enabling CORS bypass attacks.
-  const std::string allow_origin = config_.cors_allow_origin.empty() ? "*" : config_.cors_allow_origin;
+  const std::string allow_origin = config_.cors_allow_origin;
 
   // CORS preflight
   server_->Options(".*", [allow_origin](const httplib::Request& /*req*/, httplib::Response& res) {
     res.set_header("Access-Control-Allow-Origin", allow_origin);
     res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.set_header("Access-Control-Allow-Headers", "Content-Type");
+    res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
     res.status = kHttpNoContent;
   });
 
@@ -961,21 +1038,18 @@ bool HttpServer::RejectIfTableSyncing(const std::string& table_key, httplib::Res
 #endif
 }
 
-std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(const httplib::Request& req,
-                                                                                httplib::Response& res,
-                                                                                const std::string& command,
-                                                                                bool apply_pagination) {
-  // Check if server is loading
+std::optional<HttpServer::PreparedHttpRequest> HttpServer::PrepareHttpJsonRequest(const httplib::Request& req,
+                                                                                  httplib::Response& res) {
+  if (!HasJsonContentType(req)) {
+    SendError(res, kHttpUnsupportedMediaType, "Content-Type must be application/json");
+    return std::nullopt;
+  }
   if (loading_ != nullptr && loading_->load()) {
     SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
     return std::nullopt;
   }
 
-  // Validate the URL-bound table name and resolve its context. Errors are
-  // surfaced with the precise HTTP status code computed by the helper so
-  // callers do not need to know the underlying reason.
-  std::string table = ExtractRouteTableKey(req);
-  auto lookup = ResolveHttpTableContext(table);
+  auto lookup = ResolveHttpTableContext(ExtractRouteTableKey(req));
   if (lookup.table_ctx == nullptr) {
     SendError(res, lookup.status, lookup.message);
     return std::nullopt;
@@ -983,17 +1057,133 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   if (RejectIfTableSyncing(lookup.table_key, res)) {
     return std::nullopt;
   }
-  auto* table_ctx = lookup.table_ctx;
-  std::shared_lock<std::shared_mutex> generation_lock(*table_ctx->generation_mutex);
+  std::shared_lock<std::shared_mutex> generation_lock(*lookup.table_ctx->generation_mutex);
 
-  // Parse JSON body
   json body;
   try {
     body = json::parse(req.body);
-  } catch (const json::parse_error& e) {
-    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
+  } catch (const json::parse_error& error) {
+    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(error.what()));
     return std::nullopt;
   }
+
+  PreparedHttpRequest prepared;
+  prepared.generation_lock = std::move(generation_lock);
+  prepared.table_ctx = lookup.table_ctx;
+  prepared.table_key = std::move(lookup.table_key);
+  prepared.body = std::move(body);
+  return prepared;
+}
+
+bool HttpServer::ApplyHttpQueryOptions(const json& body, httplib::Response& res, query::Query& parsed_query,
+                                       bool apply_pagination, bool apply_ranked_options) {
+  if (apply_pagination) {
+    if (body.contains("limit")) {
+      if (!body["limit"].is_number_integer()) {
+        SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
+        return false;
+      }
+      const int64_t limit = body["limit"].get<int64_t>();
+      if (limit <= 0 || limit > config::defaults::kMaxLimit) {
+        SendError(res, kHttpBadRequest,
+                  "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
+        return false;
+      }
+      parsed_query.limit = static_cast<uint32_t>(limit);
+      parsed_query.limit_explicit = true;
+    }
+
+    if (body.contains("offset")) {
+      if (!body["offset"].is_number_integer()) {
+        SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
+        return false;
+      }
+      const int64_t offset = body["offset"].get<int64_t>();
+      if (offset < 0 || static_cast<uint64_t>(offset) > std::numeric_limits<uint32_t>::max()) {
+        SendError(res, kHttpBadRequest,
+                  "Invalid offset: must be between 0 and " + std::to_string(std::numeric_limits<uint32_t>::max()));
+        return false;
+      }
+      parsed_query.offset = static_cast<uint32_t>(offset);
+      parsed_query.offset_explicit = true;
+    }
+
+    if (!parsed_query.limit_explicit) {
+      parsed_query.limit = static_cast<uint32_t>(default_limit_.load(std::memory_order_acquire));
+    }
+  }
+
+  if (body.contains("filters") && !body["filters"].is_object()) {
+    SendError(res, kHttpBadRequest, "Field 'filters' must be an object");
+    return false;
+  }
+  if (body.contains("filters")) {
+    if (auto result = ParseFiltersFromJson(body["filters"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
+      return false;
+    }
+  }
+
+  if (apply_ranked_options && body.contains("sort")) {
+    if (auto result = ParseSortFromJson(body["sort"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
+      return false;
+    }
+  }
+  if (apply_ranked_options && body.contains("highlight")) {
+    if (auto result = ParseHighlightFromJson(body["highlight"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
+      return false;
+    }
+  }
+  if (apply_ranked_options && body.contains("fuzzy")) {
+    if (auto result = ParseFuzzyFromJson(body["fuzzy"], parsed_query); !result) {
+      SendError(res, kHttpBadRequest, result.error().message());
+      return false;
+    }
+  }
+
+  query::QueryParser length_validator;
+  length_validator.SetMaxQueryLength(max_query_length_.load(std::memory_order_acquire));
+  if (auto result = length_validator.ValidateQueryLength(parsed_query); !result) {
+    SendError(res, kHttpBadRequest, result.error().message());
+    return false;
+  }
+  return true;
+}
+
+bool HttpServer::ValidateHttpQueryText(const std::string& query_text, httplib::Response& res, bool allow_empty) const {
+  for (const char character : query_text) {
+    if (character == '\r' || character == '\n' || character == '\0') {
+      SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+      return false;
+    }
+  }
+  if (!allow_empty && query_text.empty()) {
+    SendError(res, kHttpBadRequest, "Field 'q' must be non-empty");
+    return false;
+  }
+
+  const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
+  if (max_query_length > 0 && query_text.size() > max_query_length) {
+    SendError(res, kHttpBadRequest,
+              "Query text length (" + std::to_string(query_text.size()) + ") exceeds maximum allowed length of " +
+                  std::to_string(max_query_length) +
+                  " characters. Increase api.max_query_length to permit longer queries.");
+    return false;
+  }
+  return true;
+}
+
+std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(const httplib::Request& req,
+                                                                                httplib::Response& res,
+                                                                                const std::string& command,
+                                                                                bool apply_pagination) {
+  auto request = PrepareHttpJsonRequest(req, res);
+  if (!request) {
+    return std::nullopt;
+  }
+  auto& body = request->body;
 
   // Validate required field
   if (!body.contains("q")) {
@@ -1021,28 +1211,11 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     }
   }
 
-  // Validate query text for control characters (CRLF injection prevention)
   std::string query_text = body["q"].get<std::string>();
-  for (char c : query_text) {
-    if (c == '\r' || c == '\n' || c == '\0') {
-      SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
-      return std::nullopt;
-    }
-  }
-
-  if (query_text.empty()) {
-    SendError(res, kHttpBadRequest, "Field 'q' must be non-empty");
+  if (!ValidateHttpQueryText(query_text, res, /*allow_empty=*/false)) {
     return std::nullopt;
   }
-
   const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
-  if (max_query_length > 0 && query_text.size() > max_query_length) {
-    SendError(res, kHttpBadRequest,
-              "Query text length (" + std::to_string(query_text.size()) + ") exceeds maximum allowed length of " +
-                  std::to_string(max_query_length) +
-                  " characters. Increase api.max_query_length to permit longer queries.");
-    return std::nullopt;
-  }
 
   auto boolean_mode = ParseHttpQueryMode(body);
   if (!boolean_mode) {
@@ -1053,7 +1226,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
   query::Query parsed_query;
   if (*boolean_mode) {
     parsed_query.type = (command == "COUNT") ? query::QueryType::COUNT : query::QueryType::SEARCH;
-    parsed_query.table = lookup.table_key;
+    parsed_query.table = request->table_key;
     parsed_query.search_text = query_text;
     parsed_query.search_expression = std::move(query_text);
   } else {
@@ -1062,7 +1235,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     // search-text extraction identical across every public surface.
     query::QueryParser parser;
     parser.SetMaxQueryLength(max_query_length);
-    auto base_query = parser.Parse(command + " " + lookup.table_key + " " + QuoteLiteralSearchExpression(query_text));
+    auto base_query = parser.Parse(command + " " + request->table_key + " " + QuoteLiteralSearchExpression(query_text));
     if (!base_query) {
       SendError(res, kHttpBadRequest, base_query.error().message());
       return std::nullopt;
@@ -1070,81 +1243,13 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     parsed_query = std::move(*base_query);
   }
 
-  if (apply_pagination) {
-    // Add limit
-    if (body.contains("limit")) {
-      if (!body["limit"].is_number_integer()) {
-        SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
-        return std::nullopt;
-      }
-      const int64_t limit = body["limit"].get<int64_t>();
-      if (limit <= 0 || limit > config::defaults::kMaxLimit) {
-        SendError(res, kHttpBadRequest,
-                  "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
-        return std::nullopt;
-      }
-      parsed_query.limit = static_cast<uint32_t>(limit);
-      parsed_query.limit_explicit = true;
-    }
-
-    // Add offset
-    if (body.contains("offset")) {
-      if (!body["offset"].is_number_integer()) {
-        SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
-        return std::nullopt;
-      }
-      const int64_t offset = body["offset"].get<int64_t>();
-      if (offset < 0 || offset > std::numeric_limits<uint32_t>::max()) {
-        SendError(res, kHttpBadRequest,
-                  "Invalid offset: must be between 0 and " + std::to_string(std::numeric_limits<uint32_t>::max()));
-        return std::nullopt;
-      }
-      parsed_query.offset = static_cast<uint32_t>(offset);
-      parsed_query.offset_explicit = true;
-    }
-  }
-
-  // Apply default limit if LIMIT was not explicitly specified in the request
-  if (apply_pagination && !parsed_query.limit_explicit) {
-    parsed_query.limit = static_cast<size_t>(default_limit_.load(std::memory_order_acquire));
-  }
-
-  // Apply filters from JSON payload
-  if (body.contains("filters") && !body["filters"].is_object()) {
-    SendError(res, kHttpBadRequest, "Field 'filters' must be an object");
+  if (!ApplyHttpQueryOptions(body, res, parsed_query, apply_pagination, apply_pagination)) {
     return std::nullopt;
-  }
-  if (body.contains("filters")) {
-    if (auto result = ParseFiltersFromJson(body["filters"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
-      return std::nullopt;
-    }
-  }
-
-  if (body.contains("sort")) {
-    if (auto result = ParseSortFromJson(body["sort"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
-      return std::nullopt;
-    }
-  }
-
-  if (body.contains("highlight")) {
-    if (auto result = ParseHighlightFromJson(body["highlight"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
-      return std::nullopt;
-    }
-  }
-
-  if (body.contains("fuzzy")) {
-    if (auto result = ParseFuzzyFromJson(body["fuzzy"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
-      return std::nullopt;
-    }
   }
 
   PreparedHttpQuery prepared;
-  prepared.generation_lock = std::move(generation_lock);
-  prepared.table_ctx = table_ctx;
+  prepared.generation_lock = std::move(request->generation_lock);
+  prepared.table_ctx = request->table_ctx;
   prepared.body = std::move(body);
   prepared.query = std::move(parsed_query);
   return prepared;
@@ -1152,30 +1257,11 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
 std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(const httplib::Request& req,
                                                                                httplib::Response& res) {
-  if (loading_ != nullptr && loading_->load()) {
-    SendError(res, kHttpServiceUnavailable, "Server is loading, please try again later");
+  auto request = PrepareHttpJsonRequest(req, res);
+  if (!request) {
     return std::nullopt;
   }
-
-  std::string table = ExtractRouteTableKey(req);
-  auto lookup = ResolveHttpTableContext(table);
-  if (lookup.table_ctx == nullptr) {
-    SendError(res, lookup.status, lookup.message);
-    return std::nullopt;
-  }
-  if (RejectIfTableSyncing(lookup.table_key, res)) {
-    return std::nullopt;
-  }
-  auto* table_ctx = lookup.table_ctx;
-  std::shared_lock<std::shared_mutex> generation_lock(*table_ctx->generation_mutex);
-
-  json body;
-  try {
-    body = json::parse(req.body);
-  } catch (const json::parse_error& e) {
-    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(e.what()));
-    return std::nullopt;
-  }
+  auto& body = request->body;
 
   if (!body.contains("column")) {
     SendError(res, kHttpBadRequest, "Missing required field: column");
@@ -1200,7 +1286,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   }
 
   std::string column = body["column"].get<std::string>();
-  if (!IsSafeJsonColumnName(column)) {
+  if (!query::QueryParser::IsSafeColumnName(column)) {
     SendError(res, kHttpBadRequest, "Invalid facet column");
     return std::nullopt;
   }
@@ -1213,78 +1299,29 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
 
   query::Query parsed_query;
   parsed_query.type = query::QueryType::FACET;
-  parsed_query.table = lookup.table_key;
+  parsed_query.table = request->table_key;
   parsed_query.facet_column = std::move(column);
 
   if (body.contains("q")) {
     std::string query_text = body["q"].get<std::string>();
-    for (char c : query_text) {
-      if (c == '\r' || c == '\n' || c == '\0') {
-        SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
-        return std::nullopt;
-      }
+    if (!ValidateHttpQueryText(query_text, res, /*allow_empty=*/true)) {
+      return std::nullopt;
     }
-
     if (!query_text.empty()) {
-      const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
-      if (max_query_length > 0 && query_text.size() > max_query_length) {
-        SendError(res, kHttpBadRequest,
-                  "Query text length (" + std::to_string(query_text.size()) + ") exceeds maximum allowed length of " +
-                      std::to_string(max_query_length) +
-                      " characters. Increase api.max_query_length to permit longer queries.");
-        return std::nullopt;
-      }
       parsed_query.search_text = query_text;
       parsed_query.search_expression =
           *boolean_mode ? std::move(query_text) : QuoteLiteralSearchExpression(parsed_query.search_text);
     }
   }
 
-  if (body.contains("limit")) {
-    if (!body["limit"].is_number_integer()) {
-      SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
-      return std::nullopt;
-    }
-    const int64_t limit = body["limit"].get<int64_t>();
-    if (limit <= 0 || limit > config::defaults::kMaxLimit) {
-      SendError(res, kHttpBadRequest,
-                "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
-      return std::nullopt;
-    }
-    parsed_query.limit = static_cast<uint32_t>(limit);
-    parsed_query.limit_explicit = true;
-  }
-  if (body.contains("offset")) {
-    if (!body["offset"].is_number_integer()) {
-      SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
-      return std::nullopt;
-    }
-    const int64_t offset = body["offset"].get<int64_t>();
-    if (offset < 0 || static_cast<uint64_t>(offset) > std::numeric_limits<uint32_t>::max()) {
-      SendError(res, kHttpBadRequest, "Invalid offset: must be between 0 and 4294967295");
-      return std::nullopt;
-    }
-    parsed_query.offset = static_cast<uint32_t>(offset);
-    parsed_query.offset_explicit = true;
-  }
-  if (!parsed_query.limit_explicit) {
-    parsed_query.limit = static_cast<uint32_t>(default_limit_.load(std::memory_order_acquire));
-  }
-
-  if (body.contains("filters") && !body["filters"].is_object()) {
-    SendError(res, kHttpBadRequest, "Field 'filters' must be an object");
+  if (!ApplyHttpQueryOptions(body, res, parsed_query, /*apply_pagination=*/true,
+                             /*apply_ranked_options=*/false)) {
     return std::nullopt;
-  }
-  if (body.contains("filters")) {
-    if (auto result = ParseFiltersFromJson(body["filters"], parsed_query); !result) {
-      SendError(res, kHttpBadRequest, result.error().message());
-      return std::nullopt;
-    }
   }
 
   PreparedHttpQuery prepared;
-  prepared.generation_lock = std::move(generation_lock);
-  prepared.table_ctx = table_ctx;
+  prepared.generation_lock = std::move(request->generation_lock);
+  prepared.table_ctx = request->table_ctx;
   prepared.body = std::move(body);
   prepared.query = std::move(parsed_query);
   return prepared;
@@ -1313,7 +1350,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
     if (!pipeline_output) {
-      SendError(res, kHttpBadRequest, pipeline_output.error().to_string());
+      SendError(res, HttpStatusForQueryError(pipeline_output.error()), pipeline_output.error().to_string());
       return;
     }
 
@@ -1330,7 +1367,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     auto sorted_result =
         SortHttpResults(results, *query, *table_ctx, *pipeline_output, full_config_, params.primary_key_column);
     if (!sorted_result.has_value()) {
-      SendError(res, kHttpBadRequest, sorted_result.error().message());
+      SendError(res, HttpStatusForQueryError(sorted_result.error()), sorted_result.error().message());
       return;
     }
     auto sorted_results = std::move(sorted_result.value());
@@ -1423,7 +1460,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
     // Execute the unified search pipeline
     auto pipeline_output = search_pipeline::ExecuteFullPipeline(*query, params);
     if (!pipeline_output) {
-      SendError(res, kHttpBadRequest, pipeline_output.error().to_string());
+      SendError(res, HttpStatusForQueryError(pipeline_output.error()), pipeline_output.error().to_string());
       return;
     }
 
@@ -1465,10 +1502,7 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
     params.load_in_progress = [this]() { return loading_ != nullptr && loading_->load(std::memory_order_acquire); };
     auto facet_output = search_pipeline::ExecuteFacetPipeline(*query, params);
     if (!facet_output) {
-      const int status = facet_output.error().code() == mygram::utils::ErrorCode::kServerShuttingDown
-                             ? kHttpServiceUnavailable
-                             : kHttpBadRequest;
-      SendError(res, status, facet_output.error().to_string());
+      SendError(res, HttpStatusForQueryError(facet_output.error()), facet_output.error().to_string());
       return;
     }
 
@@ -1691,7 +1725,9 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
       cache_obj["ttl_expirations"] = cache_stats.ttl_expirations;
       cache_obj["rejection_count"] = cache_stats.rejection_count;
       cache_obj["rejection_oversize"] = cache_stats.rejection_oversize;
+      cache_obj["rejection_memory_budget"] = cache_stats.rejection_memory_budget;
       cache_obj["rejection_duplicate"] = cache_stats.rejection_duplicate;
+      cache_obj["stale_entry_removals"] = cache_stats.stale_entry_removals;
       cache_obj["decompression_failures"] = cache_stats.decompression_failures;
       cache_obj["stale_lru_entries"] = cache_stats.stale_lru_entries;
       cache_obj["invalidations_immediate"] = cache_stats.invalidations_immediate;
@@ -1758,7 +1794,8 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
   const bool initial_data_ready = initial_data_ready_checker_ ? initial_data_ready_checker_() : true;
 #ifdef USE_MYSQL
   const bool replication_unavailable =
-      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !replication_paused_for_dump && !sync_in_progress);
+      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !binlog_reader_->IsStarting() &&
+       !replication_paused_for_dump && !sync_in_progress);
 #else
   const bool replication_unavailable = false;
 #endif
@@ -1770,8 +1807,15 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
 #ifdef USE_MYSQL
   if (binlog_reader_ != nullptr) {
     response["replication_running"] = !replication_unavailable;
+    response["replication_starting"] = binlog_reader_->IsStarting();
     response["replication_paused_for_dump"] = replication_paused_for_dump;
     response["sync_in_progress"] = sync_in_progress;
+    response["replication_last_error"] = binlog_reader_->GetLastError();
+    response["replication_last_error_code"] = static_cast<uint16_t>(binlog_reader_->GetLastErrorCode());
+    response["replication_crc_errors"] = binlog_reader_->GetCRCErrors();
+    response["replication_schema_incompatible"] = binlog_reader_->HasSchemaIncompatibleError();
+    response["replication_last_applied_unixtime"] = binlog_reader_->GetLastAppliedUnixTime();
+    response["replication_seconds_since_last_applied"] = binlog_reader_->GetSecondsSinceLastApplied();
   }
 #endif
 
@@ -1786,6 +1830,10 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
       response["reason"] = "Initial data has not been loaded";
     } else if (is_loading) {
       response["reason"] = "Server is loading";
+    } else if (binlog_reader_ != nullptr && binlog_reader_->HasSchemaIncompatibleError()) {
+      response["reason"] = "Replication stopped due to an incompatible schema";
+    } else if (binlog_reader_ != nullptr && !binlog_reader_->GetLastError().empty()) {
+      response["reason"] = binlog_reader_->GetLastError();
     } else if (sync_in_progress) {
       response["reason"] = "SYNC is in progress";
     } else {
@@ -1807,8 +1855,8 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
   const bool replication_paused_for_dump =
       replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire);
 #ifdef USE_MYSQL
-  const bool replication_unavailable =
-      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !replication_paused_for_dump);
+  const bool replication_unavailable = (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() &&
+                                        !binlog_reader_->IsStarting() && !replication_paused_for_dump);
 #else
   const bool replication_unavailable = false;
 #endif
@@ -1867,17 +1915,29 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
   // Binlog component (if available)
   if (binlog_reader_ != nullptr) {
     json binlog_comp;
-    if (binlog_reader_->IsRunning()) {
-      binlog_comp["status"] = "connected";
-      binlog_comp["running"] = true;
+    const auto replication_state = binlog_reader_->GetReplicationState();
+    const bool replication_starting = binlog_reader_->IsStarting();
+    if (replication_state == mysql::ReplicationState::kRunning || replication_starting) {
+      binlog_comp["status"] = replication_starting ? "starting" : "connected";
+      binlog_comp["running"] = !replication_starting;
+      binlog_comp["starting"] = replication_starting;
       binlog_comp["current_gtid"] = binlog_reader_->GetCurrentGTID();
       binlog_comp["processed_events"] = binlog_reader_->GetProcessedEvents();
       binlog_comp["queue_size"] = binlog_reader_->GetQueueSize();
     } else {
-      binlog_comp["status"] = replication_paused_for_dump ? "paused_for_dump" : "disconnected";
+      binlog_comp["status"] = replication_paused_for_dump
+                                  ? "paused_for_dump"
+                                  : (replication_state == mysql::ReplicationState::kFailed ? "failed" : "disconnected");
       binlog_comp["running"] = false;
       binlog_comp["paused_for_dump"] = replication_paused_for_dump;
     }
+    binlog_comp["replication_state"] = mysql::ToString(replication_state);
+    binlog_comp["crc_errors"] = binlog_reader_->GetCRCErrors();
+    binlog_comp["schema_incompatible"] = binlog_reader_->HasSchemaIncompatibleError();
+    binlog_comp["last_error_code"] = static_cast<uint16_t>(binlog_reader_->GetLastErrorCode());
+    binlog_comp["last_error"] = binlog_reader_->GetLastError();
+    binlog_comp["last_applied_unixtime"] = binlog_reader_->GetLastAppliedUnixTime();
+    binlog_comp["seconds_since_last_applied"] = binlog_reader_->GetSecondsSinceLastApplied();
     components["binlog"] = binlog_comp;
   }
 #endif
@@ -1950,11 +2010,18 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
   try {
     json response;
     const bool is_running = binlog_reader_->IsRunning();
+    const auto replication_state = binlog_reader_->GetReplicationState();
     response["enabled"] = is_running;
-    response["status"] = is_running ? "running" : "stopped";
+    response["status"] = mysql::ToString(replication_state);
     response["current_gtid"] = binlog_reader_->GetCurrentGTID();
     response["processed_events"] = binlog_reader_->GetProcessedEvents();
     response["queue_size"] = binlog_reader_->GetQueueSize();
+    response["crc_errors"] = binlog_reader_->GetCRCErrors();
+    response["schema_incompatible"] = binlog_reader_->HasSchemaIncompatibleError();
+    response["last_error_code"] = static_cast<uint16_t>(binlog_reader_->GetLastErrorCode());
+    response["last_error"] = binlog_reader_->GetLastError();
+    response["last_applied_unixtime"] = binlog_reader_->GetLastAppliedUnixTime();
+    response["seconds_since_last_applied"] = binlog_reader_->GetSecondsSinceLastApplied();
 
     SendJson(res, kHttpOk, response);
 
@@ -1971,6 +2038,83 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
 #endif
 }
 
+void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& res) {
+  RecordRequest();
+
+  if (!HasJsonContentType(req)) {
+    SendError(res, kHttpUnsupportedMediaType, "Content-Type must be application/json");
+    return;
+  }
+
+  if (full_config_ != nullptr && !full_config_->api.admin_token.empty()) {
+    constexpr std::string_view kBearerPrefix = "Bearer ";
+    const std::string authorization = req.get_header_value("Authorization");
+    const bool has_bearer = authorization.size() >= kBearerPrefix.size() &&
+                            std::string_view(authorization).substr(0, kBearerPrefix.size()) == kBearerPrefix;
+    const std::string_view supplied =
+        has_bearer ? std::string_view(authorization).substr(kBearerPrefix.size()) : std::string_view{};
+    if (!has_bearer || !ConstantTimeEqual(supplied, full_config_->api.admin_token)) {
+      res.set_header("WWW-Authenticate", "Bearer");
+      SendError(res, kHttpUnauthorized, "Administrative endpoint requires a valid bearer token");
+      return;
+    }
+  }
+
+  json body;
+  try {
+    body = json::parse(req.body);
+  } catch (const json::parse_error& error) {
+    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(error.what()));
+    return;
+  }
+  if (!body.is_object()) {
+    SendError(res, kHttpBadRequest, "Request body must be a JSON object");
+    return;
+  }
+  for (const auto& [key, value] : body.items()) {
+    (void)value;
+    if (key != "table") {
+      SendError(res, kHttpBadRequest, "Unsupported field: " + key);
+      return;
+    }
+  }
+
+  std::string table;
+  if (body.contains("table")) {
+    if (!body["table"].is_string()) {
+      SendError(res, kHttpBadRequest, "Field 'table' must be a string");
+      return;
+    }
+    table = body["table"].get<std::string>();
+    auto lookup = ResolveHttpTableContext(table);
+    if (lookup.table_ctx == nullptr) {
+      SendError(res, lookup.status, lookup.message);
+      return;
+    }
+    table = std::move(lookup.table_key);
+  }
+
+  if (!optimize_callback_) {
+    SendError(res, kHttpServiceUnavailable, "OPTIMIZE handler is not available");
+    return;
+  }
+
+  RecordCommand(query::QueryType::OPTIMIZE);
+  const std::string result = optimize_callback_(table);
+  constexpr std::string_view kOkPrefix = "OK ";
+  constexpr std::string_view kErrorPrefix = "ERROR ";
+  if (result.rfind(kOkPrefix, 0) == 0) {
+    json response;
+    response["status"] = "ok";
+    response["result"] = result.substr(kOkPrefix.size());
+    SendJson(res, kHttpOk, response);
+    return;
+  }
+
+  const std::string message = result.rfind(kErrorPrefix, 0) == 0 ? result.substr(kErrorPrefix.size()) : result;
+  SendError(res, kHttpServiceUnavailable, message);
+}
+
 void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Response& res) {
   RecordRequest();
 
@@ -1984,8 +2128,8 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
     StatisticsService::UpdateServerStatistics(effective_stats, aggregated_metrics);
 
     // Format response
-    std::string metrics = ResponseFormatter::FormatPrometheusMetrics(aggregated_metrics, effective_stats,
-                                                                     table_contexts_, binlog_reader_, cache_manager_);
+    std::string metrics = ResponseFormatter::FormatPrometheusMetrics(
+        aggregated_metrics, effective_stats, table_contexts_, binlog_reader_, cache_manager_, thread_pool_);
     res.status = kHttpOk;
     res.set_content(metrics, "text/plain; version=0.0.4; charset=utf-8");
   } catch (const std::exception& e) {

@@ -5,13 +5,15 @@
 
 #include <gtest/gtest.h>
 #include <httplib.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <set>
-#include <sstream>
 #include <thread>
 
 #include "cache/cache_manager.h"
@@ -23,7 +25,6 @@
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
 #include "support/network_test_utils.h"
-#include "utils/binary_io.h"
 
 using json = nlohmann::json;
 
@@ -32,17 +33,27 @@ namespace server {
 
 std::unique_ptr<query::SynonymDictionary> MakeHttpTestSynonymDictionary(
     const std::vector<std::vector<std::string>>& groups) {
-  std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
-  mygram::utils::WriteBinary(stream, static_cast<uint32_t>(groups.size()));
+  static std::atomic<uint64_t> counter{0};
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("mygramdb_http_synonyms_" + std::to_string(::getpid()) + "_" +
+                     std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) + ".tsv");
+  std::ofstream output(path);
   for (const auto& group : groups) {
-    mygram::utils::WriteBinary(stream, static_cast<uint32_t>(group.size()));
-    for (const auto& term : group) {
-      mygram::utils::WriteString(stream, term);
+    for (size_t i = 0; i < group.size(); ++i) {
+      if (i != 0) {
+        output << '\t';
+      }
+      output << group[i];
     }
+    output << '\n';
   }
-  stream.seekg(0);
+  output.close();
+
   auto dictionary = std::make_unique<query::SynonymDictionary>();
-  return dictionary->LoadFromStream(stream) ? std::move(dictionary) : nullptr;
+  const auto loaded = dictionary->LoadFromFile(path.string(), [](std::string_view term) { return std::string(term); });
+  std::error_code remove_error;
+  std::filesystem::remove(path, remove_error);
+  return loaded ? std::move(dictionary) : nullptr;
 }
 
 class HttpServerTest : public ::testing::Test {
@@ -202,6 +213,30 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   EXPECT_FALSE(paged_body["results"][1].contains("doc_id"));
   EXPECT_EQ(paged_body["results"][0]["primary_key"], "article_2");
   EXPECT_EQ(paged_body["results"][1]["primary_key"], "article_1");
+}
+
+TEST_F(HttpServerTest, JsonEndpointsRequireApplicationJsonContentType) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  const json search_body = {{"q", "machine"}};
+  const json facet_body = {{"column", "category"}};
+
+  auto search = client.Post("/tables/test/search", search_body.dump(), "text/plain");
+  ASSERT_TRUE(search);
+  EXPECT_EQ(search->status, 415);
+
+  auto count = client.Post("/tables/test/count", search_body.dump(), "text/plain");
+  ASSERT_TRUE(count);
+  EXPECT_EQ(count->status, 415);
+
+  auto facet = client.Post("/tables/test/facet", facet_body.dump(), "text/plain");
+  ASSERT_TRUE(facet);
+  EXPECT_EQ(facet->status, 415);
+
+  auto accepted = client.Post("/tables/test/search", search_body.dump(), "application/json; charset=utf-8");
+  ASSERT_TRUE(accepted);
+  EXPECT_EQ(accepted->status, 200);
 }
 
 TEST_F(HttpServerTest, DbQualifiedTableRoutesResolveWithoutTopLevelCollision) {
@@ -703,6 +738,24 @@ TEST_F(HttpServerTest, SearchRejectsOversizedHighlightTags) {
   EXPECT_NE(error_str.find("at most 256 bytes"), std::string::npos);
 }
 
+TEST_F(HttpServerTest, SearchCountsJsonFiltersAndHighlightTagsTowardQueryLength) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  json request_body;
+  request_body["q"] = "x";
+  request_body["filters"] = {{"status", std::string(50, 'a')}};
+  request_body["highlight"] = {{"open_tag", std::string(40, 'b')}, {"close_tag", std::string(40, 'c')}};
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  const auto body = json::parse(res->body);
+  ASSERT_TRUE(body.contains("error"));
+  EXPECT_NE(body["error"].get<std::string>().find("Query expression length"), std::string::npos);
+}
+
 TEST_F(HttpServerTest, SearchInvalidBooleanExpressionReturnsBadRequest) {
   ASSERT_TRUE(http_server_->Start());
 
@@ -741,6 +794,10 @@ TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
 }
 
 TEST_F(HttpServerTest, SearchAllowsMaximumJsonFilterCount) {
+  // This test isolates the filter-count boundary from the independent query
+  // expression length guard.
+  http_server_->UpdateApiConfig(config_->api.default_limit, /*max_query_length=*/0);
+
   storage::FilterMap filters;
   json request_filters = json::object();
   for (size_t i = 0; i < query::QueryParser::kMaxTermCount; ++i) {
@@ -827,6 +884,18 @@ TEST_F(HttpServerTest, SearchRejectsOversizedJsonFilterColumn) {
   auto body = json::parse(res->body);
   ASSERT_TRUE(body.contains("error"));
   EXPECT_NE(body["error"].get<std::string>().find("Invalid filter column"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, SearchRejectsNonAsciiJsonFilterColumn) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  const json request_body = {{"q", "machine"}, {"filters", {{"状態", "active"}}}};
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+  EXPECT_NE(json::parse(res->body)["error"].get<std::string>().find("Invalid filter column"), std::string::npos);
 }
 
 TEST_F(HttpServerTest, SearchRejectsOversizedJsonFilterValue) {

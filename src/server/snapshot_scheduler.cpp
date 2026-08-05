@@ -18,6 +18,8 @@
 #include "mysql/binlog_reader_interface.h"
 #include "server/log_field_names.h"
 #include "server/replication_pause_counter.h"
+#include "server/server_stats.h"
+#include "server/server_types.h"
 #include "server/sync_operation_manager.h"
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
@@ -64,7 +66,8 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
                                      replication_pause::Counter* replication_pause_counter,
                                      std::atomic<bool>* dump_load_in_progress, SyncOperationManager* sync_manager,
                                      std::function<bool()> sync_in_progress_checker,
-                                     std::atomic<bool>* optimization_in_progress, std::atomic<bool>* shutdown_requested)
+                                     std::atomic<bool>* optimization_in_progress, std::atomic<bool>* shutdown_requested,
+                                     DumpProgress* dump_progress, ServerStats* stats)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
@@ -78,7 +81,9 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
                                                                       : &local_replication_pause_counter_),
       sync_manager_(sync_manager),
       sync_in_progress_checker_(std::move(sync_in_progress_checker)),
-      shutdown_requested_(shutdown_requested) {
+      shutdown_requested_(shutdown_requested),
+      dump_progress_(dump_progress),
+      stats_(stats) {
   // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
   // which is the only production caller. Tests must also provide a non-null catalog.
 }
@@ -259,6 +264,10 @@ void SnapshotScheduler::TakeSnapshot() {
 
     std::filesystem::path dump_path = std::filesystem::path(dump_dir_) / filename.str();
 
+    if (dump_progress_ != nullptr) {
+      dump_progress_->Reset(DumpStatus::SAVING, dump_path.string(), catalog_->GetTables().size());
+    }
+
     mygram::utils::StructuredLog()
         .Event("snapshot_taking")
         .Field(log_fields::kFieldFilepath, dump_path.string())
@@ -313,27 +322,6 @@ void SnapshotScheduler::TakeSnapshot() {
     } else if (binlog_reader_ != nullptr) {
       gtid = binlog_reader_->GetCurrentGTID();
     }
-    if (binlog_reader_ != nullptr && gtid.empty()) {
-      mygram::utils::StructuredLog()
-          .Event("auto_snapshot_skipped")
-          .Field("reason", "replication GTID is empty")
-          .Field(log_fields::kFieldFilepath, dump_path.string())
-          .Error();
-      return;
-    }
-    if (replication_pause_acquired) {
-      // We are the first pauser: actually stop the reader and assert the
-      // observable flag. Subsequent pausers piggy-back on this Stop().
-      // If first_pauser is false, another operation already owns the Stop().
-      mygram::utils::StructuredLog()
-          .Event("replication_paused_for_dump")
-          .Field("operation", "snapshot")
-          .Field("filepath", dump_path.string())
-          .Field("auto_resume", "true")
-          .Field("first_pauser", first_pauser)
-          .Info();
-    }
-
     // RAII restore: even on exception or early return, replication is resumed
     // (when we are the last releaser) and the paused flag is cleared. The
     // lambda captures the dump_path string by value defensively; structured-
@@ -393,35 +381,92 @@ void SnapshotScheduler::TakeSnapshot() {
                 .Error();
           }
         });
+
+    if (replication_pause_acquired) {
+      // We are the first pauser: actually stop the reader and assert the
+      // observable flag. Subsequent pausers piggy-back on this Stop().
+      // If first_pauser is false, another operation already owns the Stop().
+      mygram::utils::StructuredLog()
+          .Event("replication_paused_for_dump")
+          .Field("operation", "snapshot")
+          .Field("filepath", dump_path.string())
+          .Field("auto_resume", "true")
+          .Field("first_pauser", first_pauser)
+          .Info();
+    }
+    if (binlog_reader_ != nullptr && gtid.empty()) {
+      mygram::utils::StructuredLog()
+          .Event("auto_snapshot_skipped")
+          .Field("reason", "replication GTID is empty")
+          .Field(log_fields::kFieldFilepath, dump_path.string())
+          .Error();
+      if (dump_progress_ != nullptr) {
+        dump_progress_->Fail("Scheduled snapshot skipped: replication GTID is empty");
+      }
+      if (stats_ != nullptr) {
+        stats_->IncrementDumpFailureAuto();
+      }
+      return;
+    }
 #endif
 
     // Get dumpable contexts from catalog
     auto dumpable = catalog_->GetDumpableContexts();
+    std::string source_server_uuid;
+#ifdef USE_MYSQL
+    if (binlog_reader_ != nullptr) {
+      source_server_uuid = binlog_reader_->GetSourceServerUUID();
+    }
+#endif
 
     // Perform save using dump API (writes V2 format)
     auto result = storage::dump_v2::WriteDump(
-        dump_path.string(), gtid, *full_config_, dumpable, nullptr, nullptr, {},
+        dump_path.string(), gtid, *full_config_, dumpable, nullptr, nullptr,
+        [this](const std::string& table_name, size_t tables_processed) {
+          if (dump_progress_ != nullptr) {
+            dump_progress_->UpdateTable(table_name, tables_processed);
+          }
+        },
         storage::dump_v2::RestoreLimits{
             static_cast<uint64_t>(full_config_->dump.restore_memory_budget_mb) * 1024ULL * 1024ULL,
-            static_cast<uint64_t>(full_config_->dump.restore_max_section_mb) * 1024ULL * 1024ULL});
+            static_cast<uint64_t>(full_config_->dump.restore_max_section_mb) * 1024ULL * 1024ULL},
+        source_server_uuid);
 
     if (result) {
       mygram::utils::StructuredLog()
           .Event("snapshot_completed")
           .Field(log_fields::kFieldFilepath, dump_path.string())
           .Info();
+      if (dump_progress_ != nullptr) {
+        dump_progress_->Complete(dump_path.string());
+      }
+      if (stats_ != nullptr) {
+        stats_->RecordDumpSuccess();
+      }
     } else {
       mygram::utils::StructuredLog()
           .Event("snapshot_save_failed")
           .Field(log_fields::kFieldFilepath, dump_path.string())
           .Field(log_fields::kFieldError, result.error().message())
           .Error();
+      if (dump_progress_ != nullptr) {
+        dump_progress_->Fail("Scheduled snapshot failed: " + result.error().message());
+      }
+      if (stats_ != nullptr) {
+        stats_->IncrementDumpFailureAuto();
+      }
     }
 
     // restore_replication runs here (when in scope), resuming replication
     // before dump_save_guard releases the dump_save_in_progress flag.
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog().Event("snapshot_save_exception").Field(log_fields::kFieldError, e.what()).Error();
+    if (dump_progress_ != nullptr) {
+      dump_progress_->Fail("Scheduled snapshot exception: " + std::string(e.what()));
+    }
+    if (stats_ != nullptr) {
+      stats_->IncrementDumpFailureAuto();
+    }
   }
 }
 

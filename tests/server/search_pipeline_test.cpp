@@ -15,10 +15,13 @@
 #include "server/search_pipeline.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
-#include <sstream>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -33,22 +36,31 @@
 #include "query/synonym_dictionary.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
-#include "utils/binary_io.h"
 
 namespace mygramdb::server::search_pipeline {
 
 std::unique_ptr<query::SynonymDictionary> MakeSynonymDictionary(const std::vector<std::vector<std::string>>& groups) {
-  std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
-  mygram::utils::WriteBinary(stream, static_cast<uint32_t>(groups.size()));
+  static std::atomic<uint64_t> counter{0};
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("mygramdb_pipeline_synonyms_" + std::to_string(::getpid()) + "_" +
+                     std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) + ".tsv");
+  std::ofstream output(path);
   for (const auto& group : groups) {
-    mygram::utils::WriteBinary(stream, static_cast<uint32_t>(group.size()));
-    for (const auto& term : group) {
-      mygram::utils::WriteString(stream, term);
+    for (size_t i = 0; i < group.size(); ++i) {
+      if (i != 0) {
+        output << '\t';
+      }
+      output << group[i];
     }
+    output << '\n';
   }
-  stream.seekg(0);
+  output.close();
+
   auto dictionary = std::make_unique<query::SynonymDictionary>();
-  if (!dictionary->LoadFromStream(stream)) {
+  const auto loaded = dictionary->LoadFromFile(path.string(), [](std::string_view term) { return std::string(term); });
+  std::error_code remove_error;
+  std::filesystem::remove(path, remove_error);
+  if (!loaded) {
     return nullptr;
   }
   return dictionary;
@@ -309,13 +321,19 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheWithStaleDataVersionDoesNotInsert)
   query.table = "test";
   query.search_text = "alpha";
   query.limit = 100;
+  index::Index cache_index(2);
+  FullPipelineParams pipeline_params;
+  pipeline_params.current_index = &cache_index;
+  pipeline_params.ngram_size = 2;
+  pipeline_params.kanji_ngram_size = 2;
+  const query::Query cache_query = BuildCanonicalCacheQuery(query, pipeline_params);
 
   std::vector<SearchTermInfo> term_infos = {{{"al", "lp", "ph", "ha"}, 4, 0, "alpha"}};
   const auto stale_version = cache_manager.CaptureDataVersion();
   cache_manager.Invalidate("test", "", "unrelated mutation");
 
-  InsertToCache(&cache_manager, query, doc_ids_, term_infos, 1.0, 2, 0, false, stale_version);
-  EXPECT_FALSE(cache_manager.Lookup(query).has_value());
+  InsertToCache(&cache_manager, cache_query, doc_ids_, term_infos, 1.0, 2, 0, false, stale_version);
+  EXPECT_FALSE(cache_manager.Lookup(cache_query).has_value());
 }
 
 TEST_F(SearchPipelineFilterTest, InsertToCacheSkipsEmptyNgramTerms) {
@@ -337,12 +355,18 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheSkipsEmptyNgramTerms) {
   query.table = "test";
   query.search_text = "a";
   query.limit = 100;
+  index::Index cache_index(2);
+  FullPipelineParams pipeline_params;
+  pipeline_params.current_index = &cache_index;
+  pipeline_params.ngram_size = 2;
+  pipeline_params.kanji_ngram_size = 2;
+  const query::Query cache_query = BuildCanonicalCacheQuery(query, pipeline_params);
 
   std::vector<SearchTermInfo> term_infos = {{{}, std::numeric_limits<size_t>::max(), 0, "a"}};
 
-  InsertToCache(&cache_manager, query, doc_ids_, term_infos, 1.0, 2, 2, false);
+  InsertToCache(&cache_manager, cache_query, doc_ids_, term_infos, 1.0, 2, 2, false);
 
-  EXPECT_FALSE(cache_manager.Lookup(query).has_value());
+  EXPECT_FALSE(cache_manager.Lookup(cache_query).has_value());
 }
 
 TEST(SearchPipelineCacheTest, MergeSortedTermNgramsForCacheUsesKWaySortedUniqueMerge) {
@@ -380,15 +404,19 @@ TEST(SearchPipelineBM25Test, GenerateTermInfosSkipsDocumentFrequencyByDefault) {
   EXPECT_EQ(term_infos[0].normalized_term, "abc");
 }
 
-TEST(SearchPipelineBM25Test, GenerateTermInfosUsesTermIntersectionForDocumentFrequencyWhenRequested) {
+TEST(SearchPipelineBM25Test, GenerateTermInfosUsesVerifiedTermDocumentFrequencyWhenRequested) {
   index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
-  index.AddDocument(1, "abc");
-  index.AddDocument(2, "abq");
-  index.AddDocument(3, "xbc");
+  storage::DocumentStore doc_store;
+  auto exact = doc_store.AddDocument("1", {}, "abc");
+  auto false_positive = doc_store.AddDocument("2", {}, "abxxbc");
+  ASSERT_TRUE(exact.has_value());
+  ASSERT_TRUE(false_positive.has_value());
+  index.AddDocument(*exact, "abc");
+  index.AddDocument(*false_positive, "abxxbc");
 
   auto term_infos = GenerateTermInfos({"abc"}, &index, /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
                                       /* cross_boundary_ngrams= */ true,
-                                      /*compute_term_doc_freq=*/true);
+                                      /*compute_term_doc_freq=*/true, &doc_store);
 
   ASSERT_EQ(term_infos.size(), 1);
   EXPECT_EQ(term_infos[0].ngrams, (std::vector<std::string>{"ab", "bc"}));
@@ -400,13 +428,20 @@ TEST(SearchPipelineBM25Test, GenerateTermInfosUsesTermIntersectionForDocumentFre
 
 TEST(SearchPipelineBM25Test, TermDocumentFrequencyStaysPairedWithNormalizedTermAfterSorting) {
   index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
-  index.AddDocument(1, "rare common");
-  index.AddDocument(2, "common only");
-  index.AddDocument(3, "common extra");
+  storage::DocumentStore doc_store;
+  auto first = doc_store.AddDocument("1", {}, "rare common");
+  auto second = doc_store.AddDocument("2", {}, "common only");
+  auto third = doc_store.AddDocument("3", {}, "common extra");
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(third.has_value());
+  index.AddDocument(*first, "rare common");
+  index.AddDocument(*second, "common only");
+  index.AddDocument(*third, "common extra");
 
   auto term_infos = GenerateTermInfos({"common", "rare"}, &index, /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
                                       /* cross_boundary_ngrams= */ true,
-                                      /*compute_term_doc_freq=*/true);
+                                      /*compute_term_doc_freq=*/true, &doc_store);
   std::sort(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& lhs, const SearchTermInfo& rhs) {
     return lhs.estimated_size < rhs.estimated_size;
   });
@@ -418,6 +453,25 @@ TEST(SearchPipelineBM25Test, TermDocumentFrequencyStaysPairedWithNormalizedTermA
   ASSERT_EQ(term_infos[1].normalized_term, "common");
   EXPECT_EQ(term_infos[1].term_doc_freq, 3u);
   EXPECT_TRUE(term_infos[1].term_doc_freq_computed);
+}
+
+TEST(SearchPipelineBM25Test, CjkDocumentFrequencyExcludesUnorderedUnigramCandidates) {
+  index::Index index(/* ngram_size= */ 2, /* kanji_ngram_size= */ 1);
+  storage::DocumentStore doc_store;
+  auto exact = doc_store.AddDocument("1", {}, "東京");
+  auto false_positive = doc_store.AddDocument("2", {}, "東西京");
+  ASSERT_TRUE(exact.has_value());
+  ASSERT_TRUE(false_positive.has_value());
+  index.AddDocument(*exact, "東京");
+  index.AddDocument(*false_positive, "東西京");
+
+  auto term_infos = GenerateTermInfos({"東京"}, &index, /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                      /* cross_boundary_ngrams= */ true,
+                                      /*compute_term_doc_freq=*/true, &doc_store);
+
+  ASSERT_EQ(term_infos.size(), 1);
+  EXPECT_EQ(term_infos[0].term_doc_freq, 1U);
+  EXPECT_TRUE(term_infos[0].term_doc_freq_computed);
 }
 
 // =============================================================================
@@ -925,7 +979,7 @@ TEST_F(FullPipelineTest, SharedFacetPipelineRechecksLoadingAfterSnapshot) {
   auto output = ExecuteFacetPipeline(query, params);
 
   ASSERT_FALSE(output.has_value());
-  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kServerShuttingDown);
+  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kServerLoading);
 }
 
 TEST_F(FullPipelineTest, SingleTermNgramAndReproducibilityIsExplicitPerExecutionPath) {
@@ -1475,18 +1529,19 @@ TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
 
   auto params = MakeParams();
   params.cache_manager = &cache_manager;
+  const query::Query cache_query = BuildCanonicalCacheQuery(query, params);
   auto output = ExecuteFullPipeline(query, params);
 
   ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
   ASSERT_FALSE(output->cache_hit);
-  ASSERT_TRUE(cache_manager.Lookup(query).has_value());
+  ASSERT_TRUE(cache_manager.Lookup(cache_query).has_value());
 
   cache_manager.Invalidate("test", "article cat", "article do");
 
-  for (int i = 0; i < 50 && cache_manager.Lookup(query).has_value(); ++i) {
+  for (int i = 0; i < 50 && cache_manager.Lookup(cache_query).has_value(); ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
-  EXPECT_FALSE(cache_manager.Lookup(query).has_value());
+  EXPECT_FALSE(cache_manager.Lookup(cache_query).has_value());
 }
 
 TEST_F(FullPipelineTest, SearchWithAndTerms) {
@@ -1828,6 +1883,30 @@ TEST_F(FullPipelineTest, FuzzySearchPath) {
   EXPECT_GE(output->results.size(), 1);
 }
 
+TEST_F(FullPipelineTest, FuzzyCjkSearchVerifiesContinuousTextByCodepointWindow) {
+  auto cjk_doc = doc_store_->AddDocument("pk_cjk", {}, "私は東京都に住む");
+  ASSERT_TRUE(cjk_doc.has_value());
+  index_->AddDocument(*cjk_doc, "私は東京都に住む");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "東京市";
+  query.fuzzy_max_distance = 1;
+  query.limit = 100;
+
+  config::Config config;
+  config.memory.verify_text = "all";
+
+  auto params = MakeParams();
+  params.kanji_ngram_size = 1;
+  params.full_config = &config;
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*cjk_doc}));
+}
+
 TEST_F(FullPipelineTest, QueryTimeMsPopulated) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
@@ -2077,24 +2156,25 @@ TEST_F(FullPipelineCacheTest, CacheMissReasonStaleVsNotFound) {
   query.limit = 100;
 
   auto params = MakeParams();
+  const query::Query cache_query = BuildCanonicalCacheQuery(query, params);
   auto first = ExecuteFullPipeline(query, params);
   ASSERT_TRUE(first.has_value());
   ASSERT_FALSE(first->results.empty());
 
   // Removing a doc that appears in the cached result set causes
-  // GetPrimaryKeysBatch to return an empty primary key for that DocId, which
+  // GetPrimaryKeysBatch to return no primary key for that DocId, which
   // IsCacheStale flags as stale.
   doc_store_->RemoveDocument(first->results.front());
 
   CacheMissReason reason = CacheMissReason::kHit;
-  auto stale_result = TryCacheLookup(query, cache_manager_.get(), doc_store_.get(), &reason);
+  auto stale_result = TryCacheLookup(cache_query, cache_manager_.get(), doc_store_.get(), &reason);
   EXPECT_FALSE(stale_result.has_value());
   EXPECT_EQ(reason, CacheMissReason::kStale);
 
   // Staleness detection must remove the resident key. Otherwise the next
   // completed search cannot be cached because QueryCache sees a duplicate.
-  EXPECT_FALSE(cache_manager_->Lookup(query).has_value());
-  EXPECT_TRUE(cache_manager_->Insert(query, {999}, {"learning"}, 1.0, 2, 0, false));
+  EXPECT_FALSE(cache_manager_->Lookup(cache_query).has_value());
+  EXPECT_TRUE(cache_manager_->Insert(cache_query, {999}, {"learning"}, 1.0, 2, 0, false));
 }
 
 // =============================================================================

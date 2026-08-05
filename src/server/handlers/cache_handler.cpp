@@ -93,7 +93,9 @@ std::string CacheHandler::HandleStats() {
   oss << "ttl_expirations: " << stats.ttl_expirations << "\r\n";
   oss << "rejection_count: " << stats.rejection_count << "\r\n";
   oss << "rejection_oversize: " << stats.rejection_oversize << "\r\n";
+  oss << "rejection_memory_budget: " << stats.rejection_memory_budget << "\r\n";
   oss << "rejection_duplicate: " << stats.rejection_duplicate << "\r\n";
+  oss << "stale_entry_removals: " << stats.stale_entry_removals << "\r\n";
   oss << "decompression_failures: " << stats.decompression_failures << "\r\n";
   oss << "stale_lru_entries: " << stats.stale_lru_entries << "\r\n";
 

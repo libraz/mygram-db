@@ -52,15 +52,12 @@ std::optional<std::string> ResolveTableKey(const std::unordered_map<std::string,
  * - Manage table contexts
  * - Provide encapsulated access patterns
  * - Convert table contexts for dump operations
- * - Centralize read_only and loading state management
  * - Delegate metric aggregation to StatisticsService
  *
  * Design principles:
  * - Single source of truth for table operations
  * - Immutable post-construction: the table map is built once at startup and
- *   never mutated, so read access requires no synchronization. Mutating
- *   per-catalog state (read-only / loading flags) uses std::atomic.
- * - Consistent state management
+ *   never mutated, so read access requires no synchronization.
  */
 class TableCatalog {
  public:
@@ -132,30 +129,6 @@ class TableCatalog {
   std::unordered_map<std::string, std::pair<index::Index*, storage::DocumentStore*>> GetDumpableContexts() const;
 
   /**
-   * @brief Set read-only mode for catalog
-   * @param read_only Read-only flag
-   */
-  void SetReadOnly(bool read_only);
-
-  /**
-   * @brief Set loading mode for catalog
-   * @param loading Loading flag
-   */
-  void SetLoading(bool loading);
-
-  /**
-   * @brief Check if catalog is in read-only mode
-   * @return true if read-only
-   */
-  bool IsReadOnly() const { return read_only_.load(); }
-
-  /**
-   * @brief Check if catalog is in loading mode
-   * @return true if loading
-   */
-  bool IsLoading() const { return loading_.load(); }
-
-  /**
    * @brief Aggregate metrics across all tables
    *
    * This method delegates to StatisticsService for consistency.
@@ -183,8 +156,6 @@ class TableCatalog {
   // tables_ is immutable post-construction. Access is safe without locking
   // from any thread; see class-level Doxygen.
   std::unordered_map<std::string, TableContext*> tables_;
-  std::atomic<bool> read_only_{false};
-  std::atomic<bool> loading_{false};
 };
 
 }  // namespace mygramdb::server

@@ -2,13 +2,14 @@
  * @file table_catalog_test.cpp
  * @brief Unit tests for TableCatalog class
  *
- * Tests table context management, lookup, and state flag operations.
+ * Tests table context management and lookup operations.
  */
 
 #include "server/table_catalog.h"
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <thread>
@@ -213,66 +214,6 @@ TEST_F(TableCatalogTest, GetDumpableContextsEmptyCatalog) {
 }
 
 // ===========================================================================
-// ReadOnly flag tests
-// ===========================================================================
-
-TEST_F(TableCatalogTest, ReadOnlyInitiallyFalse) {
-  TableCatalog catalog(tables_);
-
-  EXPECT_FALSE(catalog.IsReadOnly());
-}
-
-TEST_F(TableCatalogTest, SetReadOnlyTrue) {
-  TableCatalog catalog(tables_);
-
-  catalog.SetReadOnly(true);
-  EXPECT_TRUE(catalog.IsReadOnly());
-}
-
-TEST_F(TableCatalogTest, SetReadOnlyFalse) {
-  TableCatalog catalog(tables_);
-
-  catalog.SetReadOnly(true);
-  catalog.SetReadOnly(false);
-  EXPECT_FALSE(catalog.IsReadOnly());
-}
-
-TEST_F(TableCatalogTest, SetReadOnlyToggle) {
-  TableCatalog catalog(tables_);
-
-  for (int i = 0; i < 10; ++i) {
-    bool expected = (i % 2 == 0);
-    catalog.SetReadOnly(expected);
-    EXPECT_EQ(catalog.IsReadOnly(), expected);
-  }
-}
-
-// ===========================================================================
-// Loading flag tests
-// ===========================================================================
-
-TEST_F(TableCatalogTest, LoadingInitiallyFalse) {
-  TableCatalog catalog(tables_);
-
-  EXPECT_FALSE(catalog.IsLoading());
-}
-
-TEST_F(TableCatalogTest, SetLoadingTrue) {
-  TableCatalog catalog(tables_);
-
-  catalog.SetLoading(true);
-  EXPECT_TRUE(catalog.IsLoading());
-}
-
-TEST_F(TableCatalogTest, SetLoadingFalse) {
-  TableCatalog catalog(tables_);
-
-  catalog.SetLoading(true);
-  catalog.SetLoading(false);
-  EXPECT_FALSE(catalog.IsLoading());
-}
-
-// ===========================================================================
 // GetTables tests
 // ===========================================================================
 
@@ -320,42 +261,6 @@ TEST_F(TableCatalogTest, ConcurrentReadAccess) {
 
   // All reads should succeed
   EXPECT_EQ(success_count.load(), 10 * 100 * 3);
-}
-
-TEST_F(TableCatalogTest, ConcurrentFlagAccess) {
-  TableCatalog catalog(tables_);
-
-  std::vector<std::thread> threads;
-  std::atomic<bool> error_detected{false};
-
-  // Writers toggle flags
-  for (int i = 0; i < 5; ++i) {
-    threads.emplace_back([&catalog, &error_detected]() {
-      for (int j = 0; j < 100; ++j) {
-        catalog.SetReadOnly(j % 2 == 0);
-        catalog.SetLoading(j % 3 == 0);
-      }
-    });
-  }
-
-  // Readers check flags
-  for (int i = 0; i < 5; ++i) {
-    threads.emplace_back([&catalog, &error_detected]() {
-      for (int j = 0; j < 100; ++j) {
-        // Just ensure no crash - value is indeterminate due to concurrent writes
-        bool ro = catalog.IsReadOnly();
-        bool ld = catalog.IsLoading();
-        (void)ro;
-        (void)ld;
-      }
-    });
-  }
-
-  for (auto& thread : threads) {
-    thread.join();
-  }
-
-  EXPECT_FALSE(error_detected.load());
 }
 
 // ===========================================================================

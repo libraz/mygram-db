@@ -655,9 +655,8 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     }
 
     // Capture exactly one current configuration snapshot for this complete
-    // operation. In particular, mysql.host and mysql.port may have changed
-    // through SET after startup; reading individual fields lazily could mix
-    // values from different revisions.
+    // operation. Immutable MySQL endpoints remain at their startup values,
+    // while mutable settings must still come from one coherent snapshot.
     const auto current_config = GetCurrentConfigSnapshot();
     if (!current_config.has_value()) {
       update_state([](SyncState& state) {

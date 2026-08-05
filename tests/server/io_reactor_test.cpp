@@ -800,6 +800,37 @@ TEST_F(IoReactorTest, ActiveConnectionIsNotReaped) {
   reactor->Stop();
 }
 
+TEST_F(IoReactorTest, RequestInFlightIsNotReapedUntilWorkerCompletes) {
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 50;
+  cfg.idle_timeout_sec = 1;
+  cfg.reaper_interval_sec = 1;
+
+  auto pool = std::make_unique<ThreadPool>(1, 16);
+  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  ASSERT_TRUE(reactor->Start());
+
+  SocketPair sp;
+  const int client_fd = sp.TakeClient();
+  auto conn = ReactorConnection::Create(client_fd, reactor.get(), nullptr, pool.get());
+  ASSERT_TRUE(reactor->Register(conn));
+
+  // Model a request that has been accepted by the drain worker but whose
+  // handler has not emitted a response yet. Its socket activity timestamp
+  // intentionally remains stale for longer than idle_timeout_sec.
+  conn->SetDrainScheduledForTest(true);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+  EXPECT_EQ(reactor->ConnectionCount(), 1u) << "An executing request must not be reaped as idle";
+
+  // Once the worker releases its slot, the unchanged idle timestamp makes
+  // the connection eligible on the next sweep.
+  conn->SetDrainScheduledForTest(false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  EXPECT_EQ(reactor->ConnectionCount(), 0u) << "Completed work must not disable normal idle reaping";
+
+  reactor->Stop();
+}
+
 TEST_F(IoReactorTest, InitialReadTimeoutClosesConnectionDespitePartialBytes) {
   ReactorConfig cfg;
   cfg.poll_timeout_ms = 50;

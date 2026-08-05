@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 
@@ -67,6 +68,19 @@ struct Statistics {
   uint64_t repl_deletes_skipped = 0;
   uint64_t repl_ddl_executed = 0;
   uint64_t repl_events_skipped_other_tables = 0;
+
+  // Dump/snapshot statistics
+  uint64_t dump_last_success_timestamp_seconds = 0;
+  uint64_t dump_failures_manual = 0;
+  uint64_t dump_failures_auto = 0;
+
+  // Rejected request counters, split by the enforcement surface.
+  uint64_t requests_denied_rate_limit_tcp = 0;
+  uint64_t requests_denied_rate_limit_http = 0;
+  uint64_t requests_denied_acl_tcp = 0;
+  uint64_t requests_denied_acl_http = 0;
+  uint64_t requests_denied_connection_limit_tcp = 0;
+  uint64_t requests_denied_pool_full_tcp = 0;
 };
 
 /**
@@ -82,6 +96,8 @@ struct Statistics {
 class ServerStats {
  public:
   ServerStats();
+  /// Construct with an explicit monotonic start point (primarily useful for tests).
+  explicit ServerStats(std::chrono::steady_clock::time_point steady_start_time);
   ~ServerStats() = default;
 
   // Disable copy and move
@@ -207,6 +223,43 @@ class ServerStats {
   uint64_t GetReplDdlExecuted() const { return repl_ddl_executed_.load(); }
   uint64_t GetReplEventsSkippedOtherTables() const { return repl_events_skipped_other_tables_.load(); }
 
+  /** Record a successful manual or scheduled dump using the current wall-clock timestamp. */
+  void RecordDumpSuccess();
+  void IncrementDumpFailureManual() { dump_failures_manual_.fetch_add(1, std::memory_order_relaxed); }
+  void IncrementDumpFailureAuto() { dump_failures_auto_.fetch_add(1, std::memory_order_relaxed); }
+  uint64_t GetDumpLastSuccessTimestampSeconds() const {
+    return dump_last_success_timestamp_seconds_.load(std::memory_order_relaxed);
+  }
+  uint64_t GetDumpFailuresManual() const { return dump_failures_manual_.load(std::memory_order_relaxed); }
+  uint64_t GetDumpFailuresAuto() const { return dump_failures_auto_.load(std::memory_order_relaxed); }
+
+  void IncrementRequestsDeniedRateLimitTcp() {
+    requests_denied_rate_limit_tcp_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void IncrementRequestsDeniedRateLimitHttp() {
+    requests_denied_rate_limit_http_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void IncrementRequestsDeniedAclTcp() { requests_denied_acl_tcp_.fetch_add(1, std::memory_order_relaxed); }
+  void IncrementRequestsDeniedAclHttp() { requests_denied_acl_http_.fetch_add(1, std::memory_order_relaxed); }
+  void IncrementRequestsDeniedConnectionLimitTcp() {
+    requests_denied_connection_limit_tcp_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void IncrementRequestsDeniedPoolFullTcp() { requests_denied_pool_full_tcp_.fetch_add(1, std::memory_order_relaxed); }
+  uint64_t GetRequestsDeniedRateLimitTcp() const {
+    return requests_denied_rate_limit_tcp_.load(std::memory_order_relaxed);
+  }
+  uint64_t GetRequestsDeniedRateLimitHttp() const {
+    return requests_denied_rate_limit_http_.load(std::memory_order_relaxed);
+  }
+  uint64_t GetRequestsDeniedAclTcp() const { return requests_denied_acl_tcp_.load(std::memory_order_relaxed); }
+  uint64_t GetRequestsDeniedAclHttp() const { return requests_denied_acl_http_.load(std::memory_order_relaxed); }
+  uint64_t GetRequestsDeniedConnectionLimitTcp() const {
+    return requests_denied_connection_limit_tcp_.load(std::memory_order_relaxed);
+  }
+  uint64_t GetRequestsDeniedPoolFullTcp() const {
+    return requests_denied_pool_full_tcp_.load(std::memory_order_relaxed);
+  }
+
   /**
    * @brief Reset all statistics (except start_time)
    */
@@ -215,6 +268,9 @@ class ServerStats {
  private:
   // Server start time (Unix timestamp)
   const uint64_t start_time_;
+  // Monotonic start point used for uptime calculations. Unlike wall-clock
+  // time, this does not move backwards when NTP corrects the system clock.
+  const std::chrono::steady_clock::time_point steady_start_time_;
 
   // Command counters
   std::atomic<uint64_t> cmd_search_{0};
@@ -251,6 +307,20 @@ class ServerStats {
   std::atomic<uint64_t> repl_deletes_skipped_{0};
   std::atomic<uint64_t> repl_ddl_executed_{0};
   std::atomic<uint64_t> repl_events_skipped_other_tables_{0};
+
+  // Dump/snapshot statistics
+  std::atomic<uint64_t> dump_last_success_timestamp_seconds_{0};
+  std::atomic<uint64_t> dump_failures_manual_{0};
+  std::atomic<uint64_t> dump_failures_auto_{0};
+
+  // Rejected request counters. These deliberately do not share the
+  // rate-limited logging counters: every denial is observable.
+  std::atomic<uint64_t> requests_denied_rate_limit_tcp_{0};
+  std::atomic<uint64_t> requests_denied_rate_limit_http_{0};
+  std::atomic<uint64_t> requests_denied_acl_tcp_{0};
+  std::atomic<uint64_t> requests_denied_acl_http_{0};
+  std::atomic<uint64_t> requests_denied_connection_limit_tcp_{0};
+  std::atomic<uint64_t> requests_denied_pool_full_tcp_{0};
 };
 
 }  // namespace mygramdb::server

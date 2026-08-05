@@ -172,7 +172,7 @@ TEST_F(TcpServerLifecycleTest, CleanStartStop) {
 }
 
 #ifdef USE_MYSQL
-TEST_F(TcpServerLifecycleTest, RuntimeMysqlConfigIsWiredIntoSyncManager) {
+TEST_F(TcpServerLifecycleTest, MysqlEndpointRuntimeChangesAreRejectedAndSyncUsesStartupConfig) {
   config::Config full_config;
   full_config.mysql.host = "startup-primary.internal";
   full_config.mysql.port = 3306;
@@ -185,13 +185,13 @@ TEST_F(TcpServerLifecycleTest, RuntimeMysqlConfigIsWiredIntoSyncManager) {
   ASSERT_NE(variable_manager, nullptr);
   ASSERT_NE(sync_manager, nullptr);
 
-  ASSERT_TRUE(variable_manager->SetVariable("mysql.host", "runtime-primary.internal").has_value());
-  ASSERT_TRUE(variable_manager->SetVariable("mysql.port", "4407").has_value());
+  EXPECT_FALSE(variable_manager->SetVariable("mysql.host", "runtime-primary.internal").has_value());
+  EXPECT_FALSE(variable_manager->SetVariable("mysql.port", "4407").has_value());
 
   const auto current_config = sync_manager->GetCurrentConfigSnapshotForTest();
   ASSERT_TRUE(current_config.has_value());
-  EXPECT_EQ(current_config->mysql.host, "runtime-primary.internal");
-  EXPECT_EQ(current_config->mysql.port, 4407);
+  EXPECT_EQ(current_config->mysql.host, "startup-primary.internal");
+  EXPECT_EQ(current_config->mysql.port, 3306);
   EXPECT_EQ(full_config.mysql.host, "startup-primary.internal");
   EXPECT_EQ(full_config.mysql.port, 3306);
 }

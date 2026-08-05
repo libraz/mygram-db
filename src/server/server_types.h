@@ -96,6 +96,7 @@ struct ServerConfig {
   std::vector<std::string> allow_cidrs;
   std::vector<mygram::utils::CIDR> parsed_allow_cidrs;
   std::string unix_socket_path;  // Empty = TCP mode, non-empty = UDS mode
+  std::string admin_token;
 
   /**
    * @brief Create ServerConfig from application Config
@@ -128,6 +129,7 @@ struct ServerConfig {
     sc.max_query_length = cfg.api.max_query_length;
     sc.allow_cidrs = cfg.network.allow_cidrs;
     sc.unix_socket_path = cfg.api.unix_socket.path;
+    sc.admin_token = cfg.api.admin_token;
     return sc;
   }
 };
@@ -141,6 +143,7 @@ struct ConnectionContext {
   // Atomic because the event-loop thread reads this flag while the drain-task
   // thread (command handler) may write it concurrently (see ReactorConnection).
   std::atomic<bool> debug_mode{false};
+  std::atomic<bool> admin_authenticated{false};
 };
 
 /**

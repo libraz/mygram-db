@@ -40,16 +40,24 @@ class HealthFakeBinlogReader final : public mysql::IBinlogReader {
   void Stop() override { running_.store(false, std::memory_order_release); }
 
   bool IsRunning() const override { return running_.load(std::memory_order_acquire); }
+  bool IsStarting() const override { return starting_.load(std::memory_order_acquire); }
   std::string GetCurrentGTID() const override { return "uuid:1"; }
   void SetCurrentGTID(const std::string&) override {}
   std::string GetLastError() const override { return ""; }
   uint64_t GetProcessedEvents() const override { return 7; }
   size_t GetQueueSize() const override { return 0; }
+  uint64_t GetCRCErrors() const override { return 3; }
+  bool HasSchemaIncompatibleError() const override { return false; }
+  mygram::utils::ErrorCode GetLastErrorCode() const override { return mygram::utils::ErrorCode::kSuccess; }
+  int64_t GetLastAppliedUnixTime() const override { return 1722840000; }
+  int64_t GetSecondsSinceLastApplied() const override { return 42; }
 
   void SetRunning(bool running) { running_.store(running, std::memory_order_release); }
+  void SetStarting(bool starting) { starting_.store(starting, std::memory_order_release); }
 
  private:
   std::atomic<bool> running_{true};
+  std::atomic<bool> starting_{false};
 };
 
 class HealthEndpointTest : public ::testing::Test {
@@ -234,6 +242,31 @@ TEST_F(HealthEndpointTest, ReadinessProbeReflectsReplicationState) {
   EXPECT_EQ(response["reason"], "Replication is not running");
 }
 
+TEST_F(HealthEndpointTest, ReadinessRemainsReadyWhileReplicationIsStarting) {
+  httplib::Client client(base_url_);
+  client.set_connection_timeout(5);
+
+  binlog_reader_.SetRunning(false);
+  binlog_reader_.SetStarting(true);
+
+  auto ready = client.Get("/health/ready");
+  ASSERT_TRUE(ready);
+  EXPECT_EQ(ready->status, 200);
+  const auto ready_body = json::parse(ready->body);
+  EXPECT_EQ(ready_body["status"], "ready");
+  EXPECT_TRUE(ready_body["replication_starting"]);
+
+  auto detail = client.Get("/health/detail");
+  ASSERT_TRUE(detail);
+  EXPECT_EQ(detail->status, 200);
+  const auto detail_body = json::parse(detail->body);
+  EXPECT_EQ(detail_body["status"], "healthy");
+  EXPECT_EQ(detail_body["components"]["binlog"]["status"], "starting");
+  EXPECT_TRUE(detail_body["components"]["binlog"]["starting"]);
+
+  binlog_reader_.SetStarting(false);
+}
+
 TEST_F(HealthEndpointTest, ReadinessRemainsReadyWhenReplicationPausedForDump) {
   httplib::Client client(base_url_);
   client.set_connection_timeout(5);
@@ -290,6 +323,10 @@ TEST_F(HealthEndpointTest, DetailedHealthReturnsComponentStatus) {
   ASSERT_TRUE(components.contains("binlog"));
   EXPECT_EQ(components["binlog"]["status"], "connected");
   EXPECT_TRUE(components["binlog"]["running"]);
+  EXPECT_EQ(components["binlog"]["crc_errors"], 3);
+  EXPECT_EQ(components["binlog"]["last_error_code"], 0);
+  EXPECT_EQ(components["binlog"]["last_applied_unixtime"], 1722840000);
+  EXPECT_EQ(components["binlog"]["seconds_since_last_applied"], 42);
 }
 
 /**

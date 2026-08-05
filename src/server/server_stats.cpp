@@ -9,7 +9,10 @@
 
 namespace mygramdb::server {
 
-ServerStats::ServerStats() : start_time_(static_cast<uint64_t>(std::time(nullptr))) {}
+ServerStats::ServerStats() : ServerStats(std::chrono::steady_clock::now()) {}
+
+ServerStats::ServerStats(std::chrono::steady_clock::time_point steady_start_time)
+    : start_time_(static_cast<uint64_t>(std::time(nullptr))), steady_start_time_(steady_start_time) {}
 
 // Per-command counters cover hot-path commands; less common commands accumulate
 // in cmd_other_. Always update GetTotalCommands and aggregate stats together
@@ -157,12 +160,26 @@ Statistics ServerStats::GetStatistics() const {
   stats.repl_ddl_executed = repl_ddl_executed_.load();
   stats.repl_events_skipped_other_tables = repl_events_skipped_other_tables_.load();
 
+  stats.dump_last_success_timestamp_seconds = dump_last_success_timestamp_seconds_.load();
+  stats.dump_failures_manual = dump_failures_manual_.load();
+  stats.dump_failures_auto = dump_failures_auto_.load();
+  stats.requests_denied_rate_limit_tcp = requests_denied_rate_limit_tcp_.load();
+  stats.requests_denied_rate_limit_http = requests_denied_rate_limit_http_.load();
+  stats.requests_denied_acl_tcp = requests_denied_acl_tcp_.load();
+  stats.requests_denied_acl_http = requests_denied_acl_http_.load();
+  stats.requests_denied_connection_limit_tcp = requests_denied_connection_limit_tcp_.load();
+  stats.requests_denied_pool_full_tcp = requests_denied_pool_full_tcp_.load();
+
   return stats;
 }
 
+void ServerStats::RecordDumpSuccess() {
+  dump_last_success_timestamp_seconds_.store(static_cast<uint64_t>(std::time(nullptr)), std::memory_order_relaxed);
+}
+
 uint64_t ServerStats::GetUptimeSeconds() const {
-  auto current_time = static_cast<uint64_t>(std::time(nullptr));
-  return current_time - start_time_;
+  const auto elapsed = std::chrono::steady_clock::now() - steady_start_time_;
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
 }
 
 uint64_t ServerStats::GetTotalCommands() const {
@@ -262,6 +279,15 @@ void ServerStats::Reset() {
   repl_deletes_skipped_.store(0);
   repl_ddl_executed_.store(0);
   repl_events_skipped_other_tables_.store(0);
+  dump_last_success_timestamp_seconds_.store(0);
+  dump_failures_manual_.store(0);
+  dump_failures_auto_.store(0);
+  requests_denied_rate_limit_tcp_.store(0);
+  requests_denied_rate_limit_http_.store(0);
+  requests_denied_acl_tcp_.store(0);
+  requests_denied_acl_http_.store(0);
+  requests_denied_connection_limit_tcp_.store(0);
+  requests_denied_pool_full_tcp_.store(0);
 
   // Note: start_time_ is NOT reset
 }

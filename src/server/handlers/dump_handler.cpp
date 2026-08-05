@@ -376,6 +376,12 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 
   // Convert table contexts to format expected by dump API
   auto converted_contexts = ctx_.table_catalog->GetDumpableContexts();
+  std::string source_server_uuid;
+#ifdef USE_MYSQL
+  if (ctx_.binlog_reader != nullptr) {
+    source_server_uuid = ctx_.binlog_reader->GetSourceServerUUID();
+  }
+#endif
 
   // Call dump API (writes V2 format)
   mygram::utils::StructuredLog()
@@ -394,7 +400,8 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
       },
       storage::dump_v2::RestoreLimits{
           static_cast<uint64_t>(ctx_.full_config->dump.restore_memory_budget_mb) * 1024ULL * 1024ULL,
-          static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) * 1024ULL * 1024ULL});
+          static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) * 1024ULL * 1024ULL},
+      source_server_uuid);
 
   mygram::utils::StructuredLog()
       .Event("dump_save_write_finished")
@@ -495,6 +502,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
     if (ctx_.dump_progress != nullptr) {
       ctx_.dump_progress->Complete(filepath);
     }
+    ctx_.stats.RecordDumpSuccess();
   } else {
     std::string error_msg = result.error().message();
     mygram::utils::StructuredLog()
@@ -506,6 +514,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
     if (ctx_.dump_progress != nullptr) {
       ctx_.dump_progress->Fail("Failed to save dump: " + error_msg);
     }
+    ctx_.stats.IncrementDumpFailureManual();
   }
 
   return success;
@@ -589,6 +598,14 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
     return ResponseFormatter::FormatError(
         "Cannot load dump while OPTIMIZE is in progress. "
         "Please wait for optimization to complete.");
+  }
+
+  // Publish the new operation before taking the generation locks below.
+  // DUMP LOAD can wait there for an in-flight request, and without this
+  // transition DUMP STATUS would keep reporting the previous DUMP SAVE as
+  // COMPLETED for the entire wait (including its stale result filepath).
+  if (ctx_.dump_progress != nullptr) {
+    ctx_.dump_progress->Reset(DumpStatus::LOADING, filepath, ctx_.table_catalog->GetTables().size());
   }
 
   std::string previous_gtid;
@@ -723,14 +740,22 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 
   // Variables to receive loaded data
   std::string gtid;
+  std::string loaded_source_server_uuid;
+  std::string expected_source_server_uuid;
+#ifdef USE_MYSQL
+  if (ctx_.binlog_reader != nullptr) {
+    expected_source_server_uuid = ctx_.binlog_reader->GetSourceServerUUID();
+  }
+#endif
   config::Config loaded_config;
   storage::dump_format::IntegrityError integrity_error;
 
   // Call dump API (auto-detects V1 or V2 format)
   auto result = storage::dump_v2::ReadDump(
       filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error,
-      [this, &previous_gtid](const config::Config& dump_config,
-                             const std::string& loaded_gtid) -> mygram::utils::Expected<void, mygram::utils::Error> {
+      [this, &previous_gtid, &expected_source_server_uuid, &loaded_source_server_uuid](
+          const config::Config& dump_config,
+          const std::string& loaded_gtid) -> mygram::utils::Expected<void, mygram::utils::Error> {
         if (ctx_.full_config == nullptr) {
           // GTID validation below does not depend on the server config.
         } else {
@@ -742,6 +767,39 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
                 .Error();
             return mygram::utils::MakeUnexpected(
                 mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, *mismatch));
+          }
+          const auto& expected_mysql = ctx_.full_config->mysql;
+          const auto& dump_mysql = dump_config.mysql;
+          if (dump_mysql.host != expected_mysql.host || dump_mysql.port != expected_mysql.port ||
+              dump_mysql.database != expected_mysql.database) {
+            const std::string detail = "dump MySQL source does not match the configured host/port/database";
+            mygram::utils::StructuredLog()
+                .Event("dump_load_rejected")
+                .Field("reason", "mysql_source_mismatch")
+                .Field("detail", detail)
+                .Error();
+            return mygram::utils::MakeUnexpected(
+                mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, detail));
+          }
+          if (!expected_source_server_uuid.empty() && loaded_source_server_uuid.empty()) {
+            const std::string detail = "dump does not record its MySQL source server UUID";
+            mygram::utils::StructuredLog()
+                .Event("dump_load_rejected")
+                .Field("reason", "missing_source_server_uuid")
+                .Field("detail", detail)
+                .Error();
+            return mygram::utils::MakeUnexpected(
+                mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, detail));
+          }
+          if (!expected_source_server_uuid.empty() && loaded_source_server_uuid != expected_source_server_uuid) {
+            const std::string detail = "dump MySQL source server UUID does not match the running source";
+            mygram::utils::StructuredLog()
+                .Event("dump_load_rejected")
+                .Field("reason", "source_server_uuid_mismatch")
+                .Field("detail", detail)
+                .Error();
+            return mygram::utils::MakeUnexpected(
+                mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, detail));
           }
         }
 
@@ -766,9 +824,11 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
       },
       ctx_.full_config == nullptr
           ? storage::dump_v2::RestoreLimits{}
-          : storage::dump_v2::RestoreLimits{
-                static_cast<uint64_t>(ctx_.full_config->dump.restore_memory_budget_mb) * 1024ULL * 1024ULL,
-                static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) * 1024ULL * 1024ULL});
+          : storage::dump_v2::RestoreLimits{static_cast<uint64_t>(ctx_.full_config->dump.restore_memory_budget_mb) *
+                                                1024ULL * 1024ULL,
+                                            static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) *
+                                                1024ULL * 1024ULL},
+      &loaded_source_server_uuid);
 
   // The loading guard remains active through replication restart and cache
   // rebuild. It is released only after the success path completes, ensuring
@@ -887,8 +947,10 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
               .Field("operation", "dump_load")
               .FieldError(start_result.error())
               .Error();
-          // Don't fail DUMP LOAD due to replication restart failure
-          // User can manually restart replication
+          // The dump contents are already installed, but reporting success
+          // would hide that replication remains stopped. Preserve the
+          // underlying restart error for the DUMP LOAD response.
+          result = mygram::utils::MakeUnexpected(start_result.error());
         }
       }
       restore_replication.Release();
@@ -911,6 +973,9 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
         .Field(log_fields::kFieldFilepath, filepath)
         .Field(log_fields::kFieldGtid, gtid)
         .Info();
+    if (ctx_.dump_progress != nullptr) {
+      ctx_.dump_progress->Complete(filepath);
+    }
     loading_guard.Release();
     return ResponseFormatter::FormatLoadResponse(filepath);
   }
@@ -929,6 +994,9 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
       .Field("error", error_msg)
       .Field("error_code", static_cast<int64_t>(result.error().code()))
       .Error();
+  if (ctx_.dump_progress != nullptr) {
+    ctx_.dump_progress->Fail(error_msg);
+  }
   return ResponseFormatter::FormatError(error_msg);
 }
 

@@ -87,6 +87,7 @@ class RequestDispatcher {
   HandlerContext& ctx_;
   std::atomic<int> default_limit_;
   std::atomic<size_t> max_query_length_;
+  std::string admin_token_;
   std::unordered_map<query::QueryType, CommandHandler*> handlers_;
 };
 

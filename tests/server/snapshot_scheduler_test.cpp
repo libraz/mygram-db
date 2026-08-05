@@ -24,6 +24,7 @@
 #include "index/index.h"
 #include "mysql/binlog_reader_interface.h"
 #include "server/replication_pause_counter.h"
+#include "server/server_stats.h"
 #include "server/server_types.h"
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
@@ -351,18 +352,21 @@ TEST_F(SnapshotSchedulerTest, CleanupRemovesOldAutoAndManualDumpTempFiles) {
   const auto old_auto_temp = test_dir_ / "auto_20240101_120000.dmp.tmp.123.456";
   const auto recent_auto_temp = test_dir_ / "auto_20240102_120000.dmp.tmp.123.456";
   const auto old_manual_temp = test_dir_ / "manual_backup.dmp.tmp.123.456";
+  const auto old_legacy_temp = test_dir_ / "legacy_backup.dmp.tmp";
   const auto recent_manual_temp = test_dir_ / "recent_backup.dmp.tmp.123.456";
   const auto unrelated_temp = test_dir_ / "notes.dmp.tmp.keep";
 
   std::ofstream(old_auto_temp) << "old temp";
   std::ofstream(recent_auto_temp) << "recent temp";
   std::ofstream(old_manual_temp) << "manual temp";
+  std::ofstream(old_legacy_temp) << "legacy temp";
   std::ofstream(recent_manual_temp) << "recent manual temp";
   std::ofstream(unrelated_temp) << "unrelated";
 
   const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
   std::filesystem::last_write_time(old_auto_temp, old_time);
   std::filesystem::last_write_time(old_manual_temp, old_time);
+  std::filesystem::last_write_time(old_legacy_temp, old_time);
   std::filesystem::last_write_time(unrelated_temp, old_time);
 
   DumpConfig dump_config;
@@ -380,6 +384,7 @@ TEST_F(SnapshotSchedulerTest, CleanupRemovesOldAutoAndManualDumpTempFiles) {
   EXPECT_FALSE(std::filesystem::exists(old_auto_temp));
   EXPECT_TRUE(std::filesystem::exists(recent_auto_temp));
   EXPECT_FALSE(std::filesystem::exists(old_manual_temp));
+  EXPECT_FALSE(std::filesystem::exists(old_legacy_temp));
   EXPECT_TRUE(std::filesystem::exists(recent_manual_temp));
   EXPECT_TRUE(std::filesystem::exists(unrelated_temp));
 }
@@ -647,8 +652,12 @@ TEST_F(SnapshotSchedulerTest, TakeSnapshotPausesAndResumesReplication) {
   dump_config.interval_sec = 1;  // Trigger a snapshot quickly
   dump_config.retain = 3;
 
+  DumpProgress dump_progress;
+  ServerStats stats;
+
   SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
-                              dump_save_in_progress_, replication_paused_for_dump_);
+                              dump_save_in_progress_, replication_paused_for_dump_, nullptr, nullptr, nullptr, {},
+                              nullptr, nullptr, &dump_progress, &stats);
 
   scheduler.Start();
   // Wait long enough for at least one snapshot cycle to run to completion.
@@ -669,6 +678,33 @@ TEST_F(SnapshotSchedulerTest, TakeSnapshotPausesAndResumesReplication) {
   // Final state: flag cleared and stub running again.
   EXPECT_FALSE(replication_paused_for_dump_.load());
   EXPECT_TRUE(stub.IsRunning()) << "Replication must be running after the snapshot completes";
+
+  const auto progress = dump_progress.GetSnapshot();
+  EXPECT_EQ(progress.status, DumpStatus::COMPLETED);
+  EXPECT_FALSE(progress.last_result_filepath.empty());
+  EXPECT_GT(stats.GetDumpLastSuccessTimestampSeconds(), 0);
+  EXPECT_EQ(stats.GetDumpFailuresAuto(), 0);
+}
+
+TEST_F(SnapshotSchedulerTest, EmptyGtidSnapshotResumesReplication) {
+  StubBinlogReader stub;
+  stub.SetRunningForTest(true);
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), &stub,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+  ASSERT_TRUE(scheduler.Start().has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  scheduler.Stop();
+
+  EXPECT_GE(stub.StopCount(), 1);
+  EXPECT_EQ(stub.StopCount(), stub.StartCount())
+      << "an empty GTID must not bypass the scope guard that resumes replication";
+  EXPECT_TRUE(stub.IsRunning());
+  EXPECT_FALSE(replication_paused_for_dump_.load(std::memory_order_acquire));
 }
 
 TEST_F(SnapshotSchedulerTest, TakeSnapshotDoesNotRestartReplicationDuringServerShutdown) {
