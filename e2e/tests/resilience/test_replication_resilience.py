@@ -15,24 +15,23 @@ class TestReplicationResilience:
     """Verify replication handles concurrent and stop/start scenarios."""
 
     def _ensure_replication_running(self, mygramdb):
-        """Ensure replication is running (with retry and sync fallback)."""
-        for _attempt in range(30):
-            status = mygramdb.replication_status()
-            if status and "running" in status.lower():
-                return
+        """Bring replication back to running and confirm the reported state.
+
+        START is rejected while a previous STOP is still winding down, so it is
+        retried until accepted; the reported state then has to agree, because
+        returning on the acknowledgement alone would let the next assertion run
+        against a reader that is not consuming yet.
+        """
+
+        def _started() -> bool:
+            if mygramdb.replication_is_running():
+                return True
             resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
-            if resp is None:
-                time.sleep(1)
-                continue
-            if "STARTED" in resp or "already" in resp.lower() or "running" in resp.lower():
-                time.sleep(1)
-                return
-            if "stopping" in resp.lower():
-                time.sleep(2)
-                continue
-            time.sleep(1)
-        # Last resort: sync to re-establish replication
-        mygramdb.sync("testdb.articles", timeout=30)
+            if resp is None or "stopping" in resp.lower():
+                return False
+            return mygramdb.replication_is_running()
+
+        wait_until(_started, timeout=40, interval=0.5, description="replication to be running")
 
     def test_stop_during_active_writes(self, mysql, mygramdb, seed_data):
         """STOP during active MySQL writes should not lose data after START."""
@@ -67,8 +66,15 @@ class TestReplicationResilience:
             writer = threading.Thread(target=insert_worker)
             writer.start()
 
-            # Wait a bit then stop replication mid-stream
-            time.sleep(0.5)
+            # Stop only once the stream is demonstrably flowing, so the STOP
+            # really does land mid-stream rather than before the first row.
+            wait_until_gte(
+                lambda: mygramdb.count("testdb.articles", marker),
+                minimum=1,
+                timeout=20,
+                interval=0.1,
+                description="the first row of the write burst to be indexed",
+            )
             mygramdb.tcp_command("REPLICATION STOP", timeout=10.0)
 
             # Wait for all inserts to complete
@@ -77,7 +83,12 @@ class TestReplicationResilience:
             assert not errors, f"Insert worker errors: {errors}"
 
             # Wait for stop to fully complete, then restart
-            time.sleep(2)
+            wait_until(
+                lambda: not mygramdb.replication_is_running(),
+                timeout=70,
+                interval=0.5,
+                description="the reader to finish stopping",
+            )
             self._ensure_replication_running(mygramdb)
 
             # All rows should eventually appear

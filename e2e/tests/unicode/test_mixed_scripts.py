@@ -1,8 +1,10 @@
 """Test mixed script and emoji handling."""
 
+import uuid
+
 import pytest
 
-from lib.wait import wait_until_gte
+from lib.wait import wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.unicode
 
@@ -45,15 +47,23 @@ class TestMixedScripts:
         )
 
     def test_emoji_content(self, mysql, mygramdb, seed_data):
-        """Content with emoji should not crash search."""
+        """Text next to an emoji stays findable.
+
+        Emoji are outside the Basic Multilingual Plane, so a byte- or UTF-16
+        oriented slip in normalization corrupts the n-grams around them rather
+        than crashing. That shows up as the neighbouring words becoming
+        unsearchable, which is what this requires -- a call that merely returned
+        a dictionary would pass with the text mangled.
+        """
+        marker = f"emoji{uuid.uuid4().hex[:8]}"
         mysql.insert_rows(
             "articles",
             [
                 {
                     "title": "Emoji Test",
                     "content": (
-                        "\U0001f389\U0001f38a\U0001f388 Party time"
-                        " celebration emoji test \U0001f973"
+                        f"\U0001f389\U0001f38a\U0001f388 Party time"
+                        f" celebration {marker} \U0001f973 aftermath"
                     ),
                     "status": 1,
                     "category": "tech",
@@ -61,14 +71,21 @@ class TestMixedScripts:
                 }
             ],
         )
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", marker),
+            expected=1,
+            timeout=20,
+            interval=0.5,
+            description="the emoji-bearing row to be indexed",
+        )
 
-        import time
-
-        time.sleep(3)
-
-        # Search for text adjacent to emoji
-        result = mygramdb.search("testdb.articles", "Party", limit=10)
-        assert isinstance(result, dict)
+        # Words on both sides of an emoji run must survive it.
+        assert mygramdb.count("testdb.articles", "Party") >= 1, (
+            "text before an emoji became unsearchable"
+        )
+        assert mygramdb.count("testdb.articles", "aftermath") >= 1, (
+            "text after an emoji became unsearchable"
+        )
 
     def test_accented_characters(self, mysql, mygramdb, seed_data):
         """Accented characters should be handled properly."""

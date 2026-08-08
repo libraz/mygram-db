@@ -78,19 +78,38 @@ def test_log_bin_compress_is_rejected_before_startup(mysql: MysqlClient, mygramd
                 }
             ],
         )
+        # A fatal event is a distinct terminal state from an operator stop: the
+        # status carries "failed" and the reason stays queryable, so asserting
+        # on "stopped" here would pass only while the two were conflated.
         wait_until(
-            lambda: _replication_status(mygramdb).get("status") == "stopped",
+            lambda: _replication_status(mygramdb).get("status") == "failed",
             timeout=20,
             interval=0.2,
             description="reader to fail closed on a MariaDB compressed row event",
         )
         after = _replication_status(mygramdb)
         assert after.get("current_gtid") == before.get("current_gtid"), (before, after)
+        assert "compressed binlog event" in after.get("last_error", ""), after
     finally:
         mysql.execute("SET GLOBAL log_bin_compress = OFF")
-        if _replication_status(mygramdb).get("status") != "running":
-            assert mygramdb.sync("testdb.articles", timeout=60)
 
+    # Turning the setting off does not remove the event already written, so the
+    # reader is still stalled just before it and the remediation has to name a
+    # recovery that gets past it rather than one that replays it.
+    stalled = _replication_status(mygramdb)
+    assert stalled.get("status") == "failed", stalled
+    assert "run SYNC for every replicated table" in stalled.get("last_error", ""), stalled
+
+    # Recovery has to restart the stream after the snapshot marker. Restarting
+    # from the drained position replays the undecodable event, which stops
+    # replication again at the same place no matter how often SYNC is run.
+    assert mygramdb.sync("testdb.articles", timeout=60)
+    wait_until(
+        lambda: _replication_status(mygramdb).get("status") == "running",
+        timeout=30,
+        interval=0.2,
+        description="replication to resume past the undecodable event",
+    )
     wait_until(
         lambda: mygramdb.count("testdb.articles", marker) == 1,
         timeout=20,

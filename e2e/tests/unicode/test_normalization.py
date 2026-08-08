@@ -61,14 +61,26 @@ class TestNormalization:
         )
 
     def test_zero_width_characters(self, mysql, mygramdb, seed_data):
-        """A zero-width separator should normalize like searchable whitespace."""
-        marker = f"zwprobe_{uuid.uuid4().hex[:8]}"
+        """A zero-width separator keeps both sides independently searchable.
+
+        U+200B is not a compatibility character, so NFKC preserves it: it is
+        neither dropped (which would join the two tokens into one) nor widened
+        to a space (which would split them). Both the indexing path and the
+        query path must agree on that, otherwise text containing the separator
+        becomes unreachable by any query.
+
+        The three assertions pin exactly that: each side is findable on its
+        own, the two sides are findable together via an explicit AND, and the
+        forms that would only match under the drop or widen behaviours do not.
+        """
+        marker = f"zwprobe{uuid.uuid4().hex[:8]}"
+        left, right = f"{marker}L", f"{marker}R"
         mysql.insert_rows(
             "articles",
             [
                 {
                     "title": "Zero Width Test",
-                    "content": f"{marker}\u200bneedle",
+                    "content": f"{left}\u200b{right}",
                     "status": 1,
                     "category": "tech",
                     "enabled": 1,
@@ -77,9 +89,24 @@ class TestNormalization:
         )
 
         wait_until_value(
-            lambda: mygramdb.count("testdb.articles", f"{marker} needle"),
+            lambda: mygramdb.count("testdb.articles", left),
             expected=1,
             timeout=10,
             interval=0.5,
-            description="zero-width separator normalization",
+            description="text before a zero-width separator to be searchable",
+        )
+        assert mygramdb.count("testdb.articles", right) == 1, (
+            "text after a zero-width separator must be searchable on its own"
+        )
+        assert mygramdb.count("testdb.articles", f"{left} AND {right}") == 1, (
+            "both sides of a zero-width separator must belong to the same document"
+        )
+
+        # The separator is preserved, so neither the dropped nor the widened
+        # form of the stored text matches.
+        assert mygramdb.count("testdb.articles", f"{left}{right}") == 0, (
+            "a zero-width separator must not be dropped during normalization"
+        )
+        assert mygramdb.count("testdb.articles", f"{left} {right}") == 0, (
+            "a zero-width separator must not be widened to a space"
         )

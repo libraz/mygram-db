@@ -1,13 +1,12 @@
 """Test DDL edge cases: DROP, RENAME, column type changes, sequential DDL+DML."""
 
 import contextlib
-import time
 import uuid
 
 import pytest
 
 from lib.data_generator import DataGenerator
-from lib.metrics import MetricsSnapshot
+from lib.metrics import REPL_DDL_TOTAL, MetricsSnapshot, read_counter
 from lib.wait import wait_until, wait_until_gte
 
 pytestmark = pytest.mark.ddl
@@ -35,20 +34,45 @@ CREATE TABLE IF NOT EXISTS articles (
 ADD_FULLTEXT_SQL = "ALTER TABLE articles ADD FULLTEXT INDEX ft_content (content) WITH PARSER ngram"
 
 
-def _ensure_replication_running(mygramdb):
-    """Ensure replication is running (with retry for stopping race)."""
-    status = mygramdb.tcp_command("REPLICATION STATUS") or ""
-    if "running" in status.lower():
-        return True
-    for _ in range(10):
-        resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
-        if resp and ("STARTED" in resp or "already" in resp.lower()):
+def _ensure_replication_running(mygramdb, sync_table: str = "testdb.articles"):
+    """Bring replication back to running and confirm the reported state.
+
+    Two conditions block a restart. START is rejected while a previous STOP is
+    still winding down, which clears on its own. A schema incompatibility is
+    sticky by design and the documented recovery is an explicit SYNC, so that
+    is issued here rather than reported as a refusal. The reported state is
+    then required to agree: returning on the acknowledgement alone would let
+    the next step run against a reader that is not consuming yet.
+    """
+
+    def _started() -> bool:
+        if mygramdb.replication_is_running():
             return True
-        if resp and "stopping" in resp.lower():
-            time.sleep(3)
-            continue
-        return False
-    return False
+        resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
+        if resp and "SCHEMA_INCOMPATIBLE" in resp:
+            mygramdb.sync(sync_table, timeout=60)
+            return False
+        if resp is None or "stopping" in resp.lower():
+            return False
+        return mygramdb.replication_is_running()
+
+    wait_until(_started, timeout=90, interval=0.5, description="replication to be running")
+    return True
+
+
+def _await_ddl_replayed(mygramdb, before: float, *, by: int = 1) -> None:
+    """Block until the reader has replayed the DDL just issued.
+
+    Row images decode against the layout the reader last saw, so a test that
+    writes rows before the DDL is replayed is testing the old schema.
+    """
+    wait_until_gte(
+        lambda: read_counter(mygramdb, REPL_DDL_TOTAL) - before,
+        minimum=by,
+        timeout=30,
+        interval=0.25,
+        description="the DDL to be replayed by the reader",
+    )
 
 
 def _replication_status_value(mygramdb, key):
@@ -131,11 +155,12 @@ class TestDDLEdgeCases:
         )
 
         MetricsSnapshot.capture(mygramdb)
+        ddl_before = read_counter(mygramdb, REPL_DDL_TOTAL)
 
         cols = mysql.execute("SHOW COLUMNS FROM products LIKE 'ddl_test_col'")
         if not cols:
             mysql.execute("ALTER TABLE products ADD COLUMN ddl_test_col VARCHAR(50) DEFAULT NULL")
-        time.sleep(3)
+            _await_ddl_replayed(mygramdb, ddl_before)
 
         info_after = mygramdb.info()
         doc_count_after = info_after.get(
@@ -147,11 +172,8 @@ class TestDDLEdgeCases:
 
         assert mygramdb.ping()
 
-        try:
+        with contextlib.suppress(Exception):
             mysql.execute("ALTER TABLE products DROP COLUMN ddl_test_col")
-            time.sleep(1)
-        except Exception:
-            pass
 
     def test_sequential_ddl_with_dml(self, mysql, mygramdb, seed_data):
         """Sequential DDL + DML operations should all be handled correctly."""
@@ -162,12 +184,13 @@ class TestDDLEdgeCases:
         marker = f"seqddl_{uuid.uuid4().hex[:8]}"
 
         try:
+            ddl_before = read_counter(mygramdb, REPL_DDL_TOTAL)
             cols = mysql.execute("SHOW COLUMNS FROM articles LIKE 'seq_test_col'")
             if not cols:
                 mysql.execute(
                     "ALTER TABLE articles ADD COLUMN seq_test_col VARCHAR(50) DEFAULT NULL"
                 )
-            time.sleep(2)
+                _await_ddl_replayed(mygramdb, ddl_before)
 
             for i in range(3):
                 mysql.insert_rows(
@@ -183,9 +206,11 @@ class TestDDLEdgeCases:
                     ],
                 )
 
+            drop_ddl_before = read_counter(mygramdb, REPL_DDL_TOTAL)
             mysql.execute("ALTER TABLE articles DROP COLUMN seq_test_col")
-            # DDL may cause binlog reader to reconnect; wait for it to stabilize
-            time.sleep(5)
+            # The DROP can make the reader reconnect, so require both halves:
+            # the DDL replayed, and the reader consuming again afterwards.
+            _await_ddl_replayed(mygramdb, drop_ddl_before)
             _ensure_replication_running(mygramdb)
 
             for i in range(3):
@@ -210,13 +235,10 @@ class TestDDLEdgeCases:
                 description="sequential DDL+DML propagation",
             )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 cols = mysql.execute("SHOW COLUMNS FROM articles LIKE 'seq_test_col'")
                 if cols:
                     mysql.execute("ALTER TABLE articles DROP COLUMN seq_test_col")
-                    time.sleep(1)
-            except Exception:
-                pass
 
     def test_alter_text_source_column_type(self, mysql, mygramdb, seed_data):
         """Configured text type changes must stop before advancing GTID."""
@@ -296,40 +318,75 @@ class TestDDLEdgeCases:
 
         assert mygramdb.health_ready()
 
-    def test_drop_table_server_survives(self, mysql, mygramdb, seed_data):
-        """Server should survive DROP TABLE and remain functional."""
+    def test_drop_table_keeps_serving_the_indexed_snapshot(self, mysql, mygramdb, seed_data):
+        """A DROP stops replication without taking the serving plane with it.
+
+        The fail-closed side is covered separately; what this pins is that the
+        two planes are independent. Reads must keep returning the last
+        consistent snapshot at full fidelity — the failure must not be handled
+        by dropping the in-memory index, which would turn a recoverable
+        replication stop into silent data loss for every reader.
+        """
+        before_ids = mygramdb.search("testdb.articles", "test", limit=50)["ids"]
+        assert before_ids, "probe needs a non-empty result set to be meaningful"
+
         try:
-            before = MetricsSnapshot.capture(mygramdb)
-
             mysql.execute("DROP TABLE articles")
-            time.sleep(3)
+            wait_until(
+                lambda: _replication_status_value(mygramdb, "status") == "failed",
+                timeout=20,
+                interval=0.2,
+                description="replication to fail closed on configured table DROP",
+            )
 
-            assert mygramdb.ping(), "Server should be alive after DROP TABLE"
-            assert mygramdb.health_live(), "Health endpoint should work after DROP TABLE"
+            assert mygramdb.health_live(), "liveness must not follow the replication failure"
+            assert not mygramdb.health_ready(), "readiness must reflect the stopped replication"
 
-            after = MetricsSnapshot.capture(mygramdb)
-            diff = MetricsSnapshot.diff(before, after)
-
-            ddl_metrics = {k: v for k, v in diff.items() if "ddl" in k.lower()}
-            if ddl_metrics:
-                assert max(ddl_metrics.values()) >= 1, (
-                    f"DDL counter should increase on DROP, got {ddl_metrics}"
-                )
+            after_ids = mygramdb.search("testdb.articles", "test", limit=50)["ids"]
+            assert after_ids == before_ids, (
+                "reads must keep serving the pre-DROP snapshot unchanged, "
+                f"got {len(after_ids)} ids instead of {len(before_ids)}"
+            )
+            assert mygramdb.info().get("version"), "INFO must still answer after DROP"
         finally:
             _recreate_articles_table(mysql, mygramdb)
 
-    def test_rename_table_no_crash(self, mysql, mygramdb, seed_data):
-        """RENAME TABLE should not crash the server."""
+        assert mygramdb.health_ready()
+
+    def test_rename_table_fails_closed_and_recovers(self, mysql, mygramdb, seed_data):
+        """A RENAME stops replication before the GTID advances, and recovers.
+
+        Aliases are deliberately not followed: continuing past a rename would
+        apply rows from a table the configuration never named. Freezing the
+        GTID is what makes the stop recoverable — if it advanced past the
+        rename, the skipped events could never be replayed and the index would
+        stay permanently behind MySQL with no way to detect it.
+        """
+        before_gtid = _replication_status_value(mygramdb, "current_gtid")
+        before_total = mygramdb.search("testdb.articles", "test", limit=1)["total"]
+
         try:
             mysql.execute("RENAME TABLE articles TO articles_old")
-            time.sleep(3)
-
-            assert mygramdb.ping(), "Server should be alive after RENAME"
+            wait_until(
+                lambda: _replication_status_value(mygramdb, "status") == "failed",
+                timeout=20,
+                interval=0.2,
+                description="replication to fail closed on configured table RENAME",
+            )
+            assert _replication_status_value(mygramdb, "last_error_code") == "2012"
+            assert "renamed" in _replication_status_value(mygramdb, "last_error")
+            assert _replication_status_value(mygramdb, "current_gtid") == before_gtid, (
+                "the GTID advanced past the rename, making the stop unrecoverable"
+            )
+            assert mygramdb.health_live(), "liveness must survive the rename"
+            assert mygramdb.search("testdb.articles", "test", limit=1)["total"] == before_total
 
             mysql.execute("RENAME TABLE articles_old TO articles")
-            time.sleep(3)
+            _ensure_replication_running(mygramdb)
+            mygramdb.sync("testdb.articles", timeout=60)
 
-            assert mygramdb.ping(), "Server should be alive after RENAME back"
+            # Recovery is only real if newly written rows reach the index again.
+            _verify_replication_works(mysql, mygramdb)
         except Exception:
             with contextlib.suppress(Exception):
                 mysql.execute("RENAME TABLE articles_old TO articles")

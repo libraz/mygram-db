@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import threading
-import time
 import uuid
 
 import pytest
@@ -58,20 +57,30 @@ CREATE TABLE IF NOT EXISTS products (
 """
 
 
-def _ensure_replication_running(mygramdb):
-    """Ensure replication is running."""
-    status = mygramdb.tcp_command("REPLICATION STATUS") or ""
-    if "running" in status.lower():
-        return True
-    for _ in range(10):
-        resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
-        if resp and ("STARTED" in resp or "already" in resp.lower()):
+def _ensure_replication_running(mygramdb, sync_table: str = "testdb.articles"):
+    """Bring replication back to running and confirm the reported state.
+
+    Two conditions block a restart. START is rejected while a previous STOP is
+    still winding down, which clears on its own. A schema incompatibility is
+    sticky by design and the documented recovery is an explicit SYNC, so that
+    is issued here rather than reported as a refusal. The reported state is
+    then required to agree: returning on the acknowledgement alone would let
+    the next step run against a reader that is not consuming yet.
+    """
+
+    def _started() -> bool:
+        if mygramdb.replication_is_running():
             return True
-        if resp and "stopping" in resp.lower():
-            time.sleep(3)
-            continue
-        return False
-    return False
+        resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
+        if resp and "SCHEMA_INCOMPATIBLE" in resp:
+            mygramdb.sync(sync_table, timeout=60)
+            return False
+        if resp is None or "stopping" in resp.lower():
+            return False
+        return mygramdb.replication_is_running()
+
+    wait_until(_started, timeout=90, interval=0.5, description="replication to be running")
+    return True
 
 
 ADD_FULLTEXT_SQL = "ALTER TABLE articles ADD FULLTEXT INDEX ft_content (content) WITH PARSER ngram"
@@ -128,11 +137,11 @@ class TestMultiTableSearch:
             ],
         )
 
-        # Sync both tables (sequential to avoid SYNC STATUS race)
+        # Sequential rather than concurrent: SYNC STATUS reports per table with
+        # no generation number, so overlapping syncs cannot be told apart. The
+        # client already blocks until each table is complete and queryable.
         mygramdb.sync("testdb.articles", timeout=30)
-        time.sleep(1)
         mygramdb.sync("testdb.products", timeout=30)
-        time.sleep(1)
 
         wait_until_gte(
             lambda: mygramdb.count("testdb.articles", art_marker),
@@ -420,6 +429,7 @@ class TestMultiTableDDL:
     def test_drop_one_table_other_still_works(self, mysql, mygramdb, seed_data):
         """DROP articles — products SEARCH must still work. Then restore."""
         prod_marker = f"dropiso_{uuid.uuid4().hex[:8]}"
+        art_marker = f"dropisoart_{uuid.uuid4().hex[:8]}"
 
         mysql.insert_rows(
             "products",
@@ -433,17 +443,48 @@ class TestMultiTableDDL:
                 }
             ],
         )
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Drop Iso Article",
+                    "content": f"Article {art_marker} is dropped with its table",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
 
         wait_until(
-            lambda: mygramdb.search("testdb.products", prod_marker, limit=10)["total"] >= 1,
+            lambda: (
+                mygramdb.search("testdb.products", prod_marker, limit=10)["total"] >= 1
+                and mygramdb.search("testdb.articles", art_marker, limit=10)["total"] >= 1
+            ),
             timeout=20,
             interval=0.5,
-            description=f"products to find {prod_marker}",
+            description="both markers to be searchable before the drop",
         )
 
         try:
             mysql.execute("DROP TABLE articles")
-            time.sleep(3)
+            # Dropping a configured table is refused rather than applied: the
+            # reader fails closed without advancing the GTID so the operator
+            # can restore the table. Waiting for that state is what proves the
+            # DDL reached the reader -- otherwise the isolation check below
+            # could run before it and pass for the wrong reason.
+            wait_until(
+                lambda: mygramdb.replication_field("status") == "failed",
+                timeout=30,
+                interval=0.25,
+                description="replication to fail closed on the configured table DROP",
+            )
+            assert "dropped" in mygramdb.replication_field("last_error"), (
+                "replication stopped for a reason other than the DROP"
+            )
+            assert mygramdb.search("testdb.articles", art_marker, limit=10)["total"] >= 1, (
+                "the index was cleared by a DROP that was supposed to be refused"
+            )
 
             # Products SEARCH must still work
             result = mygramdb.search("testdb.products", prod_marker, limit=10)
@@ -500,12 +541,13 @@ class TestMultiTableDDL:
 
         try:
             mysql.execute("TRUNCATE TABLE articles")
-            time.sleep(3)
 
             # Articles should be empty
-            art_result = mygramdb.search("testdb.articles", art_marker, limit=10)
-            assert art_result["total"] == 0, (
-                f"Articles should be empty after TRUNCATE, got total={art_result['total']}"
+            wait_until(
+                lambda: mygramdb.search("testdb.articles", art_marker, limit=10)["total"] == 0,
+                timeout=30,
+                interval=0.5,
+                description="the truncated table to stop matching its own marker",
             )
 
             # Products must be intact
@@ -523,9 +565,37 @@ class TestMultiTableDDL:
         Note: DDL causes binlog reader reconnect. We use SYNC to rebuild
         the index from scratch rather than relying on replication recovery.
         """
+        pre_marker = f"predrop_{uuid.uuid4().hex[:8]}"
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Pre Drop",
+                    "content": f"Content before the drop {pre_marker}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        wait_until(
+            lambda: mygramdb.search("testdb.articles", pre_marker, limit=10)["total"] >= 1,
+            timeout=20,
+            interval=0.5,
+            description=f"articles SEARCH to find {pre_marker} before the drop",
+        )
+
         try:
             mysql.execute("DROP TABLE articles")
-            time.sleep(5)
+            # The reader refuses the DROP and holds its position. Rebuilding
+            # before that state is reached would race the refusal against the
+            # SYNC, so the recovery below would not be the one under test.
+            wait_until(
+                lambda: mygramdb.replication_field("status") == "failed",
+                timeout=30,
+                interval=0.25,
+                description="replication to fail closed on the articles DROP",
+            )
 
             # Recreate, re-seed, and SYNC (full rebuild from MySQL)
             _reseed_table(mysql, mygramdb, "articles", count=50)
@@ -540,7 +610,6 @@ class TestMultiTableDDL:
 
             # Ensure replication is running for the new marker test
             _ensure_replication_running(mygramdb)
-            time.sleep(2)
 
             # Insert a new unique row via replication
             marker = f"recreate_{uuid.uuid4().hex[:8]}"

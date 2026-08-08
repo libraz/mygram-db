@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from lib.wait import wait_until_gte
+from lib.wait import wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.replication
 
@@ -82,9 +82,20 @@ class TestUpdatePropagation:
         # Update the status
         mysql.update("articles", "status = 2", f"content LIKE '%{marker}%'")
 
-        # The document should still be searchable (status change doesn't remove it)
-        import time
-
-        time.sleep(3)  # Wait for propagation
-        count = mygramdb.count("testdb.articles", marker)
-        assert count >= 1, "Document should still be searchable after status update"
+        # status is a configured filter, so the row stays in the index and the
+        # new value has to be visible through that filter. Only checking that
+        # the row is still findable would pass even if the filter value were
+        # never updated.
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", marker, filters={"status": 2}),
+            expected=1,
+            timeout=20,
+            interval=0.5,
+            description="the new status value to be filterable",
+        )
+        assert mygramdb.count("testdb.articles", marker) == 1, (
+            "a filter-only change removed the row from the index"
+        )
+        assert mygramdb.count("testdb.articles", marker, filters={"status": 1}) == 0, (
+            "the row still matches the status it no longer has"
+        )

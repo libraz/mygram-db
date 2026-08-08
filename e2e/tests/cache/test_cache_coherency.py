@@ -214,6 +214,8 @@ class TestCacheCoherency:
             t.start()
             threads.append(t)
 
+        # A fixed soak window, not a readiness wait: the point is to keep the
+        # clear and read paths colliding for long enough to shake out a race.
         time.sleep(5)
         stop_event.set()
         for t in threads:

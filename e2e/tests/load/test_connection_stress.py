@@ -7,7 +7,6 @@ rapid connect/disconnect cycles, slow clients, and half-close scenarios.
 from __future__ import annotations
 
 import socket
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
@@ -16,6 +15,7 @@ from lib.raw_socket import (
     raw_tcp_connect_disconnect,
     raw_tcp_slow_send,
 )
+from lib.wait import wait_until
 
 
 @pytest.mark.load
@@ -56,8 +56,12 @@ class TestConnectionStress:
         # All connections should succeed — server supports 10000 max_connections
         assert successes >= 180, f"Only {successes}/200 connections succeeded"
         # Server must remain healthy
-        time.sleep(1)
-        assert mygramdb.ping(), "Server unresponsive after connection storm"
+        wait_until(
+            mygramdb.ping,
+            timeout=15,
+            interval=0.25,
+            description="the server to answer again after the connection storm",
+        )
 
     def test_connect_disconnect_rapid(self, mygramdb, seed_data):
         """500 rapid connect-disconnect cycles with no data sent."""
@@ -70,8 +74,12 @@ class TestConnectionStress:
 
         # Some connection refusals under rapid cycling are acceptable
         assert errors < 250, f"Too many connection errors: {errors}/500"
-        time.sleep(1)
-        assert mygramdb.ping(), "Server unresponsive after rapid connect/disconnect"
+        wait_until(
+            mygramdb.ping,
+            timeout=15,
+            interval=0.25,
+            description="the server to answer again after rapid connect/disconnect",
+        )
         info = mygramdb.info()
         assert info, "INFO failed after rapid connect/disconnect"
 
@@ -166,8 +174,12 @@ class TestConnectionStress:
         total_responded = sum(resp for _, _, resp in results)
         assert total_sent > 0, "No commands were sent"
         assert total_responded > 0, "No responses received"
-        time.sleep(1)
-        assert mygramdb.ping(), "Server unresponsive after concurrent pipelines"
+        wait_until(
+            mygramdb.ping,
+            timeout=15,
+            interval=0.25,
+            description="the server to answer again after the concurrent pipelines",
+        )
 
     def test_half_close_write(self, mygramdb, seed_data):
         """Send command then shutdown(SHUT_WR) — should still receive response."""

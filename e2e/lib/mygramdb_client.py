@@ -510,6 +510,27 @@ class MygramdbClient:
         resp = self.tcp_command_multiline("REPLICATION STATUS", timeout=10.0, terminator=b"END\r\n")
         return resp or ""
 
+    def replication_field(self, key: str) -> str:
+        """Read one field from the REPLICATION STATUS response.
+
+        Raises when the field is absent so a renamed field fails the caller's
+        assertion instead of silently reading as an empty string.
+        """
+        response = self.replication_status()
+        for line in response.splitlines():
+            line = line.strip().removeprefix("OK ")
+            if line.startswith(f"{key}:"):
+                return line.split(":", 1)[1].strip()
+        raise AssertionError(f"{key} not found in REPLICATION STATUS:\n{response}")
+
+    def replication_gtid(self) -> str:
+        """Position replication has consumed up to."""
+        return self.replication_field("current_gtid")
+
+    def replication_is_running(self) -> bool:
+        """Whether the replication reader is currently consuming events."""
+        return self.replication_field("status") == "running"
+
     @staticmethod
     def _http_table_path(table: str) -> str:
         """Build the single-segment HTTP route prefix for a table.

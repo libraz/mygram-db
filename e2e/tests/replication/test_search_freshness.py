@@ -11,12 +11,11 @@ and run both with cache disabled and enabled to isolate the root cause.
 
 from __future__ import annotations
 
-import time
 import uuid
 
 import pytest
 
-from lib.wait import wait_until, wait_until_gte
+from lib.wait import wait_until, wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.replication
 
@@ -579,20 +578,27 @@ class TestSearchFreshnessCacheToggle:
             description=f"SEARCH to find all 5 {marker} rows",
         )
 
-        # Rapidly toggle cache while deleting
+        # Delete and toggle back to back so the replication events land while the
+        # cache is being switched, which is the window this test exists for.
         for i in range(3):
             mygramdb.tcp_command("CACHE DISABLE")
             mysql.delete("articles", f"content LIKE '%{marker}%row {i}%'")
-            time.sleep(0.5)
             mygramdb.tcp_command("CACHE ENABLE")
-            time.sleep(0.5)
-
-        # Wait for replication to settle
-        time.sleep(3)
 
         # Final state: 2 rows remaining (deleted 0, 1, 2)
-        result = mygramdb.search("testdb.articles", marker, limit=100)
-        assert result["total"] == 2, (
-            f"After rapid toggle + deletes, expected 2 remaining rows "
-            f"but SEARCH returned total={result['total']}"
+        wait_until_value(
+            lambda: mygramdb.search("testdb.articles", marker, limit=100)["total"],
+            expected=2,
+            timeout=30,
+            interval=0.5,
+            description="the deletes issued across the toggles to all be reflected",
         )
+
+        # Converging once is not enough: an entry cached during the toggling
+        # could still be handed out afterwards, so the answer has to stay put.
+        for _ in range(5):
+            result = mygramdb.search("testdb.articles", marker, limit=100)
+            assert result["total"] == 2, (
+                f"SEARCH went back to total={result['total']} after settling at 2, "
+                f"so a stale entry cached during the toggling is still being served"
+            )

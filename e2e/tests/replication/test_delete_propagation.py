@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from lib.wait import wait_until, wait_until_gte
+from lib.wait import wait_until, wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.replication
 
@@ -80,10 +80,31 @@ class TestDeletePropagation:
             f"content LIKE '%{marker}%'",
         )
 
-        # Wait and check - document may still be searchable depending on config
-        import time
-
-        time.sleep(3)
-        # Soft delete behavior depends on MygramDB configuration
-        # Just verify no crash
-        mygramdb.count("testdb.articles", marker)
+        # deleted_at is not a configured filter, so a soft delete is an ordinary
+        # column change: the row stays indexed and searchable. Treating it as a
+        # removal would silently drop rows for every deployment that soft-deletes.
+        # A control row written afterwards is the barrier that proves the update
+        # was applied before the assertion below runs.
+        control = f"ctl{uuid.uuid4().hex[:8]}"
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Soft Delete Control",
+                    "content": f"control after soft delete {control}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", control),
+            expected=1,
+            timeout=20,
+            interval=0.5,
+            description="the control row written after the soft delete",
+        )
+        assert mygramdb.count("testdb.articles", marker) == 1, (
+            "setting an unconfigured column removed the row from the index"
+        )

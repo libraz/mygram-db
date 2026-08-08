@@ -5,7 +5,7 @@ import uuid
 import pytest
 
 from lib.data_generator import DataGenerator
-from lib.wait import wait_until_gte
+from lib.wait import wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.replication
 
@@ -60,11 +60,29 @@ class TestBatchOperations:
         )
         mysql.delete("articles", f"content LIKE '%{marker}%'")
 
-        # Wait for events to process
-        import time
-
-        time.sleep(5)
-
-        # Should have 0 documents with this marker
-        count = mygramdb.count("testdb.articles", marker)
-        assert count == 0, f"Expected 0 documents after insert+delete, got {count}"
+        # Waiting for a count of zero would be satisfied before either event was
+        # applied, so a control row written afterwards provides the barrier:
+        # once it is visible, the insert and the delete ahead of it are done.
+        control = f"ctl{uuid.uuid4().hex[:8]}"
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": "Churn Control",
+                    "content": f"control after churn {control}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+            ],
+        )
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", control),
+            expected=1,
+            timeout=30,
+            interval=0.5,
+            description="the control row written after the insert/delete pair",
+        )
+        assert mygramdb.count("testdb.articles", marker) == 0, (
+            "a row inserted and immediately deleted is still searchable"
+        )

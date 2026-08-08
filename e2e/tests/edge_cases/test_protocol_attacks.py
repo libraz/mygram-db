@@ -1,142 +1,191 @@
 """Protocol-level attack and edge case tests.
 
-Verify server robustness against malformed TCP input, partial sends,
-oversized requests, and delimiter edge cases using raw sockets.
+Each case asserts the framing and error contract the server actually promises:
+which byte sequences terminate a command, which are rejected and with what
+code, and that nothing an attacker supplies is reflected back verbatim. A
+liveness-only check passes even when the framing rule silently changes, which
+is exactly the kind of regression that desynchronises real clients.
 """
 
 from __future__ import annotations
 
 import os
-import time
 
 import pytest
 
+from lib.protocol import (
+    QUERY_ERRORS,
+    assert_error,
+    assert_no_control_bytes,
+    parse_response,
+    parse_search_results,
+    split_responses,
+)
 from lib.raw_socket import (
     raw_tcp_exchange,
     raw_tcp_send_only,
     raw_tcp_slow_send,
 )
+from lib.wait import wait_until
+
+# Longest query the test configuration accepts.
+MAX_QUERY_LENGTH = 128
 
 
 @pytest.mark.edge_cases
 class TestProtocolAttacks:
     """Protocol-level robustness tests using raw TCP sockets."""
 
+    def _exchange(self, mygramdb, data: bytes, timeout: float = 5.0) -> bytes:
+        return raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=timeout)
+
     def test_binary_garbage_data(self, mygramdb, seed_data):
-        """4KB random bytes with no \\r\\n — server should timeout-close, not crash."""
-        garbage = os.urandom(4096)
-        # Ensure no accidental \r\n
-        garbage = garbage.replace(b"\r\n", b"\x00\x00")
-        raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, garbage, timeout=5.0)
-        # Server may return error or just close — either is fine
-        # Key assertion: server still works afterward
-        assert mygramdb.ping(), "Server unresponsive after garbage data"
+        """Unterminated binary garbage yields no response and no leaked bytes.
+
+        Without a CRLF the server has no complete command, so it must buffer
+        rather than guess. Emitting anything here would mean it acted on a
+        fragment.
+        """
+        garbage = os.urandom(4096).replace(b"\r\n", b"\x00\x00")
+        raw = self._exchange(mygramdb, garbage, timeout=5.0)
+        assert raw == b"", f"unterminated garbage produced a response: {raw[:200]!r}"
+        # A following command on a fresh connection must still be framed correctly.
+        assert parse_response(self._exchange(mygramdb, b"INFO\r\n")).is_ok
 
     def test_null_bytes_in_command(self, mygramdb, seed_data):
-        """Null bytes embedded in a command — should not crash."""
-        data = b"SEARCH\x00articles\x00test\r\n"
-        raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=5.0)
-        # May return error or treat as partial command
-        assert mygramdb.ping(), "Server unresponsive after null-byte command"
+        """NUL bytes are sanitized out of the echoed verb, not passed through.
+
+        The command is unknown, and the NULs must be replaced before the
+        offending text is quoted back to the client.
+        """
+        raw = self._exchange(mygramdb, b"SEARCH\x00articles\x00test\r\n")
+        assert_error(raw, code_in=QUERY_ERRORS, message_contains="unknown command")
+        assert b"\x00" not in raw, f"NUL byte reflected to the client: {raw[:200]!r}"
 
     def test_bare_lf_delimiter(self, mygramdb, seed_data):
-        """Command with bare LF (no CR) — server should wait for \\r\\n."""
-        data = b"INFO\n"
-        # Server expects \r\n, so bare \n should not be treated as command terminator
-        raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=3.0)
-        # Timeout is acceptable — server is still waiting for \r\n
-        assert mygramdb.ping(), "Server unresponsive after bare LF"
+        """A bare LF does not terminate a command; the server keeps waiting."""
+        raw = self._exchange(mygramdb, b"INFO\n", timeout=3.0)
+        assert raw == b"", f"bare LF was accepted as a terminator: {raw[:200]!r}"
 
     def test_bare_cr_delimiter(self, mygramdb, seed_data):
-        """Command with bare CR (no LF) — server should wait for \\r\\n."""
-        data = b"INFO\r"
-        raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=3.0)
-        assert mygramdb.ping(), "Server unresponsive after bare CR"
+        """A bare CR does not terminate a command; the server keeps waiting."""
+        raw = self._exchange(mygramdb, b"INFO\r", timeout=3.0)
+        assert raw == b"", f"bare CR was accepted as a terminator: {raw[:200]!r}"
 
     def test_mixed_delimiters(self, mygramdb, seed_data):
-        """Mix of valid \\r\\n and invalid bare \\n delimiters."""
-        data = b"INFO\r\n" + b"INFO\n" + b"INFO\r\n"
-        resp = raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=5.0)
-        resp.decode("utf-8", errors="ignore")
-        # At least the first valid INFO should get a response
-        assert mygramdb.ping(), "Server unresponsive after mixed delimiters"
+        """A bare LF between CRLF commands joins lines instead of splitting them.
+
+        ``INFO\\r\\nINFO\\nINFO\\r\\n`` spells INFO three times but contains only
+        two CRLF frames. The middle bare LF ends up as whitespace inside the
+        second frame, so exactly two responses come back; a third would mean
+        the framing had started accepting a bare LF as a terminator.
+        """
+        raw = self._exchange(mygramdb, b"INFO\r\nINFO\nINFO\r\n", timeout=5.0)
+        assert raw.startswith(b"OK INFO"), f"first INFO was not answered: {raw[:120]!r}"
+        assert raw.count(b"OK INFO") == 2, (
+            f"expected 2 CRLF-framed responses, got {raw.count(b'OK INFO')}: "
+            "a bare LF was treated as a command terminator"
+        )
 
     def test_oversized_request_no_newline(self, mygramdb, seed_data):
-        """11MB of 'a' with no \\r\\n — should trigger size limit error."""
-        data = b"a" * (11 * 1024 * 1024)
-        resp = raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=10.0)
-        resp.decode("utf-8", errors="ignore").upper()
-        # Server should reject oversized input or close connection
-        assert mygramdb.ping(), "Server unresponsive after oversized request"
+        """An 11 MB unterminated line is dropped without a response.
+
+        The connection buffer must not grow without bound waiting for a CRLF
+        that never comes.
+        """
+        raw = self._exchange(mygramdb, b"a" * (11 * 1024 * 1024), timeout=10.0)
+        assert raw == b"", f"oversized unterminated input produced a response: {raw[:200]!r}"
+        assert parse_response(self._exchange(mygramdb, b"INFO\r\n")).is_ok
 
     def test_oversized_single_line_command(self, mygramdb, seed_data):
-        """Very long single-line command — should return error."""
+        """An over-length query is refused by length, naming both numbers."""
         long_query = "a" * 200_000
-        cmd = f"SEARCH testdb.articles {long_query}\r\n"
-        resp = raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, cmd.encode("utf-8"), timeout=10.0)
-        decoded = resp.decode("utf-8", errors="ignore").upper()
-        # Expect error about request size or query length
-        assert "ERROR" in decoded or len(resp) == 0, (
-            f"Expected error for oversized command, got: {decoded[:200]}"
+        raw = self._exchange(
+            mygramdb, f"SEARCH testdb.articles {long_query}\r\n".encode(), timeout=10.0
         )
-        assert mygramdb.ping(), "Server unresponsive after oversized command"
+        resp = assert_error(raw, code_in=QUERY_ERRORS, message_contains="length")
+        assert str(len(long_query)) in resp.message, (
+            f"the rejected length should be reported, got: {resp.message!r}"
+        )
+        assert str(MAX_QUERY_LENGTH) in resp.message, (
+            f"the configured limit should be reported, got: {resp.message!r}"
+        )
+        # The rejected payload itself must not be echoed back.
+        assert len(resp.message) < 1000, "the error message echoed the oversized query"
 
     def test_partial_send_then_close(self, mygramdb, seed_data):
-        """Send partial command then close — server should not leak FDs."""
+        """Partial-send-then-close cycles must not leak connection slots.
+
+        If each abandoned connection leaked, the accepted-connection counter
+        would keep climbing while the server stopped serving; asserting a real
+        INFO still parses is what catches that.
+        """
         for _ in range(10):
             raw_tcp_send_only(mygramdb.host, mygramdb.tcp_port, b"SEAR")
-        # After 10 partial-send-close cycles, server should still be healthy
-        time.sleep(0.5)
-        assert mygramdb.ping(), "Server unresponsive after partial send cycles"
-        # Verify a real command still works
+
+        wait_until(
+            lambda: parse_response(self._exchange(mygramdb, b"INFO\r\n")).is_ok,
+            timeout=10,
+            interval=0.5,
+            description="server to serve INFO after partial-send cycles",
+        )
         info = mygramdb.info()
-        assert info, "INFO command failed after partial send cycles"
+        assert info.get("version"), f"INFO body incomplete after partial sends: {info}"
 
     def test_partial_send_slow_completion(self, mygramdb, seed_data):
-        """Send command in two parts with delay — should process after completion."""
-        resp = raw_tcp_slow_send(
+        """A command split across the CRLF is answered once the LF arrives."""
+        raw = raw_tcp_slow_send(
             mygramdb.host,
             mygramdb.tcp_port,
             [b"INFO\r", b"\n"],
             delay=2.0,
             timeout=10.0,
         )
-        decoded = resp.decode("utf-8", errors="ignore")
-        # The completed command should get a response
-        assert len(decoded) > 0, "No response for slowly-completed command"
-        assert mygramdb.ping(), "Server unresponsive after slow completion"
+        assert raw.startswith(b"OK INFO"), f"slowly-completed INFO was not answered: {raw[:120]!r}"
 
     def test_pipelined_commands(self, mygramdb, seed_data):
-        """Three commands sent in a single sendall — expect three responses."""
-        data = b"INFO\r\nINFO\r\nINFO\r\n"
-        resp = raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=5.0)
-        decoded = resp.decode("utf-8", errors="ignore")
-        # Server may handle pipelining or process only the first command
-        # At minimum, we should get at least one response
-        assert len(decoded) > 0, "No response for pipelined commands"
-        assert mygramdb.ping(), "Server unresponsive after pipelining"
+        """Three pipelined commands get three responses, in order."""
+        raw = self._exchange(mygramdb, b"INFO\r\nINFO\r\nINFO\r\n", timeout=5.0)
+        assert raw.count(b"OK INFO") == 3, (
+            f"expected 3 pipelined INFO responses, got {raw.count(b'OK INFO')}: {raw[:200]!r}"
+        )
 
     def test_empty_lines_between_commands(self, mygramdb, seed_data):
-        """Empty lines (\\r\\n\\r\\n) before and after a valid command."""
-        data = b"\r\n\r\nINFO\r\n\r\n"
-        resp = raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=5.0)
-        resp.decode("utf-8", errors="ignore")
-        # INFO command should be processed; empty lines should be skipped
-        assert mygramdb.ping(), "Server unresponsive after empty lines"
+        """Empty lines are answered as errors, not silently skipped.
+
+        Silently skipping them would leave the client's request/response
+        accounting one short for every blank line sent.
+        """
+        raw = self._exchange(mygramdb, b"\r\n\r\nINFO\r\n\r\n", timeout=5.0)
+        assert_no_control_bytes(raw, context="empty-line responses")
+        errors = [line for line in split_responses(raw) if line.startswith(b"ERROR ")]
+        assert len(errors) >= 2, (
+            f"each empty line should be answered, got {len(errors)} errors: {raw[:200]!r}"
+        )
+        for line in errors[:2]:
+            assert_error(line, code_in=QUERY_ERRORS, message_contains="empty")
+        assert b"OK INFO" in raw, "the real command after the empty lines was not processed"
 
     def test_command_with_trailing_spaces(self, mygramdb, seed_data):
-        """Command with trailing spaces before \\r\\n — should still work."""
-        resp = mygramdb.tcp_command("INFO   ")
-        assert resp is not None, "INFO with trailing spaces returned None"
-        assert "ERROR" not in resp.upper() or "unknown" not in resp.lower(), (
-            f"Unexpected error for trailing spaces: {resp[:200]}"
+        """Trailing spaces are trimmed, not treated as arguments."""
+        raw = self._exchange(mygramdb, b"INFO   \r\n")
+        resp = parse_response(raw)
+        assert resp.is_ok and raw.startswith(b"OK INFO"), (
+            f"INFO with trailing spaces was not accepted: {resp.text[:200]!r}"
         )
 
     def test_crlf_in_query_term(self, mygramdb, seed_data):
-        """\\r\\n embedded in query term — should split into two separate commands."""
-        data = b"SEARCH testdb.articles te\r\nst\r\n"
-        resp = raw_tcp_exchange(mygramdb.host, mygramdb.tcp_port, data, timeout=5.0)
-        resp.decode("utf-8", errors="ignore")
-        # "SEARCH testdb.articles te" is one (invalid) command, "st" is another
-        # Both may return errors, but server should not crash
-        assert mygramdb.ping(), "Server unresponsive after CRLF in query"
+        """An embedded CRLF splits one request into two independent commands.
+
+        This is the request-smuggling shape: the client believes it sent one
+        SEARCH, so the server must not treat the tail as part of that query.
+        """
+        raw = self._exchange(mygramdb, b"SEARCH testdb.articles te\r\nst\r\n", timeout=5.0)
+        lines = split_responses(raw)
+        assert len(lines) == 2, (
+            f"embedded CRLF should yield exactly 2 responses, got {len(lines)}: {raw[:200]!r}"
+        )
+        # First line is the truncated SEARCH; it must be a well-formed result set.
+        parse_search_results(lines[0])
+        # Second line is the orphaned tail parsed as its own command verb.
+        assert_error(lines[1], code_in=QUERY_ERRORS, message_contains="unknown command")

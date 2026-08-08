@@ -1,351 +1,321 @@
 """Test replication stop and restart functionality."""
 
-import time
+from __future__ import annotations
+
+import contextlib
 import uuid
 
 import pytest
 
-from lib.metrics import MetricsSnapshot
-from lib.wait import wait_until_gte
+from lib.metrics import REPL_DDL_TOTAL, read_counter
+from lib.wait import wait_until, wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.replication
 
 
+def _articles(marker: str, prefix: str, count: int) -> list[dict]:
+    return [
+        {
+            "title": f"{prefix} {index}",
+            "content": f"{prefix} {marker} item {index}",
+            "status": 1,
+            "category": "tech",
+            "enabled": 1,
+        }
+        for index in range(count)
+    ]
+
+
 class TestStopRestart:
-    """Verify replication stop/start behavior and data integrity."""
+    """Verify replication stop/start behavior and data integrity.
+
+    Stopping replication must be a clean pause rather than a data loss window:
+    writes made while stopped have to be waiting in the binlog and land in full
+    once the reader restarts. Each test therefore pins both halves -- nothing
+    arrives while stopped, and everything arrives afterwards -- because a reader
+    that silently skipped the gap would satisfy either half alone.
+    """
 
     def _stop_replication(self, mygramdb):
-        """Stop replication and wait until fully stopped.
-
-        The STOP handler calls BinlogReader::Stop() synchronously, which
-        blocks on reader_thread_->join(). The reader's read_timeout is 60s,
-        so the TCP response may take up to 60s. We use a 65s timeout.
-        """
-        resp = mygramdb.tcp_command("REPLICATION STOP", timeout=10.0)
+        """Stop replication and confirm the reader is no longer consuming."""
+        resp = mygramdb.tcp_command("REPLICATION STOP", timeout=65.0)
         assert resp is not None and "STOPPED" in resp, f"Failed to stop replication: {resp}"
+        # STOP joins the reader thread before replying, so the state is settled
+        # by the time the response arrives; assert it rather than sleeping.
+        assert not mygramdb.replication_is_running(), (
+            "REPLICATION STOP acknowledged while the reader is still running"
+        )
 
     def _start_replication(self, mygramdb):
-        """Start replication with retry for 'stopping' race."""
-        for attempt in range(10):
+        """Start replication, tolerating an in-flight stop."""
+
+        def _attempt() -> bool:
             resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
             if resp is not None and "STARTED" in resp:
-                return
+                return True
             if resp and "stopping" in resp.lower():
-                # Stop() is still running; wait and retry
-                time.sleep(3)
-                continue
-            # Some other response (e.g. already running, or error)
-            raise AssertionError(f"Failed to start replication (attempt {attempt}): {resp}")
-        raise AssertionError("Failed to start replication: stuck in stopping state")
+                return False
+            raise AssertionError(f"Failed to start replication: {resp}")
+
+        wait_until(_attempt, timeout=40, interval=1, description="replication to start")
 
     def _ensure_replication_running(self, mygramdb):
-        """Ensure replication is running (best effort)."""
-        for _ in range(10):
-            resp = mygramdb.tcp_command("REPLICATION START", timeout=10.0)
-            if resp is None:
-                time.sleep(3)
-                continue
-            if "STARTED" in resp or "already" in resp.lower() or "running" in resp.lower():
+        """Best-effort restore of the running state for the next test."""
+        with contextlib.suppress(Exception):
+            if mygramdb.replication_is_running():
                 return
-            if "stopping" in resp.lower():
-                time.sleep(3)
-                continue
-            return  # Unknown response, stop retrying
-
-    def test_stop_insert_restart(self, mysql, mygramdb, seed_data):
-        """Stopped replication should resume and process accumulated INSERTs."""
-        try:
-            self._stop_replication(mygramdb)
-            time.sleep(1)
-
-            marker = f"stoprestart_{uuid.uuid4().hex[:8]}"
-            n = 10
-            rows = [
-                {
-                    "title": f"Stop Restart Test {i}",
-                    "content": f"Content for stop restart {marker} item {i}",
-                    "status": 1,
-                    "category": "tech",
-                    "enabled": 1,
-                }
-                for i in range(n)
-            ]
-            mysql.insert_rows("articles", rows)
-
-            # Data should NOT appear while replication is stopped
-            time.sleep(2)
-            count_while_stopped = mygramdb.count("testdb.articles", marker)
-            assert count_while_stopped == 0, (
-                f"Data should not appear while replication stopped, got {count_while_stopped}"
-            )
-
-            # Restart replication
             self._start_replication(mygramdb)
 
-            # All rows should appear
-            wait_until_gte(
+    def _assert_frozen_while_stopped(self, mygramdb, marker: str, gtid_before: str) -> None:
+        """Nothing written after STOP may reach the index or move the position.
+
+        Checking the count alone would also pass if replication were merely
+        slow, so the consumed position has to be unchanged as well.
+        """
+        assert mygramdb.count("testdb.articles", marker) == 0, (
+            "rows written while replication was stopped reached the index"
+        )
+        assert mygramdb.replication_gtid() == gtid_before, (
+            "the consumed position advanced while replication was stopped"
+        )
+
+    def test_stop_insert_restart(self, mysql, mygramdb, seed_data):
+        """INSERTs made while stopped are all applied after restart."""
+        try:
+            self._stop_replication(mygramdb)
+            gtid_before = mygramdb.replication_gtid()
+
+            marker = f"stoprestart{uuid.uuid4().hex[:8]}"
+            rows = _articles(marker, "stop restart", 10)
+            mysql.insert_rows("articles", rows)
+            self._assert_frozen_while_stopped(mygramdb, marker, gtid_before)
+
+            self._start_replication(mygramdb)
+            wait_until_value(
                 lambda: mygramdb.count("testdb.articles", marker),
-                minimum=n,
-                timeout=20,
+                expected=len(rows),
+                timeout=30,
                 interval=0.5,
-                description="stop/restart insert propagation",
+                description="every row written during the stop to be applied",
             )
         finally:
             self._ensure_replication_running(mygramdb)
 
     def test_stop_mixed_dml_restart(self, mysql, mygramdb, seed_data):
-        """Mixed DML during stop should all be applied after restart."""
-        marker = f"stopmix_{uuid.uuid4().hex[:8]}"
-
-        # Insert seed rows first (while replication is running)
-        seed_rows = [
-            {
-                "title": f"Stop Mix Seed {i}",
-                "content": f"Content for stopmix seed {marker} item {i}",
-                "status": 1,
-                "category": "tech",
-                "enabled": 1,
-            }
-            for i in range(5)
-        ]
-        mysql.insert_rows("articles", seed_rows)
-
-        wait_until_gte(
-            lambda: mygramdb.count("testdb.articles", marker),
-            minimum=5,
-            timeout=10,
+        """INSERT, UPDATE and DELETE made while stopped all land after restart."""
+        marker = f"stopmix{uuid.uuid4().hex[:8]}"
+        mysql.insert_rows("articles", _articles(marker, "stopmix seed", 5))
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", f"stopmix seed {marker}"),
+            expected=5,
+            timeout=20,
             interval=0.5,
-            description="stop mix seed data",
+            description="the seed rows to be indexed",
         )
 
         try:
             self._stop_replication(mygramdb)
-            time.sleep(1)
+            gtid_before = mygramdb.replication_gtid()
 
-            # INSERT 3 more
-            new_rows = [
-                {
-                    "title": f"Stop Mix New {i}",
-                    "content": f"Content for stopmix new {marker} extra {i}",
-                    "status": 1,
-                    "category": "tech",
-                    "enabled": 1,
-                }
-                for i in range(3)
-            ]
-            mysql.insert_rows("articles", new_rows)
-
-            # UPDATE 2 rows
-            mysql.update(
-                "articles",
-                f"content = 'Updated stopmix {marker} item 0'",
-                f"content LIKE '%stopmix seed {marker} item 0%'",
-            )
-            mysql.update(
-                "articles",
-                f"content = 'Updated stopmix {marker} item 1'",
-                f"content LIKE '%stopmix seed {marker} item 1%'",
-            )
-
-            # DELETE 1 row
+            mysql.insert_rows("articles", _articles(marker, "stopmix new", 3))
+            for index in range(2):
+                mysql.update(
+                    "articles",
+                    f"content = 'stopmix rewritten {marker} item {index}'",
+                    f"content LIKE '%stopmix seed {marker} item {index}%'",
+                )
             mysql.delete("articles", f"content LIKE '%stopmix seed {marker} item 4%'")
+            self._assert_frozen_while_stopped(mygramdb, f"stopmix new {marker}", gtid_before)
 
-            # Restart
             self._start_replication(mygramdb)
 
-            # Wait for all changes to propagate
-            # Should have: 5 original - 1 deleted + 3 new = 7 total with marker
-            # But some searches may match differently, so check for new inserts
-            wait_until_gte(
-                lambda: mygramdb.count("testdb.articles", f"stopmix new {marker}"),
-                minimum=3,
-                timeout=20,
+            # 5 seeded - 2 rewritten - 1 deleted leaves 2 of the original rows.
+            wait_until_value(
+                lambda: mygramdb.count("testdb.articles", f"stopmix seed {marker}"),
+                expected=2,
+                timeout=30,
                 interval=0.5,
-                description="stop/restart mixed DML propagation",
+                description="the deleted and rewritten rows to leave the seed result set",
             )
-
-            # Deleted row should eventually disappear
-            time.sleep(3)
+            assert mygramdb.count("testdb.articles", f"stopmix new {marker}") == 3, (
+                "inserts made during the stop did not all arrive"
+            )
+            assert mygramdb.count("testdb.articles", f"stopmix rewritten {marker}") == 2, (
+                "updates made during the stop did not all arrive"
+            )
+            assert mygramdb.count("testdb.articles", f"stopmix seed {marker} item 4") == 0, (
+                "the row deleted during the stop is still searchable"
+            )
         finally:
             self._ensure_replication_running(mygramdb)
 
     def test_replication_status_reflects_state(self, mygramdb, seed_data):
-        """REPLICATION STATUS should reflect running/stopped state."""
+        """The reported state tracks the stop and start commands.
+
+        An operator gates deploys on this field, so it reporting "running"
+        while the reader is stopped is worse than the reader being stopped.
+        """
         try:
-            # Initially running
-            status = mygramdb.tcp_command("REPLICATION STATUS")
-            assert status is not None, "REPLICATION STATUS should return a response"
+            assert mygramdb.replication_is_running(), "replication is not running to begin with"
 
-            # Stop
             self._stop_replication(mygramdb)
-            time.sleep(1)
+            assert mygramdb.replication_field("status") == "stopped", (
+                "the status field still claims replication is running after STOP"
+            )
 
-            status_stopped = mygramdb.tcp_command("REPLICATION STATUS")
-            assert status_stopped is not None
-
-            # Start
             self._start_replication(mygramdb)
-            time.sleep(1)
+            wait_until(
+                mygramdb.replication_is_running,
+                timeout=20,
+                interval=0.25,
+                description="the status field to report running again",
+            )
+        finally:
+            self._ensure_replication_running(mygramdb)
 
-            status_running = mygramdb.tcp_command("REPLICATION STATUS")
-            assert status_running is not None
+    def test_a_restart_clears_the_previous_runs_error(self, mygramdb, seed_data):
+        """A stop after a successful restart reports "stopped", not "failed".
+
+        Tearing the stream down to honour STOP records an error on the reader.
+        If a later successful START leaves it in place, every subsequent
+        deliberate stop is reported as a failure and the status surface keeps
+        naming a condition that has already been recovered from -- which is
+        exactly what an operator would be paged on.
+        """
+        try:
+            self._stop_replication(mygramdb)
+            self._start_replication(mygramdb)
+
+            assert mygramdb.replication_field("last_error") == "", (
+                "the restart kept the error the previous run ended with"
+            )
+            assert mygramdb.replication_field("last_error_code") == "0", (
+                "the restart kept the error code the previous run ended with"
+            )
+
+            self._stop_replication(mygramdb)
+            assert mygramdb.replication_field("status") == "stopped", (
+                "a deliberate stop is reported as a failure after a restart"
+            )
         finally:
             self._ensure_replication_running(mygramdb)
 
     def test_rapid_stop_start_cycles(self, mysql, mygramdb, seed_data):
-        """Stop/start cycles should not crash the server."""
+        """Replication still works after repeated stop/start cycles."""
         try:
-            for _i in range(3):
+            for _ in range(3):
                 self._stop_replication(mygramdb)
                 self._start_replication(mygramdb)
 
-            # Server should still be functional
-            assert mygramdb.ping(), "Server should be functional after rapid cycles"
-
-            # Insert and verify replication still works
-            marker = f"rapidcycle_{uuid.uuid4().hex[:8]}"
-            mysql.insert_rows(
-                "articles",
-                [
-                    {
-                        "title": "Rapid Cycle Test",
-                        "content": f"Content for rapid cycle {marker}",
-                        "status": 1,
-                        "category": "tech",
-                        "enabled": 1,
-                    }
-                ],
-            )
-
-            wait_until_gte(
+            marker = f"rapidcycle{uuid.uuid4().hex[:8]}"
+            mysql.insert_rows("articles", _articles(marker, "rapid cycle", 1))
+            wait_until_value(
                 lambda: mygramdb.count("testdb.articles", marker),
-                minimum=1,
-                timeout=15,
+                expected=1,
+                timeout=20,
                 interval=0.5,
-                description="rapid cycle insert propagation",
+                description="replication to still deliver rows after the cycles",
             )
         finally:
             self._ensure_replication_running(mygramdb)
 
-    def test_stop_while_already_stopped(self, mygramdb, seed_data):
-        """Double STOP should return error or be idempotent, not crash."""
+    def test_stop_while_already_stopped_is_idempotent(self, mysql, mygramdb, seed_data):
+        """A second STOP leaves replication stopped and restartable."""
         try:
             self._stop_replication(mygramdb)
-            time.sleep(0.5)
+            resp = mygramdb.tcp_command("REPLICATION STOP", timeout=65.0)
+            assert resp is not None, "the second STOP produced no response"
+            assert mygramdb.replication_field("status") == "stopped", (
+                "the second STOP left the reported state inconsistent"
+            )
 
-            # Second STOP - should not crash (may return error or be idempotent)
-            resp = mygramdb.tcp_command("REPLICATION STOP", timeout=10.0)
-            assert resp is not None, "Double STOP should not crash (returned None)"
-            # Server should still respond
-            assert mygramdb.ping(), "Server should be functional after double STOP"
+            # The real risk is a repeated STOP wedging the reader, so require it
+            # to still resume and deliver a row.
+            self._start_replication(mygramdb)
+            marker = f"doublestop{uuid.uuid4().hex[:8]}"
+            mysql.insert_rows("articles", _articles(marker, "double stop", 1))
+            wait_until_value(
+                lambda: mygramdb.count("testdb.articles", marker),
+                expected=1,
+                timeout=20,
+                interval=0.5,
+                description="replication to resume after a repeated STOP",
+            )
         finally:
             self._ensure_replication_running(mygramdb)
 
-    def test_start_while_already_running(self, mygramdb, seed_data):
-        """Double START should return error or be idempotent, not crash."""
-        # Replication should already be running
+    def test_start_while_already_running_is_idempotent(self, mysql, mygramdb, seed_data):
+        """A redundant START does not disturb a healthy reader."""
+        assert mygramdb.replication_is_running()
         resp = mygramdb.tcp_command("REPLICATION START")
-        assert resp is not None, "Double START should not crash (returned None)"
-        # Server should still respond
-        assert mygramdb.ping(), "Server should be functional after double START"
+        assert resp is not None, "the redundant START produced no response"
+        assert mygramdb.replication_is_running(), "a redundant START stopped the reader"
+
+        marker = f"doublestart{uuid.uuid4().hex[:8]}"
+        mysql.insert_rows("articles", _articles(marker, "double start", 1))
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", marker),
+            expected=1,
+            timeout=20,
+            interval=0.5,
+            description="replication to keep delivering rows after a redundant START",
+        )
 
     def test_accumulated_changes_ordering(self, mysql, mygramdb, seed_data):
-        """Accumulated changes during STOP should all appear after START."""
+        """A long backlog accumulated during a stop is applied in full."""
         try:
             self._stop_replication(mygramdb)
-            time.sleep(1)
+            gtid_before = mygramdb.replication_gtid()
 
-            marker = f"accum_{uuid.uuid4().hex[:8]}"
-            n = 20
-            rows = [
-                {
-                    "title": f"Accumulated {i:03d}",
-                    "content": f"Content for accumulated {marker} seq {i:03d}",
-                    "status": 1,
-                    "category": "tech",
-                    "enabled": 1,
-                }
-                for i in range(n)
-            ]
+            marker = f"accum{uuid.uuid4().hex[:8]}"
+            rows = _articles(marker, "accumulated", 20)
             mysql.insert_rows("articles", rows)
+            self._assert_frozen_while_stopped(mygramdb, marker, gtid_before)
 
-            # Nothing should appear yet
-            time.sleep(2)
-            count_stopped = mygramdb.count("testdb.articles", marker)
-            assert count_stopped == 0, f"No data should appear while stopped, got {count_stopped}"
-
-            # Restart
             self._start_replication(mygramdb)
-
-            # All 20 rows should appear
-            wait_until_gte(
+            wait_until_value(
                 lambda: mygramdb.count("testdb.articles", marker),
-                minimum=n,
-                timeout=30,
+                expected=len(rows),
+                timeout=40,
                 interval=0.5,
-                description="accumulated changes propagation",
+                description="the whole backlog to be applied",
             )
         finally:
             self._ensure_replication_running(mygramdb)
 
     def test_stop_ddl_restart(self, mysql, mygramdb, seed_data):
-        """DDL + INSERT during STOP should both be processed after START."""
+        """A DDL and an INSERT queued during a stop are both replayed."""
+        column = f"stopddl_{uuid.uuid4().hex[:6]}"
         try:
-            # Clean up potential leftover column
-            cols = mysql.execute("SHOW COLUMNS FROM articles LIKE 'stop_ddl_col'")
-            if cols:
-                mysql.execute("ALTER TABLE articles DROP COLUMN stop_ddl_col")
-                time.sleep(2)
-
-            before = MetricsSnapshot.capture(mygramdb)
-
+            ddl_before = read_counter(mygramdb, REPL_DDL_TOTAL)
             self._stop_replication(mygramdb)
-            time.sleep(1)
 
-            # DDL while stopped
-            mysql.execute("ALTER TABLE articles ADD COLUMN stop_ddl_col VARCHAR(50) DEFAULT NULL")
+            mysql.execute(f"ALTER TABLE articles ADD COLUMN {column} VARCHAR(50) DEFAULT NULL")
+            marker = f"stopddl{uuid.uuid4().hex[:8]}"
+            mysql.insert_rows("articles", _articles(marker, "stop ddl", 1))
 
-            # INSERT while stopped
-            marker = f"stopddl_{uuid.uuid4().hex[:8]}"
-            mysql.insert_rows(
-                "articles",
-                [
-                    {
-                        "title": "Stop DDL Test",
-                        "content": f"Content for stop ddl {marker}",
-                        "status": 1,
-                        "category": "tech",
-                        "enabled": 1,
-                    }
-                ],
-            )
-
-            # Restart
             self._start_replication(mygramdb)
-
-            # INSERT should propagate
-            wait_until_gte(
+            wait_until_value(
                 lambda: mygramdb.count("testdb.articles", marker),
+                expected=1,
+                timeout=30,
+                interval=0.5,
+                description="the row queued behind the DDL to be indexed",
+            )
+            # The row arriving is not enough: the DDL ahead of it must have been
+            # replayed too, or later row images decode against a stale layout.
+            wait_until_gte(
+                lambda: read_counter(mygramdb, REPL_DDL_TOTAL) - ddl_before,
                 minimum=1,
                 timeout=20,
-                interval=0.5,
-                description="stop DDL restart insert propagation",
+                interval=0.25,
+                description="the queued DDL to be replayed",
             )
-
-            after = MetricsSnapshot.capture(mygramdb)
-            diff = MetricsSnapshot.diff(before, after)
-
-            # DDL counter should have increased
-            ddl_metrics = {k: v for k, v in diff.items() if "ddl" in k.lower()}
-            if ddl_metrics:
-                assert max(ddl_metrics.values()) >= 1, (
-                    f"DDL counter should increase, got {ddl_metrics}"
-                )
+            # A trailing column must not shift the filter values of that row.
+            assert mygramdb.count("testdb.articles", marker, filters={"category": "tech"}) == 1, (
+                "filter values were misread after replaying the queued DDL"
+            )
         finally:
             self._ensure_replication_running(mygramdb)
-            # Cleanup column
-            try:
-                mysql.execute("ALTER TABLE articles DROP COLUMN stop_ddl_col")
-                time.sleep(2)
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                mysql.execute(f"ALTER TABLE articles DROP COLUMN {column}")

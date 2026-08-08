@@ -9,6 +9,51 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from lib.mygramdb_client import MygramdbClient
 
+# Exact exported names of the replication counters. Tests name the metric they
+# depend on rather than substring-matching, so a renamed or dropped metric fails
+# the test instead of silently matching nothing.
+REPL_INSERTS_APPLIED = 'mygramdb_replication_inserts_total{status="applied"}'
+REPL_INSERTS_SKIPPED = 'mygramdb_replication_inserts_total{status="skipped"}'
+REPL_UPDATES_APPLIED = 'mygramdb_replication_updates_total{status="applied"}'
+REPL_UPDATES_ADDED = 'mygramdb_replication_updates_total{status="added"}'
+REPL_UPDATES_REMOVED = 'mygramdb_replication_updates_total{status="removed"}'
+REPL_UPDATES_MODIFIED = 'mygramdb_replication_updates_total{status="modified"}'
+REPL_UPDATES_SKIPPED = 'mygramdb_replication_updates_total{status="skipped"}'
+REPL_DELETES_APPLIED = 'mygramdb_replication_deletes_total{status="applied"}'
+REPL_DELETES_SKIPPED = 'mygramdb_replication_deletes_total{status="skipped"}'
+REPL_DDL_TOTAL = "mygramdb_replication_ddl_total"
+REPL_EVENTS_PROCESSED = "mygramdb_replication_events_processed"
+
+SERVER_COMMANDS_TOTAL = "mygramdb_server_commands_total"
+CLIENTS_TOTAL = "mygramdb_clients_total"
+
+CACHE_HITS = "mygramdb_cache_hits_total"
+CACHE_MISSES_NOT_FOUND = 'mygramdb_cache_misses_total{reason="not_found"}'
+CACHE_MISSES_TTL_EXPIRED = 'mygramdb_cache_misses_total{reason="ttl_expired"}'
+CACHE_MISSES_INVALIDATED = 'mygramdb_cache_misses_total{reason="invalidated"}'
+CACHE_ENTRIES = "mygramdb_cache_entries"
+CACHE_HIT_RATE = "mygramdb_cache_hit_rate"
+CACHE_INVALIDATIONS_IMMEDIATE = 'mygramdb_cache_invalidations_total{phase="immediate"}'
+CACHE_INVALIDATIONS_DEFERRED = 'mygramdb_cache_invalidations_total{phase="deferred"}'
+CACHE_MEMORY_CACHE = 'mygramdb_cache_memory_bytes{type="cache"}'
+
+
+def command_total(command: str) -> str:
+    """Name of the per-command counter for ``command`` (e.g. ``search``)."""
+    return f'mygramdb_command_total{{command="{command}"}}'
+
+
+def read_counter(client: MygramdbClient, metric: str) -> float:
+    """Read one exported counter, failing if the endpoint does not export it.
+
+    Returning a default for a missing metric would turn every assertion built on
+    it into a no-op, so an absent name is an error rather than zero.
+    """
+    snapshot = MetricsSnapshot.capture(client)
+    if metric not in snapshot.data:
+        raise AssertionError(f"metric {metric} is not exported by /metrics")
+    return snapshot.data[metric]
+
 
 class MetricsSnapshot:
     """A snapshot of Prometheus metrics."""
