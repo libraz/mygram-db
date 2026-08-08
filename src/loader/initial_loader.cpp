@@ -511,12 +511,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
   return {};
 }
 
-/**
- * @brief Validate that a string represents a valid numeric value
- *
- * Accepts optional sign, digits, and at most one decimal point.
- */
-static bool IsValidNumericValue(const std::string& value) {
+bool internal::IsSafeSQLNumericLiteral(std::string_view value) {
   if (value.empty()) {
     return false;
   }
@@ -528,20 +523,36 @@ static bool IsValidNumericValue(const std::string& value) {
     return false;
   }
   bool has_dot = false;
+  bool has_digit = false;
   for (size_t i = start; i < value.size(); i++) {
     if (value[i] == '.') {
       if (has_dot) {
         return false;
       }
       has_dot = true;
-    } else if (std::isdigit(static_cast<unsigned char>(value[i])) == 0) {
+      continue;
+    }
+    const auto byte = static_cast<unsigned char>(value[i]);
+    if (byte < '0' || byte > '9') {
       return false;
     }
+    has_digit = true;
   }
-  return true;
+  return has_digit;
+}
+
+bool internal::IsAllowedFilterOperator(std::string_view comparison_operator) {
+  return comparison_operator == "=" || comparison_operator == "!=" || comparison_operator == "<" ||
+         comparison_operator == ">" || comparison_operator == "<=" || comparison_operator == ">=" ||
+         comparison_operator == "IS NULL" || comparison_operator == "IS NOT NULL";
 }
 
 std::string InitialLoader::BuildSelectQuery() const {
+  return internal::BuildInitialLoadSelectQuery(table_config_, mysql_config_);
+}
+
+std::string internal::BuildInitialLoadSelectQuery(const config::TableConfig& table_config,
+                                                  const config::MysqlConfig& mysql_config) {
   std::ostringstream query;
   query << "SELECT ";
 
@@ -560,24 +571,24 @@ std::string InitialLoader::BuildSelectQuery() const {
   };
 
   // Primary key (always first)
-  add_column(table_config_.primary_key);
+  add_column(table_config.primary_key);
 
   // Text source columns
-  if (!table_config_.text_source.column.empty()) {
-    add_column(table_config_.text_source.column);
+  if (!table_config.text_source.column.empty()) {
+    add_column(table_config.text_source.column);
   } else {
-    for (const auto& col : table_config_.text_source.concat) {
+    for (const auto& col : table_config.text_source.concat) {
       add_column(col);
     }
   }
 
   // Required filter columns (for binlog replication condition checking)
-  for (const auto& filter : table_config_.required_filters) {
+  for (const auto& filter : table_config.required_filters) {
     add_column(filter.name);
   }
 
   // Optional filter columns (for search-time filtering)
-  for (const auto& filter : table_config_.filters) {
+  for (const auto& filter : table_config.filters) {
     add_column(filter.name);
   }
 
@@ -595,17 +606,17 @@ std::string InitialLoader::BuildSelectQuery() const {
     first_select_column = false;
   }
 
-  auto quoted_table = mygramdb::utils::QuoteQualifiedSQLIdentifier(table_config_.database, table_config_.name);
+  auto quoted_table = mygramdb::utils::QuoteQualifiedSQLIdentifier(table_config.database, table_config.name);
   if (!quoted_table) {
     return "";
   }
   query << " FROM " << *quoted_table;
 
   // Add WHERE clause from required_filters
-  if (!table_config_.required_filters.empty()) {
+  if (!table_config.required_filters.empty()) {
     query << " WHERE ";
     bool first_required_filter = true;
-    for (const auto& filter : table_config_.required_filters) {
+    for (const auto& filter : table_config.required_filters) {
       if (!first_required_filter) {
         query << " AND ";
       }
@@ -615,6 +626,19 @@ std::string InitialLoader::BuildSelectQuery() const {
       if (!quoted_filter) {
         return "";
       }
+      // The operator is the one part of a filter that becomes SQL syntax rather
+      // than a quoted identifier or an encoded literal, so it is checked here
+      // as well as at configuration load.
+      if (!internal::IsAllowedFilterOperator(filter.op)) {
+        mygram::utils::StructuredLog()
+            .Event("loader_error")
+            .Field("operation", "build_select_query")
+            .Field("type", "unsupported_filter_operator")
+            .Field("filter_name", filter.name)
+            .Error();
+        return "";
+      }
+
       query << *quoted_filter << " ";
 
       if (filter.op == "IS NULL" || filter.op == "IS NOT NULL") {
@@ -632,7 +656,7 @@ std::string InitialLoader::BuildSelectQuery() const {
         // literal in mysql.datetime_timezone, then compare using the same UTC
         // epoch that row-based binlog decoding produces.
         if (filter.type == "timestamp") {
-          auto epoch = mygram::utils::ParseDatetimeValue(filter.value, mysql_config_.datetime_timezone);
+          auto epoch = mygram::utils::ParseDatetimeValue(filter.value, mysql_config.datetime_timezone);
           if (!epoch.has_value()) {
             mygram::utils::StructuredLog()
                 .Event("loader_error")
@@ -640,7 +664,7 @@ std::string InitialLoader::BuildSelectQuery() const {
                 .Field("type", "invalid_timestamp_filter_value")
                 .Field("filter_name", filter.name)
                 .Field("value", filter.value)
-                .Field("timezone", mysql_config_.datetime_timezone)
+                .Field("timezone", mysql_config.datetime_timezone)
                 .Error();
             return "";
           }
@@ -649,7 +673,7 @@ std::string InitialLoader::BuildSelectQuery() const {
           query << mygramdb::utils::EncodeMySQLStringLiteral(filter.value);
         } else {
           // Validate numeric values to prevent SQL injection
-          if (!IsValidNumericValue(filter.value)) {
+          if (!internal::IsSafeSQLNumericLiteral(filter.value)) {
             mygram::utils::StructuredLog()
                 .Event("loader_error")
                 .Field("operation", "build_select_query")
@@ -666,7 +690,7 @@ std::string InitialLoader::BuildSelectQuery() const {
   }
 
   // Add ORDER BY for efficient processing
-  auto quoted_primary_key = quote_identifier(table_config_.primary_key);
+  auto quoted_primary_key = quote_identifier(table_config.primary_key);
   if (!quoted_primary_key) {
     return "";
   }

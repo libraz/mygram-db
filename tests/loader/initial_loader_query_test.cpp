@@ -37,370 +37,269 @@
 namespace mygramdb::loader {
 
 /**
- * @brief Test fixture for SELECT query generation logic
- *
- * These tests document the expected behavior of BuildSelectQuery().
- * The actual implementation in initial_loader.cpp should:
- * - Collect all columns from primary_key, text_source, required_filters, and filters
- * - Avoid duplicates using an unordered_set for tracking
- * - Preserve insertion order using a vector for output
+ * @brief Build a minimal table configuration for query-generation tests.
  */
-class SelectQueryLogicTest : public ::testing::Test {
- protected:
-  /**
-   * @brief Helper to verify column uniqueness logic
-   *
-   * This simulates the duplicate-avoidance logic used in BuildSelectQuery
-   */
-  static std::vector<std::string> CollectUniqueColumns(const config::TableConfig& table_config) {
-    std::vector<std::string> selected_columns;
-    std::unordered_set<std::string> seen_columns;
-
-    auto add_column = [&](const std::string& col) {
-      if (seen_columns.find(col) == seen_columns.end()) {
-        selected_columns.push_back(col);
-        seen_columns.insert(col);
-      }
-    };
-
-    // Primary key
-    add_column(table_config.primary_key);
-
-    // Text source columns
-    if (!table_config.text_source.column.empty()) {
-      add_column(table_config.text_source.column);
-    } else {
-      for (const auto& col : table_config.text_source.concat) {
-        add_column(col);
-      }
-    }
-
-    // Required filter columns
-    for (const auto& filter : table_config.required_filters) {
-      add_column(filter.name);
-    }
-
-    // Optional filter columns
-    for (const auto& filter : table_config.filters) {
-      add_column(filter.name);
-    }
-
-    return selected_columns;
-  }
-};
-
-/**
- * @brief Test that basic column collection works
- */
-TEST_F(SelectQueryLogicTest, CollectColumns_Basic) {
+config::TableConfig BaseTableConfig() {
   config::TableConfig table_config;
   table_config.name = "articles";
   table_config.primary_key = "id";
   table_config.text_source.column = "content";
-
-  auto columns = CollectUniqueColumns(table_config);
-
-  ASSERT_EQ(columns.size(), 2);
-  EXPECT_EQ(columns[0], "id");
-  EXPECT_EQ(columns[1], "content");
+  return table_config;
 }
 
-/**
- * @brief Test that filter columns are included
- */
-TEST_F(SelectQueryLogicTest, CollectColumns_WithFilters) {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.column = "content";
-
-  config::FilterConfig filter1;
-  filter1.name = "status";
-  filter1.type = "int";
-  table_config.filters.push_back(filter1);
-
-  config::FilterConfig filter2;
-  filter2.name = "category";
-  filter2.type = "string";
-  table_config.filters.push_back(filter2);
-
-  auto columns = CollectUniqueColumns(table_config);
-
-  ASSERT_EQ(columns.size(), 4);
-  EXPECT_EQ(columns[0], "id");
-  EXPECT_EQ(columns[1], "content");
-  EXPECT_EQ(columns[2], "status");
-  EXPECT_EQ(columns[3], "category");
-}
-
-/**
- * @brief Test that required filter columns are included
- */
-TEST_F(SelectQueryLogicTest, CollectColumns_WithRequiredFilters) {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.column = "content";
-
-  config::RequiredFilterConfig required_filter;
-  required_filter.name = "enabled";
-  required_filter.type = "int";
-  required_filter.op = "=";
-  required_filter.value = "1";
-  table_config.required_filters.push_back(required_filter);
-
-  auto columns = CollectUniqueColumns(table_config);
-
-  ASSERT_EQ(columns.size(), 3);
-  EXPECT_EQ(columns[0], "id");
-  EXPECT_EQ(columns[1], "content");
-  EXPECT_EQ(columns[2], "enabled");
-}
-
-/**
- * @brief Test that duplicate columns are avoided
- *
- * This is the key test for the bug fix: when the same column appears
- * in multiple places (e.g., primary_key, text_source, filters),
- * it should only appear once in the final SELECT clause.
- */
-TEST_F(SelectQueryLogicTest, CollectColumns_NoDuplicates) {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.column = "content";
-
-  // Add filter that duplicates primary_key
-  config::FilterConfig filter1;
-  filter1.name = "id";  // Same as primary_key
-  filter1.type = "bigint";
-  table_config.filters.push_back(filter1);
-
-  // Add filter that duplicates text_source
-  config::FilterConfig filter2;
-  filter2.name = "content";  // Same as text_source
-  filter2.type = "text";
-  table_config.filters.push_back(filter2);
-
-  // Add required_filter with unique column
-  config::RequiredFilterConfig required_filter;
-  required_filter.name = "enabled";
-  required_filter.type = "int";
-  required_filter.op = "=";
-  required_filter.value = "1";
-  table_config.required_filters.push_back(required_filter);
-
-  // Add filter that duplicates required_filter
-  config::FilterConfig filter3;
-  filter3.name = "enabled";  // Same as required_filter
-  filter3.type = "int";
-  table_config.filters.push_back(filter3);
-
-  auto columns = CollectUniqueColumns(table_config);
-
-  // Should have exactly 3 unique columns: id, content, enabled
-  ASSERT_EQ(columns.size(), 3);
-  EXPECT_EQ(columns[0], "id");
-  EXPECT_EQ(columns[1], "content");
-  EXPECT_EQ(columns[2], "enabled");
-
-  // Verify each column appears exactly once
-  std::unordered_map<std::string, int> column_counts;
-  for (const auto& col : columns) {
-    column_counts[col]++;
-  }
-  EXPECT_EQ(column_counts["id"], 1);
-  EXPECT_EQ(column_counts["content"], 1);
-  EXPECT_EQ(column_counts["enabled"], 1);
-}
-
-/**
- * @brief Test with concatenated text source
- */
-TEST_F(SelectQueryLogicTest, CollectColumns_WithConcatenatedTextSource) {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.concat = {"title", "body", "summary"};
-
-  auto columns = CollectUniqueColumns(table_config);
-
-  ASSERT_EQ(columns.size(), 4);
-  EXPECT_EQ(columns[0], "id");
-  EXPECT_EQ(columns[1], "title");
-  EXPECT_EQ(columns[2], "body");
-  EXPECT_EQ(columns[3], "summary");
-}
-
-/**
- * @brief Test that duplicates in concatenated text source are avoided
- */
-TEST_F(SelectQueryLogicTest, CollectColumns_NoDuplicatesWithConcat) {
-  config::TableConfig table_config;
-  table_config.name = "articles";
-  table_config.primary_key = "id";
-  table_config.text_source.concat = {"title", "body"};
-
-  // Add filter that duplicates one of the concat columns
+config::FilterConfig MakeFilter(const std::string& name, const std::string& type) {
   config::FilterConfig filter;
-  filter.name = "title";  // Same as one of concat columns
-  filter.type = "varchar";
-  table_config.filters.push_back(filter);
-
-  auto columns = CollectUniqueColumns(table_config);
-
-  // 'title' should appear exactly once
-  ASSERT_EQ(columns.size(), 3);
-  EXPECT_EQ(columns[0], "id");
-  EXPECT_EQ(columns[1], "title");
-  EXPECT_EQ(columns[2], "body");
-
-  // Verify 'title' appears exactly once
-  int title_count = std::count(columns.begin(), columns.end(), "title");
-  EXPECT_EQ(title_count, 1);
+  filter.name = name;
+  filter.type = type;
+  return filter;
 }
 
-// ===========================================================================
-// SQL literal encoding tests for filter values
-// ===========================================================================
+config::RequiredFilterConfig MakeRequiredFilter(const std::string& name, const std::string& type,
+                                                const std::string& comparison_operator, const std::string& value) {
+  config::RequiredFilterConfig filter;
+  filter.name = name;
+  filter.type = type;
+  filter.op = comparison_operator;
+  filter.value = value;
+  return filter;
+}
 
 /**
- * @brief Test fixture for SQL value escaping logic
+ * @brief Extract the column list between SELECT and FROM.
+ */
+std::vector<std::string> SelectedColumns(const std::string& query) {
+  const size_t select_end = query.find(" FROM ");
+  if (query.rfind("SELECT ", 0) != 0 || select_end == std::string::npos) {
+    return {};
+  }
+  const std::string list = query.substr(7, select_end - 7);
+  std::vector<std::string> columns;
+  size_t pos = 0;
+  while (pos < list.size()) {
+    const size_t next = list.find(", ", pos);
+    const size_t stop = next == std::string::npos ? list.size() : next;
+    columns.push_back(list.substr(pos, stop - pos));
+    pos = next == std::string::npos ? list.size() : next + 2;
+  }
+  return columns;
+}
+
+/**
+ * @brief A column named in several roles is selected once, in first-seen order.
+ */
+TEST(InitialLoadSelectQueryTest, EachColumnIsSelectedOnceInFirstSeenOrder) {
+  auto table_config = BaseTableConfig();
+  table_config.filters.push_back(MakeFilter("id", "bigint"));     // also the primary key
+  table_config.filters.push_back(MakeFilter("content", "text"));  // also the text source
+  table_config.required_filters.push_back(MakeRequiredFilter("enabled", "int", "=", "1"));
+  table_config.filters.push_back(MakeFilter("enabled", "int"));  // also a required filter
+
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+  ASSERT_FALSE(query.empty());
+  EXPECT_EQ(SelectedColumns(query), (std::vector<std::string>{"`id`", "`content`", "`enabled`"}));
+}
+
+/**
+ * @brief Concatenated text sources contribute every part column.
+ */
+TEST(InitialLoadSelectQueryTest, ConcatenatedTextSourceSelectsEveryPartOnce) {
+  auto table_config = BaseTableConfig();
+  table_config.text_source.column.clear();
+  table_config.text_source.concat = {"title", "body", "title"};
+  table_config.filters.push_back(MakeFilter("body", "text"));
+
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+  ASSERT_FALSE(query.empty());
+  EXPECT_EQ(SelectedColumns(query), (std::vector<std::string>{"`id`", "`title`", "`body`"}));
+}
+
+/**
+ * @brief Identifiers are quoted and the table is qualified by its database.
+ */
+TEST(InitialLoadSelectQueryTest, IdentifiersAreQuotedAndTheTableIsQualified) {
+  auto table_config = BaseTableConfig();
+  table_config.database = "shop";
+
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+  EXPECT_EQ(query, "SELECT `id`, `content` FROM `shop`.`articles` ORDER BY `id`");
+}
+
+/**
+ * @brief A column name carrying a backtick is escaped, not passed through.
+ */
+TEST(InitialLoadSelectQueryTest, BacktickInAnIdentifierIsEscapedRatherThanClosingTheQuoting) {
+  auto table_config = BaseTableConfig();
+  table_config.primary_key = "id`, (SELECT password FROM users) AS leaked, `id";
+
+  // Every backtick from the name is doubled, so the identifier never ends early
+  // and the injected text stays inside it.
+  const std::string escaped = "`id``, (SELECT password FROM users) AS leaked, ``id`";
+  EXPECT_EQ(internal::BuildInitialLoadSelectQuery(table_config, {}),
+            "SELECT " + escaped + ", `content` FROM `articles` ORDER BY " + escaped);
+}
+
+/**
+ * @brief An identifier that cannot be quoted at all refuses the whole query.
  *
- * These tests verify the mode-independent encoding applied to filter values
- * in BuildSelectQuery().
+ * A NUL truncates the C string handed to the driver, so the statement the
+ * server executes would be a prefix of the one that was built and checked.
  */
-class SqlEscapingTest : public ::testing::Test {
- protected:
-  /**
-   * @brief Build WHERE clause from required_filters (mirrors BuildSelectQuery logic)
-   */
-  static std::string BuildWhereClause(const std::vector<config::RequiredFilterConfig>& filters) {
-    if (filters.empty())
-      return "";
+TEST(InitialLoadSelectQueryTest, UnquotableIdentifierRefusesTheQuery) {
+  auto embedded_nul = BaseTableConfig();
+  embedded_nul.name = std::string("articles\0", 9);
+  EXPECT_TRUE(internal::BuildInitialLoadSelectQuery(embedded_nul, {}).empty());
 
-    std::ostringstream query;
-    query << " WHERE ";
-    bool first = true;
-    for (const auto& filter : filters) {
-      if (!first) {
-        query << " AND ";
-      }
-      first = false;
-      query << filter.name << " ";
-
-      if (filter.op == "IS NULL" || filter.op == "IS NOT NULL") {
-        query << filter.op;
-      } else {
-        query << filter.op << " ";
-        auto requires_quoting = [&filter]() -> bool {
-          return filter.type == "string" || filter.type == "varchar" || filter.type == "text" ||
-                 filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
-        };
-        if (requires_quoting()) {
-          query << mygramdb::utils::EncodeMySQLStringLiteral(filter.value);
-        } else {
-          query << filter.value;
-        }
-      }
-    }
-    return query.str();
-  }
-
-  static bool IsValidNumericValue(const std::string& value) {
-    if (value.empty()) {
-      return false;
-    }
-    size_t start = 0;
-    if (value[0] == '-' || value[0] == '+') {
-      start = 1;
-    }
-    if (start >= value.size()) {
-      return false;
-    }
-    bool has_dot = false;
-    for (size_t i = start; i < value.size(); ++i) {
-      if (value[i] == '.') {
-        if (has_dot) {
-          return false;
-        }
-        has_dot = true;
-      } else if (std::isdigit(static_cast<unsigned char>(value[i])) == 0) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  static std::optional<std::string> BuildWhereClauseValidated(
-      const std::vector<config::RequiredFilterConfig>& filters) {
-    for (const auto& filter : filters) {
-      const bool requires_quoting = filter.type == "string" || filter.type == "varchar" || filter.type == "text" ||
-                                    filter.type == "datetime" || filter.type == "date" || filter.type == "timestamp";
-      if (!requires_quoting && filter.op != "IS NULL" && filter.op != "IS NOT NULL" &&
-          !IsValidNumericValue(filter.value)) {
-        return std::nullopt;
-      }
-    }
-    return BuildWhereClause(filters);
-  }
-};
-
-/**
- * @brief Test that quotes and backslashes are encoded without SQL-mode semantics
- */
-TEST_F(SqlEscapingTest, StringValuesUseModeIndependentHexEncoding) {
-  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("it's"), "_utf8mb4 X'69742773'");
-  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("path\\to"), "_utf8mb4 X'706174685C746F'");
-  EXPECT_EQ(mygramdb::utils::EncodeMySQLStringLiteral("\n"), "_utf8mb4 X'0A'");
-}
-
-TEST_F(SqlEscapingTest, EmptyStringRequiredFilterBuildsQuotedEmptyLiteral) {
-  config::RequiredFilterConfig filter;
-  filter.name = "status";
-  filter.type = "varchar";
-  filter.op = "=";
-  filter.value = "";
-
-  EXPECT_EQ(BuildWhereClause({filter}), " WHERE status = _utf8mb4 X''");
+  auto empty_primary_key = BaseTableConfig();
+  empty_primary_key.primary_key.clear();
+  EXPECT_TRUE(internal::BuildInitialLoadSelectQuery(empty_primary_key, {}).empty());
 }
 
 /**
- * @brief Test that a SQL injection attempt via filter value is neutralized
+ * @brief String filter values become hex literals rather than quoted text.
+ *
+ * Hex encoding carries the bytes through without depending on the server's
+ * SQL mode for backslash handling, so no value can terminate the literal.
  */
-TEST_F(SqlEscapingTest, SqlInjectionInFilterValue) {
-  config::RequiredFilterConfig filter;
-  filter.name = "status";
-  filter.type = "string";
-  filter.op = "=";
-  filter.value = "'; DROP TABLE articles; --";
+TEST(InitialLoadSelectQueryTest, StringFilterValuesAreHexEncoded) {
+  auto table_config = BaseTableConfig();
+  table_config.required_filters.push_back(MakeRequiredFilter("status", "string", "=", "'; DROP TABLE articles; --"));
 
-  std::string clause = BuildWhereClause({filter});
-  EXPECT_EQ(clause, " WHERE status = _utf8mb4 X'273B2044524F50205441424C452061727469636C65733B202D2D'");
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+  ASSERT_NE(query.find(" WHERE "), std::string::npos);
+  EXPECT_NE(query.find("`status` = _utf8mb4 X'273B2044524F50205441424C452061727469636C65733B202D2D'"),
+            std::string::npos)
+      << query;
+  // Nothing that could end a literal or start a statement survives into the SQL.
+  EXPECT_EQ(query.find("DROP"), std::string::npos);
+}
+
+TEST(InitialLoadSelectQueryTest, EmptyStringFilterValueBecomesAnEmptyHexLiteral) {
+  auto table_config = BaseTableConfig();
+  table_config.required_filters.push_back(MakeRequiredFilter("status", "varchar", "=", ""));
+
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+  EXPECT_NE(query.find("`status` = _utf8mb4 X''"), std::string::npos) << query;
 }
 
 /**
- * @brief Test that numeric filter values are not quoted (but still safe)
+ * @brief Numeric filter values are emitted bare, so only numbers may pass.
  */
-TEST_F(SqlEscapingTest, NumericFilterNotQuoted) {
-  config::RequiredFilterConfig filter;
-  filter.name = "enabled";
-  filter.type = "int";
-  filter.op = "=";
-  filter.value = "1";
+TEST(InitialLoadSelectQueryTest, NumericFilterValueIsEmittedWithoutQuoting) {
+  auto table_config = BaseTableConfig();
+  table_config.required_filters.push_back(MakeRequiredFilter("enabled", "int", "=", "1"));
 
-  std::string clause = BuildWhereClause({filter});
-  EXPECT_EQ(clause, " WHERE enabled = 1");
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+  EXPECT_NE(query.find("`enabled` = 1"), std::string::npos) << query;
 }
 
-TEST_F(SqlEscapingTest, InvalidNumericFilterIsRejected) {
-  config::RequiredFilterConfig filter;
-  filter.name = "enabled";
-  filter.type = "int";
-  filter.op = "=";
-  filter.value = "1 OR 1=1";
+TEST(InitialLoadSelectQueryTest, NonNumericValueOnANumericFilterRefusesTheQuery) {
+  const std::vector<std::string> rejected = {
+      "1 OR 1=1", "1; DROP TABLE articles", "1'", "0x41", "1e5", "", " 1", "1 ", "+", "-", ".", "1.2.3", "1,2",
+  };
+  for (const auto& value : rejected) {
+    auto table_config = BaseTableConfig();
+    table_config.required_filters.push_back(MakeRequiredFilter("enabled", "int", "=", value));
+    EXPECT_TRUE(internal::BuildInitialLoadSelectQuery(table_config, {}).empty())
+        << "a non-numeric value reached an unquoted comparison: " << value;
+  }
+}
 
-  EXPECT_FALSE(BuildWhereClauseValidated({filter}).has_value());
+/**
+ * @brief Digits are recognized by byte value, not by the process locale.
+ */
+TEST(InitialLoadSelectQueryTest, NumericLiteralCheckClassifiesEveryByte) {
+  for (int value = 0; value <= 0xFF; ++value) {
+    const auto byte = static_cast<unsigned char>(value);
+    const std::string candidate(1, static_cast<char>(byte));
+    const bool expected = byte >= '0' && byte <= '9';
+    EXPECT_EQ(internal::IsSafeSQLNumericLiteral(candidate), expected)
+        << "byte 0x" << std::hex << value << " was classified against the documented set";
+  }
+  EXPECT_TRUE(internal::IsSafeSQLNumericLiteral("-12.50"));
+  EXPECT_TRUE(internal::IsSafeSQLNumericLiteral("+0"));
+  EXPECT_FALSE(internal::IsSafeSQLNumericLiteral("."));
+  EXPECT_FALSE(internal::IsSafeSQLNumericLiteral("-"));
+}
+
+/**
+ * @brief The comparison operator is the one filter field that becomes syntax.
+ *
+ * The configuration schema constrains it to an enumeration, but the check is
+ * repeated where the string turns into SQL so a configuration that reached the
+ * loader without passing that schema cannot inject through it.
+ */
+TEST(InitialLoadSelectQueryTest, OperatorOutsideTheAllowedSetRefusesTheQuery) {
+  const std::vector<std::string> rejected = {
+      "= 1 OR 1", "IN", "LIKE", "=1", " =", "= (SELECT 1) --", "IS NULL OR 1=1", "", "<>",
+  };
+  for (const auto& comparison_operator : rejected) {
+    auto table_config = BaseTableConfig();
+    table_config.required_filters.push_back(MakeRequiredFilter("enabled", "int", comparison_operator, "1"));
+    EXPECT_TRUE(internal::BuildInitialLoadSelectQuery(table_config, {}).empty())
+        << "an unlisted operator was emitted as SQL: " << comparison_operator;
+  }
+
+  for (const auto& comparison_operator : {"=", "!=", "<", ">", "<=", ">="}) {
+    auto table_config = BaseTableConfig();
+    table_config.required_filters.push_back(MakeRequiredFilter("enabled", "int", comparison_operator, "1"));
+    EXPECT_FALSE(internal::BuildInitialLoadSelectQuery(table_config, {}).empty())
+        << "a documented operator was rejected: " << comparison_operator;
+  }
+}
+
+TEST(InitialLoadSelectQueryTest, NullComparisonsTakeNoValue) {
+  for (const auto& comparison_operator : {"IS NULL", "IS NOT NULL"}) {
+    auto table_config = BaseTableConfig();
+    table_config.required_filters.push_back(MakeRequiredFilter("deleted_at", "datetime", comparison_operator, ""));
+    const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+    ASSERT_FALSE(query.empty());
+    EXPECT_NE(query.find(std::string("`deleted_at` ") + comparison_operator + " ORDER BY"), std::string::npos) << query;
+  }
+}
+
+/**
+ * @brief A timestamp filter is compared as an epoch, not as a pasted literal.
+ */
+TEST(InitialLoadSelectQueryTest, TimestampFilterBecomesAnEpochExpression) {
+  auto table_config = BaseTableConfig();
+  table_config.required_filters.push_back(MakeRequiredFilter("published_at", "timestamp", "<=", "2026-01-01 00:30:00"));
+  config::MysqlConfig mysql_config;
+  mysql_config.datetime_timezone = "+00:00";
+
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, mysql_config);
+  ASSERT_FALSE(query.empty());
+  auto expected_epoch = mygram::utils::ParseDatetimeValue("2026-01-01 00:30:00", "+00:00");
+  ASSERT_TRUE(expected_epoch.has_value());
+  EXPECT_NE(query.find("FROM_UNIXTIME(" + std::to_string(*expected_epoch) + ")"), std::string::npos) << query;
+
+  auto unparseable = BaseTableConfig();
+  unparseable.required_filters.push_back(MakeRequiredFilter("published_at", "timestamp", "<=", "not a timestamp"));
+  EXPECT_TRUE(internal::BuildInitialLoadSelectQuery(unparseable, mysql_config).empty());
+}
+
+/**
+ * @brief Several required filters are joined, and one bad filter refuses all.
+ */
+TEST(InitialLoadSelectQueryTest, RequiredFiltersAreJoinedAndOneRefusalDiscardsTheQuery) {
+  auto table_config = BaseTableConfig();
+  table_config.required_filters.push_back(MakeRequiredFilter("enabled", "int", "=", "1"));
+  table_config.required_filters.push_back(MakeRequiredFilter("status", "varchar", "!=", "draft"));
+
+  const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
+  ASSERT_FALSE(query.empty());
+  EXPECT_NE(query.find(" AND "), std::string::npos) << query;
+
+  table_config.required_filters.push_back(MakeRequiredFilter("score", "int", "=", "1 OR 1=1"));
+  EXPECT_TRUE(internal::BuildInitialLoadSelectQuery(table_config, {}).empty());
+}
+
+/**
+ * @brief The loader streams in primary-key order, which the query must impose.
+ */
+TEST(InitialLoadSelectQueryTest, RowsAreOrderedByThePrimaryKey) {
+  const auto query = internal::BuildInitialLoadSelectQuery(BaseTableConfig(), {});
+  ASSERT_FALSE(query.empty());
+  EXPECT_EQ(query.substr(query.size() - std::string(" ORDER BY `id`").size()), " ORDER BY `id`");
 }
 
 // ===========================================================================
