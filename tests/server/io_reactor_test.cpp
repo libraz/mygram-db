@@ -87,7 +87,7 @@ class IoReactorTest : public ::testing::Test {
  protected:
   void SetUp() override {
     pool_ = std::make_unique<ThreadPool>(2, 64);
-    reactor_ = std::make_unique<IoReactor>(pool_.get(), /*dispatcher=*/nullptr, FastConfig());
+    reactor_ = std::make_unique<IoReactor>(FastConfig());
   }
 
   void TearDown() override {
@@ -583,7 +583,7 @@ TEST_F(IoReactorTest, ShutdownWith500ActiveConnectionsIsClean) {
   ReactorConfig cfg;
   cfg.poll_timeout_ms = 0;
   auto pool500 = std::make_unique<ThreadPool>(2, 64);
-  auto reactor500 = std::make_unique<IoReactor>(pool500.get(), nullptr, cfg);
+  auto reactor500 = std::make_unique<IoReactor>(cfg);
 
   MockEventMultiplexer* mock500 = nullptr;
   reactor500->SetMultiplexerFactoryForTest([&mock500]() {
@@ -643,7 +643,7 @@ TEST_F(IoReactorTest, ShutdownWith500ActiveConnectionsIsClean) {
 TEST_F(IoReactorTest, StartStopRapidCycleNoThreadLeak) {
   for (int i = 0; i < 100; ++i) {
     auto pool = std::make_unique<ThreadPool>(1, 16);
-    auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+    auto reactor = std::make_unique<IoReactor>(FastConfig());
     reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
 
     auto start_result = reactor->Start();
@@ -664,7 +664,7 @@ TEST_F(IoReactorTest, StartStopRapidCycleNoThreadLeak) {
 TEST_F(IoReactorTest, StartStopConcurrentNoLeak) {
   for (int i = 0; i < 50; ++i) {
     auto pool = std::make_unique<ThreadPool>(1, 16);
-    auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+    auto reactor = std::make_unique<IoReactor>(FastConfig());
     reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
 
     std::atomic<bool> go{false};
@@ -720,7 +720,7 @@ TEST_F(IoReactorTest, IdleConnectionIsReaped) {
   cfg.event_loop_threads = 1;
 
   auto pool = std::make_unique<ThreadPool>(1, 16);
-  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  auto reactor = std::make_unique<IoReactor>(cfg);
 
   std::atomic<int> close_callback_count{0};
   std::atomic<int> closed_fd{-1};
@@ -768,7 +768,7 @@ TEST_F(IoReactorTest, ActiveConnectionIsNotReaped) {
   cfg.event_loop_threads = 1;
 
   auto pool = std::make_unique<ThreadPool>(1, 16);
-  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  auto reactor = std::make_unique<IoReactor>(cfg);
 
   std::atomic<int> close_callback_count{0};
   reactor->SetCloseCallback([&](int) { close_callback_count.fetch_add(1); });
@@ -807,7 +807,7 @@ TEST_F(IoReactorTest, RequestInFlightIsNotReapedUntilWorkerCompletes) {
   cfg.reaper_interval_sec = 1;
 
   auto pool = std::make_unique<ThreadPool>(1, 16);
-  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  auto reactor = std::make_unique<IoReactor>(cfg);
   ASSERT_TRUE(reactor->Start());
 
   SocketPair sp;
@@ -840,7 +840,7 @@ TEST_F(IoReactorTest, InitialReadTimeoutClosesConnectionDespitePartialBytes) {
   cfg.event_loop_threads = 1;
 
   auto pool = std::make_unique<ThreadPool>(1, 16);
-  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  auto reactor = std::make_unique<IoReactor>(cfg);
 
   std::atomic<int> close_callback_count{0};
   reactor->SetCloseCallback([&](int) { close_callback_count.fetch_add(1); });
@@ -931,7 +931,7 @@ TEST_F(IoReactorTest, StopReturnsPromptlyWithLongPollTimeout) {
   ReactorConfig cfg;
   cfg.poll_timeout_ms = 5000;
   auto pool = std::make_unique<ThreadPool>(1, 16);
-  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  auto reactor = std::make_unique<IoReactor>(cfg);
   reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
 
   ASSERT_TRUE(reactor->Start());
@@ -962,7 +962,7 @@ TEST_F(IoReactorTest, StopReturnsPromptlyWithRealBackend) {
   ReactorConfig cfg;
   cfg.poll_timeout_ms = 5000;
   auto pool = std::make_unique<ThreadPool>(1, 16);
-  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, cfg);
+  auto reactor = std::make_unique<IoReactor>(cfg);
   // Do NOT call SetMultiplexerFactoryForTest — use the real kernel backend.
 
   ASSERT_TRUE(reactor->Start()) << "Real backend Start() failed";
@@ -980,7 +980,7 @@ TEST_F(IoReactorTest, StopReturnsPromptlyWithRealBackend) {
 TEST_F(IoReactorTest, RegisterRaceWithStopLeavesNoStaleEntries) {
   for (int iter = 0; iter < 20; ++iter) {
     auto pool = std::make_unique<ThreadPool>(2, 64);
-    auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+    auto reactor = std::make_unique<IoReactor>(FastConfig());
     reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
     ASSERT_TRUE(reactor->Start());
 
@@ -1040,7 +1040,7 @@ TEST_F(IoReactorTest, RegisterRaceWithStopLeavesNoStaleEntries) {
 
 TEST_F(IoReactorTest, RegisterPublishIsSerializedBeforeStopClear) {
   auto pool = std::make_unique<ThreadPool>(2, 64);
-  auto reactor = std::make_unique<IoReactor>(pool.get(), nullptr, FastConfig());
+  auto reactor = std::make_unique<IoReactor>(FastConfig());
   reactor->SetMultiplexerFactoryForTest([]() { return std::make_unique<MockEventMultiplexer>(); });
 
   std::promise<void> register_after_add_promise;

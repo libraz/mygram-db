@@ -55,9 +55,6 @@ namespace mygramdb::server {
 using mygram::utils::ToSockaddr;
 
 namespace {
-// Buffer size for IP address formatting
-constexpr size_t kIpAddressBufferSize = 64;
-
 // Default timeout values (in seconds)
 constexpr int kDefaultSyncShutdownTimeoutSec = 30;
 
@@ -240,7 +237,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   }
   rcfg.idle_timeout_sec = config_.idle_timeout_sec;
   rcfg.reaper_interval_sec = config_.reaper_interval_sec;
-  reactor_ = std::make_unique<IoReactor>(thread_pool_.get(), dispatcher_.get(), rcfg);
+  reactor_ = std::make_unique<IoReactor>(rcfg);
   // When the reactor tears down a connection, decrement the acceptor's
   // max_connections gate so new accepts can proceed, and the server stats
   // so GetConnectionCount() reflects reality.
@@ -259,7 +256,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   {
     auto r = reactor_->Start();
     if (!r) {
-      Stop();
+      (void)Stop();
       return MakeUnexpected(r.error());
     }
   }
@@ -307,7 +304,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   {
     auto accept_result = acceptor_->StartAccepting();
     if (!accept_result) {
-      Stop();
+      (void)Stop();
       return MakeUnexpected(accept_result.error());
     }
   }

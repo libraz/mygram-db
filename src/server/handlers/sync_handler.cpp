@@ -13,7 +13,7 @@
 
 namespace mygramdb::server {
 
-std::string SyncHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
+std::string SyncHandler::Handle(const query::Query& query, ConnectionContext& /*conn_ctx*/) {
   if (query.type == query::QueryType::SYNC) {
     return HandleSync(query);
   }

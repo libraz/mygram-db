@@ -488,6 +488,18 @@ TEST(ReactorConnectionBackpressureTest, ConfiguredHighWatermarkBackpressuresSing
 }
 
 TEST(ReactorConnectionBackpressureTest, PausedDrainAndAppendSerializeReadBufferAccess) {
+  // The two threads model the event loop appending received bytes while the
+  // drain worker walks the same buffer looking for frame terminators. Both run
+  // long enough, and start close enough together, that their critical sections
+  // genuinely overlap: a test where the threads run back to back would pass
+  // under ThreadSanitizer whether or not the accesses are serialized.
+  constexpr int kIterations = 2000;
+  // Appended chunks carry no terminator, so the unframed tail keeps growing and
+  // the appending thread reallocates it repeatedly. That is the access the
+  // scanning thread must never observe half-done.
+  constexpr size_t kChunkBytes = 64;
+  const std::string chunk(kChunkBytes, 'y');
+
   auto conn = ReactorConnection::Create(-1, nullptr, nullptr, nullptr, nullptr,
                                         ReactorConnection::kDefaultMaxWriteQueueBytes, nullptr,
                                         /*max_pending_frames=*/8, /*max_pending_frame_bytes=*/4096);
@@ -499,27 +511,47 @@ TEST(ReactorConnectionBackpressureTest, PausedDrainAndAppendSerializeReadBufferA
   ASSERT_TRUE(conn->AppendReadBytesForTest(initial_frames, initial_enqueued));
   ASSERT_TRUE(conn->ReadPausedForTest());
 
+  std::atomic<bool> start{false};
+  std::atomic<bool> appending_done{false};
   std::atomic<bool> append_succeeded{true};
   std::thread drainer([&]() {
-    for (int iteration = 0; iteration < 20; ++iteration) {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    while (!appending_done.load(std::memory_order_acquire)) {
+      conn->DrainPendingFramesForTest(2);
+    }
+    // Sweep up whatever the appender queued after the last observation, so the
+    // final counts do not depend on how the two loops interleaved.
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
       conn->DrainPendingFramesForTest(2);
     }
   });
   std::thread appender([&]() {
-    for (int iteration = 0; iteration < 20; ++iteration) {
+    while (!start.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
       size_t enqueued = 0;
-      if (!conn->AppendReadBytesForTest("y\r\n", enqueued)) {
+      if (!conn->AppendReadBytesForTest(chunk, enqueued)) {
         append_succeeded.store(false, std::memory_order_release);
-        return;
+        break;
       }
     }
+    appending_done.store(true, std::memory_order_release);
   });
+  start.store(true, std::memory_order_release);
   drainer.join();
   appender.join();
 
   EXPECT_TRUE(append_succeeded.load(std::memory_order_acquire));
-  EXPECT_LE(conn->ReadBufferSizeForTest(), ReactorConnection::kMaxReadBufferBytes);
-  EXPECT_LE(conn->PendingFrameCountForTest(), 6U);
+  // Byte-exact rather than bounded: an append that lands in a buffer another
+  // thread is reallocating is lost silently, which is a dropped request rather
+  // than a crash. The drain loop consumes the terminated frames seeded above
+  // and nothing terminates the appended chunks, so exactly those must remain.
+  EXPECT_EQ(conn->ReadBufferSizeForTest(), static_cast<size_t>(kIterations) * kChunkBytes)
+      << "appended bytes went missing while the buffer was being scanned";
+  EXPECT_EQ(conn->PendingFrameCountForTest(), 0U);
   EXPECT_FALSE(conn->IsClosing());
 }
 

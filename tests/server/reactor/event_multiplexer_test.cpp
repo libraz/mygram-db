@@ -801,6 +801,184 @@ TEST(EpollMultiplexerTest, RemoveFailureClearsUserspaceRegistrationMaps) {
   ::close(fds[1]);
 }
 
+// The self-wake path is specific to this backend: it is an eventfd registered
+// on the same epoll instance as the connection fds. Poll() has to drain it and
+// drop it, because surfacing it would hand the reactor a ready fd that belongs
+// to no connection.
+TEST(EpollMultiplexerTest, WakeUnblocksPollWithoutSurfacingTheWakeDescriptor) {
+  EpollMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  std::vector<ReadyEvent> out;
+  std::atomic<bool> returned{false};
+  std::thread waiter([&] {
+    // A long timeout: the only thing that should end this wait is the Wake().
+    ASSERT_TRUE(mux.Poll(30000, out).has_value());
+    returned.store(true, std::memory_order_release);
+  });
+
+  // Give the waiter a chance to reach epoll_wait. A Wake() issued before it
+  // gets there still works -- eventfd keeps a counter -- so this is only to
+  // make the test exercise the blocked case rather than assume it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_TRUE(mux.Wake().has_value());
+
+  waiter.join();
+  EXPECT_TRUE(returned.load(std::memory_order_acquire));
+  EXPECT_TRUE(out.empty()) << "the self-wake descriptor was reported to the caller as a ready event";
+}
+
+// eventfd accumulates a counter, so several Wake() calls collapse into a single
+// readable notification. The drain has to clear the whole counter: if it left a
+// residue, the next Poll() would return immediately with nothing ready and the
+// reactor would spin.
+TEST(EpollMultiplexerTest, RepeatedWakesDrainCompletely) {
+  EpollMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  for (int i = 0; i < 16; ++i) {
+    ASSERT_TRUE(mux.Wake().has_value());
+  }
+
+  std::vector<ReadyEvent> out;
+  ASSERT_TRUE(mux.Poll(0, out).has_value());
+  EXPECT_TRUE(out.empty());
+
+  // Whether the counter was cleared is not visible in `out` -- the wake entry
+  // is dropped either way. It is visible in whether the next Poll() waits: a
+  // residual count keeps the eventfd readable, so the wait returns at once and
+  // the reactor spins through its loop burning a core.
+  const auto start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(mux.Poll(200, out).has_value());
+  const auto waited = std::chrono::steady_clock::now() - start;
+
+  EXPECT_TRUE(out.empty());
+  EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(), 150)
+      << "Poll() returned early, so the wake counter still had a residue to report";
+}
+
+// Registrations are addressed by token, not by fd, so that a closed fd whose
+// number has been reused cannot be mistaken for the connection that used to
+// hold it. Modify must therefore refuse a token that does not match the
+// registration currently held for that fd.
+TEST(EpollMultiplexerTest, ModifyWithAStaleRegistrationTokenIsRefused) {
+  EpollMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+  constexpr RegistrationToken kCurrent = 4242;
+  constexpr RegistrationToken kStale = 4241;
+  ASSERT_TRUE(mux.Add(fds[0], event::kReadable, kCurrent).has_value());
+
+  const auto stale = mux.Modify(fds[0], event::kReadable | event::kWritable, kStale);
+  ASSERT_FALSE(stale.has_value()) << "a modify for a superseded registration was applied";
+  EXPECT_EQ(stale.error().code(), mygram::utils::ErrorCode::kNetworkReactorModifyFailed);
+
+  // The matching token still works, so the refusal above is about the token
+  // rather than the fd having been dropped.
+  EXPECT_TRUE(mux.Modify(fds[0], event::kReadable | event::kWritable, kCurrent).has_value());
+
+  ASSERT_TRUE(mux.Remove(fds[0]).has_value());
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
+// The token the caller supplied is what comes back on the ready event. The
+// reactor uses it to reject events for a registration it has already torn down,
+// so a backend that substituted its own value would defeat that check.
+TEST(EpollMultiplexerTest, PollReturnsTheRegistrationTokenTheCallerSupplied) {
+  EpollMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+  constexpr RegistrationToken kToken = 987654321;
+  ASSERT_TRUE(mux.Add(fds[0], event::kReadable, kToken).has_value());
+  ASSERT_EQ(::write(fds[1], "x", 1), 1);
+
+  std::vector<ReadyEvent> out;
+  ASSERT_TRUE(mux.Poll(1000, out).has_value());
+  ASSERT_EQ(out.size(), 1U);
+  EXPECT_EQ(out[0].fd, fds[0]);
+  EXPECT_EQ(out[0].registration_token, kToken);
+  EXPECT_NE(out[0].events & event::kReadable, 0);
+
+  ASSERT_TRUE(mux.Remove(fds[0]).has_value());
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
+// epoll rejects a second EPOLL_CTL_ADD for the same fd with EEXIST. The failure
+// must not disturb the registration that is already there, or the fd would be
+// left armed in the kernel with no way to address it.
+TEST(EpollMultiplexerTest, DuplicateAddFailsAndLeavesTheFirstRegistrationIntact) {
+  EpollMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+  constexpr RegistrationToken kFirst = 111;
+  ASSERT_TRUE(mux.Add(fds[0], event::kReadable, kFirst).has_value());
+  ASSERT_EQ(mux.RegistrationCountForTest(), 1U);
+
+  const auto duplicate = mux.Add(fds[0], event::kWritable, 222);
+  ASSERT_FALSE(duplicate.has_value()) << "the same fd was registered twice";
+  EXPECT_EQ(duplicate.error().code(), mygram::utils::ErrorCode::kNetworkReactorRegisterFailed);
+  EXPECT_EQ(mux.RegistrationCountForTest(), 1U);
+
+  // The original token is still the one that addresses this fd.
+  EXPECT_TRUE(mux.Modify(fds[0], event::kReadable, kFirst).has_value());
+
+  ASSERT_TRUE(mux.Remove(fds[0]).has_value());
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
+// Add and Remove run from worker threads while the event loop polls, so the two
+// registration maps have to stay in step under concurrency. A divergence shows
+// up as a leftover entry once the churn stops.
+TEST(EpollMultiplexerTest, ConcurrentRegistrationChurnLeavesNoResidue) {
+  EpollMultiplexer mux;
+  ASSERT_TRUE(mux.Open().has_value());
+
+  constexpr int kThreads = 8;
+  constexpr int kIterations = 100;
+
+  std::vector<std::thread> workers;
+  std::atomic<bool> any_failure{false};
+  workers.reserve(kThreads);
+  for (int t = 0; t < kThreads; ++t) {
+    workers.emplace_back([&mux, &any_failure, t]() {
+      int fds[2] = {-1, -1};
+      if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        any_failure.store(true, std::memory_order_relaxed);
+        return;
+      }
+      const auto token = static_cast<RegistrationToken>(t + 1) * 1000;
+      for (int i = 0; i < kIterations; ++i) {
+        if (!mux.Add(fds[0], event::kReadable, token).has_value() ||
+            !mux.Modify(fds[0], event::kReadable | event::kWritable, token).has_value() ||
+            !mux.Remove(fds[0]).has_value()) {
+          any_failure.store(true, std::memory_order_relaxed);
+          break;
+        }
+      }
+      ::close(fds[0]);
+      ::close(fds[1]);
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+
+  EXPECT_FALSE(any_failure.load()) << "a registration operation failed while others were in flight";
+  EXPECT_EQ(mux.RegistrationCountForTest(), 0U) << "registration bookkeeping outlived the descriptors it tracked";
+}
+
 #endif
 
 }  // namespace mygramdb::server::reactor

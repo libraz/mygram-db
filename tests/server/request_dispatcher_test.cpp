@@ -749,6 +749,32 @@ TEST_F(RequestDispatcherTest, AdministrativeCommandsRequireSuccessfulAuth) {
   EXPECT_EQ(dispatcher.Dispatch("DUMP STATUS", conn_ctx), "OK RECORDED");
 }
 
+/**
+ * @brief Authentication attempts appear in command traffic.
+ *
+ * AUTH is answered and returned before the shared counting site, so it is
+ * counted in its own branch. Without that, repeated token guesses would leave
+ * no trace in the command counters at all.
+ */
+TEST_F(RequestDispatcherTest, AuthenticationAttemptsAreCountedWhetherOrNotTheySucceed) {
+  ServerConfig config;
+  config.default_limit = 100;
+  config.max_query_length = 10000;
+  config.admin_token = "correct horse battery staple";
+  RequestDispatcher dispatcher(*ctx_, config);
+
+  const uint64_t before = ctx_->stats.GetTotalCommands();
+  ConnectionContext conn_ctx;
+
+  EXPECT_TRUE(dispatcher.Dispatch("AUTH wrong-token", conn_ctx).find("ERROR") == 0);
+  EXPECT_EQ(ctx_->stats.GetTotalCommands(), before + 1) << "a rejected authentication left no trace";
+
+  EXPECT_TRUE(dispatcher.Dispatch("AUTH 'correct horse battery staple'", conn_ctx).find("OK AUTHENTICATED") == 0);
+  EXPECT_EQ(ctx_->stats.GetTotalCommands(), before + 2) << "a successful authentication left no trace";
+
+  EXPECT_EQ(ctx_->stats.GetCommandCount(QueryType::AUTH), 2U);
+}
+
 TEST_F(RequestDispatcherTest, AuthenticationTokenIsRedactedFromRequestLogs) {
   auto previous_logger = spdlog::default_logger();
   auto previous_level = spdlog::get_level();

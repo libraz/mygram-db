@@ -96,14 +96,12 @@ struct ReactorConfig {
 class IoReactor {
  public:
   /**
-   * @param pool        Non-owning thread pool used to run drain tasks. Must
-   *                    outlive this reactor.
-   * @param dispatcher  Non-owning request dispatcher used by drain tasks.
-   *                    May be null if no connections are ever registered
-   *                    (e.g. reactor-parity unit tests with a mock mux).
-   * @param cfg         Reactor tuning parameters.
+   * @param cfg Reactor tuning parameters.
+   *
+   * The thread pool and request dispatcher a connection needs are passed to
+   * ReactorConnection::Create by the acceptor, not held here.
    */
-  IoReactor(ThreadPool* pool, RequestDispatcher* dispatcher, ReactorConfig cfg);
+  explicit IoReactor(ReactorConfig cfg);
   ~IoReactor();
 
   IoReactor(const IoReactor&) = delete;
@@ -257,8 +255,6 @@ class IoReactor {
   mygram::utils::Expected<void, mygram::utils::Error> SetInterestBit(int fd, const ReactorConnection* owner,
                                                                      uint8_t bit, bool enabled);
 
-  ThreadPool* pool_;               // non-owning
-  RequestDispatcher* dispatcher_;  // non-owning
   ReactorConfig config_;
   std::shared_ptr<ReactorMemoryBudget> memory_budget_;
 

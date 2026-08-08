@@ -77,6 +77,7 @@ void ServerStats::IncrementCommand(query::QueryType type) {
     case query::QueryType::SET:
     case query::QueryType::SHOW_VARIABLES:
     case query::QueryType::FACET:
+    case query::QueryType::AUTH:
       cmd_other_.fetch_add(1, std::memory_order_relaxed);
       break;
   }
@@ -233,6 +234,7 @@ uint64_t ServerStats::GetCommandCount(query::QueryType type) const {
     case query::QueryType::SET:
     case query::QueryType::SHOW_VARIABLES:
     case query::QueryType::FACET:
+    case query::QueryType::AUTH:
       return cmd_other_.load();
   }
   return 0;

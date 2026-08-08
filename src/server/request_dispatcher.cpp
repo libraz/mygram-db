@@ -148,6 +148,10 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
   }
 
   if (query->type == query::QueryType::AUTH) {
+    // Counted here rather than at the shared site below, which this branch
+    // returns before reaching. An uncounted AUTH would let repeated token
+    // guesses run without appearing in command traffic at all.
+    ctx_.stats.IncrementCommand(query->type);
     if (admin_token_.empty() || !ConstantTimeEqual(query->auth_token, admin_token_)) {
       conn_ctx.admin_authenticated.store(false, std::memory_order_release);
       return ResponseFormatter::FormatError("Authentication failed");

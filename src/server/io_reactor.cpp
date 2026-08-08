@@ -33,10 +33,8 @@ namespace {
 constexpr size_t kReadyEventReserve = 64;
 }
 
-IoReactor::IoReactor(ThreadPool* pool, RequestDispatcher* dispatcher, ReactorConfig cfg)
-    : pool_(pool),
-      dispatcher_(dispatcher),
-      config_(std::move(cfg)),
+IoReactor::IoReactor(ReactorConfig cfg)
+    : config_(std::move(cfg)),
       memory_budget_(std::make_shared<ReactorMemoryBudget>(config_.max_total_buffered_bytes)) {}
 
 IoReactor::~IoReactor() {
