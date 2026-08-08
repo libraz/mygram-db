@@ -1,9 +1,20 @@
-# Build artifacts
+# Local secrets. The builder stage runs COPY . ., so anything left here reaches
+# a build layer even though the runtime stage copies only the install tree.
+.env
+.env.*
+!.env.example
+
+# Build artifacts. The glob covers the out-of-tree directories (build-linux,
+# build-asan, ...) that would otherwise be sent as build context.
 build/
+build-*/
 *.o
 *.a
 *.so
 *.dylib
+
+# Local working notes
+backup/
 
 # Git
 .git/

@@ -64,7 +64,7 @@ esac
 MYSQL_HOST=${MYSQL_HOST:-mysql}
 MYSQL_PORT=${MYSQL_PORT:-3306}
 MYSQL_USER=${MYSQL_USER:-repl_user}
-MYSQL_PASSWORD=${MYSQL_PASSWORD:-your_password}
+MYSQL_PASSWORD=${MYSQL_PASSWORD-}
 MYSQL_DATABASE=${MYSQL_DATABASE:-mydb}
 MYSQL_USE_GTID=${MYSQL_USE_GTID:-true}
 MYSQL_CONNECT_TIMEOUT_MS=${MYSQL_CONNECT_TIMEOUT_MS:-3000}
@@ -169,8 +169,22 @@ else
   require_number BM25_B "$BM25_B"
   require_number CACHE_MIN_QUERY_COST_MS "$CACHE_MIN_QUERY_COST_MS"
 
+  # No placeholder default: a generated configuration carrying a stand-in
+  # password cannot connect, and the failure would surface as a replication
+  # error rather than as the missing setting it is.
+  if [ -z "$MYSQL_PASSWORD" ]; then
+      echo "ERROR: MYSQL_PASSWORD must be set to generate a configuration" >&2
+      exit 1
+  fi
+
   # Generate configuration only when the target does not already exist. This
-  # keeps read-only/bind-mounted operator configuration intact.
+  # keeps read-only/bind-mounted operator configuration intact. The umask is
+  # narrowed for the duration: the file carries the MySQL password from its
+  # first write, so restricting the mode afterwards would leave a window in
+  # which it is world-readable. It is restored before exec so the server's own
+  # files keep the operator's chosen defaults.
+  previous_umask=$(umask)
+  umask 077
   cat > "$CONFIG_FILE" <<EOF
 # MygramDB Configuration (Auto-generated from environment variables)
 # Generated at: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -289,7 +303,7 @@ EOF
     done
   fi
 
-  chmod 600 "$CONFIG_FILE"
+  umask "$previous_umask"
   echo "Configuration file generated at: $CONFIG_FILE"
 fi
 echo "MySQL: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DATABASE}"

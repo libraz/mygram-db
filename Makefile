@@ -192,14 +192,15 @@ test-mysql: build
 	@echo "Running MySQL integration tests..."
 	@set -eu; \
 		compose_file="e2e/docker/docker-compose.yml"; \
+		compose_project="mygramdb-e2e"; \
 		cleanup() { \
 			status=$$?; \
 			trap - EXIT HUP INT TERM; \
-			docker compose -f "$$compose_file" down -v >/dev/null 2>&1 || true; \
+			docker compose -p "$$compose_project" -f "$$compose_file" down -v >/dev/null 2>&1 || true; \
 			exit $$status; \
 		}; \
 		trap cleanup EXIT HUP INT TERM; \
-		docker compose -f "$$compose_file" up -d --wait --wait-timeout 120 mysql; \
+		docker compose -p "$$compose_project" -f "$$compose_file" up -d --wait --wait-timeout 120 mysql; \
 		export ENABLE_MYSQL_INTEGRATION_TESTS=1; \
 		export MYSQL_HOST=127.0.0.1; \
 		export MYSQL_PORT="$${MYSQL_PORT:-23306}"; \
@@ -328,7 +329,7 @@ e2e-matrix:
 # Clean up e2e test environment
 e2e-test-cleanup:
 	@echo "Cleaning up E2E test environment..."
-	docker compose -f e2e/docker/docker-compose.yml down -v 2>/dev/null || true
+	docker compose -p mygramdb-e2e -f e2e/docker/docker-compose.yml down -v 2>/dev/null || true
 	@echo "E2E cleanup complete!"
 
 # Lint e2e Python code
@@ -398,7 +399,7 @@ docker-test:
 	docker build -t mygramdb:test .
 	@echo ""
 	@echo "3. Testing entrypoint script..."
-	docker run --rm -e MYSQL_HOST=testhost mygramdb:test test-config || echo "   Config test completed (expected to fail without MySQL)"
+	docker run --rm -e MYSQL_HOST=testhost -e MYSQL_PASSWORD=entrypoint-smoke-test mygramdb:test test-config || echo "   Config test completed (expected to fail without MySQL)"
 	@echo ""
 	@echo "Docker environment test completed!"
 	@echo "Run 'make docker-up' to start the full environment"
