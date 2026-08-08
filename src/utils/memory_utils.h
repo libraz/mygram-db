@@ -98,9 +98,14 @@ std::string MemoryHealthStatusToString(MemoryHealthStatus status);
  *
  * @param index_memory_usage Current index memory usage (bytes)
  * @param batch_size Batch size for optimization
+ * @param term_count Number of distinct terms in the index. Optimization first
+ *        snapshots every term name so that concurrent inserts and erases cannot
+ *        invalidate its iteration; that snapshot scales with the term count
+ *        rather than with posting-list memory, so leaving it out lets a
+ *        term-heavy index pass the check and then exhaust memory mid-run.
  * @return Estimated peak memory requirement (bytes)
  */
-uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size);
+uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size, uint64_t term_count = 0);
 
 }  // namespace mygramdb::utils
 

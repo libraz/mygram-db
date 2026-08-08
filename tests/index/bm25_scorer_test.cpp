@@ -182,3 +182,49 @@ TEST(BM25ScorerTest, ScoreDocumentsRejectsMismatchedTermFrequencyArray) {
   EXPECT_EQ(scored.error().code(), mygram::utils::ErrorCode::kInvalidArgument);
   EXPECT_NE(scored.error().message().find("identical lengths"), std::string::npos);
 }
+
+/**
+ * @brief Scoring spans chunk boundaries without dropping or reordering docs
+ *
+ * Candidate texts are materialized in bounded chunks rather than all at once,
+ * so a candidate set larger than one chunk must still produce exactly one score
+ * per candidate, in candidate order, including candidates with no stored text
+ * and candidates that were never added to the store.
+ */
+TEST(BM25ScorerTest, ScoreDocumentsSpansChunkBoundariesInCandidateOrder) {
+  DocumentStore store;
+  const size_t candidate_count = (DocumentStore::kSelectedNormalizedTextChunkSize * 2) + 3;
+
+  std::vector<DocId> candidates;
+  candidates.reserve(candidate_count + 1);
+  std::vector<size_t> scoring_positions;
+  for (size_t i = 0; i < candidate_count; ++i) {
+    // Every third document carries the search term; the rest do not.
+    auto added = i % 3 == 0 ? store.AddDocument("doc" + std::to_string(i), {}, "alpha beta")
+                            : store.AddDocument("doc" + std::to_string(i), {}, "gamma delta");
+    ASSERT_TRUE(added.has_value());
+    candidates.push_back(added.value());
+    if (i % 3 == 0) {
+      scoring_positions.push_back(i);
+    }
+  }
+  // A candidate that is not in the store at all.
+  candidates.push_back(9'000'000);
+
+  std::vector<std::string> terms = {"alpha"};
+  std::vector<uint64_t> dfs = {scoring_positions.size()};
+  BM25Params params;
+
+  auto scored = BM25Scorer::ScoreDocuments(candidates, terms, dfs, store, candidate_count, 2.0, params);
+  ASSERT_TRUE(scored.has_value()) << scored.error().message();
+  ASSERT_EQ(scored->size(), candidates.size());
+
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    EXPECT_EQ((*scored)[i].doc_id, candidates[i]) << "candidate order must be preserved at " << i;
+  }
+  for (const size_t position : scoring_positions) {
+    EXPECT_GT((*scored)[position].score, 0.0) << "matching document at " << position;
+  }
+  EXPECT_DOUBLE_EQ((*scored)[1].score, 0.0);
+  EXPECT_DOUBLE_EQ(scored->back().score, 0.0) << "an unknown candidate scores zero rather than being dropped";
+}

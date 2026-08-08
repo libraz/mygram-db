@@ -130,7 +130,9 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
 
         const uint64_t index_memory = current_index->MemoryUsage();
         const uint64_t total_docs = current_doc_store->Size();
-        const uint64_t estimated_memory = mygram::utils::EstimateOptimizationMemory(index_memory, kDefaultBatchSize);
+        const uint64_t index_terms = current_index->GetStatistics().total_terms;
+        const uint64_t estimated_memory =
+            mygram::utils::EstimateOptimizationMemory(index_memory, kDefaultBatchSize, index_terms);
         if (!mygram::utils::CheckMemoryAvailability(estimated_memory, mygram::utils::kDefaultMemorySafetyMargin)) {
           auto sys_info = mygram::utils::GetSystemMemoryInfo();
           std::ostringstream oss;

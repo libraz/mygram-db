@@ -176,18 +176,36 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
 
   auto start_time = std::chrono::steady_clock::now();
 
-  // Collect term names for batch processing
-  std::vector<std::string> terms;
+  // Snapshot the term names so that concurrent inserts and erases cannot
+  // invalidate the iteration. Holding one std::string per term costs 24 bytes
+  // of object overhead plus an allocation for every term above the small-string
+  // bound; a single character arena with offsets holds the same names in two
+  // allocations regardless of term count.
+  std::string term_arena;
+  std::vector<size_t> term_offsets;  // term j spans [term_offsets[j], term_offsets[j + 1])
   {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-    terms.reserve(term_postings_.size());
+    size_t arena_bytes = 0;
     for (const auto& [term, posting] : term_postings_) {
       (void)posting;  // Suppress unused variable warning
-      terms.push_back(term);
+      arena_bytes += term.size();
+    }
+    term_arena.reserve(arena_bytes);
+    term_offsets.reserve(term_postings_.size() + 1);
+    term_offsets.push_back(0);
+    for (const auto& [term, posting] : term_postings_) {
+      (void)posting;  // Suppress unused variable warning
+      term_arena.append(term);
+      term_offsets.push_back(term_arena.size());
     }
   }
 
-  size_t total_terms = terms.size();
+  const std::string_view terms_view(term_arena);
+  auto term_at = [&terms_view, &term_offsets](size_t index) {
+    return terms_view.substr(term_offsets[index], term_offsets[index + 1] - term_offsets[index]);
+  };
+
+  size_t total_terms = term_offsets.size() - 1;
   size_t converted_count = 0;
 
   // Process in batches to allow periodic updates
@@ -198,33 +216,31 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
     // IMPORTANT: We store versions (not sizes) to detect all concurrent mutations:
     // - Version-based detection catches balanced Remove+Add (size unchanged but data changed)
     // - shared_ptr copies keep posting lists alive during optimization
-    absl::flat_hash_map<std::string, uint64_t> batch_snapshot_versions;
-    absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> batch_snapshot_ptrs;
+    // Indexed by the batch-relative position so that no term string is copied
+    // again for bookkeeping.
+    const size_t batch_span = batch_end - i;
+    std::vector<uint64_t> batch_snapshot_versions(batch_span, 0);
+    std::vector<std::shared_ptr<PostingList>> batch_snapshot_ptrs(batch_span);
     {
       std::shared_lock<std::shared_mutex> lock(postings_mutex_);
       for (size_t j = i; j < batch_end; ++j) {
-        const auto& term = terms[j];
-        auto iter = term_postings_.find(term);
+        auto iter = term_postings_.find(term_at(j));
         if (iter != term_postings_.end()) {
-          batch_snapshot_versions[term] = iter->second->Version();  // Capture version at snapshot time
-          batch_snapshot_ptrs[term] = iter->second;                 // Keep pointer for optimization
+          batch_snapshot_versions[j - i] = iter->second->Version();  // Capture version at snapshot time
+          batch_snapshot_ptrs[j - i] = iter->second;                 // Keep pointer for optimization
         }
       }
     }
     // Lock released - AddDocument/RemoveDocument can proceed
 
     // Step 1b: Create optimized copies for this batch (CPU-intensive, outside lock)
-    absl::flat_hash_map<std::string, std::shared_ptr<PostingList>> optimized_postings;
+    std::vector<std::shared_ptr<PostingList>> optimized_postings(batch_span);
     for (size_t j = i; j < batch_end; ++j) {
-      const auto& term = terms[j];
-
-      // Find the posting list in batch snapshot
-      auto iterator = batch_snapshot_ptrs.find(term);
-      if (iterator == batch_snapshot_ptrs.end()) {
+      const auto& posting = batch_snapshot_ptrs[j - i];
+      if (!posting) {
         continue;  // Term was removed
       }
 
-      const auto& posting = iterator->second;
       auto old_strategy = posting->GetStrategy();
 
       // Clone and optimize (CPU-intensive, outside lock)
@@ -235,7 +251,7 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
         converted_count++;
       }
 
-      optimized_postings[term] = std::move(optimized);
+      optimized_postings[j - i] = std::move(optimized);
     }
 
     if (before_batch_optimization_publish_hook_for_test_) {
@@ -264,31 +280,27 @@ bool Index::OptimizeInBatches(uint64_t total_docs, size_t batch_size) {
       // - Terms modified during Step 1: keep current version (source of truth),
       //   skip optimization for this term
       for (size_t j = i; j < batch_end; ++j) {
-        const auto& term = terms[j];
-        auto opt_it = optimized_postings.find(term);
-        if (opt_it == optimized_postings.end()) {
+        auto& optimized = optimized_postings[j - i];
+        if (!optimized) {
           continue;  // Term wasn't optimized
         }
 
-        auto current_it = term_postings_.find(term);
+        auto current_it = term_postings_.find(term_at(j));
         if (current_it != term_postings_.end()) {
           const auto& current_posting = current_it->second;
-          auto snapshot_version_it = batch_snapshot_versions.find(term);
 
           // Require pointer identity as well as the captured version. A term
           // can be erased and recreated between the snapshot and publish;
           // the replacement's version may coincidentally match the old one.
-          const auto snapshot_posting_it = batch_snapshot_ptrs.find(term);
-          if (snapshot_version_it == batch_snapshot_versions.end() ||
-              snapshot_posting_it == batch_snapshot_ptrs.end() || current_posting != snapshot_posting_it->second ||
-              current_posting->Version() != snapshot_version_it->second) {
+          if (current_posting != batch_snapshot_ptrs[j - i] ||
+              current_posting->Version() != batch_snapshot_versions[j - i]) {
             // Posting list was modified during optimization.
             // Keep current_posting as-is (source of truth) rather than Union,
             // which would resurrect documents removed during optimization.
             // This term will be optimized in the next optimization cycle.
           } else {
             // No changes: use optimized version as-is
-            term_postings_[term] = std::move(opt_it->second);
+            current_it->second = std::move(optimized);
           }
         }
         // If term was removed, don't re-add it

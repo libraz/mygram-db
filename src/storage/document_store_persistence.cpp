@@ -109,13 +109,15 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
       auto filter_it = doc_filters_.find(doc_id);
       uint32_t filter_count = 0;
       if (filter_it != doc_filters_.end()) {
-        filter_count = static_cast<uint32_t>(filter_it->second.size());
+        filter_count = static_cast<uint32_t>(filter_it->second.entries.size());
       }
       WriteBinary(out, filter_count);
 
       if (filter_count > 0) {
-        for (const auto& [name, value] : filter_it->second) {
-          // Write filter name
+        // Column names live in the store's interned table, so the dump format
+        // is unchanged: each entry still writes its own name.
+        for (const auto& [column_id, value] : filter_it->second.entries) {
+          const std::string& name = filter_column_names_[column_id];
           auto name_len = static_cast<uint32_t>(name.size());
           WriteBinary(out, name_len);
           out.write(name.data(), static_cast<std::streamsize>(name_len));
@@ -575,7 +577,17 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     std::unique_lock lock(mutex_);
     doc_id_to_pk_ = std::move(new_doc_id_to_pk);
     pk_to_doc_id_ = std::move(new_pk_to_doc_id);
-    doc_filters_ = std::move(new_doc_filters);
+
+    // Rebuild the interned column table for the loaded documents, so the ids in
+    // doc_filters_ always refer to this store's own name table.
+    decltype(filter_column_names_)().swap(filter_column_names_);
+    decltype(filter_column_ids_)().swap(filter_column_ids_);
+    decltype(doc_filters_)().swap(doc_filters_);
+    doc_filters_.reserve(new_doc_filters.size());
+    for (const auto& [loaded_doc_id, loaded_filters] : new_doc_filters) {
+      doc_filters_.emplace(loaded_doc_id, InternFilterMapLocked(loaded_filters));
+    }
+
     doc_texts_ = std::move(new_doc_texts);
     original_texts_ = std::move(new_original_texts);
     filter_index_ = std::move(new_filter_index);

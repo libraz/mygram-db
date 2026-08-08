@@ -38,6 +38,47 @@ std::optional<uint64_t> ParseUnsignedPrimaryKey(std::string_view primary_key) {
 
 }  // namespace
 
+FilterColumnId DocumentStore::InternFilterColumnLocked(std::string_view column_name) {
+  const auto existing = filter_column_ids_.find(column_name);
+  if (existing != filter_column_ids_.end()) {
+    return existing->second;
+  }
+  const auto column_id = static_cast<FilterColumnId>(filter_column_names_.size());
+  filter_column_names_.emplace_back(column_name);
+  filter_column_ids_.emplace(filter_column_names_.back(), column_id);
+  return column_id;
+}
+
+std::optional<FilterColumnId> DocumentStore::FindFilterColumnLocked(std::string_view column_name) const {
+  const auto existing = filter_column_ids_.find(column_name);
+  if (existing == filter_column_ids_.end()) {
+    return std::nullopt;
+  }
+  return existing->second;
+}
+
+DocumentFilterValues DocumentStore::InternFilterMapLocked(const FilterMap& filters) {
+  DocumentFilterValues values;
+  values.entries.reserve(filters.size());
+  for (const auto& [column_name, value] : filters) {
+    values.entries.emplace_back(InternFilterColumnLocked(column_name), value);
+  }
+  std::sort(values.entries.begin(), values.entries.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+  return values;
+}
+
+FilterMap DocumentStore::MaterializeFiltersLocked(const DocumentFilterValues& values) const {
+  FilterMap filters;
+  filters.reserve(values.entries.size());
+  for (const auto& [column_id, value] : values.entries) {
+    if (column_id < filter_column_names_.size()) {
+      filters.emplace(filter_column_names_[column_id], value);
+    }
+  }
+  return filters;
+}
+
 DocumentStore::DocumentStore() : filter_index_(std::make_shared<FilterIndex>()) {}
 
 DocumentStore::~DocumentStore() = default;
@@ -84,7 +125,7 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
   if (!filters.empty()) {
     try {
       filter_index_->AddDocument(doc_id, filters);
-      doc_filters_[doc_id] = filters;
+      doc_filters_[doc_id] = InternFilterMapLocked(filters);
     } catch (const std::exception& e) {
       // Rollback: remove document from maps to maintain consistency
       auto pk_copy = doc_id_to_pk_[doc_id];
@@ -174,7 +215,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     if (!doc.filters.empty()) {
       try {
         filter_index_->AddDocument(doc_id, doc.filters);
-        doc_filters_[doc_id] = doc.filters;
+        doc_filters_[doc_id] = InternFilterMapLocked(doc.filters);
       } catch (const std::exception& e) {
         // Rollback: remove document from maps to maintain consistency
         auto pk_copy = doc_id_to_pk_[doc_id];
@@ -225,16 +266,16 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
     return false;
   }
 
-  // Call UpdateDocument before overwriting doc_filters_ to avoid copying old_filters.
-  // filter_index_->UpdateDocument reads old_filters by const&, so passing the
-  // iterator's value directly is safe: UpdateDocument does not access
-  // doc_filters_.
+  // filter_index_ works in terms of FilterMap, so the previous values are
+  // rebuilt from their interned form first. That copy is bounded by the number
+  // of configured filter columns, not by the document count.
   auto old_filter_it = doc_filters_.find(doc_id);
   if (old_filter_it != doc_filters_.end()) {
-    filter_index_->UpdateDocument(doc_id, old_filter_it->second, filters);
-    doc_filters_[doc_id] = filters;
+    const FilterMap old_filters = MaterializeFiltersLocked(old_filter_it->second);
+    filter_index_->UpdateDocument(doc_id, old_filters, filters);
+    doc_filters_[doc_id] = InternFilterMapLocked(filters);
   } else {
-    doc_filters_[doc_id] = filters;
+    doc_filters_[doc_id] = InternFilterMapLocked(filters);
     filter_index_->UpdateDocument(doc_id, {}, filters);
   }
 
@@ -262,7 +303,7 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
   // Remove from filter index before erasing filter data
   auto filter_it = doc_filters_.find(doc_id);
   if (filter_it != doc_filters_.end()) {
-    filter_index_->RemoveDocument(doc_id, filter_it->second);
+    filter_index_->RemoveDocument(doc_id, MaterializeFiltersLocked(filter_it->second));
   }
 
   // Remove mappings
@@ -311,6 +352,8 @@ void DocumentStore::Clear() {
   decltype(doc_id_to_pk_)().swap(doc_id_to_pk_);
   decltype(pk_to_doc_id_)().swap(pk_to_doc_id_);
   decltype(doc_filters_)().swap(doc_filters_);
+  decltype(filter_column_names_)().swap(filter_column_names_);
+  decltype(filter_column_ids_)().swap(filter_column_ids_);
   decltype(doc_texts_)().swap(doc_texts_);
   decltype(original_texts_)().swap(original_texts_);
   filter_index_ = std::make_shared<FilterIndex>();
@@ -332,7 +375,11 @@ void DocumentStore::ReplaceWithLoaded(DocumentStore& loaded) {
 
   doc_id_to_pk_.swap(loaded.doc_id_to_pk_);
   pk_to_doc_id_.swap(loaded.pk_to_doc_id_);
+  // The interned ids in doc_filters_ only mean anything alongside the table
+  // that assigned them, so both move together.
   doc_filters_.swap(loaded.doc_filters_);
+  filter_column_names_.swap(loaded.filter_column_names_);
+  filter_column_ids_.swap(loaded.filter_column_ids_);
   doc_texts_.swap(loaded.doc_texts_);
   original_texts_.swap(loaded.original_texts_);
   filter_index_.swap(loaded.filter_index_);
@@ -416,10 +463,9 @@ void DocumentStore::Compact() {
     original_texts_.swap(tmp);
   }
 
-  // Also compact inner filter maps
+  // Also release any spare capacity in the per-document value vectors
   for (auto& [doc_id, filters] : doc_filters_) {
-    decltype(filters) tmp(filters.begin(), filters.end());
-    filters.swap(tmp);
+    decltype(filters.entries)(filters.entries).swap(filters.entries);
   }
 
   mygram::utils::StructuredLog()
@@ -439,7 +485,7 @@ size_t DocumentStore::MemoryUsage() const {
   constexpr size_t kControlByteSize = 1;
   total += doc_id_to_pk_.capacity() * (sizeof(std::pair<DocId, std::string>) + kControlByteSize);
   total += pk_to_doc_id_.capacity() * (sizeof(std::pair<std::string, DocId>) + kControlByteSize);
-  total += doc_filters_.capacity() * (sizeof(std::pair<DocId, FilterMap>) + kControlByteSize);
+  total += doc_filters_.capacity() * (sizeof(std::pair<DocId, DocumentFilterValues>) + kControlByteSize);
 
   // doc_id_to_pk_ - heap allocation for strings only
   // (slot overhead including sizeof(DocId) + sizeof(std::string) is already counted above)
@@ -453,13 +499,20 @@ size_t DocumentStore::MemoryUsage() const {
     total += primary_key_str.capacity();
   }
 
+  // Interned column names are stored once per store rather than per document.
+  for (const auto& name : filter_column_names_) {
+    total += sizeof(std::string) + name.capacity();
+  }
+  total += filter_column_ids_.capacity() * (sizeof(std::pair<std::string, FilterColumnId>) + kControlByteSize);
+  for (const auto& [name, column_id] : filter_column_ids_) {
+    total += name.capacity();
+  }
+
   // doc_filters_ (approximate)
   for (const auto& [doc_id, filters] : doc_filters_) {
     total += sizeof(DocId);
-    // Include inner map slot overhead
-    total += filters.capacity() * (sizeof(std::pair<std::string, FilterValue>) + kControlByteSize);
-    for (const auto& [name, value] : filters) {
-      total += sizeof(std::string) + name.capacity();
+    total += filters.entries.capacity() * sizeof(std::pair<FilterColumnId, FilterValue>);
+    for (const auto& [column_id, value] : filters.entries) {
       total += std::visit(
           [](const auto& filter_value) -> size_t {
             using T = std::decay_t<decltype(filter_value)>;

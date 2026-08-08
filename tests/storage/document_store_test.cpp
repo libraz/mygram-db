@@ -1917,3 +1917,184 @@ TEST(DocumentStoreTest, VisitNormalizedTextChunksInvokesVisitorWithoutStoreLock)
   EXPECT_EQ(callback_count, 1);
   EXPECT_EQ(store.GetNormalizedText(*first), std::optional<std::string>("after"));
 }
+
+/**
+ * @brief VisitNormalizedTextsFor reproduces GetNormalizedTextBatch without
+ *        materializing every candidate's text at once
+ *
+ * Verification and BM25 scoring walk the whole candidate set, so copying every
+ * text up front duplicates a large fraction of the corpus. The bounded walk has
+ * to report the same documents, in the same order, including missing documents
+ * and repeated DocIds.
+ */
+TEST(DocumentStoreTest, VisitNormalizedTextsForMatchesBatchWithBoundedChunks) {
+  DocumentStore store;
+  constexpr size_t kDocumentCount = 500;
+  std::vector<DocumentStore::DocumentItem> documents;
+  documents.reserve(kDocumentCount);
+  for (size_t i = 0; i < kDocumentCount; ++i) {
+    documents.push_back({std::to_string(i + 1), {}, "normalized-" + std::to_string(i), ""});
+  }
+  auto added = store.AddDocumentBatch(documents);
+  ASSERT_TRUE(added.has_value());
+
+  // Include a repeated DocId and one that was never stored.
+  std::vector<DocId> requested = *added;
+  requested.push_back(added->front());
+  requested.push_back(1'000'000);
+
+  const auto batch = store.GetNormalizedTextBatch(requested);
+  ASSERT_EQ(batch.size(), requested.size());
+
+  constexpr size_t kChunkSize = 7;
+  std::vector<size_t> visited_indices;
+  std::vector<DocId> visited_ids;
+  std::vector<std::optional<std::string>> visited_texts;
+  store.VisitNormalizedTextsFor(requested, kChunkSize, [&](size_t index, DocId doc_id, const std::string* text) {
+    visited_indices.push_back(index);
+    visited_ids.push_back(doc_id);
+    visited_texts.emplace_back(text != nullptr ? std::optional<std::string>(*text) : std::nullopt);
+    return true;
+  });
+
+  ASSERT_EQ(visited_ids.size(), requested.size());
+  EXPECT_EQ(visited_ids, requested);
+  EXPECT_EQ(visited_texts, batch);
+  for (size_t i = 0; i < visited_indices.size(); ++i) {
+    EXPECT_EQ(visited_indices[i], i);
+  }
+  EXPECT_FALSE(visited_texts.back().has_value()) << "an unknown DocId must be reported as absent";
+}
+
+/**
+ * @brief Returning false stops the walk without visiting later chunks
+ */
+TEST(DocumentStoreTest, VisitNormalizedTextsForStopsWhenVisitorReturnsFalse) {
+  DocumentStore store;
+  std::vector<DocumentStore::DocumentItem> documents;
+  documents.reserve(20);
+  for (size_t i = 0; i < 20; ++i) {
+    documents.push_back({std::to_string(i + 1), {}, "text-" + std::to_string(i), ""});
+  }
+  auto added = store.AddDocumentBatch(documents);
+  ASSERT_TRUE(added.has_value());
+
+  size_t visits = 0;
+  store.VisitNormalizedTextsFor(*added, 4, [&](size_t /*index*/, DocId /*doc_id*/, const std::string* /*text*/) {
+    ++visits;
+    return visits < 5;
+  });
+  EXPECT_EQ(visits, 5);
+
+  // Degenerate arguments visit nothing rather than reading out of range.
+  size_t never = 0;
+  auto count_visit = [&](size_t /*index*/, DocId /*doc_id*/, const std::string* /*text*/) {
+    ++never;
+    return true;
+  };
+  store.VisitNormalizedTextsFor(*added, 0, count_visit);
+  store.VisitNormalizedTextsFor({}, 4, count_visit);
+  EXPECT_EQ(never, 0);
+}
+
+/**
+ * @brief Interned filter columns preserve every value-access path
+ *
+ * Column names are stored once per store rather than once per (document,
+ * column) pair, so the interning has to be invisible through GetDocument, the
+ * batch accessors, the multi-column accessor, the unindexed NULL scan and the
+ * update/remove paths — including columns that only some documents carry and
+ * names that were never seen at all.
+ */
+TEST(DocumentStoreTest, InternedFilterColumnsPreserveAllValueAccessPaths) {
+  DocumentStore store;
+
+  auto first = store.AddDocument(
+      "pk1",
+      {{"status", FilterValue{int64_t{1}}}, {"name", FilterValue{std::string("alice")}}, {"score", FilterValue{85.5}}},
+      "alice");
+  auto second = store.AddDocument("pk2", {{"status", FilterValue{int64_t{2}}}}, "bob");
+  auto third = store.AddDocument("pk3", {}, "carol");
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+  ASSERT_TRUE(third.has_value());
+
+  // Single-document access returns the full name-keyed map.
+  const auto document = store.GetDocument(*first);
+  ASSERT_TRUE(document.has_value());
+  ASSERT_EQ(document->filters.size(), 3U);
+  EXPECT_EQ(document->filters.at("name"), FilterValue{std::string("alice")});
+  EXPECT_EQ(document->filters.at("status"), FilterValue{int64_t{1}});
+  EXPECT_EQ(document->filters.at("score"), FilterValue{85.5});
+
+  // Single-value access, including a column this document lacks and a column
+  // the store has never seen.
+  EXPECT_EQ(store.GetFilterValue(*first, "status"), std::optional<FilterValue>(FilterValue{int64_t{1}}));
+  EXPECT_FALSE(store.GetFilterValue(*second, "name").has_value());
+  EXPECT_FALSE(store.GetFilterValue(*first, "never_seen").has_value());
+  EXPECT_FALSE(store.GetFilterValue(*third, "status").has_value());
+
+  // Batch accessors keep the requested order and report absences as nullopt.
+  const std::vector<DocId> requested{*first, *second, *third, 999999};
+  const auto status_batch = store.GetFilterValuesBatch(requested, "status");
+  ASSERT_EQ(status_batch.size(), requested.size());
+  EXPECT_EQ(status_batch[0], std::optional<FilterValue>(FilterValue{int64_t{1}}));
+  EXPECT_EQ(status_batch[1], std::optional<FilterValue>(FilterValue{int64_t{2}}));
+  EXPECT_FALSE(status_batch[2].has_value());
+  EXPECT_FALSE(status_batch[3].has_value());
+  EXPECT_EQ(store.GetFilterValuesBatch(requested, "never_seen").size(), requested.size());
+
+  const auto multi = store.GetFilterValuesBatchMultiColumn(requested, {"status", "name", "never_seen"});
+  ASSERT_EQ(multi.size(), 3U);
+  ASSERT_EQ(multi[0].size(), requested.size());
+  EXPECT_EQ(multi[0][1], std::optional<FilterValue>(FilterValue{int64_t{2}}));
+  EXPECT_EQ(multi[1][0], std::optional<FilterValue>(FilterValue{std::string("alice")}));
+  EXPECT_FALSE(multi[1][1].has_value());
+  EXPECT_FALSE(multi[2][0].has_value());
+
+  // Updating replaces the whole value set, including dropping a column.
+  ASSERT_TRUE(store.UpdateDocument(*first, {{"status", FilterValue{int64_t{9}}}}));
+  EXPECT_EQ(store.GetFilterValue(*first, "status"), std::optional<FilterValue>(FilterValue{int64_t{9}}));
+  EXPECT_FALSE(store.GetFilterValue(*first, "name").has_value());
+
+  // The unindexed NULL scan resolves through the same interned id.
+  ASSERT_TRUE(store.UpdateDocument(*second, {{"status", FilterValue{std::monostate{}}}}));
+  EXPECT_EQ(store.FilterByValue("status", FilterValue{std::monostate{}}), (std::vector<DocId>{*second}));
+  EXPECT_TRUE(store.FilterByValue("never_seen", FilterValue{std::monostate{}}).empty());
+
+  EXPECT_TRUE(store.RemoveDocument(*first));
+  EXPECT_FALSE(store.GetFilterValue(*first, "status").has_value());
+}
+
+/**
+ * @brief Interned column ids survive a save/load round trip
+ *
+ * The ids are private to one store, so a snapshot has to keep writing the names
+ * and the loading store has to rebuild its own name table.
+ */
+TEST(DocumentStoreTest, InternedFilterColumnsRoundTripThroughSnapshot) {
+  DocumentStore source;
+  ASSERT_TRUE(
+      source.AddDocument("pk1", {{"alpha", FilterValue{int64_t{1}}}, {"beta", FilterValue{std::string("x")}}}, "first")
+          .has_value());
+  ASSERT_TRUE(source.AddDocument("pk2", {{"beta", FilterValue{std::string("y")}}}, "second").has_value());
+
+  std::stringstream buffer;
+  ASSERT_TRUE(source.SaveToStream(buffer, "gtid-1").has_value());
+
+  // Load into a store that already interned a different column, so the loaded
+  // ids cannot accidentally reuse the pre-existing table.
+  DocumentStore target;
+  ASSERT_TRUE(target.AddDocument("other", {{"unrelated", FilterValue{int64_t{7}}}}, "other").has_value());
+  ASSERT_TRUE(target.LoadFromStream(buffer).has_value());
+
+  const auto doc1 = target.GetDocId("pk1");
+  const auto doc2 = target.GetDocId("pk2");
+  ASSERT_TRUE(doc1.has_value());
+  ASSERT_TRUE(doc2.has_value());
+  EXPECT_EQ(target.GetFilterValue(*doc1, "alpha"), std::optional<FilterValue>(FilterValue{int64_t{1}}));
+  EXPECT_EQ(target.GetFilterValue(*doc1, "beta"), std::optional<FilterValue>(FilterValue{std::string("x")}));
+  EXPECT_EQ(target.GetFilterValue(*doc2, "beta"), std::optional<FilterValue>(FilterValue{std::string("y")}));
+  EXPECT_FALSE(target.GetFilterValue(*doc2, "alpha").has_value());
+  EXPECT_FALSE(target.GetDocId("other").has_value()) << "loading replaces the previous contents";
+}

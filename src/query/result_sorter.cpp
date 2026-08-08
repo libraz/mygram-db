@@ -29,14 +29,8 @@ namespace {
 constexpr int kNumericWidth = 20;
 constexpr int kDoubleWidth = 20;
 
-// Buffer sizes for string formatting (width + null terminator + safety margin)
-constexpr size_t kNumericBufferSize = 32;
-
 // Buffer size for std::to_chars: max uint64_t is 20 digits + null terminator
 constexpr size_t kToCharsBufferSize = 21;
-
-// Buffer size for std::from_chars parsing
-constexpr size_t kFromCharsBufferSize = 21;
 
 // Partial sort threshold: use partial_sort when needed elements < 50% of total
 constexpr double kPartialSortThreshold = 0.5;

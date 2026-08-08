@@ -290,3 +290,25 @@ if(USE_MYSQL AND MYSQL_FOUND)
       RESOURCE_LOCK mysql_connection
   )
 endif()
+
+# Document store benchmarks: comparative cost of the whole-candidate-set paths
+add_executable(document_store_benchmark_test
+  document_store_benchmark_test.cpp
+)
+
+target_link_libraries(document_store_benchmark_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+# Benchmarks build stores of 100K+ documents and compare a production path
+# against a baseline in the same process, so they need the machine to
+# themselves to produce comparable figures.
+gtest_discover_tests(document_store_benchmark_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)

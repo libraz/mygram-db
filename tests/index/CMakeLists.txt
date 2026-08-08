@@ -287,3 +287,25 @@ gtest_discover_tests(search_by_threshold_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+# Posting list benchmarks: comparative timings for the search hot paths
+add_executable(posting_list_benchmark_test
+  posting_list_benchmark_test.cpp
+)
+
+target_link_libraries(posting_list_benchmark_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+# Benchmarks build large posting lists and compare a production path against a
+# baseline in the same process, so they need the machine to themselves to
+# produce comparable figures.
+gtest_discover_tests(posting_list_benchmark_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)

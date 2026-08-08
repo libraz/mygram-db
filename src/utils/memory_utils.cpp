@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 
 #include "utils/string_utils.h"
@@ -317,7 +318,7 @@ std::string MemoryHealthStatusToString(MemoryHealthStatus status) {
   return "UNKNOWN";
 }
 
-uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size) {
+uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size, uint64_t term_count) {
   // Optimization creates clones of posting lists in batches
   // Peak memory usage occurs when:
   // 1. Original index is fully loaded
@@ -344,8 +345,20 @@ uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_si
   constexpr double kOverheadRatio = 0.10;
   auto overhead = static_cast<uint64_t>(static_cast<double>(batch_memory) * kOverheadRatio);
 
-  // Total peak = original + batch + overhead
-  return index_memory_usage + batch_memory + overhead;
+  // The term-name snapshot taken before the batch loop is proportional to the
+  // term count, not to posting-list memory: one offset plus the term bytes for
+  // every distinct term in the index.
+  constexpr uint64_t kAverageTermBytes = 8;
+  constexpr uint64_t kBytesPerSnapshottedTerm = sizeof(size_t) + kAverageTermBytes;
+  const uint64_t term_snapshot_memory = term_count * kBytesPerSnapshottedTerm;
+
+  // Each batch also holds, per term, the captured version plus the snapshot and
+  // optimized posting-list handles.
+  constexpr uint64_t kBytesPerBatchedTerm = sizeof(uint64_t) + (2 * sizeof(std::shared_ptr<void>));
+  const uint64_t batch_bookkeeping_memory = static_cast<uint64_t>(batch_size) * kBytesPerBatchedTerm;
+
+  // Total peak = original + batch + overhead + snapshots
+  return index_memory_usage + batch_memory + overhead + term_snapshot_memory + batch_bookkeeping_memory;
 }
 
 }  // namespace mygramdb::utils

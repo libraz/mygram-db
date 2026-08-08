@@ -56,7 +56,12 @@ struct DumpLoadAccess {
 
       replacement.target_doc_store->doc_id_to_pk_ = std::move(replacement.loaded_doc_store->doc_id_to_pk_);
       replacement.target_doc_store->pk_to_doc_id_ = std::move(replacement.loaded_doc_store->pk_to_doc_id_);
+      // The interned ids only mean anything alongside the name table that
+      // assigned them, so both move together.
       replacement.target_doc_store->doc_filters_ = std::move(replacement.loaded_doc_store->doc_filters_);
+      replacement.target_doc_store->filter_column_names_ =
+          std::move(replacement.loaded_doc_store->filter_column_names_);
+      replacement.target_doc_store->filter_column_ids_ = std::move(replacement.loaded_doc_store->filter_column_ids_);
       replacement.target_doc_store->doc_texts_ = std::move(replacement.loaded_doc_store->doc_texts_);
       replacement.target_doc_store->original_texts_ = std::move(replacement.loaded_doc_store->original_texts_);
       replacement.target_doc_store->filter_index_ = std::move(replacement.loaded_doc_store->filter_index_);

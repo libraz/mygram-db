@@ -651,3 +651,51 @@ TEST(IndexTest, SearchAndStandardPathLimitTruncation) {
   auto large_limit = index.SearchAnd({"a", "b"}, 100, false);
   EXPECT_EQ(large_limit.size(), 50u);
 }
+
+/**
+ * @brief FilterByNgrams agrees with SearchAnd across both posting strategies
+ *
+ * The candidate filter walks each posting list once instead of probing it per
+ * candidate, so it has to reproduce the membership decision exactly for
+ * fixed-width delta lists, Roaring bitmaps, unknown terms and empty inputs.
+ */
+TEST(IndexTest, FilterByNgramsMatchesSearchAndForBothPostingStrategies) {
+  Index index(1, 0, /*roaring_threshold=*/0.01);
+
+  // "a" lands in every document and converts to a Roaring bitmap; "b" stays a
+  // sparse fixed-width delta list.
+  constexpr mygramdb::storage::DocId kDocumentCount = 6000;
+  for (mygramdb::storage::DocId doc_id = 1; doc_id <= kDocumentCount; ++doc_id) {
+    index.AddDocument(doc_id, doc_id % 3 == 0 ? "ab" : "a");
+  }
+  index.Optimize(kDocumentCount);
+
+  std::vector<mygramdb::storage::DocId> candidates;
+  for (mygramdb::storage::DocId doc_id = 1; doc_id <= kDocumentCount; doc_id += 7) {
+    candidates.push_back(doc_id);
+  }
+
+  const auto expected_all = index.SearchAnd({"a", "b"});
+  const std::unordered_set<mygramdb::storage::DocId> expected(expected_all.begin(), expected_all.end());
+
+  const auto filtered = index.FilterByNgrams(candidates, {"a", "b"});
+  std::vector<mygramdb::storage::DocId> reference;
+  for (const auto doc_id : candidates) {
+    if (expected.find(doc_id) != expected.end()) {
+      reference.push_back(doc_id);
+    }
+  }
+  EXPECT_EQ(filtered, reference);
+  EXPECT_FALSE(filtered.empty());
+
+  // A term that is not indexed at all matches nothing.
+  EXPECT_TRUE(index.FilterByNgrams(candidates, {"a", "z"}).empty());
+
+  // No terms means no filtering; no candidates means no results.
+  EXPECT_EQ(index.FilterByNgrams(candidates, {}), candidates);
+  EXPECT_TRUE(index.FilterByNgrams({}, {"a"}).empty());
+
+  // Boundary DocIds and repeated candidates survive the single-pass merge.
+  const std::vector<mygramdb::storage::DocId> edges{3, 3, kDocumentCount, kDocumentCount + 1};
+  EXPECT_EQ(index.FilterByNgrams(edges, {"b"}), (std::vector<mygramdb::storage::DocId>{3, 3, kDocumentCount}));
+}

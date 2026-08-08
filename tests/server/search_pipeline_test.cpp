@@ -1412,7 +1412,35 @@ TEST_F(FullPipelineTest, BooleanVerifyTextHonorsOrBranches) {
   EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[2]}));
 }
 
+/**
+ * @brief A term whose n-grams carry no postings is an early exit
+ *
+ * Its posting list may be populated by the next document, so the empty result
+ * must not be cached.
+ */
 TEST_F(FullPipelineTest, BooleanEmptyTermResultSkipsCache) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning AND zzqqwx";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(output->results.empty());
+  EXPECT_TRUE(output->empty_term_detected);
+}
+
+/**
+ * @brief A term shorter than the n-gram size is not an early exit
+ *
+ * It can never gain n-grams, and its entry is registered for invalidation on
+ * any text change, so its result is cacheable. Treating it as an early exit is
+ * what made every repeat of a short-term query rescan the whole corpus.
+ */
+TEST_F(FullPipelineTest, BooleanShortTermResultIsNotTreatedAsEarlyExit) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
   query.table = "test";
@@ -1424,7 +1452,7 @@ TEST_F(FullPipelineTest, BooleanEmptyTermResultSkipsCache) {
 
   ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
   EXPECT_TRUE(output->results.empty());
-  EXPECT_TRUE(output->empty_term_detected);
+  EXPECT_FALSE(output->empty_term_detected);
 }
 
 TEST_F(FullPipelineTest, ShortTermWithoutStoredTextReturnsExplicitError) {
@@ -1586,6 +1614,101 @@ TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
   for (int i = 0; i < 50 && cache_manager.Lookup(cache_query).has_value(); ++i) {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
+  EXPECT_FALSE(cache_manager.Lookup(cache_query).has_value());
+}
+
+/**
+ * @brief A term shorter than the n-gram size is cached, not rescanned each time
+ *
+ * Such a term produces no n-grams and is answered by a linear substring scan of
+ * every stored text. Refusing to cache it made every repeat of the same short
+ * query rescan the whole corpus. The entry is registered for invalidation on any
+ * text change, so a later document containing the term must still evict it.
+ */
+TEST_F(FullPipelineTest, ShortTermSubstringFallbackIsCachedAndInvalidatedOnTextChange) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  auto short_doc = doc_store_->AddDocument("pk_short_cache", {}, "marker x");
+  ASSERT_TRUE(short_doc.has_value());
+  index_->AddDocument(*short_doc, "marker x");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "x";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.cache_manager = &cache_manager;
+  const query::Query cache_query = BuildCanonicalCacheQuery(query, params);
+
+  auto first = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(first.has_value()) << (first.has_value() ? std::string{} : first.error().message());
+  ASSERT_FALSE(first->cache_hit);
+  ASSERT_FALSE(first->empty_term_detected);
+  ASSERT_NE(std::find(first->results.begin(), first->results.end(), *short_doc), first->results.end());
+
+  ASSERT_TRUE(cache_manager.Lookup(cache_query).has_value())
+      << "a short-term query must be cached instead of rescanning every text";
+
+  auto second = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(second.has_value()) << (second.has_value() ? std::string{} : second.error().message());
+  EXPECT_TRUE(second->cache_hit);
+  EXPECT_EQ(second->results, first->results);
+
+  // Any text change in the table must evict the entry, since it cannot be
+  // reached through n-gram invalidation.
+  cache_manager.Invalidate("test", "", "another x document");
+  for (int i = 0; i < 50 && cache_manager.Lookup(cache_query).has_value(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+  EXPECT_FALSE(cache_manager.Lookup(cache_query).has_value());
+}
+
+/**
+ * @brief A term whose n-grams exist but carry no postings is still not cached
+ *
+ * Its posting list may be populated by the next document, and the entry would
+ * mask that result until an n-gram invalidation it never registered arrives.
+ */
+TEST_F(FullPipelineTest, TermWithEmptyNgramPostingsIsStillNotCached) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "zzqqwx";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.cache_manager = &cache_manager;
+  const query::Query cache_query = BuildCanonicalCacheQuery(query, params);
+
+  auto output = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_TRUE(output->results.empty());
   EXPECT_FALSE(cache_manager.Lookup(cache_query).has_value());
 }
 

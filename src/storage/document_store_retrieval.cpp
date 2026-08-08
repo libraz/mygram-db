@@ -28,7 +28,7 @@ std::optional<Document> DocumentStore::GetDocument(DocId doc_id) const {
   // Get filters if they exist
   auto filter_it = doc_filters_.find(doc_id);
   if (filter_it != doc_filters_.end()) {
-    doc.filters = filter_it->second;
+    doc.filters = MaterializeFiltersLocked(filter_it->second);
   }
 
   return doc;
@@ -54,7 +54,7 @@ std::vector<std::optional<Document>> DocumentStore::GetDocumentsBatch(const std:
 
     auto filter_it = doc_filters_.find(doc_id);
     if (filter_it != doc_filters_.end()) {
-      doc.filters = filter_it->second;
+      doc.filters = MaterializeFiltersLocked(filter_it->second);
     }
 
     results.emplace_back(std::move(doc));
@@ -104,17 +104,21 @@ std::vector<std::optional<std::string>> DocumentStore::GetPrimaryKeysBatch(const
 
 std::optional<FilterValue> DocumentStore::GetFilterValue(DocId doc_id, std::string_view filter_name) const {
   std::shared_lock lock(mutex_);
+  const auto column_id = FindFilterColumnLocked(filter_name);
+  if (!column_id.has_value()) {
+    return std::nullopt;
+  }
+
   auto doc_it = doc_filters_.find(doc_id);
   if (doc_it == doc_filters_.end()) {
     return std::nullopt;
   }
 
-  auto filter_it = doc_it->second.find(filter_name);
-  if (filter_it == doc_it->second.end()) {
+  const FilterValue* value = doc_it->second.Find(*column_id);
+  if (value == nullptr) {
     return std::nullopt;
   }
-
-  return filter_it->second;
+  return *value;
 }
 
 std::optional<std::string> DocumentStore::ResolveFilterColumnName(std::string_view filter_name) const {
@@ -132,17 +136,25 @@ std::vector<std::optional<FilterValue>> DocumentStore::GetFilterValuesBatch(cons
   std::vector<std::optional<FilterValue>> results;
   results.reserve(doc_ids.size());
 
+  // The column name is resolved to its interned id once instead of hashed per
+  // document.
+  const auto column_id = FindFilterColumnLocked(column);
+  if (!column_id.has_value()) {
+    results.resize(doc_ids.size(), std::nullopt);
+    return results;
+  }
+
   for (const auto& doc_id : doc_ids) {
     auto doc_it = doc_filters_.find(doc_id);
     if (doc_it == doc_filters_.end()) {
       results.emplace_back(std::nullopt);
       continue;
     }
-    auto filter_it = doc_it->second.find(column);
-    if (filter_it == doc_it->second.end()) {
+    const FilterValue* value = doc_it->second.Find(*column_id);
+    if (value == nullptr) {
       results.emplace_back(std::nullopt);
     } else {
-      results.emplace_back(filter_it->second);
+      results.emplace_back(*value);
     }
   }
 
@@ -162,15 +174,24 @@ std::vector<std::vector<std::optional<FilterValue>>> DocumentStore::GetFilterVal
   // Each doc_id lookup is O(1) amortized for flat_hash_map, but doing it once
   // Fetching once per doc instead of once per (doc, column) pair saves repeated lookups per doc.
   // The result layout is preserved as [column][doc_index].
+  std::vector<std::optional<FilterColumnId>> column_ids;
+  column_ids.reserve(columns.size());
+  for (const auto& column : columns) {
+    column_ids.push_back(FindFilterColumnLocked(column));
+  }
+
   for (size_t di = 0; di < doc_ids.size(); ++di) {
     auto doc_it = doc_filters_.find(doc_ids[di]);
     if (doc_it == doc_filters_.end()) {
       continue;  // all columns already nullopt
     }
     for (size_t ci = 0; ci < columns.size(); ++ci) {
-      auto filter_it = doc_it->second.find(columns[ci]);
-      if (filter_it != doc_it->second.end()) {
-        all_results[ci][di] = filter_it->second;
+      if (!column_ids[ci].has_value()) {
+        continue;
+      }
+      const FilterValue* value = doc_it->second.Find(*column_ids[ci]);
+      if (value != nullptr) {
+        all_results[ci][di] = *value;
       }
     }
   }
@@ -184,9 +205,13 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
   // Monostate (NULL) values are not indexed — fall back to scan
   if (!filter_index_ || std::holds_alternative<std::monostate>(value)) {
     std::vector<DocId> results;
+    const auto column_id = FindFilterColumnLocked(filter_name);
+    if (!column_id.has_value()) {
+      return results;
+    }
     for (const auto& [doc_id, filters] : doc_filters_) {
-      auto iterator = filters.find(filter_name);
-      if (iterator != filters.end() && iterator->second == value) {
+      const FilterValue* stored = filters.Find(*column_id);
+      if (stored != nullptr && *stored == value) {
         results.push_back(doc_id);
       }
     }
@@ -259,6 +284,41 @@ std::vector<std::optional<std::string>> DocumentStore::GetNormalizedTextBatch(co
     }
   }
   return results;
+}
+
+void DocumentStore::VisitNormalizedTextsFor(const std::vector<DocId>& doc_ids, size_t max_doc_ids_per_chunk,
+                                            const SelectedNormalizedTextVisitor& visitor) const {
+  if (doc_ids.empty() || max_doc_ids_per_chunk == 0 || !visitor) {
+    return;
+  }
+
+  std::vector<std::optional<std::string>> chunk;
+  chunk.reserve(std::min(max_doc_ids_per_chunk, doc_ids.size()));
+
+  for (size_t begin = 0; begin < doc_ids.size(); begin += max_doc_ids_per_chunk) {
+    const size_t end = std::min(begin + max_doc_ids_per_chunk, doc_ids.size());
+    chunk.clear();
+    {
+      std::shared_lock lock(mutex_);
+      for (size_t i = begin; i < end; ++i) {
+        auto it = doc_texts_.find(doc_ids[i]);
+        if (it != doc_texts_.end()) {
+          chunk.emplace_back(it->second);
+        } else {
+          chunk.emplace_back(std::nullopt);
+        }
+      }
+    }
+
+    // Visitor runs without the store mutex so that long predicates (fuzzy
+    // matching, synonym expansion) do not stall binlog apply.
+    for (size_t i = begin; i < end; ++i) {
+      const auto& text = chunk[i - begin];
+      if (!visitor(i, doc_ids[i], text.has_value() ? &text.value() : nullptr)) {
+        return;
+      }
+    }
+  }
 }
 
 void DocumentStore::VisitNormalizedTextChunks(size_t max_doc_ids_per_chunk,

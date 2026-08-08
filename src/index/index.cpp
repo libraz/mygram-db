@@ -11,6 +11,7 @@
 #include <mutex>
 #include <queue>
 #include <tuple>
+#include <unordered_set>
 
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -368,25 +369,50 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
 
 std::vector<DocId> Index::FilterByNgrams(const std::vector<DocId>& candidates,
                                          const std::vector<std::string>& terms) const {
+  if (candidates.empty()) {
+    return {};
+  }
+
   // Take snapshots of posting lists (RCU pattern, same as SearchAnd)
   auto snapshots = TakePostingSnapshots(terms);
-
-  std::vector<DocId> result;
-  result.reserve(candidates.size());
-
-  for (const auto& doc_id : candidates) {
-    bool match = true;
-    for (size_t i = 0; i < terms.size(); ++i) {
-      if (!snapshots[i] || !snapshots[i]->Contains(doc_id)) {
-        match = false;
-        break;
-      }
-    }
-    if (match) {
-      result.push_back(doc_id);
+  if (snapshots.empty()) {
+    return candidates;  // No terms to filter by
+  }
+  for (const auto& snapshot : snapshots) {
+    if (!snapshot) {
+      return {};  // An unknown term matches nothing
     }
   }
-  return result;
+
+  // Walk each posting list once against the candidate list instead of probing
+  // it per candidate, which would take a lock and rescan the encoded array for
+  // every (candidate, term) pair.
+  const bool ascending = std::is_sorted(candidates.begin(), candidates.end());
+  std::vector<DocId> sorted_candidates;
+  if (!ascending) {
+    sorted_candidates = candidates;
+    std::sort(sorted_candidates.begin(), sorted_candidates.end());
+  }
+
+  std::vector<DocId> retained = snapshots[0]->RetainPresent(ascending ? candidates : sorted_candidates);
+  for (size_t i = 1; i < snapshots.size() && !retained.empty(); ++i) {
+    retained = snapshots[i]->RetainPresent(retained);
+  }
+
+  if (ascending || retained.empty()) {
+    return retained;
+  }
+
+  // Restore the caller's original ordering, including any repeated candidates.
+  const std::unordered_set<DocId> kept(retained.begin(), retained.end());
+  std::vector<DocId> ordered;
+  ordered.reserve(retained.size());
+  for (const DocId doc_id : candidates) {
+    if (kept.find(doc_id) != kept.end()) {
+      ordered.push_back(doc_id);
+    }
+  }
+  return ordered;
 }
 
 std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const {

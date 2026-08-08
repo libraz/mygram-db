@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <vector>
 
@@ -92,6 +93,19 @@ class PostingList {
    * @return Vector of document IDs (sorted)
    */
   [[nodiscard]] std::vector<DocId> GetAll() const;
+
+  /**
+   * @brief Keep only the candidates that are present in this posting list
+   *
+   * Probing each candidate with Contains() costs one lock acquisition plus, for
+   * the fixed-width delta strategy, a full rescan of the encoded array. This
+   * walks both sequences once under a single lock instead, so the cost is
+   * O(candidates + postings) rather than O(candidates x postings).
+   *
+   * @param sorted_candidates Candidate DocIds in ascending order
+   * @return The subset present in this list, preserving the input order
+   */
+  [[nodiscard]] std::vector<DocId> RetainPresent(const std::vector<DocId>& sorted_candidates) const;
 
   /**
    * @brief Get top N document IDs with optional reverse order
@@ -261,15 +275,42 @@ class PostingList {
   // Uses shared_mutex to allow concurrent reads while serializing writes
   mutable std::shared_mutex mutex_;
 
+  // Number of Roaring point mutations tolerated before the cached serialized
+  // size is recomputed. See UpdateCountsAndVersion().
+  static constexpr uint32_t kRoaringMemoryRefreshInterval = 64;
+
+  // Roaring point mutations applied since cached_memory_size_ was recomputed.
+  // Guarded by mutex_.
+  uint32_t roaring_mutations_since_memory_refresh_ = 0;
+
   /**
    * @brief Update doc_count_ and increment version_ after a mutation
    *
    * Consolidates the repeated pattern of reading the current strategy,
    * storing the appropriate cardinality into doc_count_, and bumping version_.
    *
+   * @param known_doc_count Exact cardinality when the caller already knows it.
+   *        Both roaring_bitmap_get_cardinality() and
+   *        roaring_bitmap_portable_size_in_bytes() walk every container, so
+   *        deriving them from scratch on each single-document mutation makes
+   *        binlog apply cost O(containers) per n-gram term. Point mutations
+   *        pass their own exact count and let the serialized-size estimate
+   *        refresh on a bounded schedule instead.
+   *
    * @note Caller must already hold mutex_ exclusively
    */
-  void UpdateCountsAndVersion();
+  void UpdateCountsAndVersion(std::optional<uint64_t> known_doc_count = std::nullopt);
+
+  /**
+   * @brief Release fixed-width delta capacity left behind by removals
+   *
+   * std::vector::erase keeps the old allocation, so a term whose documents are
+   * repeatedly replaced would hold — and report through MemoryUsage() — its
+   * peak allocation for the lifetime of the index.
+   *
+   * @note Caller must already hold mutex_ exclusively
+   */
+  void ShrinkDeltaCapacityIfSparse();
 
   /**
    * @brief Recompute and cache last_doc_id_ from delta_encoded_

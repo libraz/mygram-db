@@ -101,6 +101,32 @@ struct Document {
   FilterMap filters;
 };
 
+/// Interned filter-column name, valid within one DocumentStore.
+using FilterColumnId = uint32_t;
+
+/**
+ * @brief One document's filter values, keyed by interned column
+ *
+ * Holding a FilterMap per document costs one hash map plus one owned column-name
+ * string per (document, column) pair — 10 million rows with 5 filter columns
+ * means 10 million hash maps and 50 million column-name strings for a set of
+ * names the table configuration fixes at a handful. The names are interned once
+ * per store and each document keeps only a small vector sorted by column id,
+ * which for the usual handful of columns is also faster to scan than to hash.
+ */
+struct DocumentFilterValues {
+  std::vector<std::pair<FilterColumnId, FilterValue>> entries;  ///< Sorted by column id
+
+  [[nodiscard]] const FilterValue* Find(FilterColumnId column_id) const {
+    const auto iterator = std::lower_bound(entries.begin(), entries.end(), column_id,
+                                           [](const auto& entry, FilterColumnId id) { return entry.first < id; });
+    if (iterator == entries.end() || iterator->first != column_id) {
+      return nullptr;
+    }
+    return &iterator->second;
+  }
+};
+
 /**
  * @brief Document store
  *
@@ -114,6 +140,15 @@ class DocumentStore {
   };
 
   using NormalizedTextChunkVisitor = std::function<bool(const std::vector<NormalizedTextEntry>&)>;
+
+  /// Receives the position in the requested DocID list, the DocID, and its
+  /// normalized text — nullptr when the document has no stored text. Return
+  /// false to stop iteration.
+  using SelectedNormalizedTextVisitor = std::function<bool(size_t, DocId, const std::string*)>;
+
+  /// Documents whose text is materialized per lock acquisition when verifying a
+  /// candidate set. Bounds peak copy size independently of the candidate count.
+  static constexpr size_t kSelectedNormalizedTextChunkSize = 1024;
 
   DocumentStore();
   ~DocumentStore();
@@ -363,6 +398,22 @@ class DocumentStore {
   [[nodiscard]] std::vector<std::optional<std::string>> GetNormalizedTextBatch(const std::vector<DocId>& doc_ids) const;
 
   /**
+   * @brief Visit the normalized text of specific documents in bounded chunks
+   *
+   * GetNormalizedTextBatch() copies every requested document's text before the
+   * first comparison runs, so verifying or scoring a large candidate set
+   * duplicates a large fraction of the corpus. This materializes one bounded
+   * chunk at a time and runs the visitor with the store mutex released, so peak
+   * copy size depends on the chunk size rather than the candidate count.
+   *
+   * @param doc_ids Documents to visit, in the caller's order
+   * @param max_doc_ids_per_chunk Documents copied per lock acquisition (0 = no visit)
+   * @param visitor Callback invoked once per document
+   */
+  void VisitNormalizedTextsFor(const std::vector<DocId>& doc_ids, size_t max_doc_ids_per_chunk,
+                               const SelectedNormalizedTextVisitor& visitor) const;
+
+  /**
    * @brief Visit stored normalized texts in bounded DocID chunks
    *
    * Each chunk owns at most @p max_doc_ids_per_chunk texts and the visitor runs
@@ -476,8 +527,33 @@ class DocumentStore {
   absl::flat_hash_map<std::string, DocId, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
       pk_to_doc_id_;
 
-  // DocID -> Filter values (inner map uses transparent hash for string_view lookup)
-  absl::flat_hash_map<DocId, FilterMap> doc_filters_;
+  // DocID -> Filter values, keyed by interned column id. FilterMap stays the
+  // interface type for producers and consumers; only the stored form is interned.
+  absl::flat_hash_map<DocId, DocumentFilterValues> doc_filters_;
+
+  // Interned filter-column names. Ids are dense indices into filter_column_names_
+  // and are never reused, so a stored DocumentFilterValues stays valid for the
+  // lifetime of the store.
+  std::vector<std::string> filter_column_names_;
+  absl::flat_hash_map<std::string, FilterColumnId, mygram::utils::TransparentStringHash,
+                      mygram::utils::TransparentStringEqual>
+      filter_column_ids_;
+
+  /// Intern a column name, assigning a new id when it is seen for the first time.
+  /// @note Caller must hold mutex_ exclusively
+  FilterColumnId InternFilterColumnLocked(std::string_view column_name);
+
+  /// Look up an already-interned column name.
+  /// @note Caller must hold mutex_ at least in shared mode
+  [[nodiscard]] std::optional<FilterColumnId> FindFilterColumnLocked(std::string_view column_name) const;
+
+  /// Convert a caller-supplied FilterMap into the interned stored form.
+  /// @note Caller must hold mutex_ exclusively
+  [[nodiscard]] DocumentFilterValues InternFilterMapLocked(const FilterMap& filters);
+
+  /// Rebuild a FilterMap from the interned stored form.
+  /// @note Caller must hold mutex_ at least in shared mode
+  [[nodiscard]] FilterMap MaterializeFiltersLocked(const DocumentFilterValues& values) const;
 
   // DocID -> Normalized text (for n-gram post-filter verification)
   absl::flat_hash_map<DocId, std::string> doc_texts_;

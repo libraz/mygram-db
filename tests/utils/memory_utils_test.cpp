@@ -130,3 +130,26 @@ TEST(MemoryUtilsTest, MemoryInfoConsistency) {
   // Process virtual memory should be greater than or equal to RSS
   EXPECT_GE(proc_info->virtual_bytes, proc_info->rss_bytes);
 }
+
+/**
+ * @brief The optimization estimate must scale with the term count
+ *
+ * OptimizeInBatches snapshots every term name before it starts. That snapshot
+ * is proportional to the term count rather than to posting-list memory, so an
+ * estimate that ignores it lets a term-heavy index clear the pre-check and then
+ * exhaust memory part-way through the batch loop.
+ */
+TEST(MemoryUtilsTest, EstimateOptimizationMemoryAccountsForTermCount) {
+  constexpr uint64_t kIndexSize = 100ULL * 1024 * 1024;
+  constexpr size_t kBatchSize = 1000;
+  constexpr uint64_t kTermCount = 50ULL * 1000 * 1000;
+
+  const uint64_t without_terms = EstimateOptimizationMemory(kIndexSize, kBatchSize);
+  const uint64_t with_terms = EstimateOptimizationMemory(kIndexSize, kBatchSize, kTermCount);
+
+  EXPECT_GT(with_terms, without_terms);
+  EXPECT_GT(with_terms - without_terms, kTermCount) << "the per-term snapshot cost must be counted";
+
+  // An empty index still short-circuits regardless of the reported term count.
+  EXPECT_EQ(EstimateOptimizationMemory(0, kBatchSize, kTermCount), 0);
+}

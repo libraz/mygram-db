@@ -64,35 +64,35 @@ mygram::utils::Expected<std::vector<ScoredDoc>, mygram::utils::Error> BM25Scorer
     idfs.push_back(ComputeIDF(total_docs, term_doc_freqs[i]));
   }
 
-  // Batch fetch all normalized texts in a single lock acquisition
-  auto all_texts = doc_store.GetNormalizedTextBatch(candidates);
-  if (all_texts.size() != candidates.size()) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
-                                 "DocumentStore returned a normalized-text batch with an unexpected length"));
-  }
+  // Ranking needs a score for every candidate, so the candidate set cannot be
+  // truncated before scoring. Materializing all of their texts at once would
+  // copy a large fraction of the corpus for a broad query, so they are visited
+  // in bounded chunks instead.
+  doc_store.VisitNormalizedTextsFor(candidates, storage::DocumentStore::kSelectedNormalizedTextChunkSize,
+                                    [&](size_t /*index*/, storage::DocId doc_id, const std::string* text) {
+                                      double score = 0.0;
+                                      if (text != nullptr && !text->empty()) {
+                                        auto doc_length = static_cast<double>(mygram::utils::CountCodePoints(*text));
 
-  for (size_t doc_idx = 0; doc_idx < candidates.size(); ++doc_idx) {
-    auto doc_id = candidates[doc_idx];
-    double score = 0.0;
+                                        for (size_t i = 0; i < search_terms.size(); ++i) {
+                                          auto tf = static_cast<double>(CountTermOccurrences(*text, search_terms[i]));
+                                          if (tf > 0.0) {
+                                            double length_norm =
+                                                1.0 - params.b + params.b * doc_length / std::max(avg_doc_length, 1.0);
+                                            double numerator = tf * (params.k1 + 1.0);
+                                            double denominator = tf + params.k1 * length_norm;
+                                            score += idfs[i] * numerator / denominator;
+                                          }
+                                        }
+                                      }
 
-    const auto& text_opt = all_texts[doc_idx];
-    if (text_opt.has_value() && !text_opt->empty()) {
-      const auto& text = *text_opt;
-      auto doc_length = static_cast<double>(mygram::utils::CountCodePoints(text));
+                                      results.push_back({doc_id, score});
+                                      return true;
+                                    });
 
-      for (size_t i = 0; i < search_terms.size(); ++i) {
-        auto tf = static_cast<double>(CountTermOccurrences(text, search_terms[i]));
-        if (tf > 0.0) {
-          double length_norm = 1.0 - params.b + params.b * doc_length / std::max(avg_doc_length, 1.0);
-          double numerator = tf * (params.k1 + 1.0);
-          double denominator = tf + params.k1 * length_norm;
-          score += idfs[i] * numerator / denominator;
-        }
-      }
-    }
-
-    results.push_back({doc_id, score});
+  if (results.size() != candidates.size()) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kInternalError, "DocumentStore visited an unexpected number of scoring candidates"));
   }
 
   return results;

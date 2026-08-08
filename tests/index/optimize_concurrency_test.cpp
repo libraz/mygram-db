@@ -828,4 +828,47 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
   }
 }
 
+/**
+ * @brief Batch optimization tracks terms by snapshot position, not by name copy
+ *
+ * The batch loop identifies terms by their position in a shared character
+ * arena instead of copying a std::string per term into three hash maps. A term
+ * whose last document disappears mid-run must still be dropped rather than
+ * republished from the stale snapshot, and every surviving term must keep its
+ * exact document set across batch boundaries.
+ */
+TEST_F(OptimizeConcurrencyTest, BatchOptimizationPreservesTermIdentityAcrossBatches) {
+  auto test_index = std::make_unique<Index>(2, 1);
+  constexpr uint32_t kDocs = 400;
+  for (uint32_t doc_id = 1; doc_id <= kDocs; ++doc_id) {
+    test_index->AddDocument(doc_id, "shared body text " + std::to_string(doc_id));
+  }
+  test_index->AddDocument(kDocs + 1, "zqzq");
+
+  std::map<std::string, std::vector<DocId>> before;
+  for (const auto& term : {std::string("sh"), std::string("ar"), std::string("zq")}) {
+    before[term] = test_index->SearchAnd({term});
+    ASSERT_FALSE(before[term].empty()) << term;
+  }
+
+  // Drop the only document carrying "zq" just before the first publish, so the
+  // term is erased from the index while a snapshot of it is still in flight.
+  bool hook_called = false;
+  SetBeforeBatchOptimizationPublishHook(*test_index, [&] {
+    if (hook_called) {
+      return;
+    }
+    hook_called = true;
+    test_index->RemoveDocument(kDocs + 1, "zqzq");
+  });
+
+  // A batch size well below the term count forces many batches.
+  ASSERT_TRUE(test_index->OptimizeInBatches(kDocs + 1, 8));
+  EXPECT_TRUE(hook_called);
+
+  EXPECT_TRUE(test_index->SearchAnd({"zq"}).empty()) << "an erased term must not be republished";
+  EXPECT_EQ(test_index->SearchAnd({"sh"}), before["sh"]);
+  EXPECT_EQ(test_index->SearchAnd({"ar"}), before["ar"]);
+}
+
 }  // namespace mygramdb::index

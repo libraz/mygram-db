@@ -1626,3 +1626,131 @@ TEST_F(PostingListTest, MemoryUsageApproxCachedRoaring) {
   // MemoryUsage (with lock) should return the same value
   EXPECT_EQ(pl.MemoryUsage(), mem);
 }
+
+/**
+ * @brief Point mutations on a Roaring list keep an exact count and never
+ *        under-report memory
+ *
+ * Cardinality and serialized size are both O(container count) to derive, so
+ * single-document mutations track the count themselves and refresh the size
+ * estimate on a bounded schedule. The count must stay exact through duplicate
+ * adds and absent removes, and the throttled size estimate must remain an
+ * upper bound.
+ */
+TEST_F(PostingListTest, RoaringPointMutationsKeepCountExactAndMemoryAnUpperBound) {
+  PostingList posting(0.01);
+  for (DocId id = 1; id <= 5000; ++id) {
+    posting.Add(id);
+  }
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  ASSERT_EQ(posting.Size(), 5000);
+
+  // Mutations that change nothing must not move the count.
+  posting.Add(1);
+  posting.Add(5000);
+  posting.Remove(900000);
+  EXPECT_EQ(posting.Size(), 5000);
+  EXPECT_EQ(posting.SizeApprox(), 5000);
+
+  // Enough interleaved point mutations to cross the refresh window repeatedly.
+  for (DocId id = 1; id <= 200; ++id) {
+    posting.Remove(id);
+  }
+  for (DocId id = 100001; id <= 100200; ++id) {
+    posting.Add(id);
+  }
+  EXPECT_EQ(posting.Size(), 5000);
+  EXPECT_EQ(posting.SizeApprox(), 5000);
+  ASSERT_EQ(posting.GetAll().size(), 5000U);
+  EXPECT_FALSE(posting.Contains(1));
+  EXPECT_TRUE(posting.Contains(201));
+  EXPECT_TRUE(posting.Contains(100200));
+
+  // A list holding the identical documents but built in one bulk operation
+  // reports the exact size; the point-mutated list must not report less.
+  PostingList rebuilt(0.01);
+  rebuilt.AddBatch(posting.GetAll());
+  ASSERT_EQ(rebuilt.GetStrategy(), PostingStrategy::kRoaringBitmap);
+  EXPECT_GE(posting.MemoryUsageApprox(), rebuilt.MemoryUsageApprox());
+}
+
+/**
+ * @brief Removals release the fixed-width delta allocation they vacate
+ *
+ * std::vector::erase keeps the peak capacity, which both wastes memory on
+ * churning tables and makes STATUS report the peak as still in use.
+ */
+TEST_F(PostingListTest, RemovedFixedWidthDeltaCapacityIsReclaimed) {
+  PostingList posting;
+  std::vector<DocId> ids;
+  ids.reserve(2000);
+  for (DocId id = 1; id <= 2000; ++id) {
+    ids.push_back(id * 3);
+  }
+  posting.AddBatch(ids);
+  ASSERT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
+  const size_t peak_memory = posting.MemoryUsage();
+  ASSERT_GT(peak_memory, 2000 * sizeof(uint32_t));
+
+  constexpr size_t kRetained = 50;
+  for (size_t i = 0; i + kRetained < ids.size(); ++i) {
+    posting.Remove(ids[i]);
+  }
+
+  ASSERT_EQ(posting.Size(), kRetained);
+  EXPECT_LT(posting.MemoryUsage(), peak_memory / 4);
+  EXPECT_EQ(posting.MemoryUsageApprox(), posting.MemoryUsage());
+
+  const auto remaining = posting.GetAll();
+  ASSERT_EQ(remaining.size(), kRetained);
+  EXPECT_EQ(remaining.front(), ids[ids.size() - kRetained]);
+  EXPECT_EQ(remaining.back(), ids.back());
+}
+
+/**
+ * @brief RetainPresent reproduces Contains() for every candidate
+ *
+ * The single-pass merge replaces per-candidate probing, so it must agree with
+ * Contains() on both storage strategies, including candidates below the first
+ * posting, past the last posting, and repeated in the input.
+ */
+TEST_F(PostingListTest, RetainPresentAgreesWithContainsOnBothStrategies) {
+  for (const bool use_roaring : {false, true}) {
+    PostingList posting(0.01);
+    std::vector<DocId> stored;
+    const DocId count = use_roaring ? 6000 : 300;
+    for (DocId i = 1; i <= count; ++i) {
+      stored.push_back(i * 5);
+    }
+    posting.AddBatch(stored);
+    ASSERT_EQ(posting.GetStrategy(), use_roaring ? PostingStrategy::kRoaringBitmap : PostingStrategy::kFixedWidthDelta)
+        << "use_roaring=" << use_roaring;
+
+    std::vector<DocId> candidates;
+    for (DocId id = 1; id <= count * 5 + 10; ++id) {
+      candidates.push_back(id);
+    }
+
+    std::vector<DocId> expected;
+    for (const DocId candidate : candidates) {
+      if (posting.Contains(candidate)) {
+        expected.push_back(candidate);
+      }
+    }
+    EXPECT_EQ(posting.RetainPresent(candidates), expected) << "use_roaring=" << use_roaring;
+
+    // Repeated candidates are reported once per occurrence, and candidates
+    // outside the stored range are dropped.
+    const std::vector<DocId> edges{1, 5, 5, count * 5, count * 5 + 1};
+    EXPECT_EQ(posting.RetainPresent(edges), (std::vector<DocId>{5, 5, count * 5})) << "use_roaring=" << use_roaring;
+    EXPECT_TRUE(posting.RetainPresent({}).empty()) << "use_roaring=" << use_roaring;
+  }
+}
+
+/**
+ * @brief An empty posting list retains nothing
+ */
+TEST_F(PostingListTest, RetainPresentOnEmptyListReturnsNoCandidates) {
+  PostingList posting;
+  EXPECT_TRUE(posting.RetainPresent({1, 2, 3}).empty());
+}

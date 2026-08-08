@@ -253,15 +253,28 @@ void CollectAstScoringTerms(const query::QueryNode& node, std::vector<std::strin
   }
 }
 
-bool ContainsEmptyPostingTerm(const std::vector<SearchTermInfo>& term_infos) {
-  return std::any_of(term_infos.begin(), term_infos.end(), [](const SearchTermInfo& term_info) {
+/// A term whose n-grams exist but carry no postings must not be cached: the
+/// next document may populate that posting list, and a cached empty result
+/// would mask it until an n-gram invalidation arrives for an n-gram the entry
+/// never registered.
+///
+/// A term shorter than the n-gram size is a different case. It produces no
+/// n-grams at all and is answered by a linear substring scan over every stored
+/// text, so it can never be reached through n-gram invalidation — but the
+/// caller registers such entries for invalidation on any text change in the
+/// table, which is a strictly wider trigger. Vetoing them anyway is what made
+/// repeated short-term queries rescan the whole corpus every time.
+bool ContainsEmptyPostingTerm(const std::vector<SearchTermInfo>& term_infos, bool invalidate_on_any_text_change) {
+  return std::any_of(term_infos.begin(), term_infos.end(), [&](const SearchTermInfo& term_info) {
     // NOT-term infos are registered for cache invalidation only; an empty
     // posting list is their normal state and must not block caching.
     if (term_info.is_not_term) {
       return false;
     }
-    return term_info.ngrams.empty() || term_info.estimated_size == 0 ||
-           term_info.estimated_size == std::numeric_limits<size_t>::max();
+    if (term_info.ngrams.empty()) {
+      return term_info.normalized_term.empty() || !invalidate_on_any_text_change;
+    }
+    return term_info.estimated_size == 0 || term_info.estimated_size == std::numeric_limits<size_t>::max();
   });
 }
 
@@ -364,29 +377,42 @@ std::vector<storage::DocId> EvaluateBooleanAstExpanded(
   return {};
 }
 
+/// Keep the candidates whose stored normalized text satisfies @p matches.
+///
+/// Text is materialized in bounded chunks rather than for the whole candidate
+/// set at once, so peak memory does not scale with the number of candidates.
+/// Documents with no stored text are kept, so a snapshot restored without text
+/// storage cannot turn a hit into a miss.
+std::vector<storage::DocId> RetainCandidatesMatchingText(const std::vector<storage::DocId>& candidates,
+                                                         const storage::DocumentStore* doc_store,
+                                                         const std::function<bool(const std::string&)>& matches) {
+  std::vector<storage::DocId> verified;
+  if (candidates.empty() || doc_store == nullptr) {
+    return verified;
+  }
+  verified.reserve(candidates.size());
+  doc_store->VisitNormalizedTextsFor(candidates, storage::DocumentStore::kSelectedNormalizedTextChunkSize,
+                                     [&](size_t /*index*/, storage::DocId doc_id, const std::string* text) {
+                                       if (text == nullptr || matches(*text)) {
+                                         verified.push_back(doc_id);
+                                       }
+                                       return true;
+                                     });
+  return verified;
+}
+
 std::vector<storage::DocId> PostFilterByBooleanText(const std::vector<storage::DocId>& candidates,
                                                     const query::QueryNode& ast,
                                                     const std::unordered_map<std::string, SearchTermInfo>& term_infos,
                                                     storage::DocumentStore* doc_store) {
-  auto texts = doc_store->GetNormalizedTextBatch(candidates);
-
-  std::vector<storage::DocId> verified;
-  verified.reserve(candidates.size());
-  for (size_t i = 0; i < candidates.size(); ++i) {
-    if (!texts[i].has_value()) {
-      verified.push_back(candidates[i]);
-      continue;
-    }
+  return RetainCandidatesMatchingText(candidates, doc_store, [&](const std::string& text) {
     auto term_matches = [&](const std::string& term) {
       auto info_iter = term_infos.find(term);
       return info_iter != term_infos.end() && !info_iter->second.normalized_term.empty() &&
-             texts[i]->find(info_iter->second.normalized_term) != std::string::npos;
+             text.find(info_iter->second.normalized_term) != std::string::npos;
     };
-    if (BooleanAstMatchesExpandedText(ast, term_matches)) {
-      verified.push_back(candidates[i]);
-    }
-  }
-  return verified;
+    return BooleanAstMatchesExpandedText(ast, term_matches);
+  });
 }
 
 /// Intersect accumulator with new sorted results (AND semantics).
@@ -522,12 +548,20 @@ void PopulateTermDocumentFrequency(SearchTermInfo& term_info, index::Index* curr
     return;
   }
 
+  // Every n-gram candidate has to be inspected to get an exact frequency, but
+  // materializing all of their texts at once would copy a large fraction of the
+  // corpus for a common term.
   const auto candidates = current_index->SearchAnd(term_info.ngrams);
-  const auto normalized_texts = current_doc_store->GetNormalizedTextBatch(candidates);
-  term_info.term_doc_freq = static_cast<uint64_t>(
-      std::count_if(normalized_texts.begin(), normalized_texts.end(), [&term_info](const auto& text) {
-        return text.has_value() && text->find(term_info.normalized_term) != std::string::npos;
-      }));
+  uint64_t matching = 0;
+  current_doc_store->VisitNormalizedTextsFor(
+      candidates, storage::DocumentStore::kSelectedNormalizedTextChunkSize,
+      [&](size_t /*index*/, storage::DocId /*doc_id*/, const std::string* text) {
+        if (text != nullptr && text->find(term_info.normalized_term) != std::string::npos) {
+          ++matching;
+        }
+        return true;
+      });
+  term_info.term_doc_freq = matching;
 }
 
 }  // namespace
@@ -1205,29 +1239,10 @@ std::vector<storage::DocId> ApplyFiltersWithBitmap(const std::vector<storage::Do
 std::vector<storage::DocId> PostFilterByText(const std::vector<storage::DocId>& candidates,
                                              const std::vector<std::string>& normalized_terms,
                                              storage::DocumentStore* doc_store) {
-  // Batch fetch all texts in a single lock acquisition.
-  auto texts = doc_store->GetNormalizedTextBatch(candidates);
-
-  std::vector<storage::DocId> verified;
-  verified.reserve(candidates.size());
-  for (size_t i = 0; i < candidates.size(); ++i) {
-    if (!texts[i].has_value()) {
-      // Text unavailable (e.g. after snapshot restore) -- include to avoid false negatives
-      verified.push_back(candidates[i]);
-      continue;
-    }
-    bool all_found = true;
-    for (const auto& term : normalized_terms) {
-      if (texts[i]->find(term) == std::string::npos) {
-        all_found = false;
-        break;
-      }
-    }
-    if (all_found) {
-      verified.push_back(candidates[i]);
-    }
-  }
-  return verified;
+  return RetainCandidatesMatchingText(candidates, doc_store, [&](const std::string& text) {
+    return std::all_of(normalized_terms.begin(), normalized_terms.end(),
+                       [&](const std::string& term) { return text.find(term) != std::string::npos; });
+  });
 }
 
 std::vector<storage::DocId> ApplyVerifyTextFilter(std::vector<storage::DocId> results,
@@ -1327,7 +1342,7 @@ void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query
   if (cache_manager == nullptr || !cache_manager->IsEnabled()) {
     return;
   }
-  if (ContainsEmptyPostingTerm(term_infos)) {
+  if (ContainsEmptyPostingTerm(term_infos, invalidate_on_any_text_change)) {
     return;
   }
   auto all_ngrams = MergeSortedTermNgramsForCache(term_infos);
@@ -1520,14 +1535,7 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
         prepare_term(and_term);
       }
 
-      auto texts = current_doc_store->GetNormalizedTextBatch(result.results);
-      std::vector<storage::DocId> verified;
-      verified.reserve(result.results.size());
-      for (size_t i = 0; i < result.results.size(); ++i) {
-        if (!texts[i].has_value()) {
-          verified.push_back(result.results[i]);
-          continue;
-        }
+      result.results = RetainCandidatesMatchingText(result.results, current_doc_store, [&](const std::string& text) {
         auto term_matches = [&](const std::string& term) {
           const auto variants = verification_variants.find(term);
           if (variants == verification_variants.end()) {
@@ -1535,22 +1543,16 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
           }
           if (fuzzy_max_distance.has_value()) {
             return std::any_of(variants->second.begin(), variants->second.end(), [&](const auto& variant) {
-              return texts[i]->find(variant) != std::string::npos ||
-                     mygram::utils::ContainsFuzzyMatch(*texts[i], variant, *fuzzy_max_distance);
+              return text.find(variant) != std::string::npos ||
+                     mygram::utils::ContainsFuzzyMatch(text, variant, *fuzzy_max_distance);
             });
           }
           return std::any_of(variants->second.begin(), variants->second.end(),
-                             [&](const auto& synonym) { return texts[i]->find(synonym) != std::string::npos; });
+                             [&](const auto& synonym) { return text.find(synonym) != std::string::npos; });
         };
-        bool matches = BooleanAstMatchesExpandedText(ast, term_matches);
-        if (matches) {
-          matches = std::all_of(query.and_terms.begin(), query.and_terms.end(), term_matches);
-        }
-        if (matches) {
-          verified.push_back(result.results[i]);
-        }
-      }
-      result.results = std::move(verified);
+        return BooleanAstMatchesExpandedText(ast, term_matches) &&
+               std::all_of(query.and_terms.begin(), query.and_terms.end(), term_matches);
+      });
     } else {
       TermInfoLookup fallback_term_infos;
       const TermInfoLookup* verify_term_infos = precomputed_term_infos;
@@ -1644,37 +1646,12 @@ std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<stora
     return candidates;
   }
 
-  // Batch fetch all texts in single lock acquisition
-  auto texts = doc_store->GetNormalizedTextBatch(candidates);
-
-  std::vector<storage::DocId> verified;
-  verified.reserve(candidates.size());
-
-  for (size_t i = 0; i < candidates.size(); ++i) {
-    if (!texts[i].has_value()) {
-      verified.push_back(candidates[i]);
-      continue;
-    }
-
-    bool all_groups_match = true;
-    for (const auto& group : synonym_groups) {
-      bool any_synonym_found = false;
-      for (const auto& term : group.normalized_terms) {
-        if (texts[i]->find(term) != std::string::npos) {
-          any_synonym_found = true;
-          break;
-        }
-      }
-      if (!any_synonym_found) {
-        all_groups_match = false;
-        break;
-      }
-    }
-
-    if (all_groups_match) {
-      verified.push_back(candidates[i]);
-    }
-  }
+  auto verified = RetainCandidatesMatchingText(candidates, doc_store, [&](const std::string& text) {
+    return std::all_of(synonym_groups.begin(), synonym_groups.end(), [&](const auto& group) {
+      return std::any_of(group.normalized_terms.begin(), group.normalized_terms.end(),
+                         [&](const std::string& term) { return text.find(term) != std::string::npos; });
+    });
+  });
 
   return verified;
 }
@@ -1769,38 +1746,12 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
 std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::DocId>& candidates,
                                                   const std::vector<std::string>& normalized_terms,
                                                   uint32_t max_distance, storage::DocumentStore* doc_store) {
-  // Batch fetch all texts in a single lock acquisition.
-  auto texts = doc_store->GetNormalizedTextBatch(candidates);
-
-  std::vector<storage::DocId> verified;
-  verified.reserve(candidates.size());
-
-  for (size_t i = 0; i < candidates.size(); ++i) {
-    if (!texts[i].has_value()) {
-      // Text unavailable -- include to avoid false negatives
-      verified.push_back(candidates[i]);
-      continue;
-    }
-
-    bool all_terms_match = true;
-    for (const auto& term : normalized_terms) {
-      // First try exact substring match (faster than edit distance)
-      if (texts[i]->find(term) != std::string::npos) {
-        continue;
-      }
-      // Fall back to fuzzy word-level matching
-      if (!mygram::utils::ContainsFuzzyMatch(*texts[i], term, max_distance)) {
-        all_terms_match = false;
-        break;
-      }
-    }
-
-    if (all_terms_match) {
-      verified.push_back(candidates[i]);
-    }
-  }
-
-  return verified;
+  return RetainCandidatesMatchingText(candidates, doc_store, [&](const std::string& text) {
+    return std::all_of(normalized_terms.begin(), normalized_terms.end(), [&](const std::string& term) {
+      // Exact substring match first; it is cheaper than edit distance.
+      return text.find(term) != std::string::npos || mygram::utils::ContainsFuzzyMatch(text, term, max_distance);
+    });
+  });
 }
 
 mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPipeline(
@@ -1928,7 +1879,8 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
                               query.fuzzy_max_distance, params.synonym_dict, &term_info_lookup);
 
     if (!query.fuzzy_max_distance.has_value() && params.synonym_dict == nullptr && pipeline_result.results.empty() &&
-        ContainsEmptyPostingTerm(output.term_infos)) {
+        // The boolean path always inserts with invalidation on any text change.
+        ContainsEmptyPostingTerm(output.term_infos, /*invalidate_on_any_text_change=*/true)) {
       pipeline_result.empty_term_detected = true;
     }
 

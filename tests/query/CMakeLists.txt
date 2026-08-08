@@ -119,3 +119,24 @@ gtest_discover_tests(result_sorter_asc_desc_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+# Result sorter benchmarks: pagination cost over a wide match set
+add_executable(result_sorter_benchmark_test
+  result_sorter_benchmark_test.cpp
+)
+
+target_link_libraries(result_sorter_benchmark_test
+  mygramdb_query
+  GTest::gtest_main
+)
+
+# Benchmarks order 300K matches through both paths, so they need the machine to
+# themselves to produce comparable figures.
+gtest_discover_tests(result_sorter_benchmark_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)
