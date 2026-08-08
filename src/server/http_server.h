@@ -204,6 +204,18 @@ class HttpServer {
   void SetOptimizeCallback(OptimizeCallback callback) { optimize_callback_ = std::move(callback); }
 
   /**
+   * @brief Adopt the shared query cache once its owner has created it.
+   *
+   * The cache is owned by the TCP server and only exists after that server
+   * starts, which is later than this server is constructed. Without this the
+   * HTTP surface would keep the null pointer it was built with and silently
+   * run every request outside the cache. Must be called before Start().
+   */
+  void SetCacheManager(cache::CacheManager* cache_manager) { cache_manager_ = cache_manager; }
+
+  const cache::CacheManager* GetCacheManagerForTesting() const { return cache_manager_; }
+
+  /**
    * @brief Get total requests handled.
    *
    * Reads through the *effective* stats source: when a `tcp_stats` pointer was

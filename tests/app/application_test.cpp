@@ -25,8 +25,11 @@
 #include "app/server_orchestrator.h"
 #include "app/signal_manager.h"
 #include "mysql/null_binlog_reader.h"
+#include "server/http_server.h"
 #include "server/operation_coordinator.h"
 #include "server/replication_pause_counter.h"
+#include "server/tcp_server.h"
+#include "support/network_test_utils.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -575,6 +578,54 @@ TEST(ServerOrchestratorStartupTest, MissingEnabledSynonymFileFailsInitialization
   auto result = (*orchestrator)->Initialize();
   ASSERT_FALSE(result);
   EXPECT_NE(result.error().message().find("Failed to load synonyms"), std::string::npos);
+}
+
+TEST(ServerOrchestratorStartupTest, HttpSurfaceAdoptsTheQueryCacheOwnedByTheTcpServer) {
+  // The cache is created while the TCP server starts, which is after both
+  // servers are constructed. If the HTTP server keeps the pointer it was built
+  // with, every HTTP request runs outside the cache and the cache reports
+  // itself as disabled over HTTP while TCP reports it as enabled -- a split
+  // that no single-protocol test can see.
+  auto signal_manager = mygramdb::app::SignalManager::Create();
+  ASSERT_TRUE(signal_manager) << signal_manager.error().to_string();
+
+  mygramdb::config::Config config;
+  config.replication.enable = false;
+  config.replication.auto_initial_snapshot = false;
+  config.dump.load_on_startup = false;
+  config.cache.enabled = true;
+  config.api.tcp.bind = "127.0.0.1";
+  config.api.tcp.port = mygramdb::testing::FindAvailableLoopbackPort();
+  config.api.http.enable = true;
+  config.api.http.bind = "127.0.0.1";
+  config.api.http.port = mygramdb::testing::FindAvailableLoopbackPort();
+
+  mygramdb::config::TableConfig table;
+  table.database = "catalog";
+  table.name = "posts";
+  table.text_source.column = "body";
+  config.tables.push_back(std::move(table));
+
+  const std::string dump_dir = std::filesystem::temp_directory_path().string();
+  mygramdb::app::ServerOrchestrator::Dependencies deps{
+      .config = config,
+      .signal_manager = **signal_manager,
+      .dump_dir = dump_dir,
+  };
+  auto orchestrator = mygramdb::app::ServerOrchestrator::Create(deps);
+  ASSERT_TRUE(orchestrator);
+  ASSERT_TRUE((*orchestrator)->Initialize());
+  ASSERT_TRUE((*orchestrator)->Start());
+
+  auto* tcp_server = (*orchestrator)->GetTcpServerForTesting();
+  const auto* http_server = (*orchestrator)->GetHttpServerForTesting();
+  ASSERT_NE(tcp_server, nullptr);
+  ASSERT_NE(http_server, nullptr);
+  ASSERT_NE(tcp_server->GetCacheManager(), nullptr) << "the TCP server never created a cache";
+  EXPECT_EQ(http_server->GetCacheManagerForTesting(), tcp_server->GetCacheManager())
+      << "the HTTP surface is not sharing the cache the TCP surface owns";
+
+  EXPECT_TRUE((*orchestrator)->Stop());
 }
 
 TEST(ServerOrchestratorStartupRetryTest, SucceedsOnFirstAttemptWithoutSleeping) {

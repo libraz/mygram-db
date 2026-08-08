@@ -262,6 +262,9 @@ class ServerOrchestrator {
    */
   bool IsRunning() const;
 
+  const server::HttpServer* GetHttpServerForTesting() const { return http_server_.get(); }
+  server::TcpServer* GetTcpServerForTesting() { return tcp_server_.get(); }
+
  private:
   ServerOrchestrator(Dependencies deps);
 

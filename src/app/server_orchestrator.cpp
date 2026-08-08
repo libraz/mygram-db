@@ -258,10 +258,29 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
     return mygram::utils::MakeUnexpected(tcp_start.error());
   }
 
+#ifdef USE_MYSQL
+  // Hand the query cache to the replication path at the first moment it exists:
+  // the TCP server creates it while starting, which is after the binlog reader
+  // was constructed and started. Until this runs, every row event skips
+  // invalidation, so a cached result would keep being served after the row
+  // behind it changed. Doing it immediately after the listener starts keeps the
+  // gap to the span of this statement, during which no query can have been
+  // cached yet.
+  if (binlog_reader_) {
+    binlog_reader_->SetCacheManager(tcp_server_->GetCacheManager());
+  }
+#endif
+
   RegisterRuntimeCallbacks();
 
   // Start HTTP server (if enabled)
   if (http_server_) {
+    // The TCP server creates the query cache while starting, so the pointer
+    // handed over at construction time was still null. Adopt the real one here
+    // or the HTTP surface serves every request outside the cache and reports
+    // caching as disabled.
+    http_server_->SetCacheManager(tcp_server_->GetCacheManager());
+
     auto http_start = http_server_->Start();
     if (!http_start) {
       // Cleanup in reverse start order. Start() must be transactional: callers
@@ -688,7 +707,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     loader::InitialLoader initial_loader(*mysql_connection_, *ctx->index, *ctx->doc_store, table_config,
                                          deps_.config.mysql, deps_.config.build);
 
-    auto progress_callback = [this, &table_config, &initial_loader](const auto& progress) {
+    auto progress_callback = [&table_config, &initial_loader](const auto& progress) {
       // Check cancellation flag in progress callback
       if (SignalManager::IsShutdownRequested()) {
         mygram::utils::StructuredLog().Event("initial_load_cancellation_requested").Info();
