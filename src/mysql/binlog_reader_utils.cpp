@@ -412,9 +412,6 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::UpdateCurrentG
   if (!advanced) {
     return mygram::utils::MakeUnexpected(advanced.error());
   }
-  last_applied_unix_time_.store(
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
-      std::memory_order_release);
   ClearReachedReplayWatermarks(*advanced);
   return {};
 }
@@ -465,6 +462,14 @@ mygram::utils::Expected<std::string, mygram::utils::Error> BinlogReader::UpdateC
     applied_gtid = *merged;
   }
   current_gtid_ = applied_gtid;
+  // Stamped here rather than in the callers so no path can advance the applied
+  // position without also advancing the timestamp the lag gauge is derived
+  // from. The commit path updates the position under an already-held lock, and
+  // a lag figure that never moves reads as "perfectly caught up" no matter how
+  // far behind replication really is.
+  last_applied_unix_time_.store(
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count(),
+      std::memory_order_release);
   return applied_gtid;
 }
 
