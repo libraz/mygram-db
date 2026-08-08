@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -239,6 +240,20 @@ class QueryCache {
 
   /** Test-only lifecycle observation. */
   [[nodiscard]] bool IsBackgroundWorkerRunningForTesting() const { return lru_refresh_worker_.IsRunning(); }
+
+  /**
+   * @brief Run one periodic-maintenance pass synchronously.
+   *
+   * Lets tests observe the bounded, resumable LRU scan one slice at a time
+   * instead of racing the 100 ms worker tick. Construct the cache with
+   * start_background_worker = false before using this.
+   */
+  void RefreshLRUForTesting() { RefreshLRU(); }
+
+  /** Size of one periodic-maintenance scan slice, exposed for test sizing. */
+  [[nodiscard]] static constexpr size_t RefreshSliceSizeForTesting(size_t entry_count) {
+    return std::max(kMinRefreshSliceEntries, entry_count / kRefreshSlicesPerCycle);
+  }
 
   /**
    * @brief Cache lookup result with metadata
@@ -476,6 +491,15 @@ class QueryCache {
 
   // Reverse index for table-scoped clears: table name -> cache keys.
   std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_cache_keys_;
+
+  // RefreshLRU() runs on a 100 ms tick and holds the exclusive lock, so walking
+  // every entry each time would stall all lookups and inserts in proportion to
+  // the cache size. Instead it walks a bounded slice per tick and resumes from
+  // the key recorded here. Caches at or below kMinRefreshSliceEntries are still
+  // covered in a single tick, so small deployments keep the original timing.
+  static constexpr size_t kMinRefreshSliceEntries = 4096;
+  static constexpr size_t kRefreshSlicesPerCycle = 8;
+  std::optional<CacheKey> refresh_cursor_key_;
 
   // Configuration
   size_t max_memory_bytes_;

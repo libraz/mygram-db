@@ -554,6 +554,7 @@ void QueryCache::Clear() {
     decltype(lru_list_)().swap(lru_list_);
     decltype(cache_map_)().swap(cache_map_);
     decltype(table_to_cache_keys_)().swap(table_to_cache_keys_);
+    refresh_cursor_key_.reset();
     total_memory_bytes_ = 0;
     stats_.current_entries = 0;
     stats_.current_memory_bytes = 0;
@@ -829,17 +830,48 @@ void QueryCache::RefreshLRU() {
     std::unordered_set<CacheEntryIdentity> scan_expired_entries;
     std::unordered_set<CacheEntryIdentity> invalidated_entries;
 
-    // Update LRU for entries that were accessed since last refresh
-    for (auto& [key, entry_pair] : cache_map_) {
-      const CacheEntryIdentity identity{key, entry_pair.first.metadata.entry_generation};
-      if (entry_pair.first.invalidated.load(std::memory_order_relaxed)) {
+    // Update LRU for entries that were accessed since last refresh.
+    //
+    // Walk the LRU list rather than the hash map so that the scan can stop
+    // after a bounded slice and resume from the same place on the next tick.
+    // std::list iterators are stable across insertions and unrelated erasures,
+    // but the resume point is stored as a key so that erasing it simply
+    // restarts the cycle instead of leaving a dangling iterator.
+    const size_t slice_size = RefreshSliceSizeForTesting(cache_map_.size());
+
+    auto cursor = lru_list_.end();
+    if (refresh_cursor_key_.has_value()) {
+      auto resume_iter = cache_map_.find(*refresh_cursor_key_);
+      if (resume_iter != cache_map_.end()) {
+        cursor = resume_iter->second.second;
+      }
+    }
+    if (cursor == lru_list_.end()) {
+      cursor = lru_list_.begin();
+    }
+
+    size_t visited = 0;
+    while (cursor != lru_list_.end() && visited < slice_size) {
+      const CacheKey key = *cursor;
+      // Advance before Touch() can splice this node to the front.
+      ++cursor;
+      ++visited;
+
+      auto entry_iter = cache_map_.find(key);
+      if (entry_iter == cache_map_.end()) {
+        continue;  // Stale LRU node; EvictForSpace reports and pops these
+      }
+      auto& entry = entry_iter->second.first;
+
+      const CacheEntryIdentity identity{key, entry.metadata.entry_generation};
+      if (entry.invalidated.load(std::memory_order_relaxed)) {
         invalidated_entries.insert(identity);
         continue;
       }
 
       // Check TTL expiration
       if (current_ttl > 0) {
-        auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry_pair.first.metadata.created_at).count();
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
         if (age >= current_ttl) {
           // Only add to scan set if not already detected by Lookup
           if (lookup_expired_entries.find(identity) == lookup_expired_entries.end()) {
@@ -849,12 +881,13 @@ void QueryCache::RefreshLRU() {
         }
       }
 
-      if (entry_pair.first.metadata.accessed_since_refresh.exchange(false, std::memory_order_relaxed)) {
+      if (entry.metadata.accessed_since_refresh.exchange(false, std::memory_order_relaxed)) {
         // Entry was accessed, move to front of LRU list
         Touch(key);
-        entry_pair.first.metadata.last_accessed = now;
+        entry.metadata.last_accessed = now;
       }
     }
+    refresh_cursor_key_ = cursor == lru_list_.end() ? std::nullopt : std::optional<CacheKey>(*cursor);
 
     // Queue overflow can drop deferred Step 2 erasure. The invalidated flag is
     // authoritative, so the periodic scan purges such entries instead of

@@ -1580,4 +1580,158 @@ TEST(InvalidationManagerTest, FilterColumnsChangedRestrictedToTargetTable) {
   }
 }
 
+namespace {
+
+/** Registers one filtered and one text-sensitive entry on @p table. */
+struct SweepFixture {
+  CacheKey filtered_key;
+  CacheKey text_sensitive_key;
+  CacheKey plain_key;
+
+  static SweepFixture Register(InvalidationManager& mgr, const std::string& table, const std::string& prefix) {
+    SweepFixture fixture;
+
+    CacheMetadata base;
+    base.table = table;
+    base.ngrams = {"zzz"};  // never produced by the texts used below
+    base.ngram_size = 3;
+    base.kanji_ngram_size = 2;
+
+    fixture.filtered_key = CacheKeyGenerator::Generate(prefix + "-filtered");
+    CacheMetadata filtered = base;
+    filtered.filters = {{"status", query::FilterOp::EQ, "1"}};
+    mgr.RegisterCacheEntry(fixture.filtered_key, filtered);
+
+    fixture.text_sensitive_key = CacheKeyGenerator::Generate(prefix + "-text-sensitive");
+    CacheMetadata text_sensitive = base;
+    text_sensitive.invalidate_on_any_text_change = true;
+    mgr.RegisterCacheEntry(fixture.text_sensitive_key, text_sensitive);
+
+    fixture.plain_key = CacheKeyGenerator::Generate(prefix + "-plain");
+    mgr.RegisterCacheEntry(fixture.plain_key, base);
+
+    return fixture;
+  }
+};
+
+/** Runs both non-ngram sweeps at once and returns everything they invalidated. */
+std::unordered_set<CacheKey> SweepFilterAndTextChange(InvalidationManager& mgr, const std::string& table) {
+  return mgr.InvalidateAffectedEntries(table, "aaa", "bbb", 3, 2,
+                                       /*cross_boundary_ngrams=*/true,
+                                       /*filter_columns_changed=*/true);
+}
+
+}  // namespace
+
+/**
+ * @test Unregistering an entry removes it from the non-ngram sweep indexes
+ *
+ * The filter-change and any-text-change sweeps are driven by dedicated reverse
+ * indexes. If unregistration only cleaned up the general table index, an evicted
+ * key would keep being reported as invalidated forever.
+ */
+TEST(InvalidationManagerTest, UnregisterRemovesEntryFromNonNgramSweepIndexes) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto fixture = SweepFixture::Register(mgr, "posts", "unreg");
+
+  auto before = SweepFilterAndTextChange(mgr, "posts");
+  ASSERT_TRUE(before.find(fixture.filtered_key) != before.end());
+  ASSERT_TRUE(before.find(fixture.text_sensitive_key) != before.end());
+  EXPECT_FALSE(before.find(fixture.plain_key) != before.end())
+      << "an entry with neither filters nor text sensitivity must not be swept";
+
+  mgr.UnregisterCacheEntry(fixture.filtered_key);
+  mgr.UnregisterCacheEntry(fixture.text_sensitive_key);
+
+  auto after = SweepFilterAndTextChange(mgr, "posts");
+  EXPECT_TRUE(after.empty()) << "unregistered keys must not be reported by either sweep";
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
+}
+
+/**
+ * @test Batch unregistration keeps the sweep indexes consistent
+ */
+TEST(InvalidationManagerTest, BatchUnregisterRemovesEntriesFromNonNgramSweepIndexes) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto fixture = SweepFixture::Register(mgr, "posts", "batch-unreg");
+
+  mgr.UnregisterCacheEntries({fixture.filtered_key, fixture.text_sensitive_key, fixture.plain_key});
+
+  auto after = SweepFilterAndTextChange(mgr, "posts");
+  EXPECT_TRUE(after.empty());
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+}
+
+/**
+ * @test ClearTable drops the sweep indexes for that table only
+ */
+TEST(InvalidationManagerTest, ClearTableDropsNonNgramSweepIndexesForThatTableOnly) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto posts = SweepFixture::Register(mgr, "posts", "ct-posts");
+  const auto comments = SweepFixture::Register(mgr, "comments", "ct-comments");
+
+  mgr.ClearTable("posts");
+
+  auto posts_after = SweepFilterAndTextChange(mgr, "posts");
+  EXPECT_TRUE(posts_after.empty()) << "ClearTable must purge the cleared table from both sweep indexes";
+
+  auto comments_after = SweepFilterAndTextChange(mgr, "comments");
+  EXPECT_TRUE(comments_after.find(comments.filtered_key) != comments_after.end())
+      << "ClearTable on one table must not disturb another table's sweep indexes";
+  EXPECT_TRUE(comments_after.find(comments.text_sensitive_key) != comments_after.end());
+  EXPECT_FALSE(comments_after.find(posts.filtered_key) != comments_after.end());
+}
+
+/**
+ * @test Clear() empties the sweep indexes
+ */
+TEST(InvalidationManagerTest, ClearEmptiesNonNgramSweepIndexes) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  SweepFixture::Register(mgr, "posts", "clear-posts");
+  SweepFixture::Register(mgr, "comments", "clear-comments");
+
+  mgr.Clear();
+
+  EXPECT_TRUE(SweepFilterAndTextChange(mgr, "posts").empty());
+  EXPECT_TRUE(SweepFilterAndTextChange(mgr, "comments").empty());
+  EXPECT_EQ(mgr.MemoryUsage(), 0U);
+}
+
+/**
+ * @test Re-registering a key with the sweep flags cleared drops it from the indexes
+ *
+ * Re-registration reuses the same cache key, so a stale membership left in
+ * either sweep index would keep invalidating an entry whose query no longer has
+ * filters or text sensitivity.
+ */
+TEST(InvalidationManagerTest, ReRegisterWithClearedFlagsLeavesNonNgramSweepIndexes) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  const auto key = CacheKeyGenerator::Generate("re-register");
+  CacheMetadata sensitive;
+  sensitive.table = "posts";
+  sensitive.ngrams = {"zzz"};
+  sensitive.ngram_size = 3;
+  sensitive.kanji_ngram_size = 2;
+  sensitive.filters = {{"status", query::FilterOp::EQ, "1"}};
+  sensitive.invalidate_on_any_text_change = true;
+  mgr.RegisterCacheEntry(key, sensitive);
+
+  auto before = SweepFilterAndTextChange(mgr, "posts");
+  ASSERT_TRUE(before.find(key) != before.end());
+
+  CacheMetadata plain = sensitive;
+  plain.filters.clear();
+  plain.invalidate_on_any_text_change = false;
+  mgr.RegisterCacheEntry(key, plain);
+
+  auto after = SweepFilterAndTextChange(mgr, "posts");
+  EXPECT_TRUE(after.empty()) << "re-registration must drop stale sweep-index memberships";
+}
+
 }  // namespace mygramdb::cache

@@ -185,6 +185,14 @@ class InvalidationManager {
   // under the same mutex_, so the two views are always consistent.
   std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_cache_keys_;
 
+  // Reverse indexes for the two invalidation triggers that are not keyed by
+  // ngram. Without them every row event walks every cache key registered for
+  // the table just to test one boolean per entry, which turns binlog apply into
+  // an O(entries per table) sweep per changed row. Both are strict subsets of
+  // table_to_cache_keys_ and are maintained under the same mutex.
+  std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_filtered_cache_keys_;
+  std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_text_sensitive_cache_keys_;
+
   // Per-table ngram settings reference count: table -> (ngram_size, kanji_ngram_size, cross_boundary) -> count
   // Enables O(1) lookup of distinct historical ngram settings instead of O(N) scan over cache_metadata_
   std::unordered_map<std::string, std::map<std::tuple<int, int, bool>, size_t>> table_ngram_settings_;

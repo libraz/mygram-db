@@ -74,6 +74,12 @@ void InvalidationManager::RegisterCacheEntry(const CacheKey& key, const CacheMet
 
   // Update table -> cache keys reverse index for O(k) ClearTable.
   table_to_cache_keys_[stored_meta.table].insert(key);
+  if (stored_meta.has_filters) {
+    table_to_filtered_cache_keys_[stored_meta.table].insert(key);
+  }
+  if (stored_meta.has_not_terms || stored_meta.invalidate_on_any_text_change) {
+    table_to_text_sensitive_cache_keys_[stored_meta.table].insert(key);
+  }
 
   // Track per-table ngram settings for O(1) lookup during invalidation
   if (stored_meta.ngram_size > 0) {
@@ -155,31 +161,28 @@ std::unordered_set<CacheEntryIdentity> InvalidationManager::InvalidateAffectedEn
     // that have filter conditions. Queries with filters may return different
     // results regardless of whether text also changed.
     //
-    // use the table_to_cache_keys_ reverse index to walk only the keys
-    // belonging to @p table_name (O(k) where k = entries in this table)
-    // instead of scanning every entry across every table (O(N)). For each
-    // table-local key, dereference cache_metadata_ to confirm has_filters.
+    // table_to_filtered_cache_keys_ already holds exactly the filtered entries
+    // for this table, so the sweep is O(matching entries) rather than O(entries
+    // in the table) — no per-key metadata lookup is needed to reject entries
+    // that could never be affected.
     if (filter_columns_changed) {
-      auto tk_it = table_to_cache_keys_.find(table_name);
-      if (tk_it != table_to_cache_keys_.end()) {
+      auto tk_it = table_to_filtered_cache_keys_.find(table_name);
+      if (tk_it != table_to_filtered_cache_keys_.end()) {
         for (const auto& cache_key : tk_it->second) {
-          auto meta_it = cache_metadata_.find(cache_key);
-          if (meta_it != cache_metadata_.end() && meta_it->second.has_filters) {
-            add_affected(cache_key);
-          }
+          add_affected(cache_key);
         }
       }
     }
 
+    // Entries that must be dropped on any text change at all — NOT terms (whose
+    // result set can grow when unrelated text changes) and queries flagged as
+    // text-change sensitive — are tracked in their own index for the same
+    // reason.
     if (old_text != new_text) {
-      auto tk_it = table_to_cache_keys_.find(table_name);
-      if (tk_it != table_to_cache_keys_.end()) {
+      auto tk_it = table_to_text_sensitive_cache_keys_.find(table_name);
+      if (tk_it != table_to_text_sensitive_cache_keys_.end()) {
         for (const auto& cache_key : tk_it->second) {
-          auto meta_it = cache_metadata_.find(cache_key);
-          if (meta_it != cache_metadata_.end() &&
-              (meta_it->second.has_not_terms || meta_it->second.invalidate_on_any_text_change)) {
-            add_affected(cache_key);
-          }
+          add_affected(cache_key);
         }
       }
     }
@@ -261,14 +264,20 @@ void InvalidationManager::UnregisterCacheEntryUnlocked(const CacheKey& key, cons
     }
   }
 
-  // Remove from table -> cache keys reverse index.
-  auto tk_it = table_to_cache_keys_.find(metadata.table);
-  if (tk_it != table_to_cache_keys_.end()) {
-    tk_it->second.erase(key);
-    if (tk_it->second.empty()) {
-      table_to_cache_keys_.erase(tk_it);
+  // Remove from the table -> cache keys reverse indexes.
+  const auto erase_from = [&key, &metadata](auto& index) {
+    auto table_it = index.find(metadata.table);
+    if (table_it == index.end()) {
+      return;
     }
-  }
+    table_it->second.erase(key);
+    if (table_it->second.empty()) {
+      index.erase(table_it);
+    }
+  };
+  erase_from(table_to_cache_keys_);
+  erase_from(table_to_filtered_cache_keys_);
+  erase_from(table_to_text_sensitive_cache_keys_);
 
   // Remove metadata
   cache_metadata_.erase(metadata_it);
@@ -336,6 +345,8 @@ void InvalidationManager::ClearTable(const std::string& table_name) {
   ngram_to_cache_keys_.erase(table_name);
   table_ngram_settings_.erase(table_name);
   table_to_cache_keys_.erase(table_name);
+  table_to_filtered_cache_keys_.erase(table_name);
+  table_to_text_sensitive_cache_keys_.erase(table_name);
 }
 
 void InvalidationManager::Clear() {
@@ -345,6 +356,8 @@ void InvalidationManager::Clear() {
   decltype(cache_metadata_)().swap(cache_metadata_);
   decltype(table_ngram_settings_)().swap(table_ngram_settings_);
   decltype(table_to_cache_keys_)().swap(table_to_cache_keys_);
+  decltype(table_to_filtered_cache_keys_)().swap(table_to_filtered_cache_keys_);
+  decltype(table_to_text_sensitive_cache_keys_)().swap(table_to_text_sensitive_cache_keys_);
   estimated_bytes_.store(0, std::memory_order_relaxed);
 }
 
@@ -413,17 +426,20 @@ size_t InvalidationManager::DiagnosticMemoryUsage() const {
     total += settings_map.size() * (sizeof(std::tuple<int, int, bool>) + sizeof(size_t) + 3 * sizeof(void*));
   }
 
-  // table_to_cache_keys_ overhead (reverse index for O(k) ClearTable)
-  total += table_to_cache_keys_.bucket_count() * sizeof(void*);
-  for (const auto& [table_name, key_set] : table_to_cache_keys_) {
-    total += table_name.capacity() + sizeof(void*) + sizeof(size_t);
-    total += key_set.bucket_count() * sizeof(void*);
-    // Each CacheKey membership in the set
-    for (const auto& cache_key : key_set) {
-      (void)cache_key;
-      total += sizeof(CacheKey) + sizeof(void*) + sizeof(size_t);
+  // table -> cache keys reverse indexes (O(k) ClearTable plus the two
+  // non-ngram invalidation triggers)
+  const auto account_table_index = [&total](const auto& index) {
+    total += index.bucket_count() * sizeof(void*);
+    for (const auto& [table_name, key_set] : index) {
+      total += table_name.capacity() + sizeof(void*) + sizeof(size_t);
+      total += key_set.bucket_count() * sizeof(void*);
+      // Each CacheKey membership in the set
+      total += key_set.size() * (sizeof(CacheKey) + sizeof(void*) + sizeof(size_t));
     }
-  }
+  };
+  account_table_index(table_to_cache_keys_);
+  account_table_index(table_to_filtered_cache_keys_);
+  account_table_index(table_to_text_sensitive_cache_keys_);
 
   return total;
 }

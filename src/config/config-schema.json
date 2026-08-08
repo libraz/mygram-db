@@ -931,7 +931,7 @@
         },
         "eviction_batch_size": {
           "type": "integer",
-          "description": "Maximum number of entries evicted in one capacity-enforcement batch",
+          "description": "Minimum number of entries evicted in one capacity-enforcement batch. Eviction continues past the point where enough space is free so that reverse-index callbacks are amortized under sustained memory pressure",
           "default": 10,
           "minimum": 1
         },

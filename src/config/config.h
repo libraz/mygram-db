@@ -510,7 +510,7 @@ struct CacheConfig {
 
   // Advanced tuning
   bool compression_enabled = true;  ///< Enable LZ4 compression (default: true)
-  int eviction_batch_size = 10;     ///< Maximum entries evicted per capacity pass  // NOLINT
+  int eviction_batch_size = 10;     ///< Minimum entries evicted per capacity pass  // NOLINT
 
   // Invalidation queue settings
   struct {

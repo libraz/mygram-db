@@ -215,3 +215,25 @@ gtest_discover_tests(cache_metrics_test
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK cache_state TIMEOUT 60
 )
+
+# Cache benchmarks: sweep and maintenance cost against cache size
+add_executable(query_cache_benchmark_test
+  query_cache_benchmark_test.cpp
+)
+
+target_link_libraries(query_cache_benchmark_test PRIVATE
+  mygramdb_cache
+  GTest::gtest_main
+)
+
+# Benchmarks fill caches of 100K+ entries and compare per-operation cost across
+# sizes, so they need the machine to themselves to produce comparable figures.
+gtest_discover_tests(query_cache_benchmark_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RESOURCE_LOCK cache_state
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)

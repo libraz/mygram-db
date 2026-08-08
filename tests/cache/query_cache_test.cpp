@@ -2900,4 +2900,146 @@ TEST(QueryCacheTest, MemoryUsageIncludesSharedPtrControlBlockOverhead) {
       << "H-M1: MemoryUsage must include shared_ptr control block overhead (~24 bytes)";
 }
 
+/**
+ * @brief Periodic maintenance scans a bounded slice and resumes where it stopped
+ *
+ * The periodic pass holds the exclusive lock, so it must not walk the whole
+ * cache on every tick. It also must not repeatedly rescan the same prefix, or
+ * entries past the first slice would never be maintained at all.
+ *
+ * The probe is an entry sitting at the very tail of the LRU list, past the
+ * first slice boundary. Marking it invalidated makes the periodic pass the only
+ * thing that can remove it, so its residency reports exactly whether the scan
+ * reached it:
+ *   - after one pass it must still be resident (the scan is bounded), and
+ *   - after enough passes to cover the rest of the list it must be gone (the
+ *     scan resumed past the first slice instead of restarting at the front).
+ */
+TEST(QueryCacheTest, PeriodicRefreshScansBoundedSliceAndResumes) {
+  // Size the cache past one slice so that a single pass cannot cover it.
+  const size_t kSliceSize = QueryCache::RefreshSliceSizeForTesting(0);
+  const size_t kEntryCount = kSliceSize + (kSliceSize / 2);
+
+  QueryCache cache(/*max_memory_bytes=*/512UL * 1024 * 1024, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0,
+                   /*compression_enabled=*/false, /*eviction_batch_size=*/1,
+                   /*start_background_worker=*/false);
+  ASSERT_FALSE(cache.IsBackgroundWorkerRunningForTesting());
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+
+  // Inserted first, never looked up again: this ends up at the LRU tail, i.e.
+  // the last node the scan reaches.
+  const auto probe_key = CacheKeyGenerator::Generate("probe");
+  ASSERT_TRUE(cache.Insert(probe_key, std::vector<DocId>{1}, meta, 1.0));
+  for (size_t i = 0; i < kEntryCount; ++i) {
+    const auto key = CacheKeyGenerator::Generate("filler-" + std::to_string(i));
+    ASSERT_TRUE(cache.Insert(key, std::vector<DocId>{static_cast<DocId>(i)}, meta, 1.0));
+  }
+  ASSERT_EQ(cache.GetStatistics().current_entries, kEntryCount + 1);
+
+  // Only the periodic pass removes entries that are merely flagged.
+  ASSERT_TRUE(cache.MarkInvalidated(probe_key));
+
+  cache.RefreshLRUForTesting();
+  EXPECT_EQ(cache.GetStatistics().current_entries, kEntryCount + 1)
+      << "one maintenance pass must stop after a bounded slice, not walk the whole cache";
+
+  // Cover the remainder. Each pass advances by at least one slice, so the
+  // number of passes needed is bounded by the number of slices in the cache.
+  const size_t passes_to_cover = ((kEntryCount + 1) / kSliceSize) + 1;
+  for (size_t pass = 0; pass < passes_to_cover; ++pass) {
+    cache.RefreshLRUForTesting();
+  }
+  EXPECT_EQ(cache.GetStatistics().current_entries, kEntryCount)
+      << "the scan must resume past the first slice, not restart at the front";
+}
+
+/**
+ * @brief A cache smaller than one slice is fully scanned every pass
+ *
+ * Small caches and tests must keep the original timing: one pass covers
+ * everything, with no multi-tick lag before an entry is maintained.
+ */
+TEST(QueryCacheTest, PeriodicRefreshCoversSmallCacheInOnePass) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0, /*compression_enabled=*/false,
+                   /*eviction_batch_size=*/1, /*start_background_worker=*/false);
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+
+  std::vector<CacheKey> keys;
+  for (size_t i = 0; i < 8; ++i) {
+    keys.push_back(CacheKeyGenerator::Generate("small-" + std::to_string(i)));
+    ASSERT_TRUE(cache.Insert(keys.back(), std::vector<DocId>{static_cast<DocId>(i)}, meta, 1.0));
+  }
+
+  // Flag every entry, including the one at the very tail.
+  for (const auto& key : keys) {
+    ASSERT_TRUE(cache.MarkInvalidated(key));
+  }
+
+  cache.RefreshLRUForTesting();
+  EXPECT_EQ(cache.GetStatistics().current_entries, 0U)
+      << "a cache below the slice threshold must be fully covered by a single pass";
+}
+
+/**
+ * @brief Clear() drops the resume point along with the entries
+ *
+ * A resume key that outlives Clear() usually heals itself, because the key is
+ * gone from the map and the scan falls back to the front. It does NOT heal when
+ * the same query is cached again after the flush — the common case, since the
+ * hot query set is what refills a cleared cache. The stale key then resolves to
+ * a live node somewhere in the middle of the list, and the first pass after the
+ * flush silently skips everything ahead of it.
+ *
+ * Refilling with the same keys in the same order puts that node back at the
+ * same distance from the front, so the number of entries a single pass covers
+ * reports directly whether the resume point survived the flush.
+ */
+TEST(QueryCacheTest, PeriodicRefreshResumePointIsResetByClear) {
+  const size_t kSliceSize = QueryCache::RefreshSliceSizeForTesting(0);
+  const size_t kEntryCount = kSliceSize + (kSliceSize / 2);
+
+  QueryCache cache(/*max_memory_bytes=*/512UL * 1024 * 1024, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0,
+                   /*compression_enabled=*/false, /*eviction_batch_size=*/1,
+                   /*start_background_worker=*/false);
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"abc"};
+
+  std::vector<CacheKey> keys;
+  keys.reserve(kEntryCount);
+  for (size_t i = 0; i < kEntryCount; ++i) {
+    keys.push_back(CacheKeyGenerator::Generate("refill-" + std::to_string(i)));
+  }
+
+  const auto fill = [&]() {
+    for (size_t i = 0; i < keys.size(); ++i) {
+      ASSERT_TRUE(cache.Insert(keys[i], std::vector<DocId>{static_cast<DocId>(i)}, meta, 1.0));
+    }
+  };
+
+  fill();
+  // Park the resume point one slice in from the front.
+  cache.RefreshLRUForTesting();
+
+  cache.Clear();
+  ASSERT_EQ(cache.GetStatistics().current_entries, 0U);
+
+  // Same keys, same order: every node returns to its original position.
+  fill();
+  for (const auto& key : keys) {
+    ASSERT_TRUE(cache.MarkInvalidated(key));
+  }
+
+  cache.RefreshLRUForTesting();
+  EXPECT_EQ(cache.GetStatistics().current_entries, kEntryCount - kSliceSize)
+      << "Clear() must drop the resume point so the first pass after a flush starts from the front";
+}
+
 }  // namespace mygramdb::cache
