@@ -107,8 +107,28 @@ option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(BUILD_FUZZERS "Build local randomized fuzz targets (not registered with CTest)" OFF)
+set(FUZZER_ENGINE "standalone" CACHE STRING "Fuzzing engine: standalone or libfuzzer")
+set_property(CACHE FUZZER_ENGINE PROPERTY STRINGS standalone libfuzzer)
 option(ENABLE_COVERAGE "Enable code coverage" OFF)
 option(USE_ICU "Use ICU for Unicode normalization" ON)
+
+# Fuzzing instrumentation is applied to the whole build, never to the harness
+# alone. The harness constructs library types directly, so instrumenting only
+# its translation unit leaves inline and template code compiled two ways in one
+# binary; the resulting crashes look like product defects and are not.
+if(BUILD_FUZZERS)
+  if(NOT FUZZER_ENGINE STREQUAL "standalone" AND NOT FUZZER_ENGINE STREQUAL "libfuzzer")
+    message(FATAL_ERROR "FUZZER_ENGINE must be 'standalone' or 'libfuzzer', got '${FUZZER_ENGINE}'")
+  endif()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address,undefined")
+  if(FUZZER_ENGINE STREQUAL "libfuzzer")
+    # Every translation unit gets coverage instrumentation; only the harness
+    # links the driver itself.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=fuzzer-no-link")
+  endif()
+  message(STATUS "Fuzzing enabled: engine ${FUZZER_ENGINE}, whole build instrumented")
+endif()
 
 # AddressSanitizer
 if(ENABLE_ASAN)
@@ -381,7 +401,14 @@ if(TARGET yaml-cpp)
   target_compile_options(yaml-cpp PRIVATE -w)
 endif()
 if(TARGET nlohmann_json)
-  target_compile_options(nlohmann_json INTERFACE -w)
+  # Header-only, so its warnings have to be silenced through the include path
+  # rather than with -w: an INTERFACE -w propagates to every consumer and would
+  # turn off -Wall/-Wextra across this project's own sources as well.
+  get_target_property(nlohmann_json_includes nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+  if(nlohmann_json_includes)
+    set_target_properties(nlohmann_json PROPERTIES
+      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${nlohmann_json_includes}")
+  endif()
 endif()
 if(TARGET nlohmann_json_schema_validator)
   target_compile_options(nlohmann_json_schema_validator PRIVATE -w)
