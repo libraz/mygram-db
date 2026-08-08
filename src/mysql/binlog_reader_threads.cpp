@@ -199,16 +199,26 @@ bool BinlogReader::RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type
   } else if (event_type == MySQLBinlogEventType::XA_PREPARE_LOG_EVENT) {
     remediation =
         "Received XA_PREPARE_LOG_EVENT. XA transactions are unsupported because prepared rows cannot be "
-        "published before a later XA COMMIT or discarded on XA ROLLBACK.";
+        "published before a later XA COMMIT or discarded on XA ROLLBACK";
   } else if (IsUnsupportedMariaDBCompressedEvent(event_type)) {
     remediation =
         "Received a MariaDB compressed binlog event while log_bin_compress is enabled. "
-        "Compressed events cannot be decoded; disable log_bin_compress and run SYNC.";
+        "Compressed events cannot be decoded. Disable compression with: SET GLOBAL log_bin_compress=OFF";
   } else {
     return false;
   }
 
-  SetLastError(remediation);
+  // Changing the server setting only stops new events of this kind; the one
+  // that stopped the stream stays in the binlog, so replication can never be
+  // resumed from a position before it. Recovery means rebuilding from a
+  // snapshot taken after it, and it has to cover every replicated table: the
+  // first SYNC moves the shared stream past the event, so any table not
+  // rebuilt keeps whatever the skipped transactions would have written.
+  remediation +=
+      ". The event stays in the binlog, so replication cannot resume from before it: run SYNC for every "
+      "replicated table to rebuild past it.";
+
+  SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent, remediation));
   mygram::utils::StructuredLog()
       .Event("binlog_fatal_error")
       .Field("type", "unsupported_runtime_event")

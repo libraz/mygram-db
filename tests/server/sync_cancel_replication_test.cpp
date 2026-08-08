@@ -65,7 +65,11 @@ class MockBinlogReader : public mysql::IBinlogReader {
     current_gtid_ = gtid;
   }
 
-  std::string GetLastError() const override { return ""; }
+  std::string GetLastError() const override { return last_error_.message(); }
+
+  mygram::utils::ErrorCode GetLastErrorCode() const override { return last_error_.code(); }
+
+  void SetLastErrorForTest(const mygram::utils::Error& error) { last_error_ = error; }
 
   uint64_t GetProcessedEvents() const override { return 0; }
 
@@ -84,6 +88,7 @@ class MockBinlogReader : public mysql::IBinlogReader {
  private:
   bool running_ = false;
   bool start_should_fail_ = false;
+  mygram::utils::Error last_error_;
   std::string current_gtid_;
   int start_call_count_ = 0;
   int stop_call_count_ = 0;
@@ -347,6 +352,51 @@ TEST_F(SyncCancelReplicationTest, NullReaderDoesNotCrash) {
   // Should complete without crashing
   manager.reset();
   SUCCEED();
+}
+
+/**
+ * @brief Only an undecodable event moves the restart point off the drained position
+ *
+ * Every other stop reason can be replayed once its cause is corrected, so the
+ * drained position stays the lower bound that protects tables the SYNC did not
+ * rebuild.
+ */
+TEST_F(SyncCancelReplicationTest, OnlyAnUndecodableEventStallSelectsTheSnapshotRestartPoint) {
+  EXPECT_FALSE(internal::StalledOnUndecodableEvent(nullptr));
+  EXPECT_FALSE(internal::StalledOnUndecodableEvent(mock_reader_.get())) << "a reader with no error is not stalled";
+
+  mock_reader_->SetLastErrorForTest(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLInvalidSchema, "SCHEMA_INCOMPATIBLE"));
+  EXPECT_FALSE(internal::StalledOnUndecodableEvent(mock_reader_.get()))
+      << "a schema stop is repaired at the source, so its interval can still be replayed";
+
+  mock_reader_->SetLastErrorForTest(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLDisconnected, "connection lost"));
+  EXPECT_FALSE(internal::StalledOnUndecodableEvent(mock_reader_.get()));
+
+  mock_reader_->SetLastErrorForTest(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent, "compressed event"));
+  EXPECT_TRUE(internal::StalledOnUndecodableEvent(mock_reader_.get()));
+}
+
+/**
+ * @brief The stalled restart point advances past the event, and only then
+ *
+ * Restarting a stalled stream from the drained position replays the event that
+ * stopped it, which is what makes the stall permanent.
+ */
+TEST_F(SyncCancelReplicationTest, StalledSyncRestartsAfterTheSnapshotInsteadOfReplayingTheEvent) {
+  const std::string drained = "0-1-188";
+  const std::string snapshot = "0-1-189";
+
+  EXPECT_EQ(internal::ChooseSyncRestartGtid(false, snapshot, drained), drained)
+      << "an ordinary SYNC must not skip the interval other tables still need";
+  EXPECT_EQ(internal::ChooseSyncRestartGtid(true, snapshot, drained), snapshot)
+      << "restarting a stalled stream from the drained position replays the event that stalled it";
+
+  // Without a snapshot marker there is no position to skip to, and resuming
+  // from an empty GTID would replay the binlog from its start.
+  EXPECT_EQ(internal::ChooseSyncRestartGtid(true, "", drained), drained);
 }
 
 }  // namespace

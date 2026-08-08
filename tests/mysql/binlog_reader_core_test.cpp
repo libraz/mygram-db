@@ -141,6 +141,15 @@ TEST_F(BinlogReaderFixture, UnsupportedRuntimeEventsStopBeforeGtidAdvance) {
     EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
     EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:17");
     EXPECT_FALSE(reader_->GetLastError().empty());
+    // The code is what SYNC reads to decide it must restart past the event
+    // rather than replay it; a generic binlog error would be replayed forever.
+    EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
+    const std::string last_error = reader_->GetLastError();
+    // Turning the producing setting off leaves the event in place, so a
+    // remediation that stops at the setting describes a recovery that does not
+    // work.
+    EXPECT_NE(last_error.find("stays in the binlog"), std::string::npos) << last_error;
+    EXPECT_NE(last_error.find("SYNC for every replicated table"), std::string::npos) << last_error;
   }
 }
 

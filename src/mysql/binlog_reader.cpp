@@ -374,6 +374,13 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       }
     }
 
+    // The stream is open, so whatever error ended the previous run has been
+    // overcome. Leaving it set would make the next operator-initiated stop
+    // report "failed" instead of "stopped" and keep publishing a stale
+    // diagnostic on the status and health surfaces. A schema incompatibility
+    // is refused before this point, so it cannot be erased here.
+    SetLastError(mygram::utils::Error{});
+
     mygram::utils::StructuredLog()
         .Event("binlog_reader_started")
         .Field("host", connection_.GetConfig().host)

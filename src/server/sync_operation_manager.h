@@ -70,6 +70,38 @@ struct SyncState {
   std::string replication_status;  // Protected by sync_mutex_ - "STARTED", "ALREADY_RUNNING", "DISABLED", "FAILED"
 };
 
+namespace internal {
+
+/**
+ * @brief Whether replication stopped on an event this build cannot decode
+ *
+ * Such an event is written into the binlog, so it is still there after the
+ * server setting that produced it is changed. It is the one stop reason a
+ * replay cannot get past, which is why it selects a different restart point.
+ *
+ * @param reader Reader to inspect; a null reader is not stalled
+ */
+[[nodiscard]] bool StalledOnUndecodableEvent(const mysql::IBinlogReader* reader);
+
+/**
+ * @brief Position replication resumes from once a SYNC has swapped in its snapshot
+ *
+ * Normally the drained pre-SYNC position, so tables other than the synced one
+ * do not lose commits made while the snapshot was being built. When the stream
+ * is stalled on an undecodable event that interval cannot be replayed at all,
+ * and the snapshot marker is the only position the stream can move forward
+ * from.
+ *
+ * @param stalled_on_undecodable_event Result of StalledOnUndecodableEvent()
+ * @param snapshot_gtid Position the candidate snapshot is consistent at
+ * @param drained_gtid Position replication had applied before the SYNC
+ */
+[[nodiscard]] const std::string& ChooseSyncRestartGtid(bool stalled_on_undecodable_event,
+                                                       const std::string& snapshot_gtid,
+                                                       const std::string& drained_gtid);
+
+}  // namespace internal
+
 /**
  * @brief Manages MySQL SYNC operations for tables
  *

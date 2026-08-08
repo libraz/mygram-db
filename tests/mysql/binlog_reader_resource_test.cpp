@@ -699,6 +699,59 @@ TEST_F(BinlogReaderResourceTest, XaTransactionStopsBeforePublishingPreparedGtid)
   EXPECT_FALSE(*covers_prepared) << "prepared XA GTID was published before commit";
 }
 
+/**
+ * @brief A restart must clear the error the previous run ended with.
+ *
+ * Tearing the stream down to honour Stop() records an error on the reader. If
+ * a subsequent successful Start() leaves it in place, the reader reports
+ * kFailed the next time it is stopped and keeps publishing an error that has
+ * already been recovered from -- so an operator-initiated stop becomes
+ * indistinguishable from a crash on the status and health surfaces.
+ */
+TEST_F(BinlogReaderResourceTest, RestartClearsTheErrorTheStoppedRunEndedWith) {
+  auto connect_result = connection_->Connect("test");
+  if (!connect_result) {
+    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
+  }
+  auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
+  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
+    GTEST_SKIP() << "MySQL GTID mode is not enabled";
+  }
+
+  BinlogReader::Config reader_config;
+  reader_config.queue_size = 100;
+  reader_config.server_id = 12345;
+  auto executed_gtid = connection_->GetExecutedGTID();
+  ASSERT_TRUE(executed_gtid) << executed_gtid.error().message();
+  reader_config.start_gtid = *executed_gtid;
+
+  reader_ = std::make_unique<BinlogReader>(*connection_, *index_, *doc_store_, table_config_, mysql_config_,
+                                           reader_config, stats_.get());
+
+  auto first_start = reader_->Start();
+  if (!first_start) {
+    GTEST_SKIP() << "Start failed: " << reader_->GetLastError();
+  }
+
+  // A redundant start is a benign, operator-reachable condition that records
+  // an error on the reader. It stands in here for any recoverable failure: the
+  // point is that a condition which no longer applies must not keep being
+  // reported once the reader has started successfully again.
+  auto redundant_start = reader_->Start();
+  ASSERT_FALSE(redundant_start) << "a second Start() was expected to be refused";
+  ASSERT_FALSE(reader_->GetLastError().empty());
+
+  reader_->Stop();
+  auto second_start = reader_->Start();
+  ASSERT_TRUE(second_start) << reader_->GetLastError();
+  EXPECT_TRUE(reader_->GetLastError().empty())
+      << "a successful restart kept an error that no longer applies: " << reader_->GetLastError();
+
+  reader_->Stop();
+  EXPECT_EQ(reader_->GetReplicationState(), ReplicationState::kStopped)
+      << "a deliberate stop is reported as a failure because of a stale error";
+}
+
 }  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

@@ -75,6 +75,7 @@ enum class ErrorCode : std::uint16_t {
   kMySQLInvalidMetadata = 2014,         ///< Invalid field metadata in binlog event
   kMySQLUnsupportedType = 2015,         ///< Unsupported MySQL column type
   kMySQLBinlogChecksumMismatch = 2016,  ///< Binlog event CRC32 checksum mismatch
+  kMySQLUndecodableBinlogEvent = 2017,  ///< Binlog event uses an encoding this build cannot decode
 
   // MariaDB-specific errors (2020-2029)
   kMariaDBInvalidGTID = 2020,         ///< Invalid MariaDB GTID format (expected domain-server-seq)
@@ -264,6 +265,8 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "Unsupported column type";
     case ErrorCode::kMySQLBinlogChecksumMismatch:
       return "Binlog checksum mismatch";
+    case ErrorCode::kMySQLUndecodableBinlogEvent:
+      return "Undecodable binlog event";
     case ErrorCode::kMariaDBInvalidGTID:
       return "Invalid MariaDB GTID";
     case ErrorCode::kMariaDBProtocolError:

@@ -33,6 +33,25 @@ constexpr int kDefaultSyncWaitTimeoutSec = 30;
 constexpr auto kSyncCatchupTimeout = std::chrono::seconds(60);
 }  // namespace
 
+namespace internal {
+
+bool StalledOnUndecodableEvent(const mysql::IBinlogReader* reader) {
+  return reader != nullptr && reader->GetLastErrorCode() == mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent;
+}
+
+const std::string& ChooseSyncRestartGtid(bool stalled_on_undecodable_event, const std::string& snapshot_gtid,
+                                         const std::string& drained_gtid) {
+  // An empty snapshot marker carries no position, so it cannot be used to skip
+  // anything; fall back to the drained position and let the stream stall again
+  // rather than resume from the beginning of the binlog.
+  if (stalled_on_undecodable_event && !snapshot_gtid.empty()) {
+    return snapshot_gtid;
+  }
+  return drained_gtid;
+}
+
+}  // namespace internal
+
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
                                            const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                                            replication_pause::Counter* replication_pause_counter,
@@ -613,6 +632,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   // Declared before the try block so they are accessible in catch.
   mysql::IBinlogReader* reader = binlog_reader_;
   bool replication_was_running = false;
+  bool stalled_on_undecodable_event = false;
   std::string saved_gtid;
   std::optional<replication_pause::Scope> replication_pause_scope;
   TableContext* live_ctx = nullptr;
@@ -751,6 +771,13 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     // returns, no binlog worker thread may write into index/doc_store.
     // Save the current GTID so we can restore replication if SYNC is
     // cancelled or fails.
+    //
+    // One stop reason makes the drained GTID unusable as a restart point: an
+    // event whose encoding this build cannot decode. Such an event stays in the
+    // binlog whatever the server setting that produced it is changed to, so
+    // replaying from before it stops the stream again at the same position.
+    // Read the reason here, before the restart path clears it.
+    stalled_on_undecodable_event = current_config->replication.enable && internal::StalledOnUndecodableEvent(reader);
     if (current_config->replication.enable && reader != nullptr && reader->IsRunning()) {
       if (replication_pause_counter_ != nullptr) {
         replication_pause_scope.emplace(*replication_pause_counter_);
@@ -946,7 +973,25 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           .Field("gtid", gtid)
           .Info();
 
-      const std::string restart_gtid = saved_gtid;
+      // The one exception is a stream stalled on an event it cannot decode.
+      // Replaying that interval cannot succeed, so the snapshot marker is the
+      // only position the stream can move forward from. Non-target tables lose
+      // the interval, but they were never going to receive it: the stream could
+      // not have crossed the event to deliver it. Each of them needs its own
+      // SYNC, which the stop reason tells the operator to run.
+      const std::string& restart_gtid = internal::ChooseSyncRestartGtid(stalled_on_undecodable_event, gtid, saved_gtid);
+      const bool skipped_undecodable_interval = restart_gtid != saved_gtid;
+      if (skipped_undecodable_interval) {
+        mygram::utils::StructuredLog()
+            .Event("sync_skipping_undecodable_interval")
+            .Field("table", table_name)
+            .Field("stalled_gtid", saved_gtid)
+            .Field("restart_gtid", gtid)
+            .Field("message",
+                   "Replication restarts past an undecodable event; tables other than this one must be synced "
+                   "to pick up what the skipped interval wrote")
+            .Warn();
+      }
       bool replication_started = false;
       if (current_config->replication.enable && reader != nullptr) {
         // If replication is still running (e.g., was not stopped earlier because
