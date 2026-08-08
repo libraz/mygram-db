@@ -97,6 +97,9 @@ __pycache__/
 .venv/
 .python-version
 dumps/
+# The matrix runner gives each database flavor its own dump directory so the
+# runs cannot read each other's snapshots.
+dumps-*/
 # Dependencies are locked by rye (requirements*.lock); a uv lockfile would be
 # a second, conflicting source of truth.
 uv.lock
@@ -111,4 +114,6 @@ e2e/*.egg-info/
 e2e/.mypy_cache/
 e2e/.ruff_cache/
 e2e/.pytest_cache/
-!e2e/results/baselines/baseline.json
+# Benchmark baselines are machine-specific; they are produced locally by
+# benchmark_suite.py --save-baseline and are not shared through the repository.
+e2e/results/baselines/*.json

@@ -6,6 +6,10 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$SCRIPT_DIR"
 
+# Pinned so the throwaway matrix databases stay separate from any long-lived
+# stack that also defines a "mysql" service.
+COMPOSE_PROJECT="mygramdb-e2e"
+
 # Parse options
 PYTEST_ARGS=()
 TARGETS=()
@@ -85,18 +89,18 @@ for target in "${TARGETS[@]}"; do
     fi
 
     # Stop any previous containers
-    docker compose -f "docker/docker-compose.yml" down -v 2>/dev/null || true
-    docker compose -f "docker/docker-compose.mariadb.yml" down -v 2>/dev/null || true
+    docker compose -p "$COMPOSE_PROJECT" -f "docker/docker-compose.yml" down -v 2>/dev/null || true
+    docker compose -p "$COMPOSE_PROJECT" -f "docker/docker-compose.mariadb.yml" down -v 2>/dev/null || true
 
     # Start database
     echo "Starting $flavor $version..."
-    docker compose -f "$compose_file" up -d --wait --wait-timeout 120 2>&1
+    docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" up -d --wait --wait-timeout 120 2>&1
 
     if [[ $? -ne 0 ]]; then
         echo "FAIL: Could not start $flavor $version"
         summary_lines+=("FAIL  $flavor $version  (container start failed)")
         ((overall_fail++))
-        docker compose -f "$compose_file" down -v 2>/dev/null || true
+        docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" down -v 2>/dev/null || true
         continue
     fi
 
@@ -120,7 +124,7 @@ for target in "${TARGETS[@]}"; do
     fi
 
     # Cleanup
-    docker compose -f "$compose_file" down -v 2>/dev/null || true
+    docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" down -v 2>/dev/null || true
     echo ""
 done
 

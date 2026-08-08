@@ -8,6 +8,7 @@ cd "$SCRIPT_DIR"
 
 # Parse options
 MYSQL_VERSION="${MYSQL_VERSION:-8.4}"
+COMPOSE_PROJECT="mygramdb-e2e"
 PYTEST_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -40,9 +41,15 @@ if [ ! -x "$BINARY" ]; then
     exit 1
 fi
 
-# Start MySQL test container
+# Start MySQL test container.
+#
+# The project name is pinned so the throwaway test database can never be
+# confused with a long-lived stack. Both this file and the benchmark compose
+# file define a service called "mysql", so without an explicit project the
+# teardown below would tear down whichever "mysql" the ambient
+# COMPOSE_PROJECT_NAME points at.
 echo "Starting MySQL test container..."
-docker compose -f docker/docker-compose.yml up -d --wait --wait-timeout 120
+docker compose -p "$COMPOSE_PROJECT" -f docker/docker-compose.yml up -d --wait --wait-timeout 120
 
 # shellcheck source=python-env.sh
 source "$SCRIPT_DIR/python-env.sh"
@@ -54,7 +61,7 @@ mkdir -p results/reports results/metrics
 # Ensure cleanup happens even if pytest (or any later step) fails
 cleanup() {
     echo "Cleaning up MySQL container..."
-    docker compose -f docker/docker-compose.yml down -v
+    docker compose -p "$COMPOSE_PROJECT" -f docker/docker-compose.yml down -v
 }
 trap cleanup EXIT
 

@@ -1,3 +1,8 @@
+# Throwaway database for the e2e suite. The project name is declared here so a
+# manual `docker compose -f ...` still lands in its own project rather than
+# adopting an unrelated stack's `mysql` service.
+name: mygramdb-e2e
+
 # MariaDB test container. Uses a distinct host port from MySQL so matrix
 # runs can switch flavors by changing MYSQL_PORT and MYGRAMDB_CONFIG.
 services:

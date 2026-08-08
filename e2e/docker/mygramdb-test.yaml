@@ -102,6 +102,10 @@ logging:
 
 cache:
   enabled: true
+  # The e2e dataset answers every query in well under the default cost floor,
+  # so leaving it in place would keep the cache permanently empty and make the
+  # cache-behaviour tests assert nothing.
+  min_query_cost_ms: 0.0
 
 bm25:
   enable: true
