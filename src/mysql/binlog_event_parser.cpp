@@ -88,6 +88,9 @@ struct RowsEventContext {
   // must match the registration key rather than the bare binlog table name.
   std::string table_key;
   std::string text_column;
+  // Ordinals the configuration actually reads back. Everything else in the row
+  // image is skipped rather than decoded and copied.
+  RetainedColumns retained_columns;
 };
 
 struct QueryEventData {
@@ -205,6 +208,8 @@ std::optional<RowsEventContext> InitRowsEventContext(
     ctx.text_column = "";
   }
 
+  ctx.retained_columns = BuildRetainedColumns(*ctx.table_meta, *ctx.current_config);
+
   return ctx;
 }
 
@@ -302,7 +307,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       const auto& ctx = *ctx_opt;
 
       auto rows_result = ParseWriteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
-                                             ctx.text_column, event_type);
+                                             ctx.text_column, event_type, &ctx.retained_columns);
 
       if (!rows_result || rows_result->empty()) {
         return {};
@@ -359,7 +364,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
       // Parse rows using rows_parser
       auto row_pairs_result = ParseUpdateRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
-                                                   ctx.text_column, event_type);
+                                                   ctx.text_column, event_type, &ctx.retained_columns);
 
       if (!row_pairs_result || row_pairs_result->empty()) {
         return {};
@@ -426,7 +431,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
       // Parse rows using rows_parser
       auto rows_result = ParseDeleteRowsEvent(buffer, length, ctx.table_meta, ctx.current_config->primary_key,
-                                              ctx.text_column, event_type);
+                                              ctx.text_column, event_type, &ctx.retained_columns);
 
       if (!rows_result || rows_result->empty()) {
         return {};
@@ -730,8 +735,11 @@ std::optional<std::string> BinlogEventParser::ExtractTaggedGTID(const unsigned c
 }
 
 std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigned char* buffer, unsigned long length) {
-  if ((buffer == nullptr) || length < 8) {
-    // Minimum TABLE_MAP event size (6 bytes table_id + 2 bytes flags)
+  if ((buffer == nullptr) || length < mygram::constants::kBinlogEventHeaderLen) {
+    // The common header is read before anything else, including the event_size
+    // field at offset 9, so the whole header has to be present first. The
+    // post-header fields this event needs are checked against the declared
+    // event size further down.
     mygram::utils::StructuredLog()
         .Event("binlog_parse_error")
         .Field("function", "ParseTableMapEvent")

@@ -9,6 +9,16 @@
 #include <chrono>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#include <unistd.h>
+
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#endif
 
 #include "binlog_event_builder.h"
 #include "mysql/binlog_event_parser.h"
@@ -1922,5 +1932,123 @@ TEST(BinlogParsingTest, RenameTableMultiplePairsTargetInDestination) {
   EXPECT_TRUE(
       BinlogEventParser::IsTableAffectingDDL("rename table users to users_old, ARTICLES to articles_new", "articles"));
 }
+
+#if defined(__unix__) || defined(__APPLE__)
+
+/**
+ * @brief A buffer whose last byte abuts an unreadable page.
+ *
+ * Reading one byte past a heap buffer normally succeeds and returns whatever
+ * happens to be there, so a test cannot see it. Placing the bytes at the end of
+ * a readable page with an unmapped page behind it turns any overread into a
+ * fault, which is what makes the case below detect the defect rather than
+ * describe it.
+ */
+class GuardedBuffer {
+ public:
+  explicit GuardedBuffer(const std::vector<uint8_t>& bytes) {
+    page_size_ = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    total_bytes_ = page_size_ * 2;
+    auto* mapping = static_cast<uint8_t*>(
+        ::mmap(nullptr, total_bytes_, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    if (mapping == MAP_FAILED) {
+      base_ = nullptr;
+      return;
+    }
+    base_ = mapping;
+    if (::mprotect(base_ + page_size_, page_size_, PROT_NONE) != 0) {
+      ::munmap(base_, total_bytes_);
+      base_ = nullptr;
+      return;
+    }
+    data_ = base_ + page_size_ - bytes.size();
+    std::memcpy(data_, bytes.data(), bytes.size());
+  }
+
+  ~GuardedBuffer() {
+    if (base_ != nullptr) {
+      ::munmap(base_, total_bytes_);
+    }
+  }
+
+  GuardedBuffer(const GuardedBuffer&) = delete;
+  GuardedBuffer& operator=(const GuardedBuffer&) = delete;
+
+  [[nodiscard]] bool valid() const { return base_ != nullptr; }
+  [[nodiscard]] const unsigned char* data() const { return data_; }
+
+ private:
+  uint8_t* base_ = nullptr;
+  uint8_t* data_ = nullptr;
+  size_t page_size_ = 0;
+  size_t total_bytes_ = 0;
+};
+
+/**
+ * @brief A frame shorter than the common header is refused before it is read.
+ *
+ * The event_size field sits at offset 9 and is four bytes wide, so it can only
+ * be read once nineteen bytes are present. A shorter frame reaching that read
+ * takes bytes from beyond the caller's buffer -- a replication stream that
+ * delivers a truncated event is enough to trigger it.
+ */
+TEST(BinlogParsingTest, ParseTableMapEventRefusesFramesShorterThanTheCommonHeader) {
+  for (size_t length = 1; length < 19; ++length) {
+    std::vector<uint8_t> bytes(length);
+    for (size_t i = 0; i < length; ++i) {
+      bytes[i] = static_cast<uint8_t>(0x80U + i);
+    }
+
+    GuardedBuffer guarded(bytes);
+    ASSERT_TRUE(guarded.valid()) << "could not place a guarded buffer for length " << length;
+
+    auto metadata = BinlogEventParser::ParseTableMapEvent(guarded.data(), static_cast<unsigned long>(length));
+    EXPECT_FALSE(metadata.has_value()) << "a " << length << "-byte frame was accepted as a table map event";
+  }
+}
+
+/**
+ * @brief Row events are refused before their header is read, too.
+ *
+ * All three row-event parsers share one prologue, which reads the event_size
+ * field out of the common header before any bound is known. Each parser is a
+ * separate entry point, so each is checked here rather than trusting the one
+ * they happen to share today.
+ */
+TEST(BinlogParsingTest, RowEventParsersRefuseFramesShorterThanTheCommonHeader) {
+  TableMetadata table_meta;
+  table_meta.table_id = 1;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "articles";
+  ColumnMetadata column;
+  column.type = ColumnType::LONG;
+  column.name = "id";
+  table_meta.columns.push_back(column);
+
+  for (size_t length = 1; length < 19; ++length) {
+    std::vector<uint8_t> bytes(length);
+    for (size_t i = 0; i < length; ++i) {
+      bytes[i] = static_cast<uint8_t>(0x80U + i);
+    }
+
+    GuardedBuffer guarded(bytes);
+    ASSERT_TRUE(guarded.valid()) << "could not place a guarded buffer for length " << length;
+    const auto size = static_cast<unsigned long>(length);
+
+    auto write_result =
+        ParseWriteRowsEvent(guarded.data(), size, &table_meta, "id", "id", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+    EXPECT_FALSE(write_result.has_value()) << "a " << length << "-byte frame was accepted as a write rows event";
+
+    auto update_result =
+        ParseUpdateRowsEvent(guarded.data(), size, &table_meta, "id", "id", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+    EXPECT_FALSE(update_result.has_value()) << "a " << length << "-byte frame was accepted as an update rows event";
+
+    auto delete_result =
+        ParseDeleteRowsEvent(guarded.data(), size, &table_meta, "id", "id", MySQLBinlogEventType::DELETE_ROWS_EVENT);
+    EXPECT_FALSE(delete_result.has_value()) << "a " << length << "-byte frame was accepted as a delete rows event";
+  }
+}
+
+#endif  // defined(__unix__) || defined(__APPLE__)
 
 #endif  // USE_MYSQL

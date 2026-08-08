@@ -72,6 +72,36 @@ struct RowData {
 };
 
 /**
+ * @brief Column ordinals whose values a row image has to decode
+ *
+ * A ROWS event carries every column of the row, but only the configured key,
+ * the text sources and the filter columns are ever read back out of RowData.
+ * Decoding the rest materializes the full value — a non-indexed BLOB is decoded
+ * and allocated once per INSERT or DELETE and twice per UPDATE — for data that
+ * nothing consumes.
+ */
+struct RetainedColumns {
+  /// Empty means "retain every column", for callers without a table config.
+  std::vector<bool> by_ordinal;
+
+  [[nodiscard]] bool Retains(size_t ordinal) const {
+    return by_ordinal.empty() || (ordinal < by_ordinal.size() && by_ordinal[ordinal]);
+  }
+};
+
+/**
+ * @brief Resolve the columns a table configuration actually reads
+ *
+ * Names that do not resolve against the row image are left out; RowData lookups
+ * for them already return nothing, so skipping their decode changes no result.
+ *
+ * @param metadata Table metadata from TABLE_MAP
+ * @param table_config Configuration for the monitored table
+ * @return Retained-ordinal mask sized to @p metadata's column count
+ */
+RetainedColumns BuildRetainedColumns(const TableMetadata& metadata, const config::TableConfig& table_config);
+
+/**
  * @brief Parse WRITE_ROWS event (INSERT)
  *
  * @param buffer Event buffer (after header)
@@ -83,7 +113,8 @@ struct RowData {
  */
 mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type);
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const RetainedColumns* retained_columns = nullptr);
 
 /**
  * @brief Parse UPDATE_ROWS event
@@ -97,7 +128,8 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRo
  */
 mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils::Error> ParseUpdateRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type);
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const RetainedColumns* retained_columns = nullptr);
 
 /**
  * @brief Parse DELETE_ROWS event
@@ -111,7 +143,8 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
  */
 mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type);
+    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const RetainedColumns* retained_columns = nullptr);
 
 /**
  * @brief Extract filter values from row data

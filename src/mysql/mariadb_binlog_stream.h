@@ -22,10 +22,28 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "mysql/binlog_stream.h"
 
 namespace mygramdb::mysql {
+
+/**
+ * @brief Whether a GTID position is safe to interpolate into a session variable
+ *
+ * MariaDB takes the resume position through `SET @slave_connect_state = '...'`,
+ * so the value reaches the server inside a quoted SQL literal. The position
+ * itself comes from a dump, a SYNC or an operator command, none of which the
+ * server has validated. Accepting only the characters a MariaDB GTID list can
+ * contain — alphanumerics, `-`, `,` and `.` — leaves no quote, backslash,
+ * semicolon or whitespace to end the literal with.
+ *
+ * An empty position is valid and means "no executed GTIDs".
+ *
+ * @param gtid Position to check
+ * @return true if every character is in the accepted set
+ */
+[[nodiscard]] bool IsSafeMariaDBGtidPosition(std::string_view gtid);
 
 /**
  * @brief MariaDB binlog stream implementation

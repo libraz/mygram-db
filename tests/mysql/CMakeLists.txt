@@ -242,6 +242,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_TIMEOUT 30
   )
 
+  # Transport option unit tests (no MySQL connection required)
+  add_executable(connection_transport_options_test
+    connection_transport_options_test.cpp
+  )
+
+  target_link_libraries(connection_transport_options_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(connection_transport_options_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # Connection validator unit tests (no MySQL connection required)
   add_executable(connection_validator_unit_test
     connection_validator_unit_test.cpp
@@ -365,6 +380,42 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(binlog_event_processor_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
+  # Rows parser benchmarks: decode cost of a table wider than its configuration
+  add_executable(rows_parser_benchmark_test
+    rows_parser_benchmark_test.cpp
+  )
+
+  target_link_libraries(rows_parser_benchmark_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  # Benchmarks decode multi-megabyte events repeatedly, so they need the machine
+  # to themselves to produce comparable figures.
+  gtest_discover_tests(rows_parser_benchmark_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      LABELS "LOAD"
+      RUN_SERIAL TRUE
+      TIMEOUT 300
+  )
+
+  # Binlog stream helpers that need no server connection
+  add_executable(binlog_stream_unit_test
+    binlog_stream_unit_test.cpp
+  )
+
+  target_link_libraries(binlog_stream_unit_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(binlog_stream_unit_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
   )

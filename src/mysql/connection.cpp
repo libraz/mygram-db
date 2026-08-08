@@ -14,10 +14,11 @@
 #include <charconv>
 #include <cstring>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "mysql/gtid_encoder.h"
-#include "server/log_field_names.h"
 #include "utils/numeric_parse.h"
 #include "utils/sql_utils.h"
 #include "utils/structured_log.h"
@@ -100,6 +101,62 @@ std::string GTID::ToString() const {
   return server_uuid + ":" + std::to_string(transaction_id);
 }
 
+mygram::utils::Expected<void, mygram::utils::Error> ApplyMySQLTransportOptions(const Connection::Config& config,
+                                                                               const MySQLOptionApplier& apply_option) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  auto refuse = [](std::string_view option_name) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed,
+                                    std::string("MySQL client rejected transport option ") + std::string(option_name) +
+                                        "; refusing to connect with an unknown transport posture"));
+  };
+
+  // Enable RSA public key retrieval only for caching_sha2_password without SSL.
+  // Required for MySQL 8.4+ where caching_sha2_password is the default plugin
+  // and mysql_native_password may be unavailable (removed in MySQL 9.x).
+  bool get_pubkey = !config.ssl_enable;
+  if (!apply_option(MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &get_pubkey)) {
+    return refuse("MYSQL_OPT_GET_SERVER_PUBLIC_KEY");
+  }
+
+  if (!config.ssl_enable) {
+    // Explicitly disable SSL negotiation for non-SSL connections.
+    // Without this, mysql_real_connect() uses SSL_MODE_PREFERRED by default,
+    // which attempts SSL handshake and can crash in csm_establish_ssl
+    // during concurrent connection establishment.
+    unsigned int disabled_mode = SSL_MODE_DISABLED;
+    if (!apply_option(MYSQL_OPT_SSL_MODE, &disabled_mode)) {
+      return refuse("MYSQL_OPT_SSL_MODE");
+    }
+    return {};
+  }
+
+  unsigned int ssl_mode = SSL_MODE_REQUIRED;
+  if (config.ssl_verify_server_cert) {
+    ssl_mode = SSL_MODE_VERIFY_IDENTITY;  // Verify CA chain and server hostname
+  }
+  if (!apply_option(MYSQL_OPT_SSL_MODE, &ssl_mode)) {
+    return refuse("MYSQL_OPT_SSL_MODE");
+  }
+
+  // Certificate paths are optional in configuration but mandatory once
+  // supplied: a CA that was configured and then silently not applied is the
+  // difference between a verified peer and any peer.
+  if (!config.ssl_ca.empty() && !apply_option(MYSQL_OPT_SSL_CA, config.ssl_ca.c_str())) {
+    return refuse("MYSQL_OPT_SSL_CA");
+  }
+  if (!config.ssl_cert.empty() && !apply_option(MYSQL_OPT_SSL_CERT, config.ssl_cert.c_str())) {
+    return refuse("MYSQL_OPT_SSL_CERT");
+  }
+  if (!config.ssl_key.empty() && !apply_option(MYSQL_OPT_SSL_KEY, config.ssl_key.c_str())) {
+    return refuse("MYSQL_OPT_SSL_KEY");
+  }
+
+  return {};
+}
+
 // Connection implementation
 
 Connection::Connection(Config config) : config_(std::move(config)), mysql_(mysql_init(nullptr)) {}
@@ -138,11 +195,12 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     return MakeUnexpected(MakeError(ErrorCode::kMySQLConnectionFailed, "MySQL handle not initialized"));
   }
 
-  // Enable RSA public key retrieval only for caching_sha2_password without SSL.
-  // Required for MySQL 8.4+ where caching_sha2_password is the default plugin
-  // and mysql_native_password may be unavailable (removed in MySQL 9.x).
-  bool get_pubkey = !config_.ssl_enable;
-  mysql_options(mysql_, MYSQL_OPT_GET_SERVER_PUBLIC_KEY, &get_pubkey);
+  if (auto applied = ApplyMySQLTransportOptions(
+          config_,
+          [this](enum mysql_option option, const void* value) { return mysql_options(mysql_, option, value) == 0; });
+      !applied) {
+    return MakeUnexpected(applied.error());
+  }
 
   // Set connection timeouts (with error checking)
   if (mysql_options(mysql_, MYSQL_OPT_CONNECT_TIMEOUT, &config_.connect_timeout) != 0) {
@@ -170,60 +228,12 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
   // Note: MYSQL_OPT_RECONNECT is deprecated and removed
   // Manual reconnection is handled via Reconnect() method when needed
 
-  // Configure SSL/TLS if enabled
   if (config_.ssl_enable) {
-    // Set SSL mode to REQUIRED
-    unsigned int ssl_mode = SSL_MODE_REQUIRED;
-    if (config_.ssl_verify_server_cert) {
-      ssl_mode = SSL_MODE_VERIFY_IDENTITY;  // Verify CA chain and server hostname
-    }
-    if (mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode) != 0) {
-      mygram::utils::StructuredLog()
-          .Event("mysql_options_warning")
-          .Field("option", "MYSQL_OPT_SSL_MODE")
-          .Field("value", static_cast<uint64_t>(ssl_mode))
-          .Warn();
-    }
-
-    // Set SSL certificate paths if provided (with error checking)
-    if (!config_.ssl_ca.empty()) {
-      if (mysql_options(mysql_, MYSQL_OPT_SSL_CA, config_.ssl_ca.c_str()) != 0) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_options_warning")
-            .Field("option", "MYSQL_OPT_SSL_CA")
-            .Field(server::log_fields::kFieldFilepath, config_.ssl_ca)
-            .Warn();
-      }
-    }
-    if (!config_.ssl_cert.empty()) {
-      if (mysql_options(mysql_, MYSQL_OPT_SSL_CERT, config_.ssl_cert.c_str()) != 0) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_options_warning")
-            .Field("option", "MYSQL_OPT_SSL_CERT")
-            .Field(server::log_fields::kFieldFilepath, config_.ssl_cert)
-            .Warn();
-      }
-    }
-    if (!config_.ssl_key.empty()) {
-      if (mysql_options(mysql_, MYSQL_OPT_SSL_KEY, config_.ssl_key.c_str()) != 0) {
-        mygram::utils::StructuredLog()
-            .Event("mysql_options_warning")
-            .Field("option", "MYSQL_OPT_SSL_KEY")
-            .Field(server::log_fields::kFieldFilepath, config_.ssl_key)
-            .Warn();
-      }
-    }
-
-    mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "ssl_enabled").Debug();
-  } else {
-    // Explicitly disable SSL negotiation for non-SSL connections.
-    // Without this, mysql_real_connect() uses SSL_MODE_PREFERRED by default,
-    // which attempts SSL handshake and can crash in csm_establish_ssl
-    // during concurrent connection establishment.
-    unsigned int ssl_mode = SSL_MODE_DISABLED;
-    if (mysql_options(mysql_, MYSQL_OPT_SSL_MODE, &ssl_mode) != 0) {
-      mygram::utils::StructuredLog().Event("mysql_warning").Field("type", "ssl_mode_disable_failed").Warn();
-    }
+    mygram::utils::StructuredLog()
+        .Event("mysql_debug")
+        .Field("action", "ssl_enabled")
+        .Field("verify_server_cert", config_.ssl_verify_server_cert)
+        .Debug();
   }
 
   // Connect to MySQL

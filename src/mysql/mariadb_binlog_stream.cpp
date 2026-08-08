@@ -10,9 +10,9 @@
 
 #ifdef USE_MYSQL
 
-#include <cctype>
 #include <cstring>
 #include <string>
+#include <string_view>
 
 #include "mysql/binlog_reader_internal.h"
 #include "utils/structured_log.h"
@@ -28,6 +28,22 @@ std::string CurrentConnectionError(Connection& conn) {
 }
 
 }  // namespace
+
+bool IsSafeMariaDBGtidPosition(std::string_view gtid) {
+  // The classification is done byte by byte rather than through <cctype>, whose
+  // alnum answer depends on the process locale. A locale that classified high
+  // bytes as alphanumeric would widen what reaches the server.
+  for (char character : gtid) {
+    const auto byte = static_cast<unsigned char>(character);
+    const bool is_digit = byte >= '0' && byte <= '9';
+    const bool is_lower = byte >= 'a' && byte <= 'z';
+    const bool is_upper = byte >= 'A' && byte <= 'Z';
+    if (!is_digit && !is_lower && !is_upper && byte != '-' && byte != ',' && byte != '.') {
+      return false;
+    }
+  }
+  return true;
+}
 
 mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSession(Connection& conn) {
   using mygram::utils::ErrorCode;
@@ -95,14 +111,11 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  // Validate GTID format to prevent SQL injection.
-  // MariaDB GTID format: empty string, or "domain-server_id-sequence[,...]"
-  // Only allow alphanumeric, hyphens, commas, and periods.
-  for (char c : gtid) {
-    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != ',' && c != '.') {
-      return MakeUnexpected(
-          MakeError(ErrorCode::kMariaDBProtocolError, "Invalid GTID format: contains unexpected characters", gtid));
-    }
+  // The position is interpolated into a quoted session-variable assignment
+  // below, so it is checked before the connection is touched at all.
+  if (!IsSafeMariaDBGtidPosition(gtid)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMariaDBProtocolError, "Invalid GTID format: contains unexpected characters", gtid));
   }
 
   // Set MariaDB GTID position via session variable BEFORE COM_BINLOG_DUMP.

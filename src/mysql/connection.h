@@ -9,6 +9,7 @@
 
 #include <mysql.h>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -266,6 +267,25 @@ class Connection {
    */
   [[nodiscard]] std::string GetMySQLErrorMessage() const;
 };
+
+/// Applies one client option, reporting whether the client library accepted it.
+using MySQLOptionApplier = std::function<bool(enum mysql_option option, const void* value)>;
+
+/**
+ * @brief Apply the options that decide how credentials and rows cross the wire.
+ *
+ * Every option here is refused rather than warned about when the client library
+ * rejects it. Leaving an unset option behind does not fall back to the
+ * configured posture: the client default is SSL_MODE_PREFERRED, so a failed
+ * SSL_MODE assignment turns a configuration that demands a verified server into
+ * an opportunistic, unauthenticated one, and a failed CA assignment leaves
+ * verification without the trust anchor it was told to use.
+ *
+ * The applier is a parameter so the refusal paths can be exercised without a
+ * server; production passes one that calls mysql_options().
+ */
+[[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> ApplyMySQLTransportOptions(
+    const Connection::Config& config, const MySQLOptionApplier& apply_option);
 
 }  // namespace mygramdb::mysql
 

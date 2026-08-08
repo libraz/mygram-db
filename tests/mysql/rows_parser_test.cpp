@@ -3899,3 +3899,115 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
 }
 
 #endif  // USE_MYSQL
+
+/**
+ * @brief Only the configured key, text sources and filter columns are decoded
+ *
+ * A row image carries every column, but nothing reads back a column that is not
+ * one of those three, so decoding it copies the whole value — for a large BLOB,
+ * once per INSERT or DELETE and twice per UPDATE — for no consumer. The retained
+ * columns must still decode exactly as before, and the skipped ones must report
+ * as absent rather than as an empty value.
+ */
+TEST_F(RowsParserTest, UnreferencedColumnsAreNotDecoded) {
+  TableMetadata table_meta;
+  table_meta.table_id = 900;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "wide_table";
+
+  const auto add_column = [&](ColumnType type, const std::string& name, uint16_t metadata) {
+    ColumnMetadata column;
+    column.type = type;
+    column.name = name;
+    column.metadata = metadata;
+    table_meta.columns.push_back(column);
+  };
+  add_column(ColumnType::LONG, "id", 0);
+  add_column(ColumnType::VARCHAR, "body", 255);
+  add_column(ColumnType::VARCHAR, "payload", 255);
+  add_column(ColumnType::LONG, "status", 0);
+  add_column(ColumnType::VARCHAR, "tail", 255);
+
+  std::vector<std::vector<std::string>> rows = {{"7", "searchable body", "ignored payload", "3", "ignored tail"}};
+  auto buffer = CreateWriteRowsEvent(table_meta, rows);
+
+  mygramdb::config::TableConfig table_config;
+  table_config.name = "wide_table";
+  table_config.primary_key = "id";
+  table_config.text_source.column = "body";
+  mygramdb::config::FilterConfig status_filter;
+  status_filter.name = "status";
+  table_config.filters.push_back(status_filter);
+
+  const auto retained = BuildRetainedColumns(table_meta, table_config);
+  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "body",
+                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1, &retained);
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_EQ(1, result->size());
+  const auto& row = result->front();
+
+  // Configured columns decode exactly as before, including the columns that sit
+  // after a skipped one — the field-size advance must stay correct.
+  EXPECT_EQ("7", row.primary_key);
+  EXPECT_EQ("searchable body", row.text);
+  EXPECT_EQ("searchable body", row.GetColumnValue("body"));
+  EXPECT_EQ("3", row.GetColumnValue("status"));
+
+  // Columns nothing reads are reported as absent rather than as empty values.
+  EXPECT_EQ(nullptr, row.FindColumnValue("payload"));
+  EXPECT_EQ(nullptr, row.FindColumnValue("tail"));
+
+  // Without a retained mask every column is still decoded.
+  auto full = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "body",
+                                  MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  ASSERT_TRUE(full.has_value());
+  ASSERT_EQ(1, full->size());
+  EXPECT_EQ("ignored payload", full->front().GetColumnValue("payload"));
+  EXPECT_EQ("ignored tail", full->front().GetColumnValue("tail"));
+}
+
+/**
+ * @brief Concatenated text sources and required filters are all retained
+ */
+TEST_F(RowsParserTest, RetainedColumnsCoverConcatSourcesAndRequiredFilters) {
+  TableMetadata table_meta;
+  table_meta.table_id = 901;
+  table_meta.database_name = "test_db";
+  table_meta.table_name = "concat_table";
+
+  const auto add_column = [&](ColumnType type, const std::string& name, uint16_t metadata) {
+    ColumnMetadata column;
+    column.type = type;
+    column.name = name;
+    column.metadata = metadata;
+    table_meta.columns.push_back(column);
+  };
+  add_column(ColumnType::LONG, "id", 0);
+  add_column(ColumnType::VARCHAR, "title", 255);
+  add_column(ColumnType::VARCHAR, "summary", 255);
+  add_column(ColumnType::LONG, "deleted", 0);
+  add_column(ColumnType::VARCHAR, "blob_like", 255);
+
+  mygramdb::config::TableConfig table_config;
+  table_config.primary_key = "id";
+  table_config.text_source.concat = {"title", "summary"};
+  mygramdb::config::RequiredFilterConfig required;
+  required.name = "deleted";
+  table_config.required_filters.push_back(required);
+
+  const auto retained = BuildRetainedColumns(table_meta, table_config);
+  EXPECT_TRUE(retained.Retains(0));   // id
+  EXPECT_TRUE(retained.Retains(1));   // title
+  EXPECT_TRUE(retained.Retains(2));   // summary
+  EXPECT_TRUE(retained.Retains(3));   // deleted
+  EXPECT_FALSE(retained.Retains(4));  // blob_like
+
+  // An unresolvable configured name simply contributes no ordinal.
+  mygramdb::config::TableConfig unknown_config;
+  unknown_config.primary_key = "no_such_column";
+  const auto none_retained = BuildRetainedColumns(table_meta, unknown_config);
+  for (size_t ordinal = 0; ordinal < table_meta.columns.size(); ++ordinal) {
+    EXPECT_FALSE(none_retained.Retains(ordinal)) << ordinal;
+  }
+}

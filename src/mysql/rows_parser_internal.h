@@ -112,12 +112,13 @@ struct SingleRowResult {
  * @param text_col_idx Index of text column, or -1 if not found
  * @param event_type_label Short label for log/error messages (e.g. "write_rows")
  * @param image_label Image label for log/error messages (e.g. "before", "after", or "")
+ * @param retained_columns Ordinals whose values are decoded; nullptr decodes all
  * @return Parsed row and pointer past the row data, or error
  */
 mygram::utils::Expected<SingleRowResult, mygram::utils::Error> ParseSingleRow(
     const unsigned char* ptr, const unsigned char* end, const TableMetadata* meta, const unsigned char* columns_present,
     size_t null_bitmap_size, uint64_t column_count, int pk_col_idx, int text_col_idx, const char* event_type_label,
-    const char* image_label);
+    const char* image_label, const RetainedColumns* retained_columns = nullptr);
 
 }  // namespace mygramdb::mysql::internal
 
