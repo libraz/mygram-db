@@ -64,6 +64,9 @@ services:
       REPLICATION_ENABLE: ${REPLICATION_ENABLE:-true}
       REPLICATION_SERVER_ID: ${REPLICATION_SERVER_ID:-12345}
       REPLICATION_START_FROM: ${REPLICATION_START_FROM:-snapshot}
+      # Pairs with REPLICATION_START_FROM=snapshot. Without it the server comes
+      # up with an empty index and stays not_ready until a client sends SYNC.
+      REPLICATION_AUTO_INITIAL_SNAPSHOT: ${REPLICATION_AUTO_INITIAL_SNAPSHOT:-true}
 
       # Build Configuration
       BUILD_BATCH_SIZE: ${BUILD_BATCH_SIZE:-5000}
@@ -114,7 +117,10 @@ services:
       API_ADMIN_TOKEN: ${API_ADMIN_TOKEN:?API_ADMIN_TOKEN must be set for administrative TCP commands}
 
       # Network Configuration
-      # Defaults are loopback-only. Do not combine a public bind with 0.0.0.0/0 or ::/0:
+      # Matched against the address the server sees, which for a published port
+      # is the bridge gateway rather than the host address, so the list has to
+      # cover the bridge range. Host-side exposure is bounded by the loopback
+      # ports mapping below. Do not combine a public bind with 0.0.0.0/0 or ::/0.
       # Administrative TCP commands additionally require API_ADMIN_TOKEN.
       NETWORK_ALLOW_CIDRS: ${NETWORK_ALLOW_CIDRS:?NETWORK_ALLOW_CIDRS must be set in .env}
 

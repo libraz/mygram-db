@@ -1,6 +1,10 @@
 -- MygramDB Sample Database Initialization Script
 -- This script creates sample tables for testing MygramDB
 
+-- The container has no locale, so the client this script runs under defaults to
+-- latin1 and would store the multibyte sample rows double-encoded.
+SET NAMES utf8mb4;
+
 USE mydb;
 
 -- Sample articles table
