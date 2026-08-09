@@ -29,7 +29,10 @@ done
 
 # Default: all targets
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
-    TARGETS=("mysql:8.4" "mysql:9.4" "mariadb:10.11" "mariadb:11.4")
+    # Every entry is a supported LTS. Innovation releases are superseded by the
+    # next one a quarter later, so they are reached with --only rather than
+    # carried here, where they would go out of support between runs.
+    TARGETS=("mysql:8.4" "mysql:9.7" "mariadb:10.11" "mariadb:11.4")
 fi
 
 # Check binary
