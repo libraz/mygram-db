@@ -372,5 +372,7 @@ jobs:
         # Test version command
         docker run --rm mygramdb:test --version
 
-        # Test config generation and validation
-        docker run --rm -e MYSQL_HOST=testdb -e TABLE_NAME=test mygramdb:test test-config
+        # Test config generation and validation. The entrypoint refuses to
+        # generate a configuration without a password rather than substituting
+        # a placeholder that would only surface later as a replication error.
+        docker run --rm -e MYSQL_HOST=testdb -e TABLE_NAME=test -e MYSQL_PASSWORD=ci-test mygramdb:test test-config
