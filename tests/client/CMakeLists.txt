@@ -58,6 +58,15 @@ mygramdb_split_compiler_launcher(CMAKE_C_COMPILER CMAKE_C_COMPILER_ARG1
 mygramdb_split_compiler_launcher(CMAKE_CXX_COMPILER CMAKE_CXX_COMPILER_ARG1
   consumer_cxx_compiler consumer_cxx_launcher)
 
+# A coverage build instruments the client library, so linking it from an
+# uninstrumented consumer leaves the gcov symbols undefined. The consumer links
+# the runtime too, which keeps the export and header checks meaningful under
+# coverage instead of dropping the test from the only job that runs it.
+set(consumer_exe_linker_flags "")
+if(ENABLE_COVERAGE)
+  set(consumer_exe_linker_flags "--coverage")
+endif()
+
 # Validate the installed SDK from a separate consumer project. This catches
 # missing transitive headers, broken CMake exports, and unusable pkg-config
 # metadata that build-tree targets cannot expose.
@@ -70,6 +79,7 @@ add_test(
     -DMYGRAMDB_CXX_COMPILER=${consumer_cxx_compiler}
     -DMYGRAMDB_C_COMPILER_LAUNCHER=${consumer_c_launcher}
     -DMYGRAMDB_CXX_COMPILER_LAUNCHER=${consumer_cxx_launcher}
+    -DMYGRAMDB_EXE_LINKER_FLAGS=${consumer_exe_linker_flags}
     -DMYGRAMDB_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/install_consumer_test.cmake
 )
