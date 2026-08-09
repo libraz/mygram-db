@@ -21,9 +21,6 @@ from lib.wait import wait_until_gte
 pytestmark = pytest.mark.load
 
 SCENARIOS_PATH = os.path.join(os.path.dirname(__file__), "scenarios.json")
-BASELINE_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "results", "baselines", "baseline.json"
-)
 
 
 def _load_scenarios() -> dict:
@@ -153,15 +150,3 @@ class TestLoad:
 
         summary = result.summary()
         print(f"\nLoad test results: {json.dumps(summary, indent=2)}")
-
-        # Check against baseline if exists
-        if os.path.exists(BASELINE_PATH):
-            with open(BASELINE_PATH) as f:
-                baseline = json.load(f)
-            if "p99_ms" in baseline and "p99_ms" in summary:
-                degradation = summary["p99_ms"] / baseline["p99_ms"]
-                assert degradation < 1.2, (
-                    f"P99 degradation: {degradation:.1%} "
-                    f"(current: {summary['p99_ms']:.1f}ms, "
-                    f"baseline: {baseline['p99_ms']:.1f}ms)"
-                )

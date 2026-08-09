@@ -71,7 +71,7 @@ e2e/
 └── results/                    # Generated at runtime
     ├── reports/                #   JUnit XML
     ├── metrics/                #   Prometheus snapshots
-    └── baselines/              #   Performance baselines (tracked in git)
+    └── baselines/              #   Performance baselines (machine-specific, not tracked)
 ```
 
 ## Test Categories and Markers
