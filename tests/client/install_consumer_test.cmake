@@ -35,6 +35,18 @@ if(NOT install_result EQUAL 0)
     "Installing MygramDB into the consumer prefix failed:\n${install_output}${install_error}")
 endif()
 
+# Optional: set when the parent build's compiler is really a launcher plus a
+# compiler, so the consumer projects invoke the same pair.
+set(consumer_compiler_args
+  "-DCMAKE_C_COMPILER=${MYGRAMDB_C_COMPILER}"
+  "-DCMAKE_CXX_COMPILER=${MYGRAMDB_CXX_COMPILER}")
+if(DEFINED MYGRAMDB_C_COMPILER_LAUNCHER AND NOT "${MYGRAMDB_C_COMPILER_LAUNCHER}" STREQUAL "")
+  list(APPEND consumer_compiler_args "-DCMAKE_C_COMPILER_LAUNCHER=${MYGRAMDB_C_COMPILER_LAUNCHER}")
+endif()
+if(DEFINED MYGRAMDB_CXX_COMPILER_LAUNCHER AND NOT "${MYGRAMDB_CXX_COMPILER_LAUNCHER}" STREQUAL "")
+  list(APPEND consumer_compiler_args "-DCMAKE_CXX_COMPILER_LAUNCHER=${MYGRAMDB_CXX_COMPILER_LAUNCHER}")
+endif()
+
 set(previous_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
 set(ENV{PKG_CONFIG_PATH} "${install_prefix}/${MYGRAMDB_INSTALL_LIBDIR}/pkgconfig")
 if(NOT previous_pkg_config_path STREQUAL "")
@@ -46,8 +58,7 @@ execute_process(
     -S "${CMAKE_CURRENT_LIST_DIR}/install_consumer"
     -B "${consumer_build_dir}"
     "-DCMAKE_PREFIX_PATH=${install_prefix}"
-    "-DCMAKE_C_COMPILER=${MYGRAMDB_C_COMPILER}"
-    "-DCMAKE_CXX_COMPILER=${MYGRAMDB_CXX_COMPILER}"
+    ${consumer_compiler_args}
   RESULT_VARIABLE configure_result
   OUTPUT_VARIABLE configure_output
   ERROR_VARIABLE configure_error
@@ -77,8 +88,7 @@ execute_process(
     -S "${install_prefix}/share/doc/mygramdb/examples/client"
     -B "${example_build_dir}"
     "-DCMAKE_PREFIX_PATH=${install_prefix}"
-    "-DCMAKE_C_COMPILER=${MYGRAMDB_C_COMPILER}"
-    "-DCMAKE_CXX_COMPILER=${MYGRAMDB_CXX_COMPILER}"
+    ${consumer_compiler_args}
   RESULT_VARIABLE example_configure_result
   OUTPUT_VARIABLE example_configure_output
   ERROR_VARIABLE example_configure_error

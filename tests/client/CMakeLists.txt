@@ -37,6 +37,27 @@ set_target_properties(c_api_v2_smoke PROPERTIES LINKER_LANGUAGE CXX)
 target_link_libraries(c_api_v2_smoke PRIVATE mygramclient_static)
 add_test(NAME CApiV2CompileLinkSmokeTest COMMAND c_api_v2_smoke)
 
+# A `CC` of the form "ccache gcc" leaves CMAKE_C_COMPILER holding only the
+# launcher, with the real compiler in CMAKE_C_COMPILER_ARG1. Forwarding the
+# first half alone makes the consumer project invoke a bare launcher, so split
+# the pair back into a compiler and a launcher the consumer can accept.
+function(mygramdb_split_compiler_launcher compiler_var arg1_var out_compiler out_launcher)
+  set(${out_compiler} "${${compiler_var}}" PARENT_SCOPE)
+  set(${out_launcher} "" PARENT_SCOPE)
+  if(NOT "${${arg1_var}}" STREQUAL "")
+    string(STRIP "${${arg1_var}}" stripped_arg1)
+    if(NOT "${stripped_arg1}" STREQUAL "")
+      set(${out_compiler} "${stripped_arg1}" PARENT_SCOPE)
+      set(${out_launcher} "${${compiler_var}}" PARENT_SCOPE)
+    endif()
+  endif()
+endfunction()
+
+mygramdb_split_compiler_launcher(CMAKE_C_COMPILER CMAKE_C_COMPILER_ARG1
+  consumer_c_compiler consumer_c_launcher)
+mygramdb_split_compiler_launcher(CMAKE_CXX_COMPILER CMAKE_CXX_COMPILER_ARG1
+  consumer_cxx_compiler consumer_cxx_launcher)
+
 # Validate the installed SDK from a separate consumer project. This catches
 # missing transitive headers, broken CMake exports, and unusable pkg-config
 # metadata that build-tree targets cannot expose.
@@ -45,8 +66,10 @@ add_test(
   COMMAND ${CMAKE_COMMAND}
     -DMYGRAMDB_BUILD_DIR=${CMAKE_BINARY_DIR}
     -DMYGRAMDB_BUILD_CONFIG=$<CONFIG>
-    -DMYGRAMDB_C_COMPILER=${CMAKE_C_COMPILER}
-    -DMYGRAMDB_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DMYGRAMDB_C_COMPILER=${consumer_c_compiler}
+    -DMYGRAMDB_CXX_COMPILER=${consumer_cxx_compiler}
+    -DMYGRAMDB_C_COMPILER_LAUNCHER=${consumer_c_launcher}
+    -DMYGRAMDB_CXX_COMPILER_LAUNCHER=${consumer_cxx_launcher}
     -DMYGRAMDB_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}
     -P ${CMAKE_CURRENT_SOURCE_DIR}/install_consumer_test.cmake
 )
