@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
 [![Docs](https://img.shields.io/badge/docs-mygramdb.libraz.net-2563eb)](https://mygramdb.libraz.net)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/libraz/mygram-db/pkgs/container/mygram-db)
-[![MySQL](https://img.shields.io/badge/MySQL-8.4--9.6-blue?logo=mysql)](https://dev.mysql.com/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.4--9.7-blue?logo=mysql)](https://dev.mysql.com/)
 
 **MygramDB is an in-memory full-text search engine synchronized from MySQL or
 MariaDB binlogs.** Keep MySQL/MariaDB as the source of truth and send search
@@ -24,7 +24,7 @@ traffic to MygramDB.
 
 ## What it includes
 
-- GTID-based MySQL 8.4+/9.x and MariaDB 10.6+/11.x replication
+- GTID-based MySQL 8.4+/9.x and MariaDB 10.11+/11.x replication
 - TCP protocol, HTTP API, and C/C++ client libraries
 - Multi-table indexing, runtime configuration, DUMP save/load, and automatic reconnection to the configured MySQL endpoint
 - ICU normalization for CJK and other multilingual text
@@ -42,9 +42,9 @@ different endpoint, and a source-server UUID change is rejected.
 The shipped Docker environment is localhost-only by default. For a
 non-loopback TCP bind, set a high-entropy `API_ADMIN_TOKEN`; MygramDB rejects
 the configuration when it is absent. Before a TCP connection can use an
-administrative command (`SET`, `DUMP`, `SYNC`, `REPLICATION`, `OPTIMIZE`,
-`CACHE`, `CONFIG`, or `DEBUG`), it must send `AUTH <token>` on that same
-connection. The HTTP `POST /optimize` endpoint uses the same token as an
+administrative command (`SET`, `SHOW VARIABLES`, `DUMP`, `SYNC`,
+`REPLICATION`, `OPTIMIZE`, `CACHE`, `CONFIG`, or `DEBUG`), it must send
+`AUTH <token>` on that same connection. The HTTP `POST /optimize` endpoint uses the same token as an
 `Authorization: Bearer <token>` credential. Docker Compose deliberately refuses
 to start until the placeholder token in `.env` is replaced.
 
@@ -52,6 +52,11 @@ Keep the TCP port behind a restrictive `NETWORK_ALLOW_CIDRS` list and a private
 or encrypted network. The TCP protocol itself does not encrypt the `AUTH`
 token. Configuration also rejects a universal IPv4 or IPv6 allow list with a
 public bind.
+
+`NETWORK_ALLOW_CIDRS` is matched against the address the server sees. Under
+Docker that is the bridge gateway rather than the host address, so the shipped
+compose files allow the bridge range and rely on the loopback ports mapping to
+bound host exposure.
 
 ## Development
 

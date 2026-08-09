@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey)](https://github.com/libraz/mygram-db)
 [![Docs](https://img.shields.io/badge/docs-mygramdb.libraz.net-2563eb)](https://mygramdb.libraz.net/ja/)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/libraz/mygram-db/pkgs/container/mygram-db)
-[![MySQL](https://img.shields.io/badge/MySQL-8.4--9.6-blue?logo=mysql)](https://dev.mysql.com/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.4--9.7-blue?logo=mysql)](https://dev.mysql.com/)
 
 **MygramDB は、MySQL/MariaDB の binlog から同期するインメモリ全文検索エンジンです。** MySQL/MariaDB を正本のままにして、検索トラフィックだけを MygramDB に送れます。
 
@@ -22,7 +22,7 @@
 
 ## 含まれるもの
 
-- GTID ベースの MySQL 8.4+/9.x、MariaDB 10.6+/11.x レプリケーション
+- GTID ベースの MySQL 8.4+/9.x、MariaDB 10.11+/11.x レプリケーション
 - TCP プロトコル、HTTP API、C/C++ クライアントライブラリ
 - 複数テーブルの index、runtime configuration、DUMP save/load、設定済み MySQL 接続先への自動再接続
 - CJK を含む多言語テキストの ICU 正規化
@@ -35,9 +35,11 @@ MySQL の接続設定は起動時のみ変更できます。`mysql.host` また�
 
 ## ネットワークの安全性
 
-同梱の Docker 環境は既定で localhost のみに公開します。非ループバックの TCP bind を使う場合は、高エントロピーの `API_ADMIN_TOKEN` が必須です。未設定なら MygramDB は設定を拒否します。TCP 接続では、管理コマンド（`SET`、`DUMP`、`SYNC`、`REPLICATION`、`OPTIMIZE`、`CACHE`、`CONFIG`、`DEBUG`）の前に、同一接続で `AUTH <token>` を実行してください。HTTP の `POST /optimize` は同じトークンを `Authorization: Bearer <token>` として受け取ります。Docker Compose も `.env` のプレースホルダーを置換するまで起動を拒否します。
+同梱の Docker 環境は既定で localhost のみに公開します。非ループバックの TCP bind を使う場合は、高エントロピーの `API_ADMIN_TOKEN` が必須です。未設定なら MygramDB は設定を拒否します。TCP 接続では、管理コマンド（`SET`、`SHOW VARIABLES`、`DUMP`、`SYNC`、`REPLICATION`、`OPTIMIZE`、`CACHE`、`CONFIG`、`DEBUG`）の前に、同一接続で `AUTH <token>` を実行してください。HTTP の `POST /optimize` は同じトークンを `Authorization: Bearer <token>` として受け取ります。Docker Compose も `.env` のプレースホルダーを置換するまで起動を拒否します。
 
 TCP ポートは必ず限定した `NETWORK_ALLOW_CIDRS` と、プライベートまたは暗号化されたネットワークの内側に置いてください。TCP プロトコル自体は `AUTH` トークンを暗号化しません。IPv4/IPv6 の全許可リストと public bind の組み合わせは、設定読み込み時にも拒否します。
+
+`NETWORK_ALLOW_CIDRS` はサーバーが実際に見るアドレスと照合します。Docker ではそれがホストのアドレスではなく bridge gateway になるため、同梱の compose は bridge のレンジを許可し、ホストへの公開範囲は loopback への ports マッピングで絞っています。
 
 ## 開発
 
