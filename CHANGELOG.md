@@ -10,9 +10,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-08-09
+
 ### Breaking Change
 
 - **Runtime MySQL endpoint changes removed** — `mysql.host` and `mysql.port` are startup-only and `SET` returns an immutable-variable error. Automatic reconnects stay on the configured endpoint and reject a changed source-server UUID; deployments that previously used runtime failover must update configuration and restart MygramDB.
+- **Admin token required for non-loopback binds** — `api.admin_token` is mandatory when the TCP bind is not loopback and no Unix socket is configured. Administrative commands are gated behind `AUTH` on the same TCP connection or an HTTP `Bearer` credential; a configuration that previously exposed them unauthenticated on a routable address now fails to start.
+- **Fail-closed configuration validation** — a public bind with an open CIDR list, CORS without an allowed origin, a TLS listener without a CA, a missing GTID, and an unresolvable `mysql.user` are all rejected while the configuration is parsed. The built-in schema is validated first, so a custom schema can only add constraints.
+- **Docker defaults to localhost** — published API and HTTP ports bind to `127.0.0.1` rather than every host interface, `API_BIND`, `API_HTTP_BIND` and `NETWORK_ALLOW_CIDRS` default to localhost only, and `API_ADMIN_TOKEN` is mandatory with the placeholder value rejected. In-container listeners moved to `API_CONTAINER_BIND` and `API_HTTP_CONTAINER_BIND`.
+- **Container password no longer defaults** — the entrypoint fails when `MYSQL_PASSWORD` is unset instead of substituting a placeholder that could only surface later as a replication error.
+- **`DUMP SAVE --with-stats` removed** — the flag is no longer part of the grammar.
+- **Cache keys rebuilt** — the key serializer prefix changed, so entries built by earlier versions are not reused after upgrade.
+
+### Added
+
+- **Admin authentication** — `AUTH` on TCP and `Bearer` on HTTP gate administrative commands, with constant-time comparison and redaction from request logs. `POST /optimize`, HTTP connection caps, and `X-Forwarded-For` honored only from trusted proxies.
+- **Error codes across both protocols** — TCP `ERROR` frames carry a numeric prefix, HTTP error bodies carry `error_code`, and `protocol::ParseErrorFrame` decodes coded and legacy frames through one parser. New codes: `2017` undecodable binlog event, `6028` server loading, `6029` server not ready, `6030` server busy.
+- **Readiness surface** — `data_initialized` and readiness in TCP `INFO`, evaluated from the same inputs as the HTTP health endpoint.
+- **Startup dump restore** — `dump.load_on_startup` restores `dump.dir/default_filename` before falling back to a MySQL initial snapshot, rejecting a dump whose host, port, database, source server UUID or GTID does not match the configured source.
+- **Configuration keys** — `cache.invalidation.max_queue_size`, `dump.load_on_startup`, `api.http.max_connections`, `api.http.trusted_proxies`, and `mysql.ignored_ddl_prefixes`.
+- **Installable client SDK** — `MygramDB::client_static` and `client_shared` ship with a CMake package config, version file, pkg-config file, and self-contained headers. The API gains `QueryMode`/`MYGRAM_QUERY_BOOLEAN`, facet pagination with a total distinct value count, expression parse and convert variants returning a diagnostic string, connect and operation timeouts, typed `Error` values parsed from `ERROR` frames, and standalone C and C++ examples.
+- **Client deadlines and bounds** — one total command deadline instead of a per-read reset, a response frame cap, rejection of control characters and quotes in commands and identifiers, strict `COUNT` parsing, typed `CacheStatistics`, and `struct_size`-resolved `MygramSearchOptions_C` fields for two-way compatibility.
+- **CLI timeouts and typed retries** — `--timeout`, `--connect-timeout` and `--retry-interval`; retry and connection-loss decisions come from the server's error code rather than message substrings. `DUMP SAVE [path]` is parsed locally including quoted paths, and banners, prompts and errors go to stderr so stdout carries only results.
+- **Query grammar** — `AUTH`, `SORT BY <column>`, `AND NOT <term>`, and compact `SET name=value`.
+- **Dump provenance** — compatibility metadata version 2 records the source server UUID; version 1 metadata still restores.
+- **Statistics** — `invalidation_queue_memory_bytes`, text normalization failures, and denial, dump and pool metrics on a monotonic uptime.
+- **Fuzzing build** — `FUZZER_ENGINE` selects the standalone driver or libFuzzer, with instrumentation applied to the whole build.
+
+### Fixed
+
+- **Query cache reached neither the replication path nor HTTP** — the cache is created while the TCP server starts, so the binlog reader and HTTP server were both constructed with a null pointer. Row events skipped invalidation entirely, leaving a cached result served after the row behind it changed, and every HTTP request ran outside the cache while caching was reported as disabled.
+- **Replication lag read as caught up** — the applied timestamp is stamped where the position advances, so the commit path can no longer advance the position without it.
+- **Recovery from an undecodable binlog event** — XA prepare and MariaDB compressed events stay in the binlog after the producing server setting is changed, so `SYNC` restarts from the snapshot marker instead of replaying an interval that can never succeed. A successful start clears the previous run's error rather than leaving a stale diagnostic on the status and health surfaces.
+- **Rejected MySQL transport options are fatal** — a client library that rejects an SSL mode, CA, certificate or key fails the connection instead of logging a warning; an unset SSL mode otherwise falls back to `SSL_MODE_PREFERRED`, turning a configuration that demands a verified server into an opportunistic one.
+- **Locale-independent input validation** — MariaDB GTID positions and initial-load numeric literals are classified by byte range rather than through `<cctype>`, whose answer depends on the process locale. The filter comparison operator is checked where it becomes SQL, and a bare sign or dot with no digit is rejected.
+- **Binlog frame bounds** — `TABLE_MAP` and `ROWS` parsers require the full common header before reading the event size field that lives inside it.
+- **Transient and deterministic replication failures separated** — the same-GTID replay-stop budget applies only to deterministic failures, the metadata connection reconnects under backoff, and the failure kind is published atomically so a transient request cannot downgrade a deterministic one.
+- **Restore and verification memory bounded** — index sections are checked against `dump.restore_memory_budget_mb` before materialization, `DUMP VERIFY` refuses a section longer than `dump.restore_max_section_mb`, and section CRC is streamed instead of buffered.
+- **Filter columns holding only NULL** — per-column reference counts keep such a column visible to `HasColumn` and name resolution.
+- **Highlight mapping over grapheme clusters** — the original text is segmented with an ICU character break iterator so combining marks and halfwidth kana dakuten are not normalized in isolation, with a per-codepoint fallback when ICU is unavailable.
+- **Cache keys faithful to whitespace** — whitespace is no longer collapsed and trimmed for the key, which let two queries that execution treats differently share one entry.
+- **Invalidation queue bounded per entry** — the size limit applies to each pending identity rather than once per batch, its pending and in-flight bytes are charged to the shared cache budget, and the overflow log reports only the identities actually dropped.
+- **Cache lifecycle** — LRU maintenance starts only after every eviction callback is installed, a canonical key is required, and statistics are reported even while the cache is disabled.
+- **Posting list ownership** — roaring bitmaps are owned through an RAII handle, moved-from lists reset, top-N iterates on stack storage, and publishing an optimized term requires pointer identity as well as a matching version.
+- **Startup ordering and paths** — the root privilege check runs before path resolution and log file creation; TLS, Unix socket and synonym paths are absolutized so daemon mode survives a working-directory change.
+- **Replication resilience** — reader and worker threads are wrapped so an uncaught exception cannot end the process, replication stops only on DDL that can carry row data, binlog checksums are verified with little-endian reads, and binary JSON output is bounded with cycle detection.
+- **Authentication attempts counted** — `AUTH` is recorded in command statistics; the dispatcher returned before the shared counting site, so repeated token guesses did not appear in command traffic at all.
+- **Diagnosable error access** — `Expected::error()` throws instead of aborting, and fuzzy matching scans codepoint windows so a hit inside a continuous CJK word is found.
+
+### Changed
+
+- **Text canonicalization** — UTF-8 sanitization moved inside `CanonicalizeColumnValue`, so snapshot and binlog inputs share one path, and VARCHAR, BLOB and CHAR decoding routes through it.
+- **Shared UTF-8 primitives** — one strict decoder backs code point counting, and the fullwidth/halfwidth transliterators are held in thread-local caches instead of being created per call.
+- **Replication pause** — an RAII guard owns pause, drain publication and restore for `DUMP SAVE`, `DUMP LOAD` and scheduled snapshots, restarting the reader only for the last releaser.
+- **Reactor construction** — `IoReactor` no longer holds the thread pool and dispatcher pointers it never used; the acceptor passes them per connection.
+- **`eviction_batch_size` documentation** — describes the minimum, not the maximum, entries evicted per capacity pass.
+
+### Performance
+
+- **Bounded peak memory on the search path** — candidate text is materialized in bounded chunks with the store mutex released for BM25 scoring, term-frequency counting and every text post-filter, instead of copying a large fraction of the corpus up front.
+- **Interned filter columns** — per-document filter values are stored against interned column ids in a small sorted vector rather than a hash map plus an owned column-name string per document and column. The dump format is unchanged.
+- **Candidate filtering** — a posting list is walked once against a sorted candidate list, so n-gram filtering costs O(candidates + postings) instead of a locked rescan per candidate and term. Roaring cardinality is tracked exactly through point mutations and delta capacity left by removals is released.
+- **Cache invalidation sweeps** — dedicated reverse indexes for the filtered and text-sensitive triggers mean a row event visits only the entries it can affect, and periodic maintenance walks a bounded, resumable slice of the LRU list per tick rather than every entry under the exclusive lock.
+- **Row image decoding** — only the columns the table configuration reads back are decoded; a non-indexed BLOB was previously materialized once per INSERT or DELETE and twice per UPDATE for a value nothing consumes.
+- **Term info reuse** — one deduplicated term-info lookup is threaded through boolean evaluation, NOT filtering, synonym expansion and verification, and the full doc-id scan is skipped when the AST has no NOT node.
+- **Statistics aggregation** — per-table statistics are aggregated once into a bounded snapshot served to `INFO`, `/metrics` and Prometheus instead of locking every table per metric.
+- **Cache construction** — hash buckets are no longer reserved from `max_memory_bytes`, which allocated hundreds of MiB for a large empty cache.
 
 ## [1.9.0] - 2026-07-27
 
@@ -815,7 +878,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.9.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.10.0...HEAD
+[1.10.0]: https://github.com/libraz/mygram-db/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/libraz/mygram-db/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/libraz/mygram-db/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/libraz/mygram-db/compare/v1.7.0...v1.8.0
