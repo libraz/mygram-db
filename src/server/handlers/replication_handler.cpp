@@ -25,7 +25,8 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
       if (ctx_.replication_paused_for_dump.load()) {
         return ResponseFormatter::FormatError(
             "Cannot stop replication while DUMP SAVE/LOAD is in progress. "
-            "Replication state is owned by the DUMP operation until it completes.");
+            "Replication state is owned by the DUMP operation until it completes.",
+            mygram::utils::ErrorCode::kServerBusy);
       }
       if (ctx_.binlog_reader != nullptr) {
         if (ctx_.binlog_reader->IsRunning()) {
@@ -36,9 +37,9 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
         return ResponseFormatter::FormatError(
             mygram::utils::MakeError(mygram::utils::ErrorCode::kServerNotReady, "Replication is not running"));
       }
-      return ResponseFormatter::FormatError("Replication is not configured");
+      return ResponseFormatter::FormatError("Replication is not configured", mygram::utils::ErrorCode::kNotImplemented);
 #else
-      return ResponseFormatter::FormatError("MySQL support not compiled");
+      return ResponseFormatter::FormatError("MySQL support not compiled", mygram::utils::ErrorCode::kNotImplemented);
 #endif
     }
 
@@ -48,14 +49,16 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
       if (ctx_.mysql_reconnecting.load()) {
         return ResponseFormatter::FormatError(
             "Cannot start replication while MySQL reconnection is in progress. "
-            "Replication will automatically restart after reconnection completes.");
+            "Replication will automatically restart after reconnection completes.",
+            mygram::utils::ErrorCode::kServerBusy);
       }
 
       // Check if replication is paused for DUMP operation (block manual restart)
       if (ctx_.replication_paused_for_dump.load()) {
         return ResponseFormatter::FormatError(
             "Cannot start replication while DUMP SAVE/LOAD is in progress. "
-            "Replication will automatically restart after DUMP completes.");
+            "Replication will automatically restart after DUMP completes.",
+            mygram::utils::ErrorCode::kServerBusy);
       }
 
       // Check if any table is currently syncing
@@ -70,14 +73,16 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
       if (ctx_.dump_load_in_progress.load()) {
         return ResponseFormatter::FormatError(
             "Cannot start replication while DUMP LOAD is in progress. "
-            "Please wait for load to complete.");
+            "Please wait for load to complete.",
+            mygram::utils::ErrorCode::kServerBusy);
       }
 
       // Check if DUMP SAVE is in progress (block REPLICATION START)
       if (ctx_.dump_save_in_progress.load()) {
         return ResponseFormatter::FormatError(
             "Cannot start replication while DUMP SAVE is in progress. "
-            "Please wait for save to complete.");
+            "Please wait for save to complete.",
+            mygram::utils::ErrorCode::kServerBusy);
       }
 
       if (ctx_.binlog_reader != nullptr) {
@@ -87,7 +92,8 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
           if (current_gtid.empty()) {
             return ResponseFormatter::FormatError(
                 "Cannot start replication without GTID position. "
-                "Please run SYNC command first to establish initial position.");
+                "Please run SYNC command first to establish initial position.",
+                mygram::utils::ErrorCode::kServerNotReady);
           }
 
           mygram::utils::StructuredLog()
@@ -110,18 +116,21 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
               .Field(log_fields::kFieldGtid, current_gtid)
               .FieldError(start_result.error())
               .Error();
-          return ResponseFormatter::FormatError("Failed to start replication: " + start_result.error().message());
+          return ResponseFormatter::FormatError(mygram::utils::MakeError(
+              start_result.error().code(), "Failed to start replication: " + start_result.error().message()));
         }
-        return ResponseFormatter::FormatError("Replication is already running");
+        return ResponseFormatter::FormatError("Replication is already running",
+                                              mygram::utils::ErrorCode::kAlreadyExists);
       }
-      return ResponseFormatter::FormatError("Replication is not configured");
+      return ResponseFormatter::FormatError("Replication is not configured", mygram::utils::ErrorCode::kNotImplemented);
 #else
-      return ResponseFormatter::FormatError("MySQL support not compiled");
+      return ResponseFormatter::FormatError("MySQL support not compiled", mygram::utils::ErrorCode::kNotImplemented);
 #endif
     }
 
     default:
-      return ResponseFormatter::FormatError("Invalid query type for ReplicationHandler");
+      return ResponseFormatter::FormatError("Invalid query type for ReplicationHandler",
+                                            mygram::utils::ErrorCode::kInternalError);
   }
 }
 

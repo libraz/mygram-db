@@ -104,8 +104,9 @@ std::string CommandHandler::CheckTableNotSyncing(const std::string& table_name) 
     return {};
   }
 
-  return ResponseFormatter::FormatError("Table '" + ResponseFormatter::SanitizeDelimitedField(resolved) +
-                                        "' is synchronizing, please try again later");
+  return ResponseFormatter::FormatError(
+      "Table '" + ResponseFormatter::SanitizeDelimitedField(resolved) + "' is synchronizing, please try again later",
+      mygram::utils::ErrorCode::kServerNotReady);
 #else
   (void)table_name;
   return {};

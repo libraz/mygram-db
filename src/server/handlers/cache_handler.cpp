@@ -28,16 +28,17 @@ std::string CacheHandler::Handle(const query::Query& query, ConnectionContext& c
     case query::QueryType::CACHE_DISABLE:
       return HandleDisable();
     default:
-      return ResponseFormatter::FormatError("Invalid query type for CacheHandler");
+      return ResponseFormatter::FormatError("Invalid query type for CacheHandler",
+                                            mygram::utils::ErrorCode::kInternalError);
   }
 }
 
 std::string CacheHandler::HandleClear(const query::Query& query) {
   if (ctx_.cache_manager == nullptr) {
-    return ResponseFormatter::FormatError("Cache not configured");
+    return ResponseFormatter::FormatError("Cache not configured", mygram::utils::ErrorCode::kCacheDisabled);
   }
   if (!ctx_.cache_manager->IsEnabled()) {
-    return ResponseFormatter::FormatError("Cache is disabled");
+    return ResponseFormatter::FormatError("Cache is disabled", mygram::utils::ErrorCode::kCacheDisabled);
   }
 
   if (query.table.empty()) {
@@ -48,11 +49,13 @@ std::string CacheHandler::HandleClear(const query::Query& query) {
 
   // CACHE CLEAR <table> - clear table-specific cache
   if (ctx_.table_catalog == nullptr) {
-    return ResponseFormatter::FormatError("Table catalog is not available");
+    return ResponseFormatter::FormatError("Table catalog is not available",
+                                          mygram::utils::ErrorCode::kCatalogNotInitialized);
   }
   const auto resolved_table = ctx_.table_catalog->ResolveName(query.table);
   if (!resolved_table.has_value()) {
-    return ResponseFormatter::FormatError("Table not found or ambiguous: " + query.table);
+    return ResponseFormatter::FormatError("Table not found or ambiguous: " + query.table,
+                                          mygram::utils::ErrorCode::kTableNotFound);
   }
   ctx_.cache_manager->ClearTable(*resolved_table);
   return ResponseFormatter::FormatStatus("CACHE_CLEARED table=" + *resolved_table);
@@ -61,7 +64,7 @@ std::string CacheHandler::HandleClear(const query::Query& query) {
 std::string CacheHandler::HandleStats() {
   // Check if cache manager exists
   if (ctx_.cache_manager == nullptr) {
-    return ResponseFormatter::FormatError("Cache not configured");
+    return ResponseFormatter::FormatError("Cache not configured", mygram::utils::ErrorCode::kCacheDisabled);
   }
 
   auto stats = ctx_.cache_manager->GetStatistics();
@@ -122,14 +125,15 @@ std::string CacheHandler::HandleStats() {
 std::string CacheHandler::HandleEnable() {
   // Check if cache manager exists
   if (ctx_.cache_manager == nullptr) {
-    return ResponseFormatter::FormatError("Cache not configured");
+    return ResponseFormatter::FormatError("Cache not configured", mygram::utils::ErrorCode::kCacheDisabled);
   }
 
   // Attempt to enable cache
   if (!ctx_.cache_manager->Enable()) {
     return ResponseFormatter::FormatError(
         "Cache cannot be enabled: server was started with cache disabled. "
-        "Please restart the server with cache.enabled = true in configuration.");
+        "Please restart the server with cache.enabled = true in configuration.",
+        mygram::utils::ErrorCode::kCacheDisabled);
   }
 
   return ResponseFormatter::FormatStatus("CACHE_ENABLED");
@@ -138,7 +142,7 @@ std::string CacheHandler::HandleEnable() {
 std::string CacheHandler::HandleDisable() {
   // Check if cache manager exists
   if (ctx_.cache_manager == nullptr) {
-    return ResponseFormatter::FormatError("Cache not configured");
+    return ResponseFormatter::FormatError("Cache not configured", mygram::utils::ErrorCode::kCacheDisabled);
   }
 
   ctx_.cache_manager->Disable();

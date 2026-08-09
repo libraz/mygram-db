@@ -67,7 +67,8 @@ std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& co
     case query::QueryType::DUMP_STATUS:
       return HandleDumpStatus();
     default:
-      return ResponseFormatter::FormatError("Invalid query type for DumpHandler");
+      return ResponseFormatter::FormatError("Invalid query type for DumpHandler",
+                                            mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -80,7 +81,8 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     if (current_gtid.empty()) {
       return ResponseFormatter::FormatError(
           "Cannot save dump without GTID position. "
-          "Please run SYNC command first to establish initial position.");
+          "Please run SYNC command first to establish initial position.",
+          mygram::utils::ErrorCode::kServerNotReady);
     }
   }
 
@@ -88,7 +90,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (ctx_.sync_manager != nullptr) {
     auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kSaveDump);
     if (!check) {
-      return ResponseFormatter::FormatError(check.error().message());
+      return ResponseFormatter::FormatError(check.error());
     }
   }
 #endif
@@ -97,7 +99,8 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (ctx_.dump_load_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot save dump while DUMP LOAD is in progress. "
-        "Please wait for load to complete.");
+        "Please wait for load to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
 
   // Check if full_config is available
@@ -108,7 +111,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
         .Field("reason", "config_not_available")
         .Field(log_fields::kFieldError, error_msg)
         .Error();
-    return ResponseFormatter::FormatError(error_msg);
+    return ResponseFormatter::FormatError(error_msg, mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
 
   // Determine filepath
@@ -116,7 +119,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (!query.filepath.empty()) {
     auto resolved = ResolveDumpFilepath(query.filepath, ctx_.dump_dir);
     if (!resolved) {
-      return ResponseFormatter::FormatError(resolved.error().message());
+      return ResponseFormatter::FormatError(resolved.error());
     }
     filepath = std::move(*resolved);
   } else {
@@ -127,8 +130,9 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (ctx_.operation_coordinator != nullptr) {
     auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kDumpSave, filepath);
     if (!acquired.has_value()) {
-      return ResponseFormatter::FormatError("Cannot save dump while " + ctx_.operation_coordinator->DescribeActive() +
-                                            " is in progress");
+      return ResponseFormatter::FormatError(
+          "Cannot save dump while " + ctx_.operation_coordinator->DescribeActive() + " is in progress",
+          mygram::utils::ErrorCode::kServerBusy);
     }
     operation_token = std::make_shared<OperationCoordinator::Token>(std::move(*acquired));
   }
@@ -151,7 +155,8 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (!flag_guard.engaged()) {
     return ResponseFormatter::FormatError(
         "Cannot save dump while another DUMP SAVE is in progress. "
-        "Please wait for current save to complete or use DUMP STATUS to check progress.");
+        "Please wait for current save to complete or use DUMP STATUS to check progress.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
   if (ctx_.after_dump_save_flag_acquired) {
     ctx_.after_dump_save_flag_acquired();
@@ -160,13 +165,15 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     flag_guard.Release();
     return ResponseFormatter::FormatError(
         "Cannot save dump while DUMP LOAD is in progress. "
-        "Please wait for load to complete.");
+        "Please wait for load to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
   if (ctx_.optimization_in_progress.load()) {
     flag_guard.Release();
     return ResponseFormatter::FormatError(
         "Cannot save dump while OPTIMIZE is in progress. "
-        "Please wait for optimization to complete.");
+        "Please wait for optimization to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
 
   // Capture the current GTID once for both async/sync log paths so the
@@ -239,7 +246,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   if (success) {
     return ResponseFormatter::FormatStatus("SAVED " + filepath);
   }
-  return ResponseFormatter::FormatError("Dump save failed");
+  return ResponseFormatter::FormatError("Dump save failed", mygram::utils::ErrorCode::kStorageDumpWriteError);
 }
 
 bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
@@ -370,7 +377,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   if (ctx_.sync_manager != nullptr) {
     auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kLoadDump);
     if (!check) {
-      return ResponseFormatter::FormatError(check.error().message());
+      return ResponseFormatter::FormatError(check.error());
     }
   }
 #endif
@@ -379,14 +386,16 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   if (ctx_.optimization_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot load dump while OPTIMIZE is in progress. "
-        "Please wait for optimization to complete.");
+        "Please wait for optimization to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
 
   // Check if DUMP SAVE is in progress (block DUMP LOAD)
   if (ctx_.dump_save_in_progress.load()) {
     return ResponseFormatter::FormatError(
         "Cannot load dump while DUMP SAVE is in progress. "
-        "Please wait for save to complete.");
+        "Please wait for save to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
 
   // Validate filepath BEFORE mutating any replication or load-flag state.
@@ -395,11 +404,11 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // validation failure (P0-A). Failing fast here keeps the server in a clean
   // state.
   if (query.filepath.empty()) {
-    return ResponseFormatter::FormatError("DUMP LOAD requires a filepath");
+    return ResponseFormatter::FormatError("DUMP LOAD requires a filepath", mygram::utils::ErrorCode::kQuerySyntaxError);
   }
   auto resolved = ResolveDumpFilepath(query.filepath, ctx_.dump_dir);
   if (!resolved) {
-    return ResponseFormatter::FormatError(resolved.error().message());
+    return ResponseFormatter::FormatError(resolved.error());
   }
   std::string filepath = std::move(*resolved);
 
@@ -407,8 +416,9 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   if (ctx_.operation_coordinator != nullptr) {
     auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kDumpLoad, filepath);
     if (!acquired.has_value()) {
-      return ResponseFormatter::FormatError("Cannot load dump while " + ctx_.operation_coordinator->DescribeActive() +
-                                            " is in progress");
+      return ResponseFormatter::FormatError(
+          "Cannot load dump while " + ctx_.operation_coordinator->DescribeActive() + " is in progress",
+          mygram::utils::ErrorCode::kServerBusy);
     }
     operation_token = std::move(*acquired);
   }
@@ -429,19 +439,22 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   if (!loading_guard.engaged()) {
     return ResponseFormatter::FormatError(
         "Cannot load dump while another DUMP LOAD is in progress. "
-        "Please wait for current load to complete.");
+        "Please wait for current load to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
   if (ctx_.dump_save_in_progress.load()) {
     loading_guard.Release();
     return ResponseFormatter::FormatError(
         "Cannot load dump while DUMP SAVE is in progress. "
-        "Please wait for save to complete.");
+        "Please wait for save to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
   if (ctx_.optimization_in_progress.load()) {
     loading_guard.Release();
     return ResponseFormatter::FormatError(
         "Cannot load dump while OPTIMIZE is in progress. "
-        "Please wait for optimization to complete.");
+        "Please wait for optimization to complete.",
+        mygram::utils::ErrorCode::kServerBusy);
   }
 
   // Publish the new operation before taking the generation locks below.
@@ -701,16 +714,17 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   if (ctx_.dump_progress != nullptr) {
     ctx_.dump_progress->Fail(error_msg);
   }
-  return ResponseFormatter::FormatError(error_msg);
+  return ResponseFormatter::FormatError(mygram::utils::MakeError(result.error().code(), error_msg));
 }
 
 std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
   if (query.filepath.empty()) {
-    return ResponseFormatter::FormatError("DUMP VERIFY requires a filepath");
+    return ResponseFormatter::FormatError("DUMP VERIFY requires a filepath",
+                                          mygram::utils::ErrorCode::kQuerySyntaxError);
   }
   auto resolved = ResolveDumpFilepath(query.filepath, ctx_.dump_dir);
   if (!resolved) {
-    return ResponseFormatter::FormatError(resolved.error().message());
+    return ResponseFormatter::FormatError(resolved.error());
   }
   std::string filepath = std::move(*resolved);
 
@@ -740,16 +754,16 @@ std::string DumpHandler::HandleDumpVerify(const query::Query& query) {
       .Field("filepath", filepath)
       .FieldError(mygram::utils::MakeError(result.error().code(), error_msg))
       .Error();
-  return ResponseFormatter::FormatError(error_msg);
+  return ResponseFormatter::FormatError(mygram::utils::MakeError(result.error().code(), error_msg));
 }
 
 std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
   if (query.filepath.empty()) {
-    return ResponseFormatter::FormatError("DUMP INFO requires a filepath");
+    return ResponseFormatter::FormatError("DUMP INFO requires a filepath", mygram::utils::ErrorCode::kQuerySyntaxError);
   }
   auto resolved = ResolveDumpFilepath(query.filepath, ctx_.dump_dir);
   if (!resolved) {
-    return ResponseFormatter::FormatError(resolved.error().message());
+    return ResponseFormatter::FormatError(resolved.error());
   }
   std::string filepath = std::move(*resolved);
 
@@ -759,8 +773,9 @@ std::string DumpHandler::HandleDumpInfo(const query::Query& query) {
   auto info_result = storage::dump_v2::GetDumpInfo(filepath, info);
 
   if (!info_result) {
-    return ResponseFormatter::FormatError("Failed to read dump info from " + filepath + ": " +
-                                          info_result.error().message());
+    return ResponseFormatter::FormatError(
+        mygram::utils::MakeError(info_result.error().code(),
+                                 "Failed to read dump info from " + filepath + ": " + info_result.error().message()));
   }
 
   // Note: returning the full canonical filepath is intentional. TCP clients

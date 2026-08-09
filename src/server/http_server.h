@@ -344,6 +344,9 @@ class HttpServer {
     std::string table_key;              ///< Canonical table key on success.
     int status = 0;                     ///< HTTP status (0 means uninitialized).
     std::string message;                ///< Error message for failures.
+    /// Machine-readable cause, carried so callers report the same code the TCP
+    /// surface uses for the identical condition.
+    mygram::utils::ErrorCode code = mygram::utils::ErrorCode::kSuccess;
   };
 
   /**
@@ -507,9 +510,13 @@ class HttpServer {
 
   /**
    * @brief Send error response
+   *
+   * The code is mandatory: a default turned every call site that did not think
+   * about it into `kUnknown`, so the HTTP surface reported one opaque code
+   * where the TCP surface named the cause.
    */
   static void SendError(httplib::Response& res, int status_code, const std::string& message,
-                        mygram::utils::ErrorCode code = mygram::utils::ErrorCode::kUnknown);
+                        mygram::utils::ErrorCode code);
   static void SendError(httplib::Response& res, int status_code, const mygram::utils::Error& error);
 
   /**

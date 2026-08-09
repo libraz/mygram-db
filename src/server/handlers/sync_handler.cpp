@@ -23,7 +23,7 @@ std::string SyncHandler::Handle(const query::Query& query, ConnectionContext& /*
   if (query.type == query::QueryType::SYNC_STOP) {
     return HandleSyncStop(query);
   }
-  return ResponseFormatter::FormatError("Unknown SYNC command");
+  return ResponseFormatter::FormatError("Unknown SYNC command", mygram::utils::ErrorCode::kQuerySyntaxError);
 }
 
 std::string SyncHandler::HandleSync(const query::Query& query) {
@@ -32,20 +32,24 @@ std::string SyncHandler::HandleSync(const query::Query& query) {
     return ResponseFormatter::FormatError(resolved.error());
   }
   if (ctx_.optimization_in_progress.load(std::memory_order_acquire)) {
-    return ResponseFormatter::FormatError("Cannot start SYNC while OPTIMIZE is in progress");
+    return ResponseFormatter::FormatError("Cannot start SYNC while OPTIMIZE is in progress",
+                                          mygram::utils::ErrorCode::kServerBusy);
   }
   if (ctx_.dump_save_in_progress.load(std::memory_order_acquire)) {
-    return ResponseFormatter::FormatError("Cannot start SYNC while DUMP SAVE is in progress");
+    return ResponseFormatter::FormatError("Cannot start SYNC while DUMP SAVE is in progress",
+                                          mygram::utils::ErrorCode::kServerBusy);
   }
   if (ctx_.dump_load_in_progress.load(std::memory_order_acquire)) {
-    return ResponseFormatter::FormatError("Cannot start SYNC while DUMP LOAD is in progress");
+    return ResponseFormatter::FormatError("Cannot start SYNC while DUMP LOAD is in progress",
+                                          mygram::utils::ErrorCode::kServerBusy);
   }
   auto table_context = GetTableContext(*resolved);
   if (!table_context) {
     return ResponseFormatter::FormatError(table_context.error());
   }
   if (table_context->index != nullptr && table_context->index->IsOptimizing()) {
-    return ResponseFormatter::FormatError("Cannot start SYNC while OPTIMIZE is in progress");
+    return ResponseFormatter::FormatError("Cannot start SYNC while OPTIMIZE is in progress",
+                                          mygram::utils::ErrorCode::kServerBusy);
   }
   auto result = sync_manager_->StartSync(*resolved);
   if (!result) {

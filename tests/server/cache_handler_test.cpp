@@ -149,7 +149,8 @@ TEST_F(CacheHandlerTest, ClearRejectsUnknownTableAndCanonicalizesKnownTable) {
   unknown.type = query::QueryType::CACHE_CLEAR;
   unknown.table = "missing";
   EXPECT_EQ(handler_->Handle(unknown, conn_ctx_),
-            ResponseFormatter::FormatError("Table not found or ambiguous: missing"));
+            ResponseFormatter::FormatError("Table not found or ambiguous: missing",
+                                           mygram::utils::ErrorCode::kTableNotFound));
 
   query::Query known;
   known.type = query::QueryType::CACHE_CLEAR;
@@ -162,12 +163,14 @@ TEST_F(CacheHandlerTest, ClearRejectsRequestsWhileCacheIsDisabled) {
 
   query::Query clear_all;
   clear_all.type = query::QueryType::CACHE_CLEAR;
-  EXPECT_EQ(handler_->Handle(clear_all, conn_ctx_), ResponseFormatter::FormatError("Cache is disabled"));
+  EXPECT_EQ(handler_->Handle(clear_all, conn_ctx_),
+            ResponseFormatter::FormatError("Cache is disabled", mygram::utils::ErrorCode::kCacheDisabled));
 
   query::Query clear_table;
   clear_table.type = query::QueryType::CACHE_CLEAR;
   clear_table.table = "articles";
-  EXPECT_EQ(handler_->Handle(clear_table, conn_ctx_), ResponseFormatter::FormatError("Cache is disabled"));
+  EXPECT_EQ(handler_->Handle(clear_table, conn_ctx_),
+            ResponseFormatter::FormatError("Cache is disabled", mygram::utils::ErrorCode::kCacheDisabled));
 }
 
 }  // namespace mygramdb::server

@@ -733,7 +733,7 @@ std::string ResponseFormatter::FormatReplicationStatusResponse(mysql::IBinlogRea
   return oss.str();
 #else
   (void)binlog_reader;  // Suppress unused parameter warning
-  return FormatError("MySQL support not compiled");
+  return FormatError("MySQL support not compiled", mygram::utils::ErrorCode::kNotImplemented);
 #endif
 }
 

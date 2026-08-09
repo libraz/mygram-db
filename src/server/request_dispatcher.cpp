@@ -117,7 +117,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
           .Field("suppressed_since_last_log", decision.suppressed_count)
           .Warn();
     }
-    return ResponseFormatter::FormatError("Rate limit exceeded");
+    return ResponseFormatter::FormatError("Rate limit exceeded", mygram::utils::ErrorCode::kServerBusy);
   }
 
   // Untrusted client input may contain log-injection sequences. Truncation also
@@ -154,7 +154,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
     ctx_.stats.IncrementCommand(query->type);
     if (admin_token_.empty() || !ConstantTimeEqual(query->auth_token, admin_token_)) {
       conn_ctx.admin_authenticated.store(false, std::memory_order_release);
-      return ResponseFormatter::FormatError("Authentication failed");
+      return ResponseFormatter::FormatError("Authentication failed", mygram::utils::ErrorCode::kPermissionDenied);
     }
     conn_ctx.admin_authenticated.store(true, std::memory_order_release);
     return ResponseFormatter::FormatStatus("AUTHENTICATED");
@@ -162,7 +162,8 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
 
   if (IsAdministrativeCommand(query->type) && !admin_token_.empty() &&
       !conn_ctx.admin_authenticated.load(std::memory_order_acquire)) {
-    return ResponseFormatter::FormatError("Administrative command requires AUTH");
+    return ResponseFormatter::FormatError("Administrative command requires AUTH",
+                                          mygram::utils::ErrorCode::kPermissionDenied);
   }
 
   // Apply configured default LIMIT if not explicitly specified
@@ -183,7 +184,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
   // Find handler
   auto handler_iter = handlers_.find(query->type);
   if (handler_iter == handlers_.end()) {
-    return ResponseFormatter::FormatError("Unknown query type");
+    return ResponseFormatter::FormatError("Unknown query type", mygram::utils::ErrorCode::kQuerySyntaxError);
   }
 
   // Dispatch to handler. Handlers are required by contract to convert errors

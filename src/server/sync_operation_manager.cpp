@@ -381,7 +381,7 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
     }
 
     if (tables_to_stop.empty()) {
-      return ResponseFormatter::FormatError("No active SYNC operations to stop");
+      return ResponseFormatter::FormatError("No active SYNC operations to stop", mygram::utils::ErrorCode::kNotFound);
     }
 
     // Publish the cancellation request before looking up loaders. A worker
@@ -428,13 +428,15 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
     {
       std::lock_guard<std::mutex> syncing_lock(syncing_tables_mutex_);
       if (syncing_tables_.find(table_name) == syncing_tables_.end()) {
-        return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
+        return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name,
+                                              mygram::utils::ErrorCode::kNotFound);
       }
     }
 
     auto state_iter = sync_states_.find(table_name);
     if (state_iter == sync_states_.end() || !state_iter->second.is_running) {
-      return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name);
+      return ResponseFormatter::FormatError("No active SYNC operation for table: " + table_name,
+                                            mygram::utils::ErrorCode::kNotFound);
     }
     state_iter->second.cancel_requested.store(true, std::memory_order_release);
     state_iter->second.status = "CANCELLING";

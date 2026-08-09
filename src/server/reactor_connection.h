@@ -328,9 +328,9 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   void SetDrainScheduledForTest(bool value) { drain_scheduled_.store(value, std::memory_order_release); }
 
-  [[nodiscard]] bool SendReadOverflowErrorForTest(std::string_view message,
+  [[nodiscard]] bool SendReadOverflowErrorForTest(std::string_view message, mygram::utils::ErrorCode code,
                                                   const std::function<void()>& under_lock_hook = {}) {
-    return TrySendErrorIfWriteQueueEmpty(message, under_lock_hook);
+    return TrySendErrorIfWriteQueueEmpty(message, code, under_lock_hook);
   }
 
   void DrainPendingFramesForTest(size_t count) {
@@ -375,7 +375,8 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
  private:
   bool AppendReadBytes(const char* data, size_t len, size_t& enqueued);
   bool ShouldSendReadOverflowError();
-  bool TrySendErrorIfWriteQueueEmpty(std::string_view message, const std::function<void()>& under_lock_hook = {});
+  bool TrySendErrorIfWriteQueueEmpty(std::string_view message, mygram::utils::ErrorCode code,
+                                     const std::function<void()>& under_lock_hook = {});
   [[nodiscard]] bool CloseWithServerBusy();
   bool MaybeResumeReadsLocked();
   bool PublishReadEofLocked();

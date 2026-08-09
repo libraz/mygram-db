@@ -593,7 +593,8 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsExposesReplicationDiagnosti
  * @brief Test error response formatting
  */
 TEST_F(ResponseFormatterTest, FormatError) {
-  std::string response = ResponseFormatter::FormatError("Invalid query syntax");
+  std::string response =
+      ResponseFormatter::FormatError("Invalid query syntax", mygram::utils::ErrorCode::kQuerySyntaxError);
 
   EXPECT_TRUE(response.find("ERROR") != std::string::npos);
   EXPECT_TRUE(response.find("Invalid query syntax") != std::string::npos);
@@ -624,14 +625,15 @@ TEST_F(ResponseFormatterTest, FormatTypedErrorIncludesStableNumericCode) {
  * @brief Test error response with special characters
  */
 TEST_F(ResponseFormatterTest, FormatErrorWithSpecialCharacters) {
-  std::string response = ResponseFormatter::FormatError("Error: \"quoted\" value");
+  std::string response = ResponseFormatter::FormatError("Error: \"quoted\" value", mygram::utils::ErrorCode::kUnknown);
 
   EXPECT_TRUE(response.find("ERROR") != std::string::npos);
   EXPECT_TRUE(response.find("quoted") != std::string::npos);
 }
 
 TEST_F(ResponseFormatterTest, FormatErrorSanitizesLineBreaksForSingleLineProtocol) {
-  std::string response = ResponseFormatter::FormatError("Configuration validation failed:\r\n  missing table\tname");
+  std::string response = ResponseFormatter::FormatError("Configuration validation failed:\r\n  missing table\tname",
+                                                        mygram::utils::ErrorCode::kUnknown);
 
   EXPECT_TRUE(response.find("ERROR") == 0);
   EXPECT_EQ(response.find('\r'), std::string::npos);
@@ -654,7 +656,7 @@ TEST_F(ResponseFormatterTest, SanitizeDelimitedFieldRemovesFrameDelimiters) {
  * @brief Test error response with empty message
  */
 TEST_F(ResponseFormatterTest, FormatErrorEmpty) {
-  std::string response = ResponseFormatter::FormatError("");
+  std::string response = ResponseFormatter::FormatError("", mygram::utils::ErrorCode::kUnknown);
 
   EXPECT_TRUE(response.find("ERROR") != std::string::npos);
 }

@@ -28,7 +28,7 @@ std::string DocumentHandler::Handle(const query::Query& query, ConnectionContext
 
   // Verify doc_store is available
   if (current_doc_store == nullptr) {
-    return ResponseFormatter::FormatError("Document store not available");
+    return ResponseFormatter::FormatError("Document store not available", mygram::utils::ErrorCode::kInternalError);
   }
 
   auto doc_id_opt = current_doc_store->GetDocId(query.primary_key);

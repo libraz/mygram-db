@@ -48,8 +48,8 @@ constexpr int kSendFlags = MSG_NOSIGNAL;
 constexpr int kSendFlags = 0;
 #endif
 
-void BestEffortSendError(int fd, std::string_view message) {
-  std::string response = ResponseFormatter::FormatError(message);
+void BestEffortSendError(int fd, std::string_view message, mygram::utils::ErrorCode code) {
+  std::string response = ResponseFormatter::FormatError(message, code);
   response.append(kResponseTerminator, kResponseTerminatorLen);
 
   size_t sent = 0;
@@ -174,7 +174,9 @@ bool ReactorConnection::OnReadable() {
             .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
             .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
             .Warn();
-        (void)TrySendErrorIfWriteQueueEmpty(frame_queue_overflow ? "server busy" : "request too large");
+        (void)TrySendErrorIfWriteQueueEmpty(frame_queue_overflow ? "server busy" : "request too large",
+                                            frame_queue_overflow ? mygram::utils::ErrorCode::kServerBusy
+                                                                 : mygram::utils::ErrorCode::kNetworkInvalidRequest);
         closing_.store(true, std::memory_order_release);
         return false;
       }
@@ -388,7 +390,7 @@ bool ReactorConnection::ShouldSendReadOverflowError() {
   return write_queue_.empty();
 }
 
-bool ReactorConnection::TrySendErrorIfWriteQueueEmpty(std::string_view message,
+bool ReactorConnection::TrySendErrorIfWriteQueueEmpty(std::string_view message, mygram::utils::ErrorCode code,
                                                       const std::function<void()>& under_lock_hook) {
   std::lock_guard<std::mutex> lock(write_mutex_);
   if (!write_queue_.empty()) {
@@ -397,7 +399,7 @@ bool ReactorConnection::TrySendErrorIfWriteQueueEmpty(std::string_view message,
   if (under_lock_hook) {
     under_lock_hook();
   }
-  BestEffortSendError(fd_, message);
+  BestEffortSendError(fd_, message, code);
   return true;
 }
 
@@ -652,14 +654,14 @@ void ReactorConnection::DrainTask() {
         .Field("fd", static_cast<int64_t>(fd_))
         .Field("error", error.what())
         .Error();
-    (void)TrySendErrorIfWriteQueueEmpty("internal server error");
+    (void)TrySendErrorIfWriteQueueEmpty("internal server error", mygram::utils::ErrorCode::kInternalError);
     closing_.store(true, std::memory_order_release);
   } catch (...) {
     mygram::utils::StructuredLog()
         .Event("reactor_drain_unknown_exception")
         .Field("fd", static_cast<int64_t>(fd_))
         .Error();
-    (void)TrySendErrorIfWriteQueueEmpty("internal server error");
+    (void)TrySendErrorIfWriteQueueEmpty("internal server error", mygram::utils::ErrorCode::kInternalError);
     closing_.store(true, std::memory_order_release);
   }
 

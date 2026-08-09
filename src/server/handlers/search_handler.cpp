@@ -47,7 +47,8 @@ std::string SearchHandler::Handle(const query::Query& query, ConnectionContext& 
   if (query.type == query::QueryType::COUNT) {
     return HandleCount(query, conn_ctx);
   }
-  return ResponseFormatter::FormatError("Invalid query type for SearchHandler");
+  return ResponseFormatter::FormatError("Invalid query type for SearchHandler",
+                                        mygram::utils::ErrorCode::kInternalError);
 }
 
 search_pipeline::FullPipelineParams SearchHandler::BuildPipelineParams(const query::Query& query,
@@ -211,7 +212,7 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   output.current_kanji_ngram_size = table_ctx->kanji_ngram_size;
   output.generation_lock = std::move(table_ctx->generation_lock);
   if (output.current_index == nullptr) {
-    return ResponseFormatter::FormatError("Index not available");
+    return ResponseFormatter::FormatError("Index not available", mygram::utils::ErrorCode::kInternalError);
   }
   output.current_cross_boundary = output.current_index->GetCrossBoundaryNgrams();
 
@@ -330,7 +331,7 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
   // Check if this was an early-exit (empty posting list) or cache hit without index context
   if (output.current_doc_store == nullptr) {
-    return ResponseFormatter::FormatError("Document store not available");
+    return ResponseFormatter::FormatError("Document store not available", mygram::utils::ErrorCode::kInternalError);
   }
 
   // Check for cache hit path - results are already final, just need pagination.
@@ -397,24 +398,27 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
   if (effective_query.highlight.has_value() && output.current_doc_store != nullptr &&
       !output.current_doc_store->IsStoreTextsEnabled()) {
     return ResponseFormatter::FormatError(
-        "HIGHLIGHT requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in configuration.");
+        "HIGHLIGHT requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in configuration.",
+        mygram::utils::ErrorCode::kNotImplemented);
   }
 
   // BM25 scoring: compute scores if SORT _score is requested
   if (is_score_sort) {
     // Validate BM25 is enabled
     if (ctx_.full_config == nullptr || !ctx_.full_config->bm25.enable) {
-      return ResponseFormatter::FormatError("SORT _score requires BM25 to be enabled in configuration");
+      return ResponseFormatter::FormatError("SORT _score requires BM25 to be enabled in configuration",
+                                            mygram::utils::ErrorCode::kQueryInvalidSort);
     }
     if (output.current_doc_store == nullptr || !output.current_doc_store->IsStoreTextsEnabled()) {
       return ResponseFormatter::FormatError(
           "SORT _score requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
-          "configuration.");
+          "configuration.",
+          mygram::utils::ErrorCode::kNotImplemented);
     }
 
     const auto& bm25_config = ctx_.full_config->bm25;
     if (output.table_context == nullptr) {
-      return ResponseFormatter::FormatError("table not found");
+      return ResponseFormatter::FormatError("table not found", mygram::utils::ErrorCode::kTableNotFound);
     }
     const auto& bm25_stats = output.table_context->bm25_stats;
 

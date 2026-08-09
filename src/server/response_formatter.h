@@ -166,11 +166,16 @@ class ResponseFormatter {
 
   /**
    * @brief Format error response
+   *
+   * The code is mandatory. It used to default to `kUnknown`, which every call
+   * site that did not think about classification silently inherited, so most
+   * frames named no cause at all.
+   *
    * @param message Error message
+   * @param code Machine-readable cause carried in the frame
    * @return Formatted response
    */
-  static std::string FormatError(std::string_view message,
-                                 mygram::utils::ErrorCode code = mygram::utils::ErrorCode::kUnknown);
+  static std::string FormatError(std::string_view message, mygram::utils::ErrorCode code);
   static std::string FormatError(const mygram::utils::Error& error);
 
   /**

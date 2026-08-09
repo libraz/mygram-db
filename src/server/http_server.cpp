@@ -752,7 +752,8 @@ void HttpServer::SetupAccessControl() {
             .Field("suppressed_since_last_log", decision.suppressed_count)
             .Warn();
       }
-      SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs");
+      SendError(res, kHttpForbidden, "Access denied by network.allow_cidrs",
+                mygram::utils::ErrorCode::kPermissionDenied);
       return httplib::Server::HandlerResponse::Handled;
     }
 
@@ -767,7 +768,7 @@ void HttpServer::SetupAccessControl() {
             .Field("suppressed_since_last_log", decision.suppressed_count)
             .Warn();
       }
-      SendError(res, kHttpTooManyRequests, "Rate limit exceeded");
+      SendError(res, kHttpTooManyRequests, "Rate limit exceeded", mygram::utils::ErrorCode::kServerBusy);
       return httplib::Server::HandlerResponse::Handled;
     }
 
@@ -974,6 +975,7 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
   if (!IsValidTableName(table_name)) {
     result.status = kHttpBadRequest;
     result.message = "Invalid table name (allowed characters: letters, digits, '_', '-', '.')";
+    result.code = mygram::utils::ErrorCode::kQueryInvalidToken;
     return result;
   }
 
@@ -981,6 +983,7 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
   if (config::RequiresQualifiedTableReferences(full_config_) && !IsDatabaseQualifiedTableName(table_name)) {
     result.status = kHttpBadRequest;
     result.message = "Bare table names are not supported; use <database>.<table>: " + table_name;
+    result.code = mygram::utils::ErrorCode::kQuerySyntaxError;
     return result;
   }
 
@@ -989,6 +992,7 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
   if (!resolved.has_value()) {
     result.status = kHttpNotFound;
     result.message = "Table not found: " + table_name;
+    result.code = mygram::utils::ErrorCode::kTableNotFound;
     return result;
   }
 
@@ -996,12 +1000,14 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
   if (table_iter == table_contexts_.end()) {
     result.status = kHttpNotFound;
     result.message = "Table not found: " + table_name;
+    result.code = mygram::utils::ErrorCode::kTableNotFound;
     return result;
   }
 
   if (!table_iter->second->index || !table_iter->second->doc_store) {
     result.status = kHttpInternalServerError;
     result.message = "Table context has null index or doc_store";
+    result.code = mygram::utils::ErrorCode::kInternalError;
     return result;
   }
 
@@ -1013,7 +1019,8 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
 
 bool HttpServer::RejectIfTableSyncing(const std::string& table_key, httplib::Response& res) const {
   if (table_syncing_checker_ && table_syncing_checker_(table_key)) {
-    SendError(res, kHttpServiceUnavailable, "Table '" + table_key + "' is synchronizing, please try again later");
+    SendError(res, kHttpServiceUnavailable, "Table '" + table_key + "' is synchronizing, please try again later",
+              mygram::utils::ErrorCode::kServerNotReady);
     return true;
   }
 #ifdef USE_MYSQL
@@ -1024,7 +1031,8 @@ bool HttpServer::RejectIfTableSyncing(const std::string& table_key, httplib::Res
   if (syncing_tables.find(table_key) == syncing_tables.end()) {
     return false;
   }
-  SendError(res, kHttpServiceUnavailable, "Table '" + table_key + "' is synchronizing, please try again later");
+  SendError(res, kHttpServiceUnavailable, "Table '" + table_key + "' is synchronizing, please try again later",
+            mygram::utils::ErrorCode::kServerNotReady);
   return true;
 #else
   (void)table_key;
@@ -1036,7 +1044,8 @@ bool HttpServer::RejectIfTableSyncing(const std::string& table_key, httplib::Res
 std::optional<HttpServer::PreparedHttpRequest> HttpServer::PrepareHttpJsonRequest(const httplib::Request& req,
                                                                                   httplib::Response& res) {
   if (!HasJsonContentType(req)) {
-    SendError(res, kHttpUnsupportedMediaType, "Content-Type must be application/json");
+    SendError(res, kHttpUnsupportedMediaType, "Content-Type must be application/json",
+              mygram::utils::ErrorCode::kNetworkInvalidRequest);
     return std::nullopt;
   }
   if (loading_ != nullptr && loading_->load()) {
@@ -1047,7 +1056,7 @@ std::optional<HttpServer::PreparedHttpRequest> HttpServer::PrepareHttpJsonReques
 
   auto lookup = ResolveHttpTableContext(ExtractRouteTableKey(req));
   if (lookup.table_ctx == nullptr) {
-    SendError(res, lookup.status, lookup.message);
+    SendError(res, lookup.status, lookup.message, lookup.code);
     return std::nullopt;
   }
   if (RejectIfTableSyncing(lookup.table_key, res)) {
@@ -1059,7 +1068,8 @@ std::optional<HttpServer::PreparedHttpRequest> HttpServer::PrepareHttpJsonReques
   try {
     body = json::parse(req.body);
   } catch (const json::parse_error& error) {
-    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(error.what()));
+    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(error.what()),
+              mygram::utils::ErrorCode::kQuerySyntaxError);
     return std::nullopt;
   }
 
@@ -1076,13 +1086,15 @@ bool HttpServer::ApplyHttpQueryOptions(const json& body, httplib::Response& res,
   if (apply_pagination) {
     if (body.contains("limit")) {
       if (!body["limit"].is_number_integer()) {
-        SendError(res, kHttpBadRequest, "Invalid limit: must be an integer");
+        SendError(res, kHttpBadRequest, "Invalid limit: must be an integer",
+                  mygram::utils::ErrorCode::kQueryInvalidLimit);
         return false;
       }
       const int64_t limit = body["limit"].get<int64_t>();
       if (limit <= 0 || limit > config::defaults::kMaxLimit) {
         SendError(res, kHttpBadRequest,
-                  "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit));
+                  "Invalid limit: must be between 1 and " + std::to_string(config::defaults::kMaxLimit),
+                  mygram::utils::ErrorCode::kQueryInvalidLimit);
         return false;
       }
       parsed_query.limit = static_cast<uint32_t>(limit);
@@ -1091,13 +1103,15 @@ bool HttpServer::ApplyHttpQueryOptions(const json& body, httplib::Response& res,
 
     if (body.contains("offset")) {
       if (!body["offset"].is_number_integer()) {
-        SendError(res, kHttpBadRequest, "Invalid offset: must be an integer");
+        SendError(res, kHttpBadRequest, "Invalid offset: must be an integer",
+                  mygram::utils::ErrorCode::kQueryInvalidOffset);
         return false;
       }
       const int64_t offset = body["offset"].get<int64_t>();
       if (offset < 0 || static_cast<uint64_t>(offset) > std::numeric_limits<uint32_t>::max()) {
         SendError(res, kHttpBadRequest,
-                  "Invalid offset: must be between 0 and " + std::to_string(std::numeric_limits<uint32_t>::max()));
+                  "Invalid offset: must be between 0 and " + std::to_string(std::numeric_limits<uint32_t>::max()),
+                  mygram::utils::ErrorCode::kQueryInvalidOffset);
         return false;
       }
       parsed_query.offset = static_cast<uint32_t>(offset);
@@ -1110,7 +1124,7 @@ bool HttpServer::ApplyHttpQueryOptions(const json& body, httplib::Response& res,
   }
 
   if (body.contains("filters") && !body["filters"].is_object()) {
-    SendError(res, kHttpBadRequest, "Field 'filters' must be an object");
+    SendError(res, kHttpBadRequest, "Field 'filters' must be an object", mygram::utils::ErrorCode::kQueryInvalidFilter);
     return false;
   }
   if (body.contains("filters")) {
@@ -1151,12 +1165,13 @@ bool HttpServer::ApplyHttpQueryOptions(const json& body, httplib::Response& res,
 bool HttpServer::ValidateHttpQueryText(const std::string& query_text, httplib::Response& res, bool allow_empty) const {
   for (const char character : query_text) {
     if (character == '\r' || character == '\n' || character == '\0') {
-      SendError(res, kHttpBadRequest, "Query text contains invalid control characters");
+      SendError(res, kHttpBadRequest, "Query text contains invalid control characters",
+                mygram::utils::ErrorCode::kQueryInvalidToken);
       return false;
     }
   }
   if (!allow_empty && query_text.empty()) {
-    SendError(res, kHttpBadRequest, "Field 'q' must be non-empty");
+    SendError(res, kHttpBadRequest, "Field 'q' must be non-empty", mygram::utils::ErrorCode::kQuerySyntaxError);
     return false;
   }
 
@@ -1165,7 +1180,8 @@ bool HttpServer::ValidateHttpQueryText(const std::string& query_text, httplib::R
     SendError(res, kHttpBadRequest,
               "Query text length (" + std::to_string(query_text.size()) + ") exceeds maximum allowed length of " +
                   std::to_string(max_query_length) +
-                  " characters. Increase api.max_query_length to permit longer queries.");
+                  " characters. Increase api.max_query_length to permit longer queries.",
+              mygram::utils::ErrorCode::kQueryTooLong);
     return false;
   }
   return true;
@@ -1183,13 +1199,13 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
 
   // Validate required field
   if (!body.contains("q")) {
-    SendError(res, kHttpBadRequest, "Missing required field: q");
+    SendError(res, kHttpBadRequest, "Missing required field: q", mygram::utils::ErrorCode::kQuerySyntaxError);
     return std::nullopt;
   }
 
   // Validate field type before extraction
   if (!body["q"].is_string()) {
-    SendError(res, kHttpBadRequest, "Field 'q' must be a string");
+    SendError(res, kHttpBadRequest, "Field 'q' must be a string", mygram::utils::ErrorCode::kQuerySyntaxError);
     return std::nullopt;
   }
 
@@ -1201,7 +1217,8 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
         SendError(res, kHttpBadRequest,
                   "Field '" + std::string(field) +
                       "' is not supported by COUNT; use /search for ranked or paginated "
-                      "results");
+                      "results",
+                  mygram::utils::ErrorCode::kQuerySyntaxError);
         return std::nullopt;
       }
     }
@@ -1260,30 +1277,31 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
   auto& body = request->body;
 
   if (!body.contains("column")) {
-    SendError(res, kHttpBadRequest, "Missing required field: column");
+    SendError(res, kHttpBadRequest, "Missing required field: column", mygram::utils::ErrorCode::kQuerySyntaxError);
     return std::nullopt;
   }
   if (!body["column"].is_string()) {
-    SendError(res, kHttpBadRequest, "Field 'column' must be a string");
+    SendError(res, kHttpBadRequest, "Field 'column' must be a string", mygram::utils::ErrorCode::kQuerySyntaxError);
     return std::nullopt;
   }
 
   if (body.contains("q") && !body["q"].is_string()) {
-    SendError(res, kHttpBadRequest, "Field 'q' must be a string");
+    SendError(res, kHttpBadRequest, "Field 'q' must be a string", mygram::utils::ErrorCode::kQuerySyntaxError);
     return std::nullopt;
   }
 
   static constexpr std::array<std::string_view, 3> kFacetRejectedFields = {"sort", "highlight", "fuzzy"};
   for (const auto field : kFacetRejectedFields) {
     if (body.contains(std::string(field))) {
-      SendError(res, kHttpBadRequest, "Field '" + std::string(field) + "' is not supported by FACET");
+      SendError(res, kHttpBadRequest, "Field '" + std::string(field) + "' is not supported by FACET",
+                mygram::utils::ErrorCode::kQuerySyntaxError);
       return std::nullopt;
     }
   }
 
   std::string column = body["column"].get<std::string>();
   if (!query::QueryParser::IsSafeColumnName(column)) {
-    SendError(res, kHttpBadRequest, "Invalid facet column");
+    SendError(res, kHttpBadRequest, "Invalid facet column", mygram::utils::ErrorCode::kQueryInvalidToken);
     return std::nullopt;
   }
 
@@ -1383,7 +1401,8 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       if (!current_doc_store->IsStoreTextsEnabled()) {
         SendError(res, kHttpBadRequest,
                   "HIGHLIGHT requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
-                  "configuration.");
+                  "configuration.",
+                  mygram::utils::ErrorCode::kNotImplemented);
         return;
       }
       highlight_texts = current_doc_store->GetNormalizedTextBatch(sorted_results);
@@ -1431,7 +1450,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
         .Field("handler", "search")
         .Field("error", e.what())
         .Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -1472,7 +1491,7 @@ void HttpServer::HandleCount(const httplib::Request& req, httplib::Response& res
         .Field("handler", "count")
         .Field("error", e.what())
         .Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -1523,7 +1542,7 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
         .Field("handler", "facet")
         .Field("error", e.what())
         .Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -1544,7 +1563,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     std::string primary_key = ExtractRoutePrimaryKey(req);
     auto lookup = ResolveHttpTableContext(ExtractRouteTableKey(req));
     if (lookup.table_ctx == nullptr) {
-      SendError(res, lookup.status, lookup.message);
+      SendError(res, lookup.status, lookup.message, lookup.code);
       return;
     }
     if (RejectIfTableSyncing(lookup.table_key, res)) {
@@ -1583,7 +1602,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog().Event("http_handler_error").Field("handler", "get").Field("error", e.what()).Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -1736,7 +1755,7 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
         .Field("handler", "info")
         .Field("error", e.what())
         .Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -1939,7 +1958,7 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
   RecordCommand(query::QueryType::CONFIG_SHOW);
 
   if (full_config_ == nullptr) {
-    SendError(res, kHttpInternalServerError, "Configuration not available");
+    SendError(res, kHttpInternalServerError, "Configuration not available", mygram::utils::ErrorCode::kInternalError);
     return;
   }
 
@@ -1980,7 +1999,7 @@ void HttpServer::HandleConfig(const httplib::Request& /*req*/, httplib::Response
         .Field("handler", "config")
         .Field("error", e.what())
         .Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -1990,7 +2009,7 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
 
 #ifdef USE_MYSQL
   if (binlog_reader_ == nullptr) {
-    SendError(res, kHttpServiceUnavailable, "Replication not configured");
+    SendError(res, kHttpServiceUnavailable, "Replication not configured", mygram::utils::ErrorCode::kNotImplemented);
     return;
   }
 
@@ -2018,10 +2037,10 @@ void HttpServer::HandleReplicationStatus(const httplib::Request& /*req*/, httpli
         .Field("handler", "replication_status")
         .Field("error", e.what())
         .Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 #else
-  SendError(res, kHttpServiceUnavailable, "MySQL replication not compiled");
+  SendError(res, kHttpServiceUnavailable, "MySQL replication not compiled", mygram::utils::ErrorCode::kNotImplemented);
 #endif
 }
 
@@ -2029,7 +2048,8 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
   RecordRequest();
 
   if (!HasJsonContentType(req)) {
-    SendError(res, kHttpUnsupportedMediaType, "Content-Type must be application/json");
+    SendError(res, kHttpUnsupportedMediaType, "Content-Type must be application/json",
+              mygram::utils::ErrorCode::kNetworkInvalidRequest);
     return;
   }
 
@@ -2042,7 +2062,8 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
         has_bearer ? std::string_view(authorization).substr(kBearerPrefix.size()) : std::string_view{};
     if (!has_bearer || !ConstantTimeEqual(supplied, full_config_->api.admin_token)) {
       res.set_header("WWW-Authenticate", "Bearer");
-      SendError(res, kHttpUnauthorized, "Administrative endpoint requires a valid bearer token");
+      SendError(res, kHttpUnauthorized, "Administrative endpoint requires a valid bearer token",
+                mygram::utils::ErrorCode::kPermissionDenied);
       return;
     }
   }
@@ -2051,17 +2072,18 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
   try {
     body = json::parse(req.body);
   } catch (const json::parse_error& error) {
-    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(error.what()));
+    SendError(res, kHttpBadRequest, "Invalid JSON: " + std::string(error.what()),
+              mygram::utils::ErrorCode::kQuerySyntaxError);
     return;
   }
   if (!body.is_object()) {
-    SendError(res, kHttpBadRequest, "Request body must be a JSON object");
+    SendError(res, kHttpBadRequest, "Request body must be a JSON object", mygram::utils::ErrorCode::kQuerySyntaxError);
     return;
   }
   for (const auto& [key, value] : body.items()) {
     (void)value;
     if (key != "table") {
-      SendError(res, kHttpBadRequest, "Unsupported field: " + key);
+      SendError(res, kHttpBadRequest, "Unsupported field: " + key, mygram::utils::ErrorCode::kQuerySyntaxError);
       return;
     }
   }
@@ -2069,20 +2091,21 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
   std::string table;
   if (body.contains("table")) {
     if (!body["table"].is_string()) {
-      SendError(res, kHttpBadRequest, "Field 'table' must be a string");
+      SendError(res, kHttpBadRequest, "Field 'table' must be a string", mygram::utils::ErrorCode::kQuerySyntaxError);
       return;
     }
     table = body["table"].get<std::string>();
     auto lookup = ResolveHttpTableContext(table);
     if (lookup.table_ctx == nullptr) {
-      SendError(res, lookup.status, lookup.message);
+      SendError(res, lookup.status, lookup.message, lookup.code);
       return;
     }
     table = std::move(lookup.table_key);
   }
 
   if (!optimize_callback_) {
-    SendError(res, kHttpServiceUnavailable, "OPTIMIZE handler is not available");
+    SendError(res, kHttpServiceUnavailable, "OPTIMIZE handler is not available",
+              mygram::utils::ErrorCode::kServerInitMissingDependency);
     return;
   }
 
@@ -2103,7 +2126,7 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
     SendError(res, kHttpServiceUnavailable, std::string(error_frame->message), code);
     return;
   }
-  SendError(res, kHttpServiceUnavailable, result);
+  SendError(res, kHttpServiceUnavailable, result, mygram::utils::ErrorCode::kInternalError);
 }
 
 void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Response& res) {
@@ -2129,7 +2152,7 @@ void HttpServer::HandleMetrics(const httplib::Request& /*req*/, httplib::Respons
         .Field("handler", "metrics")
         .Field("error", e.what())
         .Error();
-    SendError(res, kHttpInternalServerError, "Internal server error");
+    SendError(res, kHttpInternalServerError, "Internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 }
 

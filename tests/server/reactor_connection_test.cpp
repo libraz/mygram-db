@@ -231,7 +231,7 @@ TEST_F(ReactorConnectionTest, ThrowingHandlerReturnsErrorAndDoesNotWedgeDrainSlo
   char response[128] = {};
   const ssize_t received = ::read(peer_fd_, response, sizeof(response));
   ASSERT_GT(received, 0);
-  EXPECT_NE(std::string_view(response, static_cast<size_t>(received)).find("ERROR 1 internal server error"),
+  EXPECT_NE(std::string_view(response, static_cast<size_t>(received)).find("ERROR 5 internal server error"),
             std::string_view::npos);
 
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -409,7 +409,7 @@ TEST_F(ReactorConnectionNoDispatcherTest, OnReadableRespectsMaxReadBuffer) {
   char response[128]{};
   ssize_t n = ::recv(peer_fd_, response, sizeof(response) - 1, 0);
   ASSERT_GT(n, 0) << "Expected request-too-large error response";
-  EXPECT_NE(std::string(response, static_cast<size_t>(n)).find("ERROR 1 request too large"), std::string::npos);
+  EXPECT_NE(std::string(response, static_cast<size_t>(n)).find("ERROR 6007 request too large"), std::string::npos);
 }
 
 TEST_F(ReactorConnectionNoDispatcherTest, ReadBufferCapAppliesOnlyToUnframedTail) {
@@ -584,10 +584,11 @@ TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowErrorHoldsWriteMutexAcross
   auto release_future = release.get_future().share();
 
   auto error_sender = std::async(std::launch::async, [this, &entered, release_future]() {
-    return conn_->SendReadOverflowErrorForTest("request too large", [&entered, release_future]() {
-      entered.set_value();
-      release_future.wait();
-    });
+    return conn_->SendReadOverflowErrorForTest("request too large", mygram::utils::ErrorCode::kNetworkInvalidRequest,
+                                               [&entered, release_future]() {
+                                                 entered.set_value();
+                                                 release_future.wait();
+                                               });
   });
   ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
 
@@ -599,7 +600,7 @@ TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowErrorHoldsWriteMutexAcross
   EXPECT_TRUE(error_sender.get());
   EXPECT_TRUE(response_sender.get());
 
-  const std::string expected = "ERROR 1 request too large\r\nOK response\r\n";
+  const std::string expected = "ERROR 6007 request too large\r\nOK response\r\n";
   std::string received;
   while (received.size() < expected.size() && WaitReadable(peer_fd_, 1000)) {
     char response[128]{};

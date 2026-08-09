@@ -92,7 +92,8 @@ TcpServer::~TcpServer() {
 
 std::string TcpServer::HandleOptimizeRequest(const std::string& table) {
   if (debug_handler_ == nullptr) {
-    return ResponseFormatter::FormatError("OPTIMIZE handler is not initialized");
+    return ResponseFormatter::FormatError("OPTIMIZE handler is not initialized",
+                                          mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
 
   query::Query optimize_query;

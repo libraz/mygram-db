@@ -37,12 +37,13 @@ std::string VariableHandler::Handle(const Query& query, ConnectionContext& /*con
     return HandleShowVariables(query);
   }
 
-  return ResponseFormatter::FormatError("Unknown variable command");
+  return ResponseFormatter::FormatError("Unknown variable command", mygram::utils::ErrorCode::kQuerySyntaxError);
 }
 
 std::string VariableHandler::HandleSet(const Query& query) {
   if (ctx_.variable_manager == nullptr) {
-    return ResponseFormatter::FormatError("Runtime variable manager not initialized");
+    return ResponseFormatter::FormatError("Runtime variable manager not initialized",
+                                          mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
 
   std::vector<std::pair<std::string, std::string>> applied_old_values;
@@ -54,8 +55,8 @@ std::string VariableHandler::HandleSet(const Query& query) {
   for (const auto& [variable_name, value] : query.variable_assignments) {
     auto old_value = ctx_.variable_manager->GetVariable(variable_name);
     if (!old_value) {
-      return ResponseFormatter::FormatError("Failed to set variable '" + variable_name +
-                                            "': " + old_value.error().message());
+      return ResponseFormatter::FormatError(mygram::utils::MakeError(
+          old_value.error().code(), "Failed to set variable '" + variable_name + "': " + old_value.error().message()));
     }
 
     auto result = ctx_.variable_manager->SetVariable(variable_name, value);
@@ -70,8 +71,8 @@ std::string VariableHandler::HandleSet(const Query& query) {
               .Error();
         }
       }
-      return ResponseFormatter::FormatError("Failed to set variable '" + variable_name +
-                                            "': " + result.error().message());
+      return ResponseFormatter::FormatError(mygram::utils::MakeError(
+          result.error().code(), "Failed to set variable '" + variable_name + "': " + result.error().message()));
     }
     applied_old_values.emplace_back(variable_name, *old_value);
   }
@@ -91,7 +92,8 @@ std::string VariableHandler::HandleSet(const Query& query) {
 
 std::string VariableHandler::HandleShowVariables(const Query& query) {
   if (ctx_.variable_manager == nullptr) {
-    return ResponseFormatter::FormatError("Runtime variable manager not initialized");
+    return ResponseFormatter::FormatError("Runtime variable manager not initialized",
+                                          mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
 
   // Get all variables (optionally filtered by LIKE pattern prefix).

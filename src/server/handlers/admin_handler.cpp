@@ -44,7 +44,8 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
       // with table_catalog=nullptr). Keep the null-check scoped to commands that
       // dereference the catalog so config commands remain usable in admin-only contexts.
       if (ctx_.table_catalog == nullptr) {
-        return ResponseFormatter::FormatError("Table catalog not initialized");
+        return ResponseFormatter::FormatError("Table catalog not initialized",
+                                              mygram::utils::ErrorCode::kCatalogNotInitialized);
       }
       const auto& tables = ctx_.table_catalog->GetTables();
       // 1. Aggregate metrics (domain layer, pure function)
@@ -83,7 +84,8 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
       return HandleConfigVerify(query.filepath);
 
     default:
-      return ResponseFormatter::FormatError("Invalid query type for AdminHandler");
+      return ResponseFormatter::FormatError("Invalid query type for AdminHandler",
+                                            mygram::utils::ErrorCode::kInternalError);
   }
 }
 
@@ -91,7 +93,8 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
   auto explorer_result = config::ConfigSchemaExplorer::Create();
   if (!explorer_result) {
     mygram::utils::StructuredLog().Event("config_help_failed").FieldError(explorer_result.error()).Error();
-    return ResponseFormatter::FormatError(std::string("CONFIG HELP failed: ") + explorer_result.error().message());
+    return ResponseFormatter::FormatError(mygram::utils::MakeError(
+        explorer_result.error().code(), std::string("CONFIG HELP failed: ") + explorer_result.error().message()));
   }
   auto& explorer = *explorer_result;
 
@@ -106,7 +109,7 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
   // Show help for specific path
   auto help_info = explorer.GetHelp(path);
   if (!help_info.has_value()) {
-    return ResponseFormatter::FormatError("Configuration path not found: " + path);
+    return ResponseFormatter::FormatError("Configuration path not found: " + path, mygram::utils::ErrorCode::kNotFound);
   }
 
   std::string result = config::ConfigSchemaExplorer::FormatHelp(help_info.value());
@@ -117,7 +120,8 @@ std::string AdminHandler::HandleConfigHelp(const std::string& path) {
 std::string AdminHandler::HandleConfigShow(const std::string& path) {
   if (ctx_.full_config == nullptr) {
     mygram::utils::StructuredLog().Event("config_show_warning").Field("reason", "config_not_available").Warn();
-    return ResponseFormatter::FormatError("Server configuration is not available");
+    return ResponseFormatter::FormatError("Server configuration is not available",
+                                          mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
 
   config::Config display_config =
@@ -125,7 +129,8 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
   auto format_result = config::FormatConfigForDisplay(display_config, path);
   if (!format_result) {
     mygram::utils::StructuredLog().Event("config_show_failed").FieldError(format_result.error()).Error();
-    return ResponseFormatter::FormatError(std::string("CONFIG SHOW failed: ") + format_result.error().message());
+    return ResponseFormatter::FormatError(mygram::utils::MakeError(
+        format_result.error().code(), std::string("CONFIG SHOW failed: ") + format_result.error().message()));
   }
 
   std::string result = std::move(*format_result);
@@ -138,28 +143,32 @@ std::string AdminHandler::HandleConfigShow(const std::string& path) {
 
 std::string AdminHandler::HandleConfigVerify(const std::string& filepath) const {
   if (filepath.empty()) {
-    return ResponseFormatter::FormatError("CONFIG VERIFY requires a filepath");
+    return ResponseFormatter::FormatError("CONFIG VERIFY requires a filepath",
+                                          mygram::utils::ErrorCode::kQuerySyntaxError);
   }
 
   // Security: restrict to relative paths to avoid reading arbitrary filesystem
   // paths through CONFIG VERIFY. The check is performed before symlink
   // resolution so that the user-visible argument is what we evaluate.
   if (!filepath.empty() && filepath[0] == '/') {
-    return ResponseFormatter::FormatError("CONFIG VERIFY: absolute paths not allowed");
+    return ResponseFormatter::FormatError("CONFIG VERIFY: absolute paths not allowed",
+                                          mygram::utils::ErrorCode::kInvalidArgument);
   }
   // Reject any traversal sequence (..) explicitly — even though
   // ResolveSafePath would later catch escapes via lexically_relative, the
   // historical error message "path traversal (..) not allowed" is part of the
   // public CLI surface and must be preserved.
   if (filepath.find("..") != std::string::npos) {
-    return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed");
+    return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed",
+                                          mygram::utils::ErrorCode::kInvalidArgument);
   }
 
   // Resolve relative to the active configuration file. The process working
   // directory is mutable (daemonization changes it to "/") and must not
   // become an implicit file-disclosure root for a remote command.
   if (ctx_.full_config == nullptr || ctx_.full_config->source_path.empty()) {
-    return ResponseFormatter::FormatError("CONFIG VERIFY: active configuration directory is unavailable");
+    return ResponseFormatter::FormatError("CONFIG VERIFY: active configuration directory is unavailable",
+                                          mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
   std::error_code ec;
   const std::string base_dir = std::filesystem::path(ctx_.full_config->source_path).parent_path().string();
@@ -169,12 +178,15 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) const 
     const auto& err = resolved.error();
     // Surface a more user-friendly error for the most common failure modes.
     if (err.message().find("Disallowed file extension") != std::string::npos) {
-      return ResponseFormatter::FormatError("CONFIG VERIFY only accepts .yaml or .yml files");
+      return ResponseFormatter::FormatError("CONFIG VERIFY only accepts .yaml or .yml files",
+                                            mygram::utils::ErrorCode::kInvalidArgument);
     }
     if (err.message().find("must be within base directory") != std::string::npos) {
-      return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed");
+      return ResponseFormatter::FormatError("CONFIG VERIFY: path traversal (..) not allowed",
+                                            mygram::utils::ErrorCode::kInvalidArgument);
     }
-    return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath);
+    return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath,
+                                          mygram::utils::ErrorCode::kConfigFileNotFound);
   }
   std::string canonical_path = std::move(*resolved);
 
@@ -188,15 +200,18 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) const 
   std::filesystem::path joined = std::filesystem::path(base_dir) / std::filesystem::path(filepath);
   std::filesystem::path joined_normal = joined.lexically_normal();
   if (std::filesystem::exists(joined_normal, ec) && std::filesystem::path(canonical_path) != joined_normal) {
-    return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed");
+    return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed",
+                                          mygram::utils::ErrorCode::kInvalidArgument);
   }
 
   // Verify the resolved target is a regular file (not a device, FIFO, etc.).
   if (!std::filesystem::exists(canonical_path, ec)) {
-    return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath);
+    return ResponseFormatter::FormatError("CONFIG VERIFY: file not found: " + filepath,
+                                          mygram::utils::ErrorCode::kConfigFileNotFound);
   }
   if (!std::filesystem::is_regular_file(canonical_path, ec)) {
-    return ResponseFormatter::FormatError("CONFIG VERIFY: not a regular file");
+    return ResponseFormatter::FormatError("CONFIG VERIFY: not a regular file",
+                                          mygram::utils::ErrorCode::kInvalidArgument);
   }
 
   // TOCTOU mitigation: between the canonical()/exists()/is_regular_file()
@@ -219,7 +234,8 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) const 
     if (probe_fd < 0) {
       // ELOOP indicates the path is now a symlink (raced); other errors
       // (ENOENT, EACCES, ...) also defeat verification, so reject.
-      return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed");
+      return ResponseFormatter::FormatError("CONFIG VERIFY: symbolic links are not allowed",
+                                            mygram::utils::ErrorCode::kInvalidArgument);
     }
     ::close(probe_fd);
   }
@@ -237,8 +253,9 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) const 
         .Field("filepath", filepath)
         .FieldError(config_result.error())
         .Warn();
-    return ResponseFormatter::FormatError(std::string("Configuration validation failed:\r\n  ") +
-                                          config_result.error().message());
+    return ResponseFormatter::FormatError(mygram::utils::MakeError(
+        config_result.error().code(),
+        std::string("Configuration validation failed:\r\n  ") + config_result.error().message()));
   }
 
   config::Config test_config = *config_result;

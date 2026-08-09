@@ -46,7 +46,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       if (ctx_.sync_manager != nullptr) {
         auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kOptimize);
         if (!check) {
-          return ResponseFormatter::FormatError(check.error().message());
+          return ResponseFormatter::FormatError(check.error());
         }
       }
 #endif
@@ -55,7 +55,8 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       if (ctx_.dump_load_in_progress.load()) {
         return ResponseFormatter::FormatError(
             "Cannot optimize while DUMP LOAD is in progress. "
-            "Please wait for load to complete.");
+            "Please wait for load to complete.",
+            mygram::utils::ErrorCode::kServerBusy);
       }
 
       OperationCoordinator::Token operation_token;
@@ -63,8 +64,9 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
         const std::string operation_detail = query.table.empty() ? "all tables" : query.table;
         auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kOptimize, operation_detail);
         if (!acquired.has_value()) {
-          return ResponseFormatter::FormatError("Cannot optimize while " +
-                                                ctx_.operation_coordinator->DescribeActive() + " is in progress");
+          return ResponseFormatter::FormatError(
+              "Cannot optimize while " + ctx_.operation_coordinator->DescribeActive() + " is in progress",
+              mygram::utils::ErrorCode::kServerBusy);
         }
         operation_token = std::move(*acquired);
       }
@@ -75,11 +77,13 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       // the index-rebuild critical section.
       auto guard = mygram::utils::OperationGuard::TryAcquire(ctx_.optimization_in_progress);
       if (!guard.engaged()) {
-        return ResponseFormatter::FormatError("Another OPTIMIZE operation is already in progress");
+        return ResponseFormatter::FormatError("Another OPTIMIZE operation is already in progress",
+                                              mygram::utils::ErrorCode::kServerBusy);
       }
 
       if (ctx_.table_catalog == nullptr) {
-        return ResponseFormatter::FormatError("Table catalog not initialized");
+        return ResponseFormatter::FormatError("Table catalog not initialized",
+                                              mygram::utils::ErrorCode::kCatalogNotInitialized);
       }
 
       // Check memory health before optimization
@@ -97,14 +101,16 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
             .Field("reason", "critical_memory_status")
             .Field("details", oss.str())
             .Warn();
-        return ResponseFormatter::FormatError("Memory critically low. Cannot start optimization: " + oss.str());
+        return ResponseFormatter::FormatError("Memory critically low. Cannot start optimization: " + oss.str(),
+                                              mygram::utils::ErrorCode::kServerBusy);
       }
 
       std::vector<std::string> table_names;
       if (query.table.empty()) {
         table_names = ctx_.table_catalog->GetTableNames();
         if (table_names.empty()) {
-          return ResponseFormatter::FormatError("No tables are available for optimization");
+          return ResponseFormatter::FormatError("No tables are available for optimization",
+                                                mygram::utils::ErrorCode::kTableNotFound);
         }
       } else {
         table_names.push_back(query.table);
@@ -120,12 +126,13 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
       for (const auto& table_name : table_names) {
         auto table_ctx = GetTableContext(table_name);
         if (!table_ctx) {
-          return ResponseFormatter::FormatError(table_ctx.error().message());
+          return ResponseFormatter::FormatError(table_ctx.error());
         }
         auto* current_index = table_ctx->index;
         auto* current_doc_store = table_ctx->doc_store;
         if (current_index == nullptr || current_doc_store == nullptr) {
-          return ResponseFormatter::FormatError("Index or document store not available for table: " + table_name);
+          return ResponseFormatter::FormatError("Index or document store not available for table: " + table_name,
+                                                mygram::utils::ErrorCode::kInternalError);
         }
 
         const uint64_t index_memory = current_index->MemoryUsage();
@@ -146,7 +153,8 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
               .Field("details", oss.str())
               .Field("table", table_name)
               .Warn();
-          return ResponseFormatter::FormatError("Insufficient memory for optimization: " + oss.str());
+          return ResponseFormatter::FormatError("Insufficient memory for optimization: " + oss.str(),
+                                                mygram::utils::ErrorCode::kServerBusy);
         }
 
         mygram::utils::StructuredLog()
@@ -159,7 +167,8 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
             .Info();
 
         if (!current_index->OptimizeInBatches(total_docs, kDefaultBatchSize)) {
-          return ResponseFormatter::FormatError("Failed to optimize table: " + table_name);
+          return ResponseFormatter::FormatError("Failed to optimize table: " + table_name,
+                                                mygram::utils::ErrorCode::kInternalError);
         }
         auto stats = current_index->GetStatistics();
         ++optimized_tables;
@@ -176,7 +185,8 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
     }
 
     default:
-      return ResponseFormatter::FormatError("Invalid query type for DebugHandler");
+      return ResponseFormatter::FormatError("Invalid query type for DebugHandler",
+                                            mygram::utils::ErrorCode::kInternalError);
   }
 }
 

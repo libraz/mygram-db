@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -83,6 +84,16 @@ std::string SendTcpRequest(uint16_t port, const std::string& request) {
   }
   close(sock);
   return response;
+}
+
+// Extract the numeric code from an "ERROR <code> <message>" frame, or -1 when
+// the response is not a coded error frame.
+int ParseTcpErrorCode(const std::string& response) {
+  std::istringstream stream(response);
+  std::string tag;
+  int code = -1;
+  stream >> tag >> code;
+  return tag == "ERROR" ? code : -1;
 }
 
 // Extract the numeric "OK SEARCH N" / "OK COUNT N" prefix.
@@ -220,6 +231,7 @@ class HttpTcpConsistencyTest : public ::testing::Test {
     tcp_cfg.host = "127.0.0.1";
     tcp_cfg.port = 0;
     tcp_cfg.allow_cidrs = {"127.0.0.1/32"};
+    tcp_cfg.admin_token = config_->api.admin_token;
     tcp_server_ = std::make_unique<TcpServer>(tcp_cfg, table_contexts_, "./dumps", config_.get());
     ASSERT_TRUE(tcp_server_->Start());
     tcp_port_ = tcp_server_->GetPort();
@@ -295,6 +307,52 @@ TEST_F(HttpTcpConsistencyTest, HttpOptimizePreservesCodedCallbackError) {
   const auto body = json::parse(response->body);
   EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kInternalError));
   EXPECT_EQ(body["error"], "Optimization failed");
+}
+
+TEST_F(HttpTcpConsistencyTest, ErrorCodesMatchAcrossProtocols) {
+  httplib::Client client("127.0.0.1", http_port_);
+
+  // An unknown table is the same fault whichever surface reports it.
+  const auto tcp_missing = SendTcpRequest(tcp_port_, "SEARCH app.missing machine");
+  EXPECT_EQ(ParseTcpErrorCode(tcp_missing), static_cast<int>(mygram::utils::ErrorCode::kTableNotFound)) << tcp_missing;
+  auto http_missing = client.Post("/tables/app.missing/search", R"({"q":"machine"})", "application/json");
+  ASSERT_TRUE(http_missing);
+  ASSERT_EQ(http_missing->status, 404) << http_missing->body;
+  EXPECT_EQ(json::parse(http_missing->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kTableNotFound));
+
+  // So is an administrative request that carries no credentials.
+  const auto tcp_unauthenticated = SendTcpRequest(tcp_port_, "OPTIMIZE");
+  EXPECT_EQ(ParseTcpErrorCode(tcp_unauthenticated), static_cast<int>(mygram::utils::ErrorCode::kPermissionDenied))
+      << tcp_unauthenticated;
+  auto http_unauthorized = client.Post("/optimize", "{}", "application/json");
+  ASSERT_TRUE(http_unauthorized);
+  ASSERT_EQ(http_unauthorized->status, 401) << http_unauthorized->body;
+  EXPECT_EQ(json::parse(http_unauthorized->body)["error_code"],
+            static_cast<int>(mygram::utils::ErrorCode::kPermissionDenied));
+}
+
+TEST_F(HttpTcpConsistencyTest, HttpRequestErrorsNameTheirCause) {
+  httplib::Client client("127.0.0.1", http_port_);
+
+  struct RejectedRequest {
+    const char* body;
+    const char* content_type;
+    mygram::utils::ErrorCode expected;
+  };
+  const std::array<RejectedRequest, 5> cases = {{
+      {R"({"q":"machine","limit":0})", "application/json", mygram::utils::ErrorCode::kQueryInvalidLimit},
+      {R"({"q":"machine","offset":-1})", "application/json", mygram::utils::ErrorCode::kQueryInvalidOffset},
+      {R"({"q":"machine","filters":[]})", "application/json", mygram::utils::ErrorCode::kQueryInvalidFilter},
+      {"{not json", "application/json", mygram::utils::ErrorCode::kQuerySyntaxError},
+      {R"({"q":"machine"})", "text/plain", mygram::utils::ErrorCode::kNetworkInvalidRequest},
+  }};
+
+  for (const auto& rejected : cases) {
+    auto response = client.Post("/tables/app.articles/search", rejected.body, rejected.content_type);
+    ASSERT_TRUE(response) << rejected.body;
+    const auto body = json::parse(response->body);
+    EXPECT_EQ(body["error_code"], static_cast<int>(rejected.expected)) << response->body;
+  }
 }
 
 TEST_F(HttpTcpConsistencyTest, HttpOptimizeValidatesPayloadAndAdminToken) {
