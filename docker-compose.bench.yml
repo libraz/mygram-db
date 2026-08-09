@@ -26,7 +26,7 @@ services:
       - --collation-server=utf8mb4_unicode_ci
       - --local-infile=ON
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - bench_mysql_data:/var/lib/mysql
       - ./support/docker/mysql/init/01-create-tables.sql:/docker-entrypoint-initdb.d/01-create-tables.sql:ro
@@ -68,13 +68,21 @@ services:
       MEMORY_NORMALIZE_WIDTH: narrow
       MEMORY_NORMALIZE_LOWER: "true"
       CACHE_ENABLED: "false"
-      NETWORK_ALLOW_CIDRS: 0.0.0.0/0
+      # The container has to listen on its own network interface, so host
+      # exposure is limited by the loopback ports mapping below instead. Docker
+      # rewrites the source address of a published-port connection to the
+      # bridge gateway, so the allow list covers the bridge range rather than
+      # 127.0.0.1, which would reject every benchmark client.
+      NETWORK_ALLOW_CIDRS: 127.0.0.1/32,172.16.0.0/12
       API_BIND: 0.0.0.0
       API_PORT: "11016"
+      # Throwaway local stack, so this is fixed for the same reason the MySQL
+      # password above is. Administrative TCP commands need AUTH with it.
+      API_ADMIN_TOKEN: bench-local-only
       LOG_LEVEL: info
       LOG_FORMAT: json
     ports:
-      - "11016:11016"
+      - "127.0.0.1:11016:11016"
     volumes:
       - bench_mygramdb_data:/var/lib/mygramdb
       - ./support/docker/bench-entrypoint.sh:/bench-entrypoint.sh:ro
