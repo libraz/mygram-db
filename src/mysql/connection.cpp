@@ -34,9 +34,10 @@ mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_er
   constexpr unsigned int kUnknownColumn = 1054;
   constexpr unsigned int kCommandDenied = 1142;
   constexpr unsigned int kNoSuchTable = 1146;
-  constexpr unsigned int kServerGoneAway = 2006;      // CR_SERVER_GONE_ERROR
-  constexpr unsigned int kServerLost = 2013;          // CR_SERVER_LOST (includes read timeout)
-  constexpr unsigned int kServerLostExtended = 2055;  // CR_SERVER_LOST_EXTENDED
+  constexpr unsigned int kSpecificAccessDenied = 1227;  // Missing SUPER / REPLICATION CLIENT
+  constexpr unsigned int kServerGoneAway = 2006;        // CR_SERVER_GONE_ERROR
+  constexpr unsigned int kServerLost = 2013;            // CR_SERVER_LOST (includes read timeout)
+  constexpr unsigned int kServerLostExtended = 2055;    // CR_SERVER_LOST_EXTENDED
   switch (native_error) {
     case kNoSuchTable:
       return mygram::utils::ErrorCode::kMySQLTableNotFound;
@@ -45,6 +46,7 @@ mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_er
     case kAccessDeniedDatabase:
     case kAccessDeniedUser:
     case kCommandDenied:
+    case kSpecificAccessDenied:
       return mygram::utils::ErrorCode::kPermissionDenied;
     case kServerGoneAway:
     case kServerLost:
@@ -711,8 +713,10 @@ mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetLatest
   // MySQL: Try new syntax first (MySQL 8.0.23+)
   auto result_exp = Execute("SHOW BINARY LOG STATUS");
 
-  // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23
-  if (!result_exp) {
+  // Fallback to old syntax for MySQL 5.7 / 8.0 < 8.0.23. A missing privilege is
+  // reported as-is instead: the legacy statement was removed in MySQL 8.4, so
+  // retrying it would bury the real cause under a parse error.
+  if (!result_exp && result_exp.error().code() != mygram::utils::ErrorCode::kPermissionDenied) {
     mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "fallback_show_master_status").Debug();
     result_exp = Execute("SHOW MASTER STATUS");
   }

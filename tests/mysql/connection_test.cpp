@@ -181,6 +181,10 @@ TEST(MySQLConnectionTest, QueryErrorClassificationKeepsSemanticFailuresTerminal)
   EXPECT_EQ(internal::ClassifyQueryErrorCode(1146), ErrorCode::kMySQLTableNotFound);
   EXPECT_EQ(internal::ClassifyQueryErrorCode(1054), ErrorCode::kMySQLColumnNotFound);
   EXPECT_EQ(internal::ClassifyQueryErrorCode(1045), ErrorCode::kPermissionDenied);
+  // A replication account missing REPLICATION CLIENT reports 1227 rather than a
+  // generic access denial, and the binary log status query relies on the
+  // distinction to skip its pre-8.4 fallback.
+  EXPECT_EQ(internal::ClassifyQueryErrorCode(1227), ErrorCode::kPermissionDenied);
   EXPECT_EQ(internal::ClassifyQueryErrorCode(1064), ErrorCode::kMySQLQueryFailed);
 }
 
