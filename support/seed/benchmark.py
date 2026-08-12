@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import platform
 import socket
 import statistics
+import subprocess
 import sys
 import threading
 import time
@@ -103,27 +106,69 @@ def _mysql_connect(host: str, port: int, user: str, password: str, db: str):
 # Benchmark Helpers
 # ============================================================================
 
-def run_iterations(func, iterations: int) -> list[float]:
-    """Run a function N times, return list of elapsed_ms."""
-    # Warmup
-    func()
-    return [func() for _ in range(iterations)]
+def progress(message: str) -> None:
+    """Write transient progress to stderr.
+
+    Keeping it off stdout means a piped run produces a report that can be
+    published verbatim, instead of one littered with carriage returns.
+    """
+    print(f"  {message}{' ' * 40}", end="\r", file=sys.stderr, flush=True)
+
+
+def percentile(sorted_times: list[float], q: float) -> float:
+    """Nearest-rank percentile over an already-sorted list."""
+    if not sorted_times:
+        return float("inf")
+    rank = max(1, math.ceil(q * len(sorted_times)))
+    return sorted_times[min(rank, len(sorted_times)) - 1]
+
+
+def summarize(times: list[float]) -> dict[str, Any]:
+    """Reduce raw timings to the distribution actually worth publishing.
+
+    A median on its own hides the tail that decides whether an engine is
+    usable, so p95/p99 and the spread are reported alongside it, with the
+    sample count so a reader can tell how much the tail is worth.
+    """
+    if not times:
+        return {"n": 0, "p50": float("inf"), "p95": float("inf"), "p99": float("inf"),
+                "mean": float("inf"), "stdev": 0.0, "min": float("inf"), "max": float("inf")}
+    ordered = sorted(times)
+    return {
+        "n": len(ordered),
+        "p50": percentile(ordered, 0.50),
+        "p95": percentile(ordered, 0.95),
+        "p99": percentile(ordered, 0.99),
+        "mean": statistics.mean(ordered),
+        "stdev": statistics.stdev(ordered) if len(ordered) > 1 else 0.0,
+        "min": ordered[0],
+        "max": ordered[-1],
+    }
+
+
+def error_stats(message: str) -> dict[str, Any]:
+    stats = summarize([])
+    stats["error"] = message
+    return stats
 
 
 def benchmark_mysql_search(
     host: str, port: int, user: str, password: str, db: str,
-    query: str, limit: int = 100, iterations: int = 5,
+    query: str, limit: int = 100, iterations: int = 5, warmup: int = 3,
 ) -> dict[str, Any] | None:
     conn = _mysql_connect(host, port, user, password, db)
     cursor = conn.cursor()
     sql = f"SELECT id FROM articles WHERE MATCH(content) AGAINST(%s IN BOOLEAN MODE) ORDER BY id LIMIT {limit}"
     try:
-        cursor.execute(sql, (query,))
-        cursor.fetchall()
+        for _ in range(warmup):
+            cursor.execute(sql, (query,))
+            cursor.fetchall()
     except Exception as e:
         cursor.close()
         conn.close()
-        return {"error": str(e), "p50": float("inf"), "mean": float("inf"), "min": float("inf"), "max": float("inf"), "rows": 0}
+        stats = error_stats(str(e))
+        stats["rows"] = 0
+        return stats
 
     times = []
     row_count = 0
@@ -140,26 +185,33 @@ def benchmark_mysql_search(
             times.append(elapsed)
     cursor.close()
     conn.close()
-    return {"p50": statistics.median(times), "mean": statistics.mean(times), "min": min(times), "max": max(times), "rows": row_count}
+    stats = summarize(times)
+    stats["rows"] = row_count
+    return stats
 
 
 def benchmark_mysql_count(
     host: str, port: int, user: str, password: str, db: str,
-    query: str, iterations: int = 5,
+    query: str, iterations: int = 5, warmup: int = 3,
 ) -> dict[str, Any]:
     try:
         conn = _mysql_connect(host, port, user, password, db)
     except Exception as e:
-        return {"error": str(e), "p50": float("inf"), "mean": float("inf"), "count": 0}
+        stats = error_stats(str(e))
+        stats["count"] = 0
+        return stats
     cursor = conn.cursor()
     sql = "SELECT COUNT(*) FROM articles WHERE MATCH(content) AGAINST(%s IN BOOLEAN MODE)"
     try:
-        cursor.execute(sql, (query,))
-        cursor.fetchall()
+        for _ in range(warmup):
+            cursor.execute(sql, (query,))
+            cursor.fetchall()
     except Exception as e:
         cursor.close()
         conn.close()
-        return {"error": str(e), "p50": float("inf"), "mean": float("inf"), "count": 0}
+        stats = error_stats(str(e))
+        stats["count"] = 0
+        return stats
     times = []
     count = 0
     for _ in range(iterations):
@@ -175,35 +227,43 @@ def benchmark_mysql_count(
             times.append(elapsed)
     cursor.close()
     conn.close()
-    return {"p50": statistics.median(times), "mean": statistics.mean(times), "count": count}
+    stats = summarize(times)
+    stats["count"] = count
+    return stats
 
 
 def benchmark_mygramdb_search(
-    host: str, port: int, query: str, limit: int = 100, iterations: int = 5,
+    host: str, port: int, query: str, limit: int = 100, iterations: int = 5, warmup: int = 3,
 ) -> dict[str, Any]:
     client = MygramDBClient(host, port)
-    client.search("articles", query, limit=limit)
+    for _ in range(warmup):
+        client.search("articles", query, limit=limit)
     times = []
     row_count = 0
     for _ in range(iterations):
         rows, elapsed = client.search("articles", query, limit=limit)
         times.append(elapsed)
         row_count = rows
-    return {"p50": statistics.median(times), "mean": statistics.mean(times), "min": min(times), "max": max(times), "rows": row_count}
+    stats = summarize(times)
+    stats["rows"] = row_count
+    return stats
 
 
 def benchmark_mygramdb_count(
-    host: str, port: int, query: str, iterations: int = 5,
+    host: str, port: int, query: str, iterations: int = 5, warmup: int = 3,
 ) -> dict[str, Any]:
     client = MygramDBClient(host, port)
-    client.count("articles", query)
+    for _ in range(warmup):
+        client.count("articles", query)
     times = []
     count = 0
     for _ in range(iterations):
         c, elapsed = client.count("articles", query)
         times.append(elapsed)
         count = c
-    return {"p50": statistics.median(times), "mean": statistics.mean(times), "count": count}
+    stats = summarize(times)
+    stats["count"] = count
+    return stats
 
 
 def benchmark_concurrent(
@@ -264,10 +324,106 @@ def benchmark_concurrent(
         "qps": qps,
     }
     if latencies:
-        latencies.sort()
-        result["p50"] = latencies[len(latencies) // 2]
-        result["p99"] = latencies[int(len(latencies) * 0.99)]
+        result.update(summarize(latencies))
     return result
+
+
+# ============================================================================
+# Environment capture
+# ============================================================================
+
+def _mysql_settings(host: str, port: int, user: str, password: str, db: str) -> dict[str, Any]:
+    """Record the baseline's own configuration alongside its numbers.
+
+    A latency figure means nothing without the settings that produced it, and
+    the buffer pool in particular decides whether MySQL is being measured on
+    memory or on disk.
+    """
+    wanted = [
+        "version",
+        "version_comment",
+        "innodb_buffer_pool_size",
+        "innodb_buffer_pool_instances",
+        "innodb_ft_cache_size",
+        "innodb_ft_total_cache_size",
+        "ngram_token_size",
+    ]
+    settings: dict[str, Any] = {}
+    try:
+        conn = _mysql_connect(host, port, user, password, db)
+        cursor = conn.cursor()
+        for name in wanted:
+            cursor.execute(f"SELECT @@GLOBAL.{name}")
+            settings[name] = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT ROUND(SUM(data_length)/1048576), ROUND(SUM(index_length)/1048576) "
+            "FROM information_schema.tables WHERE table_schema=%s AND table_name='articles'",
+            (db,),
+        )
+        row = cursor.fetchone()
+        if row:
+            settings["articles_data_mb"] = row[0]
+            settings["articles_index_mb"] = row[1]
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        settings["error"] = str(e)
+    return settings
+
+
+def _mysql_buffer_pool_state(host: str, port: int, user: str, password: str, db: str) -> dict[str, Any]:
+    """Measure how much of the baseline's work was served from RAM.
+
+    Sizing the pool is only a claim of fairness; the hit ratio is the evidence
+    for it. A run where MySQL still fell back to disk is a run where the
+    comparison was against I/O rather than against the index structure.
+    """
+    state: dict[str, Any] = {}
+    try:
+        conn = _mysql_connect(host, port, user, password, db)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.global_status "
+            "WHERE VARIABLE_NAME IN ('Innodb_buffer_pool_read_requests','Innodb_buffer_pool_reads',"
+            "'Innodb_buffer_pool_pages_data','Innodb_buffer_pool_pages_total')"
+        )
+        raw = {name: int(value) for name, value in cursor.fetchall()}
+        cursor.close()
+        conn.close()
+        requests = raw.get("Innodb_buffer_pool_read_requests", 0)
+        disk = raw.get("Innodb_buffer_pool_reads", 0)
+        state = dict(raw)
+        if requests:
+            state["hit_ratio_pct"] = round(100.0 * (requests - disk) / requests, 4)
+    except Exception as e:
+        state["error"] = str(e)
+    return state
+
+
+def _host_info() -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "python": platform.python_version(),
+    }
+    try:
+        if sys.platform == "darwin":
+            info["cpu"] = subprocess.check_output(
+                ["sysctl", "-n", "machdep.cpu.brand_string"], text=True,
+            ).strip()
+            info["cpu_count"] = int(subprocess.check_output(["sysctl", "-n", "hw.ncpu"], text=True).strip())
+            info["memory_gb"] = round(
+                int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()) / 1024**3
+            )
+    except Exception:
+        pass
+    try:
+        info["docker"] = subprocess.check_output(
+            ["docker", "version", "--format", "{{.Server.Version}}"], text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        pass
+    return info
 
 
 # ============================================================================
@@ -307,7 +463,37 @@ def bar(value: float, max_value: float, width: int = 30, char: str = "█") -> s
 
 
 def section_header(title: str) -> str:
-    return f"\n{'─' * 70}\n  {title}\n{'─' * 70}"
+    return f"\n{'─' * 94}\n  {title}\n{'─' * 94}"
+
+
+def latency_header(first: str = "Query", second: str = "Matches") -> str:
+    return (
+        f"  {first:<18} {second:>10}  {'MySQL p50':>10} {'p99':>9}  "
+        f"{'MygramDB p50':>13} {'p99':>9}  {'Result':>14}"
+    )
+
+
+def latency_rule() -> str:
+    return (
+        f"  {'─' * 18} {'─' * 10}  {'─' * 10} {'─' * 9}  "
+        f"{'─' * 13} {'─' * 9}  {'─' * 14}"
+    )
+
+
+def latency_row(label: str, count: int, mysql_r: dict, mg_r: dict, speedup: float) -> str:
+    failed = "error" in mysql_r
+    mysql_p50 = "Error" if failed else fmt_ms(mysql_r["p50"])
+    mysql_p99 = "" if failed else fmt_ms(mysql_r["p99"])
+    return (
+        f"  {label:<18} {count:>10,}  {mysql_p50:>10} {mysql_p99:>9}  "
+        f"{fmt_ms(mg_r['p50']):>13} {fmt_ms(mg_r['p99']):>9}  {fmt_speedup(speedup):>14}"
+    )
+
+
+def compute_speedup(mysql_r: dict, mg_r: dict) -> float:
+    if "error" in mysql_r:
+        return float("inf")
+    return mysql_r["p50"] / mg_r["p50"] if mg_r["p50"] > 0 else float("inf")
 
 
 # ============================================================================
@@ -323,10 +509,19 @@ def main():
     parser.add_argument("--mysql-db", default="mydb")
     parser.add_argument("--mygramdb-host", default="127.0.0.1")
     parser.add_argument("--mygramdb-port", type=int, default=11016)
-    parser.add_argument("--iterations", type=int, default=10)
+    # A p99 needs enough samples to mean anything; 10 iterations cannot
+    # produce one, so the default is high enough for the tail to be real.
+    parser.add_argument("--iterations", type=int, default=200)
+    parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--concurrent-duration", type=int, default=10)
+    parser.add_argument(
+        "--concurrency-levels", type=str, default="1,2,4,8,16",
+        help="Comma-separated connection counts for the throughput sweep",
+    )
     parser.add_argument("--json-output", type=str, default=None)
     args = parser.parse_args()
+
+    concurrency_levels = [int(c) for c in args.concurrency_levels.split(",") if c.strip()]
 
     mysql_args = dict(
         host=args.mysql_host, port=args.mysql_port,
@@ -367,7 +562,7 @@ def main():
     print("╠══════════════════════════════════════════════════════════════════════╣")
     print("║                                                                    ║")
     print(f"║  Dataset      : {total_rows:>10,} rows (Wikipedia EN + JA articles)     ║")
-    print(f"║  Iterations   : {args.iterations:>10} per query (median reported)         ║")
+    print(f"║  Iterations   : {args.iterations:>10} per query (p50/p95/p99 reported)    ║")
     print("║                                                                    ║")
     print("║  What this tests:                                                  ║")
     print("║    • Search latency — FULLTEXT vs in-memory n-gram index           ║")
@@ -397,84 +592,90 @@ def main():
         ("algorithm", "Low frequency"),
     ]
 
-    results: dict[str, Any] = {"dataset_rows": total_rows, "tests": {}}
+    mysql_settings = _mysql_settings(
+        args.mysql_host, args.mysql_port, args.mysql_user, args.mysql_password, args.mysql_db,
+    )
+    results: dict[str, Any] = {
+        "dataset_rows": total_rows,
+        "iterations": args.iterations,
+        "warmup": args.warmup,
+        "environment": {
+            "host": _host_info(),
+            "mysql": mysql_settings,
+        },
+        "tests": {},
+    }
+
+    pool_bytes = mysql_settings.get("innodb_buffer_pool_size")
+    if isinstance(pool_bytes, int):
+        data_mb = mysql_settings.get("articles_data_mb") or 0
+        index_mb = mysql_settings.get("articles_index_mb") or 0
+        print(
+            f"  Baseline    : MySQL buffer pool {pool_bytes / 1024**3:.1f}GB "
+            f"vs {float(data_mb) + float(index_mb):,.0f}MB of table + index"
+        )
 
     # ── 1. Search Performance ─────────────────────────────────
-    print(section_header("1. SEARCH LATENCY  (SORT id LIMIT 100, p50)"))
+    print(section_header("1. SEARCH LATENCY  (SORT id LIMIT 100)"))
     print()
-    print(f"  {'Query':<18} {'Matches':>10}  {'MySQL':>10}  {'MygramDB':>10}  {'Result':>14}")
-    print(f"  {'─' * 18} {'─' * 10}  {'─' * 10}  {'─' * 10}  {'─' * 14}")
+    print(latency_header())
+    print(latency_rule())
 
     for query, label, _desc in search_queries:
-        print(f"  Running '{query}'...{' ' * 60}", end="\r", flush=True)
-        mysql_r = benchmark_mysql_search(**mysql_args, query=query, iterations=args.iterations)
-        mg_r = benchmark_mygramdb_search(**mg_args, query=query, iterations=args.iterations)
-        mg_count_r = benchmark_mygramdb_count(**mg_args, query=query, iterations=1)
+        progress(f"Running '{query}'...")
+        mysql_r = benchmark_mysql_search(**mysql_args, query=query, iterations=args.iterations, warmup=args.warmup)
+        mg_r = benchmark_mygramdb_search(**mg_args, query=query, iterations=args.iterations, warmup=args.warmup)
+        mg_count_r = benchmark_mygramdb_count(**mg_args, query=query, iterations=1, warmup=1)
         match_count = mg_count_r["count"]
-
-        if "error" in mysql_r:
-            speedup = float("inf")
-        else:
-            speedup = mysql_r["p50"] / mg_r["p50"] if mg_r["p50"] > 0 else float("inf")
-
-        mysql_str = "Error" if "error" in mysql_r else fmt_ms(mysql_r["p50"])
-        print(f"  {label:<18} {match_count:>9,}  {mysql_str:>10}  {fmt_ms(mg_r['p50']):>10}  {fmt_speedup(speedup):>14}")
+        speedup = compute_speedup(mysql_r, mg_r)
+        print(latency_row(label, match_count, mysql_r, mg_r, speedup))
 
         results["tests"][f"search_{label}"] = {
             "query": query, "match_count": match_count,
+            "mysql": mysql_r, "mygramdb": mg_r,
             "mysql_p50": mysql_r["p50"], "mygramdb_p50": mg_r["p50"],
             "speedup": speedup, "mysql_error": mysql_r.get("error"),
         }
 
     # ── 2. CJK Search Performance ────────────────────────────
-    print(section_header("2. CJK SEARCH LATENCY  (Japanese bi-gram, SORT id LIMIT 100, p50)"))
+    print(section_header("2. CJK SEARCH LATENCY  (Japanese bi-gram, SORT id LIMIT 100)"))
     print()
-    print(f"  {'Query':<18} {'Matches':>10}  {'MySQL':>10}  {'MygramDB':>10}  {'Result':>14}")
-    print(f"  {'─' * 18} {'─' * 10}  {'─' * 10}  {'─' * 10}  {'─' * 14}")
+    print(latency_header())
+    print(latency_rule())
 
     for query, label, _desc in ja_queries:
-        print(f"  Running '{query}'...{' ' * 60}", end="\r", flush=True)
-        mysql_r = benchmark_mysql_search(**mysql_args, query=query, iterations=args.iterations)
-        mg_r = benchmark_mygramdb_search(**mg_args, query=query, iterations=args.iterations)
-        mg_count_r = benchmark_mygramdb_count(**mg_args, query=query, iterations=1)
+        progress(f"Running '{query}'...")
+        mysql_r = benchmark_mysql_search(**mysql_args, query=query, iterations=args.iterations, warmup=args.warmup)
+        mg_r = benchmark_mygramdb_search(**mg_args, query=query, iterations=args.iterations, warmup=args.warmup)
+        mg_count_r = benchmark_mygramdb_count(**mg_args, query=query, iterations=1, warmup=1)
         match_count = mg_count_r["count"]
-
-        if "error" in mysql_r:
-            speedup = float("inf")
-        else:
-            speedup = mysql_r["p50"] / mg_r["p50"] if mg_r["p50"] > 0 else float("inf")
-
-        mysql_str = "Error" if "error" in mysql_r else fmt_ms(mysql_r["p50"])
-        print(f"  {label:<18} {match_count:>9,}  {mysql_str:>10}  {fmt_ms(mg_r['p50']):>10}  {fmt_speedup(speedup):>14}")
+        speedup = compute_speedup(mysql_r, mg_r)
+        print(latency_row(label, match_count, mysql_r, mg_r, speedup))
 
         results["tests"][f"cjk_{label}"] = {
             "query": query, "match_count": match_count,
+            "mysql": mysql_r, "mygramdb": mg_r,
             "mysql_p50": mysql_r["p50"], "mygramdb_p50": mg_r["p50"],
             "speedup": speedup, "mysql_error": mysql_r.get("error"),
         }
 
     # ── 3. COUNT Performance ──────────────────────────────────
-    print(section_header("3. COUNT PERFORMANCE  (total matching rows, p50)"))
+    print(section_header("3. COUNT PERFORMANCE  (total matching rows)"))
     print()
-    print(f"  {'Query':<18} {'Count':>10}  {'MySQL':>10}  {'MygramDB':>10}  {'Result':>14}")
-    print(f"  {'─' * 18} {'─' * 10}  {'─' * 10}  {'─' * 10}  {'─' * 14}")
+    print(latency_header(first="Query", second="Count"))
+    print(latency_rule())
 
     for query, label in count_queries:
-        print(f"  Running '{query}'...{' ' * 60}", end="\r", flush=True)
-        mysql_r = benchmark_mysql_count(**mysql_args, query=query, iterations=args.iterations)
-        mg_r = benchmark_mygramdb_count(**mg_args, query=query, iterations=args.iterations)
+        progress(f"Running '{query}'...")
+        mysql_r = benchmark_mysql_count(**mysql_args, query=query, iterations=args.iterations, warmup=args.warmup)
+        mg_r = benchmark_mygramdb_count(**mg_args, query=query, iterations=args.iterations, warmup=args.warmup)
         count_val = mysql_r["count"] if mysql_r["count"] > 0 else mg_r["count"]
-
-        if "error" in mysql_r:
-            speedup = float("inf")
-        else:
-            speedup = mysql_r["p50"] / mg_r["p50"] if mg_r["p50"] > 0 else float("inf")
-
-        mysql_str = "Error" if "error" in mysql_r else fmt_ms(mysql_r["p50"])
-        print(f"  {label:<18} {count_val:>10,}  {mysql_str:>10}  {fmt_ms(mg_r['p50']):>10}  {fmt_speedup(speedup):>14}")
+        speedup = compute_speedup(mysql_r, mg_r)
+        print(latency_row(label, count_val, mysql_r, mg_r, speedup))
 
         results["tests"][f"count_{label}"] = {
             "query": query, "count": count_val,
+            "mysql": mysql_r, "mygramdb": mg_r,
             "mysql_p50": mysql_r["p50"], "mygramdb_p50": mg_r["p50"],
             "speedup": speedup, "mysql_error": mysql_r.get("error"),
         }
@@ -497,7 +698,7 @@ def main():
     mg_client = MygramDBClient(args.mygramdb_host, args.mygramdb_port)
 
     for query, label in consistency_queries:
-        print(f"  Running '{query}'...{' ' * 60}", end="\r", flush=True)
+        progress(f"Running '{query}'...")
         # MySQL COUNT
         try:
             conn = _mysql_connect(args.mysql_host, args.mysql_port, args.mysql_user, args.mysql_password, args.mysql_db)
@@ -545,10 +746,16 @@ def main():
     query_for_concurrent = "algorithm"
     print(section_header(f"5. CONCURRENT THROUGHPUT  (query: '{query_for_concurrent}', {args.concurrent_duration}s per level)"))
     print()
-    print(f"  {'Connections':<14} {'MySQL QPS':>12} {'MygramDB QPS':>14} {'MySQL p50':>10} {'MG p50':>10} {'QPS ratio':>12}")
-    print(f"  {'─' * 14} {'─' * 12} {'─' * 14} {'─' * 10} {'─' * 10} {'─' * 12}")
+    print(
+        f"  {'Connections':<12} {'MySQL QPS':>10} {'MygramDB QPS':>13} "
+        f"{'MySQL p50':>10} {'p99':>9} {'MG p50':>9} {'p99':>9} {'QPS ratio':>12}"
+    )
+    print(
+        f"  {'─' * 12} {'─' * 10} {'─' * 13} "
+        f"{'─' * 10} {'─' * 9} {'─' * 9} {'─' * 9} {'─' * 12}"
+    )
 
-    for conc in [1, 4]:
+    for conc in concurrency_levels:
         # Each worker thread creates its own connection
         import mysql.connector as mc
 
@@ -599,7 +806,7 @@ def main():
                 return None, elapsed
             return mg_func, socks
 
-        print(f"  {conc} conn ...    ", end="", flush=True)
+        progress(f"Running {conc}-connection level...")
         mysql_func, mysql_conns = make_mysql_func(conc)
         mysql_conc = benchmark_concurrent(mysql_func, conc, args.concurrent_duration)
         for c in mysql_conns.values():
@@ -613,9 +820,12 @@ def main():
             except: pass
 
         qps_ratio = mg_conc["qps"] / mysql_conc["qps"] if mysql_conc["qps"] > 0 else float("inf")
-        mysql_p50 = fmt_ms(mysql_conc.get("p50", 0))
-        mg_p50 = fmt_ms(mg_conc.get("p50", 0))
-        print(f"\r  {conc:<14} {mysql_conc['qps']:>11,.0f} {mg_conc['qps']:>13,.0f} {mysql_p50:>10} {mg_p50:>10} {fmt_speedup(qps_ratio):>12}")
+        print(
+            f"  {conc:<12} {mysql_conc['qps']:>10,.0f} {mg_conc['qps']:>13,.0f} "
+            f"{fmt_ms(mysql_conc.get('p50', 0)):>10} {fmt_ms(mysql_conc.get('p99', 0)):>9} "
+            f"{fmt_ms(mg_conc.get('p50', 0)):>9} {fmt_ms(mg_conc.get('p99', 0)):>9} "
+            f"{fmt_speedup(qps_ratio):>12}"
+        )
 
         results["tests"][f"concurrent_{conc}"] = {"mysql": mysql_conc, "mygramdb": mg_conc}
 
@@ -637,24 +847,52 @@ def main():
         avg_speedup = statistics.mean([s for _, s in speedups])
         min_label, min_s = min(speedups, key=lambda x: x[1])
         max_label, max_s = max(speedups, key=lambda x: x[1])
-        print(f"║  Average speedup  : {avg_speedup:>6.0f}x  (MygramDB vs MySQL FULLTEXT)       ║")
-        print(f"║  Best case        : {max_s:>6.0f}x  ({max_label:<38s})║")
-        print(f"║  Worst case       : {min_s:>6.0f}x  ({min_label:<38s})║")
+        median_speedup = statistics.median([s for _, s in speedups])
+        for line in (
+            f"  Median speedup : {median_speedup:>6.1f}x  (MygramDB vs MySQL FULLTEXT)",
+            f"  Mean speedup   : {avg_speedup:>6.1f}x  (skewed by the best case below)",
+            f"  Best case      : {max_s:>6.1f}x  ({max_label})",
+            f"  Worst case     : {min_s:>6.1f}x  ({min_label})",
+        ):
+            print(f"║{line:<68}║")
 
-    for conc in [10, 100]:
+    for conc in concurrency_levels:
         key = f"concurrent_{conc}"
         if key in results["tests"]:
             my_qps = results["tests"][key]["mysql"]["qps"]
             mg_qps = results["tests"][key]["mygramdb"]["qps"]
             ratio = mg_qps / my_qps if my_qps > 0 else float("inf")
-            print(f"║  Throughput @{conc:>3}c  : {mg_qps:>6,.0f} QPS vs {my_qps:>6,.0f} QPS ({ratio:.1f}x){' ' * (13 - len(f'{ratio:.1f}'))}║")
+            line = f"  Throughput @{conc:>3}c  : {mg_qps:>6,.0f} QPS vs {my_qps:>6,.0f} QPS ({ratio:.1f}x)"
+            print(f"║{line:<68}║")
 
     print("║                                                                    ║")
-    print("║  MygramDB keeps a full n-gram index in memory, eliminating disk     ║")
-    print("║  I/O entirely. MySQL FULLTEXT uses B-tree on disk (with buffer      ║")
-    print("║  pool caching). The gap widens with dataset size and concurrency.   ║")
+    print("║                                                                    ║")
+    if isinstance(pool_bytes, int):
+        baseline = f"  Baseline     : MySQL {mysql_settings.get('version', '?')} with a {pool_bytes / 1024**3:.0f}GB buffer pool"
+        print(f"║{baseline:<68}║")
+    print("║                                                                    ║")
+    print("║  MygramDB keeps a full n-gram index in memory. MySQL FULLTEXT uses  ║")
+    print("║  a B-tree the buffer pool above is sized to hold, so what is left   ║")
+    print("║  is the difference between the two index structures rather than a   ║")
+    print("║  difference in how much disk each one had to touch.                 ║")
+    print("║                                                                    ║")
+    print("║  The ratios carry across machines; the millisecond figures do not.  ║")
+    print("║  Re-run with 'make bench-up && make bench-run' on your own hardware.║")
     print("╚══════════════════════════════════════════════════════════════════════╝")
     print()
+
+    # Sampled after the workload so the ratio describes this run, not the idle
+    # server that preceded it.
+    pool_state = _mysql_buffer_pool_state(
+        args.mysql_host, args.mysql_port, args.mysql_user, args.mysql_password, args.mysql_db,
+    )
+    results["environment"]["mysql_buffer_pool_after_run"] = pool_state
+    if "hit_ratio_pct" in pool_state:
+        print(
+            f"  MySQL served {pool_state['hit_ratio_pct']:.3f}% of page requests from its buffer pool "
+            f"during this run ({pool_state.get('Innodb_buffer_pool_reads', 0):,} disk reads)."
+        )
+        print()
 
     if args.json_output:
         with open(args.json_output, "w") as f:
