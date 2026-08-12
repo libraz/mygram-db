@@ -25,6 +25,19 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --local-infile=ON
+      # MygramDB holds its whole index in RAM, so a MySQL left on the 128MB
+      # default buffer pool would be measured on disk I/O it never had to do.
+      # The pool is sized to hold the table and its FULLTEXT index outright,
+      # which is the configuration a MySQL serving this dataset would actually
+      # run. The benchmark reports the effective value so the published numbers
+      # state what the baseline was given.
+      - --innodb-buffer-pool-size=${BENCH_MYSQL_BUFFER_POOL:-8G}
+      - --innodb-buffer-pool-instances=8
+      # Redo capacity sized for the bulk seed load; without it the load stalls
+      # on checkpoint flushing and leaves the pool cold.
+      - --innodb-redo-log-capacity=2G
+      - --innodb-ft-cache-size=80000000
+      - --innodb-ft-total-cache-size=1600000000
     ports:
       - "127.0.0.1:3306:3306"
     volumes:
