@@ -7,6 +7,9 @@
 
 #ifdef USE_MYSQL
 
+#include <cstdint>
+#include <optional>
+#include <string_view>
 #include <unordered_map>
 
 #include "config/config.h"
@@ -41,6 +44,18 @@ class BinlogFilterEvaluator {
    */
   static bool CompareFilterValue(const storage::FilterValue& value, const config::RequiredFilterConfig& filter,
                                  const std::string& datetime_timezone = "+00:00");
+
+  /**
+   * @brief Parse a `time`-typed filter value into seconds since midnight
+   *
+   * Accepts either a bare number of seconds or an "HH:MM:SS" clock string.
+   * Exposed so that the initial-load query builder derives its SQL literal from
+   * the same rule that decides membership during replication.
+   *
+   * @param value Configured filter value
+   * @return Seconds since midnight, or std::nullopt for an unsupported format
+   */
+  static std::optional<int64_t> ParseTimeFilterSeconds(std::string_view value);
 
   /**
    * @brief Extract all filter columns (both required and optional) from row data

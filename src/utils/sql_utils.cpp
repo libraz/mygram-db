@@ -68,6 +68,34 @@ std::string EncodeMySQLStringLiteral(std::string_view value) {
   return encoded;
 }
 
+std::optional<std::string> FormatMySQLTimeLiteral(int64_t seconds) {
+  constexpr int64_t kSecondsPerMinute = 60;
+  constexpr int64_t kSecondsPerHour = 3600;
+  // MySQL's TIME range is -838:59:59 to 838:59:59.
+  constexpr int64_t kMaxTimeSeconds = (838 * kSecondsPerHour) + (59 * kSecondsPerMinute) + 59;
+
+  if (seconds < -kMaxTimeSeconds || seconds > kMaxTimeSeconds) {
+    return std::nullopt;
+  }
+
+  const int64_t magnitude = seconds < 0 ? -seconds : seconds;
+  const auto two_digits = [](int64_t component) {
+    std::string text = std::to_string(component);
+    return text.size() < 2 ? "0" + text : text;
+  };
+
+  std::string literal;
+  if (seconds < 0) {
+    literal.push_back('-');
+  }
+  literal += two_digits(magnitude / kSecondsPerHour);
+  literal.push_back(':');
+  literal += two_digits((magnitude / kSecondsPerMinute) % kSecondsPerMinute);
+  literal.push_back(':');
+  literal += two_digits(magnitude % kSecondsPerMinute);
+  return literal;
+}
+
 std::string StripSQLComments(const std::string& query) {
   std::string result;
   result.reserve(query.length());

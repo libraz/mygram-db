@@ -8,4 +8,11 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
   target_include_directories(initial_loader_query_test PRIVATE ${CMAKE_SOURCE_DIR}/tests/mysql)
   gtest_discover_tests(initial_loader_query_test DISCOVERY_TIMEOUT 30)
+
+  # Agreement between the initial-load WHERE clause and the binlog predicate
+  add_executable(required_filter_predicate_test required_filter_predicate_test.cpp)
+  target_link_libraries(
+    required_filter_predicate_test PRIVATE GTest::gtest_main mygramdb_loader
+  )
+  gtest_discover_tests(required_filter_predicate_test DISCOVERY_TIMEOUT 30)
 endif()

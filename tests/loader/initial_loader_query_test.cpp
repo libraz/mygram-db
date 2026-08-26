@@ -166,7 +166,7 @@ TEST(InitialLoadSelectQueryTest, StringFilterValuesAreHexEncoded) {
 
   const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
   ASSERT_NE(query.find(" WHERE "), std::string::npos);
-  EXPECT_NE(query.find("`status` = _utf8mb4 X'273B2044524F50205441424C452061727469636C65733B202D2D'"),
+  EXPECT_NE(query.find("CAST(`status` AS BINARY) = _utf8mb4 X'273B2044524F50205441424C452061727469636C65733B202D2D'"),
             std::string::npos)
       << query;
   // Nothing that could end a literal or start a statement survives into the SQL.
@@ -178,7 +178,7 @@ TEST(InitialLoadSelectQueryTest, EmptyStringFilterValueBecomesAnEmptyHexLiteral)
   table_config.required_filters.push_back(MakeRequiredFilter("status", "varchar", "=", ""));
 
   const auto query = internal::BuildInitialLoadSelectQuery(table_config, {});
-  EXPECT_NE(query.find("`status` = _utf8mb4 X''"), std::string::npos) << query;
+  EXPECT_NE(query.find("CAST(`status` AS BINARY) = _utf8mb4 X''"), std::string::npos) << query;
 }
 
 /**
@@ -270,7 +270,8 @@ TEST(InitialLoadSelectQueryTest, TimestampFilterBecomesAnEpochExpression) {
   ASSERT_FALSE(query.empty());
   auto expected_epoch = mygram::utils::ParseDatetimeValue("2026-01-01 00:30:00", "+00:00");
   ASSERT_TRUE(expected_epoch.has_value());
-  EXPECT_NE(query.find("FROM_UNIXTIME(" + std::to_string(*expected_epoch) + ")"), std::string::npos) << query;
+  EXPECT_NE(query.find("UNIX_TIMESTAMP(`published_at`) <= " + std::to_string(*expected_epoch)), std::string::npos)
+      << query;
 
   auto unparseable = BaseTableConfig();
   unparseable.required_filters.push_back(MakeRequiredFilter("published_at", "timestamp", "<=", "not a timestamp"));

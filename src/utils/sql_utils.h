@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -49,6 +51,19 @@ Expected<std::string, Error> QuoteQualifiedSQLIdentifier(std::string_view databa
  * @return `_utf8mb4 X'...'` character-set-introduced hex literal.
  */
 std::string EncodeMySQLStringLiteral(std::string_view value);
+
+/**
+ * @brief Render seconds since midnight in MySQL's TIME text format.
+ *
+ * MySQL reads a bare number compared against a TIME column as packed HHMMSS
+ * rather than as seconds, so a filter value held as seconds has to be written
+ * back as a clock string before it becomes a comparison.
+ *
+ * @param seconds Signed seconds since midnight.
+ * @return "[-]HH:MM:SS", or std::nullopt outside MySQL's TIME range of
+ *         +/-838:59:59, which no TIME column can hold.
+ */
+std::optional<std::string> FormatMySQLTimeLiteral(int64_t seconds);
 
 /// @brief Remove SQL comments (/* ... */ and -- ...) from a query string.
 /// @param sql SQL query string

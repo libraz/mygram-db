@@ -184,30 +184,20 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
     // TIME comparison (stored as TimeValue with seconds)
     storage::TimeValue val = std::get<storage::TimeValue>(value);
 
-    // Parse target value: support both seconds (numeric) and HH:MM:SS format
-    int64_t target = 0;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
-    auto [ptr_t, ec_t] = std::from_chars(filter.value.data(), filter.value.data() + filter.value.size(), target);
-    if (ec_t != std::errc() || ptr_t != filter.value.data() + filter.value.size()) {
-      // Not a pure integer, try HH:MM:SS format using DateTimeProcessor
-      // TimeToSeconds is a static method that doesn't require timezone
-      auto seconds_result = mygram::utils::DateTimeProcessor::TimeToSeconds(filter.value);
-      if (seconds_result) {
-        target = *seconds_result;
-      } else {
-        mygram::utils::StructuredLog()
-            .Event("mysql_binlog_warning")
-            .Field("type", "invalid_time_filter")
-            .Field("reason", "unsupported_format")
-            .Field("value", filter.value)
-            .Field("column_name", filter.name)
-            .Warn();
-        return false;  // Fail-closed: reject document on invalid filter
-      }
+    auto target = ParseTimeFilterSeconds(filter.value);
+    if (!target) {
+      mygram::utils::StructuredLog()
+          .Event("mysql_binlog_warning")
+          .Field("type", "invalid_time_filter")
+          .Field("reason", "unsupported_format")
+          .Field("value", filter.value)
+          .Field("column_name", filter.name)
+          .Warn();
+      return false;  // Fail-closed: reject document on invalid filter
     }
 
     // Perform comparison
-    return mygram::utils::CompareValues(val.seconds, target, filter.op);
+    return mygram::utils::CompareValues(val.seconds, *target, filter.op);
 
   } else if (std::holds_alternative<bool>(value)) {
     const std::string target_text = mygram::utils::ToLower(filter.value);
@@ -276,6 +266,24 @@ bool BinlogFilterEvaluator::CompareFilterValue(const storage::FilterValue& value
       .Field("column_name", filter.name)
       .Warn();
   return false;
+}
+
+std::optional<int64_t> BinlogFilterEvaluator::ParseTimeFilterSeconds(std::string_view value) {
+  int64_t seconds = 0;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+  auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), seconds);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
+  if (ec == std::errc() && ptr == value.data() + value.size()) {
+    return seconds;
+  }
+
+  // Not a pure integer, try HH:MM:SS format using DateTimeProcessor.
+  // TimeToSeconds is a static method that doesn't require timezone.
+  auto parsed = mygram::utils::DateTimeProcessor::TimeToSeconds(value);
+  if (!parsed) {
+    return std::nullopt;
+  }
+  return *parsed;
 }
 
 storage::FilterMap BinlogFilterEvaluator::ExtractAllFilters(const RowData& row_data,
