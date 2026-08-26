@@ -981,4 +981,213 @@ TEST(EpollMultiplexerTest, ConcurrentRegistrationChurnLeavesNoResidue) {
 
 #endif
 
+// ===========================================================================
+// One contract, checked against every backend this build has
+// ===========================================================================
+//
+// Only one kernel backend compiles on a given platform, so no build can run
+// epoll and kqueue against each other; a true cross-implementation comparison
+// in one process is impossible. What is possible is to state the contract from
+// event_multiplexer.h once and hold whichever backends this build does have to
+// it, so that each platform checks its own implementation against the same
+// assertions the other must satisfy. Where the assertions below have to branch
+// on the backend, they branch on the *stimulus* — how an fd is made ready —
+// and not on what is then asserted.
+//
+// Two places where the backends do not agree are recorded at the end of this
+// section rather than asserted as a shared contract.
+
+/// Make @p fd readable in whatever way this backend supports, and return the
+/// fd Poll() is expected to report.
+template <typename MuxT>
+int ArmReadable(MuxT& mux, const std::pair<int, int>& socket_pair, RegistrationToken token) {
+  EXPECT_TRUE(mux.Add(socket_pair.first, event::kReadable, token).has_value());
+  if constexpr (std::is_same_v<MuxT, MockEventMultiplexer>) {
+    mux.InjectReadable(socket_pair.first);
+  } else {
+    const char byte = 'x';
+    EXPECT_EQ(::write(socket_pair.second, &byte, 1), 1);
+  }
+  return socket_pair.first;
+}
+
+// Registration bookkeeping is what Remove() has to clear; a backend that leaks
+// an entry keeps an fd addressable after the reactor has torn it down.
+TYPED_TEST(EventMultiplexerTest, RegistrationCountTracksAddAndRemove) {
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 0U);
+
+  auto first = this->MakeSocketPair();
+  auto second = this->MakeSocketPair();
+  ASSERT_TRUE(this->mux->Add(first.first, event::kReadable).has_value());
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 1U);
+  ASSERT_TRUE(this->mux->Add(second.first, event::kReadable | event::kWritable).has_value());
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 2U);
+
+  // Modify does not change the registration set.
+  ASSERT_TRUE(this->mux->Modify(second.first, event::kReadable).has_value());
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 2U);
+
+  ASSERT_TRUE(this->mux->Remove(first.first).has_value());
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 1U);
+  // Removing an fd that is not registered leaves the set alone.
+  ASSERT_TRUE(this->mux->Remove(first.first).has_value());
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 1U);
+  ASSERT_TRUE(this->mux->Remove(second.first).has_value());
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 0U);
+}
+
+// The token the caller supplied is what has to come back on the ready event:
+// the reactor uses it to reject events for a registration it already tore down,
+// so a backend that substituted its own value would defeat that check.
+TYPED_TEST(EventMultiplexerTest, PollReturnsTheRegistrationTokenTheCallerSupplied) {
+  constexpr RegistrationToken kToken = 987654321;
+  auto pair = this->MakeSocketPair();
+  const int expected_fd = ArmReadable(*this->mux, pair, kToken);
+
+  std::vector<ReadyEvent> out;
+  ASSERT_TRUE(this->mux->Poll(1000, out).has_value());
+  ASSERT_EQ(out.size(), 1U);
+  EXPECT_EQ(out[0].fd, expected_fd);
+  EXPECT_EQ(out[0].registration_token, kToken);
+  EXPECT_NE(out[0].events & event::kReadable, 0);
+}
+
+// A registration is addressed by token, not by fd, so that a closed fd whose
+// number was reused cannot be mistaken for the connection that used to hold it.
+TYPED_TEST(EventMultiplexerTest, ModifyWithAStaleRegistrationTokenIsRefused) {
+  constexpr RegistrationToken kCurrent = 4242;
+  constexpr RegistrationToken kStale = 4241;
+  auto pair = this->MakeSocketPair();
+  ASSERT_TRUE(this->mux->Add(pair.first, event::kReadable, kCurrent).has_value());
+
+  const auto stale = this->mux->Modify(pair.first, event::kReadable | event::kWritable, kStale);
+  ASSERT_FALSE(stale.has_value()) << "a modify for a superseded registration was applied";
+  EXPECT_EQ(stale.error().code(), mygram::utils::ErrorCode::kNetworkReactorModifyFailed);
+
+  // The matching token still works, so the refusal is about the token and not
+  // about the fd having been dropped.
+  EXPECT_TRUE(this->mux->Modify(pair.first, event::kReadable | event::kWritable, kCurrent).has_value());
+
+  // The default sentinel means "do not check", which is what every caller that
+  // does not track tokens relies on.
+  EXPECT_TRUE(this->mux->Modify(pair.first, event::kReadable, kInvalidRegistrationToken).has_value());
+}
+
+// Remove() unregisters; a later Modify has nothing left to address.
+TYPED_TEST(EventMultiplexerTest, ModifyAfterRemoveIsRefused) {
+  auto pair = this->MakeSocketPair();
+  ASSERT_TRUE(this->mux->Add(pair.first, event::kReadable).has_value());
+  ASSERT_TRUE(this->mux->Remove(pair.first).has_value());
+
+  const auto after_remove = this->mux->Modify(pair.first, event::kReadable);
+  ASSERT_FALSE(after_remove.has_value());
+  EXPECT_EQ(after_remove.error().code(), mygram::utils::ErrorCode::kNetworkReactorModifyFailed);
+}
+
+// Stop() publishes running_=false and calls Wake() to break a blocked Poll()
+// immediately instead of waiting out poll_timeout_ms. The wake mechanism is
+// backend specific but the observable behaviour is not: the blocked Poll comes
+// back, and it comes back with nothing, because the wake-up bookkeeping event
+// belongs to no connection.
+TYPED_TEST(EventMultiplexerTest, WakeUnblocksPollWithoutSurfacingAWakeEvent) {
+  std::vector<ReadyEvent> out;
+  std::atomic<bool> returned{false};
+  std::thread waiter([&] {
+    // A long timeout: only the Wake() should end this wait.
+    EXPECT_TRUE(this->mux->Poll(30000, out).has_value());
+    returned.store(true, std::memory_order_release);
+  });
+
+  // Give the waiter a chance to reach the blocking call. A Wake() issued before
+  // it gets there still works, so this only makes the test exercise the blocked
+  // case rather than assume it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_TRUE(this->mux->Wake().has_value());
+
+  waiter.join();
+  EXPECT_TRUE(returned.load(std::memory_order_acquire));
+  EXPECT_TRUE(out.empty()) << "the wake-up bookkeeping event was reported to the caller";
+}
+
+// A Wake() with nobody inside Poll() is latched, not lost: the next Poll()
+// observes it and returns at once. It must also be consumed by that Poll, or
+// the reactor would spin through its loop returning nothing on every pass.
+TYPED_TEST(EventMultiplexerTest, WakeBeforePollIsLatchedAndConsumedByOnePoll) {
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(this->mux->Wake().has_value());
+  }
+
+  std::vector<ReadyEvent> out;
+  const auto first_start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(this->mux->Poll(5000, out).has_value());
+  const auto first_waited = std::chrono::steady_clock::now() - first_start;
+  EXPECT_TRUE(out.empty());
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(first_waited).count(), 1000)
+      << "a latched wake did not release the next Poll()";
+
+  // Repeated wakes collapse into one notification, and the whole of it is
+  // consumed: this Poll has to wait out its timeout.
+  const auto second_start = std::chrono::steady_clock::now();
+  ASSERT_TRUE(this->mux->Poll(200, out).has_value());
+  const auto second_waited = std::chrono::steady_clock::now() - second_start;
+  EXPECT_TRUE(out.empty());
+  EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(second_waited).count(), 150)
+      << "Poll() returned early, so the wake signal still had a residue to report";
+}
+
+// ---------------------------------------------------------------------------
+// Where the backends do not agree
+// ---------------------------------------------------------------------------
+//
+// The two assertions below are recorded as observed. Neither behaviour is
+// stated by the EventMultiplexer contract, and the backends answer differently,
+// so a caller that relies on either is relying on the platform it happens to
+// run on.
+
+// Registering the same fd twice: epoll's EPOLL_CTL_ADD returns EEXIST and the
+// first registration survives, and the mock refuses for the same reason. kqueue
+// has no such kernel check — EV_ADD on an already-armed filter is an update —
+// so the second call succeeds and replaces the recorded token.
+TYPED_TEST(EventMultiplexerTest, DuplicateAddIsAnsweredDifferentlyPerBackend) {
+  constexpr RegistrationToken kFirst = 111;
+  constexpr RegistrationToken kSecond = 222;
+  auto pair = this->MakeSocketPair();
+  ASSERT_TRUE(this->mux->Add(pair.first, event::kReadable, kFirst).has_value());
+
+  const auto duplicate = this->mux->Add(pair.first, event::kWritable, kSecond);
+
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+  if constexpr (std::is_same_v<TypeParam, KqueueMultiplexer>) {
+    EXPECT_TRUE(duplicate.has_value()) << "kqueue is expected to accept the second Add as an update";
+    // The registration was replaced, so the first token no longer addresses it.
+    EXPECT_FALSE(this->mux->Modify(pair.first, event::kReadable, kFirst).has_value());
+    EXPECT_TRUE(this->mux->Modify(pair.first, event::kReadable, kSecond).has_value());
+  } else
+#endif
+  {
+    ASSERT_FALSE(duplicate.has_value()) << "the same fd was registered twice";
+    EXPECT_EQ(duplicate.error().code(), mygram::utils::ErrorCode::kNetworkReactorRegisterFailed);
+    // The original registration is intact, so the first token still addresses it.
+    EXPECT_TRUE(this->mux->Modify(pair.first, event::kReadable, kFirst).has_value());
+  }
+  EXPECT_EQ(this->mux->RegistrationCountForTest(), 1U);
+}
+
+// Add() before Open(): both kernel backends refuse, because there is no poller
+// fd to register against. The mock keeps its registration map independently of
+// opened_, so it accepts.
+TYPED_TEST(EventMultiplexerTest, AddBeforeOpenIsAnsweredDifferentlyPerBackend) {
+  TypeParam fresh;
+  auto pair = this->MakeSocketPair();
+
+  const auto before_open = fresh.Add(pair.first, event::kReadable);
+  if constexpr (std::is_same_v<TypeParam, MockEventMultiplexer>) {
+    EXPECT_TRUE(before_open.has_value()) << "the mock does not gate registration on Open()";
+    fresh.Shutdown();
+  } else {
+    ASSERT_FALSE(before_open.has_value()) << "a registration was accepted with no poller fd";
+    EXPECT_EQ(before_open.error().code(), mygram::utils::ErrorCode::kNetworkReactorRegisterFailed);
+  }
+}
+
 }  // namespace mygramdb::server::reactor

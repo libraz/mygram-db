@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <mutex>
 #include <unordered_map>
@@ -84,6 +85,10 @@ class MockEventMultiplexer final : public EventMultiplexer {
 
   /// Snapshot of all currently-registered fd keys.
   std::vector<int> RegisteredFds() const;
+
+  /// Number of currently-registered fds. Named to match the accessor the real
+  /// backends expose, so a backend-parameterised test can read all three.
+  [[nodiscard]] std::size_t RegistrationCountForTest() const;
 
   /// Current interest mask for @p fd, or 0 if unknown.
   uint8_t InterestFor(int fd) const;

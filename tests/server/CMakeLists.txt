@@ -1205,3 +1205,19 @@ gtest_discover_tests(admin_info_cost_test
     RUN_SERIAL TRUE
     TIMEOUT 600
 )
+
+# SearchPipeline path parity: one input run down all four executors
+
+add_executable(search_pipeline_path_parity_test
+  search_pipeline_path_parity_test.cpp
+)
+
+target_link_libraries(search_pipeline_path_parity_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_path_parity_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

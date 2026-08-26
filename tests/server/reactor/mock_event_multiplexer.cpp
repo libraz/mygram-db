@@ -164,6 +164,11 @@ std::vector<int> MockEventMultiplexer::RegisteredFds() const {
   return fds;
 }
 
+std::size_t MockEventMultiplexer::RegistrationCountForTest() const {
+  std::unique_lock<std::mutex> lock(mu_);
+  return interest_.size();
+}
+
 uint8_t MockEventMultiplexer::InterestFor(int fd) const {
   std::unique_lock<std::mutex> lock(mu_);
   auto it = interest_.find(fd);

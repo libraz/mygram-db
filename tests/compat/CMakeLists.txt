@@ -39,3 +39,24 @@ gtest_discover_tests(persistence_corpus_test
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK storage_io
 )
+
+# Writes one in-memory state through both dump containers and diffs the restores.
+add_executable(dump_container_parity_test
+  dump_container_parity_test.cpp
+)
+
+target_link_libraries(dump_container_parity_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+target_include_directories(dump_container_parity_test PRIVATE
+  ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/src
+)
+
+gtest_discover_tests(dump_container_parity_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK storage_io
+)
