@@ -65,6 +65,33 @@ std::string EncodeMySQLStringLiteral(std::string_view value);
  */
 std::optional<std::string> FormatMySQLTimeLiteral(int64_t seconds);
 
+/**
+ * @brief Render an instant in MySQL's DATETIME text format.
+ *
+ * The wall clock is taken in the supplied offset, so a literal built from an
+ * instant reads back as the same instant when the server interprets it with
+ * the offset the column's values were converted with.
+ *
+ * @param epoch_seconds Signed seconds since the Unix epoch (UTC).
+ * @param timezone_offset_seconds Offset the wall clock is expressed in.
+ * @return "YYYY-MM-DD HH:MM:SS", or std::nullopt outside MySQL's DATETIME year
+ *         range of 1000-9999, which no DATETIME or DATE column can hold.
+ */
+std::optional<std::string> FormatMySQLDateTimeLiteral(int64_t epoch_seconds, int32_t timezone_offset_seconds);
+
+/**
+ * @brief Render a double as a MySQL approximate-value literal.
+ *
+ * The digit count round-trips an IEEE double exactly, and the exponent marker
+ * keeps MySQL reading the literal as an approximate value rather than as an
+ * exact DECIMAL, so the server compares in the same domain the caller parsed
+ * the value in.
+ *
+ * @param value Finite double value.
+ * @return Literal text in exponent form, such as "1.10000000000000009e+00".
+ */
+std::string FormatMySQLDoubleLiteral(double value);
+
 /// @brief Remove SQL comments (/* ... */ and -- ...) from a query string.
 /// @param sql SQL query string
 /// @return Query with comments stripped

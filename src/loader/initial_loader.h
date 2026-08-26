@@ -29,27 +29,12 @@ namespace mygramdb::loader {
 namespace internal {
 
 /**
- * @brief Whether a string is safe to emit as a bare SQL numeric literal.
- *
- * Optional sign, digits, at most one decimal point. Digits are matched by byte
- * range rather than through <cctype>, whose answer depends on the process
- * locale: a locale that classified additional bytes as digits would widen what
- * reaches the server.
- */
-[[nodiscard]] bool IsSafeSQLNumericLiteral(std::string_view value);
-
-/**
- * @brief Whether a comparison operator may be emitted into a WHERE clause.
- *
- * The configuration schema already constrains this field to an enumeration.
- * Repeating the constraint here keeps the guarantee at the point where the
- * string becomes SQL, so a configuration reaching the loader by some other
- * route cannot inject through it.
- */
-[[nodiscard]] bool IsAllowedFilterOperator(std::string_view comparison_operator);
-
-/**
  * @brief Build the initial-load SELECT for one table.
+ *
+ * Every required-filter conjunct is rendered by RequiredFilterPredicate, so no
+ * configured value or operator reaches the server except through the same
+ * declaration that decides membership during replication.
+ *
  * @return The query, or an empty string if any part of it could not be built
  *         safely. Callers must treat an empty result as a refusal.
  */

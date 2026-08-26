@@ -37,6 +37,11 @@ class BinlogFilterEvaluator {
 
   /**
    * @brief Compare filter value against required filter condition
+   *
+   * Delegates to RequiredFilterPredicate, the same declaration the initial-load
+   * SELECT's WHERE clause is rendered from, so a row admitted here is a row
+   * that query selects.
+   *
    * @param value Filter value from binlog
    * @param filter Required filter configuration
    * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
@@ -44,18 +49,6 @@ class BinlogFilterEvaluator {
    */
   static bool CompareFilterValue(const storage::FilterValue& value, const config::RequiredFilterConfig& filter,
                                  const std::string& datetime_timezone = "+00:00");
-
-  /**
-   * @brief Parse a `time`-typed filter value into seconds since midnight
-   *
-   * Accepts either a bare number of seconds or an "HH:MM:SS" clock string.
-   * Exposed so that the initial-load query builder derives its SQL literal from
-   * the same rule that decides membership during replication.
-   *
-   * @param value Configured filter value
-   * @return Seconds since midnight, or std::nullopt for an unsupported format
-   */
-  static std::optional<int64_t> ParseTimeFilterSeconds(std::string_view value);
 
   /**
    * @brief Extract all filter columns (both required and optional) from row data

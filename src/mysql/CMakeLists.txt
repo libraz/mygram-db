@@ -12,6 +12,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
     binlog_reader_utils.cpp
     binlog_event_parser.cpp
     binlog_filter_evaluator.cpp
+    required_filter_predicate.cpp
     binlog_event_processor.cpp
     table_metadata.cpp
     value_canonicalizer.cpp

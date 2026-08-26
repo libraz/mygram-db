@@ -221,9 +221,9 @@ TEST_F(BinlogFilterEvaluatorTest, DoubleEquality) {
   FilterValue match = 19.99;
   EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(match, filter));
 
-  // Test with epsilon tolerance (1e-9)
-  // 19.990000001 - 19.99 = 1e-9 which is NOT < 1e-9, so it fails
-  FilterValue close = 19.9900000001;  // Difference is 1e-10, which is < 1e-9
+  // A float required filter is compared at FLOAT precision, because that is
+  // the precision the column itself carries: both operands round to 19.99f.
+  FilterValue close = 19.9900000001;
   EXPECT_TRUE(BinlogFilterEvaluator::CompareFilterValue(close, filter));
 }
 

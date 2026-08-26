@@ -206,19 +206,21 @@ TEST(InitialLoadSelectQueryTest, NonNumericValueOnANumericFilterRefusesTheQuery)
 
 /**
  * @brief Digits are recognized by byte value, not by the process locale.
+ *
+ * A locale that classified further bytes as digits would widen what reaches
+ * the server, so the check is made at the emitting site over every byte.
  */
 TEST(InitialLoadSelectQueryTest, NumericLiteralCheckClassifiesEveryByte) {
   for (int value = 0; value <= 0xFF; ++value) {
     const auto byte = static_cast<unsigned char>(value);
-    const std::string candidate(1, static_cast<char>(byte));
-    const bool expected = byte >= '0' && byte <= '9';
-    EXPECT_EQ(internal::IsSafeSQLNumericLiteral(candidate), expected)
+    auto table_config = BaseTableConfig();
+    table_config.required_filters.push_back(
+        MakeRequiredFilter("enabled", "int", "=", std::string(1, static_cast<char>(byte))));
+
+    const bool accepted = !internal::BuildInitialLoadSelectQuery(table_config, {}).empty();
+    EXPECT_EQ(accepted, byte >= '0' && byte <= '9')
         << "byte 0x" << std::hex << value << " was classified against the documented set";
   }
-  EXPECT_TRUE(internal::IsSafeSQLNumericLiteral("-12.50"));
-  EXPECT_TRUE(internal::IsSafeSQLNumericLiteral("+0"));
-  EXPECT_FALSE(internal::IsSafeSQLNumericLiteral("."));
-  EXPECT_FALSE(internal::IsSafeSQLNumericLiteral("-"));
 }
 
 /**

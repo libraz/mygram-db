@@ -28,10 +28,9 @@
 #include <unordered_set>
 #include <vector>
 
-#include "mysql/binlog_filter_evaluator.h"
+#include "mysql/required_filter_predicate.h"
 #include "mysql/rows_parser.h"
 #include "mysql/value_canonicalizer.h"
-#include "utils/datetime_converter.h"
 #include "utils/sql_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -58,13 +57,6 @@ mysql::CanonicalValueKind CanonicalKind(enum_field_types type) {
     default:
       return mysql::CanonicalValueKind::kText;
   }
-}
-
-// Text filter values are compared byte for byte during replication. Leaving
-// the same comparison to the column's collation would admit rows the binlog
-// path later rejects: MySQL's default utf8mb4_0900_ai_ci is case-insensitive.
-bool ComparesTextBytes(const std::string& filter_type) {
-  return filter_type == "string" || filter_type == "varchar" || filter_type == "text";
 }
 
 std::string CanonicalizeSnapshotField(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields, int index) {
@@ -520,42 +512,6 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
   return {};
 }
 
-bool internal::IsSafeSQLNumericLiteral(std::string_view value) {
-  if (value.empty()) {
-    return false;
-  }
-  size_t start = 0;
-  if (value[0] == '-' || value[0] == '+') {
-    start = 1;
-  }
-  if (start >= value.size()) {
-    return false;
-  }
-  bool has_dot = false;
-  bool has_digit = false;
-  for (size_t i = start; i < value.size(); i++) {
-    if (value[i] == '.') {
-      if (has_dot) {
-        return false;
-      }
-      has_dot = true;
-      continue;
-    }
-    const auto byte = static_cast<unsigned char>(value[i]);
-    if (byte < '0' || byte > '9') {
-      return false;
-    }
-    has_digit = true;
-  }
-  return has_digit;
-}
-
-bool internal::IsAllowedFilterOperator(std::string_view comparison_operator) {
-  return comparison_operator == "=" || comparison_operator == "!=" || comparison_operator == "<" ||
-         comparison_operator == ">" || comparison_operator == "<=" || comparison_operator == ">=" ||
-         comparison_operator == "IS NULL" || comparison_operator == "IS NOT NULL";
-}
-
 std::string InitialLoader::BuildSelectQuery() const {
   return internal::BuildInitialLoadSelectQuery(table_config_, mysql_config_);
 }
@@ -635,91 +591,22 @@ std::string internal::BuildInitialLoadSelectQuery(const config::TableConfig& tab
       if (!quoted_filter) {
         return "";
       }
-      // The operator is the one part of a filter that becomes SQL syntax rather
-      // than a quoted identifier or an encoded literal, so it is checked here
-      // as well as at configuration load.
-      if (!internal::IsAllowedFilterOperator(filter.op)) {
+
+      // The conjunct comes from the same declaration BinlogFilterEvaluator
+      // decides membership with, so the rows this SELECT returns are exactly
+      // the rows replication keeps.
+      auto predicate = mysql::RequiredFilterPredicate::Resolve(filter, mysql_config.datetime_timezone);
+      if (!predicate) {
         mygram::utils::StructuredLog()
             .Event("loader_error")
             .Field("operation", "build_select_query")
-            .Field("type", "unsupported_filter_operator")
+            .Field("type", "unusable_required_filter")
             .Field("filter_name", filter.name)
+            .Field("error", predicate.error().message())
             .Error();
         return "";
       }
-
-      if (filter.op == "IS NULL" || filter.op == "IS NOT NULL") {
-        query << *quoted_filter << " " << filter.op;
-        continue;
-      }
-
-      // The left-hand side is not always the bare column. Text is forced to a
-      // byte comparison and a TIMESTAMP is reduced to its UTC epoch, so that
-      // the server decides membership exactly as BinlogFilterEvaluator does.
-      if (ComparesTextBytes(filter.type)) {
-        query << "CAST(" << *quoted_filter << " AS BINARY)";
-      } else if (filter.type == "timestamp") {
-        query << "UNIX_TIMESTAMP(" << *quoted_filter << ")";
-      } else {
-        query << *quoted_filter;
-      }
-      query << " " << filter.op << " ";
-
-      // Lambda to check if type requires quoting
-      auto requires_quoting = [&filter]() -> bool {
-        return ComparesTextBytes(filter.type) || filter.type == "datetime" || filter.type == "date";
-      };
-
-      // The connection renders TIMESTAMP in UTC. Interpret the configured
-      // literal in mysql.datetime_timezone, then compare using the same UTC
-      // epoch that row-based binlog decoding produces.
-      if (filter.type == "timestamp") {
-        auto epoch = mygram::utils::ParseDatetimeValue(filter.value, mysql_config.datetime_timezone);
-        if (!epoch.has_value()) {
-          mygram::utils::StructuredLog()
-              .Event("loader_error")
-              .Field("operation", "build_select_query")
-              .Field("type", "invalid_timestamp_filter_value")
-              .Field("filter_name", filter.name)
-              .Field("value", filter.value)
-              .Field("timezone", mysql_config.datetime_timezone)
-              .Error();
-          return "";
-        }
-        query << *epoch;
-      } else if (filter.type == "time") {
-        // MySQL reads a bare number compared against a TIME column as packed
-        // HHMMSS, so the configured value is resolved to seconds by the same
-        // rule replication uses and written back as a clock literal.
-        auto seconds = mysql::BinlogFilterEvaluator::ParseTimeFilterSeconds(filter.value);
-        auto literal = seconds ? mygramdb::utils::FormatMySQLTimeLiteral(*seconds) : std::nullopt;
-        if (!literal.has_value()) {
-          mygram::utils::StructuredLog()
-              .Event("loader_error")
-              .Field("operation", "build_select_query")
-              .Field("type", "invalid_time_filter_value")
-              .Field("filter_name", filter.name)
-              .Field("value", filter.value)
-              .Error();
-          return "";
-        }
-        query << mygramdb::utils::EncodeMySQLStringLiteral(*literal);
-      } else if (requires_quoting()) {
-        query << mygramdb::utils::EncodeMySQLStringLiteral(filter.value);
-      } else {
-        // Validate numeric values to prevent SQL injection
-        if (!internal::IsSafeSQLNumericLiteral(filter.value)) {
-          mygram::utils::StructuredLog()
-              .Event("loader_error")
-              .Field("operation", "build_select_query")
-              .Field("type", "invalid_numeric_filter_value")
-              .Field("filter_name", filter.name)
-              .Field("value", filter.value)
-              .Error();
-          return "";
-        }
-        query << filter.value;
-      }
+      query << predicate->SqlPredicate(*quoted_filter);
     }
   }
 

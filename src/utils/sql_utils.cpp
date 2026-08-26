@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cctype>
+#include <cstdio>
 
 namespace mygramdb::utils {
 
@@ -94,6 +95,57 @@ std::optional<std::string> FormatMySQLTimeLiteral(int64_t seconds) {
   literal.push_back(':');
   literal += two_digits(magnitude % kSecondsPerMinute);
   return literal;
+}
+
+std::optional<std::string> FormatMySQLDateTimeLiteral(int64_t epoch_seconds, int32_t timezone_offset_seconds) {
+  constexpr int64_t kSecondsPerDay = 86400;
+  constexpr int kMinMySQLYear = 1000;
+  constexpr int kMaxMySQLYear = 9999;
+
+  const int64_t local = epoch_seconds + timezone_offset_seconds;
+  // Floor division: a pre-epoch instant belongs to the day it falls in, not to
+  // the day truncation toward zero would put it in.
+  int64_t days = local / kSecondsPerDay;
+  int64_t seconds_of_day = local % kSecondsPerDay;
+  if (seconds_of_day < 0) {
+    seconds_of_day += kSecondsPerDay;
+    --days;
+  }
+
+  // Days since 1970-01-01 to a proleptic Gregorian date, shifting the era so
+  // that the leap-day irregularity falls at the end of the 400-year cycle.
+  int64_t shifted = days + 719468;
+  const int64_t era = (shifted >= 0 ? shifted : shifted - 146096) / 146097;
+  const int64_t day_of_era = shifted - era * 146097;
+  const int64_t year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+  const int64_t day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+  const int64_t month_index = (5 * day_of_year + 2) / 153;
+  const int64_t day = day_of_year - (153 * month_index + 2) / 5 + 1;
+  const int64_t month = month_index < 10 ? month_index + 3 : month_index - 9;
+  const int64_t year = year_of_era + era * 400 + (month <= 2 ? 1 : 0);
+
+  if (year < kMinMySQLYear || year > kMaxMySQLYear) {
+    return std::nullopt;
+  }
+
+  std::array<char, 32> buffer{};
+  const int written = std::snprintf(
+      buffer.data(), buffer.size(), "%04lld-%02lld-%02lld %02lld:%02lld:%02lld", static_cast<long long>(year),
+      static_cast<long long>(month), static_cast<long long>(day), static_cast<long long>(seconds_of_day / 3600),
+      static_cast<long long>((seconds_of_day / 60) % 60), static_cast<long long>(seconds_of_day % 60));
+  if (written <= 0) {
+    return std::nullopt;
+  }
+  return std::string(buffer.data(), static_cast<size_t>(written));
+}
+
+std::string FormatMySQLDoubleLiteral(double value) {
+  std::array<char, 40> buffer{};
+  const int written = std::snprintf(buffer.data(), buffer.size(), "%.17e", value);
+  if (written <= 0) {
+    return "0e0";
+  }
+  return std::string(buffer.data(), static_cast<size_t>(written));
 }
 
 std::string StripSQLComments(const std::string& query) {
