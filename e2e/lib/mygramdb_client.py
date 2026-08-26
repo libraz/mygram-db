@@ -12,6 +12,31 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+class MygramdbError(RuntimeError):
+    """Base class for failures raised while talking to MygramDB.
+
+    Every failure to obtain a well-formed answer is raised rather than
+    reported as an empty or zero-valued result, so a broken or unreachable
+    server can never satisfy an assertion that expects a count of zero.
+    """
+
+
+class MygramdbTransportError(MygramdbError):
+    """The command could not be exchanged with the server."""
+
+
+class MygramdbCommandError(MygramdbError):
+    """The server answered with an ERROR frame."""
+
+
+class MygramdbSynchronizingError(MygramdbCommandError):
+    """The server refused the command because the table is mid-sync."""
+
+
+class MygramdbProtocolError(MygramdbError):
+    """The response matched no frame the client knows how to read."""
+
+
 class MygramdbClient:
     """MygramDB client supporting both TCP and HTTP protocols."""
 
@@ -24,40 +49,65 @@ class MygramdbClient:
         self.unix_socket_path = unix_socket_path
 
     def ping(self) -> bool:
-        """Check if MygramDB accepts TCP connections."""
-        try:
-            resp = self.tcp_command("INFO")
-            return resp is not None
-        except Exception:
-            return False
+        """Check whether MygramDB accepts TCP connections.
 
-    def tcp_command(self, cmd: str, timeout: float = 30.0) -> str | None:
-        """Send a TCP command and return the response string."""
+        Reachability is this method's return value, so an unreachable server
+        is reported as False rather than raised. Callers that need a command
+        result must use the command methods, which raise instead.
+        """
         try:
-            if self.unix_socket_path:
-                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            else:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
+            self.tcp_command("INFO")
+        except MygramdbError:
+            return False
+        return True
+
+    def _open_socket(self, timeout: float) -> socket.socket:
+        """Connect to the configured TCP or Unix endpoint."""
+        family = socket.AF_UNIX if self.unix_socket_path else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
             if self.unix_socket_path:
                 sock.connect(self.unix_socket_path)
             else:
                 sock.connect((self.host, self.tcp_port))
-            sock.sendall((cmd + "\r\n").encode("utf-8"))
-
-            data = b""
-            while True:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                if data.endswith(b"\r\n"):
-                    break
-
+        except OSError:
             sock.close()
-            return data.decode("utf-8", errors="ignore").strip()
-        except Exception:
-            return None
+            raise
+        return sock
+
+    def _exchange(self, cmd: str, timeout: float, terminator: bytes) -> str:
+        """Send ``cmd`` and read the response, or raise.
+
+        A connection failure, a timeout, or a connection closed before any
+        byte arrived is raised as MygramdbTransportError. Returning a sentinel
+        instead would let an unreachable server be parsed as an empty result.
+        """
+        try:
+            sock = self._open_socket(timeout)
+            try:
+                sock.sendall((cmd + "\r\n").encode("utf-8"))
+
+                data = b""
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if data.endswith(terminator):
+                        break
+            finally:
+                sock.close()
+        except OSError as exc:
+            raise MygramdbTransportError(f"{cmd!r} failed: {exc!r}") from exc
+
+        if not data:
+            raise MygramdbTransportError(f"{cmd!r}: connection closed before any response")
+        return data.decode("utf-8", errors="ignore").strip()
+
+    def tcp_command(self, cmd: str, timeout: float = 30.0) -> str:
+        """Send a TCP command and return the single-line response string."""
+        return self._exchange(cmd, timeout, b"\r\n")
 
     def tcp_command_timed(self, cmd: str, timeout: float = 30.0) -> tuple[bool, float, str]:
         """Send a TCP command and return (success, elapsed_ms, response)."""
@@ -124,37 +174,45 @@ class MygramdbClient:
                 cmd += f" LIMIT {limit}"
 
         resp = self.tcp_command(cmd)
-        # A mid-sync rejection must not be parsed as an empty result set.
-        if self._is_synchronizing_response(resp):
-            raise RuntimeError(f"SEARCH rejected while table synchronizing: {resp}")
+        # A refusal must not be parsed as an empty result set.
+        self._raise_for_error_frame("SEARCH", resp)
         return self._parse_search_response(resp)
 
     def count(self, table: str, query: str, *, filters: dict[str, Any] | None = None) -> int:
-        """Execute a COUNT command."""
+        """Execute a COUNT command and return the count the server reported.
+
+        An integer is returned only when the server answered with a success
+        frame this client recognises. Every other outcome raises: an
+        unreachable server, a refusal, and an unreadable frame must all be
+        distinguishable from a genuine count of zero, because a poll waiting
+        for zero would otherwise be satisfied by a server that never answered.
+        """
         cmd = f"COUNT {table} {query}"
         if filters:
             for key, value in filters.items():
                 cmd += f" FILTER {key}={value}"
         resp = self.tcp_command(cmd)
-        if not resp:
-            return 0
-        # A mid-sync rejection ("ERROR ... is synchronizing ...") must not be
-        # silently coerced to 0; surface it so polling callers retry instead of
-        # treating the transient window as a real empty result.
-        if self._is_synchronizing_response(resp):
-            raise RuntimeError(f"COUNT rejected while table synchronizing: {resp}")
-        # Handle "OK COUNT N" format
+        self._raise_for_error_frame("COUNT", resp)
+
+        # "OK COUNT N" format
         if resp.startswith("OK COUNT "):
             parts = resp.split()
             if len(parts) >= 3:
                 try:
                     return int(parts[2])
-                except ValueError:
-                    pass
-        # Handle "(integer) N" format
+                except ValueError as exc:
+                    raise MygramdbProtocolError(
+                        f"COUNT reported a non-numeric total: {resp!r}"
+                    ) from exc
+        # "(integer) N" format
         if resp.startswith("(integer)"):
-            return int(resp.split(")", 1)[1].strip())
-        return 0
+            try:
+                return int(resp.split(")", 1)[1].strip())
+            except ValueError as exc:
+                raise MygramdbProtocolError(
+                    f"COUNT reported a non-numeric total: {resp!r}"
+                ) from exc
+        raise MygramdbProtocolError(f"unrecognised COUNT response: {resp!r}")
 
     def facet(
         self,
@@ -176,8 +234,9 @@ class MygramdbClient:
             cmd += f" LIMIT {limit}"
 
         resp = self.tcp_command_multiline(cmd)
-        if not resp or not resp.startswith("OK FACET"):
-            return {}
+        self._raise_for_error_frame("FACET", resp)
+        if not resp.startswith("OK FACET"):
+            raise MygramdbProtocolError(f"unrecognised FACET response: {resp!r}")
 
         counts: dict[str, int] = {}
         for line in resp.splitlines()[1:]:
@@ -190,39 +249,14 @@ class MygramdbClient:
 
     def tcp_command_multiline(
         self, cmd: str, timeout: float = 30.0, terminator: bytes = b"\r\n\r\n"
-    ) -> str | None:
+    ) -> str:
         """Send a TCP command and read until a multi-line response terminator."""
-        try:
-            if self.unix_socket_path:
-                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            else:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            if self.unix_socket_path:
-                sock.connect(self.unix_socket_path)
-            else:
-                sock.connect((self.host, self.tcp_port))
-            sock.sendall((cmd + "\r\n").encode("utf-8"))
-
-            data = b""
-            while True:
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-                if data.endswith(terminator):
-                    break
-
-            sock.close()
-            return data.decode("utf-8", errors="ignore").strip()
-        except Exception:
-            return None
+        return self._exchange(cmd, timeout, terminator)
 
     def info(self) -> dict[str, Any]:
         """Execute INFO command and parse result."""
         resp = self.tcp_command("INFO")
-        if not resp:
-            return {}
+        self._raise_for_error_frame("INFO", resp)
         result: dict[str, Any] = {}
         for line in resp.split("\n"):
             line = line.strip()
@@ -253,8 +287,13 @@ class MygramdbClient:
         # protocol frame terminator, yielding ``END\r\n\r\n`` on the wire.
         # Waiting for only the body suffix makes ``endswith`` miss the frame
         # and turns every status read into a five-second socket timeout.
-        resp = self.tcp_command_multiline("SYNC STATUS", timeout=5.0, terminator=b"END\r\n\r\n")
-        if resp is None:
+        try:
+            resp = self.tcp_command_multiline("SYNC STATUS", timeout=5.0, terminator=b"END\r\n\r\n")
+        except MygramdbTransportError:
+            # This probe only ever runs inside sync()'s bounded polling loop,
+            # which keeps retrying and ends in a False return. A single
+            # unreadable poll is therefore reported, not hidden: a server that
+            # stays unreachable exhausts the deadline and fails the caller.
             return None
         if table is None:
             return resp
@@ -267,6 +306,20 @@ class MygramdbClient:
     def _is_synchronizing_response(self, resp: str | None) -> bool:
         """True if ``resp`` is a server "table is synchronizing" rejection."""
         return resp is not None and "synchronizing" in resp.lower()
+
+    def _raise_for_error_frame(self, command: str, resp: str) -> None:
+        """Raise if ``resp`` is an ERROR frame.
+
+        The mid-sync rejection gets its own type so a polling caller can retry
+        that transient window while every other refusal still fails the test.
+        """
+        if not resp.startswith("ERROR"):
+            return
+        if self._is_synchronizing_response(resp):
+            raise MygramdbSynchronizingError(
+                f"{command} rejected while table synchronizing: {resp}"
+            )
+        raise MygramdbCommandError(f"{command} refused by the server: {resp}")
 
     @staticmethod
     def _normalize_completed_marker(line: str) -> str:
@@ -291,8 +344,12 @@ class MygramdbClient:
         """
         if table is None:
             return True
-        resp = self.tcp_command(f"COUNT {table} _readiness_probe_", timeout=5.0)
-        if resp is None:
+        try:
+            resp = self.tcp_command(f"COUNT {table} _readiness_probe_", timeout=5.0)
+        except MygramdbTransportError:
+            # Same bounded-loop contract as _sync_status_line: sync() retries
+            # until its deadline and then returns False, so an unreadable probe
+            # can only delay a failure, never turn one into a success.
             return False
         return not self._is_synchronizing_response(resp)
 
@@ -325,7 +382,7 @@ class MygramdbClient:
 
         cmd = f"SYNC {table}" if table else "SYNC"
         resp = self.tcp_command(cmd, timeout=timeout)
-        if resp is None or "OK" not in resp:
+        if "OK" not in resp:
             return False
 
         deadline = time.monotonic() + timeout
@@ -371,18 +428,15 @@ class MygramdbClient:
 
     def cache_clear(self) -> bool:
         """Clear the query cache."""
-        resp = self.tcp_command("CACHE CLEAR")
-        return resp is not None and "OK" in resp
+        return "OK" in self.tcp_command("CACHE CLEAR")
 
     def dump_save(self) -> bool:
         """Trigger a dump save."""
-        resp = self.tcp_command("DUMP SAVE", timeout=60.0)
-        return resp is not None and "OK" in resp
+        return "OK" in self.tcp_command("DUMP SAVE", timeout=60.0)
 
     def dump_load(self, filepath: str = "mygramdb.dmp") -> bool:
         """Trigger a dump load."""
-        resp = self.tcp_command(f"DUMP LOAD {filepath}", timeout=60.0)
-        return resp is not None and "OK" in resp
+        return "OK" in self.tcp_command(f"DUMP LOAD {filepath}", timeout=60.0)
 
     def http_get_with_status(
         self, path: str, timeout: float = 10.0
@@ -497,18 +551,15 @@ class MygramdbClient:
 
     def replication_stop(self) -> bool:
         """Send REPLICATION STOP command."""
-        resp = self.tcp_command("REPLICATION STOP")
-        return resp is not None and "STOPPED" in resp
+        return "STOPPED" in self.tcp_command("REPLICATION STOP")
 
     def replication_start(self) -> bool:
         """Send REPLICATION START command."""
-        resp = self.tcp_command("REPLICATION START")
-        return resp is not None and "STARTED" in resp
+        return "STARTED" in self.tcp_command("REPLICATION START")
 
     def replication_status(self) -> str:
         """Send REPLICATION STATUS command and return response."""
-        resp = self.tcp_command_multiline("REPLICATION STATUS", timeout=10.0, terminator=b"END\r\n")
-        return resp or ""
+        return self.tcp_command_multiline("REPLICATION STATUS", timeout=10.0, terminator=b"END\r\n")
 
     def replication_field(self, key: str) -> str:
         """Read one field from the REPLICATION STATUS response.
@@ -553,10 +604,14 @@ class MygramdbClient:
         order = parts[1].upper() if len(parts) > 1 else "DESC"
         return {"column": column, "order": order}
 
-    def _parse_search_response(self, resp: str | None) -> dict[str, Any]:
-        """Parse a SEARCH response into structured data."""
-        if not resp:
-            return {"total": 0, "ids": [], "raw_response": ""}
+    def _parse_search_response(self, resp: str) -> dict[str, Any]:
+        """Parse a SEARCH response into structured data.
+
+        Only a frame opening with a success status is parsed; anything else
+        raises rather than reading as a zero-result set.
+        """
+        if not resp.startswith("OK"):
+            raise MygramdbProtocolError(f"unrecognised SEARCH response: {resp!r}")
 
         result: dict[str, Any] = {"raw_response": resp, "ids": [], "total": 0}
 

@@ -82,6 +82,20 @@ class TestCacheCoherency:
         for t in search_threads:
             t.join(timeout=10)
 
+        assert not errors, f"Search errors: {errors}"
+
+        # The concurrent reads are the point of running the searchers, so they
+        # are checked rather than merely collected. The workload only inserts,
+        # so every observation has to sit between an empty index and the full
+        # set; anything outside that means a reader saw an index state that
+        # was never written.
+        observed = [count for counts in search_results for count in counts]
+        assert observed, "no searcher thread recorded a result"
+        assert all(0 <= count <= insert_count for count in observed), (
+            f"a concurrent read reported a count outside [0, {insert_count}]: "
+            f"{sorted(set(observed))}"
+        )
+
         # Sync and verify final state
         mygramdb.sync("testdb.articles", timeout=15)
         wait_until_value(
@@ -91,7 +105,6 @@ class TestCacheCoherency:
             interval=0.5,
             description=f"all {marker} inserts",
         )
-        assert not errors, f"Search errors: {errors}"
 
     def test_cache_invalidation_under_updates(self, mysql, mygramdb, seed_data, clear_cache):
         """Cache a search result, UPDATE all matching rows, verify cache invalidated."""
@@ -199,7 +212,10 @@ class TestCacheCoherency:
         def _searcher(thread_id: int):
             while not stop_event.is_set():
                 try:
-                    mygramdb.tcp_command("SEARCH testdb.articles test")
+                    # search() rejects anything that is not a result frame, so a
+                    # refusal caused by a concurrent clear is recorded here
+                    # rather than passing for a well-formed empty answer.
+                    mygramdb.search("testdb.articles", "test", limit=10)
                 except Exception as e:
                     errors.append(f"searcher-{thread_id}: {e}")
                 time.sleep(0.1)
@@ -222,5 +238,7 @@ class TestCacheCoherency:
             t.join(timeout=10)
 
         assert mygramdb.ping(), "Server unresponsive after concurrent cache clear + search"
-        # Some errors from race conditions are tolerable, but should be minimal
-        assert len(errors) < 10, f"Too many errors ({len(errors)}): {errors[:5]}"
+        # Clearing the cache is transparent to a reader: it may cost a lookup a
+        # cache hit, never an answer. Any error here is a read path breaking
+        # under a concurrent clear.
+        assert not errors, f"{len(errors)} search or clear failures: {errors[:5]}"
