@@ -344,6 +344,18 @@ class HttpServer {
    */
   void SetupAccessControl();
 
+  /** True when `api.admin_token` is set and therefore has to be presented. */
+  bool AdminTokenConfigured() const;
+
+  /**
+   * @brief Decide whether a request may see administrative state.
+   *
+   * True when no token is configured (the surface is open by configuration) or
+   * when the request carries a matching `Authorization: Bearer` value. The
+   * token is compared in constant time.
+   */
+  bool AdminCredentialsAccepted(const httplib::Request& req) const;
+
   /**
    * @brief Result of a successful PrepareHttpSearchQuery call.
    *

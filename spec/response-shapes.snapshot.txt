@@ -893,37 +893,21 @@
 < }
 ### 086 HTTP config
 > GET /config
-< status: 200
+< status: 401
 < content-type: application/json
+< www-authenticate: Bearer
 < {
-<   "api": {
-<     "http": {
-<       "cors_enabled": false,
-<       "enabled": true
-<     },
-<     "tcp": {
-<       "enabled": true
-<     }
-<   },
-<   "mysql": {
-<     "configured": true,
-<     "database_defined": false
-<   },
-<   "network": {
-<     "allow_cidrs_configured": true
-<   },
-<   "notes": "Sensitive configuration values are redacted over HTTP. Use CONFIG SHOW over a secured connection for details.",
-<   "replication": {
-<     "enable": true
-<   }
+<   "error": "Administrative endpoint requires a valid bearer token",
+<   "error_code": 7
 < }
 ### 087 HTTP replication status
 > GET /replication/status
-< status: 503
+< status: 401
 < content-type: application/json
+< www-authenticate: Bearer
 < {
-<   "error": "Replication not configured",
-<   "error_code": 4
+<   "error": "Administrative endpoint requires a valid bearer token",
+<   "error_code": 7
 < }
 ### 088 HTTP metrics
 > GET /metrics

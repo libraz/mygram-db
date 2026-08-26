@@ -61,24 +61,32 @@ bool ConstantTimeEqual(std::string_view lhs, std::string_view rhs) {
   return difference == 0;
 }
 
-bool IsAuthCommandForLogging(std::string_view request) {
-  size_t offset = 0;
-  while (offset < request.size() && std::isspace(static_cast<unsigned char>(request[offset]))) {
-    ++offset;
-  }
-
+/**
+ * @brief True when a request mentions AUTH anywhere, ignoring case.
+ *
+ * Used only for requests the parser rejected. A rejected request has no token
+ * boundaries the parser can vouch for, so anything that could be an
+ * authentication attempt is treated as one and redacted whole. The scan is
+ * deliberately broader than the grammar in that direction only.
+ */
+bool MentionsAuth(std::string_view request) {
   constexpr std::string_view kAuth = "AUTH";
-  if (request.size() - offset < kAuth.size()) {
+  if (request.size() < kAuth.size()) {
     return false;
   }
-  for (size_t i = 0; i < kAuth.size(); ++i) {
-    if (std::toupper(static_cast<unsigned char>(request[offset + i])) != kAuth[i]) {
-      return false;
+  for (size_t offset = 0; offset + kAuth.size() <= request.size(); ++offset) {
+    bool matched = true;
+    for (size_t i = 0; i < kAuth.size(); ++i) {
+      if (std::toupper(static_cast<unsigned char>(request[offset + i])) != kAuth[i]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      return true;
     }
   }
-
-  return offset + kAuth.size() == request.size() ||
-         std::isspace(static_cast<unsigned char>(request[offset + kAuth.size()]));
+  return false;
 }
 
 }  // namespace
@@ -120,28 +128,41 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
     return ResponseFormatter::FormatError("Rate limit exceeded", mygram::utils::ErrorCode::kServerBusy);
   }
 
-  // Untrusted client input may contain log-injection sequences. Truncation also
-  // bounds log volume on long requests. The full byte length is preserved in a
-  // separate numeric field so log consumers can detect truncation and never
-  // assume the logged string is complete.
-  std::string truncated_request = IsAuthCommandForLogging(request) ? "AUTH <redacted>"
-                                                                   : mygram::utils::StructuredLog::TruncateUtf8Prefix(
-                                                                         request, mygram::utils::kMaxQueryLogLength);
-  if (!IsAuthCommandForLogging(request) && request.size() > mygram::utils::kMaxQueryLogLength) {
-    truncated_request += "...";
-  }
-  mygram::utils::StructuredLog()
-      .Event("request_dispatching")
-      .Field("request", truncated_request)
-      .Field("request_full_length", static_cast<int64_t>(request.size()))
-      .Debug();
-
   // Create a thread-local parser for this request
   query::QueryParser parser;
   parser.SetMaxQueryLength(max_query_length_.load(std::memory_order_acquire));
 
   // Parse query
   auto query = parser.Parse(request);
+
+  // Logged after parsing so the redaction decision is the parser's own verdict
+  // rather than a second reading of the bytes. A separate scanner would have to
+  // reproduce the grammar's quoting and Unicode whitespace rules exactly, and
+  // every spelling where the two disagreed would write a token to the log.
+  // Requests the parser rejected are still logged — a malformed request is the
+  // diagnostically interesting one — but are redacted whole when they mention
+  // AUTH, because a rejected request has no token boundaries to trust.
+  //
+  // Untrusted client input may contain log-injection sequences. Truncation also
+  // bounds log volume on long requests. The full byte length is preserved in a
+  // separate numeric field so log consumers can detect truncation and never
+  // assume the logged string is complete.
+  std::string logged_request;
+  if (query && query->type == query::QueryType::AUTH) {
+    logged_request = "AUTH <redacted>";
+  } else if (!query && MentionsAuth(request)) {
+    logged_request = "<redacted>";
+  } else {
+    logged_request = mygram::utils::StructuredLog::TruncateUtf8Prefix(request, mygram::utils::kMaxQueryLogLength);
+    if (request.size() > mygram::utils::kMaxQueryLogLength) {
+      logged_request += "...";
+    }
+  }
+  mygram::utils::StructuredLog()
+      .Event("request_dispatching")
+      .Field("request", logged_request)
+      .Field("request_full_length", static_cast<int64_t>(request.size()))
+      .Debug();
 
   if (!query) {
     return ResponseFormatter::FormatError(query.error());

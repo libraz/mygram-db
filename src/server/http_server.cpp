@@ -398,6 +398,24 @@ bool ConstantTimeEqual(std::string_view lhs, std::string_view rhs) {
   return difference == 0;
 }
 
+#ifdef USE_MYSQL
+/**
+ * @brief Describe a replication fault without repeating MySQL's own text.
+ *
+ * The reader stores mysql_error() verbatim, and that text can name the
+ * replication account, the address MySQL resolved the client to, and whether a
+ * password was sent. Surfaces reachable without administrative credentials
+ * report the error code's own description instead; the verbatim message stays
+ * on GET /replication/status and in the structured log.
+ */
+std::string ReplicationErrorSummary(const mysql::IBinlogReader& reader) {
+  if (reader.GetLastError().empty()) {
+    return {};
+  }
+  return mygram::utils::ErrorCodeToString(reader.GetLastErrorCode());
+}
+#endif
+
 int HttpStatusForQueryError(const Error& error) {
   if (error.code() == ErrorCode::kServerShuttingDown || error.code() == ErrorCode::kServerLoading) {
     return kHttpServiceUnavailable;
@@ -705,8 +723,8 @@ const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServ
       {Method::kGet, "/health/live", false, &HttpServer::HandleHealthLive},
       {Method::kGet, "/health/ready", false, &HttpServer::HandleHealthReady},
       {Method::kGet, "/health/detail", false, &HttpServer::HandleHealthDetail},
-      {Method::kGet, "/config", false, &HttpServer::HandleConfig},
-      {Method::kGet, "/replication/status", false, &HttpServer::HandleReplicationStatus},
+      {Method::kGet, "/config", true, &HttpServer::HandleConfig},
+      {Method::kGet, "/replication/status", true, &HttpServer::HandleReplicationStatus},
       {Method::kPost, "/optimize", true, &HttpServer::HandleOptimize},
       {Method::kGet, "/metrics", false, &HttpServer::HandleMetrics},
       {Method::kGet, R"(/tables/([^/]+)/([^/]+))", false, &HttpServer::HandleGet},
@@ -714,9 +732,40 @@ const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServ
   return kRoutes;
 }
 
+bool HttpServer::AdminTokenConfigured() const {
+  return full_config_ != nullptr && !full_config_->api.admin_token.empty();
+}
+
+bool HttpServer::AdminCredentialsAccepted(const httplib::Request& req) const {
+  if (!AdminTokenConfigured()) {
+    // With no token configured the administrative surface is open by design,
+    // exactly as RequestDispatcher treats administrative TCP commands.
+    return true;
+  }
+  constexpr std::string_view kBearerPrefix = "Bearer ";
+  const std::string authorization = req.get_header_value("Authorization");
+  const bool has_bearer = authorization.size() >= kBearerPrefix.size() &&
+                          std::string_view(authorization).substr(0, kBearerPrefix.size()) == kBearerPrefix;
+  const std::string_view supplied =
+      has_bearer ? std::string_view(authorization).substr(kBearerPrefix.size()) : std::string_view{};
+  return has_bearer && ConstantTimeEqual(supplied, full_config_->api.admin_token);
+}
+
 void HttpServer::SetupRoutes() {
   for (const auto& route : Routes()) {
-    auto invoke = [this, handler = route.handler](const httplib::Request& req, httplib::Response& res) {
+    auto invoke = [this, handler = route.handler, requires_admin_token = route.requires_admin_token](
+                      const httplib::Request& req, httplib::Response& res) {
+      // Credentials are checked here rather than inside each handler, so a
+      // route cannot serve administrative state to an uncredentialed caller by
+      // omitting a check of its own. The rejection happens before the handler
+      // reads any state or assembles any body.
+      if (requires_admin_token && !AdminCredentialsAccepted(req)) {
+        RecordRequest();
+        res.set_header("WWW-Authenticate", "Bearer");
+        SendError(res, kHttpUnauthorized, "Administrative endpoint requires a valid bearer token",
+                  mygram::utils::ErrorCode::kPermissionDenied);
+        return;
+      }
       (this->*handler)(req, res);
     };
     const std::string pattern(route.pattern);
@@ -1779,7 +1828,7 @@ void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Resp
   SendJson(res, kHttpOk, response);
 }
 
-void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Response& res) {
+void HttpServer::HandleHealthReady(const httplib::Request& req, httplib::Response& res) {
   // Health probe — not counted in total_requests; see HandleHealth.
   // Readiness probe: Return 200 OK if ready to accept traffic, 503 otherwise
   const bool is_loading = (loading_ != nullptr && loading_->load());
@@ -1810,12 +1859,18 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
     response["replication_starting"] = binlog_reader_->IsStarting();
     response["replication_paused_for_dump"] = replication_paused_for_dump;
     response["sync_in_progress"] = sync_in_progress;
-    response["replication_last_error"] = binlog_reader_->GetLastError();
+    // The probe names the fault by code and by the code's own description. The
+    // reader's message is verbatim MySQL text that can carry the replication
+    // account and the address the server sees, so it stays on the credentialed
+    // /replication/status route and in the structured log.
+    response["replication_last_error"] = ReplicationErrorSummary(*binlog_reader_);
     response["replication_last_error_code"] = static_cast<uint16_t>(binlog_reader_->GetLastErrorCode());
-    response["replication_crc_errors"] = binlog_reader_->GetCRCErrors();
-    response["replication_schema_incompatible"] = binlog_reader_->HasSchemaIncompatibleError();
     response["replication_last_applied_unixtime"] = binlog_reader_->GetLastAppliedUnixTime();
     response["replication_seconds_since_last_applied"] = binlog_reader_->GetSecondsSinceLastApplied();
+    if (AdminCredentialsAccepted(req)) {
+      response["replication_crc_errors"] = binlog_reader_->GetCRCErrors();
+      response["replication_schema_incompatible"] = binlog_reader_->HasSchemaIncompatibleError();
+    }
   }
 #endif
 
@@ -1833,7 +1888,7 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
     } else if (binlog_reader_ != nullptr && binlog_reader_->HasSchemaIncompatibleError()) {
       response["reason"] = "Replication stopped due to an incompatible schema";
     } else if (binlog_reader_ != nullptr && !binlog_reader_->GetLastError().empty()) {
-      response["reason"] = binlog_reader_->GetLastError();
+      response["reason"] = ReplicationErrorSummary(*binlog_reader_);
     } else if (sync_in_progress) {
       response["reason"] = "SYNC is in progress";
     } else {
@@ -1845,7 +1900,7 @@ void HttpServer::HandleHealthReady(const httplib::Request& /*req*/, httplib::Res
   }
 }
 
-void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Response& res) {
+void HttpServer::HandleHealthDetail(const httplib::Request& req, httplib::Response& res) {
   // Health probe — not counted in total_requests; see HandleHealth.
   // Detailed health: Return comprehensive component status
   json response;
@@ -1917,13 +1972,19 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
     json binlog_comp;
     const auto replication_state = binlog_reader_->GetReplicationState();
     const bool replication_starting = binlog_reader_->IsStarting();
+    // The binlog position, the counters derived from it, and the schema
+    // verdict are what GET /replication/status protects. Serving them from an
+    // open probe would leave that route gated in name only.
+    const bool expose_replication_detail = AdminCredentialsAccepted(req);
     if (replication_state == mysql::ReplicationState::kRunning || replication_starting) {
       binlog_comp["status"] = replication_starting ? "starting" : "connected";
       binlog_comp["running"] = !replication_starting;
       binlog_comp["starting"] = replication_starting;
-      binlog_comp["current_gtid"] = binlog_reader_->GetCurrentGTID();
-      binlog_comp["processed_events"] = binlog_reader_->GetProcessedEvents();
-      binlog_comp["queue_size"] = binlog_reader_->GetQueueSize();
+      if (expose_replication_detail) {
+        binlog_comp["current_gtid"] = binlog_reader_->GetCurrentGTID();
+        binlog_comp["processed_events"] = binlog_reader_->GetProcessedEvents();
+        binlog_comp["queue_size"] = binlog_reader_->GetQueueSize();
+      }
     } else {
       binlog_comp["status"] = replication_paused_for_dump
                                   ? "paused_for_dump"
@@ -1932,12 +1993,14 @@ void HttpServer::HandleHealthDetail(const httplib::Request& /*req*/, httplib::Re
       binlog_comp["paused_for_dump"] = replication_paused_for_dump;
     }
     binlog_comp["replication_state"] = mysql::ToString(replication_state);
-    binlog_comp["crc_errors"] = binlog_reader_->GetCRCErrors();
-    binlog_comp["schema_incompatible"] = binlog_reader_->HasSchemaIncompatibleError();
     binlog_comp["last_error_code"] = static_cast<uint16_t>(binlog_reader_->GetLastErrorCode());
-    binlog_comp["last_error"] = binlog_reader_->GetLastError();
+    binlog_comp["last_error"] = ReplicationErrorSummary(*binlog_reader_);
     binlog_comp["last_applied_unixtime"] = binlog_reader_->GetLastAppliedUnixTime();
     binlog_comp["seconds_since_last_applied"] = binlog_reader_->GetSecondsSinceLastApplied();
+    if (expose_replication_detail) {
+      binlog_comp["crc_errors"] = binlog_reader_->GetCRCErrors();
+      binlog_comp["schema_incompatible"] = binlog_reader_->HasSchemaIncompatibleError();
+    }
     components["binlog"] = binlog_comp;
   }
 #endif
@@ -2045,21 +2108,6 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
     SendError(res, kHttpUnsupportedMediaType, "Content-Type must be application/json",
               mygram::utils::ErrorCode::kNetworkInvalidRequest);
     return;
-  }
-
-  if (full_config_ != nullptr && !full_config_->api.admin_token.empty()) {
-    constexpr std::string_view kBearerPrefix = "Bearer ";
-    const std::string authorization = req.get_header_value("Authorization");
-    const bool has_bearer = authorization.size() >= kBearerPrefix.size() &&
-                            std::string_view(authorization).substr(0, kBearerPrefix.size()) == kBearerPrefix;
-    const std::string_view supplied =
-        has_bearer ? std::string_view(authorization).substr(kBearerPrefix.size()) : std::string_view{};
-    if (!has_bearer || !ConstantTimeEqual(supplied, full_config_->api.admin_token)) {
-      res.set_header("WWW-Authenticate", "Bearer");
-      SendError(res, kHttpUnauthorized, "Administrative endpoint requires a valid bearer token",
-                mygram::utils::ErrorCode::kPermissionDenied);
-      return;
-    }
   }
 
   json body;

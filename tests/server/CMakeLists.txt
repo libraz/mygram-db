@@ -1083,3 +1083,49 @@ gtest_discover_tests(facet_handler_cache_key_test
   DISCOVERY_TIMEOUT 30
   PROPERTIES RESOURCE_LOCK server_state
 )
+
+# HTTP administrative authentication tests
+
+add_executable(http_admin_auth_test
+  http_admin_auth_test.cpp
+)
+
+target_link_libraries(http_admin_auth_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(http_admin_auth_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+# On macOS, run serially to avoid network stack resource contention
+if(APPLE)
+  gtest_discover_tests(http_admin_auth_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      RUN_SERIAL TRUE
+  )
+else()
+  gtest_discover_tests(http_admin_auth_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+endif()
+
+# Authentication token log redaction tests
+
+add_executable(auth_log_redaction_test
+  auth_log_redaction_test.cpp
+)
+
+target_link_libraries(auth_log_redaction_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(auth_log_redaction_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
