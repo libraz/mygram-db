@@ -33,6 +33,7 @@
 #include "query/query_parser.h"
 #include "server/denial_log_limiter.h"
 #include "server/rate_limiter.h"
+#include "server/readiness.h"
 #include "server/server_stats.h"
 #include "server/statistics_service.h"
 #include "storage/document_store.h"
@@ -288,6 +289,25 @@ class HttpServer {
     RouteMethod method;         ///< Verb the route is registered under.
     std::string_view pattern;   ///< Path or path regex, as registered.
     bool requires_admin_token;  ///< True when the handler enforces api.admin_token.
+    /**
+     * @brief True when a request on this route belongs in `total_requests`.
+     *
+     * The orchestrator probes are excluded: they are polled at a frequency that
+     * has nothing to do with application traffic and would distort the QPS view.
+     * The pre-routing denial branches read this so a probe is accounted the same
+     * way whether it is served or rejected.
+     */
+    bool counts_requests;
+    /**
+     * @brief True when a request on this route consumes a rate-limit token.
+     *
+     * The constant-cost probes opt out: a `429` on a liveness or readiness probe
+     * reads as a dead process to whatever is polling it, so unrelated traffic
+     * sharing the bucket could take a healthy server out of rotation. They stay
+     * bounded by `network.allow_cidrs`, by `api.http.max_connections`, and by
+     * doing no index or document work per request.
+     */
+    bool rate_limited;
     void (HttpServer::*handler)(const httplib::Request&, httplib::Response&);  ///< Member handler.
   };
 
@@ -306,6 +326,25 @@ class HttpServer {
   static const std::array<RouteDescriptor, kRouteCount>& Routes();
 
  private:
+  /**
+   * @brief Find the descriptor for a fixed-path route, before cpp-httplib matches.
+   *
+   * Only exact-literal patterns can be resolved this way, which is enough for
+   * the pre-routing handler: every route that opts out of request accounting or
+   * of the rate limiter is registered under a literal path. Returns nullptr for
+   * a regex route or an unrecognised path.
+   */
+  static const RouteDescriptor* FindLiteralRoute(const std::string& method, const std::string& path);
+
+  /**
+   * @brief Collect the state the readiness verdict is computed from.
+   *
+   * The single point at which this surface reads its replication, sync, dump
+   * and initial-data handles; every health route classifies the result rather
+   * than re-reading them.
+   */
+  ReadinessInputs CurrentReadinessInputs() const;
+
   HttpServerConfig config_;
   // Uses std::unordered_map (not absl::flat_hash_map) to match the
   // std::unordered_map<> parameter type used by ResponseFormatter and

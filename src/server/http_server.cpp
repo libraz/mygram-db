@@ -25,6 +25,7 @@
 #include "server/handlers/search_handler.h"
 #include "server/log_field_names.h"
 #include "server/protocol_constants.h"
+#include "server/readiness.h"
 #include "server/response_formatter.h"
 #include "server/search_pipeline.h"
 #include "server/statistics_service.h"
@@ -397,24 +398,6 @@ bool ConstantTimeEqual(std::string_view lhs, std::string_view rhs) {
   return difference == 0;
 }
 
-#ifdef USE_MYSQL
-/**
- * @brief Describe a replication fault without repeating MySQL's own text.
- *
- * The reader stores mysql_error() verbatim, and that text can name the
- * replication account, the address MySQL resolved the client to, and whether a
- * password was sent. Surfaces reachable without administrative credentials
- * report the error code's own description instead; the verbatim message stays
- * on GET /replication/status and in the structured log.
- */
-std::string ReplicationErrorSummary(const mysql::IBinlogReader& reader) {
-  if (reader.GetLastError().empty()) {
-    return {};
-  }
-  return mygram::utils::ErrorCodeToString(reader.GetLastErrorCode());
-}
-#endif
-
 int HttpStatusForQueryError(const Error& error) {
   if (error.code() == ErrorCode::kServerShuttingDown || error.code() == ErrorCode::kServerLoading) {
     return kHttpServiceUnavailable;
@@ -682,21 +665,31 @@ const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServ
   // but it does shadow the /tables/{identity}/search family and therefore
   // must stay last.
   static const std::array<RouteDescriptor, kRouteCount> kRoutes = {{
-      {Method::kPost, R"(/tables/([^/]+)/search)", false, &HttpServer::HandleSearch},
-      {Method::kPost, R"(/tables/([^/]+)/count)", false, &HttpServer::HandleCount},
-      {Method::kPost, R"(/tables/([^/]+)/facet)", false, &HttpServer::HandleFacet},
-      {Method::kGet, "/info", false, &HttpServer::HandleInfo},
-      {Method::kGet, "/health", false, &HttpServer::HandleHealth},
-      {Method::kGet, "/health/live", false, &HttpServer::HandleHealthLive},
-      {Method::kGet, "/health/ready", false, &HttpServer::HandleHealthReady},
-      {Method::kGet, "/health/detail", false, &HttpServer::HandleHealthDetail},
-      {Method::kGet, "/config", true, &HttpServer::HandleConfig},
-      {Method::kGet, "/replication/status", true, &HttpServer::HandleReplicationStatus},
-      {Method::kPost, "/optimize", true, &HttpServer::HandleOptimize},
-      {Method::kGet, "/metrics", false, &HttpServer::HandleMetrics},
-      {Method::kGet, R"(/tables/([^/]+)/([^/]+))", false, &HttpServer::HandleGet},
+      {Method::kPost, R"(/tables/([^/]+)/search)", false, true, true, &HttpServer::HandleSearch},
+      {Method::kPost, R"(/tables/([^/]+)/count)", false, true, true, &HttpServer::HandleCount},
+      {Method::kPost, R"(/tables/([^/]+)/facet)", false, true, true, &HttpServer::HandleFacet},
+      {Method::kGet, "/info", false, true, true, &HttpServer::HandleInfo},
+      {Method::kGet, "/health", false, false, false, &HttpServer::HandleHealth},
+      {Method::kGet, "/health/live", false, false, false, &HttpServer::HandleHealthLive},
+      {Method::kGet, "/health/ready", false, false, false, &HttpServer::HandleHealthReady},
+      {Method::kGet, "/health/detail", false, false, true, &HttpServer::HandleHealthDetail},
+      {Method::kGet, "/config", true, true, true, &HttpServer::HandleConfig},
+      {Method::kGet, "/replication/status", true, true, true, &HttpServer::HandleReplicationStatus},
+      {Method::kPost, "/optimize", true, true, true, &HttpServer::HandleOptimize},
+      {Method::kGet, "/metrics", false, true, true, &HttpServer::HandleMetrics},
+      {Method::kGet, R"(/tables/([^/]+)/([^/]+))", false, true, true, &HttpServer::HandleGet},
   }};
   return kRoutes;
+}
+
+const HttpServer::RouteDescriptor* HttpServer::FindLiteralRoute(const std::string& method, const std::string& path) {
+  for (const auto& route : Routes()) {
+    const bool method_matches = (route.method == RouteMethod::kGet) ? method == "GET" : method == "POST";
+    if (method_matches && route.pattern == path) {
+      return &route;
+    }
+  }
+  return nullptr;
 }
 
 bool HttpServer::AdminTokenConfigured() const {
@@ -748,11 +741,21 @@ void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
     const std::string& client_ip = req.remote_addr.empty() ? "unknown" : req.remote_addr;
 
+    // The route table decides how a request is accounted and whether it is
+    // subject to the shared quota. Only fixed-path routes can be identified
+    // before cpp-httplib matches, which is exactly the set that opts out of
+    // either; anything unrecognised is counted and rate limited.
+    const RouteDescriptor* route = FindLiteralRoute(req.method, req.path);
+    const bool counts_requests = route == nullptr || route->counts_requests;
+    const bool rate_limited = route == nullptr || route->rate_limited;
+
     // Reject unauthorized peers before allocating or consuming a shared rate
     // bucket. ACL-denied traffic is already log-suppressed independently and
     // must not evict or exhaust quota state used by allowed clients.
     if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
-      RecordRequest();
+      if (counts_requests) {
+        RecordRequest();
+      }
       GetEffectiveStats().IncrementRequestsDeniedAclHttp();
       const auto decision = denial_log_limiter_.Record("acl:" + client_ip);
       if (decision.should_log) {
@@ -767,8 +770,10 @@ void HttpServer::SetupAccessControl() {
       return httplib::Server::HandlerResponse::Handled;
     }
 
-    if (rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
-      RecordRequest();
+    if (rate_limited && rate_limiter_ && !rate_limiter_->AllowRequest(client_ip)) {
+      if (counts_requests) {
+        RecordRequest();
+      }
       GetEffectiveStats().IncrementRequestsDeniedRateLimitHttp();
       const auto decision = rate_limiter_->RecordDenialLog("http:" + client_ip);
       if (decision.should_log) {
@@ -1764,12 +1769,28 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
   }
 }
 
+ReadinessInputs HttpServer::CurrentReadinessInputs() const {
+  ReadinessInputs inputs;
+  inputs.binlog_reader = binlog_reader_;
+  inputs.data_initialized = initial_data_ready_checker_ ? initial_data_ready_checker_() : true;
+  inputs.loading = loading_ != nullptr && loading_->load();
+  inputs.replication_paused_for_dump =
+      replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire);
+  inputs.sync_in_progress = any_syncing_checker_ ? any_syncing_checker_() :
+#ifdef USE_MYSQL
+                                                 sync_manager_ != nullptr && sync_manager_->IsAnySyncing();
+#else
+                                                 false;
+#endif
+  return inputs;
+}
+
 void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response& res) {
   // Health probes are intentionally NOT counted in total_requests:
   // they are typically driven by orchestrators (Kubernetes liveness/readiness)
   // at high frequency and would distort QPS metrics for actual application traffic.
-  // If you need a separate counter for probe rate, add a dedicated metric instead
-  // of resurrecting RecordRequest() here.
+  // The route table carries that decision (`counts_requests`) so the pre-routing
+  // denial branches account a rejected probe the same way.
   json response;
   response["status"] = "ok";
   response["timestamp"] =
@@ -1793,34 +1814,17 @@ void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Resp
 void HttpServer::HandleHealthReady(const httplib::Request& req, httplib::Response& res) {
   // Health probe — not counted in total_requests; see HandleHealth.
   // Readiness probe: Return 200 OK if ready to accept traffic, 503 otherwise
-  const bool is_loading = (loading_ != nullptr && loading_->load());
-  const bool replication_paused_for_dump =
-      replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire);
-  const bool sync_in_progress = any_syncing_checker_ ? any_syncing_checker_() :
-#ifdef USE_MYSQL
-                                                     sync_manager_ != nullptr && sync_manager_->IsAnySyncing();
-#else
-                                                     false;
-#endif
-  const bool initial_data_ready = initial_data_ready_checker_ ? initial_data_ready_checker_() : true;
-#ifdef USE_MYSQL
-  const bool replication_unavailable =
-      (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() && !binlog_reader_->IsStarting() &&
-       !replication_paused_for_dump && !sync_in_progress);
-#else
-  const bool replication_unavailable = false;
-#endif
-  bool is_ready = initial_data_ready && !is_loading && !sync_in_progress && !replication_unavailable;
+  const ReadinessVerdict verdict = EvaluateReadiness(CurrentReadinessInputs());
 
   json response;
-  response["loading"] = is_loading;
-  response["data_initialized"] = initial_data_ready;
+  response["loading"] = verdict.loading;
+  response["data_initialized"] = verdict.data_initialized;
 #ifdef USE_MYSQL
   if (binlog_reader_ != nullptr) {
-    response["replication_running"] = !replication_unavailable;
-    response["replication_starting"] = binlog_reader_->IsStarting();
-    response["replication_paused_for_dump"] = replication_paused_for_dump;
-    response["sync_in_progress"] = sync_in_progress;
+    response["replication_running"] = verdict.replication_available();
+    response["replication_starting"] = verdict.replication == ReplicationAvailability::kStarting;
+    response["replication_paused_for_dump"] = verdict.replication_paused_for_dump;
+    response["sync_in_progress"] = verdict.sync_in_progress;
     // The probe names the fault by code and by the code's own description. The
     // reader's message is verbatim MySQL text that can carry the replication
     // account and the address the server sees, so it stays on the credentialed
@@ -1836,30 +1840,13 @@ void HttpServer::HandleHealthReady(const httplib::Request& req, httplib::Respons
   }
 #endif
 
-  if (is_ready) {
-    response["status"] = "ready";
-    response["timestamp"] =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    SendJson(res, kHttpOk, response);
-  } else {
-    response["status"] = "not_ready";
-    if (!initial_data_ready) {
-      response["reason"] = "Initial data has not been loaded";
-    } else if (is_loading) {
-      response["reason"] = "Server is loading";
-    } else if (binlog_reader_ != nullptr && binlog_reader_->HasSchemaIncompatibleError()) {
-      response["reason"] = "Replication stopped due to an incompatible schema";
-    } else if (binlog_reader_ != nullptr && !binlog_reader_->GetLastError().empty()) {
-      response["reason"] = ReplicationErrorSummary(*binlog_reader_);
-    } else if (sync_in_progress) {
-      response["reason"] = "SYNC is in progress";
-    } else {
-      response["reason"] = "Replication is not running";
-    }
-    response["timestamp"] =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    SendJson(res, kHttpServiceUnavailable, response);
+  response["status"] = verdict.ready ? "ready" : "not_ready";
+  if (!verdict.ready) {
+    response["reason"] = verdict.reason;
   }
+  response["timestamp"] =
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  SendJson(res, verdict.ready ? kHttpOk : kHttpServiceUnavailable, response);
 }
 
 void HttpServer::HandleHealthDetail(const httplib::Request& req, httplib::Response& res) {
@@ -1867,17 +1854,14 @@ void HttpServer::HandleHealthDetail(const httplib::Request& req, httplib::Respon
   // Detailed health: Return comprehensive component status
   json response;
 
-  // Overall status
-  bool is_loading = (loading_ != nullptr && loading_->load());
-  const bool replication_paused_for_dump =
-      replication_paused_for_dump_ != nullptr && replication_paused_for_dump_->load(std::memory_order_acquire);
-#ifdef USE_MYSQL
-  const bool replication_unavailable = (binlog_reader_ != nullptr && !binlog_reader_->IsRunning() &&
-                                        !binlog_reader_->IsStarting() && !replication_paused_for_dump);
-#else
-  const bool replication_unavailable = false;
-#endif
-  response["status"] = (is_loading || replication_unavailable) ? "degraded" : "healthy";
+  // Overall status. The verdict is the same one /health/ready renders, so this
+  // route cannot raise an alert for a state the readiness probe calls healthy.
+  const ReadinessVerdict verdict = EvaluateReadiness(CurrentReadinessInputs());
+  const bool is_loading = verdict.loading;
+  response["status"] = verdict.ready ? "healthy" : "degraded";
+  if (!verdict.ready) {
+    response["reason"] = verdict.reason;
+  }
   response["timestamp"] =
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -1932,14 +1916,13 @@ void HttpServer::HandleHealthDetail(const httplib::Request& req, httplib::Respon
   // Binlog component (if available)
   if (binlog_reader_ != nullptr) {
     json binlog_comp;
-    const auto replication_state = binlog_reader_->GetReplicationState();
-    const bool replication_starting = binlog_reader_->IsStarting();
     // The binlog position, the counters derived from it, and the schema
     // verdict are what GET /replication/status protects. Serving them from an
     // open probe would leave that route gated in name only.
     const bool expose_replication_detail = AdminCredentialsAccepted(req);
-    if (replication_state == mysql::ReplicationState::kRunning || replication_starting) {
-      binlog_comp["status"] = replication_starting ? "starting" : "connected";
+    const bool replication_starting = verdict.replication == ReplicationAvailability::kStarting;
+    binlog_comp["status"] = ToString(verdict.replication);
+    if (verdict.replication == ReplicationAvailability::kRunning || replication_starting) {
       binlog_comp["running"] = !replication_starting;
       binlog_comp["starting"] = replication_starting;
       if (expose_replication_detail) {
@@ -1948,13 +1931,10 @@ void HttpServer::HandleHealthDetail(const httplib::Request& req, httplib::Respon
         binlog_comp["queue_size"] = binlog_reader_->GetQueueSize();
       }
     } else {
-      binlog_comp["status"] = replication_paused_for_dump
-                                  ? "paused_for_dump"
-                                  : (replication_state == mysql::ReplicationState::kFailed ? "failed" : "disconnected");
       binlog_comp["running"] = false;
-      binlog_comp["paused_for_dump"] = replication_paused_for_dump;
+      binlog_comp["paused_for_dump"] = verdict.replication_paused_for_dump;
     }
-    binlog_comp["replication_state"] = mysql::ToString(replication_state);
+    binlog_comp["replication_state"] = mysql::ToString(binlog_reader_->GetReplicationState());
     binlog_comp["last_error_code"] = static_cast<uint16_t>(binlog_reader_->GetLastErrorCode());
     binlog_comp["last_error"] = ReplicationErrorSummary(*binlog_reader_);
     binlog_comp["last_applied_unixtime"] = binlog_reader_->GetLastAppliedUnixTime();

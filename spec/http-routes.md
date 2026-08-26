@@ -2,7 +2,7 @@
 
 This file is normative. It describes the HTTP surface as the code in `src/server/` behaves today, derived by reading that code; where prose elsewhere in the repository disagrees, this file follows the code. Every statement carries a `file:line` citation so the spec can be re-verified mechanically. Line numbers refer to the state of the tree in which this file was written.
 
-The HTTP surface is served by `HttpServer`, which embeds cpp-httplib 0.51.0 (`build/_deps/httplib-src/httplib.h:11`). Routes are declared in the `HttpServer::Routes()` descriptor table (`src/server/http_server.cpp:688-715`) and registered from it, in table order, by `HttpServer::SetupRoutes` (`src/server/http_server.cpp:717-729`). cpp-httplib matches in registration order, so the table order is behavioural.
+The HTTP surface is served by `HttpServer`, which embeds cpp-httplib 0.51.0 (`build/_deps/httplib-src/httplib.h:11`). Routes are declared in the `HttpServer::Routes()` descriptor table (`src/server/http_server.cpp:667-681`) and registered from it, in table order, by `HttpServer::SetupRoutes` (`src/server/http_server.cpp:714-738`). cpp-httplib matches in registration order, so the table order is behavioural.
 
 ## Route index
 
@@ -13,10 +13,10 @@ The HTTP surface is served by `HttpServer`, which embeds cpp-httplib 0.51.0 (`bu
 | POST | `/tables/{identity}/facet` | `HandleFacet` (`src/server/http_server.cpp:1492`) | none | yes | yes (`src/server/http_server.cpp:1493`) | `FACET` (`src/server/http_server.cpp:1500`) |
 | GET | `/tables/{identity}/{primary_key}` | `HandleGet` (`src/server/http_server.cpp:1543`) | none | yes | yes (`src/server/http_server.cpp:1544`) | `GET` (`src/server/http_server.cpp:1569`) |
 | GET | `/info` | `HandleInfo` (`src/server/http_server.cpp:1603`) | none | yes | yes (`src/server/http_server.cpp:1605`) | `INFO` (`src/server/http_server.cpp:1606`) |
-| GET | `/health` | `HandleHealth` (`src/server/http_server.cpp:1756`) | none | yes | no (`src/server/http_server.cpp:1757-1761`) | no |
-| GET | `/health/live` | `HandleHealthLive` (`src/server/http_server.cpp:1770`) | none | yes | no (`src/server/http_server.cpp:1771`) | no |
-| GET | `/health/ready` | `HandleHealthReady` (`src/server/http_server.cpp:1782`) | none | yes | no (`src/server/http_server.cpp:1783`) | no |
-| GET | `/health/detail` | `HandleHealthDetail` (`src/server/http_server.cpp:1848`) | none | yes | no (`src/server/http_server.cpp:1849`) | no |
+| GET | `/health` | `HandleHealth` (`src/server/http_server.cpp:1788`) | none | no (`src/server/http_server.cpp:672`) | no (`src/server/http_server.cpp:672`) | no |
+| GET | `/health/live` | `HandleHealthLive` (`src/server/http_server.cpp:1802`) | none | no (`src/server/http_server.cpp:673`) | no (`src/server/http_server.cpp:673`) | no |
+| GET | `/health/ready` | `HandleHealthReady` (`src/server/http_server.cpp:1814`) | none | no (`src/server/http_server.cpp:674`) | no (`src/server/http_server.cpp:674`) | no |
+| GET | `/health/detail` | `HandleHealthDetail` (`src/server/http_server.cpp:1852`) | none | yes (`src/server/http_server.cpp:675`) | no (`src/server/http_server.cpp:675`) | no |
 | GET | `/config` | `HandleConfig` (`src/server/http_server.cpp:1950`) | none | yes | yes (`src/server/http_server.cpp:1951`) | `CONFIG_SHOW` (`src/server/http_server.cpp:1952`) |
 | GET | `/replication/status` | `HandleReplicationStatus` (`src/server/http_server.cpp:2000`) | none | yes | yes (`src/server/http_server.cpp:2001`) | `REPLICATION_STATUS` (`src/server/http_server.cpp:2002`) |
 | POST | `/optimize` | `HandleOptimize` (`src/server/http_server.cpp:2041`) | bearer token (`src/server/http_server.cpp:2050-2063`) | yes | yes (`src/server/http_server.cpp:2042`) | `OPTIMIZE` (`src/server/http_server.cpp:2106`) |
@@ -24,6 +24,8 @@ The HTTP surface is served by `HttpServer`, which embeds cpp-httplib 0.51.0 (`bu
 | OPTIONS | `.*` | CORS preflight, only when CORS is active | none | yes | no | no |
 
 `OPTIONS .*` is registered only when `enable_cors` is true **and** `cors_allow_origin` is non-empty (`src/server/http_server.cpp:677-681`, `src/server/http_server.cpp:777-782`).
+
+The *Rate limited* and *Counted in `total_requests`* columns are declared per route in the same descriptor table (`src/server/http_server.h:287-311`) and read by the pre-routing handler through `FindLiteralRoute` (`src/server/http_server.cpp:685-693`, `:744-750`), so a route's accounting is the same whether the request is served or rejected. A path the table does not name — including every regex route and every unmatched path — is counted and rate limited.
 
 ### Path matching rules
 
@@ -348,7 +350,23 @@ Always `200` while the process serves requests (`src/server/http_server.cpp:1770
 
 ## GET /health/ready
 
-`200` when ready, `503` when not (`src/server/http_server.cpp:1822-1845`). Readiness is `initial_data_ready && !loading && !sync_in_progress && !replication_unavailable` (`src/server/http_server.cpp:1802`).
+`200` when ready, `503` when not (`src/server/http_server.cpp:1843-1849`).
+
+Readiness is not decided here. `HttpServer::CurrentReadinessInputs` collects the binlog reader, the dump-pause flag, the sync state and the initial-data checker (`src/server/http_server.cpp:1772-1786`), and `EvaluateReadiness` classifies them (`src/server/readiness.cpp:92-107`); this route renders the verdict (`src/server/http_server.cpp:1817`). The same verdict backs `GET /health/detail` (`src/server/http_server.cpp:1859`) and the TCP `INFO` command (`src/server/handlers/admin_handler.cpp:59-71`), so the three cannot disagree.
+
+Readiness is `data_initialized && !loading && !sync_in_progress && replication_available` (`src/server/readiness.cpp:101-102`). Replication availability is one of seven states (`src/server/readiness.h:26-34`), classified in this order (`src/server/readiness.cpp:15-45`):
+
+| Order | State | Condition | Available |
+|---|---|---|---|
+| 1 | `disabled` | no binlog reader wired, or a build without MySQL support | yes |
+| 2 | `connected` | `IsRunning()` | yes |
+| 3 | `starting` | `IsStarting()` | yes |
+| 4 | `paused_for_dump` | `replication_paused_for_dump` | yes |
+| 5 | `paused_for_sync` | a SYNC is in progress; it stops the reader through `replication_pause::Scope` without raising the dump flag | yes |
+| 6 | `failed` | `GetReplicationState() == kFailed` | no |
+| 7 | `disconnected` | otherwise | no |
+
+A SYNC therefore leaves replication *available* while still making the server *not ready*: the table being rebuilt cannot answer queries yet.
 
 ```json
 {
@@ -369,20 +387,22 @@ Always `200` while the process serves requests (`src/server/http_server.cpp:1770
 }
 ```
 
-The `replication_*` block is present only in `USE_MYSQL` builds with a non-null binlog reader (`src/server/http_server.cpp:1807-1820`). When not ready, `status` is `"not_ready"` and a `reason` field is added, chosen in this order (`src/server/http_server.cpp:1828-1841`):
+The `replication_*` block is present only in `USE_MYSQL` builds with a non-null binlog reader (`src/server/http_server.cpp:1822-1841`). `replication_running` reports availability, so it stays `true` through `starting`, `paused_for_dump` and `paused_for_sync` (`src/server/http_server.cpp:1824`).
+
+When not ready, `status` is `"not_ready"` and a `reason` field is added, chosen in this order (`src/server/readiness.cpp:47-64`):
 
 | Order | `reason` | Condition |
 |---|---|---|
 | 1 | `Initial data has not been loaded` | `!initial_data_ready` |
 | 2 | `Server is loading` | `is_loading` |
 | 3 | `Replication stopped due to an incompatible schema` | `HasSchemaIncompatibleError()` |
-| 4 | the binlog reader's last error string | `GetLastError()` non-empty |
+| 4 | the error code's own description, never MySQL's text | `GetLastError()` non-empty (`src/server/readiness.cpp:109-114`) |
 | 5 | `SYNC is in progress` | `sync_in_progress` |
 | 6 | `Replication is not running` | otherwise |
 
 ## GET /health/detail
 
-Always `200`, `application/json` (`src/server/http_server.cpp:1848-1947`).
+Always `200`, `application/json` (`src/server/http_server.cpp:1852-1953`).
 
 ```json
 {
@@ -415,10 +435,12 @@ Always `200`, `application/json` (`src/server/http_server.cpp:1848-1947`).
 }
 ```
 
-- Top-level `status` is `"degraded"` when loading or replication is unavailable, otherwise `"healthy"` (`src/server/http_server.cpp:1863`).
-- `uptime_seconds` here is measured from this `HttpServer`'s construction, not from the shared server stats (`src/server/http_server.cpp:1867-1870`).
-- `components.cache` appears only when a cache manager is wired (`src/server/http_server.cpp:1901-1912`).
-- `components.binlog` appears only in `USE_MYSQL` builds with a non-null reader (`src/server/http_server.cpp:1914-1943`). When not running/starting, the object carries `status` (`paused_for_dump` / `failed` / `disconnected`), `running: false` and `paused_for_dump` instead of `starting`/`current_gtid`/`processed_events`/`queue_size` (`src/server/http_server.cpp:1927-1933`).
+- Top-level `status` is `"healthy"` when the readiness verdict is ready and `"degraded"` otherwise — the same verdict `GET /health/ready` renders, so this route never reports a fault the readiness probe calls healthy (`src/server/http_server.cpp:1859-1861`).
+- `reason` is present only when `status` is `"degraded"`, and carries the same string `/health/ready` puts in its own `reason` (`src/server/http_server.cpp:1862-1864`).
+- `uptime_seconds` here is measured from this `HttpServer`'s construction, not from the shared server stats (`src/server/http_server.cpp:1868-1871`).
+- `components.cache` appears only when a cache manager is wired (`src/server/http_server.cpp:1902-1913`).
+- `components.binlog` appears only in `USE_MYSQL` builds with a non-null reader (`src/server/http_server.cpp:1916-1947`). `status` is the availability state's own name — `connected`, `starting`, `paused_for_dump`, `paused_for_sync`, `failed` or `disconnected` (`src/server/http_server.cpp:1924`, `src/server/readiness.cpp:68-86`). Outside `connected`/`starting` the object carries `running: false` and `paused_for_dump` instead of `starting`/`current_gtid`/`processed_events`/`queue_size` (`src/server/http_server.cpp:1933-1936`).
+- `components.binlog.replication_state` is the reader's own three-state lifecycle value and is independent of the availability classification (`src/server/http_server.cpp:1937`, `src/mysql/binlog_reader_interface.h:22-32`).
 
 ---
 
@@ -547,24 +569,26 @@ There is no session, cookie, API-key-parameter or query-string authentication pa
 
 ## Network ACL
 
-A pre-routing handler runs before every route, including `/health*` and `/metrics` (`src/server/http_server.cpp:732-770`).
+A pre-routing handler runs before every route, including `/health*` and `/metrics` (`src/server/http_server.cpp:740-792`).
 
-- The client identity is `req.remote_addr`, or the literal `"unknown"` when empty (`src/server/http_server.cpp:733`).
+- The client identity is `req.remote_addr`, or the literal `"unknown"` when empty (`src/server/http_server.cpp:742`).
 - `X-Forwarded-For` is honoured only when the direct peer matches `api.http.trusted_proxies` exactly (`src/server/http_server.cpp:651-655`).
-- A peer outside `network.allow_cidrs` gets `403` with `kPermissionDenied` and message `Access denied by network.allow_cidrs` (`src/server/http_server.cpp:738-751`).
-- ACL denials increment `total_requests` and `requests_denied_total{reason="acl",surface="http"}` (`src/server/http_server.cpp:739-740`).
-- ACL rejection happens **before** the rate limiter, so denied peers cannot consume or evict rate-limit buckets (`src/server/http_server.cpp:736-752`).
-- Repeated denials from the same IP are log-suppressed by `DenialLogLimiter` (`src/server/http_server.cpp:741-748`).
+- A peer outside `network.allow_cidrs` gets `403` with `kPermissionDenied` and message `Access denied by network.allow_cidrs` (`src/server/http_server.cpp:755-770`).
+- ACL denials increment `requests_denied_total{reason="acl",surface="http"}`, and `total_requests` only on a route the table marks `counts_requests` (`src/server/http_server.cpp:756-759`).
+- ACL rejection happens **before** the rate limiter, so denied peers cannot consume or evict rate-limit buckets (`src/server/http_server.cpp:755-773`).
+- Repeated denials from the same IP are log-suppressed by `DenialLogLimiter` (`src/server/http_server.cpp:760-767`).
 
 ## Rate limiting
 
-- Applied in the same pre-routing handler, to **every** route (`src/server/http_server.cpp:754`).
-- Bucket key is the client IP string (`src/server/http_server.cpp:733`, `:754`).
+- Applied in the same pre-routing handler, to every route the descriptor table marks `rate_limited` (`src/server/http_server.cpp:750`, `:773`).
+- `GET /health`, `GET /health/live` and `GET /health/ready` are **exempt** (`src/server/http_server.cpp:672-674`). A `429` on a liveness or readiness probe is read as a dead process by whatever is polling it, so traffic that happens to share the bucket could take a healthy server out of rotation. What still bounds them: `network.allow_cidrs` is enforced first and is unaffected (`src/server/http_server.cpp:755`), `api.http.max_connections` caps accepted sockets, and each response is a fixed-size JSON object built from atomics — no index walk, no document store access, no amplification.
+- `GET /health/detail` stays rate limited (`src/server/http_server.cpp:675`): it walks every table's index and document store under the generation lock (`src/server/http_server.cpp:1882-1895`), so its cost grows with the corpus.
+- Bucket key is the client IP string (`src/server/http_server.cpp:742`, `:773`).
 - When `ServerLifecycleManager`/`ServerOrchestrator` wires the server, the limiter instance is shared with the TCP server, so one client's quota spans both protocols (`src/app/server_orchestrator.cpp:943`, `src/server/http_server.h:318-324`).
 - When no limiter is injected and `api.rate_limiting.enable` is true, `HttpServer` constructs a private one from config (`src/server/http_server.cpp:627-637`).
 - Algorithm is a per-client token bucket with `capacity` burst and `refill_rate` tokens/second, capped at `max_clients` tracked clients; once that cap is reached, **new** clients are rejected outright (`src/server/rate_limiter.cpp:111-165`).
-- Denial: `429` with `kServerBusy` (6030) and message `Rate limit exceeded` (`src/server/http_server.cpp:765`).
-- Denials increment `total_requests` and `requests_denied_total{reason="rate_limit",surface="http"}` (`src/server/http_server.cpp:755-756`).
+- Denial: `429` with `kServerBusy` (6030) and message `Rate limit exceeded` (`src/server/http_server.cpp:786`).
+- Denials increment `requests_denied_total{reason="rate_limit",surface="http"}`, and `total_requests` only on a route the table marks `counts_requests` (`src/server/http_server.cpp:774-777`).
 
 ## Request size limits, timeouts and concurrency caps
 
@@ -625,7 +649,7 @@ Statuses chosen directly by handlers, independent of that helper:
 | Replication not configured / not compiled | 503 | `kNotImplemented` (4) | `src/server/http_server.cpp:2006`, `:2037` |
 | Optimize callback failure | 503 | frame code or `kInternalError` | `src/server/http_server.cpp:2120`, `:2123` |
 | Optimize callback missing | 503 | `kServerInitMissingDependency` (6026) | `src/server/http_server.cpp:2101-2102` |
-| Not ready (`/health/ready`) | 503 | — (health bodies carry no `error_code`) | `src/server/http_server.cpp:1844` |
+| Not ready (`/health/ready`) | 503 | — (health bodies carry no `error_code`) | `src/server/http_server.cpp:1849` |
 
 By error-code range (ranges from the project's error taxonomy, `src/utils/error.h`):
 
@@ -721,12 +745,18 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 39 | `total_requests` | Incremented once per dispatched request, including rate-limited and malformed input (`src/server/request_dispatcher.cpp:104`) | Incremented per handler; `/health`, `/health/live`, `/health/ready` and `/health/detail` never increment it (`src/server/http_server.cpp:1757-1761`, `:1771`, `:1783`, `:1849`) |
-| 40 | Rate-limited requests | Counted in `total_requests` before the limiter check (`src/server/request_dispatcher.cpp:104`, `:110`) | Counted only inside the denial branch, so a denied health probe *is* counted while an allowed one is not (`src/server/http_server.cpp:754-756`) |
-| 41 | Rate-limit token consumption | One token per parsed request (`src/server/request_dispatcher.cpp:110`) | One token per HTTP request on **every** route, including `/health*`, `/metrics` and CORS preflights (`src/server/http_server.cpp:754`) |
+| 39 | `total_requests` | Incremented once per dispatched request, including rate-limited and malformed input (`src/server/request_dispatcher.cpp:104`) | Incremented per handler, and in the pre-routing denial branches, on every route the descriptor table marks `counts_requests`; `/health`, `/health/live`, `/health/ready` and `/health/detail` never increment it, on any outcome (`src/server/http_server.cpp:672-675`, `:756-759`, `:774-777`) |
+| 41 | Rate-limit token consumption | One token per parsed request (`src/server/request_dispatcher.cpp:110`) | One token per HTTP request on every route the descriptor table marks `rate_limited`, which includes `/metrics`, `/health/detail` and CORS preflights but excludes `/health`, `/health/live` and `/health/ready` (`src/server/http_server.cpp:672-675`, `:773`) |
 | 42 | Command counters | Incremented after a successful parse, before dispatch, for every command type (`src/server/request_dispatcher.cpp:175`) | Incremented per handler; `/metrics` and the health routes record no command at all (`src/server/http_server.cpp:2126-2142`) |
 | 43 | Network ACL enforcement point | Applied when a connection is accepted | Applied per request, before routing (`src/server/http_server.cpp:732-752`) |
 | 44 | Denial counters | `requests_denied_total{surface="tcp"}`, with additional `connection_limit` and `pool_full` reasons | `requests_denied_total{surface="http"}`, only `acl` and `rate_limit` reasons are ever produced (`src/server/response_formatter.cpp:990-1001`) |
+
+### Readiness reporting
+
+| # | Aspect | TCP behaviour | HTTP behaviour |
+|---|---|---|---|
+| 45 | Overall readiness | `INFO` reports `readiness: ready` / `not_ready` from the shared verdict (`src/server/handlers/admin_handler.cpp:62-72`, `src/server/response_formatter.cpp:488`) | `/health/ready` and `/health/detail` render the same verdict, adding the `reason` and the per-component breakdown the text frame has no room for (`src/server/http_server.cpp:1817`, `:1859`) |
+| 46 | Replication state in the overall report | `INFO`'s `replication_status` line is the reader's raw `IsRunning()`, so a dump pause or a SYNC reads as `stopped` (`src/server/response_formatter.cpp:623`) | `/health/detail` reports the availability classification, which names `paused_for_dump` and `paused_for_sync` separately from `disconnected` (`src/server/http_server.cpp:1924`) |
 
 ### TCP commands with no HTTP route
 

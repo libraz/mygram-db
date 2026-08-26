@@ -623,6 +623,38 @@ else()
   )
 endif()
 
+# Readiness agreement tests (one verdict, three surfaces)
+
+add_executable(readiness_agreement_test
+  readiness_agreement_test.cpp
+)
+
+target_compile_definitions(readiness_agreement_test PRIVATE MYGRAMDB_SYNC_TEST_HOOKS)
+
+target_link_libraries(readiness_agreement_test
+  mygramdb_server
+  httplib::httplib
+  nlohmann_json::nlohmann_json
+  GTest::gtest_main
+)
+
+target_include_directories(readiness_agreement_test PRIVATE ${CMAKE_BINARY_DIR}/src)
+
+# On macOS, run serially to avoid network stack resource contention
+if(APPLE)
+  gtest_discover_tests(readiness_agreement_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+    PROPERTIES
+      RUN_SERIAL TRUE
+  )
+else()
+  gtest_discover_tests(readiness_agreement_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+endif()
+
 # ReplicationHandler tests (regression tests for replication bugs)
 
 add_executable(replication_handler_test
