@@ -44,13 +44,17 @@ bool CompareDocIdTie(DocId lhs, DocId rhs, bool ascending) {
   return ascending ? (lhs < rhs) : (lhs > rhs);
 }
 
-template <typename SortEntryLike>
-bool CompareSortEntries(const SortEntryLike& lhs, const SortEntryLike& rhs, bool ascending) {
-  int cmp = lhs.sort_key.compare(rhs.sort_key);
+bool CompareSortKeys(const std::string& key_lhs, const std::string& key_rhs, DocId lhs, DocId rhs, bool ascending) {
+  int cmp = key_lhs.compare(key_rhs);
   if (cmp != 0) {
     return ascending ? (cmp < 0) : (cmp > 0);
   }
-  return CompareDocIdTie(lhs.doc_id, rhs.doc_id, ascending);
+  return CompareDocIdTie(lhs, rhs, ascending);
+}
+
+template <typename SortEntryLike>
+bool CompareSortEntries(const SortEntryLike& lhs, const SortEntryLike& rhs, bool ascending) {
+  return CompareSortKeys(lhs.sort_key, rhs.sort_key, lhs.doc_id, rhs.doc_id, ascending);
 }
 
 /**
@@ -168,6 +172,28 @@ std::optional<std::string> ParseNumericPrimaryKey(std::string_view pk_str) {
 }
 
 /**
+ * @brief Build the sort key for a primary key string
+ *
+ * All-digit keys that fit in uint64_t become zero-padded so that lexicographic
+ * comparison matches numeric order; every other key is used as-is. Mapping the
+ * whole value space into a single key space is what makes comparison a strict
+ * weak ordering when numeric and non-numeric keys are mixed.
+ *
+ * @param pk_str Primary key string
+ * @return Sort key string
+ */
+std::string MakePrimaryKeySortKey(std::string_view pk_str) {
+  if (!pk_str.empty() &&
+      std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
+    auto padded = ParseNumericPrimaryKey(pk_str);
+    if (padded.has_value()) {
+      return padded.value();
+    }
+  }
+  return std::string(pk_str);
+}
+
+/**
  * @brief Convert a FilterValue variant to a sort-key string
  *
  * Centralizes the conversion logic used by GetSortKey, SortWithSchwartzianTransform,
@@ -181,8 +207,8 @@ std::optional<std::string> ParseNumericPrimaryKey(std::string_view pk_str) {
  * int64_t, double> with a custom comparator, adding complexity for marginal
  * gain. The bit-level transformations (sign-bit XOR for integers, IEEE 754
  * flip for doubles) preserve total order correctly in the string domain.
- * The SortComparator fallback path already uses direct numeric comparison
- * for primary key ordering (see operator()).
+ * The SortComparator keeps a direct numeric comparison for primary key ordering
+ * where both keys are numeric (see operator()).
  */
 static std::string FilterValueToSortKey(const storage::FilterValue& val) {
   return std::visit(
@@ -240,20 +266,7 @@ std::string ResultSorter::GetSortKey(DocId doc_id, const storage::DocumentStore&
     // Get primary key as sort key
     auto pk_opt = doc_store.GetPrimaryKey(doc_id);
     if (pk_opt.has_value()) {
-      const auto& pk_str = pk_opt.value();
-
-      // Fast path: Numeric primary keys
-      // Try to parse as numeric and convert to zero-padded string for correct lexicographic ordering
-      if (!pk_str.empty() &&
-          std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-        auto padded = ParseNumericPrimaryKey(pk_str);
-        if (padded.has_value()) {
-          return padded.value();
-        }
-      }
-
-      // String primary keys: use as-is
-      return pk_str;
+      return MakePrimaryKeySortKey(pk_opt.value());
     }
     // Fallback: use DocID itself (numeric)
     // Pre-pad to avoid repeated string allocation in comparator
@@ -283,19 +296,9 @@ void ResultSorter::PrecomputeSortKeys(const std::vector<DocId>& results, const s
     // Batch primary key lookup: single lock acquisition for all keys
     auto primary_keys = doc_store.GetPrimaryKeysBatch(results);
     for (size_t i = 0; i < results.size(); ++i) {
-      std::string sort_key;
       const auto& primary_key = primary_keys[i];
-      if (primary_key.has_value()) {
-        const auto& pk_str = *primary_key;
-        if (std::all_of(pk_str.begin(), pk_str.end(), [](unsigned char chr) { return std::isdigit(chr) != 0; })) {
-          auto padded = ParseNumericPrimaryKey(pk_str);
-          sort_key = padded.has_value() ? padded.value() : pk_str;
-        } else {
-          sort_key = pk_str;
-        }
-      } else {
-        sort_key = ToZeroPaddedString(results[i], kNumericWidth);
-      }
+      std::string sort_key =
+          primary_key.has_value() ? MakePrimaryKeySortKey(*primary_key) : ToZeroPaddedString(results[i], kNumericWidth);
       entries.push_back({results[i], std::move(sort_key)});
     }
   } else {
@@ -445,7 +448,9 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
       const auto& str_lhs = pk_lhs.value();
       const auto& str_rhs = pk_rhs.value();
 
-      // Fast path: both are pure numeric strings — use std::from_chars (locale-independent, lock-free)
+      // Fast path: both keys parse as whole uint64_t values, which is exactly the
+      // case where MakePrimaryKeySortKey zero-pads both to the same width, so a
+      // numeric comparison yields the same answer without allocating.
       if (!str_lhs.empty() && !str_rhs.empty()) {
         uint64_t num_lhs = 0;
         uint64_t num_rhs = 0;
@@ -458,19 +463,21 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
           }
           return ascending_ ? (num_lhs < num_rhs) : (num_lhs > num_rhs);
         }
-        // Parse failure (non-numeric or overflow): fall through to string comparison
       }
 
-      // String comparison for non-numeric primary keys
-      int cmp = str_lhs.compare(str_rhs);
-      if (cmp == 0) {
-        return CompareDocIdTie(lhs, rhs, ascending_);
-      }
-      return ascending_ ? (cmp < 0) : (cmp > 0);
+      // At least one key is non-numeric. Comparing the raw strings would put the
+      // two sides in different key spaces and break transitivity, so derive the
+      // same keys the pre-computed path uses.
+      return CompareSortKeys(MakePrimaryKeySortKey(str_lhs), MakePrimaryKeySortKey(str_rhs), lhs, rhs, ascending_);
     }
 
-    // Fallback: use DocId if primary key not available
-    return ascending_ ? (lhs < rhs) : (lhs > rhs);
+    // A missing primary key falls back to a key derived from the DocId; deriving
+    // it for both sides keeps a partially populated result set in one key space.
+    std::string key_lhs =
+        pk_lhs.has_value() ? MakePrimaryKeySortKey(pk_lhs.value()) : ToZeroPaddedString(lhs, kNumericWidth);
+    std::string key_rhs =
+        pk_rhs.has_value() ? MakePrimaryKeySortKey(pk_rhs.value()) : ToZeroPaddedString(rhs, kNumericWidth);
+    return CompareSortKeys(key_lhs, key_rhs, lhs, rhs, ascending_);
   }
 
   // For filter columns, we need to get the filter values
@@ -478,12 +485,7 @@ bool ResultSorter::SortComparator::operator()(DocId lhs, DocId rhs) const {
   std::string key_lhs = GetSortKey(lhs, doc_store_, order_by_, primary_key_column_);
   std::string key_rhs = GetSortKey(rhs, doc_store_, order_by_, primary_key_column_);
 
-  // String comparison
-  int cmp = key_lhs.compare(key_rhs);
-  if (cmp == 0) {
-    return CompareDocIdTie(lhs, rhs, ascending_);
-  }
-  return ascending_ ? (cmp < 0) : (cmp > 0);
+  return CompareSortKeys(key_lhs, key_rhs, lhs, rhs, ascending_);
 }
 
 mygram::utils::Expected<std::vector<DocId>, mygram::utils::Error> ResultSorter::SortAndPaginate(

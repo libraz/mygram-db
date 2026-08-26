@@ -58,6 +58,22 @@ gtest_discover_tests(result_sorter_test
   DISCOVERY_TIMEOUT 30
 )
 
+# Result sorter ordering guarantees
+
+add_executable(result_sorter_ordering_test
+  result_sorter_ordering_test.cpp
+)
+
+target_link_libraries(result_sorter_ordering_test
+  mygramdb_query
+  GTest::gtest_main
+)
+
+gtest_discover_tests(result_sorter_ordering_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # BM25 sort tests
 add_executable(bm25_sort_test
   bm25_sort_test.cpp
