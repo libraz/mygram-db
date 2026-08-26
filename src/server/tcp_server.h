@@ -46,6 +46,7 @@ namespace mygramdb::server {
 
 // Forward declaration
 class CommandHandler;
+class HttpServer;
 class SyncOperationManager;
 
 }  // namespace mygramdb::server
@@ -163,6 +164,20 @@ class TcpServer {
   }
 
   /**
+   * @brief Hand every component this server owns to the HTTP surface.
+   *
+   * Must be called after Start(): the rate limiter, thread pool, cache manager
+   * and SYNC manager are created while starting, which is later than the HTTP
+   * server is constructed. This is the single crossing point between the two
+   * surfaces — anything they share is a field of HttpServer::SharedComponents
+   * and is wired here, so a new component cannot reach the HTTP surface as a
+   * permanently null pointer or as a privately constructed substitute.
+   *
+   * @param http_server The HTTP surface of this server, not yet started.
+   */
+  void AttachTo(HttpServer& http_server);
+
+  /**
    * @brief Get cache manager pointer (for HttpServer)
    */
   cache::CacheManager* GetCacheManager() { return cache_manager_.get(); }
@@ -190,18 +205,6 @@ class TcpServer {
    * @brief Get rate limiter pointer (for ServerOrchestrator to set callbacks)
    */
   RateLimiter* GetRateLimiter() { return rate_limiter_.get(); }
-
-  /**
-   * @brief Get the shared rate limiter as a shared_ptr.
-   *
-   * Returned by reference so callers can construct an HttpServer that
-   * shares the same RateLimiter instance. A client's quota MUST apply across
-   * protocols; two independent limiters give the client effectively 2x the
-   * configured limit.
-   *
-   * Returns nullptr-equivalent shared_ptr if rate limiting is disabled.
-   */
-  std::shared_ptr<RateLimiter> GetSharedRateLimiter() const { return rate_limiter_; }
 
 #ifdef USE_MYSQL
   /**

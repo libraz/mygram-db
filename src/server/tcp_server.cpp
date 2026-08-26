@@ -38,6 +38,7 @@
 #include "server/handlers/sync_handler.h"
 #endif
 #include "cache/cache_manager.h"
+#include "server/http_server.h"
 #include "server/server_lifecycle_manager.h"
 #include "storage/dump_format_v1.h"
 #include "utils/network_utils.h"
@@ -88,6 +89,30 @@ TcpServer::~TcpServer() {
     (void)Stop();
   }
 #endif
+}
+
+void TcpServer::AttachTo(HttpServer& http_server) {
+  HttpServer::SharedComponents components;
+  components.stats = &stats_;
+  components.cache_manager = cache_manager_.get();
+  components.thread_pool = thread_pool_.get();
+  components.rate_limiter = rate_limiter_;
+  components.dump_load_in_progress = &dump_load_in_progress_;
+  components.replication_paused_for_dump = &replication_paused_for_dump_;
+  components.initial_data_ready_checker = initial_data_ready_checker_;
+  components.optimize_callback = [this](const std::string& table) { return HandleOptimizeRequest(table); };
+#ifdef USE_MYSQL
+  components.sync_manager = sync_manager_.get();
+  components.table_syncing_checker = [this](const std::string& table_name) {
+    if (sync_manager_ == nullptr) {
+      return false;
+    }
+    const auto syncing_tables = sync_manager_->GetSyncingTables();
+    return syncing_tables.find(table_name) != syncing_tables.end();
+  };
+  components.any_syncing_checker = [this]() { return sync_manager_ != nullptr && sync_manager_->IsAnySyncing(); };
+#endif
+  http_server.AdoptSharedComponents(std::move(components));
 }
 
 std::string TcpServer::HandleOptimizeRequest(const std::string& table) {

@@ -27,6 +27,7 @@
 #include "server/request_dispatcher.h"
 #include "server/tcp_server.h"
 #include "storage/dump_format_v2.h"
+#include "storage/dump_source_identity.h"
 #include "utils/constants.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -275,11 +276,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
 
   // Start HTTP server (if enabled)
   if (http_server_) {
-    // The TCP server creates the query cache while starting, so the pointer
-    // handed over at construction time was still null. Adopt the real one here
-    // or the HTTP surface serves every request outside the cache and reports
-    // caching as disabled.
-    http_server_->SetCacheManager(tcp_server_->GetCacheManager());
+    // The TCP server creates the query cache, the rate limiter and the thread
+    // pool while starting, so none of them existed when the HTTP server was
+    // constructed. Binding them here is what makes one client's quota span both
+    // protocols and what lets /metrics report live thread-pool state.
+    tcp_server_->AttachTo(*http_server_);
 
     auto http_start = http_server_->Start();
     if (!http_start) {
@@ -544,13 +545,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
       }
 
       std::string loaded_gtid;
-      std::string loaded_source_server_uuid;
+      storage::DumpSourceIdentity loaded_source_identity;
       config::Config loaded_config;
       storage::dump_format::IntegrityError integrity_error;
       const std::string expected_source_server_uuid = *expected_uuid_result;
       auto restore_result = storage::dump_v2::ReadDump(
           filepath, loaded_gtid, loaded_config, dump_contexts, nullptr, nullptr, &integrity_error,
-          [this, &expected_source_server_uuid, &loaded_source_server_uuid](
+          [this, &expected_source_server_uuid, &loaded_source_identity](
               const config::Config& dump_config,
               const std::string& dump_gtid) -> mygram::utils::Expected<void, mygram::utils::Error> {
             if (auto mismatch = server::FindDumpConfigMismatch(dump_config, deps_.config); mismatch.has_value()) {
@@ -564,15 +565,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
                   mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch,
                                            "dump MySQL source does not match the configured host/port/database"));
             }
-            if (loaded_source_server_uuid.empty()) {
-              return mygram::utils::MakeUnexpected(
-                  mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch,
-                                           "dump does not record its MySQL source server UUID"));
-            }
-            if (loaded_source_server_uuid != expected_source_server_uuid) {
-              return mygram::utils::MakeUnexpected(
-                  mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch,
-                                           "dump MySQL source server UUID does not match the configured source"));
+            if (auto source_mismatch =
+                    storage::FindDumpSourceIdentityMismatch(loaded_source_identity, expected_source_server_uuid);
+                source_mismatch.has_value()) {
+              return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+                  mygram::utils::ErrorCode::kStorageVersionMismatch, std::string(source_mismatch->detail)));
             }
             if (deps_.config.replication.enable && dump_gtid.empty()) {
               return mygram::utils::MakeUnexpected(
@@ -584,7 +581,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
           storage::dump_v2::RestoreLimits{
               static_cast<uint64_t>(deps_.config.dump.restore_memory_budget_mb) * mygram::constants::kBytesPerMegabyte,
               static_cast<uint64_t>(deps_.config.dump.restore_max_section_mb) * mygram::constants::kBytesPerMegabyte},
-          &loaded_source_server_uuid);
+          &loaded_source_identity);
 
       if (restore_result) {
         snapshot_gtid_ = loaded_gtid;
@@ -937,35 +934,16 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   if (deps_.config.api.http.enable) {
     auto http_config = server::HttpServerConfig::FromConfig(deps_.config);
 
+    // Only the arguments this class owns are passed here. Everything the TCP
+    // server owns arrives through TcpServer::AttachTo() in Start(), because it
+    // does not exist yet: reading it now would bind null pointers and a rate
+    // limiter of the HTTP surface's own.
 #ifdef USE_MYSQL
-    http_server_ = std::make_unique<server::HttpServer>(
-        http_config, table_contexts_ptrs, &deps_.config, binlog_reader_.get(), tcp_server_->GetCacheManager(),
-        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), tcp_server_->GetSharedRateLimiter(),
-        tcp_server_->GetReplicationPausedForDumpFlag(), tcp_server_->GetSyncManager(),
-        [tcp_server = tcp_server_.get()](const std::string& table_name) {
-          auto* manager = tcp_server->GetSyncManager();
-          if (manager == nullptr) {
-            return false;
-          }
-          const auto syncing_tables = manager->GetSyncingTables();
-          return syncing_tables.find(table_name) != syncing_tables.end();
-        },
-        [tcp_server = tcp_server_.get()]() {
-          auto* manager = tcp_server->GetSyncManager();
-          return manager != nullptr && manager->IsAnySyncing();
-        },
-        [this]() { return initial_data_readiness_.IsReady(); }, tcp_server_->GetThreadPool());
+    http_server_ =
+        std::make_unique<server::HttpServer>(http_config, table_contexts_ptrs, &deps_.config, binlog_reader_.get());
 #else
-    http_server_ = std::make_unique<server::HttpServer>(
-        http_config, table_contexts_ptrs, &deps_.config, nullptr, tcp_server_->GetCacheManager(),
-        tcp_server_->GetDumpLoadInProgressFlag(), tcp_server_->GetMutableStats(), tcp_server_->GetSharedRateLimiter(),
-        tcp_server_->GetReplicationPausedForDumpFlag(), nullptr, std::function<bool(const std::string&)>{},
-        std::function<bool()>{}, [this]() { return initial_data_readiness_.IsReady(); }, tcp_server_->GetThreadPool());
+    http_server_ = std::make_unique<server::HttpServer>(http_config, table_contexts_ptrs, &deps_.config, nullptr);
 #endif
-
-    http_server_->SetOptimizeCallback([tcp_server = tcp_server_.get()](const std::string& table) {
-      return tcp_server->HandleOptimizeRequest(table);
-    });
 
     mygram::utils::StructuredLog()
         .Event("http_server_initialized")

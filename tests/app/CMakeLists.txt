@@ -50,6 +50,21 @@ gtest_discover_tests(signal_manager_test
   DISCOVERY_TIMEOUT 30
 )
 
+# Cross-protocol server wiring tests (shared rate limiter, thread pool metrics)
+add_executable(server_wiring_test server_wiring_test.cpp)
+target_link_libraries(server_wiring_test
+    PRIVATE
+    mygramdb_app
+    GTest::gtest_main
+)
+
+# RESOURCE_LOCK: binds loopback TCP and HTTP ports
+gtest_discover_tests(server_wiring_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
 # Surface snapshot test (golden file pinning the static external surface)
 add_executable(surface_snapshot_test surface_snapshot_test.cpp)
 target_link_libraries(surface_snapshot_test
