@@ -305,9 +305,12 @@ class HttpServer {
    * expression when it contains capture groups.
    */
   struct RouteDescriptor {
-    RouteMethod method;         ///< Verb the route is registered under.
-    std::string_view pattern;   ///< Path or path regex, as registered.
-    bool requires_admin_token;  ///< True when the handler enforces api.admin_token.
+    RouteMethod method;        ///< Verb the route is registered under.
+    std::string_view pattern;  ///< Path or path regex, as registered.
+    /// True when `SetupRoutes`' shared wrapper requires api.admin_token before
+    /// dispatching the handler. No handler checks credentials itself, so a
+    /// route cannot serve administrative state by omitting a check of its own.
+    bool requires_admin_token;
     /**
      * @brief True when a request on this route belongs in `total_requests`.
      *
@@ -494,10 +497,10 @@ class HttpServer {
   /**
    * @brief Validate a URL-bound table name and resolve its TableContext.
    *
-   * Centralises the trio of checks that HandleSearch / HandleCount / HandleGet
-   * each performed inline:
-   *   1. `IsValidTableName` — reject names that would break the parser
-   *      grammar (uniform across all endpoints).
+   * The single place HandleSearch, HandleCount and HandleGet resolve a table,
+   * so all three answer an identical name identically:
+   *   1. `QueryParser::IsSafeTableName` — reject names that would break the
+   *      parser grammar (uniform across all endpoints).
    *   2. `table_contexts_.find` — ensure the table exists.
    *   3. Non-null `index` and `doc_store` — defensive against partially
    *      initialised contexts.
