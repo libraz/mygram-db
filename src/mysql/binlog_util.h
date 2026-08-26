@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-*,cppcoreguidelines-avoid-*,cppcoreguidelines-pro-type-vararg,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return,readability-redundant-casting,readability-math-missing-parentheses,readability-implicit-bool-conversion,modernize-avoid-c-arrays)
@@ -121,6 +122,40 @@ inline bool bitmap_is_set(const unsigned char* bitmap, size_t bit_index) {
   return (bitmap[bit_index / 8] & (1 << (bit_index % 8))) != 0;
 }
 
+/// Bytes needed to hold 0-9 leftover decimal digits (MySQL's dig2bytes table).
+inline constexpr int kDecimalDigitsToBytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+
+/**
+ * @brief Encoded byte length of a DECIMAL/NEWDECIMAL value
+ *
+ * Based on MySQL's decimal_bin_size() function from strings/decimal.c.
+ *
+ * Precision and scale arrive verbatim from a TABLE_MAP event, so pairs MySQL
+ * would never emit (scale above precision, precision past the protocol maximum)
+ * have to be rejected instead of sized. This is the single size rule for the
+ * type: every caller that needs the length of a DECIMAL field goes through here.
+ *
+ * @param precision Total number of digits
+ * @param scale Number of digits after the decimal point
+ * @return Encoded size in bytes, or std::nullopt if the pair is not valid
+ */
+inline std::optional<uint32_t> decimal_binary_size(uint8_t precision, uint8_t scale) {
+  constexpr uint8_t kMaxDecimalPrecision = 65;
+  constexpr uint8_t kMaxDecimalScale = 30;
+  if (precision == 0 || precision > kMaxDecimalPrecision || scale > precision || scale > kMaxDecimalScale) {
+    return std::nullopt;
+  }
+
+  int intg = precision - scale;  // Integer part digits
+  int intg0 = intg / 9;          // Full 4-byte groups in integer part
+  int intg_rem = intg % 9;       // Remaining digits in integer part
+  int frac0 = scale / 9;         // Full 4-byte groups in fractional part
+  int frac_rem = scale % 9;      // Remaining digits in fractional part
+
+  return static_cast<uint32_t>(intg0 * 4 + kDecimalDigitsToBytes[intg_rem] + frac0 * 4 +
+                               kDecimalDigitsToBytes[frac_rem]);
+}
+
 /**
  * @brief Decode MySQL DECIMAL/NEWDECIMAL binary format
  *
@@ -143,7 +178,8 @@ inline bool bitmap_is_set(const unsigned char* bitmap, size_t bit_index) {
  * @return String representation of the decimal value
  */
 inline std::string decode_decimal(const unsigned char* data, uint8_t precision, uint8_t scale) {
-  if (precision == 0) {
+  auto encoded_size = decimal_binary_size(precision, scale);
+  if (!encoded_size) {
     return "0";
   }
 
@@ -153,11 +189,7 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
   int frac0 = scale / 9;         // Full 4-byte groups in fractional part
   int frac_rem = scale % 9;      // Remaining digits in fractional part
 
-  // Digits per byte mapping: how many bytes to store n digits (1-9)
-  static const int dig2bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
-
-  // Calculate total size
-  int total_size = dig2bytes[intg_rem] + intg0 * 4 + frac0 * 4 + dig2bytes[frac_rem];
+  auto total_size = static_cast<int>(*encoded_size);
   if (total_size == 0) {
     return "0";
   }
@@ -199,7 +231,7 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
 
   // Process integer remainder (leading digits that don't fill a 4-byte group)
   if (intg_rem > 0) {
-    int bytes = dig2bytes[intg_rem];
+    int bytes = kDecimalDigitsToBytes[intg_rem];
     int32_t val = 0;
     for (int i = 0; i < bytes; i++) {
       val = (val << 8) | *ptr++;
@@ -243,7 +275,7 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
 
     // Process fractional remainder
     if (frac_rem > 0) {
-      int bytes = dig2bytes[frac_rem];
+      int bytes = kDecimalDigitsToBytes[frac_rem];
       int32_t val = 0;
       for (int i = 0; i < bytes; i++) {
         val = (val << 8) | *ptr++;
@@ -395,21 +427,11 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
 
     // DECIMAL types
     case 246: {  // MYSQL_TYPE_NEWDECIMAL
-      // metadata: (precision << 8) | scale
-      uint8_t precision = metadata >> 8;
-      uint8_t scale = metadata & 0xFF;
-      // Decimal binary size calculation
-      // Based on MySQL's decimal_bin_size() function
-      int intg = precision - scale;  // Integer part digits
-      int intg0 = intg / 9;          // Full 4-byte groups
-      int intg_rem = intg % 9;       // Remaining digits
-      int frac0 = scale / 9;         // Full 4-byte groups in fractional part
-      int frac_rem = scale % 9;      // Remaining digits in fractional part
-
-      // Bytes needed for remaining digits
-      static const int dig2bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
-
-      return intg0 * 4 + dig2bytes[intg_rem] + frac0 * 4 + dig2bytes[frac_rem];
+      // metadata: (precision << 8) | scale. A pair MySQL would never emit
+      // yields 0, which the caller reports as an unsupported column type.
+      auto precision = static_cast<uint8_t>(metadata >> 8);
+      auto scale = static_cast<uint8_t>(metadata & 0xFF);
+      return decimal_binary_size(precision, scale).value_or(0);
     }
 
     // JSON type

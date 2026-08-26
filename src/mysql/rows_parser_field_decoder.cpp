@@ -131,19 +131,11 @@ Expected<std::string, Error> DecodeEnumSetValue(EnumSetKind kind, const unsigned
 }
 
 Expected<size_t, Error> DecimalBinarySize(uint8_t precision, uint8_t scale) {
-  constexpr uint8_t kMaxDecimalPrecision = 65;
-  constexpr uint8_t kMaxDecimalScale = 30;
-  if (precision == 0 || precision > kMaxDecimalPrecision || scale > precision || scale > kMaxDecimalScale) {
+  auto encoded_size = binlog_util::decimal_binary_size(precision, scale);
+  if (!encoded_size) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DECIMAL metadata"));
   }
-
-  int intg = precision - scale;
-  int intg0 = intg / 9;
-  int intg_rem = intg % 9;
-  int frac0 = scale / 9;
-  int frac_rem = scale % 9;
-  static constexpr int kDig2Bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
-  return static_cast<size_t>(intg0 * 4 + kDig2Bytes[intg_rem] + frac0 * 4 + kDig2Bytes[frac_rem]);
+  return static_cast<size_t>(*encoded_size);
 }
 
 Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned char* data, uint16_t metadata,
