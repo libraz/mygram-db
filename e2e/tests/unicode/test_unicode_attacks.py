@@ -83,16 +83,15 @@ class TestUnicodeAttacks:
         Rejecting on length is what bounds the ICU normalization work; if the
         limit stopped being enforced, this input would reach the normalizer.
         """
-        bomb = "a" + "́" * 100
-        # The limit is measured in bytes, so a 101-character bomb of two-byte
-        # combining marks is 201 bytes: well past the cap that a naive
-        # character count would put it under.
-        bomb_bytes = len(bomb.encode("utf-8"))
-        assert bomb_bytes > MAX_QUERY_LENGTH >= len(bomb) - 1
+        bomb = "a" + "́" * 200
+        # The limit counts characters, so the bomb has to carry more combining
+        # marks than the cap itself. Each mark is two bytes, so the byte length
+        # the cap admits still bounds what reaches the normalizer.
+        assert len(bomb) > MAX_QUERY_LENGTH
         raw = self._exchange(mygramdb, f"SEARCH testdb.articles {bomb}\r\n".encode())
         resp = assert_error(raw, code_in=QUERY_ERRORS, message_contains="length")
-        assert str(bomb_bytes) in resp.message, (
-            f"the rejected byte length should be reported, got: {resp.message!r}"
+        assert str(len(bomb)) in resp.message, (
+            f"the rejected character length should be reported, got: {resp.message!r}"
         )
         assert str(MAX_QUERY_LENGTH) in resp.message, (
             f"the configured limit should be reported, got: {resp.message!r}"
