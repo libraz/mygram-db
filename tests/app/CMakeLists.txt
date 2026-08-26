@@ -49,3 +49,21 @@ gtest_discover_tests(signal_manager_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+# Surface snapshot test (golden file pinning the static external surface)
+add_executable(surface_snapshot_test surface_snapshot_test.cpp)
+target_link_libraries(surface_snapshot_test
+    PRIVATE
+    mygramdb_app
+    GTest::gtest_main
+)
+
+target_compile_definitions(surface_snapshot_test
+    PRIVATE
+    MYGRAMDB_SPEC_DIR="${CMAKE_SOURCE_DIR}/spec"
+)
+
+gtest_discover_tests(surface_snapshot_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)

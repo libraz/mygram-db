@@ -6,6 +6,7 @@ add_library(mygramdb_app STATIC
   configuration_manager.cpp
   server_orchestrator.cpp
   signal_manager.cpp
+  surface_descriptor.cpp
 )
 
 target_include_directories(mygramdb_app PUBLIC
@@ -15,6 +16,7 @@ target_include_directories(mygramdb_app PUBLIC
 target_link_libraries(mygramdb_app PUBLIC
   mygramdb_config
   mygramdb_server
+  mygramdb_storage
   mygramdb_utils
   spdlog::spdlog
 )

@@ -47,6 +47,10 @@ Expected<CommandLineArgs, mygram::utils::Error> CommandLineParser::Parse(int arg
       args.show_version = true;
       return args;  // Early return - no further parsing needed
     }
+    if (arg == "--print-surface") {
+      args.show_surface = true;
+      return args;  // Early return - no config file is read
+    }
   }
 
   // Require at least one argument (config file or flag)
@@ -114,6 +118,7 @@ void CommandLineParser::PrintHelp(const char* program_name) {
   std::cout << "  -d, --daemon                   Run as daemon (background process)\n";
   std::cout << "  -t, --config-test              Test configuration file and exit\n";
   std::cout << "  -s, --schema <schema.json>     Use custom JSON Schema (optional)\n";
+  std::cout << "      --print-surface            Print the external surface snapshot and exit\n";
   std::cout << "  -h, --help                     Show this help message\n";
   std::cout << "  -v, --version                  Show version information\n";
   std::cout << "\n";

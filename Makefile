@@ -1,7 +1,7 @@
 # MygramDB Makefile
 # Convenience wrapper for CMake build system
 
-.PHONY: help setup build test test-fast test-slow test-load test-all test-mysql test-large-dump test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check pkg-rpm-el9 pkg-rpm-el10 pkg-rpm-all pkg-deb-jammy pkg-deb-noble pkg-deb-all pkg-all pkg-test-rpm-el9 pkg-test-rpm-el10 pkg-test-deb-jammy pkg-test-deb-noble pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble pkg-verify-all
+.PHONY: help setup build test test-fast test-slow test-load test-all test-mysql test-large-dump test-full test-sequential test-verbose clean rebuild install uninstall format format-check lint lint-diff lint-diff-main configure run surface-snapshot e2e-test e2e-test-smoke e2e-test-load e2e-test-cleanup e2e-lint e2e-format e2e-fix e2e-benchmark docker-build docker-up docker-down docker-logs docker-test bench-up bench-down bench-logs docker-dev-build docker-dev-shell docker-build-linux docker-test-linux docker-lint-linux docker-lint-diff-linux docker-format-check-linux docker-clean-linux docker-ci-check pkg-rpm-el9 pkg-rpm-el10 pkg-rpm-all pkg-deb-jammy pkg-deb-noble pkg-deb-all pkg-all pkg-test-rpm-el9 pkg-test-rpm-el10 pkg-test-deb-jammy pkg-test-deb-noble pkg-verify-rpm-el9 pkg-verify-rpm-el10 pkg-verify-deb-jammy pkg-verify-deb-noble pkg-verify-all
 
 # Build directory
 BUILD_DIR := build
@@ -54,6 +54,7 @@ help:
 	@echo "  make lint-diff-main - Check files changed from main branch (recommended for CI)"
 	@echo "  make configure      - Configure CMake (for changing options)"
 	@echo "  make run            - Build and run mygramdb"
+	@echo "  make surface-snapshot - Regenerate spec/surface.snapshot.txt from the built binary"
 	@echo "  make help           - Show this help message"
 	@echo ""
 	@echo "Test options (override with environment variables):"
@@ -293,6 +294,12 @@ lint-diff-main: format build
 run: build
 	@echo "Running MygramDB..."
 	$(BUILD_DIR)/bin/mygramdb
+
+# Regenerate the external surface golden from the built server binary
+surface-snapshot: build
+	@echo "Regenerating spec/surface.snapshot.txt..."
+	$(BUILD_DIR)/bin/mygramdb --print-surface > spec/surface.snapshot.txt
+	@echo "Done. Review the diff before committing."
 
 # Quick test (useful during development)
 quick-test: build

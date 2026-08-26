@@ -1,0 +1,377 @@
+# surface-snapshot-format: 1
+[commands]
+text="AUTH" min_args=1 max_args=1 administrative=no handler=dispatcher-inline
+text="SEARCH" min_args=2 max_args=unbounded administrative=no handler=registered
+text="COUNT" min_args=2 max_args=unbounded administrative=no handler=registered
+text="GET" min_args=2 max_args=2 administrative=no handler=registered
+text="INFO" min_args=0 max_args=unbounded administrative=no handler=registered
+text="DUMP SAVE" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="DUMP LOAD" min_args=1 max_args=unbounded administrative=yes handler=registered
+text="DUMP VERIFY" min_args=1 max_args=unbounded administrative=yes handler=registered
+text="DUMP INFO" min_args=1 max_args=unbounded administrative=yes handler=registered
+text="DUMP STATUS" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="SAVE" min_args=0 max_args=0 administrative=no handler=none
+text="LOAD" min_args=0 max_args=0 administrative=no handler=none
+text="REPLICATION STATUS" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="REPLICATION STOP" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="REPLICATION START" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="SYNC" min_args=1 max_args=unbounded administrative=yes handler=registered
+text="SYNC STATUS" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="SYNC STOP" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="CONFIG HELP" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="CONFIG SHOW" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="CONFIG VERIFY" min_args=1 max_args=unbounded administrative=yes handler=registered
+text="OPTIMIZE" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="DEBUG ON" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="DEBUG OFF" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="CACHE CLEAR" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="CACHE STATS" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="CACHE ENABLE" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="CACHE DISABLE" min_args=0 max_args=unbounded administrative=yes handler=registered
+text="SET" min_args=1 max_args=unbounded administrative=yes handler=registered
+text="SHOW VARIABLES" min_args=0 max_args=2 administrative=yes handler=registered
+text="FACET" min_args=2 max_args=unbounded administrative=no handler=registered
+[query-limits]
+http.default_max_body_bytes = 16777216
+http.default_read_timeout_sec = 5
+http.default_write_timeout_sec = 5
+query.default_limit = 100
+query.default_max_query_length = 128
+query.max_filter_column_name_length = 128
+query.max_filter_value_length = 1024
+query.max_highlight_tag_length = 256
+query.max_limit = 1000
+query.max_term_count = 64
+query.min_limit = 5
+tcp.client_recv_buffer_bytes = 65536
+tcp.default_max_connections = 10000
+tcp.default_max_write_queue_bytes = 16777216
+tcp.max_pending_frame_bytes = 4194304
+tcp.max_pending_frames = 1024
+tcp.max_request_bytes = 1048576
+[http-routes]
+POST /tables/([^/]+)/search auth=none
+POST /tables/([^/]+)/count auth=none
+POST /tables/([^/]+)/facet auth=none
+GET /info auth=none
+GET /health auth=none
+GET /health/live auth=none
+GET /health/ready auth=none
+GET /health/detail auth=none
+GET /config auth=none
+GET /replication/status auth=none
+POST /optimize auth=admin-token
+GET /metrics auth=none
+GET /tables/([^/]+)/([^/]+) auth=none
+[error-codes]
+0 = Success
+1 = Unknown error
+2 = Invalid argument
+3 = Out of range
+4 = Not implemented
+5 = Internal error
+6 = I/O error
+7 = Permission denied
+8 = Not found
+9 = Already exists
+10 = Timeout
+11 = Cancelled
+1000 = Configuration file not found
+1001 = Configuration parse error
+1002 = Configuration validation error
+1003 = Missing required configuration
+1004 = Invalid configuration value
+1005 = JSON schema error
+1006 = YAML parsing error
+1007 = JSON parsing error
+2000 = MySQL connection failed
+2001 = MySQL query failed
+2002 = MySQL disconnected
+2003 = MySQL authentication failed
+2004 = MySQL timeout
+2005 = Invalid GTID
+2006 = GTID mode not enabled
+2007 = Replication error
+2008 = Binlog error
+2009 = Table not found
+2010 = Column not found
+2011 = Duplicate column
+2012 = Invalid schema
+2013 = Field data truncated
+2014 = Invalid field metadata
+2015 = Unsupported column type
+2016 = Binlog checksum mismatch
+2017 = Undecodable binlog event
+2020 = Invalid MariaDB GTID
+2021 = MariaDB protocol error
+2022 = MariaDB version not supported
+3000 = Query syntax error
+3001 = Invalid token
+3002 = Unexpected token
+3003 = Missing operand
+3004 = Invalid operator
+3005 = Query too long
+3006 = Invalid filter
+3007 = Invalid sort
+3008 = Invalid limit
+3009 = Invalid offset
+3010 = Expression parse error
+3011 = AST build error
+4000 = Index not found
+4001 = Index corrupted
+4002 = Index serialization failed
+4003 = Index deserialization failed
+4004 = Document not found
+4005 = Invalid document ID
+4006 = Index full
+4007 = Table not found
+4008 = Table catalog not initialized
+4010 = Table not found for SYNC
+4011 = SYNC already in progress
+4012 = Memory critically low for SYNC
+4013 = Failed to create sync thread
+4014 = SyncOperationManager dependency is null
+5000 = Storage file not found
+5001 = Storage read error
+5002 = Storage write error
+5003 = Storage corrupted
+5004 = CRC mismatch
+5005 = Version mismatch
+5006 = Compression failed
+5007 = Decompression failed
+5008 = Invalid format
+5009 = Snapshot build failed
+5010 = DocID exhausted
+5011 = Storage dump read error
+5012 = Storage dump write error
+6000 = Bind failed
+6001 = Listen failed
+6002 = Accept failed
+6003 = Connection refused
+6004 = Connection closed
+6005 = Send failed
+6006 = Receive failed
+6007 = Invalid request
+6008 = Protocol error
+6010 = Server not started
+6011 = Server already running
+6012 = Socket creation failed
+6013 = Invalid bind address
+6014 = Unix socket path too long
+6015 = Unix socket already in use
+6016 = Event multiplexer not supported on this platform
+6017 = Event multiplexer initialization failed
+6018 = Event multiplexer register failed
+6019 = Event multiplexer modify failed
+6020 = Event multiplexer remove failed
+6021 = Event multiplexer poll failed
+6023 = Event multiplexer already opened
+6024 = Required dependency is null
+6025 = Acceptor reactor handler not installed
+6026 = Server initialization missing required dependency
+6027 = Server is shutting down
+6028 = Server is loading
+6029 = Server is not ready
+6030 = Server is busy
+7000 = Not connected
+7001 = Connection failed
+7002 = Send failed
+7003 = Receive failed
+7004 = Invalid response
+7005 = Timeout
+7006 = Already connected
+7007 = Command failed
+7008 = Connection closed
+7009 = Invalid argument
+7010 = Server error
+7011 = Protocol error
+7012 = Expression parse error
+8000 = Cache miss
+8001 = Cache disabled
+8002 = Cache compression failed
+8003 = Cache decompression failed
+8004 = Cache worker start failed
+count 0-999 = 12
+count 1000-1999 = 8
+count 2000-2999 = 21
+count 3000-3999 = 12
+count 4000-4999 = 14
+count 5000-5999 = 13
+count 6000-6999 = 29
+count 7000-7999 = 13
+count 8000-8999 = 5
+count total = 127
+[config-keys]
+api type=object mutable=no
+api.admin_token type=string default="" mutable=no
+api.default_limit type=integer default=100 minimum=5 maximum=1000 mutable=yes
+api.http type=object mutable=no
+api.http.bind type=string default="127.0.0.1" mutable=no
+api.http.cors_allow_origin type=string default="" mutable=no
+api.http.enable type=boolean default=false mutable=no
+api.http.enable_cors type=boolean default=false mutable=no
+api.http.max_body_bytes type=integer default=16777216 minimum=0 maximum=1073741824 mutable=no
+api.http.max_connections type=integer default=10000 minimum=1 maximum=1000000 mutable=no
+api.http.port type=integer default=8080 minimum=1 maximum=65535 mutable=no
+api.http.read_timeout_sec type=integer default=5 minimum=1 maximum=3600 mutable=no
+api.http.trusted_proxies type=array default=[] mutable=no
+api.http.write_timeout_sec type=integer default=5 minimum=1 maximum=3600 mutable=no
+api.max_query_length type=integer default=128 minimum=0 maximum=4096 mutable=yes
+api.rate_limiting type=object mutable=no
+api.rate_limiting.capacity type=integer default=100 minimum=1 maximum=10000 mutable=yes
+api.rate_limiting.enable type=boolean default=false mutable=yes
+api.rate_limiting.max_clients type=integer default=10000 minimum=10 maximum=100000 mutable=no
+api.rate_limiting.refill_rate type=integer default=10 minimum=1 maximum=1000 mutable=yes
+api.tcp type=object mutable=no
+api.tcp.bind type=string default="127.0.0.1" mutable=no
+api.tcp.idle_timeout_sec type=integer default=300 minimum=0 maximum=86400 mutable=no
+api.tcp.keepalive type=object mutable=no
+api.tcp.keepalive.enabled type=boolean default=true mutable=no
+api.tcp.keepalive.idle_sec type=integer default=60 minimum=1 maximum=86400 mutable=no
+api.tcp.keepalive.interval_sec type=integer default=20 minimum=1 maximum=3600 mutable=no
+api.tcp.keepalive.probe_count type=integer default=3 minimum=1 maximum=32 mutable=no
+api.tcp.max_connections type=integer default=10000 minimum=1 maximum=1000000 mutable=no
+api.tcp.max_pending_frame_bytes type=integer default=4194304 minimum=4096 maximum=1073741824 mutable=no
+api.tcp.max_pending_frames type=integer default=1024 minimum=4 maximum=1000000 mutable=no
+api.tcp.max_total_buffered_bytes type=integer default=268435456 minimum=1048576 maximum=68719476736 mutable=no
+api.tcp.max_write_queue_bytes type=integer default=16777216 minimum=4096 maximum=1073741824 mutable=no
+api.tcp.port type=integer default=11016 minimum=1 maximum=65535 mutable=no
+api.tcp.reaper_interval_sec type=integer default=5 minimum=1 maximum=3600 mutable=no
+api.tcp.recv_timeout_sec type=integer default=60 minimum=0 maximum=86400 mutable=no
+api.tcp.thread_pool_queue_size type=integer default=1000 minimum=0 maximum=1000000 mutable=no
+api.tcp.worker_threads type=integer default=0 minimum=0 maximum=16384 mutable=no
+api.unix_socket type=object mutable=no
+api.unix_socket.path type=string default="" mutable=no
+bm25 type=object mutable=no
+bm25.b type=number default=0.75 minimum=0.0 maximum=1.0 mutable=no
+bm25.enable type=boolean default=false mutable=no
+bm25.k1 type=number default=1.2 minimum=0.0 mutable=no
+build type=object mutable=no
+build.batch_size type=integer default=5000 minimum=100 maximum=100000 mutable=no
+build.mode type=string default="select_snapshot" enum=["select_snapshot"] mutable=no
+build.parallelism type=integer default=2 minimum=1 maximum=64 mutable=no
+build.throttle_ms type=integer default=0 minimum=0 maximum=10000 mutable=no
+cache type=object mutable=no
+cache.compression_enabled type=boolean default=true mutable=no
+cache.enabled type=boolean default=true mutable=yes
+cache.eviction_batch_size type=integer default=10 minimum=1 mutable=no
+cache.invalidation type=object mutable=no
+cache.invalidation.batch_size type=integer default=1000 minimum=1 mutable=no
+cache.invalidation.max_delay_ms type=integer default=100 minimum=0 mutable=no
+cache.invalidation.max_queue_size type=integer default=100000 minimum=1 mutable=no
+cache.invalidation_strategy type=string default="ngram" enum=["ngram","table"] mutable=no
+cache.max_memory_mb type=integer default=32 minimum=1 mutable=no
+cache.min_query_cost_ms type=number default=10.0 minimum=0.0 mutable=yes
+cache.ttl_seconds type=integer default=3600 minimum=0 mutable=yes
+dump type=object mutable=no
+dump.default_filename type=string default="mygramdb.dmp" mutable=no
+dump.dir type=string default="/var/lib/mygramdb/dumps" mutable=no
+dump.interval_sec type=integer default=0 minimum=0 maximum=86400 mutable=no
+dump.load_on_startup type=boolean default=false mutable=no
+dump.restore_max_section_mb type=integer default=2048 minimum=1 maximum=1048576 mutable=no
+dump.restore_memory_budget_mb type=integer default=4096 minimum=1 maximum=1048576 mutable=no
+dump.retain type=integer default=3 minimum=1 maximum=100 mutable=no
+index type=object mutable=no
+index.ngram_size type=integer default=2 minimum=1 maximum=10 mutable=no
+logging type=object mutable=no
+logging.file type=string default="" mutable=no
+logging.format type=string default="json" enum=["json","text"] mutable=yes
+logging.level type=string default="info" enum=["debug","info","warn","error"] mutable=yes
+memory type=object mutable=no
+memory.arena_chunk_mb type=integer default=64 minimum=1 maximum=1024 mutable=no
+memory.hard_limit_mb type=integer default=8192 minimum=256 mutable=no
+memory.minute_epoch type=boolean default=true mutable=no
+memory.normalize type=object mutable=no
+memory.normalize.lower type=boolean default=false mutable=no
+memory.normalize.nfkc type=boolean default=true mutable=no
+memory.normalize.width type=string default="narrow" enum=["keep","narrow","wide"] mutable=no
+memory.roaring_threshold type=number default=0.18 minimum=0.0 maximum=1.0 mutable=no
+memory.soft_target_mb type=integer default=4096 minimum=128 mutable=no
+memory.verify_text type=string default="off" enum=["off","ascii","all"] mutable=no
+mysql type=object mutable=no
+mysql.binlog_format type=string default="ROW" enum=["ROW"] mutable=no
+mysql.binlog_row_image type=string default="FULL" enum=["FULL"] mutable=no
+mysql.connect_timeout_ms type=integer default=3000 minimum=100 maximum=60000 mutable=no
+mysql.database type=string mutable=no
+mysql.datetime_timezone type=string default="+00:00" mutable=no
+mysql.host type=string default="127.0.0.1" mutable=no
+mysql.ignored_ddl_prefixes type=array default=[] mutable=no
+mysql.password type=string mutable=no
+mysql.port type=integer default=3306 minimum=1 maximum=65535 mutable=no
+mysql.read_timeout_ms type=integer default=3600000 minimum=1000 maximum=86400000 mutable=no
+mysql.session_timeout_sec type=integer default=3600 minimum=60 maximum=86400 mutable=no
+mysql.ssl_ca type=string mutable=no
+mysql.ssl_cert type=string mutable=no
+mysql.ssl_enable type=boolean default=false mutable=no
+mysql.ssl_key type=string mutable=no
+mysql.ssl_verify_server_cert type=boolean default=true mutable=no
+mysql.use_gtid type=boolean default=true mutable=no
+mysql.user type=string mutable=no
+mysql.write_timeout_ms type=integer default=3600000 minimum=1000 maximum=86400000 mutable=no
+network type=object mutable=no
+network.allow_cidrs type=array mutable=no
+replication type=object mutable=no
+replication.auto_initial_snapshot type=boolean default=false mutable=no
+replication.enable type=boolean default=true mutable=no
+replication.queue_size type=integer default=10000 minimum=100 maximum=1000000 mutable=no
+replication.reconnect_backoff_max_ms type=integer default=10000 minimum=1000 maximum=600000 mutable=no
+replication.reconnect_backoff_min_ms type=integer default=500 minimum=100 maximum=60000 mutable=no
+replication.server_id type=integer minimum=1 maximum=4294967295 mutable=no
+replication.start_from type=string default="snapshot" mutable=no
+server type=object mutable=no
+server.host type=string mutable=no
+server.port type=integer minimum=1 maximum=65535 mutable=no
+tables type=array mutable=no
+tables[].cross_boundary_ngrams type=boolean default=true mutable=no
+tables[].database type=string mutable=no
+tables[].filters type=array mutable=no
+tables[].filters[].bitmap_index type=boolean default=false mutable=no
+tables[].filters[].bucket type=string enum=["minute","hour","day"] mutable=no
+tables[].filters[].dict_compress type=boolean default=false mutable=no
+tables[].filters[].name type=string mutable=no
+tables[].filters[].type type=string enum=["tinyint","tinyint_unsigned","smallint","smallint_unsigned","mediumint","mediumint_unsigned","int","int_unsigned","bigint","bigint_unsigned","float","double","string","varchar","text","datetime","date","timestamp","time","boolean"] mutable=no
+tables[].kanji_ngram_size type=integer default=0 minimum=0 maximum=10 mutable=no
+tables[].name type=string mutable=no
+tables[].ngram_size type=integer default=2 minimum=1 maximum=10 mutable=no
+tables[].posting type=object mutable=no
+tables[].posting.block_size type=integer default=128 minimum=8 maximum=1024 mutable=no
+tables[].posting.freq_bits type=integer default=0 enum=[0,4,8] mutable=no
+tables[].posting.use_roaring type=string default="auto" enum=["auto","always","never"] mutable=no
+tables[].primary_key type=string default="id" mutable=no
+tables[].required_filters type=array mutable=no
+tables[].required_filters[].bitmap_index type=boolean default=false mutable=no
+tables[].required_filters[].name type=string mutable=no
+tables[].required_filters[].op type=string enum=["=","!=","<",">","<=",">=","IS NULL","IS NOT NULL"] mutable=no
+tables[].required_filters[].type type=string enum=["tinyint","tinyint_unsigned","smallint","smallint_unsigned","mediumint","mediumint_unsigned","int","int_unsigned","bigint","bigint_unsigned","float","double","string","varchar","text","datetime","date","timestamp","time","boolean"] mutable=no
+tables[].required_filters[].value type=["string","number","boolean"] mutable=no
+tables[].synonyms type=object mutable=no
+tables[].synonyms.enable type=boolean default=false mutable=no
+tables[].synonyms.file type=string mutable=no
+tables[].text_source type=object mutable=no
+tables[].text_source.column type=string mutable=no
+tables[].text_source.concat type=array mutable=no
+tables[].text_source.delimiter type=string default=" " mutable=no
+[persistence]
+dump.magic = MGDB
+dump.fixed_header_bytes = 8
+dump.section_envelope_bytes = 16
+dump.container_version_written = 2
+dump.container_version_accepted_min = 1
+dump.container_version_accepted_max = 2
+dump.container_version_rejected_at_or_below = 0
+dump.container_version_rejected_at_or_above = 3
+index.magic = MGIX
+index.crc32_trailer_bytes = 4
+index.serialization_version_written = 4
+index.serialization_version_accepted_min = 1
+index.serialization_version_accepted_max = 4
+index.serialization_version_rejected_at_or_below = 0
+index.serialization_version_rejected_at_or_above = 5
+[cli-flags]
+--print-surface argument=no config_key=none
+-c,--config argument=yes config_key=none
+-d,--daemon argument=no config_key=none
+-h,--help argument=no config_key=none
+-s,--schema argument=yes config_key=none
+-t,--config-test argument=no config_key=none
+-v,--version argument=no config_key=none

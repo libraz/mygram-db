@@ -27,6 +27,7 @@ struct CommandLineArgs {
   bool config_test_mode = false;
   bool show_help = false;
   bool show_version = false;
+  bool show_surface = false;  ///< Print the static external surface and exit
 };
 
 /**
@@ -51,9 +52,11 @@ class CommandLineParser {
    * - -s, --schema <file>: Use custom JSON Schema
    * - -h, --help: Show help message
    * - -v, --version: Show version information
+   * - --print-surface: Print the static external surface snapshot
    * - Positional argument: Configuration file path (backward compatibility)
    *
-   * @note Help and version flags take precedence (set show_help/show_version flags)
+   * @note Help, version, and surface flags take precedence (set the
+   *       show_help/show_version/show_surface flags)
    */
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays) - Standard C/C++ main signature
   static Expected<CommandLineArgs, mygram::utils::Error> Parse(int argc, char* argv[]);

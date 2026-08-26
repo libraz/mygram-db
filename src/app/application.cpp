@@ -12,6 +12,7 @@
 #include <iostream>
 
 #include "app/application_lifecycle.h"
+#include "app/surface_descriptor.h"
 #include "server/log_field_names.h"
 #include "utils/daemon_utils.h"
 #include "utils/structured_log.h"
@@ -62,6 +63,14 @@ mygram::utils::Expected<std::unique_ptr<Application>, mygram::utils::Error> Appl
   if (args.show_version) {
     CommandLineParser::PrintVersion();
     // Return special "success" application that exits immediately
+    auto app = std::unique_ptr<Application>(new Application(std::move(args), nullptr));
+    return app;
+  }
+
+  // Rendered from static tables only, so no configuration is loaded and no
+  // socket or file is touched.
+  if (args.show_surface) {
+    std::cout << RenderSurfaceSnapshot();
     auto app = std::unique_ptr<Application>(new Application(std::move(args), nullptr));
     return app;
   }
@@ -300,8 +309,8 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::Stop() {
 }
 
 int Application::HandleSpecialModes() {
-  // Help and version are handled in Create() (print and return immediately)
-  if (args_.show_help || args_.show_version) {
+  // Help, version, and surface printing are handled in Create()
+  if (args_.show_help || args_.show_version || args_.show_surface) {
     return 0;  // Success exit
   }
 
