@@ -93,6 +93,7 @@ add_subdirectory(server)
 add_subdirectory(cli)
 add_subdirectory(client)
 add_subdirectory(app)
+add_subdirectory(compat)
 
 # Integration tests
 add_subdirectory(integration)
