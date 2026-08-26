@@ -156,3 +156,24 @@ gtest_discover_tests(result_sorter_benchmark_test
     RUN_SERIAL TRUE
     TIMEOUT 300
 )
+
+# Highlighter cost: snippet generation work as a document grows
+add_executable(highlighter_cost_test
+  highlighter_cost_test.cpp
+)
+
+target_link_libraries(highlighter_cost_test
+  mygramdb_query
+  GTest::gtest_main
+)
+
+# Renders multi-kilobyte documents repeatedly, so it runs on its own to keep the
+# reported timings comparable.
+gtest_discover_tests(highlighter_cost_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)

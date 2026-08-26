@@ -330,3 +330,24 @@ gtest_discover_tests(posting_list_benchmark_test
     RUN_SERIAL TRUE
     TIMEOUT 300
 )
+
+# Threshold search cost: transient allocation for one fuzzy request
+add_executable(index_threshold_cost_test
+  index_threshold_cost_test.cpp
+)
+
+target_link_libraries(index_threshold_cost_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+# Indexes a 200K-document corpus and replaces the global allocator to account
+# for one request, so it runs alone.
+gtest_discover_tests(index_threshold_cost_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 600
+)

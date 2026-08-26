@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 
 #include "utils/string_utils.h"
@@ -15,6 +16,7 @@
 #include <unicode/brkiter.h>
 #include <unicode/locid.h>
 #include <unicode/unistr.h>
+#include <unicode/utf16.h>
 #endif
 
 namespace mygramdb::query {
@@ -27,6 +29,39 @@ struct OriginalSegment {
   uint32_t cp_start;
   uint32_t cp_end;
 };
+
+#ifdef USE_ICU
+/// @brief Measure a UTF-16 range in UTF-8 bytes and code points
+///
+/// Materializing every grapheme cluster as its own std::string just to read its
+/// length costs one allocation per cluster of the document. The same two
+/// figures follow from walking the UTF-16 range directly.
+struct Utf16RangeExtent {
+  size_t utf8_bytes;
+  uint32_t code_points;
+};
+
+Utf16RangeExtent MeasureUtf16Range(const icu::UnicodeString& text, int32_t start, int32_t limit) {
+  Utf16RangeExtent extent{0, 0};
+  const UChar* buffer = text.getBuffer();
+  int32_t index = start;
+  while (index < limit) {
+    UChar32 codepoint = 0;
+    U16_NEXT(buffer, index, limit, codepoint);
+    if (codepoint < 0x80) {
+      extent.utf8_bytes += 1;
+    } else if (codepoint < 0x800) {
+      extent.utf8_bytes += 2;
+    } else if (codepoint < 0x10000) {
+      extent.utf8_bytes += 3;
+    } else {
+      extent.utf8_bytes += 4;
+    }
+    ++extent.code_points;
+  }
+  return extent;
+}
+#endif
 
 std::vector<OriginalSegment> SegmentOriginalText(std::string_view text) {
   std::vector<OriginalSegment> segments;
@@ -43,11 +78,9 @@ std::vector<OriginalSegment> SegmentOriginalText(std::string_view text) {
     uint32_t cp_start = 0;
     for (int32_t utf16_end = iterator->next(); utf16_end != icu::BreakIterator::DONE;
          utf16_start = utf16_end, utf16_end = iterator->next()) {
-      const icu::UnicodeString cluster = unicode_text.tempSubStringBetween(utf16_start, utf16_end);
-      std::string utf8_cluster;
-      cluster.toUTF8String(utf8_cluster);
-      const size_t byte_end = byte_start + utf8_cluster.size();
-      const uint32_t cp_end = cp_start + static_cast<uint32_t>(cluster.countChar32());
+      const Utf16RangeExtent extent = MeasureUtf16Range(unicode_text, utf16_start, utf16_end);
+      const size_t byte_end = byte_start + extent.utf8_bytes;
+      const uint32_t cp_end = cp_start + extent.code_points;
       segments.push_back({byte_start, byte_end, cp_start, cp_end});
       byte_start = byte_end;
       cp_start = cp_end;
@@ -325,32 +358,69 @@ HighlightResult Highlighter::GenerateOriginal(std::string_view original_text,
   }
 
   const std::string normalized_text = normalizer(original_text);
-  std::vector<std::pair<uint32_t, uint32_t>> normalized_to_original;
-  for (const auto& segment : SegmentOriginalText(original_text)) {
-    const std::string normalized_piece =
-        normalizer(original_text.substr(segment.byte_start, segment.byte_end - segment.byte_start));
-    const size_t normalized_cp_count = mygram::utils::CountCodePoints(normalized_piece);
-    for (size_t i = 0; i < normalized_cp_count; ++i) {
-      normalized_to_original.emplace_back(segment.cp_start, segment.cp_end);
+  const auto normalized_matches = FindMatchPositions(normalized_text, normalized_search_terms);
+
+  // Nothing to translate back onto the original text. The snippet is then the
+  // bounded leading window, which needs no offset mapping at all -- and the
+  // mapping is what makes this function expensive on a long document.
+  if (normalized_matches.empty()) {
+    return GenerateWithPositions(original_text, {}, options);
+  }
+
+  const auto segments = SegmentOriginalText(original_text);
+
+  // Each grapheme cluster contributes a known number of code points to the
+  // normalized text, and a document draws its clusters from a small repertoire.
+  // Normalizing per distinct cluster instead of per occurrence keeps the
+  // normalizer -- an ICU pipeline per call, and the dominant cost here -- off
+  // the document-length axis.
+  std::unordered_map<std::string_view, size_t> normalized_cp_per_cluster;
+  std::vector<size_t> segment_normalized_cp;
+  segment_normalized_cp.reserve(segments.size());
+  size_t total_normalized_cp = 0;
+  for (const auto& segment : segments) {
+    const std::string_view cluster = original_text.substr(segment.byte_start, segment.byte_end - segment.byte_start);
+    auto [entry, inserted] = normalized_cp_per_cluster.try_emplace(cluster, 0);
+    if (inserted) {
+      entry->second = mygram::utils::CountCodePoints(normalizer(cluster));
     }
+    segment_normalized_cp.push_back(entry->second);
+    total_normalized_cp += entry->second;
   }
 
   // The full normalized string is authoritative for matching. A custom
   // normalizer that composes across grapheme boundaries cannot be mapped
   // safely; fall back to the bounded no-match snippet instead of highlighting
   // the wrong original bytes.
-  if (normalized_to_original.size() != mygram::utils::CountCodePoints(normalized_text)) {
+  if (total_normalized_cp != mygram::utils::CountCodePoints(normalized_text)) {
     return GenerateWithPositions(original_text, {}, options);
   }
 
-  const auto normalized_matches = FindMatchPositions(normalized_text, normalized_search_terms);
+  // Matches arrive sorted and non-overlapping, so both ends of every match are
+  // non-decreasing and one forward cursor over the segments serves all of them.
+  size_t segment_index = 0;
+  size_t normalized_cp_before_segment = 0;
+  auto locate = [&](size_t normalized_cp) -> const OriginalSegment* {
+    while (segment_index < segments.size() &&
+           normalized_cp_before_segment + segment_normalized_cp[segment_index] <= normalized_cp) {
+      normalized_cp_before_segment += segment_normalized_cp[segment_index];
+      ++segment_index;
+    }
+    return segment_index < segments.size() ? &segments[segment_index] : nullptr;
+  };
+
   std::vector<std::pair<uint32_t, uint32_t>> original_matches;
   original_matches.reserve(normalized_matches.size());
   for (const auto& [start, end] : normalized_matches) {
-    if (start >= normalized_to_original.size() || end == 0 || end > normalized_to_original.size()) {
+    if (start >= total_normalized_cp || end == 0 || end > total_normalized_cp) {
       continue;
     }
-    original_matches.emplace_back(normalized_to_original[start].first, normalized_to_original[end - 1].second);
+    const OriginalSegment* start_segment = locate(start);
+    const OriginalSegment* end_segment = locate(end - 1);
+    if (start_segment == nullptr || end_segment == nullptr) {
+      continue;
+    }
+    original_matches.emplace_back(start_segment->cp_start, end_segment->cp_end);
   }
   return GenerateWithPositions(original_text, RemoveOverlappingMatchPositions(std::move(original_matches)), options);
 }

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "server/handlers/command_handler.h"
+#include "server/statistics_service.h"
 
 namespace mygramdb::server {
 
@@ -21,6 +22,13 @@ class AdminHandler : public CommandHandler {
   std::string Handle(const query::Query& query, ConnectionContext& conn_ctx) override;
 
  private:
+  /// INFO reports memory accounting derived by walking retained document and
+  /// index data under the store's shared lock, which excludes the writer that
+  /// replication apply needs. A monitoring agent polls far faster than those
+  /// figures can meaningfully move, so polls share a bounded snapshot instead
+  /// of each repeating the walk.
+  StatisticsSnapshotCache statistics_snapshot_cache_;
+
   /**
    * @brief Handle CONFIG HELP command
    * @param path Configuration path (empty for root)

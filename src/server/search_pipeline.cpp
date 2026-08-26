@@ -333,61 +333,172 @@ std::vector<storage::DocId> UnionSortedDocuments(std::vector<storage::DocId> lhs
 using ExclusionVerifier =
     std::function<std::vector<storage::DocId>(const std::vector<storage::DocId>&, const query::QueryNode&)>;
 
-std::vector<storage::DocId> EvaluateBooleanAstExpanded(
-    const query::QueryNode& node, const std::function<std::vector<storage::DocId>(const std::string&)>& search_term,
-    const std::vector<storage::DocId>& all_docs, const ExclusionVerifier& verify_exclusion = nullptr) {
+std::vector<storage::DocId> SubtractSortedDocuments(const std::vector<storage::DocId>& lhs,
+                                                    const std::vector<storage::DocId>& rhs) {
+  if (rhs.empty()) {
+    return lhs;
+  }
+  std::vector<storage::DocId> result;
+  result.reserve(lhs.size());
+  std::set_difference(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), std::back_inserter(result));
+  return result;
+}
+
+std::vector<storage::DocId> IntersectSortedDocuments(const std::vector<storage::DocId>& lhs,
+                                                     const std::vector<storage::DocId>& rhs) {
+  std::vector<storage::DocId> result;
+  result.reserve(std::min(lhs.size(), rhs.size()));
+  std::set_intersection(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), std::back_inserter(result));
+  return result;
+}
+
+/// The documents a subexpression selects, possibly named by what it excludes.
+///
+/// `docs` is the selection itself when `complement` is false, and the documents
+/// removed from the corpus when it is true. A NOT is a complement, and naming a
+/// complement outright means producing every document in the table -- an
+/// allocation and a sort proportional to the corpus, on every request. Carrying
+/// the exclusion instead lets the enclosing AND subtract it from the matches it
+/// already has, which is what the flat NOT clause does.
+struct AstDocumentSet {
+  std::vector<storage::DocId> docs;
+  bool complement = false;
+};
+
+/// Supplies the corpus to the shapes that genuinely need it.
+using CorpusProvider = std::function<const std::vector<storage::DocId>&()>;
+
+/// Whether a subexpression selects by exclusion rather than by matching.
+bool AstYieldsComplement(const query::QueryNode& node) {
   switch (node.type) {
     case query::NodeType::TERM:
-      return search_term(node.term);
+      return false;
+    case query::NodeType::AND:
+      return !node.children.empty() && std::all_of(node.children.begin(), node.children.end(), [](const auto& child) {
+        return child != nullptr && AstYieldsComplement(*child);
+      });
+    case query::NodeType::OR:
+      return std::any_of(node.children.begin(), node.children.end(),
+                         [](const auto& child) { return child != nullptr && AstYieldsComplement(*child); });
+    case query::NodeType::NOT:
+      return true;
+  }
+  return false;
+}
+
+/// Whether evaluating a subexpression has to name the corpus outright.
+///
+/// Only the operand of a NOT must be produced in full, so the corpus is needed
+/// exactly when some NOT is applied to something that is itself an exclusion.
+bool AstNeedsCorpusDuringEvaluation(const query::QueryNode& node) {
+  if (node.type == query::NodeType::NOT) {
+    if (node.children.empty() || node.children[0] == nullptr) {
+      return false;
+    }
+    return AstYieldsComplement(*node.children[0]) || AstNeedsCorpusDuringEvaluation(*node.children[0]);
+  }
+  return std::any_of(node.children.begin(), node.children.end(),
+                     [](const auto& child) { return child != nullptr && AstNeedsCorpusDuringEvaluation(*child); });
+}
+
+/// Whether answering a query requires enumerating the table at all.
+bool AstNeedsCorpus(const query::QueryNode& node) {
+  return AstYieldsComplement(node) || AstNeedsCorpusDuringEvaluation(node);
+}
+
+AstDocumentSet EvaluateBooleanAstExpanded(
+    const query::QueryNode& node, const std::function<std::vector<storage::DocId>(const std::string&)>& search_term,
+    const CorpusProvider& corpus, const ExclusionVerifier& verify_exclusion = nullptr) {
+  switch (node.type) {
+    case query::NodeType::TERM:
+      return {search_term(node.term), false};
     case query::NodeType::AND: {
-      bool first = true;
-      std::vector<storage::DocId> result;
+      std::vector<storage::DocId> matched;
+      std::vector<storage::DocId> excluded;
+      bool has_matched = false;
+      bool has_excluded = false;
       for (const auto& child : node.children) {
         if (child == nullptr) {
           return {};
         }
-        auto child_result = EvaluateBooleanAstExpanded(*child, search_term, all_docs, verify_exclusion);
-        if (first) {
-          result = std::move(child_result);
-          first = false;
-        } else {
-          std::vector<storage::DocId> intersection;
-          std::set_intersection(result.begin(), result.end(), child_result.begin(), child_result.end(),
-                                std::back_inserter(intersection));
-          result = std::move(intersection);
+        auto child_result = EvaluateBooleanAstExpanded(*child, search_term, corpus, verify_exclusion);
+        if (child_result.complement) {
+          excluded = UnionSortedDocuments(std::move(excluded), std::move(child_result.docs));
+          has_excluded = true;
+          continue;
         }
-        if (result.empty()) {
+        if (!has_matched) {
+          matched = std::move(child_result.docs);
+          has_matched = true;
+        } else {
+          matched = IntersectSortedDocuments(matched, child_result.docs);
+        }
+        if (matched.empty()) {
           break;
         }
       }
-      return result;
+      if (has_matched) {
+        return {has_excluded ? SubtractSortedDocuments(matched, excluded) : std::move(matched), false};
+      }
+      // Every child was an exclusion, so the conjunction is itself an
+      // exclusion: everything outside the union of what they remove.
+      if (has_excluded) {
+        return {std::move(excluded), true};
+      }
+      return {};
     }
     case query::NodeType::OR: {
-      std::vector<storage::DocId> result;
+      std::vector<storage::DocId> matched;
+      std::vector<storage::DocId> excluded;
+      bool has_excluded = false;
       for (const auto& child : node.children) {
-        if (child != nullptr) {
-          result = UnionSortedDocuments(std::move(result),
-                                        EvaluateBooleanAstExpanded(*child, search_term, all_docs, verify_exclusion));
+        if (child == nullptr) {
+          continue;
+        }
+        auto child_result = EvaluateBooleanAstExpanded(*child, search_term, corpus, verify_exclusion);
+        if (!child_result.complement) {
+          matched = UnionSortedDocuments(std::move(matched), std::move(child_result.docs));
+          continue;
+        }
+        if (!has_excluded) {
+          excluded = std::move(child_result.docs);
+          has_excluded = true;
+        } else {
+          excluded = IntersectSortedDocuments(excluded, child_result.docs);
         }
       }
-      return result;
+      if (!has_excluded) {
+        return {std::move(matched), false};
+      }
+      // A union that contains a complement is itself a complement: only the
+      // documents every exclusion removes, and that no positive branch selects,
+      // stay out.
+      return {SubtractSortedDocuments(excluded, matched), true};
     }
     case query::NodeType::NOT: {
       if (node.children.empty() || node.children[0] == nullptr) {
-        return all_docs;
+        return {{}, true};
       }
-      auto excluded = EvaluateBooleanAstExpanded(*node.children[0], search_term, all_docs, verify_exclusion);
+      auto child_result = EvaluateBooleanAstExpanded(*node.children[0], search_term, corpus, verify_exclusion);
+      // A negated exclusion is the only shape whose operand cannot be named
+      // without the corpus.
+      std::vector<storage::DocId> excluded =
+          child_result.complement ? SubtractSortedDocuments(corpus(), child_result.docs) : std::move(child_result.docs);
       if (verify_exclusion) {
         excluded = verify_exclusion(excluded, *node.children[0]);
       }
-      std::vector<storage::DocId> result;
-      result.reserve(all_docs.size());
-      std::set_difference(all_docs.begin(), all_docs.end(), excluded.begin(), excluded.end(),
-                          std::back_inserter(result));
-      return result;
+      return {std::move(excluded), true};
     }
   }
   return {};
+}
+
+/// Resolve a subexpression result to the documents it selects.
+std::vector<storage::DocId> MaterializeAstDocumentSet(AstDocumentSet evaluated, const CorpusProvider& corpus) {
+  if (!evaluated.complement) {
+    return std::move(evaluated.docs);
+  }
+  return SubtractSortedDocuments(corpus(), evaluated.docs);
 }
 
 /// Keep the candidates whose stored normalized text satisfies @p matches.
@@ -1724,13 +1835,22 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
     };
   }
 
-  const auto all_docs = ContainsAstNot(ast) ? current_doc_store->GetAllDocIds() : std::vector<storage::DocId>{};
+  // Enumerating the table allocates and orders one entry per document, so only
+  // a query whose answer is genuinely an exclusion pays for it. An exclusion
+  // under a conjunction is not such a query: it subtracts from the matches its
+  // siblings already produced.
+  const auto all_docs = AstNeedsCorpus(ast) ? current_doc_store->GetAllDocIds() : std::vector<storage::DocId>{};
+  CorpusProvider corpus = [&all_docs]() -> const std::vector<storage::DocId>& { return all_docs; };
+
   if (fuzzy_max_distance.has_value()) {
-    result.results = EvaluateBooleanAstExpanded(ast, fuzzy_term_search, all_docs, verify_exclusion);
+    result.results =
+        MaterializeAstDocumentSet(EvaluateBooleanAstExpanded(ast, fuzzy_term_search, corpus, verify_exclusion), corpus);
   } else if (synonym_dict != nullptr) {
-    result.results = EvaluateBooleanAstExpanded(ast, synonym_term_search, all_docs, verify_exclusion);
+    result.results = MaterializeAstDocumentSet(
+        EvaluateBooleanAstExpanded(ast, synonym_term_search, corpus, verify_exclusion), corpus);
   } else {
-    result.results = EvaluateBooleanAstExpanded(ast, regular_term_search, all_docs, verify_exclusion);
+    result.results = MaterializeAstDocumentSet(
+        EvaluateBooleanAstExpanded(ast, regular_term_search, corpus, verify_exclusion), corpus);
   }
   result.total_candidates = result.results.size();
 

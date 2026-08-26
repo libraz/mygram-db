@@ -48,8 +48,10 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
                                               mygram::utils::ErrorCode::kCatalogNotInitialized);
       }
       const auto& tables = ctx_.table_catalog->GetTables();
-      // 1. Aggregate metrics (domain layer, pure function)
-      auto metrics = StatisticsService::AggregateMetrics(tables);
+      // 1. Aggregate metrics (domain layer, pure function), reusing a bounded
+      // snapshot so a polling client cannot drive one corpus-sized walk per
+      // request.
+      auto metrics = statistics_snapshot_cache_.Get(tables);
 
       // 2. Update stats (domain layer, explicit side effect)
       StatisticsService::UpdateServerStatistics(ctx_.stats, metrics);

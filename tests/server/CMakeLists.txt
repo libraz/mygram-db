@@ -1129,3 +1129,47 @@ gtest_discover_tests(auth_log_redaction_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+# SearchPipeline exclusion cost: boolean NOT node against the equivalent clause
+
+add_executable(search_pipeline_exclusion_cost_test
+  search_pipeline_exclusion_cost_test.cpp
+)
+
+target_link_libraries(search_pipeline_exclusion_cost_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# Indexes a 200K-document corpus and compares query durations, so it needs the
+# machine to itself for the ratio to mean anything.
+gtest_discover_tests(search_pipeline_exclusion_cost_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 600
+)
+
+# TCP INFO cost: repeated polls and their effect on a concurrent writer
+
+add_executable(admin_info_cost_test
+  admin_info_cost_test.cpp
+)
+
+target_link_libraries(admin_info_cost_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+# Builds a 200K-document table and measures throughput under contention, so it
+# needs the machine to itself.
+gtest_discover_tests(admin_info_cost_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 600
+)

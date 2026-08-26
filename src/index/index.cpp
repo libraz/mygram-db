@@ -9,10 +9,12 @@
 
 #include <algorithm>
 #include <mutex>
+#include <new>
 #include <queue>
 #include <tuple>
 #include <unordered_set>
 
+#include "utils/roaring_bitmap_ptr.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -530,59 +532,72 @@ std::vector<DocId> Index::SearchByThreshold(const std::vector<std::string>& term
     return {};
   }
 
-  // Get all posting lists as sorted vectors
-  std::vector<std::vector<DocId>> all_docs;
-  all_docs.reserve(valid_snapshots.size());
-  for (const auto& snapshot : valid_snapshots) {
-    all_docs.push_back(snapshot->GetAll());
-  }
-
-  // K-way merge with counting using min-heap
-  // Heap element: (doc_id, list_index, position_in_list)
-  using HeapEntry = std::tuple<DocId, size_t, size_t>;
-  std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<HeapEntry>> heap;
-
-  // Initialize heap with first element of each list
-  for (size_t i = 0; i < all_docs.size(); ++i) {
-    if (!all_docs[i].empty()) {
-      heap.emplace(all_docs[i][0], i, 0);
+  // Count occurrences across the lists as a ladder of bitmaps: levels[j] holds
+  // the documents seen in at least j+1 lists. Folding one list in at a time
+  // keeps a single posting list resident, so a request costs the longest list
+  // rather than the sum of every candidate list, and the ladder itself stays
+  // compressed no matter how large the corpus is.
+  //
+  // An unallocatable bitmap is reported the way the vectors this replaced
+  // reported it. Returning an empty answer instead would turn exhaustion into a
+  // silently wrong result set.
+  std::vector<utils::RoaringBitmapPtr> levels;
+  levels.reserve(threshold);
+  for (size_t level = 0; level < threshold; ++level) {
+    levels.push_back(utils::MakeEmptyRoaring());
+    if (levels.back() == nullptr) {
+      throw std::bad_alloc();
     }
   }
 
-  std::vector<DocId> result;
-  DocId current_doc = 0;
-  size_t current_count = 0;
-  bool has_current = false;
-
-  while (!heap.empty()) {
-    auto [doc_id, list_idx, pos] = heap.top();
-    heap.pop();
-
-    if (!has_current || doc_id != current_doc) {
-      // Emit previous document if it met threshold
-      if (has_current && current_count >= threshold) {
-        result.push_back(current_doc);
+  const size_t list_count = valid_snapshots.size();
+  size_t lowest_live_level = 0;
+  for (size_t i = 0; i < list_count; ++i) {
+    {
+      std::vector<DocId> docs = valid_snapshots[i]->GetAll();
+      utils::RoaringBitmapPtr current = utils::MakeRoaringFromVector(docs);
+      if (current == nullptr) {
+        throw std::bad_alloc();
       }
-      current_doc = doc_id;
-      current_count = 1;
-      has_current = true;
-    } else {
-      ++current_count;
+      // The decoded list is not needed once the bitmap holds it; releasing it
+      // here is what keeps only one list resident at a time.
+      docs.clear();
+      docs.shrink_to_fit();
+
+      // Promote from the top down so a document is not counted twice for this
+      // list: level j takes from level j-1 before level j-1 sees the list.
+      for (size_t level = threshold - 1; level >= 1; --level) {
+        if (level - 1 < lowest_live_level) {
+          break;
+        }
+        utils::RoaringBitmapPtr promoted(roaring_bitmap_and(levels[level - 1].get(), current.get()));
+        if (promoted == nullptr) {
+          throw std::bad_alloc();
+        }
+        roaring_bitmap_or_inplace(levels[level].get(), promoted.get());
+      }
+      if (lowest_live_level == 0) {
+        roaring_bitmap_or_inplace(levels[0].get(), current.get());
+      }
     }
 
-    // Advance in this list
-    size_t next_pos = pos + 1;
-    if (next_pos < all_docs[list_idx].size()) {
-      heap.emplace(all_docs[list_idx][next_pos], list_idx, next_pos);
+    // A document counted c times needs threshold - c more lists to qualify.
+    // Once no such list remains, the levels below that count can never
+    // contribute and their memory is released.
+    const size_t remaining_lists = list_count - 1 - i;
+    const size_t min_viable_count = threshold > remaining_lists ? threshold - remaining_lists : 1;
+    while (lowest_live_level + 1 < min_viable_count) {
+      roaring_bitmap_clear(levels[lowest_live_level].get());
+      ++lowest_live_level;
     }
   }
 
-  // Don't forget the last document
-  if (has_current && current_count >= threshold) {
-    result.push_back(current_doc);
+  const roaring_bitmap_t* qualified = levels[threshold - 1].get();
+  std::vector<DocId> result(roaring_bitmap_get_cardinality(qualified));
+  if (!result.empty()) {
+    roaring_bitmap_to_uint32_array(qualified, result.data());
   }
-
-  return result;
+  return result;  // Already sorted (roaring guarantees sorted order)
 }
 
 uint64_t Index::PostingSize(std::string_view term) const {
