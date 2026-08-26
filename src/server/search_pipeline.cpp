@@ -12,6 +12,8 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -324,9 +326,14 @@ std::vector<storage::DocId> UnionSortedDocuments(std::vector<storage::DocId> lhs
   return result;
 }
 
+/// Narrows an exclusion set to the documents whose stored text really satisfies
+/// the negated subexpression. Empty when the verification policy is off.
+using ExclusionVerifier =
+    std::function<std::vector<storage::DocId>(const std::vector<storage::DocId>&, const query::QueryNode&)>;
+
 std::vector<storage::DocId> EvaluateBooleanAstExpanded(
     const query::QueryNode& node, const std::function<std::vector<storage::DocId>(const std::string&)>& search_term,
-    const std::vector<storage::DocId>& all_docs) {
+    const std::vector<storage::DocId>& all_docs, const ExclusionVerifier& verify_exclusion = nullptr) {
   switch (node.type) {
     case query::NodeType::TERM:
       return search_term(node.term);
@@ -337,7 +344,7 @@ std::vector<storage::DocId> EvaluateBooleanAstExpanded(
         if (child == nullptr) {
           return {};
         }
-        auto child_result = EvaluateBooleanAstExpanded(*child, search_term, all_docs);
+        auto child_result = EvaluateBooleanAstExpanded(*child, search_term, all_docs, verify_exclusion);
         if (first) {
           result = std::move(child_result);
           first = false;
@@ -357,7 +364,8 @@ std::vector<storage::DocId> EvaluateBooleanAstExpanded(
       std::vector<storage::DocId> result;
       for (const auto& child : node.children) {
         if (child != nullptr) {
-          result = UnionSortedDocuments(std::move(result), EvaluateBooleanAstExpanded(*child, search_term, all_docs));
+          result = UnionSortedDocuments(std::move(result),
+                                        EvaluateBooleanAstExpanded(*child, search_term, all_docs, verify_exclusion));
         }
       }
       return result;
@@ -366,7 +374,10 @@ std::vector<storage::DocId> EvaluateBooleanAstExpanded(
       if (node.children.empty() || node.children[0] == nullptr) {
         return all_docs;
       }
-      auto excluded = EvaluateBooleanAstExpanded(*node.children[0], search_term, all_docs);
+      auto excluded = EvaluateBooleanAstExpanded(*node.children[0], search_term, all_docs, verify_exclusion);
+      if (verify_exclusion) {
+        excluded = verify_exclusion(excluded, *node.children[0]);
+      }
       std::vector<storage::DocId> result;
       result.reserve(all_docs.size());
       std::set_difference(all_docs.begin(), all_docs.end(), excluded.begin(), excluded.end(),
@@ -399,6 +410,72 @@ std::vector<storage::DocId> RetainCandidatesMatchingText(const std::vector<stora
                                        return true;
                                      });
   return verified;
+}
+
+std::vector<std::string> NormalizeTerms(const std::vector<std::string>& terms, index::Index* current_index) {
+  std::vector<std::string> normalized_terms;
+  normalized_terms.reserve(terms.size());
+  for (const auto& term : terms) {
+    normalized_terms.push_back(current_index->NormalizeText(term));
+  }
+  return normalized_terms;
+}
+
+/// Predicate accepting a text that contains every normalized term (AND).
+auto MakeAllTermsPresentMatcher(std::vector<std::string> normalized_terms) {
+  return [terms = std::move(normalized_terms)](const std::string& text) {
+    return std::all_of(terms.begin(), terms.end(),
+                       [&](const std::string& term) { return text.find(term) != std::string::npos; });
+  };
+}
+
+/// Predicate accepting a text that contains at least one of the normalized
+/// terms (OR).
+auto MakeAnyTermPresentMatcher(std::vector<std::string> normalized_terms) {
+  return [terms = std::move(normalized_terms)](const std::string& text) {
+    return std::any_of(terms.begin(), terms.end(),
+                       [&](const std::string& term) { return text.find(term) != std::string::npos; });
+  };
+}
+
+/// Predicate accepting a text that contains at least one term of every synonym
+/// group (OR within a group, AND across groups).
+auto MakeSynonymGroupsMatcher(const std::vector<SynonymTermGroup>& synonym_groups) {
+  return [&synonym_groups](const std::string& text) {
+    return std::all_of(synonym_groups.begin(), synonym_groups.end(), [&](const auto& group) {
+      return std::any_of(group.normalized_terms.begin(), group.normalized_terms.end(),
+                         [&](const std::string& term) { return text.find(term) != std::string::npos; });
+    });
+  };
+}
+
+/// Reject candidates that only satisfy the partial n-gram coverage of a term
+/// mixing CJK and non-CJK characters.
+///
+/// When kanji_ngram_size differs from ngram_size, such a term leaves fragments
+/// that generate no n-gram, so an n-gram intersection returns documents that do
+/// not contain the term. Every path producing candidates from an intersection
+/// routes through here so the rule lives in one place. It is deliberately not
+/// gated on memory.verify_text, which selects precision/performance rather than
+/// correctness.
+///
+/// @param terms Terms deciding whether the guard applies (non-normalized or
+///        already normalized; normalization is idempotent)
+/// @param make_text_matches Factory for the path-specific exact-substring
+///        predicate, invoked only when the guard applies so that paths do not
+///        pay for normalization they will not use
+template <typename MatcherFactory>
+std::vector<storage::DocId> EnforceExactTextForHybridFragments(std::vector<storage::DocId> results,
+                                                               const std::vector<std::string>& terms,
+                                                               index::Index* current_index,
+                                                               storage::DocumentStore* doc_store, int ngram_size,
+                                                               int kanji_ngram_size, bool cross_boundary_ngrams,
+                                                               MatcherFactory make_text_matches) {
+  if (results.empty() ||
+      !RequiresExactTextForHybridFragments(terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams)) {
+    return results;
+  }
+  return RetainCandidatesMatchingText(results, doc_store, make_text_matches());
 }
 
 std::vector<storage::DocId> PostFilterByBooleanText(const std::vector<storage::DocId>& candidates,
@@ -468,14 +545,28 @@ SynonymTermGroup ExpandNormalizedTermWithSynonyms(std::string_view normalized,
                                                   index::Index* current_index, int ngram_size, int kanji_ngram_size,
                                                   bool cross_boundary_ngrams);
 
+/// Decide whether NOT terms must be confirmed against stored text, using the
+/// same verification policy the positive terms of the path are judged by.
+bool ShouldVerifyExclusions(const config::Config* full_config, const std::vector<std::string>& positive_terms,
+                            const std::vector<std::string>& not_terms) {
+  if (full_config == nullptr || not_terms.empty()) {
+    return false;
+  }
+  std::vector<std::string> terms = positive_terms;
+  terms.insert(terms.end(), not_terms.begin(), not_terms.end());
+  return ShouldApplyVerifyText(full_config->memory.verify_text, terms);
+}
+
 /// Apply NOT filter and column filters (shared by all Execute* functions)
 void ApplyNotAndFilters(SearchPipelineResult& result, const query::Query& query, index::Index* current_index,
                         storage::DocumentStore* current_doc_store, int ngram_size, int kanji_ngram_size,
                         bool cross_boundary, const query::SynonymDictionary* synonym_dict = nullptr,
-                        const std::unordered_map<std::string, SearchTermInfo>* precomputed_infos = nullptr) {
+                        const std::unordered_map<std::string, SearchTermInfo>* precomputed_infos = nullptr,
+                        bool verify_exclusions = false) {
   if (!query.not_terms.empty()) {
-    result.results = ApplyNotFilter(result.results, query.not_terms, current_index, current_doc_store, ngram_size,
-                                    kanji_ngram_size, cross_boundary, synonym_dict, precomputed_infos);
+    result.results =
+        ApplyNotFilter(result.results, query.not_terms, current_index, current_doc_store, ngram_size, kanji_ngram_size,
+                       cross_boundary, synonym_dict, precomputed_infos, verify_exclusions);
   }
   result.after_not = result.results.size();
   if (!query.filters.empty()) {
@@ -841,8 +932,10 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 
   // Apply NOT filter
   if (!query.not_terms.empty()) {
-    result.results = ApplyNotFilter(result.results, query.not_terms, current_index, current_doc_store, ngram_size,
-                                    kanji_ngram_size, cross_boundary);
+    result.results =
+        ApplyNotFilter(result.results, query.not_terms, current_index, current_doc_store, ngram_size, kanji_ngram_size,
+                       cross_boundary, /*synonym_dict=*/nullptr, /*precomputed_infos=*/nullptr,
+                       ShouldVerifyExclusions(full_config, all_search_terms, query.not_terms));
   }
   result.after_not = result.results.size();
 
@@ -855,15 +948,9 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
   // Apply verify_text post-filter
   result.results =
       ApplyVerifyTextFilter(std::move(result.results), all_search_terms, current_index, current_doc_store, full_config);
-  if (RequiresExactTextForHybridFragments(all_search_terms, current_index, ngram_size, kanji_ngram_size,
-                                          cross_boundary)) {
-    std::vector<std::string> normalized_terms;
-    normalized_terms.reserve(all_search_terms.size());
-    for (const auto& term : all_search_terms) {
-      normalized_terms.push_back(current_index->NormalizeText(term));
-    }
-    result.results = PostFilterByText(result.results, normalized_terms, current_doc_store);
-  }
+  result.results = EnforceExactTextForHybridFragments(
+      std::move(result.results), all_search_terms, current_index, current_doc_store, ngram_size, kanji_ngram_size,
+      cross_boundary, [&]() { return MakeAllTermsPresentMatcher(NormalizeTerms(all_search_terms, current_index)); });
 
   return result;
 }
@@ -873,7 +960,8 @@ std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& re
                                            storage::DocumentStore* current_doc_store, int ngram_size,
                                            int kanji_ngram_size, bool cross_boundary_ngrams,
                                            const query::SynonymDictionary* synonym_dict,
-                                           const std::unordered_map<std::string, SearchTermInfo>* precomputed_infos) {
+                                           const std::unordered_map<std::string, SearchTermInfo>* precomputed_infos,
+                                           bool verify_exclusions) {
   if (results.empty() || not_terms.empty()) {
     return results;
   }
@@ -912,6 +1000,21 @@ std::vector<storage::DocId> ApplyNotFilter(const std::vector<storage::DocId>& re
     for (const auto& term_info : term_infos) {
       term_docs =
           UnionSortedDocuments(std::move(term_docs), SearchTermDocuments(term_info, current_index, current_doc_store));
+    }
+    if (verify_exclusions) {
+      // An n-gram match is not evidence that the term occurs, so exclusions are
+      // confirmed against the stored text. Documents without stored text stay
+      // excluded: verification is impossible there, and the n-gram decision is
+      // all that remains.
+      std::vector<std::string> normalized_variants;
+      normalized_variants.reserve(term_infos.size());
+      for (const auto& term_info : term_infos) {
+        if (!term_info.normalized_term.empty()) {
+          normalized_variants.push_back(term_info.normalized_term);
+        }
+      }
+      term_docs = RetainCandidatesMatchingText(term_docs, current_doc_store,
+                                               MakeAnyTermPresentMatcher(std::move(normalized_variants)));
     }
     temp.clear();
     temp.reserve(excluded_docs.size() + term_docs.size());
@@ -990,6 +1093,22 @@ inline ParsedFilterValue ParseFilterValue(const std::string& value) {
   }
 
   return parsed_value;
+}
+
+/// Compare two doubles the way the bitmap index does: on their stored
+/// representation.
+///
+/// ApplyFiltersWithBitmap answers EQ/NE from serialized value keys, so it can
+/// only ever match a bit-identical double; tolerating a neighbourhood there
+/// would mean scanning every distinct value of the column instead of a bitmap
+/// lookup. The fallback path therefore decides EQ/NE the same way, and keeps
+/// the ordering operators, which never reach the bitmap path, unchanged.
+bool DoubleValuesIdentical(double lhs, double rhs) {
+  uint64_t lhs_bits = 0;
+  uint64_t rhs_bits = 0;
+  std::memcpy(&lhs_bits, &lhs, sizeof(lhs_bits));
+  std::memcpy(&rhs_bits, &rhs, sizeof(rhs_bits));
+  return lhs_bits == rhs_bits;
 }
 
 /// Check if all filter conditions can be accelerated with bitmap index
@@ -1156,6 +1275,12 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
             } else if constexpr (std::is_same_v<T, double>) {
               if (!parsed_value.double_valid) {
                 return false;  // Invalid number
+              }
+              if (filter_cond.op == query::FilterOp::EQ) {
+                return DoubleValuesIdentical(val, parsed_value.double_val);
+              }
+              if (filter_cond.op == query::FilterOp::NE) {
+                return !DoubleValuesIdentical(val, parsed_value.double_val);
               }
               return mygram::utils::CompareDoubleValues(val, parsed_value.double_val, op_str,
                                                         mygram::constants::kFilterValueEpsilon);
@@ -1466,13 +1591,80 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
     return matches;
   };
 
+  // Substring variants of every term the query mentions, materialized on demand
+  // and shared by the exclusion verifier, the verification filter and the
+  // hybrid-fragment guard.
+  std::unordered_map<std::string, std::vector<std::string>> term_variants;
+  auto prepare_term = [&](const std::string& term) {
+    if (term_variants.find(term) != term_variants.end()) {
+      return;
+    }
+    const SearchTermInfo* info = find_precomputed(term);
+    std::string normalized = info != nullptr ? info->normalized_term : current_index->NormalizeText(term);
+    if (normalized.empty()) {
+      term_variants.emplace(term, std::vector<std::string>{});
+    } else if (synonym_dict != nullptr && !fuzzy_max_distance.has_value()) {
+      term_variants.emplace(term, synonym_dict->Expand(normalized));
+    } else {
+      term_variants.emplace(term, std::vector<std::string>{std::move(normalized)});
+    }
+  };
+  auto prepare_all_terms = [&]() {
+    std::function<void(const query::QueryNode&)> prepare_ast = [&](const query::QueryNode& node) {
+      if (node.type == query::NodeType::TERM) {
+        prepare_term(node.term);
+      }
+      for (const auto& child : node.children) {
+        if (child != nullptr) {
+          prepare_ast(*child);
+        }
+      }
+    };
+    prepare_ast(ast);
+    for (const auto& and_term : query.and_terms) {
+      prepare_term(and_term);
+    }
+  };
+  auto term_present_in = [&](const std::string& text, const std::string& term, bool allow_fuzzy) {
+    const auto variants = term_variants.find(term);
+    if (variants == term_variants.end()) {
+      return false;
+    }
+    return std::any_of(variants->second.begin(), variants->second.end(), [&](const std::string& variant) {
+      return text.find(variant) != std::string::npos ||
+             (allow_fuzzy && mygram::utils::ContainsFuzzyMatch(text, variant, *fuzzy_max_distance));
+    });
+  };
+  auto matches_ast = [&](const query::QueryNode& node, const std::string& text, bool allow_fuzzy) {
+    return BooleanAstMatchesExpandedText(
+        node, [&](const std::string& term) { return term_present_in(text, term, allow_fuzzy); });
+  };
+  auto matches_query_shape = [&](const std::string& text, bool allow_fuzzy) {
+    return matches_ast(ast, text, allow_fuzzy) &&
+           std::all_of(query.and_terms.begin(), query.and_terms.end(),
+                       [&](const std::string& term) { return term_present_in(text, term, allow_fuzzy); });
+  };
+
+  // A NOT node removes documents, so its evidence is held to the same
+  // verification policy as the positive terms.
+  ExclusionVerifier verify_exclusion;
+  if (ContainsAstNot(ast) && full_config != nullptr &&
+      ShouldApplyVerifyText(full_config->memory.verify_text, verify_terms_for_mode)) {
+    verify_exclusion = [&](const std::vector<storage::DocId>& excluded, const query::QueryNode& negated) {
+      prepare_all_terms();
+      return RetainCandidatesMatchingText(excluded, current_doc_store, [&](const std::string& text) {
+        return matches_ast(negated, text, fuzzy_max_distance.has_value());
+      });
+    };
+  }
+
   const auto all_docs = ContainsAstNot(ast) ? current_doc_store->GetAllDocIds() : std::vector<storage::DocId>{};
   if (fuzzy_max_distance.has_value()) {
-    result.results = EvaluateBooleanAstExpanded(ast, fuzzy_term_search, all_docs);
+    result.results = EvaluateBooleanAstExpanded(ast, fuzzy_term_search, all_docs, verify_exclusion);
   } else if (synonym_dict != nullptr) {
-    result.results = EvaluateBooleanAstExpanded(ast, synonym_term_search, all_docs);
+    result.results = EvaluateBooleanAstExpanded(ast, synonym_term_search, all_docs, verify_exclusion);
   } else {
-    result.results = EvaluateBooleanAstExpanded(ast, regular_term_search, all_docs);
+    result.results = EvaluateBooleanAstExpanded(ast, regular_term_search, all_docs, verify_exclusion);
   }
   result.total_candidates = result.results.size();
 
@@ -1501,57 +1693,15 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
   result.after_intersection = result.results.size();
 
   ApplyNotAndFilters(result, query, current_index, current_doc_store, ngram_size, kanji_ngram_size, cross_boundary,
-                     synonym_dict, precomputed_term_infos);
+                     synonym_dict, precomputed_term_infos,
+                     ShouldVerifyExclusions(full_config, verify_terms_for_mode, query.not_terms));
+
   if (!result.results.empty() && full_config != nullptr &&
       ShouldApplyVerifyText(full_config->memory.verify_text, verify_terms_for_mode)) {
     if (fuzzy_max_distance.has_value() || synonym_dict != nullptr) {
-      std::unordered_map<std::string, std::vector<std::string>> verification_variants;
-      auto prepare_term = [&](const std::string& term) {
-        if (verification_variants.find(term) != verification_variants.end()) {
-          return;
-        }
-        const SearchTermInfo* info = find_precomputed(term);
-        std::string normalized = info != nullptr ? info->normalized_term : current_index->NormalizeText(term);
-        if (normalized.empty()) {
-          verification_variants.emplace(term, std::vector<std::string>{});
-        } else if (fuzzy_max_distance.has_value()) {
-          verification_variants.emplace(term, std::vector<std::string>{std::move(normalized)});
-        } else {
-          verification_variants.emplace(term, synonym_dict->Expand(normalized));
-        }
-      };
-      std::function<void(const query::QueryNode&)> prepare_ast = [&](const query::QueryNode& node) {
-        if (node.type == query::NodeType::TERM) {
-          prepare_term(node.term);
-        }
-        for (const auto& child : node.children) {
-          if (child != nullptr) {
-            prepare_ast(*child);
-          }
-        }
-      };
-      prepare_ast(ast);
-      for (const auto& and_term : query.and_terms) {
-        prepare_term(and_term);
-      }
-
+      prepare_all_terms();
       result.results = RetainCandidatesMatchingText(result.results, current_doc_store, [&](const std::string& text) {
-        auto term_matches = [&](const std::string& term) {
-          const auto variants = verification_variants.find(term);
-          if (variants == verification_variants.end()) {
-            return false;
-          }
-          if (fuzzy_max_distance.has_value()) {
-            return std::any_of(variants->second.begin(), variants->second.end(), [&](const auto& variant) {
-              return text.find(variant) != std::string::npos ||
-                     mygram::utils::ContainsFuzzyMatch(text, variant, *fuzzy_max_distance);
-            });
-          }
-          return std::any_of(variants->second.begin(), variants->second.end(),
-                             [&](const auto& synonym) { return text.find(synonym) != std::string::npos; });
-        };
-        return BooleanAstMatchesExpandedText(ast, term_matches) &&
-               std::all_of(query.and_terms.begin(), query.and_terms.end(), term_matches);
+        return matches_query_shape(text, fuzzy_max_distance.has_value());
       });
     } else {
       TermInfoLookup fallback_term_infos;
@@ -1574,6 +1724,13 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
       result.results = PostFilterByText(result.results, normalized_and_terms, current_doc_store);
     }
   }
+
+  result.results = EnforceExactTextForHybridFragments(
+      std::move(result.results), verify_terms_for_mode, current_index, current_doc_store, ngram_size, kanji_ngram_size,
+      cross_boundary, [&]() {
+        prepare_all_terms();
+        return [&](const std::string& text) { return matches_query_shape(text, /*allow_fuzzy=*/false); };
+      });
   return result;
 }
 
@@ -1620,13 +1777,23 @@ SearchPipelineResult ExecuteWithSynonyms(const query::Query& query, const std::v
     return result;
   }
 
+  std::vector<std::string> expanded_terms;
+  for (const auto& group : synonym_groups) {
+    expanded_terms.insert(expanded_terms.end(), group.normalized_terms.begin(), group.normalized_terms.end());
+  }
+
   // Apply NOT filter and column filters
   ApplyNotAndFilters(result, query, current_index, current_doc_store, ngram_size, kanji_ngram_size, cross_boundary,
-                     synonym_dict);
+                     synonym_dict, /*precomputed_infos=*/nullptr,
+                     ShouldVerifyExclusions(full_config, expanded_terms, query.not_terms));
 
   // Apply synonym-aware verify_text
   result.results =
       PostFilterByTextWithSynonyms(result.results, synonym_groups, current_index, current_doc_store, full_config);
+
+  result.results = EnforceExactTextForHybridFragments(std::move(result.results), expanded_terms, current_index,
+                                                      current_doc_store, ngram_size, kanji_ngram_size, cross_boundary,
+                                                      [&]() { return MakeSynonymGroupsMatcher(synonym_groups); });
 
   return result;
 }
@@ -1646,14 +1813,7 @@ std::vector<storage::DocId> PostFilterByTextWithSynonyms(const std::vector<stora
     return candidates;
   }
 
-  auto verified = RetainCandidatesMatchingText(candidates, doc_store, [&](const std::string& text) {
-    return std::all_of(synonym_groups.begin(), synonym_groups.end(), [&](const auto& group) {
-      return std::any_of(group.normalized_terms.begin(), group.normalized_terms.end(),
-                         [&](const std::string& term) { return text.find(term) != std::string::npos; });
-    });
-  });
-
-  return verified;
+  return RetainCandidatesMatchingText(candidates, doc_store, MakeSynonymGroupsMatcher(synonym_groups));
 }
 
 SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vector<SearchTermInfo>& term_infos,
@@ -1716,29 +1876,21 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
   }
 
   // Apply NOT filter and column filters
-  ApplyNotAndFilters(result, query, current_index, current_doc_store, ngram_size, kanji_ngram_size, cross_boundary);
+  ApplyNotAndFilters(result, query, current_index, current_doc_store, ngram_size, kanji_ngram_size, cross_boundary,
+                     /*synonym_dict=*/nullptr, /*precomputed_infos=*/nullptr,
+                     ShouldVerifyExclusions(full_config, all_search_terms, query.not_terms));
 
   // Apply fuzzy verify_text post-filter
   if (!result.results.empty() && full_config != nullptr) {
     const auto& verify_mode = full_config->memory.verify_text;
     if (ShouldApplyVerifyText(verify_mode, all_search_terms)) {
-      std::vector<std::string> normalized_terms;
-      normalized_terms.reserve(all_search_terms.size());
-      for (const auto& term : all_search_terms) {
-        normalized_terms.push_back(current_index->NormalizeText(term));
-      }
-      result.results = PostFilterByFuzzyText(result.results, normalized_terms, max_distance, current_doc_store);
+      result.results = PostFilterByFuzzyText(result.results, NormalizeTerms(all_search_terms, current_index),
+                                             max_distance, current_doc_store);
     }
   }
-  if (RequiresExactTextForHybridFragments(all_search_terms, current_index, ngram_size, kanji_ngram_size,
-                                          cross_boundary)) {
-    std::vector<std::string> normalized_terms;
-    normalized_terms.reserve(all_search_terms.size());
-    for (const auto& term : all_search_terms) {
-      normalized_terms.push_back(current_index->NormalizeText(term));
-    }
-    result.results = PostFilterByText(result.results, normalized_terms, current_doc_store);
-  }
+  result.results = EnforceExactTextForHybridFragments(
+      std::move(result.results), all_search_terms, current_index, current_doc_store, ngram_size, kanji_ngram_size,
+      cross_boundary, [&]() { return MakeAllTermsPresentMatcher(NormalizeTerms(all_search_terms, current_index)); });
 
   return result;
 }
@@ -2113,9 +2265,11 @@ mygram::utils::Expected<FacetPipelineOutput, mygram::utils::Error> ExecuteFacetP
     } else {
       results = current_doc_store->GetAllDocIds();
       if (has_not) {
-        results = ApplyNotFilter(results, query.not_terms, current_index, current_doc_store, params.search.ngram_size,
-                                 params.search.kanji_ngram_size, params.search.cross_boundary_ngrams,
-                                 params.search.synonym_dict);
+        results = ApplyNotFilter(
+            results, query.not_terms, current_index, current_doc_store, params.search.ngram_size,
+            params.search.kanji_ngram_size, params.search.cross_boundary_ngrams, params.search.synonym_dict,
+            /*precomputed_infos=*/nullptr,
+            ShouldVerifyExclusions(params.search.full_config, /*positive_terms=*/{}, query.not_terms));
       }
       if (has_filters) {
         results = ApplyFiltersWithBitmap(results, query.filters, current_doc_store);

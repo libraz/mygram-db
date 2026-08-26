@@ -306,17 +306,6 @@ std::vector<std::string> SearchHandler::GenerateHighlightSnippets(
   return snippets;
 }
 
-mygram::utils::Expected<query::Query, mygram::utils::Error> SearchHandler::CanonicalizeQueryTable(
-    const query::Query& query) const {
-  auto resolved = ResolveTableName(query.table);
-  if (!resolved) {
-    return mygram::utils::MakeUnexpected(resolved.error());
-  }
-  query::Query canonical = query;
-  canonical.table = *resolved;
-  return canonical;
-}
-
 std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionContext& conn_ctx) {
   auto canonical_query = CanonicalizeQueryTable(query);
   if (!canonical_query) {

@@ -1018,3 +1018,68 @@ foreach(reactor_connection_concurrency_test
     APPEND PROPERTY LABELS "CONCURRENCY"
   )
 endforeach()
+
+# SearchPipeline mixed CJK/ASCII exact-text tests
+
+add_executable(search_pipeline_hybrid_exact_test
+  search_pipeline_hybrid_exact_test.cpp
+)
+
+target_link_libraries(search_pipeline_hybrid_exact_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_hybrid_exact_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# SearchPipeline NOT-term verification tests
+
+add_executable(search_pipeline_not_verification_test
+  search_pipeline_not_verification_test.cpp
+)
+
+target_link_libraries(search_pipeline_not_verification_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_not_verification_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# SearchPipeline DOUBLE filter path parity tests
+
+add_executable(search_pipeline_double_filter_test
+  search_pipeline_double_filter_test.cpp
+)
+
+target_link_libraries(search_pipeline_double_filter_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_pipeline_double_filter_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
+# FacetHandler cache key normalization tests
+
+add_executable(facet_handler_cache_key_test
+  facet_handler_cache_key_test.cpp
+)
+
+target_link_libraries(facet_handler_cache_key_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(facet_handler_cache_key_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_state
+)

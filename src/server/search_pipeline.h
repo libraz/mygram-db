@@ -135,12 +135,17 @@ SearchPipelineResult Execute(const query::Query& query, const std::vector<Search
 /// @param ngram_size N-gram size for ASCII/alphanumeric characters
 /// @param kanji_ngram_size N-gram size for CJK characters
 /// @param cross_boundary_ngrams Generate n-grams spanning CJK/non-CJK boundaries
+/// @param synonym_dict Dictionary expanding each NOT term, or nullptr
+/// @param precomputed_infos Already generated term metadata, or nullptr
+/// @param verify_exclusions Confirm each exclusion against the document's
+///        stored normalized text before removing it, as required by the
+///        configured verification policy
 /// @return Filtered results with NOT-matching documents removed
 std::vector<storage::DocId> ApplyNotFilter(
     const std::vector<storage::DocId>& results, const std::vector<std::string>& not_terms, index::Index* current_index,
     storage::DocumentStore* current_doc_store, int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams,
     const query::SynonymDictionary* synonym_dict = nullptr,
-    const std::unordered_map<std::string, SearchTermInfo>* precomputed_infos = nullptr);
+    const std::unordered_map<std::string, SearchTermInfo>* precomputed_infos = nullptr, bool verify_exclusions = false);
 
 /// @brief Apply filter conditions using bitmap intersection (fast path) with fallback
 ///

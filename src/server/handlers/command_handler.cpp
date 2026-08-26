@@ -48,6 +48,17 @@ mygram::utils::Expected<std::string, mygram::utils::Error> CommandHandler::Resol
   return *resolved;
 }
 
+mygram::utils::Expected<query::Query, mygram::utils::Error> CommandHandler::CanonicalizeQueryTable(
+    const query::Query& query) const {
+  auto resolved = ResolveTableName(query.table);
+  if (!resolved) {
+    return mygram::utils::MakeUnexpected(resolved.error());
+  }
+  query::Query canonical = query;
+  canonical.table = *resolved;
+  return canonical;
+}
+
 mygram::utils::Expected<CommandHandler::TableContextResult, mygram::utils::Error> CommandHandler::GetTableContext(
     const std::string& table_name) {
   using mygram::utils::MakeError;

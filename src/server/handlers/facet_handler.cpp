@@ -29,8 +29,13 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
     return err;
   }
 
+  auto canonical_query = CanonicalizeQueryTable(query);
+  if (!canonical_query) {
+    return ResponseFormatter::FormatError(canonical_query.error());
+  }
+
   // Get table context
-  auto table_ctx = GetTableContext(query.table);
+  auto table_ctx = GetTableContext(canonical_query->table);
   if (!table_ctx) {
     return ResponseFormatter::FormatError(table_ctx.error());
   }
@@ -55,7 +60,7 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   }
   params.load_in_progress = [this]() { return ctx_.dump_load_in_progress.load(std::memory_order_acquire); };
 
-  auto facet_output = search_pipeline::ExecuteFacetPipeline(query, params);
+  auto facet_output = search_pipeline::ExecuteFacetPipeline(*canonical_query, params);
   if (!facet_output) {
     return ResponseFormatter::FormatError(facet_output.error());
   }

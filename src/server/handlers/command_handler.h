@@ -96,6 +96,20 @@ class CommandHandler {
   mygram::utils::Expected<std::string, mygram::utils::Error> ResolveTableName(const std::string& table_name) const;
 
   /**
+   * @brief Return a copy of the query whose table field is the canonical key.
+   *
+   * Every client-originated query that can reach the cache must be canonical
+   * before it does: cache keys and metadata are built from `query.table`, while
+   * invalidation (binlog apply, DDL, SYNC completion, CACHE CLEAR) arrives with
+   * the qualified `database.table` key. A bare name left as-is would key its
+   * entries where no invalidation ever looks.
+   *
+   * @param query Query as parsed from the client request.
+   * @return The canonicalized query, or an error if the table is rejected.
+   */
+  mygram::utils::Expected<query::Query, mygram::utils::Error> CanonicalizeQueryTable(const query::Query& query) const;
+
+  /**
    * @brief Get table context for a query
    * @param table_name Table name
    * @return Table context result or error
