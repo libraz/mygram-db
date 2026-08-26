@@ -14,25 +14,25 @@ text is wrong. The authority order is:
 
 | File | Covers |
 |---|---|
-| `tcp-commands.md` | TCP text protocol: commands, grammar, arity, limits, framing, auth, response formats |
-| `http-routes.md` | HTTP surface: routes, parameters, status codes, JSON shapes, and its divergences from TCP |
-| `error-codes.md` | Every defined error code, its meaning, and which surfaces emit it |
-| `config-keys.md` | Every configuration key, its type, range, default, and whether it is startup-only or runtime-mutable; CLI flags and environment variables |
-| `persistence-formats.md` | Dump container and index serialization layouts, and the version-acceptance policy |
-| `filter-semantics.md` | Per-type comparison rules for query filters and for `required_filters`, at each site that evaluates them, and where those sites disagree |
-| `surface.snapshot.txt` | Generated golden: the static surface rendered as deterministic text |
-| `response-shapes.snapshot.txt` | Generated golden: the responses a representative request set produces on both surfaces |
+| `spec/tcp-commands.md` | TCP text protocol: commands, grammar, arity, limits, framing, auth, response formats |
+| `spec/http-routes.md` | HTTP surface: routes, parameters, status codes, JSON shapes, and its divergences from TCP |
+| `spec/error-codes.md` | Every defined error code, its meaning, and which surfaces emit it |
+| `spec/config-keys.md` | Every configuration key, its type, range, default, and whether it is startup-only or runtime-mutable; CLI flags and environment variables |
+| `spec/persistence-formats.md` | Dump container and index serialization layouts, and the version-acceptance policy |
+| `spec/filter-semantics.md` | Per-type comparison rules for query filters and for `required_filters`, at each site that evaluates them, and where those sites disagree |
+| `spec/surface.snapshot.txt` | Generated golden: the static surface rendered as deterministic text |
+| `spec/response-shapes.snapshot.txt` | Generated golden: the responses a representative request set produces on both surfaces |
 
 ## The two goldens
 
 The `.txt` files are generated, not hand-written. Do not edit them by hand.
 
-`surface.snapshot.txt` is what the server binary prints for `--print-surface`. It renders
+`spec/surface.snapshot.txt` is what the server binary prints for `--print-surface`. It renders
 the command table, the request limits, the route table, the error-code registry, the
 configuration keys, the accepted format versions and the CLI flags — every part of the
 surface that is fixed at build time.
 
-`response-shapes.snapshot.txt` records what a representative set of requests actually
+`spec/response-shapes.snapshot.txt` records what a representative set of requests actually
 returns on both protocols, with volatile values (timestamps, durations, allocator
 figures, ports, paths) replaced by typed placeholders.
 
@@ -41,9 +41,14 @@ inconvenience: confirm the change is intended, record it in the release notes, a
 then regenerate.
 
 ```
-make surface-snapshot                       # regenerate surface.snapshot.txt
-MYGRAMDB_UPDATE_SNAPSHOT=1 ctest -R response_shape   # regenerate response-shapes.snapshot.txt
+make surface-snapshot                                        # regenerate surface.snapshot.txt
+MYGRAMDB_UPDATE_SNAPSHOT=1 ctest -R ResponseShapeSnapshot    # regenerate response-shapes.snapshot.txt
 ```
+
+`make surface-snapshot` runs from the repository root and rebuilds the server binary first.
+The `ctest` invocation runs from a configured build directory; the test it selects is
+`ResponseShapeSnapshotTest.ResponseShapesMatchGolden`, which compares against the golden
+unless `MYGRAMDB_UPDATE_SNAPSHOT` is set in the environment.
 
 ## Known divergences
 
@@ -52,9 +57,24 @@ two code paths, or a document and the code, currently disagree. They are part of
 description of what is, not a list of intentions. A divergence is resolved by making the
 code agree with this specification and deleting the entry.
 
-## Keeping this accurate
+## Citations
 
-Every claim in the Markdown files carries a `file.cpp:123` citation so it can be
-re-checked against the implementation mechanically rather than by memory. When a
-citation no longer resolves to the behavior described, the specification is stale and
-fixing it takes priority over the change that made it stale.
+Every claim in the Markdown files names the file that implements it, so the claim can be
+re-checked against the implementation rather than taken on trust. Where the file is large
+the claim also names the symbol, written as ``​`Symbol` (`path`)``.
+
+Citations carry no line numbers. A line number drifts on any edit above the line it names,
+silently and in bulk, and the stale result still looks like evidence — the citations in
+this directory decayed exactly that way once. A file path and a symbol name survive every
+refactor that does not rename them, and a rename is visible.
+
+```
+make spec-check     # verify that every citation still resolves
+```
+
+That check enforces three rules: every cited path is a tracked file, no citation carries a
+line anchor, and a cited symbol appears in the file it is cited to. It reads the tree
+directly, so it fails the moment a citation stops matching the code.
+
+When a citation no longer resolves to the behavior described, the specification is stale
+and fixing it takes priority over the change that made it stale.
