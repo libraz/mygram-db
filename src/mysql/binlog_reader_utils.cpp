@@ -412,7 +412,9 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::UpdateCurrentG
   if (!advanced) {
     return mygram::utils::MakeUnexpected(advanced.error());
   }
-  ClearReachedReplayWatermarks(*advanced);
+  if (!ClearReachedReplayWatermarks(*advanced)) {
+    return mygram::utils::MakeUnexpected(GetLastErrorObject());
+  }
   return {};
 }
 
@@ -473,9 +475,9 @@ mygram::utils::Expected<std::string, mygram::utils::Error> BinlogReader::UpdateC
   return applied_gtid;
 }
 
-void BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid) {
+bool BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid) {
   if (applied_gtid.empty()) {
-    return;
+    return true;
   }
   for (const auto& [table_name, table_context] : table_contexts_) {
     if (table_context == nullptr || table_context->replay_watermark == nullptr) {
@@ -491,7 +493,14 @@ void BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid)
       continue;
     }
     auto reached = GtidEncoder::PositionCoversAuto(watermark, applied_gtid);
-    if (!reached || !*reached) {
+    if (!reached) {
+      // The same unevaluable fence the reader and worker paths stop on. Leaving
+      // it in place silently would keep suppressing rows for this table under a
+      // watermark nobody can interpret.
+      FailClosedOnUnevaluableReplayWatermark(table_name, applied_gtid, reached.error());
+      return false;
+    }
+    if (!*reached) {
       continue;
     }
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -505,6 +514,7 @@ void BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid)
           .Info();
     }
   }
+  return true;
 }
 
 bool BinlogReader::ValidateConnection() {
@@ -545,7 +555,8 @@ bool BinlogReader::ValidateConnection() {
     if (result.error_code.has_value()) {
       SetLastError(mygram::utils::Error(*result.error_code, "Connection validation failed: " + result.error_message));
     } else {
-      SetLastError("Connection validation failed: " + result.error_message);
+      SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                            "Connection validation failed: " + result.error_message));
     }
     mygram::utils::StructuredLog()
         .Event("binlog_connection_validation_failed")

@@ -435,6 +435,36 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_TIMEOUT 30
   )
 
+  # Fail-closed dispatch of binlog event types (no MySQL connection required)
+  add_executable(binlog_event_dispatch_test
+    binlog_event_dispatch_test.cpp
+  )
+
+  target_link_libraries(binlog_event_dispatch_test
+    mygramdb_server
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(binlog_event_dispatch_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
+  # SYNC replay fence recovery class (no MySQL connection required)
+  add_executable(binlog_replay_watermark_test
+    binlog_replay_watermark_test.cpp
+  )
+
+  target_link_libraries(binlog_replay_watermark_test
+    mygramdb_server
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(binlog_replay_watermark_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # DDL detection across multi-table statements (no MySQL connection required)
   add_executable(ddl_multi_table_statement_test
     ddl_multi_table_statement_test.cpp

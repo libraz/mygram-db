@@ -18,6 +18,7 @@
 #include <sstream>
 #include <string_view>
 
+#include "mysql/binlog_event_disposition.h"
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_filter_evaluator.h"
 #include "mysql/binlog_util.h"
@@ -599,7 +600,18 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       return {};
 
     default:
-      // Ignore other event types
+      // Every type not decoded above is dispatched by its recorded disposition
+      // rather than ignored. Only the reader can stop replication, so the
+      // parser reports a fail-closed type and produces nothing from it; the
+      // reader rejects the same type before it ever reaches this function.
+      if (ClassifyBinlogEventDisposition(event_type) == BinlogEventDisposition::kFailClosed) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_error")
+            .Field("type", "unreplayable_binlog_event")
+            .Field("event_type", GetEventTypeName(event_type))
+            .Field("message", UnreplayableEventRemediation(event_type))
+            .Error();
+      }
       return {};
   }
 }

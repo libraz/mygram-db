@@ -70,7 +70,10 @@ if(APPLE)
 endif()
 
 # Compiler flags
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
+# -Werror=switch: a switch over an enum with no default label must list every
+# enumerator. The binlog reader relies on this to force a classification for
+# each new event type instead of letting it fall into an unexamined default.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic -Werror=switch")
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   # Architecture flags: use baseline arch for portable builds, -march=native for local builds
   # CI/RPM sets MYGRAMDB_PORTABLE_BUILD=ON to avoid "Illegal instruction" on different CPUs

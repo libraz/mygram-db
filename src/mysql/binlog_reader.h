@@ -13,8 +13,10 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -579,16 +581,22 @@ class BinlogReader final : public IBinlogReader {
   }
 
   /**
-   * @brief Set last error from a message string (convenience overload)
+   * @brief Stop replication for an event that can neither be applied nor skipped.
    *
-   * Creates an Error with kMySQLBinlogError code. Prefer the Error overload
-   * when a more specific error code is available.
+   * Publishes the error before requesting the stop so a consumer that observes
+   * should_stop_ can always read the reason that produced it. The code is a
+   * parameter because it is what SYNC reads to decide whether replaying the
+   * position is pointless; flattening it would make every such stop look like a
+   * generic binlog failure.
    *
-   * @param message Error message
+   * @param code Specific error code for the condition
+   * @param message Operator-facing reason and remediation
+   * @param failure_type Value of the structured log "type" field
+   * @param event_type_name Wire event type name, logged when non-empty
    */
-  void SetLastError(const std::string& message) {
-    SetLastError(mygram::utils::Error(mygram::utils::ErrorCode::kMySQLBinlogError, message));
-  }
+  void FailClosedOnUnreplayableEvent(mygram::utils::ErrorCode code, const std::string& message,
+                                     std::string_view failure_type = "unreplayable_binlog_event",
+                                     std::string_view event_type_name = {});
 
   /**
    * @brief Convert a single GTID "uuid:N" to range "uuid:1-N"
@@ -624,9 +632,33 @@ class BinlogReader final : public IBinlogReader {
 
   /**
    * @brief Fail closed for an event type that cannot be decoded safely.
+   *
+   * Covers every type classified fail-closed, so a type added to the
+   * classification is rejected here without a second edit.
+   *
    * @return true when replication was stopped for an unsupported event
    */
   bool RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type);
+
+  /**
+   * @brief Fail closed for a tagged GTID event, naming the position it carried.
+   *
+   * A tagged position cannot be encoded back into a reconnect request, so the
+   * stream can never be resumed from it.
+   */
+  void RejectTaggedGtidEvent(const std::optional<std::string>& tagged_gtid);
+
+  /**
+   * @brief Fail closed for a transaction the source marked XA.
+   * @param source_event Wire event that revealed the XA transaction
+   * @param statement Originating statement when one is available
+   */
+  void RejectUnsupportedXaTransaction(std::string_view source_event, const std::string& statement);
+
+  /**
+   * @brief Fail closed for a statement that may carry row data the decoder never sees.
+   */
+  void RejectUnsafeStatementEvent(const std::string& statement);
 
   /**
    * @brief Return whether a table event is already represented by its SYNC snapshot.
@@ -726,8 +758,27 @@ class BinlogReader final : public IBinlogReader {
   static bool ShouldStopForProcessingFailure(ProcessingFailureKind kind, const std::string& applied_gtid,
                                              std::string& last_failure_gtid, int& consecutive_failures);
 
-  /** Clear each table replay fence once the applied reader position reaches it. */
-  void ClearReachedReplayWatermarks(const std::string& applied_gtid);
+  /**
+   * @brief Clear each table replay fence once the applied reader position reaches it.
+   *
+   * A fence that cannot be compared against the applied position is the same
+   * root condition the reader and worker paths observe, so it fails closed here
+   * too rather than leaving the fence in place silently.
+   *
+   * @return false when a fence could not be evaluated and replication was stopped
+   */
+  bool ClearReachedReplayWatermarks(const std::string& applied_gtid);
+
+  /**
+   * @brief Stop replication because a SYNC replay fence cannot be evaluated.
+   *
+   * The reader path, the worker path and the fence-clearing path all reach this
+   * one exit so that an unevaluable fence produces the same code, message and
+   * restartability wherever it is observed. It is never a schema condition, so
+   * schema_incompatible_ stays untouched.
+   */
+  void FailClosedOnUnevaluableReplayWatermark(const std::string& table_name, const std::string& gtid,
+                                              const mygram::utils::Error& error);
 
   /**
    * @brief Validate binlog connection after (re)connect

@@ -90,19 +90,53 @@ enum class MySQLBinlogEventType : uint8_t {
 
 /**
  * @brief Get event type name as string
+ *
+ * The switch has no default label so that a new enumerator is a build error
+ * until it is named here; a type byte outside the enumeration falls through to
+ * the placeholder below the switch.
  */
 inline const char* GetEventTypeName(MySQLBinlogEventType type) {
   switch (type) {
     case MySQLBinlogEventType::UNKNOWN_EVENT:
       return "UNKNOWN_EVENT";
+    case MySQLBinlogEventType::START_EVENT_V3:
+      return "START_EVENT_V3";
     case MySQLBinlogEventType::QUERY_EVENT:
       return "QUERY_EVENT";
     case MySQLBinlogEventType::STOP_EVENT:
       return "STOP_EVENT";
     case MySQLBinlogEventType::ROTATE_EVENT:
       return "ROTATE_EVENT";
+    case MySQLBinlogEventType::INTVAR_EVENT:
+      return "INTVAR_EVENT";
+    case MySQLBinlogEventType::SLAVE_EVENT:
+      return "SLAVE_EVENT";
+    case MySQLBinlogEventType::APPEND_BLOCK_EVENT:
+      return "APPEND_BLOCK_EVENT";
+    case MySQLBinlogEventType::DELETE_FILE_EVENT:
+      return "DELETE_FILE_EVENT";
+    case MySQLBinlogEventType::RAND_EVENT:
+      return "RAND_EVENT";
+    case MySQLBinlogEventType::USER_VAR_EVENT:
+      return "USER_VAR_EVENT";
     case MySQLBinlogEventType::FORMAT_DESCRIPTION_EVENT:
       return "FORMAT_DESCRIPTION_EVENT";
+    case MySQLBinlogEventType::BEGIN_LOAD_QUERY_EVENT:
+      return "BEGIN_LOAD_QUERY_EVENT";
+    case MySQLBinlogEventType::EXECUTE_LOAD_QUERY_EVENT:
+      return "EXECUTE_LOAD_QUERY_EVENT";
+    case MySQLBinlogEventType::INCIDENT_EVENT:
+      return "INCIDENT_EVENT";
+    case MySQLBinlogEventType::IGNORABLE_LOG_EVENT:
+      return "IGNORABLE_LOG_EVENT";
+    case MySQLBinlogEventType::TRANSACTION_CONTEXT_EVENT:
+      return "TRANSACTION_CONTEXT_EVENT";
+    case MySQLBinlogEventType::VIEW_CHANGE_EVENT:
+      return "VIEW_CHANGE_EVENT";
+    case MySQLBinlogEventType::XA_PREPARE_LOG_EVENT:
+      return "XA_PREPARE_LOG_EVENT";
+    case MySQLBinlogEventType::ENUM_END_EVENT:
+      return "ENUM_END_EVENT";
     case MySQLBinlogEventType::XID_EVENT:
       return "XID_EVENT";
     case MySQLBinlogEventType::TABLE_MAP_EVENT:
@@ -161,9 +195,8 @@ inline const char* GetEventTypeName(MySQLBinlogEventType type) {
       return "MARIADB_UPDATE_ROWS_COMPRESSED_EVENT";
     case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT:
       return "MARIADB_DELETE_ROWS_COMPRESSED_EVENT";
-    default:
-      return "UNKNOWN";
   }
+  return "UNKNOWN";
 }
 
 /**
