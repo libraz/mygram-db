@@ -228,13 +228,21 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
   if (terms.size() > 1 && std::all_of(snapshots.begin(), snapshots.end(), [](const auto& snapshot) {
         return snapshot->GetStrategy() == PostingStrategy::kRoaringBitmap;
       })) {
-    std::vector<std::shared_ptr<PostingList>> sorted_snapshots = snapshots;
-    std::sort(sorted_snapshots.begin(), sorted_snapshots.end(),
-              [](const auto& lhs, const auto& rhs) { return lhs->SizeApprox() < rhs->SizeApprox(); });
+    // Capture each size before sorting. SizeApprox() reads an atomic that
+    // concurrent binlog apply keeps moving, so a comparator that re-read it
+    // could answer differently for the same pair and stop being a strict weak
+    // ordering part-way through the sort.
+    std::vector<std::pair<size_t, const PostingList*>> sized_snapshots;
+    sized_snapshots.reserve(snapshots.size());
+    for (const auto& snapshot : snapshots) {
+      sized_snapshots.emplace_back(snapshot->SizeApprox(), snapshot.get());
+    }
+    std::sort(sized_snapshots.begin(), sized_snapshots.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
 
-    std::unique_ptr<PostingList> intersected = sorted_snapshots[0]->Intersect(*sorted_snapshots[1]);
-    for (size_t i = 2; i < sorted_snapshots.size() && intersected->SizeApprox() != 0; ++i) {
-      intersected = intersected->Intersect(*sorted_snapshots[i]);
+    std::unique_ptr<PostingList> intersected = sized_snapshots[0].second->Intersect(*sized_snapshots[1].second);
+    for (size_t i = 2; i < sized_snapshots.size() && intersected->SizeApprox() != 0; ++i) {
+      intersected = intersected->Intersect(*sized_snapshots[i].second);
     }
     return intersected->GetTopN(limit, reverse);
   }

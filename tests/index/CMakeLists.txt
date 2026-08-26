@@ -76,6 +76,27 @@ gtest_discover_tests(index_concurrent_test
     TIMEOUT 60
 )
 
+# SearchAnd under concurrent posting list mutation
+add_executable(search_and_concurrent_mutation_test
+  search_and_concurrent_mutation_test.cpp
+)
+
+target_link_libraries(search_and_concurrent_mutation_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+# Note: The stress loop needs many threads and thousands of queries to cover
+# the interleavings, taking several seconds
+gtest_discover_tests(search_and_concurrent_mutation_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "SLOW\\;CONCURRENCY"
+    RESOURCE_LOCK index_concurrent_lock
+    TIMEOUT 120
+)
+
 # Index GetTopN tests
 add_executable(index_gettopn_test
   index_gettopn_test.cpp
