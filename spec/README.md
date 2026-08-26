@@ -1,0 +1,59 @@
+# MygramDB external surface specification
+
+This directory is the normative description of everything a client, an operator or a
+packager can observe about MygramDB: the TCP command set, the HTTP routes, the error
+codes, the configuration keys, and the on-disk format versions the code accepts.
+
+Where any other text in this repository disagrees with a file in `spec/`, that other
+text is wrong. The authority order is:
+
+`spec/` > `src/config/config-schema.json` > public signatures in installed headers >
+`README*.md` and `docs/` > Doxygen comments on public headers > inline comments
+
+## Contents
+
+| File | Covers |
+|---|---|
+| `tcp-commands.md` | TCP text protocol: commands, grammar, arity, limits, framing, auth, response formats |
+| `http-routes.md` | HTTP surface: routes, parameters, status codes, JSON shapes, and its divergences from TCP |
+| `error-codes.md` | Every defined error code, its meaning, and which surfaces emit it |
+| `config-keys.md` | Every configuration key, its type, range, default, and whether it is startup-only or runtime-mutable; CLI flags and environment variables |
+| `persistence-formats.md` | Dump container and index serialization layouts, and the version-acceptance policy |
+| `surface.snapshot.txt` | Generated golden: the static surface rendered as deterministic text |
+| `response-shapes.snapshot.txt` | Generated golden: the responses a representative request set produces on both surfaces |
+
+## The two goldens
+
+The `.txt` files are generated, not hand-written. Do not edit them by hand.
+
+`surface.snapshot.txt` is what the server binary prints for `--print-surface`. It renders
+the command table, the request limits, the route table, the error-code registry, the
+configuration keys, the accepted format versions and the CLI flags — every part of the
+surface that is fixed at build time.
+
+`response-shapes.snapshot.txt` records what a representative set of requests actually
+returns on both protocols, with volatile values (timestamps, durations, allocator
+figures, ports, paths) replaced by typed placeholders.
+
+A diff in either file means the external surface moved. That is a decision, not an
+inconvenience: confirm the change is intended, record it in the release notes, and only
+then regenerate.
+
+```
+make surface-snapshot                       # regenerate surface.snapshot.txt
+MYGRAMDB_UPDATE_SNAPSHOT=1 ctest -R response_shape   # regenerate response-shapes.snapshot.txt
+```
+
+## Known divergences
+
+Several of the documents carry a "Known divergences" section. Those record places where
+two code paths, or a document and the code, currently disagree. They are part of the
+description of what is, not a list of intentions. A divergence is resolved by making the
+code agree with this specification and deleting the entry.
+
+## Keeping this accurate
+
+Every claim in the Markdown files carries a `file.cpp:123` citation so it can be
+re-checked against the implementation mechanically rather than by memory. When a
+citation no longer resolves to the behavior described, the specification is stale and
+fixing it takes priority over the change that made it stale.
