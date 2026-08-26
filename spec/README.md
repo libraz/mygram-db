@@ -19,6 +19,7 @@ text is wrong. The authority order is:
 | `error-codes.md` | Every defined error code, its meaning, and which surfaces emit it |
 | `config-keys.md` | Every configuration key, its type, range, default, and whether it is startup-only or runtime-mutable; CLI flags and environment variables |
 | `persistence-formats.md` | Dump container and index serialization layouts, and the version-acceptance policy |
+| `filter-semantics.md` | Per-type comparison rules for query filters and for `required_filters`, at each site that evaluates them, and where those sites disagree |
 | `surface.snapshot.txt` | Generated golden: the static surface rendered as deterministic text |
 | `response-shapes.snapshot.txt` | Generated golden: the responses a representative request set produces on both surfaces |
 
