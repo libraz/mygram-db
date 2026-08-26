@@ -380,7 +380,7 @@ class MygramClient {
    * @param table Table name
    * @param column Facet column name
    * @param query Optional search query text
-   * @param limit Maximum number of facet values to return (0 = server default/no explicit limit)
+   * @param limit Maximum number of facet values to return (0 applies the server default limit)
    * @param and_terms Additional required terms
    * @param not_terms Excluded terms
    * @param filters Filter conditions (key=value pairs)

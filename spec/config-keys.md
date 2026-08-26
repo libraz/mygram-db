@@ -169,7 +169,7 @@ This value is applied only to tables that do not carry their own `ngram_size` (`
 | `api.http.cors_allow_origin` | string | must be non-empty when `api.http.enable` and `api.http.enable_cors` are both true | `""` | startup-only | `config.cpp:119` |
 | `api.http.read_timeout_sec` | integer | 1–3600 | `5` | startup-only | `config-schema.json:749` |
 | `api.http.write_timeout_sec` | integer | 1–3600 | `5` | startup-only | `config-schema.json:756` |
-| `api.http.max_body_bytes` | integer | 0–1073741824; `0` disables the limit (no `set_payload_max_length` call, leaving cpp-httplib's effectively unbounded default) | `16777216` (16 MiB) | startup-only | `config-schema.json:763`, applied at `http_server.cpp:665` |
+| `api.http.max_body_bytes` | integer | 0–1073741824; `0` disables the limit (`set_payload_max_length(SIZE_MAX)`, which is what lifting it takes — omitting the call falls back to cpp-httplib's compiled-in 100 MB ceiling) | `16777216` (16 MiB) | startup-only | `config-schema.json:763`, applied at `http_server.cpp:501` |
 
 ## `api` (top-level)
 
@@ -301,7 +301,7 @@ For the five keys that participate in environment overrides, the order is:
 
 This is implemented at `config.cpp:350`. An environment variable set to the empty string counts as unset and falls through to the configuration file (`config.cpp:334`).
 
-Environment overrides are applied only on the normal load path. The validation-only path used by `CONFIG VERIFY` deliberately skips them so the file itself is what gets inspected (`config_loader.cpp:325`, `config.h:572`).
+Environment overrides are applied only on the normal load path. The validation-only path used by `CONFIG VERIFY` deliberately skips them so the file itself is what gets inspected (`config_loader.cpp:325`, `config.h:572`). A configuration that supplies `mysql.user` only through `MYGRAM_MYSQL_USER` therefore starts but fails `CONFIG VERIFY`; the failure message states that environment overrides do not apply on that path (`config.cpp:406`).
 
 ## Environment variables
 
@@ -356,7 +356,9 @@ The process exits non-zero. Config-file problems surface before any socket or lo
 
 **MySQL**
 
-- `mysql.user` empty after environment override — `config.cpp:452`
+- `mysql.user` empty after environment override — `config.cpp:502`. The message names the sources
+  the parse actually consulted, so on the validation-only path it reports that environment overrides
+  are not applied instead of offering `MYGRAM_MYSQL_USER` as a remedy — `config.cpp:406`
 - `mysql.database` empty or not a quotable identifier — `config.cpp:478`
 - `MYGRAM_MYSQL_PORT` not an integer in 1–65535 — `config.cpp:433`
 - `mysql.use_gtid: false` — `config.cpp:483`

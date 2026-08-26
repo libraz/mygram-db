@@ -110,5 +110,9 @@ install(FILES
   DESTINATION ${MYGRAMDB_CLIENT_CMAKE_DIR}
 )
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/mygramclient_pkgconfig.cmake)
+mygramdb_client_pkgconfig_fields(
+  "${CMAKE_INSTALL_LIBDIR}" "${CMAKE_INSTALL_INCLUDEDIR}"
+  MYGRAMDB_PC_PREFIX MYGRAMDB_PC_LIBDIR MYGRAMDB_PC_INCLUDEDIR MYGRAMDB_PC_CXX_RUNTIME)
 configure_file(mygramclient.pc.in ${CMAKE_CURRENT_BINARY_DIR}/mygramclient.pc @ONLY)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/mygramclient.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)

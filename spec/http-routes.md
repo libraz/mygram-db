@@ -31,9 +31,9 @@ The *Rate limited* and *Counted in `total_requests`* columns are declared per ro
 
 - Fixed paths (`/info`, `/health`, `/health/live`, `/health/ready`, `/health/detail`, `/config`, `/replication/status`, `/optimize`, `/metrics`) are registered as exact literal strings (`src/server/http_server.cpp:703-711`). A trailing slash does not match: `/info/` is not `/info`.
 - Method and path are both case-sensitive as registered. cpp-httplib accepts only the methods `GET, HEAD, POST, PUT, DELETE, CONNECT, OPTIONS, TRACE, PATCH, PRI` on the request line (`build/_deps/httplib-src/httplib.h:11611-11618`); anything else fails request-line parsing.
-- The table routes use the regex `/tables/([^/]+)/search`, `.../count`, `.../facet` (`src/server/http_server.cpp:700`, `:701`, `:702`) and `/tables/([^/]+)/([^/]+)` for GET (`src/server/http_server.cpp:712`). `{identity}` is capture group 1 (`src/server/http_server.cpp:290-292`); the GET primary key is capture group 2 (`src/server/http_server.cpp:294-296`).
+- The table routes use the regex `/tables/([^/]+)/search`, `.../count`, `.../facet` (`src/server/http_server.cpp:572`, `:573`, `:574`) and `/tables/([^/]+)/(.+)` for GET (`src/server/http_server.cpp:584`). `{identity}` is capture group 1 (`src/server/http_server.cpp:180-182`); the GET primary key is capture group 2 (`src/server/http_server.cpp:184-186`). The GET key group is greedy, so a primary key containing `/` — including one written as `%2F`, which is decoded before matching — is captured whole rather than failing to match.
 - The request path is percent-decoded and its `#fragment` stripped before routing; the query string is split off into `req.params` (`build/_deps/httplib-src/httplib.h:11626-11641`). No handler reads `req.params`, so **query-string parameters are ignored on every route**.
-- The GET document route is last in the table (`src/server/http_server.cpp:712`), so it cannot shadow the fixed endpoints. It does match `GET /tables/{identity}/search`, which is treated as a document lookup for the primary key `search`.
+- The GET document route is last in the table (`src/server/http_server.cpp:584`), so it cannot shadow the fixed endpoints. It does match `GET /tables/{identity}/search`, which is treated as a document lookup for the primary key `search`, and — being greedy — `GET /tables/{identity}/search/anything`, as a lookup for `search/anything`.
 - Unmatched method/path combinations receive cpp-httplib's default `404` with an empty body (`build/_deps/httplib-src/httplib.h:12742`, `:12773`). No `set_error_handler` is registered, so these 404s are **not** JSON.
 
 ---
@@ -224,7 +224,7 @@ Errors: as `/search`, with `Invalid facet column` reported as `kQueryInvalidToke
 
 Fetch one document by primary key. No body, no `Content-Type` requirement (`src/server/http_server.cpp:1543-1601`).
 
-Both path segments are percent-decoded by cpp-httplib before matching (`build/_deps/httplib-src/httplib.h:11637-11638`). `{identity}` goes through the same `IsValidTableName` / qualification / catalog resolution as the POST routes (`src/server/http_server.cpp:1558-1562`). `{primary_key}` is used verbatim with no validation (`src/server/http_server.cpp:1557`, `:1571`).
+Both path segments are percent-decoded by cpp-httplib before matching (`build/_deps/httplib-src/httplib.h:11637-11638`). `{identity}` goes through the same `IsValidTableName` / qualification / catalog resolution as the POST routes (`src/server/http_server.cpp:1460-1464`). `{primary_key}` is everything after the table segment, used verbatim with no validation (`src/server/http_server.cpp:1459`, `:1473`); because decoding happens before matching and the route's key group is greedy, a key containing `/` is reachable as `%2F`.
 
 Success: `200`, `application/json`.
 
@@ -586,7 +586,7 @@ A pre-routing handler runs before every route, including `/health*` and `/metric
 - Bucket key is the client IP string (`src/server/http_server.cpp:742`, `:773`).
 - When `ServerLifecycleManager`/`ServerOrchestrator` wires the server, the limiter instance is shared with the TCP server, so one client's quota spans both protocols (`src/app/server_orchestrator.cpp:943`, `src/server/http_server.h:318-324`).
 - When no limiter is injected and `api.rate_limiting.enable` is true, `HttpServer` constructs a private one from config (`src/server/http_server.cpp:627-637`).
-- Algorithm is a per-client token bucket with `capacity` burst and `refill_rate` tokens/second, capped at `max_clients` tracked clients; once that cap is reached, **new** clients are rejected outright (`src/server/rate_limiter.cpp:111-165`).
+- Algorithm is a per-client token bucket with `capacity` burst and `refill_rate` tokens/second. `max_clients` bounds the size of the tracking table, not admission: once it is reached, an untracked client's request evicts the least-recently-seen bucket and is then served normally, so the only cause of a denial is an exhausted bucket (`src/server/rate_limiter.cpp:111-173`).
 - Denial: `429` with `kServerBusy` (6030) and message `Rate limit exceeded` (`src/server/http_server.cpp:786`).
 - Denials increment `requests_denied_total{reason="rate_limit",surface="http"}`, and `total_requests` only on a route the table marks `counts_requests` (`src/server/http_server.cpp:774-777`).
 
@@ -594,7 +594,7 @@ A pre-routing handler runs before every route, including `/health*` and `/metric
 
 | Limit | Value | Citation |
 |---|---|---|
-| Request body | `api.http.max_body_bytes`, default 16 MiB; oversize bodies get cpp-httplib's `413` before any handler runs | `src/server/http_server.cpp:665-667`, `src/server/http_server.h:56`, `src/config/config.h:450` |
+| Request body | `api.http.max_body_bytes`, default 16 MiB; oversize bodies get cpp-httplib's `413` before any handler runs. `0` lifts the cap entirely | `src/server/http_server.cpp:501-502`, `src/server/http_server.h:85`, `src/config/config.h:450` |
 | Read timeout | `api.http.read_timeout_sec`, default 5 s; non-positive values fall back to the default | `src/server/http_server.cpp:658`, `src/server/http_server.h:103-105`, `src/config/config.h:436` |
 | Write timeout | `api.http.write_timeout_sec`, default 5 s; same fallback | `src/server/http_server.cpp:659`, `src/server/http_server.h:106-108`, `src/config/config.h:442` |
 | Concurrent connections | `api.http.max_connections`, default 10000, clamped to ≥ 1; enforced at the accepted-socket boundary by `CappedHttpTaskQueue`, covering both queued and active sockets | `src/server/http_server.cpp:84-121`, `:646-649`, `src/config/config.h:425` |
@@ -720,7 +720,6 @@ Which commands are administrative no longer differs: a route's `requires_admin_t
 |---|---|---|---|
 | 28 | Literal search text | The client supplies the quoting; the tokenizer processes `\n`, `\t`, `\r`, `\\` and `\"` escape sequences (`src/query/query_parser.cpp:545-561`) | The server quotes `q` itself with `QueryParser::QuoteSearchLiteral`, the parser's own escaper for `\` and `"`; `\n`-style sequences in `q` stay literal because control characters were already rejected (`src/query/query_parser_commands.cpp`) |
 | 29 | Response escaping | Primary keys and facet values are escaped/sanitised for the delimited text protocol (`src/server/response_formatter.cpp:309`, `:418`) | Values are emitted as JSON strings with invalid UTF-8 replaced by U+FFFD (`src/server/http_server.cpp:2155`) |
-| 30 | Path decoding | Table and primary key come from tokenizer output | Table and primary key are percent-decoded from the URL path before matching, so `%2F` cannot appear (the route pattern excludes `/`) (`build/_deps/httplib-src/httplib.h:11637-11638`, `src/server/http_server.cpp:712`) |
 | 31 | Floating-point filter values in responses | Fixed six decimals (`src/server/response_formatter.cpp:458-459`) | Full JSON double serialization (`src/server/http_server.cpp:154-170`) |
 
 ### Result payload shape

@@ -33,6 +33,25 @@ MySQL の接続設定は起動時のみ変更できます。`mysql.host` また�
 を変更するには再起動が必要です。自動再接続が別の接続先へ切り替わることはなく、
 接続元サーバーの UUID が変わった場合は拒否します。
 
+## 環境変数からの資格情報
+
+資格情報は設定ファイルに書かずに済ませられます。MygramDB は次の変数を自身で読み取り、対応する設定キーより優先します。
+
+| 変数 | 上書きするキー |
+| --- | --- |
+| `MYGRAM_MYSQL_HOST` | `mysql.host` |
+| `MYGRAM_MYSQL_PORT` | `mysql.port` |
+| `MYGRAM_MYSQL_USER` | `mysql.user` |
+| `MYGRAM_MYSQL_PASSWORD` | `mysql.password` |
+| `MYGRAM_MYSQL_DATABASE` | `mysql.database` |
+| `MYGRAM_API_ADMIN_TOKEN` | `api.admin_token` |
+
+空文字列を設定した変数は未設定として扱い、設定ファイルの値にフォールバックします。
+
+`MYGRAM_API_ADMIN_TOKEN` はサーバー自身が読み取ります。`.env` の `API_ADMIN_TOKEN` とは別物で、そちらは Docker の entrypoint が生成する `config.yaml` に書き込む値です。同梱の compose を使うなら `API_ADMIN_TOKEN`、バイナリを直接動かすなら `MYGRAM_API_ADMIN_TOKEN` を使ってください。
+
+`CONFIG VERIFY` は渡されたファイル自体を検査するためこれらの上書きを適用しません。上書きに依存した構成は、サーバーが起動できる場合でも `CONFIG VERIFY` では不足として報告されます。
+
 ## ネットワークの安全性
 
 同梱の Docker 環境は既定で localhost のみに公開します。非ループバックの TCP bind を使う場合は、高エントロピーの `API_ADMIN_TOKEN` が必須です。未設定なら MygramDB は設定を拒否します。TCP 接続では、管理コマンド（`SET`、`SHOW VARIABLES`、`DUMP`、`SYNC`、`REPLICATION`、`OPTIMIZE`、`CACHE`、`CONFIG`、`DEBUG`）の前に、同一接続で `AUTH <token>` を実行してください。HTTP の `POST /optimize` は同じトークンを `Authorization: Bearer <token>` として受け取ります。Docker Compose も `.env` のプレースホルダーを置換するまで起動を拒否します。

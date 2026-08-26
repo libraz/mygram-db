@@ -392,6 +392,26 @@ std::string GetConfigValueWithEnvOverride(const std::optional<std::string>& json
 }
 
 /**
+ * @brief Describe how to supply a required value, listing only the live sources
+ *
+ * The same parse serves startup and CONFIG VERIFY, and the latter deliberately
+ * ignores environment overrides so it reports on the supplied file alone. The
+ * remedy text is therefore derived from the same flag that decides which
+ * sources were consulted, so it can never name a source this call ignored.
+ *
+ * @param key Dotted configuration key that is missing
+ * @param env_var_name Environment variable that overrides the key
+ * @param apply_environment_overrides Whether this parse consulted the environment
+ */
+std::string MissingRequiredValueMessage(const char* key, const char* env_var_name, bool apply_environment_overrides) {
+  if (apply_environment_overrides) {
+    return std::string(key) + " is required in the configuration or " + env_var_name;
+  }
+  return std::string(key) + " is required in the configuration file; environment overrides such as " + env_var_name +
+         " are not applied when validating a file";
+}
+
+/**
  * @brief Convert YAML node to JSON object recursively
  */
 json YamlToJsonImpl(const YAML::Node& node, bool preserve_scalar_string = false) {
@@ -480,8 +500,9 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
                       : json_value.value_or(config.user);
   }
   if (config.user.empty()) {
-    return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigMissingRequired,
-                                    "mysql.user is required in the configuration or MYGRAM_MYSQL_USER"));
+    return MakeUnexpected(
+        MakeError(mygram::utils::ErrorCode::kConfigMissingRequired,
+                  MissingRequiredValueMessage("mysql.user", "MYGRAM_MYSQL_USER", apply_environment_overrides)));
   }
 
   // Password: environment variable takes precedence (security best practice)

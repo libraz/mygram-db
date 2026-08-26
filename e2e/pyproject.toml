@@ -60,6 +60,7 @@ markers = [
     "persistence: Dump/restore",
     "resilience: Fault recovery",
     "multi_table: Multiple table tests",
+    "security: Administrative authentication and access control",
 ]
 timeout = 120
 junit_family = "xunit2"

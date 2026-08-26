@@ -11,12 +11,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 
 #include "config/config_help.h"
 #include "config/config_internal.h"
 #include "utils/error.h"
 #include "utils/memory_utils.h"
+#include "utils/network_utils.h"
 
 using namespace mygramdb::config;
 using json = nlohmann::json;
@@ -39,6 +41,11 @@ std::string SourcePath(const std::string& relative_path) {
 #else
   return relative_path;
 #endif
+}
+
+/// True for the bind addresses that keep a listener off every external interface.
+bool BindsLoopbackOnly(const std::string& bind) {
+  return bind == "localhost" || bind == "::1" || bind.rfind("127.", 0) == 0;
 }
 
 class ConfigTestEnvironment : public ::testing::Environment {
@@ -1920,6 +1927,32 @@ TEST(ConfigTest, ValidationOnlyLoadIgnoresEnvironmentOverrides) {
   std::filesystem::remove(path);
 }
 
+TEST(ConfigTest, ValidationOnlyMissingUserDoesNotOfferEnvironmentOverrideAsRemedy) {
+  const std::string path = TempConfigPath("validation_missing_user.yaml");
+  std::ofstream file(path);
+  file << "mysql:\n"
+       << "  database: file-database\n"
+       << "tables:\n"
+       << "  - name: docs\n"
+       << "    text_source: {column: body}\n";
+  file.close();
+
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_USER", "environment-user", 1), 0);
+  auto startup = LoadConfig(path);
+  auto validation = LoadConfigForValidation(path);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_USER"), 0);
+
+  // The same file the server starts from is rejected by the validation-only
+  // parse, so its message has to describe the remedy that parse honours.
+  ASSERT_TRUE(startup) << startup.error().to_string();
+  ASSERT_FALSE(validation);
+  EXPECT_EQ(validation.error().code(), mygram::utils::ErrorCode::kConfigMissingRequired);
+  EXPECT_NE(validation.error().message().find("not applied when validating a file"), std::string::npos)
+      << validation.error().message();
+
+  std::filesystem::remove(path);
+}
+
 TEST(ConfigTest, RuntimeRateLimitBoundsMatchSchema) {
   std::ifstream schema_file(SourcePath("src/config/config-schema.json"));
   ASSERT_TRUE(schema_file.is_open());
@@ -2424,6 +2457,42 @@ TEST(ConfigTest, QueueSizeRangeValidation) {
     EXPECT_FALSE(result) << "queue_size=-5 should be rejected";
     std::remove("queue_negative.yaml");
   }
+}
+
+TEST(ConfigTest, ShippedExamplesAreSecureWhenCopiedVerbatim) {
+  // The examples are meant to be copied and edited, so an active value that
+  // contradicts the security instruction printed beside it is what an operator
+  // ends up deploying.
+  for (const auto* example : {"examples/config.yaml", "examples/config.json", "examples/config-minimal.yaml",
+                              "examples/config-minimal.json"}) {
+    auto config = LoadConfigForValidation(SourcePath(example));
+    ASSERT_TRUE(config) << example << ": " << config.error().message();
+
+    for (const auto& cidr : config->network.allow_cidrs) {
+      const auto parsed = mygram::utils::CIDR::Parse(cidr);
+      ASSERT_TRUE(parsed.has_value()) << example << " has an unparsable CIDR: " << cidr;
+      EXPECT_NE(parsed->prefix_length, 0) << example << " ships '" << cidr << "' as an active allow list entry";
+    }
+
+    EXPECT_TRUE(BindsLoopbackOnly(config->api.tcp.bind)) << example << " binds TCP to " << config->api.tcp.bind;
+    if (config->api.http.enable) {
+      EXPECT_TRUE(BindsLoopbackOnly(config->api.http.bind)) << example << " binds HTTP to " << config->api.http.bind;
+    }
+  }
+}
+
+TEST(ConfigTest, CompleteExampleCoversTheKeysThatCanRefuseStartup) {
+  // api.admin_token is the one key whose absence makes the server refuse to
+  // start, so the exhaustive template has to carry a line for it even though a
+  // loopback-only copy leaves it unset.
+  std::ifstream complete(SourcePath("examples/config.yaml"));
+  ASSERT_TRUE(complete) << "cannot read examples/config.yaml";
+  const std::string text((std::istreambuf_iterator<char>(complete)), std::istreambuf_iterator<char>());
+
+  EXPECT_NE(text.find("admin_token"), std::string::npos)
+      << "the complete template omits api.admin_token, which a non-loopback bind requires";
+  EXPECT_NE(text.find("openssl rand -hex 32"), std::string::npos)
+      << "the complete template names api.admin_token without saying how to generate one";
 }
 
 TEST(ConfigTest, CompleteYamlAndJsonExamplesHaveIdenticalCanonicalProjection) {

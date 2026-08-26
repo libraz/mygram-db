@@ -225,6 +225,13 @@ api:
     trusted_proxies: []             # Proxy IPs allowed to supply X-Forwarded-For
     enable_cors: false              # Enable CORS headers for browser clients (default: false)
     cors_allow_origin: ""           # Origin allowed when CORS is enabled (e.g., "https://app.example.com")
+    max_body_bytes: 16777216        # Maximum HTTP request body size in bytes (16 MiB)
+  # admin_token: ""                 # Shared secret for administrative TCP commands (AUTH <token>)
+                                    # SECURITY: REQUIRED when any listener binds a non-loopback
+                                    # address; the server refuses to start without it.
+                                    # Generate with: openssl rand -hex 32
+                                    # Prefer supplying it through MYGRAM_API_ADMIN_TOKEN so the
+                                    # secret never lands in this file.
   default_limit: 100                # Default LIMIT when not specified (range 5-1000)
   max_query_length: 128             # Max query expression length (0 = unlimited)
 
@@ -245,10 +252,12 @@ api:
 # You MUST explicitly configure allowed IP ranges
 network:
   allow_cidrs:                      # Allow CIDR list applied to TCP/HTTP
-    - "0.0.0.0/0"                   # Allow all (for development/testing, restrict in production)
-    # - "127.0.0.1/32"              # Example: Localhost only (most secure for production)
+    - "127.0.0.1/32"                # Localhost only, matching the loopback bind above
     # - "192.168.1.0/24"            # Example: Local network
     # - "10.0.0.0/8"                # Example: Private network
+    # - "172.16.0.0/12"             # Example: Docker bridge range (see docker-compose.yml)
+    # - "0.0.0.0/0"                 # Allow all: development only. Combining this with a
+    #                               # non-loopback bind is rejected at startup.
 
 # Logging Configuration
 logging:

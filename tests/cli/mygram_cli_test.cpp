@@ -360,6 +360,18 @@ TEST_F(CliStringHelperTest, HelpMatchesImplementedRuntimeSyntax) {
   EXPECT_EQ(output.find("FACET <db.table> <column> [WHERE"), std::string::npos);
 }
 
+TEST_F(CliStringHelperTest, HelpListsEverySearchClauseTheServerAccepts) {
+  StdoutCapture capture;
+  MygramClient::PrintHelp();
+
+  // Discovering the protocol through the CLI must not make a clause the parser
+  // accepts look like an HTTP-only feature.
+  const std::string output = capture.GetOutput();
+  for (const auto* clause : {"AND", "OR", "NOT", "FILTER", "SORT", "LIMIT", "OFFSET", "HIGHLIGHT", "FUZZY"}) {
+    EXPECT_NE(output.find(clause), std::string::npos) << "SEARCH clause missing from help: " << clause;
+  }
+}
+
 // =============================================================================
 // Port parsing (closes the gap where the old code silently truncated)
 // =============================================================================

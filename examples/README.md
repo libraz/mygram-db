@@ -69,6 +69,10 @@ cp examples/config-minimal.json config.json
    - Table name and primary key
    - Text source column(s)
    - API server bind address and port
+   - `network.allow_cidrs` — the copies allow loopback only, so widen it to the
+     network the clients connect from
+   - `api.admin_token` — required once any listener binds a non-loopback
+     address; the server refuses to start without it
 
 3. Test the configuration:
 

@@ -13,7 +13,9 @@ set -e
 REPL_USER=${MYSQL_USER:-repl_user}
 REPL_DATABASE=${MYSQL_DATABASE:-mydb}
 
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<SQL
+# MYSQL_PWD passes the password through the environment. A -p argument would
+# put it in /proc/<pid>/cmdline, which any UID in the container can read.
+MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO '${REPL_USER}'@'%';
 GRANT SELECT ON \`${REPL_DATABASE}\`.* TO '${REPL_USER}'@'%';
 FLUSH PRIVILEGES;

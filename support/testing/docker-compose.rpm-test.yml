@@ -24,7 +24,9 @@ services:
       - mysql_rpm_test_data:/var/lib/mysql
       - ./support/docker/mysql/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_secure_password}"]
+      # The password reaches the probe through the environment; a -p argument
+      # would publish it in the process table on every interval.
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
       interval: 10s
       timeout: 5s
       retries: 5

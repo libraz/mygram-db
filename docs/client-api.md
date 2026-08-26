@@ -77,6 +77,11 @@ Set `unix_socket_path` to use a Unix domain socket; it takes precedence over the
 `timeout_ms == 0` and `recv_buffer_size == 0` select the defaults on both the C
 and C++ APIs. Receive buffers larger than 16 MiB are clamped to 16 MiB.
 
+A `unix_socket_path` longer than the platform's socket address buffer is
+rejected by `Connect()` with `kClientInvalidArgument` and a message naming the
+path, rather than truncated to a shorter name that may belong to another
+socket. The limit is 103 bytes on macOS and 107 on Linux.
+
 A C handle may be shared between threads. Connection lifecycle calls and
 commands are serialized on the handle; disconnect waits for an in-flight
 command to finish and does not cancel it. Do not call `mygramclient_destroy()`

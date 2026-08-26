@@ -18,4 +18,7 @@ replication:
 
 network:
   allow_cidrs:
-    - "0.0.0.0/0"  # Allow all (for development/testing only, restrict in production)
+    - "127.0.0.1/32"  # Localhost only, matching the default loopback bind
+    # Widen this to the network the clients come from. Combining 0.0.0.0/0 with
+    # a non-loopback bind is rejected at startup, and any non-loopback bind also
+    # requires api.admin_token (see examples/config.yaml).

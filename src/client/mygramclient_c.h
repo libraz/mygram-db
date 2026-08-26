@@ -344,7 +344,7 @@ int mygramclient_count_advanced(MygramClient_C* client, const char* table, const
  * @param table Table name
  * @param column Facet column name
  * @param query Optional search query text (can be empty)
- * @param limit Maximum number of facet values (0 for no explicit limit)
+ * @param limit Maximum number of facet values (0 applies the server default limit)
  * @param result Output facet values (caller must free with mygramclient_free_facet_result)
  * @return 0 on success, -1 on error
  */
@@ -358,7 +358,7 @@ int mygramclient_facet(MygramClient_C* client, const char* table, const char* co
  * @param table Table name
  * @param column Facet column name
  * @param query Optional search query text (can be empty)
- * @param limit Maximum number of facet values (0 for server default)
+ * @param limit Maximum number of facet values (0 applies the server default limit)
  * @param offset Number of facet values to skip before applying limit
  * @param result Output facet page and total count
  * @return 0 on success, -1 on error
@@ -373,7 +373,7 @@ int mygramclient_facet_paged(MygramClient_C* client, const char* table, const ch
  * @param table Table name
  * @param column Facet column name
  * @param query Optional search query text (can be empty)
- * @param limit Maximum number of facet values (0 for no explicit limit)
+ * @param limit Maximum number of facet values (0 applies the server default limit)
  * @param and_terms Array of AND terms (can be NULL)
  * @param and_count Number of AND terms
  * @param not_terms Array of NOT terms (can be NULL)
@@ -392,7 +392,9 @@ int mygramclient_facet_advanced(MygramClient_C* client, const char* table, const
 /**
  * @brief Facet pagination with AND/NOT/FILTER clauses
  *
- * This is the paginated counterpart of mygramclient_facet_advanced.
+ * This is the paginated counterpart of mygramclient_facet_advanced. As with the
+ * other facet entry points, a @c limit of 0 applies the server default limit
+ * rather than returning every distinct value.
  */
 int mygramclient_facet_advanced_paged(MygramClient_C* client, const char* table, const char* column, const char* query,
                                       uint32_t limit, uint32_t offset, const char** and_terms, size_t and_count,

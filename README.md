@@ -37,6 +37,33 @@ MySQL connection settings are startup-only. Changing `mysql.host` or
 `mysql.port` requires a restart; automatic reconnection never switches to a
 different endpoint, and a source-server UUID change is rejected.
 
+## Credentials from the environment
+
+Credentials can stay out of the configuration file entirely. MygramDB reads
+these variables itself and they take precedence over the corresponding
+configuration keys:
+
+| Variable | Key it overrides |
+| --- | --- |
+| `MYGRAM_MYSQL_HOST` | `mysql.host` |
+| `MYGRAM_MYSQL_PORT` | `mysql.port` |
+| `MYGRAM_MYSQL_USER` | `mysql.user` |
+| `MYGRAM_MYSQL_PASSWORD` | `mysql.password` |
+| `MYGRAM_MYSQL_DATABASE` | `mysql.database` |
+| `MYGRAM_API_ADMIN_TOKEN` | `api.admin_token` |
+
+A variable set to the empty string counts as unset and falls through to the
+configuration file.
+
+`MYGRAM_API_ADMIN_TOKEN` is read by the server. It is not the same thing as the
+`API_ADMIN_TOKEN` in `.env`, which the Docker entrypoint writes into the
+generated `config.yaml`; use `API_ADMIN_TOKEN` with the shipped compose files
+and `MYGRAM_API_ADMIN_TOKEN` when you run the binary yourself.
+
+`CONFIG VERIFY` inspects the supplied file on its own and does not apply these
+overrides, so a configuration that relies on them is reported as incomplete
+there even though the server starts from it.
+
 ## Network safety
 
 The shipped Docker environment is localhost-only by default. For a

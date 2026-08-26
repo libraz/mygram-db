@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <array>
@@ -342,6 +343,35 @@ TEST_F(MygramClientTest, CApiV2SupportsUnixSocketAndShorterKnownStruct) {
   ASSERT_NE(tcp_client, nullptr);
   ASSERT_EQ(mygramclient_connect(tcp_client), 0) << mygramclient_get_last_error(tcp_client);
   mygramclient_destroy(tcp_client);
+}
+
+TEST(MygramClientUnixSocketTest, RejectsPathLongerThanTheAddressBufferInsteadOfTruncatingIt) {
+  // A path one byte past the buffer would be silently cut to a name that can
+  // resolve to a different socket, so it has to be reported rather than used.
+  constexpr size_t kMaxUnixSocketPathLength = sizeof(sockaddr_un::sun_path) - 1;
+  const std::string too_long = "/tmp/" + std::string(kMaxUnixSocketPathLength, 'p');
+
+  ClientConfig config;
+  config.unix_socket_path = too_long;
+  MygramClient client(config);
+
+  auto result = client.Connect();
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  EXPECT_NE(result.error().message().find(too_long), std::string::npos) << result.error().message();
+
+  MygramClientConfigV2_C c_config{};
+  c_config.struct_size = sizeof(c_config);
+  c_config.version = MYGRAMCLIENT_CONFIG_V2_VERSION;
+  c_config.host = "127.0.0.1";
+  c_config.timeout_ms = 5000;
+  c_config.unix_socket_path = too_long.c_str();
+  MygramClient_C* c_client = mygramclient_create_v2(&c_config);
+  ASSERT_NE(c_client, nullptr);
+  EXPECT_EQ(mygramclient_connect(c_client), -1);
+  EXPECT_NE(std::string(mygramclient_get_last_error(c_client)).find(too_long), std::string::npos)
+      << mygramclient_get_last_error(c_client);
+  mygramclient_destroy(c_client);
 }
 
 TEST(MygramClientCApiV2Test, RejectsStructSizeOnlyPrefixWithoutReadingPastAllocation) {

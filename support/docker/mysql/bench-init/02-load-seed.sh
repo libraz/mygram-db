@@ -8,7 +8,10 @@
 set -e
 
 SEED_URL="https://dl.libraz.net/mygram-bench-seed.sql.zst"
-MYSQL_CMD="mysql -u root -p${MYSQL_ROOT_PASSWORD:-mygramdb}"
+# MYSQL_PWD passes the password through the environment. A -p argument would
+# put it in /proc/<pid>/cmdline, which any UID in the container can read.
+export MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-mygramdb}"
+MYSQL_CMD="mysql -u root"
 
 # MySQL 8.4 no longer loads mysql_native_password by default. The image-created
 # account uses the server default authentication plugin, which MygramDB supports.

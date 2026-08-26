@@ -937,6 +937,18 @@ class MygramClient::Impl {
     }
 
     if (!config_.unix_socket_path.empty()) {
+      // sockaddr_un::sun_path is a fixed buffer, so a longer path would be
+      // truncated into a different socket that may well exist. Reject it by
+      // name instead of connecting somewhere the caller never asked for.
+      constexpr size_t kMaxUnixSocketPathLength = sizeof(sockaddr_un::sun_path) - 1;
+      if (config_.unix_socket_path.size() > kMaxUnixSocketPathLength) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kClientInvalidArgument, "Unix socket path '" + config_.unix_socket_path + "' is " +
+                                                             std::to_string(config_.unix_socket_path.size()) +
+                                                             " bytes, over this platform's limit of " +
+                                                             std::to_string(kMaxUnixSocketPathLength)));
+      }
+
       sock_ = socket(AF_UNIX, SOCK_STREAM, 0);
       if (sock_ < 0) {
         return MakeUnexpected(MakeError(ErrorCode::kClientConnectionFailed,

@@ -29,7 +29,12 @@ services:
       - mysql_data:/var/lib/mysql
       - ./support/docker/mysql/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      # MYSQL_PWD keeps the password in the probe's environment; a -p argument
+      # would put it in /proc/<pid>/cmdline, which any UID in the same PID
+      # namespace can read. $$ defers expansion until the probe runs inside the
+      # container, so Compose never interpolates the value into the daemon's
+      # stored service definition.
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
       interval: 10s
       timeout: 5s
       retries: 5

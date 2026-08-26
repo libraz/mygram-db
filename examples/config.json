@@ -126,7 +126,8 @@
       "max_connections": 10000,
       "trusted_proxies": [],
       "enable_cors": false,
-      "cors_allow_origin": ""
+      "cors_allow_origin": "",
+      "max_body_bytes": 16777216
     },
     "default_limit": 100,
     "max_query_length": 128,
@@ -138,7 +139,7 @@
     }
   },
   "network": {
-    "allow_cidrs": ["0.0.0.0/0"]
+    "allow_cidrs": ["127.0.0.1/32"]
   },
   "logging": {
     "level": "info",

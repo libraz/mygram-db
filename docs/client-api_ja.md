@@ -74,6 +74,11 @@ Unix domain socketを使う場合は `unix_socket_path` を設定します。こ
 `timeout_ms == 0` と `recv_buffer_size == 0` はC/C++の両APIで既定値を
 選びます。16 MiBを超える受信bufferは16 MiBにclampされます。
 
+platformのsocket addressのbufferを超える長さの `unix_socket_path` は、
+別のsocketを指しかねない短い名前へ切り詰めるのではなく、`Connect()` が
+`kClientInvalidArgument` とそのpathを名指すmessageで拒否します。上限は
+macOSで103 byte、Linuxで107 byteです。
+
 C handleはthread間で共有できます。接続lifecycle callとcommandはhandle上で
 直列化され、disconnectは実行中commandをcancelせず完了まで待ちます。別threadが
 handleを使用中に `mygramclient_destroy()` を呼ばないでください。error stateへの

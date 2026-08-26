@@ -62,7 +62,7 @@ GET /config auth=admin-token
 GET /replication/status auth=admin-token
 POST /optimize auth=admin-token
 GET /metrics auth=none
-GET /tables/([^/]+)/([^/]+) auth=none
+GET /tables/([^/]+)/(.+) auth=none
 [error-codes]
 0 = Success
 1 = Unknown error

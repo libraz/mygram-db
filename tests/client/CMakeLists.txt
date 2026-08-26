@@ -85,6 +85,23 @@ add_test(
 )
 set_tests_properties(MygramClientInstalledConsumerTest PROPERTIES RUN_SERIAL TRUE)
 
+# The consumer test above installs into the layout this build was configured
+# for. Resolve the generated pkg-config metadata against the other layouts
+# GNUInstallDirs can produce, which a single-arch install never exercises.
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  add_test(
+    NAME MygramClientPkgConfigLayoutTest
+    COMMAND ${CMAKE_COMMAND}
+      -DMYGRAMDB_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+      -DMYGRAMDB_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/pkgconfig-layouts
+      -DMYGRAMDB_PKG_CONFIG=${PKG_CONFIG_EXECUTABLE}
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/pkgconfig_layout_test.cmake
+  )
+else()
+  message(WARNING "pkg-config not found: MygramClientPkgConfigLayoutTest will not be registered")
+endif()
+
 # Search expression parser tests
 
 add_executable(search_expression_test

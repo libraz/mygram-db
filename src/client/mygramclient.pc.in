@@ -1,11 +1,11 @@
-prefix=${pcfiledir}/../..
+prefix=@MYGRAMDB_PC_PREFIX@
 exec_prefix=${prefix}
-libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
-includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+libdir=@MYGRAMDB_PC_LIBDIR@
+includedir=@MYGRAMDB_PC_INCLUDEDIR@
 
 Name: MygramDB Client
 Description: C and C++ client library for MygramDB
 Version: @PROJECT_VERSION@
 Libs: -L${libdir} -lmygramclient
-Libs.private: -pthread
+Libs.private: -pthread @MYGRAMDB_PC_CXX_RUNTIME@
 Cflags: -I${includedir}

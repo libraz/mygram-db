@@ -287,8 +287,9 @@ std::optional<std::string> ParseDumpSaveFilepath(std::string_view command) {
 #ifdef USE_READLINE
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-avoid-non-const-global-variables)
-const char* command_list[] = {"SEARCH", "COUNT", "GET",  "INFO", "CONFIG",   "FACET", "SET",  "SHOW", "REPLICATION",
-                              "DEBUG",  "CACHE", "DUMP", "SYNC", "OPTIMIZE", "quit",  "exit", "help", nullptr};
+const char* command_list[] = {"SEARCH", "COUNT",       "GET",   "INFO",  "CONFIG", "FACET", "SET",
+                              "SHOW",   "REPLICATION", "DEBUG", "CACHE", "DUMP",   "SYNC",  "OPTIMIZE",
+                              "AUTH",   "quit",        "exit",  "help",  nullptr};
 
 char* CommandGenerator(const char* text, int state) {
   static int list_index;
@@ -399,7 +400,7 @@ char** CommandCompletion(const char* text, int start, int /* end */) {
       // No useful suggestion for free-form search text
       return nullptr;
     }
-    current_keywords = {"AND", "OR", "NOT", "FILTER", "SORT", "LIMIT", "OFFSET"};
+    current_keywords = {"AND", "OR", "NOT", "FILTER", "SORT", "LIMIT", "OFFSET", "HIGHLIGHT", "FUZZY"};
     return rl_completion_matches(text, KeywordGeneratorWrapper);
   }
 
@@ -1035,6 +1036,8 @@ class MygramClient {
     std::cout << "Available commands:\n"
               << "  SEARCH <db.table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
               << "         [SORT [BY] <col>|ASC|DESC] [LIMIT <n>] [OFFSET <n>]\n"
+              << "         [HIGHLIGHT [TAG <open> <close>] [SNIPPET_LEN <n>] [MAX_FRAGMENTS <n>]]\n"
+              << "         [FUZZY [1|2]]\n"
               << "  COUNT <db.table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
               << "  GET <db.table> <primary_key>\n"
               << "  INFO              - Show server statistics\n"
@@ -1049,6 +1052,7 @@ class MygramClient {
               << "  CACHE STATS|CLEAR|ENABLE|DISABLE\n"
               << "  DUMP SAVE|LOAD|VERIFY|INFO|STATUS\n"
               << "  SYNC <db.table>|STOP [db.table]|STATUS\n"
+              << "  AUTH <token>      - Unlock administrative commands on this connection\n"
               << '\n'
               << "Query syntax examples:\n"
               << "  SEARCH app.threads golang                          # Simple search\n"
