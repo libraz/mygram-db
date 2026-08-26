@@ -9,6 +9,7 @@
 #include <fstream>
 
 #include "index/index.h"
+#include "index/index_format.h"
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -34,15 +35,12 @@ using mygram::utils::MakeUnexpected;
 
 namespace {
 
-// Current serialization format version (writes V4 with tokenizer config and CRC32 trailer)
-constexpr uint32_t kFormatVersionV1 = 1;
-constexpr uint32_t kFormatVersionV2 = 2;
-constexpr uint32_t kFormatVersionV3 = 3;
-constexpr uint32_t kFormatVersionV4 = 4;
-constexpr uint32_t kCurrentFormatVersion = kFormatVersionV4;
-
-// Size of the CRC32 checksum trailer (4 bytes)
-constexpr size_t kCRC32Size = 4;
+using format::kCRC32Size;
+using format::kCurrentFormatVersion;
+using format::kFormatVersionV1;
+using format::kFormatVersionV2;
+using format::kFormatVersionV3;
+using format::kFormatVersionV4;
 
 }  // namespace
 
@@ -137,7 +135,7 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
     };
 
     // Write magic number
-    crc_write("MGIX", 4);
+    crc_write(format::kMagic.data(), format::kMagic.size());
 
     // Write version
     crc_write_binary(kCurrentFormatVersion);
@@ -298,7 +296,7 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
     // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
     // Verify magic number
-    if (std::memcmp(all_data.data(), "MGIX", 4) != 0) {
+    if (std::memcmp(all_data.data(), format::kMagic.data(), format::kMagic.size()) != 0) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
           .Field("type", "invalid_format")
