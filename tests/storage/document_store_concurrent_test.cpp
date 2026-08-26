@@ -257,6 +257,16 @@ TEST(DocumentStoreConcurrentTest, SetStoreTextsDuringConcurrentWrites) {
 
   writer.join();
   toggler.join();
+
+  // Toggling text storage must not disturb the identity mapping: every document
+  // is stored exactly once and resolves both ways.
+  EXPECT_EQ(store.Size(), 100U);
+  for (int i = 0; i < 100; ++i) {
+    const std::string primary_key = "pk" + std::to_string(i);
+    auto doc_id = store.GetDocId(primary_key);
+    ASSERT_TRUE(doc_id.has_value()) << primary_key << " was lost";
+    EXPECT_EQ(store.GetPrimaryKey(*doc_id), primary_key);
+  }
 }
 
 /**

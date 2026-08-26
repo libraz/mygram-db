@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -292,17 +293,52 @@ TEST_F(FilterIndexTest, ConcurrentReadWriteSafety) {
     }
   });
 
-  // Reader thread: get bitmaps and use them
+  // Reader thread: get bitmaps and check every snapshot against the invariant
+  // that the writer never touches the seeded documents. GetEqBitmap answers with
+  // an independent copy taken under the lock, so a snapshot may include at most
+  // the one document the writer currently has in flight.
+  std::atomic<int> snapshots_taken{0};
+  std::atomic<int> snapshots_missing_seed{0};
+  std::atomic<uint64_t> max_cardinality{0};
+  std::atomic<uint64_t> min_cardinality{UINT64_MAX};
   std::thread reader([&] {
     for (int i = 0; i < kIterations && !stop; ++i) {
       auto bm = index_.GetEqBitmap("category", key);
-      if (bm != nullptr) {
-        // Actually use the bitmap to detect use-after-free
-        (void)roaring_bitmap_get_cardinality(bm.get());
+      if (bm == nullptr) {
+        continue;
+      }
+      snapshots_taken.fetch_add(1, std::memory_order_relaxed);
+      const uint64_t cardinality = roaring_bitmap_get_cardinality(bm.get());
+      uint64_t previous_max = max_cardinality.load(std::memory_order_relaxed);
+      while (cardinality > previous_max &&
+             !max_cardinality.compare_exchange_weak(previous_max, cardinality, std::memory_order_relaxed)) {
+      }
+      uint64_t previous_min = min_cardinality.load(std::memory_order_relaxed);
+      while (cardinality < previous_min &&
+             !min_cardinality.compare_exchange_weak(previous_min, cardinality, std::memory_order_relaxed)) {
+      }
+      for (uint32_t doc_id = 1; doc_id <= 100; ++doc_id) {
+        if (!roaring_bitmap_contains(bm.get(), doc_id)) {
+          snapshots_missing_seed.fetch_add(1, std::memory_order_relaxed);
+          break;
+        }
       }
     }
   });
 
   writer.join();
   reader.join();
+
+  EXPECT_GT(snapshots_taken.load(), 0) << "the reader never observed the bitmap";
+  EXPECT_EQ(snapshots_missing_seed.load(), 0) << "a snapshot lost a document the writer never touched";
+  EXPECT_GE(min_cardinality.load(), 100U) << "a snapshot was torn below the seeded document count";
+  EXPECT_LE(max_cardinality.load(), 101U) << "a snapshot held more than the one in-flight writer document";
+
+  // The writer removed every document it added, so the final state is the seed.
+  auto final_bitmap = index_.GetEqBitmap("category", key);
+  ASSERT_NE(final_bitmap, nullptr);
+  EXPECT_EQ(roaring_bitmap_get_cardinality(final_bitmap.get()), 100U);
+  for (uint32_t doc_id = 1; doc_id <= 100; ++doc_id) {
+    EXPECT_TRUE(roaring_bitmap_contains(final_bitmap.get(), doc_id)) << "seeded document " << doc_id << " was lost";
+  }
 }

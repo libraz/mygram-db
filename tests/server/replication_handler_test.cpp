@@ -19,6 +19,7 @@
 #include "index/index.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
+#include "mysql/null_binlog_reader.h"
 #include "query/query_parser.h"
 #include "server/response_formatter.h"
 #include "server/server_stats.h"
@@ -174,29 +175,29 @@ TEST_F(ReplicationHandlerTest, BlockReplicationStartDuringSYNC) {
 }
 
 /**
- * @brief Test REPLICATION START error message content
+ * @brief REPLICATION START without a stored GTID reports how to obtain one
  *
- * Verifies that the error message provides helpful guidance to users
+ * A reader that has never been positioned holds an empty GTID. Starting from
+ * there would read from whatever the server still has on disk, so the request
+ * is rejected and the reply names the command that establishes a position.
  */
 TEST_F(ReplicationHandlerTest, ErrorMessageProvidesGuidance) {
-  // The actual error message check would require a BinlogReader mock
-  // Here we verify the error message format is user-friendly
+  mysql::NullBinlogReader reader;
+  ASSERT_FALSE(reader.IsRunning());
+  ASSERT_TRUE(reader.GetCurrentGTID().empty());
+  handler_ctx_.binlog_reader = &reader;
 
-  // This is a documentation test - the actual validation happens in
-  // ReplicationHandler::Handle() at line 57-61 where it checks:
-  // if (current_gtid.empty()) {
-  //   return ResponseFormatter::FormatError(
-  //       "Cannot start replication without GTID position. "
-  //       "Please run SYNC command first to establish initial position.");
-  // }
+  query::Query query;
+  query.type = query::QueryType::REPLICATION_START;
 
-  // We can verify the error message is properly formatted
-  std::string expected_error =
-      "Cannot start replication without GTID position. "
-      "Please run SYNC command first to establish initial position.";
+  ReplicationHandler handler(handler_ctx_);
+  ConnectionContext conn_ctx;
 
-  EXPECT_NE(expected_error.find("GTID position"), std::string::npos);
-  EXPECT_NE(expected_error.find("SYNC command first"), std::string::npos);
+  const std::string response = handler.Handle(query, conn_ctx);
+
+  EXPECT_NE(response.find("Cannot start replication without GTID position"), std::string::npos) << response;
+  EXPECT_NE(response.find("SYNC command first"), std::string::npos) << response;
+  EXPECT_EQ(response.find("OK"), std::string::npos) << response;
 }
 
 /**

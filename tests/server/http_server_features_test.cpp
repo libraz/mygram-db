@@ -1371,32 +1371,73 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
 }
 
 /**
- * @brief Test null pointer safety in search and get handlers
- * Regression test for: table_iter->second->index/doc_store could be null
+ * @brief A registered table whose index or document store is missing answers 500
  *
- * Note: This is a documentation test since creating a TableContext with null
- * index/doc_store in production code is prevented by design. The actual fix
- * adds defensive null checks to prevent crashes if this ever happens.
- *
- * The modified code paths are:
- * - src/server/http_server.cpp:262-265 (search handler)
- * - src/server/http_server.cpp:737-740 (get handler)
- *
- * Both now check for null pointers and return HTTP 500 error instead of crashing.
+ * A table context can be registered before its index and document store are
+ * built, or be torn down while requests are still arriving. Every route that
+ * resolves a table must report that as a server error rather than dereference
+ * the missing member.
  */
-TEST(HttpServerPointerSafetyTest, NullPointerDefensiveChecks) {
-  // This test documents the safety improvements
-  // In practice, the null pointer checks in http_server.cpp prevent crashes when:
-  // 1. A table is registered but index/doc_store initialization fails
-  // 2. A table is in an inconsistent state during shutdown
-  // 3. Memory corruption or other unexpected conditions occur
+TEST(HttpServerPointerSafetyTest, TableWithoutIndexOrDocStoreIsRejected) {
+  std::unordered_map<std::string, TableContext*> table_contexts;
 
-  // The fix ensures:
-  // - No segfault/crash occurs
-  // - HTTP 500 error is returned with appropriate message
-  // - Server continues to handle other requests
+  TableContext ready;
+  ready.name = "ready";
+  ready.config.ngram_size = 1;
+  ready.index = std::make_unique<index::Index>(1);
+  ready.doc_store = std::make_unique<storage::DocumentStore>();
+  auto ready_doc = ready.doc_store->AddDocument("doc1", {});
+  ASSERT_TRUE(ready_doc.has_value());
+  ready.index->AddDocument(*ready_doc, "machine learning");
+  table_contexts["ready"] = &ready;
 
-  SUCCEED() << "Null pointer safety checks added to search and get handlers";
+  // Registered, but its index and document store were never built.
+  TableContext incomplete;
+  incomplete.name = "incomplete";
+  incomplete.config.ngram_size = 1;
+  table_contexts["incomplete"] = &incomplete;
+
+  const uint16_t http_port = FindAvailableLoopbackPort();
+  ASSERT_GT(http_port, 0);
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = http_port;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  HttpServer http_server(http_config, table_contexts, nullptr, nullptr);
+  ASSERT_TRUE(http_server.Start());
+
+  httplib::Client client("127.0.0.1", http_port);
+
+  {
+    json request;
+    request["q"] = "machine";
+    auto res = client.Post("/tables/incomplete/search", request.dump(), "application/json");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 500);
+    auto body = json::parse(res->body);
+    EXPECT_EQ(body["error"], "Table context has null index or doc_store");
+    EXPECT_EQ(body["error_code"], static_cast<std::uint16_t>(mygram::utils::ErrorCode::kInternalError));
+  }
+
+  {
+    auto res = client.Get("/tables/incomplete/doc1");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 500);
+    auto body = json::parse(res->body);
+    EXPECT_EQ(body["error"], "Table context has null index or doc_store");
+  }
+
+  // The complete table still answers, so the guard rejects only the broken one.
+  {
+    json request;
+    request["q"] = "machine";
+    auto res = client.Post("/tables/ready/search", request.dump(), "application/json");
+    ASSERT_TRUE(res);
+    EXPECT_EQ(res->status, 200);
+  }
+
+  http_server.Stop();
 }
 
 // ============================================================================

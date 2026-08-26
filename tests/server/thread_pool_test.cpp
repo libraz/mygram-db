@@ -119,8 +119,7 @@ TEST_F(ThreadPoolTest, QueueSize) {
 
   // Queue should have tasks waiting (5 tasks - 2 executing = 3 in queue)
   size_t queue_size = pool.GetQueueSize();
-  EXPECT_GE(queue_size, 0);  // At least 0 (may have started executing some)
-  EXPECT_LE(queue_size, 3);  // At most 3 (if 2 are executing)
+  EXPECT_LE(queue_size, 3) << "at most 3 remain queued while 2 of the 5 tasks execute";
 
   // Allow tasks to complete
   start_execution = true;

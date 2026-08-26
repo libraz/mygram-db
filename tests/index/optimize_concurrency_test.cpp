@@ -553,9 +553,13 @@ TEST_F(OptimizeConcurrencyTest, ConcurrentOperationsDuringBatchedOptimization) {
 
   std::cout << "Searches completed during optimization: " << searches_completed.load() << std::endl;
 
-  // The test primarily verifies that concurrent operations don't crash or deadlock.
-  // If optimization is very fast (<1ms), searches_completed may be 0, which is acceptable.
-  // Reaching this point without hanging proves no deadlock occurred.
+  // Optimization ran alongside live searches, so the index must still hold every
+  // document. If optimization is very fast (<1ms), searches_completed may be 0.
+  auto after_optimization = large_index->SearchAnd({"te"});
+  EXPECT_EQ(after_optimization.size(), num_docs) << "optimization lost documents while searches were running";
+  for (uint32_t i = 1; i <= num_docs; ++i) {
+    ASSERT_EQ(after_optimization[i - 1], i) << "document " << i << " is missing or out of order";
+  }
 }
 
 /**

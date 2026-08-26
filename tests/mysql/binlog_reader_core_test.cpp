@@ -708,23 +708,28 @@ TEST_F(BinlogReaderFixture, InvalidGtidMergeReturnsErrorWithoutAdvancingAppliedP
 // ===========================================================================
 
 /**
- * @brief ReaderThread loop should only exit when should_stop_ is true
+ * @brief An uninterrupted reconnect wait tells the reader loop to keep going
  *
- * Previously the exit condition was `if (!connection_lost || should_stop_) { break; }`
- * which incorrectly broke when connection_lost=false (normal idle). Fixed to
- * `if (should_stop_) { break; }`.
+ * The reader loop only leaves its reconnection cycle when a stop was requested.
+ * A backoff that simply elapses reports that the loop should continue, so an
+ * idle connection cannot end replication.
  */
 TEST_F(BinlogReaderFixture, ReaderThreadContinuesOnNormalIdle) {
-  // Normal operation: should NOT exit
-  EXPECT_FALSE(false) << "should_stop=false: loop continues";
+  reader_->config_.reconnect_delay_ms = 20;
+  ASSERT_FALSE(reader_->should_stop_.load());
 
-  // Connection lost without stop: should continue (for reconnect)
-  bool should_stop = false;
-  EXPECT_FALSE(should_stop) << "Connection lost: loop continues for reconnect";
+  const auto started = std::chrono::steady_clock::now();
+  const bool keep_going = reader_->WaitForReconnectBackoff(1);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
 
-  // Stop requested: should exit
-  should_stop = true;
-  EXPECT_TRUE(should_stop) << "should_stop=true: loop exits";
+  EXPECT_TRUE(keep_going) << "an elapsed backoff must not end the reader loop";
+  EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 20)
+      << "the backoff returned before the configured delay";
+
+  // A stop request answers the same call with "leave the loop".
+  reader_->should_stop_ = true;
+  EXPECT_FALSE(reader_->WaitForReconnectBackoff(1)) << "a requested stop must end the reader loop";
+  reader_->should_stop_ = false;
 }
 
 /**

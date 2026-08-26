@@ -29,6 +29,66 @@ TEST_F(SignalManagerTest, CreateSucceeds) {
   EXPECT_NE(result.value(), nullptr);
 }
 
+TEST_F(SignalManagerTest, ShutdownNotRequestedBeforeAnySignal) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  EXPECT_FALSE(SignalManager::IsShutdownRequested());
+}
+
+TEST_F(SignalManagerTest, SIGINTRequestsShutdown) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  raise(SIGINT);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  EXPECT_TRUE(SignalManager::IsShutdownRequested());
+}
+
+TEST_F(SignalManagerTest, SIGTERMRequestsShutdown) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  raise(SIGTERM);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  EXPECT_TRUE(SignalManager::IsShutdownRequested());
+}
+
+/**
+ * @brief The shutdown request stays set so a polling loop cannot miss it
+ *
+ * Unlike the log-reopen request, reading the shutdown flag does not clear it,
+ * and a repeated signal cannot turn it back off.
+ */
+TEST_F(SignalManagerTest, RepeatedShutdownSignalsKeepTheFlagSet) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  raise(SIGTERM);
+  raise(SIGINT);
+  raise(SIGTERM);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  EXPECT_TRUE(SignalManager::IsShutdownRequested());
+  EXPECT_TRUE(SignalManager::IsShutdownRequested()) << "polling must not consume the shutdown request";
+}
+
+/**
+ * @brief A shutdown signal does not raise the log rotation request
+ */
+TEST_F(SignalManagerTest, ShutdownSignalDoesNotRequestLogReopen) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  raise(SIGTERM);
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  EXPECT_TRUE(SignalManager::IsShutdownRequested());
+  EXPECT_FALSE(SignalManager::ConsumeLogReopenRequest());
+}
+
 TEST_F(SignalManagerTest, LogReopenInitiallyFalse) {
   auto signal_mgr = SignalManager::Create();
   ASSERT_TRUE(signal_mgr.has_value());

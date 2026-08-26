@@ -1386,11 +1386,12 @@ TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
 // =============================================================================
 
 /**
- * @test BLOB with invalid metadata value should not crash
+ * @test A BLOB column whose length-prefix width is zero is rejected
  *
- * The BLOB parsing code has a switch statement for metadata values 1-4,
- * but no default case. If metadata is 0 or >4, blob_len and blob_data
- * remain uninitialized, causing undefined behavior.
+ * MYSQL_TYPE_BLOB carries the width of its length prefix in the column
+ * metadata. Zero names no width, so the field cannot be decoded and the event
+ * has to be reported as unparseable rather than decoded from uninitialized
+ * length and data pointers.
  */
 TEST_F(RowsParserTest, BlobInvalidMetadataZero) {
   // Create table with BLOB column having metadata=0 (invalid)
@@ -1431,18 +1432,18 @@ TEST_F(RowsParserTest, BlobInvalidMetadataZero) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  // This should not crash - either return nullopt or handle gracefully
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
 
-  // With invalid metadata, the parser should return nullopt or handle safely
-  // The key requirement is: NO CRASH
-  // We're flexible on the return value as long as it doesn't crash
-  SUCCEED();  // If we reach here without crashing, the test passes
+  ASSERT_FALSE(result.has_value()) << "a BLOB with no length-prefix width must not decode";
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
 }
 
 /**
- * @test BLOB with metadata=5 (out of range) should not crash
+ * @test A BLOB length-prefix width above four is rejected
+ *
+ * The widest BLOB length prefix MySQL writes is four bytes, so five names no
+ * decodable layout.
  */
 TEST_F(RowsParserTest, BlobInvalidMetadataFive) {
   TableMetadata table_meta;
@@ -1476,10 +1477,11 @@ TEST_F(RowsParserTest, BlobInvalidMetadataFive) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  // Should not crash
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
                                     MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
-  SUCCEED();
+
+  ASSERT_FALSE(result.has_value()) << "a BLOB length-prefix width of five must not decode";
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
 }
 
 // =============================================================================
@@ -2210,13 +2212,10 @@ TEST_F(RowsParserTest, BlobTextUtf8Sanitization) {
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
 
-  // The BLOB content should be sanitized - no crash and valid output
+  // The invalid bytes are replaced, so what reaches the index is valid UTF-8.
   std::string content = result->front().GetColumnValue("data");
   EXPECT_FALSE(content.empty()) << "BLOB content should not be empty";
-
-  // Result should be valid UTF-8 (either sanitized or marked as invalid)
-  // The key is that it doesn't crash and returns something processable
-  SUCCEED();
+  EXPECT_TRUE(mygram::utils::IsValidUtf8(content)) << "BLOB content was not sanitized: " << content;
 }
 
 /**

@@ -168,9 +168,16 @@ TEST(DocumentStoreStressTest, ConcurrentAddRemoveMemoryStress) {
   // Verify operations completed without crashes
   EXPECT_GT(add_success.load(), 0) << "No documents were added";
   // Note: remove_success may be 0 if all adds happened after removes finished
-  // The main verification is that no crashes occurred
 
-  // Final state verification
-  size_t final_size = store.Size();
-  EXPECT_GE(final_size, 0);
+  // Every document that was added and not removed is still addressable, and the
+  // reported size matches the number of survivors exactly.
+  const size_t final_size = store.Size();
+  EXPECT_EQ(final_size, add_success.load() - remove_success.load()) << "size drifted from adds minus removes";
+  auto surviving_ids = store.GetAllDocIds();
+  EXPECT_EQ(surviving_ids.size(), final_size);
+  for (const auto& doc_id : surviving_ids) {
+    auto primary_key = store.GetPrimaryKey(doc_id);
+    ASSERT_TRUE(primary_key.has_value()) << "doc " << doc_id << " has no primary key";
+    EXPECT_EQ(store.GetDocId(*primary_key), doc_id) << "primary key " << *primary_key << " maps elsewhere";
+  }
 }

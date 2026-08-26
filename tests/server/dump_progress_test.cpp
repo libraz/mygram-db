@@ -111,12 +111,14 @@ TEST(DumpProgressTest, ResetAndJoinWorkerNonDeadlock) {
   for (int iteration = 0; iteration < 10; ++iteration) {
     // Set up a worker thread
     std::atomic<bool> may_finish{false};
+    std::atomic<bool> worker_finished{false};
     {
       std::lock_guard<std::mutex> lock(progress.mutex);
-      progress.worker_thread = std::make_unique<std::thread>([&may_finish]() {
+      progress.worker_thread = std::make_unique<std::thread>([&may_finish, &worker_finished]() {
         while (!may_finish.load()) {
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        worker_finished.store(true);
       });
     }
 
@@ -128,6 +130,20 @@ TEST(DumpProgressTest, ResetAndJoinWorkerNonDeadlock) {
 
     reset_thread.join();
     join_thread.join();
+
+    // JoinWorker owns the thread it joined, so no thread object is left behind.
+    {
+      std::lock_guard<std::mutex> lock(progress.mutex);
+      EXPECT_EQ(progress.worker_thread, nullptr) << "iteration " << iteration;
+    }
+    EXPECT_TRUE(worker_finished.load()) << "the worker was released without being joined, iteration " << iteration;
+
+    // The concurrent Reset still published a complete state.
+    const auto snapshot = progress.GetSnapshot();
+    EXPECT_EQ(snapshot.status, DumpStatus::SAVING) << "iteration " << iteration;
+    EXPECT_EQ(snapshot.filepath, "/tmp/test") << "iteration " << iteration;
+    EXPECT_EQ(snapshot.tables_total, 1U) << "iteration " << iteration;
+    EXPECT_EQ(snapshot.tables_processed, 0U) << "iteration " << iteration;
   }
 }
 

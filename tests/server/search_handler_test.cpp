@@ -3,571 +3,492 @@
  * @brief Unit tests for search handler logic
  *
  * Tests for:
- * - Reuse calculation with zero/small/large result sets
- * - Total results tracking after filter application
- * - Stale cache detection
- * - Floating-point epsilon comparison for filters (H3)
- * - Adaptive cache validation sampling (M1)
- * - Configurable FilterByNgrams threshold (M6)
- * - NOT n-gram deduplication
- * - COUNT FilterByNgrams threshold logic
- * - ParseFilterValue from_chars parsing
+ * - SEARCH GetTopN optimization selection for empty, small and large result sets
+ * - Result count reported for pagination when the optimization does not apply
+ * - Cached result staleness detection and sample sizing
+ * - Floating-point and out-of-range filter value comparison
+ * - Configurable FilterByNgrams threshold
+ * - N-gram deduplication and NOT-term exclusion
+ * - PostFilterByText fail-open behavior
  */
 
 #include "server/handlers/search_handler.h"
 
 #include <gtest/gtest.h>
 
-#include <charconv>
 #include <cmath>
 #include <limits>
+#include <string>
+#include <vector>
 
+#include "config/config.h"
+#include "index/index.h"
+#include "query/query_parser.h"
+#include "server/search_pipeline.h"
 #include "storage/document_store.h"
 
 namespace mygramdb {
 namespace server {
+namespace {
+
+using search_pipeline::ApplySearchTopNOptimization;
+using search_pipeline::GenerateTermInfos;
+
+constexpr int kNgramSize = 2;
+
+/// @brief Index and document store seeded with documents sharing one text body.
+class SearchCorpus {
+ public:
+  SearchCorpus(size_t document_count, const std::string& text) : index_(kNgramSize) {
+    for (size_t i = 1; i <= document_count; ++i) {
+      Add(std::to_string(i), text);
+    }
+  }
+
+  storage::DocId Add(const std::string& primary_key, const std::string& text) {
+    auto doc_id = doc_store_.AddDocument(primary_key, {}, text);
+    EXPECT_TRUE(doc_id.has_value());
+    index_.AddDocument(*doc_id, text);
+    doc_ids_.push_back(*doc_id);
+    return *doc_id;
+  }
+
+  index::Index* index() { return &index_; }
+  storage::DocumentStore* doc_store() { return &doc_store_; }
+  const std::vector<storage::DocId>& doc_ids() const { return doc_ids_; }
+
+ private:
+  index::Index index_;
+  storage::DocumentStore doc_store_;
+  std::vector<storage::DocId> doc_ids_;
+};
+
+/// @brief Query shape the GetTopN optimization accepts: single term, no NOT, no filters.
+query::Query MakeTopNQuery(const std::string& search_text, uint32_t limit, uint32_t offset = 0) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = search_text;
+  query.limit = limit;
+  query.offset = offset;
+  return query;
+}
+
+config::Config MakeConfigWithoutVerifyText() {
+  config::Config config;
+  config.memory.verify_text = "off";
+  return config;
+}
+
+}  // namespace
 
 // =============================================================================
-// Reuse calculation with division-by-zero guard
-// =============================================================================
-// The bug is in search_handler.cpp:205
-//
-// auto all_results = current_index->SearchAnd(term_infos[0].ngrams);
-// total_results = all_results.size();  // Could be 0!
-//
-// size_t index_limit = query.offset + query.limit;
-// bool should_reuse = (static_cast<double>(index_limit) /
-//                      static_cast<double>(total_results)) > kReuseThreshold;
-// // Division by zero when total_results == 0!
+// SEARCH GetTopN optimization
 // =============================================================================
 
 /**
- * @brief Test the specific calculation that causes division by zero
+ * @brief An empty result set must not reach the reuse ratio division
  *
- * This test directly validates the problematic calculation at line 205.
- * Division by zero in search optimization.
+ * The optimization divides the requested page size by the full result count.
+ * With no results that division would produce infinity and select the reuse
+ * path, so the empty case has to be answered before it.
  */
-TEST(SearchHandlerTest, ReuseCalculationWithZeroResults) {
-  // Simulate the calculation at line 205
-  size_t total_results = 0;  // Empty search results
-  size_t query_offset = 0;
-  size_t query_limit = 10;
+TEST(SearchHandlerTopNTest, EmptyResultSetIsReportedWithoutSelectingReuse) {
+  SearchCorpus corpus(0, "");
+  // Every n-gram of "abcd" ("ab", "bc", "cd") has a non-empty posting list here,
+  // so the term survives the empty-posting-list early exit, yet the three lists
+  // have no document in common.
+  corpus.Add("1", "abcx");
+  corpus.Add("2", "xbcd");
+  ASSERT_TRUE(corpus.doc_store()->IsPrimaryKeyDocIdOrderValid());
 
-  size_t index_limit = query_offset + query_limit;  // = 10
-  constexpr double kReuseThreshold = 0.5;
+  const auto query = MakeTopNQuery("abcd", /*limit=*/10);
+  auto term_infos = GenerateTermInfos({query.search_text}, corpus.index(), kNgramSize, 0, false);
+  ASSERT_EQ(term_infos.size(), 1U);
+  ASSERT_EQ(term_infos[0].ngrams.size(), 3U);
+  ASSERT_GT(term_infos[0].estimated_size, 0U);
 
-  // The buggy calculation:
-  // bool should_reuse = (static_cast<double>(index_limit) /
-  //                      static_cast<double>(total_results)) > kReuseThreshold;
+  auto results = corpus.index()->SearchAnd(term_infos[0].ngrams);
+  ASSERT_TRUE(results.empty());
 
-  // This would be: 10.0 / 0.0 > 0.5 -> inf > 0.5 -> true (or crash on some systems)
+  const config::Config config = MakeConfigWithoutVerifyText();
+  auto topn =
+      ApplySearchTopNOptimization(query, corpus.index(), corpus.doc_store(), &config, term_infos, {query.search_text},
+                                  /*semantics_reproducible_by_single_term_ngram_and=*/true,
+                                  /*cache_hit=*/false, "id", results);
 
-  // Test that division by zero produces infinity (IEEE 754 behavior)
-  if (total_results == 0) {
-    double buggy_ratio = static_cast<double>(index_limit) / static_cast<double>(total_results);
-    EXPECT_TRUE(std::isinf(buggy_ratio)) << "Division by zero should produce infinity";
-  }
-
-  // The fix should check for total_results == 0 BEFORE the division
-  bool can_optimize = true;  // Assume we can optimize initially
-
-  // Fixed logic: Don't optimize if there are no results
-  if (total_results == 0) {
-    can_optimize = false;
-  }
-
-  double ratio = 0.0;
-  bool should_reuse = false;
-
-  if (can_optimize && total_results > 0) {
-    ratio = static_cast<double>(index_limit) / static_cast<double>(total_results);
-    should_reuse = ratio > kReuseThreshold;
-  }
-
-  // With zero results, we should NOT attempt the optimization
-  EXPECT_FALSE(can_optimize) << "Should disable optimization for empty results";
-  EXPECT_FALSE(should_reuse) << "should_reuse should be false for empty results";
+  EXPECT_TRUE(topn.considered);
+  EXPECT_TRUE(topn.applicable);
+  EXPECT_TRUE(topn.no_results);
+  EXPECT_FALSE(topn.reused_existing);
+  EXPECT_FALSE(topn.optimized);
+  EXPECT_EQ(topn.total_results, 0U);
+  EXPECT_TRUE(results.empty());
 }
 
 /**
- * @brief Test edge case: very small result set
- *
- * Single result should not cause division issues.
+ * @brief A result set smaller than twice the page is reused instead of re-fetched
  */
-TEST(SearchHandlerTest, ReuseCalculationSmallResultSet) {
-  size_t total_results = 1;  // Single result
-  size_t query_offset = 0;
-  size_t query_limit = 10;
+TEST(SearchHandlerTopNTest, SmallResultSetReusesTheExistingResults) {
+  SearchCorpus corpus(4, "alpha");
+  ASSERT_TRUE(corpus.doc_store()->IsPrimaryKeyDocIdOrderValid());
 
-  size_t index_limit = query_offset + query_limit;  // = 10
-  constexpr double kReuseThreshold = 0.5;
+  const auto query = MakeTopNQuery("alpha", /*limit=*/10);
+  auto term_infos = GenerateTermInfos({query.search_text}, corpus.index(), kNgramSize, 0, false);
+  auto results = corpus.index()->SearchAnd(term_infos[0].ngrams);
+  ASSERT_EQ(results.size(), 4U);
+  const auto results_before = results;
 
-  // With 1 result and limit 10, ratio = 10/1 = 10 > 0.5
-  // So should_reuse = true (which might be unexpected but not a crash)
+  const config::Config config = MakeConfigWithoutVerifyText();
+  auto topn =
+      ApplySearchTopNOptimization(query, corpus.index(), corpus.doc_store(), &config, term_infos, {query.search_text},
+                                  /*semantics_reproducible_by_single_term_ngram_and=*/true,
+                                  /*cache_hit=*/false, "id", results);
 
-  bool can_optimize = total_results > 0;
-  double ratio = 0.0;
-  bool should_reuse = false;
-
-  if (can_optimize) {
-    ratio = static_cast<double>(index_limit) / static_cast<double>(total_results);
-    should_reuse = ratio > kReuseThreshold;
-  }
-
-  EXPECT_TRUE(can_optimize);
-  EXPECT_DOUBLE_EQ(ratio, 10.0);
-  EXPECT_TRUE(should_reuse);
+  EXPECT_TRUE(topn.applicable);
+  EXPECT_TRUE(topn.reused_existing);
+  EXPECT_FALSE(topn.optimized);
+  EXPECT_FALSE(topn.no_results);
+  EXPECT_EQ(topn.total_results, 4U);
+  EXPECT_EQ(results, results_before) << "reuse must leave the fetched results untouched";
 }
 
 /**
- * @brief Test normal case: large result set
+ * @brief A large result set is replaced by a descending top-N fetch
  *
- * Large result set should use GetTopN optimization.
+ * total_results keeps the pre-truncation count so pagination metadata still
+ * reports the full match count after the result vector has been shortened.
  */
-TEST(SearchHandlerTest, ReuseCalculationLargeResultSet) {
-  size_t total_results = 1000;  // Many results
-  size_t query_offset = 0;
-  size_t query_limit = 10;
+TEST(SearchHandlerTopNTest, LargeResultSetIsReplacedByDescendingTopN) {
+  constexpr size_t kDocumentCount = 40;
+  SearchCorpus corpus(kDocumentCount, "alpha");
+  ASSERT_TRUE(corpus.doc_store()->IsPrimaryKeyDocIdOrderValid());
 
-  size_t index_limit = query_offset + query_limit;  // = 10
-  constexpr double kReuseThreshold = 0.5;
+  const auto query = MakeTopNQuery("alpha", /*limit=*/10);
+  auto term_infos = GenerateTermInfos({query.search_text}, corpus.index(), kNgramSize, 0, false);
+  auto results = corpus.index()->SearchAnd(term_infos[0].ngrams);
+  ASSERT_EQ(results.size(), kDocumentCount);
 
-  // With 1000 results and limit 10, ratio = 10/1000 = 0.01 < 0.5
-  // So should_reuse = false (use GetTopN optimization)
+  const config::Config config = MakeConfigWithoutVerifyText();
+  auto topn =
+      ApplySearchTopNOptimization(query, corpus.index(), corpus.doc_store(), &config, term_infos, {query.search_text},
+                                  /*semantics_reproducible_by_single_term_ngram_and=*/true,
+                                  /*cache_hit=*/false, "id", results);
 
-  bool can_optimize = total_results > 0;
-  double ratio = 0.0;
-  bool should_reuse = false;
+  EXPECT_TRUE(topn.applicable);
+  EXPECT_TRUE(topn.optimized);
+  EXPECT_FALSE(topn.reused_existing);
+  EXPECT_TRUE(topn.reverse);
+  EXPECT_EQ(topn.total_results, kDocumentCount) << "total_results must survive the truncation";
 
-  if (can_optimize) {
-    ratio = static_cast<double>(index_limit) / static_cast<double>(total_results);
-    should_reuse = ratio > kReuseThreshold;
+  const auto& doc_ids = corpus.doc_ids();
+  std::vector<storage::DocId> expected;
+  expected.reserve(query.limit);
+  for (size_t i = 0; i < query.limit; ++i) {
+    expected.push_back(doc_ids[doc_ids.size() - 1 - i]);
   }
-
-  EXPECT_TRUE(can_optimize);
-  EXPECT_DOUBLE_EQ(ratio, 0.01);
-  EXPECT_FALSE(should_reuse);
+  EXPECT_EQ(results, expected) << "the ten highest document ids, highest first";
 }
 
 /**
- * @brief Test that the fix correctly handles zero total_results
- *
- * Verifies the proposed fix (checking total_results > 0
- * before performing the division) across multiple edge cases.
+ * @brief Offset and limit decide between reuse, top-N fetch and no optimization
  */
-TEST(SearchHandlerTest, ReuseCalculationEdgeCases) {
-  // Simulating the fixed code path from search_handler.cpp:195-206
+TEST(SearchHandlerTopNTest, OffsetAndLimitSelectTheOptimizationPath) {
+  constexpr size_t kDocumentCount = 40;
+  SearchCorpus corpus(kDocumentCount, "alpha");
+
   struct TestCase {
-    size_t total_results;
-    size_t offset;
-    size_t limit;
-    bool expected_can_optimize;
+    uint32_t offset;
+    uint32_t limit;
+    bool expected_applicable;
+    bool expected_optimized;
+    bool expected_reused;
+  };
+  const std::vector<TestCase> test_cases = {
+      {0, 10, true, true, false},       // 10/40 = 0.25 -> re-fetch the top 10
+      {0, 20, true, true, false},       // 20/40 = 0.50 -> not above the threshold
+      {0, 30, true, false, true},       // 30/40 = 0.75 -> reuse what was fetched
+      {5, 20, true, false, true},       // 25/40 = 0.625 -> reuse what was fetched
+      {10001, 10, false, false, false}  // beyond the offset cap -> no optimization
   };
 
-  std::vector<TestCase> test_cases = {
-      {0, 0, 10, false},      // Zero results - should NOT optimize
-      {1, 0, 10, true},       // Single result - can optimize
-      {100, 0, 10, true},     // Many results - can optimize
-      {0, 5, 20, false},      // Zero results with offset - should NOT optimize
-      {1000, 500, 100, true}  // Large offset/limit - can optimize
-  };
+  const config::Config config = MakeConfigWithoutVerifyText();
+  for (const auto& test_case : test_cases) {
+    const auto query = MakeTopNQuery("alpha", test_case.limit, test_case.offset);
+    auto term_infos = GenerateTermInfos({query.search_text}, corpus.index(), kNgramSize, 0, false);
+    auto results = corpus.index()->SearchAnd(term_infos[0].ngrams);
+    ASSERT_EQ(results.size(), kDocumentCount);
 
-  for (const auto& tc : test_cases) {
-    bool can_optimize = true;
+    auto topn =
+        ApplySearchTopNOptimization(query, corpus.index(), corpus.doc_store(), &config, term_infos, {query.search_text},
+                                    /*semantics_reproducible_by_single_term_ngram_and=*/true,
+                                    /*cache_hit=*/false, "id", results);
 
-    // Fixed code: Check total_results before division
-    if (tc.total_results == 0) {
-      can_optimize = false;
-    }
-
-    EXPECT_EQ(can_optimize, tc.expected_can_optimize)
-        << "Failed for total_results=" << tc.total_results << ", offset=" << tc.offset << ", limit=" << tc.limit;
-
-    // If can_optimize is false, we should NOT attempt division
-    if (!can_optimize) {
-      // The fix prevents us from reaching the division
-      SUCCEED() << "Correctly avoided division by zero";
-    }
-  }
-}
-
-// =============================================================================
-// Total results tracking after filter application
-// =============================================================================
-// When GetTopN optimization is used, total_results is set before filters are
-// applied. After filtering, the results vector shrinks but total_results
-// is not updated, causing incorrect pagination metadata.
-//
-// This is a logic test - actual SearchHandler integration tests would be
-// in a separate file that sets up the full infrastructure.
-// =============================================================================
-
-/**
- * @brief Test that total_results tracking logic is correct
- *
- * total_results must be updated after filter application.
- */
-TEST(SearchHandlerTest, TotalResultsUpdatedAfterFilter) {
-  // Simulate the problematic code path:
-  // 1. can_optimize = true
-  // 2. total_results = all_results.size() = 100  (set before filtering)
-  // 3. Apply filters, results shrinks to 20
-  // 4. But total_results is still 100 (BUG!)
-
-  size_t initial_results = 100;
-  size_t after_filter_results = 20;
-
-  // Buggy behavior: total_results not updated
-  size_t buggy_total_results = initial_results;  // Still 100 after filtering
-
-  // Fixed behavior: total_results should be updated after filtering
-  // when we're NOT using the GetTopN optimization
-  size_t fixed_total_results = after_filter_results;  // Updated to 20
-
-  // The bug causes pagination to be wrong
-  EXPECT_NE(buggy_total_results, after_filter_results) << "total_results not updated after filtering";
-  EXPECT_EQ(fixed_total_results, after_filter_results) << "Fixed: total_results matches filtered count";
-}
-
-/**
- * @brief Test the correct code flow for total_results
- *
- * After the fix at line 274-277:
- * if (!can_optimize) {
- *   total_results = results.size();
- * }
- */
-TEST(SearchHandlerTest, TotalResultsReflectsFilteredCount) {
-  // Simulate the search handler flow
-  bool can_optimize = true;
-  size_t total_results = 0;
-  std::vector<int> results;
-
-  // Initial fetch
-  results = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};  // 10 initial matches
-  total_results = results.size();             // = 10
-
-  // Apply NOT filter (removes some results)
-  results = {1, 2, 3, 4, 5, 6, 7, 8};  // 8 after NOT filter
-
-  // Apply regular filters (removes more results)
-  results = {1, 2, 3, 4, 5};  // 5 after all filters
-
-  // Fix: Update total_results when not using optimization
-  if (!can_optimize) {
-    total_results = results.size();  // = 5
-  }
-
-  // When can_optimize is true, total_results stays at initial value
-  // This is the bug - for the test, we simulate can_optimize being reset to false
-  // after we realize the optimization doesn't apply
-
-  // The fix ensures total_results reflects actual results count
-  // Note: In the actual code, can_optimize may be set to false earlier
-  // which then triggers the update at line 274-277
-
-  // For demonstration, let's simulate can_optimize being false
-  can_optimize = false;
-  if (!can_optimize) {
-    total_results = results.size();
-  }
-
-  EXPECT_EQ(total_results, 5) << "total_results should match filtered results count";
-  EXPECT_EQ(total_results, results.size()) << "total_results should equal results.size()";
-}
-
-// =============================================================================
-// Stale cache detection
-// =============================================================================
-// When cache is hit, the cached DocIds might be stale (documents deleted since
-// cache population). The fix validates a sample of cached DocIds before use
-// and falls through to normal execution if any are stale.
-//
-// This is a race condition fix that can't be easily unit tested, but we can
-// verify the validation logic conceptually works.
-// =============================================================================
-
-/**
- * @test Conceptual test for stale cache detection
- *
- * Verifies that stale DocIds can be detected
- * by checking if they exist in the document store.
- */
-TEST(SearchHandlerTest, StaleCacheDetection) {
-  // Simulated scenario:
-  // 1. Cache stores DocIds [1, 2, 3, 4, 5]
-  // 2. Document 3 is deleted
-  // 3. Validation should detect that DocId 3 is stale
-
-  // This is a conceptual test - the actual implementation uses
-  // DocumentStore::GetPrimaryKey() to validate DocIds.
-  // The key insight is: if GetPrimaryKey(doc_id) returns nullopt,
-  // the document has been deleted and the cache is stale.
-
-  std::vector<uint32_t> cached_doc_ids = {1, 2, 3, 4, 5};
-  std::set<uint32_t> deleted_doc_ids = {3};  // DocId 3 was deleted
-
-  // Validation logic: check if any cached DocId is deleted
-  bool cache_is_stale = false;
-  for (auto doc_id : cached_doc_ids) {
-    if (deleted_doc_ids.count(doc_id) > 0) {
-      cache_is_stale = true;
-      break;
+    const std::string context =
+        "offset=" + std::to_string(test_case.offset) + " limit=" + std::to_string(test_case.limit);
+    EXPECT_TRUE(topn.considered) << context;
+    EXPECT_EQ(topn.applicable, test_case.expected_applicable) << context;
+    EXPECT_EQ(topn.optimized, test_case.expected_optimized) << context;
+    EXPECT_EQ(topn.reused_existing, test_case.expected_reused) << context;
+    if (test_case.expected_optimized) {
+      EXPECT_EQ(results.size(), test_case.offset + test_case.limit) << context;
+    } else {
+      EXPECT_EQ(results.size(), kDocumentCount) << context;
     }
   }
-
-  // Validation should detect the stale cache
-  EXPECT_TRUE(cache_is_stale) << "Should detect stale cache when DocIds are deleted";
 }
 
 /**
- * @test Fresh cache should not be detected as stale
+ * @brief Column filters disable the optimization so the filtered count is kept
  *
- * Validates that valid cache entries pass validation.
+ * The handler only overwrites its result count with total_results when the
+ * optimization applies. A filtered query must therefore report the number of
+ * documents left after filtering, not the number matched before it.
  */
-TEST(SearchHandlerTest, FreshCacheNotStale) {
-  // Simulated scenario:
-  // 1. Cache stores DocIds [1, 2, 3, 4, 5]
-  // 2. All documents still exist
-  // 3. Validation should NOT detect stale cache
+TEST(SearchHandlerTopNTest, FilteredQueryKeepsThePostFilteredResultCount) {
+  SearchCorpus corpus(40, "alpha");
 
-  std::vector<uint32_t> cached_doc_ids = {1, 2, 3, 4, 5};
-  std::set<uint32_t> deleted_doc_ids = {};  // No documents deleted
+  auto query = MakeTopNQuery("alpha", /*limit=*/10);
+  query.filters.push_back({"status", query::FilterOp::EQ, "1"});
 
-  bool cache_is_stale = false;
-  for (auto doc_id : cached_doc_ids) {
-    if (deleted_doc_ids.count(doc_id) > 0) {
-      cache_is_stale = true;
-      break;
-    }
-  }
+  auto term_infos = GenerateTermInfos({query.search_text}, corpus.index(), kNgramSize, 0, false);
+  // Stand in for the result vector the pipeline hands over after filtering.
+  std::vector<storage::DocId> results(corpus.doc_ids().begin(), corpus.doc_ids().begin() + 5);
+  const auto results_before = results;
 
-  EXPECT_FALSE(cache_is_stale) << "Fresh cache should not be detected as stale";
-}
+  const config::Config config = MakeConfigWithoutVerifyText();
+  auto topn =
+      ApplySearchTopNOptimization(query, corpus.index(), corpus.doc_store(), &config, term_infos, {query.search_text},
+                                  /*semantics_reproducible_by_single_term_ngram_and=*/true,
+                                  /*cache_hit=*/false, "id", results);
 
-// =============================================================================
-// COUNT handler TOCTOU validation on cached results
-// =============================================================================
-// HandleCount returned cached result count directly WITHOUT validating that
-// the cached DocIds still exist. If documents are deleted after caching,
-// COUNT returns inflated numbers. The fix adds the same TOCTOU validation
-// sampling that HandleSearch uses.
-//
-// Note: Full integration testing of HandleCount cache validation requires
-// setting up SearchHandler with a real CacheManager, DocumentStore, and
-// Index infrastructure. The conceptual tests below validate the validation
-// logic in isolation.
-// =============================================================================
-
-/**
- * @test COUNT stale cache detection should invalidate cached count
- *
- * Verifies that stale DocIds in cached results cause COUNT
- * to fall through to normal execution instead of returning inflated count.
- */
-TEST(SearchHandlerTest, CountStaleCacheDetection) {
-  // Simulated scenario:
-  // 1. SEARCH caches DocIds [1, 2, 3, 4, 5] (count=5)
-  // 2. Document 3 is deleted
-  // 3. COUNT with same query hits cache
-  // 4. Without fix: COUNT returns 5 (wrong!)
-  // 5. With fix: validation detects DocId 3 is stale, falls through to
-  //    normal execution which returns 4 (correct)
-
-  std::vector<uint32_t> cached_doc_ids = {1, 2, 3, 4, 5};
-  std::set<uint32_t> deleted_doc_ids = {3};
-
-  // Simulate the TOCTOU validation logic added to HandleCount
-  bool cache_stale = false;
-  if (!cached_doc_ids.empty()) {
-    size_t sample_size = std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
-    size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
-    for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
-      // In real code: !current_doc_store->GetPrimaryKey(doc_id).has_value()
-      if (deleted_doc_ids.count(cached_doc_ids[i]) > 0) {
-        cache_stale = true;
-        break;
-      }
-    }
-  }
-
-  // With the fix, COUNT should detect stale cache and NOT return cached count
-  EXPECT_TRUE(cache_stale) << "COUNT should detect stale cache when DocIds are deleted";
-
-  // The actual count after re-execution would be 4, not 5
-  size_t correct_count = cached_doc_ids.size() - deleted_doc_ids.size();
-  EXPECT_EQ(correct_count, 4) << "Correct count should exclude deleted documents";
+  EXPECT_TRUE(topn.considered);
+  EXPECT_FALSE(topn.applicable) << "a filtered query must not take the top-N path";
+  EXPECT_EQ(topn.total_results, 0U);
+  EXPECT_EQ(results, results_before) << "the filtered result set must survive unchanged";
 }
 
 /**
- * @test COUNT fresh cache should return cached count directly
- *
- * When cache is fresh, COUNT should still return the cached count
- * without re-executing the query.
+ * @brief NOT terms disable the optimization the same way column filters do
  */
-TEST(SearchHandlerTest, CountFreshCacheReturnsDirectly) {
-  std::vector<uint32_t> cached_doc_ids = {1, 2, 3, 4, 5};
-  std::set<uint32_t> deleted_doc_ids = {};  // No deletions
+TEST(SearchHandlerTopNTest, NotTermsKeepThePostFilteredResultCount) {
+  SearchCorpus corpus(40, "alpha");
 
-  bool cache_stale = false;
-  if (!cached_doc_ids.empty()) {
-    size_t sample_size = std::min(cached_doc_ids.size(), std::max(size_t{10}, cached_doc_ids.size() / 10));
-    size_t step = std::max(size_t{1}, cached_doc_ids.size() / sample_size);
-    for (size_t i = 0; i < cached_doc_ids.size() && i / step < sample_size; i += step) {
-      if (deleted_doc_ids.count(cached_doc_ids[i]) > 0) {
-        cache_stale = true;
-        break;
-      }
-    }
-  }
+  auto query = MakeTopNQuery("alpha", /*limit=*/10);
+  query.not_terms.push_back("beta");
 
-  EXPECT_FALSE(cache_stale) << "Fresh cache should not be detected as stale";
-  // COUNT should return cached_doc_ids.size() = 5 directly
-  EXPECT_EQ(cached_doc_ids.size(), 5);
-}
+  auto term_infos = GenerateTermInfos({query.search_text}, corpus.index(), kNgramSize, 0, false);
+  std::vector<storage::DocId> results(corpus.doc_ids().begin(), corpus.doc_ids().begin() + 7);
+  const auto results_before = results;
 
-/**
- * @test COUNT empty cached results should not be flagged as stale
- *
- * Edge case - empty cached results should pass validation.
- */
-TEST(SearchHandlerTest, CountEmptyCacheNotStale) {
-  std::vector<uint32_t> cached_doc_ids = {};
+  const config::Config config = MakeConfigWithoutVerifyText();
+  auto topn =
+      ApplySearchTopNOptimization(query, corpus.index(), corpus.doc_store(), &config, term_infos, {query.search_text},
+                                  /*semantics_reproducible_by_single_term_ngram_and=*/true,
+                                  /*cache_hit=*/false, "id", results);
 
-  bool cache_stale = false;
-  if (!cached_doc_ids.empty()) {
-    // This block should be skipped for empty results
-    cache_stale = true;  // Would be set if we entered the loop
-  }
-
-  EXPECT_FALSE(cache_stale) << "Empty cache should not be flagged as stale";
+  EXPECT_TRUE(topn.considered);
+  EXPECT_FALSE(topn.applicable);
+  EXPECT_EQ(topn.total_results, 0U);
+  EXPECT_EQ(results, results_before);
 }
 
 // =============================================================================
-// Floating-point epsilon comparison for filters (H3)
+// Cached result staleness
 // =============================================================================
 
 /**
- * @brief Test that floating-point filter equality uses epsilon comparison
+ * @brief A removed document makes a cached result set stale
  *
- * H3: The classic 0.1 + 0.2 != 0.3 problem should be handled gracefully.
+ * Cached entries hold DocIds. Once a document is gone its DocId no longer
+ * resolves to a primary key, and the entry must not be served.
  */
-TEST(SearchHandlerTest, FloatFilterEpsilonComparison) {
-  // Simulate the filter comparison logic
-  double stored_value = 0.1 + 0.2;  // = 0.30000000000000004
-  double filter_value = 0.3;        // Exact 0.3
+TEST(SearchHandlerCacheStalenessTest, RemovedDocumentMakesCachedResultsStale) {
+  storage::DocumentStore doc_store;
+  std::vector<storage::DocId> cached_results;
+  for (int i = 1; i <= 5; ++i) {
+    auto doc_id = doc_store.AddDocument("pk" + std::to_string(i), {}, "text");
+    ASSERT_TRUE(doc_id.has_value());
+    cached_results.push_back(*doc_id);
+  }
 
-  // Exact comparison fails
-  EXPECT_NE(stored_value, filter_value) << "Exact comparison should fail (demonstrates the problem)";
+  EXPECT_FALSE(search_pipeline::IsCacheStale(cached_results, &doc_store));
 
-  // Epsilon comparison should succeed
-  double max_abs = std::max({1.0, std::abs(stored_value), std::abs(filter_value)});
-  double epsilon = std::numeric_limits<double>::epsilon() * max_abs;
-  bool matches = std::abs(stored_value - filter_value) < epsilon;
-  EXPECT_TRUE(matches) << "Epsilon comparison should handle 0.1+0.2 == 0.3";
+  ASSERT_TRUE(doc_store.RemoveDocument(cached_results[2]));
+  EXPECT_TRUE(search_pipeline::IsCacheStale(cached_results, &doc_store));
 }
 
 /**
- * @brief Test NaN handling in float filter
+ * @brief Staleness sampling covers a result set far larger than the sample size
  *
- * H3: NaN comparisons should never match.
+ * Only a bounded sample of a wide result set is validated, so the sampled
+ * positions have to be spread across the whole vector.
  */
-TEST(SearchHandlerTest, FloatFilterNaNHandling) {
-  double nan_val = std::numeric_limits<double>::quiet_NaN();
-  double normal_val = 1.0;
+TEST(SearchHandlerCacheStalenessTest, StalenessIsDetectedInWideResultSets) {
+  constexpr size_t kResultCount = 5000;
+  storage::DocumentStore doc_store;
+  std::vector<storage::DocId> cached_results;
+  cached_results.reserve(kResultCount);
+  for (size_t i = 1; i <= kResultCount; ++i) {
+    auto doc_id = doc_store.AddDocument("pk" + std::to_string(i), {}, "text");
+    ASSERT_TRUE(doc_id.has_value());
+    cached_results.push_back(*doc_id);
+  }
+  ASSERT_FALSE(search_pipeline::IsCacheStale(cached_results, &doc_store));
 
-  // NaN comparisons
-  double max_abs = std::max({1.0, std::abs(nan_val), std::abs(normal_val)});
-  // std::abs(NaN) is NaN, std::max with NaN is implementation-defined
-  // The epsilon comparison with NaN should NOT match (NaN != anything)
-  bool eq_result = std::abs(nan_val - normal_val) < std::numeric_limits<double>::epsilon() * max_abs;
-  EXPECT_FALSE(eq_result) << "NaN should not equal any value";
+  // The sample walks the vector in fixed steps from index 0, so the first
+  // element is always inspected.
+  ASSERT_TRUE(doc_store.RemoveDocument(cached_results.front()));
+  EXPECT_TRUE(search_pipeline::IsCacheStale(cached_results, &doc_store));
 }
 
 /**
- * @brief Test large value epsilon comparison
- *
- * H3: Relative epsilon should handle large magnitudes correctly.
+ * @brief Sample size grows with the result count and is capped
  */
-TEST(SearchHandlerTest, FloatFilterLargeValueEpsilon) {
-  // For large values, absolute epsilon would fail but relative epsilon works
-  double large1 = 1e15;
-  double large2 = 1e15 + 1.0;  // Difference of 1.0
-
-  // These are different values
-  double max_abs = std::max({1.0, std::abs(large1), std::abs(large2)});
-  double epsilon = std::numeric_limits<double>::epsilon() * max_abs;
-  bool matches = std::abs(large1 - large2) < epsilon;
-  // 1.0 difference at 1e15 scale is within relative epsilon
-  // epsilon * 1e15 ≈ 2.2e-16 * 1e15 ≈ 0.22 < 1.0, so should NOT match
-  EXPECT_FALSE(matches) << "Values differing by 1.0 at 1e15 scale should not match";
-
-  // But values that are representationally close should match
-  double a = 1e15;
-  double b = a;  // Exact same value
-  max_abs = std::max({1.0, std::abs(a), std::abs(b)});
-  epsilon = std::numeric_limits<double>::epsilon() * max_abs;
-  matches = std::abs(a - b) < epsilon;
-  EXPECT_TRUE(matches) << "Identical large values should match";
+TEST(SearchHandlerCacheStalenessTest, SampleSizeIsBoundedAndProportional) {
+  EXPECT_EQ(search_pipeline::CacheStaleSampleSize(0), 0U);
+  EXPECT_EQ(search_pipeline::CacheStaleSampleSize(5), 5U) << "below the minimum, check everything";
+  EXPECT_EQ(search_pipeline::CacheStaleSampleSize(50), 10U) << "at least ten samples";
+  EXPECT_EQ(search_pipeline::CacheStaleSampleSize(1000), 100U) << "one tenth of the results";
+  EXPECT_EQ(search_pipeline::CacheStaleSampleSize(100000), 1024U) << "capped, not one tenth";
 }
 
 // =============================================================================
-// Adaptive cache validation sampling (M1)
+// Filter value comparison
 // =============================================================================
 
+namespace {
+
+/// @brief Documents whose only filter column holds notable double values.
+class DoubleFilterCorpus {
+ public:
+  DoubleFilterCorpus() {
+    sum_of_tenths_ = Add(0.1 + 0.2);
+    three_tenths_ = Add(0.3);
+    not_a_number_ = Add(std::numeric_limits<double>::quiet_NaN());
+    large_ = Add(1e15);
+    large_plus_one_ = Add(1e15 + 1.0);
+  }
+
+  std::vector<storage::DocId> Filter(query::FilterOp op, const std::string& value) {
+    const std::vector<query::FilterCondition> filters = {{"score", op, value}};
+    return search_pipeline::ApplyFilters(doc_ids_, filters, &doc_store_);
+  }
+
+  storage::DocId sum_of_tenths() const { return sum_of_tenths_; }
+  storage::DocId three_tenths() const { return three_tenths_; }
+  storage::DocId not_a_number() const { return not_a_number_; }
+  storage::DocId large() const { return large_; }
+  storage::DocId large_plus_one() const { return large_plus_one_; }
+  const std::vector<storage::DocId>& doc_ids() const { return doc_ids_; }
+
+ private:
+  storage::DocId Add(double score) {
+    auto doc_id =
+        doc_store_.AddDocument("pk" + std::to_string(doc_ids_.size() + 1), {{"score", storage::FilterValue{score}}});
+    EXPECT_TRUE(doc_id.has_value());
+    doc_ids_.push_back(*doc_id);
+    return *doc_id;
+  }
+
+  storage::DocumentStore doc_store_;
+  std::vector<storage::DocId> doc_ids_;
+  storage::DocId sum_of_tenths_ = 0;
+  storage::DocId three_tenths_ = 0;
+  storage::DocId not_a_number_ = 0;
+  storage::DocId large_ = 0;
+  storage::DocId large_plus_one_ = 0;
+};
+
+}  // namespace
+
 /**
- * @brief Test adaptive sample size calculation
+ * @brief Double equality selects the exact stored value, not a neighbouring one
  *
- * M1: Validates the formula: min(n, max(10, n/10))
+ * 0.1 + 0.2 and 0.3 are different doubles, and each equality filter selects
+ * only the document holding its own value.
  */
-TEST(SearchHandlerTest, AdaptiveSampleSizeCalculation) {
-  // Small result set: check all
-  {
-    size_t n = 5;
-    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
-    EXPECT_EQ(sample, 5) << "For n=5, should check all (5 < 10)";
+TEST(SearchHandlerFilterValueTest, DoubleEqualityDistinguishesAdjacentValues) {
+  DoubleFilterCorpus corpus;
+
+  auto exactly_three_tenths = corpus.Filter(query::FilterOp::EQ, "0.3");
+  ASSERT_EQ(exactly_three_tenths.size(), 1U);
+  EXPECT_EQ(exactly_three_tenths[0], corpus.three_tenths());
+
+  auto sum_of_tenths = corpus.Filter(query::FilterOp::EQ, "0.30000000000000004");
+  ASSERT_EQ(sum_of_tenths.size(), 1U);
+  EXPECT_EQ(sum_of_tenths[0], corpus.sum_of_tenths());
+}
+
+/**
+ * @brief NaN matches no ordering or equality filter, and every inequality filter
+ */
+TEST(SearchHandlerFilterValueTest, NotANumberNeverMatchesAComparison) {
+  DoubleFilterCorpus corpus;
+
+  for (const auto op :
+       {query::FilterOp::EQ, query::FilterOp::GT, query::FilterOp::GTE, query::FilterOp::LT, query::FilterOp::LTE}) {
+    auto matched = corpus.Filter(op, "1.0");
+    EXPECT_EQ(std::count(matched.begin(), matched.end(), corpus.not_a_number()), 0)
+        << "NaN matched operator " << static_cast<int>(op);
   }
 
-  // Medium result set: check 10
-  {
-    size_t n = 50;
-    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
-    EXPECT_EQ(sample, 10) << "For n=50, should check 10 (50/10=5 < 10, so 10)";
-  }
+  auto not_equal = corpus.Filter(query::FilterOp::NE, "1.0");
+  EXPECT_EQ(std::count(not_equal.begin(), not_equal.end(), corpus.not_a_number()), 1);
+}
 
-  // Large result set: check 10%
-  {
-    size_t n = 1000;
-    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
-    EXPECT_EQ(sample, 100) << "For n=1000, should check 100 (10%)";
-  }
+/**
+ * @brief Ordering filters keep their resolution at large magnitudes
+ */
+TEST(SearchHandlerFilterValueTest, OrderingFiltersSeparateLargeNeighbouringDoubles) {
+  DoubleFilterCorpus corpus;
 
-  // Very large result set: check 10%
-  {
-    size_t n = 100000;
-    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
-    EXPECT_EQ(sample, 10000) << "For n=100000, should check 10000 (10%)";
-  }
+  auto above = corpus.Filter(query::FilterOp::GT, "1000000000000000");
+  ASSERT_EQ(above.size(), 1U);
+  EXPECT_EQ(above[0], corpus.large_plus_one()) << "a difference of one at 1e15 is not absorbed";
 
-  // Edge case: empty
-  {
-    size_t n = 0;
-    // The actual code guards with !full_results.empty()
-    // but the formula itself: min(0, max(10, 0)) = 0
-    size_t sample = std::min(n, std::max(size_t{10}, n / 10));
-    EXPECT_EQ(sample, 0);
+  auto at_or_above = corpus.Filter(query::FilterOp::GTE, "1000000000000000");
+  ASSERT_EQ(at_or_above.size(), 2U);
+  EXPECT_EQ(at_or_above[0], corpus.large());
+  EXPECT_EQ(at_or_above[1], corpus.large_plus_one());
+}
+
+/**
+ * @brief A filter value that is not a number matches no numeric document
+ */
+TEST(SearchHandlerFilterValueTest, NonNumericFilterValueMatchesNoNumericColumn) {
+  storage::DocumentStore doc_store;
+  auto doc_id = doc_store.AddDocument("pk1", {{"status", storage::FilterValue{int64_t{1}}}});
+  ASSERT_TRUE(doc_id.has_value());
+  const std::vector<storage::DocId> candidates = {*doc_id};
+
+  for (const std::string& value : {std::string("abc"), std::string(), std::string("1x")}) {
+    const std::vector<query::FilterCondition> filters = {{"status", query::FilterOp::EQ, value}};
+    EXPECT_TRUE(search_pipeline::ApplyFilters(candidates, filters, &doc_store).empty())
+        << "value \"" << value << "\" must not match an integer column";
   }
 }
 
+/**
+ * @brief The largest unsigned value round-trips through filter parsing
+ */
+TEST(SearchHandlerFilterValueTest, UnsignedColumnMatchesItsMaximumValue) {
+  storage::DocumentStore doc_store;
+  auto doc_id = doc_store.AddDocument("pk1", {{"counter", storage::FilterValue{std::numeric_limits<uint64_t>::max()}}});
+  ASSERT_TRUE(doc_id.has_value());
+  const std::vector<storage::DocId> candidates = {*doc_id};
+
+  const std::vector<query::FilterCondition> match = {{"counter", query::FilterOp::EQ, "18446744073709551615"}};
+  EXPECT_EQ(search_pipeline::ApplyFilters(candidates, match, &doc_store), candidates);
+
+  const std::vector<query::FilterCondition> no_match = {{"counter", query::FilterOp::EQ, "18446744073709551614"}};
+  EXPECT_TRUE(search_pipeline::ApplyFilters(candidates, no_match, &doc_store).empty());
+}
+
 // =============================================================================
-// Configurable FilterByNgrams threshold (M6)
+// Configurable FilterByNgrams threshold
 // =============================================================================
 
-/**
- * @brief Test that filter threshold is configurable
- *
- * M6: SearchHandler::GetFilterThreshold/SetFilterThreshold.
- */
 TEST(SearchHandlerTest, FilterThresholdConfigurable) {
   // Default threshold
   EXPECT_EQ(SearchHandler::GetFilterThreshold(), 1000);
@@ -585,163 +506,74 @@ TEST(SearchHandlerTest, FilterThresholdConfigurable) {
   EXPECT_EQ(SearchHandler::GetFilterThreshold(), 1000);
 }
 
-// =============================================================================
-// NOT n-gram deduplication
-// =============================================================================
-
 /**
- * @brief Test that NOT n-gram deduplication logic works correctly
+ * @brief Both sides of the threshold produce the same intersection
  *
- * When multiple NOT terms generate overlapping n-grams, duplicates should
- * be removed to avoid redundant PostingList lookups.
+ * The threshold only picks between filtering the current candidates and
+ * intersecting a freshly searched posting list, so the answer must not depend
+ * on it.
  */
-TEST(SearchHandlerTest, NotNgramDeduplication) {
-  // Simulate multiple NOT terms generating overlapping n-grams
-  // e.g., NOT "abc" and NOT "abcd" both generate n-gram "ab", "bc"
-  std::vector<std::string> not_ngrams;
+TEST(SearchHandlerTest, FilterThresholdDoesNotChangeTheResultSet) {
+  SearchCorpus corpus(0, "");
+  const auto both = corpus.Add("1", "alpha beta");
+  corpus.Add("2", "alpha gamma");
+  const auto both_again = corpus.Add("3", "beta alpha");
+  corpus.Add("4", "gamma delta");
 
-  // Term 1: "abc" -> n-grams "ab", "bc"
-  not_ngrams.push_back("ab");
-  not_ngrams.push_back("bc");
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.and_terms.push_back("beta");
+  query.limit = 100;
 
-  // Term 2: "abcd" -> n-grams "ab", "bc", "cd"
-  not_ngrams.push_back("ab");
-  not_ngrams.push_back("bc");
-  not_ngrams.push_back("cd");
+  const std::vector<std::string> all_terms = {"alpha", "beta"};
+  auto term_infos = GenerateTermInfos(all_terms, corpus.index(), kNgramSize, 0, false);
+  const config::Config config = MakeConfigWithoutVerifyText();
 
-  // Before dedup: 5 entries with duplicates
-  EXPECT_EQ(not_ngrams.size(), 5);
+  auto filtered = search_pipeline::Execute(query, term_infos, all_terms, corpus.index(), corpus.doc_store(), &config,
+                                           kNgramSize, 0, false, /*filter_threshold=*/1000);
+  auto intersected = search_pipeline::Execute(query, term_infos, all_terms, corpus.index(), corpus.doc_store(), &config,
+                                              kNgramSize, 0, false, /*filter_threshold=*/0);
 
-  // Apply deduplication (same logic as the fix)
-  std::sort(not_ngrams.begin(), not_ngrams.end());
-  not_ngrams.erase(std::unique(not_ngrams.begin(), not_ngrams.end()), not_ngrams.end());
-
-  // After dedup: 3 unique entries
-  EXPECT_EQ(not_ngrams.size(), 3);
-  EXPECT_EQ(not_ngrams[0], "ab");
-  EXPECT_EQ(not_ngrams[1], "bc");
-  EXPECT_EQ(not_ngrams[2], "cd");
-}
-
-/**
- * @brief Test deduplication with no duplicates (no-op case)
- */
-TEST(SearchHandlerTest, NotNgramDeduplicationNoDuplicates) {
-  std::vector<std::string> not_ngrams = {"ab", "cd", "ef"};
-
-  std::sort(not_ngrams.begin(), not_ngrams.end());
-  not_ngrams.erase(std::unique(not_ngrams.begin(), not_ngrams.end()), not_ngrams.end());
-
-  EXPECT_EQ(not_ngrams.size(), 3);
+  const std::vector<storage::DocId> expected = {both, both_again};
+  EXPECT_EQ(filtered.results, expected) << "candidate filtering path";
+  EXPECT_EQ(intersected.results, expected) << "full intersection path";
 }
 
 // =============================================================================
-// COUNT FilterByNgrams threshold logic
+// N-gram generation and NOT-term exclusion
 // =============================================================================
 
 /**
- * @brief Conceptual test for FilterByNgrams threshold logic in COUNT
- *
- * Verifies the decision logic: when candidate set is small, use FilterByNgrams;
- * when large, use full SearchAnd intersection.
+ * @brief Repeated n-grams within a term are collapsed to one lookup each
  */
-TEST(SearchHandlerTest, CountFilterThresholdLogic) {
-  size_t filter_threshold = 1000;
+TEST(SearchHandlerTest, GeneratedNgramsAreSortedAndUnique) {
+  SearchCorpus corpus(0, "");
+  corpus.Add("1", "abab");
 
-  // Small candidate set -> should use FilterByNgrams
-  {
-    size_t candidates = 500;
-    bool use_filter = (candidates <= filter_threshold);
-    EXPECT_TRUE(use_filter) << "500 candidates should use FilterByNgrams (threshold=1000)";
-  }
-
-  // Exactly at threshold -> should use FilterByNgrams
-  {
-    size_t candidates = 1000;
-    bool use_filter = (candidates <= filter_threshold);
-    EXPECT_TRUE(use_filter) << "1000 candidates should use FilterByNgrams (threshold=1000)";
-  }
-
-  // Large candidate set -> should use full intersection
-  {
-    size_t candidates = 5000;
-    bool use_filter = (candidates <= filter_threshold);
-    EXPECT_FALSE(use_filter) << "5000 candidates should use full intersection (threshold=1000)";
-  }
-}
-
-// =============================================================================
-// ParseFilterValue from_chars parsing
-// =============================================================================
-
-/**
- * @brief Test from_chars integer parsing behavior
- *
- * Validates that from_chars correctly parses various numeric formats.
- */
-TEST(SearchHandlerTest, FromCharsIntegerParsing) {
-  // Valid integer
-  {
-    int64_t result = 0;
-    std::string value = "12345";
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
-    EXPECT_EQ(ec, std::errc());
-    EXPECT_EQ(result, 12345);
-  }
-
-  // Negative integer
-  {
-    int64_t result = 0;
-    std::string value = "-42";
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
-    EXPECT_EQ(ec, std::errc());
-    EXPECT_EQ(result, -42);
-  }
-
-  // Invalid string
-  {
-    int64_t result = 0;
-    std::string value = "abc";
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
-    EXPECT_NE(ec, std::errc());
-  }
-
-  // Empty string
-  {
-    int64_t result = 0;
-    std::string value;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
-    EXPECT_NE(ec, std::errc());
-  }
+  auto term_infos = GenerateTermInfos({"abab"}, corpus.index(), kNgramSize, 0, false);
+  ASSERT_EQ(term_infos.size(), 1U);
+  // "abab" yields "ab", "ba", "ab"; the repeat is dropped.
+  EXPECT_EQ(term_infos[0].ngrams, (std::vector<std::string>{"ab", "ba"}));
 }
 
 /**
- * @brief Test from_chars double parsing behavior
+ * @brief Overlapping NOT terms exclude exactly the documents they match
  */
-TEST(SearchHandlerTest, FromCharsDoubleParsing) {
-  // Valid double
-  {
-    double result = 0.0;
-    std::string value = "3.14";
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
-    EXPECT_EQ(ec, std::errc());
-    EXPECT_DOUBLE_EQ(result, 3.14);
-  }
+TEST(SearchHandlerTest, OverlappingNotTermsExcludeOnlyTheirOwnMatches) {
+  SearchCorpus corpus(0, "");
+  const auto plain = corpus.Add("1", "alpha zzz");
+  corpus.Add("2", "alpha abc");
+  corpus.Add("3", "alpha abcd");
 
-  // Large value
-  {
-    uint64_t result = 0;
-    std::string value = "18446744073709551615";  // UINT64_MAX
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
-    EXPECT_EQ(ec, std::errc());
-    EXPECT_EQ(result, UINT64_MAX);
-  }
+  auto term_infos = GenerateTermInfos({"alpha"}, corpus.index(), kNgramSize, 0, false);
+  auto candidates = corpus.index()->SearchAnd(term_infos[0].ngrams);
+  ASSERT_EQ(candidates.size(), 3U);
+
+  auto remaining = search_pipeline::ApplyNotFilter(candidates, {"abc", "abcd"}, corpus.index(), corpus.doc_store(),
+                                                   kNgramSize, 0, false);
+  EXPECT_EQ(remaining, (std::vector<storage::DocId>{plain}));
 }
 
 // =============================================================================

@@ -1513,7 +1513,8 @@ TEST_F(FullPipelineTest, MixedScriptBoundaryFragmentRequiresExactTextMatch) {
 }
 
 TEST_F(FullPipelineTest, SearchWithNotTerms) {
-  // First verify the base search returns expected results
+  // "learning" is in doc1 ("machine learning basics") and doc2 ("deep learning
+  // techniques"); only doc2 also holds "deep".
   {
     query::Query base_query;
     base_query.type = query::QueryType::SEARCH;
@@ -1523,7 +1524,7 @@ TEST_F(FullPipelineTest, SearchWithNotTerms) {
     auto params = MakeParams();
     auto base_output = ExecuteFullPipeline(base_query, params);
     ASSERT_TRUE(base_output.has_value());
-    ASSERT_GE(base_output->results.size(), 1) << "Base search for 'learning' should find docs";
+    EXPECT_EQ(base_output->results, (std::vector<storage::DocId>{doc_ids_[0], doc_ids_[1]}));
   }
 
   query::Query query;
@@ -1536,11 +1537,10 @@ TEST_F(FullPipelineTest, SearchWithNotTerms) {
   auto params = MakeParams();
   auto output = ExecuteFullPipeline(query, params);
 
-  EXPECT_TRUE(output.has_value());
-  // NOT "deep" should exclude doc2, leaving fewer results than the base search
-  EXPECT_GE(output->results.size(), 0);
-  // At minimum, the NOT filter should not add results
-  EXPECT_LE(output->results.size(), 2);
+  ASSERT_TRUE(output.has_value());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{doc_ids_[0]}));
+  EXPECT_EQ(output->after_intersection, 2U);
+  EXPECT_EQ(output->after_not, 1U);
 }
 
 TEST_F(FullPipelineTest, NotFilterDoesNotPoolNgramsAcrossTerms) {

@@ -645,13 +645,13 @@ TEST(InvalidationQueueTest, RapidStartStopNoRunawayThread) {
     // Stop immediately
     queue.Stop();
 
-    // Verify queue is truly stopped
-    // If spurious wakeup handling is broken, worker might still be running
+    // A worker that survived Stop() would keep draining the queue afterwards.
+    EXPECT_FALSE(queue.IsRunning()) << "worker still running after Stop, iteration " << i;
+    const size_t pending_after_stop = queue.GetPendingCount();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_FALSE(queue.IsRunning()) << "worker restarted itself, iteration " << i;
+    EXPECT_EQ(queue.GetPendingCount(), pending_after_stop) << "a stopped worker kept processing, iteration " << i;
   }
-
-  // If we get here without hanging or crashing, spurious wakeup handling is correct
-  SUCCEED();
 }
 
 /**
@@ -707,16 +707,19 @@ TEST(InvalidationQueueTest, EmptyQueueStartAndEnqueue) {
   // Wait a bit to ensure worker thread is in wait state
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
+  EXPECT_TRUE(queue.IsRunning());
+
   // Now enqueue an item - should wake up the worker thread
   queue.Enqueue("posts", "", "test ngram");
 
   // Wait for processing
   std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
-  queue.Stop();
+  // The worker woke from its empty-queue wait and drained the item.
+  EXPECT_EQ(queue.GetPendingCount(), 0U) << "the enqueued item was never processed";
 
-  // Test passed if no crash occurred
-  SUCCEED();
+  queue.Stop();
+  EXPECT_FALSE(queue.IsRunning());
 }
 
 /**
@@ -755,9 +758,11 @@ TEST(InvalidationQueueTest, ResourceCleanupOrder) {
 
   queue.Stop();
 
-  // The important part is no crash occurred during cleanup
-  // (even if Erase() might throw, Unregister should happen first)
-  SUCCEED();
+  // Both entries shared an invalidated ngram, so both were erased from the
+  // cache and released from invalidation tracking.
+  EXPECT_EQ(queue.GetPendingCount(), 0U);
+  EXPECT_FALSE(cache.Lookup(key1).has_value()) << "invalidated entry was left in the cache";
+  EXPECT_FALSE(cache.Lookup(key2).has_value()) << "invalidated entry was left in the cache";
 }
 
 /**

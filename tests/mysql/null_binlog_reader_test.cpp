@@ -17,7 +17,11 @@ namespace mygramdb::mysql {
  */
 TEST(NullBinlogReaderTest, ConstructionAndDestruction) {
   NullBinlogReader reader;
-  // Should construct and destruct without issues
+  // A freshly built reader reports the inert state every caller relies on.
+  EXPECT_FALSE(reader.IsRunning());
+  EXPECT_EQ(reader.GetProcessedEvents(), 0);
+  EXPECT_EQ(reader.GetQueueSize(), 0);
+  EXPECT_EQ(reader.GetCurrentGTID(), "");
 }
 
 /**
@@ -89,7 +93,12 @@ TEST(NullBinlogReaderTest, StartReturnsError) {
 TEST(NullBinlogReaderTest, StopDoesNotCrash) {
   NullBinlogReader reader;
   reader.Stop();
-  // If we reach here, Stop() did not crash
+  EXPECT_FALSE(reader.IsRunning());
+
+  // Stop is idempotent and leaves the reader in the same inert state.
+  reader.Stop();
+  EXPECT_FALSE(reader.IsRunning());
+  EXPECT_EQ(reader.GetProcessedEvents(), 0);
 }
 
 /**
