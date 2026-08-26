@@ -16,10 +16,6 @@
 
 namespace mygramdb::storage {
 
-FilterIndex::~FilterIndex() {
-  Clear();
-}
-
 void FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) {
   for (const auto& [column, value] : filters) {
     ++column_ref_counts_[column];
@@ -31,11 +27,14 @@ void FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) 
     auto& column_map = eq_bitmaps_[column];
     auto it = column_map.find(key);
     if (it == column_map.end()) {
-      roaring_bitmap_t* bm = roaring_bitmap_create();
-      roaring_bitmap_add(bm, doc_id);
-      column_map[std::move(key)] = bm;
+      mygram::utils::RoaringBitmapPtr bm = mygram::utils::MakeEmptyRoaring();
+      if (bm == nullptr) {
+        continue;
+      }
+      roaring_bitmap_add(bm.get(), doc_id);
+      column_map[std::move(key)] = std::move(bm);
     } else {
-      roaring_bitmap_add(it->second, doc_id);
+      roaring_bitmap_add(it->second.get(), doc_id);
     }
   }
 }
@@ -53,9 +52,8 @@ void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filt
       if (col_it != eq_bitmaps_.end()) {
         auto val_it = col_it->second.find(key);
         if (val_it != col_it->second.end()) {
-          roaring_bitmap_remove(val_it->second, doc_id);
-          if (roaring_bitmap_is_empty(val_it->second)) {
-            roaring_bitmap_free(val_it->second);
+          roaring_bitmap_remove(val_it->second.get(), doc_id);
+          if (roaring_bitmap_is_empty(val_it->second.get())) {
             col_it->second.erase(val_it);
           }
         }
@@ -83,17 +81,18 @@ void FilterIndex::RemoveDocument(DocId doc_id, const FilterMap& filters) {
   RemoveDocFromBitmapsLocked(doc_id, filters);
 }
 
-RoaringBitmapPtr FilterIndex::GetEqBitmap(const std::string& column, const std::string& serialized_value) const {
+mygram::utils::RoaringBitmapPtr FilterIndex::GetEqBitmap(const std::string& column,
+                                                         const std::string& serialized_value) const {
   std::shared_lock lock(mutex_);
   auto col_it = eq_bitmaps_.find(column);
   if (col_it == eq_bitmaps_.end()) {
-    return RoaringBitmapPtr(nullptr, roaring_bitmap_free);
+    return {};
   }
   auto val_it = col_it->second.find(serialized_value);
   if (val_it == col_it->second.end()) {
-    return RoaringBitmapPtr(nullptr, roaring_bitmap_free);
+    return {};
   }
-  return RoaringBitmapPtr(roaring_bitmap_copy(val_it->second), roaring_bitmap_free);
+  return mygram::utils::RoaringBitmapPtr(roaring_bitmap_copy(val_it->second.get()));
 }
 
 bool FilterIndex::OrEqBitmapInto(std::string_view column, std::string_view serialized_value,
@@ -110,7 +109,7 @@ bool FilterIndex::OrEqBitmapInto(std::string_view column, std::string_view seria
   if (value_iter == column_iter->second.end()) {
     return false;
   }
-  roaring_bitmap_or_inplace(destination, value_iter->second);
+  roaring_bitmap_or_inplace(destination, value_iter->second.get());
   return true;
 }
 
@@ -148,11 +147,6 @@ std::optional<std::string> FilterIndex::ResolveColumnName(std::string_view colum
 
 void FilterIndex::Clear() {
   std::unique_lock lock(mutex_);
-  for (auto& [column, value_map] : eq_bitmaps_) {
-    for (auto& [key, bm] : value_map) {
-      roaring_bitmap_free(bm);
-    }
-  }
   eq_bitmaps_.clear();
   column_ref_counts_.clear();
 }
@@ -164,7 +158,7 @@ size_t FilterIndex::MemoryUsage() const {
     total += column.size() + column.capacity();
     for (const auto& [key, bm] : value_map) {
       total += key.size() + key.capacity();
-      total += roaring_bitmap_portable_size_in_bytes(bm);
+      total += roaring_bitmap_portable_size_in_bytes(bm.get());
     }
   }
   for (const auto& [column, count] : column_ref_counts_) {
@@ -269,7 +263,7 @@ std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCounts(
     result.reserve(col_it->second.size());
 
     for (const auto& [serialized_value, bitmap] : col_it->second) {
-      uint64_t count = roaring_bitmap_get_cardinality(bitmap);
+      uint64_t count = roaring_bitmap_get_cardinality(bitmap.get());
       if (count > 0) {
         result.emplace_back(serialized_value, count);
       }
@@ -300,7 +294,7 @@ std::vector<std::pair<std::string, uint64_t>> FilterIndex::GetColumnValueCountsF
   std::vector<std::pair<std::string, uint64_t>> result;
   result.reserve(col_it->second.size());
   for (const auto& [serialized_value, bitmap] : col_it->second) {
-    uint64_t count = roaring_bitmap_and_cardinality(bitmap, filter_bitmap);
+    uint64_t count = roaring_bitmap_and_cardinality(bitmap.get(), filter_bitmap);
     if (count > 0) {
       result.emplace_back(serialized_value, count);
     }

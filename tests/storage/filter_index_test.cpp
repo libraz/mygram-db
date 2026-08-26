@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "utils/roaring_bitmap_ptr.h"
+
 using namespace mygramdb::storage;
 
 class FilterIndexTest : public ::testing::Test {
@@ -237,7 +239,7 @@ TEST_F(FilterIndexTest, OrEqBitmapIntoMergesWithoutReturningAnIntermediateCopy) 
   second_filters["category"] = std::string("sports");
   index_.AddDocument(2, second_filters);
 
-  RoaringBitmapPtr destination(roaring_bitmap_create(), roaring_bitmap_free);
+  auto destination = mygram::utils::MakeEmptyRoaring();
   ASSERT_NE(destination, nullptr);
   const auto news = FilterIndex::SerializeFilterValue(FilterValue{std::string("news")});
   const auto sports = FilterIndex::SerializeFilterValue(FilterValue{std::string("sports")});

@@ -22,11 +22,9 @@
 #include "storage/document_store.h"
 #include "types/doc_id.h"
 #include "utils/hash_utils.h"
+#include "utils/roaring_bitmap_ptr.h"
 
 namespace mygramdb::storage {
-
-/// RAII wrapper for roaring_bitmap_t* (auto-frees on destruction)
-using RoaringBitmapPtr = std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bitmap_free)>;
 
 /**
  * @brief Bitmap-based filter index for EQ/NE filter acceleration
@@ -39,9 +37,9 @@ using RoaringBitmapPtr = std::unique_ptr<roaring_bitmap_t, decltype(&roaring_bit
 class FilterIndex {
  public:
   FilterIndex() = default;
-  ~FilterIndex();
+  ~FilterIndex() = default;
 
-  // Non-copyable (owns roaring_bitmap_t pointers)
+  // Non-copyable (owns its bitmaps)
   FilterIndex(const FilterIndex&) = delete;
   FilterIndex& operator=(const FilterIndex&) = delete;
   FilterIndex(FilterIndex&&) = delete;
@@ -58,7 +56,8 @@ class FilterIndex {
 
   /// Get a copy of bitmap for (column, value) pair. Returns null ptr if not found.
   /// The returned bitmap is an independent copy safe to use without holding any lock.
-  [[nodiscard]] RoaringBitmapPtr GetEqBitmap(const std::string& column, const std::string& serialized_value) const;
+  [[nodiscard]] mygram::utils::RoaringBitmapPtr GetEqBitmap(const std::string& column,
+                                                            const std::string& serialized_value) const;
 
   /// OR the stored bitmap for (column, value) directly into destination.
   /// Avoids copying a potentially large bitmap when callers probe and union
@@ -109,10 +108,12 @@ class FilterIndex {
   /// writers (AddDocument, UpdateDocument, RemoveDocument, Clear) take unique_lock.
   mutable std::shared_mutex mutex_;
 
-  /// column_name -> { serialized_value -> roaring_bitmap_t* }
+  /// column_name -> { serialized_value -> owning bitmap handle }
+  /// The mapped type owns its bitmap, so erasing an entry frees it.
   /// Uses transparent hash for heterogeneous lookup (string_view without allocation)
-  using ValueBitmapMap = absl::flat_hash_map<std::string, roaring_bitmap_t*, mygram::utils::TransparentStringHash,
-                                             mygram::utils::TransparentStringEqual>;
+  using ValueBitmapMap =
+      absl::flat_hash_map<std::string, mygram::utils::RoaringBitmapPtr, mygram::utils::TransparentStringHash,
+                          mygram::utils::TransparentStringEqual>;
   absl::flat_hash_map<std::string, ValueBitmapMap, mygram::utils::TransparentStringHash,
                       mygram::utils::TransparentStringEqual>
       eq_bitmaps_;
