@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <list>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -102,7 +103,10 @@ class RateLimiter {
    * @brief Construct rate limiter
    * @param capacity Maximum tokens per client (burst size)
    * @param refill_rate Tokens added per second per client
-   * @param max_clients Maximum number of tracked clients (for memory management)
+   * @param max_clients Maximum number of tracked clients (for memory
+   *        management). This bounds memory, not admission: a request from an
+   *        untracked client when the table is full evicts the
+   *        least-recently-seen bucket instead of being rejected.
    * @param cleanup_interval Cleanup check interval (time between cleanup sweeps).
    *        Accepts millisecond resolution so tests can run a faster sweep
    *        cycle; production callers may continue to pass `std::chrono::seconds`
@@ -129,6 +133,12 @@ class RateLimiter {
 
   /**
    * @brief Check if request from client_ip is allowed
+   *
+   * The only reason for a false return is that the client's bucket is out of
+   * tokens. Reaching `max_clients` never denies: the caller reports "rate
+   * limit exceeded", and a client that has consumed no tokens must not be
+   * told that.
+   *
    * @param client_ip Client IP address
    * @return true if request is allowed, false if rate limited
    */
@@ -167,6 +177,7 @@ class RateLimiter {
     uint64_t allowed_requests = 0;  ///< Requests allowed
     uint64_t blocked_requests = 0;  ///< Requests blocked (rate limited)
     size_t tracked_clients = 0;     ///< Number of clients currently tracked
+    uint64_t evicted_clients = 0;   ///< Buckets dropped to stay within max_clients
   };
 
   /**
@@ -203,18 +214,29 @@ class RateLimiter {
   struct ClientBucket {
     TokenBucket bucket;
     std::chrono::steady_clock::time_point last_access;
+    /// Position of this client's IP in `lru_order_`. Always valid while the
+    /// entry is in `client_buckets_`; the two containers are inserted into and
+    /// erased from together, under `mutex_`.
+    std::list<std::string>::iterator lru_position;
 
     ClientBucket(size_t capacity, size_t refill_rate)
         : bucket(capacity, refill_rate), last_access(std::chrono::steady_clock::now()) {}
   };
 
   std::unordered_map<std::string, ClientBucket> client_buckets_;  ///< Per-client buckets
-  mutable std::mutex mutex_;                                      ///< Protects client_buckets_
+
+  /// Tracked client IPs, most recently seen first. Keeps eviction O(1) so a
+  /// flood of distinct source addresses cannot turn each request into a scan
+  /// of the whole table while `mutex_` is held.
+  std::list<std::string> lru_order_;
+
+  mutable std::mutex mutex_;  ///< Protects client_buckets_ and lru_order_
 
   // Statistics (atomic counters avoid the need for a separate stats_mutex_)
   std::atomic<uint64_t> total_requests_{0};
   std::atomic<uint64_t> allowed_requests_{0};
   std::atomic<uint64_t> blocked_requests_{0};
+  std::atomic<uint64_t> evicted_clients_{0};
   DenialLogLimiter denial_log_limiter_;
 
   // Background sweeper. Cleanup is offloaded to a dedicated thread to avoid

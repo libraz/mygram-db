@@ -77,6 +77,10 @@ struct HttpServerConfig {
    * cpp-httplib rejects bodies larger than this with HTTP 413 (Payload Too
    * Large) before invoking any handler. Default: 16 MiB. Source of truth is
    * `config::ApiConfig::http::max_body_bytes`.
+   *
+   * 0 means no limit. That sentinel has to survive `FromConfig`: the config
+   * layer already substitutes the 16 MiB default for an absent key, so an
+   * explicit 0 arriving here is a deliberate choice and not "unset".
    */
   size_t max_body_bytes = defaults::kHttpDefaultMaxBodyBytes;
 
@@ -95,7 +99,12 @@ struct HttpServerConfig {
     hc.enable_cors = cfg.api.http.enable_cors;
     hc.cors_allow_origin = cfg.api.http.cors_allow_origin;
     hc.allow_cidrs = cfg.network.allow_cidrs;
-    if (cfg.api.http.max_body_bytes > 0) {
+    // Carried through as-is, 0 included: the configuration layer has already
+    // applied the 16 MiB default for an absent key, so treating 0 as "unset"
+    // here would make the documented no-limit sentinel unreachable. A negative
+    // value cannot pass schema validation; keep the struct default rather than
+    // wrapping it into an enormous size_t.
+    if (cfg.api.http.max_body_bytes >= 0) {
       hc.max_body_bytes = static_cast<size_t>(cfg.api.http.max_body_bytes);
     }
     // 0 / negative timeouts are nonsensical (cpp-httplib would never time out
@@ -242,6 +251,16 @@ class HttpServer {
   void AdoptSharedComponents(SharedComponents components);
 
   const cache::CacheManager* GetCacheManagerForTesting() const { return cache_manager_; }
+
+  /**
+   * @brief Render an `Error` into a response exactly as a rejected request does.
+   *
+   * Exposed so the two surfaces can be compared for the same `Error` object
+   * without needing a route whose failure happens to carry a context string.
+   */
+  static void SendErrorForTesting(httplib::Response& res, int status_code, const mygram::utils::Error& error) {
+    SendError(res, status_code, error);
+  }
 
   /**
    * @brief Get total requests handled.
@@ -553,6 +572,10 @@ class HttpServer {
 
   /**
    * @brief Handle GET /{table}/:primary_key
+   *
+   * The primary key is everything after the table segment, so a key containing
+   * `/` is reachable: cpp-httplib decodes `%2F` before routing and the route's
+   * key group is greedy.
    */
   void HandleGet(const httplib::Request& req, httplib::Response& res);
 
@@ -640,6 +663,14 @@ class HttpServer {
    */
   static void SendError(httplib::Response& res, int status_code, const std::string& message,
                         mygram::utils::ErrorCode code);
+
+  /**
+   * @brief Send an error response built from an `Error` object.
+   *
+   * The body carries the message plus the error's context, rendered by
+   * `ResponseFormatter::FormatErrorMessage` — the same helper the TCP frame
+   * uses — so one `Error` names the same cause on both surfaces.
+   */
   static void SendError(httplib::Response& res, int status_code, const mygram::utils::Error& error);
 
   /**

@@ -199,8 +199,10 @@ TEST_F(RateLimiterCleanupTest, ClearRemovesAllClients) {
  * @brief Test rate limiting still works correctly during cleanup
  */
 TEST_F(RateLimiterCleanupTest, RateLimitingWorksWithCleanup) {
-  // Create a limiter with small capacity for this specific test
-  RateLimiter small_limiter(10, 1, 100, std::chrono::seconds(2), 2);
+  // Small token capacity, but room for more tracked clients than the churn
+  // below produces: this test is about token accounting surviving unrelated
+  // traffic, not about what happens when the client table fills up.
+  RateLimiter small_limiter(10, 1, 200, std::chrono::seconds(2), 2);
   std::string client_ip = "192.168.1.50";
 
   // Exhaust the bucket (capacity=10)

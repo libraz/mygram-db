@@ -8,8 +8,14 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <future>
+#include <limits>
+#include <string_view>
+#include <thread>
 
 #include "cache/cache_manager.h"
 #include "cache/cache_types.h"
@@ -883,4 +889,102 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsExposesThreadPoolSaturation
 
   release_promise.set_value();
   pool.Shutdown();
+}
+
+namespace {
+
+/// Sum the values of every `mygramdb_command_total{command="..."} N` series.
+uint64_t SumPrometheusCommandSeries(const std::string& metrics) {
+  constexpr std::string_view kPrefix = "mygramdb_command_total{";
+  uint64_t sum = 0;
+  for (size_t pos = metrics.find(kPrefix); pos != std::string::npos; pos = metrics.find(kPrefix, pos + 1)) {
+    const size_t value_start = metrics.find("} ", pos);
+    if (value_start == std::string::npos) {
+      continue;
+    }
+    sum += std::strtoull(metrics.c_str() + value_start + 2, nullptr, 10);
+  }
+  return sum;
+}
+
+/// Sum the values of every `cmd_<name>: N` line in an INFO response.
+uint64_t SumInfoCommandLines(const std::string& info) {
+  constexpr std::string_view kPrefix = "cmd_";
+  uint64_t sum = 0;
+  for (size_t pos = info.find(kPrefix); pos != std::string::npos; pos = info.find(kPrefix, pos + 1)) {
+    if (pos != 0 && info[pos - 1] != '\n') {
+      continue;
+    }
+    const size_t value_start = info.find(": ", pos);
+    if (value_start == std::string::npos) {
+      continue;
+    }
+    sum += std::strtoull(info.c_str() + value_start + 2, nullptr, 10);
+  }
+  return sum;
+}
+
+/// Read the number that follows @p label at the start of a line. Anchoring on
+/// the line start keeps a Prometheus `# HELP <name> ...` comment from being
+/// mistaken for the sample it documents.
+uint64_t ReadCounterAfterLine(const std::string& text, std::string_view label) {
+  for (size_t pos = text.find(label); pos != std::string::npos; pos = text.find(label, pos + 1)) {
+    if (pos != 0 && text[pos - 1] != '\n') {
+      continue;
+    }
+    return std::strtoull(text.c_str() + pos + label.size(), nullptr, 10);
+  }
+  return std::numeric_limits<uint64_t>::max();
+}
+
+}  // namespace
+
+/**
+ * @brief The reported total and the per-command breakdown come from one
+ *        snapshot, so they agree even while commands are being counted.
+ *
+ * Reading the counters a second time for the total lets it overshoot the sum
+ * of its parts, which shows up downstream as a phantom "other" bucket.
+ */
+TEST_F(ResponseFormatterTest, CommandTotalsAgreeWithBreakdownUnderConcurrentCounting) {
+  ServerStats stats;
+  const auto metrics = StatisticsService::AggregateMetrics(table_contexts_);
+
+  std::atomic<bool> stop{false};
+  std::thread counter([&stats, &stop]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      stats.IncrementCommand(query::QueryType::SEARCH);
+      stats.IncrementCommand(query::QueryType::COUNT);
+      stats.IncrementCommand(query::QueryType::GET);
+    }
+  });
+
+  // Failures are recorded rather than asserted inside the loop: an assertion
+  // that leaves the scope early would abandon the counting thread.
+  std::string prometheus_mismatch;
+  std::string info_mismatch;
+  for (int iteration = 0; iteration < 2000 && prometheus_mismatch.empty() && info_mismatch.empty(); ++iteration) {
+    const std::string prometheus = ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, nullptr);
+    const uint64_t reported_total = ReadCounterAfterLine(prometheus, "mygramdb_server_commands_total ");
+    const uint64_t series_sum = SumPrometheusCommandSeries(prometheus);
+    if (reported_total != series_sum) {
+      prometheus_mismatch = "mygramdb_server_commands_total " + std::to_string(reported_total) + " vs series sum " +
+                            std::to_string(series_sum);
+    }
+
+    const std::string info = ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, nullptr, nullptr);
+    const uint64_t info_total = ReadCounterAfterLine(info, "total_commands_processed: ");
+    const uint64_t info_sum = SumInfoCommandLines(info);
+    if (info_total != info_sum) {
+      info_mismatch =
+          "total_commands_processed " + std::to_string(info_total) + " vs Commandstats sum " + std::to_string(info_sum);
+    }
+  }
+
+  stop.store(true, std::memory_order_relaxed);
+  counter.join();
+
+  EXPECT_TRUE(prometheus_mismatch.empty())
+      << "/metrics total disagrees with the sum of its own series: " << prometheus_mismatch;
+  EXPECT_TRUE(info_mismatch.empty()) << "INFO total disagrees with its own Commandstats block: " << info_mismatch;
 }

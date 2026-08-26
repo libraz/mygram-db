@@ -8,6 +8,7 @@
 #include "server/snapshot_scheduler.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
@@ -72,8 +73,13 @@ void CreateDummyDmpFile(const std::filesystem::path& dir, const std::string& fil
 class SnapshotSchedulerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Create temporary directory for tests
-    test_dir_ = std::filesystem::temp_directory_path() / "snapshot_scheduler_test";
+    // A directory of this case's own. ctest runs the cases in this suite as
+    // separate processes and in parallel, so a shared path lets one case's
+    // TearDown delete the directory another is still listing.
+    const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    test_dir_ = std::filesystem::temp_directory_path() /
+                ("snapshot_scheduler_test_" + std::string(info->name()) + "_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(test_dir_);
     std::filesystem::create_directories(test_dir_);
 
     // Create table context

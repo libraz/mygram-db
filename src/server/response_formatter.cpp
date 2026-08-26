@@ -488,17 +488,19 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
   oss << "readiness: " << (ready ? "ready" : "not_ready") << "\r\n";
   oss << "\r\n";
 
-  // Stats - Command counters
+  // Stats - Command counters. One snapshot feeds both the totals here and the
+  // per-command breakdown below; reading the counters twice lets the total
+  // exceed the sum of its parts within a single INFO response.
+  auto cmd_stats = stats.GetStatistics();
   oss << "# Stats\r\n";
-  oss << "total_commands_processed: " << stats.GetTotalCommands() << "\r\n";
-  oss << "total_connections_received: " << stats.GetStatistics().total_connections_received << "\r\n";
-  oss << "total_requests: " << stats.GetTotalRequests() << "\r\n";
+  oss << "total_commands_processed: " << cmd_stats.total_commands_processed << "\r\n";
+  oss << "total_connections_received: " << cmd_stats.total_connections_received << "\r\n";
+  oss << "total_requests: " << cmd_stats.total_requests << "\r\n";
   oss << "text_normalization_failures: " << mygram::utils::GetTextNormalizationFailureCount() << "\r\n";
   oss << "\r\n";
 
   // Command counters
   oss << "# Commandstats\r\n";
-  auto cmd_stats = stats.GetStatistics();
   if (cmd_stats.cmd_search > 0) {
     oss << "cmd_search: " << cmd_stats.cmd_search << "\r\n";
   }
@@ -764,11 +766,14 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
   oss << "mygramdb_server_uptime_seconds " << stats.GetUptimeSeconds() << "\n";
   oss << "\n";
 
-  // Total commands processed
+  // Total commands processed. The total and the per-command breakdown below
+  // must come from this one snapshot: reading the counters twice lets the
+  // total exceed the sum of its parts under load, which makes a
+  // "other = total - sum(known)" panel show a phantom bucket.
   auto cmd_stats = stats.GetStatistics();
   oss << "# HELP mygramdb_server_commands_total Total number of commands processed\n";
   oss << "# TYPE mygramdb_server_commands_total counter\n";
-  oss << "mygramdb_server_commands_total " << stats.GetTotalCommands() << "\n";
+  oss << "mygramdb_server_commands_total " << cmd_stats.total_commands_processed << "\n";
   oss << "\n";
 
   oss << "# HELP mygramdb_text_normalization_failures_total Total failed text normalization operations\n";
@@ -1224,14 +1229,18 @@ std::string ResponseFormatter::FormatError(std::string_view message, mygram::uti
   return result;
 }
 
-std::string ResponseFormatter::FormatError(const mygram::utils::Error& error) {
+std::string ResponseFormatter::FormatErrorMessage(const mygram::utils::Error& error) {
   std::string message = error.message();
   if (!error.context().empty()) {
     message += " (context: ";
     message += error.context();
     message += ')';
   }
-  return FormatError(message, error.code());
+  return message;
+}
+
+std::string ResponseFormatter::FormatError(const mygram::utils::Error& error) {
+  return FormatError(FormatErrorMessage(error), error.code());
 }
 
 std::string ResponseFormatter::FormatOk(std::string_view body) {

@@ -158,25 +158,37 @@ bool ReactorConnection::OnReadable() {
     ssize_t n = ::recv(fd_, chunk.data(), chunk.size(), 0);
     if (n > 0) {
       received_bytes += static_cast<size_t>(n);
-      if (!AppendReadBytes(chunk.data(), static_cast<size_t>(n), enqueued)) {
-        bool frame_queue_overflow = false;
+      const ReadAppendStatus append_status = AppendReadBytes(chunk.data(), static_cast<size_t>(n), enqueued);
+      if (append_status != ReadAppendStatus::kOk) {
         size_t read_buffer_size = 0;
         {
           std::lock_guard<std::mutex> lock(frame_mutex_);
-          frame_queue_overflow = frame_queue_overflow_;
           read_buffer_size = read_buf_.size();
         }
+        // Each rejection keeps its own event name and wire error: an operator
+        // reading the log, and a client branching on the numeric code, must
+        // both be able to tell a payload problem from a multiplexer fault.
+        const char* overflow_event = "reactor_read_buf_overflow";
+        std::string_view wire_message = "request too large";
+        mygram::utils::ErrorCode wire_code = mygram::utils::ErrorCode::kNetworkInvalidRequest;
+        if (append_status == ReadAppendStatus::kFrameQueueOverflow) {
+          overflow_event = "reactor_pending_frames_overflow";
+          wire_message = "server busy";
+          wire_code = mygram::utils::ErrorCode::kServerBusy;
+        } else if (append_status == ReadAppendStatus::kInterestUpdateFailed) {
+          overflow_event = "reactor_read_interest_update_failed";
+          wire_message = "event multiplexer modify failed";
+          wire_code = mygram::utils::ErrorCode::kNetworkReactorModifyFailed;
+        }
         mygram::utils::StructuredLog()
-            .Event(frame_queue_overflow ? "reactor_pending_frames_overflow" : "reactor_read_buf_overflow")
+            .Event(overflow_event)
             .Field("fd", static_cast<int64_t>(fd_))
             .Field("buf_bytes", static_cast<uint64_t>(read_buffer_size))
             .Field("cap_bytes", static_cast<uint64_t>(kMaxReadBufferBytes))
             .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
             .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
             .Warn();
-        (void)TrySendErrorIfWriteQueueEmpty(frame_queue_overflow ? "server busy" : "request too large",
-                                            frame_queue_overflow ? mygram::utils::ErrorCode::kServerBusy
-                                                                 : mygram::utils::ErrorCode::kNetworkInvalidRequest);
+        (void)TrySendErrorIfWriteQueueEmpty(wire_message, wire_code);
         closing_.store(true, std::memory_order_release);
         return false;
       }
@@ -305,8 +317,24 @@ bool ReactorConnection::OnWritable() {
   // Fully drained: disarm kWritable so the event loop stops spinning on
   // this fd. If we had never actually armed (edge case — OnWritable fired
   // spuriously), skip the disarm call.
+  //
+  // Clear write_armed_ only when the disarm reached the multiplexer. Clearing
+  // it after a failure would leave the kernel holding writable interest that
+  // nothing will ever retract: OnWritable would then fire every loop
+  // iteration, find an empty queue, and skip the disarm because the guard
+  // above already reads false. Treat the failure as fatal for this connection,
+  // matching the ArmWrite / SetReadEnabled paths.
   if (write_armed_ && reactor_ != nullptr) {
-    (void)reactor_->DisarmWrite(fd_, this);
+    auto disarm_result = reactor_->DisarmWrite(fd_, this);
+    if (!disarm_result) {
+      mygram::utils::StructuredLog()
+          .Event("reactor_disarm_write_failed")
+          .Field("fd", static_cast<int64_t>(fd_))
+          .Field("error", disarm_result.error().to_string())
+          .Warn();
+      closing_.store(true, std::memory_order_release);
+      return false;
+    }
     write_armed_ = false;
   }
 
@@ -337,13 +365,13 @@ bool ReactorConnection::OnError() {
   return false;
 }
 
-bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& enqueued) {
+ReactorConnection::ReadAppendStatus ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& enqueued) {
   // The drain worker may call ExtractFramesLocked() while read_paused_. Keep
   // the insert, capacity check, accounting, and extraction in one critical
   // section so vector reallocation cannot race its data()/swap operations.
   std::lock_guard<std::mutex> lock(frame_mutex_);
   if (len > read_buf_.max_size() - read_buf_.size()) {
-    return false;
+    return ReadAppendStatus::kReadBufferOverflow;
   }
   if (memory_budget_ != nullptr && !memory_budget_->TryReserve(len)) {
     frame_queue_overflow_ = true;
@@ -355,7 +383,7 @@ bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& en
         .Field("used_bytes", static_cast<uint64_t>(memory_budget_->UsedBytes()))
         .Field("cap_bytes", static_cast<uint64_t>(memory_budget_->LimitBytes()))
         .Warn();
-    return false;
+    return ReadAppendStatus::kFrameQueueOverflow;
   }
   auto read_reservation_guard = mygram::utils::ScopeGuard([this, len]() {
     if (memory_budget_ != nullptr) {
@@ -379,10 +407,23 @@ bool ReactorConnection::AppendReadBytes(const char* data, size_t len, size_t& en
     }
   }
 
+  // A failed interest update is an engine-layer fault, not a property of the
+  // bytes just received; report it ahead of the request-shaped conditions so
+  // the caller never attributes a syscall failure to the peer's payload.
+  if (!interest_update_ok) {
+    return ReadAppendStatus::kInterestUpdateFailed;
+  }
+  if (frame_queue_overflow_) {
+    return ReadAppendStatus::kFrameQueueOverflow;
+  }
+
   // Hard cap on the unframed tail only. Completed CRLF-delimited frames are
   // moved to pending_frames_ above before this check, so a valid pipelined
   // burst larger than 1 MiB is not mistaken for one oversized request.
-  return interest_update_ok && !frame_queue_overflow_ && read_buf_.size() <= kMaxReadBufferBytes;
+  if (read_buf_.size() > kMaxReadBufferBytes) {
+    return ReadAppendStatus::kReadBufferOverflow;
+  }
+  return ReadAppendStatus::kOk;
 }
 
 bool ReactorConnection::ShouldSendReadOverflowError() {

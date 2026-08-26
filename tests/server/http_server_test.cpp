@@ -480,5 +480,50 @@ TEST_F(HttpServerStartupTest, FromConfigIgnoresNonPositiveTimeouts) {
   EXPECT_EQ(hc.write_timeout_sec, config::defaults::kHttpTimeoutSec);
 }
 
+/**
+ * @brief `api.http.max_body_bytes: 0` reaches HttpServer as the no-limit
+ *        sentinel rather than being read as an unset key.
+ *
+ * The configuration layer already substitutes the 16 MiB default for an absent
+ * key, so a 0 arriving at FromConfig is always deliberate.
+ */
+TEST_F(HttpServerStartupTest, FromConfigPropagatesUnlimitedBodySentinel) {
+  config::Config cfg;
+  cfg.api.http.max_body_bytes = 0;
+  EXPECT_EQ(HttpServerConfig::FromConfig(cfg).max_body_bytes, 0U);
+
+  cfg.api.http.max_body_bytes = 4096;
+  EXPECT_EQ(HttpServerConfig::FromConfig(cfg).max_body_bytes, 4096U);
+
+  config::Config defaults;
+  EXPECT_EQ(HttpServerConfig::FromConfig(defaults).max_body_bytes, defaults::kHttpDefaultMaxBodyBytes);
+}
+
+/**
+ * @brief With the no-limit sentinel configured, a body past the 16 MiB default
+ *        is not rejected with 413.
+ */
+TEST_F(HttpServerStartupTest, UnlimitedBodySentinelAcceptsOversizedPayload) {
+  auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
+  cfg.max_body_bytes = 0;
+
+  HttpServer server(cfg, table_contexts_, config_.get());
+  ASSERT_TRUE(server.Start().has_value());
+
+  httplib::Client client("127.0.0.1", cfg.port);
+  client.set_read_timeout(30, 0);
+  client.set_write_timeout(30, 0);
+
+  std::string padding(defaults::kHttpDefaultMaxBodyBytes + 1024, 'x');
+  const std::string body = R"({"q":")" + padding + R"("})";
+
+  auto res = client.Post("/tables/test/search", body, "application/json");
+  ASSERT_TRUE(res) << "POST failed at the network layer";
+  EXPECT_NE(res->status, 413) << "no-limit sentinel still enforced a payload cap";
+
+  server.Stop();
+}
+
 }  // namespace server
 }  // namespace mygramdb

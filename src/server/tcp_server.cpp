@@ -403,12 +403,13 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Stop() {
   // Step 3: tear down the network stack.
   //
   // Stop the IoReactor BEFORE the acceptor. Rationale: `ConnectionAcceptor::Stop`
-  // eagerly close(2)s every fd in its active_fds_ set — which includes the
-  // reactor-owned client fds, since the reactor's close_callback removes them
-  // only when the connection terminates naturally. If the acceptor ran first,
-  // it would close fds the reactor still owns, and drain tasks would then hit
-  // EBADF mid-send. Stopping the reactor first gives it the chance to drain
-  // and release its fds via Unregister → close_callback → active_fds_.erase.
+  // clears its active_fds_ set without closing the fds — they belong to the
+  // reactor-owned ReactorConnection objects, and the acceptor learns of a close
+  // only via the reactor's close_callback when the connection terminates. If
+  // the acceptor ran first, every still-open client fd would be dropped from
+  // the only set that tracks it and leak. Stopping the reactor first gives it
+  // the chance to drain and release its fds via Unregister → close_callback →
+  // active_fds_.erase, leaving nothing for the acceptor to forget.
   //
   // While the reactor is stopping, the acceptor may still accept a stray
   // connection and hand it to reactor_handler_; the handler's Register call

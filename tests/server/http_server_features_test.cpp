@@ -24,6 +24,7 @@
 #include "server/server_stats.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
+#include "support/network_test_utils.h"
 #include "version.h"
 
 using json = nlohmann::json;
@@ -32,33 +33,6 @@ namespace mygramdb {
 namespace server {
 
 namespace {
-
-uint16_t FindAvailableLoopbackPort() {
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) {
-    return 0;
-  }
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = htons(0);
-
-  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    ::close(fd);
-    return 0;
-  }
-
-  sockaddr_in actual_addr{};
-  socklen_t addr_len = sizeof(actual_addr);
-  if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual_addr), &addr_len) != 0) {
-    ::close(fd);
-    return 0;
-  }
-
-  ::close(fd);
-  return ntohs(actual_addr.sin_port);
-}
 
 std::string LoopbackUrl(uint16_t port) {
   return "http://127.0.0.1:" + std::to_string(port);
@@ -169,7 +143,7 @@ class HttpServerTest : public ::testing::Test {
 
     table_contexts_["test"] = &table_context_;
 
-    port_ = FindAvailableLoopbackPort();
+    port_ = testing::FindAvailableLoopbackPort();
     ASSERT_GT(port_, 0);
 
     // Create config
@@ -219,7 +193,7 @@ class HttpServerTest : public ::testing::Test {
 
 TEST_F(HttpServerTest, CORSHeaders) {
   // Create a separate server with CORS enabled
-  uint16_t cors_port = FindAvailableLoopbackPort();
+  uint16_t cors_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(cors_port, 0);
   HttpServerConfig cors_config;
   cors_config.bind = "127.0.0.1";
@@ -244,7 +218,7 @@ TEST_F(HttpServerTest, CORSHeaders) {
 
 TEST_F(HttpServerTest, CORSPreflight) {
   // Create a separate server with CORS enabled
-  uint16_t cors_port = FindAvailableLoopbackPort();
+  uint16_t cors_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(cors_port, 0);
   HttpServerConfig cors_config;
   cors_config.bind = "127.0.0.1";
@@ -359,7 +333,7 @@ TEST_F(HttpServerTest, ReplicationStatusIncludesTcpParityFields) {
   reader.last_applied_unixtime = 1722840000;
   reader.seconds_since_last_applied = 42;
 
-  uint16_t replication_port = FindAvailableLoopbackPort();
+  uint16_t replication_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(replication_port, 0);
   HttpServerConfig replication_config;
   replication_config.bind = "127.0.0.1";
@@ -615,7 +589,7 @@ class HttpServerMultiTableTest : public ::testing::Test {
     table_contexts_["table1"] = &table_context1_;
     table_contexts_["table2"] = &table_context2_;
 
-    port_ = FindAvailableLoopbackPort();
+    port_ = testing::FindAvailableLoopbackPort();
     ASSERT_GT(port_, 0);
 
     // Create config
@@ -847,7 +821,7 @@ class HttpServerKanjiTest : public ::testing::Test {
 
     table_contexts_["test_kanji"] = &table_context_;
 
-    port_ = FindAvailableLoopbackPort();
+    port_ = testing::FindAvailableLoopbackPort();
     ASSERT_GT(port_, 0);
 
     // Create config
@@ -946,7 +920,7 @@ TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
   full_config.api.max_query_length = 10000;
 
   // Start TCP server
-  const uint16_t tcp_port = FindAvailableLoopbackPort();
+  const uint16_t tcp_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(tcp_port, 0);
   ServerConfig tcp_config;
   tcp_config.host = "127.0.0.1";
@@ -969,7 +943,7 @@ TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
   }
 
   // Start HTTP server WITH tcp_stats pointer
-  const uint16_t http_port = FindAvailableLoopbackPort();
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -1090,7 +1064,7 @@ TEST(HttpServerRegressionTest, NonAlphanumericTableNames) {
   ctx3.index->AddDocument(*doc_id3, "japanese table");
   table_contexts["テーブル"] = &ctx3;
 
-  const uint16_t http_port = FindAvailableLoopbackPort();
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -1154,7 +1128,7 @@ TEST(HttpServerRegressionTest, AllFilterOperators) {
   }
   table_contexts["test"] = &ctx;
 
-  const uint16_t http_port = FindAvailableLoopbackPort();
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -1299,7 +1273,7 @@ TEST(HttpServerRegressionTest, UnsignedFilterLargeValues) {
 
   table_contexts["test"] = &ctx;
 
-  const uint16_t http_port = FindAvailableLoopbackPort();
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -1397,7 +1371,7 @@ TEST(HttpServerPointerSafetyTest, TableWithoutIndexOrDocStoreIsRejected) {
   incomplete.config.ngram_size = 1;
   table_contexts["incomplete"] = &incomplete;
 
-  const uint16_t http_port = FindAvailableLoopbackPort();
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -1463,7 +1437,7 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementHttpOnlyStatsWhenNoTcpStats) {
   full_config.api.default_limit = 100;
   full_config.api.max_query_length = 10000;
 
-  const uint16_t http_port = FindAvailableLoopbackPort();
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -1537,7 +1511,7 @@ TEST(HttpServerStatsTest, HttpHandlersIncrementTcpStatsWhenProvided) {
   ServerStats tcp_stats;
   uint64_t tcp_baseline = tcp_stats.GetTotalRequests();
 
-  const uint16_t http_port = FindAvailableLoopbackPort();
+  const uint16_t http_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(http_port, 0);
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
@@ -1603,7 +1577,7 @@ TEST(HttpServerStatsTest, GetCommandStatsCountRoutedRequests) {
   full_config.api.default_limit = 100;
   full_config.api.max_query_length = 10000;
 
-  const uint16_t port = FindAvailableLoopbackPort();
+  const uint16_t port = testing::FindAvailableLoopbackPort();
   ASSERT_NE(port, 0);
 
   HttpServerConfig http_config;

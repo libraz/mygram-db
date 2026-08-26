@@ -57,6 +57,10 @@ Expected<void, Error> MockEventMultiplexer::Add(int fd, uint8_t interest, Regist
 
 Expected<void, Error> MockEventMultiplexer::Modify(int fd, uint8_t interest, RegistrationToken registration_token) {
   std::unique_lock<std::mutex> lock(mu_);
+  if (modify_should_fail_) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNetworkReactorModifyFailed, "MockEventMultiplexer::Modify: forced failure for test"));
+  }
   auto it = interest_.find(fd);
   if (it == interest_.end()) {
     return MakeUnexpected(
@@ -197,6 +201,11 @@ void MockEventMultiplexer::Shutdown() {
 void MockEventMultiplexer::SetAddShouldFail(bool should_fail) {
   std::unique_lock<std::mutex> lock(mu_);
   add_should_fail_ = should_fail;
+}
+
+void MockEventMultiplexer::SetModifyShouldFail(bool should_fail) {
+  std::unique_lock<std::mutex> lock(mu_);
+  modify_should_fail_ = should_fail;
 }
 
 }  // namespace mygramdb::server::reactor

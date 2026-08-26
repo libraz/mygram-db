@@ -207,21 +207,46 @@ TEST_F(RateLimiterTest, Statistics) {
 }
 
 /**
- * @brief Test max clients limit
+ * @brief max_clients caps memory, so a full table evicts rather than denies.
+ *
+ * A client with no bucket has consumed no tokens; denying it would report
+ * "rate limit exceeded" for a condition it had no part in.
  */
-TEST_F(RateLimiterTest, MaxClientsLimit) {
+TEST_F(RateLimiterTest, MaxClientsEvictsLeastRecentlySeenInsteadOfDenying) {
   RateLimiter limiter(10, 10, 3);  // Max 3 clients
 
-  // Create 3 clients
   EXPECT_TRUE(limiter.AllowRequest("192.168.1.1"));
   EXPECT_TRUE(limiter.AllowRequest("192.168.1.2"));
   EXPECT_TRUE(limiter.AllowRequest("192.168.1.3"));
 
-  // 4th client should be rejected
-  EXPECT_FALSE(limiter.AllowRequest("192.168.1.4"));
+  // Touch .1 so .2 becomes the least recently seen bucket.
+  EXPECT_TRUE(limiter.AllowRequest("192.168.1.1"));
+
+  EXPECT_TRUE(limiter.AllowRequest("192.168.1.4")) << "a client that consumed no tokens must not be rate limited";
 
   auto stats = limiter.GetStats();
-  EXPECT_EQ(stats.tracked_clients, 3);
+  EXPECT_EQ(stats.tracked_clients, 3U) << "the table must still be bounded by max_clients";
+  EXPECT_EQ(stats.evicted_clients, 1U);
+  EXPECT_EQ(stats.blocked_requests, 0U) << "eviction is not a rate-limit denial";
+}
+
+/**
+ * @brief The evicted bucket is the least recently seen one, not an arbitrary
+ *        entry: an active client keeps its consumed-token state across the
+ *        arrival of a new one.
+ */
+TEST_F(RateLimiterTest, EvictionPreservesTheMostRecentlyActiveBucket) {
+  RateLimiter limiter(/*capacity=*/2, /*refill_rate=*/0, /*max_clients=*/2);
+
+  EXPECT_TRUE(limiter.AllowRequest("10.0.0.1"));
+  EXPECT_TRUE(limiter.AllowRequest("10.0.0.2"));
+  EXPECT_TRUE(limiter.AllowRequest("10.0.0.1"));  // 10.0.0.1 now has 0 tokens left
+
+  // Admitting a third client evicts 10.0.0.2, the least recently seen.
+  EXPECT_TRUE(limiter.AllowRequest("10.0.0.3"));
+
+  // 10.0.0.1 is still tracked and still out of tokens.
+  EXPECT_FALSE(limiter.AllowRequest("10.0.0.1"));
 }
 
 /**

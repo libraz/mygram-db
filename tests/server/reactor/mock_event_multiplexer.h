@@ -112,6 +112,14 @@ class MockEventMultiplexer final : public EventMultiplexer {
    */
   void SetAddShouldFail(bool should_fail);
 
+  /**
+   * @brief Force Modify() to return kNetworkReactorModifyFailed until cleared.
+   *
+   * Toggleable at any point so a test can let the initial arm succeed and then
+   * fail the interest update that follows it.
+   */
+  void SetModifyShouldFail(bool should_fail);
+
  private:
   mutable std::mutex mu_;
   std::condition_variable poll_cv_;
@@ -119,6 +127,7 @@ class MockEventMultiplexer final : public EventMultiplexer {
   bool opened_{false};
   bool shutdown_{false};
   bool add_should_fail_{false};
+  bool modify_should_fail_{false};
   /// One-shot Wake() flag. Cleared by Poll() once consumed so subsequent
   /// blocking Polls revert to normal cv-wait behaviour.
   bool wake_pending_{false};

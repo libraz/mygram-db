@@ -444,6 +444,95 @@ TEST_F(IoReactorTest, ReadAndWriteInterestUpdatesDoNotClobberEachOther) {
   EXPECT_EQ(mock->InterestFor(client_fd) & kWritable, 0U);
 }
 
+namespace {
+
+/// Drain everything currently buffered on @p fd. Returns the byte count.
+size_t DrainReadable(int fd) {
+  size_t total = 0;
+  std::vector<char> buf(64 * 1024);
+  while (true) {
+    const ssize_t n = ::recv(fd, buf.data(), buf.size(), MSG_DONTWAIT);
+    if (n <= 0) {
+      return total;
+    }
+    total += static_cast<size_t>(n);
+  }
+}
+
+}  // namespace
+
+TEST_F(IoReactorTest, FailedWriteDisarmKeepsArmedFlagAndTearsDownConnection) {
+  auto* mock = StartWithMock();
+  SocketPair sp;
+  const int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(conn));
+
+  // Measure how much the socket absorbs before EAGAIN, then give it back, so
+  // the queued response is guaranteed to arm on enqueue and to fit entirely
+  // into the freed buffer on the single OnWritable below.
+  ::fcntl(sp.Peer(), F_SETFL, ::fcntl(sp.Peer(), F_GETFL, 0) | O_NONBLOCK);
+  std::string filler(64 * 1024, 'F');
+  size_t capacity = 0;
+  while (true) {
+    const ssize_t n = ::send(client_fd, filler.data(), filler.size(), 0);
+    if (n <= 0) {
+      break;
+    }
+    capacity += static_cast<size_t>(n);
+  }
+  ASSERT_GT(capacity, 1024U);
+  ASSERT_EQ(DrainReadable(sp.Peer()), capacity);
+
+  ASSERT_TRUE(conn->EnqueueResponse(std::string(capacity + 1024, 'A')));
+  ASSERT_TRUE(conn->WriteArmedForTest()) << "response did not arm writable interest";
+  ASSERT_GT(conn->WriteQueueDepthForTest(), 0U);
+  ASSERT_GT(DrainReadable(sp.Peer()), 0U);
+
+  // The queue now drains completely, so OnWritable reaches the disarm.
+  mock->SetModifyShouldFail(true);
+  EXPECT_FALSE(conn->OnWritable()) << "a rejected disarm must tear the connection down";
+  EXPECT_TRUE(conn->IsClosing());
+  EXPECT_EQ(conn->WriteQueueDepthForTest(), 0U);
+  EXPECT_TRUE(conn->WriteArmedForTest())
+      << "write_armed_ must keep mirroring the interest bit the multiplexer still holds";
+  EXPECT_NE(mock->InterestFor(client_fd) & kWritable, 0U);
+
+  mock->SetModifyShouldFail(false);
+}
+
+TEST_F(IoReactorTest, FailedReadInterestUpdateReportsMultiplexerErrorNotOversizedRequest) {
+  auto* mock = StartWithMock();
+  SocketPair sp;
+  const int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(conn));
+
+  // Enough frames to cross the pending-frame high watermark, which is what
+  // makes the read path ask the multiplexer to drop readable interest.
+  std::string frames;
+  frames.reserve(ReactorConnection::kPendingFramesHighWatermark * 3);
+  for (size_t i = 0; i < ReactorConnection::kPendingFramesHighWatermark; ++i) {
+    frames.append("x\r\n");
+  }
+  ASSERT_EQ(::send(sp.Peer(), frames.data(), frames.size(), 0), static_cast<ssize_t>(frames.size()));
+
+  mock->SetModifyShouldFail(true);
+  EXPECT_FALSE(conn->OnReadable());
+  EXPECT_TRUE(conn->IsClosing());
+
+  std::string received;
+  char buf[256]{};
+  const ssize_t n = ::recv(sp.Peer(), buf, sizeof(buf), 0);
+  ASSERT_GT(n, 0) << "expected an error frame before teardown";
+  received.assign(buf, static_cast<size_t>(n));
+  EXPECT_NE(received.find("ERROR 6019"), std::string::npos)
+      << "multiplexer failure reported as a request-validation error: " << received;
+  EXPECT_EQ(received.find("6007"), std::string::npos) << received;
+
+  mock->SetModifyShouldFail(false);
+}
+
 TEST_F(IoReactorTest, EofDisarmsReadBeforeBufferedWorkCompletes) {
   auto* mock = StartWithMock();
   SocketPair sp;

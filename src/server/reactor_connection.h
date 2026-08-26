@@ -120,6 +120,21 @@ class ReactorMemoryBudget {
  */
 class ReactorConnection : public std::enable_shared_from_this<ReactorConnection> {
  public:
+  /**
+   * @brief Outcome of appending one recv() chunk to the read buffer.
+   *
+   * The rejection cases are kept apart because they belong to different
+   * layers and must not be reported to the client under the same error code:
+   * two are request-shaped conditions the peer can act on, the third is an
+   * engine-layer syscall failure the peer cannot influence.
+   */
+  enum class ReadAppendStatus {
+    kOk,                    ///< Bytes buffered; framing may have advanced.
+    kReadBufferOverflow,    ///< Unframed tail exceeds `kMaxReadBufferBytes`.
+    kFrameQueueOverflow,    ///< Pending-frame caps or the shared read budget are exhausted.
+    kInterestUpdateFailed,  ///< The multiplexer rejected the backpressure interest update.
+  };
+
   /// Default read buffer reservation. Grows on demand up to kMaxReadBufferBytes.
   static constexpr size_t kDefaultReadBufferBytes = 4096;
 
@@ -227,6 +242,12 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    * true (or false if `closing_` was also set, so the reactor tears down
    * the fd). On partial drain, leave the queue armed and return true. On
    * fatal send error (EPIPE / ECONNRESET / etc.), return false.
+   *
+   * A failing `DisarmWrite` is also fatal: `write_armed_` mirrors the
+   * multiplexer's writable-interest bit for `fd_`, and clearing it while the
+   * multiplexer still holds the bit would spin the event loop on this fd
+   * forever. Every exit of this function preserves `write_armed_ == true` iff
+   * the multiplexer holds `kWritable` for `fd_`.
    */
   bool OnWritable();
 
@@ -311,7 +332,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   [[nodiscard]] const std::string& ClientIdentityForTest() const { return conn_ctx_.client_ip; }
 
   [[nodiscard]] bool AppendReadBytesForTest(std::string_view bytes, size_t& enqueued) {
-    return AppendReadBytes(bytes.data(), bytes.size(), enqueued);
+    return AppendReadBytes(bytes.data(), bytes.size(), enqueued) == ReadAppendStatus::kOk;
   }
 
   [[nodiscard]] size_t ReadBufferSizeForTest() const {
@@ -373,7 +394,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   bool EnqueueResponse(std::string response);
 
  private:
-  bool AppendReadBytes(const char* data, size_t len, size_t& enqueued);
+  ReadAppendStatus AppendReadBytes(const char* data, size_t len, size_t& enqueued);
   bool ShouldSendReadOverflowError();
   bool TrySendErrorIfWriteQueueEmpty(std::string_view message, mygram::utils::ErrorCode code,
                                      const std::function<void()>& under_lock_hook = {});

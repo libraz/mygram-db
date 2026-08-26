@@ -146,6 +146,27 @@ TEST_F(HttpServerTest, GetDocumentNotFound) {
   EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kNotFound));
 }
 
+TEST_F(HttpServerTest, GetDocumentWithSlashInPrimaryKey) {
+  storage::FilterMap filters;
+  filters["status"] = static_cast<int64_t>(1);
+  auto doc_id = doc_store_->AddDocument("catalog/shoes/42", filters);
+  ASSERT_TRUE(doc_id.has_value());
+
+  ASSERT_TRUE(http_server_->Start());
+
+  // The target is decoded once, before routing, so the escaped separators
+  // arrive at the route as literal slashes. A key that SEARCH can return must
+  // still be fetchable.
+  httplib::Client client("127.0.0.1", port_);
+  auto res = client.Get("/tables/test/catalog%2Fshoes%2F42");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["primary_key"], "catalog/shoes/42");
+}
+
 TEST_F(HttpServerTest, GetDocumentInvalidID) {
   ASSERT_TRUE(http_server_->Start());
 

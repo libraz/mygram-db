@@ -527,6 +527,21 @@ TEST_F(HttpTcpConsistencyTest, HttpRequestErrorsNameTheirCause) {
   }
 }
 
+TEST(HttpTcpErrorRenderingTest, BothSurfacesCarryTheErrorContext) {
+  const auto error = mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed,
+                                              "Failed to connect to MySQL", "db.internal:3306");
+
+  const std::string tcp_frame = ResponseFormatter::FormatError(error);
+  EXPECT_NE(tcp_frame.find("db.internal:3306"), std::string::npos) << tcp_frame;
+
+  httplib::Response res;
+  HttpServer::SendErrorForTesting(res, 503, error);
+  const auto body = json::parse(res.body);
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kMySQLConnectionFailed));
+  EXPECT_NE(body["error"].get<std::string>().find("db.internal:3306"), std::string::npos)
+      << "HTTP dropped the identifying detail the TCP frame carries: " << res.body;
+}
+
 TEST_F(HttpTcpConsistencyTest, HttpOptimizeValidatesPayloadAndAdminToken) {
   httplib::Client client("127.0.0.1", http_port_);
   httplib::Headers headers{{"Authorization", "Bearer maintenance-secret"}};

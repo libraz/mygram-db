@@ -106,9 +106,19 @@ class ConnectionAcceptor {
   mygram::utils::Expected<void, mygram::utils::Error> StartAccepting();
 
   /**
-   * @brief Stop accepting connections
+   * @brief Stop accepting connections.
    *
-   * Stops the accept loop and closes all active connections.
+   * Stops the accept loop, joins the accept thread and empties the active-fd
+   * set. It does **not** close the accepted sockets: once `reactor_handler_`
+   * has taken an fd, that fd is owned by the `ReactorConnection` holding it,
+   * which closes it in its destructor. Closing here would double-close against
+   * the reactor's teardown.
+   *
+   * Shutdown order is therefore mandatory: stop the reactor first, then the
+   * acceptor. Calling `Stop()` while reactor connections are still alive leaks
+   * every accepted fd, because nothing else tracks them once `active_fds_` is
+   * cleared. An embedder that installs a handler which does not transfer
+   * ownership of the fd owns the close itself.
    */
   void Stop();
 

@@ -23,6 +23,7 @@
 #include "server/http_server.h"
 #include "server/tcp_server.h"  // For TableContext definition
 #include "storage/document_store.h"
+#include "support/network_test_utils.h"
 #include "version.h"
 
 using json = nlohmann::json;
@@ -31,33 +32,6 @@ namespace mygramdb {
 namespace server {
 
 namespace {
-
-uint16_t FindAvailableLoopbackPort() {
-  int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) {
-    return 0;
-  }
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = htons(0);
-
-  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    ::close(fd);
-    return 0;
-  }
-
-  sockaddr_in actual_addr{};
-  socklen_t addr_len = sizeof(actual_addr);
-  if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual_addr), &addr_len) != 0) {
-    ::close(fd);
-    return 0;
-  }
-
-  ::close(fd);
-  return ntohs(actual_addr.sin_port);
-}
 
 uint16_t FindAvailableIpv6LoopbackPort() {
   int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
@@ -124,7 +98,7 @@ class HttpServerTest : public ::testing::Test {
     doc_store_ = table_context_.doc_store.get();
 
     table_contexts_["test"] = &table_context_;
-    port_ = FindAvailableLoopbackPort();
+    port_ = testing::FindAvailableLoopbackPort();
     ASSERT_GT(port_, 0);
 
     // Create config
@@ -353,7 +327,7 @@ TEST_F(HttpServerTest, InfoEndpointExposesAccountedCacheMemoryAndRejectionReason
 
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";
-  http_config.port = FindAvailableLoopbackPort();
+  http_config.port = testing::FindAvailableLoopbackPort();
   ASSERT_NE(http_config.port, 0);
   http_config.allow_cidrs = {"127.0.0.1/32"};
   http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, &cache_manager);
@@ -400,7 +374,7 @@ TEST_F(HttpServerTest, ConfigEndpoint) {
 }
 
 TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
-  uint16_t port = FindAvailableLoopbackPort();
+  uint16_t port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(port, 0);
 
   HttpServerConfig restricted_config;
@@ -440,7 +414,7 @@ TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
 
 TEST_F(HttpServerTest, EmptyAndInvalidAclFailClosedForAllEndpoints) {
   for (const auto& cidrs : std::vector<std::vector<std::string>>{{}, {"not-a-cidr", "999.1.2.3/24"}}) {
-    uint16_t port = FindAvailableLoopbackPort();
+    uint16_t port = testing::FindAvailableLoopbackPort();
     ASSERT_GT(port, 0);
 
     HttpServerConfig restricted_config;
@@ -504,7 +478,7 @@ TEST_F(HttpServerTest, MultipleRequests) {
  */
 TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   std::atomic<bool> loading_flag{false};
-  const uint16_t loading_port = FindAvailableLoopbackPort();
+  const uint16_t loading_port = testing::FindAvailableLoopbackPort();
   ASSERT_GT(loading_port, 0);
 
   // Create HTTP server with loading flag

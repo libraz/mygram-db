@@ -30,26 +30,38 @@ namespace mygramdb::server::reactor {
 /**
  * @brief `EventMultiplexer` implementation backed by Linux `epoll(7)`.
  *
+ * Shared state: `tokens_by_fd_` and `fds_by_token_` form the registration
+ * table, guarded by `registration_mutex_`. The table exists for the stale-fd
+ * guard, not for interest bookkeeping: `epoll_ctl(EPOLL_CTL_MOD)` already
+ * accepts the full desired mask, so no user-space interest mask is kept.
+ * A closed fd can be reused by the kernel for a new connection while events
+ * for the old one are still in flight, so every registration carries a
+ * `RegistrationToken` that the caller supplies and that this backend stores in
+ * `epoll_event::data.u64`:
+ *  - `Modify` rejects a token that does not match the fd's current
+ *    registration with `kNetworkReactorModifyFailed`, so a late interest
+ *    update cannot retarget a recycled fd.
+ *  - `Poll` resolves each event's token back to an fd and drops events whose
+ *    token is no longer in the table, so an event queued before `Remove` is
+ *    never delivered against the successor registration.
+ *  - `Remove` erases both maps even when `epoll_ctl(DEL)` fails; a retained
+ *    entry would make a later fd reuse look registered.
+ *
  * Thread-safety:
  *  - `Add`, `Modify`, and `Remove` are safe to call concurrently from
- *    multiple threads because each one is a single `epoll_ctl` syscall,
- *    which is documented as MT-safe. Unlike the kqueue backend, this
- *    implementation keeps no per-fd interest map in user space — `epoll_ctl`
- *    accepts `EPOLL_CTL_MOD` directly with the desired mask — so there is
- *    nothing to guard with a user-space mutex.
- *  - `Poll` is **event-loop thread only**. The `events_` scratch buffer
- *    is written without locking and IoReactor guarantees that `Poll()` is
- *    only ever invoked from its single `EventLoop()` thread (sequenced
- *    behind the reactor's `mux_lifecycle_` shared lock that publishes /
- *    republishes the multiplexer pointer). It is not legal to call `Poll`
- *    concurrently from two threads even though the epoll fd itself would
- *    tolerate it.
- *
- *  Note: unlike `KqueueMultiplexer`, this backend does not need an
- *  internal mutex because there is no shared in-process state to guard.
- *  `epoll_ctl` is unaffected because it operates on a single fd
- *  per call; the multi-record race that motivates kqueue's serialised
- *  ApplyInterest does not apply here.
+ *    multiple threads. `registration_mutex_` is held across both the
+ *    `epoll_ctl` syscall and the map update, so the table and the kernel's
+ *    interest list cannot disagree about which registration owns an fd. Any
+ *    method added here that touches either map must take the same lock; the
+ *    only exception is the test hook below, which is called from a single
+ *    thread with no concurrent `Poll()`.
+ *  - `Poll` is **event-loop thread only**. It takes `registration_mutex_`
+ *    only for the token lookups; the `events_` scratch buffer is written
+ *    without locking, and IoReactor guarantees that `Poll()` is only ever
+ *    invoked from its single `EventLoop()` thread (sequenced behind the
+ *    reactor's `mux_lifecycle_` shared lock that publishes / republishes the
+ *    multiplexer pointer). It is not legal to call `Poll` concurrently from
+ *    two threads even though the epoll fd itself would tolerate it.
  */
 class EpollMultiplexer : public EventMultiplexer {
  public:

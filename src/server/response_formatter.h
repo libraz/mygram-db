@@ -179,6 +179,19 @@ class ResponseFormatter {
   static std::string FormatError(const mygram::utils::Error& error);
 
   /**
+   * @brief Render the human-readable half of an `Error` for either surface.
+   *
+   * Returns the message with the context appended when one is set. TCP frames
+   * and HTTP error bodies both go through this, so the same `Error` names the
+   * same cause on both; the numeric code is carried separately by each
+   * surface's own envelope.
+   *
+   * @param error Error to render
+   * @return Message text, with " (context: ...)" appended when non-empty
+   */
+  static std::string FormatErrorMessage(const mygram::utils::Error& error);
+
+  /**
    * @brief Format a simple "+OK" status reply (Redis-style).
    *
    * Produces `"+OK"` when @p body is empty, or `"+OK <body>"` otherwise.

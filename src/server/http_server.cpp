@@ -494,9 +494,12 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   // POST bodies with 413 Payload Too Large before any handler runs, which
   // protects /search and /count from memory-exhaustion attacks via giant
   // JSON payloads. Default 16 MiB; configurable via api.http.max_body_bytes.
-  if (config_.max_body_bytes > 0) {
-    server_->set_payload_max_length(config_.max_body_bytes);
-  }
+  //
+  // 0 means no limit, and the call still has to happen: leaving the cap unset
+  // does not lift it, it falls back to cpp-httplib's compiled-in ceiling, so
+  // the request would keep getting a 413 the operator asked us not to send.
+  server_->set_payload_max_length(config_.max_body_bytes > 0 ? config_.max_body_bytes
+                                                             : std::numeric_limits<size_t>::max());
 
   // Setup network ACL before registering routes
   SetupAccessControl();
@@ -558,6 +561,13 @@ const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServ
   // cannot shadow /info, /health/*, /config, /metrics or /replication/status,
   // but it does shadow the /tables/{identity}/search family and therefore
   // must stay last.
+  //
+  // Its primary-key group is greedy (`(.+)`) rather than slash-free. cpp-httplib
+  // percent-decodes the target once, before routing, so a `%2F` in the key is
+  // already a literal `/` by the time the pattern is applied; a slash-free group
+  // would 404 every primary key that contains one — paths, URLs, hierarchical
+  // SKUs — even though SEARCH returns those keys and TCP GET resolves them.
+  // Greediness is safe here because no other GET route lives under /tables/.
   static const std::array<RouteDescriptor, kRouteCount> kRoutes = {{
       {Method::kPost, R"(/tables/([^/]+)/search)", false, true, true, &HttpServer::HandleSearch},
       {Method::kPost, R"(/tables/([^/]+)/count)", false, true, true, &HttpServer::HandleCount},
@@ -571,7 +581,7 @@ const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServ
       {Method::kGet, "/replication/status", true, true, true, &HttpServer::HandleReplicationStatus},
       {Method::kPost, "/optimize", true, true, true, &HttpServer::HandleOptimize},
       {Method::kGet, "/metrics", false, true, true, &HttpServer::HandleMetrics},
-      {Method::kGet, R"(/tables/([^/]+)/([^/]+))", false, true, true, &HttpServer::HandleGet},
+      {Method::kGet, R"(/tables/([^/]+)/(.+))", false, true, true, &HttpServer::HandleGet},
   }};
   return kRoutes;
 }
@@ -2022,7 +2032,9 @@ void HttpServer::SendError(httplib::Response& res, int status_code, const std::s
 }
 
 void HttpServer::SendError(httplib::Response& res, int status_code, const mygram::utils::Error& error) {
-  SendError(res, status_code, error.message(), error.code());
+  // Render through the same helper the TCP formatter uses, so one Error object
+  // names the same cause (GTID, table, host:port) on both surfaces.
+  SendError(res, status_code, ResponseFormatter::FormatErrorMessage(error), error.code());
 }
 
 }  // namespace mygramdb::server

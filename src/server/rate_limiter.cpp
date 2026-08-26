@@ -128,24 +128,33 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
   // Get or create bucket for this client
   auto bucket_iter = client_buckets_.find(client_ip);
   if (bucket_iter == client_buckets_.end()) {
-    // Check if we've reached max_clients limit
-    if (client_buckets_.size() >= max_clients_) {
-      // Enforce hard limit: reject new clients
-      blocked_requests_.fetch_add(1, std::memory_order_relaxed);
-      const auto decision = denial_log_limiter_.Record("max-clients:" + client_ip);
+    // max_clients_ bounds memory, not admission. A client with no bucket has
+    // consumed no tokens, so denying it here would report "rate limit
+    // exceeded" for a condition the client had no part in. Make room by
+    // dropping the least-recently-seen bucket instead; that client is either
+    // gone or will simply be re-tracked with a fresh allowance on its next
+    // request, which is what the periodic sweep would have done anyway.
+    while (client_buckets_.size() >= max_clients_ && !lru_order_.empty()) {
+      client_buckets_.erase(lru_order_.back());
+      lru_order_.pop_back();
+      evicted_clients_.fetch_add(1, std::memory_order_relaxed);
+      const auto decision = denial_log_limiter_.Record("rate-limiter-evict");
       if (decision.should_log) {
         mygram::utils::StructuredLog()
-            .Event("rate_limiter_max_clients")
+            .Event("rate_limiter_client_evicted")
             .Field("max_clients", static_cast<uint64_t>(max_clients_))
             .Field("client_ip", client_ip)
             .Field("suppressed_since_last_log", decision.suppressed_count)
             .Warn();
       }
-      return false;
     }
 
     // Create new bucket for this client
     bucket_iter = client_buckets_.try_emplace(client_ip, capacity_, refill_rate_).first;
+    lru_order_.push_front(client_ip);
+    bucket_iter->second.lru_position = lru_order_.begin();
+  } else {
+    lru_order_.splice(lru_order_.begin(), lru_order_, bucket_iter->second.lru_position);
   }
 
   // Update last access time
@@ -172,6 +181,7 @@ void RateLimiter::SweepExpiredBuckets() {
 
   for (auto it = client_buckets_.begin(); it != client_buckets_.end();) {
     if (now - it->second.last_access > inactivity_timeout_) {
+      lru_order_.erase(it->second.lru_position);
       it = client_buckets_.erase(it);
       removed++;
     } else {
@@ -219,7 +229,8 @@ RateLimiter::Stats RateLimiter::GetStats() const {
   return Stats{.total_requests = allowed + blocked,
                .allowed_requests = allowed,
                .blocked_requests = blocked,
-               .tracked_clients = tracked};
+               .tracked_clients = tracked,
+               .evicted_clients = evicted_clients_.load(std::memory_order_relaxed)};
 }
 
 void RateLimiter::ResetStats() {
@@ -243,6 +254,7 @@ void RateLimiter::ResetStats() {
 void RateLimiter::Clear() {
   std::lock_guard<std::mutex> lock(mutex_);
   client_buckets_.clear();
+  lru_order_.clear();
 }
 
 void RateLimiter::UpdateParameters(size_t capacity, size_t refill_rate) {
