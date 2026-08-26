@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <zlib.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -211,6 +212,26 @@ void WriteFileBytes(const std::string& filepath, const std::vector<char>& file_d
   EXPECT_TRUE(output);
   output.write(file_data.data(), static_cast<std::streamsize>(file_data.size()));
   EXPECT_TRUE(output.good());
+}
+
+/**
+ * @brief Offset of a bool config field within the serialized config section.
+ *
+ * The two configurations must differ in exactly one bool field, which shows up
+ * as the single differing byte between their serializations.
+ */
+size_t FindSerializedConfigBoolOffset(const Config& with_false, const Config& with_true) {
+  std::ostringstream false_stream;
+  std::ostringstream true_stream;
+  EXPECT_TRUE(dump_v1::SerializeConfig(false_stream, with_false).has_value());
+  EXPECT_TRUE(dump_v1::SerializeConfig(true_stream, with_true).has_value());
+  const std::string false_data = false_stream.str();
+  const std::string true_data = true_stream.str();
+  EXPECT_EQ(false_data.size(), true_data.size());
+
+  const auto mismatch = std::mismatch(false_data.begin(), false_data.end(), true_data.begin());
+  EXPECT_NE(mismatch.first, false_data.end()) << "configs serialize identically";
+  return static_cast<size_t>(mismatch.first - false_data.begin());
 }
 
 void RewriteFileCrc(std::vector<char>& file_data) {
@@ -2083,6 +2104,104 @@ TEST(DumpFormatV2Test, SharedFdStreambufHandlesEveryEightKiBBoundaryForV1AndV2) 
     ASSERT_TRUE(doc_id.has_value());
     EXPECT_EQ(loaded_store.GetNormalizedText(*doc_id), std::optional<std::string>(payload));
   }
+}
+
+TEST(DumpFormatV2Test, ConfigBoolFieldAcceptsAnyNonZeroByte) {
+  const auto filepath = TempFilePath("config_bool_byte");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  cfg.memory.normalize.lower = false;
+  Config flipped = cfg;
+  flipped.memory.normalize.lower = true;
+  const size_t bool_offset = FindSerializedConfigBoolOffset(cfg, flipped);
+
+  Index source_index(2, 1);
+  ASSERT_TRUE(source_index.AddDocument(1, "article text"));
+  DocumentStore source_store;
+  ASSERT_TRUE(source_store.AddDocument("article", {}, "article text").has_value());
+  WriteManualV2Dump(filepath, cfg,
+                    {BuildTableSectionData("articles", SerializeIndex(source_index), SerializeDocStore(source_store))});
+
+  std::ostringstream config_stream;
+  ASSERT_TRUE(dump_v1::SerializeConfig(config_stream, cfg).has_value());
+  const std::string config_data = config_stream.str();
+
+  auto file_data = ReadFileBytes(filepath);
+  const auto config_start = std::search(file_data.begin(), file_data.end(), config_data.begin(), config_data.end());
+  ASSERT_NE(config_start, file_data.end());
+  const auto config_offset = static_cast<size_t>(config_start - file_data.begin());
+
+  // A dump produced elsewhere can carry any byte in a bool field. Two is not a
+  // value this process would ever write.
+  file_data[config_offset + bool_offset] = static_cast<char>(0x02);
+
+  // Section envelope: type(4) + crc32(4) + data_length(8) precede the data.
+  const size_t section_crc_offset = config_offset - 16 + 4;
+  const auto section_crc = static_cast<uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(&file_data[config_offset]), static_cast<uInt>(config_data.size())));
+  std::memcpy(&file_data[section_crc_offset], &section_crc, sizeof(section_crc));
+  RewriteFileCrc(file_data);
+  WriteFileBytes(filepath, file_data);
+
+  Index loaded_index;
+  DocumentStore loaded_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts{
+      {"articles", {&loaded_index, &loaded_store}}};
+  std::string read_gtid;
+  Config read_config;
+
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+
+  ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+  EXPECT_TRUE(read_config.memory.normalize.lower);
+}
+
+TEST(DumpFormatV2Test, ConfigBoolFieldSurvivesATruncatedSection) {
+  const auto filepath = TempFilePath("config_bool_truncated");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  cfg.memory.normalize.lower = false;
+  Config flipped = cfg;
+  flipped.memory.normalize.lower = true;
+  const size_t bool_offset = FindSerializedConfigBoolOffset(cfg, flipped);
+
+  std::ostringstream config_stream;
+  ASSERT_TRUE(dump_v1::SerializeConfig(config_stream, cfg).has_value());
+  std::string config_data = config_stream.str();
+  // Cut the section one byte into the bool so the read runs out of input while
+  // that field is the destination.
+  config_data.resize(bool_offset);
+
+  std::ofstream out(filepath, std::ios::binary);
+  ASSERT_TRUE(out);
+  out.write(dump_format::kMagicNumber.data(), static_cast<std::streamsize>(dump_format::kMagicNumber.size()));
+  auto version = static_cast<uint32_t>(dump_format::FormatVersion::V2);
+  ASSERT_TRUE(WriteBinary(out, version));
+  HeaderV2 header;
+  header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + 4 + header.gtid.size());
+  header.flags = dump_format::flags_v2::kWithCRC;
+  header.dump_timestamp = 1700000000;
+  header.section_count = 1;
+  ASSERT_TRUE(WriteHeaderV2(out, header).has_value());
+  ASSERT_TRUE(WriteSectionEnvelope(out, dump_format::SectionType::kConfig, config_data).has_value());
+  out.close();
+
+  auto file_data = ReadFileBytes(filepath);
+  const auto total_size = static_cast<uint64_t>(file_data.size());
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderTotalFileSizeOffset)], &total_size, sizeof(total_size));
+  RewriteFileCrc(file_data);
+  WriteFileBytes(filepath, file_data);
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts;
+  std::string read_gtid;
+  Config read_config;
+
+  auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts);
+
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kStorageDumpReadError, read_result.error().code());
 }
 
 TEST(DumpFormatV2Test, BoundedDecodeStreamTracksSectionCrcWithoutASeparatePass) {

@@ -61,6 +61,11 @@ inline bool WriteBinary(std::ostream& output_stream, const T& value) {
  * All multi-byte integers are stored in little-endian format for
  * cross-platform compatibility.
  *
+ * The stream may hold anything, so bytes are never placed straight into the
+ * destination when not every byte pattern is a valid value of the type: a
+ * `bool` is read as one octet and narrowed. On a short read the destination
+ * keeps the value it had on entry, so it stays readable either way.
+ *
  * @tparam T Type of data to read (must be trivially copyable)
  * @param input_stream Input stream to read from
  * @param value Reference to store the read value
@@ -70,20 +75,34 @@ template <typename T>
 inline bool ReadBinary(std::istream& input_stream, T& value) {
   static_assert(std::is_trivially_copyable_v<T>, "ReadBinary requires trivially copyable type");
 
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-  input_stream.read(reinterpret_cast<char*>(&value), sizeof(T));
-  if (!input_stream.good()) {
-    return false;
-  }
+  if constexpr (std::is_same_v<T, bool>) {
+    uint8_t raw_byte = 0;
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    input_stream.read(reinterpret_cast<char*>(&raw_byte), sizeof(raw_byte));
+    if (!input_stream.good()) {
+      return false;
+    }
+    value = raw_byte != 0;
+    return true;
+  } else {
+    T raw_value{};
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    input_stream.read(reinterpret_cast<char*>(&raw_value), sizeof(T));
+    if (!input_stream.good()) {
+      return false;
+    }
 
-  if constexpr (std::is_same_v<T, double>) {
-    value = FromLittleEndianDouble(value);
-  } else if constexpr (std::is_integral_v<T>) {
-    value = FromLittleEndian(value);
-  }
-  // For non-integral types (e.g., structs), keep as-is
+    if constexpr (std::is_same_v<T, double>) {
+      value = FromLittleEndianDouble(raw_value);
+    } else if constexpr (std::is_integral_v<T>) {
+      value = FromLittleEndian(raw_value);
+    } else {
+      // For non-integral types (e.g., structs), keep as-is
+      value = raw_value;
+    }
 
-  return true;
+    return true;
+  }
 }
 
 /**

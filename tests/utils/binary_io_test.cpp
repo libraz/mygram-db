@@ -101,6 +101,37 @@ TEST(BinaryIOTest, ReadStringOversizedLengthReturnsFalse) {
   EXPECT_FALSE(ReadString(ss, result));
 }
 
+TEST(BinaryIOTest, WriteThenReadBool) {
+  std::stringstream ss;
+  bool value = true;
+  ASSERT_TRUE(WriteBinary(ss, value));
+
+  bool result = false;
+  ASSERT_TRUE(ReadBinary(ss, result));
+  EXPECT_TRUE(result);
+}
+
+TEST(BinaryIOTest, ReadBoolNarrowsAnyNonZeroByteToTrue) {
+  // A dump written by anything other than this process can carry any byte in a
+  // bool field. Every such byte has to land in the destination as a valid bool.
+  for (int byte = 0; byte <= 0xFF; ++byte) {
+    std::stringstream ss;
+    ss.put(static_cast<char>(byte));
+
+    bool result = false;
+    ASSERT_TRUE(ReadBinary(ss, result)) << "byte " << byte;
+    EXPECT_EQ(byte != 0, result) << "byte " << byte;
+  }
+}
+
+TEST(BinaryIOTest, ReadBoolLeavesDestinationUntouchedOnShortRead) {
+  std::stringstream ss;
+
+  bool result = true;
+  EXPECT_FALSE(ReadBinary(ss, result));
+  EXPECT_TRUE(result);
+}
+
 TEST(BinaryIOTest, WriteThenReadDouble) {
   std::stringstream ss;
   double value = 3.14159265358979;
