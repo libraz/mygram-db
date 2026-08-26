@@ -10,7 +10,6 @@
 #include <iterator>
 
 #include "cache/cache_manager.h"
-#include "index/bm25_scorer.h"
 #include "query/highlighter.h"
 #include "query/result_sorter.h"
 #include "query/synonym_dictionary.h"
@@ -393,71 +392,22 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
 
   // BM25 scoring: compute scores if SORT _score is requested
   if (is_score_sort) {
-    // Validate BM25 is enabled
-    if (ctx_.full_config == nullptr || !ctx_.full_config->bm25.enable) {
-      return ResponseFormatter::FormatError("SORT _score requires BM25 to be enabled in configuration",
-                                            mygram::utils::ErrorCode::kQueryInvalidSort);
-    }
-    if (output.current_doc_store == nullptr || !output.current_doc_store->IsStoreTextsEnabled()) {
-      return ResponseFormatter::FormatError(
-          "SORT _score requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
-          "configuration.",
-          mygram::utils::ErrorCode::kNotImplemented);
-    }
+    search_pipeline::RelevanceSortParams score_params;
+    score_params.index = output.current_index;
+    score_params.doc_store = output.current_doc_store;
+    score_params.full_config = ctx_.full_config;
+    score_params.bm25_stats = output.table_context != nullptr ? &output.table_context->bm25_stats : nullptr;
+    score_params.ngram_size = output.current_ngram_size;
+    score_params.kanji_ngram_size = output.current_kanji_ngram_size;
+    score_params.cross_boundary_ngrams = output.current_cross_boundary;
 
-    const auto& bm25_config = ctx_.full_config->bm25;
-    if (output.table_context == nullptr) {
-      return ResponseFormatter::FormatError("table not found", mygram::utils::ErrorCode::kTableNotFound);
-    }
-    const auto& bm25_stats = output.table_context->bm25_stats;
-
-    index::BM25Params params{bm25_config.k1, bm25_config.b};
-
-    // Regenerate term_infos if empty (e.g., cache hit path skips GenerateTermInfos)
-    const bool needs_term_doc_freq =
-        std::any_of(output.term_infos.begin(), output.term_infos.end(),
-                    [](const auto& term_info) { return !term_info.term_doc_freq_computed; });
-    if ((output.term_infos.empty() || needs_term_doc_freq) && !output.all_search_terms.empty() &&
-        output.current_index != nullptr) {
-      output.term_infos =
-          search_pipeline::GenerateTermInfos(output.all_search_terms, output.current_index, output.current_ngram_size,
-                                             output.current_kanji_ngram_size, output.current_cross_boundary,
-                                             /*compute_term_doc_freq=*/true, output.current_doc_store);
-    }
-
-    // Reuse pre-computed term_infos (already normalized and ngram-generated)
-    std::vector<std::string> normalized_terms;
-    std::vector<uint64_t> term_dfs;
-    normalized_terms.reserve(output.term_infos.size());
-    term_dfs.reserve(output.term_infos.size());
-    for (size_t i = 0; i < output.term_infos.size(); ++i) {
-      const auto& ti = output.term_infos[i];
-      if (!ti.normalized_term.empty()) {
-        normalized_terms.push_back(ti.normalized_term);
-      } else if (i < output.all_search_terms.size()) {
-        normalized_terms.push_back(output.current_index->NormalizeText(output.all_search_terms[i]));
-      }
-      term_dfs.push_back(ti.term_doc_freq);
-    }
-
-    auto scored = index::BM25Scorer::ScoreDocuments(
-        output.results, normalized_terms, term_dfs, *output.current_doc_store,
-        bm25_stats.doc_count.load(std::memory_order_relaxed), bm25_stats.avg_doc_length(), params);
-    if (!scored) {
-      return ResponseFormatter::FormatError(scored.error());
-    }
-
-    // Extract scores parallel to results
-    std::vector<double> scores;
-    scores.reserve(scored->size());
-    for (const auto& sd : *scored) {
-      scores.push_back(sd.score);
-    }
-
-    auto sort_order = effective_query.order_by->order;
-    auto sorted_results = query::ResultSorter::SortByScore(output.results, scores, sort_order, effective_query.limit,
-                                                           effective_query.offset);
     size_t score_total = output.results.size();
+    auto scored_results = search_pipeline::ScoreAndSortByRelevance(
+        effective_query, output.results, output.all_search_terms, output.term_infos, score_params);
+    if (!scored_results) {
+      return ResponseFormatter::FormatError(scored_results.error());
+    }
+    auto sorted_results = std::move(scored_results.value());
 
     if (effective_query.highlight.has_value()) {
       auto snippets = GenerateHighlightSnippets(effective_query, output, sorted_results);

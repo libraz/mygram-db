@@ -19,7 +19,6 @@
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
-#include "index/bm25_scorer.h"
 #include "query/highlighter.h"
 #include "query/query_parser.h"
 #include "query/result_sorter.h"
@@ -430,13 +429,17 @@ Expected<void, Error> ParseSortFromJson(const json& sort_json, query::Query& que
   if (!sort_json.is_object()) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort' must be an object"));
   }
-  if (!sort_json.contains("column") || !sort_json["column"].is_string()) {
-    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort.column' must be a string"));
-  }
-
-  std::string column = sort_json["column"].get<std::string>();
-  if (column != "_score" && column != "id" && !query::QueryParser::IsSafeColumnName(column)) {
-    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort column"));
+  // An omitted column orders by the primary key, mirroring the TCP shorthand
+  // `SORT ASC` / `SORT DESC`. A named column is resolved as the client wrote it.
+  std::string column;
+  if (sort_json.contains("column")) {
+    if (!sort_json["column"].is_string()) {
+      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort.column' must be a string"));
+    }
+    column = sort_json["column"].get<std::string>();
+    if (column != "_score" && !query::QueryParser::IsSafeColumnName(column)) {
+      return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort column"));
+    }
   }
 
   query::SortOrder order = query::SortOrder::DESC;
@@ -454,9 +457,6 @@ Expected<void, Error> ParseSortFromJson(const json& sort_json, query::Query& que
     }
   }
 
-  if (column == "id") {
-    column.clear();  // Query AST convention: empty column means primary key.
-  }
   query.order_by = query::OrderByClause{std::move(column), order};
   return {};
 }
@@ -539,67 +539,22 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortH
     std::vector<storage::DocId>& results, const query::Query& query, TableContext& table_ctx,
     search_pipeline::FullPipelineOutput& pipeline_output, const config::Config* full_config,
     const std::string& primary_key_column) {
-  using mygram::utils::ErrorCode;
-  using mygram::utils::MakeError;
-  using mygram::utils::MakeUnexpected;
-
   const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
   if (!is_score_sort) {
     return query::ResultSorter::SortAndPaginate(results, *table_ctx.doc_store, query, primary_key_column);
   }
 
-  if (full_config == nullptr || !full_config->bm25.enable) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kInvalidArgument, "SORT _score requires BM25 to be enabled in configuration"));
-  }
-  if (table_ctx.index == nullptr || table_ctx.doc_store == nullptr) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Table is not available"));
-  }
-  if (!table_ctx.doc_store->IsStoreTextsEnabled()) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kInvalidArgument,
-                  "SORT _score requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
-                  "configuration."));
-  }
+  search_pipeline::RelevanceSortParams score_params;
+  score_params.index = table_ctx.index.get();
+  score_params.doc_store = table_ctx.doc_store.get();
+  score_params.full_config = full_config;
+  score_params.bm25_stats = &table_ctx.bm25_stats;
+  score_params.ngram_size = table_ctx.config.ngram_size;
+  score_params.kanji_ngram_size = table_ctx.config.kanji_ngram_size;
+  score_params.cross_boundary_ngrams = table_ctx.config.cross_boundary_ngrams;
 
-  const bool needs_term_doc_freq = std::any_of(pipeline_output.term_infos.begin(), pipeline_output.term_infos.end(),
-                                               [](const auto& term_info) { return !term_info.term_doc_freq_computed; });
-  if ((pipeline_output.term_infos.empty() || needs_term_doc_freq) && !pipeline_output.all_search_terms.empty()) {
-    pipeline_output.term_infos = search_pipeline::GenerateTermInfos(
-        pipeline_output.all_search_terms, table_ctx.index.get(), table_ctx.config.ngram_size,
-        table_ctx.config.kanji_ngram_size, table_ctx.config.cross_boundary_ngrams,
-        /*compute_term_doc_freq=*/true, table_ctx.doc_store.get());
-  }
-
-  std::vector<std::string> normalized_terms;
-  std::vector<uint64_t> term_dfs;
-  normalized_terms.reserve(pipeline_output.term_infos.size());
-  term_dfs.reserve(pipeline_output.term_infos.size());
-  for (size_t i = 0; i < pipeline_output.term_infos.size(); ++i) {
-    const auto& term_info = pipeline_output.term_infos[i];
-    if (!term_info.normalized_term.empty()) {
-      normalized_terms.push_back(term_info.normalized_term);
-    } else if (i < pipeline_output.all_search_terms.size()) {
-      normalized_terms.push_back(table_ctx.index->NormalizeText(pipeline_output.all_search_terms[i]));
-    }
-    term_dfs.push_back(term_info.term_doc_freq);
-  }
-
-  const auto& bm25_config = full_config->bm25;
-  const index::BM25Params bm25_params{bm25_config.k1, bm25_config.b};
-  auto scored = index::BM25Scorer::ScoreDocuments(results, normalized_terms, term_dfs, *table_ctx.doc_store,
-                                                  table_ctx.bm25_stats.doc_count.load(std::memory_order_relaxed),
-                                                  table_ctx.bm25_stats.avg_doc_length(), bm25_params);
-  if (!scored) {
-    return MakeUnexpected(scored.error());
-  }
-
-  std::vector<double> scores;
-  scores.reserve(scored->size());
-  for (const auto& scored_doc : *scored) {
-    scores.push_back(scored_doc.score);
-  }
-  return query::ResultSorter::SortByScore(results, scores, query.order_by->order, query.limit, query.offset);
+  return search_pipeline::ScoreAndSortByRelevance(query, results, pipeline_output.all_search_terms,
+                                                  pipeline_output.term_infos, score_params);
 }
 
 }  // namespace
@@ -635,24 +590,6 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
     default_limit_.store(full_config_->api.default_limit, std::memory_order_release);
     max_query_length_.store(configured_limit <= 0 ? 0 : static_cast<size_t>(configured_limit),
                             std::memory_order_release);
-
-    // Rate limiter resolution:
-    //   - If the embedder injected a shared instance (ServerLifecycleManager
-    //     does this so quotas apply across TCP+HTTP), use it.
-    //   - Otherwise fall back to constructing a private one from config so
-    //     standalone HttpServer instances (and unit tests that pre-date the
-    //     shared rate limiter wiring) still rate-limit.
-    if (!rate_limiter_ && full_config_->api.rate_limiting.enable) {
-      rate_limiter_ = std::make_shared<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
-                                                    static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
-                                                    static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
-      mygram::utils::StructuredLog()
-          .Event("http_rate_limiter_initialized")
-          .Field("capacity", static_cast<uint64_t>(full_config_->api.rate_limiting.capacity))
-          .Field("refill_rate", static_cast<uint64_t>(full_config_->api.rate_limiting.refill_rate))
-          .Field("max_clients", static_cast<uint64_t>(full_config_->api.rate_limiting.max_clients))
-          .Info();
-    }
   }
 
   server_ = std::make_unique<httplib::Server>();
@@ -701,6 +638,36 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
 
 HttpServer::~HttpServer() {
   Stop();
+}
+
+void HttpServer::AdoptSharedComponents(SharedComponents components) {
+  tcp_stats_ = components.stats;
+  cache_manager_ = components.cache_manager;
+  thread_pool_ = components.thread_pool;
+  rate_limiter_ = std::move(components.rate_limiter);
+  loading_ = components.dump_load_in_progress;
+  replication_paused_for_dump_ = components.replication_paused_for_dump;
+  sync_manager_ = components.sync_manager;
+  table_syncing_checker_ = std::move(components.table_syncing_checker);
+  any_syncing_checker_ = std::move(components.any_syncing_checker);
+  initial_data_ready_checker_ = std::move(components.initial_data_ready_checker);
+  optimize_callback_ = std::move(components.optimize_callback);
+  components_adopted_ = true;
+}
+
+void HttpServer::EnsureStandaloneRateLimiter() {
+  if (components_adopted_ || rate_limiter_ || full_config_ == nullptr || !full_config_->api.rate_limiting.enable) {
+    return;
+  }
+  rate_limiter_ = std::make_shared<RateLimiter>(static_cast<size_t>(full_config_->api.rate_limiting.capacity),
+                                                static_cast<size_t>(full_config_->api.rate_limiting.refill_rate),
+                                                static_cast<size_t>(full_config_->api.rate_limiting.max_clients));
+  mygram::utils::StructuredLog()
+      .Event("http_standalone_rate_limiter_initialized")
+      .Field("capacity", static_cast<uint64_t>(full_config_->api.rate_limiting.capacity))
+      .Field("refill_rate", static_cast<uint64_t>(full_config_->api.rate_limiting.refill_rate))
+      .Field("max_clients", static_cast<uint64_t>(full_config_->api.rate_limiting.max_clients))
+      .Info();
 }
 
 const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServer::Routes() {
@@ -840,6 +807,8 @@ mygram::utils::Expected<void, mygram::utils::Error> HttpServer::Start() {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
+
+  EnsureStandaloneRateLimiter();
 
   std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
   lifecycle_cv_.wait(lifecycle_lock, [this]() { return lifecycle_state_ != LifecycleState::kStopping; });
@@ -1218,15 +1187,8 @@ bool HttpServer::ValidateHttpQueryText(const std::string& query_text, httplib::R
     return false;
   }
 
-  const auto max_query_length = max_query_length_.load(std::memory_order_acquire);
-  if (max_query_length > 0 && query_text.size() > max_query_length) {
-    SendError(res, kHttpBadRequest,
-              "Query text length (" + std::to_string(query_text.size()) + ") exceeds maximum allowed length of " +
-                  std::to_string(max_query_length) +
-                  " characters. Increase api.max_query_length to permit longer queries.",
-              mygram::utils::ErrorCode::kQueryTooLong);
-    return false;
-  }
+  // Length is checked once, on the assembled query expression, exactly as the
+  // TCP surface checks it.
   return true;
 }
 

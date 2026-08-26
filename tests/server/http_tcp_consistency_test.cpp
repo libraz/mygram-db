@@ -137,6 +137,69 @@ void SortPrimaryKeys(std::vector<std::string>& primary_keys) {
   std::sort(primary_keys.begin(), primary_keys.end());
 }
 
+std::string RepeatUtf8(std::string_view character, size_t count) {
+  std::string text;
+  text.reserve(character.size() * count);
+  for (size_t i = 0; i < count; ++i) {
+    text.append(character);
+  }
+  return text;
+}
+
+// Bring up a TCP and an HTTP server over one shared set of table contexts.
+// Returns false when either server fails to bind.
+bool StartSurfacePair(const std::unordered_map<std::string, TableContext*>& table_contexts, config::Config& config,
+                      std::unique_ptr<TcpServer>& tcp_server, std::unique_ptr<HttpServer>& http_server,
+                      uint16_t& tcp_port, uint16_t& http_port) {
+  ServerConfig tcp_config;
+  tcp_config.host = "127.0.0.1";
+  tcp_config.port = 0;
+  tcp_config.allow_cidrs = {"127.0.0.1/32"};
+  tcp_config.max_query_length = config.api.max_query_length;
+  tcp_server = std::make_unique<TcpServer>(tcp_config, table_contexts, "./dumps", &config);
+  if (!tcp_server->Start()) {
+    return false;
+  }
+  tcp_port = tcp_server->GetPort();
+
+  const uint16_t requested_http_port = testing::FindAvailableLoopbackPort();
+  if (requested_http_port == 0) {
+    return false;
+  }
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = requested_http_port;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+  http_server = std::make_unique<HttpServer>(http_config, table_contexts, &config, nullptr);
+  if (!http_server->Start()) {
+    return false;
+  }
+  http_port = http_server->GetPort();
+
+  // Allow servers to fully bind.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  return true;
+}
+
+void StopSurfacePair(TcpServer* tcp_server, HttpServer* http_server) {
+  if (tcp_server != nullptr && tcp_server->IsRunning()) {
+    tcp_server->Stop();
+  }
+  if (http_server != nullptr && http_server->IsRunning()) {
+    http_server->Stop();
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+
+std::vector<std::string> HttpSearchPrimaryKeys(const std::string& body) {
+  const json parsed = json::parse(body);
+  std::vector<std::string> primary_keys;
+  for (const auto& result : parsed["results"]) {
+    primary_keys.push_back(result["primary_key"].get<std::string>());
+  }
+  return primary_keys;
+}
+
 std::vector<std::pair<std::string, uint64_t>> ParseTcpFacetValues(const std::string& response) {
   std::istringstream stream(response);
   std::string header;
@@ -329,6 +392,34 @@ TEST_F(HttpTcpConsistencyTest, ErrorCodesMatchAcrossProtocols) {
   ASSERT_EQ(http_unauthorized->status, 401) << http_unauthorized->body;
   EXPECT_EQ(json::parse(http_unauthorized->body)["error_code"],
             static_cast<int>(mygram::utils::ErrorCode::kPermissionDenied));
+}
+
+TEST_F(HttpTcpConsistencyTest, ScoreSortRejectionCodesMatchAcrossProtocols) {
+  httplib::Client client("127.0.0.1", http_port_);
+  json request;
+  request["q"] = "machine";
+  request["sort"] = {{"column", "_score"}, {"order", "DESC"}};
+
+  // BM25 is disabled in this fixture's configuration.
+  const auto tcp_bm25_disabled = SendTcpRequest(tcp_port_, "SEARCH app.articles machine SORT _score DESC");
+  EXPECT_EQ(ParseTcpErrorCode(tcp_bm25_disabled), static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidSort))
+      << tcp_bm25_disabled;
+  auto http_bm25_disabled = client.Post("/tables/app.articles/search", request.dump(), "application/json");
+  ASSERT_TRUE(http_bm25_disabled);
+  EXPECT_EQ(json::parse(http_bm25_disabled->body)["error_code"],
+            static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidSort))
+      << http_bm25_disabled->body;
+
+  // With BM25 enabled, scoring still needs the stored normalized text.
+  config_->bm25.enable = true;
+  table_ctx_.doc_store->SetStoreTexts(false);
+
+  const auto tcp_no_text = SendTcpRequest(tcp_port_, "SEARCH app.articles machine SORT _score DESC");
+  EXPECT_EQ(ParseTcpErrorCode(tcp_no_text), static_cast<int>(mygram::utils::ErrorCode::kNotImplemented)) << tcp_no_text;
+  auto http_no_text = client.Post("/tables/app.articles/search", request.dump(), "application/json");
+  ASSERT_TRUE(http_no_text);
+  EXPECT_EQ(json::parse(http_no_text->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kNotImplemented))
+      << http_no_text->body;
 }
 
 TEST_F(HttpTcpConsistencyTest, HttpRequestErrorsNameTheirCause) {
@@ -796,6 +887,154 @@ TEST_F(HttpTcpConsistencyTest, NoMatchReturnsZeroOnBothPaths) {
 
   EXPECT_EQ(tcp_count, 0u);
   EXPECT_EQ(http_count, 0u);
+}
+
+// A table whose primary key is not called "id" while an ordinary column is.
+// Both surfaces must resolve the sort column the client named, and both must
+// offer the same shorthand for ordering by the primary key.
+class HttpTcpAlternatePrimaryKeyTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    mygramdb::test::SkipIfSocketCreationBlocked();
+
+    auto index = std::make_unique<index::Index>(2);
+    auto doc_store = std::make_unique<storage::DocumentStore>();
+
+    // The "id" column runs opposite to the primary key, so the two orderings
+    // are distinguishable.
+    for (const auto& [primary_key, id_value] :
+         std::vector<std::pair<std::string, std::string>>{{"article_1", "c"}, {"article_2", "b"}, {"article_3", "a"}}) {
+      storage::FilterMap filters;
+      filters["id"] = id_value;
+      auto doc_id = doc_store->AddDocument(primary_key, filters, "shared topic");
+      ASSERT_TRUE(doc_id.has_value());
+      index->AddDocument(*doc_id, "shared topic");
+    }
+
+    table_ctx_.name = "papers";
+    table_ctx_.config.name = "papers";
+    table_ctx_.config.database = "app";
+    table_ctx_.config.ngram_size = 2;
+    table_ctx_.config.primary_key = "article_id";
+    table_ctx_.index = std::move(index);
+    table_ctx_.doc_store = std::move(doc_store);
+    table_contexts_["app.papers"] = &table_ctx_;
+
+    config_ = std::make_unique<config::Config>();
+    config_->api.default_limit = 10;
+    config_->tables.push_back(table_ctx_.config);
+
+    ASSERT_TRUE(StartSurfacePair(table_contexts_, *config_, tcp_server_, http_server_, tcp_port_, http_port_));
+  }
+
+  void TearDown() override { StopSurfacePair(tcp_server_.get(), http_server_.get()); }
+
+  TableContext table_ctx_;
+  std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<config::Config> config_;
+  std::unique_ptr<TcpServer> tcp_server_;
+  std::unique_ptr<HttpServer> http_server_;
+  uint16_t tcp_port_ = 0;
+  uint16_t http_port_ = 0;
+};
+
+TEST_F(HttpTcpAlternatePrimaryKeyTest, NamedSortColumnResolvesIdenticallyOnBothSurfaces) {
+  const auto tcp_response = SendTcpRequest(tcp_port_, "SEARCH app.papers shared SORT id ASC LIMIT 10");
+  ASSERT_EQ(tcp_response.rfind("OK RESULTS", 0), 0U) << tcp_response;
+  const auto tcp_primary_keys = ParseTcpSearchPrimaryKeys(tcp_response);
+  ASSERT_EQ(tcp_primary_keys, (std::vector<std::string>{"article_3", "article_2", "article_1"})) << tcp_response;
+
+  httplib::Client client("127.0.0.1", http_port_);
+  const json request = {{"q", "shared"}, {"limit", 10}, {"sort", {{"column", "id"}, {"order", "asc"}}}};
+  auto http_response = client.Post("/tables/app.papers/search", request.dump(), "application/json");
+  ASSERT_TRUE(http_response);
+  ASSERT_EQ(http_response->status, 200) << http_response->body;
+  EXPECT_EQ(HttpSearchPrimaryKeys(http_response->body), tcp_primary_keys) << http_response->body;
+}
+
+TEST_F(HttpTcpAlternatePrimaryKeyTest, PrimaryKeyShorthandMatchesTheTcpForm) {
+  const auto tcp_response = SendTcpRequest(tcp_port_, "SEARCH app.papers shared SORT ASC LIMIT 10");
+  ASSERT_EQ(tcp_response.rfind("OK RESULTS", 0), 0U) << tcp_response;
+  const auto tcp_primary_keys = ParseTcpSearchPrimaryKeys(tcp_response);
+  ASSERT_EQ(tcp_primary_keys, (std::vector<std::string>{"article_1", "article_2", "article_3"})) << tcp_response;
+
+  httplib::Client client("127.0.0.1", http_port_);
+  const json request = {{"q", "shared"}, {"limit", 10}, {"sort", {{"order", "asc"}}}};
+  auto http_response = client.Post("/tables/app.papers/search", request.dump(), "application/json");
+  ASSERT_TRUE(http_response);
+  ASSERT_EQ(http_response->status, 200) << http_response->body;
+  EXPECT_EQ(HttpSearchPrimaryKeys(http_response->body), tcp_primary_keys) << http_response->body;
+}
+
+// api.max_query_length is documented in characters, so the same query must be
+// accepted or rejected identically whatever encoding it uses, on both surfaces.
+class HttpTcpQueryLengthTest : public ::testing::Test {
+ protected:
+  static constexpr int kMaxQueryLength = 128;
+
+  void SetUp() override {
+    mygramdb::test::SkipIfSocketCreationBlocked();
+
+    auto index = std::make_unique<index::Index>(2);
+    auto doc_store = std::make_unique<storage::DocumentStore>();
+    auto doc_id = doc_store->AddDocument("doc_1", {}, "machine learning models");
+    ASSERT_TRUE(doc_id.has_value());
+    index->AddDocument(*doc_id, "machine learning models");
+
+    table_ctx_.name = "articles";
+    table_ctx_.config.name = "articles";
+    table_ctx_.config.database = "app";
+    table_ctx_.config.ngram_size = 2;
+    table_ctx_.config.primary_key = "id";
+    table_ctx_.index = std::move(index);
+    table_ctx_.doc_store = std::move(doc_store);
+    table_contexts_["app.articles"] = &table_ctx_;
+
+    config_ = std::make_unique<config::Config>();
+    config_->api.default_limit = 10;
+    config_->api.max_query_length = kMaxQueryLength;
+    config_->tables.push_back(table_ctx_.config);
+
+    ASSERT_TRUE(StartSurfacePair(table_contexts_, *config_, tcp_server_, http_server_, tcp_port_, http_port_));
+  }
+
+  void TearDown() override { StopSurfacePair(tcp_server_.get(), http_server_.get()); }
+
+  TableContext table_ctx_;
+  std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<config::Config> config_;
+  std::unique_ptr<TcpServer> tcp_server_;
+  std::unique_ptr<HttpServer> http_server_;
+  uint16_t tcp_port_ = 0;
+  uint16_t http_port_ = 0;
+};
+
+TEST_F(HttpTcpQueryLengthTest, QueryLengthLimitCountsCharactersOnBothSurfaces) {
+  const std::string within_limit = RepeatUtf8("あ", kMaxQueryLength);
+  const std::string over_limit = RepeatUtf8("あ", kMaxQueryLength + 1);
+
+  httplib::Client client("127.0.0.1", http_port_);
+
+  const auto tcp_accepted = SendTcpRequest(tcp_port_, "SEARCH app.articles " + QuoteLiteral(within_limit));
+  EXPECT_EQ(tcp_accepted.rfind("OK RESULTS", 0), 0U) << tcp_accepted;
+  const json accepted_request = {{"q", within_limit}};
+  auto http_accepted = client.Post("/tables/app.articles/search", accepted_request.dump(), "application/json");
+  ASSERT_TRUE(http_accepted);
+  EXPECT_EQ(http_accepted->status, 200) << http_accepted->body;
+
+  const auto tcp_rejected = SendTcpRequest(tcp_port_, "SEARCH app.articles " + QuoteLiteral(over_limit));
+  EXPECT_EQ(ParseTcpErrorCode(tcp_rejected), static_cast<int>(mygram::utils::ErrorCode::kQueryTooLong)) << tcp_rejected;
+  const json rejected_request = {{"q", over_limit}};
+  auto http_rejected = client.Post("/tables/app.articles/search", rejected_request.dump(), "application/json");
+  ASSERT_TRUE(http_rejected);
+  const auto rejected_body = json::parse(http_rejected->body);
+  EXPECT_EQ(rejected_body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQueryTooLong))
+      << http_rejected->body;
+  // A single length check on each surface, reporting the assembled expression.
+  EXPECT_NE(rejected_body["error"].get<std::string>().find("Query expression length (" +
+                                                           std::to_string(kMaxQueryLength + 1) + ")"),
+            std::string::npos)
+      << http_rejected->body;
 }
 
 }  // namespace server

@@ -44,12 +44,12 @@ Full-text search. Request body must be a JSON object; `Content-Type` must be `ap
 
 | Field | Type | Required | Default | Validation |
 |---|---|---|---|---|
-| `q` | string | yes | — | Presence `src/server/http_server.cpp:1195-1198`; type `:1201-1204`; no `\r`, `\n`, `\0` `:1160-1166`; non-empty `:1167-1170`; length ≤ `api.max_query_length` when that is > 0 `:1172-1180` |
+| `q` | string | yes | — | Presence `src/server/http_server.cpp:1206-1209`; type `:1212-1215`; no `\r`, `\n`, `\0` `:1178-1184`; non-empty `:1185-1188`. Length is checked once, on the assembled expression (see *Query construction*) |
 | `mode` | string | no | `"literal"` | Must be `"literal"` or `"boolean"` (`src/server/http_server.cpp:137-152`) |
 | `limit` | integer | no | `api.default_limit` (`src/server/http_server.cpp:1115-1117`) | Must be an integer `:1082-1086`; `1 <= limit <= 1000` (`config::defaults::kMaxLimit`, `src/config/config.h:63`) `:1088-1093` |
 | `offset` | integer | no | `0` | Must be an integer `:1099-1103`; `0 <= offset <= 4294967295` `:1105-1110` |
 | `filters` | object | no | — | Must be an object `:1120-1123`; parsed by `ParseFiltersFromJson` `:309-360` |
-| `sort` | object | no | primary key DESC | `ParseSortFromJson` `:411-444` |
+| `sort` | object | no | primary key DESC | `ParseSortFromJson` `:428-462` |
 | `highlight` | object | no | — | `ParseHighlightFromJson` `:466-502` |
 | `fuzzy` | integer | no | — | Must be an integer `:505-507`; must be `1` or `2` `:509-511` |
 
@@ -71,14 +71,14 @@ Caps applied to `filters`:
 
 Non-string filter values are coerced to strings: integers via `std::to_string(int64_t)`, floats via `std::to_string(double)` (fixed six decimals), booleans to `"1"`/`"0"` (`src/server/http_server.cpp:177-191`). Because `filters` is a JSON object, at most one condition per column can be expressed.
 
-**`sort`** (`src/server/http_server.cpp:411-444`):
+**`sort`** (`src/server/http_server.cpp:428-462`):
 
 | Field | Type | Required | Validation |
 |---|---|---|---|
-| `column` | string | yes | `_score`, `id`, or `IsSafeColumnName` (`:415-422`) |
-| `order` | string | no | `ASC`/`DESC`, ASCII-case-insensitive; default `DESC` (`:424-437`) |
+| `column` | string | no | `_score` or `IsSafeColumnName` (`:435-443`) |
+| `order` | string | no | `ASC`/`DESC`, ASCII-case-insensitive; default `DESC` (`:445-458`) |
 
-`column: "id"` is rewritten to the empty string, which the query AST treats as "primary key" (`src/server/http_server.cpp:439-441`).
+Omitting `column` orders by the primary key, the shorthand `SORT ASC` / `SORT DESC` carries on the TCP surface (`src/server/http_server.cpp:432-434`). A named column is passed through as written and resolved by `ResultSorter`, which accepts the primary-key column name as well as any filter column (`src/query/result_sorter.cpp:528-549`).
 
 **`highlight`** (`src/server/http_server.cpp:466-502`):
 
@@ -94,7 +94,7 @@ Non-string filter values are coerced to strings: integers via `std::to_string(in
 - `mode: "literal"` (default): the request is turned into the text command `SEARCH <resolved_table> "<escaped q>"` and run through `QueryParser::Parse`, where `<escaped q>` backslash-escapes `\` and `"` (`src/server/http_server.cpp:123-135`, `:1243-1250`). A parser error is returned as 400 with the parser's own error code (`:1246-1249`).
 - `mode: "boolean"`: `q` is assigned directly to both `search_text` and `search_expression` without invoking the parser (`src/server/http_server.cpp:1234-1238`).
 
-After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, highlight and fuzzy, then re-validates the assembled query against `api.max_query_length` via `QueryParser::ValidateQueryLength` (`src/server/http_server.cpp:1150-1155`, `src/query/query_parser.cpp:521-536`).
+After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, highlight and fuzzy, then validates the assembled query against `api.max_query_length` via `QueryParser::ValidateQueryLength` (`src/server/http_server.cpp:1168-1173`, `src/query/query_parser.cpp:523-538`). This is the only length check on the route, and it counts code points, not bytes (`src/query/query_parser.cpp:21-50`).
 
 ### Success response
 
@@ -129,17 +129,18 @@ After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, h
 | 400 | Missing / non-string `q`, bad `mode` | `kQuerySyntaxError` (3000) | `:1196`, `:1202`, `:142`, `:151` |
 | 400 | `q` contains `\r`/`\n`/`\0` | `kQueryInvalidToken` (3001) | `:1162` |
 | 400 | `q` empty | `kQuerySyntaxError` (3000) | `:1168` |
-| 400 | `q` exceeds `api.max_query_length` | `kQueryTooLong` (3005) | `:1174-1178` |
-| 400 | Assembled query exceeds `api.max_query_length` | `kQueryTooLong` (3005) | `:1152`, `src/query/query_parser.cpp:528-532` |
+| 400 | Assembled query exceeds `api.max_query_length` characters | `kQueryTooLong` (3005) | `:1170`, `src/query/query_parser.cpp:530-534` |
 | 400 | Bad `limit` | `kQueryInvalidLimit` (3008) | `:1083`, `:1089` |
 | 400 | Bad `offset` | `kQueryInvalidOffset` (3009) | `:1100`, `:1106` |
 | 400 | `filters` not an object / bad condition | `kQueryInvalidFilter` (3006) | `:1121`, `:313`, `:319`, `:330`, `:337`, `:353` |
-| 400 | Bad `sort` | `kQueryInvalidSort` (3007) | `:413`, `:416`, `:421`, `:427`, `:435` |
+| 400 | Bad `sort` | `kQueryInvalidSort` (3007) | `:430`, `:437`, `:441`, `:448`, `:456` |
 | 400 | Bad `highlight` / `fuzzy` | `kQuerySyntaxError` (3000) | `:453`, `:460`, `:468`, `:474`, `:506`, `:510` |
 | 400 | Invalid table name | `kQueryInvalidToken` (3001) | `:969-973` |
 | 400 | Bare table name under a multi-database configuration | `kQuerySyntaxError` (3000) | `:977-982` |
 | 400 | `HIGHLIGHT` requested but normalized text storage is off | `kNotImplemented` (4) | `:1394-1401` |
-| 400 | `sort._score` with BM25 disabled, or with text storage off | `kInvalidArgument` (2) | `:533-545` mapped by `:401-409` |
+| 400 | `sort._score` with BM25 disabled | `kQueryInvalidSort` (3007) | `src/server/search_pipeline.cpp:813-816` via `:556`, mapped by `:418-426` |
+| 400 | `sort._score` with normalized text storage off | `kNotImplemented` (4) | `src/server/search_pipeline.cpp:817-822` |
+| 400 | `sort._score` when the table's index or BM25 statistics are missing | `kTableNotFound` (4007) | `src/server/search_pipeline.cpp:823-825` |
 | 400 | Any other pipeline / sorter error | error's own code | `:1361`, `:1378` via `:401-409` |
 | 404 | Table not resolvable | `kTableNotFound` (4007) | `:985-999` |
 | 415 | `Content-Type` not `application/json` | `kNetworkInvalidRequest` (6007) | `:1041` |
@@ -667,7 +668,6 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 | 8 | Repeated conditions on one filter column | `FILTER` clauses are a list; the same column may appear more than once (`src/query/query_parser_clauses.cpp:97`) | `filters` is a JSON object, so at most one condition per column survives (`src/server/http_server.cpp:317`) |
 | 9 | Filter value starting with an operator character | Rejected: `FILTER value must not start with an operator character`, `kQueryInvalidFilter` (`src/query/query_parser_clauses.cpp:35-41`, `:138`, `:177`) | No such check; the value is accepted (`src/server/http_server.cpp:309-358`) |
 | 10 | Non-string filter values | Values arrive as text tokens only (`src/query/query_parser_clauses.cpp:150`, `:176`) | JSON integers, floats and booleans are coerced: `true`→`"1"`, `false`→`"0"`, floats via `std::to_string(double)` (fixed six decimals) (`src/server/http_server.cpp:177-191`) |
-| 11 | Primary-key sort | `SORT ASC` / `SORT DESC` is the primary-key shorthand; `SORT id` names a real column and errors if no such column exists (`src/query/query_parser_clauses.cpp:312-320`, `src/query/result_sorter.cpp:528-549`) | `{"sort":{"column":"id"}}` is rewritten to the primary key regardless of the table's actual primary-key name; there is no shorthand form (`src/server/http_server.cpp:439-441`) |
 | 12 | Boolean-expression validation | `q` goes through `ParseSearchTextTokens`, which rejects unmatched/unclosed parentheses, the deprecated `ORDER` keyword, comma-separated table lists, and splits flat `AND`/`NOT` clauses (`src/query/query_parser_commands.cpp:72-217`) | `mode:"boolean"` assigns `q` straight to `search_text`/`search_expression`; none of those checks or the clause split run (`src/server/http_server.cpp:1234-1238`) |
 | 13 | FACET search text | Runs through the parser's shared search-text extraction (`src/query/query_parser_commands.cpp:467`) | Assembled field by field; `QueryParser::Parse` is never invoked on the facet path (`src/server/http_server.cpp:1308-1323`) |
 | 14 | COUNT clause rejection | Rejects `SORT`, `ORDER`, and any clause other than `AND`/`NOT`/`FILTER`, including `LIMIT`/`OFFSET`, all as `kQuerySyntaxError` (`src/query/query_parser_commands.cpp:382-394`) | Rejects exactly the fields `limit`, `offset`, `sort`, `highlight`, `fuzzy` as `kQuerySyntaxError`; other unknown JSON fields are silently ignored (`src/server/http_server.cpp:1206-1219`) |
@@ -681,16 +681,12 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 | 17 | More than 64 filter conditions | `kQuerySyntaxError` (3000) (`src/query/query_parser_commands.cpp:316-319`, `:406-409`, `:522-525`) | `kQueryInvalidFilter` (3006) (`src/server/http_server.cpp:311-315`) |
 | 18 | Invalid facet column | `kQuerySyntaxError` (3000) (`src/query/query_parser_commands.cpp:462-465`) | `kQueryInvalidToken` (3001) (`src/server/http_server.cpp:1296-1300`) |
 | 19 | Highlight tag over 256 bytes | `kQuerySyntaxError`, message names `HIGHLIGHT TAG open/close tag` (`src/query/query_parser_clauses.cpp:390-399`) | `kQuerySyntaxError`, message names `Field 'highlight.open_tag'` (`src/server/http_server.cpp:477-490`) |
-| 20 | Query-length check | One check, on the assembled query expression, message `Query expression length (N) …` (`src/query/query_parser.cpp:521-536`) | Two checks: the raw `q` bytes first, message `Query text length (N) …` (`src/server/http_server.cpp:1172-1180`), then the assembled expression (`src/server/http_server.cpp:1150-1155`) |
 | 21 | Control characters in search text | No explicit `\r`/`\n`/`\0` rejection in the parser; framing removes the line terminator | `q` containing `\r`, `\n` or `\0` is 400 `kQueryInvalidToken` (`src/server/http_server.cpp:1159-1166`) |
 
 ### Error mapping
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 22 | `SORT _score` with BM25 disabled | `kQueryInvalidSort` (3007) (`src/server/handlers/search_handler.cpp:408-411`) | `kInvalidArgument` (2), HTTP 400 (`src/server/http_server.cpp:533-536`, mapped by `:401-409`) |
-| 23 | `SORT _score` without normalized text storage | `kNotImplemented` (4) (`src/server/handlers/search_handler.cpp:412-417`) | `kInvalidArgument` (2), HTTP 400 (`src/server/http_server.cpp:540-545`) |
-| 24 | `SORT _score` when the table context is missing | `kTableNotFound` (4007) (`src/server/handlers/search_handler.cpp:420-422`) | `kInvalidArgument` (2) with message `Table is not available` (`src/server/http_server.cpp:537-539`) |
 | 25 | OPTIMIZE failure | The handler returns the condition's own code, e.g. `kServerBusy` (6030) when a DUMP LOAD or another long operation is in flight (`src/server/handlers/debug_handler.cpp:43-72`), reached over HTTP through the shared entry point `TcpServer::HandleOptimizeRequest` (`src/server/tcp_server.cpp:93`) | The frame's code is preserved in the body but the status is always 503, whatever the code (`src/server/http_server.cpp:2117-2123`) |
 | 26 | Error envelope | Single line `ERROR <code> <message>`, parsed by `ParseErrorFrame` (`src/server/protocol_constants.h:75-92`) | JSON object `{"error": …, "error_code": …}` (`src/server/http_server.cpp:2158-2164`) |
 | 27 | Transport-layer rejections | All failures are `ERROR` frames | `413`, `414` and malformed-request-line `400` come from cpp-httplib with a non-JSON body (`build/_deps/httplib-src/httplib.h:12283`, `:12551`, `:12526`); unmatched routes get an empty-bodied `404` (`:12773`) |
@@ -717,8 +713,8 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 36 | Score-sort execution | Handled inline in `SearchHandler::HandleSearch`, with highlight snippets generated from the score-sorted page (`src/server/handlers/search_handler.cpp:406-490`) | Handled in `SortHttpResults`, which returns only the sorted ids; highlighting is applied afterwards by the shared response builder (`src/server/http_server.cpp:520-585`, `:1390-1436`). Both call `BM25Scorer::ScoreDocuments` with the same parameters and `ResultSorter::SortByScore` |
-| 37 | Non-score sorting and pagination | `ResultSorter::SortAndPaginate` (`src/server/handlers/search_handler.cpp:493-494`) | Same function, same primary-key column (`src/server/http_server.cpp:530`) |
+| 36 | Score-sort execution | `SearchHandler::HandleSearch` generates highlight snippets from the score-sorted page (`src/server/handlers/search_handler.cpp:393-430`) | `SortHttpResults` returns only the sorted ids; highlighting is applied afterwards by the shared response builder (`src/server/http_server.cpp:538-557`, `:1349-1420`). Both obtain the page from `search_pipeline::ScoreAndSortByRelevance` (`src/server/search_pipeline.cpp:805-867`) |
+| 37 | Non-score sorting and pagination | `ResultSorter::SortAndPaginate` (`src/server/handlers/search_handler.cpp:433-434`) | Same function, same primary-key column (`src/server/http_server.cpp:544`) |
 | 38 | Top-N optimization | `ApplySearchTopNOptimization`, with the chosen strategy surfaced in debug output (`src/server/handlers/search_handler.cpp:375-395`) | Same call, but the strategy is not reported anywhere in the response (`src/server/http_server.cpp:1367-1373`) |
 
 ### Request and rate-limit accounting

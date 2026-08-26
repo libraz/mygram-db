@@ -206,14 +206,39 @@ class HttpServer {
   void SetOptimizeCallback(OptimizeCallback callback) { optimize_callback_ = std::move(callback); }
 
   /**
-   * @brief Adopt the shared query cache once its owner has created it.
+   * @brief Every piece of state the TCP server owns and this surface shares.
    *
-   * The cache is owned by the TCP server and only exists after that server
-   * starts, which is later than this server is constructed. Without this the
-   * HTTP surface would keep the null pointer it was built with and silently
-   * run every request outside the cache. Must be called before Start().
+   * All of it is created or populated while the TCP server starts, which is
+   * later than this server is constructed. Grouping it means there is exactly
+   * one crossing point between the two surfaces: a component that both must
+   * share is added as a field here and wired in TcpServer::AttachTo(), instead
+   * of a new setter that every embedder has to remember to call.
    */
-  void SetCacheManager(cache::CacheManager* cache_manager) { cache_manager_ = cache_manager; }
+  struct SharedComponents {
+    ServerStats* stats = nullptr;
+    cache::CacheManager* cache_manager = nullptr;
+    ThreadPool* thread_pool = nullptr;
+    std::shared_ptr<RateLimiter> rate_limiter;
+    std::atomic<bool>* dump_load_in_progress = nullptr;
+    std::atomic<bool>* replication_paused_for_dump = nullptr;
+    SyncOperationManager* sync_manager = nullptr;
+    std::function<bool(const std::string&)> table_syncing_checker;
+    std::function<bool()> any_syncing_checker;
+    std::function<bool()> initial_data_ready_checker;
+    OptimizeCallback optimize_callback;
+  };
+
+  /**
+   * @brief Adopt the components their owner created while starting.
+   *
+   * Called by TcpServer::AttachTo() before Start(). Every field is assigned
+   * unconditionally, so a shared component can never degrade into a privately
+   * constructed substitute because the pointer happened to be null when this
+   * server was built — a second rate limiter would give one client twice the
+   * configured quota, and a null thread pool would pin the /metrics thread-pool
+   * gauges to zero.
+   */
+  void AdoptSharedComponents(SharedComponents components);
 
   const cache::CacheManager* GetCacheManagerForTesting() const { return cache_manager_; }
 
@@ -318,10 +343,13 @@ class HttpServer {
   // Rate limiter is held as shared_ptr so the same instance can be co-owned
   // by TcpServer and HttpServer. A single client's quota MUST apply across
   // protocols; two independent limiters give the client effectively 2x the
-  // configured limit. When the parent (ServerLifecycleManager / TcpServer)
-  // does not provide one, HttpServer falls back to constructing its own from
-  // `full_config_->api.rate_limiting`.
+  // configured limit. An embedded server receives the TCP server's instance
+  // through AdoptSharedComponents(); a standalone one builds its own in
+  // Start() from `full_config_->api.rate_limiting`.
   std::shared_ptr<RateLimiter> rate_limiter_;
+  /// True once AdoptSharedComponents() has run, i.e. this surface belongs to a
+  /// TcpServer. Start() only builds a private rate limiter when it is false.
+  bool components_adopted_ = false;
   std::vector<mygram::utils::CIDR> parsed_allow_cidrs_;
   DenialLogLimiter denial_log_limiter_;
   std::atomic<bool>* loading_;  // Shared loading flag (owned by TcpServer)
@@ -333,6 +361,16 @@ class HttpServer {
   std::function<bool()> any_syncing_checker_;
   std::function<bool()> initial_data_ready_checker_;
   OptimizeCallback optimize_callback_;
+
+  /**
+   * @brief Give a standalone server its own rate limiter.
+   *
+   * Only reached when no TcpServer attached one: an HttpServer constructed on
+   * its own still has to enforce `api.rate_limiting`. Deciding this at Start()
+   * rather than at construction keeps the embedded path free of a throwaway
+   * limiter and makes the standalone case visible in the startup log.
+   */
+  void EnsureStandaloneRateLimiter();
 
   /**
    * @brief Setup routes

@@ -18,12 +18,14 @@ namespace mygramdb::query {
 
 namespace {
 
+// api.max_query_length is documented and reported in characters, so every part
+// of the expression is measured in code points rather than bytes.
 size_t CalculateQueryExpressionLength(const Query& query) {
-  size_t length = query.search_text.size();
+  size_t length = mygram::utils::CountCodePoints(query.search_text);
 
   auto accumulate_terms = [&length](const std::vector<std::string>& terms) {
     for (const auto& term : terms) {
-      length += term.size();
+      length += mygram::utils::CountCodePoints(term);
     }
   };
 
@@ -31,17 +33,17 @@ size_t CalculateQueryExpressionLength(const Query& query) {
   accumulate_terms(query.not_terms);
 
   for (const auto& filter : query.filters) {
-    length += filter.column.size();
-    length += filter.value.size();
+    length += mygram::utils::CountCodePoints(filter.column);
+    length += mygram::utils::CountCodePoints(filter.value);
   }
 
   if (query.order_by.has_value()) {
-    length += query.order_by->column.size();
+    length += mygram::utils::CountCodePoints(query.order_by->column);
   }
 
   if (query.highlight.has_value()) {
-    length += query.highlight->open_tag.size();
-    length += query.highlight->close_tag.size();
+    length += mygram::utils::CountCodePoints(query.highlight->open_tag);
+    length += mygram::utils::CountCodePoints(query.highlight->close_tag);
   }
 
   return length;

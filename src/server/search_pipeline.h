@@ -392,6 +392,35 @@ TopNOptimizationResult ApplySearchTopNOptimization(
     const std::vector<std::string>& all_search_terms, bool semantics_reproducible_by_single_term_ngram_and,
     bool cache_hit, const std::string& primary_key_column, std::vector<storage::DocId>& results);
 
+/// @brief Table and configuration inputs required to order a result set by BM25 relevance.
+struct RelevanceSortParams {
+  index::Index* index = nullptr;
+  storage::DocumentStore* doc_store = nullptr;
+  const config::Config* full_config = nullptr;
+  const BM25Stats* bm25_stats = nullptr;  ///< Corpus stats of the searched table (nullptr when unresolved)
+  int ngram_size = 0;
+  int kanji_ngram_size = 0;
+  bool cross_boundary_ngrams = false;
+};
+
+/// @brief Validate a `SORT _score` request, score the results and return the ordered page.
+///
+/// Shared by the TCP and HTTP search handlers so that each rejection condition
+/// reports the same error code whichever transport served the request. Callers
+/// must have verified that the query orders by `_score`.
+///
+/// @param query Query carrying the `_score` order, limit and offset
+/// @param results Full result set to score
+/// @param all_search_terms All search terms (main + AND)
+/// @param term_infos Term information; regenerated in place when document
+///        frequencies are missing (a cache hit skips GenerateTermInfos)
+/// @param params Table and configuration inputs required for scoring
+/// @return Ordered and paginated DocIds, or the rejection describing why scoring is unavailable
+mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> ScoreAndSortByRelevance(
+    const query::Query& query, const std::vector<storage::DocId>& results,
+    const std::vector<std::string>& all_search_terms, std::vector<SearchTermInfo>& term_infos,
+    const RelevanceSortParams& params);
+
 /// @brief Build normalized terms used by highlight generation.
 std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, index::Index* current_index,
                                              const query::SynonymDictionary* synonym_dict);

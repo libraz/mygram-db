@@ -25,8 +25,10 @@
 #include "cache/cache_key.h"
 #include "cache/cache_manager.h"
 #include "config/config.h"
+#include "index/bm25_scorer.h"
 #include "query/query_ast.h"
 #include "query/query_normalizer.h"
+#include "query/result_sorter.h"
 #include "query/substring_search.h"
 #include "query/synonym_dictionary.h"
 #include "server/server_types.h"
@@ -798,6 +800,70 @@ TopNOptimizationResult ApplySearchTopNOptimization(
   results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, result.reverse);
   result.optimized = true;
   return result;
+}
+
+mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> ScoreAndSortByRelevance(
+    const query::Query& query, const std::vector<storage::DocId>& results,
+    const std::vector<std::string>& all_search_terms, std::vector<SearchTermInfo>& term_infos,
+    const RelevanceSortParams& params) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  if (params.full_config == nullptr || !params.full_config->bm25.enable) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kQueryInvalidSort, "SORT _score requires BM25 to be enabled in configuration"));
+  }
+  if (params.doc_store == nullptr || !params.doc_store->IsStoreTextsEnabled()) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kNotImplemented,
+                  "SORT _score requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
+                  "configuration."));
+  }
+  if (params.index == nullptr || params.bm25_stats == nullptr) {
+    return MakeUnexpected(MakeError(ErrorCode::kTableNotFound, "table not found"));
+  }
+
+  // Regenerate term_infos when document frequencies are missing (the cache-hit
+  // path skips GenerateTermInfos).
+  const bool needs_term_doc_freq = std::any_of(term_infos.begin(), term_infos.end(),
+                                               [](const auto& term_info) { return !term_info.term_doc_freq_computed; });
+  if ((term_infos.empty() || needs_term_doc_freq) && !all_search_terms.empty()) {
+    term_infos = GenerateTermInfos(all_search_terms, params.index, params.ngram_size, params.kanji_ngram_size,
+                                   params.cross_boundary_ngrams, /*compute_term_doc_freq=*/true, params.doc_store);
+  }
+
+  // Reuse pre-computed term_infos (already normalized and ngram-generated)
+  std::vector<std::string> normalized_terms;
+  std::vector<uint64_t> term_dfs;
+  normalized_terms.reserve(term_infos.size());
+  term_dfs.reserve(term_infos.size());
+  for (size_t i = 0; i < term_infos.size(); ++i) {
+    const auto& term_info = term_infos[i];
+    if (!term_info.normalized_term.empty()) {
+      normalized_terms.push_back(term_info.normalized_term);
+    } else if (i < all_search_terms.size()) {
+      normalized_terms.push_back(params.index->NormalizeText(all_search_terms[i]));
+    }
+    term_dfs.push_back(term_info.term_doc_freq);
+  }
+
+  const auto& bm25_config = params.full_config->bm25;
+  const index::BM25Params bm25_params{bm25_config.k1, bm25_config.b};
+  auto scored = index::BM25Scorer::ScoreDocuments(results, normalized_terms, term_dfs, *params.doc_store,
+                                                  params.bm25_stats->doc_count.load(std::memory_order_relaxed),
+                                                  params.bm25_stats->avg_doc_length(), bm25_params);
+  if (!scored) {
+    return MakeUnexpected(scored.error());
+  }
+
+  std::vector<double> scores;
+  scores.reserve(scored->size());
+  for (const auto& scored_doc : *scored) {
+    scores.push_back(scored_doc.score);
+  }
+
+  return query::ResultSorter::SortByScore(results, scores, query.order_by->order, query.limit, query.offset);
 }
 
 std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, index::Index* current_index,
