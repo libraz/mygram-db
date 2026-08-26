@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 
@@ -319,46 +320,48 @@ std::string MemoryHealthStatusToString(MemoryHealthStatus status) {
 }
 
 uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size, uint64_t term_count) {
-  // Optimization creates clones of posting lists in batches
-  // Peak memory usage occurs when:
-  // 1. Original index is fully loaded
-  // 2. One batch worth of cloned posting lists is being created
-  // 3. Temporary data structures for batch processing
-  //
-  // Memory breakdown:
-  // - Original index: index_memory_usage
-  // - Cloned batch (worst case): (batch_size / total_terms) * index_memory_usage
-  // - Temporary overhead: ~10% of batch memory
-  //
-  // Conservative estimate: assume average term size
-  // Typical batch represents ~1-5% of total index for default batch size (1000)
-
   if (batch_size == 0 || index_memory_usage == 0) {
     return 0;
   }
 
-  // Estimate batch represents 5% of index (conservative)
-  constexpr double kBatchRatio = 0.05;
-  auto batch_memory = static_cast<uint64_t>(static_cast<double>(index_memory_usage) * kBatchRatio);
+  // Optimization rebuilds every posting list into a fresh allocation and
+  // releases the original once the replacement is published. Batching bounds
+  // how many replacements are live at one time, but it does not bound the
+  // footprint: a rebuilt list rarely fits the hole its original left, so a
+  // first pass grows the resident set by close to a second copy of the index
+  // whatever batch size it runs with. The rebuild is therefore charged in full.
+  const uint64_t rebuild_memory = index_memory_usage;
 
-  // Add 10% overhead for temporary structures
+  // Temporary structures around the rebuild.
   constexpr double kOverheadRatio = 0.10;
-  auto overhead = static_cast<uint64_t>(static_cast<double>(batch_memory) * kOverheadRatio);
+  auto overhead = static_cast<uint64_t>(static_cast<double>(rebuild_memory) * kOverheadRatio);
 
   // The term-name snapshot taken before the batch loop is proportional to the
   // term count, not to posting-list memory: one offset plus the term bytes for
   // every distinct term in the index.
   constexpr uint64_t kAverageTermBytes = 8;
   constexpr uint64_t kBytesPerSnapshottedTerm = sizeof(size_t) + kAverageTermBytes;
-  const uint64_t term_snapshot_memory = term_count * kBytesPerSnapshottedTerm;
+  const uint64_t term_snapshot_memory = term_count > std::numeric_limits<uint64_t>::max() / kBytesPerSnapshottedTerm
+                                            ? std::numeric_limits<uint64_t>::max()
+                                            : term_count * kBytesPerSnapshottedTerm;
 
   // Each batch also holds, per term, the captured version plus the snapshot and
   // optimized posting-list handles.
   constexpr uint64_t kBytesPerBatchedTerm = sizeof(uint64_t) + (2 * sizeof(std::shared_ptr<void>));
   const uint64_t batch_bookkeeping_memory = static_cast<uint64_t>(batch_size) * kBytesPerBatchedTerm;
 
-  // Total peak = original + batch + overhead + snapshots
-  return index_memory_usage + batch_memory + overhead + term_snapshot_memory + batch_bookkeeping_memory;
+  // Total peak = the index that is already resident + the rebuild + the
+  // structures that carry it. Saturate rather than wrap: an estimate that
+  // overflows would read as a small number and admit the very run it must
+  // refuse.
+  uint64_t total = index_memory_usage;
+  for (const uint64_t component : {rebuild_memory, overhead, term_snapshot_memory, batch_bookkeeping_memory}) {
+    if (total > std::numeric_limits<uint64_t>::max() - component) {
+      return std::numeric_limits<uint64_t>::max();
+    }
+    total += component;
+  }
+  return total;
 }
 
 }  // namespace mygramdb::utils

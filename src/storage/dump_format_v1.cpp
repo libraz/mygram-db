@@ -981,7 +981,8 @@ Expected<void, Error> ReadDumpV1(
         return result;
       }
       if (auto result = dump_internal::ValidateRestoreMaterializationBudget(
-              staged_memory_bytes, index_len, restore_limits.memory_budget_bytes, "Index data", "V1");
+              staged_memory_bytes, index_len, restore_limits.memory_budget_bytes, "Index data", "V1",
+              dump_internal::kIndexMaterializationFactor);
           !result) {
         return result;
       }
@@ -1018,7 +1019,18 @@ Expected<void, Error> ReadDumpV1(
       }
       {
         BoundedInputStream doc_stream(ifs, doc_len);
-        if (auto result = LoadPendingDocumentStore(pending, doc_stream); !result) {
+        dump_internal::DocumentSectionHeader doc_header;
+        if (auto result = dump_internal::ReadDocumentSectionHeader(doc_stream, doc_len, doc_header); !result) {
+          return result;
+        }
+        if (auto result = dump_internal::ValidateRestoreDocumentBudget(staged_memory_bytes + index_memory, doc_len,
+                                                                       doc_header.document_count,
+                                                                       restore_limits.memory_budget_bytes, "V1");
+            !result) {
+          return result;
+        }
+        dump_internal::PrefixedInputStream replayed_doc_stream(std::move(doc_header.consumed_prefix), doc_stream);
+        if (auto result = LoadPendingDocumentStore(pending, replayed_doc_stream); !result) {
           return result;
         }
         if (doc_stream.Remaining() != 0) {

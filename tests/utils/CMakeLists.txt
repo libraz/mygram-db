@@ -358,3 +358,25 @@ gtest_discover_tests(roaring_bitmap_ptr_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
 )
+
+# Optimize memory estimate: measured peak of a batched optimize against the
+# admission estimate. Builds multi-megabyte indexes and samples the resident
+# set, so it needs the machine to itself.
+add_executable(optimize_memory_estimate_test
+  optimize_memory_estimate_test.cpp
+)
+
+target_link_libraries(optimize_memory_estimate_test PRIVATE
+  mygramdb_index
+  mygramdb_utils
+  GTest::gtest_main
+)
+
+gtest_discover_tests(optimize_memory_estimate_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)

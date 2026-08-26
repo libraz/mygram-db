@@ -1823,22 +1823,31 @@ TEST(DumpFormatV2Test, ConfiguredSectionAndMemoryLimitsRejectBeforeLiveReplaceme
   CleanupFile(filepath);
 }
 
-TEST(DumpFormatV2Test, RestoreMaterializationBudgetUsesOverflowSafeThreeTimesEstimate) {
+TEST(DumpFormatV2Test, RestoreMaterializationBudgetScalesEncodedLengthOverflowSafely) {
   auto boundary = dump_internal::ValidateRestoreMaterializationBudget(
-      /*staged_memory_bytes=*/100, /*encoded_length=*/200, /*memory_budget_bytes=*/700, "Index data", "V2");
+      /*staged_memory_bytes=*/100, /*encoded_length=*/200, /*memory_budget_bytes=*/700, "Index data", "V2",
+      /*materialization_factor=*/3);
   EXPECT_TRUE(boundary.has_value());
 
   auto above_boundary = dump_internal::ValidateRestoreMaterializationBudget(
-      /*staged_memory_bytes=*/101, /*encoded_length=*/200, /*memory_budget_bytes=*/700, "Index data", "V2");
+      /*staged_memory_bytes=*/101, /*encoded_length=*/200, /*memory_budget_bytes=*/700, "Index data", "V2",
+      /*materialization_factor=*/3);
   ASSERT_FALSE(above_boundary.has_value());
   EXPECT_NE(above_boundary.error().message().find("materialization estimate"), std::string::npos);
   EXPECT_NE(above_boundary.error().message().find("dump.restore_memory_budget_mb"), std::string::npos);
 
   auto huge_length = dump_internal::ValidateRestoreMaterializationBudget(
       /*staged_memory_bytes=*/0, std::numeric_limits<uint64_t>::max(), std::numeric_limits<uint64_t>::max(),
-      "Index data", "V1");
+      "Index data", "V1", /*materialization_factor=*/3);
   ASSERT_FALSE(huge_length.has_value());
   EXPECT_NE(huge_length.error().message().find("V1"), std::string::npos);
+
+  // A larger factor refuses an encoded length the smaller one admits.
+  auto tighter = dump_internal::ValidateRestoreMaterializationBudget(
+      /*staged_memory_bytes=*/100, /*encoded_length=*/200, /*memory_budget_bytes=*/700, "Document data", "V2",
+      /*materialization_factor=*/4);
+  ASSERT_FALSE(tighter.has_value());
+  EXPECT_NE(tighter.error().message().find("Document data"), std::string::npos);
 }
 
 TEST(DumpFormatV2Test, V2RejectsIndexMaterializationEstimateBeforeLiveReplacement) {
@@ -1870,6 +1879,133 @@ TEST(DumpFormatV2Test, V2RejectsIndexMaterializationEstimateBeforeLiveReplacemen
   EXPECT_NE(result.error().message().find("materialization estimate"), std::string::npos) << result.error().message();
   EXPECT_EQ(gtid, "unchanged");
   EXPECT_TRUE(live_store.GetDocId("live").has_value());
+}
+
+TEST(DumpFormatV2Test, DocumentSectionFloorScalesWithDocumentCount) {
+  // Two sections of the same encoded length decode into very different stores
+  // depending on how many documents share those bytes, and the floor has to
+  // follow that rather than the byte count alone.
+  const uint64_t sparse = dump_internal::EstimateDocumentSectionResidentFloor(1024 * 1024, 8);
+  const uint64_t dense = dump_internal::EstimateDocumentSectionResidentFloor(1024 * 1024, 32768);
+  EXPECT_GT(dense, sparse);
+
+  // Framing bytes are not stored, so a payload that is nothing but framing
+  // contributes only its per-document slots.
+  EXPECT_EQ(dump_internal::EstimateDocumentSectionResidentFloor(4 * dump_internal::kEncodedHeaderBytesPerDocument, 4),
+            4 * dump_internal::kMinimumResidentBytesPerDocument);
+
+  // A count that cannot be multiplied out saturates rather than wrapping.
+  EXPECT_EQ(dump_internal::EstimateDocumentSectionResidentFloor(0, std::numeric_limits<uint64_t>::max()),
+            std::numeric_limits<uint64_t>::max());
+}
+
+TEST(DumpFormatV2Test, V2RefusesDocumentSectionThatCannotFitBeforeDecoding) {
+  const auto filepath = TempFilePath("v2_document_budget");
+  ScopedCleanup cleanup(filepath);
+
+  Index source_index;
+  source_index.AddDocument(1, "text");
+  DocumentStore source_store;
+  for (uint32_t doc = 0; doc < 4096; ++doc) {
+    ASSERT_TRUE(source_store.AddDocument(std::to_string(doc)));
+  }
+  const std::string index_data = SerializeIndex(source_index);
+  const std::string doc_data = SerializeDocStore(source_store);
+  const std::string table_section = BuildTableSectionData("articles", index_data, doc_data);
+  WriteManualV2Dump(filepath, MakeTestConfig(), {table_section});
+
+  const uint64_t floor_bytes =
+      dump_internal::EstimateDocumentSectionResidentFloor(static_cast<uint64_t>(doc_data.size()), 4096);
+  ASSERT_GT(floor_bytes, 0U);
+  // Room for the whole encoded file, but not for what the documents decode into.
+  const uint64_t budget = floor_bytes - 1;
+  ASSERT_GT(budget, table_section.size());
+
+  std::string gtid = "unchanged";
+  Config loaded_config;
+  Index live_index;
+  live_index.AddDocument(1, "live text");
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live", {}, "live text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  const RestoreLimits limits{budget, budget};
+
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_NE(result.error().message().find("Document data"), std::string::npos) << result.error().message();
+  EXPECT_NE(result.error().message().find("dump.restore_memory_budget_mb"), std::string::npos)
+      << result.error().message();
+  EXPECT_EQ(gtid, "unchanged");
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+  EXPECT_EQ(live_store.Size(), 1U);
+}
+
+TEST(DumpFormatV2Test, V2AdmitsDocumentSectionThatFitsUnderTheSameGuard) {
+  const auto filepath = TempFilePath("v2_document_budget_fits");
+  ScopedCleanup cleanup(filepath);
+
+  Index source_index;
+  source_index.AddDocument(1, "text");
+  DocumentStore source_store;
+  for (uint32_t doc = 0; doc < 4096; ++doc) {
+    ASSERT_TRUE(source_store.AddDocument(std::to_string(doc)));
+  }
+  const std::string index_data = SerializeIndex(source_index);
+  const std::string doc_data = SerializeDocStore(source_store);
+  WriteManualV2Dump(filepath, MakeTestConfig(), {BuildTableSectionData("articles", index_data, doc_data)});
+
+  std::string gtid;
+  Config loaded_config;
+  Index live_index;
+  DocumentStore live_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  const RestoreLimits limits{64ULL * 1024 * 1024, 64ULL * 1024 * 1024};
+
+  auto result = ReadDumpV2(filepath, gtid, loaded_config, contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_EQ(live_store.Size(), 4096U);
+  EXPECT_TRUE(live_store.GetDocId("0").has_value());
+  EXPECT_TRUE(live_store.GetDocId("4095").has_value());
+}
+
+TEST(DumpFormatV2Test, V1RefusesDocumentSectionThatCannotFitBeforeDecoding) {
+  const auto filepath = TempFilePath("v1_document_budget");
+  ScopedCleanup cleanup(filepath);
+
+  Index source_index;
+  source_index.AddDocument(1, "text");
+  DocumentStore source_store;
+  for (uint32_t doc = 0; doc < 4096; ++doc) {
+    ASSERT_TRUE(source_store.AddDocument(std::to_string(doc)));
+  }
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+  ASSERT_TRUE(dump_v1::WriteDumpV1(filepath, "GTID:v1", MakeTestConfig(), source_contexts).has_value());
+
+  const auto dump_bytes = ReadFileBytes(filepath);
+  const auto offsets = LocateV1SectionLengths(dump_bytes);
+  uint64_t document_length = 0;
+  std::memcpy(&document_length, dump_bytes.data() + offsets.document_store, sizeof(document_length));
+  const uint64_t budget = dump_internal::EstimateDocumentSectionResidentFloor(document_length, 4096) - 1;
+  ASSERT_GT(budget, dump_bytes.size());
+
+  std::string gtid = "unchanged";
+  Config loaded_config;
+  Index live_index;
+  live_index.AddDocument(1, "live text");
+  DocumentStore live_store;
+  ASSERT_TRUE(live_store.AddDocument("live", {}, "live text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&live_index, &live_store}}};
+  const RestoreLimits limits{budget, budget};
+
+  auto result = dump_v1::ReadDumpV1(filepath, gtid, loaded_config, contexts, nullptr, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_NE(result.error().message().find("Document data"), std::string::npos) << result.error().message();
+  EXPECT_EQ(gtid, "unchanged");
+  EXPECT_TRUE(live_store.GetDocId("live").has_value());
+  EXPECT_EQ(live_store.Size(), 1U);
 }
 
 TEST(DumpFormatV2Test, V1RejectsIndexMaterializationEstimateBeforeLiveReplacement) {

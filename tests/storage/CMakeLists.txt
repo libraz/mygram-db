@@ -312,3 +312,24 @@ gtest_discover_tests(document_store_benchmark_test
     RUN_SERIAL TRUE
     TIMEOUT 300
 )
+
+# Restore materialization ratio measurement
+add_executable(restore_materialization_test
+  restore_materialization_test.cpp
+)
+
+target_link_libraries(restore_materialization_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+# Builds tens of thousands of documents and full n-gram indexes per shape, so
+# it needs the machine to itself to produce comparable figures.
+gtest_discover_tests(restore_materialization_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "LOAD"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+)

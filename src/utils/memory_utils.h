@@ -90,20 +90,22 @@ std::string MemoryHealthStatusToString(MemoryHealthStatus status);
 /**
  * @brief Estimate memory required for index optimization
  *
- * This estimates the peak memory usage during OptimizeInBatches operation.
- * The actual memory used depends on:
- * - Number of terms in the index
- * - Average posting list size
- * - Batch size parameter
+ * Estimates the peak memory an OptimizeInBatches run occupies, including the
+ * index that is already resident. The dominant term is a second copy of the
+ * index: optimization rebuilds every posting list and releases the original,
+ * and the replacements do not fit back into the holes the originals left, so
+ * the resident set grows by roughly the whole index no matter how small the
+ * batches are. Batch size therefore bounds only the per-batch bookkeeping, not
+ * the peak.
  *
  * @param index_memory_usage Current index memory usage (bytes)
- * @param batch_size Batch size for optimization
+ * @param batch_size Batch size for optimization. Zero returns zero.
  * @param term_count Number of distinct terms in the index. Optimization first
  *        snapshots every term name so that concurrent inserts and erases cannot
  *        invalidate its iteration; that snapshot scales with the term count
  *        rather than with posting-list memory, so leaving it out lets a
  *        term-heavy index pass the check and then exhaust memory mid-run.
- * @return Estimated peak memory requirement (bytes)
+ * @return Estimated peak memory requirement (bytes), saturating at UINT64_MAX
  */
 uint64_t EstimateOptimizationMemory(uint64_t index_memory_usage, size_t batch_size, uint64_t term_count = 0);
 

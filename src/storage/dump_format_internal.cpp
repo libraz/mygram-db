@@ -272,16 +272,145 @@ bool BoundedInputStream::Drain() {
 
 Expected<void, Error> ValidateRestoreMaterializationBudget(uint64_t staged_memory_bytes, uint64_t encoded_length,
                                                            uint64_t memory_budget_bytes, std::string_view section_name,
-                                                           std::string_view format_name) {
-  constexpr uint64_t kMaterializationFactor = 3;
+                                                           std::string_view format_name,
+                                                           uint64_t materialization_factor) {
+  if (materialization_factor == 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
+                                    std::string(section_name) + " materialization factor must be positive"));
+  }
   if (staged_memory_bytes > memory_budget_bytes ||
-      encoded_length > (memory_budget_bytes - staged_memory_bytes) / kMaterializationFactor) {
+      encoded_length > (memory_budget_bytes - staged_memory_bytes) / materialization_factor) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
                                     std::string(section_name) + " materialization estimate exceeds configured " +
                                         std::string(format_name) +
                                         " restore memory budget (dump.restore_memory_budget_mb)"));
   }
   return {};
+}
+
+uint64_t EstimateDocumentSectionResidentFloor(uint64_t encoded_length, uint64_t document_count) {
+  if (document_count > std::numeric_limits<uint64_t>::max() / kMinimumResidentBytesPerDocument) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  const uint64_t slot_floor = document_count * kMinimumResidentBytesPerDocument;
+
+  // Whatever the per-document framing accounts for is not stored, so only the
+  // bytes beyond it can be counted as payload that survives the decode.
+  const uint64_t framing = document_count > std::numeric_limits<uint64_t>::max() / kEncodedHeaderBytesPerDocument
+                               ? std::numeric_limits<uint64_t>::max()
+                               : document_count * kEncodedHeaderBytesPerDocument;
+  const uint64_t payload_floor = encoded_length > framing ? encoded_length - framing : 0;
+
+  if (slot_floor > std::numeric_limits<uint64_t>::max() - payload_floor) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return slot_floor + payload_floor;
+}
+
+Expected<void, Error> ReadDocumentSectionHeader(std::istream& input_stream, uint64_t encoded_length,
+                                                DocumentSectionHeader& header) {
+  // [4 magic][4 version][4 next_doc_id][4 gtid_length][gtid_length][8 doc_count]
+  constexpr uint64_t kFixedPrefixBytes = 16;
+  constexpr uint64_t kGtidLengthOffset = 12;
+  constexpr uint64_t kDocumentCountBytes = 8;
+  if (encoded_length < kFixedPrefixBytes + kDocumentCountBytes) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Document data section is too short to carry a header"));
+  }
+
+  std::string prefix(kFixedPrefixBytes, '\0');
+  input_stream.read(prefix.data(), static_cast<std::streamsize>(kFixedPrefixBytes));
+  if (input_stream.gcount() != static_cast<std::streamsize>(kFixedPrefixBytes)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read document data section header"));
+  }
+
+  uint32_t gtid_length = 0;
+  std::memcpy(&gtid_length, prefix.data() + kGtidLengthOffset, sizeof(gtid_length));
+  gtid_length = mygramdb::utils::FromLittleEndian(gtid_length);
+  if (gtid_length > encoded_length - kFixedPrefixBytes - kDocumentCountBytes) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Document data GTID length exceeds the section bytes remaining"));
+  }
+
+  const auto tail_bytes = static_cast<std::streamsize>(gtid_length + kDocumentCountBytes);
+  std::string tail(static_cast<size_t>(tail_bytes), '\0');
+  input_stream.read(tail.data(), tail_bytes);
+  if (input_stream.gcount() != tail_bytes) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Failed to read document data section document count"));
+  }
+
+  uint64_t document_count = 0;
+  std::memcpy(&document_count, tail.data() + gtid_length, sizeof(document_count));
+  header.document_count = mygramdb::utils::FromLittleEndian(document_count);
+  header.consumed_prefix = prefix + tail;
+  return {};
+}
+
+Expected<void, Error> ValidateRestoreDocumentBudget(uint64_t staged_memory_bytes, uint64_t encoded_length,
+                                                    uint64_t document_count, uint64_t memory_budget_bytes,
+                                                    std::string_view format_name) {
+  const uint64_t floor_bytes = EstimateDocumentSectionResidentFloor(encoded_length, document_count);
+  if (staged_memory_bytes > memory_budget_bytes || floor_bytes > memory_budget_bytes - staged_memory_bytes) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Document data cannot be restored within the configured " +
+                                                        std::string(format_name) +
+                                                        " restore memory budget (dump.restore_memory_budget_mb)"));
+  }
+  return {};
+}
+
+PrefixedInputStreambuf::PrefixedInputStreambuf(std::string prefix, std::istream& rest)
+    : prefix_(std::move(prefix)), rest_(rest), buffer_(kPrefixReplayBufferSize) {}
+
+std::streambuf::int_type PrefixedInputStreambuf::underflow() {
+  if (gptr() != nullptr && gptr() < egptr()) {
+    return traits_type::to_int_type(*gptr());
+  }
+  if (prefix_pos_ < prefix_.size()) {
+    const size_t chunk = std::min(buffer_.size(), prefix_.size() - prefix_pos_);
+    std::memcpy(buffer_.data(), prefix_.data() + prefix_pos_, chunk);
+    prefix_pos_ += chunk;
+    setg(buffer_.data(), buffer_.data(), buffer_.data() + chunk);
+    return traits_type::to_int_type(*gptr());
+  }
+  // Past the prefix, take exactly one byte rather than filling the buffer: the
+  // caller counts how much of its bounded payload the decoder consumed, and a
+  // read-ahead would spend bytes the decoder never asked for.
+  rest_.read(buffer_.data(), 1);
+  if (rest_.gcount() != 1) {
+    return traits_type::eof();
+  }
+  setg(buffer_.data(), buffer_.data(), buffer_.data() + 1);
+  return traits_type::to_int_type(*gptr());
+}
+
+std::streamsize PrefixedInputStreambuf::xsgetn(char* dest, std::streamsize count) {
+  std::streamsize produced = 0;
+  while (produced < count) {
+    if (gptr() == nullptr || gptr() >= egptr()) {
+      // Bypass the intermediate buffer once the prefix is exhausted: a bulk
+      // read of the remainder is what the decoder asks for most of the time.
+      if (prefix_pos_ >= prefix_.size()) {
+        rest_.read(dest + produced, count - produced);
+        return produced + rest_.gcount();
+      }
+      if (underflow() == traits_type::eof()) {
+        return produced;
+      }
+    }
+    const auto available = static_cast<std::streamsize>(egptr() - gptr());
+    const std::streamsize chunk = std::min(available, count - produced);
+    std::memcpy(dest + produced, gptr(), static_cast<size_t>(chunk));
+    gbump(static_cast<int>(chunk));
+    produced += chunk;
+  }
+  return produced;
+}
+
+PrefixedInputStream::PrefixedInputStream(std::string prefix, std::istream& rest)
+    : std::istream(nullptr), buffer_(std::move(prefix), rest) {
+  rdbuf(&buffer_);
 }
 
 Expected<void, Error> LoadPendingIndex(PendingTableLoad& pending, std::istream& index_stream) {

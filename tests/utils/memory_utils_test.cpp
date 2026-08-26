@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include "utils/string_utils.h"
 
 using namespace mygramdb::utils;
@@ -96,6 +98,10 @@ TEST(MemoryUtilsTest, FormatBytes) {
 
 /**
  * @brief Test optimization memory estimation
+ *
+ * The estimate has to cover the rebuild as well as the index already resident,
+ * so it sits above twice the index size; the measured peak of a real run is in
+ * optimize_memory_estimate_test.cpp.
  */
 TEST(MemoryUtilsTest, EstimateOptimizationMemory) {
   uint64_t index_size = 100 * 1024 * 1024;  // 100 MB
@@ -103,15 +109,39 @@ TEST(MemoryUtilsTest, EstimateOptimizationMemory) {
 
   uint64_t estimated = EstimateOptimizationMemory(index_size, batch_size);
 
-  // Estimated memory should be greater than original index
-  EXPECT_GT(estimated, index_size);
-
-  // But not excessively large (should be < 2x original for typical batch sizes)
-  EXPECT_LT(estimated, index_size * 2);
+  EXPECT_GT(estimated, index_size * 2);
+  EXPECT_LT(estimated, index_size * 3);
 
   // Zero inputs should return zero
   EXPECT_EQ(EstimateOptimizationMemory(0, 1000), 0);
   EXPECT_EQ(EstimateOptimizationMemory(100000, 0), 0);
+}
+
+/**
+ * @brief An index too large to double must not wrap into a small estimate
+ */
+TEST(MemoryUtilsTest, EstimateOptimizationMemorySaturatesInsteadOfWrapping) {
+  constexpr uint64_t kHuge = std::numeric_limits<uint64_t>::max() / 2;
+  const uint64_t estimated = EstimateOptimizationMemory(kHuge, 1000, 1000);
+  EXPECT_EQ(estimated, std::numeric_limits<uint64_t>::max());
+}
+
+/**
+ * @brief Batch size must not shrink the estimate below the rebuild cost
+ *
+ * A smaller batch keeps fewer rebuilt posting lists live at once, but the
+ * released originals are not reusable for their replacements, so the peak does
+ * not fall with the batch size and neither may the estimate.
+ */
+TEST(MemoryUtilsTest, EstimateOptimizationMemoryDoesNotShrinkWithBatchSize) {
+  constexpr uint64_t kIndexSize = 100ULL * 1024 * 1024;
+  constexpr uint64_t kTermCount = 100000;
+
+  const uint64_t tiny_batch = EstimateOptimizationMemory(kIndexSize, 1, kTermCount);
+  const uint64_t whole_index_batch = EstimateOptimizationMemory(kIndexSize, kTermCount, kTermCount);
+
+  EXPECT_GT(tiny_batch, kIndexSize * 2);
+  EXPECT_GT(whole_index_batch, kIndexSize * 2);
 }
 
 /**
