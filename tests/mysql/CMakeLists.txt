@@ -435,4 +435,19 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_TIMEOUT 30
   )
 
+  # DDL detection across multi-table statements (no MySQL connection required)
+  add_executable(ddl_multi_table_statement_test
+    ddl_multi_table_statement_test.cpp
+  )
+
+  target_link_libraries(ddl_multi_table_statement_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(ddl_multi_table_statement_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
 endif()

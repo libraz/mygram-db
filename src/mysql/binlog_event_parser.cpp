@@ -1580,6 +1580,64 @@ bool MatchConfiguredTableReference(const std::string& statement_upper, size_t& p
   return true;
 }
 
+enum class TableReferenceScan : uint8_t { kMatched, kSkipped, kMalformed };
+
+/**
+ * @brief Consume one table reference from a list, reporting whether it is the configured table.
+ *
+ * On kMatched and kSkipped the position advances past the reference, so the
+ * caller can keep walking a comma-separated list without caring which entry
+ * matched. kMalformed means the text is not a table reference at all.
+ */
+TableReferenceScan ScanTableReference(const std::string& statement_upper, size_t& pos,
+                                      const std::string& event_db_upper, const std::string& target_db_upper,
+                                      const std::string& table_upper) {
+  if (MatchConfiguredTableReference(statement_upper, pos, event_db_upper, target_db_upper, table_upper)) {
+    return TableReferenceScan::kMatched;
+  }
+
+  const size_t saved_pos = pos;
+  std::string ignored;
+  if (!ReadSqlIdentifier(statement_upper, pos, ignored)) {
+    pos = saved_pos;
+    return TableReferenceScan::kMalformed;
+  }
+  if (pos < statement_upper.size() && statement_upper[pos] == '.') {
+    ++pos;
+    if (!ReadSqlIdentifier(statement_upper, pos, ignored)) {
+      return TableReferenceScan::kMalformed;
+    }
+  }
+  return TableReferenceScan::kSkipped;
+}
+
+/**
+ * @brief Whether a comma-separated table list names the configured table.
+ *
+ * DROP TABLE accepts any number of tables, so a configured table may appear at
+ * any position; matching only the first entry would miss the rest.
+ */
+bool MatchConfiguredTableInList(const std::string& statement_upper, size_t& pos, const std::string& event_db_upper,
+                                const std::string& target_db_upper, const std::string& table_upper) {
+  while (mygram::utils::SkipWhitespace(statement_upper, pos)) {
+    const TableReferenceScan scan =
+        ScanTableReference(statement_upper, pos, event_db_upper, target_db_upper, table_upper);
+    if (scan == TableReferenceScan::kMatched) {
+      return true;
+    }
+    if (scan == TableReferenceScan::kMalformed) {
+      break;
+    }
+
+    mygram::utils::SkipWhitespace(statement_upper, pos);
+    if (pos >= statement_upper.size() || statement_upper[pos] != ',') {
+      break;
+    }
+    ++pos;
+  }
+  return false;
+}
+
 bool MatchAlterRenameTarget(const std::string& statement_upper, size_t pos, const std::string& event_db_upper,
                             const std::string& target_db_upper, const std::string& table_upper) {
   while (pos < statement_upper.size()) {
@@ -1656,10 +1714,14 @@ bool IsSingleStatementAffectingConfiguredTable(const std::string& query_upper, c
   }
 
   pos = saved_start;
-  if (mygram::utils::MatchKeyword(query_upper, pos, "DROP")) {
-    if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE") &&
-        mygram::utils::SkipWhitespace(query_upper, pos)) {
-      size_t saved_pos = pos;
+  if (mygram::utils::MatchKeyword(query_upper, pos, "DROP") && mygram::utils::SkipWhitespace(query_upper, pos)) {
+    size_t saved_pos = pos;
+    if (!mygram::utils::MatchKeyword(query_upper, pos, "TEMPORARY") ||
+        !mygram::utils::SkipWhitespace(query_upper, pos)) {
+      pos = saved_pos;
+    }
+    if (mygram::utils::MatchKeyword(query_upper, pos, "TABLE") && mygram::utils::SkipWhitespace(query_upper, pos)) {
+      saved_pos = pos;
       if (mygram::utils::MatchKeyword(query_upper, pos, "IF")) {
         if (mygram::utils::SkipWhitespace(query_upper, pos) &&
             mygram::utils::MatchKeyword(query_upper, pos, "EXISTS")) {
@@ -1668,7 +1730,7 @@ bool IsSingleStatementAffectingConfiguredTable(const std::string& query_upper, c
           pos = saved_pos;
         }
       }
-      return MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper);
+      return MatchConfiguredTableInList(query_upper, pos, event_db_upper, target_db_upper, table_upper);
     }
   }
 
@@ -1734,41 +1796,25 @@ bool IsSingleStatementAffectingConfiguredTable(const std::string& query_upper, c
   if (mygram::utils::MatchKeyword(query_upper, pos, "RENAME")) {
     if (mygram::utils::SkipWhitespace(query_upper, pos) && mygram::utils::MatchKeyword(query_upper, pos, "TABLE")) {
       while (mygram::utils::SkipWhitespace(query_upper, pos)) {
-        if (MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper)) {
+        TableReferenceScan scan = ScanTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper);
+        if (scan == TableReferenceScan::kMatched) {
           return true;
         }
-
-        size_t saved_pos = pos;
-        std::string ignored;
-        if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
-          pos = saved_pos;
+        if (scan == TableReferenceScan::kMalformed) {
           break;
-        }
-        if (pos < query_upper.size() && query_upper[pos] == '.') {
-          ++pos;
-          if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
-            break;
-          }
         }
 
         mygram::utils::SkipWhitespace(query_upper, pos);
         if (!mygram::utils::MatchKeyword(query_upper, pos, "TO") || !mygram::utils::SkipWhitespace(query_upper, pos)) {
           break;
         }
-        if (MatchConfiguredTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper)) {
+
+        scan = ScanTableReference(query_upper, pos, event_db_upper, target_db_upper, table_upper);
+        if (scan == TableReferenceScan::kMatched) {
           return true;
         }
-
-        saved_pos = pos;
-        if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
-          pos = saved_pos;
+        if (scan == TableReferenceScan::kMalformed) {
           break;
-        }
-        if (pos < query_upper.size() && query_upper[pos] == '.') {
-          ++pos;
-          if (!ReadSqlIdentifier(query_upper, pos, ignored)) {
-            break;
-          }
         }
 
         mygram::utils::SkipWhitespace(query_upper, pos);
@@ -1798,9 +1844,14 @@ DDLType ClassifySingleDDLStatement(const std::string& statement_upper) {
   }
 
   pos = saved_pos;
-  if (mygram::utils::MatchKeyword(statement_upper, pos, "DROP")) {
-    if (mygram::utils::SkipWhitespace(statement_upper, pos) &&
-        mygram::utils::MatchKeyword(statement_upper, pos, "TABLE")) {
+  if (mygram::utils::MatchKeyword(statement_upper, pos, "DROP") &&
+      mygram::utils::SkipWhitespace(statement_upper, pos)) {
+    const size_t modifier_pos = pos;
+    if (!mygram::utils::MatchKeyword(statement_upper, pos, "TEMPORARY") ||
+        !mygram::utils::SkipWhitespace(statement_upper, pos)) {
+      pos = modifier_pos;
+    }
+    if (mygram::utils::MatchKeyword(statement_upper, pos, "TABLE")) {
       return DDLType::kDrop;
     }
   }
