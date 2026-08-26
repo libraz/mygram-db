@@ -168,11 +168,6 @@ class InitialLoader {
    */
   std::string BuildSelectQuery() const;
 
-  /**
-   * @brief Check if column type is text (VARCHAR/TEXT)
-   */
-  static bool IsTextColumn(enum_field_types type);
-
   /// Map from field name to column index, built once per query result set
   using FieldIndexMap = std::unordered_map<std::string, int>;
 

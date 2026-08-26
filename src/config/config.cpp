@@ -198,11 +198,16 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateReactorFrameLimits(c
 
 bool IsSupportedFilterType(const std::string& type) {
   static const std::set<std::string> kSupportedFilterTypes = {
-      "tinyint", "tinyint_unsigned", "smallint",  "smallint_unsigned",
-      "int",     "int_unsigned",     "mediumint", "mediumint_unsigned",
-      "bigint",  "bigint_unsigned",  "float",     "double",
-      "string",  "varchar",          "text",      "datetime",
-      "date",    "timestamp",        "time",      "boolean",
+      "tinyint",   "tinyint_unsigned",
+      "smallint",  "smallint_unsigned",
+      "int",       "int_unsigned",
+      "mediumint", "mediumint_unsigned",
+      "bigint",    "bigint_unsigned",
+      "double",    "string",
+      "varchar",   "text",
+      "datetime",  "date",
+      "timestamp", "time",
+      "boolean",
   };
   return kSupportedFilterTypes.find(type) != kSupportedFilterTypes.end();
 }
@@ -221,11 +226,20 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateFilterType(const std
                                         "initial load and replication disagree."));
   }
 
+  if (type == "float") {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
+                                    context + " type '" + type +
+                                        "' is not supported. A FLOAT column is rendered to six significant digits in "
+                                        "a result set while a binlog row image carries the whole stored value, so "
+                                        "initial load and replication would filter the same row differently. Use a "
+                                        "DOUBLE column and type 'double'."));
+  }
+
   if (!IsSupportedFilterType(type)) {
     return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue,
                                     context + " has unsupported type '" + type +
                                         "'. Valid types: tinyint, tinyint_unsigned, smallint, smallint_unsigned, int, "
-                                        "int_unsigned, mediumint, mediumint_unsigned, bigint, bigint_unsigned, float, "
+                                        "int_unsigned, mediumint, mediumint_unsigned, bigint, bigint_unsigned, "
                                         "double, string, varchar, text, datetime, date, timestamp, time, boolean"));
   }
 
@@ -618,7 +632,7 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
                                     "Required filter error: 'type' field is required for filter '" + config.name +
                                         "'\n"
                                         "  Valid types: tinyint, tinyint_unsigned, smallint, smallint_unsigned, int, "
-                                        "int_unsigned, bigint, bigint_unsigned, float, double, string, varchar, text, "
+                                        "int_unsigned, bigint, bigint_unsigned, double, string, varchar, text, "
                                         "datetime, date, timestamp, time\n"
                                         "  Example:\n"
                                         "    required_filters:\n"

@@ -465,6 +465,36 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_TIMEOUT 30
   )
 
+  # Column type support table (no MySQL connection required)
+  add_executable(column_type_support_test
+    column_type_support_test.cpp
+  )
+
+  target_link_libraries(column_type_support_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(column_type_support_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
+  # Schema change detection in the table metadata cache (no MySQL connection required)
+  add_executable(schema_change_detection_test
+    schema_change_detection_test.cpp
+  )
+
+  target_link_libraries(schema_change_detection_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(schema_change_detection_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # DDL detection across multi-table statements (no MySQL connection required)
   add_executable(ddl_multi_table_statement_test
     ddl_multi_table_statement_test.cpp

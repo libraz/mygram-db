@@ -28,6 +28,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "mysql/column_type_support.h"
 #include "mysql/required_filter_predicate.h"
 #include "mysql/rows_parser.h"
 #include "mysql/value_canonicalizer.h"
@@ -41,22 +42,9 @@ namespace {
 // Default batch size for initial loading
 constexpr size_t kDefaultBatchSize = 1000;
 
-mysql::CanonicalValueKind CanonicalKind(enum_field_types type) {
-  switch (type) {
-    case MYSQL_TYPE_DECIMAL:
-    case MYSQL_TYPE_NEWDECIMAL:
-      return mysql::CanonicalValueKind::kDecimal;
-    case MYSQL_TYPE_DATE:
-    case MYSQL_TYPE_DATETIME:
-    case MYSQL_TYPE_TIMESTAMP:
-      return mysql::CanonicalValueKind::kTemporal;
-    case MYSQL_TYPE_FLOAT:
-      return mysql::CanonicalValueKind::kFloat;
-    case MYSQL_TYPE_DOUBLE:
-      return mysql::CanonicalValueKind::kDouble;
-    default:
-      return mysql::CanonicalValueKind::kText;
-  }
+/// The support row for a result-set column, keyed by the code MySQL reports.
+mysql::ColumnTypeSupport ColumnSupport(MYSQL_FIELD* fields, int index) {
+  return mysql::DescribeColumnType(static_cast<mysql::ColumnType>(fields[index].type));
 }
 
 std::string CanonicalizeSnapshotField(MYSQL_ROW row, const unsigned long* lengths, MYSQL_FIELD* fields, int index) {
@@ -64,7 +52,7 @@ std::string CanonicalizeSnapshotField(MYSQL_ROW row, const unsigned long* length
     return {};
   }
   return mysql::CanonicalizeColumnValue(std::string_view(row[index], lengths[index]),
-                                        CanonicalKind(fields[index].type));
+                                        ColumnSupport(fields, index).snapshot_normalization);
 }
 }  // namespace
 
@@ -620,22 +608,6 @@ std::string internal::BuildInitialLoadSelectQuery(const config::TableConfig& tab
   return query.str();
 }
 
-bool InitialLoader::IsTextColumn(enum_field_types type) {
-  // Support VARCHAR and TEXT types (TINY, MEDIUM, LONG, BLOB variants)
-  switch (type) {
-    case MYSQL_TYPE_VARCHAR:
-    case MYSQL_TYPE_VAR_STRING:
-    case MYSQL_TYPE_STRING:
-    case MYSQL_TYPE_TINY_BLOB:
-    case MYSQL_TYPE_MEDIUM_BLOB:
-    case MYSQL_TYPE_LONG_BLOB:
-    case MYSQL_TYPE_BLOB:
-      return true;
-    default:
-      return false;
-  }
-}
-
 InitialLoader::FieldIndexMap InitialLoader::BuildFieldIndexMap(MYSQL_FIELD* fields, unsigned int num_fields) {
   FieldIndexMap field_map;
   field_map.reserve(num_fields);
@@ -654,13 +626,16 @@ mysql::MaterializedText InitialLoader::ExtractText(MYSQL_ROW row, const unsigned
       return false;
     }
     const int idx = it->second;
-    if (!IsTextColumn(fields[idx].type)) {
+    // A type the two ingest paths do not agree on is refused before replication
+    // starts, so reaching this is a column whose type changed under a running
+    // server. Refusing it here keeps the snapshot from publishing text the
+    // binlog would never reproduce.
+    if (ColumnSupport(fields, idx).acceptance != mysql::ColumnAcceptance::kAccepted) {
       mygram::utils::StructuredLog()
           .Event("loader_error")
           .Field("operation", "extract_text")
-          .Field("type", "invalid_column_type")
+          .Field("type", "unsupported_column_type")
           .Field("column", column)
-          .Field("expected", "VARCHAR/TEXT")
           .Field("actual_type_id", static_cast<uint64_t>(fields[idx].type))
           .Error();
       return false;

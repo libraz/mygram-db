@@ -208,7 +208,7 @@
                     "mediumint", "mediumint_unsigned",
                     "int", "int_unsigned",
                     "bigint", "bigint_unsigned",
-                    "float", "double",
+                    "double",
                     "string", "varchar", "text",
                     "datetime", "date", "timestamp", "time", "boolean"
                   ]
@@ -253,7 +253,7 @@
                     "mediumint", "mediumint_unsigned",
                     "int", "int_unsigned",
                     "bigint", "bigint_unsigned",
-                    "float", "double",
+                    "double",
                     "string", "varchar", "text",
                     "datetime", "date", "timestamp", "time", "boolean"
                   ]

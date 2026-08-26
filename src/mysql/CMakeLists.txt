@@ -5,6 +5,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
     connection.cpp
     connection_validator.cpp
     binary_json.cpp
+    column_type_support.cpp
     ddl_schema_validator.cpp
     binlog_stream.cpp
     binlog_reader.cpp

@@ -135,7 +135,7 @@ struct FilterConfig {
   std::string type;            // Type options:
                                // Integer: "tinyint", "tinyint_unsigned", "smallint", "smallint_unsigned",
                                //          "int", "int_unsigned", "bigint", "bigint_unsigned"
-                               // Float: "float", "double"
+                               // Approximate numeric: "double"
                                // String: "string", "varchar", "text"
                                // Date/time: "datetime", "date", "timestamp", "time"
                                // Boolean: "boolean"

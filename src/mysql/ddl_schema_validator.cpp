@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "mysql/column_type_support.h"
 #include "mysql/connection.h"
 #include "utils/sql_utils.h"
 
@@ -56,6 +57,10 @@ bool IsCharacterStringType(const std::string& column_type) {
   return kCharacterTypes.find(BaseType(column_type)) != kCharacterTypes.end();
 }
 
+bool IsZerofill(const std::string& column_type) {
+  return Lower(column_type).find("zerofill") != std::string::npos;
+}
+
 bool IsSupportedTextCollation(const std::string& collation) {
   const std::string lower = Lower(collation);
   return lower.rfind("utf8mb4_", 0) == 0 || lower.rfind("utf8mb3_", 0) == 0 || lower.rfind("utf8_", 0) == 0 ||
@@ -80,6 +85,24 @@ Expected<void, Error> ValidateConfiguredColumnEncoding(const DDLColumnMetadata& 
                       reported_collation +
                       "'. Only utf8mb4, utf8/utf8mb3, and ascii character sets are supported for binlog replication",
                   context));
+  }
+  // ZEROFILL is a display attribute the server applies when it renders the
+  // column as text. The initial snapshot receives the padded digits and the
+  // binlog row image carries the unpadded number, so the two paths would key
+  // and index the same row differently.
+  if (IsZerofill(column.column_type)) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
+                                    "Configured column '" + column.name + "' in '" + table_name + "' is declared '" +
+                                        column.column_type +
+                                        "'. ZEROFILL pads the value the initial snapshot reads and not the value the "
+                                        "binlog row image carries, so the two would disagree",
+                                    context));
+  }
+  const std::string unusable = UnusableColumnTypeReason(column.column_type);
+  if (!unusable.empty()) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
+                                    "Configured column '" + column.name + "' in '" + table_name + "' uses " + unusable,
+                                    context));
   }
   return {};
 }
@@ -111,8 +134,6 @@ bool IsFilterTypeCompatible(const std::string& configured_type, const std::strin
     return integer_matches("bigint", false);
   if (configured_type == "bigint_unsigned")
     return integer_matches("bigint", true);
-  if (configured_type == "float")
-    return actual == "float";
   if (configured_type == "double")
     return actual == "double" || actual == "real";
   if (configured_type == "boolean") {

@@ -58,7 +58,7 @@ Each element requires `name` and `text_source`. Table identity is `(database, na
 | `tables[].text_source.concat` | string[] | minItems 2, each minLength 1, no NUL, quotable SQL identifier | `[]` | startup-only | `config.cpp:831`, `config-schema.json:171` |
 | `tables[].text_source.delimiter` | string | any | `" "` (single space) | startup-only | `config-schema.json:173` |
 | `tables[].required_filters[].name` | string | minLength 1, no NUL, quotable SQL identifier | (none — required) | startup-only | `config.cpp:596` |
-| `tables[].required_filters[].type` | string | `tinyint`, `tinyint_unsigned`, `smallint`, `smallint_unsigned`, `mediumint`, `mediumint_unsigned`, `int`, `int_unsigned`, `bigint`, `bigint_unsigned`, `float`, `double`, `string`, `varchar`, `text`, `datetime`, `date`, `timestamp`, `time`, `boolean` | (none — required) | startup-only | `config.cpp:615`, `config.cpp:183` |
+| `tables[].required_filters[].type` | string | `tinyint`, `tinyint_unsigned`, `smallint`, `smallint_unsigned`, `mediumint`, `mediumint_unsigned`, `int`, `int_unsigned`, `bigint`, `bigint_unsigned`, `double`, `string`, `varchar`, `text`, `datetime`, `date`, `timestamp`, `time`, `boolean` | (none — required) | startup-only | `config.cpp:238`, `config-schema.json:202` |
 | `tables[].required_filters[].op` | string | `=`, `!=`, `<`, `>`, `<=`, `>=`, `IS NULL`, `IS NOT NULL`; `boolean` type restricted to `=`, `!=`, `IS NULL`, `IS NOT NULL` | (none — required) | startup-only | `config.cpp:650`, `config.cpp:664` |
 | `tables[].required_filters[].value` | string \| number \| boolean | must be absent for `IS NULL`/`IS NOT NULL`, present otherwise; empty string permitted only for `string`/`varchar`/`text` | (none) | startup-only | `config.cpp:672`, `config.cpp:687`, `config.cpp:700` |
 | `tables[].required_filters[].bitmap_index` | boolean | — | `false` | startup-only · unread | `config-schema.json:225` |
@@ -369,8 +369,9 @@ The process exits non-zero. Config-file problems surface before any socket or lo
 **Tables**
 
 - Table name, database, primary key, text-source column, concat column, or filter name that is empty or not a quotable identifier — `config.cpp:767`, `config.cpp:773`, `config.cpp:780`, `config.cpp:824`, `config.cpp:831`, `config.cpp:596`, `config.cpp:722`
-- Filter type `enum` or `set` — `config.cpp:200`
-- Any other unsupported filter type — `config.cpp:208`
+- Filter type `enum` or `set` — `config.cpp:221`
+- Filter type `float` — `config.cpp:229`
+- Any other unsupported filter type — `config.cpp:238`
 - `kanji_ngram_size` outside 0–10 — `config.cpp:788`
 - `where_clause` present — `config.cpp:804`
 - Invalid required-filter operator — `config.cpp:651`
@@ -382,6 +383,18 @@ The process exits non-zero. Config-file problems surface before any socket or lo
 - `synonyms.enable: true` with an empty `synonyms.file` — `config.cpp:913`
 - `..` component or NUL in `synonyms.file` — `config.cpp:908`
 - Two tables with the same `(database, name)` identity — `config.cpp:976`
+
+**Configured columns, checked against MySQL when replication starts**
+
+Every column named by `primary_key`, `text_source` or a filter is looked up with `SHOW FULL COLUMNS` and refused when the initial snapshot and the binlog row image would not produce the same string for it (`ddl_schema_validator.cpp:70`). Each of these is a hard failure with `kMySQLInvalidSchema`:
+
+- `BINARY`, `VARBINARY`, `TINYBLOB`, `BLOB`, `MEDIUMBLOB`, `LONGBLOB` — `ddl_schema_validator.cpp:72`
+- A character type whose collation is not `utf8mb4_*`, `utf8mb3_*`, `utf8_*` or `ascii_*` — `ddl_schema_validator.cpp:80`
+- Any `ZEROFILL` column: the result set carries the padded digits and the row image the unpadded number — `ddl_schema_validator.cpp:93`
+- `JSON`, `GEOMETRY` and its subtypes, `VECTOR`, `FLOAT`: both paths produce a string and the two differ — `ddl_schema_validator.cpp:101`, `column_type_support.h:75`
+- A declared type this build does not decode from a row image, such as a vendor type absent from `column_type_support.cpp` — `ddl_schema_validator.cpp:101`
+
+The types that pass are the ones both paths render identically: the integer widths, `DECIMAL`, `DOUBLE`, `DATE`, `DATETIME`, `TIMESTAMP`, `TIME`, `YEAR`, `BIT`, `CHAR`, `VARCHAR`, the `TEXT` family, `ENUM` and `SET` (`column_type_support.h:75`).
 
 **Replication**
 

@@ -94,10 +94,10 @@ logging:
 }
 
 /**
- * @brief Test float value formatting (should have decimal point)
+ * @brief Test fractional value formatting (should have decimal point)
  */
-TEST(RequiredFiltersFormattingTest, FloatValueFormat) {
-  // Create temporary YAML config with float filter value
+TEST(RequiredFiltersFormattingTest, FractionalValueFormat) {
+  // Create temporary YAML config with fractional filter values
   const char* yaml_content = R"(
 mysql:
   host: "127.0.0.1"
@@ -113,7 +113,7 @@ tables:
       column: "content"
     required_filters:
       - name: "price"
-        type: "float"
+        type: "double"
         op: ">"
         value: 99.99
       - name: "rating"
@@ -149,7 +149,7 @@ logging:
 
   ASSERT_EQ(table.required_filters.size(), 2);
 
-  // Check float values have decimal points
+  // Check fractional values have decimal points
   EXPECT_EQ(table.required_filters[0].name, "price");
   EXPECT_NE(table.required_filters[0].value.find("."), std::string::npos);  // Has decimal point
 
@@ -291,7 +291,7 @@ logging:
 /**
  * @brief Test mixed integer and float values in same config
  */
-TEST(RequiredFiltersFormattingTest, MixedIntegerAndFloatValues) {
+TEST(RequiredFiltersFormattingTest, MixedIntegerAndFractionalValues) {
   // Create temporary YAML config with mixed values
   const char* yaml_content = R"(
 mysql:
@@ -312,7 +312,7 @@ tables:
         op: ">"
         value: 10
       - name: "percentage"
-        type: "float"
+        type: "double"
         op: "<"
         value: 50.5
       - name: "limit"
@@ -352,7 +352,7 @@ logging:
   EXPECT_EQ(table.required_filters[0].value, "10");
   EXPECT_EQ(table.required_filters[0].value.find("."), std::string::npos);
 
-  // Float value: has decimal point
+  // Fractional value: has decimal point
   EXPECT_EQ(table.required_filters[1].name, "percentage");
   EXPECT_NE(table.required_filters[1].value.find("."), std::string::npos);
 

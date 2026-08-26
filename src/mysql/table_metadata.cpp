@@ -179,6 +179,13 @@ bool TableMetadataCache::SchemaEquals(const TableMetadata& lhs, const TableMetad
       return false;
     }
 
+    // Signedness decides how the row decoder reads an integer's bytes, and a
+    // TABLE_MAP carries the same type code either way. An ALTER that only
+    // changes it must still be reported as a schema change.
+    if (col_lhs.is_unsigned != col_rhs.is_unsigned) {
+      return false;
+    }
+
     // Check name (might change after ALTER TABLE)
     if (col_lhs.name != col_rhs.name) {
       return false;

@@ -14,6 +14,7 @@
 
 #include "mysql/binary_json.h"
 #include "mysql/binlog_util.h"
+#include "mysql/column_type_support.h"
 #include "mysql/rows_parser_internal.h"
 #include "mysql/table_metadata.h"
 #include "mysql/value_canonicalizer.h"
@@ -142,6 +143,17 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
                                               bool is_null, const unsigned char* end, bool is_unsigned,
                                               const std::vector<std::string>* enum_set_values) {
   constexpr uint32_t kMaxFieldLength = 256 * 1024 * 1024;  // 256MB max for any field
+
+  // The cases below decode exactly the codes the support table records as
+  // decodable. A code it does not is refused here rather than at the end of the
+  // switch, including when the value is NULL: the column is one this build
+  // cannot follow, and publishing an empty string for it would let a row that
+  // is only sometimes decodable through.
+  if (DescribeColumnType(static_cast<ColumnType>(col_type)).binlog_decoding != BinlogDecoding::kDecoded) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLUnsupportedType, "Unsupported column type: " + std::to_string(col_type)));
+  }
+
   if (is_null) {
     return std::string{};  // NULL values represented as empty string
   }

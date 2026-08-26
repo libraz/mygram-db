@@ -43,6 +43,16 @@ std::string CanonicalizeColumnValue(std::string_view value, CanonicalValueKind k
   if (kind == CanonicalValueKind::kText) {
     return mygram::utils::SanitizeUtf8(value);
   }
+  if (kind == CanonicalValueKind::kBitset) {
+    // A BIT column arrives from the result set as its raw storage bytes, most
+    // significant first. The binlog decoder reads the same bytes the same way,
+    // so both sides publish the decimal value rather than the bytes.
+    uint64_t bits = 0;
+    for (const char byte : value) {
+      bits = (bits << 8) | static_cast<unsigned char>(byte);
+    }
+    return std::to_string(bits);
+  }
   if (value.empty()) {
     return std::string(value);
   }

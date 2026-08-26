@@ -329,7 +329,7 @@ tables[].filters[].bitmap_index type=boolean default=false mutable=no
 tables[].filters[].bucket type=string enum=["minute","hour","day"] mutable=no
 tables[].filters[].dict_compress type=boolean default=false mutable=no
 tables[].filters[].name type=string mutable=no
-tables[].filters[].type type=string enum=["tinyint","tinyint_unsigned","smallint","smallint_unsigned","mediumint","mediumint_unsigned","int","int_unsigned","bigint","bigint_unsigned","float","double","string","varchar","text","datetime","date","timestamp","time","boolean"] mutable=no
+tables[].filters[].type type=string enum=["tinyint","tinyint_unsigned","smallint","smallint_unsigned","mediumint","mediumint_unsigned","int","int_unsigned","bigint","bigint_unsigned","double","string","varchar","text","datetime","date","timestamp","time","boolean"] mutable=no
 tables[].kanji_ngram_size type=integer default=0 minimum=0 maximum=10 mutable=no
 tables[].name type=string mutable=no
 tables[].ngram_size type=integer default=2 minimum=1 maximum=10 mutable=no
@@ -342,7 +342,7 @@ tables[].required_filters type=array mutable=no
 tables[].required_filters[].bitmap_index type=boolean default=false mutable=no
 tables[].required_filters[].name type=string mutable=no
 tables[].required_filters[].op type=string enum=["=","!=","<",">","<=",">=","IS NULL","IS NOT NULL"] mutable=no
-tables[].required_filters[].type type=string enum=["tinyint","tinyint_unsigned","smallint","smallint_unsigned","mediumint","mediumint_unsigned","int","int_unsigned","bigint","bigint_unsigned","float","double","string","varchar","text","datetime","date","timestamp","time","boolean"] mutable=no
+tables[].required_filters[].type type=string enum=["tinyint","tinyint_unsigned","smallint","smallint_unsigned","mediumint","mediumint_unsigned","int","int_unsigned","bigint","bigint_unsigned","double","string","varchar","text","datetime","date","timestamp","time","boolean"] mutable=no
 tables[].required_filters[].value type=["string","number","boolean"] mutable=no
 tables[].synonyms type=object mutable=no
 tables[].synonyms.enable type=boolean default=false mutable=no
