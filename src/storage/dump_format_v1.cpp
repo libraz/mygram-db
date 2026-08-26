@@ -200,7 +200,11 @@ uint32_t ExpectedHeaderSizeV1(const HeaderV1& header) {
 
 Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV1& header) {
   const uint32_t expected_header_size = ExpectedHeaderSizeV1(header);
-  if (header.header_size != expected_header_size) {
+  // Releases up to and including v1.5.3 emitted this field as a literal zero
+  // and never patched it, so zero marks such a release rather than a wrong
+  // length. The V1 header layout is fixed, so parsing continues at the offset
+  // the layout implies. Any other value still has to be exact.
+  if (header.header_size != kUnrecordedHeaderSizeV1 && header.header_size != expected_header_size) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
                                     "Invalid V1 header size: expected " + std::to_string(expected_header_size) +
                                         ", got " + std::to_string(header.header_size)));

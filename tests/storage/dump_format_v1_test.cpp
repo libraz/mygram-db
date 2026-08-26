@@ -106,6 +106,92 @@ TEST(DumpFormatV1Test, HeaderSizeWithEmptyGtid) {
   EXPECT_EQ(read_header.header_size, expected_size);
 }
 
+/**
+ * @brief A header_size of zero is what releases up to v1.5.3 left behind
+ *
+ * Zero marks a release that never wrote the field. Any other value still has
+ * to be the exact size the layout implies.
+ */
+TEST(DumpFormatV1Test, ValidateHeaderAcceptsAnUnrecordedHeaderSize) {
+  HeaderV1 header;
+  header.gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:42";
+  header.total_file_size = 4096;
+
+  header.header_size = kUnrecordedHeaderSizeV1;
+  EXPECT_TRUE(ValidateHeaderIntegrityFields(header).has_value());
+
+  header.header_size = static_cast<uint32_t>(32 + header.gtid.size());
+  EXPECT_TRUE(ValidateHeaderIntegrityFields(header).has_value());
+
+  header.header_size = static_cast<uint32_t>(32 + header.gtid.size()) + 1;
+  auto wrong = ValidateHeaderIntegrityFields(header);
+  ASSERT_FALSE(wrong.has_value());
+  EXPECT_NE(wrong.error().message().find("Invalid V1 header size"), std::string::npos);
+}
+
+/**
+ * @brief A table config written before cross_boundary_ngrams existed decodes
+ *
+ * That layout is one byte shorter. The byte is a serialized bool, so a value
+ * above one identifies the shorter layout and belongs to the posting block
+ * size that follows; posting.block_size is set here to a value whose least
+ * significant octet is neither, which is what makes the two distinguishable.
+ */
+TEST(DumpFormatV1Test, ConfigWithoutCrossBoundaryNgramsDecodes) {
+  Config write_config;
+  write_config.mysql.host = "127.0.0.1";
+  write_config.mysql.database = "corpus";
+
+  TableConfig table;
+  table.name = "articles";
+  table.primary_key = "id";
+  table.text_source.column = "body";
+  table.ngram_size = 2;
+  table.kanji_ngram_size = 3;
+  table.posting.block_size = 0x1234FF;
+  table.cross_boundary_ngrams = true;
+  write_config.tables.push_back(table);
+
+  std::ostringstream with_field;
+  ASSERT_TRUE(SerializeConfig(with_field, write_config).has_value());
+
+  // Locate the field by serializing the one value that differs: the two
+  // buffers can only disagree at the byte that records it.
+  write_config.tables[0].cross_boundary_ngrams = false;
+  std::ostringstream without_field;
+  ASSERT_TRUE(SerializeConfig(without_field, write_config).has_value());
+
+  const std::string recorded = with_field.str();
+  const std::string cleared = without_field.str();
+  ASSERT_EQ(recorded.size(), cleared.size());
+  size_t field_offset = std::string::npos;
+  for (size_t i = 0; i < recorded.size(); ++i) {
+    if (recorded[i] != cleared[i]) {
+      ASSERT_EQ(field_offset, std::string::npos) << "more than one byte differs at " << i;
+      field_offset = i;
+    }
+  }
+  ASSERT_NE(field_offset, std::string::npos);
+
+  std::string legacy = recorded;
+  legacy.erase(field_offset, 1);
+
+  Config read_config;
+  std::istringstream input(legacy);
+  auto result = DeserializeConfig(input, read_config);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+
+  ASSERT_EQ(read_config.tables.size(), 1u);
+  EXPECT_EQ(read_config.tables[0].name, "articles");
+  EXPECT_EQ(read_config.tables[0].ngram_size, 2);
+  EXPECT_EQ(read_config.tables[0].kanji_ngram_size, 3);
+  EXPECT_EQ(read_config.tables[0].posting.block_size, 0x1234FF);
+  // The field is absent, so the running default stands.
+  EXPECT_EQ(read_config.tables[0].cross_boundary_ngrams, TableConfig{}.cross_boundary_ngrams);
+  EXPECT_EQ(read_config.mysql.host, "127.0.0.1");
+  EXPECT_EQ(read_config.mysql.database, "corpus");
+}
+
 TEST(DumpFormatV1Test, ConfigRoundTripPreservesPerTableDatabase) {
   Config write_config;
   write_config.mysql.database = "default_db";

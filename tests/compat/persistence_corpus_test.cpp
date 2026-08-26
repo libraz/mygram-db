@@ -31,6 +31,7 @@
 #include "storage/dump_format.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
+#include "storage/dump_source_identity.h"
 #include "utils/error.h"
 
 namespace {
@@ -216,7 +217,9 @@ struct DumpFixture {
   const char* name;
   /// Document store version embedded in the table section.
   uint32_t docstore_version;
-  /// MySQL source server UUID the dump is expected to yield, empty when none.
+  /// Whether the dump records a MySQL source server UUID at all.
+  bool records_source_server_uuid;
+  /// UUID the dump is expected to yield when it records one.
   std::string_view source_server_uuid;
   /// memory.verify_text the config section is expected to yield.
   std::string_view verify_text;
@@ -232,16 +235,15 @@ TEST_P(DumpContainerCorpusTest, LoadsWithTheRecordedContent) {
 
   std::string gtid;
   mygramdb::config::Config loaded_config;
-  // Pre-seed the UUID so a reader that never writes it is distinguishable from
-  // one that writes an empty string.
-  std::string source_server_uuid = "not-populated-by-the-reader";
+  mygramdb::storage::DumpSourceIdentity source_identity;
 
   auto result = mygramdb::storage::dump_v2::ReadDump(FixturePath(fixture.file), gtid, loaded_config, contexts, nullptr,
-                                                     nullptr, nullptr, {}, {}, &source_server_uuid);
+                                                     nullptr, nullptr, {}, {}, &source_identity);
   ASSERT_TRUE(result.has_value()) << fixture.name << " is no longer readable: " << result.error().message();
 
   EXPECT_EQ(gtid, corpus::kGtid);
-  EXPECT_EQ(source_server_uuid, fixture.source_server_uuid);
+  EXPECT_EQ(source_identity.recorded, fixture.records_source_server_uuid);
+  EXPECT_EQ(source_identity.uuid, fixture.source_server_uuid);
   EXPECT_EQ(loaded_config.memory.verify_text, fixture.verify_text);
   EXPECT_EQ(loaded_config.mysql.host, corpus::kMysqlHost);
   EXPECT_EQ(loaded_config.mysql.port, corpus::kMysqlPort);
@@ -259,15 +261,15 @@ INSTANTIATE_TEST_SUITE_P(
     AcceptedVersions, DumpContainerCorpusTest,
     ::testing::Values(
         // Container V1, compatibility metadata version 1, index V1, docstore V1.
-        DumpFixture{corpus::kDumpV1MetaV1File, "container V1 with compatibility metadata version 1", 1, "",
+        DumpFixture{corpus::kDumpV1MetaV1File, "container V1 with compatibility metadata version 1", 1, false, "",
                     corpus::kVerifyText},
         // Container V1 as WriteDumpV1 emits it: metadata version 2, index V4, docstore V3.
-        DumpFixture{corpus::kDumpV1MetaV2File, "container V1 from WriteDumpV1", 3, "", corpus::kVerifyText},
+        DumpFixture{corpus::kDumpV1MetaV2File, "container V1 from WriteDumpV1", 3, false, "", corpus::kVerifyText},
         // Container V2 carrying index V3 and docstore V2, versions no writer emits.
-        DumpFixture{corpus::kDumpV2LegacyPayloadsFile, "container V2 with legacy embedded payloads", 2,
+        DumpFixture{corpus::kDumpV2LegacyPayloadsFile, "container V2 with legacy embedded payloads", 2, true,
                     corpus::kSourceServerUuid, corpus::kVerifyText},
         // Container V2 as WriteDumpV2 emits it.
-        DumpFixture{corpus::kDumpV2CurrentFile, "container V2 from WriteDumpV2", 3, corpus::kSourceServerUuid,
+        DumpFixture{corpus::kDumpV2CurrentFile, "container V2 from WriteDumpV2", 3, true, corpus::kSourceServerUuid,
                     corpus::kVerifyText}),
     [](const ::testing::TestParamInfo<DumpFixture>& info) {
       std::string suite_name(info.param.file);
@@ -331,76 +333,106 @@ TEST(DumpContainerCorpusRejectionTest, DirectV1ReaderRefusesAV2Container) {
 }
 
 // ============================================================================
-// The container layer accepts a V1 dump that the server layer then refuses
+// The source-identity rule both restore paths apply
 // ============================================================================
 
-TEST(DumpContainerV1ServerRefusalTest, ContainerLayerLoadsButRecordsNoSourceServerUuid) {
-  auto targets = MakeCorpusTargets();
+/// Restore a fixture and hand its recorded source to the shared policy.
+mygram::utils::Expected<void, mygram::utils::Error> LoadUnderSourcePolicy(
+    std::string_view fixture, const std::string& live_source_server_uuid, RestoreTargets& targets,
+    mygramdb::storage::DumpSourceIdentity& source_identity) {
   auto contexts = targets.Contexts(corpus::kTableName);
   std::string gtid;
   mygramdb::config::Config loaded_config;
-  std::string source_server_uuid = "not-populated-by-the-reader";
 
-  auto result = mygramdb::storage::dump_v2::ReadDump(FixturePath(corpus::kDumpV1MetaV1File), gtid, loaded_config,
-                                                     contexts, nullptr, nullptr, nullptr, {}, {}, &source_server_uuid);
-  ASSERT_TRUE(result.has_value()) << result.error().message();
-  // The dispatcher clears the caller's buffer and the V1 reader has no way to
-  // fill it, so a V1 dump can never carry a source server UUID.
-  EXPECT_TRUE(source_server_uuid.empty());
-}
-
-TEST(DumpContainerV1ServerRefusalTest, StartupRestoreValidatorRefusesADumpWithoutSourceServerUuid) {
-  auto targets = MakeCorpusTargets();
-  auto contexts = targets.Contexts(corpus::kTableName);
-  std::string gtid;
-  mygramdb::config::Config loaded_config;
-  std::string source_server_uuid = "not-populated-by-the-reader";
-
-  // The rule startup restore applies: a dump that records no MySQL source
-  // server UUID is refused, whatever the container layer made of it.
-  auto validator = [&source_server_uuid](const mygramdb::config::Config&,
-                                         const std::string&) -> mygram::utils::Expected<void, mygram::utils::Error> {
-    if (source_server_uuid.empty()) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(ErrorCode::kStorageVersionMismatch,
-                                                                    "dump does not record its MySQL source server "
-                                                                    "UUID"));
+  auto validator = [&source_identity, &live_source_server_uuid](
+                       const mygramdb::config::Config&,
+                       const std::string&) -> mygram::utils::Expected<void, mygram::utils::Error> {
+    if (auto mismatch = mygramdb::storage::FindDumpSourceIdentityMismatch(source_identity, live_source_server_uuid);
+        mismatch.has_value()) {
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(ErrorCode::kStorageVersionMismatch, std::string(mismatch->detail)));
     }
     return {};
   };
 
-  auto result =
-      mygramdb::storage::dump_v2::ReadDump(FixturePath(corpus::kDumpV1MetaV1File), gtid, loaded_config, contexts,
-                                           nullptr, nullptr, nullptr, validator, {}, &source_server_uuid);
-  ASSERT_FALSE(result.has_value());
+  return mygramdb::storage::dump_v2::ReadDump(FixturePath(fixture), gtid, loaded_config, contexts, nullptr, nullptr,
+                                              nullptr, validator, {}, &source_identity);
+}
+
+TEST(DumpSourceIdentityTest, AV1ContainerRecordsNoSourceServerUuid) {
+  auto targets = MakeCorpusTargets();
+  auto contexts = targets.Contexts(corpus::kTableName);
+  std::string gtid;
+  mygramdb::config::Config loaded_config;
+  mygramdb::storage::DumpSourceIdentity source_identity;
+
+  auto result = mygramdb::storage::dump_v2::ReadDump(FixturePath(corpus::kDumpV1MetaV1File), gtid, loaded_config,
+                                                     contexts, nullptr, nullptr, nullptr, {}, {}, &source_identity);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  // The V1 container has no field for it, so the source stays unknown rather
+  // than coming back as an empty UUID.
+  EXPECT_FALSE(source_identity.recorded);
+  EXPECT_TRUE(source_identity.uuid.empty());
+}
+
+TEST(DumpSourceIdentityTest, ADumpThatRecordsNoSourceServerUuidIsAccepted) {
+  auto targets = MakeCorpusTargets();
+  mygramdb::storage::DumpSourceIdentity source_identity;
+
+  auto result = LoadUnderSourcePolicy(corpus::kDumpV1MetaV1File, std::string(corpus::kSourceServerUuid), targets,
+                                      source_identity);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_FALSE(source_identity.recorded);
+  ExpectCorpusIndexContent(*targets.index);
+}
+
+TEST(DumpSourceIdentityTest, ADumpRecordingTheRunningSourceIsAccepted) {
+  auto targets = MakeCorpusTargets();
+  mygramdb::storage::DumpSourceIdentity source_identity;
+
+  auto result = LoadUnderSourcePolicy(corpus::kDumpV2CurrentFile, std::string(corpus::kSourceServerUuid), targets,
+                                      source_identity);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_TRUE(source_identity.recorded);
+  EXPECT_EQ(source_identity.uuid, corpus::kSourceServerUuid);
+}
+
+TEST(DumpSourceIdentityTest, ADumpRecordingADifferentSourceIsRefused) {
+  auto targets = MakeCorpusTargets();
+  mygramdb::storage::DumpSourceIdentity source_identity;
+
+  auto result = LoadUnderSourcePolicy(corpus::kDumpV2CurrentFile, "11111111-2222-3333-4444-555555555555", targets,
+                                      source_identity);
+  ASSERT_FALSE(result.has_value()) << "widening the unknown case must not widen the mismatched one";
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+  EXPECT_NE(result.error().message().find("source server UUID does not match"), std::string::npos)
+      << result.error().message();
 
   // The refusal happens before any live table state is replaced.
   EXPECT_EQ(targets.index->TermCount(), 0U);
   EXPECT_EQ(targets.doc_store->Size(), 0U);
 }
 
-TEST(DumpContainerV1ServerRefusalTest, MetadataVersion2DumpSatisfiesTheSameValidator) {
-  auto targets = MakeCorpusTargets();
-  auto contexts = targets.Contexts(corpus::kTableName);
-  std::string gtid;
-  mygramdb::config::Config loaded_config;
-  std::string source_server_uuid;
+TEST(DumpSourceIdentityTest, PolicyDistinguishesAnUnknownSourceFromAnEmptyRecordedOne) {
+  const std::string live_source = "3e11fa47-71ca-11e1-9e33-c80aa9429562";
 
-  auto validator = [&source_server_uuid](const mygramdb::config::Config&,
-                                         const std::string&) -> mygram::utils::Expected<void, mygram::utils::Error> {
-    if (source_server_uuid.empty()) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(ErrorCode::kStorageVersionMismatch,
-                                                                    "dump does not record its MySQL source server "
-                                                                    "UUID"));
-    }
-    return {};
-  };
+  // Nothing recorded: the artifact makes no claim, so there is nothing to
+  // disagree with.
+  EXPECT_FALSE(mygramdb::storage::FindDumpSourceIdentityMismatch(mygramdb::storage::DumpSourceIdentity{}, live_source)
+                   .has_value());
 
-  auto result =
-      mygramdb::storage::dump_v2::ReadDump(FixturePath(corpus::kDumpV2CurrentFile), gtid, loaded_config, contexts,
-                                           nullptr, nullptr, nullptr, validator, {}, &source_server_uuid);
-  ASSERT_TRUE(result.has_value()) << result.error().message();
-  EXPECT_EQ(source_server_uuid, corpus::kSourceServerUuid);
+  // Recorded as empty: the dump was taken with no binlog reader attached, and
+  // that is still refused.
+  const auto empty_recorded =
+      mygramdb::storage::FindDumpSourceIdentityMismatch(mygramdb::storage::DumpSourceIdentity{true, ""}, live_source);
+  ASSERT_TRUE(empty_recorded.has_value());
+  EXPECT_NE(std::string(empty_recorded->detail).find("does not record its MySQL source server UUID"),
+            std::string::npos);
+
+  // The running server's own source unknown: no comparison is possible.
+  EXPECT_FALSE(mygramdb::storage::FindDumpSourceIdentityMismatch(
+                   mygramdb::storage::DumpSourceIdentity{true, "some-other-server"}, "")
+                   .has_value());
 }
 
 // ============================================================================
@@ -469,10 +501,10 @@ TEST_P(ReleaseDumpCorpusTest, StillLoadsWithItsRecordedContent) {
 
   std::string gtid;
   mygramdb::config::Config loaded_config;
-  std::string source_server_uuid = "not-populated-by-the-reader";
+  mygramdb::storage::DumpSourceIdentity source_identity;
 
   auto result = mygramdb::storage::dump_v2::ReadDump(FixturePath(fixture.file), gtid, loaded_config, contexts, nullptr,
-                                                     nullptr, nullptr, {}, {}, &source_server_uuid);
+                                                     nullptr, nullptr, {}, {}, &source_identity);
   ASSERT_TRUE(result.has_value()) << "a dump written by " << fixture.release
                                   << " is no longer readable: " << result.error().message();
 
@@ -486,7 +518,7 @@ TEST_P(ReleaseDumpCorpusTest, StillLoadsWithItsRecordedContent) {
   EXPECT_EQ(loaded_config.memory.verify_text, fixture.verify_text);
 
   // No release up to and including v1.9.0 recorded a MySQL source server UUID.
-  EXPECT_TRUE(source_server_uuid.empty());
+  EXPECT_FALSE(source_identity.recorded);
 
   // The three indexed documents were "hello", "hello world" and "helo".
   EXPECT_EQ(targets.index->SearchOr({"he"}), std::vector<mygramdb::DocId>({1, 2, 3}));
@@ -523,19 +555,19 @@ INSTANTIATE_TEST_SUITE_P(EarlierReleases, ReleaseDumpCorpusTest,
                          });
 
 /**
- * @brief A dump written by v1.3.2 does not load, and this records that.
+ * @brief A dump written by v1.3.2 stops inside its index payload.
  *
- * Releases up to and including v1.5.3 left the V1 header's header_size field
- * at zero; v1.5.4 began writing it, and a later release added a read-time
- * check that the field equals 32 plus the GTID length. The check refuses
- * anything those earlier releases wrote, so their dumps are unreadable by the
- * current code even though the container version is accepted.
+ * Its container header, its config section and its document store payload all
+ * decode. Its posting lists do not: that release wrote the posting list's
+ * strategy byte, element count and delta values with the octets in the reverse
+ * order to every later release, and nothing in the artifact records which order
+ * was used, so the decoder cannot tell one from the other.
  *
- * This assertion states what the code does today. It is not a statement that
- * the behavior is correct: if the read path is ever made to accept a zero
- * header_size again, this test is the thing that has to change.
+ * This assertion states what the code does today, not that the behavior is
+ * right. If the posting list decoder is ever taught to read that byte order,
+ * this test is the thing that has to change.
  */
-TEST(ReleaseDumpCorpusRejectionTest, DumpWrittenByV132IsRefusedForItsZeroHeaderSize) {
+TEST(ReleaseDumpCorpusRejectionTest, DumpWrittenByV132IsRefusedForItsPostingListByteOrder) {
   RestoreTargets targets{std::make_unique<Index>(), std::make_unique<DocumentStore>()};
   auto contexts = targets.Contexts(corpus::kTableName);
   std::string gtid;
@@ -544,6 +576,47 @@ TEST(ReleaseDumpCorpusRejectionTest, DumpWrittenByV132IsRefusedForItsZeroHeaderS
   auto result =
       mygramdb::storage::dump_v2::ReadDump(FixturePath(corpus::kReleaseV132File), gtid, loaded_config, contexts);
   ASSERT_FALSE(result.has_value()) << "a v1.3.2 dump now loads; the corpus expectation is stale";
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageDumpReadError);
+  // The refusal names the index payload, which is only reached once the header
+  // and the config section have decoded.
+  EXPECT_NE(result.error().message().find("LoadFromStream failed for index"), std::string::npos)
+      << "unexpected refusal reason: " << result.error().message();
+
+  // Nothing was applied to the live objects.
+  EXPECT_EQ(targets.index->TermCount(), 0U);
+  EXPECT_EQ(targets.doc_store->Size(), 0U);
+}
+
+/**
+ * @brief The zero header_size those releases left behind is not corruption.
+ *
+ * Releases up to and including v1.5.3 wrote the V1 header's header_size field
+ * as a literal zero and never patched it, so zero is the marker such a release
+ * leaves rather than a wrong length. Any other value still has to be exact.
+ */
+TEST(ReleaseDumpCorpusTest, ZeroHeaderSizeIsAcceptedButAWrongOneIsNot) {
+  std::string bytes = ReadFixture(corpus::kReleaseV132File);
+  // File offset 8 is the V1 header_size field (spec/persistence-formats.md 1.2).
+  ASSERT_GT(bytes.size(), 12U);
+  bytes[8] = 0x7F;
+
+  const std::filesystem::path scratch =
+      std::filesystem::temp_directory_path() / "mygramdb_corpus_wrong_header_size.dmp";
+  {
+    std::ofstream out(scratch, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(out);
+    out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  }
+
+  RestoreTargets targets{std::make_unique<Index>(), std::make_unique<DocumentStore>()};
+  auto contexts = targets.Contexts(corpus::kTableName);
+  std::string gtid;
+  mygramdb::config::Config loaded_config;
+
+  auto result = mygramdb::storage::dump_v2::ReadDump(scratch.string(), gtid, loaded_config, contexts);
+  std::filesystem::remove(scratch);
+
+  ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageDumpReadError);
   EXPECT_NE(result.error().message().find("Invalid V1 header size"), std::string::npos)
       << "unexpected refusal reason: " << result.error().message();

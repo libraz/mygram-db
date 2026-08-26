@@ -220,6 +220,8 @@ Expected<void, Error> WriteDumpV2(
  * @param table_stats Optional output for per-table statistics map
  * @param integrity_error Optional output for detailed integrity error information
  * @param config_validator Optional callback to validate loaded config and GTID before applying table data
+ * @param restore_limits Ceilings the artifact must satisfy while it is restored
+ * @param source_identity Optional output for the MySQL source the dump records
  * @return Expected<void, Error>
  */
 Expected<void, Error> ReadDumpV2(
@@ -227,7 +229,7 @@ Expected<void, Error> ReadDumpV2(
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
     dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {},
-    const RestoreLimits& restore_limits = {}, std::string* source_server_uuid = nullptr);
+    const RestoreLimits& restore_limits = {}, DumpSourceIdentity* source_identity = nullptr);
 
 // ============================================================================
 // Version dispatch functions
@@ -250,14 +252,15 @@ Expected<void, Error> WriteDump(
  * @brief Read dump from file (auto-detects V1 or V2 format)
  *
  * Reads the fixed header to determine the format version, then dispatches
- * to the appropriate reader.
+ * to the appropriate reader. A V1 container carries no MySQL source, so
+ * source_identity comes back unrecorded for one.
  */
 Expected<void, Error> ReadDump(
     const std::string& filepath, std::string& gtid, config::Config& config,
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     DumpStatistics* stats = nullptr, std::unordered_map<std::string, TableStatistics>* table_stats = nullptr,
     dump_format::IntegrityError* integrity_error = nullptr, const DumpConfigValidationCallback& config_validator = {},
-    const RestoreLimits& restore_limits = {}, std::string* source_server_uuid = nullptr);
+    const RestoreLimits& restore_limits = {}, DumpSourceIdentity* source_identity = nullptr);
 
 /**
  * @brief Verify dump file integrity (auto-detects V1 or V2 format)

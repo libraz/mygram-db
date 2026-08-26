@@ -858,10 +858,10 @@ Expected<void, Error> ReadDumpV2(
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
     std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
     const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits,
-    std::string* source_server_uuid) {
+    DumpSourceIdentity* source_identity) {
   try {
-    if (source_server_uuid != nullptr) {
-      source_server_uuid->clear();
+    if (source_identity != nullptr) {
+      *source_identity = {};
     }
     if (restore_limits.memory_budget_bytes == 0 || restore_limits.max_section_bytes == 0) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "V2 restore limits must be greater than zero"));
@@ -1043,7 +1043,7 @@ Expected<void, Error> ReadDumpV2(
           }
           BoundedInputStream compatibility_stream(section_stream, envelope.data_length);
           if (auto result =
-                  dump_v1::DeserializeCompatibilityMetadata(compatibility_stream, loaded_config, source_server_uuid);
+                  dump_v1::DeserializeCompatibilityMetadata(compatibility_stream, loaded_config, source_identity);
               !result) {
             LogStorageError("deserialize_compatibility_metadata_v2", filepath, result.error().message());
             return result;
@@ -1335,9 +1335,11 @@ Expected<void, Error> ReadDump(
     std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts, DumpStatistics* stats,
     std::unordered_map<std::string, TableStatistics>* table_stats, dump_format::IntegrityError* integrity_error,
     const DumpConfigValidationCallback& config_validator, const RestoreLimits& restore_limits,
-    std::string* source_server_uuid) {
-  if (source_server_uuid != nullptr) {
-    source_server_uuid->clear();
+    DumpSourceIdentity* source_identity) {
+  if (source_identity != nullptr) {
+    // A V1 container has no field for the MySQL source, so its source stays
+    // unknown unless the V2 reader below records one.
+    *source_identity = {};
   }
   // Read magic + version to determine format
   std::ifstream ifs(filepath, std::ios::binary);
@@ -1374,7 +1376,7 @@ Expected<void, Error> ReadDump(
   }
 
   return ReadDumpV2(filepath, gtid, config, table_contexts, stats, table_stats, integrity_error, config_validator,
-                    restore_limits, source_server_uuid);
+                    restore_limits, source_identity);
 }
 
 Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_format::IntegrityError& integrity_error,

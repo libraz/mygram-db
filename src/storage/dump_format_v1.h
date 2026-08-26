@@ -67,6 +67,7 @@
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "storage/dump_format.h"
+#include "storage/dump_source_identity.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -174,6 +175,15 @@ constexpr std::streamoff kHeaderFileCRC32Offset = 32;
  * | 28     | 4    | gtid_length    | Length of GTID string              |
  * | 32     | N    | gtid           | GTID string (UTF-8)                |
  */
+/**
+ * @brief header_size value that means "this release never recorded one"
+ *
+ * Releases up to and including v1.5.3 wrote the field as a literal zero and
+ * never patched it. The V1 header layout is fixed, so such a dump is still
+ * parsable; the field simply carries no information.
+ */
+constexpr uint32_t kUnrecordedHeaderSizeV1 = 0;
+
 struct HeaderV1 {
   uint32_t header_size = 0;      // Size of this header in bytes
   uint32_t flags = 0;            // Flags (see dump_format::flags_v1)
@@ -202,8 +212,13 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
 /** Serialize/deserialize versioned semantic compatibility metadata. */
 Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config,
                                                      std::string_view source_server_uuid = {});
+/**
+ * @param source_identity Optional output for the recorded MySQL source. Left
+ *                        unrecorded for metadata versions that predate the
+ *                        field.
+ */
 Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config,
-                                                       std::string* source_server_uuid = nullptr);
+                                                       DumpSourceIdentity* source_identity = nullptr);
 
 /**
  * @brief Serialize DumpStatistics to output stream

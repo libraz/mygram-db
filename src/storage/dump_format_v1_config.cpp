@@ -3,6 +3,7 @@
  * @brief Config serialization/deserialization for dump format V1
  */
 
+#include <array>
 #include <string>
 
 #include "storage/dump_format_v1.h"
@@ -191,6 +192,31 @@ bool SerializeTableConfig(std::ostream& output_stream, const config::TableConfig
 }
 
 /**
+ * @brief Finish a little-endian int32 whose leading octet was already consumed
+ *
+ * Used where a byte read as a possible field turns out to belong to the value
+ * that follows it, because the dump was written before that field existed.
+ *
+ * @param input_stream Stream positioned on the value's remaining three octets
+ * @param leading_octet Least significant octet, already read
+ * @param value Output value
+ * @return True on success
+ */
+bool ReadInt32AfterLeadingOctet(std::istream& input_stream, uint8_t leading_octet, int& value) {
+  std::array<char, 3> remaining{};
+  input_stream.read(remaining.data(), static_cast<std::streamsize>(remaining.size()));
+  if (!input_stream) {
+    return false;
+  }
+  const uint32_t raw = static_cast<uint32_t>(leading_octet) |
+                       (static_cast<uint32_t>(static_cast<unsigned char>(remaining[0])) << 8) |
+                       (static_cast<uint32_t>(static_cast<unsigned char>(remaining[1])) << 16) |
+                       (static_cast<uint32_t>(static_cast<unsigned char>(remaining[2])) << 24);
+  value = static_cast<int>(raw);
+  return true;
+}
+
+/**
  * @brief Deserialize TableConfig from stream
  */
 bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& table, bool includes_database = false) {
@@ -283,15 +309,25 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
     return false;
   }
 
-  // cross_boundary_ngrams
-  uint8_t cross_boundary = 1;
+  // cross_boundary_ngrams, which dumps written before the field existed do not
+  // carry. It is a serialized bool, so any other value is the least significant
+  // octet of the posting.block_size that directly follows it in that older
+  // layout; an absent field leaves the caller's default in place.
+  uint8_t cross_boundary = 0;
   if (!ReadBinary(input_stream, cross_boundary)) {
     return false;
   }
-  table.cross_boundary_ngrams = (cross_boundary != 0);
+  const bool records_cross_boundary = cross_boundary <= 1;
+  if (records_cross_boundary) {
+    table.cross_boundary_ngrams = (cross_boundary != 0);
+  }
 
   // posting config
-  if (!ReadBinary(input_stream, table.posting.block_size)) {
+  if (records_cross_boundary) {
+    if (!ReadBinary(input_stream, table.posting.block_size)) {
+      return false;
+    }
+  } else if (!ReadInt32AfterLeadingOctet(input_stream, cross_boundary, table.posting.block_size)) {
     return false;
   }
   if (!ReadBinary(input_stream, table.posting.freq_bits)) {
@@ -692,7 +728,7 @@ Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream
 }
 
 Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_stream, config::Config& config,
-                                                       std::string* source_server_uuid) {
+                                                       DumpSourceIdentity* source_identity) {
   constexpr uint32_t kLegacyCompatibilityMetadataVersion = 1;
   constexpr uint32_t kCompatibilityMetadataVersion = 2;
   uint32_t version = 0;
@@ -706,16 +742,18 @@ Expected<void, Error> DeserializeCompatibilityMetadata(std::istream& input_strea
   if (!ReadString(input_stream, config.memory.verify_text, kMaxIdentifierLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read memory.verify_text"));
   }
-  if (source_server_uuid != nullptr) {
-    source_server_uuid->clear();
+  if (source_identity != nullptr) {
+    // Version 1 predates the field, so it leaves the source unknown.
+    *source_identity = {};
   }
   if (version == kCompatibilityMetadataVersion) {
     std::string loaded_source_server_uuid;
     if (!ReadString(input_stream, loaded_source_server_uuid, kMaxConfigValueLength)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read source server UUID"));
     }
-    if (source_server_uuid != nullptr) {
-      *source_server_uuid = std::move(loaded_source_server_uuid);
+    if (source_identity != nullptr) {
+      source_identity->recorded = true;
+      source_identity->uuid = std::move(loaded_source_server_uuid);
     }
   }
   return {};

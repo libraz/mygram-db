@@ -28,6 +28,7 @@
 #include "server/table_catalog.h"
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v2.h"
+#include "storage/dump_source_identity.h"
 #include "utils/fd_guard.h"
 #include "utils/flag_guard.h"
 #include "utils/safe_path.h"
@@ -511,7 +512,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
 
   // Variables to receive loaded data
   std::string gtid;
-  std::string loaded_source_server_uuid;
+  storage::DumpSourceIdentity loaded_source_identity;
   std::string expected_source_server_uuid;
 #ifdef USE_MYSQL
   if (ctx_.binlog_reader != nullptr) {
@@ -524,7 +525,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   // Call dump API (auto-detects V1 or V2 format)
   auto result = storage::dump_v2::ReadDump(
       filepath, gtid, loaded_config, converted_contexts, nullptr, nullptr, &integrity_error,
-      [this, &previous_gtid, &expected_source_server_uuid, &loaded_source_server_uuid](
+      [this, &previous_gtid, &expected_source_server_uuid, &loaded_source_identity](
           const config::Config& dump_config,
           const std::string& loaded_gtid) -> mygram::utils::Expected<void, mygram::utils::Error> {
         if (ctx_.full_config == nullptr) {
@@ -552,21 +553,13 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
             return mygram::utils::MakeUnexpected(
                 mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, detail));
           }
-          if (!expected_source_server_uuid.empty() && loaded_source_server_uuid.empty()) {
-            const std::string detail = "dump does not record its MySQL source server UUID";
+          if (auto source_mismatch =
+                  storage::FindDumpSourceIdentityMismatch(loaded_source_identity, expected_source_server_uuid);
+              source_mismatch.has_value()) {
+            const std::string detail(source_mismatch->detail);
             mygram::utils::StructuredLog()
                 .Event("dump_load_rejected")
-                .Field("reason", "missing_source_server_uuid")
-                .Field("detail", detail)
-                .Error();
-            return mygram::utils::MakeUnexpected(
-                mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageVersionMismatch, detail));
-          }
-          if (!expected_source_server_uuid.empty() && loaded_source_server_uuid != expected_source_server_uuid) {
-            const std::string detail = "dump MySQL source server UUID does not match the running source";
-            mygram::utils::StructuredLog()
-                .Event("dump_load_rejected")
-                .Field("reason", "source_server_uuid_mismatch")
+                .Field("reason", std::string(source_mismatch->reason))
                 .Field("detail", detail)
                 .Error();
             return mygram::utils::MakeUnexpected(
@@ -599,7 +592,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
                                                 1024ULL * 1024ULL,
                                             static_cast<uint64_t>(ctx_.full_config->dump.restore_max_section_mb) *
                                                 1024ULL * 1024ULL},
-      &loaded_source_server_uuid);
+      &loaded_source_identity);
 
   // The loading guard remains active through replication restart and cache
   // rebuild. It is released only after the success path completes, ensuring

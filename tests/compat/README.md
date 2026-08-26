@@ -24,10 +24,13 @@ Running it is a deliberate act:
 ./build/bin/generate_compat_corpus tests/compat/corpus
 ```
 
-Two of the fixtures come out of the real dump writers, which stamp a wall-clock
-timestamp into the header, so re-running the generator changes their bytes even
-when nothing else changed. That is expected; do not commit such a diff unless
-you meant to replace the fixture.
+Two of the fixtures come out of the real dump writers, and their bytes change on
+every run even when nothing else changed: the header carries a wall-clock
+timestamp, and the embedded index and document store payloads are emitted in
+hash-map iteration order, which is not stable between runs. Two consecutive runs
+of the same binary therefore differ. That is expected; do not commit such a diff
+unless you meant to replace the fixture, and do not use a byte comparison
+against a fresh run to decide whether the writers changed.
 
 ## What to do when a fixture stops loading
 
@@ -78,8 +81,11 @@ may actually be holding has become unreadable.
 | `release_v1_6_1.dmp` | v1.6.1 | 2 | 2 | 2 | none |
 | `release_v1_9_0.dmp` | v1.9.0 | 2 | 4 | 3 | 1 |
 
-`release_v1_3_2.dmp` does not load. The test asserts the refusal explicitly and
-explains it; see `ReleaseDumpCorpusRejectionTest`.
+`release_v1_3_2.dmp` does not load. Its header and config section decode, but
+that release wrote its posting lists with the octets in the reverse order and
+the artifact does not record which order was used, so the index payload cannot
+be decoded. The test asserts the refusal explicitly and explains it; see
+`ReleaseDumpCorpusRejectionTest`.
 
 ## Adding a fixture for a new format version
 
