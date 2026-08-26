@@ -13,6 +13,7 @@
 
 #include <httplib.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -22,6 +23,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -245,6 +247,38 @@ class HttpServer {
   /// Number of HTTP sockets admitted to the server, including requests queued
   /// for cpp-httplib workers.
   size_t GetActiveConnectionCount() const { return active_connections_.load(std::memory_order_acquire); }
+
+  /**
+   * @brief HTTP verb a route is registered under.
+   */
+  enum class RouteMethod : uint8_t { kGet, kPost };
+
+  /**
+   * @brief One registered HTTP route.
+   *
+   * `pattern` is passed verbatim to cpp-httplib, which treats it as a regular
+   * expression when it contains capture groups.
+   */
+  struct RouteDescriptor {
+    RouteMethod method;         ///< Verb the route is registered under.
+    std::string_view pattern;   ///< Path or path regex, as registered.
+    bool requires_admin_token;  ///< True when the handler enforces api.admin_token.
+    void (HttpServer::*handler)(const httplib::Request&, httplib::Response&);  ///< Member handler.
+  };
+
+  /// Number of routes the server registers.
+  static constexpr size_t kRouteCount = 13;
+
+  /**
+   * @brief The route table, in registration order.
+   *
+   * cpp-httplib matches routes in registration order, so the order here is
+   * behavioural: the trailing `/tables/{identity}/{primary_key}` pattern would
+   * shadow the more specific `/tables/{identity}/search` style routes if it
+   * came first. SetupRoutes() and any surface description both read this
+   * table, so neither can describe a route the server does not register.
+   */
+  static const std::array<RouteDescriptor, kRouteCount>& Routes();
 
  private:
   HttpServerConfig config_;

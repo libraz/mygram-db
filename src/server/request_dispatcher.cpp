@@ -17,8 +17,6 @@
 
 namespace mygramdb::server {
 
-namespace {
-
 bool IsAdministrativeCommand(query::QueryType type) {
   switch (type) {
     case query::QueryType::DUMP_SAVE:
@@ -49,6 +47,8 @@ bool IsAdministrativeCommand(query::QueryType type) {
       return false;
   }
 }
+
+namespace {
 
 bool ConstantTimeEqual(std::string_view lhs, std::string_view rhs) {
   size_t difference = lhs.size() ^ rhs.size();

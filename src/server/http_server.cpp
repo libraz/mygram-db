@@ -685,53 +685,47 @@ HttpServer::~HttpServer() {
   Stop();
 }
 
+const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServer::Routes() {
+  using Method = RouteMethod;
+  // In the `/tables/{identity}/...` patterns, {identity} is the qualified
+  // `database.table` or a bare `table` (resolved in single-database
+  // configurations). The pattern matches any non-slash characters to support
+  // names with dashes, dots, or unicode.
+  //
+  // The trailing document-by-primary-key route lives under /tables/ so it
+  // cannot shadow /info, /health/*, /config, /metrics or /replication/status,
+  // but it does shadow the /tables/{identity}/search family and therefore
+  // must stay last.
+  static const std::array<RouteDescriptor, kRouteCount> kRoutes = {{
+      {Method::kPost, R"(/tables/([^/]+)/search)", false, &HttpServer::HandleSearch},
+      {Method::kPost, R"(/tables/([^/]+)/count)", false, &HttpServer::HandleCount},
+      {Method::kPost, R"(/tables/([^/]+)/facet)", false, &HttpServer::HandleFacet},
+      {Method::kGet, "/info", false, &HttpServer::HandleInfo},
+      {Method::kGet, "/health", false, &HttpServer::HandleHealth},
+      {Method::kGet, "/health/live", false, &HttpServer::HandleHealthLive},
+      {Method::kGet, "/health/ready", false, &HttpServer::HandleHealthReady},
+      {Method::kGet, "/health/detail", false, &HttpServer::HandleHealthDetail},
+      {Method::kGet, "/config", false, &HttpServer::HandleConfig},
+      {Method::kGet, "/replication/status", false, &HttpServer::HandleReplicationStatus},
+      {Method::kPost, "/optimize", true, &HttpServer::HandleOptimize},
+      {Method::kGet, "/metrics", false, &HttpServer::HandleMetrics},
+      {Method::kGet, R"(/tables/([^/]+)/([^/]+))", false, &HttpServer::HandleGet},
+  }};
+  return kRoutes;
+}
+
 void HttpServer::SetupRoutes() {
-  // POST /tables/{identity}/search - Full-text search.
-  // {identity} is the qualified `database.table` or a bare `table` (resolved in
-  // single-database configurations). The pattern matches any non-slash
-  // characters to support names with dashes, dots, or unicode.
-  server_->Post(R"(/tables/([^/]+)/search)",
-                [this](const httplib::Request& req, httplib::Response& res) { HandleSearch(req, res); });
-
-  // POST /tables/{identity}/count - Count matching documents
-  server_->Post(R"(/tables/([^/]+)/count)",
-                [this](const httplib::Request& req, httplib::Response& res) { HandleCount(req, res); });
-
-  // POST /tables/{identity}/facet - Facet value counts
-  server_->Post(R"(/tables/([^/]+)/facet)",
-                [this](const httplib::Request& req, httplib::Response& res) { HandleFacet(req, res); });
-
-  // GET /info - Server information
-  server_->Get("/info", [this](const httplib::Request& req, httplib::Response& res) { HandleInfo(req, res); });
-
-  // GET /health - Health check
-  // Health check endpoints
-  server_->Get("/health", [this](const httplib::Request& req, httplib::Response& res) { HandleHealth(req, res); });
-  server_->Get("/health/live",
-               [this](const httplib::Request& req, httplib::Response& res) { HandleHealthLive(req, res); });
-  server_->Get("/health/ready",
-               [this](const httplib::Request& req, httplib::Response& res) { HandleHealthReady(req, res); });
-  server_->Get("/health/detail",
-               [this](const httplib::Request& req, httplib::Response& res) { HandleHealthDetail(req, res); });
-
-  // GET /config - Configuration
-  server_->Get("/config", [this](const httplib::Request& req, httplib::Response& res) { HandleConfig(req, res); });
-
-  // GET /replication/status - Replication status
-  server_->Get("/replication/status",
-               [this](const httplib::Request& req, httplib::Response& res) { HandleReplicationStatus(req, res); });
-
-  // POST /optimize - Optimize one table or every configured table.
-  server_->Post("/optimize", [this](const httplib::Request& req, httplib::Response& res) { HandleOptimize(req, res); });
-
-  // GET /metrics - Prometheus metrics
-  server_->Get("/metrics", [this](const httplib::Request& req, httplib::Response& res) { HandleMetrics(req, res); });
-
-  // GET /tables/{identity}/{primary_key} - Get document by primary key.
-  // Registered after the fixed endpoints; it lives under /tables/ so it cannot
-  // shadow /info, /health/*, /config, /metrics, or /replication/status.
-  server_->Get(R"(/tables/([^/]+)/([^/]+))",
-               [this](const httplib::Request& req, httplib::Response& res) { HandleGet(req, res); });
+  for (const auto& route : Routes()) {
+    auto invoke = [this, handler = route.handler](const httplib::Request& req, httplib::Response& res) {
+      (this->*handler)(req, res);
+    };
+    const std::string pattern(route.pattern);
+    if (route.method == RouteMethod::kGet) {
+      server_->Get(pattern, invoke);
+    } else {
+      server_->Post(pattern, invoke);
+    }
+  }
 }
 
 void HttpServer::SetupAccessControl() {

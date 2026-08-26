@@ -19,6 +19,18 @@ class TableCatalog;
 class CommandHandler;
 
 /**
+ * @brief Whether a command is gated behind AUTH when an admin token is set.
+ *
+ * The dispatcher consults this before routing to a handler. It is exposed so
+ * surface descriptions report the same gating the dispatcher enforces instead
+ * of restating the classification.
+ *
+ * @param type Parsed query type.
+ * @return True when the command requires prior AUTH.
+ */
+[[nodiscard]] bool IsAdministrativeCommand(query::QueryType type);
+
+/**
  * @brief Request dispatcher
  *
  * This class parses queries and routes them to registered command handlers.
