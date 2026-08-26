@@ -12,10 +12,40 @@
 
 namespace mygramdb::server {
 
-inline const config::TableConfig* FindDumpTableConfigByName(const config::Config& config,
-                                                            const std::string& table_name) {
+/**
+ * @brief Resolve the running-config entry a dump table entry refers to.
+ *
+ * A table's identity is its qualified `database.table` name: configuration
+ * loading rejects duplicate `(database, name)` pairs and therefore accepts the
+ * same bare name in two databases, and the dump table set is compared by
+ * qualified name as well. Matching on the bare name here would compare a dump
+ * entry against whichever database happened to be configured first.
+ *
+ * A dump entry that records no database at all falls back to the bare name.
+ * Table entries written before the database field existed decode with it empty,
+ * and refusing them would narrow the persistence-format acceptance policy,
+ * which forbids adding a load-time check that rejects an artifact an earlier
+ * release wrote. Such an entry can only come from a single-database
+ * configuration, where the bare name is unambiguous.
+ *
+ * @param config Running configuration to search.
+ * @param dump_table Table entry decoded from the dump.
+ * @return Matching running-config entry, or nullptr when the dump table is not
+ *         configured.
+ */
+inline const config::TableConfig* FindDumpTableConfig(const config::Config& config,
+                                                      const config::TableConfig& dump_table) {
+  const auto dump_key = config::QualifiedTableName(dump_table);
   for (const auto& table : config.tables) {
-    if (table.name == table_name) {
+    if (config::QualifiedTableName(table) == dump_key) {
+      return &table;
+    }
+  }
+  if (!dump_table.database.empty()) {
+    return nullptr;
+  }
+  for (const auto& table : config.tables) {
+    if (table.name == dump_table.name) {
       return &table;
     }
   }
@@ -43,18 +73,19 @@ inline std::optional<std::string> FindDumpConfigMismatch(const config::Config& l
   }
 
   for (const auto& loaded_table : loaded_config.tables) {
-    const auto* live_table = FindDumpTableConfigByName(live_config, loaded_table.name);
+    const auto* live_table = FindDumpTableConfig(live_config, loaded_table);
     if (live_table == nullptr) {
       continue;
     }
+    const auto table_name = config::QualifiedTableName(*live_table);
     if (loaded_table.ngram_size != live_table->ngram_size) {
-      return "table '" + loaded_table.name + "' ngram_size mismatch between dump and running config";
+      return "table '" + table_name + "' ngram_size mismatch between dump and running config";
     }
     if (loaded_table.kanji_ngram_size != live_table->kanji_ngram_size) {
-      return "table '" + loaded_table.name + "' kanji_ngram_size mismatch between dump and running config";
+      return "table '" + table_name + "' kanji_ngram_size mismatch between dump and running config";
     }
     if (loaded_table.cross_boundary_ngrams != live_table->cross_boundary_ngrams) {
-      return "table '" + loaded_table.name + "' cross_boundary_ngrams mismatch between dump and running config";
+      return "table '" + table_name + "' cross_boundary_ngrams mismatch between dump and running config";
     }
   }
 

@@ -370,6 +370,22 @@ gtest_discover_tests(dump_progress_test
     TIMEOUT 30
 )
 
+# Dump/config compatibility check tests
+
+add_executable(dump_config_validator_test
+  dump_config_validator_test.cpp
+)
+
+target_link_libraries(dump_config_validator_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+gtest_discover_tests(dump_config_validator_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # DumpHandler tests
 
 add_executable(dump_handler_test
