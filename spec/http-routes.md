@@ -672,10 +672,9 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 1 | `CONFIG SHOW` / `GET /config` | Administrative: rejected with `kPermissionDenied` unless the connection has authenticated, whenever `api.admin_token` is set (`src/server/request_dispatcher.cpp:36`, `:163-167`) | No token check at all; served to any ACL-permitted client (`src/server/http_server.cpp:1950-1988`) |
-| 2 | `REPLICATION STATUS` / `GET /replication/status` | Administrative, same gate (`src/server/request_dispatcher.cpp:29`, `:163-167`) | No token check (`src/server/http_server.cpp:2000-2026`) |
-| 3 | Credential transport | `AUTH <token>` command, sets per-connection state (`src/server/request_dispatcher.cpp:150-161`) | `Authorization: Bearer <token>` per request, no session (`src/server/http_server.cpp:2051-2057`) |
-| 4 | Check ordering on `/optimize` | Parse then admin gate (`src/server/request_dispatcher.cpp:144`, `:163`) | `Content-Type` checked before the token, so an unauthenticated request with a wrong content type receives 415 rather than 401 (`src/server/http_server.cpp:2044-2063`) |
+| 3 | Credential transport | `AUTH <token>` command, sets per-connection state (`src/server/request_dispatcher.cpp:150-161`) | `Authorization: Bearer <token>` per request, no session (`src/server/http_server.cpp:610-622`) |
+
+Which commands are administrative no longer differs: a route's `requires_admin_token` field (`src/server/http_server.cpp:570-571`) is enforced in the shared route wrapper before any handler runs (`:610-622`), so `GET /config` and `GET /replication/status` answer an uncredentialed request with 401 and `kPermissionDenied` exactly as the TCP surface does. The credential check precedes the `Content-Type` check on `/optimize` for the same reason. Pinned by `HttpTcpConsistencyTest.AdministrativeReportsAreTokenGatedOnBothSurfaces` and `.HttpOptimizeChecksTheTokenBeforeTheContentType`.
 
 ### Table resolution
 
@@ -695,7 +694,7 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 | 12 | Boolean-expression validation | `q` goes through `ParseSearchTextTokens`, which rejects unmatched/unclosed parentheses, the deprecated `ORDER` keyword, comma-separated table lists, and splits flat `AND`/`NOT` clauses (`src/query/query_parser_commands.cpp:72-217`) | `mode:"boolean"` assigns `q` straight to `search_text`/`search_expression`; none of those checks or the clause split run (`src/server/http_server.cpp:1234-1238`) |
 | 13 | FACET search text | Runs through the parser's shared search-text extraction (`src/query/query_parser_commands.cpp:467`) | Assembled field by field; `QueryParser::Parse` is never invoked on the facet path (`src/server/http_server.cpp:1308-1323`) |
 | 14 | COUNT clause rejection | Rejects `SORT`, `ORDER`, and any clause other than `AND`/`NOT`/`FILTER`, including `LIMIT`/`OFFSET`, all as `kQuerySyntaxError` (`src/query/query_parser_commands.cpp:382-394`) | Rejects exactly the fields `limit`, `offset`, `sort`, `highlight`, `fuzzy` as `kQuerySyntaxError`; other unknown JSON fields are silently ignored (`src/server/http_server.cpp:1206-1219`) |
-| 15 | Unknown clause / field | Any unrecognised clause keyword is a hard `kQuerySyntaxError` (`src/query/query_parser_commands.cpp:301-303`, `:507-509`) | Unknown JSON body fields are ignored on `/search`, `/count` and `/facet`; only `/optimize` enforces an allowlist (`src/server/http_server.cpp:2077-2083`) |
+| 15 | Unknown clause / field | On `FACET` and `COUNT` an unrecognised clause keyword is a hard `kQuerySyntaxError` (`src/query/query_parser_commands.cpp:301-303`, `:507-509`). On `SEARCH` it is not: trailing tokens are absorbed into the search text, so `SEARCH t term BOGUSCLAUSE 3` answers `OK RESULTS 0` | Unknown JSON body fields are ignored on `/search`, `/count` and `/facet`; only `/optimize` enforces an allowlist (`src/server/http_server.cpp:2077-2083`) |
 
 ### Validation limits
 
@@ -704,7 +703,7 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 | 16 | LIMIT above 1000 | `kQuerySyntaxError` (3000), message `LIMIT exceeds maximum of 1000` (`src/query/query_parser_commands.cpp:322-326`, `:528-532`) | `kQueryInvalidLimit` (3008), message `Invalid limit: must be between 1 and 1000` (`src/server/http_server.cpp:1088-1093`) |
 | 17 | More than 64 filter conditions | `kQuerySyntaxError` (3000) (`src/query/query_parser_commands.cpp:316-319`, `:406-409`, `:522-525`) | `kQueryInvalidFilter` (3006) (`src/server/http_server.cpp:311-315`) |
 | 18 | Invalid facet column | `kQuerySyntaxError` (3000) (`src/query/query_parser_commands.cpp:462-465`) | `kQueryInvalidToken` (3001) (`src/server/http_server.cpp:1296-1300`) |
-| 19 | Highlight tag over 256 bytes | `kQuerySyntaxError`, message names `HIGHLIGHT TAG open/close tag` (`src/query/query_parser_clauses.cpp:390-399`) | `kQuerySyntaxError`, message names `Field 'highlight.open_tag'` (`src/server/http_server.cpp:477-490`) |
+| 19 | Highlight tag over 256 bytes | `kQuerySyntaxError`, message names `HIGHLIGHT TAG open/close tag` (`src/query/query_parser_clauses.cpp:390-399`) | `kQuerySyntaxError`, message names `Field 'highlight.open_tag'` (`src/server/http_server.cpp:477-490`). At the default `api.max_query_length` of 128 characters a 256-byte tag makes the assembled TCP command 268 characters, so that surface answers `kQueryTooLong` before the tag cap is reached; only the rejection can be compared |
 | 21 | Control characters in search text | No explicit `\r`/`\n`/`\0` rejection in the parser; framing removes the line terminator | `q` containing `\r`, `\n` or `\0` is 400 `kQueryInvalidToken` (`src/server/http_server.cpp:1159-1166`) |
 
 ### Error mapping
