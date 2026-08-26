@@ -122,11 +122,27 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateNetworkExposure(cons
         "api.http.cors_allow_origin must be set when api.http.enable_cors is true; refusing to default to '*'"));
   }
 
-  if (config.api.unix_socket.path.empty() && !IsLoopbackBind(config.api.tcp.bind) && config.api.admin_token.empty()) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
-                                 "api.admin_token must be configured when api.tcp.bind is not loopback; use a Unix "
-                                 "socket for local-only administration"));
+  if (config.api.admin_token.empty()) {
+    // A configured Unix socket replaces the TCP listener, but the HTTP
+    // listener is independent: it exposes the same administrative operations
+    // and has to clear the token rule on its own.
+    const bool tcp_is_public = config.api.unix_socket.path.empty() && !IsLoopbackBind(config.api.tcp.bind);
+    const bool http_is_public = config.api.http.enable && !IsLoopbackBind(config.api.http.bind);
+    if (tcp_is_public || http_is_public) {
+      std::string exposed_fields;
+      if (tcp_is_public && http_is_public) {
+        exposed_fields = "api.tcp.bind and api.http.bind are";
+      } else if (tcp_is_public) {
+        exposed_fields = "api.tcp.bind is";
+      } else {
+        exposed_fields = "api.http.bind is";
+      }
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kConfigInvalidValue,
+          "api.admin_token must be configured when " + exposed_fields +
+              " not loopback; bind every listener to loopback, disable api.http.enable, or use a Unix socket for "
+              "local-only administration"));
+    }
   }
 
   const bool allows_everywhere =

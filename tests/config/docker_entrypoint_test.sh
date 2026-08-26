@@ -33,6 +33,20 @@ grep -q '^cache:$' "$generated_config"
 grep -q '^  rate_limiting:$' "$generated_config"
 grep -Fq '  admin_token: "test-admin-token"' "$generated_config"
 
+> "$test_dir/placeholder.log"
+if CONFIG_FILE=$test_dir/placeholder.yaml \
+  MYGRAMDB_BINARY=$mygramdb_binary \
+  DUMP_DIR=$test_dir/dumps \
+  REPLICATION_STATE_FILE=$test_dir/replication.state \
+  MYSQL_PASSWORD=your_secure_password_here \
+  NETWORK_ALLOW_CIDRS=127.0.0.1/32 \
+  sh "$entrypoint" test-config > "$test_dir/placeholder.log" 2>&1; then
+  echo "entrypoint started with the .env.example placeholder MYSQL_PASSWORD" >&2
+  exit 1
+fi
+grep -Fq 'MYSQL_PASSWORD still holds the .env.example placeholder' "$test_dir/placeholder.log"
+test ! -e "$test_dir/placeholder.yaml"
+
 printf '%s\n' '# operator-owned sentinel' > "$existing_config"
 CONFIG_FILE=$existing_config \
 MYGRAMDB_BINARY=$(command -v true) \
@@ -56,6 +70,10 @@ for variable in API_HTTP_ENABLE API_HTTP_BIND API_HTTP_PORT DUMP_DIR DUMP_INTERV
   grep -q "^${variable}=" "$env_example"
 done
 grep -q '^API_ADMIN_TOKEN=CHANGE_ME_GENERATE_RANDOM_SECRET$' "$env_example"
+# The placeholders the entrypoint refuses to start on have to keep matching the
+# values the sample environment ships.
+grep -q '^MYSQL_PASSWORD=your_secure_password_here$' "$env_example"
+grep -q '^MYSQL_ROOT_PASSWORD=root_secure_password_here$' "$env_example"
 grep -q '^API_BIND=127\.0\.0\.1$' "$env_example"
 grep -q '^API_HTTP_BIND=127\.0\.0\.1$' "$env_example"
 grep -q '^NETWORK_ALLOW_CIDRS=127\.0\.0\.1/32,172\.16\.0\.0/12$' "$env_example"

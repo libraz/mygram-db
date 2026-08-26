@@ -518,7 +518,7 @@ TEST(ConfigTest, RejectsUniversalAclWithPublicTcpBind) {
 
 TEST(ConfigTest, RejectsUniversalIpv6AclWithPublicHttpBind) {
   json config_json = {
-      {"api", {{"http", {{"enable", true}, {"bind", "::"}}}}},
+      {"api", {{"http", {{"enable", true}, {"bind", "::"}}}, {"admin_token", "test-admin-token"}}},
       {"network", {{"allow_cidrs", json::array({"::/0"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
@@ -561,6 +561,69 @@ TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminToken) {
   auto config_result = internal::ParseConfigFromJson(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsPublicHttpBindWithoutAdminToken) {
+  json config_json = {
+      {"api", {{"tcp", {{"bind", "127.0.0.1"}}}, {"http", {{"enable", true}, {"bind", "0.0.0.0"}}}}},
+      {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
+  EXPECT_NE(config_result.error().message().find("api.http.bind"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsPublicHttpBindWithoutAdminTokenBehindUnixSocket) {
+  // A Unix socket removes the TCP listener but leaves the HTTP listener in
+  // place, so it must not exempt a public HTTP bind from the token rule.
+  json config_json = {
+      {"api", {{"unix_socket", {{"path", "/tmp/mygramdb.sock"}}}, {"http", {{"enable", true}, {"bind", "0.0.0.0"}}}}},
+      {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
+  EXPECT_NE(config_result.error().message().find("api.http.bind"), std::string::npos);
+}
+
+TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminTokenWhenHttpIsLoopback) {
+  json config_json = {
+      {"api", {{"tcp", {{"bind", "0.0.0.0"}}}, {"http", {{"enable", true}, {"bind", "127.0.0.1"}}}}},
+      {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_FALSE(config_result);
+  EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
+  EXPECT_NE(config_result.error().message().find("api.tcp.bind"), std::string::npos);
+}
+
+TEST(ConfigTest, AllowsMissingAdminTokenWhenBothListenersAreLocal) {
+  json config_json = {
+      {"api", {{"tcp", {{"bind", "127.0.0.1"}}}, {"http", {{"enable", true}, {"bind", "::1"}}}}},
+      {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+}
+
+TEST(ConfigTest, AllowsMissingAdminTokenWhenHttpIsDisabledBehindUnixSocket) {
+  json config_json = {
+      {"api", {{"unix_socket", {{"path", "/tmp/mygramdb.sock"}}}, {"tcp", {{"bind", "0.0.0.0"}}}}},
+      {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
+      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
+  };
+
+  auto config_result = internal::ParseConfigFromJson(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
 }
 
 TEST(ConfigTest, TableDatabaseDefaultsToMysqlDatabaseAndCanOverride) {

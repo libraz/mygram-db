@@ -117,6 +117,18 @@ if [ "$API_ADMIN_TOKEN" = "CHANGE_ME_GENERATE_RANDOM_SECRET" ]; then
     exit 1
 fi
 
+# The values shipped in .env.example are public. Starting with one of them in
+# place means the deployment is running on a credential anyone can read, so it
+# fails here rather than at the first connection attempt.
+if [ "$MYSQL_PASSWORD" = "your_secure_password_here" ]; then
+    echo "ERROR: MYSQL_PASSWORD still holds the .env.example placeholder; set a real password before starting MygramDB" >&2
+    exit 1
+fi
+if [ "${MYSQL_ROOT_PASSWORD-}" = "root_secure_password_here" ]; then
+    echo "ERROR: MYSQL_ROOT_PASSWORD still holds the .env.example placeholder; set a real password before starting MygramDB" >&2
+    exit 1
+fi
+
 BM25_ENABLE=${BM25_ENABLE:-false}
 BM25_K1=${BM25_K1:-1.2}
 BM25_B=${BM25_B:-0.75}

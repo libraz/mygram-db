@@ -20,7 +20,11 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      # MygramDB reaches MySQL over the bridge network, so this publish exists
+      # only so a local client can inspect the database. The host interface is
+      # literal rather than variable: root credentials come from .env, and a
+      # publish without it would put them on every interface the host has.
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./support/docker/mysql/init:/docker-entrypoint-initdb.d:ro

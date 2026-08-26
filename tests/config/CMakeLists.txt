@@ -201,6 +201,24 @@ gtest_discover_tests(config_security_test
   PROPERTIES RESOURCE_LOCK config_file_io
 )
 
+# Compose port binding test
+add_executable(compose_port_binding_test
+  compose_port_binding_test.cpp
+)
+
+target_link_libraries(compose_port_binding_test PRIVATE
+  yaml-cpp
+  GTest::gtest_main
+)
+target_compile_definitions(compose_port_binding_test PRIVATE
+  MYGRAMDB_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+
+gtest_discover_tests(compose_port_binding_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 file(GLOB MYGRAMDB_EXAMPLE_YAML_CONFIGS
   "${PROJECT_SOURCE_DIR}/examples/*.yaml"
 )
