@@ -274,6 +274,17 @@ class QueryParser {
   static constexpr size_t kMaxFilterValueLength = 1024;
   /// Maximum UTF-8 byte length for each HIGHLIGHT TAG argument.
   static constexpr size_t kMaxHighlightTagLength = 256;
+  /// Maximum UTF-8 byte length of a table identity.
+  static constexpr size_t kMaxTableNameLength = 256;
+  /// Inclusive bounds accepted for HIGHLIGHT SNIPPET_LEN.
+  static constexpr uint32_t kMinSnippetLength = 1;
+  static constexpr uint32_t kMaxSnippetLength = 10000;
+  /// Inclusive bounds accepted for HIGHLIGHT MAX_FRAGMENTS.
+  static constexpr uint32_t kMinHighlightFragments = 1;
+  static constexpr uint32_t kMaxHighlightFragments = 100;
+  /// Inclusive bounds accepted for a FUZZY edit distance.
+  static constexpr uint32_t kMinFuzzyDistance = 1;
+  static constexpr uint32_t kMaxFuzzyDistance = 2;
 
   /**
    * @brief Whether a column name is safe for every public query surface.
@@ -282,6 +293,55 @@ class QueryParser {
    * protocol tokens have the same grammar.
    */
   [[nodiscard]] static bool IsSafeColumnName(std::string_view column);
+
+  /**
+   * @brief Whether a table identity is safe to embed in a command string.
+   *
+   * Accepts ASCII letters, digits, `_`, `-` and `.`, plus any well-formed
+   * non-ASCII UTF-8 code point, up to kMaxTableNameLength bytes. Everything
+   * else — ASCII whitespace, control characters and other punctuation — would
+   * inject extra tokens into the command grammar and is rejected.
+   */
+  [[nodiscard]] static bool IsSafeTableName(std::string_view table);
+
+  /**
+   * @brief Whether a table identity carries a `<database>.<table>` qualifier.
+   *
+   * Requires a dot with a non-empty segment on each side.
+   */
+  [[nodiscard]] static bool IsDatabaseQualifiedTableName(std::string_view table);
+
+  /**
+   * @brief Whether a column may be named by a SORT clause.
+   *
+   * Accepts the relevance pseudo-column `_score` and any safe column name.
+   */
+  [[nodiscard]] static bool IsSafeSortColumn(std::string_view column);
+
+  /**
+   * @brief Parse a sort direction keyword, ASCII-case-insensitively.
+   *
+   * @return The direction, or std::nullopt when @p order is neither ASC nor DESC.
+   */
+  [[nodiscard]] static std::optional<SortOrder> ParseSortOrder(std::string_view order);
+
+  /**
+   * @brief Validate a filter condition assembled by any surface.
+   *
+   * Checks the column grammar and the value-length cap; the operator and the
+   * value are supplied already parsed by the caller's own syntax.
+   */
+  [[nodiscard]] static mygram::utils::Expected<void, mygram::utils::Error> ValidateFilterCondition(
+      const FilterCondition& filter);
+
+  /**
+   * @brief Quote a literal search term for embedding in a command string.
+   *
+   * Wraps @p text in double quotes and backslash-escapes `\` and `"` so the
+   * tokenizer reproduces the term verbatim. Surfaces that assemble a command
+   * from structured input use this instead of quoting the term themselves.
+   */
+  [[nodiscard]] static std::string QuoteSearchLiteral(std::string_view text);
 
   QueryParser() = default;
   ~QueryParser() = default;

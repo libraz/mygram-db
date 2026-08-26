@@ -10,8 +10,6 @@
 #include <iterator>
 
 #include "cache/cache_manager.h"
-#include "query/highlighter.h"
-#include "query/result_sorter.h"
 #include "query/synonym_dictionary.h"
 #include "server/search_pipeline.h"
 #include "server/table_catalog.h"
@@ -279,30 +277,9 @@ std::vector<std::string> SearchHandler::GenerateHighlightSnippets(
     return {};
   }
 
-  const auto& hl_opts = query.highlight.value();
-
   const auto* synonym_dict = output.table_context != nullptr ? output.table_context->synonym_dict.get() : nullptr;
-  auto normalized_terms =
-      search_pipeline::BuildHighlightTerms(output.all_search_terms, output.current_index, synonym_dict);
-
-  auto original_texts = output.current_doc_store->GetOriginalTextBatch(paginated_results);
-  auto normalized_texts = output.current_doc_store->GetNormalizedTextBatch(paginated_results);
-  std::vector<std::string> snippets;
-  snippets.reserve(paginated_results.size());
-  for (size_t i = 0; i < paginated_results.size(); ++i) {
-    if (original_texts[i].has_value()) {
-      auto hl_result = query::Highlighter::GenerateOriginal(
-          *original_texts[i], normalized_terms,
-          [&](std::string_view text) { return output.current_index->NormalizeText(text); }, hl_opts);
-      snippets.push_back(std::move(hl_result.snippet));
-    } else if (normalized_texts[i].has_value()) {
-      auto hl_result = query::Highlighter::Generate(*normalized_texts[i], normalized_terms, hl_opts);
-      snippets.push_back(std::move(hl_result.snippet));
-    } else {
-      snippets.emplace_back();
-    }
-  }
-  return snippets;
+  return search_pipeline::GenerateHighlightSnippets(query.highlight.value(), output.all_search_terms, paginated_results,
+                                                    output.current_index, output.current_doc_store, synonym_dict);
 }
 
 std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionContext& conn_ctx) {
@@ -390,72 +367,37 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
         mygram::utils::ErrorCode::kNotImplemented);
   }
 
-  // BM25 scoring: compute scores if SORT _score is requested
-  if (is_score_sort) {
-    search_pipeline::RelevanceSortParams score_params;
-    score_params.index = output.current_index;
-    score_params.doc_store = output.current_doc_store;
-    score_params.full_config = ctx_.full_config;
-    score_params.bm25_stats = output.table_context != nullptr ? &output.table_context->bm25_stats : nullptr;
-    score_params.ngram_size = output.current_ngram_size;
-    score_params.kanji_ngram_size = output.current_kanji_ngram_size;
-    score_params.cross_boundary_ngrams = output.current_cross_boundary;
+  // A relevance sort reports the scored set as the total; every other order
+  // reports the pre-pagination count the TopN optimization may have refined.
+  search_pipeline::RelevanceSortParams score_params;
+  score_params.index = output.current_index;
+  score_params.doc_store = output.current_doc_store;
+  score_params.full_config = ctx_.full_config;
+  score_params.bm25_stats = output.table_context != nullptr ? &output.table_context->bm25_stats : nullptr;
+  score_params.ngram_size = output.current_ngram_size;
+  score_params.kanji_ngram_size = output.current_kanji_ngram_size;
+  score_params.cross_boundary_ngrams = output.current_cross_boundary;
+  const size_t response_total = is_score_sort ? output.results.size() : total_results;
 
-    size_t score_total = output.results.size();
-    auto scored_results = search_pipeline::ScoreAndSortByRelevance(
-        effective_query, output.results, output.all_search_terms, output.term_infos, score_params);
-    if (!scored_results) {
-      return ResponseFormatter::FormatError(scored_results.error());
-    }
-    auto sorted_results = std::move(scored_results.value());
-
-    if (effective_query.highlight.has_value()) {
-      auto snippets = GenerateHighlightSnippets(effective_query, output, sorted_results);
-      if (conn_ctx.debug_mode) {
-        output.debug_info.final_results = sorted_results.size();
-        return ResponseFormatter::FormatSearchResponseWithHighlights(
-            sorted_results, score_total, output.current_doc_store, snippets, &output.debug_info);
-      }
-      return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, score_total,
-                                                                   output.current_doc_store, snippets);
-    }
-
-    if (conn_ctx.debug_mode) {
-      output.debug_info.final_results = sorted_results.size();
-      return ResponseFormatter::FormatSearchResponse(sorted_results, score_total, output.current_doc_store,
-                                                     &output.debug_info);
-    }
-    return ResponseFormatter::FormatSearchResponse(sorted_results, score_total, output.current_doc_store);
-  }
-
-  // Sort and paginate results
-  auto sorted_result = query::ResultSorter::SortAndPaginate(output.results, *output.current_doc_store, effective_query,
-                                                            primary_key_column);
-
+  auto sorted_result = search_pipeline::SortAndPaginateResults(effective_query, output.results, output.all_search_terms,
+                                                               output.term_infos, score_params, primary_key_column);
   if (!sorted_result.has_value()) {
     return ResponseFormatter::FormatError(sorted_result.error());
   }
 
   auto sorted_results = std::move(sorted_result.value());
+  if (conn_ctx.debug_mode) {
+    output.debug_info.final_results = sorted_results.size();
+  }
+  const query::DebugInfo* debug_info = conn_ctx.debug_mode ? &output.debug_info : nullptr;
 
   if (effective_query.highlight.has_value()) {
     auto snippets = GenerateHighlightSnippets(effective_query, output, sorted_results);
-    if (conn_ctx.debug_mode) {
-      output.debug_info.final_results = sorted_results.size();
-      return ResponseFormatter::FormatSearchResponseWithHighlights(
-          sorted_results, total_results, output.current_doc_store, snippets, &output.debug_info);
-    }
-    return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, total_results,
-                                                                 output.current_doc_store, snippets);
+    return ResponseFormatter::FormatSearchResponseWithHighlights(sorted_results, response_total,
+                                                                 output.current_doc_store, snippets, debug_info);
   }
 
-  if (conn_ctx.debug_mode) {
-    output.debug_info.final_results = sorted_results.size();
-    return ResponseFormatter::FormatSearchResponse(sorted_results, total_results, output.current_doc_store,
-                                                   &output.debug_info);
-  }
-
-  return ResponseFormatter::FormatSearchResponse(sorted_results, total_results, output.current_doc_store);
+  return ResponseFormatter::FormatSearchResponse(sorted_results, response_total, output.current_doc_store, debug_info);
 }
 
 std::string SearchHandler::HandleCount(const query::Query& query, ConnectionContext& conn_ctx) {

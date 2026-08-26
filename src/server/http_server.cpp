@@ -19,9 +19,7 @@
 
 #include "cache/cache_manager.h"
 #include "config/config.h"
-#include "query/highlighter.h"
 #include "query/query_parser.h"
-#include "query/result_sorter.h"
 #include "server/handlers/search_handler.h"
 #include "server/log_field_names.h"
 #include "server/protocol_constants.h"
@@ -120,20 +118,6 @@ class CappedHttpTaskQueue final : public httplib::TaskQueue {
   std::unique_ptr<httplib::TaskQueue> delegate_;
 };
 
-std::string QuoteLiteralSearchExpression(std::string_view text) {
-  std::string quoted;
-  quoted.reserve(text.size() + 2);
-  quoted.push_back('"');
-  for (char character : text) {
-    if (character == '\\' || character == '"') {
-      quoted.push_back('\\');
-    }
-    quoted.push_back(character);
-  }
-  quoted.push_back('"');
-  return quoted;
-}
-
 Expected<bool, Error> ParseHttpQueryMode(const json& body) {
   if (!body.contains("mode")) {
     return false;
@@ -190,100 +174,6 @@ std::optional<std::string> JsonFilterValueToString(const json& val) {
   return std::nullopt;
 }
 
-bool IsValidUtf8ContinuationByte(unsigned char byte) {
-  return (byte & 0xC0U) == 0x80U;
-}
-
-bool ConsumeValidUtf8CodePoint(std::string_view text, size_t& index) {
-  const auto first = static_cast<unsigned char>(text[index]);
-  size_t needed = 0;
-  uint32_t code_point = 0;
-
-  if (first >= 0xC2U && first <= 0xDFU) {
-    needed = 2;
-    code_point = first & 0x1FU;
-  } else if (first >= 0xE0U && first <= 0xEFU) {
-    needed = 3;
-    code_point = first & 0x0FU;
-  } else if (first >= 0xF0U && first <= 0xF4U) {
-    needed = 4;
-    code_point = first & 0x07U;
-  } else {
-    return false;
-  }
-
-  if (index + needed > text.size()) {
-    return false;
-  }
-
-  for (size_t offset = 1; offset < needed; ++offset) {
-    const auto byte = static_cast<unsigned char>(text[index + offset]);
-    if (!IsValidUtf8ContinuationByte(byte)) {
-      return false;
-    }
-    code_point = (code_point << 6U) | (byte & 0x3FU);
-  }
-
-  if ((needed == 3 && code_point < 0x800U) || (needed == 4 && code_point < 0x10000U)) {
-    return false;
-  }
-  if (code_point >= 0xD800U && code_point <= 0xDFFFU) {
-    return false;
-  }
-  if (code_point > 0x10FFFFU) {
-    return false;
-  }
-
-  index += needed;
-  return true;
-}
-
-/**
- * @brief Validate a table name supplied via the HTTP API.
- *
- * Permitted characters:
- * - ASCII letters, digits, underscore, hyphen, and dot.
- * - Well-formed UTF-8 non-ASCII code points, which lets names such as
- *   "テーブル" pass through unchanged.
- *
- * Rejected: empty names, ASCII whitespace, ASCII control characters, and any
- * other ASCII punctuation. The goal is to prevent the value from breaking the
- * QueryParser command grammar (e.g. `articles foo` would inject an extra
- * token, and `articles;` would inject a stray punctuation token).
- *
- * @param table Table name from the request URL.
- * @return true if the name is safe to embed in a parser command, false
- *         otherwise.
- */
-bool IsValidTableName(std::string_view table) {
-  if (table.empty()) {
-    return false;
-  }
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-  constexpr size_t kMaxTableNameLength = 256;
-  if (table.size() > kMaxTableNameLength) {
-    return false;
-  }
-  for (size_t i = 0; i < table.size();) {
-    auto u = static_cast<unsigned char>(table[i]);
-    bool ascii_safe =
-        (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' || u == '-' || u == '.';
-    if (ascii_safe) {
-      ++i;
-      continue;
-    }
-    if (u < 0x80 || !ConsumeValidUtf8CodePoint(table, i)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool IsDatabaseQualifiedTableName(std::string_view table_name) {
-  const auto separator = table_name.find('.');
-  return separator != std::string_view::npos && separator != 0 && separator + 1 < table_name.size();
-}
-
 // Routes are single-segment `/tables/{identity}/...`, where {identity} is the
 // qualified `database.table` or a bare `table` (resolved in single-db configs).
 // The identity is always match[1]; GET carries the primary key in match[2].
@@ -315,6 +205,8 @@ Expected<void, Error> ParseFiltersFromJson(const json& filters_json, query::Quer
   }
 
   for (const auto& [key, val] : filters_json.items()) {
+    // The column is checked before the value is read so a malformed condition
+    // on an unknown column still names the column as the fault.
     if (!query::QueryParser::IsSafeColumnName(key)) {
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter column"));
     }
@@ -348,10 +240,8 @@ Expected<void, Error> ParseFiltersFromJson(const json& filters_json, query::Quer
       filter.value = std::move(str_val.value());
     }
 
-    if (filter.value.size() > query::QueryParser::kMaxFilterValueLength) {
-      return MakeUnexpected(MakeError(
-          ErrorCode::kQueryInvalidFilter,
-          "FILTER value exceeds maximum length (" + std::to_string(query::QueryParser::kMaxFilterValueLength) + ")"));
+    if (auto validated = query::QueryParser::ValidateFilterCondition(filter); !validated) {
+      return validated;
     }
 
     query.filters.push_back(std::move(filter));
@@ -420,7 +310,7 @@ Expected<void, Error> ParseSortFromJson(const json& sort_json, query::Query& que
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort.column' must be a string"));
     }
     column = sort_json["column"].get<std::string>();
-    if (column != "_score" && !query::QueryParser::IsSafeColumnName(column)) {
+    if (!query::QueryParser::IsSafeSortColumn(column)) {
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort column"));
     }
   }
@@ -431,13 +321,11 @@ Expected<void, Error> ParseSortFromJson(const json& sort_json, query::Query& que
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Field 'sort.order' must be a string"));
     }
     std::string order_str = sort_json["order"].get<std::string>();
-    if (EqualsAsciiIgnoreCase(order_str, "ASC")) {
-      order = query::SortOrder::ASC;
-    } else if (EqualsAsciiIgnoreCase(order_str, "DESC")) {
-      order = query::SortOrder::DESC;
-    } else {
+    const auto parsed_order = query::QueryParser::ParseSortOrder(order_str);
+    if (!parsed_order.has_value()) {
       return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort order: " + order_str));
     }
+    order = *parsed_order;
   }
 
   query.order_by = query::OrderByClause{std::move(column), order};
@@ -491,10 +379,14 @@ Expected<void, Error> ParseHighlightFromJson(const json& highlight_json, query::
     }
   }
 
-  if (auto result = ParseHighlightUint(highlight_json, "snippet_length", 1, 10000, opts.snippet_length); !result) {
+  if (auto result = ParseHighlightUint(highlight_json, "snippet_length", query::QueryParser::kMinSnippetLength,
+                                       query::QueryParser::kMaxSnippetLength, opts.snippet_length);
+      !result) {
     return result;
   }
-  if (auto result = ParseHighlightUint(highlight_json, "max_fragments", 1, 100, opts.max_fragments); !result) {
+  if (auto result = ParseHighlightUint(highlight_json, "max_fragments", query::QueryParser::kMinHighlightFragments,
+                                       query::QueryParser::kMaxHighlightFragments, opts.max_fragments);
+      !result) {
     return result;
   }
 
@@ -507,26 +399,16 @@ Expected<void, Error> ParseFuzzyFromJson(const json& fuzzy_json, query::Query& q
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'fuzzy' must be an integer"));
   }
   int64_t distance = fuzzy_json.get<int64_t>();
-  if (distance < 1 || distance > 2) {
+  if (distance < static_cast<int64_t>(query::QueryParser::kMinFuzzyDistance) ||
+      distance > static_cast<int64_t>(query::QueryParser::kMaxFuzzyDistance)) {
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'fuzzy' must be 1 or 2"));
   }
   query.fuzzy_max_distance = static_cast<uint32_t>(distance);
   return {};
 }
 
-std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, TableContext& table_ctx) {
-  return search_pipeline::BuildHighlightTerms(search_terms, table_ctx.index.get(), table_ctx.synonym_dict.get());
-}
-
-mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortHttpResults(
-    std::vector<storage::DocId>& results, const query::Query& query, TableContext& table_ctx,
-    search_pipeline::FullPipelineOutput& pipeline_output, const config::Config* full_config,
-    const std::string& primary_key_column) {
-  const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
-  if (!is_score_sort) {
-    return query::ResultSorter::SortAndPaginate(results, *table_ctx.doc_store, query, primary_key_column);
-  }
-
+search_pipeline::RelevanceSortParams BuildRelevanceSortParams(TableContext& table_ctx,
+                                                              const config::Config* full_config) {
   search_pipeline::RelevanceSortParams score_params;
   score_params.index = table_ctx.index.get();
   score_params.doc_store = table_ctx.doc_store.get();
@@ -535,9 +417,21 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortH
   score_params.ngram_size = table_ctx.config.ngram_size;
   score_params.kanji_ngram_size = table_ctx.config.kanji_ngram_size;
   score_params.cross_boundary_ngrams = table_ctx.config.cross_boundary_ngrams;
+  return score_params;
+}
 
-  return search_pipeline::ScoreAndSortByRelevance(query, results, pipeline_output.all_search_terms,
-                                                  pipeline_output.term_infos, score_params);
+/// @brief Wall-clock seconds since the Unix epoch, as health bodies report it.
+int64_t UnixTimestampSeconds() {
+  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+/// @brief Serialize a document's filter values as a JSON object.
+json FilterMapToJson(const storage::FilterMap& filters) {
+  json filters_obj;
+  for (const auto& [key, value] : filters) {
+    filters_obj[key] = FilterValueToJson(value);
+  }
+  return filters_obj;
 }
 
 }  // namespace
@@ -989,7 +883,7 @@ void HttpServer::UpdateApiConfig(int default_limit, int max_query_length) {
 HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name) {
   TableContextLookup result;
 
-  if (!IsValidTableName(table_name)) {
+  if (!query::QueryParser::IsSafeTableName(table_name)) {
     result.status = kHttpBadRequest;
     result.message = "Invalid table name (allowed characters: letters, digits, '_', '-', '.')";
     result.code = mygram::utils::ErrorCode::kQueryInvalidToken;
@@ -997,7 +891,8 @@ HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::st
   }
 
   // Multi-database configurations require a qualified `database.table` identity.
-  if (config::RequiresQualifiedTableReferences(full_config_) && !IsDatabaseQualifiedTableName(table_name)) {
+  if (config::RequiresQualifiedTableReferences(full_config_) &&
+      !query::QueryParser::IsDatabaseQualifiedTableName(table_name)) {
     result.status = kHttpBadRequest;
     result.message = "Bare table names are not supported; use <database>.<table>: " + table_name;
     result.code = mygram::utils::ErrorCode::kQuerySyntaxError;
@@ -1258,7 +1153,8 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     // search-text extraction identical across every public surface.
     query::QueryParser parser;
     parser.SetMaxQueryLength(max_query_length);
-    auto base_query = parser.Parse(command + " " + request->table_key + " " + QuoteLiteralSearchExpression(query_text));
+    auto base_query =
+        parser.Parse(command + " " + request->table_key + " " + query::QueryParser::QuoteSearchLiteral(query_text));
     if (!base_query) {
       SendError(res, kHttpBadRequest, base_query.error());
       return std::nullopt;
@@ -1334,7 +1230,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     if (!query_text.empty()) {
       parsed_query.search_text = query_text;
       parsed_query.search_expression =
-          *boolean_mode ? std::move(query_text) : QuoteLiteralSearchExpression(parsed_query.search_text);
+          *boolean_mode ? std::move(query_text) : query::QueryParser::QuoteSearchLiteral(parsed_query.search_text);
     }
   }
 
@@ -1388,8 +1284,9 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
       total_count = topn.total_results;
     }
 
-    auto sorted_result =
-        SortHttpResults(results, *query, *table_ctx, *pipeline_output, full_config_, params.primary_key_column);
+    auto sorted_result = search_pipeline::SortAndPaginateResults(
+        *query, results, pipeline_output->all_search_terms, pipeline_output->term_infos,
+        BuildRelevanceSortParams(*table_ctx, full_config_), params.primary_key_column);
     if (!sorted_result.has_value()) {
       SendError(res, HttpStatusForQueryError(sorted_result.error()), sorted_result.error());
       return;
@@ -1404,9 +1301,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
 
     json results_array = json::array();
     auto docs = current_doc_store->GetDocumentsBatch(sorted_results);
-    std::vector<std::optional<std::string>> highlight_texts;
-    std::vector<std::optional<std::string>> original_highlight_texts;
-    std::vector<std::string> highlight_terms;
+    std::vector<std::string> highlight_snippets;
     if (query->highlight.has_value()) {
       if (!current_doc_store->IsStoreTextsEnabled()) {
         SendError(res, kHttpBadRequest,
@@ -1415,36 +1310,21 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
                   mygram::utils::ErrorCode::kNotImplemented);
         return;
       }
-      highlight_texts = current_doc_store->GetNormalizedTextBatch(sorted_results);
-      original_highlight_texts = current_doc_store->GetOriginalTextBatch(sorted_results);
-      highlight_terms = BuildHighlightTerms(pipeline_output->all_search_terms, *table_ctx);
+      highlight_snippets = search_pipeline::GenerateHighlightSnippets(
+          *query->highlight, pipeline_output->all_search_terms, sorted_results, table_ctx->index.get(),
+          current_doc_store, table_ctx->synonym_dict.get());
     }
     for (size_t i = 0; i < docs.size(); ++i) {
       if (docs[i]) {
         json doc_obj;
         doc_obj["primary_key"] = docs[i]->primary_key;
 
-        // Add filters
         if (!docs[i]->filters.empty()) {
-          json filters_obj;
-          for (const auto& [key, val] : docs[i]->filters) {
-            filters_obj[key] = FilterValueToJson(val);
-          }
-          doc_obj["filters"] = filters_obj;
+          doc_obj["filters"] = FilterMapToJson(docs[i]->filters);
         }
 
-        if (query->highlight.has_value() && i < highlight_texts.size()) {
-          if (i < original_highlight_texts.size() && original_highlight_texts[i].has_value()) {
-            auto hl = query::Highlighter::GenerateOriginal(
-                *original_highlight_texts[i], highlight_terms,
-                [&](std::string_view text) { return table_ctx->index->NormalizeText(text); }, *query->highlight);
-            doc_obj["highlight"] = hl.snippet;
-          } else if (highlight_texts[i].has_value()) {
-            auto hl = query::Highlighter::Generate(*highlight_texts[i], highlight_terms, *query->highlight);
-            doc_obj["highlight"] = hl.snippet;
-          } else {
-            doc_obj["highlight"] = "";
-          }
+        if (i < highlight_snippets.size()) {
+          doc_obj["highlight"] = highlight_snippets[i];
         }
 
         results_array.push_back(doc_obj);
@@ -1518,12 +1398,8 @@ void HttpServer::HandleFacet(const httplib::Request& req, httplib::Response& res
     auto* table_ctx = prepared->table_ctx;
     auto& query_ref = prepared->query;
     auto* query = &query_ref;
-    search_pipeline::FacetPipelineParams params;
-    params.search = search_pipeline::BuildPipelineParamsFromContext(
-        *table_ctx, full_config_, cache_manager_, SearchHandler::GetFilterThreshold(), /*attach_bm25_stats=*/true);
-    for (const auto& filter : config::BuildUnifiedFilterConfigs(table_ctx->config)) {
-      params.configured_filter_columns.push_back(filter.name);
-    }
+    auto params = search_pipeline::BuildFacetPipelineParamsFromContext(*table_ctx, full_config_, cache_manager_,
+                                                                       SearchHandler::GetFilterThreshold());
     params.load_in_progress = [this]() { return loading_ != nullptr && loading_->load(std::memory_order_acquire); };
     auto facet_output = search_pipeline::ExecuteFacetPipeline(*query, params);
     if (!facet_output) {
@@ -1601,11 +1477,7 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
     response["primary_key"] = doc->primary_key;
 
     if (!doc->filters.empty()) {
-      json filters_obj;
-      for (const auto& [key, val] : doc->filters) {
-        filters_obj[key] = FilterValueToJson(val);
-      }
-      response["filters"] = filters_obj;
+      response["filters"] = FilterMapToJson(doc->filters);
     }
 
     SendJson(res, kHttpOk, response);
@@ -1793,8 +1665,7 @@ void HttpServer::HandleHealth(const httplib::Request& /*req*/, httplib::Response
   // denial branches account a rejected probe the same way.
   json response;
   response["status"] = "ok";
-  response["timestamp"] =
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  response["timestamp"] = UnixTimestampSeconds();
 
   SendJson(res, kHttpOk, response);
 }
@@ -1805,8 +1676,7 @@ void HttpServer::HandleHealthLive(const httplib::Request& /*req*/, httplib::Resp
   // This is used by orchestrators (Kubernetes, Docker) to detect deadlocks
   json response;
   response["status"] = "alive";
-  response["timestamp"] =
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  response["timestamp"] = UnixTimestampSeconds();
 
   SendJson(res, kHttpOk, response);
 }
@@ -1844,8 +1714,7 @@ void HttpServer::HandleHealthReady(const httplib::Request& req, httplib::Respons
   if (!verdict.ready) {
     response["reason"] = verdict.reason;
   }
-  response["timestamp"] =
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  response["timestamp"] = UnixTimestampSeconds();
   SendJson(res, verdict.ready ? kHttpOk : kHttpServiceUnavailable, response);
 }
 
@@ -1862,8 +1731,7 @@ void HttpServer::HandleHealthDetail(const httplib::Request& req, httplib::Respon
   if (!verdict.ready) {
     response["reason"] = verdict.reason;
   }
-  response["timestamp"] =
-      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+  response["timestamp"] = UnixTimestampSeconds();
 
   // Uptime from this HttpServer instance's construction time
   auto uptime =

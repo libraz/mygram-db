@@ -86,12 +86,8 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFilters(co
     return result;
   }
 
-  if (!IsSafeColumnName(filter.column)) {
-    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter column"));
-  }
-  if (filter.value.size() > kMaxFilterValueLength) {
-    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "FILTER value exceeds maximum length (" +
-                                                                        std::to_string(kMaxFilterValueLength) + ")"));
+  if (auto validated = ValidateFilterCondition(filter); !validated) {
+    return validated;
   }
 
   query.filters.push_back(filter);
@@ -310,10 +306,10 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseSort(const
   const auto& next_token = tokens[pos];
 
   // Check for shorthand: SORT ASC/DESC (primary key ordering)
-  if (EqualsIgnoreCase(next_token, "ASC") || EqualsIgnoreCase(next_token, "DESC")) {
+  if (const auto shorthand_order = ParseSortOrder(next_token); shorthand_order.has_value()) {
     // Shorthand for primary key ordering
     order_by.column = "";  // Empty = primary key
-    order_by.order = EqualsIgnoreCase(next_token, "ASC") ? SortOrder::ASC : SortOrder::DESC;
+    order_by.order = *shorthand_order;
     pos++;
     query.order_by = order_by;
     return {};
@@ -329,17 +325,14 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseSort(const
                                     "Multiple column sorting is not supported. Sort by a single column only."));
   }
 
-  if (!IsSafeColumnName(order_by.column)) {
+  if (!IsSafeSortColumn(order_by.column)) {
     return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidSort, "Invalid sort column"));
   }
 
   // Check for ASC/DESC (optional, default is DESC)
   if (pos < tokens.size()) {
-    if (EqualsIgnoreCase(tokens[pos], "ASC")) {
-      order_by.order = SortOrder::ASC;
-      pos++;
-    } else if (EqualsIgnoreCase(tokens[pos], "DESC")) {
-      order_by.order = SortOrder::DESC;
+    if (const auto explicit_order = ParseSortOrder(tokens[pos]); explicit_order.has_value()) {
+      order_by.order = *explicit_order;
       pos++;
     }
     // If not ASC or DESC, leave it for next clause to handle
@@ -408,7 +401,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseHighlight(
       if (!val) {
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Invalid HIGHLIGHT SNIPPET_LEN value"));
       }
-      if (*val == 0 || *val > 10000) {
+      if (*val < kMinSnippetLength || *val > kMaxSnippetLength) {
         return MakeUnexpected(
             MakeError(ErrorCode::kQuerySyntaxError, "HIGHLIGHT SNIPPET_LEN must be between 1 and 10000"));
       }
@@ -424,7 +417,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseHighlight(
       if (!val) {
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Invalid HIGHLIGHT MAX_FRAGMENTS value"));
       }
-      if (*val == 0 || *val > 100) {
+      if (*val < kMinHighlightFragments || *val > kMaxHighlightFragments) {
         return MakeUnexpected(
             MakeError(ErrorCode::kQuerySyntaxError, "HIGHLIGHT MAX_FRAGMENTS must be between 1 and 100"));
       }
@@ -451,7 +444,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseFuzzy(cons
     const auto val = mygram::utils::ParseNumeric<uint32_t>(token);
     if (val) {
       // Successfully parsed as number — validate range
-      if (*val < 1 || *val > 2) {
+      if (*val < kMinFuzzyDistance || *val > kMaxFuzzyDistance) {
         return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "FUZZY distance must be 1 or 2, got: " + token));
       }
       max_distance = *val;

@@ -520,6 +520,69 @@ bool QueryParser::IsSafeColumnName(std::string_view column) {
   return true;
 }
 
+bool QueryParser::IsSafeTableName(std::string_view table) {
+  if (table.empty() || table.size() > kMaxTableNameLength) {
+    return false;
+  }
+  const auto* bytes = reinterpret_cast<const unsigned char*>(table.data());
+  for (size_t i = 0; i < table.size();) {
+    const auto u = bytes[i];
+    const bool ascii_safe =
+        (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' || u == '-' || u == '.';
+    if (ascii_safe) {
+      ++i;
+      continue;
+    }
+    if (u < 0x80) {
+      return false;
+    }
+    // Only well-formed multi-byte sequences may pass; TryParseUtf8Char rejects
+    // overlong forms, surrogates and out-of-range code points.
+    uint32_t code_point = 0;
+    const int consumed = mygram::utils::TryParseUtf8Char(bytes + i, table.size() - i, &code_point);
+    if (consumed <= 1) {
+      return false;
+    }
+    i += static_cast<size_t>(consumed);
+  }
+  return true;
+}
+
+bool QueryParser::IsDatabaseQualifiedTableName(std::string_view table) {
+  const auto separator = table.find('.');
+  return separator != std::string_view::npos && separator != 0 && separator + 1 < table.size();
+}
+
+bool QueryParser::IsSafeSortColumn(std::string_view column) {
+  return column == "_score" || IsSafeColumnName(column);
+}
+
+std::optional<SortOrder> QueryParser::ParseSortOrder(std::string_view order) {
+  if (EqualsIgnoreCase(order, "ASC")) {
+    return SortOrder::ASC;
+  }
+  if (EqualsIgnoreCase(order, "DESC")) {
+    return SortOrder::DESC;
+  }
+  return std::nullopt;
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateFilterCondition(
+    const FilterCondition& filter) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  if (!IsSafeColumnName(filter.column)) {
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter column"));
+  }
+  if (filter.value.size() > kMaxFilterValueLength) {
+    return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "FILTER value exceeds maximum length (" +
+                                                                        std::to_string(kMaxFilterValueLength) + ")"));
+  }
+  return {};
+}
+
 mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateQueryLength(const Query& query) {
   if (max_query_length_ == 0) {
     return {};

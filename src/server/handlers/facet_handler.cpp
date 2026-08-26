@@ -42,12 +42,8 @@ std::string FacetHandler::Handle(const query::Query& query, ConnectionContext& c
   auto* current_doc_store = table_ctx->doc_store;
   search_pipeline::FacetPipelineParams params;
   if (table_ctx->table_context != nullptr) {
-    params.search = search_pipeline::BuildPipelineParamsFromContext(
-        *table_ctx->table_context, ctx_.full_config, ctx_.cache_manager, SearchHandler::GetFilterThreshold(),
-        /*attach_bm25_stats=*/true);
-    for (const auto& filter : config::BuildUnifiedFilterConfigs(table_ctx->table_context->config)) {
-      params.configured_filter_columns.push_back(filter.name);
-    }
+    params = search_pipeline::BuildFacetPipelineParamsFromContext(
+        *table_ctx->table_context, ctx_.full_config, ctx_.cache_manager, SearchHandler::GetFilterThreshold());
   } else {
     params.search.current_index = table_ctx->index;
     params.search.current_doc_store = current_doc_store;

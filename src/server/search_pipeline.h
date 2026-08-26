@@ -421,9 +421,44 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> Score
     const std::vector<std::string>& all_search_terms, std::vector<SearchTermInfo>& term_infos,
     const RelevanceSortParams& params);
 
+/// @brief Order and paginate a result set according to the query's sort.
+///
+/// Routes `SORT _score` to ScoreAndSortByRelevance and every other order to
+/// ResultSorter::SortAndPaginate, so both request surfaces resolve a sort the
+/// same way and reject an unavailable one with the same error.
+///
+/// @param query Query carrying the sort, limit and offset
+/// @param results Full result set to order; reordered in place by a column sort
+/// @param all_search_terms All search terms (main + AND); used for scoring
+/// @param term_infos Term information; may be regenerated when scoring
+/// @param params Table and configuration inputs required for scoring
+/// @param primary_key_column Primary key column of the searched table
+/// @return The ordered page, or the rejection describing why it is unavailable
+mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortAndPaginateResults(
+    const query::Query& query, std::vector<storage::DocId>& results, const std::vector<std::string>& all_search_terms,
+    std::vector<SearchTermInfo>& term_infos, const RelevanceSortParams& params, const std::string& primary_key_column);
+
 /// @brief Build normalized terms used by highlight generation.
 std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, index::Index* current_index,
                                              const query::SynonymDictionary* synonym_dict);
+
+/// @brief Generate one highlight snippet per document of a result page.
+///
+/// Prefers the stored original text and falls back to the normalized text; a
+/// document with neither yields an empty snippet. The returned vector is
+/// parallel to @p page.
+///
+/// @param options Highlight options carried by the query
+/// @param all_search_terms All search terms (main + AND)
+/// @param page Ordered, paginated DocIds to highlight
+/// @param index Index supplying the normalization used to align spans
+/// @param doc_store Document store holding the original/normalized texts
+/// @param synonym_dict Dictionary expanding the highlighted terms, or nullptr
+std::vector<std::string> GenerateHighlightSnippets(const query::HighlightOptions& options,
+                                                   const std::vector<std::string>& all_search_terms,
+                                                   const std::vector<storage::DocId>& page, index::Index* index,
+                                                   storage::DocumentStore* doc_store,
+                                                   const query::SynonymDictionary* synonym_dict);
 
 /// @brief Execute the full search pipeline: cache lookup, synonym/fuzzy expansion, search, cache insert
 ///
@@ -496,5 +531,22 @@ namespace mygramdb::server::search_pipeline {
 FullPipelineParams BuildPipelineParamsFromContext(const TableContext& table_ctx, const config::Config* full_config,
                                                   cache::CacheManager* cache_manager, size_t filter_threshold,
                                                   bool attach_bm25_stats);
+
+/**
+ * @brief Build a `FacetPipelineParams` from a `TableContext` plus shared dependencies.
+ *
+ * Wraps BuildPipelineParamsFromContext and adds the table's configured filter
+ * columns, which decide which columns may be faceted. The caller supplies its
+ * own `load_in_progress` probe.
+ *
+ * @param table_ctx Resolved table context with valid `index` and `doc_store`.
+ * @param full_config Pointer to the full server config (may be null).
+ * @param cache_manager Pointer to the shared cache manager (may be null).
+ * @param filter_threshold FilterByNgrams/SearchAnd threshold.
+ * @return Populated FacetPipelineParams, less the `load_in_progress` probe.
+ */
+FacetPipelineParams BuildFacetPipelineParamsFromContext(const TableContext& table_ctx,
+                                                        const config::Config* full_config,
+                                                        cache::CacheManager* cache_manager, size_t filter_threshold);
 
 }  // namespace mygramdb::server::search_pipeline

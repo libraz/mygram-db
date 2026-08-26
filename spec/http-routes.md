@@ -66,10 +66,10 @@ Caps applied to `filters`:
 
 | Rule | Limit | Citation |
 |---|---|---|
-| Number of conditions | ≤ 64 (`QueryParser::kMaxTermCount`, `src/query/query_parser.h:272`) | `src/server/http_server.cpp:311-315` |
-| Column name | `IsSafeColumnName`: 1–128 bytes of `[A-Za-z0-9_.$-]` (`src/query/query_parser.cpp:506-519`) | `src/server/http_server.cpp:318-320` |
-| Value type | string, integer, float, boolean only (`src/server/http_server.cpp:177-191`) | `src/server/http_server.cpp:334-338`, `:343-347` |
-| Value length | ≤ 1024 bytes (`kMaxFilterValueLength`, `src/query/query_parser.h:274`) | `src/server/http_server.cpp:351-355` |
+| Number of conditions | ≤ 64 (`QueryParser::kMaxTermCount`) | `ParseFiltersFromJson`, `src/server/http_server.cpp` |
+| Column name | `IsSafeColumnName`: 1–128 bytes of `[A-Za-z0-9_.$-]` (`src/query/query_parser.cpp`) | `QueryParser::ValidateFilterCondition`, shared with the TCP `FILTER` clause (`src/query/query_parser_clauses.cpp`) |
+| Value type | string, integer, float, boolean only (`JsonFilterValueToString`, `src/server/http_server.cpp`) | `src/server/http_server.cpp` |
+| Value length | ≤ 1024 bytes (`kMaxFilterValueLength`) | `QueryParser::ValidateFilterCondition`, shared with the TCP `FILTER` clause |
 
 Non-string filter values are coerced to strings: integers via `std::to_string(int64_t)`, floats via `std::to_string(double)` (fixed six decimals), booleans to `"1"`/`"0"` (`src/server/http_server.cpp:177-191`). Because `filters` is a JSON object, at most one condition per column can be expressed.
 
@@ -77,8 +77,8 @@ Non-string filter values are coerced to strings: integers via `std::to_string(in
 
 | Field | Type | Required | Validation |
 |---|---|---|---|
-| `column` | string | no | `_score` or `IsSafeColumnName` (`:435-443`) |
-| `order` | string | no | `ASC`/`DESC`, ASCII-case-insensitive; default `DESC` (`:445-458`) |
+| `column` | string | no | `QueryParser::IsSafeSortColumn` — `_score` or `IsSafeColumnName` — shared with the TCP `SORT` clause |
+| `order` | string | no | `QueryParser::ParseSortOrder` — `ASC`/`DESC`, ASCII-case-insensitive; default `DESC` — shared with the TCP `SORT` clause |
 
 Omitting `column` orders by the primary key, the shorthand `SORT ASC` / `SORT DESC` carries on the TCP surface (`src/server/http_server.cpp:432-434`). A named column is passed through as written and resolved by `ResultSorter`, which accepts the primary-key column name as well as any filter column (`src/query/result_sorter.cpp:528-549`).
 
@@ -86,14 +86,14 @@ Omitting `column` orders by the primary key, the shorthand `SORT ASC` / `SORT DE
 
 | Field | Type | Range | Citation |
 |---|---|---|---|
-| `open_tag` | string | ≤ 256 bytes (`kMaxHighlightTagLength`, `src/query/query_parser.h:276`) | `:472-481` |
-| `close_tag` | string | ≤ 256 bytes | `:483-491` |
-| `snippet_length` | integer | 1–10000 | `:493` via `:446-464` |
-| `max_fragments` | integer | 1–100 | `:496` via `:446-464` |
+| `open_tag` | string | ≤ 256 bytes (`kMaxHighlightTagLength`) | `ParseHighlightFromJson`, `src/server/http_server.cpp` |
+| `close_tag` | string | ≤ 256 bytes (`kMaxHighlightTagLength`) | `ParseHighlightFromJson`, `src/server/http_server.cpp` |
+| `snippet_length` | integer | `kMinSnippetLength`–`kMaxSnippetLength` (1–10000), shared with `HIGHLIGHT SNIPPET_LEN` | `ParseHighlightUint`, `src/server/http_server.cpp` |
+| `max_fragments` | integer | `kMinHighlightFragments`–`kMaxHighlightFragments` (1–100), shared with `HIGHLIGHT MAX_FRAGMENTS` | `ParseHighlightUint`, `src/server/http_server.cpp` |
 
 ### Query construction
 
-- `mode: "literal"` (default): the request is turned into the text command `SEARCH <resolved_table> "<escaped q>"` and run through `QueryParser::Parse`, where `<escaped q>` backslash-escapes `\` and `"` (`src/server/http_server.cpp:123-135`, `:1243-1250`). A parser error is returned as 400 with the parser's own error code (`:1246-1249`).
+- `mode: "literal"` (default): the request is turned into the text command `SEARCH <resolved_table> "<escaped q>"` and run through `QueryParser::Parse`, where `<escaped q>` is produced by `QueryParser::QuoteSearchLiteral`, the escaper the parser itself uses to re-emit a quoted token (`src/query/query_parser_commands.cpp`). A parser error is returned as 400 with the parser's own error code.
 - `mode: "boolean"`: `q` is assigned directly to both `search_text` and `search_expression` without invoking the parser (`src/server/http_server.cpp:1234-1238`).
 
 After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, highlight and fuzzy, then validates the assembled query against `api.max_query_length` via `QueryParser::ValidateQueryLength` (`src/server/http_server.cpp:1168-1173`, `src/query/query_parser.cpp:523-538`). This is the only length check on the route, and it counts code points, not bytes (`src/query/query_parser.cpp:21-50`).
@@ -681,8 +681,8 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 5 | Table-name character set | No whitelist; the token is whatever the tokenizer produced (`src/query/query_parser_commands.cpp:350`, `:437`) | `IsValidTableName`: ≤ 256 bytes, ASCII limited to `[A-Za-z0-9_.-]` plus well-formed non-ASCII UTF-8; anything else is 400 `kQueryInvalidToken` (`src/server/http_server.cpp:258-280`, `:969-973`) |
-| 6 | Bare name under a multi-database configuration | `kTableNotFound` (4007) with message `Bare table names are not supported; use <database>.<table>: …` (`src/server/handlers/command_handler.cpp:39-42`) | Same message, but `kQuerySyntaxError` (3000) and HTTP 400 (`src/server/http_server.cpp:977-982`) |
+| 5 | Table-name character set | No whitelist; the token is whatever the tokenizer produced (`src/query/query_parser_commands.cpp:350`, `:437`) | `QueryParser::IsSafeTableName`: ≤ `kMaxTableNameLength` (256) bytes, ASCII limited to `[A-Za-z0-9_.-]` plus well-formed non-ASCII UTF-8; anything else is 400 `kQueryInvalidToken` (`src/query/query_parser.cpp`, `ResolveHttpTableContext`) |
+| 6 | Bare name under a multi-database configuration | `kTableNotFound` (4007) with message `Bare table names are not supported; use <database>.<table>: …` (`src/server/handlers/command_handler.cpp`) | Same message and the same `QueryParser::IsDatabaseQualifiedTableName` test, but `kQuerySyntaxError` (3000) and HTTP 400 (`ResolveHttpTableContext`, `src/server/http_server.cpp`) |
 | 7 | Partially initialised table context | Reported as `Index not available` / `Document store not available`, `kInternalError` (`src/server/handlers/search_handler.cpp:214-216`, `:333-335`) | Reported earlier during resolution as `Table context has null index or doc_store`, `kInternalError` / 500 (`src/server/http_server.cpp:1001-1006`) |
 
 ### Accepted parameters
@@ -719,7 +719,7 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 28 | Literal search text | The client supplies the quoting; the tokenizer processes `\n`, `\t`, `\r`, `\\` and `\"` escape sequences (`src/query/query_parser.cpp:545-561`) | The server quotes `q` itself, escaping only `\` and `"`; `\n`-style sequences in `q` stay literal because control characters were already rejected (`src/server/http_server.cpp:123-135`, `:1245`) |
+| 28 | Literal search text | The client supplies the quoting; the tokenizer processes `\n`, `\t`, `\r`, `\\` and `\"` escape sequences (`src/query/query_parser.cpp:545-561`) | The server quotes `q` itself with `QueryParser::QuoteSearchLiteral`, the parser's own escaper for `\` and `"`; `\n`-style sequences in `q` stay literal because control characters were already rejected (`src/query/query_parser_commands.cpp`) |
 | 29 | Response escaping | Primary keys and facet values are escaped/sanitised for the delimited text protocol (`src/server/response_formatter.cpp:309`, `:418`) | Values are emitted as JSON strings with invalid UTF-8 replaced by U+FFFD (`src/server/http_server.cpp:2155`) |
 | 30 | Path decoding | Table and primary key come from tokenizer output | Table and primary key are percent-decoded from the URL path before matching, so `%2F` cannot appear (the route pattern excludes `/`) (`build/_deps/httplib-src/httplib.h:11637-11638`, `src/server/http_server.cpp:712`) |
 | 31 | Floating-point filter values in responses | Fixed six decimals (`src/server/response_formatter.cpp:458-459`) | Full JSON double serialization (`src/server/http_server.cpp:154-170`) |
@@ -735,11 +735,12 @@ The TCP surface is normative. The differences below are recorded as observed, wi
 
 ### Sorting and scoring
 
+Both surfaces order a result page through `search_pipeline::SortAndPaginateResults`, which routes `SORT _score` to `ScoreAndSortByRelevance` and every other order to `ResultSorter::SortAndPaginate`, and both build snippets through `search_pipeline::GenerateHighlightSnippets`. Sort resolution, scoring and highlighting therefore have no surface-specific behaviour of their own.
+
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 36 | Score-sort execution | `SearchHandler::HandleSearch` generates highlight snippets from the score-sorted page (`src/server/handlers/search_handler.cpp:393-430`) | `SortHttpResults` returns only the sorted ids; highlighting is applied afterwards by the shared response builder (`src/server/http_server.cpp:538-557`, `:1349-1420`). Both obtain the page from `search_pipeline::ScoreAndSortByRelevance` (`src/server/search_pipeline.cpp:805-867`) |
-| 37 | Non-score sorting and pagination | `ResultSorter::SortAndPaginate` (`src/server/handlers/search_handler.cpp:433-434`) | Same function, same primary-key column (`src/server/http_server.cpp:544`) |
-| 38 | Top-N optimization | `ApplySearchTopNOptimization`, with the chosen strategy surfaced in debug output (`src/server/handlers/search_handler.cpp:375-395`) | Same call, but the strategy is not reported anywhere in the response (`src/server/http_server.cpp:1367-1373`) |
+| 38 | Top-N optimization | `ApplySearchTopNOptimization`, with the chosen strategy surfaced in debug output (`src/server/handlers/search_handler.cpp`) | Same call, but the strategy is not reported anywhere in the response (`src/server/http_server.cpp`) |
+| 47 | Order of the HIGHLIGHT storage check | Rejected before the page is ordered, so a request that both asks for `HIGHLIGHT` without stored text and orders by an unavailable `_score` reports the highlight fault (`src/server/handlers/search_handler.cpp`) | Rejected after the page is ordered, so the same request reports the sort fault instead (`src/server/http_server.cpp`) |
 
 ### Request and rate-limit accounting
 

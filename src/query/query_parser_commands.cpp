@@ -27,11 +27,11 @@ static bool IsNonExpressionClauseKeyword(const std::string& token) {
          token == "FUZZY" || token == "FACET";
 }
 
-static std::string EscapeQuotedSearchToken(const std::string& token) {
+std::string QueryParser::QuoteSearchLiteral(std::string_view text) {
   std::string escaped;
-  escaped.reserve(token.size() + 2);
+  escaped.reserve(text.size() + 2);
   escaped.push_back('"');
-  for (char c : token) {
+  for (char c : text) {
     if (c == '\\' || c == '"') {
       escaped.push_back('\\');
     }
@@ -46,7 +46,7 @@ static std::string SearchTokenForFlatExpression(const std::string& token) {
 }
 
 static std::string SearchTokenForSemanticExpression(const std::string& token, bool was_quoted) {
-  return was_quoted ? EscapeQuotedSearchToken(token) : SearchTokenForFlatExpression(token);
+  return was_quoted ? QueryParser::QuoteSearchLiteral(token) : SearchTokenForFlatExpression(token);
 }
 
 /**

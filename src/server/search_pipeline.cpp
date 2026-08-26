@@ -26,6 +26,7 @@
 #include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/bm25_scorer.h"
+#include "query/highlighter.h"
 #include "query/query_ast.h"
 #include "query/query_normalizer.h"
 #include "query/result_sorter.h"
@@ -975,6 +976,43 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> Score
   }
 
   return query::ResultSorter::SortByScore(results, scores, query.order_by->order, query.limit, query.offset);
+}
+
+mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> SortAndPaginateResults(
+    const query::Query& query, std::vector<storage::DocId>& results, const std::vector<std::string>& all_search_terms,
+    std::vector<SearchTermInfo>& term_infos, const RelevanceSortParams& params, const std::string& primary_key_column) {
+  const bool is_score_sort = query.order_by.has_value() && query.order_by->IsScoreSort();
+  if (!is_score_sort) {
+    return query::ResultSorter::SortAndPaginate(results, *params.doc_store, query, primary_key_column);
+  }
+  return ScoreAndSortByRelevance(query, results, all_search_terms, term_infos, params);
+}
+
+std::vector<std::string> GenerateHighlightSnippets(const query::HighlightOptions& options,
+                                                   const std::vector<std::string>& all_search_terms,
+                                                   const std::vector<storage::DocId>& page, index::Index* index,
+                                                   storage::DocumentStore* doc_store,
+                                                   const query::SynonymDictionary* synonym_dict) {
+  auto normalized_terms = BuildHighlightTerms(all_search_terms, index, synonym_dict);
+
+  auto original_texts = doc_store->GetOriginalTextBatch(page);
+  auto normalized_texts = doc_store->GetNormalizedTextBatch(page);
+  std::vector<std::string> snippets;
+  snippets.reserve(page.size());
+  for (size_t i = 0; i < page.size(); ++i) {
+    if (original_texts[i].has_value()) {
+      auto highlighted = query::Highlighter::GenerateOriginal(
+          *original_texts[i], normalized_terms, [&](std::string_view text) { return index->NormalizeText(text); },
+          options);
+      snippets.push_back(std::move(highlighted.snippet));
+    } else if (normalized_texts[i].has_value()) {
+      auto highlighted = query::Highlighter::Generate(*normalized_texts[i], normalized_terms, options);
+      snippets.push_back(std::move(highlighted.snippet));
+    } else {
+      snippets.emplace_back();
+    }
+  }
+  return snippets;
 }
 
 std::vector<std::string> BuildHighlightTerms(const std::vector<std::string>& search_terms, index::Index* current_index,
@@ -2520,6 +2558,18 @@ FullPipelineParams BuildPipelineParamsFromContext(const TableContext& table_ctx,
     params.synonym_dict = table_ctx.synonym_dict.get();
   }
 
+  return params;
+}
+
+FacetPipelineParams BuildFacetPipelineParamsFromContext(const TableContext& table_ctx,
+                                                        const config::Config* full_config,
+                                                        cache::CacheManager* cache_manager, size_t filter_threshold) {
+  FacetPipelineParams params;
+  params.search = BuildPipelineParamsFromContext(table_ctx, full_config, cache_manager, filter_threshold,
+                                                 /*attach_bm25_stats=*/true);
+  for (const auto& filter : config::BuildUnifiedFilterConfigs(table_ctx.config)) {
+    params.configured_filter_columns.push_back(filter.name);
+  }
   return params;
 }
 

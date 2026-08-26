@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -41,8 +42,10 @@ namespace server {
 namespace {
 
 // Send a single TCP request and read the full response (until "OK ..." or
-// "ERROR ..." line is received). Returns empty string on failure.
-std::string SendTcpRequest(uint16_t port, const std::string& request) {
+// "ERROR ..." line is received). Frames that carry a body after the header
+// line — FACET counts and highlighted SEARCH results — end with a blank line;
+// pass multiline_response to read up to it. Returns empty string on failure.
+std::string SendTcpRequest(uint16_t port, const std::string& request, bool multiline_response = false) {
   int sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
     return "";
@@ -71,7 +74,7 @@ std::string SendTcpRequest(uint16_t port, const std::string& request) {
     if (received > 0) {
       buffer[received] = '\0';
       response.append(buffer, received);
-      if (response.rfind("OK FACET", 0) == 0) {
+      if ((response.rfind("OK FACET", 0) == 0 || multiline_response) && response.rfind("ERROR", 0) != 0) {
         if (response.find("\r\n\r\n") != std::string::npos) {
           break;
         }
@@ -198,6 +201,36 @@ std::vector<std::string> HttpSearchPrimaryKeys(const std::string& body) {
     primary_keys.push_back(result["primary_key"].get<std::string>());
   }
   return primary_keys;
+}
+
+// Map the "<pk>\t<snippet>" body lines of a highlighted SEARCH frame.
+std::map<std::string, std::string> ParseTcpHighlightSnippets(const std::string& response) {
+  std::istringstream stream(response);
+  std::string header;
+  std::getline(stream, header);
+
+  std::map<std::string, std::string> snippets;
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    const auto tab_pos = line.find('\t');
+    if (tab_pos == std::string::npos) {
+      continue;
+    }
+    snippets.emplace(line.substr(0, tab_pos), line.substr(tab_pos + 1));
+  }
+  return snippets;
+}
+
+std::map<std::string, std::string> HttpHighlightSnippets(const std::string& body) {
+  const json parsed = json::parse(body);
+  std::map<std::string, std::string> snippets;
+  for (const auto& result : parsed["results"]) {
+    snippets.emplace(result["primary_key"].get<std::string>(), result["highlight"].get<std::string>());
+  }
+  return snippets;
 }
 
 std::vector<std::pair<std::string, uint64_t>> ParseTcpFacetValues(const std::string& response) {
@@ -775,6 +808,93 @@ TEST_F(HttpTcpConsistencyTest, LiteralIsDefaultAndBooleanModeIsExplicit) {
   ASSERT_EQ(http_boolean->status, 200) << http_boolean->body;
   EXPECT_EQ(json::parse(http_boolean->body)["count"].get<size_t>(), ParseTcpCount(tcp_boolean, "RESULTS"));
   EXPECT_GT(ParseTcpCount(tcp_boolean, "RESULTS"), ParseTcpCount(tcp_literal, "RESULTS"));
+}
+
+TEST_F(HttpTcpConsistencyTest, LiteralQuotingOfSpecialCharactersMatchesAcrossSurfaces) {
+  httplib::Client client("127.0.0.1", http_port_);
+
+  // Text carrying the characters the command grammar quotes with must survive
+  // both surfaces as a literal phrase rather than becoming extra tokens.
+  const std::array<const char*, 3> texts = {R"(say "hi")", R"(back\slash)", R"(a "quoted" \ tail)"};
+  for (const auto* text : texts) {
+    const auto tcp_response = SendTcpRequest(tcp_port_, "SEARCH app.articles " + QuoteLiteral(text));
+    ASSERT_FALSE(tcp_response.empty()) << text;
+    EXPECT_EQ(ParseTcpErrorCode(tcp_response), -1) << tcp_response;
+
+    json request;
+    request["q"] = text;
+    auto http_response = client.Post("/tables/app.articles/search", request.dump(), "application/json");
+    ASSERT_TRUE(http_response) << text;
+    ASSERT_EQ(http_response->status, 200) << http_response->body;
+    EXPECT_EQ(json::parse(http_response->body)["count"].get<size_t>(), ParseTcpCount(tcp_response, "RESULTS")) << text;
+  }
+}
+
+TEST_F(HttpTcpConsistencyTest, FilterConditionRulesMatchAcrossSurfaces) {
+  httplib::Client client("127.0.0.1", http_port_);
+
+  // A column outside the shared grammar.
+  const auto tcp_column = SendTcpRequest(tcp_port_, R"(SEARCH app.articles machine FILTER "bad col" = ai)");
+  EXPECT_EQ(ParseTcpErrorCode(tcp_column), static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidFilter))
+      << tcp_column;
+  json bad_column;
+  bad_column["q"] = "machine";
+  bad_column["filters"]["bad col"] = "ai";
+  auto http_column = client.Post("/tables/app.articles/search", bad_column.dump(), "application/json");
+  ASSERT_TRUE(http_column);
+  EXPECT_EQ(json::parse(http_column->body)["error_code"],
+            static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidFilter))
+      << http_column->body;
+
+  // A value one byte past the shared cap.
+  const std::string oversize_value(query::QueryParser::kMaxFilterValueLength + 1, 'a');
+  const auto tcp_value = SendTcpRequest(tcp_port_, "SEARCH app.articles machine FILTER category = " + oversize_value);
+  EXPECT_EQ(ParseTcpErrorCode(tcp_value), static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidFilter)) << tcp_value;
+  json oversize;
+  oversize["q"] = "machine";
+  oversize["filters"]["category"] = oversize_value;
+  auto http_value = client.Post("/tables/app.articles/search", oversize.dump(), "application/json");
+  ASSERT_TRUE(http_value);
+  EXPECT_EQ(json::parse(http_value->body)["error_code"],
+            static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidFilter))
+      << http_value->body;
+}
+
+TEST_F(HttpTcpConsistencyTest, SortOrderKeywordCaseIsIgnoredOnBothSurfaces) {
+  httplib::Client client("127.0.0.1", http_port_);
+
+  const auto tcp_upper = SendTcpRequest(tcp_port_, "SEARCH app.articles learning SORT id ASC");
+  const auto tcp_lower = SendTcpRequest(tcp_port_, "SEARCH app.articles learning SORT id asc");
+  const auto upper_keys = ParseTcpSearchPrimaryKeys(tcp_upper);
+  ASSERT_FALSE(upper_keys.empty()) << tcp_upper;
+  EXPECT_EQ(ParseTcpSearchPrimaryKeys(tcp_lower), upper_keys) << tcp_lower;
+
+  for (const auto* order : {"ASC", "asc"}) {
+    json request;
+    request["q"] = "learning";
+    request["sort"] = {{"column", "id"}, {"order", order}};
+    auto response = client.Post("/tables/app.articles/search", request.dump(), "application/json");
+    ASSERT_TRUE(response) << order;
+    ASSERT_EQ(response->status, 200) << response->body;
+    EXPECT_EQ(HttpSearchPrimaryKeys(response->body), upper_keys) << response->body;
+  }
+}
+
+TEST_F(HttpTcpConsistencyTest, HighlightSnippetsMatchAcrossSurfaces) {
+  const auto tcp_response =
+      SendTcpRequest(tcp_port_, "SEARCH app.articles learning HIGHLIGHT TAG <b> </b>", /*multiline_response=*/true);
+  const auto tcp_snippets = ParseTcpHighlightSnippets(tcp_response);
+  ASSERT_FALSE(tcp_snippets.empty()) << tcp_response;
+
+  httplib::Client client("127.0.0.1", http_port_);
+  json request;
+  request["q"] = "learning";
+  request["highlight"] = {{"open_tag", "<b>"}, {"close_tag", "</b>"}};
+  auto http_response = client.Post("/tables/app.articles/search", request.dump(), "application/json");
+  ASSERT_TRUE(http_response);
+  ASSERT_EQ(http_response->status, 200) << http_response->body;
+
+  EXPECT_EQ(HttpHighlightSnippets(http_response->body), tcp_snippets) << http_response->body;
 }
 
 TEST_F(HttpTcpConsistencyTest, GetByPrimaryKeyMatches) {

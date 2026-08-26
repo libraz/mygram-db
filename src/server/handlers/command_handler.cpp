@@ -16,15 +16,6 @@
 
 namespace mygramdb::server {
 
-namespace {
-
-bool IsDatabaseQualifiedTableName(const std::string& table_name) {
-  const auto separator = table_name.find('.');
-  return separator != std::string::npos && separator != 0 && separator + 1 < table_name.size();
-}
-
-}  // namespace
-
 mygram::utils::Expected<std::string, mygram::utils::Error> CommandHandler::ResolveTableName(
     const std::string& table_name) const {
   using mygram::utils::MakeError;
@@ -36,7 +27,8 @@ mygram::utils::Expected<std::string, mygram::utils::Error> CommandHandler::Resol
 
   // Multi-database configurations require qualified references; reject bare
   // identifiers up front to keep the helpful error message.
-  if (config::RequiresQualifiedTableReferences(ctx_.full_config) && !IsDatabaseQualifiedTableName(table_name)) {
+  if (config::RequiresQualifiedTableReferences(ctx_.full_config) &&
+      !query::QueryParser::IsDatabaseQualifiedTableName(table_name)) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kTableNotFound,
                                     "Bare table names are not supported; use <database>.<table>: " + table_name));
   }
