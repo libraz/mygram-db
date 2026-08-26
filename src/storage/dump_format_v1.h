@@ -129,8 +129,12 @@ constexpr uint32_t kMaxIdentifierLength = 1024;  // 1KB
 /// Maximum length for short config values (host, bind address, mode, format, CIDR, etc.)
 constexpr uint32_t kMaxConfigValueLength = 4 * 1024;  // 4KB
 
-/// Maximum length for path fields (dump directory, GTID strings)
+/// Maximum length for path fields (dump directory)
 constexpr uint32_t kMaxPathLength = 8 * 1024;  // 8KB
+
+/// Maximum length for replication GTID strings. Shared by the V1 and V2 header
+/// writers and readers so a GTID a writer accepts always reads back.
+constexpr uint32_t kMaxGtidLength = 64 * 1024;  // 64KB
 
 /// Maximum length for text content fields (document content in table data section)
 constexpr uint32_t kMaxTextContentLength = 16 * 1024 * 1024;  // 16MB
@@ -254,6 +258,10 @@ Expected<void, Error> DeserializeTableStatistics(std::istream& input_stream, Tab
 
 /**
  * @brief Write Version 1 dump header
+ *
+ * Rejects a GTID longer than kMaxGtidLength before writing any byte, which is
+ * the same bound ReadHeaderV1 enforces.
+ *
  * @param output_stream Output stream
  * @param header Header to write
  * @return Expected<void, Error> Success or error with details

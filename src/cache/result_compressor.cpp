@@ -7,6 +7,7 @@
 
 #include <lz4.h>
 
+#include <atomic>
 #include <climits>
 #include <string>
 
@@ -16,11 +17,27 @@ using mygram::utils::MakeUnexpected;
 
 namespace mygramdb::cache {
 
+#ifdef MYGRAMDB_CACHE_TEST_HOOKS
+namespace {
+std::atomic<bool> g_force_compression_failure{false};
+}  // namespace
+
+void ResultCompressor::ForceCompressionFailureForTesting(bool force) {
+  g_force_compression_failure.store(force, std::memory_order_relaxed);
+}
+#endif
+
 mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> ResultCompressor::Compress(
     const std::vector<DocId>& result) {
   if (result.empty()) {
     return {};
   }
+
+#ifdef MYGRAMDB_CACHE_TEST_HOOKS
+  if (g_force_compression_failure.load(std::memory_order_relaxed)) {
+    return MakeUnexpected(MakeError(ErrorCode::kCacheCompressionFailed, "Forced compression failure"));
+  }
+#endif
 
   const size_t src_size = result.size() * sizeof(DocId);
 

@@ -17,7 +17,7 @@ This file is normative for MygramDB's error-code surface. It describes what the 
 | 8000-8999 | Cache | 5 |
 | **Total** | | **127** |
 
-Of the 127 defined codes, 105 have at least one construction site in `src/` and 22 have none.
+Of the 127 defined codes, 106 have at least one construction site in `src/` and 21 have none.
 
 The enumerator names below are C++ identifiers (`mygramdb::utils::ErrorCode`). No surface transmits the name — only the unsigned 16-bit number travels over TCP, HTTP, and the C ABI.
 
@@ -61,7 +61,7 @@ The HTTP surface does not have an equivalent blanket path: `HttpServer::SendErro
 | 3 | `kOutOfRange` | Value out of range | `internal` — masked into 2008 at `src/mysql/mysql_binlog_stream.cpp:76` | `src/mysql/gtid_encoder.cpp:372`, `src/mysql/gtid_encoder.cpp:389` |
 | 4 | `kNotImplemented` | Feature not implemented | `TCP+`, `HTTP` | `src/server/handlers/replication_handler.cpp:40`, `src/server/response_formatter.cpp:736`, `src/server/http_server.cpp:2006` (10 sites total) |
 | 5 | `kInternalError` | Internal error | `TCP+`, `HTTP`, `internal` | `src/server/handlers/search_handler.cpp:215`, `src/server/http_server.cpp:1447`, `src/server/search_pipeline.cpp:2129` (47 sites total) |
-| 6 | `kIOError` | I/O error (file read/write) | `internal` — startup configuration and synonym-dictionary loading | `src/app/configuration_manager.cpp:166`, `src/app/application.cpp:392`, `src/query/synonym_dictionary.cpp:42` (8 sites total) |
+| 6 | `kIOError` | I/O error (file read/write) | `internal` — startup configuration | `src/app/configuration_manager.cpp:166`, `src/app/configuration_manager.cpp:213`, `src/app/application.cpp:401` (7 sites total) |
 | 7 | `kPermissionDenied` | Permission denied | `TCP+` (AUTH), `HTTP` (CIDR allow-list, bearer token), `internal` (privilege drop, MySQL grants) | `src/server/request_dispatcher.cpp:157`, `src/server/http_server.cpp:750`, `src/app/application.cpp:332` (9 sites total) |
 | 8 | `kNotFound` | Resource not found | `TCP+`, `HTTP` | `src/server/response_formatter.cpp:436`, `src/server/sync_operation_manager.cpp:384`, `src/server/http_server.cpp:1573` (8 sites total) |
 | 9 | `kAlreadyExists` | Resource already exists | `TCP+` — `REPLICATION START` when replication is already running | `src/server/handlers/replication_handler.cpp:123` |
@@ -74,8 +74,8 @@ All Configuration codes except 1007 reach TCP through the administrative command
 
 | Code | Symbolic name | Meaning | Surfaces | Emitting site(s) |
 |------|---------------|---------|----------|------------------|
-| 1000 | `kConfigFileNotFound` | Configuration file not found | `TCP+` (`CONFIG VERIFY`), `internal` (startup) | `src/server/handlers/admin_handler.cpp:189`, `src/server/handlers/admin_handler.cpp:210`, `src/config/config_loader.cpp:74` (4 sites total) |
-| 1001 | `kConfigParseError` | Configuration parse error | `TCP+` (`CONFIG VERIFY`), `internal` (startup) | `src/config/config_loader.cpp:171`, `src/config/config_loader.cpp:238`, `src/config/config_validator.cpp:222` (5 sites total) |
+| 1000 | `kConfigFileNotFound` | Configuration file not found | `TCP+` (`CONFIG VERIFY`), `internal` (startup, synonym-dictionary loading) | `src/server/handlers/admin_handler.cpp:187`, `src/server/handlers/admin_handler.cpp:208`, `src/config/config_loader.cpp:74`, `src/query/synonym_dictionary.cpp:42` (5 sites total) |
+| 1001 | `kConfigParseError` | Configuration parse error | `TCP+` (`CONFIG VERIFY`), `internal` (startup, synonym-dictionary loading) | `src/config/config_loader.cpp:171`, `src/config/config_loader.cpp:238`, `src/query/synonym_dictionary.cpp:174` (6 sites total) |
 | 1002 | `kConfigValidationError` | Configuration validation error | `TCP+` (`CONFIG VERIFY`) | `src/config/config_validator.cpp:202`, `src/config/config.cpp:977`, `src/config/config.cpp:1034` |
 | 1003 | `kConfigMissingRequired` | Missing required configuration | `TCP+` (`CONFIG VERIFY`) | `src/config/config.cpp:453`, `src/config/config.cpp:586`, `src/config/config.cpp:601` (4 sites total) |
 | 1004 | `kConfigInvalidValue` | Invalid configuration value | `TCP+` (`CONFIG VERIFY`, `CONFIG SHOW`, `CONFIG HELP`, `VARIABLE SET`) | `src/config/runtime_variable_manager.cpp:294`, `src/config/config_validator.cpp:102`, `src/config/config.cpp:58` (56 sites total) |
@@ -92,7 +92,7 @@ All Configuration codes except 1007 reach TCP through the administrative command
 | 2000 | `kMySQLConnectionFailed` | MySQL connection failed | `status field`, `internal` (startup) | `src/mysql/binlog_reader.cpp:267`, `src/mysql/binlog_reader.cpp:279`, `src/mysql/connection.cpp:113` (9 sites total) |
 | 2001 | `kMySQLQueryFailed` | MySQL query failed | `TCP+` (`REPLICATION START`), `status field` | `src/mysql/connection_validator.cpp:424`, `src/mysql/connection.cpp:326`, `src/mysql/ddl_schema_validator.cpp:174` (13 sites total) |
 | 2002 | `kMySQLDisconnected` | MySQL disconnected | `TCP+` (`REPLICATION START`), `status field` | `src/mysql/binlog_reader_threads.cpp:316`, `src/mysql/connection_validator.cpp:117`, `src/mysql/connection.cpp:58` (14 sites total) |
-| 2003 | `kMySQLAuthFailed` | MySQL authentication failed | `unreferenced` | — |
+| 2003 | `kMySQLAuthFailed` | MySQL authentication failed | `status field`, `internal` (startup) — a server that answered and refused the credentials, as opposed to 2000 for one that could not be reached | `src/mysql/connection.cpp:44` (classified from the native error at `src/mysql/connection.cpp:264`) |
 | 2004 | `kMySQLTimeout` | MySQL timeout | `unreferenced` — the only appearance is a comparison in `IsRetryableSchemaValidationError` (`src/mysql/binlog_reader_utils.cpp:115`) | — |
 | 2005 | `kMySQLInvalidGTID` | Invalid GTID | `TCP+` (`REPLICATION START`), `status field`, `internal` | `src/mysql/connection_validator.cpp:404`, `src/mysql/gtid_encoder.cpp:202`, `src/mysql/connection.cpp:76` (18 sites total) |
 | 2006 | `kMySQLGTIDNotEnabled` | GTID mode not enabled | `TCP+` (`REPLICATION START`), `status field` | `src/mysql/connection_validator.cpp:265`, `src/mysql/binlog_reader.cpp:228` |
@@ -158,7 +158,7 @@ Query-parser codes reach TCP through `RequestDispatcher::Dispatch` (`src/server/
 | Code | Symbolic name | Meaning | Surfaces | Emitting site(s) |
 |------|---------------|---------|----------|------------------|
 | 5000 | `kStorageFileNotFound` | Storage file not found | `internal` | `src/index/index_serialization.cpp:234`, `src/utils/atomic_file_writer.cpp:93` |
-| 5001 | `kStorageReadError` | Storage read error | `TCP+` (`DUMP LOAD` — the document-store loader is propagated verbatim by `src/storage/dump_format_internal.cpp:302`), `internal` | `src/storage/document_store_persistence.cpp:192`, `src/storage/document_store_persistence.cpp:203`, `src/query/synonym_dictionary.cpp:171` (18 sites total) |
+| 5001 | `kStorageReadError` | Storage read error | `TCP+` (`DUMP LOAD` — the document-store loader is propagated verbatim by `src/storage/dump_format_internal.cpp:302`), `internal` | `src/storage/document_store_persistence.cpp:192`, `src/storage/document_store_persistence.cpp:203`, `src/storage/document_store_persistence.cpp:210` (17 sites total) |
 | 5002 | `kStorageWriteError` | Storage write error | `internal` — masked into 5012 on the dump path | `src/utils/atomic_file_writer.cpp:49`, `src/storage/document_store_persistence.cpp:608`, `src/storage/document_store.cpp:140` (15 sites total) |
 | 5003 | `kStorageCorrupted` | Storage corrupted | `TCP+` (`DUMP LOAD`, document-store payload), `internal` (index payload) | `src/storage/document_store_persistence.cpp:184`, `src/storage/document_store_persistence.cpp:195`, `src/index/index_serialization.cpp:491` (39 sites total) |
 | 5004 | `kStorageCRCMismatch` | CRC mismatch | `internal` — masked into 5011 by `src/storage/dump_format_internal.cpp:294` | `src/index/index_serialization.cpp:364` |
@@ -195,7 +195,7 @@ Codes 6000-6025 are lifecycle and socket-layer failures raised before or outside
 | 6016 | `kNetworkReactorUnsupported` | Event multiplexer not supported on this platform | `internal` — startup | `src/server/io_reactor.cpp:70` |
 | 6017 | `kNetworkReactorInitFailed` | Event multiplexer initialization failed | `internal` | `src/server/reactor/epoll_multiplexer.cpp:115`, `src/server/reactor/kqueue_multiplexer.cpp:81` (6 sites total) |
 | 6018 | `kNetworkReactorRegisterFailed` | Event multiplexer register failed | `internal` | `src/server/reactor/epoll_multiplexer.cpp:177`, `src/server/reactor/kqueue_multiplexer.cpp:213`, `src/server/reactor/kqueue_multiplexer.cpp:237` |
-| 6019 | `kNetworkReactorModifyFailed` | Event multiplexer modify failed | `internal` | `src/server/reactor/epoll_multiplexer.cpp:190`, `src/server/reactor/kqueue_multiplexer.cpp:269`, `src/server/io_reactor.cpp:365` (7 sites total) |
+| 6019 | `kNetworkReactorModifyFailed` | Event multiplexer modify failed | `TCP+` (read-backpressure interest update, `src/server/reactor_connection.cpp:179-181`), `internal` elsewhere | `src/server/reactor/epoll_multiplexer.cpp:190`, `src/server/reactor/kqueue_multiplexer.cpp:269`, `src/server/io_reactor.cpp:365` (7 sites total) |
 | 6020 | `kNetworkReactorRemoveFailed` | Event multiplexer remove failed | `internal` | `src/server/reactor/epoll_multiplexer.cpp:226`, `src/server/reactor/kqueue_multiplexer.cpp:368` |
 | 6021 | `kNetworkReactorPollFailed` | Event multiplexer poll failed | `internal` | `src/server/reactor/epoll_multiplexer.cpp:161`, `src/server/reactor/kqueue_multiplexer.cpp:128` (5 sites total) |
 | 6023 | `kNetworkReactorAlreadyOpen` | Event multiplexer already opened | `internal` | `src/server/reactor/epoll_multiplexer.cpp:109`, `src/server/reactor/kqueue_multiplexer.cpp:75` |

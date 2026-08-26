@@ -1053,12 +1053,22 @@ TEST(BinlogReaderTest, ConvertSingleGtidToRangeWithRange) {
 }
 
 /**
- * @brief Test ConvertSingleGtidToRange with multi-UUID GTID (no conversion)
+ * @brief Test ConvertSingleGtidToRange with multi-UUID GTID of ranges
  */
 TEST(BinlogReaderTest, ConvertSingleGtidToRangeWithMultiUuid) {
-  // Multi-UUID GTID should pass through unchanged (has comma)
+  // Every entry is already a range, so each passes through unchanged
   std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:1-100,uuid2:1-50");
   EXPECT_EQ(result, "uuid1:1-100,uuid2:1-50");
+}
+
+/**
+ * @brief Test ConvertSingleGtidToRange converts each entry of a multi-UUID set
+ */
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeConvertsEveryMultiUuidEntry) {
+  // Single transaction numbers become ranges entry by entry; already-range
+  // entries in the same set keep their value
+  std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:101,uuid2:1-50,uuid3:7");
+  EXPECT_EQ(result, "uuid1:1-101,uuid2:1-50,uuid3:1-7");
 }
 
 /**

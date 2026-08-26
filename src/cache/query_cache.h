@@ -68,10 +68,11 @@ struct CacheStatisticsSnapshot {
   uint64_t rejection_oversize = 0;      ///< Inserts rejected because the entry exceeds max_memory_bytes
   uint64_t rejection_memory_budget =
       0;  ///< Inserts rejected because cache + invalidation metadata exceed the shared budget
-  uint64_t rejection_duplicate = 0;   ///< Inserts rejected because the cache key is already present
-  uint64_t stale_entry_removals = 0;  ///< Entries removed after a caller detected a stale payload
-  uint64_t forced_clears = 0;         ///< Bulk Clear()/ClearTable() invocations (count of bulk operations)
-  uint64_t stale_lru_entries = 0;     ///< LRU-list keys that were missing from cache_map_ (defensive counter)
+  uint64_t rejection_duplicate = 0;    ///< Inserts rejected because the cache key is already present
+  uint64_t rejection_compression = 0;  ///< Inserts rejected because compressing the payload failed
+  uint64_t stale_entry_removals = 0;   ///< Entries removed after a caller detected a stale payload
+  uint64_t forced_clears = 0;          ///< Bulk Clear()/ClearTable() invocations (count of bulk operations)
+  uint64_t stale_lru_entries = 0;      ///< LRU-list keys that were missing from cache_map_ (defensive counter)
 
   // Configuration snapshot (constants taken from QueryCache constructor)
   size_t max_memory_bytes = 0;       ///< Configured cache memory ceiling
@@ -119,9 +120,9 @@ struct CacheStatisticsSnapshot {
  * or QueryCache::GetStatistics() is not kept in sync.
  *
  * Current schema (must match exactly):
- *   21 atomic uint64_t counters in CacheStatistics
+ *   22 atomic uint64_t counters in CacheStatistics
  *   3 timing doubles guarded by timing_mutex_ in CacheStatistics
- *   21 plain uint64_t counters in CacheStatisticsSnapshot
+ *   22 plain uint64_t counters in CacheStatisticsSnapshot
  *   2 invalidation memory counters (snapshot only, populated by CacheManager)
  *   4 configuration snapshot fields (max_memory_bytes, min_query_cost_ms,
  *     ttl_seconds, compression_enabled) — snapshot only
@@ -129,7 +130,7 @@ struct CacheStatisticsSnapshot {
  *   3 helper methods on snapshot (HitRate, AverageCacheHitLatency,
  *     AverageCacheMissLatency) and 1 accessor (TotalTimeSaved)
  */
-inline constexpr uint32_t kCacheStatsFieldVersion = 5;
+inline constexpr uint32_t kCacheStatsFieldVersion = 6;
 
 /**
  * @brief Internal cache statistics (thread-safe, non-copyable)
@@ -160,6 +161,7 @@ struct CacheStatistics {
   std::atomic<uint64_t> rejection_oversize{0};       ///< Inserts rejected because the entry exceeds max_memory_bytes
   std::atomic<uint64_t> rejection_memory_budget{0};  ///< Inserts rejected because the shared budget cannot retain them
   std::atomic<uint64_t> rejection_duplicate{0};      ///< Inserts rejected because cache key is already present
+  std::atomic<uint64_t> rejection_compression{0};    ///< Inserts rejected because compressing the payload failed
   std::atomic<uint64_t> stale_entry_removals{0};     ///< Entries removed after caller-detected stale payload
   std::atomic<uint64_t> forced_clears{0};            ///< Bulk Clear()/ClearTable() invocations
   std::atomic<uint64_t> stale_lru_entries{0};        ///< LRU keys not found in cache_map_ during EvictForSpace
@@ -364,6 +366,7 @@ class QueryCache {
     snapshot.rejection_oversize = stats_.rejection_oversize.load();
     snapshot.rejection_memory_budget = stats_.rejection_memory_budget.load();
     snapshot.rejection_duplicate = stats_.rejection_duplicate.load();
+    snapshot.rejection_compression = stats_.rejection_compression.load();
     snapshot.stale_entry_removals = stats_.stale_entry_removals.load();
     snapshot.forced_clears = stats_.forced_clears.load();
     snapshot.stale_lru_entries = stats_.stale_lru_entries.load();
@@ -632,7 +635,7 @@ class QueryCache {
 // contains a std::mutex whose size is implementation-defined and would make
 // the assertion brittle.
 // ---------------------------------------------------------------------------
-inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 248;
+inline constexpr size_t kExpectedCacheStatisticsSnapshotSize = 256;
 static_assert(sizeof(CacheStatisticsSnapshot) == kExpectedCacheStatisticsSnapshotSize,
               "CacheStatisticsSnapshot layout changed: also update CacheStatistics, "
               "QueryCache::GetStatistics(), and bump kCacheStatsFieldVersion.");

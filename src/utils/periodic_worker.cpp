@@ -51,13 +51,22 @@ Expected<void, Error> PeriodicWorker::Start(Task task, std::chrono::milliseconds
   task_ = std::move(task);
   interval_ = interval;
   should_stop_.store(false, std::memory_order_release);
-  running_.store(true, std::memory_order_release);
 
   // Spawn last so the thread observes a fully-initialized worker. The
   // thread constructor synchronizes-with the new thread's first action,
   // so any writes above (task_, interval_, atomics) happen-before the
-  // thread reads them.
-  thread_ = std::thread(&PeriodicWorker::Loop, this);
+  // thread reads them. running_ is published only once the thread exists,
+  // so a failed spawn cannot leave a worker that reports itself running.
+  try {
+    thread_ = std::thread(&PeriodicWorker::Loop, this);
+  } catch (const std::exception& e) {
+    task_ = nullptr;
+    auto error =
+        MakeError(ErrorCode::kInternalError, "PeriodicWorker '" + name_ + "' failed to start its thread: " + e.what());
+    StructuredLog().Event("periodic_worker_start_failed").Field("name", name_).FieldError(error).Error();
+    return MakeUnexpected(error);
+  }
+  running_.store(true, std::memory_order_release);
 
   StructuredLog()
       .Event("periodic_worker_started")

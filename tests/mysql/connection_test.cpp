@@ -188,6 +188,17 @@ TEST(MySQLConnectionTest, QueryErrorClassificationKeepsSemanticFailuresTerminal)
   EXPECT_EQ(internal::ClassifyQueryErrorCode(1064), ErrorCode::kMySQLQueryFailed);
 }
 
+TEST(MySQLConnectionTest, ConnectErrorClassificationSeparatesRefusedCredentials) {
+  using mygram::utils::ErrorCode;
+
+  // A client that reads the code must be able to tell a wrong password from an
+  // unreachable host: the first is not worth retrying, the second is.
+  EXPECT_EQ(internal::ClassifyConnectErrorCode(1045), ErrorCode::kMySQLAuthFailed);
+  EXPECT_EQ(internal::ClassifyConnectErrorCode(1044), ErrorCode::kMySQLAuthFailed);
+  EXPECT_EQ(internal::ClassifyConnectErrorCode(2003), ErrorCode::kMySQLConnectionFailed);  // CR_CONN_HOST_ERROR
+  EXPECT_EQ(internal::ClassifyConnectErrorCode(0), ErrorCode::kMySQLConnectionFailed);
+}
+
 /**
  * @brief Test MySQLResult RAII wrapper prevents memory leak
  *

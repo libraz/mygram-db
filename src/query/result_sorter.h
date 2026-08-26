@@ -49,7 +49,7 @@ class ResultSorter {
    * Column validation:
    * - PRIMARY KEY: always valid
    * - Filter columns: validated with DocumentStore::HasFilterColumn
-   * - Non-existent columns: return kInvalidArgument
+   * - Non-existent columns: return kQueryInvalidSort
    *
    * @param results Document IDs to sort (modified in-place)
    * @param doc_store Document store for retrieving sort values

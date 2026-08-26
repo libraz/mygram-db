@@ -72,6 +72,49 @@ std::string BuildV1IndexWithTermLen(uint32_t term_len) {
   return std::string(data.begin(), data.end());
 }
 
+/**
+ * @brief Build a raw MGIX payload of a legacy format version carrying no terms
+ *
+ * Only the newest version is ever written by SaveToStream, so the fields an
+ * older version does and does not carry can be exercised only from a payload
+ * built by hand. V1 carries ngram_size alone, V2 adds the CRC32 trailer, V3
+ * adds kanji_ngram_size and cross_boundary_ngrams.
+ */
+std::string BuildLegacyIndexHeader(uint32_t version, uint32_t ngram_size, uint32_t kanji_ngram_size = 1,
+                                   bool cross_boundary = true) {
+  std::string data;
+
+  auto append = [&](const void* ptr, size_t size) {
+    const auto* bytes = static_cast<const char*>(ptr);
+    data.append(bytes, size);
+  };
+
+  data.append("MGIX");
+
+  uint32_t version_le = mygram::utils::ToLittleEndian(version);
+  append(&version_le, sizeof(version_le));
+
+  uint32_t ngram_le = mygram::utils::ToLittleEndian(ngram_size);
+  append(&ngram_le, sizeof(ngram_le));
+
+  if (version >= 3) {
+    uint32_t kanji_le = mygram::utils::ToLittleEndian(kanji_ngram_size);
+    append(&kanji_le, sizeof(kanji_le));
+    uint8_t cross = cross_boundary ? 1 : 0;
+    append(&cross, sizeof(cross));
+  }
+
+  uint64_t term_count = mygram::utils::ToLittleEndian(static_cast<uint64_t>(0));
+  append(&term_count, sizeof(term_count));
+
+  if (version >= 2) {
+    uint32_t crc = mygram::utils::ToLittleEndian(mygram::utils::ComputeCRC32(data.data(), data.size()));
+    append(&crc, sizeof(crc));
+  }
+
+  return data;
+}
+
 }  // namespace
 
 /**
@@ -143,6 +186,69 @@ TEST(IndexSerializationTest, LoadFromStreamTermLengthJustOverBoundary) {
   auto result = index.LoadFromStream(iss);
   EXPECT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageCorrupted);
+}
+
+TEST(IndexSerializationTest, V1PayloadRejectsNgramSizeMismatch) {
+  Index target(3);
+  std::istringstream input(BuildLegacyIndexHeader(1, 2));
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, V1PayloadAcceptsSettingsItDoesNotCarry) {
+  // V1 records ngram_size only, so kanji, cross-boundary and normalization
+  // differences cannot be a mismatch for this version.
+  Index target(2, 3, kDefaultRoaringThreshold, false, false, "fold", false);
+  std::istringstream input(BuildLegacyIndexHeader(1, 2));
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+}
+
+TEST(IndexSerializationTest, V2PayloadRejectsNgramSizeMismatch) {
+  Index target(3);
+  std::istringstream input(BuildLegacyIndexHeader(2, 2));
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, V2PayloadAcceptsSettingsItDoesNotCarry) {
+  Index target(2, 3, kDefaultRoaringThreshold, false, false, "fold", false);
+  std::istringstream input(BuildLegacyIndexHeader(2, 2));
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+}
+
+TEST(IndexSerializationTest, V3PayloadRejectsKanjiNgramSizeMismatch) {
+  Index target(2, 2);
+  std::istringstream input(BuildLegacyIndexHeader(3, 2, 1, true));
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, V3PayloadRejectsCrossBoundaryMismatch) {
+  Index target(2, 1, kDefaultRoaringThreshold, false);
+  std::istringstream input(BuildLegacyIndexHeader(3, 2, 1, true));
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
+}
+
+TEST(IndexSerializationTest, V3PayloadAcceptsNormalizationSettingsItDoesNotCarry) {
+  // Normalization arrived with V4, so a V3 payload cannot disagree about it.
+  Index target(2, 1, kDefaultRoaringThreshold, true, false, "fold", false);
+  std::istringstream input(BuildLegacyIndexHeader(3, 2, 1, true));
+  auto result = target.LoadFromStream(input);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
 }
 
 TEST(IndexSerializationTest, LoadFromStreamRejectsNgramSizeMismatch) {

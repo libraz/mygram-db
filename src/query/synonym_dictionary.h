@@ -44,7 +44,9 @@ class SynonymDictionary {
    *
    * @param filepath Path to the TSV file
    * @param normalizer Function to normalize terms (should match index normalization)
-   * @return void or Error
+   * @return void, or an error in the configuration range: kConfigFileNotFound
+   *         when the file cannot be opened, kConfigParseError when reading it
+   *         fails partway through
    */
   mygram::utils::Expected<void, mygram::utils::Error> LoadFromFile(
       const std::string& filepath, std::function<std::string(std::string_view)> normalizer);

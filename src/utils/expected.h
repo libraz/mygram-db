@@ -10,7 +10,7 @@
  * @code
  * Expected<int, Error> Divide(int a, int b) {
  *   if (b == 0) {
- *     return Unexpected(Error(ErrorCode::kDivisionByZero, "Division by zero"));
+ *     return Unexpected(Error(ErrorCode::kInvalidArgument, "Division by zero"));
  *   }
  *   return a / b;
  * }
@@ -19,7 +19,7 @@
  * if (result) {
  *   std::cout << "Result: " << *result << std::endl;
  * } else {
- *   std::cerr << "Error: " << result.error().message << std::endl;
+ *   std::cerr << "Error: " << result.error().message() << std::endl;
  * }
  * @endcode
  */

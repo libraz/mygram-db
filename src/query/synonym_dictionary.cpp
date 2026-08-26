@@ -39,7 +39,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
 
   std::ifstream file(filepath);
   if (!file.is_open()) {
-    return MakeUnexpected(MakeError(ErrorCode::kIOError, "Cannot open synonym file: " + filepath));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigFileNotFound, "Cannot open synonym file: " + filepath));
   }
 
   std::vector<std::vector<std::string>> loaded_groups;
@@ -168,7 +168,10 @@ mygram::utils::Expected<void, mygram::utils::Error> SynonymDictionary::LoadFromF
   }
 
   if (file.bad()) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageReadError, "Failed while reading synonym file: " + filepath));
+    // The path comes from the table configuration, so both failure exits report
+    // in the configuration range rather than splitting the same misconfiguration
+    // across two ranges depending on which stream failbit was raised.
+    return MakeUnexpected(MakeError(ErrorCode::kConfigParseError, "Failed while reading synonym file: " + filepath));
   }
 
   if (loaded_groups.empty() && nonempty_data_lines > 0 && single_term_lines == nonempty_data_lines) {

@@ -15,7 +15,7 @@ Every dump, regardless of container version, begins with the same 8 bytes (`dump
 | 0 | 4 | `magic` | ASCII `MGDB`, byte-for-byte, not endian-converted (`dump_format_v2.cpp:544`) |
 | 4 | 4 | `version` | Container format version, little-endian `uint32` (`dump_format_v2.cpp:545`) |
 
-All multi-byte integers in every dump section are written little-endian and converted on both ends (`binary_io.h:39`, `binary_io.h:70`, `endian_utils.h:75`). Strings are length-prefixed with a little-endian `uint32` and are not NUL-terminated (`dump_format_v1_internal.h:28`, `dump_format_v1_internal.h:46`). Reads of length-prefixed strings are bounded per field type: identifiers 1 KiB, config values 4 KiB, paths and V1 GTIDs 8 KiB, text content 16 MiB, general 1 MiB (`dump_format_v1.h:127-139`); V2 GTIDs are bounded at 64 KiB (`dump_format_v2.h:93`).
+All multi-byte integers in every dump section are written little-endian and converted on both ends (`binary_io.h:39`, `binary_io.h:70`, `endian_utils.h:75`). Strings are length-prefixed with a little-endian `uint32` and are not NUL-terminated (`dump_format_v1_internal.h:28`, `dump_format_v1_internal.h:46`). Reads of length-prefixed strings are bounded per field type: identifiers 1 KiB, config values 4 KiB, paths 8 KiB, text content 16 MiB, general 1 MiB (`dump_format_v1.h:127-143`). GTIDs are bounded at 64 KiB in both container versions, and both writers reject a longer one before emitting any byte (`dump_format_v1.h:137`, `dump_format_v1.cpp:154-157`, `dump_format_v1.cpp:319-322`, `dump_format_v2.cpp:301-304`).
 
 Container versions that exist: `V1 = 1` and `V2 = 2` (`dump_format.h:55-58`).
 

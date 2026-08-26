@@ -105,30 +105,30 @@ std::string BuildHeaderV1StreamWithGtidLength(uint32_t gtid_length) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Tests for ReadHeaderV1 GTID field (limit: kMaxPathLength = 8KB)
+// Tests for ReadHeaderV1 GTID field (limit: kMaxGtidLength = 64KB)
 // ---------------------------------------------------------------------------
 
 TEST(DumpStringLimitsTest, HeaderGtidAtMaxLength) {
-  // A GTID string exactly at the kMaxPathLength limit should succeed
-  std::string gtid(kMaxPathLength, 'g');
+  // A GTID string exactly at the kMaxGtidLength limit should succeed
+  std::string gtid(kMaxGtidLength, 'g');
   std::string data = BuildHeaderV1Stream(gtid);
   std::istringstream iss(data, std::ios::binary);
 
   HeaderV1 header;
   auto result = ReadHeaderV1(iss, header);
-  EXPECT_TRUE(result) << "GTID at max path length should succeed";
+  EXPECT_TRUE(result) << "GTID at max GTID length should succeed";
   EXPECT_EQ(header.gtid, gtid);
 }
 
 TEST(DumpStringLimitsTest, HeaderGtidExceedsMaxLength) {
-  // A GTID length exceeding kMaxPathLength should be rejected
-  uint32_t bad_length = kMaxPathLength + 1;
+  // A GTID length exceeding kMaxGtidLength should be rejected
+  uint32_t bad_length = kMaxGtidLength + 1;
   std::string data = BuildHeaderV1StreamWithGtidLength(bad_length);
   std::istringstream iss(data, std::ios::binary);
 
   HeaderV1 header;
   auto result = ReadHeaderV1(iss, header);
-  EXPECT_FALSE(result) << "GTID exceeding max path length should fail";
+  EXPECT_FALSE(result) << "GTID exceeding max GTID length should fail";
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +387,7 @@ TEST(DumpStringLimitsTest, ConstantValues) {
   EXPECT_EQ(kMaxIdentifierLength, 1024u) << "Identifier limit should be 1KB";
   EXPECT_EQ(kMaxConfigValueLength, 4u * 1024u) << "Config value limit should be 4KB";
   EXPECT_EQ(kMaxPathLength, 8u * 1024u) << "Path limit should be 8KB";
+  EXPECT_EQ(kMaxGtidLength, 64u * 1024u) << "GTID limit should be 64KB";
   EXPECT_EQ(kMaxTextContentLength, 16u * 1024u * 1024u) << "Text content limit should be 16MB";
   EXPECT_EQ(kMaxGeneralStringLength, 1u * 1024u * 1024u) << "General string limit should be 1MB";
 

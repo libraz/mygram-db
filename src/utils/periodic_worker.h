@@ -89,6 +89,11 @@ class PeriodicWorker {
    * code space; the code is not specific to networking, only to the
    * "already-running" semantic).
    *
+   * A thread the runtime refuses to create yields `kInternalError` and
+   * leaves the worker not running, so IsRunning() never reports true for
+   * a worker that has no thread. Embedders map the failure onto their own
+   * subsystem code.
+   *
    * @param task     Callback to run every @p interval. Captured by
    *                 std::function so std::move-friendly callables work.
    * @param interval Wall-clock interval between callback invocations.

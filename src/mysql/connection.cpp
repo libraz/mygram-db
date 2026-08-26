@@ -27,10 +27,28 @@
 
 namespace mygramdb::mysql {
 
+namespace {
+
+// Stable server error numbers from the MySQL/MariaDB client protocol.
+constexpr unsigned int kAccessDeniedDatabase = 1044;
+constexpr unsigned int kAccessDeniedUser = 1045;
+
+}  // namespace
+
+mygram::utils::ErrorCode internal::ClassifyConnectErrorCode(unsigned int native_error) {
+  switch (native_error) {
+    case kAccessDeniedDatabase:
+    case kAccessDeniedUser:
+      // Credentials or grants, not reachability. Reporting both as a connection
+      // failure leaves an operator retrying a host that answered and refused.
+      return mygram::utils::ErrorCode::kMySQLAuthFailed;
+    default:
+      return mygram::utils::ErrorCode::kMySQLConnectionFailed;
+  }
+}
+
 mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_error) {
   // Stable server error numbers from the MySQL/MariaDB client protocol.
-  constexpr unsigned int kAccessDeniedDatabase = 1044;
-  constexpr unsigned int kAccessDeniedUser = 1045;
   constexpr unsigned int kUnknownColumn = 1054;
   constexpr unsigned int kCommandDenied = 1142;
   constexpr unsigned int kNoSuchTable = 1146;
@@ -243,6 +261,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
                          config_.database.empty() ? nullptr : config_.database.c_str(), config_.port, nullptr,
                          0) == nullptr) {
     std::string error = GetMySQLErrorMessage();
+    const auto code = internal::ClassifyConnectErrorCode(mysql_errno(mysql_));
     // Structured logging
     mygram::utils::StructuredLog()
         .Event("mysql_connection_error")
@@ -250,9 +269,9 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
         .Field("port", static_cast<uint64_t>(config_.port))
         .Field("context", context)
         .Field("error", error)
+        .Field("error_code", static_cast<int64_t>(code))
         .Error();
-    return MakeUnexpected(
-        MakeError(ErrorCode::kMySQLConnectionFailed, error, config_.host + ":" + std::to_string(config_.port)));
+    return MakeUnexpected(MakeError(code, error, config_.host + ":" + std::to_string(config_.port)));
   }
 
   // Set character set to utf8mb4 for full Unicode support (including emoji)

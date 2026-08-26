@@ -1605,6 +1605,31 @@ TEST(QueryParserTest, SearchQuotedParentheses) {
 }
 
 /**
+ * @brief Test SEARCH where a quoted phrase ends with an opening parenthesis
+ *
+ * The space-eliding heuristic applies to grammar parentheses only, so a literal
+ * '(' at the end of a phrase must not swallow the space before the next token.
+ */
+TEST(QueryParserTest, SearchQuotedPhraseEndingWithOpenParenKeepsFollowingSpace) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH threads "ends with (" more)");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->search_text, "ends with ( more");
+}
+
+/**
+ * @brief Test SEARCH where a quoted phrase starts with a closing parenthesis
+ */
+TEST(QueryParserTest, SearchQuotedPhraseStartingWithCloseParenKeepsPrecedingSpace) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH threads more ") starts with")");
+
+  ASSERT_TRUE(query);
+  EXPECT_EQ(query->search_text, "more ) starts with");
+}
+
+/**
  * @brief Test COUNT with unclosed parenthesis
  */
 TEST(QueryParserTest, CountUnclosedParenthesis) {

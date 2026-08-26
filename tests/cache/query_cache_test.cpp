@@ -50,6 +50,17 @@ TEST(QueryCacheTest, BackgroundWorkerCanBeStartedAfterCallbacksAreInstalled) {
   EXPECT_EQ(callback_count.load(), 0U);
 }
 
+TEST(QueryCacheTest, BackgroundWorkerStartFailureReportsTheCacheWorkerCode) {
+  QueryCache cache(1024 * 1024, 0.0, 0, true, 1, false);
+  ASSERT_TRUE(cache.StartBackgroundWorker());
+
+  // A caller that cannot get the maintenance worker must be able to branch on
+  // the cache worker code rather than on whatever the shared worker reports.
+  auto second_start = cache.StartBackgroundWorker();
+  ASSERT_FALSE(second_start);
+  EXPECT_EQ(second_start.error().code(), mygram::utils::ErrorCode::kCacheWorkerStartFailed);
+}
+
 TEST(QueryCacheTest, DigestCollisionDoesNotReturnAnotherQueryResult) {
   QueryCache cache(1024 * 1024, 0.0, 0, false);
   const CacheKey colliding_digest(0x1234, 0x5678);
@@ -2402,6 +2413,27 @@ TEST(QueryCacheTest, DedicatedRejectionCountersTrackOversizeAndDuplicateInserts)
   EXPECT_EQ(after_oversize.rejection_duplicate, after_duplicate.rejection_duplicate);
   EXPECT_EQ(after_oversize.rejection_count, baseline.rejection_count);
   EXPECT_FALSE(cache.Lookup(oversize_key).has_value());
+}
+
+TEST(QueryCacheTest, CompressionFailureIsCountedAsItsOwnRejectionReason) {
+  QueryCache cache(1024 * 1024, /* min_query_cost_ms= */ 0.0,
+                   /* ttl_seconds= */ 0, /* compression_enabled= */ true);
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"foo"};
+
+  const auto before = cache.GetStatistics();
+  ResultCompressor::ForceCompressionFailureForTesting(true);
+  const bool inserted = cache.Insert(CacheKeyGenerator::Generate("compression failure"), {1, 2, 3}, meta, 1.0);
+  ResultCompressor::ForceCompressionFailureForTesting(false);
+
+  EXPECT_FALSE(inserted);
+  const auto after = cache.GetStatistics();
+  EXPECT_EQ(after.rejection_compression - before.rejection_compression, 1U);
+  EXPECT_EQ(after.rejection_count, before.rejection_count);
+  EXPECT_EQ(after.rejection_oversize, before.rejection_oversize);
+  EXPECT_EQ(after.rejection_duplicate, before.rejection_duplicate);
 }
 
 TEST(QueryCacheTest, SharedMemoryBudgetRejectionIsSeparateFromOversize) {

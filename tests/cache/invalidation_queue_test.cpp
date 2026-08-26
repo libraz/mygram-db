@@ -1581,6 +1581,7 @@ TEST(InvalidationQueueTest, ConfiguredMaximumCapsSingleLargeEnqueueAndAccountsMe
   queue.SetMaxDelay(60000);
   queue.SetMaxQueueSize(2);
 
+  std::vector<CacheKey> keys;
   for (uint64_t generation = 1; generation <= 3; ++generation) {
     const auto key = CacheKeyGenerator::Generate("queue_limit_" + std::to_string(generation));
     CacheMetadata metadata;
@@ -1589,6 +1590,7 @@ TEST(InvalidationQueueTest, ConfiguredMaximumCapsSingleLargeEnqueueAndAccountsMe
     metadata.entry_generation = generation;
     ASSERT_TRUE(cache.Insert(key, {static_cast<DocId>(generation)}, metadata, 1.0));
     mgr.RegisterCacheEntry(key, metadata);
+    keys.push_back(key);
   }
 
   ASSERT_TRUE(queue.Start().has_value());
@@ -1596,7 +1598,21 @@ TEST(InvalidationQueueTest, ConfiguredMaximumCapsSingleLargeEnqueueAndAccountsMe
 
   EXPECT_EQ(queue.GetPendingCount(), 2U);
   EXPECT_GT(queue.MemoryUsage(), 0U);
+
+  // The queue drops what it cannot hold, but every affected entry was already
+  // marked invalidated, so none of them may serve a payload afterwards.
+  for (const auto& key : keys) {
+    EXPECT_FALSE(cache.Lookup(key).has_value()) << "an invalidated entry served a stale payload";
+  }
+
   queue.Stop();
+
+  // The dropped deferred erasure is reclaimed by the periodic scan rather than
+  // leaving the entry resident until TTL expiry.
+  cache.RefreshLRUForTesting();
+  for (const auto& key : keys) {
+    EXPECT_FALSE(cache.GetMetadata(key).has_value()) << "an invalidated entry survived RefreshLRU";
+  }
 }
 
 }  // namespace mygramdb::cache

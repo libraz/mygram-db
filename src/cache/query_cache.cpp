@@ -51,9 +51,9 @@ QueryCache::QueryCache(size_t max_memory_bytes, double min_query_cost_ms, int tt
   cache_map_.max_load_factor(kLoadFactor);
 
   if (start_background_worker) {
-    // Start failure here is logged by PeriodicWorker. The interval is fixed
-    // and this is a fresh worker, so the expected failure modes cannot occur.
-    (void)StartBackgroundWorker();
+    if (auto result = StartBackgroundWorker(); !result) {
+      mygram::utils::StructuredLog().Event("cache_lru_worker_start_failed").FieldError(result.error()).Error();
+    }
   }
 }
 
@@ -63,7 +63,16 @@ QueryCache::~QueryCache() {
 
 mygram::utils::Expected<void, mygram::utils::Error> QueryCache::StartBackgroundWorker() {
   constexpr auto kRefreshInterval = std::chrono::milliseconds(100);
-  return lru_refresh_worker_.Start([this] { RefreshLRU(); }, kRefreshInterval);
+  auto result = lru_refresh_worker_.Start([this] { RefreshLRU(); }, kRefreshInterval);
+  if (!result) {
+    // Report a cache worker failure under the cache code, the way the
+    // invalidation queue does, rather than the generic code the shared worker
+    // uses for a thread the runtime refused to create.
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kCacheWorkerStartFailed,
+        std::string("Failed to start cache LRU maintenance worker: ") + result.error().message()));
+  }
+  return {};
 }
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
@@ -283,6 +292,15 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
   if (compression_enabled_) {
     auto compress_result = ResultCompressor::Compress(result);
     if (!compress_result) {
+      // Compression failures are the one Insert rejection an operator cannot
+      // infer from the memory counters, so name them and carry the underlying
+      // error into the log.
+      stats_.rejection_compression.fetch_add(1, std::memory_order_relaxed);
+      mygram::utils::StructuredLog()
+          .Event("cache_insert_rejected")
+          .Field("reason", "compression_failed")
+          .FieldError(compress_result.error())
+          .Warn();
       return false;
     }
     compressed = std::move(*compress_result);

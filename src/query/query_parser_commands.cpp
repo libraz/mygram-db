@@ -184,18 +184,22 @@ static mygram::utils::Expected<size_t, mygram::utils::Error> ParseSearchTextToke
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
   for (size_t i = 1; i < search_tokens.size(); ++i) {  // 1: Start from second token
     const std::string& token = search_tokens[i];
-    // Don't add space before closing parentheses or after opening parentheses
+    const size_t original_pos = search_token_offset + i;
+    const auto token_quoted = [&](size_t index) { return index < token_was_quoted.size() && token_was_quoted[index]; };
+    // Don't add space before closing parentheses or after opening parentheses.
+    // Only parentheses that take part in the expression grammar qualify: a
+    // parenthesis inside a quoted token is literal phrase text, so eliding the
+    // space would search for text the user never typed.
     // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
-    bool prev_ends_with_open_paren =
-        !search_tokens[i - 1].empty() && search_tokens[i - 1].back() == '(';  // 1: Check previous token
-    bool current_starts_with_close_paren = !token.empty() && token[0] == ')';
+    bool prev_ends_with_open_paren = !token_quoted(original_pos - 1) && !search_tokens[i - 1].empty() &&
+                                     search_tokens[i - 1].back() == '(';  // 1: Check previous token
+    bool current_starts_with_close_paren = !token_quoted(original_pos) && !token.empty() && token[0] == ')';
 
     if (!prev_ends_with_open_paren && !current_starts_with_close_paren) {
       query.search_text += " ";
       query.search_expression += " ";
     }
     query.search_text += SearchTokenForFlatExpression(token);
-    const size_t original_pos = search_token_offset + i;
     query.search_expression += SearchTokenForSemanticExpression(
         token, original_pos < token_was_quoted.size() && token_was_quoted[original_pos]);
   }

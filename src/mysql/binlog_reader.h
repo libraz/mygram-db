@@ -606,8 +606,13 @@ class BinlogReader final : public IBinlogReader {
    * sends transactions 1-100 and 102+, causing duplicate delivery.
    * Converting to "uuid:1-101" excludes all transactions 1 through 101.
    *
+   * A comma-separated set is split and each entry converted independently, so a
+   * multi-UUID position keeps the same exclusion semantics as a single one.
+   *
    * @param gtid GTID string to convert
-   * @return Converted GTID string (unchanged if already a range or multi-UUID)
+   * @return Converted GTID string. Entries that are already a range, tagged, or
+   *         carry multiple intervals are returned unchanged, as are MariaDB
+   *         positions, colon-less input and the empty string.
    */
   static std::string ConvertSingleGtidToRange(const std::string& gtid);
 

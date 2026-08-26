@@ -26,6 +26,12 @@ namespace mygramdb::cache {
  */
 class ResultCompressor {
  public:
+#ifdef MYGRAMDB_CACHE_TEST_HOOKS
+  /// Make Compress() fail, so callers' rejection paths can be exercised
+  /// without constructing an input larger than LZ4 accepts.
+  static void ForceCompressionFailureForTesting(bool force);
+#endif
+
   /**
    * @brief Compress vector of document IDs
    * @param result Vector of document IDs to compress

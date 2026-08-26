@@ -151,6 +151,10 @@ Expected<void, Error> ValidateSectionLength(std::istream& input_stream, uint64_t
 // ============================================================================
 
 Expected<void, Error> WriteHeaderV1(std::ostream& output_stream, const HeaderV1& header) {
+  if (header.gtid.size() > kMaxGtidLength) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    "V1 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
+  }
   if (!WriteBinary(output_stream, header.header_size)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write header size"));
   }
@@ -188,7 +192,7 @@ Expected<void, Error> ReadHeaderV1(std::istream& input_stream, HeaderV1& header)
   if (!ReadBinary(input_stream, header.file_crc32)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read file CRC32"));
   }
-  if (!ReadString(input_stream, header.gtid, kMaxPathLength)) {
+  if (!ReadString(input_stream, header.gtid, kMaxGtidLength)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read GTID"));
   }
   return {};
@@ -309,6 +313,14 @@ Expected<void, Error> WriteDumpV1(
     const std::string& filepath, const std::string& gtid, const config::Config& config,
     const std::unordered_map<std::string, std::pair<index::Index*, DocumentStore*>>& table_contexts,
     const DumpStatistics* stats, const std::unordered_map<std::string, TableStatistics>* table_stats) {
+  // Reject an over-length GTID before any byte reaches the filesystem: the
+  // reader enforces the same bound, so writing one would produce a dump that
+  // can never be loaded back.
+  if (gtid.size() > kMaxGtidLength) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    "V1 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
+  }
+
   // Atomic write strategy:
   // 1. Write to temporary file with unique suffix to avoid concurrent write collisions
   // 2. fsync the temporary file

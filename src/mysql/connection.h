@@ -26,6 +26,10 @@ namespace internal {
 /// domain. Kept visible for unit tests and connection-validator retry policy.
 mygram::utils::ErrorCode ClassifyQueryErrorCode(unsigned int native_error);
 
+/// Classify a native MySQL connect error into the stable application error
+/// domain, separating refused credentials from an unreachable server.
+mygram::utils::ErrorCode ClassifyConnectErrorCode(unsigned int native_error);
+
 }  // namespace internal
 
 /**

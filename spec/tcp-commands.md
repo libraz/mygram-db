@@ -43,8 +43,9 @@ the source.
 
 | Condition | Server action | Implementation |
 |---|---|---|
-| Unframed tail exceeds 1 MiB | Best-effort send `ERROR 6007 request too large`, then close | `src/server/reactor_connection.cpp:177-181`, `src/server/reactor_connection.cpp:385` |
-| Pending-frame count/byte cap exceeded, or shared budget exhausted | Best-effort send `ERROR 6030 server busy`, then close | `src/server/reactor_connection.cpp:177-181`, `src/server/reactor_connection.cpp:510-527` |
+| Unframed tail exceeds 1 MiB | Best-effort send `ERROR 6007 request too large`, then close | `src/server/reactor_connection.cpp:172`, `src/server/reactor_connection.cpp:425` |
+| Pending-frame count/byte cap exceeded, or shared budget exhausted | Best-effort send `ERROR 6030 server busy`, then close | `src/server/reactor_connection.cpp:176`, `src/server/reactor_connection.cpp:387`, `src/server/reactor_connection.cpp:418` |
+| Event multiplexer rejects the backpressure interest update | Best-effort send `ERROR 6019 event multiplexer modify failed`, then close | `src/server/reactor_connection.cpp:179-181`, `src/server/reactor_connection.cpp:414-416` |
 | Unsent response bytes exceed the per-connection cap | Connection closed with no error frame | `src/server/reactor_connection.cpp:760-770` |
 | Thread pool queue full when scheduling a drain task | Send `ERROR 6030 SERVER_BUSY Server is too busy, please try again later`, then close | `src/server/reactor_connection.cpp:411-412`, `src/server/reactor_connection.cpp:418-434` |
 | Reactor registration fails at accept time | Send `ERROR 6030 SERVER_BUSY Server is too busy, please try again later`, then close | `src/server/connection_acceptor.cpp:590-604` |
@@ -211,6 +212,7 @@ on the same connection; otherwise they return
 | Denial response | `ERROR 6030 Rate limit exceeded` (connection stays open) | `src/server/request_dispatcher.cpp:120` |
 | Denial metric | `mygramdb_requests_denied_total{reason="rate_limit",surface="tcp"}` | `src/server/request_dispatcher.cpp:111`, `src/server/response_formatter.cpp:992-993` |
 | Defaults | disabled; capacity 100, refill 10/s, max 10000 tracked clients | `src/config/config.h:350-352`, `src/config/config.h:479-484` |
+| Tracking-table full | `max_clients` bounds memory, not admission: the least-recently-seen bucket is evicted and the new client is served, so no request is denied for a reason other than an exhausted bucket | `src/server/rate_limiter.cpp:130-150` |
 
 Denial log lines are themselves rate-limited under the key `tcp:<ip>`; the HTTP surface uses
 `http:<ip>`, so the two surfaces have separate log suppression but share the token bucket

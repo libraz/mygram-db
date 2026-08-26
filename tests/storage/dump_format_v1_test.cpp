@@ -248,6 +248,45 @@ TEST(DumpFormatV1Test, ReadHeaderV1FailsOnTruncatedStream) {
   EXPECT_FALSE(result.has_value()) << "ReadHeaderV1 should fail on truncated stream";
 }
 
+/**
+ * @brief Every GTID WriteHeaderV1 emits reads back
+ *
+ * A multi-source position can exceed the path-field bound, and a legacy dump
+ * carrying one must stay loadable.
+ */
+TEST(DumpFormatV1Test, HeaderRoundTripsGtidLongerThanPathLimit) {
+  HeaderV1 header;
+  header.gtid = std::string(kMaxPathLength + 1024, 'a');
+  header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + header.gtid.size());
+
+  std::ostringstream oss;
+  auto write_result = WriteHeaderV1(oss, header);
+  ASSERT_TRUE(write_result.has_value()) << write_result.error().message();
+
+  std::istringstream iss(oss.str());
+  HeaderV1 read_header;
+  auto read_result = ReadHeaderV1(iss, read_header);
+  ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
+  EXPECT_EQ(read_header.gtid, header.gtid);
+}
+
+/**
+ * @brief WriteHeaderV1 rejects a GTID the reader could never accept
+ */
+TEST(DumpFormatV1Test, WriteHeaderRejectsOverLengthGtidWithoutEmittingBytes) {
+  HeaderV1 header;
+  header.gtid = std::string(kMaxGtidLength + 1, 'a');
+  header.header_size = static_cast<uint32_t>(4 + 4 + 8 + 8 + 4 + 4 + header.gtid.size());
+
+  std::ostringstream oss;
+  auto write_result = WriteHeaderV1(oss, header);
+  ASSERT_FALSE(write_result.has_value());
+  EXPECT_EQ(write_result.error().code(), mygram::utils::ErrorCode::kStorageDumpWriteError);
+  EXPECT_NE(write_result.error().message().find("GTID"), std::string::npos);
+  EXPECT_NE(write_result.error().message().find(std::to_string(kMaxGtidLength)), std::string::npos);
+  EXPECT_TRUE(oss.str().empty());
+}
+
 // ============================================================================
 // VerifyDumpIntegrity with corrupted header (#27)
 // ============================================================================

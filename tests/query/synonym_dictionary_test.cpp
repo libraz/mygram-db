@@ -200,7 +200,21 @@ TEST_F(SynonymDictionaryTest, FileNotFound) {
   SynonymDictionary dict;
   auto result = dict.LoadFromFile("/nonexistent/path/synonyms.tsv", IdentityNormalizer);
   EXPECT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code(), mygramdb::utils::ErrorCode::kIOError);
+  EXPECT_EQ(result.error().code(), mygramdb::utils::ErrorCode::kConfigFileNotFound);
+}
+
+TEST_F(SynonymDictionaryTest, UnreadablePathReportsConfigurationRange) {
+  // A directory opens on some platforms and raises badbit on the first read,
+  // which is the other failure exit of LoadFromFile. Both exits must stay in
+  // the configuration range so operators alerting on code ranges see one class.
+  SynonymDictionary dict;
+  auto result = dict.LoadFromFile(test_dir_.string(), IdentityNormalizer);
+  if (result.has_value()) {
+    GTEST_SKIP() << "Platform reports end-of-file instead of a read error for a directory";
+  }
+  auto code = static_cast<uint16_t>(result.error().code());
+  EXPECT_GE(code, 1000);
+  EXPECT_LE(code, 1999);
 }
 
 TEST_F(SynonymDictionaryTest, Clear) {

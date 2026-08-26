@@ -49,7 +49,9 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
   // Only publish the maintenance worker after all callbacks it can invoke are
   // installed. This removes the construction-time window where an eviction
   // could bypass InvalidationManager cleanup.
-  (void)query_cache_->StartBackgroundWorker();
+  if (auto start_result = query_cache_->StartBackgroundWorker(); !start_result) {
+    mygram::utils::StructuredLog().Event("cache_lru_worker_start_failed").FieldError(start_result.error()).Error();
+  }
 
   // Create invalidation queue with per-table ngram settings
   invalidation_queue_ = std::make_unique<InvalidationQueue>(query_cache_.get(), invalidation_mgr_.get(),
