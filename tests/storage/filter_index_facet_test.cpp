@@ -24,31 +24,31 @@ class FilterIndexFacetTest : public ::testing::Test {
     FilterMap f1;
     f1["category"] = std::string("news");
     f1["status"] = std::string("active");
-    filter_index_.AddDocument(1, f1);
+    ASSERT_TRUE(filter_index_.AddDocument(1, f1));
 
     // Doc 2: category="sports", status="active"
     FilterMap f2;
     f2["category"] = std::string("sports");
     f2["status"] = std::string("active");
-    filter_index_.AddDocument(2, f2);
+    ASSERT_TRUE(filter_index_.AddDocument(2, f2));
 
     // Doc 3: category="news", status="inactive"
     FilterMap f3;
     f3["category"] = std::string("news");
     f3["status"] = std::string("inactive");
-    filter_index_.AddDocument(3, f3);
+    ASSERT_TRUE(filter_index_.AddDocument(3, f3));
 
     // Doc 4: category="tech", status="active"
     FilterMap f4;
     f4["category"] = std::string("tech");
     f4["status"] = std::string("active");
-    filter_index_.AddDocument(4, f4);
+    ASSERT_TRUE(filter_index_.AddDocument(4, f4));
 
     // Doc 5: category="news", status="active"
     FilterMap f5;
     f5["category"] = std::string("news");
     f5["status"] = std::string("active");
-    filter_index_.AddDocument(5, f5);
+    ASSERT_TRUE(filter_index_.AddDocument(5, f5));
   }
 
   FilterIndex filter_index_;

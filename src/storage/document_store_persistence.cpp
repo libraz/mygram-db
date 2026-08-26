@@ -550,10 +550,15 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Stream error after reading all documents", context));
   }
 
-  // Rebuild filter index from loaded data
+  // Rebuild filter index from loaded data. A document the index cannot take
+  // aborts the load: the alternative is a store that answers filters with fewer
+  // documents than it holds.
   auto new_filter_index = std::make_shared<FilterIndex>();
   for (const auto& [doc_id, filters] : new_doc_filters) {
-    new_filter_index->AddDocument(doc_id, filters);
+    auto indexed = new_filter_index->AddDocument(doc_id, filters);
+    if (!indexed) {
+      return MakeUnexpected(std::move(indexed).error());
+    }
   }
 
   if (doc_count > 0 && (max_loaded_doc_id == UINT32_MAX || next_id <= max_loaded_doc_id)) {

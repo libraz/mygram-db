@@ -210,9 +210,11 @@ class DocumentStore {
    *
    * @param doc_id Document ID
    * @param filters New filter values
-   * @return true if document exists
+   * @return true if the document exists and was updated, false if it is gone,
+   *         or an error if the new values could not be indexed -- in which case
+   *         the document keeps the values it had.
    */
-  bool UpdateDocument(DocId doc_id, const FilterMap& filters);
+  [[nodiscard]] Expected<bool, Error> UpdateDocument(DocId doc_id, const FilterMap& filters);
 
   /**
    * @brief Remove document

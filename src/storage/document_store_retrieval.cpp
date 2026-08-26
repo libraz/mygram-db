@@ -220,14 +220,8 @@ std::vector<DocId> DocumentStore::FilterByValue(std::string_view filter_name, co
   }
 
   auto serialized = FilterIndex::SerializeFilterValue(value);
-  auto bitmap = filter_index_->GetEqBitmap(std::string(filter_name), serialized);
-  if (!bitmap) {
-    return {};
-  }
-
-  uint32_t card = roaring_bitmap_get_cardinality(bitmap.get());
-  std::vector<DocId> results(card);
-  roaring_bitmap_to_uint32_array(bitmap.get(), results.data());
+  std::vector<DocId> results;
+  filter_index_->CollectEqDocIds(filter_name, serialized, results);
   return results;  // Already sorted (roaring guarantees sorted order)
 }
 

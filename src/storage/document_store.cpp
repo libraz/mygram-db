@@ -124,7 +124,20 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
   // Store filters (index first so failure doesn't leave stale doc_filters_ entry)
   if (!filters.empty()) {
     try {
-      filter_index_->AddDocument(doc_id, filters);
+      auto indexed = filter_index_->AddDocument(doc_id, filters);
+      if (!indexed) {
+        // Rollback: remove document from maps to maintain consistency
+        auto pk_copy = doc_id_to_pk_[doc_id];
+        doc_id_to_pk_.erase(doc_id);
+        pk_to_doc_id_.erase(pk_copy);
+        mygram::utils::StructuredLog()
+            .Event("storage_error")
+            .Field("type", "filter_index_failed")
+            .Field("doc_id", static_cast<uint64_t>(doc_id))
+            .Field("error", indexed.error().message())
+            .Error();
+        return MakeUnexpected(std::move(indexed).error());
+      }
       doc_filters_[doc_id] = InternFilterMapLocked(filters);
     } catch (const std::exception& e) {
       // Rollback: remove document from maps to maintain consistency
@@ -214,7 +227,20 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
     // Store filters (index first so failure doesn't leave stale doc_filters_ entry)
     if (!doc.filters.empty()) {
       try {
-        filter_index_->AddDocument(doc_id, doc.filters);
+        auto indexed = filter_index_->AddDocument(doc_id, doc.filters);
+        if (!indexed) {
+          // Rollback: remove document from maps to maintain consistency
+          auto pk_copy = doc_id_to_pk_[doc_id];
+          doc_id_to_pk_.erase(doc_id);
+          pk_to_doc_id_.erase(pk_copy);
+          mygram::utils::StructuredLog()
+              .Event("storage_error")
+              .Field("type", "filter_index_failed_batch")
+              .Field("doc_id", static_cast<uint64_t>(doc_id))
+              .Field("error", indexed.error().message())
+              .Error();
+          return MakeUnexpected(std::move(indexed).error());
+        }
         doc_filters_[doc_id] = InternFilterMapLocked(doc.filters);
       } catch (const std::exception& e) {
         // Rollback: remove document from maps to maintain consistency
@@ -252,7 +278,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
   return doc_ids;
 }
 
-bool DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
+Expected<bool, Error> DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
   std::unique_lock lock(mutex_);
 
   // Check if document exists
@@ -270,14 +296,21 @@ bool DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
   // rebuilt from their interned form first. That copy is bounded by the number
   // of configured filter columns, not by the document count.
   auto old_filter_it = doc_filters_.find(doc_id);
-  if (old_filter_it != doc_filters_.end()) {
-    const FilterMap old_filters = MaterializeFiltersLocked(old_filter_it->second);
-    filter_index_->UpdateDocument(doc_id, old_filters, filters);
-    doc_filters_[doc_id] = InternFilterMapLocked(filters);
-  } else {
-    doc_filters_[doc_id] = InternFilterMapLocked(filters);
-    filter_index_->UpdateDocument(doc_id, {}, filters);
+  const FilterMap old_filters =
+      old_filter_it != doc_filters_.end() ? MaterializeFiltersLocked(old_filter_it->second) : FilterMap{};
+  auto indexed = filter_index_->UpdateDocument(doc_id, old_filters, filters);
+  if (!indexed) {
+    // The index still holds the previous values, so doc_filters_ keeps them too
+    // rather than advertising values no bitmap selects.
+    mygram::utils::StructuredLog()
+        .Event("storage_error")
+        .Field("type", "filter_index_update_failed")
+        .Field("doc_id", static_cast<uint64_t>(doc_id))
+        .Field("error", indexed.error().message())
+        .Error();
+    return MakeUnexpected(std::move(indexed).error());
   }
+  doc_filters_[doc_id] = InternFilterMapLocked(filters);
 
   mygram::utils::StructuredLog()
       .Event("document_updated")

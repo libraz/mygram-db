@@ -152,8 +152,9 @@ TEST(DocumentStoreTest, UpdateDocument) {
   filters2["status"] = static_cast<int64_t>(2);
   filters2["category"] = static_cast<int64_t>(10);
 
-  bool updated = store.UpdateDocument(doc_id, filters2);
-  EXPECT_TRUE(updated);
+  auto updated = store.UpdateDocument(doc_id, filters2);
+  ASSERT_TRUE(updated.has_value());
+  EXPECT_TRUE(*updated);
 
   // Verify updated filters
   auto doc = store.GetDocument(doc_id);
@@ -172,8 +173,9 @@ TEST(DocumentStoreTest, UpdateNonExistentDocument) {
   FilterMap filters;
   filters["status"] = static_cast<int64_t>(1);
 
-  bool updated = store.UpdateDocument(999, filters);
-  EXPECT_FALSE(updated);
+  auto updated = store.UpdateDocument(999, filters);
+  ASSERT_TRUE(updated.has_value());
+  EXPECT_FALSE(*updated);
 }
 
 /**
@@ -929,8 +931,8 @@ TEST(DocumentStoreTest, ConcurrentUpdates) {
         FilterMap filters;
         filters["thread_" + std::to_string(t)] = static_cast<int64_t>(i);
 
-        bool updated = store.UpdateDocument(doc_id, filters);
-        if (updated) {
+        auto updated = store.UpdateDocument(doc_id, filters);
+        if (updated.has_value() && *updated) {
           update_success++;
         }
       }

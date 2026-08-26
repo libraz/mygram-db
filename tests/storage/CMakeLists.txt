@@ -265,6 +265,22 @@ gtest_discover_tests(filter_index_facet_test
   DISCOVERY_TIMEOUT 30
 )
 
+# FilterIndex behaviour when a bitmap allocation fails.
+# Installs a process-wide CRoaring memory hook, so it needs its own binary.
+add_executable(filter_index_allocation_failure_test
+  filter_index_allocation_failure_test.cpp
+)
+
+target_link_libraries(filter_index_allocation_failure_test
+  mygramdb_storage
+  GTest::gtest_main
+)
+
+gtest_discover_tests(filter_index_allocation_failure_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 # Dump save/load integration test (MySQL only)
 if(USE_MYSQL AND MYSQL_FOUND)
   add_executable(dump_save_load_test

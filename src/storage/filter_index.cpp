@@ -16,10 +16,14 @@
 
 namespace mygramdb::storage {
 
-void FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) {
+Expected<void, Error> FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) {
+  // Entries visited so far, including the one being applied: the column ref
+  // count is taken first, so an interrupted entry has something to undo too.
+  size_t visited = 0;
   for (const auto& [column, value] : filters) {
     ++column_ref_counts_[column];
-    // Skip NULL values (monostate)
+    ++visited;
+    // Skip NULL values (monostate) -- they genuinely have no bitmap
     if (std::holds_alternative<std::monostate>(value)) {
       continue;
     }
@@ -29,7 +33,15 @@ void FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) 
     if (it == column_map.end()) {
       mygram::utils::RoaringBitmapPtr bm = mygram::utils::MakeEmptyRoaring();
       if (bm == nullptr) {
-        continue;
+        // Undoing what this call already applied is what keeps "the document is
+        // not indexed under this value" from meaning two different things.
+        if (column_map.empty()) {
+          eq_bitmaps_.erase(column);  // invalidates column_map, unused below
+        }
+        RollbackPartialAddLocked(doc_id, filters, visited);
+        return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                                        "Failed to allocate filter bitmap for column '" + column + "'",
+                                        "doc_id=" + std::to_string(doc_id)));
       }
       roaring_bitmap_add(bm.get(), doc_id);
       column_map[std::move(key)] = std::move(bm);
@@ -37,43 +49,67 @@ void FilterIndex::AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters) 
       roaring_bitmap_add(it->second.get(), doc_id);
     }
   }
+  return {};
 }
 
-void FilterIndex::AddDocument(DocId doc_id, const FilterMap& filters) {
+Expected<void, Error> FilterIndex::AddDocument(DocId doc_id, const FilterMap& filters) {
   std::unique_lock lock(mutex_);
-  AddDocToBitmapsLocked(doc_id, filters);
+  return AddDocToBitmapsLocked(doc_id, filters);
+}
+
+void FilterIndex::RemoveFilterEntryLocked(DocId doc_id, const std::string& column, const FilterValue& value) {
+  if (!std::holds_alternative<std::monostate>(value)) {
+    std::string key = SerializeFilterValue(value);
+    auto col_it = eq_bitmaps_.find(column);
+    if (col_it != eq_bitmaps_.end()) {
+      auto val_it = col_it->second.find(key);
+      if (val_it != col_it->second.end()) {
+        roaring_bitmap_remove(val_it->second.get(), doc_id);
+        if (roaring_bitmap_is_empty(val_it->second.get())) {
+          col_it->second.erase(val_it);
+        }
+      }
+      if (col_it->second.empty()) {
+        eq_bitmaps_.erase(col_it);
+      }
+    }
+  }
+
+  auto count_iter = column_ref_counts_.find(column);
+  if (count_iter != column_ref_counts_.end() && --count_iter->second == 0) {
+    column_ref_counts_.erase(count_iter);
+  }
+}
+
+void FilterIndex::RollbackPartialAddLocked(DocId doc_id, const FilterMap& filters, size_t visited) {
+  size_t position = 0;
+  for (const auto& [column, value] : filters) {
+    if (position++ >= visited) {
+      break;
+    }
+    RemoveFilterEntryLocked(doc_id, column, value);
+  }
 }
 
 void FilterIndex::RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters) {
   for (const auto& [column, value] : filters) {
-    if (!std::holds_alternative<std::monostate>(value)) {
-      std::string key = SerializeFilterValue(value);
-      auto col_it = eq_bitmaps_.find(column);
-      if (col_it != eq_bitmaps_.end()) {
-        auto val_it = col_it->second.find(key);
-        if (val_it != col_it->second.end()) {
-          roaring_bitmap_remove(val_it->second.get(), doc_id);
-          if (roaring_bitmap_is_empty(val_it->second.get())) {
-            col_it->second.erase(val_it);
-          }
-        }
-        if (col_it->second.empty()) {
-          eq_bitmaps_.erase(col_it);
-        }
-      }
-    }
-
-    auto count_iter = column_ref_counts_.find(column);
-    if (count_iter != column_ref_counts_.end() && --count_iter->second == 0) {
-      column_ref_counts_.erase(count_iter);
-    }
+    RemoveFilterEntryLocked(doc_id, column, value);
   }
 }
 
-void FilterIndex::UpdateDocument(DocId doc_id, const FilterMap& old_filters, const FilterMap& new_filters) {
+Expected<void, Error> FilterIndex::UpdateDocument(DocId doc_id, const FilterMap& old_filters,
+                                                  const FilterMap& new_filters) {
   std::unique_lock lock(mutex_);
   RemoveDocFromBitmapsLocked(doc_id, old_filters);
-  AddDocToBitmapsLocked(doc_id, new_filters);
+  auto added = AddDocToBitmapsLocked(doc_id, new_filters);
+  if (!added) {
+    // The new values did not land, so the document goes back to the values it
+    // had. A restore that fails in turn rolls itself back the same way, and the
+    // original failure is what the caller is told about either way.
+    auto restored = AddDocToBitmapsLocked(doc_id, old_filters);
+    static_cast<void>(restored);
+  }
+  return added;
 }
 
 void FilterIndex::RemoveDocument(DocId doc_id, const FilterMap& filters) {
@@ -81,18 +117,21 @@ void FilterIndex::RemoveDocument(DocId doc_id, const FilterMap& filters) {
   RemoveDocFromBitmapsLocked(doc_id, filters);
 }
 
-mygram::utils::RoaringBitmapPtr FilterIndex::GetEqBitmap(const std::string& column,
-                                                         const std::string& serialized_value) const {
+bool FilterIndex::CollectEqDocIds(std::string_view column, std::string_view serialized_value,
+                                  std::vector<DocId>& doc_ids) const {
+  doc_ids.clear();
   std::shared_lock lock(mutex_);
-  auto col_it = eq_bitmaps_.find(column);
-  if (col_it == eq_bitmaps_.end()) {
-    return {};
+  auto column_iter = eq_bitmaps_.find(column);
+  if (column_iter == eq_bitmaps_.end()) {
+    return false;
   }
-  auto val_it = col_it->second.find(serialized_value);
-  if (val_it == col_it->second.end()) {
-    return {};
+  auto value_iter = column_iter->second.find(serialized_value);
+  if (value_iter == column_iter->second.end()) {
+    return false;
   }
-  return mygram::utils::RoaringBitmapPtr(roaring_bitmap_copy(val_it->second.get()));
+  doc_ids.resize(roaring_bitmap_get_cardinality(value_iter->second.get()));
+  roaring_bitmap_to_uint32_array(value_iter->second.get(), doc_ids.data());
+  return true;
 }
 
 bool FilterIndex::OrEqBitmapInto(std::string_view column, std::string_view serialized_value,

@@ -61,7 +61,7 @@ Two further conditions fall back — a null filter index
 constructs a `FilterIndex` eagerly (`src/storage/document_store.cpp:82`) and replaces it
 rather than clearing it (`src/storage/document_store.cpp:359`,
 `src/storage/document_store_persistence.cpp:593`), so `GetFilterIndex()`
-(`src/storage/document_store_retrieval.cpp:260-263`) never returns null.
+(`src/storage/document_store_retrieval.cpp:254-257`) never returns null.
 
 ### 2.2 Filter-value parsing
 
@@ -90,9 +90,9 @@ therefore behave as a dispatch on the stored type.
 
 | Stored type | Configured `type` that produces it | Operators | Fallback rule | Bitmap rule (`=`/`!=` only) | Agree? |
 |---|---|---|---|---|---|
-| `std::string` | `string`, `varchar`, `text` | all six | Byte-exact lexicographic compare of the stored bytes against the raw filter value; no collation, no case folding (`src/server/search_pipeline.cpp:1270-1271`, `src/utils/comparison_utils.h:29-42`) | Key is `\x0B` + the raw bytes; equality is byte-exact (`src/storage/filter_index.cpp:191-196`, `src/server/search_pipeline.cpp:1153`) | Yes |
+| `std::string` | `string`, `varchar`, `text` | all six | Byte-exact lexicographic compare of the stored bytes against the raw filter value; no collation, no case folding (`src/server/search_pipeline.cpp:1270-1271`, `src/utils/comparison_utils.h:29-42`) | Key is `\x0B` + the raw bytes; equality is byte-exact (`src/storage/filter_index.cpp:224-229`, `src/server/search_pipeline.cpp:1153`) | Yes |
 | `bool` | `boolean` | all six (`<`/`>` order `false` before `true`) | Compares the stored bool against the parsed bool, which is `false` for any string outside `{1, true}` (`src/server/search_pipeline.cpp:1272-1274`) | A bool key is emitted only for `1`, `true`, `0`, `false`; any other value contributes no bool key (`src/server/search_pipeline.cpp:1156-1160`) | **No** — see 4.2 |
-| `double` | `float`, `double` | all six | `=`/`!=` compare the 64-bit object representation; `<` `>` `<=` `>=` compare numerically (`src/server/search_pipeline.cpp:1275-1286`, `src/server/search_pipeline.cpp:1106-1112`) | Key is `\x0C` + the little-endian object representation; equality is bit-exact (`src/storage/filter_index.cpp:197-202`) | Yes — by construction, see 2.4 |
+| `double` | `float`, `double` | all six | `=`/`!=` compare the 64-bit object representation; `<` `>` `<=` `>=` compare numerically (`src/server/search_pipeline.cpp:1275-1286`, `src/server/search_pipeline.cpp:1106-1112`) | Key is `\x0C` + the little-endian object representation; equality is bit-exact (`src/storage/filter_index.cpp:230-235`) | Yes — by construction, see 2.4 |
 | `TimeValue` | `time` | all six | Compares `seconds` against the `int64_t` interpretation; requires `int64_valid`, so `01:00:00` never matches (`src/server/search_pipeline.cpp:1287-1291`) | A `TimeValue` key is emitted only when the value parses as `int64_t` (`src/server/search_pipeline.cpp:1181`) | Yes |
 | `int8_t`, `int16_t`, `int32_t`, `int64_t` | `tinyint`, `smallint`, `int`/`mediumint`, `bigint`, and also `datetime`, `date`, `timestamp` (stored as an epoch-second `int64_t`) | all six | Widens the stored value to `int64_t` and compares against the `int64_t` interpretation; requires `int64_valid` (`src/server/search_pipeline.cpp:1298-1302`) | Keys for `int64_t` and every narrower signed width the value fits are all ORed in (`src/server/search_pipeline.cpp:1166-1183`) | Yes |
 | `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t` | `tinyint_unsigned`, `smallint_unsigned`, `int_unsigned`/`mediumint_unsigned`, `bigint_unsigned` | all six | Widens the stored value to `uint64_t` and compares against the `uint64_t` interpretation; requires `uint64_valid`, so a negative filter value never matches (`src/server/search_pipeline.cpp:1292-1297`) | Keys for `uint64_t` and every narrower unsigned width the value fits are all ORed in (`src/server/search_pipeline.cpp:1186-1201`) | Yes |
@@ -112,7 +112,7 @@ any per-type special case:
 - **A filter naming an unindexed column returns no rows for `=` and all rows for `!=`.**
   On the fallback path the value reads back as absent and is treated as NULL
   (`src/server/search_pipeline.cpp:1254-1260`); on the bitmap path the column lookup fails
-  and the union bitmap stays empty (`src/storage/filter_index.cpp:105-108`).
+  and the union bitmap stays empty (`src/storage/filter_index.cpp:143-146`).
 - **`kFilterValueEpsilon` does not participate in query filtering.** It is passed at
   `src/server/search_pipeline.cpp:1285-1286`, but that call is reached only for the four
   ordering operators, and `CompareDoubleValues` ignores its epsilon argument for those
@@ -125,10 +125,10 @@ any per-type special case:
 paths, and this is a deliberate consequence of the bitmap index shape.
 
 **Bitmap path.** The index is a map from a serialized value key to a Roaring bitmap
-(`src/storage/filter_index.cpp:23-41`). A `double` serializes to the tag byte `\x0C`
+(`src/storage/filter_index.cpp:23-51`). A `double` serializes to the tag byte `\x0C`
 followed by the little-endian byte image of the `double`
-(`src/storage/filter_index.cpp:197-202`). Equality is a hash-map lookup on that key
-(`src/storage/filter_index.cpp:99-115`), so it can only ever select values whose 64 bits are
+(`src/storage/filter_index.cpp:230-235`). Equality is a hash-map lookup on that key
+(`src/storage/filter_index.cpp:137-152`), so it can only ever select values whose 64 bits are
 identical to the filter value's 64 bits.
 
 **Fallback path.** `DoubleValuesIdentical` `memcpy`s both operands into `uint64_t` and

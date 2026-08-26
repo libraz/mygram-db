@@ -214,7 +214,22 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         }
 
         // Update document store filters (check return value for race condition)
-        if (!doc_store.UpdateDocument(doc_id, event.filters)) {
+        auto update_result = doc_store.UpdateDocument(doc_id, event.filters);
+        if (!update_result) {
+          // The filters MySQL reports could not be indexed. Carrying on would
+          // leave this row's filters permanently disagreeing with MySQL, so
+          // replication stops here instead.
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "update_document_failed")
+              .Field("event_type", "update")
+              .Field("primary_key", event.primary_key)
+              .Field("doc_id", static_cast<uint64_t>(doc_id))
+              .Field("error", update_result.error().message())
+              .Error();
+          return false;
+        }
+        if (!*update_result) {
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_warning")
               .Field("type", "update_document_not_found")

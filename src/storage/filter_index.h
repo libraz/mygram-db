@@ -45,19 +45,25 @@ class FilterIndex {
   FilterIndex(FilterIndex&&) = delete;
   FilterIndex& operator=(FilterIndex&&) = delete;
 
-  /// Add doc_id to bitmaps for each filter value
-  void AddDocument(DocId doc_id, const FilterMap& filters);
+  /// Add doc_id to bitmaps for each filter value.
+  /// A bitmap that cannot be allocated is reported instead of skipped: the
+  /// entries this call had already applied are rolled back, so the document is
+  /// either indexed under all of its filter values or under none of them.
+  Expected<void, Error> AddDocument(DocId doc_id, const FilterMap& filters);
 
-  /// Update bitmaps when filter values change
-  void UpdateDocument(DocId doc_id, const FilterMap& old_filters, const FilterMap& new_filters);
+  /// Update bitmaps when filter values change.
+  /// On failure the previous values are put back and the error is reported;
+  /// the document is never left indexed under a partially applied new set.
+  Expected<void, Error> UpdateDocument(DocId doc_id, const FilterMap& old_filters, const FilterMap& new_filters);
 
   /// Remove doc_id from all bitmaps for its filter values
   void RemoveDocument(DocId doc_id, const FilterMap& filters);
 
-  /// Get a copy of bitmap for (column, value) pair. Returns null ptr if not found.
-  /// The returned bitmap is an independent copy safe to use without holding any lock.
-  [[nodiscard]] mygram::utils::RoaringBitmapPtr GetEqBitmap(const std::string& column,
-                                                            const std::string& serialized_value) const;
+  /// Collect the doc ids indexed under (column, value) into @p doc_ids, ascending.
+  /// The stored bitmap is read under the lock rather than copied, so there is no
+  /// allocation whose failure could be mistaken for an unindexed value.
+  /// @return true when the indexed value exists; false leaves @p doc_ids empty
+  bool CollectEqDocIds(std::string_view column, std::string_view serialized_value, std::vector<DocId>& doc_ids) const;
 
   /// OR the stored bitmap for (column, value) directly into destination.
   /// Avoids copying a potentially large bitmap when callers probe and union
@@ -98,13 +104,20 @@ class FilterIndex {
 
  private:
   /// Add doc_id to bitmaps for given filters. Caller must hold unique_lock on mutex_.
-  void AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters);
+  [[nodiscard]] Expected<void, Error> AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters);
 
   /// Remove doc_id from bitmaps for given filters. Caller must hold unique_lock on mutex_.
   void RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters);
 
+  /// Undo one (column, value) entry of a document. Caller must hold unique_lock on mutex_.
+  void RemoveFilterEntryLocked(DocId doc_id, const std::string& column, const FilterValue& value);
+
+  /// Undo the first @p visited entries of an interrupted add, in the same
+  /// iteration order that applied them. Caller must hold unique_lock on mutex_.
+  void RollbackPartialAddLocked(DocId doc_id, const FilterMap& filters, size_t visited);
+
   /// Protects all bitmap data from concurrent read/write access.
-  /// Readers (GetEqBitmap, OrEqBitmapInto, ResolveColumnName, MemoryUsage) take shared_lock;
+  /// Readers (CollectEqDocIds, OrEqBitmapInto, ResolveColumnName, MemoryUsage) take shared_lock;
   /// writers (AddDocument, UpdateDocument, RemoveDocument, Clear) take unique_lock.
   mutable std::shared_mutex mutex_;
 
