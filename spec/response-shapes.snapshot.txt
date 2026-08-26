@@ -1,0 +1,1354 @@
+### 001 TCP SEARCH success
+> SEARCH app.articles machine
+< OK RESULTS 3 doc_4 doc_2 doc_1\r
+### 002 TCP SEARCH pagination and sort
+> SEARCH app.articles learning LIMIT 2 OFFSET 1 SORT id ASC
+< OK RESULTS 3 doc_3 doc_6\r
+### 003 TCP SEARCH filter
+> SEARCH app.articles machine FILTER category = ai
+< OK RESULTS 2 doc_2 doc_1\r
+### 004 TCP SEARCH highlight
+> SEARCH app.articles learning HIGHLIGHT TAG <b> </b> LIMIT 2
+< OK RESULTS 3\r
+< doc_6\x09<b>learning</b> to write documentation\r
+< doc_3\x09deep <b>learning</b> research\r
+< \r
+### 005 TCP SEARCH fuzzy
+> SEARCH app.articles machime FUZZY 1 LIMIT 2
+< OK RESULTS 3 doc_4 doc_2\r
+### 006 TCP SEARCH boolean
+> SEARCH app.articles machine AND learning
+< OK RESULTS 1 doc_1\r
+### 007 TCP SEARCH no match
+> SEARCH app.articles zzzznotpresent
+< OK RESULTS 0\r
+### 008 TCP SEARCH bad arity
+> SEARCH
+< ERROR 3000 SEARCH requires at least table and search text\r
+### 009 TCP SEARCH missing search text
+> SEARCH app.articles
+< ERROR 3000 SEARCH requires at least table and search text\r
+### 010 TCP SEARCH unknown table
+> SEARCH app.missing machine
+< ERROR 4007 Table not found: app.missing\r
+### 011 TCP SEARCH limit out of range
+> SEARCH app.articles machine LIMIT 0
+< ERROR 3008 LIMIT must be positive\r
+### 012 TCP SEARCH malformed limit
+> SEARCH app.articles machine LIMIT notanumber
+< ERROR 3008 Invalid LIMIT value: notanumber\r
+### 013 TCP SEARCH unknown filter column
+> SEARCH app.articles machine FILTER nosuchcolumn = 1
+< OK RESULTS 0\r
+### 014 TCP COUNT success
+> COUNT app.articles learning
+< OK COUNT 3\r
+### 015 TCP COUNT bad arity
+> COUNT
+< ERROR 3000 COUNT requires at least table and search text\r
+### 016 TCP COUNT unknown table
+> COUNT app.missing learning
+< ERROR 4007 Table not found: app.missing\r
+### 017 TCP GET success
+> GET app.articles doc_1
+< OK DOC doc_1 category=ai status=published\r
+### 018 TCP GET missing document
+> GET app.articles doc_999
+< ERROR 8 Document not found\r
+### 019 TCP GET bad arity
+> GET app.articles
+< ERROR 3000 GET requires table and primary_key\r
+### 020 TCP GET unknown table
+> GET app.missing doc_1
+< ERROR 4007 Table not found: app.missing\r
+### 021 TCP FACET success
+> FACET app.articles category
+< OK FACET 3 3\r
+< ai\x093\r
+< industry\x092\r
+< misc\x091\r
+< \r
+< \r
+### 022 TCP FACET with search text
+> FACET app.articles category learning
+< OK FACET 2 2\r
+< ai\x092\r
+< misc\x091\r
+< \r
+< \r
+### 023 TCP FACET pagination
+> FACET app.articles category LIMIT 1 OFFSET 1
+< OK FACET 1 3\r
+< industry\x092\r
+< \r
+< \r
+### 024 TCP FACET bad arity
+> FACET app.articles
+< ERROR 3000 FACET requires column name\r
+### 025 TCP FACET unknown column
+> FACET app.articles nosuchcolumn
+< ERROR 4000 Facet column "nosuchcolumn" not found\r
+### 026 TCP FACET unknown table
+> FACET app.missing category
+< ERROR 4007 Table not found: app.missing\r
+### 027 TCP INFO success
+> INFO
+< OK INFO\r
+< \r
+< # Server\r
+< version: MygramDB v1.10.0\r
+< uptime_seconds: <INT>\r
+< data_initialized: true\r
+< readiness: ready\r
+< \r
+< # Stats\r
+< total_commands_processed: <INT>\r
+< total_connections_received: <INT>\r
+< total_requests: <INT>\r
+< text_normalization_failures: 0\r
+< \r
+< # Commandstats\r
+< cmd_search: <INT>\r
+< cmd_count: <INT>\r
+< cmd_get: <INT>\r
+< cmd_info: <INT>\r
+< cmd_other: <INT>\r
+< \r
+< # Memory\r
+< used_memory_bytes: <INT>\r
+< used_memory_human: <BYTES_HUMAN>\r
+< used_memory_peak_bytes: <INT>\r
+< used_memory_peak_human: <BYTES_HUMAN>\r
+< used_memory_index: <BYTES_HUMAN>\r
+< used_memory_documents: <BYTES_HUMAN>\r
+< memory_fragmentation_ratio: <FLOAT>\r
+< total_system_memory: <BYTES_HUMAN>\r
+< available_system_memory: <BYTES_HUMAN>\r
+< system_memory_usage_ratio: <FLOAT>\r
+< process_rss: <BYTES_HUMAN>\r
+< process_rss_peak: <BYTES_HUMAN>\r
+< memory_health: <ENUM>\r
+< \r
+< # Index\r
+< total_documents: 6\r
+< total_terms: 79\r
+< total_postings: 128\r
+< avg_postings_per_term: 1.62\r
+< delta_encoded_lists: 79\r
+< roaring_bitmap_lists: 0\r
+< optimization_status: idle\r
+< \r
+< # Tables\r
+< tables: app.articles\r
+< \r
+< # Clients\r
+< connected_clients: <INT>\r
+< \r
+< # Replication\r
+< replication_status: disabled\r
+< replication_inserts_applied: 0\r
+< replication_inserts_skipped: 0\r
+< replication_updates_applied: 0\r
+< replication_updates_added: 0\r
+< replication_updates_removed: 0\r
+< replication_updates_modified: 0\r
+< replication_updates_skipped: 0\r
+< replication_deletes_applied: 0\r
+< replication_deletes_skipped: 0\r
+< replication_ddl_executed: 0\r
+< replication_events_skipped_other_tables: 0\r
+< \r
+< # Cache\r
+< cache_enabled: 1\r
+< cache_hits: <INT>\r
+< cache_misses: <INT>\r
+< cache_misses_not_found: <INT>\r
+< cache_misses_ttl_expired: <INT>\r
+< cache_misses_invalidated: <INT>\r
+< cache_total_queries: <INT>\r
+< cache_hit_rate: <FLOAT>\r
+< cache_current_entries: <INT>\r
+< cache_memory_bytes: <INT>\r
+< cache_memory_human: <INT>\r
+< cache_invalidation_queue_memory_bytes: <INT>\r
+< cache_accounted_memory_bytes: <INT>\r
+< cache_accounted_memory_human: <INT>\r
+< cache_evictions: <INT>\r
+< cache_ttl_expirations: <INT>\r
+< cache_rejections: <INT>\r
+< cache_rejection_oversize: <INT>\r
+< cache_rejection_memory_budget: <INT>\r
+< cache_rejection_duplicate: <INT>\r
+< cache_stale_entry_removals: <INT>\r
+< cache_decompression_failures: <INT>\r
+< cache_stale_lru_entries: <INT>\r
+< cache_forced_clears: <INT>\r
+< cache_invalidations_immediate: <INT>\r
+< cache_invalidations_deferred: <INT>\r
+< cache_invalidations_batches: <INT>\r
+< cache_avg_hit_latency_ms: <DURATION_MS>\r
+< cache_avg_miss_latency_ms: <DURATION_MS>\r
+< cache_total_time_saved_ms: <DURATION_MS>\r
+< cache_max_memory_bytes: 33554432\r
+< cache_max_memory_human: 32.0MB\r
+< cache_min_query_cost_ms: 10.000\r
+< cache_ttl_seconds: 3600\r
+< cache_compression_enabled: 1\r
+< \r
+< END\r
+### 028 TCP unknown command
+> NOSUCHCOMMAND app.articles
+< ERROR 3000 Unknown command: NOSUCHCOMMAND\r
+### 029 TCP empty request
+>
+< ERROR 3000 Empty query\r
+### 030 TCP admin command without AUTH
+> CACHE STATS
+< ERROR 7 Administrative command requires AUTH\r
+### 031 TCP AUTH bad arity
+> AUTH
+< ERROR 3000 AUTH requires exactly one non-empty token\r
+### 032 TCP AUTH wrong token
+> AUTH not-the-token
+< ERROR 7 Authentication failed\r
+### 033 TCP AUTH success
+> AUTH shape-admin-token
+< OK AUTHENTICATED\r
+### 034 TCP CONFIG SHOW success
+> CONFIG SHOW api.default_limit
+< +OK\r
+< 10\r
+< \r
+### 035 TCP CONFIG SHOW unknown path
+> CONFIG SHOW no.such.path
+< ERROR 1004 CONFIG SHOW failed: Path not found: no.such.path\r
+### 036 TCP CONFIG HELP success
+> CONFIG HELP api.default_limit
+< +OK\r
+< api.default_limit\r
+< \r
+< Type: integer\r
+< Default: 100\r
+< Range: 5 - 1000\r
+< Description: Default LIMIT for SEARCH queries when not explicitly specified\r
+< \r
+### 037 TCP CONFIG HELP unknown path
+> CONFIG HELP no.such.path
+< ERROR 8 Configuration path not found: no.such.path\r
+### 038 TCP CONFIG VERIFY missing file
+> CONFIG VERIFY /nonexistent/mygramdb.yaml
+< ERROR 2 CONFIG VERIFY: absolute paths not allowed\r
+### 039 TCP CONFIG VERIFY bad arity
+> CONFIG VERIFY
+< ERROR 3000 CONFIG VERIFY requires a filepath\r
+### 040 TCP CONFIG SHOW subtree
+> CONFIG SHOW api.tcp
+< +OK\r
+< bind: "127.0.0.1"\r
+< idle_timeout_sec: 300\r
+< keepalive:\r
+<   enabled: true\r
+<   idle_sec: 60\r
+<   interval_sec: 20\r
+<   probe_count: 3\r
+< max_connections: 10000\r
+< max_pending_frame_bytes: 4194304\r
+< max_pending_frames: 1024\r
+< max_total_buffered_bytes: 268435456\r
+< max_write_queue_bytes: 16777216\r
+< port: 0\r
+< reaper_interval_sec: 5\r
+< recv_timeout_sec: 60\r
+< thread_pool_queue_size: 1000\r
+< worker_threads: 0\r
+< \r
+### 041 TCP SHOW VARIABLES filtered
+> SHOW VARIABLES LIKE 'api.default_limit'
+< +----------------------+-----------------+---------+\r
+< | Variable_name        | Value           | Mutable |\r
+< +----------------------+-----------------+---------+\r
+< | api.default_limit    | 10              | YES     |\r
+< +----------------------+-----------------+---------+\r
+< 1 row in set\r
+< \r
+### 042 TCP SHOW VARIABLES group
+> SHOW VARIABLES LIKE 'dump.%'
+< +-------------------------------+-------------------------+---------+\r
+< | Variable_name                 | Value                   | Mutable |\r
+< +-------------------------------+-------------------------+---------+\r
+< | dump.default_filename         | mygramdb.dmp            | NO      |\r
+< | dump.dir                      | /var/lib/mygramdb/dumps | NO      |\r
+< | dump.interval_sec             | 0                       | NO      |\r
+< | dump.load_on_startup          | false                   | NO      |\r
+< | dump.restore_max_section_mb   | 2048                    | NO      |\r
+< | dump.restore_memory_budget_mb | 4096                    | NO      |\r
+< | dump.retain                   | 3                       | NO      |\r
+< +-------------------------------+-------------------------+---------+\r
+< 7 rows in set\r
+< \r
+### 043 TCP SHOW VARIABLES no match
+> SHOW VARIABLES LIKE 'no.such.variable'
+< +OK 0 rows\r
+< \r
+### 044 TCP CACHE STATS success
+> CACHE STATS
+< OK CACHE_STATS\r
+< \r
+< # Cache\r
+< enabled: true\r
+< total_queries: <INT>\r
+< cache_hits: <INT>\r
+< cache_misses: <INT>\r
+< hit_rate: <FLOAT>\r
+< current_entries: <INT>\r
+< current_memory_bytes: <INT>\r
+< invalidation_index_memory_bytes: <INT>\r
+< invalidation_queue_memory_bytes: <INT>\r
+< accounted_memory_bytes: <INT>\r
+< evictions: <INT>\r
+< ttl_expirations: <INT>\r
+< rejection_count: <INT>\r
+< rejection_oversize: <INT>\r
+< rejection_memory_budget: <INT>\r
+< rejection_duplicate: <INT>\r
+< stale_entry_removals: <INT>\r
+< decompression_failures: <INT>\r
+< stale_lru_entries: <INT>\r
+< invalidations_immediate: <INT>\r
+< invalidations_deferred: <INT>\r
+< invalidations_batches: <INT>\r
+< avg_cache_miss_time_ms: <DURATION_MS>\r
+< total_time_saved_ms: <DURATION_MS>\r
+< \r
+< END\r
+### 045 TCP CACHE unknown subcommand
+> CACHE NOSUCHSUBCOMMAND
+< ERROR 3000 Unknown CACHE subcommand: NOSUCHSUBCOMMAND\r
+### 046 TCP REPLICATION STATUS success
+> REPLICATION STATUS
+< OK REPLICATION\r
+< status: not_configured\r
+< END\r
+### 047 TCP REPLICATION unknown subcommand
+> REPLICATION NOSUCHSUBCOMMAND
+< ERROR 3000 Unknown REPLICATION subcommand: NOSUCHSUBCOMMAND\r
+### 048 TCP SYNC STATUS success
+> SYNC STATUS
+< OK SYNC_STATUS\r
+< status=IDLE message="No sync operation performed"\r
+< END\r
+< \r
+### 049 TCP SYNC unknown table
+> SYNC app.missing
+< ERROR 4007 Table not found: app.missing\r
+### 050 TCP DUMP STATUS idle
+> DUMP STATUS
+< OK DUMP_STATUS\r
+< save_in_progress: false\r
+< load_in_progress: false\r
+< replication_paused_for_dump: false\r
+< status: IDLE\r
+< END\r
+### 051 TCP DUMP INFO missing file
+> DUMP INFO no-such-file.dump
+< ERROR 5011 Failed to read dump info from <PATH> Get dump info failed\r
+### 052 TCP DUMP VERIFY bad arity
+> DUMP VERIFY
+< ERROR 3000 DUMP VERIFY requires a filepath\r
+### 053 TCP DUMP LOAD missing file
+> DUMP LOAD no-such-file.dump
+< ERROR 5011 Failed to load dump from <PATH> Read operation failed\r
+### 054 TCP DUMP unknown subcommand
+> DUMP NOSUCHSUBCOMMAND
+< ERROR 3000 Unknown DUMP subcommand: NOSUCHSUBCOMMAND\r
+### 055 HTTP search success
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"machine"}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 3,
+<   "limit": 10,
+<   "offset": 0,
+<   "results": [
+<     {
+<       "filters": {
+<         "category": "industry",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_4"
+<     },
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_2"
+<     },
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_1"
+<     }
+<   ]
+< }
+### 056 HTTP search pagination and sort
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"learning","limit":2,"offset":1,"sort":{"column":"id","order":"asc"}}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 3,
+<   "limit": 2,
+<   "offset": 1,
+<   "results": [
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "draft"
+<       },
+<       "primary_key": "doc_3"
+<     },
+<     {
+<       "filters": {
+<         "category": "misc",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_6"
+<     }
+<   ]
+< }
+### 057 HTTP search filter
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"machine","filters":{"category":"ai"}}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 2,
+<   "limit": 10,
+<   "offset": 0,
+<   "results": [
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_2"
+<     },
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_1"
+<     }
+<   ]
+< }
+### 058 HTTP search highlight
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"learning","limit":2,"highlight":{"open_tag":"<b>","close_tag":"</b>"}}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 3,
+<   "limit": 2,
+<   "offset": 0,
+<   "results": [
+<     {
+<       "filters": {
+<         "category": "misc",
+<         "status": "published"
+<       },
+<       "highlight": "<b>learning</b> to write documentation",
+<       "primary_key": "doc_6"
+<     },
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "draft"
+<       },
+<       "highlight": "deep <b>learning</b> research",
+<       "primary_key": "doc_3"
+<     }
+<   ]
+< }
+### 059 HTTP search fuzzy
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"machime","fuzzy":1,"limit":2}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 3,
+<   "limit": 2,
+<   "offset": 0,
+<   "results": [
+<     {
+<       "filters": {
+<         "category": "industry",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_4"
+<     },
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_2"
+<     }
+<   ]
+< }
+### 060 HTTP search boolean mode
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"machine AND learning","mode":"boolean"}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 1,
+<   "limit": 10,
+<   "offset": 0,
+<   "results": [
+<     {
+<       "filters": {
+<         "category": "ai",
+<         "status": "published"
+<       },
+<       "primary_key": "doc_1"
+<     }
+<   ]
+< }
+### 061 HTTP search no match
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"zzzznotpresent"}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 0,
+<   "limit": 10,
+<   "offset": 0,
+<   "results": []
+< }
+### 062 HTTP search unknown table
+> POST /tables/app.missing/search
+> content-type: application/json
+> {"q":"machine"}
+< status: 404
+< content-type: application/json
+< {
+<   "error": "Table not found: app.missing",
+<   "error_code": 4007
+< }
+### 063 HTTP search missing q
+> POST /tables/app.articles/search
+> content-type: application/json
+> {}
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Missing required field: q",
+<   "error_code": 3000
+< }
+### 064 HTTP search limit out of range
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"machine","limit":0}
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Invalid limit: must be between 1 and 1000",
+<   "error_code": 3008
+< }
+### 065 HTTP search malformed json
+> POST /tables/app.articles/search
+> content-type: application/json
+> {not json
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Invalid JSON: [json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing object key - invalid literal; last read: '{no'; expected string literal",
+<   "error_code": 3000
+< }
+### 066 HTTP search wrong content type
+> POST /tables/app.articles/search
+> content-type: text/plain
+> {"q":"machine"}
+< status: 415
+< content-type: application/json
+< {
+<   "error": "Content-Type must be application/json",
+<   "error_code": 6007
+< }
+### 067 HTTP search unknown filter column
+> POST /tables/app.articles/search
+> content-type: application/json
+> {"q":"machine","filters":{"nosuchcolumn":"1"}}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 0,
+<   "limit": 10,
+<   "offset": 0,
+<   "results": []
+< }
+### 068 HTTP count success
+> POST /tables/app.articles/count
+> content-type: application/json
+> {"q":"learning"}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 3
+< }
+### 069 HTTP count unknown table
+> POST /tables/app.missing/count
+> content-type: application/json
+> {"q":"learning"}
+< status: 404
+< content-type: application/json
+< {
+<   "error": "Table not found: app.missing",
+<   "error_code": 4007
+< }
+### 070 HTTP count rejects pagination
+> POST /tables/app.articles/count
+> content-type: application/json
+> {"q":"learning","limit":2}
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Field 'limit' is not supported by COUNT; use /search for ranked or paginated results",
+<   "error_code": 3000
+< }
+### 071 HTTP count malformed json
+> POST /tables/app.articles/count
+> content-type: application/json
+> {not json
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Invalid JSON: [json.exception.parse_error.101] parse error at line 1, column 3: syntax error while parsing object key - invalid literal; last read: '{no'; expected string literal",
+<   "error_code": 3000
+< }
+### 072 HTTP facet success
+> POST /tables/app.articles/facet
+> content-type: application/json
+> {"column":"category"}
+< status: 200
+< content-type: application/json
+< {
+<   "column": "category",
+<   "count": 3,
+<   "facets": [
+<     {
+<       "count": 3,
+<       "value": "ai"
+<     },
+<     {
+<       "count": 2,
+<       "value": "industry"
+<     },
+<     {
+<       "count": 1,
+<       "value": "misc"
+<     }
+<   ],
+<   "total_count": 3
+< }
+### 073 HTTP facet with search text
+> POST /tables/app.articles/facet
+> content-type: application/json
+> {"column":"category","q":"learning"}
+< status: 200
+< content-type: application/json
+< {
+<   "column": "category",
+<   "count": 2,
+<   "facets": [
+<     {
+<       "count": 2,
+<       "value": "ai"
+<     },
+<     {
+<       "count": 1,
+<       "value": "misc"
+<     }
+<   ],
+<   "total_count": 2
+< }
+### 074 HTTP facet pagination
+> POST /tables/app.articles/facet
+> content-type: application/json
+> {"column":"category","limit":1,"offset":1}
+< status: 200
+< content-type: application/json
+< {
+<   "column": "category",
+<   "count": 1,
+<   "facets": [
+<     {
+<       "count": 2,
+<       "value": "industry"
+<     }
+<   ],
+<   "total_count": 3
+< }
+### 075 HTTP facet missing column
+> POST /tables/app.articles/facet
+> content-type: application/json
+> {}
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Missing required field: column",
+<   "error_code": 3000
+< }
+### 076 HTTP facet unknown column
+> POST /tables/app.articles/facet
+> content-type: application/json
+> {"column":"nosuchcolumn"}
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Facet column \"nosuchcolumn\" not found",
+<   "error_code": 4000
+< }
+### 077 HTTP facet unknown table
+> POST /tables/app.missing/facet
+> content-type: application/json
+> {"column":"category"}
+< status: 404
+< content-type: application/json
+< {
+<   "error": "Table not found: app.missing",
+<   "error_code": 4007
+< }
+### 078 HTTP get success
+> GET /tables/app.articles/doc_1
+< status: 200
+< content-type: application/json
+< {
+<   "filters": {
+<     "category": "ai",
+<     "status": "published"
+<   },
+<   "primary_key": "doc_1"
+< }
+### 079 HTTP get missing document
+> GET /tables/app.articles/doc_999
+< status: 404
+< content-type: application/json
+< {
+<   "error": "Document not found",
+<   "error_code": 8
+< }
+### 080 HTTP get unknown table
+> GET /tables/app.missing/doc_1
+< status: 404
+< content-type: application/json
+< {
+<   "error": "Table not found: app.missing",
+<   "error_code": 4007
+< }
+### 081 HTTP info
+> GET /info
+< status: 200
+< content-type: application/json
+< {
+<   "cache": {
+<     "accounted_memory_bytes": <INT>,
+<     "accounted_memory_human": "<INT>",
+<     "avg_hit_latency_ms": <DURATION_MS>,
+<     "avg_miss_latency_ms": <DURATION_MS>,
+<     "current_entries": <INT>,
+<     "decompression_failures": <INT>,
+<     "enabled": true,
+<     "evictions": <INT>,
+<     "hit_rate": <FLOAT>,
+<     "hits": <INT>,
+<     "invalidation_index_memory_bytes": <INT>,
+<     "invalidation_queue_memory_bytes": <INT>,
+<     "invalidations_batches": <INT>,
+<     "invalidations_deferred": <INT>,
+<     "invalidations_immediate": <INT>,
+<     "memory_bytes": <INT>,
+<     "memory_human": "<BYTES_HUMAN>",
+<     "misses": <INT>,
+<     "misses_invalidated": <INT>,
+<     "misses_not_found": <INT>,
+<     "misses_ttl_expired": <INT>,
+<     "rejection_count": <INT>,
+<     "rejection_duplicate": <INT>,
+<     "rejection_memory_budget": <INT>,
+<     "rejection_oversize": <INT>,
+<     "stale_entry_removals": <INT>,
+<     "stale_lru_entries": <INT>,
+<     "total_queries": <INT>,
+<     "total_time_saved_ms": <DURATION_MS>,
+<     "ttl_expirations": <INT>
+<   },
+<   "index": {
+<     "avg_postings_per_term": 1.620253164556962,
+<     "delta_encoded_lists": 79,
+<     "roaring_bitmap_lists": 0,
+<     "total_documents": 6,
+<     "total_postings": 128,
+<     "total_terms": 79
+<   },
+<   "memory": {
+<     "available_system_memory": <INT>,
+<     "available_system_memory_human": "<BYTES_HUMAN>",
+<     "memory_health": "<ENUM>",
+<     "peak_memory_bytes": <INT>,
+<     "peak_memory_human": "<BYTES_HUMAN>",
+<     "process_rss": <INT>,
+<     "process_rss_human": "<BYTES_HUMAN>",
+<     "process_rss_peak": <INT>,
+<     "process_rss_peak_human": "<BYTES_HUMAN>",
+<     "system_memory_usage_ratio": <FLOAT>,
+<     "total_system_memory": <INT>,
+<     "total_system_memory_human": "<BYTES_HUMAN>",
+<     "used_memory_bytes": <INT>,
+<     "used_memory_documents": "<BYTES_HUMAN>",
+<     "used_memory_human": "<BYTES_HUMAN>",
+<     "used_memory_index": "<BYTES_HUMAN>"
+<   },
+<   "server": "MygramDB",
+<   "tables": {
+<     "app.articles": {
+<       "documents": 6,
+<       "memory_bytes": <INT>,
+<       "memory_human": "<BYTES_HUMAN>",
+<       "ngram_size": 2,
+<       "postings": 128,
+<       "terms": 79
+<     }
+<   },
+<   "total_commands_processed": <INT>,
+<   "total_requests": <INT>,
+<   "uptime_seconds": <INT>,
+<   "version": "<VERSION>"
+< }
+### 082 HTTP health
+> GET /health
+< status: 200
+< content-type: application/json
+< {
+<   "status": "ok",
+<   "timestamp": <TIMESTAMP>
+< }
+### 083 HTTP health live
+> GET /health/live
+< status: 200
+< content-type: application/json
+< {
+<   "status": "alive",
+<   "timestamp": <TIMESTAMP>
+< }
+### 084 HTTP health ready
+> GET /health/ready
+< status: 200
+< content-type: application/json
+< {
+<   "data_initialized": true,
+<   "loading": false,
+<   "status": "ready",
+<   "timestamp": <TIMESTAMP>
+< }
+### 085 HTTP health detail
+> GET /health/detail
+< status: 200
+< content-type: application/json
+< {
+<   "components": {
+<     "cache": {
+<       "current_entries": <INT>,
+<       "enabled": true,
+<       "hit_rate": <FLOAT>,
+<       "status": "ok",
+<       "total_hits": <INT>,
+<       "total_misses": <INT>
+<     },
+<     "index": {
+<       "status": "ok",
+<       "total_documents": 6,
+<       "total_terms": 79
+<     },
+<     "server": {
+<       "loading": false,
+<       "status": "ready"
+<     }
+<   },
+<   "status": "healthy",
+<   "timestamp": <TIMESTAMP>,
+<   "uptime_seconds": <INT>
+< }
+### 086 HTTP config
+> GET /config
+< status: 200
+< content-type: application/json
+< {
+<   "api": {
+<     "http": {
+<       "cors_enabled": false,
+<       "enabled": true
+<     },
+<     "tcp": {
+<       "enabled": true
+<     }
+<   },
+<   "mysql": {
+<     "configured": true,
+<     "database_defined": false
+<   },
+<   "network": {
+<     "allow_cidrs_configured": true
+<   },
+<   "notes": "Sensitive configuration values are redacted over HTTP. Use CONFIG SHOW over a secured connection for details.",
+<   "replication": {
+<     "enable": true
+<   }
+< }
+### 087 HTTP replication status
+> GET /replication/status
+< status: 503
+< content-type: application/json
+< {
+<   "error": "Replication not configured",
+<   "error_code": 4
+< }
+### 088 HTTP metrics
+> GET /metrics
+< status: 200
+< content-type: text/plain; version=0.0.4; charset=utf-8
+< # HELP mygramdb_server_info MygramDB server information
+< # TYPE mygramdb_server_info gauge
+< mygramdb_server_info{version="<VERSION>"} 1
+<
+< # HELP mygramdb_server_uptime_seconds Server uptime in seconds
+< # TYPE mygramdb_server_uptime_seconds counter
+< mygramdb_server_uptime_seconds <INT>
+<
+< # HELP mygramdb_server_commands_total Total number of commands processed
+< # TYPE mygramdb_server_commands_total counter
+< mygramdb_server_commands_total <INT>
+<
+< # HELP mygramdb_text_normalization_failures_total Total failed text normalization operations
+< # TYPE mygramdb_text_normalization_failures_total counter
+< mygramdb_text_normalization_failures_total 0
+<
+< # HELP mygramdb_command_total Total number of commands executed by type
+< # TYPE mygramdb_command_total counter
+< mygramdb_command_total{command="search"} <INT>
+< mygramdb_command_total{command="count"} <INT>
+< mygramdb_command_total{command="get"} <INT>
+< mygramdb_command_total{command="info"} <INT>
+< mygramdb_command_total{command="replication_status"} <INT>
+< mygramdb_command_total{command="config"} <INT>
+< mygramdb_command_total{command="other"} <INT>
+<
+< # HELP mygramdb_memory_used_bytes Current memory usage in bytes
+< # TYPE mygramdb_memory_used_bytes gauge
+< mygramdb_memory_used_bytes{type="index"} <INT>
+< mygramdb_memory_used_bytes{type="documents"} <INT>
+< mygramdb_memory_used_bytes{type="total"} <INT>
+<
+< # HELP mygramdb_memory_peak_bytes Peak memory usage since server start
+< # TYPE mygramdb_memory_peak_bytes gauge
+< mygramdb_memory_peak_bytes <INT>
+<
+< # HELP mygramdb_memory_fragmentation_ratio Memory fragmentation ratio
+< # TYPE mygramdb_memory_fragmentation_ratio gauge
+< mygramdb_memory_fragmentation_ratio <FLOAT>
+<
+< # HELP mygramdb_memory_system_total_bytes Total system physical memory
+< # TYPE mygramdb_memory_system_total_bytes gauge
+< mygramdb_memory_system_total_bytes <INT>
+<
+< # HELP mygramdb_memory_system_available_bytes Available system physical memory
+< # TYPE mygramdb_memory_system_available_bytes gauge
+< mygramdb_memory_system_available_bytes <INT>
+<
+< # HELP mygramdb_memory_system_usage_ratio System memory usage ratio
+< # TYPE mygramdb_memory_system_usage_ratio gauge
+< mygramdb_memory_system_usage_ratio <FLOAT>
+<
+< # HELP mygramdb_memory_process_rss_bytes Process resident set size
+< # TYPE mygramdb_memory_process_rss_bytes gauge
+< mygramdb_memory_process_rss_bytes <INT>
+<
+< # HELP mygramdb_memory_process_rss_peak_bytes Peak process RSS since start
+< # TYPE mygramdb_memory_process_rss_peak_bytes gauge
+< mygramdb_memory_process_rss_peak_bytes <INT>
+<
+< # HELP mygramdb_memory_health_status Memory health status (0=UNKNOWN, 1=HEALTHY, 2=WARNING, 3=CRITICAL)
+< # TYPE mygramdb_memory_health_status gauge
+< mygramdb_memory_health_status <INT>
+<
+< # HELP mygramdb_index_documents_total Total number of documents in the index
+< # TYPE mygramdb_index_documents_total gauge
+< mygramdb_index_documents_total{table="app.articles"} 6
+<
+< # HELP mygramdb_index_terms_total Total number of unique terms
+< # TYPE mygramdb_index_terms_total gauge
+< mygramdb_index_terms_total{table="app.articles"} 79
+<
+< # HELP mygramdb_index_postings_total Total number of postings
+< # TYPE mygramdb_index_postings_total gauge
+< mygramdb_index_postings_total{table="app.articles"} 128
+<
+< # HELP mygramdb_index_postings_per_term_avg Average postings per term
+< # TYPE mygramdb_index_postings_per_term_avg gauge
+< mygramdb_index_postings_per_term_avg{table="app.articles"} 1.62
+<
+< # HELP mygramdb_index_delta_encoded_lists Delta-encoded posting lists count
+< # TYPE mygramdb_index_delta_encoded_lists gauge
+< mygramdb_index_delta_encoded_lists{table="app.articles"} 79
+<
+< # HELP mygramdb_index_roaring_bitmap_lists Roaring bitmap posting lists count
+< # TYPE mygramdb_index_roaring_bitmap_lists gauge
+< mygramdb_index_roaring_bitmap_lists{table="app.articles"} 0
+<
+< # HELP mygramdb_index_optimization_in_progress Index optimization in progress (0=idle, 1=running)
+< # TYPE mygramdb_index_optimization_in_progress gauge
+< mygramdb_index_optimization_in_progress{table="app.articles"} 0
+<
+< # HELP mygramdb_clients_connected Current number of connected clients
+< # TYPE mygramdb_clients_connected gauge
+< mygramdb_clients_connected <INT>
+<
+< # HELP mygramdb_clients_total Total number of client connections received
+< # TYPE mygramdb_clients_total counter
+< mygramdb_clients_total <INT>
+<
+< # HELP mygramdb_dump_last_success_timestamp_seconds Unix timestamp of the most recent successful dump
+< # TYPE mygramdb_dump_last_success_timestamp_seconds gauge
+< mygramdb_dump_last_success_timestamp_seconds 0
+<
+< # HELP mygramdb_dump_failures_total Total failed dump attempts by trigger
+< # TYPE mygramdb_dump_failures_total counter
+< mygramdb_dump_failures_total{trigger="manual"} 0
+< mygramdb_dump_failures_total{trigger="auto"} 0
+<
+< # HELP mygramdb_requests_denied_total Total denied requests by reason and protocol surface
+< # TYPE mygramdb_requests_denied_total counter
+< mygramdb_requests_denied_total{reason="rate_limit",surface="tcp"} <INT>
+< mygramdb_requests_denied_total{reason="rate_limit",surface="http"} <INT>
+< mygramdb_requests_denied_total{reason="acl",surface="tcp"} <INT>
+< mygramdb_requests_denied_total{reason="acl",surface="http"} <INT>
+< mygramdb_requests_denied_total{reason="connection_limit",surface="tcp"} <INT>
+< mygramdb_requests_denied_total{reason="pool_full",surface="tcp"} <INT>
+<
+< # HELP mygramdb_thread_pool_queue_depth Current queued request-drain tasks
+< # TYPE mygramdb_thread_pool_queue_depth gauge
+< mygramdb_thread_pool_queue_depth <INT>
+<
+< # HELP mygramdb_thread_pool_queue_capacity Configured request-drain queue capacity (0 means unbounded)
+< # TYPE mygramdb_thread_pool_queue_capacity gauge
+< mygramdb_thread_pool_queue_capacity 1000
+<
+< # HELP mygramdb_thread_pool_workers Request-drain worker threads
+< # TYPE mygramdb_thread_pool_workers gauge
+< mygramdb_thread_pool_workers <INT>
+<
+< # HELP mygramdb_replication_inserts_total Total number of INSERT operations
+< # TYPE mygramdb_replication_inserts_total counter
+< mygramdb_replication_inserts_total{status="applied"} 0
+< mygramdb_replication_inserts_total{status="skipped"} 0
+<
+< # HELP mygramdb_replication_updates_total Total number of UPDATE operations
+< # TYPE mygramdb_replication_updates_total counter
+< mygramdb_replication_updates_total{status="applied"} 0
+< mygramdb_replication_updates_total{status="added"} 0
+< mygramdb_replication_updates_total{status="removed"} 0
+< mygramdb_replication_updates_total{status="modified"} 0
+< mygramdb_replication_updates_total{status="skipped"} 0
+<
+< # HELP mygramdb_replication_deletes_total Total number of DELETE operations
+< # TYPE mygramdb_replication_deletes_total counter
+< mygramdb_replication_deletes_total{status="applied"} 0
+< mygramdb_replication_deletes_total{status="skipped"} 0
+<
+< # HELP mygramdb_replication_ddl_total Total number of DDL operations executed
+< # TYPE mygramdb_replication_ddl_total counter
+< mygramdb_replication_ddl_total 0
+<
+< # HELP mygramdb_cache_hits_total Total number of cache hits
+< # TYPE mygramdb_cache_hits_total counter
+< mygramdb_cache_hits_total <INT>
+<
+< # HELP mygramdb_cache_misses_total Total number of cache misses
+< # TYPE mygramdb_cache_misses_total counter
+< mygramdb_cache_misses_total{reason="not_found"} <INT>
+< mygramdb_cache_misses_total{reason="ttl_expired"} <INT>
+< mygramdb_cache_misses_total{reason="invalidated"} <INT>
+<
+< # HELP mygramdb_cache_entries Current number of cache entries
+< # TYPE mygramdb_cache_entries gauge
+< mygramdb_cache_entries <INT>
+<
+< # HELP mygramdb_cache_memory_bytes Current cache memory usage in bytes
+< # TYPE mygramdb_cache_memory_bytes gauge
+< mygramdb_cache_memory_bytes{type="cache"} <INT>
+< mygramdb_cache_memory_bytes{type="invalidation_index"} <INT>
+< mygramdb_cache_memory_bytes{type="invalidation_queue"} <INT>
+< mygramdb_cache_memory_bytes{type="accounted_total"} <INT>
+<
+< # HELP mygramdb_cache_evictions_total Total number of cache evictions
+< # TYPE mygramdb_cache_evictions_total counter
+< mygramdb_cache_evictions_total <INT>
+<
+< # HELP mygramdb_cache_ttl_expirations_total Total TTL-expired entries removed
+< # TYPE mygramdb_cache_ttl_expirations_total counter
+< mygramdb_cache_ttl_expirations_total <INT>
+<
+< # HELP mygramdb_cache_rejections_total Total inserts rejected for being below the cost threshold
+< # TYPE mygramdb_cache_rejections_total counter
+< mygramdb_cache_rejections_total <INT>
+<
+< # HELP mygramdb_cache_insert_rejections_total Cache inserts rejected by reason
+< # TYPE mygramdb_cache_insert_rejections_total counter
+< mygramdb_cache_insert_rejections_total{reason="oversize"} <INT>
+< mygramdb_cache_insert_rejections_total{reason="memory_budget"} <INT>
+< mygramdb_cache_insert_rejections_total{reason="duplicate"} <INT>
+<
+< # HELP mygramdb_cache_stale_entry_removals_total Entries removed after stale-payload detection
+< # TYPE mygramdb_cache_stale_entry_removals_total counter
+< mygramdb_cache_stale_entry_removals_total <INT>
+<
+< # HELP mygramdb_cache_decompression_failures_total Cached payload decompression failures
+< # TYPE mygramdb_cache_decompression_failures_total counter
+< mygramdb_cache_decompression_failures_total <INT>
+<
+< # HELP mygramdb_cache_stale_lru_entries_total Defensive stale LRU entries detected
+< # TYPE mygramdb_cache_stale_lru_entries_total counter
+< mygramdb_cache_stale_lru_entries_total <INT>
+<
+< # HELP mygramdb_cache_forced_clears_total Total Clear()/ClearTable() invocations
+< # TYPE mygramdb_cache_forced_clears_total counter
+< mygramdb_cache_forced_clears_total <INT>
+<
+< # HELP mygramdb_cache_max_memory_bytes Configured cache memory ceiling
+< # TYPE mygramdb_cache_max_memory_bytes gauge
+< mygramdb_cache_max_memory_bytes 33554432
+<
+< # HELP mygramdb_cache_min_query_cost_ms Cost threshold below which inserts are rejected
+< # TYPE mygramdb_cache_min_query_cost_ms gauge
+< mygramdb_cache_min_query_cost_ms 10.000
+<
+< # HELP mygramdb_cache_ttl_seconds Configured TTL in seconds (0 = no expiration)
+< # TYPE mygramdb_cache_ttl_seconds gauge
+< mygramdb_cache_ttl_seconds 3600
+<
+< # HELP mygramdb_cache_compression_enabled Whether LZ4 compression is enabled (0/1)
+< # TYPE mygramdb_cache_compression_enabled gauge
+< mygramdb_cache_compression_enabled 1
+<
+< # HELP mygramdb_cache_invalidations_total Total number of cache invalidations
+< # TYPE mygramdb_cache_invalidations_total counter
+< mygramdb_cache_invalidations_total{phase="immediate"} <INT>
+< mygramdb_cache_invalidations_total{phase="deferred"} <INT>
+< mygramdb_cache_invalidations_total{phase="batch"} <INT>
+<
+< # HELP mygramdb_cache_hit_rate Cache hit rate ratio
+< # TYPE mygramdb_cache_hit_rate gauge
+< mygramdb_cache_hit_rate <FLOAT>
+<
+### 089 HTTP unrouted path
+> GET /no-such-route
+< status: 404
+< content-type:
+<
+### 090 HTTP optimize without credentials
+> POST /optimize
+> content-type: application/json
+> {}
+< status: 401
+< content-type: application/json
+< www-authenticate: Bearer
+< {
+<   "error": "Administrative endpoint requires a valid bearer token",
+<   "error_code": 7
+< }
+### 091 HTTP optimize with wrong credentials
+> POST /optimize
+> Authorization: Bearer wrong-token
+> content-type: application/json
+> {}
+< status: 401
+< content-type: application/json
+< www-authenticate: Bearer
+< {
+<   "error": "Administrative endpoint requires a valid bearer token",
+<   "error_code": 7
+< }
+### 092 HTTP optimize invalid table type
+> POST /optimize
+> Authorization: Bearer shape-admin-token
+> content-type: application/json
+> {"table":42}
+< status: 400
+< content-type: application/json
+< {
+<   "error": "Field 'table' must be a string",
+<   "error_code": 3000
+< }
+### 093 HTTP optimize unknown table
+> POST /optimize
+> Authorization: Bearer shape-admin-token
+> content-type: application/json
+> {"table":"app.missing"}
+< status: 404
+< content-type: application/json
+< {
+<   "error": "Table not found: app.missing",
+<   "error_code": 4007
+< }
+### 094 HTTP optimize success
+> POST /optimize
+> Authorization: Bearer shape-admin-token
+> content-type: application/json
+> {}
+< status: 200
+< content-type: application/json
+< {
+<   "result": "OPTIMIZED tables=1 terms=79 delta=49 roaring=30 memory=<BYTES_HUMAN>",
+<   "status": "ok"
+< }
+### 095 TCP DEBUG ON
+> DEBUG ON
+< OK DEBUG_ON\r
+### 096 TCP SEARCH with debug block
+> SEARCH app.articles machine LIMIT 1
+< OK RESULTS 3 doc_4\r
+< \r
+< # DEBUG\r
+< query_time: <DURATION_MS>ms\r
+< index_time: <DURATION_MS>ms\r
+< terms: 1\r
+< ngrams: 6\r
+< candidates: 3\r
+< after_intersection: 3\r
+< after_not: 3\r
+< after_filters: 3\r
+< final: 1\r
+< optimization: size-based term ordering\r
+< sort: id DESC (default)\r
+< limit: 1\r
+< cache: miss\r
+< cache_reason: not_found\r
+< cache_cost_ms: <DURATION_MS>\r
+< \r
+### 097 TCP DEBUG OFF
+> DEBUG OFF
+< OK DEBUG_OFF\r
+### 098 TCP SET success
+> SET api.default_limit = 10
+< +OK Variable 'api.default_limit' set to '10'\r
+< \r
+### 099 TCP SET unknown variable
+> SET no.such.variable = 1
+< ERROR 2 Failed to set variable 'no.such.variable': Unknown variable: no.such.variable\r
+### 100 TCP SET bad arity
+> SET
+< ERROR 3000 SET: No variable assignments found\r
+### 101 TCP CACHE DISABLE
+> CACHE DISABLE
+< OK CACHE_DISABLED\r
+### 102 TCP CACHE ENABLE
+> CACHE ENABLE
+< OK CACHE_ENABLED\r
+### 103 TCP CACHE CLEAR all tables
+> CACHE CLEAR
+< OK CACHE_CLEARED\r
+### 104 TCP CACHE CLEAR unknown table
+> CACHE CLEAR app.missing
+< ERROR 4007 Table not found or ambiguous: app.missing\r
+### 105 TCP OPTIMIZE all tables
+> OPTIMIZE
+< OK OPTIMIZED tables=1 terms=79 delta=49 roaring=30 memory=<BYTES_HUMAN>\r
+### 106 TCP OPTIMIZE unknown table
+> OPTIMIZE app.missing
+< ERROR 4007 Table not found: app.missing\r
+### 107 TCP REPLICATION STOP
+> REPLICATION STOP
+< ERROR 4 Replication is not configured\r
+### 108 TCP REPLICATION START
+> REPLICATION START
+< ERROR 4 Replication is not configured\r
+### 109 TCP SYNC STOP
+> SYNC STOP
+< ERROR 8 No active SYNC operations to stop\r
+### 110 TCP DUMP SAVE
+> DUMP SAVE <PATH>
+< OK DUMP_STARTED <PATH>\r
+### 111 TCP DUMP STATUS after save
+> DUMP STATUS
+< OK DUMP_STATUS\r
+< save_in_progress: false\r
+< load_in_progress: false\r
+< replication_paused_for_dump: false\r
+< status: COMPLETED\r
+< filepath: <PATH>\r
+< tables_processed: 0\r
+< tables_total: 1\r
+< current_table: app.articles\r
+< elapsed_seconds: <DURATION_S>\r
+< result_filepath: <PATH>\r
+< END\r
+### 112 TCP DUMP INFO success
+> DUMP INFO <PATH>
+< OK DUMP_INFO <PATH>\r
+< version: 2\r
+< gtid: \r
+< tables: 1\r
+< flags: 16\r
+< file_size: <INT>\r
+< timestamp: <TIMESTAMP>\r
+< has_statistics: false\r
+< END\r
+### 113 TCP DUMP VERIFY success
+> DUMP VERIFY <PATH>
+< OK DUMP_VERIFIED <PATH>\r
+### 114 TCP DUMP LOAD success
+> DUMP LOAD <PATH>
+< OK LOADED <PATH>\r
+### 115 TCP SAVE legacy
+> SAVE <PATH>
+< ERROR 3000 SAVE is no longer supported; use DUMP SAVE\r
+### 116 TCP LOAD legacy
+> LOAD <PATH>
+< ERROR 3000 LOAD is no longer supported; use DUMP LOAD\r
+### 117 TCP rate limit first request allowed
+> COUNT app.articles learning
+< OK COUNT 3\r
+### 118 TCP rate limit second request rejected
+> COUNT app.articles learning
+< ERROR 6030 Rate limit exceeded\r
+### 119 HTTP rate limit first request allowed
+> POST /tables/app.articles/count
+> content-type: application/json
+> {"q":"learning"}
+< status: 200
+< content-type: application/json
+< {
+<   "count": 3
+< }
+### 120 HTTP rate limit second request rejected
+> POST /tables/app.articles/count
+> content-type: application/json
+> {"q":"learning"}
+< status: 429
+< content-type: application/json
+< {
+<   "error": "Rate limit exceeded",
+<   "error_code": 6030
+< }

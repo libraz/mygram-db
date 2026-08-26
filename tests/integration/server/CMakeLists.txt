@@ -184,3 +184,31 @@ gtest_discover_tests(reactor_integration_test
     # budget left too little headroom on that runner.
     TIMEOUT 300
 )
+
+# Response Shape Snapshot Test
+#
+# Pins the client-visible responses of both protocol surfaces against
+# spec/response-shapes.snapshot.txt. The golden path is injected so the test
+# never resolves it relative to the working directory ctest happens to use.
+add_executable(response_shape_snapshot_test
+  response_shape_snapshot_test.cpp
+)
+
+target_link_libraries(response_shape_snapshot_test
+  mygramdb_server
+  GTest::gtest_main
+)
+
+target_compile_definitions(response_shape_snapshot_test PRIVATE
+  MYGRAMDB_RESPONSE_SHAPE_GOLDEN="${CMAKE_SOURCE_DIR}/spec/response-shapes.snapshot.txt"
+)
+
+# RESOURCE_LOCK: binds TCP and HTTP listeners and writes dump files into a
+# per-run temporary directory.
+gtest_discover_tests(response_shape_snapshot_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    RESOURCE_LOCK server_port
+    TIMEOUT 60
+)
