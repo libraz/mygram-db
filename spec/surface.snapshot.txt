@@ -84,6 +84,8 @@ GET /tables/([^/]+)/(.+) auth=none
 1005 = JSON schema error
 1006 = YAML parsing error
 1007 = JSON parsing error
+1008 = Unknown configuration variable
+1009 = Configuration variable is not runtime-mutable
 2000 = MySQL connection failed
 2001 = MySQL query failed
 2002 = MySQL disconnected
@@ -192,7 +194,7 @@ GET /tables/([^/]+)/(.+) auth=none
 8003 = Cache decompression failed
 8004 = Cache worker start failed
 count 0-999 = 12
-count 1000-1999 = 8
+count 1000-1999 = 10
 count 2000-2999 = 21
 count 3000-3999 = 12
 count 4000-4999 = 14
@@ -200,7 +202,7 @@ count 5000-5999 = 13
 count 6000-6999 = 29
 count 7000-7999 = 13
 count 8000-8999 = 5
-count total = 127
+count total = 129
 [config-keys]
 api type=object mutable=no
 api.admin_token type=string default="" mutable=no

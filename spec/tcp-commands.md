@@ -47,8 +47,8 @@ the source.
 | Pending-frame count/byte cap exceeded, or shared budget exhausted | Best-effort send `ERROR 6030 server busy`, then close | `src/server/reactor_connection.cpp:176`, `src/server/reactor_connection.cpp:387`, `src/server/reactor_connection.cpp:418` |
 | Event multiplexer rejects the backpressure interest update | Best-effort send `ERROR 6019 event multiplexer modify failed`, then close | `src/server/reactor_connection.cpp:179-181`, `src/server/reactor_connection.cpp:414-416` |
 | Unsent response bytes exceed the per-connection cap | Connection closed with no error frame | `src/server/reactor_connection.cpp:760-770` |
-| Thread pool queue full when scheduling a drain task | Send `ERROR 6030 SERVER_BUSY Server is too busy, please try again later`, then close | `src/server/reactor_connection.cpp:411-412`, `src/server/reactor_connection.cpp:418-434` |
-| Reactor registration fails at accept time | Send `ERROR 6030 SERVER_BUSY Server is too busy, please try again later`, then close | `src/server/connection_acceptor.cpp:590-604` |
+| Thread pool queue full when scheduling a drain task | Send `ERROR 6030 SERVER_BUSY Server is too busy, please try again later` on that request's own connection, count it in `requests_denied_pool_full_tcp`, then close | `src/server/reactor_connection.cpp:447-457`, `src/server/reactor_connection.cpp:459-475` |
+| Reactor registration fails at accept time | Send `ERROR 6030 SERVER_BUSY Server is too busy, please try again later`, then close | `src/server/connection_acceptor.cpp:589-593` |
 
 The best-effort error frames above are written with a blocking `send()` loop only when the
 write queue is empty, and are followed unconditionally by connection teardown
@@ -441,7 +441,7 @@ Filter column values are rendered per type: `NULL` for absent, `true`/`false` fo
 strings escaped per §11.1, doubles at 6 decimal places, `TimeValue` as integer seconds, 8-bit
 integers widened to `int` (`src/server/response_formatter.cpp:447-470`).
 
-Document absent → `ERROR 8 Document not found`
+Document absent → `ERROR 4004 Document not found`
 (`src/server/handlers/document_handler.cpp:35-37`, `src/server/response_formatter.cpp:436`).
 The loading and syncing pre-flight checks of §8.1 apply
 (`src/server/handlers/document_handler.cpp:13-19`).
@@ -927,6 +927,10 @@ value, or a standalone `,` token, separates assignments
 | Middle token is not `=` | `ERROR 3000 SET: Expected '=' after variable name` (`src/query/query_parser.cpp:420-423`) |
 | A token that is neither a separator nor the start of a new assignment | `ERROR 3000 SET: Expected ',' or end of query` (`src/query/query_parser.cpp:443-450`) |
 | No assignments parsed | `ERROR 3000 SET: No variable assignments found` (`src/query/query_parser.cpp:453-456`) |
+| No variable by that name | `ERROR 1008 Failed to set variable '<name>': Unknown variable: <name>` (`src/config/runtime_variable_manager.cpp:223`, reached from `src/server/handlers/variable_handler.cpp:56`) |
+| Variable exists but is startup-only | `ERROR 1009 Failed to set variable '<name>': Variable '<name>' is immutable (requires restart)` (`src/config/runtime_variable_manager.cpp:86`) |
+| Value rejected for a mutable variable | `ERROR 1004 Failed to set variable '<name>': <reason>` (`src/config/runtime_variable_manager.cpp:295`) |
+| `cache.enabled = true` when the cache subsystem cannot start | `ERROR 8001 Failed to set variable 'cache.enabled': Cache cannot be enabled` (`src/config/runtime_variable_manager.cpp:481`) |
 
 **Success responses** (`src/server/handlers/variable_handler.cpp:80-91`):
 

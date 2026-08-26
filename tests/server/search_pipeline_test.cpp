@@ -2453,4 +2453,108 @@ TEST_F(BuildPipelineParamsTest, EmptySynonymDictionaryIsNotWired) {
   EXPECT_EQ(params.synonym_dict, nullptr);
 }
 
+// ===========================================================================
+// Relevance sort: term / document-frequency pairing
+// ===========================================================================
+
+/**
+ * @brief Scoring inputs whose term_infos no longer line up with all_search_terms.
+ *
+ * term_infos are ordered by posting-list size and a cache hit supplies them
+ * directly, so index i of term_infos is not index i of all_search_terms. An
+ * entry carrying no normalized term must therefore leave both the term vector
+ * and the document-frequency vector, never be resolved positionally against
+ * the other sequence.
+ */
+class RelevanceSortTermPairingTest : public ::testing::Test {
+ protected:
+  static constexpr uint64_t kCorpusDocCount = 1000;
+
+  void SetUp() override {
+    index_ = std::make_unique<index::Index>(2);
+    doc_store_ = std::make_unique<storage::DocumentStore>();
+
+    // "alpha" is repeated so that its term frequency dominates the score once a
+    // high IDF is (incorrectly) attached to it; "beta" occurs once.
+    AddDocument("pk_alpha", "alpha alpha alpha alpha");
+    AddDocument("pk_beta", "beta");
+
+    bm25_stats_.doc_count.store(kCorpusDocCount, std::memory_order_relaxed);
+    bm25_stats_.total_doc_length.store(kCorpusDocCount * 10, std::memory_order_relaxed);
+
+    config_.bm25.enable = true;
+    // Length normalization off: the pairing under test is the IDF input, and a
+    // length term would blur the two rankings this fixture distinguishes.
+    config_.bm25.b = 0.0;
+  }
+
+  void AddDocument(const std::string& primary_key, const std::string& text) {
+    auto doc_id = doc_store_->AddDocument(primary_key, {}, text);
+    ASSERT_TRUE(doc_id.has_value());
+    index_->AddDocument(*doc_id, text);
+    doc_store_->SetNormalizedText(*doc_id, text);
+    doc_ids_.push_back(*doc_id);
+  }
+
+  RelevanceSortParams MakeParams() {
+    RelevanceSortParams params;
+    params.index = index_.get();
+    params.doc_store = doc_store_.get();
+    params.full_config = &config_;
+    params.bm25_stats = &bm25_stats_;
+    params.ngram_size = 2;
+    return params;
+  }
+
+  static query::Query MakeScoreQuery() {
+    query::Query query;
+    query.type = query::QueryType::SEARCH;
+    query.table = "test";
+    query.limit = 10;
+    query.order_by = query::OrderByClause{"_score", query::SortOrder::DESC};
+    return query;
+  }
+
+  static SearchTermInfo MakeTermInfo(std::string normalized_term, uint64_t term_doc_freq) {
+    SearchTermInfo term_info;
+    term_info.normalized_term = std::move(normalized_term);
+    term_info.term_doc_freq = term_doc_freq;
+    term_info.term_doc_freq_computed = true;
+    return term_info;
+  }
+
+  std::unique_ptr<index::Index> index_;
+  std::unique_ptr<storage::DocumentStore> doc_store_;
+  std::vector<storage::DocId> doc_ids_;
+  BM25Stats bm25_stats_;
+  config::Config config_;
+};
+
+TEST_F(RelevanceSortTermPairingTest, TermWithoutNormalizedTextLeavesBothScoringVectors) {
+  const std::vector<std::string> all_search_terms{"alpha"};
+  std::vector<SearchTermInfo> term_infos{MakeTermInfo("alpha", 1), MakeTermInfo("", 2)};
+
+  auto ordered = ScoreAndSortByRelevance(MakeScoreQuery(), doc_ids_, all_search_terms, term_infos, MakeParams());
+
+  ASSERT_TRUE(ordered.has_value()) << (ordered.has_value() ? std::string{} : ordered.error().to_string());
+  EXPECT_EQ(ordered->size(), doc_ids_.size());
+}
+
+TEST_F(RelevanceSortTermPairingTest, ReorderedTermInfosKeepEachTermWithItsOwnDocumentFrequency) {
+  const std::vector<std::string> all_search_terms{"alpha", "beta"};
+  // Position 0 carries no normalized term; resolving it against
+  // all_search_terms[0] would score "alpha" with the rare-term IDF that
+  // belongs to another entry and rank the alpha-heavy document first.
+  std::vector<SearchTermInfo> term_infos{MakeTermInfo("", 1), MakeTermInfo("beta", 1),
+                                         MakeTermInfo("alpha", kCorpusDocCount - 1)};
+
+  auto ordered = ScoreAndSortByRelevance(MakeScoreQuery(), doc_ids_, all_search_terms, term_infos, MakeParams());
+
+  ASSERT_TRUE(ordered.has_value()) << (ordered.has_value() ? std::string{} : ordered.error().to_string());
+  ASSERT_EQ(ordered->size(), 2U);
+  auto beta_doc = doc_store_->GetDocId("pk_beta");
+  ASSERT_TRUE(beta_doc.has_value());
+  EXPECT_EQ((*ordered)[0], *beta_doc) << "the rare term's document frequency must stay with the rare term";
+}
+
 }  // namespace mygramdb::server::search_pipeline

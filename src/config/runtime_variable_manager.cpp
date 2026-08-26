@@ -83,10 +83,10 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
   if (kMutableVariables.find(variable_name) == kMutableVariables.end()) {
     std::shared_lock lock(mutex_);
     if (GetVariableInternal(variable_name).has_value()) {
-      return MakeUnexpected(
-          MakeError(ErrorCode::kInvalidArgument, "Variable '" + variable_name + "' is immutable (requires restart)"));
+      return MakeUnexpected(MakeError(ErrorCode::kConfigVariableNotMutable,
+                                      "Variable '" + variable_name + "' is immutable (requires restart)"));
     }
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Unknown variable: " + variable_name));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigUnknownVariable, "Unknown variable: " + variable_name));
   }
 
   // Apply variable-specific logic under a single lock, then call callbacks outside.
@@ -202,7 +202,8 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
       return result;
     }
   } else {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Variable not implemented: " + variable_name));
+    return MakeUnexpected(
+        MakeError(ErrorCode::kConfigVariableNotMutable, "Variable not implemented: " + variable_name));
   }
 
   // Log the change
@@ -219,7 +220,7 @@ Expected<std::string, Error> RuntimeVariableManager::GetVariable(const std::stri
   std::shared_lock lock(mutex_);
   auto value = GetVariableInternal(variable_name);
   if (!value.has_value()) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Unknown variable: " + variable_name));
+    return MakeUnexpected(MakeError(ErrorCode::kConfigUnknownVariable, "Unknown variable: " + variable_name));
   }
   return *value;
 }
@@ -477,7 +478,7 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheEnabled(bool value) {
         std::unique_lock lock(mutex_);
         base_config_.cache.enabled = false;
         runtime_values_["cache.enabled"] = "false";
-        return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Cache cannot be enabled"));
+        return MakeUnexpected(MakeError(ErrorCode::kCacheDisabled, "Cache cannot be enabled"));
       }
     } else {
       cache_mgr->Disable();

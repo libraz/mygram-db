@@ -48,14 +48,16 @@ enum class ErrorCode : std::uint16_t {
   kCancelled = 11,        ///< Operation cancelled
 
   // ===== Configuration Errors (1000-1999) =====
-  kConfigFileNotFound = 1000,     ///< Configuration file not found
-  kConfigParseError = 1001,       ///< Failed to parse configuration file
-  kConfigValidationError = 1002,  ///< Configuration validation failed
-  kConfigMissingRequired = 1003,  ///< Required configuration field missing
-  kConfigInvalidValue = 1004,     ///< Invalid configuration value
-  kConfigSchemaError = 1005,      ///< JSON schema validation error
-  kConfigYamlError = 1006,        ///< YAML parsing error
-  kConfigJsonError = 1007,        ///< JSON parsing error
+  kConfigFileNotFound = 1000,        ///< Configuration file not found
+  kConfigParseError = 1001,          ///< Failed to parse configuration file
+  kConfigValidationError = 1002,     ///< Configuration validation failed
+  kConfigMissingRequired = 1003,     ///< Required configuration field missing
+  kConfigInvalidValue = 1004,        ///< Invalid configuration value
+  kConfigSchemaError = 1005,         ///< JSON schema validation error
+  kConfigYamlError = 1006,           ///< YAML parsing error
+  kConfigJsonError = 1007,           ///< JSON parsing error
+  kConfigUnknownVariable = 1008,     ///< No configuration variable by that name
+  kConfigVariableNotMutable = 1009,  ///< Configuration variable cannot be changed at runtime
 
   // ===== MySQL/Database Errors (2000-2999) =====
   kMySQLConnectionFailed = 2000,        ///< Failed to connect to MySQL
@@ -229,6 +231,10 @@ inline const char* ErrorCodeToString(ErrorCode code) {
       return "YAML parsing error";
     case ErrorCode::kConfigJsonError:
       return "JSON parsing error";
+    case ErrorCode::kConfigUnknownVariable:
+      return "Unknown configuration variable";
+    case ErrorCode::kConfigVariableNotMutable:
+      return "Configuration variable is not runtime-mutable";
 
     // MySQL
     case ErrorCode::kMySQLConnectionFailed:

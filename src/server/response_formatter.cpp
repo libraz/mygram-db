@@ -433,7 +433,7 @@ std::string ResponseFormatter::FormatFacetResponse(const std::vector<std::pair<s
 
 std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Document>& doc) {
   if (!doc) {
-    return FormatError("Document not found", mygram::utils::ErrorCode::kNotFound);
+    return FormatError("Document not found", mygram::utils::ErrorCode::kIndexDocumentNotFound);
   }
 
   std::ostringstream oss;

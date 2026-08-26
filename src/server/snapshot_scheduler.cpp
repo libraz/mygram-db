@@ -37,19 +37,27 @@ constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every se
 constexpr auto kOrphanTempSnapshotMaxAge = std::chrono::hours(1);
 
 bool IsDumpTempFile(const std::filesystem::path& path) {
+  // AtomicFileWriter derives its temp name from the target path alone: either
+  // "<target>.tmp.<pid>.<random>" or, without a unique suffix, "<target>.tmp".
+  // The target of a manual DUMP SAVE is whatever the operator named — the dump
+  // handler resolves it without an extension whitelist — so requiring ".dmp"
+  // here would leave those temporaries in the dump directory forever. Anything
+  // that cannot be derived from a target path this way is left untouched.
+  constexpr std::string_view kTempSuffix = ".tmp";
   const std::string filename = path.filename().string();
-  const auto marker = filename.find(".dmp.tmp");
-  if (marker == std::string::npos) {
+  if (filename.size() <= kTempSuffix.size()) {
     return false;
   }
-  const auto suffix_offset = marker + std::string_view(".dmp.tmp").size();
-  if (suffix_offset == filename.size()) {
+  if (filename.compare(filename.size() - kTempSuffix.size(), kTempSuffix.size(), kTempSuffix) == 0) {
     return true;
   }
-  if (filename[suffix_offset] != '.') {
+
+  const auto marker = filename.rfind(".tmp.");
+  if (marker == std::string::npos || marker == 0) {
     return false;
   }
-  const std::string_view unique_suffix(filename.data() + suffix_offset + 1, filename.size() - suffix_offset - 1);
+  const auto suffix_offset = marker + std::string_view(".tmp.").size();
+  const std::string_view unique_suffix(filename.data() + suffix_offset, filename.size() - suffix_offset);
   const auto separator = unique_suffix.find('.');
   if (separator == std::string_view::npos || separator == 0 || separator + 1 == unique_suffix.size()) {
     return false;

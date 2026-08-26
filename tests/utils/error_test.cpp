@@ -250,6 +250,9 @@ TEST(ErrorCodeTest, AllConfigErrorCodes) {
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigSchemaError), "JSON schema error");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigYamlError), "YAML parsing error");
   EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigJsonError), "JSON parsing error");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigUnknownVariable), "Unknown configuration variable");
+  EXPECT_STREQ(ErrorCodeToString(ErrorCode::kConfigVariableNotMutable),
+               "Configuration variable is not runtime-mutable");
 }
 
 TEST(ErrorCodeTest, AllMySQLErrorCodes) {

@@ -17,7 +17,7 @@ The root object requires `mysql` and `tables`, and rejects unknown top-level key
 | Mutability | `startup-only` or `runtime-mutable`. `unread` marks a key that is parsed and stored but never consumed by any component (see [Unread keys](#unread-keys)). |
 | Validated where | Where the value is constrained. `config-schema.json:N` means schema-only, enforced by `config_validator.cpp:210`. |
 
-Runtime mutation is available through the variable surface. The mutable set is an explicit allowlist at `runtime_variable_manager.cpp:48`; every other key is readable but rejects mutation with an "immutable (requires restart)" error (`runtime_variable_manager.cpp:83`).
+Runtime mutation is available through the variable surface. The mutable set is an explicit allowlist at `runtime_variable_manager.cpp:48`; every other key is readable but rejects mutation with error 1009 `kConfigVariableNotMutable`, "immutable (requires restart)" (`runtime_variable_manager.cpp:86`). A name that is not a configuration key at all is rejected with 1008 `kConfigUnknownVariable` (`runtime_variable_manager.cpp:89`), and a rejected value for a mutable key with 1004 `kConfigInvalidValue`.
 
 ## `mysql`
 
@@ -213,7 +213,7 @@ These write into `api.tcp.bind` / `api.tcp.port`. The `server` block is parsed b
 |---|---|---|---|---|---|
 | `network.allow_cidrs` | string[] | every entry must parse as an IPv4 or IPv6 CIDR | `[]` | startup-only | `config.cpp:1313` |
 
-An empty or omitted list denies every non-probe request (fail-closed, `network_utils.h:100`) and produces a startup warning rather than a failure (`server_orchestrator.cpp:903`). A universal entry (`0.0.0.0/0`, `::/0`) combined with a non-loopback `api.tcp.bind` or `api.http.bind` is a hard failure (`config.cpp:132`).
+An empty or omitted list denies every request, health probes included (fail-closed, `network_utils.h:100`) and produces a startup warning rather than a failure (`server_orchestrator.cpp:903`). A universal entry (`0.0.0.0/0`, `::/0`) combined with a non-loopback `api.tcp.bind` or `api.http.bind` is a hard failure (`config.cpp:132`).
 
 ## `logging`
 
@@ -434,7 +434,7 @@ The types that pass are the ones both paths render identically: the integer widt
 
 ### Warning and continue
 
-- `network.allow_cidrs` empty or omitted — every non-probe connection will be denied; logged as `network_acl_empty` and startup proceeds (`server_orchestrator.cpp:903`).
+- `network.allow_cidrs` empty or omitted — every connection will be denied, health probes included; logged as `network_acl_empty` and startup proceeds (`server_orchestrator.cpp:903`).
 - Physical memory size cannot be detected — the `cache.max_memory_mb` ratio check is skipped; logged as `config_warning` with reason `system_memory_info_unavailable` (`config.cpp:1425`).
 - `dump.load_on_startup: true` and the dump cannot be read, fails an integrity or identity check, or the MySQL source UUID is unavailable — logged as `startup_dump_load_failed` with `action: fallback_to_mysql_snapshot`, and startup continues by building a snapshot from MySQL (`server_orchestrator.cpp:621`, `server_orchestrator.cpp:628`).
 - `logging.level` outside the enum — logged as "Unknown log level, keeping current level" and startup continues (`configuration_manager.cpp:183`). Unreachable through a schema-validated configuration, because the schema enum rejects the value first.

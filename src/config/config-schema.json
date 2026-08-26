@@ -633,7 +633,7 @@
             },
             "thread_pool_queue_size": {
               "type": "integer",
-              "description": "Maximum number of connection tasks that can be queued waiting for a worker. When this is exceeded, the acceptor sends SERVER_BUSY and closes the connection. 0 = unbounded (not recommended in production).",
+              "description": "Maximum number of request tasks that can be queued waiting for a worker. When a request finds the queue full, that request's connection receives ERROR 6030 SERVER_BUSY and is closed -- an established, already-served client, not just a new one -- and requests_denied_pool_full_tcp is incremented. 0 = unbounded (not recommended in production).",
               "default": 1000,
               "minimum": 0,
               "maximum": 1000000
@@ -859,7 +859,7 @@
       "properties": {
         "allow_cidrs": {
           "type": "array",
-          "description": "IPv4 or IPv6 CIDR allow list applied to TCP and HTTP. Empty or omitted denies all non-probe requests (fail-closed); use 0.0.0.0/0 or ::/0 to explicitly allow all.",
+          "description": "IPv4 or IPv6 CIDR allow list applied to TCP and to every HTTP route, health probes included -- there is no per-path exemption. Empty or omitted denies all requests (fail-closed); use 0.0.0.0/0 or ::/0 to explicitly allow all. A container HEALTHCHECK therefore needs the probe's own source in the list: 127.0.0.1/32 for IPv4, plus ::1/128 where localhost resolves over IPv6.",
           "items": {
             "type": "string"
           }

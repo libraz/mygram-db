@@ -89,7 +89,10 @@ WORKDIR /var/lib/mygramdb
 # Expose default ports (TCP API + HTTP API)
 EXPOSE 11016 8080
 
-# Health check via HTTP API (health endpoints bypass CIDR restrictions)
+# Health check via HTTP API. The CIDR allow list applies to health endpoints
+# too, so NETWORK_ALLOW_CIDRS must contain this probe's source address
+# (127.0.0.1/32, plus ::1/128 if localhost resolves over IPv6) or the container
+# is reported unhealthy on a 403 that curl -sf hides.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -sf http://localhost:8080/health/live || exit 1
 

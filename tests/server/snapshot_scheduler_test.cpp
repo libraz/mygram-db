@@ -395,6 +395,48 @@ TEST_F(SnapshotSchedulerTest, CleanupRemovesOldAutoAndManualDumpTempFiles) {
   EXPECT_TRUE(std::filesystem::exists(unrelated_temp));
 }
 
+// DUMP SAVE accepts any filename: the dump handler resolves the requested path
+// with no extension whitelist, so AtomicFileWriter derives the temp name from
+// whatever the operator asked for. The orphan sweep must key on the temp naming
+// AtomicFileWriter produces, not on a ".dmp" that may never be part of the name.
+TEST_F(SnapshotSchedulerTest, CleanupRemovesOldManualDumpTempFilesWithoutDmpExtension) {
+  const auto old_extensionless_temp = test_dir_ / "backup-20240101.tmp.123.456";
+  const auto old_other_extension_temp = test_dir_ / "backup-20240101.bak.tmp.987.654";
+  const auto old_legacy_extensionless_temp = test_dir_ / "backup-20240102.tmp";
+  const auto recent_extensionless_temp = test_dir_ / "backup-20240103.tmp.123.457";
+  const auto undeliverable_suffix = test_dir_ / "backup-20240104.tmp.123.keep";
+  const auto unrelated_file = test_dir_ / "notes.tmp.keep";
+
+  std::ofstream(old_extensionless_temp) << "old temp";
+  std::ofstream(old_other_extension_temp) << "old temp";
+  std::ofstream(old_legacy_extensionless_temp) << "old legacy temp";
+  std::ofstream(recent_extensionless_temp) << "recent temp";
+  std::ofstream(undeliverable_suffix) << "keep";
+  std::ofstream(unrelated_file) << "keep";
+
+  const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+  std::filesystem::last_write_time(old_extensionless_temp, old_time);
+  std::filesystem::last_write_time(old_other_extension_temp, old_time);
+  std::filesystem::last_write_time(old_legacy_extensionless_temp, old_time);
+  std::filesystem::last_write_time(undeliverable_suffix, old_time);
+  std::filesystem::last_write_time(unrelated_file, old_time);
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 0;
+  dump_config.retain = 0;
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+
+  ASSERT_TRUE(scheduler.Start().has_value());
+
+  EXPECT_FALSE(std::filesystem::exists(old_extensionless_temp));
+  EXPECT_FALSE(std::filesystem::exists(old_other_extension_temp));
+  EXPECT_FALSE(std::filesystem::exists(old_legacy_extensionless_temp));
+  EXPECT_TRUE(std::filesystem::exists(recent_extensionless_temp));
+  EXPECT_TRUE(std::filesystem::exists(undeliverable_suffix));
+  EXPECT_TRUE(std::filesystem::exists(unrelated_file));
+}
+
 // ===========================================================================
 // Edge cases
 // ===========================================================================

@@ -172,7 +172,7 @@ TEST(ResponseFormatterGetTest, DocumentNotFound) {
   std::optional<storage::Document> doc = std::nullopt;
 
   auto response = ResponseFormatter::FormatGetResponse(doc);
-  EXPECT_EQ(response, "ERROR 8 Document not found");
+  EXPECT_EQ(response, "ERROR 4004 Document not found");
 }
 
 /**

@@ -143,7 +143,7 @@ TEST_F(HttpServerTest, GetDocumentNotFound) {
   auto body = json::parse(res->body);
   EXPECT_TRUE(body.contains("error"));
   EXPECT_EQ(body["error"], "Document not found");
-  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kNotFound));
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kIndexDocumentNotFound));
 }
 
 TEST_F(HttpServerTest, GetDocumentWithSlashInPrimaryKey) {

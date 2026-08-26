@@ -945,18 +945,23 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> Score
                                    params.cross_boundary_ngrams, /*compute_term_doc_freq=*/true, params.doc_store);
   }
 
-  // Reuse pre-computed term_infos (already normalized and ngram-generated)
+  // Reuse pre-computed term_infos (already normalized and ngram-generated).
+  //
+  // BM25Scorer consumes the two vectors as parallel arrays, so index i of one
+  // must describe the same query term as index i of the other. term_infos are
+  // ordered by posting-list size and a cache hit supplies them directly, so
+  // their positions do not correspond to all_search_terms: an entry that
+  // carries no normalized term leaves both vectors rather than being resolved
+  // positionally against that other sequence.
   std::vector<std::string> normalized_terms;
   std::vector<uint64_t> term_dfs;
   normalized_terms.reserve(term_infos.size());
   term_dfs.reserve(term_infos.size());
-  for (size_t i = 0; i < term_infos.size(); ++i) {
-    const auto& term_info = term_infos[i];
-    if (!term_info.normalized_term.empty()) {
-      normalized_terms.push_back(term_info.normalized_term);
-    } else if (i < all_search_terms.size()) {
-      normalized_terms.push_back(params.index->NormalizeText(all_search_terms[i]));
+  for (const auto& term_info : term_infos) {
+    if (term_info.normalized_term.empty()) {
+      continue;
     }
+    normalized_terms.push_back(term_info.normalized_term);
     term_dfs.push_back(term_info.term_doc_freq);
   }
 

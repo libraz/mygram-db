@@ -226,7 +226,7 @@ TEST_F(TcpServerTest, GetNonExistent) {
   ASSERT_GE(sock, 0);
 
   std::string response = SendRequest(sock, "GET test 999");
-  EXPECT_EQ(response, "ERROR 8 Document not found");
+  EXPECT_EQ(response, "ERROR 4004 Document not found");
 
   close(sock);
 }

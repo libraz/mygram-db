@@ -642,7 +642,7 @@ Statuses chosen directly by handlers, independent of that helper:
 | Wrong `Content-Type` | 415 | `kNetworkInvalidRequest` (6007) | `src/server/http_server.cpp:1041`, `:2045` |
 | Missing/bad bearer token | 401 | `kPermissionDenied` (7) | `src/server/http_server.cpp:2059` |
 | Table not found | 404 | `kTableNotFound` (4007) | `src/server/http_server.cpp:987-989` |
-| Document not found | 404 | `kNotFound` (8) | `src/server/http_server.cpp:1573`, `:1579` |
+| Document not found | 404 | `kIndexDocumentNotFound` (4004) | `src/server/http_server.cpp:1475`, `:1481` |
 | Null index/doc store | 500 | `kInternalError` (5) | `src/server/http_server.cpp:1002-1004` |
 | Server loading | 503 | `kServerLoading` (6028) | `src/server/http_server.cpp:1046-1047` |
 | Table synchronizing | 503 | `kServerNotReady` (6029) | `src/server/http_server.cpp:1016-1017` |

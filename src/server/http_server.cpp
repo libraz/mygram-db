@@ -1472,13 +1472,13 @@ void HttpServer::HandleGet(const httplib::Request& req, httplib::Response& res) 
 
     auto doc_id = current_doc_store->GetDocId(primary_key);
     if (!doc_id.has_value()) {
-      SendError(res, kHttpNotFound, "Document not found", mygram::utils::ErrorCode::kNotFound);
+      SendError(res, kHttpNotFound, "Document not found", mygram::utils::ErrorCode::kIndexDocumentNotFound);
       return;
     }
 
     auto doc = current_doc_store->GetDocument(*doc_id);
     if (!doc) {
-      SendError(res, kHttpNotFound, "Document not found", mygram::utils::ErrorCode::kNotFound);
+      SendError(res, kHttpNotFound, "Document not found", mygram::utils::ErrorCode::kIndexDocumentNotFound);
       return;
     }
 

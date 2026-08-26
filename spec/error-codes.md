@@ -7,7 +7,7 @@ This file is normative for MygramDB's error-code surface. It describes what the 
 | Range | Module | Codes defined |
 |-------|--------|---------------|
 | 0-999 | General | 12 |
-| 1000-1999 | Configuration | 8 |
+| 1000-1999 | Configuration | 10 |
 | 2000-2999 | Database/Connection | 21 |
 | 3000-3999 | Query/Request parsing | 12 |
 | 4000-4999 | Business logic (Index/Search) | 14 |
@@ -15,9 +15,9 @@ This file is normative for MygramDB's error-code surface. It describes what the 
 | 6000-6999 | Network/Server | 29 |
 | 7000-7999 | Client | 13 |
 | 8000-8999 | Cache | 5 |
-| **Total** | | **127** |
+| **Total** | | **129** |
 
-Of the 127 defined codes, 106 have at least one construction site in `src/` and 21 have none.
+Of the 129 defined codes, 109 have at least one construction site in `src/` and 20 have none.
 
 The enumerator names below are C++ identifiers (`mygramdb::utils::ErrorCode`). No surface transmits the name — only the unsigned 16-bit number travels over TCP, HTTP, and the C ABI.
 
@@ -57,20 +57,20 @@ The HTTP surface does not have an equivalent blanket path: `HttpServer::SendErro
 |------|---------------|---------|----------|------------------|
 | 0 | `kSuccess` | Operation succeeded; not an error | `status field`, `C ABI` | `src/client/mygramclient_c.cpp:38`, `src/client/mygramclient_c.cpp:138`, `src/mysql/binlog_reader_interface.h:140` |
 | 1 | `kUnknown` | Unknown error | `HTTP`, `C ABI` | `src/server/http_server.cpp:2119`, `src/client/mygramclient_c.cpp:1364` |
-| 2 | `kInvalidArgument` | Invalid argument provided | `TCP+`, `HTTP`, `internal` | `src/server/handlers/admin_handler.cpp:155`, `src/server/http_server.cpp:535`, `src/config/runtime_variable_manager.cpp:87` (55 sites total) |
+| 2 | `kInvalidArgument` | Invalid argument provided | `TCP+`, `HTTP`, `internal` | `src/server/handlers/admin_handler.cpp:153`, `src/utils/safe_path.cpp:51`, `src/index/bm25_scorer.cpp:53` (46 sites total). Not emitted by `SET`: the runtime-variable path reports through the Configuration range (1004, 1008, 1009) |
 | 3 | `kOutOfRange` | Value out of range | `internal` — masked into 2008 at `src/mysql/mysql_binlog_stream.cpp:76` | `src/mysql/gtid_encoder.cpp:372`, `src/mysql/gtid_encoder.cpp:389` |
 | 4 | `kNotImplemented` | Feature not implemented | `TCP+`, `HTTP` | `src/server/handlers/replication_handler.cpp:40`, `src/server/response_formatter.cpp:736`, `src/server/http_server.cpp:2006` (10 sites total) |
 | 5 | `kInternalError` | Internal error | `TCP+`, `HTTP`, `internal` | `src/server/handlers/search_handler.cpp:215`, `src/server/http_server.cpp:1447`, `src/server/search_pipeline.cpp:2129` (47 sites total) |
 | 6 | `kIOError` | I/O error (file read/write) | `internal` — startup configuration | `src/app/configuration_manager.cpp:166`, `src/app/configuration_manager.cpp:213`, `src/app/application.cpp:401` (7 sites total) |
 | 7 | `kPermissionDenied` | Permission denied | `TCP+` (AUTH), `HTTP` (CIDR allow-list, bearer token), `internal` (privilege drop, MySQL grants) | `src/server/request_dispatcher.cpp:157`, `src/server/http_server.cpp:750`, `src/app/application.cpp:332` (9 sites total) |
-| 8 | `kNotFound` | Resource not found | `TCP+`, `HTTP` | `src/server/response_formatter.cpp:436`, `src/server/sync_operation_manager.cpp:384`, `src/server/http_server.cpp:1573` (8 sites total) |
+| 8 | `kNotFound` | Resource not found | `TCP+` | `src/server/sync_operation_manager.cpp:384`, `src/server/sync_operation_manager.cpp:432`, `src/server/sync_operation_manager.cpp:439`, `src/server/handlers/admin_handler.cpp:110`. Document lookups no longer share this code; they report 4004 |
 | 9 | `kAlreadyExists` | Resource already exists | `TCP+` — `REPLICATION START` when replication is already running | `src/server/handlers/replication_handler.cpp:123` |
 | 10 | `kTimeout` | Operation timed out | `unreferenced` | — |
 | 11 | `kCancelled` | Operation cancelled | `internal` — startup abort during shutdown | `src/app/server_orchestrator.cpp:743`, `src/mysql/gtid_waiter.cpp:67` |
 
 ### Configuration (1000-1999)
 
-All Configuration codes except 1007 reach TCP through the administrative commands `CONFIG VERIFY`, `CONFIG SHOW`, `CONFIG HELP`, and `VARIABLE SET`, which forward the underlying code verbatim (`src/server/handlers/admin_handler.cpp:96`, `:132`, `:256`; `src/server/handlers/variable_handler.cpp:58`, `:74`). None of them reach the HTTP surface: `GET /config` reports failures as 5.
+All Configuration codes except 1007 reach TCP through the administrative commands `CONFIG VERIFY`, `CONFIG SHOW`, `CONFIG HELP`, and `SET`, which forward the underlying code verbatim (`src/server/handlers/admin_handler.cpp:96`, `:132`, `:256`; `src/server/handlers/variable_handler.cpp:58`, `:74`). None of them reach the HTTP surface: `GET /config` reports failures as 5.
 
 | Code | Symbolic name | Meaning | Surfaces | Emitting site(s) |
 |------|---------------|---------|----------|------------------|
@@ -78,10 +78,12 @@ All Configuration codes except 1007 reach TCP through the administrative command
 | 1001 | `kConfigParseError` | Configuration parse error | `TCP+` (`CONFIG VERIFY`), `internal` (startup, synonym-dictionary loading) | `src/config/config_loader.cpp:171`, `src/config/config_loader.cpp:238`, `src/query/synonym_dictionary.cpp:174` (6 sites total) |
 | 1002 | `kConfigValidationError` | Configuration validation error | `TCP+` (`CONFIG VERIFY`) | `src/config/config_validator.cpp:202`, `src/config/config.cpp:977`, `src/config/config.cpp:1034` |
 | 1003 | `kConfigMissingRequired` | Missing required configuration | `TCP+` (`CONFIG VERIFY`) | `src/config/config.cpp:453`, `src/config/config.cpp:586`, `src/config/config.cpp:601` (4 sites total) |
-| 1004 | `kConfigInvalidValue` | Invalid configuration value | `TCP+` (`CONFIG VERIFY`, `CONFIG SHOW`, `CONFIG HELP`, `VARIABLE SET`) | `src/config/runtime_variable_manager.cpp:294`, `src/config/config_validator.cpp:102`, `src/config/config.cpp:58` (56 sites total) |
+| 1004 | `kConfigInvalidValue` | Invalid configuration value | `TCP+` (`CONFIG VERIFY`, `CONFIG SHOW`, `CONFIG HELP`, `SET`) — the value of a known, mutable variable was rejected; the name-level rejections are 1008 and 1009 | `src/config/runtime_variable_manager.cpp:295`, `src/config/config_validator.cpp:102`, `src/config/config.cpp:58` (56 sites total) |
 | 1005 | `kConfigSchemaError` | JSON schema error | `TCP+` (`CONFIG HELP`) | `src/config/config_help.cpp:477` |
 | 1006 | `kConfigYamlError` | YAML parsing error | `TCP+` (`CONFIG VERIFY`) | `src/config/config_loader.cpp:236` |
 | 1007 | `kConfigJsonError` | JSON parsing error | `internal` — only reachable for a JSON config file at startup; `CONFIG VERIFY` rejects any extension other than `.yaml`/`.yml` (`src/server/handlers/admin_handler.cpp:181`) | `src/config/config_loader.cpp:132` |
+| 1008 | `kConfigUnknownVariable` | No configuration variable by that name | `TCP+` (`SET`) — `:223` is reached first, by the pre-assignment lookup at `src/server/handlers/variable_handler.cpp:56` | `src/config/runtime_variable_manager.cpp:89`, `src/config/runtime_variable_manager.cpp:223` |
+| 1009 | `kConfigVariableNotMutable` | Variable exists but cannot be changed at runtime | `TCP+` (`SET`) | `src/config/runtime_variable_manager.cpp:86`, `src/config/runtime_variable_manager.cpp:206` |
 
 ### Database/Connection (2000-2999)
 
@@ -138,7 +140,7 @@ Query-parser codes reach TCP through `RequestDispatcher::Dispatch` (`src/server/
 | 4001 | `kIndexCorrupted` | Index corrupted | `unreferenced` | — |
 | 4002 | `kIndexSerializationFailed` | Index serialization failed | `internal` — masked into 5012 by `src/storage/dump_format_v2.cpp:244` | `src/index/index_serialization.cpp:105`, `src/index/index_serialization.cpp:188`, `src/index/index_serialization.cpp:208` (4 sites total) |
 | 4003 | `kIndexDeserializationFailed` | Index deserialization failed | `internal` — masked into 5011 by `src/storage/dump_format_internal.cpp:294` | `src/index/index_serialization.cpp:267`, `src/index/index_serialization.cpp:582`, `src/index/index_serialization.cpp:609` |
-| 4004 | `kIndexDocumentNotFound` | Document not found | `unreferenced` | — |
+| 4004 | `kIndexDocumentNotFound` | Document not found | `TCP+` (`GET`), `HTTP` (`GET /tables/{table}/{primary_key}`) | `src/server/response_formatter.cpp:436`, `src/server/handlers/document_handler.cpp:36`, `src/server/http_server.cpp:1475`, `src/server/http_server.cpp:1481` |
 | 4005 | `kIndexInvalidDocID` | Invalid document ID | `unreferenced` | — |
 | 4006 | `kIndexFull` | Index full | `unreferenced` | — |
 | 4007 | `kTableNotFound` | Table not found in catalog | `TCP+`, `HTTP` (404) | `src/server/handlers/command_handler.cpp:40`, `src/server/http_server.cpp:989`, `src/server/handlers/search_handler.cpp:421` (8 sites total) |
@@ -234,7 +236,7 @@ Client codes are produced inside the client library and `mygram-cli`; they never
 | Code | Symbolic name | Meaning | Surfaces | Emitting site(s) |
 |------|---------------|---------|----------|------------------|
 | 8000 | `kCacheMiss` | Cache miss | `unreferenced` | — |
-| 8001 | `kCacheDisabled` | Cache disabled | `TCP+` (`CACHE` commands) | `src/server/handlers/cache_handler.cpp:38`, `src/server/handlers/cache_handler.cpp:41`, `src/server/handlers/cache_handler.cpp:67` (6 sites total) |
+| 8001 | `kCacheDisabled` | Cache disabled | `TCP+` (`CACHE` commands, `SET cache.enabled`) | `src/server/handlers/cache_handler.cpp:38`, `src/server/handlers/cache_handler.cpp:41`, `src/server/handlers/cache_handler.cpp:67`, `src/config/runtime_variable_manager.cpp:481` (7 sites total) |
 | 8002 | `kCacheCompressionFailed` | Cache compression failed | `internal` — the caller degrades to "not stored" (`src/cache/query_cache.cpp:284`) | `src/cache/result_compressor.cpp:30`, `src/cache/result_compressor.cpp:41`, `src/cache/result_compressor.cpp:53` |
 | 8003 | `kCacheDecompressionFailed` | Cache decompression failed | `internal` — the caller degrades to a cache miss (`src/cache/query_cache.cpp:186`) | `src/cache/result_compressor.cpp:77`, `src/cache/result_compressor.cpp:82`, `src/cache/result_compressor.cpp:97` (4 sites total) |
 | 8004 | `kCacheWorkerStartFailed` | Cache worker start failed | `internal` — logged, and the cache is left disabled (`src/cache/cache_manager.cpp:65`, `:374`) | `src/cache/invalidation_queue.cpp:189` |
@@ -377,6 +379,6 @@ Factual observations about the current behaviour.
 
 - **Two codes sit outside the range their name implies.** 4014 `kSyncManagerNull` reports a null-dependency condition that the Network/Server range covers elsewhere (6024 `kNetworkNullDependency`); the header records this as deliberate (`src/server/handlers/sync_handler.h:44`). 6011 `kNetworkAlreadyRunning` is also used by `PeriodicWorker`, a utility with no network role (`src/utils/periodic_worker.cpp:23`).
 
-- **No duplicate numeric values.** All 127 enumerators have distinct values. Three numbers inside allocated ranges are unassigned: 4009, 6009, and 6022.
+- **No duplicate numeric values.** All 129 enumerators have distinct values. Three numbers inside allocated ranges are unassigned: 4009, 6009, and 6022.
 
-- **22 codes are defined but never constructed:** 10, 2003, 2004, 2022, 3002, 3003, 3004, 3011, 4001, 4004, 4005, 4006, 5006, 5007, 6002, 6003, 6004, 6005, 6006, 6008, 6024, 8000. All except 2022 and 6024 appear in `tests/utils/error_test.cpp`, which asserts their `ErrorCodeToString` text; none has a production construction site.
+- **20 codes are defined but never constructed:** 10, 2004, 2022, 3002, 3003, 3004, 3011, 4001, 4005, 4006, 5006, 5007, 6002, 6003, 6004, 6005, 6006, 6008, 6024, 8000. All except 2022 and 6024 appear in `tests/utils/error_test.cpp`, which asserts their `ErrorCodeToString` text; none has a production construction site. 2004's only appearance is a comparison (`src/mysql/binlog_reader_utils.cpp:115`).

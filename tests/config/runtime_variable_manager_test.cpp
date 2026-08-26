@@ -9,7 +9,10 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <functional>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -268,7 +271,7 @@ TEST(RuntimeVariableManagerTest, GetUnknownVariable) {
 
   auto result = manager->GetVariable("unknown.variable");
   EXPECT_FALSE(result);
-  EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument);
+  EXPECT_EQ(result.error().code(), ErrorCode::kConfigUnknownVariable);
 
   auto reserved_not_exposed = manager->GetVariable("cache.eviction_batch_size");
   ASSERT_TRUE(reserved_not_exposed);
@@ -624,7 +627,7 @@ TEST(RuntimeVariableManagerTest, SetImmutableVariable) {
   // Try to set mysql.user (immutable)
   auto result1 = manager->SetVariable("mysql.user", "new_user");
   EXPECT_FALSE(result1);
-  EXPECT_EQ(static_cast<int>(result1.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(static_cast<int>(result1.error().code()), static_cast<int>(ErrorCode::kConfigVariableNotMutable));
 
   // Try to set mysql.password (immutable)
   auto result2 = manager->SetVariable("mysql.password", "new_pass");
@@ -637,7 +640,7 @@ TEST(RuntimeVariableManagerTest, SetImmutableVariable) {
   // Try to set logging.file (immutable)
   auto result4 = manager->SetVariable("logging.file", "/var/log/mygramdb/mygramdb.log");
   EXPECT_FALSE(result4);
-  EXPECT_EQ(static_cast<int>(result4.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(static_cast<int>(result4.error().code()), static_cast<int>(ErrorCode::kConfigVariableNotMutable));
 
   // MySQL endpoints are startup-only: accepting either would let a remote
   // client redirect stored credentials to an attacker-controlled server.
@@ -645,7 +648,7 @@ TEST(RuntimeVariableManagerTest, SetImmutableVariable) {
        std::vector<std::pair<std::string, std::string>>{{"mysql.host", "192.0.2.10"}, {"mysql.port", "3307"}}) {
     auto result = manager->SetVariable(name, value);
     ASSERT_FALSE(result) << name;
-    EXPECT_EQ(result.error().code(), ErrorCode::kInvalidArgument) << name;
+    EXPECT_EQ(result.error().code(), ErrorCode::kConfigVariableNotMutable) << name;
     EXPECT_NE(result.error().message().find("immutable"), std::string::npos) << name;
   }
   // Original values should remain unchanged
@@ -663,7 +666,7 @@ TEST(RuntimeVariableManagerTest, SetUnknownVariable) {
 
   auto result = manager->SetVariable("unknown.variable", "value");
   EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kConfigUnknownVariable));
 }
 
 /**
@@ -1246,7 +1249,7 @@ TEST(RuntimeVariableManagerTest, GetUnknownVariableReturnsError) {
 
   auto result = manager->GetVariable("totally.unknown.var");
   EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInvalidArgument));
+  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kConfigUnknownVariable));
 }
 
 /**
@@ -1402,4 +1405,75 @@ TEST(RuntimeVariableManagerTest, CacheEnabledDirectlyTogglesInjectedCacheManager
   ASSERT_TRUE(manager->SetVariable("cache.enabled", "false"));
   EXPECT_FALSE(cache_manager.IsEnabled());
   EXPECT_FALSE(manager->GetCurrentConfig().cache.enabled);
+}
+
+/**
+ * @brief Every SET rejection must carry a code from the range the registry
+ *        assigns to the configuration path.
+ *
+ * A client branching on the numeric code sees one error class; splitting it
+ * across the General and Configuration ranges made "no such variable"
+ * indistinguishable from every other generic argument rejection.
+ */
+TEST(RuntimeVariableManagerTest, SetRejectionsStayInTheConfigurationRange) {
+  const auto in_configuration_range = [](ErrorCode code) {
+    const auto value = static_cast<std::uint16_t>(code);
+    return value >= 1000 && value <= 1999;
+  };
+
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto unknown = manager->SetVariable("unknown.variable", "value");
+  ASSERT_FALSE(unknown.has_value());
+  EXPECT_TRUE(in_configuration_range(unknown.error().code()))
+      << "unknown variable returned " << static_cast<std::uint16_t>(unknown.error().code());
+  EXPECT_EQ(unknown.error().code(), ErrorCode::kConfigUnknownVariable);
+
+  auto immutable = manager->SetVariable("mysql.user", "other_user");
+  ASSERT_FALSE(immutable.has_value());
+  EXPECT_TRUE(in_configuration_range(immutable.error().code()))
+      << "immutable variable returned " << static_cast<std::uint16_t>(immutable.error().code());
+  EXPECT_EQ(immutable.error().code(), ErrorCode::kConfigVariableNotMutable);
+
+  auto invalid_value = manager->SetVariable("logging.level", "verbose");
+  ASSERT_FALSE(invalid_value.has_value());
+  EXPECT_TRUE(in_configuration_range(invalid_value.error().code()));
+  EXPECT_EQ(invalid_value.error().code(), ErrorCode::kConfigInvalidValue);
+
+  // The three conditions stay distinguishable by code.
+  EXPECT_NE(unknown.error().code(), immutable.error().code());
+  EXPECT_NE(unknown.error().code(), invalid_value.error().code());
+}
+
+TEST(RuntimeVariableManagerTest, GetUnknownVariableReportsUnknownVariable) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto value = manager->GetVariable("unknown.variable");
+  ASSERT_FALSE(value.has_value());
+  EXPECT_EQ(value.error().code(), ErrorCode::kConfigUnknownVariable);
+}
+
+/**
+ * @brief A cache subsystem that refuses to come up is a cache failure.
+ *
+ * Reporting it through the General range put the failures of one SET command
+ * in three different documented ranges.
+ */
+TEST(RuntimeVariableManagerTest, CacheEnableFailureReportsACacheCode) {
+  Config config = CreateTestConfig();
+  config.cache.enabled = false;
+  mygramdb::cache::NgramConfigMap ngram_configs;
+  mygramdb::cache::CacheManager cache_manager(
+      config.cache, std::move(ngram_configs),
+      [](const std::function<void()>&) -> std::thread { throw std::runtime_error("worker unavailable"); });
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+  manager->SetCacheManager(&cache_manager);
+
+  auto result = manager->SetVariable("cache.enabled", "true");
+  ASSERT_FALSE(result.has_value());
+  const auto code = static_cast<std::uint16_t>(result.error().code());
+  EXPECT_GE(code, 8000) << "cache failure returned " << code;
+  EXPECT_LE(code, 8999) << "cache failure returned " << code;
 }

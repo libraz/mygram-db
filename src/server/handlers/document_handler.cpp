@@ -33,7 +33,7 @@ std::string DocumentHandler::Handle(const query::Query& query, ConnectionContext
 
   auto doc_id_opt = current_doc_store->GetDocId(query.primary_key);
   if (!doc_id_opt) {
-    return ResponseFormatter::FormatError("Document not found", mygram::utils::ErrorCode::kNotFound);
+    return ResponseFormatter::FormatError("Document not found", mygram::utils::ErrorCode::kIndexDocumentNotFound);
   }
 
   auto doc = current_doc_store->GetDocument(doc_id_opt.value());

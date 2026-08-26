@@ -54,7 +54,7 @@
 < OK DOC doc_1 category=ai status=published\r
 ### 018 TCP GET missing document
 > GET app.articles doc_999
-< ERROR 8 Document not found\r
+< ERROR 4004 Document not found\r
 ### 019 TCP GET bad arity
 > GET app.articles
 < ERROR 3000 GET requires table and primary_key\r
@@ -748,7 +748,7 @@
 < content-type: application/json
 < {
 <   "error": "Document not found",
-<   "error_code": 8
+<   "error_code": 4004
 < }
 ### 080 HTTP get unknown table
 > GET /tables/app.missing/doc_1
@@ -1240,7 +1240,7 @@
 < \r
 ### 099 TCP SET unknown variable
 > SET no.such.variable = 1
-< ERROR 2 Failed to set variable 'no.such.variable': Unknown variable: no.such.variable\r
+< ERROR 1008 Failed to set variable 'no.such.variable': Unknown variable: no.such.variable\r
 ### 100 TCP SET bad arity
 > SET
 < ERROR 3000 SET: No variable assignments found\r
