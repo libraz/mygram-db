@@ -17,12 +17,14 @@ using mygramdb::config::Config;
 using mygramdb::config::TableConfig;
 using mygramdb::server::FindDumpConfigMismatch;
 
-TableConfig MakeTable(const std::string& database, const std::string& name, int ngram_size) {
+/// @param kanji_ngram_size Zero mirrors ngram_size, the way configuration load
+///        resolves an omitted value; pass a value to vary it on its own.
+TableConfig MakeTable(const std::string& database, const std::string& name, int ngram_size, int kanji_ngram_size = 0) {
   TableConfig table;
   table.database = database;
   table.name = name;
   table.ngram_size = ngram_size;
-  table.kanji_ngram_size = ngram_size;
+  table.kanji_ngram_size = (kanji_ngram_size != 0) ? kanji_ngram_size : ngram_size;
   return table;
 }
 
@@ -102,6 +104,34 @@ TEST(DumpConfigValidatorTest, TableAbsentFromTheRunningConfigIsSkipped) {
   loaded_config.tables.push_back(MakeTable("db2", "reviews", 3));
 
   EXPECT_FALSE(FindDumpConfigMismatch(loaded_config, live_config).has_value());
+}
+
+// ngram_size is compared first, so a case that varies both settings together
+// would pass even if this comparison were deleted.
+TEST(DumpConfigValidatorTest, KanjiNgramSizeIsComparedIndependentlyOfNgramSize) {
+  Config live_config;
+  live_config.tables.push_back(MakeTable("shop", "articles", 2, 2));
+
+  Config loaded_config;
+  loaded_config.tables.push_back(MakeTable("shop", "articles", 2, 3));
+
+  const auto mismatch = FindDumpConfigMismatch(loaded_config, live_config);
+  ASSERT_TRUE(mismatch.has_value());
+  EXPECT_NE(mismatch->find("kanji_ngram_size mismatch"), std::string::npos) << *mismatch;
+}
+
+// The one behavior this check changed: a dump entry naming a database that is
+// not configured is skipped, where matching on the bare name would have compared
+// it against a same-named table in a different database.
+TEST(DumpConfigValidatorTest, DumpTableInAnUnconfiguredDatabaseIsNotComparedAgainstTheSameBareName) {
+  Config live_config;
+  live_config.tables.push_back(MakeTable("db1", "articles", 2));
+
+  Config loaded_config;
+  loaded_config.tables.push_back(MakeTable("db2", "articles", 3));
+
+  EXPECT_FALSE(FindDumpConfigMismatch(loaded_config, live_config).has_value())
+      << "db2.articles is not configured, so it must not be compared against db1.articles";
 }
 
 TEST(DumpConfigValidatorTest, DumpEntryWithoutADatabaseFallsBackToTheBareName) {

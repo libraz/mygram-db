@@ -453,6 +453,31 @@ TEST(DumpConfigCompatibilityTest, MetadataBearingDumpMatchesAServerRunningTheSam
   EXPECT_FALSE(mygramdb::server::FindDumpConfigMismatch(loaded_config, live_config).has_value());
 }
 
+// The table-scoped settings are only reached once the dump's table resolves to a
+// running-config entry, and resolution is by qualified name. A fixture whose
+// table carried no database would resolve to nothing and skip these comparisons
+// instead of making them, which the test above cannot distinguish from a match.
+TEST(DumpConfigCompatibilityTest, DivergingNgramSizeIsRefusedByTheSharedCheck) {
+  auto targets = MakeCorpusTargets();
+  auto contexts = targets.Contexts(corpus::kTableName);
+  std::string gtid;
+  mygramdb::config::Config loaded_config;
+
+  ASSERT_TRUE(
+      mygramdb::storage::dump_v2::ReadDump(FixturePath(corpus::kDumpV2CurrentFile), gtid, loaded_config, contexts)
+          .has_value());
+
+  auto live_config = corpus::CorpusConfig();
+  ASSERT_FALSE(live_config.tables.empty());
+  live_config.tables[0].ngram_size = corpus::kNgramSize + 1;
+  const auto mismatch = mygramdb::server::FindDumpConfigMismatch(loaded_config, live_config);
+  ASSERT_TRUE(mismatch.has_value()) << "the dump table must resolve to the running entry and be compared";
+  EXPECT_NE(mismatch->find("ngram_size mismatch"), std::string::npos) << *mismatch;
+  EXPECT_NE(mismatch->find(std::string(corpus::kMysqlDatabase) + "." + std::string(corpus::kTableName)),
+            std::string::npos)
+      << *mismatch;
+}
+
 TEST(DumpConfigCompatibilityTest, DivergingNormalizationIsRefusedByTheSharedCheck) {
   auto targets = MakeCorpusTargets();
   auto contexts = targets.Contexts(corpus::kTableName);

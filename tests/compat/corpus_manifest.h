@@ -151,6 +151,11 @@ inline constexpr std::string_view kStringFilterValue = "news";
  * FindDumpConfigMismatch compares memory.verify_text, the three normalization
  * settings and every table's n-gram settings, so a server loading this corpus
  * has to be running exactly this configuration.
+ *
+ * The table carries an explicit database because that check identifies a table
+ * by its qualified `database.table` name, and DeserializeConfig fills an absent
+ * database from mysql.database. A fixture that left it empty would resolve to no
+ * table at all, and the n-gram comparisons would be skipped rather than made.
  */
 inline config::Config CorpusConfig() {
   config::Config config;
@@ -166,6 +171,7 @@ inline config::Config CorpusConfig() {
 
   config::TableConfig table;
   table.name = std::string(kTableName);
+  table.database = std::string(kMysqlDatabase);
   table.primary_key = "id";
   table.text_source.column = "body";
   table.ngram_size = kNgramSize;
