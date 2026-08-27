@@ -10,6 +10,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-08-27
+
+Every change is corrective. No capability, configuration key or default was added
+for any reason other than matching something already promised. Several corrections
+change what a client receives or whether a configuration starts; see
+[docs/releases/v1.10.1.md](docs/releases/v1.10.1.md) for the actions required before upgrading.
+
+### Changed
+
+- **Replication fails closed on an event it cannot apply** — a binlog event nobody classified was skipped, so the index diverged from MySQL without any error. It now stops the stream. Affects `binlog_transaction_compression=ON`, `gtid_mode` not `ON`, `LOAD DATA INFILE` on a replicated table, `binlog_row_value_options=PARTIAL_JSON`, MariaDB compressed events, and a source-declared binlog gap. A deployment using any of these already holds a wrong index; recover with `SYNC` per table.
+- **Columns that render differently in the two paths are refused at replication start** — `FLOAT`, `JSON`, `GEOMETRY` and its subtypes, `VECTOR`, and any `ZEROFILL` column, checked against `SHOW FULL COLUMNS`.
+- **Configurations that no longer start** — a non-loopback `api.http.bind` with an empty `api.admin_token`; a `MYSQL_PASSWORD` or `MYSQL_ROOT_PASSWORD` still holding its `.env.example` placeholder; a `time`-typed `required_filters` value outside `±838:59:59`; a filter declared `type: float`.
+- **`OPTIMIZE` requires roughly 2.1× index memory free** — the admission estimate charged 5%, and admitted runs the kernel then killed.
+- **A dump is matched to a table by its qualified `database.table` name** — the bare name compared a dump for one database against a table in another.
+- **Rate limiting is shared across protocols** — one client's quota spans TCP and HTTP.
+- **TCP `INFO`, HTTP `/info` and `/metrics` share one memory snapshot, rebuilt at most once a second** — `INFO` walked the whole corpus per poll while holding a lock replication needs.
+- **`GET /config` and `GET /replication/status` require a bearer token when `api.admin_token` is set**, as the TCP equivalents always did. The open health routes no longer carry replication detail, and a replication fault is named by code rather than by MySQL's text, which disclosed the replication account and the address the server connects from.
+- **`{"sort":{"column":"id"}}` names a column** — it was rewritten to the primary key whatever the primary key was called. Omit `column` to sort by the primary key.
+- **`SORT _score` rejections carry the TCP error codes** — 3007, 4 and 4007 rather than a single 2.
+- **`api.max_query_length` counts characters**, the unit the schema, the error message and the sample configuration all state.
+
+### Fixed
+
+- **A query returns the same documents whichever of the four execution paths serves it**, and both protocol surfaces agree. The exact-text guard for mixed CJK/ASCII terms ran on two paths; `NOT` terms are now verified against stored text under the configured `memory.verify_text` policy on both the clause and AST forms; floating-point `FILTER` equality compares the stored representation exactly.
+- **Default sorting is defined for a mixed primary key** — a `VARCHAR` primary key holding both numeric and non-numeric values broke the comparator's transitivity.
+- **Index membership is decided by one rule** — the initial-load SELECT and the binlog evaluator implemented the `required_filters` predicate separately.
+- **A configured table named anywhere in a `DROP TABLE` list is detected** — only the first name was examined.
+- **Dumps written by v1.5.4 through v1.9.0 restore**, as the v1.10.0 notes said they would. A dump too large for `dump.restore_memory_budget_mb` is refused before it is decoded rather than being killed while decoding.
+- **`/health/live` and `/health/ready` are not rate limited**, so a prober cannot be answered with 429. `/health/detail` no longer reports a resync as a replication outage.
+- **Thread pool gauges on `/metrics` report live state** — `mygramdb_thread_pool_queue_depth`, `_queue_capacity` and `_workers` were permanently zero while the pool was saturating and rejecting requests.
+- **An `AUTH` command is redacted from the log on the parser's own verdict** — a quoted or Unicode-space-prefixed `AUTH` bypassed the previous check and logged its token.
+- **The sample Docker stack publishes MySQL on `127.0.0.1`** — it published on every interface, exposing MySQL root with the password committed in this repository.
+
+### Performance
+
+- **Highlighting no longer scales with the corpus** — it performed one full document normalization per grapheme unit, so a 10 KB body with `LIMIT 100` ran roughly a million normalization passes.
+- **A boolean `NOT` no longer materializes and sorts the entire corpus per request**, and a threshold search no longer materializes every candidate posting list at once.
+
+### Added
+
+- **The external surface is described in `spec/` and held byte-exact by a test** — commands, limits, routes, error codes, configuration keys and accepted persistence-format versions. `make spec-check` verifies that every citation in those documents still resolves.
+
 ## [1.10.0] - 2026-08-09
 
 ### Breaking Change
@@ -882,7 +924,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.10.1...HEAD
+[1.10.1]: https://github.com/libraz/mygram-db/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/libraz/mygram-db/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/libraz/mygram-db/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/libraz/mygram-db/compare/v1.8.0...v1.8.1
