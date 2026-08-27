@@ -96,7 +96,7 @@
 < OK INFO\r
 < \r
 < # Server\r
-< version: MygramDB v1.10.0\r
+< version: MygramDB v<VERSION>\r
 < uptime_seconds: <INT>\r
 < data_initialized: true\r
 < readiness: ready\r

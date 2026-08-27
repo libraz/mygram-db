@@ -91,6 +91,10 @@ const std::vector<Normalization>& NormalizationRules() {
       // `version:` field stays pinned.
       {"the server version is derived from the git tag (or $MYGRAMDB_VERSION) at build time",
        R"RE((\n|^)([<\s]*"?version"?"?\s*:\s*"?)[0-9]+\.[0-9]+\.[0-9]+[^"\\\r\n,]*)RE", "$1$2<VERSION>"},
+      // The TCP banner spells the same value as `MygramDB v<semver>`, which the
+      // rule above cannot match because the field does not open on a digit.
+      {"the TCP INFO banner carries the same build-time version",
+       R"RE((\n|^)([<\s]*version\s*:\s*MygramDB v)[0-9]+\.[0-9]+\.[0-9]+[^\\\r\n]*)RE", "$1$2<VERSION>"},
       {"the Prometheus server_info label carries the same build-time version",
        R"RE(mygramdb_server_info\{version="[^"]*"\})RE", "mygramdb_server_info{version=\"<VERSION>\"}"},
 
