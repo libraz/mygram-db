@@ -64,17 +64,30 @@ re-checked against the implementation rather than taken on trust. Where the file
 the claim also names the symbol, written as ``​`Symbol` (`path`)``.
 
 Citations carry no line numbers. A line number drifts on any edit above the line it names,
-silently and in bulk, and the stale result still looks like evidence — the citations in
-this directory decayed exactly that way once. A file path and a symbol name survive every
-refactor that does not rename them, and a rename is visible.
+silently and in bulk, and the stale result still looks like evidence. A file path and a
+symbol name survive every refactor that does not rename them, and a rename is visible.
 
 ```
 make spec-check     # verify that every citation still resolves
 ```
 
-That check enforces three rules: every cited path is a tracked file, no citation carries a
-line anchor, and a cited symbol appears in the file it is cited to. It reads the tree
-directly, so it fails the moment a citation stops matching the code.
+That check reads the tree directly and enforces three rules:
+
+- Every backticked repository path in the prose resolves to a tracked file, named by its
+  full path rather than by its basename.
+- Nothing names a file together with a line number — not in the prose, not inside a fenced
+  block, with or without backticks around it.
+- Where a citation names a symbol and the token is written the way this codebase writes
+  one, that symbol appears in the cited file as a whole word.
+
+Only the third rule looks inside a file, and it reaches the small minority of citations
+that name a symbol. A token spelled the way this specification spells an enum value or a
+protocol token is left alone, because resolving one against a file would be meaningless.
+Every remaining citation is checked for the existence of the cited file and nothing more.
+
+So the check catches a path that was renamed or deleted and a symbol that was renamed. It
+does not catch a citation that still names a live file but describes the wrong behavior in
+it — that stays a matter of reading the code.
 
 When a citation no longer resolves to the behavior described, the specification is stale
 and fixing it takes priority over the change that made it stale.

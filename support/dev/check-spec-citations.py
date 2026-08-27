@@ -14,12 +14,25 @@ symbol within it, and this script checks both.
 Rules enforced:
 
   1. Every backticked repository path resolves to a tracked file.
-  2. No citation carries a line anchor (`path:123`, `path:12-34`, or a bare
-     `:123` continuation). Line anchors are rejected outright rather than
-     validated, because a line number that happens to be in range still says
-     nothing about whether it points at the cited behavior.
+  2. No text names a file together with a line anchor (`path:123` or
+     `path:12-34`), and no backticked bare `:123` continuation appears. Line
+     anchors are rejected outright rather than validated, because a line number
+     that happens to be in range still says nothing about whether it points at
+     the cited behavior.
   3. In the form `Symbol` (`path`), where the token is written the way this
-     codebase writes a symbol, that symbol appears somewhere in that file.
+     codebase writes a symbol, that symbol appears in that file as a whole
+     word.
+
+Rules 1 and 3 read only prose, because fenced blocks hold shell transcripts and
+sample payloads whose paths are illustrative and whose backticks are literal
+text. Rule 2 reads prose and fenced blocks alike, and needs no backticks, so an
+anchor written as plain text inside a transcript is caught as well.
+
+Rule 3 is the only rule that looks inside the cited file, and it applies to the
+subset of citations that name a symbol in a shape this codebase uses for one.
+Every other citation is checked for the existence of the file and nothing more:
+a citation that names a live file but describes the wrong behavior in it still
+passes.
 
 Exit status is 0 when every citation resolves and 1 otherwise.
 """
@@ -38,9 +51,14 @@ SOURCE_EXTENSIONS = ("cpp", "h", "hpp", "json", "yaml", "yml", "md", "txt", "py"
 
 _EXT_ALT = "|".join(SOURCE_EXTENSIONS)
 
-# A backticked path, with or without a line anchor. The anchor is captured so
-# rule 2 can report it.
-CITATION = re.compile(rf"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:{_EXT_ALT}))(:\d+(?:-\d+)?)?`")
+# A backticked path, with or without a line anchor. The anchor is tolerated here
+# so that the path itself is still resolved; rule 2 reports the anchor.
+CITATION = re.compile(rf"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:{_EXT_ALT}))(?::\d+(?:-\d+)?)?`")
+
+# A file name followed by a line anchor, with or without backticks around it.
+# Requiring a known source extension is what keeps this off the host:port pairs,
+# clock times and version strings that fill shell transcripts.
+LINE_ANCHOR = re.compile(rf"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:{_EXT_ALT}):\d+(?:-\d+)?")
 
 # A bare `:123` continuation, used to name a second line in a file already cited
 # earlier in the same sentence. Only meaningful next to a line anchor, so it is
@@ -53,13 +71,26 @@ SYMBOL_CITATION = re.compile(
 )
 
 # A backticked token in front of a citation is only treated as a symbol when it
-# is written the way this codebase writes one: a qualified name, a CamelCase
-# function or type, or a `kConstant`. Response field names, enum *values* and
-# configuration keys are also backticked and also sit next to citations, and
-# resolving those against the file would be meaningless.
-SYMBOL_SHAPE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*$|^k[A-Z][A-Za-z0-9_]*$|^[A-Z][a-z][A-Za-z0-9_]*$")
+# is written the way this codebase writes one. Response field names, enum
+# *values*, protocol tokens and type words are also backticked and also sit next
+# to citations, and resolving those against the file would be meaningless.
+#
+# The two exclusions that do the work: a name has to carry a lowercase letter,
+# which drops the all-caps protocol tokens and enum values (`AUTH`, `MGIX`,
+# `EQ`, `DECIMAL`), and an all-lowercase name has to be multi-word, which drops
+# the bare state and type words (`disconnected`, `true`, `int`).
+SYMBOL_SHAPE = re.compile(
+    r"""^(?:
+          (?:[A-Za-z_][A-Za-z0-9_]*::)+[A-Za-z_][A-Za-z0-9_]*  # Qualified::name
+        | k[A-Z][A-Za-z0-9_]*                                  # kConstant
+        | [A-Z][A-Za-z0-9_]*[a-z][A-Za-z0-9_]*                 # Type, BM25Stats, LRUCache
+        | [a-z][a-z0-9]*(?:_[a-z0-9]+)+                        # snake_case_function
+    )$""",
+    re.VERBOSE,
+)
 
-# Fenced code blocks hold shell transcripts and sample payloads, not citations.
+# Fenced code blocks hold shell transcripts and sample payloads. Their paths are
+# illustrative and their backticks are literal text, so only rule 2 reads them.
 FENCE = re.compile(r"^\s*```")
 
 
@@ -94,18 +125,20 @@ def check_document(
         if FENCE.match(line):
             in_fence = not in_fence
             continue
-        if in_fence:
-            continue
 
         where = f"{path.relative_to(repo_root)}:{lineno}"
 
+        for match in LINE_ANCHOR.finditer(line):
+            problems.append(
+                f"{where}: `{match.group(0)}` carries a line anchor; cite the file, "
+                f"and the symbol if the file is large"
+            )
+
+        if in_fence:
+            continue
+
         for match in CITATION.finditer(line):
-            cited, anchor = match.group(1), match.group(2)
-            if anchor:
-                problems.append(
-                    f"{where}: `{cited}{anchor}` carries a line anchor; cite the file, "
-                    f"and the symbol if the file is large"
-                )
+            cited = match.group(1)
             if cited in paths:
                 continue
             if "/" in cited:
@@ -141,7 +174,9 @@ def check_document(
             needle = symbol.rsplit("::", 1)[-1]
             if cited not in symbol_cache:
                 symbol_cache[cited] = (repo_root / cited).read_text(errors="replace")
-            if needle not in symbol_cache[cited]:
+            # Whole-word, so a longer identifier that merely contains the name
+            # does not stand in for it.
+            if not re.search(rf"\b{re.escape(needle)}\b", symbol_cache[cited]):
                 problems.append(f"{where}: `{symbol}` does not appear in `{cited}`")
 
     return problems
