@@ -65,10 +65,15 @@ class TestMemoryRelease:
             interval=0.5,
             description="the growth rows to be indexed",
         )
-        grown = _used_memory(mygramdb)
-        assert grown > baseline, (
-            f"indexing {len(added)} more rows did not increase the reported memory "
-            f"({baseline} -> {grown})"
+        # INFO serves its memory figures from a snapshot the server rebuilds at
+        # most once a second, so a read taken immediately after the rows are
+        # indexed can still be answered from the snapshot that predates them.
+        # Poll for the increase rather than reading once.
+        wait_until(
+            lambda: _used_memory(mygramdb) > baseline,
+            timeout=30,
+            interval=0.5,
+            description=f"indexing {len(added)} more rows to increase the reported memory above {baseline}",
         )
 
         mysql.truncate("articles")
