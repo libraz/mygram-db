@@ -42,6 +42,7 @@ change what a client receives or whether a configuration starts; see
 - **Thread pool gauges on `/metrics` report live state** — `mygramdb_thread_pool_queue_depth`, `_queue_capacity` and `_workers` were permanently zero while the pool was saturating and rejecting requests.
 - **An `AUTH` command is redacted from the log on the parser's own verdict** — a quoted or Unicode-space-prefixed `AUTH` bypassed the previous check and logged its token.
 - **The sample Docker stack publishes MySQL on `127.0.0.1`** — it published on every interface, exposing MySQL root with the password committed in this repository.
+- **A `MYSQL_PASSWORD` containing a backslash generates a parseable container config** — the entrypoint wrote one backslash where the YAML escape needs two, and the container image runs the `awk` reading that produces the single one.
 
 ### Performance
 

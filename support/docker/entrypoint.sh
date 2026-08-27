@@ -11,7 +11,11 @@ yaml_quote() {
     # allowed to escape the scalar and inject additional configuration keys.
     printf '%s' "$1" | awk 'BEGIN { ORS=""; printf "\"" } {
         if (NR > 1) printf "\\n";
-        gsub(/\\/, "\\\\");
+        # The replacement doubles a backslash as an escape followed by the match
+        # rather than as two escapes: POSIX reads "\\" in a replacement as one
+        # literal backslash, so the two-escape spelling emits a single one and
+        # leaves an invalid YAML escape behind.
+        gsub(/\\/, "\\\\&");
         gsub(/"/, "\\\"");
         gsub(/\r/, "\\r");
         printf "%s", $0
