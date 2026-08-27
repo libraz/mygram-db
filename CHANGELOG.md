@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Every change is corrective. No capability, configuration key or default was added
 for any reason other than matching something already promised. Several corrections
-change what a client receives or whether a configuration starts; see
-[docs/releases/v1.10.1.md](docs/releases/v1.10.1.md) for the actions required before upgrading.
+change what a client receives or whether a configuration starts; the release notes
+list the actions required before upgrading.
 
 ### Changed
 
@@ -52,6 +52,8 @@ change what a client receives or whether a configuration starts; see
 ### Added
 
 - **The external surface is described in `spec/` and held byte-exact by a test** — commands, limits, routes, error codes, configuration keys and accepted persistence-format versions. `make spec-check` verifies that every citation in those documents still resolves.
+
+**Detailed Release Notes**: [docs/releases/v1.10.1.md](docs/releases/v1.10.1.md)
 
 ## [1.10.0] - 2026-08-09
 
