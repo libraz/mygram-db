@@ -701,6 +701,15 @@ END
 `USE_MYSQL` builds (`src/server/response_formatter.cpp`). Command counters are emitted
 only when non-zero (`src/server/response_formatter.cpp`). `INFO` refreshes the
 peak-memory statistic as a side effect (`src/server/handlers/admin_handler.cpp`).
+
+Memory, index and per-table figures come from a snapshot shared with the HTTP
+surface and rebuilt at most once a second, so two `INFO` calls inside that window
+report identical numbers (`StatisticsSnapshotCache`,
+`src/server/statistics_service.h`). Walking retained document data is not a
+per-request primitive, and the interval caps a polling client at one walk per
+second whatever its request rate. A caller watching for a change — memory
+released by a `TRUNCATE`, documents arriving from replication — has to allow for
+that interval rather than expecting the next response to reflect the change.
 If the table catalog is uninitialized → `ERROR 4008 Table catalog not initialized`
 (`src/server/handlers/admin_handler.cpp`).
 

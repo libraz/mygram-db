@@ -275,7 +275,7 @@ Every row in this table is implemented in `src/server/http_server.cpp`.
 
 Server, memory, index, per-table and cache statistics. No parameters. Success `200`, `application/json` (`src/server/http_server.cpp`).
 
-Statistics are read from the shared TCP `ServerStats` when one was injected, otherwise from the HTTP-local instance (`src/server/http_server.h`). Memory accounting comes from a bounded snapshot cache shared with `/metrics` (`src/server/http_server.cpp`).
+Statistics are read from the shared TCP `ServerStats` when one was injected, otherwise from the HTTP-local instance (`src/server/http_server.h`). Memory accounting comes from a snapshot cache shared with `/metrics`, rebuilt at most once a second, so two reads inside that window report identical numbers (`StatisticsSnapshotCache`, `src/server/statistics_service.h`). The TCP `INFO` command reports the same figures under the same rule.
 
 ```json
 {

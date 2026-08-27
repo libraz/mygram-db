@@ -743,6 +743,26 @@ TEST_F(ResponseFormatterTest, StatisticsSnapshotIsSharedUntilBoundedRefresh) {
   EXPECT_GT(refreshed.tables.at("test").terms, 0U);
 }
 
+// The interval both surfaces report under is a documented figure, so a change
+// to it has to be a deliberate one rather than a default drifting upward.
+TEST_F(ResponseFormatterTest, DefaultSnapshotIntervalIsOneSecond) {
+  StatisticsSnapshotCache cache;
+  const auto initial_time = std::chrono::steady_clock::time_point(std::chrono::seconds(100));
+
+  const auto initial = cache.Get(table_contexts_, initial_time);
+  ASSERT_EQ(initial.tables.at("test").documents, 0U);
+
+  const auto doc_id = table_context_.doc_store->AddDocument("pk", {}, "searchable");
+  ASSERT_TRUE(doc_id.has_value());
+  table_context_.index->AddDocument(*doc_id, "searchable");
+
+  const auto cached = cache.Get(table_contexts_, initial_time + std::chrono::milliseconds(999));
+  EXPECT_EQ(cached.tables.at("test").documents, 0U) << "the snapshot must be held for the whole interval";
+
+  const auto refreshed = cache.Get(table_contexts_, initial_time + std::chrono::seconds(1));
+  EXPECT_EQ(refreshed.tables.at("test").documents, 1U) << "the snapshot must be rebuilt once the interval elapses";
+}
+
 TEST_F(ResponseFormatterTest, FormatInfoAndPrometheusExposeTextNormalizationFailures) {
   mygram::utils::ResetTextNormalizationFailureCountForTesting();
   const std::string invalid_utf8(1, static_cast<char>(0xFF));

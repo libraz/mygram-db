@@ -106,10 +106,16 @@ class StatisticsService {
  * DocumentStore::MemoryUsage() traverses retained document data and is not a
  * per-request primitive. This cache serializes refreshes and lets INFO and
  * Prometheus scrapes reuse the same table snapshot for a bounded interval.
+ *
+ * The interval is what bounds cost, not its length: a one-second floor already
+ * caps a polling client at one walk per second whatever its request rate, and
+ * every further second buys no protection while making the reported figure
+ * older. Memory accounting is read to decide whether a server is close to its
+ * limit, so a stale answer is a wrong answer.
  */
 class StatisticsSnapshotCache {
  public:
-  explicit StatisticsSnapshotCache(std::chrono::steady_clock::duration max_age = std::chrono::seconds(30))
+  explicit StatisticsSnapshotCache(std::chrono::steady_clock::duration max_age = std::chrono::seconds(1))
       : max_age_(max_age) {}
 
   template <typename MapT>
