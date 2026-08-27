@@ -22,11 +22,12 @@ namespace mygramdb::server {
  * entry against whichever database happened to be configured first.
  *
  * A dump entry that records no database at all falls back to the bare name.
- * Table entries written before the database field existed decode with it empty,
- * and refusing them would narrow the persistence-format acceptance policy,
- * which forbids adding a load-time check that rejects an artifact an earlier
- * release wrote. Such an entry can only come from a single-database
- * configuration, where the bare name is unambiguous.
+ * This is a backstop, not the compatibility mechanism: a table entry written
+ * before the database field existed decodes with it empty, but DeserializeConfig
+ * fills it from the dump's own mysql.database before the entry reaches this
+ * check, so an artifact an earlier release wrote arrives already qualified. The
+ * fallback covers only an entry that reaches here unqualified anyway, where the
+ * bare name is the sole identity the dump carries.
  *
  * @param config Running configuration to search.
  * @param dump_table Table entry decoded from the dump.
