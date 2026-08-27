@@ -443,6 +443,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
   target_link_libraries(binlog_event_dispatch_test
     mygramdb_server
     GTest::gtest_main
+    GTest::gmock
   )
 
   gtest_discover_tests(binlog_event_dispatch_test
@@ -458,6 +459,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
   target_link_libraries(binlog_replay_watermark_test
     mygramdb_server
     GTest::gtest_main
+    GTest::gmock
   )
 
   gtest_discover_tests(binlog_replay_watermark_test
