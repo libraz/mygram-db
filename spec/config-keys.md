@@ -15,7 +15,7 @@ The root object requires `mysql` and `tables`, and rejects unknown top-level key
 | Valid range / allowed values | Schema constraint, plus any additional constraint the parser applies. |
 | Default | The value the code produces when the key is absent. |
 | Mutability | `startup-only` or `runtime-mutable`. `unread` marks a key that is parsed and stored but never consumed by any component (see [Unread keys](#unread-keys)). |
-| Validated where | Where the value is constrained. `config-schema.json:N` means schema-only, enforced by `src/config/config_validator.cpp`. |
+| Validated where | Where the value is constrained. `src/config/config-schema.json` alone means schema-only, enforced by `src/config/config_validator.cpp`. |
 
 Runtime mutation is available through the variable surface. The mutable set is an explicit allowlist at `src/config/runtime_variable_manager.cpp`; every other key is readable but rejects mutation with error 1009 `kConfigVariableNotMutable`, "immutable (requires restart)". A name that is not a configuration key at all is rejected with 1008 `kConfigUnknownVariable` (`src/config/runtime_variable_manager.cpp`), and a rejected value for a mutable key with 1004 `kConfigInvalidValue`.
 
@@ -179,7 +179,7 @@ Every key in this table is constrained by `src/config/config-schema.json`; a cel
 |---|---|---|---|---|---|
 | `api.default_limit` | integer | 5–1000 at load; 5–1000 at runtime | `100` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
 | `api.max_query_length` | integer | 0–4096 at load; 0–4096 at runtime; `0` = unlimited | `128` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
-| `api.admin_token` | string | any; must be non-empty when `api.tcp.bind` is not loopback and no Unix socket is configured | `""` | startup-only | `src/config/config.cpp` |
+| `api.admin_token` | string | any; must be non-empty when either listener is publicly bound — `api.tcp.bind` is not loopback and no Unix socket is configured, or `api.http.enable` is true and `api.http.bind` is not loopback | `""` | startup-only | `src/config/config.cpp` |
 
 ## `api.rate_limiting`
 
@@ -232,7 +232,7 @@ When `logging.file` is set, the log is a rotating file sink capped at 100 MiB pe
 | Key | Type | Valid range / allowed values | Default | Mutability | Validated where |
 |---|---|---|---|---|---|
 | `cache.enabled` | boolean | — | `true` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
-| `cache.max_memory_mb` | integer | ≥ 1 in the schema; parser additionally rejects negative values, values above 1048576 MB, and any value above 50% of detected physical memory | `32` (stored as 33554432 bytes) | startup-only | `src/config/config.cpp` |
+| `cache.max_memory_mb` | integer | ≥ 1 in the schema; parser additionally rejects negative values, values above 1048576 MB, and — only when `cache.enabled` is true — any value above 50% of detected physical memory | `32` (stored as 33554432 bytes) | startup-only | `src/config/config.cpp` |
 | `cache.min_query_cost_ms` | number | ≥ 0.0 at load; ≥ 0 at runtime | `10.0` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
 | `cache.ttl_seconds` | integer | ≥ 0 at load; ≥ 0 at runtime; `0` = no TTL | `3600` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
 | `cache.invalidation_strategy` | string | `ngram`, `table` | `ngram` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
@@ -240,7 +240,7 @@ When `logging.file` is set, the log is a rotating file sink capped at 100 MiB pe
 | `cache.eviction_batch_size` | integer | ≥ 1 | `10` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
 | `cache.invalidation.batch_size` | integer | ≥ 1 | `1000` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
 | `cache.invalidation.max_delay_ms` | integer | ≥ 0 | `100` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
-| `cache.invalidation.max_queue_size` | integer | ≥ 1 | `100000` | startup-only | `src/config/config-schema.json` |
+| `cache.invalidation.max_queue_size` | integer | ≥ 1 | `100000` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
 
 `cache.max_memory_mb` is the configuration key; the value is stored internally in bytes. The variable surface exposes both `cache.max_memory_mb` and a derived read-only `cache.max_memory_bytes` (`src/config/runtime_variable_manager.cpp`); the latter is not a configuration key and cannot appear in a config file.
 
@@ -256,7 +256,7 @@ The cache internals are constructed even when `cache.enabled` is `false` (`src/c
 
 ## Unread keys
 
-These keys are accepted by the schema, parsed into the configuration structure, echoed by the variable surface, and written into V1 dump metadata — but no component ever reads them to make a decision. Setting them changes nothing about server behavior.
+These keys are accepted by the schema, parsed into the configuration structure, echoed by the variable surface, and written into the dump config section (both container versions) — but no component ever reads them to make a decision. Setting them changes nothing about server behavior.
 
 - `mysql.use_gtid` — compatibility field; only `true` is accepted (`src/config/config.cpp`).
 - `mysql.binlog_format`, `mysql.binlog_row_image` — the effective values are read from the live MySQL server (`src/mysql/connection_validator.cpp`).
@@ -277,7 +277,7 @@ No other key read by the parser is absent from the schema.
 
 ## CLI flags (server binary)
 
-Parsed by `src/app/command_line_parser.cpp`. `-h`/`--help` and `-v`/`--version` are scanned across the whole argument vector first and short-circuit everything else, including config loading (`src/app/command_line_parser.cpp`).
+Parsed by `src/app/command_line_parser.cpp`. `-h`/`--help`, `-v`/`--version` and `--print-surface` are scanned across the whole argument vector first and short-circuit everything else, including config loading (`src/app/command_line_parser.cpp`).
 
 | Flag | Argument | Effect | Overrides |
 |---|---|---|---|
@@ -288,6 +288,7 @@ Parsed by `src/app/command_line_parser.cpp`. `-h`/`--help` and `-v`/`--version` 
 | `-s`, `--schema` | schema file path | Validate the config against this schema *in addition to* the built-in schema | — |
 | `-h`, `--help` | — | Print usage and exit 0 | — |
 | `-v`, `--version` | — | Print version and exit 0 | — |
+| `--print-surface` | — | Print the external surface snapshot and exit 0 without reading a configuration file (`src/app/surface_descriptor.cpp`) | — |
 
 A configuration file path is mandatory; omitting it is an error (`src/app/command_line_parser.cpp`). An unrecognized `-`-prefixed argument is an error (`src/app/command_line_parser.cpp`).
 
@@ -295,7 +296,7 @@ No CLI flag overrides a configuration key. The only override mechanism is the en
 
 ### Precedence
 
-For the five keys that participate in environment overrides, the order is:
+For the six keys that participate in environment overrides, the order is:
 
 1. Environment variable (highest)
 2. Configuration file value
@@ -413,6 +414,7 @@ The types that pass are the ones both paths render identically: the integer widt
 
 - `api.http.enable_cors: true` with an empty `api.http.cors_allow_origin` (when HTTP is enabled) — `src/config/config.cpp`
 - Non-loopback `api.tcp.bind` with an empty `api.admin_token` and no Unix socket — `src/config/config.cpp`
+- `api.http.enable: true` with a non-loopback `api.http.bind` and an empty `api.admin_token`, independently of how the TCP listener is configured: a Unix socket or a loopback `api.tcp.bind` does not exempt the HTTP listener, and the message names `api.http.bind` — `src/config/config.cpp`
 - `network.allow_cidrs` containing a universal CIDR while `api.tcp.bind` or an enabled `api.http.bind` is non-loopback — `src/config/config.cpp`
 - `network.allow_cidrs` entry that is not a valid CIDR — `src/config/config.cpp`
 - `api.http.trusted_proxies` entry that is not a numeric IP address — `src/config/config.cpp`
@@ -424,7 +426,7 @@ The types that pass are the ones both paths render identically: the integer widt
 
 - Negative `cache.max_memory_mb` — `src/config/config.cpp`
 - `cache.max_memory_mb` above 1048576 — `src/config/config.cpp`
-- `cache.max_memory_mb` above 50% of detected physical memory — `src/config/config.cpp`
+- `cache.max_memory_mb` above 50% of detected physical memory, checked only when `cache.enabled` is true — `src/config/config.cpp`
 - `..` component or NUL in `dump.dir` — `src/config/config.cpp`
 - `dump.default_filename` that is empty, contains a separator, or contains `..` — `src/config/config.cpp`
 - `..` component or NUL in `logging.file` — `src/config/config.cpp`
@@ -457,7 +459,7 @@ Each item states both sides with citations. No fixes are proposed.
 
 5. **`mysql` description omits two environment variables.** The schema's `mysql` description lists `MYGRAM_MYSQL_USER`, `MYGRAM_MYSQL_PASSWORD`, `MYGRAM_MYSQL_HOST`, and `MYGRAM_MYSQL_DATABASE` (`src/config/config-schema.json`). The parser also honors `MYGRAM_MYSQL_PORT` (`src/config/config.cpp`). Separately, `MYGRAM_API_ADMIN_TOKEN` is documented on `api.admin_token` (`src/config/config-schema.json`) but is read outside the `mysql` block (`src/config/config.cpp`).
 
-6. **`cache.max_memory_mb` has no schema maximum but two code maxima.** The schema declares only `minimum: 1` (`src/config/config-schema.json`). The parser caps the value at 1048576 MB (`src/config/config.cpp`) and additionally rejects anything above 50% of detected physical memory.
+6. **`cache.max_memory_mb` has no schema maximum but two code maxima.** The schema declares only `minimum: 1` (`src/config/config-schema.json`). The parser caps the value at 1048576 MB (`src/config/config.cpp`) and additionally rejects anything above 50% of detected physical memory, that second check running only when `cache.enabled` is true (`src/config/config.cpp`).
 
 7. **`api.tcp.keepalive` description cites a design document by path.** The schema description ends with a reference to `docs/ja/design/reactor-io-refactor.md §1.1` (`src/config/config-schema.json`); no such file exists in the repository.
 

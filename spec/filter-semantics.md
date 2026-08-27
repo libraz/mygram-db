@@ -117,7 +117,8 @@ any per-type special case:
   `src/server/search_pipeline.cpp`, but that call is reached only for the four
   ordering operators, and `CompareDoubleValues` ignores its epsilon argument for those
   (`src/utils/comparison_utils.h`). `required_filters` does not use it either
-  (section 3.2), so `src/utils/constants.h` is now passed but never consulted.
+  (section 3.2), so `kFilterValueEpsilon` (`src/utils/constants.h`) is passed but never
+  consulted.
 
 ### 2.4 DOUBLE equality
 
@@ -233,7 +234,7 @@ the configured value and `` `c` `` the quoted column. Every citation in this tab
 | `string`, `varchar`, `text` | bytes | `` CAST(`c` AS BINARY) op _utf8mb4 X'<hex V>' `` | byte-exact lexicographic compare against `V` |
 | `tinyint`…`bigint`, and every `_unsigned` width below `bigint_unsigned` | signed 64-bit | `` `c` op <decimal> ``, re-rendered from the parsed target | stored value widened to `int64_t`, `V` parsed as `int64_t` |
 | `bigint_unsigned` | unsigned 64-bit | `` `c` op <decimal> `` | `uint64_t` compare, `V` parsed as `uint64_t` |
-| `float` | none | **Rejected at configuration load** with `kConfigValidationError` (1002) from the schema enum and `kConfigInvalidValue` (1004) from `ValidateFilterType` (`src/config/config.cpp`); no predicate is resolved and no SQL is emitted | not reached |
+| `float` | single-precision — unreachable | **Rejected at configuration load** with `kConfigValidationError` (1002) from the schema enum and `kConfigInvalidValue` (1004) from `ValidateFilterType` (`src/config/config.cpp`); the domain is implemented in `Resolve`, `SqlRenderer` and `MembershipTest` and would emit `` `c` op CAST(<double literal> AS FLOAT) ``, but no configuration reaches it | not reached |
 | `double` | IEEE double | `` `c` op <double literal> `` | exact `double` compare |
 | `boolean` | 1/0 | `` `c` op 1 `` or `` `c` op 0 `` | `V` lowercased, then `1`/`true` → true and `0`/`false` → false |
 | `datetime`, `date` | wall clock | `` `c` op _utf8mb4 X'<YYYY-MM-DD HH:MM:SS>' ``, where the literal is `V` resolved to an instant and written back in `mysql.datetime_timezone` | epoch compare against the epoch the column's wall clock was read as |
@@ -271,7 +272,9 @@ declared type before any of this runs (`src/mysql/ddl_schema_validator.cpp`), so
 filter cannot be pointed at a
 `VARCHAR` column. `boolean` is accepted only against `tinyint(1)`
 (`src/mysql/ddl_schema_validator.cpp`); `string`/`varchar`/`text` are accepted
-against `char`, `varchar` and every `text` width.
+against `char`, `varchar` and every `text` width, and also against `binary`, `varbinary`
+and every blob width (`IsFilterTypeCompatible`, `src/mysql/ddl_schema_validator.cpp`), so a
+string filter can be placed on a `BLOB` or `BINARY` column.
 
 ### 3.3 What neither side can observe
 
@@ -346,7 +349,10 @@ predicate: the predicate is never reached, because the value never became one.
 ### 4.4 Configuration does not check that a value is comparable under its declared type
 
 The configured `value` is validated for presence, for compatibility with `IS NULL`, and for
-emptiness (`src/config/config-schema.json`), but not against the declared `type`. A
+emptiness — all three in `ParseRequiredFilterConfig` (`src/config/config.cpp`), each
+rejection being `kConfigInvalidValue` (1004) — but not against the declared `type`. The
+schema constrains `value` only to a string, a number or a boolean
+(`src/config/config-schema.json`); it relates it to neither `type` nor `op`. A
 filter declared `type: int` with `value: "abc"` loads successfully and fails later, at
 `RequiredFilterPredicate::Resolve`, as an aborted initial load
 (`src/mysql/required_filter_predicate.cpp`, `src/loader/initial_loader.cpp`).
@@ -368,9 +374,9 @@ Every predicate below is emitted by `src/mysql/required_filter_predicate.cpp`.
 | `string`, `varchar`, `text` | `` CAST(`c` AS BINARY) `` | character literal | **No** — the column is wrapped in a function |
 | `timestamp` | `` UNIX_TIMESTAMP(`c`) `` | integer literal | **No** — the column is wrapped in a function |
 | `date`, `datetime` | bare column | character literal | Yes — MySQL folds the constant to the column's temporal type |
-| `time` | bare column | character literal `'HH:MM:SS'` | Yes — same constant folding |
+| `time` | bare column | character literal `_utf8mb4 X'<hex [-]HH:MM:SS>'` | Yes — same constant folding |
 | all integer types, `double`, `boolean` | bare column | bare numeric literal | Yes |
-| `float` | — | — | n/a — the type is refused at configuration load, so no predicate is ever emitted (§3.2) |
+| `float` | bare column | `CAST(<double literal> AS FLOAT)` | n/a — the domain is implemented but unreachable, because the type is refused at configuration load, so no predicate is ever emitted (§3.2) |
 
 Three further properties bear on the cost of an initial load:
 

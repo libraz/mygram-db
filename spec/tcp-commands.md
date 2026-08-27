@@ -234,6 +234,13 @@ Every command below is dispatched from `QueryParser::Parse`
 (`src/server/request_dispatcher.cpp`) to a handler registered in
 `src/server/server_lifecycle_manager.cpp`.
 
+Min/max args counts the arguments that follow the whole command name, and states
+the count the command gives meaning to. `spec/surface.snapshot.txt` counts a
+different thing: arguments after the first token, bounded by what the dispatcher
+accepts rather than by what the handler reads. A multi-word command that ignores
+trailing tokens therefore reads `unbounded` in the snapshot and a finite count
+with `(extras ignored)` here. The two disagree by construction; neither is stale.
+
 | Command | Min/max args | Mutates state | Auth-gated | Rate-limited | Handler |
 |---|---|---|---|---|---|
 | `AUTH <secret>` | 1 / 1 | connection auth flag | n/a | yes | dispatcher inline (`src/server/request_dispatcher.cpp`) |
@@ -242,7 +249,7 @@ Every command below is dispatched from `QueryParser::Parse`
 | `GET <table> <primary_key>` | 2 / 2 | no | no | yes | `src/server/handlers/document_handler.cpp` |
 | `FACET <table> <column> [text] [clauses]` | 2 / unbounded | no | no | yes | `src/server/handlers/facet_handler.cpp` |
 | `INFO` | 0 / 0 (extras ignored) | yes — refreshes peak-memory statistics | no | yes | `src/server/handlers/admin_handler.cpp` |
-| `DUMP SAVE [filepath]` | 0 / 1 | yes — writes a snapshot | yes | yes | `src/server/handlers/dump_handler.cpp` |
+| `DUMP SAVE [filepath]` | 0 / unbounded (last non-flag token wins) | yes — writes a snapshot | yes | yes | `src/server/handlers/dump_handler.cpp` |
 | `DUMP LOAD <filepath>` | 1 / 1 (extras ignored) | yes — replaces all index state | yes | yes | `src/server/handlers/dump_handler.cpp` |
 | `DUMP VERIFY <filepath>` | 1 / 1 (extras ignored) | no | yes | yes | `src/server/handlers/dump_handler.cpp` |
 | `DUMP INFO <filepath>` | 1 / 1 (extras ignored) | no | yes | yes | `src/server/handlers/dump_handler.cpp` |
@@ -257,12 +264,12 @@ Every command below is dispatched from `QueryParser::Parse`
 | `SYNC STATUS` | 0 / 0 (extras ignored) | no | yes | yes | `src/server/handlers/sync_handler.cpp` |
 | `SYNC STOP [table]` | 0 / 1 (extras ignored) | yes — requests cancellation | yes | yes | `src/server/handlers/sync_handler.cpp` |
 | `OPTIMIZE [table]` | 0 / 1 (extras ignored) | yes — rebuilds posting lists | yes | yes | `src/server/handlers/debug_handler.cpp` |
-| `DEBUG ON` / `DEBUG OFF` | 1 / 1 (extras ignored) | yes — connection debug flag | yes | yes | `src/server/handlers/debug_handler.cpp` |
+| `DEBUG ON` / `DEBUG OFF` | 0 / 0 (extras ignored) | yes — connection debug flag | yes | yes | `src/server/handlers/debug_handler.cpp` |
 | `CACHE CLEAR [table]` | 0 / 1 (extras ignored) | yes — evicts cache entries | yes | yes | `src/server/handlers/cache_handler.cpp` |
 | `CACHE STATS` | 0 / 0 (extras ignored) | no | yes | yes | `src/server/handlers/cache_handler.cpp` |
 | `CACHE ENABLE` / `CACHE DISABLE` | 0 / 0 (extras ignored) | yes — cache enablement | yes | yes | `src/server/handlers/cache_handler.cpp` |
 | `SET <var> = <value> [, ...]` | 1 / unbounded | yes — runtime configuration | yes | yes | `src/server/handlers/variable_handler.cpp` |
-| `SHOW VARIABLES [LIKE '<pattern>']` | 1 / 3 | no | yes | yes | `src/server/handlers/variable_handler.cpp` |
+| `SHOW VARIABLES [LIKE '<pattern>']` | 0 / 2 | no | yes | yes | `src/server/handlers/variable_handler.cpp` |
 | `SAVE ...` | — | retired | — | yes | rejected at parse (`src/query/query_parser.cpp`) |
 | `LOAD ...` | — | retired | — | yes | rejected at parse (`src/query/query_parser.cpp`) |
 
@@ -397,8 +404,17 @@ cache hit (`src/server/response_formatter.cpp`, `src/server/handlers/search_hand
 | `HIGHLIGHT` without stored normalized text | `ERROR 4 HIGHLIGHT requires normalized text storage. Set memory.verify_text to "ascii" or "all" in configuration.` | `src/server/handlers/search_handler.cpp` |
 | `SORT _score` with BM25 disabled | `ERROR 3007 SORT _score requires BM25 to be enabled in configuration` | `src/server/search_pipeline.cpp` |
 | `SORT _score` without stored normalized text | `ERROR 4 SORT _score requires normalized text storage. ...` | `src/server/search_pipeline.cpp` |
+| `SORT <col>` where `<col>` is neither a filter column of the resolved table nor its primary key | `ERROR 3007 Sort column '<col>' not found. Column does not exist as filter column or primary key. Check column name spelling.` | `ResultSorter::SortAndPaginate` (`src/query/result_sorter.cpp`) |
 | Index or document store unavailable | `ERROR 5 Index not available` / `ERROR 5 Document store not available` | `src/server/handlers/search_handler.cpp` |
 | A search term too short to produce n-grams, with normalized text not stored | `ERROR 4000 Query term is too short for n-gram search and requires normalized text storage. Set memory.verify_text to "ascii" or "all" in configuration.` | `src/server/search_pipeline.cpp` |
+
+**The sort-column check is result-set dependent.** `SortAndPaginateResults`
+(`src/server/search_pipeline.cpp`) routes every non-`_score` `SEARCH` through
+`ResultSorter::SortAndPaginate` (`src/query/result_sorter.cpp`), which returns an empty page
+before validating the column when the result set is empty. The same misspelled sort column
+therefore answers `OK RESULTS 0` on a query that matches nothing and `ERROR 3007` on a query
+that matches. This is a different condition from the grammar rejections in §9.5, which are
+raised at parse time and carry different messages.
 
 ### 8.2 `COUNT`
 
@@ -518,19 +534,31 @@ FILTER <column><op><value>            -- one compound token, e.g. FILTER status=
 FILTER <column><op> <value>           -- compound column+operator, value as next token
 ```
 
-Operators, longest-match first when scanning a compound token
-(`src/query/query_parser_clauses.cpp`):
+Operators recognized by `QueryParser::ParseFilterOp` (`src/query/query_parser_clauses.cpp`),
+which is reached with an operator token that has already been isolated:
 
-| Symbolic | Alternate | Named | Enum |
-|---|---|---|---|
-| `=` | `==` | `EQ` | `FilterOp::EQ` |
-| `!=` | `<>` | `NE` | `FilterOp::NE` |
-| `>` | — | `GT` | `FilterOp::GT` |
-| `>=` | `≥` (U+2265) | `GTE` | `FilterOp::GTE` |
-| `<` | — | `LT` | `FilterOp::LT` |
-| `<=` | `≤` (U+2264) | `LTE` | `FilterOp::LTE` |
+| Symbolic | Alternate | Named | Enum | Splits a compound token |
+|---|---|---|---|---|
+| `=` | `==` | `EQ` | `FilterOp::EQ` | `=` only |
+| `!=` | `<>` | `NE` | `FilterOp::NE` | `!=` and `<>` |
+| `>` | — | `GT` | `FilterOp::GT` | `>` |
+| `>=` | `≥` (U+2265) | `GTE` | `FilterOp::GTE` | `>=` only |
+| `<` | — | `LT` | `FilterOp::LT` | `<` |
+| `<=` | `≤` (U+2264) | `LTE` | `FilterOp::LTE` | `<=` only |
 
-(`src/query/query_parser_clauses.cpp`)
+**Only the last column applies to the compound forms.**
+`QueryParser::ParseFilterArguments` (`src/query/query_parser_clauses.cpp`) splits a compound
+token against a fixed seven-element list — `>=`, `<=`, `!=`, `<>`, `=`, `>`, `<` — which
+carries neither the named forms nor `==`, `≥` and `≤`. Those three reach `ParseFilterOp` only
+in the three-token form, so `FILTER price ≥ 100` succeeds while `FILTER price≥100` is not
+recognized as a compound token and falls through to the three-token path, which reports
+`ERROR 3006 FILTER requires column, operator, and value` when no further tokens follow.
+
+The scan is longest-**operator**-first, not longest-match-at-the-earliest-position: the seven
+symbols are tried in the order above and the first one found anywhere in the token wins, so
+`FILTER a=b>=c` binds column `a=b`, operator `>=` and value `c`, and is then rejected as
+`ERROR 3006 Invalid filter column` by `IsSafeColumnName`
+(`src/query/query_parser.cpp`).
 
 Every citation in the table below is `src/query/query_parser_clauses.cpp`.
 
@@ -732,9 +760,23 @@ directory with traversal rejection; failures surface the resolver's own error co
 **Mutual-exclusion errors.** The code depends on which operation blocks the request. A
 conflict with `DUMP SAVE`, `DUMP LOAD`, `OPTIMIZE` or the long-operation coordinator answers
 `ERROR 6030` from the per-command sites cited in the table below. A conflict with an in-flight
-`SYNC` answers `ERROR 4011`, because every such check is delegated to
-`SyncOperationManager::CheckNoSyncInProgress`, which is the sole emitter of that code on these
-paths (`src/server/sync_operation_manager.cpp`).
+`SYNC` answers `ERROR 4011`.
+
+That 4011 comes from two different places. On the `DUMP SAVE`, `DUMP LOAD`, `OPTIMIZE` and
+`REPLICATION START` rows the check is delegated to
+`SyncOperationManager::CheckNoSyncInProgress` (`src/server/sync_operation_manager.cpp`), whose
+message is `Cannot <operation> while SYNC is in progress for tables: <names>`. The `SYNC` row
+is served instead by three independent sites inside `SyncOperationManager::StartSync`
+(`src/server/sync_operation_manager.cpp`), each with its own message:
+
+| Blocking condition | Message |
+|---|---|
+| The long-operation coordinator is held | `Cannot start SYNC while <operation> is in progress` |
+| A worker is already syncing the table | `SYNC already in progress for '<name>'` |
+| A concurrent `StartSync` is joining the previous worker for the table | `SYNC for '<name>' is being restarted; please retry shortly` |
+
+The third is transient: it lasts only for the `JOINING_PREVIOUS` window described in §10.5,
+and the same request succeeds once that window closes.
 
 | Command | Blocked by | Code | Implementation |
 |---|---|---|---|
@@ -779,7 +821,7 @@ initial position.` (`src/server/handlers/dump_handler.cpp`).
 | Not found | `ERROR 1000 CONFIG VERIFY: file not found: <path>` |
 | Not a regular file | `ERROR 2 CONFIG VERIFY: not a regular file` |
 | Config directory unknown | `ERROR 6026 CONFIG VERIFY: active configuration directory is unavailable` |
-| Validation failure | `ERROR <config error code> Configuration validation failed:   <message>` (embedded CRLF is flattened to spaces by the error formatter) |
+| Validation failure | `ERROR <config error code> Configuration validation failed:    <message>` — the handler builds `Configuration validation failed:\r\n  ` and `ResponseFormatter::FormatError` replaces each control character with one space without collapsing runs, so four spaces reach the wire |
 
 `CONFIG VERIFY` deliberately omits `mysql.user` and `mysql.password` from its summary
 (`src/server/handlers/admin_handler.cpp`).
@@ -840,10 +882,16 @@ case-insensitively before falling through to the table-name branch, a table lite
 
 ```
 OK SYNC_STATUS\r\n
-table=<name> status=STARTING|IN_PROGRESS|COMPLETED|FAILED|CANCELLING|CANCELLED[ <details>]\r\n
+table=<name> status=JOINING_PREVIOUS|STARTING|IN_PROGRESS|COMPLETED|FAILED|CANCELLING|CANCELLED[ <details>]\r\n
 ...
 END\r\n
 ```
+
+`JOINING_PREVIOUS` is transient. `SyncOperationManager::StartSync` publishes it while it joins
+the previous worker for that table and replaces it with `STARTING` once the new worker is
+claimed; `SyncOperationManager::GetSyncStatus` prints whatever string is set, so a `SYNC
+STATUS` issued concurrently with a restart of the same table observes it
+(`src/server/sync_operation_manager.cpp`). It carries no detail suffix.
 
 Detail suffixes by status: `IN_PROGRESS` adds `progress=<done>/<total> rows (<pct>%)` (or
 `progress=<done> rows` when the total is unknown) and `rate=<n> rows/s`; `COMPLETED` adds
@@ -875,6 +923,13 @@ OK SYNC_STATUS\r\nstatus=IDLE message="No sync operation performed"\r\nEND\r\n
 | Another long operation holds the coordinator, or a `SYNC` already claims the table | `ERROR 4011 <detail>` | `src/server/sync_operation_manager.cpp` |
 | Memory critically low | `ERROR 4012 Memory critically low. Cannot start SYNC.` | `src/server/sync_operation_manager.cpp` |
 | Worker thread could not be created | `ERROR 4013 Failed to create sync thread: <detail>` | `src/server/sync_operation_manager.cpp` |
+
+**Two rows of that table share a message shape but not a code.** The 6030 row reports
+`Cannot start SYNC while <operation> is in progress` from the handler's own pre-checks
+(`src/server/handlers/sync_handler.cpp`), and the 4011 row reports the same sentence when the
+long-operation coordinator refuses the claim (`SyncOperationManager::StartSync`,
+`src/server/sync_operation_manager.cpp`). A client that branches on the message text rather
+than the numeric code cannot tell the two apart; branch on the code.
 
 `SYNC STOP <table>` resolves the table name first (`src/server/handlers/sync_handler.cpp`),
 so it can also answer `ERROR 4007` or `ERROR 4008` from the shared resolver
@@ -1070,21 +1125,25 @@ with the following escapes (`src/server/response_formatter.cpp`):
 
 ### 11.2 Tab- and line-delimited fields
 
-Applied to highlight snippets, facet values, `SYNC STATUS` fields, and `DUMP` status/info
-fields (`src/server/response_formatter.cpp`, exposed as
-`ResponseFormatter::SanitizeDelimitedField` at `src/server/response_formatter.cpp`).
+Applied to highlight snippets, facet values, `SYNC STATUS` fields, `DUMP` status/info fields,
+the filepath in the `DUMP_VERIFIED` success frame
+(`src/server/handlers/dump_handler.cpp`) and the table name inside the 6029 synchronizing
+error (`src/server/handlers/command_handler.cpp`). Exposed as
+`ResponseFormatter::SanitizeDelimitedField` (`src/server/response_formatter.cpp`).
 Every CR, LF, TAB and control character is replaced by a single space. No quoting is applied.
 
 ---
 
 ## 12. Response frame catalogue
 
-Three status shapes exist. None of the formatters append the transport terminator; that is
-added once by the connection layer (`src/server/reactor_connection.cpp`).
+Three status shapes exist, and the `OK <body>` shape is built two different ways. None of the
+formatters append the transport terminator; that is added once by the connection layer
+(`src/server/reactor_connection.cpp`).
 
-| Shape | Producer | Used by |
+| Shape | Assembled by | Frames |
 |---|---|---|
-| `OK <body>` | `ResponseFormatter::FormatStatus` (`src/server/response_formatter.cpp`) | `AUTHENTICATED`, `RESULTS`, `COUNT`, `DOC`, `FACET`, `INFO`, `SAVED`, `LOADED`, `DUMP_*`, `CACHE_*`, `DEBUG_*`, `OPTIMIZED`, `REPLICATION*`, `SYNC*` |
+| `OK <body>` | `ResponseFormatter::FormatStatus` (`src/server/response_formatter.cpp`) | `AUTHENTICATED`, `SAVED`, `DUMP_STARTED`, `DUMP_VERIFIED`, `CACHE_CLEARED`, `CACHE_ENABLED`, `CACHE_DISABLED`, `DEBUG_ON`, `DEBUG_OFF`, `OPTIMIZED`, `SYNC*` |
+| `OK <body>` | prefix constants concatenated at the emitting site | `RESULTS`, `COUNT`, `DOC`, `FACET`, `INFO`, `LOADED`, `REPLICATION*` (`src/server/response_formatter.cpp`); `DUMP_INFO`, `DUMP_STATUS` (`src/server/handlers/dump_handler.cpp`); `CACHE_STATS` (`src/server/handlers/cache_handler.cpp`) |
 | `+OK` / `+OK <body>` | `ResponseFormatter::FormatOk` (`src/server/response_formatter.cpp`) | `CONFIG HELP`, `CONFIG SHOW`, `CONFIG VERIFY`, `SET`, empty `SHOW VARIABLES` |
 | `ERROR <code> <message>` | `ResponseFormatter::FormatError` (`src/server/response_formatter.cpp`) | every failure path |
 
@@ -1124,10 +1183,10 @@ ERROR <numeric-code> <message>
 | 8 | `kNotFound` | `CONFIG HELP` unknown path; `SYNC STOP` with nothing running |
 | 9 | `kAlreadyExists` | `REPLICATION START` while already running |
 | 1000 | `kConfigFileNotFound` | `CONFIG VERIFY` missing file |
-| 1001-1006 | config error codes | `CONFIG VERIFY` validation failure (code propagated from the loader); `CONFIG SHOW` unknown path and a `SET` value rejected for a mutable variable (both 1004) |
+| 1001-1004, 1006 | config error codes | `CONFIG VERIFY` validation failure (code propagated from `config::LoadConfigForValidation`); `CONFIG SHOW` unknown path and a `SET` value rejected for a mutable variable (both 1004) |
 | 1008 | `kConfigUnknownVariable` | `SET` naming a variable that does not exist |
 | 1009 | `kConfigVariableNotMutable` | `SET` on a variable that is not runtime-mutable |
-| 2001, 2002, 2005-2010, 2012 | MySQL error codes | `REPLICATION START` failure (code propagated from `BinlogReader::Start`) |
+| 2002, 2006, 2008, 2012, plus any code propagated | MySQL error codes | `REPLICATION START` failure — see the note below the table |
 | 3000 | `kQuerySyntaxError` | every parser-level syntax/arity error; unknown query type |
 | 3001 | `kQueryInvalidToken` | invalid UTF-8 in search text |
 | 3005 | `kQueryTooLong` | `api.max_query_length` exceeded |
@@ -1157,6 +1216,32 @@ ERROR <numeric-code> <message>
 | 8001 | `kCacheDisabled` | `CACHE` commands with the cache unconfigured or disabled; `SET cache.enabled = true` when the subsystem cannot start |
 
 Numeric values are defined in `src/utils/error.h`.
+
+**`REPLICATION START` failure codes are not a closed set.** The handler returns
+`ERROR <code> Failed to start replication: <message>` with `<code>` taken verbatim from
+whatever `BinlogReader::Start` (`src/mysql/binlog_reader.cpp`) returned
+(`src/server/handlers/replication_handler.cpp`). `Start` emits `2012` (schema incompatible or
+a null table context), `2008` (already running, zero `replication.server_id`, initial stream
+open timed out, worker threads could not be created), `2002` (the main connection was lost and
+could not be reconnected) and `2006` (GTID mode is not `ON`) of its own. Everywhere else it
+forwards the underlying error unchanged, so the code can come from any of:
+
+- `Connection::Connect` (`src/mysql/connection.cpp`) for the dedicated binlog and metadata
+  connections, classified by `internal::ClassifyConnectErrorCode` into `2003` for MySQL
+  access-denied and `2000` for every other connect failure. These two carry the common
+  operator-visible cases — wrong credentials and an unreachable server.
+- Any metadata query `Start` issues before the stream opens
+  (`Connection::IsGTIDModeEnabled`, `Connection::ValidateUniqueColumn`,
+  `DDLSchemaValidator::Capture` in `src/mysql/ddl_schema_validator.cpp`). A failing statement
+  is classified by `internal::ClassifyQueryErrorCode` (`src/mysql/connection.cpp`) into
+  `2009`, `2010`, `2002`, `2001`, or `7` (`kPermissionDenied`) when the replication user lacks
+  a required grant; the callers additionally raise `2001`, `2010`, `2011` and `2012` on results
+  they can read but not accept.
+- The reader thread's own failure to open the first binlog stream, whose error is published
+  through the same result.
+
+Clients must therefore treat `Failed to start replication` as carrying an open code set and
+not enumerate it.
 
 ---
 

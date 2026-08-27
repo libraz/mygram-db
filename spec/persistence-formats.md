@@ -160,9 +160,9 @@ All four versions share this prefix:
 ```
 term_count : uint64
   per term:
-    term_len     : uint32     # rejected above 10000 (index_serialization.cpp:505)
+    term_len     : uint32     # rejected above 10000 (kMaxTermLength, src/index/index_serialization.cpp)
     term_bytes   : term_len
-    posting_size : uint64     # rejected above 100_000_000 (index_serialization.cpp:547)
+    posting_size : uint64     # rejected above 100_000_000 (kMaxPostingSize, src/index/index_serialization.cpp)
     posting_data : posting_size
 ```
 
@@ -202,8 +202,6 @@ The writer always emits `kCurrentFormatVersion`, which is V4 (`src/index/index_f
 
 Acceptance does not imply the payload carries its own checksum: V1 has no CRC32 trailer at all, and the trailer is verified only for V2, V3 and V4 (`src/index/index_serialization.cpp`). A V1 index payload's only integrity check is the enclosing dump's file-level, and for a V2 container section-level, CRC.
 
-**Untested read paths.** No test constructs a V2 or a V3 index payload — the only synthetic `MGIX` payloads in the suite are version 1 (`tests/index/index_serialization_test.cpp`) and version 99 (`tests/index/index_advanced_test.cpp`). The V1 read path is reached only by malformed-input tests that assert on the rejection, never by a test that loads a well-formed V1 index and asserts on the recovered terms. V4 is covered by round-trip through the dump tests. **V2 and V3 index read paths therefore have no test coverage at all, and V1 has rejection-path coverage only.**
-
 ## 3. Document store serialization format
 
 One document-store payload is embedded per table inside a dump, and the same bytes are produced by `DocumentStore::SaveToFile` (`src/storage/document_store_persistence.cpp`).
@@ -214,9 +212,9 @@ Magic is ASCII `MGDS` (`src/storage/document_store_persistence.cpp`). Version is
 magic        : 4 bytes "MGDS"
 version      : uint32
 next_doc_id  : uint32
-gtid_len     : uint32          # rejected above 1024 (document_store_persistence.cpp:49)
+gtid_len     : uint32          # rejected above 1024 (kMaxGTIDLength, src/storage/document_store_persistence.cpp)
 gtid         : gtid_len bytes
-doc_count    : uint64          # rejected above 1_000_000_000 (document_store_persistence.cpp:50)
+doc_count    : uint64          # rejected above 1_000_000_000 (kMaxDocumentCount, src/storage/document_store_persistence.cpp)
   per document:
     doc_id       : uint32
     pk_len       : uint32
@@ -225,7 +223,7 @@ doc_count    : uint64          # rejected above 1_000_000_000 (document_store_pe
       per filter:
         name_len : uint32
         name     : name_len bytes
-        type_idx : uint8       # std::variant index into FilterValue (document_store.h:73-86)
+        type_idx : uint8       # std::variant index into FilterValue (src/storage/document_store.h)
         value    : type-dependent; monostate writes nothing, string writes uint32 len + bytes
     v2+: norm_text_len : uint32 ; norm_text : bytes
     v3+: orig_text_len : uint32 ; orig_text : bytes
@@ -256,9 +254,9 @@ Only version 3 is written (`src/storage/document_store_persistence.cpp`). Versio
 
 | Format | Version | Written by current code? | Read by current code? | Read path rejects because |
 |---|---|---|---|---|
-| Index payload | 1 | No | **Yes** (rejection-path test coverage only) | — |
-| Index payload | 2 | No | **Yes** (no test coverage) | — |
-| Index payload | 3 | No | **Yes** (no test coverage) | — |
+| Index payload | 1 | No | **Yes** | — |
+| Index payload | 2 | No | **Yes** | — |
+| Index payload | 3 | No | **Yes** | — |
 | Index payload | 4 | **Yes** (`src/index/index_format.h`) | **Yes** | — |
 | Index payload | 0, or 5 and above | No | **No** | `src/index/index_serialization.cpp` → `kStorageVersionMismatch` "Unsupported index format version" |
 | Index payload | any version, wrong magic | n/a | **No** | `src/index/index_serialization.cpp` → `kStorageInvalidFormat` "Invalid magic number in index data" |
@@ -303,11 +301,13 @@ The config section records the full server configuration minus credentials (`src
 | `memory.normalize.nfkc` | Differs |
 | `memory.normalize.width` | Differs |
 | `memory.normalize.lower` | Differs |
-| `tables[*].ngram_size` | Differs, for any table whose qualified `database.table` name appears in both the dump and the running config; a dump entry that records no database is matched by its bare name |
+| `tables[*].ngram_size` | Differs, for any table whose qualified `database.table` name appears in both the dump and the running config |
 | `tables[*].kanji_ngram_size` | Differs |
 | `tables[*].cross_boundary_ngrams` | Differs |
 
 Every row in this table is enforced in `src/server/dump_config_validator.h`.
+
+A table entry written before the config section carried a database decodes with that field empty, and `DeserializeConfig` (`src/storage/dump_format_v1_config.cpp`) fills it from the dump's own `mysql.database` before the comparison runs. Such an artifact therefore resolves by qualified name like any other; the bare-name fallback in `FindDumpTableConfig` (`src/server/dump_config_validator.h`) is a backstop the load path does not reach.
 
 A table present in the dump but absent from the running config is skipped by this comparison (`src/server/dump_config_validator.h`), but the table-set check in the format layer rejects the dump anyway (`src/storage/dump_format_internal.cpp`).
 
@@ -337,6 +337,4 @@ Each item states what a shipped document asserts and what the code does, with ci
 
 **6.4 `kWithCRC` described as always set.** `src/storage/dump_format.h` annotates `kWithCRC` as "always set in V1". That is true of what `WriteDumpV1` produces (`src/storage/dump_format_v1.cpp`), and the V1 reader verifies the file CRC unconditionally, ignoring the flag (`src/storage/dump_format_v1.cpp`). The V2 reader, by contrast, treats the flag as authoritative and skips file-level CRC verification entirely when it is clear (`src/storage/dump_format_v2.cpp`, and in the verifier `src/storage/dump_format_v2.cpp`). The same bit therefore has advisory meaning in one container version and no meaning in the other.
 
-**6.5 BM25 and synonym sections.** `docs/releases/v1.6.0.md` and `docs/releases/v1.6.0.md` describe the V2 format as carrying BM25 and synonym data, and the section types `kTableBM25 = 5` and `kTableSynonyms = 7` plus flags `kHasBM25Data` and `kHasSynonymData` exist (`src/storage/dump_format.h`). `WriteDumpV2` emits neither section and sets neither flag (`src/storage/dump_format_v2.cpp`), and `ReadDumpV2`'s dispatch has no case for either type, so both would take the unknown-section skip path (`src/storage/dump_format_v2.cpp`). BM25 corpus statistics are recomputed from the restored document store after a load instead (`src/app/server_orchestrator.cpp`).
-
-**6.6 Untested accepted versions.** The acceptance policy above is wider than the tested surface. Index payload versions 2 and 3 are accepted with no test constructing such a payload; index version 1 is reached only by tests that assert on rejection (`tests/index/index_serialization_test.cpp`, `tests/index/index_advanced_test.cpp`). Document store versions 1 and 2 are covered (`tests/storage/document_store_test.cpp`), as is dump container version 1 (`tests/storage/dump_format_v2_test.cpp`).
+**6.5 BM25 and synonym sections.** `src/storage/dump_format.h` declares the section types `kTableBM25 = 5` and `kTableSynonyms = 7` and the flags `kHasBM25Data` and `kHasSynonymData`, so the V2 format has a place to carry BM25 and synonym data. Nothing puts anything there: `WriteDumpV2` emits neither section and sets neither flag (`src/storage/dump_format_v2.cpp`), and `ReadDumpV2`'s dispatch has no case for either type, so either one would take the unknown-section skip path (`src/storage/dump_format_v2.cpp`). The meaning of such a section is therefore undefined — nothing writes it and nothing would read it. BM25 corpus statistics are recomputed from the restored document store after a load instead (`src/app/server_orchestrator.cpp`).

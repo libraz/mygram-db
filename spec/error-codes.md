@@ -36,6 +36,7 @@ The Surfaces column uses these terms.
 | `status field` | Carried as the `last_error_code` value of `INFO` / `REPLICATION STATUS` (TCP), `GET /replication/status` (HTTP), and `mygramdb_replication_last_error_code` (`GET /metrics`) — a reported replication attribute, not an error response. |
 | `internal` | Constructed, but consumed inside the process (logged, branched on, or masked by an outer code) and never rendered on a client surface. |
 | `unreferenced` | No construction site anywhere in `src/`. |
+| `undetermined` | Constructed, but no call chain has been traced from the construction site to either a client surface or a consumer inside the process, so neither `internal` nor a surface term can be asserted. |
 
 ### The propagation rule behind `TCP+`
 
@@ -63,7 +64,7 @@ The HTTP surface does not have an equivalent blanket path: `HttpServer::SendErro
 | 5 | `kInternalError` | Internal error | `TCP+`, `HTTP`, `internal` | `src/server/handlers/search_handler.cpp`, `src/server/http_server.cpp`, `src/server/search_pipeline.cpp` (48 sites total) |
 | 6 | `kIOError` | I/O error (file read/write) | `internal` — startup configuration | `src/app/configuration_manager.cpp`, `src/app/application.cpp` (7 sites total) |
 | 7 | `kPermissionDenied` | Permission denied | `TCP+` (AUTH), `HTTP` (CIDR allow-list, bearer token), `internal` (privilege drop, MySQL grants) | `src/server/request_dispatcher.cpp`, `src/server/http_server.cpp`, `src/app/application.cpp` (9 sites total) |
-| 8 | `kNotFound` | Resource not found | `TCP+` | `src/server/sync_operation_manager.cpp`, `src/server/handlers/admin_handler.cpp`. Document lookups no longer share this code; they report 4004 |
+| 8 | `kNotFound` | Resource not found | `TCP+` | `src/server/sync_operation_manager.cpp`, `src/server/handlers/admin_handler.cpp`. A document lookup that finds nothing reports 4004 instead |
 | 9 | `kAlreadyExists` | Resource already exists | `TCP+` — `REPLICATION START` when replication is already running | `src/server/handlers/replication_handler.cpp` |
 | 10 | `kTimeout` | Operation timed out | `unreferenced` | — |
 | 11 | `kCancelled` | Operation cancelled | `internal` — startup abort during shutdown | `src/app/server_orchestrator.cpp`, `src/mysql/gtid_waiter.cpp` |
@@ -82,7 +83,7 @@ All Configuration codes except 1007 reach TCP through the administrative command
 | 1005 | `kConfigSchemaError` | JSON schema error | `TCP+` (`CONFIG HELP`) | `src/config/config_help.cpp` |
 | 1006 | `kConfigYamlError` | YAML parsing error | `TCP+` (`CONFIG VERIFY`) | `src/config/config_loader.cpp` |
 | 1007 | `kConfigJsonError` | JSON parsing error | `internal` — only reachable for a JSON config file at startup; `CONFIG VERIFY` rejects any extension other than `.yaml`/`.yml` (`src/server/handlers/admin_handler.cpp`) | `src/config/config_loader.cpp` |
-| 1008 | `kConfigUnknownVariable` | No configuration variable by that name | `TCP+` (`SET`) — `src/server/handlers/variable_handler.cpp` is reached first, by the pre-assignment lookup | `src/config/runtime_variable_manager.cpp` |
+| 1008 | `kConfigUnknownVariable` | No configuration variable by that name | `TCP+` (`SET`) — both construction sites are in `RuntimeVariableManager`, and a `SET` client receives the one raised by `GetVariable`, because `VariableHandler::HandleSet` (`src/server/handlers/variable_handler.cpp`) looks the name up before assigning and forwards that code | `src/config/runtime_variable_manager.cpp` |
 | 1009 | `kConfigVariableNotMutable` | Variable exists but cannot be changed at runtime | `TCP+` (`SET`) | `src/config/runtime_variable_manager.cpp` |
 
 ### Database/Connection (2000-2999)
@@ -227,7 +228,7 @@ Client codes are produced inside the client library and `mygram-cli`; they never
 | 7007 | `kClientCommandFailed` | Command failed | `C ABI` — allocation and command-dispatch failures inside the C wrapper | `src/client/mygramclient_c.cpp` (27 sites total) |
 | 7008 | `kClientConnectionClosed` | Connection closed | `C++ SDK`, `C ABI`, `CLI` | `src/client/mygramclient.cpp` |
 | 7009 | `kClientInvalidArgument` | Invalid argument | `C++ SDK`, `C ABI` | `src/client/mygramclient.cpp`, `src/client/mygramclient_c.cpp` (40 sites total) |
-| 7010 | `kClientServerError` | Server error | `C++ SDK`, `C ABI`, `CLI` — assigned when a server `ERROR` frame omits a numeric code | `src/client/mygramclient.cpp` |
+| 7010 | `kClientServerError` | Server error | `C++ SDK`, `C ABI`, `CLI` — assigned when a server `ERROR` frame omits a numeric code (`ParseServerErrorResponse`), and when `DUMP SAVE` completion polling reads a `DUMP STATUS` of `FAILED` (`src/client/mygramclient.cpp`) | `src/client/mygramclient.cpp` |
 | 7011 | `kClientProtocolError` | Protocol error | `C++ SDK`, `C ABI`, `CLI` | `src/client/mygramclient.cpp` (15 sites total) |
 | 7012 | `kClientExpressionParseError` | Expression parse error | `C++ SDK` only — the C ABI expression functions are free functions with no client handle, so they return `-1` and a `diagnostic` string, and the code itself is not reachable through `mygramclient_get_last_error_code()` | `src/client/search_expression.cpp` (10 sites total) |
 
@@ -261,20 +262,20 @@ int HttpStatusForQueryError(const Error& error) {
 
 A second, narrower pairing lives in `ResolveHttpTableContext` (`src/server/http_server.cpp`), which returns a status and a code together: 400 with 3001 for a malformed table name, 400 with 3000 for an unqualified name under a multi-database configuration, 404 with 4007 for an unknown table, and 500 with 5 for a table context missing its index or document store.
 
-Every other status/code pair is a literal at the call site. The status constants are defined at `src/server/http_server.cpp`. The pairings observed across the HTTP handlers:
+Everywhere else the status is a literal at the call site; the code is either a literal too, or is forwarded from an `Error` the handler received. `SendError(res, kHttpBadRequest, result.error())` and its siblings pass a literal status alongside whichever code the failing operation produced, which is how codes with no HTTP construction site reach the surface — 2, 3005 and 3007 appear on the 400 row that way, and 3005 `kQueryTooLong` has its only construction site in `QueryParser` (`src/query/query_parser.cpp`). The status constants are defined at `src/server/http_server.cpp`. The pairings observed across the HTTP handlers:
 
 | Status | Codes seen with it |
 |--------|--------------------|
-| 400 Bad Request | 2, 3000, 3001, 3005, 3006, 3007, 3008, 3009 |
+| 400 Bad Request | 2, 4, 3000, 3001, 3005, 3006, 3007, 3008, 3009 |
 | 401 Unauthorized | 7 |
 | 403 Forbidden | 7 |
-| 404 Not Found | 8, 4007 |
+| 404 Not Found | 4004, 4007 |
 | 415 Unsupported Media Type | 6007 |
 | 429 Too Many Requests | 6030 |
 | 500 Internal Server Error | 5 |
 | 503 Service Unavailable | 1, 4, 5, 6026, 6028, 6029, and any code parsed out of an `OPTIMIZE` frame |
 
-The 503 row is the widest because `POST /optimize` re-parses the TCP frame returned by the OPTIMIZE handler and reuses whatever code it finds, always under 503 (`src/server/http_server.cpp`).
+The 503 row is the widest because `POST /optimize` re-parses the TCP frame returned by the OPTIMIZE handler and reuses whatever code it finds, always under 503 (`src/server/http_server.cpp`). 4 `kNotImplemented` appears on two rows: under 400 when a search request asks for `HIGHLIGHT` and the table's document store has text storage disabled, and under 503 when a replication route is served by a build or a configuration without replication (`src/server/http_server.cpp`).
 
 ## Message rendering
 
@@ -346,10 +347,12 @@ The `<default text>` is `ErrorCodeToString(code)`; for a code outside the enum i
 `mygramclient_get_last_error_code()` returns the code as an `int`; `mygramclient_get_last_error()` returns a message string whose shape depends on where the error came from:
 
 ```
-// Error propagated from the C++ client (src/client/mygramclient_c.cpp:128)
+// Error propagated from the C++ client, stored by the set_last_error overload
+// taking a const Error& (src/client/mygramclient_c.cpp)
 [<default text for the code> (<code>)] <message> (context: <context>)
 
-// Error constructed inside the C wrapper (src/client/mygramclient_c.cpp:119)
+// Error constructed inside the C wrapper, stored by the set_last_error overload
+// taking a const std::string& and an ErrorCode (src/client/mygramclient_c.cpp)
 <message>
 ```
 
@@ -369,7 +372,7 @@ Factual observations about the current behaviour.
 
 - **Index-payload errors are masked on both dump directions, document-store errors are not.** Index serialization failures become 5012 (`src/storage/dump_format_v2.cpp`) and index deserialization failures become 5011 (`src/storage/dump_format_internal.cpp`), so 4002, 4003, 5004, and 5008 never reach a client. The document-store loader is returned unchanged (`src/storage/dump_format_internal.cpp`), so 5001 and 5003 do reach the client from the same command.
 
-- **Document-store save failures are handled two ways within one file.** `src/storage/dump_format_v2.cpp` replaces the underlying error with 5012, while `src/storage/dump_format_v2.cpp` returns it unchanged.
+- **Document-store save failures are handled two ways within one file.** `WriteStreamingTableSection` logs the underlying error and replaces it with 5012 `"Write operation failed"`, while `WriteDumpV2` returns the store's own error unchanged (`src/storage/dump_format_v2.cpp`).
 
 - **Replication connect failures record one code and return another.** On a failed binlog or metadata connection, `SetLastError` stores 2000 while the value returned to the caller — and thus to a `REPLICATION START` frame — is whatever `Connection::Connect` produced (`src/mysql/binlog_reader.cpp`). The `last_error_code` field and the error frame can therefore disagree for the same event.
 
