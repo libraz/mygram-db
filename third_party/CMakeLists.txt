@@ -33,12 +33,12 @@ if(YAML_CPP_IID)
   set_target_properties(yaml-cpp PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${YAML_CPP_IID}")
 endif()
 
-# Google Test for testing (using v1.17.0 for better C++17 support)
+# Google Test for testing
 if(BUILD_TESTS)
   FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.17.0
+    GIT_TAG v1.18.0
   )
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
@@ -101,11 +101,11 @@ if(LZ4_IID)
   set_target_properties(lz4 PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${LZ4_IID}")
 endif()
 
-# CRoaring for Roaring bitmaps (using v4.6.1 for better CMake compatibility)
+# CRoaring for Roaring bitmaps
 FetchContent_Declare(
   roaring
   GIT_REPOSITORY https://github.com/RoaringBitmap/CRoaring.git
-  GIT_TAG v4.6.1
+  GIT_TAG v5.1.1
 )
 set(ENABLE_ROARING_TESTS OFF CACHE BOOL "" FORCE)
 set(ROARING_BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -153,11 +153,26 @@ endif()
 FetchContent_Declare(
   httplib
   GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-  GIT_TAG v0.51.0
+  GIT_TAG v0.54.1
 )
 set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_REQUIRE_ZLIB OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_REQUIRE_BROTLI OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_ZSTD OFF CACHE BOOL "" FORCE)
+# The REQUIRE_ options above only decide whether a missing library is fatal.
+# Detection is governed by the USE_*_IF_AVAILABLE options, which default to ON
+# and would link whichever of these the build host happens to have installed --
+# so the same source would produce a different binary on two machines, and the
+# include directories those packages export leak into every target that links
+# httplib. This server speaks plain HTTP and compresses nothing at this layer,
+# so the detection is turned off rather than merely made non-fatal.
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_WOLFSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_MBEDTLS_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZSTD_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_INSTALL OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(httplib)
 
 # Mark httplib includes as system to exclude from clang-tidy
@@ -173,7 +188,7 @@ endif()
 FetchContent_Declare(
   abseil
   GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-  GIT_TAG 20250127.1
+  GIT_TAG 20260817.0
 )
 set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
