@@ -38,6 +38,11 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        # The steps below diff against the commit this push started from, which
+        # a depth-1 clone does not contain. Without it the diff resolved to
+        # nothing, so no test and no clang-tidy check ever ran here.
+        fetch-depth: 0
 
     - name: Cache CMake dependencies
       uses: actions/cache@v4
@@ -121,21 +126,30 @@ jobs:
     - name: Show ccache statistics
       run: ccache --show-stats
 
-    - name: Run tests for changed files
+    # Both steps below have to agree on what this push changed, so the base is
+    # resolved once here. `github.event.before` is the zero SHA when the branch
+    # is new and names a discarded commit after a force push; the tip commit is
+    # the best available stand-in for either case.
+    - name: Resolve the range this push introduced
+      env:
+        PUSH_BEFORE: ${{ github.event.before }}
       run: |
-        # Fetch develop branch for comparison
-        git fetch origin develop:refs/remotes/origin/develop
-        # Run tests affected by changes in this push
-        if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-          # Normal push: test changes from previous commit
-          bash support/dev/test-diff.sh ${{ github.event.before }} ${{ github.sha }} --verbose
+        if [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ] \
+           && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+          echo "DIFF_BASE=$PUSH_BEFORE" >> "$GITHUB_ENV"
         else
-          # First push or force push: test last commit only
-          bash support/dev/test-diff.sh --committed --verbose
+          echo "Push start commit unavailable; comparing against the tip's parent."
+          echo "DIFF_BASE=$(git rev-parse HEAD~1)" >> "$GITHUB_ENV"
         fi
 
+    - name: Run tests for changed files
+      run: bash support/dev/test-diff.sh "$DIFF_BASE" "$GITHUB_SHA" --verbose
+
+    # Not `--diff origin/develop`: this workflow runs on a push to develop, so
+    # by the time it starts origin/develop is the commit under test and the
+    # diff against it is empty by construction.
     - name: Run clang-tidy (diff mode)
-      run: bash support/dev/run-clang-tidy.sh --diff origin/develop
+      run: bash support/dev/run-clang-tidy.sh --diff "$DIFF_BASE"
 
     - name: Upload build artifacts
       if: failure()

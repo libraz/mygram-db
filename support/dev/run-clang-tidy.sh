@@ -65,6 +65,17 @@ get_changed_files() {
 
 # Get list of files to check
 if [ "$DIFF_MODE" = true ]; then
+  # A base this repository cannot resolve is a broken invocation, not an empty
+  # diff. Swallowed, it reports "nothing changed" and exits clean, so the caller
+  # believes the changed files were checked when none were. Checked here rather
+  # than inside get_changed_files, which runs in a command substitution where an
+  # exit would end only that subshell.
+  if [ -n "$DIFF_BASE" ] && ! git rev-parse --verify -q "${DIFF_BASE}^{commit}" > /dev/null; then
+    echo -e "${RED}Cannot resolve the diff base '${DIFF_BASE}'${NC}" >&2
+    echo "The commit is missing from this clone; fetch the history it needs." >&2
+    exit 2
+  fi
+
   FILES_TO_CHECK=$(get_changed_files "$DIFF_BASE")
 
   if [ -z "$FILES_TO_CHECK" ]; then

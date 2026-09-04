@@ -172,6 +172,20 @@ get_changed_files() {
             ;;
         range)
             log_verbose "Getting changes in range: $COMMIT_RANGE"
+            # A range endpoint this repository cannot resolve means the caller
+            # asked about history that is not present -- a shallow clone, or a
+            # commit that a force push replaced. That is a broken invocation,
+            # not an empty diff, and treating the two alike lets a caller
+            # believe every affected test ran when none did. Fail instead.
+            for endpoint in $COMMIT_RANGE; do
+                if ! git rev-parse --verify -q "${endpoint}^{commit}" > /dev/null; then
+                    log_error "Cannot resolve '$endpoint' from the requested range: $COMMIT_RANGE"
+                    log_error "The commit is missing from this clone; fetch the history it needs."
+                    # `return`, not `exit`: this function runs inside a command
+                    # substitution, where exit would only end that subshell.
+                    return 2
+                fi
+            done
             files=$(git diff --name-only $COMMIT_RANGE)
             ;;
     esac
@@ -428,9 +442,16 @@ main() {
     check_prerequisites
     load_custom_mappings
 
-    # Get changed files
+    # Get changed files. An empty diff means there is genuinely nothing to run,
+    # while an unresolvable range means we were asked about history this clone
+    # does not have -- the two must not share an exit code.
     local changed_files
-    if ! changed_files=$(get_changed_files); then
+    local diff_status=0
+    changed_files=$(get_changed_files) || diff_status=$?
+    if [[ $diff_status -eq 2 ]]; then
+        exit 2
+    fi
+    if [[ $diff_status -ne 0 ]]; then
         log_warning "No tests to run"
         exit 0
     fi
