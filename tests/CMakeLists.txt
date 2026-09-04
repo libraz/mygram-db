@@ -5,7 +5,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # Register a GoogleTest target once, then apply orthogonal labels to exact
 # cases. gtest_add_tests scans sources at configure time, which keeps this
-# split compatible with the project's CMake 3.15 floor.
+# split compatible with the project's CMake 3.16 floor.
 function(mygramdb_add_split_gtests target)
   set(options ALL_CONCURRENCY)
   set(one_value_args SOURCE RESOURCE_LOCK SLOW_TIMEOUT)

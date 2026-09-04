@@ -10,7 +10,7 @@ URL:            https://github.com/libraz/mygram-db
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  gcc-c++ >= 9
-BuildRequires:  cmake >= 3.15
+BuildRequires:  cmake >= 3.16
 BuildRequires:  mysql-community-devel >= 8.0
 BuildRequires:  libicu-devel
 BuildRequires:  readline-devel

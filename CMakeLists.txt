@@ -1,4 +1,9 @@
-cmake_minimum_required(VERSION 3.15)
+# 3.16 is what building from source actually needs: Abseil and GoogleTest, both
+# fetched in third_party/, declare that floor themselves. Consuming the installed
+# client package is a separate, lower floor -- MygramDBClientConfig.cmake only
+# pulls in Threads -- so the consumer projects under examples/ and tests/client/
+# stay at 3.15 deliberately.
+cmake_minimum_required(VERSION 3.16)
 # Set CMake policy to suppress deprecation warnings from dependencies
 cmake_policy(SET CMP0048 NEW)
 cmake_policy(SET CMP0077 NEW)
@@ -54,16 +59,17 @@ if(APPLE)
     include_directories(SYSTEM "${MACOS_SDK_PATH}/usr/include")
   endif()
 
-  # Add Homebrew paths
-  if(EXISTS "/usr/local/include")
-    include_directories(SYSTEM "/usr/local/include")
-    link_directories("/usr/local/lib")
-  endif()
-
-  if(EXISTS "/opt/homebrew/include")
-    include_directories(SYSTEM "/opt/homebrew/include")
-    link_directories("/opt/homebrew/lib")
-  endif()
+  # Homebrew installs outside the prefixes CMake searches by default, so name it
+  # as a search prefix. Deliberately not include_directories(): a prefix on every
+  # target's system include path also shadows the dependencies pinned in
+  # third_party/, so a Homebrew copy of one of them silently replaces the pinned
+  # version and the build mixes headers from two releases. Naming it here reaches
+  # find_package() and find_library() and nothing else.
+  foreach(brew_prefix "/opt/homebrew" "/usr/local")
+    if(EXISTS "${brew_prefix}/include")
+      list(APPEND CMAKE_PREFIX_PATH "${brew_prefix}")
+    endif()
+  endforeach()
 
   # macOS-specific compilation options
   add_compile_options(-Wno-unused-command-line-argument -Qunused-arguments)
