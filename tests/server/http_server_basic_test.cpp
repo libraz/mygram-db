@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <nlohmann/json.hpp>
 #include <thread>
@@ -232,6 +233,58 @@ TEST_F(HttpServerTest, StartStop) {
 
   http_server_->Stop();
   EXPECT_FALSE(http_server_->IsRunning());
+}
+
+#ifdef SO_REUSEPORT
+// cpp-httplib's default socket options set SO_REUSEPORT wherever the platform
+// defines it, which would let a second instance bind a port the first is still
+// serving. A port has to identify one dataset: with sharing allowed, Linux
+// divides incoming connections between two instances that each hold their own
+// index, while macOS hands the whole surface to the later binder and leaves the
+// earlier one listening but idle. The TCP acceptor sets SO_REUSEADDR alone, so
+// the HTTP listener has to refuse a sharing peer the same way.
+TEST_F(HttpServerTest, ListeningPortRefusesASecondBinderAskingToShareIt) {
+  ASSERT_TRUE(http_server_->Start());
+
+  const int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(probe, 0);
+  int share = 1;
+  // A SO_REUSEPORT bind succeeds only when the socket already holding the port
+  // carries the option too, so this probe passes exactly when the server opted
+  // into sharing.
+  ASSERT_EQ(::setsockopt(probe, SOL_SOCKET, SO_REUSEPORT, &share, sizeof(share)), 0);
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons(port_);
+  const int bind_result = ::bind(probe, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  const int bind_errno = errno;
+  ::close(probe);
+
+  EXPECT_EQ(bind_result, -1);
+  EXPECT_EQ(bind_errno, EADDRINUSE);
+}
+#endif
+
+TEST_F(HttpServerTest, SecondServerOnTheSamePortFailsToStart) {
+  ASSERT_TRUE(http_server_->Start());
+
+  HttpServerConfig rival_config;
+  rival_config.bind = "127.0.0.1";
+  rival_config.port = port_;
+  rival_config.allow_cidrs = {"127.0.0.1/32"};
+  HttpServer rival(rival_config, table_contexts_, config_.get(), nullptr);
+
+  EXPECT_FALSE(rival.Start());
+  EXPECT_FALSE(rival.IsRunning());
+
+  // The first server keeps the port and stays serving.
+  EXPECT_TRUE(http_server_->IsRunning());
+  httplib::Client client("127.0.0.1", port_);
+  auto response = client.Get("/health");
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 200);
 }
 
 TEST_F(HttpServerTest, HealthEndpoint) {

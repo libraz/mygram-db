@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A second instance can no longer take over an HTTP port already being served** — the HTTP listener allowed port sharing while the TCP listener did not, so starting a second server on a bound `api.http.port` succeeded instead of failing. The two instances hold independent indexes, and which one answered depended on the platform: Linux divides incoming connections between them, while macOS gives the whole surface to the one that started later and leaves the first listening but idle. A second instance now fails to start with `Bind failed (6000)`, matching the TCP surface. Restarting a server on a port it just released still works.
+
 ## [1.10.1] - 2026-08-27
 
 Every change is corrective. No capability, configuration key or default was added

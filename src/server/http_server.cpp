@@ -26,6 +26,7 @@
 #include "server/readiness.h"
 #include "server/response_formatter.h"
 #include "server/search_pipeline.h"
+#include "server/socket_utils.h"
 #include "server/statistics_service.h"
 #include "server/table_catalog.h"  // For ResolveTableKey
 #include "server/tcp_server.h"     // For TableContext definition
@@ -470,6 +471,22 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   }
 
   server_ = std::make_unique<httplib::Server>();
+
+  // cpp-httplib's default socket options set SO_REUSEPORT wherever the platform
+  // defines it, which lets a second process bind this port while the first is
+  // still serving. The port then stops identifying one dataset: on Linux the
+  // kernel divides incoming connections between two instances that each hold
+  // their own index, and on macOS the later binder takes the whole HTTP surface
+  // while the earlier one keeps its listener and silently receives nothing.
+  // The TCP acceptor sets SO_REUSEADDR alone, and it is the normative surface,
+  // so match it here -- a second instance has to fail to bind rather than
+  // shadow the first. Setting the option is best-effort by the SocketOptions
+  // contract (it cannot report failure); a listener that ends up without
+  // SO_REUSEADDR merely refuses to rebind while a previous socket lingers in
+  // TIME_WAIT, which surfaces as the bind_to_port failure handled below.
+  // `socket_t` is httplib's own alias and it declares it at global scope.
+  server_->set_socket_options(
+      [](socket_t sock) { socket_utils::TrySetSockOpt(sock, SOL_SOCKET, SO_REUSEADDR, 1, "SO_REUSEADDR"); });
 
   // Reject at the accepted-socket boundary rather than in a request handler:
   // an idle peer has not sent a request yet, but it already consumes an fd.
