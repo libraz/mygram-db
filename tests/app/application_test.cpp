@@ -16,7 +16,9 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -24,6 +26,8 @@
 #include "app/configuration_manager.h"
 #include "app/server_orchestrator.h"
 #include "app/signal_manager.h"
+#include "cache/cache_manager.h"
+#include "config/runtime_variable_manager.h"
 #include "mysql/null_binlog_reader.h"
 #include "server/http_server.h"
 #include "server/operation_coordinator.h"
@@ -364,6 +368,33 @@ TEST(ServerOrchestratorReplicationTest, EmptyGtidStillStartsConfiguredBinlogRead
   EXPECT_FALSE(mygramdb::app::ShouldStartBinlogReaderOnServerStart(nullptr, ""));
 }
 
+TEST(ServerOrchestratorReplicationTest, ReaderStartFailureAfterDumpRestoreKeepsTheServerRunning) {
+  mygramdb::mysql::NullBinlogReader failing_reader;  // Start() always fails
+
+  auto after_restore = mygramdb::app::StartBinlogReaderForStartup(failing_reader, /*restored_from_dump=*/true);
+  ASSERT_TRUE(after_restore.has_value()) << "restored data is served with replication stopped";
+  EXPECT_FALSE(*after_restore);
+
+  auto after_snapshot = mygramdb::app::StartBinlogReaderForStartup(failing_reader, /*restored_from_dump=*/false);
+  ASSERT_FALSE(after_snapshot.has_value()) << "without a restore there is nothing to serve";
+  EXPECT_EQ(after_snapshot.error().code(), mygram::utils::ErrorCode::kInternalError);
+
+  class StartingReader final : public mygramdb::mysql::IBinlogReader {
+   public:
+    mygram::utils::Expected<void, mygram::utils::Error> Start() override { return {}; }
+    void Stop() override {}
+    bool IsRunning() const override { return true; }
+    std::string GetCurrentGTID() const override { return {}; }
+    void SetCurrentGTID(const std::string&) override {}
+    std::string GetLastError() const override { return {}; }
+    uint64_t GetProcessedEvents() const override { return 0; }
+    size_t GetQueueSize() const override { return 0; }
+  } starting_reader;
+  auto started = mygramdb::app::StartBinlogReaderForStartup(starting_reader, /*restored_from_dump=*/true);
+  ASSERT_TRUE(started.has_value());
+  EXPECT_TRUE(*started);
+}
+
 TEST(ServerOrchestratorReplicationTest, CollectRequiredTablesUsesConfiguredDatabaseAndNames) {
   std::unordered_map<std::string, std::unique_ptr<mygramdb::server::TableContext>> tables;
 
@@ -625,6 +656,14 @@ TEST(ServerOrchestratorStartupTest, HttpSurfaceAdoptsTheQueryCacheOwnedByTheTcpS
   EXPECT_EQ(http_server->GetCacheManagerForTesting(), tcp_server->GetCacheManager())
       << "the HTTP surface is not sharing the cache the TCP surface owns";
 
+  // SET cache.enabled toggles the cache the server owns.
+  auto* variable_manager = tcp_server->GetVariableManager();
+  ASSERT_NE(variable_manager, nullptr);
+  ASSERT_TRUE(variable_manager->SetVariable("cache.enabled", "false"));
+  EXPECT_FALSE(tcp_server->GetCacheManager()->IsEnabled());
+  ASSERT_TRUE(variable_manager->SetVariable("cache.enabled", "true"));
+  EXPECT_TRUE(tcp_server->GetCacheManager()->IsEnabled());
+
   EXPECT_TRUE((*orchestrator)->Stop());
 }
 
@@ -701,6 +740,67 @@ TEST(ServerOrchestratorStartupRetryTest, AppliesBoundedExponentialBackoff) {
   // 5 attempts -> 4 backoff sleeps: 500, 1000, 2000, 4000 (all below the 5000 cap).
   const std::vector<int> expected_delays{500, 1000, 2000, 4000};
   EXPECT_EQ(delays, expected_delays);
+}
+
+TEST(ServerOrchestratorStartupRetryTest, ShutdownDuringBackoffCancelsWithoutFurtherAttempts) {
+  int attempts = 0;
+  int sleeps = 0;
+  bool shutdown = false;
+  const mygramdb::app::StartupConnectRetryPolicy policy{10, 500, 5000};
+
+  auto result = mygramdb::app::ConnectWithStartupRetry(
+      [&attempts]() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        ++attempts;
+        return mygram::utils::MakeUnexpected(
+            mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed, "unreachable"));
+      },
+      policy,
+      [&](int /*delay_ms*/) {
+        ++sleeps;
+        shutdown = true;  // SIGTERM arrives while backing off
+      },
+      [&shutdown]() { return shutdown; });
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kCancelled);
+  EXPECT_TRUE(mygramdb::app::IsGracefulStartupCancellation(result.error(), shutdown))
+      << "classified as an orderly shutdown, so the process exits 0";
+  EXPECT_EQ(attempts, 1);
+  EXPECT_EQ(sleeps, 1);
+}
+
+TEST(ServerOrchestratorStartupRetryTest, ShutdownAlreadyRequestedCancelsBeforeTheFirstBackoff) {
+  int sleeps = 0;
+  auto result = mygramdb::app::ConnectWithStartupRetry(
+      []() -> mygram::utils::Expected<void, mygram::utils::Error> {
+        return mygram::utils::MakeUnexpected(
+            mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed, "unreachable"));
+      },
+      mygramdb::app::StartupConnectRetryPolicy{10, 500, 5000}, [&sleeps](int) { ++sleeps; }, []() { return true; });
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kCancelled);
+  EXPECT_EQ(sleeps, 0);
+}
+
+TEST(ServerOrchestratorStartupTest, CacheThatCannotBeEnabledAnswersSetWithCacheDisabled) {
+  mygramdb::config::Config config;
+  config.cache.enabled = false;
+  config.cache.max_memory_bytes = 1024 * 1024;
+  mygramdb::cache::CacheManager cache_manager(config.cache, {}, [](std::function<void()>) -> std::thread {
+    throw std::runtime_error("deterministic thread factory failure");
+  });
+  auto variable_manager = mygramdb::config::RuntimeVariableManager::Create(config);
+  ASSERT_TRUE(variable_manager);
+  (*variable_manager)->SetCacheManager(&cache_manager);
+
+  auto result = (*variable_manager)->SetVariable("cache.enabled", "true");
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kCacheDisabled) << "spec/error-codes.md documents 8001";
+  auto reported = (*variable_manager)->GetVariable("cache.enabled");
+  ASSERT_TRUE(reported);
+  EXPECT_EQ(*reported, "false");
 }
 
 TEST(ServerOrchestratorShutdownTest, TcpFailureStillTearsDownEveryDependentComponentInOrder) {

@@ -107,6 +107,24 @@ bool ShouldStartBinlogReaderOnServerStart(const mysql::IBinlogReader* binlog_rea
   return binlog_reader != nullptr;
 }
 
+Expected<bool, mygram::utils::Error> StartBinlogReaderForStartup(mysql::IBinlogReader& binlog_reader,
+                                                                 bool restored_from_dump) {
+  auto start_result = binlog_reader.Start();
+  if (start_result) {
+    return true;
+  }
+  if (!restored_from_dump) {
+    return mygram::utils::MakeUnexpected(start_result.error());
+  }
+  mygram::utils::StructuredLog()
+      .Event("binlog_replication_start_failed")
+      .Field("after", "startup_dump_restore")
+      .Field("action", "serving_restored_data_with_replication_stopped")
+      .FieldError(start_result.error())
+      .Error();
+  return false;
+}
+
 std::vector<mysql::ConnectionValidator::RequiredTable> CollectRequiredTables(
     const std::unordered_map<std::string, std::unique_ptr<server::TableContext>>& table_contexts) {
   std::vector<mysql::ConnectionValidator::RequiredTable> required_tables;
@@ -226,11 +244,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
   // valid start position for a fresh MySQL instance; gating on non-empty GTID
   // leaves replication permanently stopped and readiness stuck at 503.
   if (ShouldStartBinlogReaderOnServerStart(binlog_reader_.get(), snapshot_gtid_)) {
-    auto start_result = binlog_reader_->Start();
+    auto start_result = StartBinlogReaderForStartup(*binlog_reader_, restored_from_dump_);
     if (!start_result) {
       return mygram::utils::MakeUnexpected(start_result.error());
     }
-    binlog_started = true;
+    binlog_started = *start_result;
+  }
+  if (binlog_started) {
     mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
 
     auto catchup_result = mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_,
@@ -452,11 +472,20 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectWithStartupRetry(
     const std::function<mygram::utils::Expected<void, mygram::utils::Error>()>& attempt,
-    const StartupConnectRetryPolicy& policy, const std::function<void(int)>& sleep_ms) {
+    const StartupConnectRetryPolicy& policy, const std::function<void(int)>& sleep_ms,
+    const std::function<bool()>& shutdown_requested) {
+  const auto cancelled = [&shutdown_requested]() { return shutdown_requested && shutdown_requested(); };
+  const auto cancellation = []() {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kCancelled, "Startup cancelled while connecting to MySQL"));
+  };
   const int max_attempts = std::max(1, policy.max_attempts);
   auto result = attempt();
   int delay_ms = policy.initial_delay_ms;
   for (int attempt_number = 2; !result && attempt_number <= max_attempts; ++attempt_number) {
+    if (cancelled()) {
+      return cancellation();
+    }
     mygram::utils::StructuredLog()
         .Event("mysql_connection_retry")
         .Field("attempt", static_cast<int64_t>(attempt_number))
@@ -465,6 +494,9 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectWithStartupRetry(
         .Field("error", result.error().message())
         .Warn();
     sleep_ms(delay_ms);
+    if (cancelled()) {
+      return cancellation();
+    }
     result = attempt();
     delay_ms = std::min(delay_ms * 2, policy.max_delay_ms);
   }
@@ -516,9 +548,19 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   constexpr int kStartupConnectMaxDelayMs = 5000;
   const StartupConnectRetryPolicy kStartupRetryPolicy{kStartupConnectMaxAttempts, kStartupConnectInitialDelayMs,
                                                       kStartupConnectMaxDelayMs};
-  auto connect_result =
-      ConnectWithStartupRetry([this]() { return mysql_connection_->Connect("snapshot builder"); }, kStartupRetryPolicy,
-                              [](int delay_ms) { std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms)); });
+  // The backoff sleeps in short slices so a shutdown signal ends the wait promptly.
+  static constexpr int kShutdownPollMs = 100;
+  auto connect_result = ConnectWithStartupRetry(
+      [this]() { return mysql_connection_->Connect("snapshot builder"); }, kStartupRetryPolicy,
+      [](int delay_ms) {
+        for (int slept = 0; slept < delay_ms && !SignalManager::IsShutdownRequested(); slept += kShutdownPollMs) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(std::min(kShutdownPollMs, delay_ms - slept)));
+        }
+      },
+      []() { return SignalManager::IsShutdownRequested(); });
+  if (!connect_result && connect_result.error().code() == mygram::utils::ErrorCode::kCancelled) {
+    return connect_result;
+  }
   if (!connect_result) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLConnectionFailed,
@@ -585,6 +627,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
 
       if (restore_result) {
         snapshot_gtid_ = loaded_gtid;
+        restored_from_dump_ = true;
         for (const auto& [table_name, table_ctx] : table_contexts_) {
           auto all_doc_ids = table_ctx->doc_store->GetAllDocIds();
           auto all_texts = table_ctx->doc_store->GetNormalizedTextBatch(all_doc_ids);
@@ -984,20 +1027,9 @@ void ServerOrchestrator::RegisterRuntimeCallbacks() {
     mygram::utils::StructuredLog().Event("rate_limiter_callback_registered").Info();
   }
 
-  if (auto* cache_manager = tcp_server_->GetCacheManager(); cache_manager != nullptr) {
-    variable_manager->SetCacheToggleCallback([cache_manager](bool enabled) -> mygram::utils::Expected<void, Error> {
-      if (enabled) {
-        if (!cache_manager->Enable()) {
-          return mygram::utils::MakeUnexpected(
-              mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument, "Cache cannot be enabled"));
-        }
-      } else {
-        cache_manager->Disable();
-      }
-      return {};
-    });
-    mygram::utils::StructuredLog().Event("cache_toggle_callback_registered").Info();
-  }
+  // SET cache.enabled reaches the cache through the CacheManager the server
+  // lifecycle already handed the variable manager; a second toggle path here
+  // would answer the same failure with a different error code.
 
   auto* http_server = http_server_.get();
   variable_manager->AddApiConfigCallback([http_server](int default_limit, int max_query_length) {

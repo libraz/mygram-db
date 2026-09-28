@@ -74,6 +74,21 @@ class InitialDataReadinessTracker {
                                                         std::string_view start_gtid);
 
 /**
+ * @brief Start replication during server startup.
+ *
+ * A reader that cannot start is fatal, except after a startup dump restore:
+ * the restored tables are already initialized and served, so the server keeps
+ * running with replication stopped and the failure logged. REPLICATION START
+ * resumes it once the cause is fixed.
+ *
+ * @param binlog_reader Configured reader
+ * @param restored_from_dump Whether the tables were restored from a dump at startup
+ * @return true if the reader started, false if it did not but startup continues, or the start error
+ */
+[[nodiscard]] Expected<bool, mygram::utils::Error> StartBinlogReaderForStartup(mysql::IBinlogReader& binlog_reader,
+                                                                               bool restored_from_dump);
+
+/**
  * @brief Collect configured table identities for MySQL reconnection validation.
  */
 [[nodiscard]] std::vector<mysql::ConnectionValidator::RequiredTable> CollectRequiredTables(
@@ -127,12 +142,13 @@ struct StartupConnectRetryPolicy {
  * @param attempt   Callable performing a single connection attempt.
  * @param policy    Bounded retry policy (attempt count and backoff bounds).
  * @param sleep_ms  Callable sleeping for the given milliseconds (injected for testability).
- * @return Expected<void, Error> - success, or the last connection error after
- *         all attempts are exhausted.
+ * @param shutdown_requested Consulted before and after every backoff; an empty function never cancels.
+ * @return Expected<void, Error> - success, kCancelled once shutdown is requested,
+ *         or the last connection error after all attempts are exhausted.
  */
 Expected<void, mygram::utils::Error> ConnectWithStartupRetry(
     const std::function<Expected<void, mygram::utils::Error>()>& attempt, const StartupConnectRetryPolicy& policy,
-    const std::function<void(int)>& sleep_ms);
+    const std::function<void(int)>& sleep_ms, const std::function<bool()>& shutdown_requested = {});
 
 /**
  * @brief Resolve the configured replication start GTID.
@@ -293,6 +309,7 @@ class ServerOrchestrator {
   // State
   std::string snapshot_gtid_;                 ///< Captured during snapshot build
   std::string snapshot_catchup_target_gtid_;  ///< Position captured after the snapshot transaction completed
+  bool restored_from_dump_ = false;           ///< Tables came from the startup dump, not a MySQL snapshot
   std::atomic<bool> initialized_{false};
   std::atomic<bool> started_{false};
 };

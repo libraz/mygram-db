@@ -546,9 +546,7 @@ TEST(InitialLoaderIntegrationTest, LoadsConfiguredDatabaseWhenSameTableExistsInD
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection loader_connection(connection_config);
   auto loader_connect = loader_connection.Connect("initial-loader-cross-database-test");
-  if (!loader_connect) {
-    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
-  }
+  ASSERT_TRUE(loader_connect) << "MySQL connection failed: " << loader_connect.error().message();
 
   mysql::Connection writer_connection(connection_config);
   auto writer_connect = writer_connection.Connect("initial-loader-cross-database-writer");
@@ -599,6 +597,83 @@ TEST(InitialLoaderIntegrationTest, LoadsConfiguredDatabaseWhenSameTableExistsInD
   cleanup();
 }
 
+/**
+ * @brief Cancelling mid-stream returns without reading the rest of the table.
+ *
+ * Freeing an unbuffered result drains every row still on the wire, so a
+ * cancelled load of a large table used to take as long as a complete one.
+ */
+TEST(InitialLoaderIntegrationTest, CancellationDoesNotDrainTheRemainingRows) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection writer(connection_config);
+  auto writer_connect = writer.Connect("initial-loader-cancel-writer");
+  ASSERT_TRUE(writer_connect) << "MySQL connection failed: " << writer_connect.error().message();
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "cancel_drain_" + suffix;
+  const std::string quoted_table = "`" + table + "`";
+  auto cleanup = [&]() { (void)writer.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table); };
+  cleanup();
+  ASSERT_TRUE(
+      writer.ExecuteUpdate("CREATE TABLE " + quoted_table + " (id INT PRIMARY KEY, content MEDIUMTEXT) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer.ExecuteUpdate("SET SESSION cte_max_recursion_depth = 100000"));
+  ASSERT_TRUE(
+      writer.ExecuteUpdate("INSERT INTO " + quoted_table +
+                           " WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 40000)"
+                           " SELECT n, REPEAT('x', 4096) FROM seq"));
+
+  // Baseline: how long streaming every row takes on this server.
+  mysql::Connection baseline(connection_config);
+  ASSERT_TRUE(baseline.Connect("initial-loader-cancel-baseline"));
+  const auto drain_start = std::chrono::steady_clock::now();
+  {
+    auto stream = baseline.ExecuteStreaming("SELECT id, content FROM " + quoted_table);
+    ASSERT_TRUE(stream) << stream.error().message();
+    while (mysql_fetch_row(stream->get()) != nullptr) {
+    }
+  }
+  const auto full_drain = std::chrono::steady_clock::now() - drain_start;
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 1;
+  config::BuildConfig build_config;
+  build_config.batch_size = 100;
+
+  mysql::Connection loader_connection(connection_config);
+  ASSERT_TRUE(loader_connection.Connect("initial-loader-cancel-test"));
+  auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode";
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
+  index::Index index(1);
+  storage::DocumentStore store;
+  InitialLoader loader(loader_connection, index, store, table_config, {}, build_config);
+  std::chrono::steady_clock::time_point cancelled_at;
+  auto result = loader.Load([&](const LoadProgress&) {
+    if (!loader.IsCancelled()) {
+      cancelled_at = std::chrono::steady_clock::now();
+      loader.Cancel();
+    }
+  });
+  const auto after_cancel = std::chrono::steady_clock::now() - cancelled_at;
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("cancelled"), std::string::npos) << result.error().message();
+  EXPECT_LT(store.Size(), 40000U);
+  EXPECT_LT(after_cancel, full_drain / 4)
+      << "cancel took " << std::chrono::duration_cast<std::chrono::milliseconds>(after_cancel).count()
+      << " ms; a full drain takes " << std::chrono::duration_cast<std::chrono::milliseconds>(full_drain).count()
+      << " ms";
+  cleanup();
+}
+
 TEST(InitialLoaderIntegrationTest, CanonicalizesEnumSetDecimalAndTemporalValues) {
   if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
     GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
@@ -607,9 +682,7 @@ TEST(InitialLoaderIntegrationTest, CanonicalizesEnumSetDecimalAndTemporalValues)
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection connection(connection_config);
   auto connect = connection.Connect("initial-loader-canonical-values-test");
-  if (!connect) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect.error().message();
-  }
+  ASSERT_TRUE(connect) << "MySQL connection failed: " << connect.error().message();
 
   const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
   const std::string table = "canonical_values_" + suffix;
@@ -674,22 +747,14 @@ TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGt
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection loader_connection(connection_config);
   auto loader_connect = loader_connection.Connect("initial-loader-shared-snapshot-test");
-  if (!loader_connect) {
-    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
-  }
+  ASSERT_TRUE(loader_connect) << "MySQL connection failed: " << loader_connect.error().message();
   auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
-  }
-  if (!*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   mysql::Connection writer_connection(connection_config);
   auto writer_connect = writer_connection.Connect("initial-loader-shared-snapshot-writer");
-  if (!writer_connect) {
-    GTEST_SKIP() << "MySQL writer connection failed: " << writer_connect.error().message();
-  }
+  ASSERT_TRUE(writer_connect) << "MySQL writer connection failed: " << writer_connect.error().message();
 
   const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
   const std::string table_a = "mygram_it_snapshot_a_" + suffix;
@@ -758,13 +823,10 @@ TEST(InitialLoaderIntegrationTest, CommitBetweenGtidCaptureAndSnapshotCannotBeSk
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection loader_connection(connection_config);
   auto loader_connect = loader_connection.Connect("initial-loader-gtid-interleaving-test");
-  if (!loader_connect) {
-    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
-  }
+  ASSERT_TRUE(loader_connect) << "MySQL connection failed: " << loader_connect.error().message();
   auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
-  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
-    GTEST_SKIP() << "GTID mode is required";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode";
+  ASSERT_TRUE(*gtid_mode_enabled) << "GTID mode is required";
 
   mysql::Connection writer_connection(connection_config);
   auto writer_connect = writer_connection.Connect("initial-loader-gtid-interleaving-writer");
@@ -820,22 +882,14 @@ TEST(InitialLoaderIntegrationTest, ExistingSnapshotErrorDoesNotRollbackCallerTra
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection loader_connection(connection_config);
   auto loader_connect = loader_connection.Connect("initial-loader-existing-snapshot-rollback-test");
-  if (!loader_connect) {
-    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
-  }
+  ASSERT_TRUE(loader_connect) << "MySQL connection failed: " << loader_connect.error().message();
   auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
-  }
-  if (!*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   mysql::Connection writer_connection(connection_config);
   auto writer_connect = writer_connection.Connect("initial-loader-existing-snapshot-rollback-writer");
-  if (!writer_connect) {
-    GTEST_SKIP() << "MySQL writer connection failed: " << writer_connect.error().message();
-  }
+  ASSERT_TRUE(writer_connect) << "MySQL writer connection failed: " << writer_connect.error().message();
 
   const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
   const std::string load_table = "mygram_it_existing_snapshot_load_" + suffix;
@@ -900,13 +954,10 @@ TEST(InitialLoaderIntegrationTest, EmbeddedNulValuesAreLoadedWithoutTruncation) 
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection connection(connection_config);
   auto connect_result = connection.Connect("initial-loader-embedded-nul-test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
   auto gtid_mode_enabled = connection.IsGTIDModeEnabled();
-  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is required";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode";
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is required";
 
   const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
   const std::string table = "mygram_it_embedded_nul_" + suffix;
@@ -974,13 +1025,10 @@ TEST(InitialLoaderIntegrationTest, EmptyStringPrimaryKeyIsLoaded) {
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection connection(connection_config);
   auto connect_result = connection.Connect("initial-loader-empty-primary-key-test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
   auto gtid_mode_enabled = connection.IsGTIDModeEnabled();
-  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is required";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode";
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is required";
 
   const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
   const std::string table = "mygram_it_empty_primary_key_" + suffix;
@@ -1020,14 +1068,10 @@ TEST(InitialLoaderIntegrationTest, SessionTimezoneAndTimestampFilterUseOneEpochC
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection loader_connection(connection_config);
   auto loader_connect = loader_connection.Connect("initial-loader-timestamp-timezone-test");
-  if (!loader_connect) {
-    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
-  }
+  ASSERT_TRUE(loader_connect) << "MySQL connection failed: " << loader_connect.error().message();
   mysql::Connection writer_connection(connection_config);
   auto writer_connect = writer_connection.Connect("initial-loader-timestamp-timezone-writer");
-  if (!writer_connect) {
-    GTEST_SKIP() << "MySQL writer connection failed: " << writer_connect.error().message();
-  }
+  ASSERT_TRUE(writer_connect) << "MySQL writer connection failed: " << writer_connect.error().message();
 
   auto timezone_result = loader_connection.Execute("SELECT @@session.time_zone");
   ASSERT_TRUE(timezone_result) << timezone_result.error().message();
@@ -1099,9 +1143,7 @@ TEST(InitialLoaderIntegrationTest, ConcatDelimiterAndEmptyDocumentsMatchBinlogMa
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection connection(connection_config);
   auto connect_result = connection.Connect("initial-loader-text-materializer-test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
 
   const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
   const std::string table = "mygram_it_text_materializer_" + suffix;
@@ -1157,9 +1199,7 @@ TEST(InitialLoaderIntegrationTest, EmptyStringRequiredFilterLoadsOnlyMatchingRow
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection connection(connection_config);
   auto connect_result = connection.Connect("initial-loader-empty-required-filter-test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
 
   const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
   const std::string table = "mygram_it_empty_required_filter_" + suffix;
@@ -1205,13 +1245,10 @@ TEST(InitialLoaderIntegrationTest, CancellationStopsStreamingLoadWithoutDraining
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   mysql::Connection loader_connection(connection_config);
   auto loader_connect = loader_connection.Connect("initial-loader-stream-cancel-test");
-  if (!loader_connect) {
-    GTEST_SKIP() << "MySQL connection failed: " << loader_connect.error().message();
-  }
+  ASSERT_TRUE(loader_connect) << "MySQL connection failed: " << loader_connect.error().message();
   auto gtid_mode_enabled = loader_connection.IsGTIDModeEnabled();
-  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode";
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   mysql::Connection writer_connection(connection_config);
   ASSERT_TRUE(writer_connection.Connect("initial-loader-stream-cancel-writer"));

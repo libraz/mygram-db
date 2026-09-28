@@ -246,7 +246,10 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
   // mysql_use_result() keeps unread rows on the wire. No other statement may
   // run on this connection until EOF, so cancellation and mid-stream failures
   // discard this dedicated load connection instead of trying to ROLLBACK it.
+  // The socket is shut down first: freeing the result would otherwise read
+  // every remaining row of the table before returning.
   auto abort_stream = [&]() {
+    connection_.ShutdownTransport();
     result_exp->reset();
     connection_.Close();
   };
@@ -380,6 +383,12 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
+  // The loop ends before EOF only when cancelled, with rows still on the wire.
+  if (!stream_exhausted) {
+    abort_stream();
+    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, "Load cancelled"));
+  }
+
   // Process remaining rows in batch
   if (!doc_batch.empty() && !index_batch.empty() && !cancelled_.load(std::memory_order_relaxed)) {
     auto flush_result = FlushBatch(doc_batch, index_batch);
@@ -390,9 +399,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     }
   }
 
-  // Release the stream before COMMIT/ROLLBACK. At EOF the connection remains
-  // reusable; an early cancellation leaves unread protocol data and therefore
-  // requires discarding the load connection.
+  // Release the stream before COMMIT/ROLLBACK; at EOF the connection remains reusable.
   result_exp->reset();
 
   // Check cancellation before committing to avoid unnecessary COMMIT
