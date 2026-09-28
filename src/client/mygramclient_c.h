@@ -44,7 +44,8 @@ typedef struct MygramClient_C MygramClient_C;
 typedef struct {
   const char* host;           // Server hostname (default: "127.0.0.1")
   uint16_t port;              // Server port (default: 11016)
-  uint32_t timeout_ms;        // Connection timeout in milliseconds (default: 5000)
+  uint32_t timeout_ms;        // Default timeout in milliseconds for connect() and every command
+                              // that has no timeout field of its own (default: 5000)
   uint32_t recv_buffer_size;  // Receive buffer size (default: 65536)
 } MygramClientConfig_C;
 

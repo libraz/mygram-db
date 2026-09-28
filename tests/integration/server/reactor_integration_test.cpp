@@ -54,6 +54,19 @@ TEST(ReactorIntegrationTest, PlatformNotSupported) {
 
 namespace mygramdb::server {
 
+namespace {
+// Test clients send to a server that may already have reset the connection
+// (over-cap frames, slow-reader eviction), so an unguarded send() can raise
+// SIGPIPE and kill the test binary. Linux: MSG_NOSIGNAL suppresses it
+// per-call; macOS lacks MSG_NOSIGNAL, so SO_NOSIGPIPE is set on the socket
+// in Connect() instead (mirrors src/server/connection_acceptor.cpp).
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+}  // namespace
+
 // ============================================================================
 // Test fixture
 // ============================================================================
@@ -163,13 +176,17 @@ class ReactorIntegrationTest : public ::testing::Test {
     io.tv_sec = 5;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &io, sizeof(io));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &io, sizeof(io));
+#ifdef SO_NOSIGPIPE
+    int nosigpipe = 1;
+    setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
     return sock;
   }
 
   /** @brief Send `line` followed by CRLF. */
   bool SendLine(int sock, const std::string& line) {
     std::string msg = line + "\r\n";
-    ssize_t sent = send(sock, msg.data(), msg.size(), 0);
+    ssize_t sent = send(sock, msg.data(), msg.size(), kSendFlags);
     return sent == static_cast<ssize_t>(msg.size());
   }
 
@@ -338,7 +355,7 @@ TEST_F(ReactorIntegrationTest, PersistentConnectionPipelining) {
 
   // Three INFO requests pipelined into one write
   const std::string burst = "INFO\r\nINFO\r\nINFO\r\n";
-  ssize_t sent = send(s, burst.data(), burst.size(), 0);
+  ssize_t sent = send(s, burst.data(), burst.size(), kSendFlags);
   ASSERT_EQ(sent, static_cast<ssize_t>(burst.size())) << "partial send";
 
   // Read 3 responses
@@ -514,7 +531,7 @@ TEST_F(ReactorIntegrationTest, ClientDisconnectMidRequest) {
     ASSERT_GE(s, 0);
     // Send partial frame — no CRLF
     const char* partial = "IN";
-    send(s, partial, 2, 0);
+    send(s, partial, 2, kSendFlags);
     close(s);  // close without completing frame
   }
 
@@ -749,7 +766,7 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
     // Send in chunks to avoid hitting SO_SNDBUF
     size_t sent_total = 0;
     while (sent_total < big_cmd.size()) {
-      ssize_t n = send(s, big_cmd.data() + sent_total, big_cmd.size() - sent_total, 0);
+      ssize_t n = send(s, big_cmd.data() + sent_total, big_cmd.size() - sent_total, kSendFlags);
       if (n <= 0)
         break;
       sent_total += static_cast<size_t>(n);
@@ -782,7 +799,7 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
     bool got_epipe = false;
     while (sent_total < huge_cmd.size()) {
       ssize_t n =
-          send(s, huge_cmd.data() + sent_total, std::min<size_t>(65536, huge_cmd.size() - sent_total), MSG_NOSIGNAL);
+          send(s, huge_cmd.data() + sent_total, std::min<size_t>(65536, huge_cmd.size() - sent_total), kSendFlags);
       if (n <= 0) {
         got_epipe = (errno == EPIPE || errno == ECONNRESET);
         break;
@@ -885,7 +902,7 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
     burst.append("INFO\r\n");
   ssize_t sent = 0;
   while (sent < static_cast<ssize_t>(burst.size())) {
-    ssize_t n = send(slow, burst.data() + sent, burst.size() - sent, MSG_NOSIGNAL);
+    ssize_t n = send(slow, burst.data() + sent, burst.size() - sent, kSendFlags);
     if (n <= 0)
       break;
     sent += n;
@@ -1216,7 +1233,7 @@ TEST_F(ReactorIntegrationTest, MaxQueryLengthEnforcedInReactorMode) {
   std::string big_cmd = "SEARCH t " + big_term;
   // Send directly; the request is one CRLF-terminated line.
   std::string wire = big_cmd + "\r\n";
-  ssize_t sent = send(s, wire.data(), wire.size(), 0);
+  ssize_t sent = send(s, wire.data(), wire.size(), kSendFlags);
   // The server may close mid-write; partial send is acceptable as evidence.
   (void)sent;
 
@@ -1301,7 +1318,7 @@ TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   // Send INFO and read the multiline response. We reuse the helper by
   // wrapping send() + RecvMultilineResponse() logic inline.
   const std::string wire = "INFO\r\n";
-  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0), static_cast<ssize_t>(wire.size()));
+  ASSERT_EQ(::send(s, wire.data(), wire.size(), kSendFlags), static_cast<ssize_t>(wire.size()));
 
   static constexpr const char kTerminator[] = "\r\nEND\r\n";
   static constexpr size_t kTerminatorLen = 7;
@@ -1353,7 +1370,7 @@ TEST_F(ReactorIntegrationTest, HalfCloseStillReceivesResponse) {
   // OnReadable's recv()==0 path must schedule a drain task that flushes the
   // INFO response before unregistering.
   const std::string wire = "INFO\r\n";
-  ASSERT_EQ(::send(s, wire.data(), wire.size(), 0), static_cast<ssize_t>(wire.size()));
+  ASSERT_EQ(::send(s, wire.data(), wire.size(), kSendFlags), static_cast<ssize_t>(wire.size()));
   ASSERT_EQ(::shutdown(s, SHUT_WR), 0) << "shutdown(SHUT_WR) failed: " << strerror(errno);
 
   const std::string out = RecvMultilineResponse(s);

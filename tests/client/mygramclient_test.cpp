@@ -31,6 +31,7 @@
 #include "client/mygramclient_c_testing.h"
 #include "client/protocol_detection.h"
 #include "client/search_expression.h"
+#include "client/wire_quoting.h"
 #include "index/index.h"
 #include "server/tcp_server.h"
 #include "storage/document_store.h"
@@ -208,6 +209,102 @@ TEST_F(MygramClientTest, SingleByteReceiveBufferReadsCompleteResponse) {
   MygramClient client(config);
   ASSERT_TRUE(client.Connect());
   EXPECT_TRUE(client.Info());
+}
+
+// Regression tests for a client-side frame-completion bug: SEARCH/COUNT with
+// HIGHLIGHT or an active DEBUG flag, and a non-empty SHOW VARIABLES table, all
+// carry more bytes after their first \r\n -- but that first line is
+// byte-for-byte identical to a genuinely single-line reply until the rest
+// arrives. A chunk boundary landing right there (recv_buffer_size==1, or
+// exactly at the header's own length) used to make IsResponseComplete return
+// early, truncating the result and leaving the trailing bytes on the socket
+// to desync the next command (see ResponseCompletionState::expect_multiline_tail
+// and protocol_detection.h's "+-" table-border check).
+TEST_F(MygramClientTest, SingleByteReceiveBufferSurvivesSearchWithHighlights) {
+  const std::string original_text = "Hello world example";
+  const std::string normalized = mygram::utils::NormalizeText(original_text, true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, normalized, original_text));
+  index_->AddDocument(1, normalized);
+
+  ASSERT_TRUE(client_->Connect());
+  auto baseline = client_->SearchWithHighlights("testdb.test", "hello", 10);
+  ASSERT_TRUE(baseline) << baseline.error().message();
+  ASSERT_EQ(baseline->results.size(), 1U);
+  const size_t header_length = std::string("OK RESULTS " + std::to_string(baseline->total_count) + "\r\n").size();
+
+  for (size_t recv_buffer_size : {size_t{1}, header_length}) {
+    ClientConfig config;
+    config.host = "127.0.0.1";
+    config.port = server_->GetPort();
+    config.recv_buffer_size = static_cast<uint32_t>(recv_buffer_size);
+    MygramClient client(config);
+    ASSERT_TRUE(client.Connect()) << "recv_buffer_size=" << recv_buffer_size;
+
+    auto result = client.SearchWithHighlights("testdb.test", "hello", 10);
+    ASSERT_TRUE(result) << "recv_buffer_size=" << recv_buffer_size << ": " << result.error().message();
+    EXPECT_EQ(result->total_count, 1U) << "recv_buffer_size=" << recv_buffer_size;
+    ASSERT_EQ(result->results.size(), 1U) << "recv_buffer_size=" << recv_buffer_size;
+    EXPECT_EQ(result->results[0].primary_key, "highlight_doc") << "recv_buffer_size=" << recv_buffer_size;
+    EXPECT_NE(result->results[0].snippet.find("<em>Hello</em>"), std::string::npos)
+        << "recv_buffer_size=" << recv_buffer_size;
+
+    // A truncated frame would leave the snippet row on the socket to answer
+    // this next command instead.
+    EXPECT_TRUE(client.Info()) << "recv_buffer_size=" << recv_buffer_size;
+  }
+}
+
+TEST_F(MygramClientTest, SingleByteReceiveBufferSurvivesDebugModeSearch) {
+  AddTestDocuments();
+
+  ASSERT_TRUE(client_->Connect());
+  ASSERT_TRUE(client_->EnableDebug());
+  auto baseline = client_->Search("testdb.test", "hello", 100);
+  ASSERT_TRUE(baseline) << baseline.error().message();
+  ASSERT_TRUE(baseline->debug.has_value());
+  const size_t header_length = std::string("OK RESULTS " + std::to_string(baseline->total_count) + "\r\n").size();
+
+  for (size_t recv_buffer_size : {size_t{1}, header_length}) {
+    ClientConfig config;
+    config.host = "127.0.0.1";
+    config.port = server_->GetPort();
+    config.recv_buffer_size = static_cast<uint32_t>(recv_buffer_size);
+    MygramClient client(config);
+    ASSERT_TRUE(client.Connect()) << "recv_buffer_size=" << recv_buffer_size;
+    ASSERT_TRUE(client.EnableDebug()) << "recv_buffer_size=" << recv_buffer_size;
+
+    auto result = client.Search("testdb.test", "hello", 100);
+    ASSERT_TRUE(result) << "recv_buffer_size=" << recv_buffer_size << ": " << result.error().message();
+    EXPECT_EQ(result->results.size(), 2U) << "recv_buffer_size=" << recv_buffer_size;
+    ASSERT_TRUE(result->debug.has_value()) << "recv_buffer_size=" << recv_buffer_size;
+    EXPECT_GT(result->debug->terms, 0U) << "recv_buffer_size=" << recv_buffer_size;
+
+    EXPECT_TRUE(client.Info()) << "recv_buffer_size=" << recv_buffer_size;
+  }
+}
+
+TEST_F(MygramClientTest, SingleByteReceiveBufferSurvivesNonEmptyShowVariables) {
+  ASSERT_TRUE(client_->Connect());
+  ASSERT_TRUE(client_->SetVariable("logging.level", "info"));
+  auto baseline = client_->ShowVariables("logging%");
+  ASSERT_TRUE(baseline) << baseline.error().message();
+  ASSERT_NE(baseline->find("logging.level"), std::string::npos);
+  const size_t header_length = baseline->find("\r\n") + 2;
+
+  for (size_t recv_buffer_size : {size_t{1}, header_length}) {
+    ClientConfig config;
+    config.host = "127.0.0.1";
+    config.port = server_->GetPort();
+    config.recv_buffer_size = static_cast<uint32_t>(recv_buffer_size);
+    MygramClient client(config);
+    ASSERT_TRUE(client.Connect()) << "recv_buffer_size=" << recv_buffer_size;
+
+    auto result = client.ShowVariables("logging%");
+    ASSERT_TRUE(result) << "recv_buffer_size=" << recv_buffer_size << ": " << result.error().message();
+    EXPECT_NE(result->find("logging.level"), std::string::npos) << "recv_buffer_size=" << recv_buffer_size;
+
+    EXPECT_TRUE(client.Info()) << "recv_buffer_size=" << recv_buffer_size;
+  }
 }
 
 /**
@@ -444,6 +541,37 @@ TEST_F(MygramClientTest, SearchCountGetAndFacetAcceptDatabaseQualifiedTableName)
   ASSERT_TRUE(bare_result) << "Search error: " << bare_result.error().message();
   EXPECT_EQ(bare_result->total_count, result->total_count);
   EXPECT_EQ(bare_result->results.size(), result->results.size());
+}
+
+/**
+ * @brief Regression test: Connect() used to hardcode AF_INET, so a server
+ * bound to an IPv6 address (or reached via a hostname resolving only to an
+ * AAAA record) was unreachable. getaddrinfo now resolves with AF_UNSPEC and
+ * every candidate address is tried in turn (see Connect(), mygramclient.cpp).
+ */
+TEST_F(MygramClientTest, ConnectsToIpv6Loopback) {
+  server::ServerConfig ipv6_server_config;
+  ipv6_server_config.port = 0;
+  ipv6_server_config.host = "::1";
+  ipv6_server_config.allow_cidrs = {"::1/128"};
+  auto ipv6_server = std::make_unique<server::TcpServer>(ipv6_server_config, table_contexts_, "./dumps", &full_config_);
+  if (!ipv6_server->Start()) {
+    GTEST_SKIP() << "IPv6 loopback is not available in this environment";
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  ClientConfig ipv6_client_config;
+  ipv6_client_config.host = "::1";
+  ipv6_client_config.port = ipv6_server->GetPort();
+  ipv6_client_config.timeout_ms = 5000;
+  MygramClient ipv6_client(ipv6_client_config);
+
+  auto connect_result = ipv6_client.Connect();
+  ASSERT_TRUE(connect_result) << connect_result.error().message();
+  EXPECT_TRUE(ipv6_client.Info());
+
+  ipv6_client.Disconnect();
+  ipv6_server->Stop();
 }
 
 TEST_F(MygramClientTest, CApiSearchAndCountAcceptDatabaseQualifiedTableName) {
@@ -803,6 +931,87 @@ TEST_F(MygramClientTest, SearchRawPreservesConvertedOrExpression) {
   auto simplified = SimplifySearchExpression("+alpha (xqz OR jkv)");
   ASSERT_FALSE(simplified);
   EXPECT_EQ(simplified.error().code(), mygram::utils::ErrorCode::kClientExpressionParseError);
+}
+
+// Regression tests for ConvertSearchExpression round-tripping ordinary
+// English words that collide with reserved clause keywords. Before the
+// shared wire_quoting.h predicate, ToQueryString emitted these terms raw,
+// so the server's own tokenizer (case-insensitive on AND/OR/NOT/ORDER --
+// query_parser_commands.cpp, query_ast.cpp) re-read them as operators
+// instead of search text.
+TEST_F(MygramClientTest, SearchRawHandlesOrdinaryWordOrder) {
+  ASSERT_TRUE(
+      doc_store_->AddDocument("order_doc", {}, mygram::utils::NormalizeText("order history", true, "keep", true)));
+  index_->AddDocument(1, mygram::utils::NormalizeText("order history", true, "keep", true));
+
+  ASSERT_TRUE(client_->Connect());
+
+  auto converted = ConvertSearchExpression("order history");
+  ASSERT_TRUE(converted) << converted.error().message();
+
+  auto result = client_->SearchRaw("testdb.test", *converted, 10);
+  ASSERT_TRUE(result) << "SearchRaw error: " << result.error().message();
+  EXPECT_EQ(result->total_count, 1U);
+}
+
+TEST_F(MygramClientTest, SearchRawHandlesCaseInsensitiveOr) {
+  const std::string tom_text = mygram::utils::NormalizeText("tom appears here", true, "keep", true);
+  const std::string jerry_text = mygram::utils::NormalizeText("jerry appears here", true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("tom_doc", {}, tom_text));
+  index_->AddDocument(1, tom_text);
+  ASSERT_TRUE(doc_store_->AddDocument("jerry_doc", {}, jerry_text));
+  index_->AddDocument(2, jerry_text);
+
+  ASSERT_TRUE(client_->Connect());
+
+  // Lowercase "or": the tokenizer must recognize it as the OR operator the
+  // same way the server does, not as three required AND terms.
+  auto converted = ConvertSearchExpression("tom or jerry");
+  ASSERT_TRUE(converted) << converted.error().message();
+
+  auto result = client_->SearchRaw("testdb.test", *converted, 10);
+  ASSERT_TRUE(result) << "SearchRaw error: " << result.error().message();
+  EXPECT_EQ(result->total_count, 2U);
+}
+
+TEST_F(MygramClientTest, SearchRawHandlesMinusInsideGroup) {
+  const std::string tutorial_only = mygram::utils::NormalizeText("tutorial content", true, "keep", true);
+  const std::string tutorial_video = mygram::utils::NormalizeText("tutorial video content", true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("tutorial_only", {}, tutorial_only));
+  index_->AddDocument(1, tutorial_only);
+  ASSERT_TRUE(doc_store_->AddDocument("tutorial_video", {}, tutorial_video));
+  index_->AddDocument(2, tutorial_video);
+
+  ASSERT_TRUE(client_->Connect());
+
+  // "-video" inside a group must become "NOT video", not glue onto the
+  // preceding term as the literal text "tutorial-video".
+  auto converted = ConvertSearchExpression("(tutorial -video)");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_NE(converted->find("NOT video"), std::string::npos) << *converted;
+  EXPECT_EQ(converted->find("tutorial-video"), std::string::npos) << *converted;
+
+  auto result = client_->SearchRaw("testdb.test", *converted, 10);
+  ASSERT_TRUE(result) << "SearchRaw error: " << result.error().message();
+  ASSERT_EQ(result->results.size(), 1U);
+  EXPECT_EQ(result->results[0].primary_key, "tutorial_only");
+}
+
+TEST_F(MygramClientTest, SearchRawHandlesQuotedPhraseWithEmbeddedQuote) {
+  const std::string text = mygram::utils::NormalizeText("she said hello world to everyone", true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("phrase_doc", {}, text));
+  index_->AddDocument(1, text);
+
+  ASSERT_TRUE(client_->Connect());
+
+  // The quoted phrase itself contains a literal double quote, which
+  // ToQueryString must re-escape rather than emit as a raw, unterminated
+  // quote character.
+  auto converted = ConvertSearchExpression(R"("she said \"hello world\"")");
+  ASSERT_TRUE(converted) << converted.error().message();
+
+  auto result = client_->SearchRaw("testdb.test", *converted, 10);
+  ASSERT_TRUE(result) << "SearchRaw error: " << result.error().message();
 }
 
 TEST_F(MygramClientTest, RejectsControlCharactersInQuery) {
@@ -1545,6 +1754,65 @@ TEST_F(MygramClientTest, SendCommandDisconnectsAfterReceiveFailure) {
   EXPECT_FALSE(client.IsConnected());
 
   closer.join();
+}
+
+// Regression test for a client-side SIGPIPE: the server answers one command
+// normally, then RSTs the connection. A later send() on that same socket
+// must surface as kClientSendFailed rather than raising SIGPIPE and killing
+// the process (see ApplyPostConnectSocketOptions / kSendFlags).
+TEST_F(MygramClientTest, SendCommandAfterPeerResetReturnsErrorInsteadOfSigpipe) {
+  int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+  const uint16_t port = ntohs(addr.sin_port);
+
+  std::thread responder([listen_fd]() {
+    int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+      char request[128];
+      (void)recv(client_fd, request, sizeof(request), 0);
+      static constexpr char kResponse[] = "OK\r\n";
+      (void)send(client_fd, kResponse, sizeof(kResponse) - 1, 0);
+      // SO_LINGER{on, 0} forces an RST on close instead of a graceful FIN,
+      // matching a server that drops a connection after an error (e.g.
+      // ERROR 6007 / 6030) rather than shutting it down cleanly.
+      linger abort_linger{1, 0};
+      (void)setsockopt(client_fd, SOL_SOCKET, SO_LINGER, &abort_linger, sizeof(abort_linger));
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = port;
+  config.timeout_ms = 1000;
+  MygramClient client(config);
+
+  ASSERT_TRUE(client.Connect());
+  auto first = client.SendCommand("INFO");
+  ASSERT_TRUE(first) << first.error().message();
+  ASSERT_TRUE(client.IsConnected());
+
+  responder.join();
+  // Give the RST time to be processed locally before writing again, so the
+  // second send() observes an already-broken connection rather than racing
+  // the close.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  auto second = client.SendCommand("INFO");
+  EXPECT_FALSE(second);
+  EXPECT_EQ(second.error().code(), mygram::utils::ErrorCode::kClientSendFailed);
+  EXPECT_FALSE(client.IsConnected());
 }
 
 TEST_F(MygramClientTest, ConcurrentDisconnectWaitsForInFlightCommand) {
@@ -2536,8 +2804,9 @@ TEST_F(MygramClientCApiTest, ParseSearchExpression_QuotedPhrase) {
   ASSERT_EQ(result, 0);
   ASSERT_NE(parsed, nullptr);
 
-  // Main term should be the quoted phrase
-  EXPECT_STREQ(parsed->main_term, "\"machine learning\"");
+  // Main term is the plain phrase text, not pre-quoted: Search()/
+  // mygramclient_search_advanced apply wire quoting to it exactly once.
+  EXPECT_STREQ(parsed->main_term, "machine learning");
 
   // AND term should be "tutorial"
   EXPECT_EQ(parsed->and_count, 1);
@@ -3379,6 +3648,53 @@ TEST(IsResponseCompleteTest, SearchWithHighlightRequiresTrailingBlankLine) {
 }
 
 /**
+ * @brief Regression test: a chunk boundary landing right after the SEARCH
+ * header's own \r\n must not be mistaken for the end of a HIGHLIGHT reply.
+ *
+ * expect_multiline_tail is what SendCommand sets from the outgoing command
+ * text (see CommandRequestsHighlight, mygramclient.cpp) -- without it, the
+ * header alone ("OK RESULTS 1\r\n") satisfies the plain single-line check.
+ */
+TEST(IsResponseCompleteTest, HighlightHeaderChunkBoundaryWaitsForRow) {
+  ResponseCompletionState state;
+  state.expect_multiline_tail = true;
+
+  std::string response = "OK RESULTS 1\r\n";
+  EXPECT_FALSE(IsResponseComplete(response, state)) << "header alone is not a complete HIGHLIGHT reply";
+
+  response += "pk1\thello <em>world</em>\r\n";
+  EXPECT_FALSE(IsResponseComplete(response, state)) << "missing the trailing blank line every HIGHLIGHT reply ends in";
+
+  response += "\r\n";
+  EXPECT_TRUE(IsResponseComplete(response, state));
+}
+
+/**
+ * @brief Regression test: a DEBUG block's own opening ("\r\n\r\n# DEBUG\r\n")
+ * is itself a double CRLF and must not be mistaken for the block's end.
+ *
+ * expect_debug_marker is what SendCommand sets when DEBUG ON is active for
+ * this connection (see debug_mode_, mygramclient.cpp). Without the marker
+ * gate, a chunk boundary landing right after the opening double CRLF -- or
+ * after the debug block's own header line, before any DEBUG content -- would
+ * satisfy the plain "ends with \r\n\r\n" check.
+ */
+TEST(IsResponseCompleteTest, DebugBlockOpeningChunkBoundaryWaitsForMarkerAndClose) {
+  ResponseCompletionState state;
+  state.expect_multiline_tail = true;
+  state.expect_debug_marker = true;
+
+  std::string response = "OK RESULTS 2 2 1\r\n\r\n";
+  EXPECT_FALSE(IsResponseComplete(response, state)) << "the block's own opening double CRLF is not its end";
+
+  response += "# DEBUG\r\nquery_time: 1.0ms\r\ncache: miss\r\n";
+  EXPECT_FALSE(IsResponseComplete(response, state)) << "debug fields without the closing blank line are incomplete";
+
+  response += "\r\n";
+  EXPECT_TRUE(IsResponseComplete(response, state));
+}
+
+/**
  * @brief Test CACHE_STATS multi-line response requires END marker
  */
 TEST(IsResponseCompleteTest, CacheStatsRequiresEndMarker) {
@@ -3431,4 +3747,71 @@ TEST(IsResponseCompleteTest, DumpStatusRequiresEndMarker) {
 
   // Minimal complete DUMP_STATUS
   EXPECT_TRUE(IsResponseComplete("OK DUMP_STATUS\r\nEND\r\n"));
+}
+
+// =============================================================================
+// Unit tests for NeedsWireQuoting / QuoteWireToken (shared quoting decision)
+// =============================================================================
+
+using mygramdb::client::detail::NeedsWireQuoting;
+using mygramdb::client::detail::QuoteWireToken;
+
+TEST(WireQuotingTest, PlainAsciiTermNeedsNoQuoting) {
+  EXPECT_FALSE(NeedsWireQuoting("hello"));
+  EXPECT_EQ(QuoteWireToken("hello"), "hello");
+}
+
+TEST(WireQuotingTest, EmptyStringIsAlwaysQuoted) {
+  EXPECT_TRUE(NeedsWireQuoting(""));
+  EXPECT_EQ(QuoteWireToken(""), "\"\"");
+}
+
+TEST(WireQuotingTest, ReservedKeywordsAreQuotedCaseInsensitively) {
+  for (const char* keyword :
+       {"AND", "and", "Or", "NOT", "Filter", "SORT", "limit", "OFFSET", "Highlight", "fuzzy", "FACET", "order"}) {
+    EXPECT_TRUE(NeedsWireQuoting(keyword)) << keyword;
+    const std::string quoted = QuoteWireToken(keyword);
+    EXPECT_EQ(quoted, "\"" + std::string(keyword) + "\"") << keyword;
+  }
+  // A keyword-looking term is only quoted on an exact match.
+  EXPECT_FALSE(NeedsWireQuoting("order_id"));
+  EXPECT_FALSE(NeedsWireQuoting("android"));
+}
+
+TEST(WireQuotingTest, AsciiSpecialCharactersAreQuoted) {
+  for (const char* value :
+       {"has space", "has\ttab", "has\"quote", "has'quote", "has\\backslash", "has(paren", "has)paren"}) {
+    EXPECT_TRUE(NeedsWireQuoting(value)) << value;
+  }
+}
+
+/**
+ * @brief Regression test for M-4: EscapeQueryString/QuoteCommandArgumentIfNeeded
+ * used to check only ASCII whitespace, missing every Unicode whitespace code
+ * point the server tokenizer splits on outside quotes (spec/tcp-commands.md
+ * §2). NeedsWireQuoting now backs both, via IsUnicodeWhitespace.
+ */
+TEST(WireQuotingTest, UnicodeWhitespaceIsQuoted) {
+  // U+3000 (ideographic space): "東京" + U+3000 + "タワー"
+  EXPECT_TRUE(NeedsWireQuoting("東京\xE3\x80\x80タワー"));
+  // U+00A0 (no-break space)
+  EXPECT_TRUE(NeedsWireQuoting("tokyo\xC2\xA0tower"));
+  // U+2028 (line separator)
+  EXPECT_TRUE(NeedsWireQuoting("tokyo\xE2\x80\xA8tower"));
+}
+
+TEST(WireQuotingTest, QuoteWireTokenEscapesEmbeddedQuoteAndBackslash) {
+  EXPECT_EQ(QuoteWireToken(R"(say "hi")"), R"("say \"hi\"")");
+  EXPECT_EQ(QuoteWireToken(R"(back\slash)"), R"("back\\slash")");
+}
+
+TEST(WireQuotingTest, QuoteWireTokenEscapesControlCharactersReversibly) {
+  // \r, \n, \t get the short mnemonic; other control bytes get \xHH -- never
+  // silently dropped, so a primary key round-trips through GET byte-for-byte
+  // (see EscapeProtocolToken's use for GET).
+  EXPECT_EQ(QuoteWireToken("a\r\n\tb"), R"("a\r\n\tb")");
+  EXPECT_EQ(QuoteWireToken(std::string("a\x01"
+                                       "b",
+                                       3)),
+            "\"a\\x01b\"");
 }

@@ -314,6 +314,12 @@ class TcpSession {
   /// Send one request and read until the client-side framing rule says the
   /// response is complete. Returns a marker instead of blocking forever when
   /// the server never completes a frame.
+  ///
+  /// Mirrors MygramClient::Impl::SendCommand's own use of
+  /// ResponseCompletionState (src/client/mygramclient.cpp): a SEARCH/COUNT
+  /// header line reads identically whether or not a HIGHLIGHT/DEBUG body
+  /// follows it, so the recv loop needs to be told from the command text
+  /// (and this session's own DEBUG ON/OFF state) when that can't happen.
   std::string Send(const std::string& request) {
     const std::string wire = request + "\r\n";
     if (::send(fd_, wire.data(), wire.size(), 0) < 0) {
@@ -321,6 +327,9 @@ class TcpSession {
     }
     std::string response;
     client::detail::ResponseCompletionState state;
+    const bool is_search_or_count = IsSearchOrCountCommand(request);
+    state.expect_multiline_tail = is_search_or_count && (debug_mode_ || RequestsHighlight(request));
+    state.expect_debug_marker = is_search_or_count && debug_mode_;
     std::array<char, 8192> buffer{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -330,6 +339,11 @@ class TcpSession {
       }
       response.append(buffer.data(), static_cast<size_t>(received));
       if (client::detail::IsResponseComplete(response, state)) {
+        if (request == "DEBUG ON") {
+          debug_mode_ = true;
+        } else if (request == "DEBUG OFF") {
+          debug_mode_ = false;
+        }
         return response;
       }
     }
@@ -337,7 +351,25 @@ class TcpSession {
   }
 
  private:
+  static bool IsSearchOrCountCommand(const std::string& request) {
+    const size_t verb_end = request.find_first_of(" \t");
+    const std::string verb = request.substr(0, verb_end);
+    return verb == "SEARCH" || verb == "COUNT";
+  }
+
+  static bool RequestsHighlight(const std::string& request) {
+    std::istringstream tokens(request);
+    std::string token;
+    while (tokens >> token) {
+      if (token == "HIGHLIGHT") {
+        return true;
+      }
+    }
+    return false;
+  }
+
   int fd_ = -1;
+  bool debug_mode_ = false;
 };
 
 }  // namespace

@@ -35,6 +35,19 @@ inline bool EndsWith(std::string_view str, std::string_view suffix) {
 struct ResponseCompletionState {
   size_t first_crlf = std::string_view::npos;
   size_t scan_offset = 0;
+  // Set by the caller before the first call, from context IsResponseComplete
+  // cannot see in the bytes alone: the command that was sent requested
+  // HIGHLIGHT, or the connection has DEBUG ON. Both attach a body after the
+  // SEARCH/COUNT header line that is byte-for-byte identical, up to that
+  // point, to a plain response that ends there -- so whether the header's
+  // first \r\n is the true end can only be decided from the command, never
+  // from a chunk boundary that happens to land right after it.
+  bool expect_multiline_tail = false;
+  // Set alongside expect_multiline_tail when a DEBUG block can actually
+  // appear. Its own opening delimiter ("\r\n\r\n# DEBUG\r\n") is itself a
+  // double CRLF, so a plain "ends with \r\n\r\n" check would treat that
+  // opening as the frame's end. See the "# DEBUG" marker gate below.
+  bool expect_debug_marker = false;
 };
 
 /**
@@ -142,12 +155,37 @@ inline bool IsResponseComplete(std::string_view response, ResponseCompletionStat
     return EndsWith(response, kDoubleCrlf);
   }
 
+  // SHOW VARIABLES (non-empty): a bare ASCII table with no OK/+OK/ERROR
+  // status prefix (spec/tcp-commands.md §13, item 1). Every border and row line
+  // ends in \r\n, so this is exactly the same early-return hazard as
+  // SEARCH/COUNT below; the "+-" border is a distinctive enough prefix that
+  // no command awareness is needed to tell it apart from a genuine
+  // single-line response.
+  constexpr std::string_view kTableBorderPrefix = "+-";
+  if (response.compare(0, kTableBorderPrefix.size(), kTableBorderPrefix) == 0) {
+    return EndsWith(response, kDoubleCrlf);
+  }
+
   // For other response types (SEARCH, COUNT, GET, SAVE, LOAD, ERROR, etc.):
   // If the first \r\n is at the end, it's a single-line response and is complete.
   // If there's content after the first \r\n (e.g., DEBUG block or highlight lines),
-  // the response is multi-line and ends with \r\n\r\n.
-  if (is_single_line) {
+  // the response is multi-line and ends with \r\n\r\n. SEARCH/COUNT headers
+  // look identical up to that first \r\n whether or not more is coming, so
+  // the single-line shortcut is only safe when the caller has told us
+  // (expect_multiline_tail) that this command's reply cannot end there.
+  if (is_single_line && !state.expect_multiline_tail) {
     return true;
+  }
+
+  // A DEBUG block's fixed opening ("\r\n\r\n# DEBUG\r\n") reads as a
+  // "double CRLF" on its own, before a single byte of the block's actual
+  // content has arrived. Require that literal marker to have fully arrived
+  // before trusting any "ends with \r\n\r\n" match as the frame's true end;
+  // once it has, the block's own lines are single-CRLF, so the next (and
+  // only the next) double CRLF is the real terminator.
+  constexpr std::string_view kDebugBlockMarker = "# DEBUG\r\n";
+  if (state.expect_debug_marker && response.find(kDebugBlockMarker) == std::string_view::npos) {
+    return false;
   }
 
   // Multi-line response with content after first line (e.g., SEARCH with DEBUG)

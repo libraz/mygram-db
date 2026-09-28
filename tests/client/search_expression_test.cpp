@@ -303,9 +303,13 @@ TEST(SearchExpressionTest, QuotedPhrase) {
   ASSERT_TRUE(result);
 
   auto& expr = *result;
-  EXPECT_EQ(expr.required_terms.size(), 2);
-  EXPECT_EQ(expr.required_terms[0], "\"machine learning\"");
+  ASSERT_EQ(expr.required_terms.size(), 2);
+  // Stored as plain phrase text, not pre-quoted: ToQueryString and
+  // SimplifySearchExpression's downstream consumers each apply the shared
+  // wire-quoting decision exactly once, at their own destination.
+  EXPECT_EQ(expr.required_terms[0], "machine learning");
   EXPECT_EQ(expr.required_terms[1], "tutorial");
+  EXPECT_EQ(expr.ToQueryString(), "\"machine learning\" AND tutorial");
 }
 
 /**
@@ -316,10 +320,11 @@ TEST(SearchExpressionTest, QuotedPhraseWithExclusion) {
   ASSERT_TRUE(result);
 
   auto& expr = *result;
-  EXPECT_EQ(expr.required_terms.size(), 1);
-  EXPECT_EQ(expr.required_terms[0], "\"deep learning\"");
-  EXPECT_EQ(expr.excluded_terms.size(), 1);
+  ASSERT_EQ(expr.required_terms.size(), 1);
+  EXPECT_EQ(expr.required_terms[0], "deep learning");
+  ASSERT_EQ(expr.excluded_terms.size(), 1);
   EXPECT_EQ(expr.excluded_terms[0], "tensorflow");
+  EXPECT_EQ(expr.ToQueryString(), "\"deep learning\" AND NOT tensorflow");
 }
 
 /**
@@ -425,8 +430,9 @@ TEST(SearchExpressionTest, EmojiInQuotedPhrase) {
   ASSERT_TRUE(result);
 
   auto& expr = *result;
-  EXPECT_EQ(expr.required_terms.size(), 1);
-  EXPECT_EQ(expr.required_terms[0], "\"Hello 😀 World\"");
+  ASSERT_EQ(expr.required_terms.size(), 1);
+  EXPECT_EQ(expr.required_terms[0], "Hello 😀 World");
+  EXPECT_EQ(expr.ToQueryString(), "\"Hello 😀 World\"");
 }
 
 /**
@@ -468,34 +474,27 @@ TEST(SearchExpressionTest, EmojiToQueryString) {
 }
 
 /**
- * @brief Test SimplifySearchExpression with OR-only expression
+ * @brief Test SimplifySearchExpression rejects an OR-only expression
  *
- * Regression test: previously this returned false because there were no
- * required terms, even though raw_expression contained the OR sub-expression.
+ * The legacy structured API has no way to represent boolean OR: every
+ * consumer of main_term (Search(), mygramclient_search_advanced) re-applies
+ * wire quoting to it, which would wrap "python OR ruby" as one opaque
+ * literal-phrase term instead of parsing it as boolean OR. Returning an
+ * error is correct; synthesizing a main_term from it is the bug.
  */
 TEST(SearchExpressionTest, SimplifyOrOnly) {
   auto simplified = SimplifySearchExpression("python OR ruby");
-  ASSERT_TRUE(simplified) << simplified.error().message();
-  EXPECT_FALSE(simplified->main_term.empty());
-  EXPECT_NE(simplified->main_term.find("python"), std::string::npos);
-  EXPECT_NE(simplified->main_term.find("ruby"), std::string::npos);
-  EXPECT_NE(simplified->main_term.find("OR"), std::string::npos);
-  EXPECT_TRUE(simplified->and_terms.empty());
-  EXPECT_TRUE(simplified->not_terms.empty());
+  ASSERT_FALSE(simplified);
+  EXPECT_EQ(simplified.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError);
 }
 
 /**
- * @brief Test SimplifySearchExpression with parenthesized OR expression
+ * @brief Test SimplifySearchExpression rejects a parenthesized OR expression
  */
 TEST(SearchExpressionTest, SimplifyParenthesizedOnly) {
   auto simplified = SimplifySearchExpression("(python OR ruby)");
-  ASSERT_TRUE(simplified) << simplified.error().message();
-  EXPECT_FALSE(simplified->main_term.empty());
-  // main_term should already be parenthesized.
-  EXPECT_EQ(simplified->main_term.front(), '(');
-  EXPECT_EQ(simplified->main_term.back(), ')');
-  EXPECT_NE(simplified->main_term.find("python"), std::string::npos);
-  EXPECT_NE(simplified->main_term.find("ruby"), std::string::npos);
+  ASSERT_FALSE(simplified);
+  EXPECT_EQ(simplified.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError);
 }
 
 TEST(SearchExpressionTest, ParenthesizedImplicitAndPreservesWhitespace) {

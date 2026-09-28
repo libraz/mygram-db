@@ -35,10 +35,10 @@ namespace mygramdb::client {
  * @brief Parsed search expression components
  */
 struct SearchExpression {
-  std::vector<std::string> required_terms;  // Terms with + prefix (AND)
+  std::vector<std::string> required_terms;  // Terms with a + prefix, and unprefixed terms (implicit AND)
   std::vector<std::string> excluded_terms;  // Terms with - prefix (NOT)
-  std::vector<std::string> optional_terms;  // Terms without prefix
-  std::string raw_expression;               // Original expression for OR/grouping
+  std::vector<std::string> optional_terms;  // Unused; kept for source compatibility
+  std::string raw_expression;               // Formatted AST-syntax text for a bare OR/grouped sub-expression
 
   /**
    * @brief Check if expression has OR operators or grouping
@@ -83,15 +83,16 @@ struct SimplifiedExpression {
  * ```cpp
  * auto expr = ParseSearchExpression("+golang tutorial");
  * if (expr) {
- *   // expr->required_terms = ["golang"]
- *   // expr->optional_terms = ["tutorial"]
+ *   // expr->required_terms = ["golang", "tutorial"]
+ *   // optional_terms is unused; every unprefixed term is required (implicit AND)
  * }
  *
  * auto expr = ParseSearchExpression("+golang +(tutorial OR guide) -old");
  * if (expr) {
- *   // expr->required_terms = ["golang"]
+ *   // expr->required_terms = ["golang", "(tutorial OR guide)"]
  *   // expr->excluded_terms = ["old"]
- *   // expr->raw_expression = "+(tutorial OR guide)"
+ *   // raw_expression stays empty: a parenthesized group after +/- is kept
+ *   // as one required_terms entry, not folded into raw_expression
  * }
  * ```
  *
