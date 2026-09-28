@@ -144,6 +144,40 @@ std::string SubstrByCodePoints(std::string_view text, uint32_t cp_start, uint32_
   return std::string(text.substr(byte_start, byte_end - byte_start));
 }
 
+/// @brief Forward-only code-point-to-byte offset lookup over UTF-8 text.
+///
+/// GenerateWithPositions requests byte offsets for a strictly non-decreasing
+/// sequence of code-point offsets: merged windows are non-overlapping and
+/// increasing, and the matches inside each window are consumed in order. A
+/// cursor that only ever advances turns what used to be one from-scratch scan
+/// per window/match into a single pass over the whole document.
+class CodePointCursor {
+ public:
+  explicit CodePointCursor(std::string_view text) : text_(text) {}
+
+  /// Advance to the byte offset of cp_offset, which must be >= every offset
+  /// requested so far, and return that byte offset.
+  size_t AdvanceTo(uint32_t cp_offset) {
+    const auto* data = reinterpret_cast<const unsigned char*>(text_.data());
+    while (byte_pos_ < text_.size() && cp_pos_ < cp_offset) {
+      uint32_t codepoint = 0;
+      const int char_length = mygram::utils::TryParseUtf8Char(data + byte_pos_, text_.size() - byte_pos_, &codepoint);
+      if (char_length < 0) {
+        ++byte_pos_;
+        continue;
+      }
+      byte_pos_ += static_cast<size_t>(char_length);
+      ++cp_pos_;
+    }
+    return byte_pos_;
+  }
+
+ private:
+  std::string_view text_;
+  size_t byte_pos_ = 0;
+  uint32_t cp_pos_ = 0;
+};
+
 /// @brief Merge overlapping windows into non-overlapping ranges
 std::vector<std::pair<uint32_t, uint32_t>> MergeWindows(std::vector<std::pair<uint32_t, uint32_t>>& windows) {
   if (windows.empty()) {
@@ -219,6 +253,11 @@ HighlightResult GenerateWithPositions(std::string_view text,
   }
 
   std::string snippet;
+  // Windows are merged into non-overlapping, increasing ranges and the
+  // matches inside each are visited in order, so one cursor spanning the
+  // whole loop converts every offset in a single forward pass instead of
+  // rescanning from byte 0 per window/match.
+  CodePointCursor byte_cursor(text);
   for (size_t wi = 0; wi < merged.size(); ++wi) {
     if (wi > 0) {
       snippet += "...";
@@ -234,7 +273,9 @@ HighlightResult GenerateWithPositions(std::string_view text,
         continue;
       }
       if (m_start > cursor) {
-        snippet += SubstrByCodePoints(text, cursor, m_start);
+        const size_t byte_start = byte_cursor.AdvanceTo(cursor);
+        const size_t byte_end = byte_cursor.AdvanceTo(m_start);
+        snippet.append(text.substr(byte_start, byte_end - byte_start));
       }
       const uint32_t clipped_start = std::max(m_start, win_start);
       const uint32_t clipped_end = std::min(m_end, win_end);
@@ -242,12 +283,16 @@ HighlightResult GenerateWithPositions(std::string_view text,
         continue;
       }
       snippet += options.open_tag;
-      snippet += SubstrByCodePoints(text, clipped_start, clipped_end);
+      const size_t match_byte_start = byte_cursor.AdvanceTo(clipped_start);
+      const size_t match_byte_end = byte_cursor.AdvanceTo(clipped_end);
+      snippet.append(text.substr(match_byte_start, match_byte_end - match_byte_start));
       snippet += options.close_tag;
       cursor = clipped_end;
     }
     if (cursor < win_end) {
-      snippet += SubstrByCodePoints(text, cursor, win_end);
+      const size_t byte_start = byte_cursor.AdvanceTo(cursor);
+      const size_t byte_end = byte_cursor.AdvanceTo(win_end);
+      snippet.append(text.substr(byte_start, byte_end - byte_start));
     }
     if (win_end < total_cp && wi == merged.size() - 1) {
       snippet += "...";

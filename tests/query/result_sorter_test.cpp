@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 
 #include "query/query_parser.h"
 #include "storage/document_store.h"
@@ -1299,6 +1300,104 @@ TEST_F(ResultSorterTest, SignedIntSortWithSchwartzianTransform) {
     int64_t curr = std::get<int64_t>(val_curr.value());
     EXPECT_LT(prev, curr) << "Sort order violation at index " << i << ": " << prev << " >= " << curr;
   }
+}
+
+/**
+ * @brief BIGINT UNSIGNED SORT must order the full uint64_t range without
+ * collision, including values that straddle 2^63.
+ *
+ * A past version of the encoding XOR-ed values <= INT64_MAX into the sign
+ * bit's domain but left values > INT64_MAX untransformed, so both halves
+ * landed in the same output range: uint64_t 0 (XOR-ed to 2^63) collided with
+ * the literal value 2^63, and INT64_MAX (XOR-ed to UINT64_MAX) collided with
+ * the literal UINT64_MAX.
+ */
+TEST_F(ResultSorterTest, BigintUnsignedSortOrdersFullRangeWithoutCollision) {
+  constexpr uint64_t kHalfRange = uint64_t{1} << 63;  // 2^63
+
+  auto id_zero = doc_store_.AddDocument("zero", {{"val", uint64_t{0}}});
+  auto id_five = doc_store_.AddDocument("five", {{"val", uint64_t{5}}});
+  auto id_half = doc_store_.AddDocument("half_range", {{"val", kHalfRange}});
+  auto id_max = doc_store_.AddDocument("uint64_max", {{"val", std::numeric_limits<uint64_t>::max()}});
+  ASSERT_TRUE(id_zero.has_value());
+  ASSERT_TRUE(id_five.has_value());
+  ASSERT_TRUE(id_half.has_value());
+  ASSERT_TRUE(id_max.has_value());
+  std::vector<DocId> doc_ids{*id_zero, *id_five, *id_half, *id_max};
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = 4;
+  query.order_by = OrderByClause{"val", SortOrder::ASC};
+
+  auto ascending = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(ascending.has_value()) << ascending.error().message();
+  ASSERT_EQ(ascending->size(), 4U);
+  EXPECT_EQ(*ascending, (std::vector<DocId>{*id_zero, *id_five, *id_half, *id_max}));
+
+  query.order_by = OrderByClause{"val", SortOrder::DESC};
+  auto descending = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(descending.has_value()) << descending.error().message();
+  ASSERT_EQ(descending->size(), 4U);
+  EXPECT_EQ(*descending, (std::vector<DocId>{*id_max, *id_half, *id_five, *id_zero}));
+}
+
+/**
+ * @brief The same full-range ordering must hold in the Schwartzian Transform
+ * path (result count above kSchwartzianTransformThreshold = 100), not just
+ * the small-N path.
+ */
+TEST_F(ResultSorterTest, BigintUnsignedSortOrdersFullRangeAboveSchwartzianThreshold) {
+  constexpr uint64_t kHalfRange = uint64_t{1} << 63;  // 2^63
+
+  std::vector<DocId> doc_ids;
+  // 100 padding documents with small, distinct values so the batch clears
+  // kSchwartzianTransformThreshold; their exact values do not matter as long
+  // as none collides with the four values under test.
+  for (int i = 0; i < 100; ++i) {
+    doc_ids.push_back(*doc_store_.AddDocument("pad_" + std::to_string(i), {{"val", uint64_t(1000 + i)}}));
+  }
+  auto id_zero = doc_store_.AddDocument("zero", {{"val", uint64_t{0}}});
+  auto id_five = doc_store_.AddDocument("five", {{"val", uint64_t{5}}});
+  auto id_half = doc_store_.AddDocument("half_range", {{"val", kHalfRange}});
+  auto id_max = doc_store_.AddDocument("uint64_max", {{"val", std::numeric_limits<uint64_t>::max()}});
+  ASSERT_TRUE(id_zero.has_value());
+  ASSERT_TRUE(id_five.has_value());
+  ASSERT_TRUE(id_half.has_value());
+  ASSERT_TRUE(id_max.has_value());
+  doc_ids.push_back(*id_zero);
+  doc_ids.push_back(*id_five);
+  doc_ids.push_back(*id_half);
+  doc_ids.push_back(*id_max);
+  ASSERT_GT(doc_ids.size(), 100U);
+
+  Query query;
+  query.type = QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "test";
+  query.limit = static_cast<int32_t>(doc_ids.size());
+  query.order_by = OrderByClause{"val", SortOrder::ASC};
+
+  auto ascending = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(ascending.has_value()) << ascending.error().message();
+  ASSERT_EQ(ascending->size(), doc_ids.size());
+  // zero and five sort below all 100 padding values (>= 1000); half_range
+  // and uint64_max sort above all of them.
+  EXPECT_EQ(ascending->front(), *id_zero);
+  EXPECT_EQ((*ascending)[1], *id_five);
+  EXPECT_EQ((*ascending)[ascending->size() - 2], *id_half);
+  EXPECT_EQ(ascending->back(), *id_max);
+
+  query.order_by = OrderByClause{"val", SortOrder::DESC};
+  auto descending = ResultSorter::SortAndPaginate(doc_ids, doc_store_, query);
+  ASSERT_TRUE(descending.has_value()) << descending.error().message();
+  ASSERT_EQ(descending->size(), doc_ids.size());
+  EXPECT_EQ(descending->front(), *id_max);
+  EXPECT_EQ((*descending)[1], *id_half);
+  EXPECT_EQ((*descending)[descending->size() - 2], *id_five);
+  EXPECT_EQ(descending->back(), *id_zero);
 }
 
 // =============================================================================

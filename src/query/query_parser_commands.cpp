@@ -246,56 +246,59 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
   }
   size_t pos = search_result.value();
 
-  // Parse optional clauses
+  // Parse optional clauses. Every keyword check is guarded by !IsQuotedToken:
+  // a quoted token is a literal search term even when its text matches a
+  // keyword, and must fall through to the "unknown keyword" error below
+  // rather than being dispatched as that clause.
   while (pos < tokens.size()) {
-    if (EqualsIgnoreCase(tokens[pos], "AND")) {
+    if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "AND")) {
       auto result = ParseAnd(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "NOT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "NOT")) {
       auto result = ParseNot(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "FILTER")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "FILTER")) {
       auto result = ParseFilters(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "ORDER")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "ORDER")) {
       // ORDER BY is deprecated, guide users to use SORT
       SetError("ORDER BY is not supported. Use SORT instead. Example: SEARCH table text SORT column DESC");
       query.type = QueryType::UNKNOWN;
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
-    } else if (EqualsIgnoreCase(tokens[pos], "SORT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "SORT")) {
       auto result = ParseSort(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "LIMIT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "LIMIT")) {
       auto result = ParseLimit(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "OFFSET")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "OFFSET")) {
       auto result = ParseOffset(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "HIGHLIGHT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "HIGHLIGHT")) {
       auto result = ParseHighlight(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "FUZZY")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "FUZZY")) {
       auto result = ParseFuzzy(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
@@ -363,31 +366,32 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
   }
   size_t pos = search_result.value();
 
-  // Parse optional clauses
+  // Parse optional clauses. See ParseSearch: every keyword check is guarded
+  // by !IsQuotedToken so a quoted literal term never dispatches as a clause.
   while (pos < tokens.size()) {
-    if (EqualsIgnoreCase(tokens[pos], "AND")) {
+    if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "AND")) {
       auto result = ParseAnd(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "NOT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "NOT")) {
       auto result = ParseNot(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "FILTER")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "FILTER")) {
       auto result = ParseFilters(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "ORDER")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "ORDER")) {
       SetError("ORDER BY is not supported. Use SORT instead (note: COUNT does not support sorting).");
       query.type = QueryType::UNKNOWN;
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
-    } else if (EqualsIgnoreCase(tokens[pos], "SORT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "SORT")) {
       SetError("COUNT does not support SORT clause. Use SEARCH if you need sorted results.");
       query.type = QueryType::UNKNOWN;
       return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
@@ -475,33 +479,35 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
   }
   pos = search_result.value();
 
-  // Parse optional clauses (AND, NOT, FILTER, LIMIT, OFFSET)
+  // Parse optional clauses (AND, NOT, FILTER, LIMIT, OFFSET). See ParseSearch:
+  // every keyword check is guarded by !IsQuotedToken so a quoted literal
+  // term never dispatches as a clause.
   while (pos < tokens.size()) {
-    if (EqualsIgnoreCase(tokens[pos], "AND")) {
+    if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "AND")) {
       auto result = ParseAnd(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "NOT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "NOT")) {
       auto result = ParseNot(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "FILTER")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "FILTER")) {
       auto result = ParseFilters(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "LIMIT")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "LIMIT")) {
       auto result = ParseLimit(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;
         return MakeUnexpected(result.error());
       }
-    } else if (EqualsIgnoreCase(tokens[pos], "OFFSET")) {
+    } else if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "OFFSET")) {
       auto result = ParseOffset(tokens, pos, query);
       if (!result) {
         query.type = QueryType::UNKNOWN;

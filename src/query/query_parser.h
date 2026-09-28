@@ -407,6 +407,17 @@ class QueryParser {
   size_t max_query_length_ = config::defaults::kDefaultQueryLengthLimit;  // Default upper bound
 
   /**
+   * @brief Whether the token at pos was inside quotes in the original command text
+   *
+   * A quoted token is a literal search term even when its text matches a
+   * clause keyword (AND, NOT, OR, FILTER, SORT, LIMIT, OFFSET, HIGHLIGHT,
+   * FUZZY, FACET); no clause-dispatch check may read it as a keyword.
+   */
+  [[nodiscard]] bool IsQuotedToken(size_t pos) const {
+    return pos < token_was_quoted_.size() && token_was_quoted_[pos];
+  }
+
+  /**
    * @brief Parse SEARCH command
    */
   mygram::utils::Expected<Query, mygram::utils::Error> ParseSearch(const std::vector<std::string>& tokens);

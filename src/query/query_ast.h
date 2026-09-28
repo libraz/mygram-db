@@ -147,9 +147,15 @@ class Tokenizer {
   std::string ReadTerm();
 
   /**
-   * @brief Check if character is valid in unquoted term
+   * @brief Check if the byte at the given position starts a valid unquoted-term
+   * character, rather than a whitespace, control, or delimiter byte.
+   *
+   * Takes a position instead of a bare `char` so a multi-byte Unicode
+   * whitespace sequence (e.g. U+3000, the ideographic space) can be
+   * recognized from its leading byte, matching the TCP tokenizer's
+   * whitespace handling (mygram::utils::IsUnicodeWhitespace).
    */
-  static bool IsTermChar(char character);
+  [[nodiscard]] bool IsTermChar(size_t pos) const;
 
   /**
    * @brief Set error message

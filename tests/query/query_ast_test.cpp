@@ -174,6 +174,38 @@ TEST(QueryASTTest, MultipleOr) {
   EXPECT_EQ(ast->children[1]->term, "c");
 }
 
+// The TCP tokenizer splits on mygram::utils::IsUnicodeWhitespace (U+3000
+// ideographic space, U+00A0 no-break space, etc.) and rejoins with ASCII
+// spaces before this parser ever sees the text; HTTP mode:boolean instead
+// hands the raw JSON string straight through. Both must produce the same
+// AST for the same query text, so this parser's own tokenizer has to
+// recognize the same separators HTTP's raw pass-through relies on it for.
+TEST(QueryASTTest, IdeographicSpaceSeparatesTermsLikeAsciiSpace) {
+  QueryASTParser parser;
+  // U+3000 is UTF-8 0xE3 0x80 0x80.
+  auto ast = parser.Parse("\xE3\x80\x80東京\xE3\x80\x80OR\xE3\x80\x80大阪\xE3\x80\x80");
+
+  ASSERT_NE(ast, nullptr) << parser.GetError();
+  EXPECT_EQ(ast->type, NodeType::OR);
+  ASSERT_EQ(ast->children.size(), 2);
+  EXPECT_EQ(ast->children[0]->type, NodeType::TERM);
+  EXPECT_EQ(ast->children[0]->term, "東京");
+  EXPECT_EQ(ast->children[1]->type, NodeType::TERM);
+  EXPECT_EQ(ast->children[1]->term, "大阪");
+}
+
+TEST(QueryASTTest, NoBreakSpaceSeparatesTermsLikeAsciiSpace) {
+  QueryASTParser parser;
+  // U+00A0 is UTF-8 0xC2 0xA0.
+  auto ast = parser.Parse("golang\xC2\xA0OR\xC2\xA0python");
+
+  ASSERT_NE(ast, nullptr) << parser.GetError();
+  EXPECT_EQ(ast->type, NodeType::OR);
+  ASSERT_EQ(ast->children.size(), 2);
+  EXPECT_EQ(ast->children[0]->term, "golang");
+  EXPECT_EQ(ast->children[1]->term, "python");
+}
+
 // ============================================================================
 // NOT Operator Tests
 // ============================================================================

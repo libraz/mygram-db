@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cstring>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <variant>
 
@@ -28,6 +29,19 @@ namespace {
 // Format widths for zero-padded strings
 constexpr int kNumericWidth = 20;
 constexpr int kDoubleWidth = 20;
+
+// Leading domain tag for FilterValueToSortKey's signed/unsigned integer
+// family. Every int64_t (and smaller signed types) and every uint64_t value
+// representable as int64_t share this tag and a sign-bit-XOR magnitude, so a
+// legacy dump mixing uint64_t and int64_t timestamps for the same logical
+// epoch still sorts chronologically together. A uint64_t value that exceeds
+// INT64_MAX has no representation in that shared space at all and gets
+// kLargeUnsignedDomainTag with a plain decimal magnitude instead; comparing
+// the tag bytes first before either magnitude keeps the two groups from ever
+// overlapping (see FilterValueToSortKey's comment for why the earlier,
+// untagged encoding collided).
+constexpr char kIntegerDomainTag = '0';
+constexpr char kLargeUnsignedDomainTag = '1';
 
 // Buffer size for std::to_chars: max uint64_t is 20 digits + null terminator
 constexpr size_t kToCharsBufferSize = 21;
@@ -226,16 +240,14 @@ static std::string FilterValueToSortKey(const storage::FilterValue& val) {
           if constexpr (std::is_same_v<T, double>) {
             return ToZeroPaddedDoubleString(arg, kDoubleWidth);
           } else if constexpr (std::is_signed_v<T>) {
-            return ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
+            return kIntegerDomainTag + ToZeroPaddedSignedString(static_cast<int64_t>(arg), kNumericWidth);
           } else {
-            // Legacy dumps can hold post-epoch timestamps as uint64_t while
-            // pre-epoch values are int64_t. Use the signed encoding whenever
-            // representable so their numeric order shares the same zero point.
+            // See kIntegerDomainTag/kLargeUnsignedDomainTag's doc comment.
             const uint64_t value = static_cast<uint64_t>(arg);
             if (value <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-              return ToZeroPaddedSignedString(static_cast<int64_t>(value), kNumericWidth);
+              return kIntegerDomainTag + ToZeroPaddedSignedString(static_cast<int64_t>(value), kNumericWidth);
             }
-            return ToZeroPaddedString(value, kNumericWidth);
+            return kLargeUnsignedDomainTag + ToZeroPaddedString(value, kNumericWidth);
           }
         }
       },

@@ -210,6 +210,41 @@ TEST(QueryParserTest, SearchAcceptsAndNotClause) {
   EXPECT_EQ(query->not_terms.front(), "excluded");
 }
 
+/**
+ * @brief A quoted "not" after AND is the literal term, not the NOT clause.
+ *
+ * ParseAnd folds `AND NOT <term>` into a standalone NOT clause so the client
+ * expression converter's exclusion syntax works, but that fold must not
+ * fire when the token was quoted -- a client explicitly asking for the
+ * literal word "not" must get an AND term, not an accidental exclusion of
+ * whatever token follows.
+ */
+TEST(QueryParserTest, QuotedNotAfterAndIsALiteralTermNotTheNotClause) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles required AND "not")");
+
+  ASSERT_TRUE(query.has_value()) << query.error().message();
+  EXPECT_TRUE(query->not_terms.empty());
+  ASSERT_EQ(query->and_terms.size(), 1U);
+  EXPECT_EQ(query->and_terms.front(), "not");
+}
+
+/**
+ * @brief A quoted clause keyword after a completed clause is a syntax
+ * error, not a silently misdispatched clause.
+ *
+ * Once ParseAnd consumes its one term, the dispatch loop resumes matching
+ * clause keywords; a quoted token here can never be valid clause syntax on
+ * its own, but it must fail as an unrecognized token rather than being
+ * misread as e.g. the FILTER clause because its text happens to match.
+ */
+TEST(QueryParserTest, QuotedClauseKeywordAfterCompletedClauseIsRejected) {
+  QueryParser parser;
+  auto query = parser.Parse(R"(SEARCH articles alpha AND beta "FILTER" col = val)");
+
+  EXPECT_FALSE(query.has_value());
+}
+
 TEST(QueryParserTest, SearchRejectsAndNotWithoutTerm) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles required AND NOT");

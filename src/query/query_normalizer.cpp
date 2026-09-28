@@ -33,9 +33,12 @@ enum class FieldTag : uint8_t {
   kExecutionMode = 8,
   kVerificationPolicy = 9,
   kSynonymRevision = 10,
+  kBooleanAst = 11,
 };
 
 enum class FilterFieldTag : uint8_t { kColumn = 1, kOperator = 2, kValue = 3 };
+
+enum class AstNodeTag : uint8_t { kTerm = 1, kAnd = 2, kOr = 3, kNot = 4 };
 
 void AppendUint64(std::string& output, uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) {
@@ -59,8 +62,33 @@ std::string OneByteValue(uint8_t value) {
 
 }  // namespace
 
+void QueryNormalizer::AppendAstNode(std::string& output, const query::QueryNode& node,
+                                    const TextNormalizer& text_normalizer) {
+  if (node.type == query::NodeType::TERM) {
+    AppendField(output, static_cast<uint8_t>(AstNodeTag::kTerm), NormalizeSearchText(node.term, text_normalizer));
+    return;
+  }
+  AstNodeTag tag = AstNodeTag::kAnd;
+  switch (node.type) {
+    case query::NodeType::OR:
+      tag = AstNodeTag::kOr;
+      break;
+    case query::NodeType::NOT:
+      tag = AstNodeTag::kNot;
+      break;
+    default:
+      break;
+  }
+  output.push_back(static_cast<char>(tag));
+  AppendUint64(output, static_cast<uint64_t>(node.children.size()));
+  for (const auto& child : node.children) {
+    AppendAstNode(output, *child, text_normalizer);
+  }
+}
+
 std::string QueryNormalizer::Normalize(const query::Query& query, const TextNormalizer& text_normalizer,
-                                       const CacheSemanticContext& semantic_context) {
+                                       const CacheSemanticContext& semantic_context,
+                                       const query::QueryNode* boolean_ast) {
   uint8_t command = 0;
   switch (query.type) {
     case query::QueryType::SEARCH:
@@ -89,9 +117,21 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const TextNorm
   std::string encoded_revision;
   AppendUint64(encoded_revision, semantic_context.synonym_revision);
   AppendField(result, FieldTag::kSynonymRevision, encoded_revision);
-  AppendField(result, FieldTag::kSearchText,
-              NormalizeSearchText(query.search_expression.empty() ? query.search_text : query.search_expression,
-                                  text_normalizer));
+  if (semantic_context.execution_mode == CacheExecutionMode::kBooleanAst && boolean_ast != nullptr) {
+    // The tokenizer's ASCII-only whitespace check and the index text
+    // normalizer's Unicode folding (e.g. NFKC mapping NBSP to a plain space)
+    // disagree on which characters separate tokens. Two raw expressions that
+    // normalize to the same text can therefore still parse into different
+    // trees, so the key is built from the tree ast_parser.Parse actually
+    // produced, not from re-normalizing the raw expression independently.
+    std::string encoded_ast;
+    AppendAstNode(encoded_ast, *boolean_ast, text_normalizer);
+    AppendField(result, FieldTag::kBooleanAst, encoded_ast);
+  } else {
+    AppendField(result, FieldTag::kSearchText,
+                NormalizeSearchText(query.search_expression.empty() ? query.search_text : query.search_expression,
+                                    text_normalizer));
+  }
 
   std::vector<std::string> and_terms;
   and_terms.reserve(query.and_terms.size());

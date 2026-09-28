@@ -16,11 +16,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -98,6 +100,36 @@ void ReportRow(std::string_view script, size_t clusters, const HighlightCost& co
   std::cout << "  " << std::left << std::setw(10) << script << std::right << std::setw(10) << clusters << std::setw(14)
             << cost.normalizer_calls << std::setw(12) << std::fixed << std::setprecision(3) << cost.elapsed_ms
             << std::setw(10) << cost.snippet_bytes << "\n";
+}
+
+/// @brief A long filler document with a dense run of match occurrences a
+/// fixed distance in, separated only by a space so each stays a distinct,
+/// non-overlapping match.
+std::string MakeDocumentWithMatchCluster(size_t total_clusters, size_t match_count, std::string_view term) {
+  static constexpr std::array<std::string_view, 10> kWords = {"the ",  "quick ", "brown ", "fox ", "jumps ",
+                                                              "over ", "lazy ",  "dog ",   "and ", "again "};
+  const size_t half = total_clusters / 2;
+  std::string text = BuildDocument("", kWords, half);
+  for (size_t i = 0; i < match_count; ++i) {
+    text.append(term);
+    text.append(" ");
+  }
+  text.append(BuildDocument("", kWords, half));
+  return text;
+}
+
+/// @brief Best of a few runs, to keep the comparison stable against scheduler noise.
+double MeasureGenerateMinMs(const std::string& document, const HighlightOptions& options,
+                            const std::vector<std::string>& terms) {
+  double best_ms = std::numeric_limits<double>::max();
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = Highlighter::Generate(document, terms, options);
+    const auto end = std::chrono::steady_clock::now();
+    best_ms = std::min(best_ms, std::chrono::duration<double, std::milli>(end - start).count());
+    EXPECT_FALSE(result.snippet.empty());
+  }
+  return best_ms;
 }
 
 }  // namespace
@@ -186,6 +218,39 @@ TEST_F(HighlighterCostTest, NoMatchCostsAFixedNumberOfNormalizerCalls) {
   // One pass over the document decides there is nothing to highlight; nothing
   // beyond that is a function of length.
   EXPECT_LE(calls.back(), calls.front() + 1);
+}
+
+/**
+ * @brief Offset conversion cost must track document length, not match count.
+ *
+ * Both documents below are the same length, with the entire match cluster
+ * sitting far enough in that a cursor restarting from byte 0 per window/match
+ * would cost roughly match_count x document_length. A single forward pass
+ * costs O(document_length) regardless of match_count, so growing the match
+ * count 60x must not multiply the elapsed time anywhere near that much.
+ */
+TEST_F(HighlighterCostTest, OffsetConversionCostDoesNotGrowWithMatchCountOnALongDocument) {
+  constexpr size_t kDocumentClusters = 500000;
+  constexpr size_t kSparseMatches = 5;
+  constexpr size_t kDenseMatches = 300;
+  constexpr std::string_view kClusterTerm = "ab";
+
+  HighlightOptions options;
+  options.snippet_length = 2000;
+  options.max_fragments = 10;
+  const std::vector<std::string> terms = {std::string(kClusterTerm)};
+
+  const std::string sparse_document = MakeDocumentWithMatchCluster(kDocumentClusters, kSparseMatches, kClusterTerm);
+  const std::string dense_document = MakeDocumentWithMatchCluster(kDocumentClusters, kDenseMatches, kClusterTerm);
+
+  const double sparse_ms = MeasureGenerateMinMs(sparse_document, options, terms);
+  const double dense_ms = MeasureGenerateMinMs(dense_document, options, terms);
+
+  std::cout << "\nHIGHLIGHT cost by match count (document length fixed at " << kDocumentClusters << " clusters)\n";
+  std::cout << "  sparse (" << kSparseMatches << " matches): " << sparse_ms << " ms\n";
+  std::cout << "  dense  (" << kDenseMatches << " matches): " << dense_ms << " ms\n";
+
+  EXPECT_LT(dense_ms, sparse_ms * 5.0 + 5.0);
 }
 
 }  // namespace mygramdb::query

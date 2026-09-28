@@ -53,8 +53,9 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ParseAnd(const 
 
   // The client expression converter emits `AND NOT <term>` for exclusions.
   // Treat it as the equivalent standalone NOT clause rather than indexing the
-  // keyword itself as a required term.
-  if (EqualsIgnoreCase(tokens[pos], "NOT")) {
+  // keyword itself as a required term -- unless the token was quoted, which
+  // means the client asked for the literal term "not", not the clause.
+  if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "NOT")) {
     return ParseNot(tokens, pos, query);
   }
 

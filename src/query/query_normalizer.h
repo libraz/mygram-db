@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include "query/query_ast.h"
 #include "query/query_parser.h"
 
 namespace mygramdb::cache {
@@ -51,18 +52,30 @@ class QueryNormalizer {
    * @brief Normalize query for cache key generation
    * @param query Parsed query object
    * @param text_normalizer Optional index-compatible normalizer for search, AND, and NOT terms
+   * @param boolean_ast For CacheExecutionMode::kBooleanAst, the tree the same raw expression
+   * was actually parsed into. The tokenizer's ASCII-only whitespace handling and the index
+   * text normalizer's Unicode folding disagree on which characters separate tokens, so two
+   * raw expressions that fold to the same normalized text can still parse into different
+   * trees; serializing the tree itself (rather than re-normalizing the raw text) keeps the
+   * key injective with respect to what actually executes. Ignored for every other mode.
    * The returned string is binary and may contain NUL bytes. It is intended
    * only as input to CacheKeyGenerator.
    * @return Versioned canonical query serialization
    */
   static std::string Normalize(const query::Query& query, const TextNormalizer& text_normalizer = nullptr,
-                               const CacheSemanticContext& semantic_context = {});
+                               const CacheSemanticContext& semantic_context = {},
+                               const query::QueryNode* boolean_ast = nullptr);
 
  private:
   /**
    * @brief Apply optional index text normalization without changing query whitespace semantics
    */
   static std::string NormalizeSearchText(const std::string& text, const TextNormalizer& text_normalizer);
+
+  /**
+   * @brief Recursively serialize a boolean AST node with a type tag and normalized leaf terms
+   */
+  static void AppendAstNode(std::string& output, const query::QueryNode& node, const TextNormalizer& text_normalizer);
 };
 
 }  // namespace mygramdb::cache

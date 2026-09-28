@@ -167,18 +167,29 @@ std::vector<index::DocId> QueryNode::Evaluate(const index::Index& index, const s
 Tokenizer::Tokenizer(std::string input) : input_(std::move(input)) {}
 
 void Tokenizer::SkipWhitespace() {
-  while (pos_ < input_.size() && (std::isspace(static_cast<unsigned char>(input_[pos_])) != 0)) {
-    pos_++;
+  while (pos_ < input_.size()) {
+    size_t char_len = 0;
+    if (!mygram::utils::IsUnicodeWhitespace(input_, pos_, char_len)) {
+      break;
+    }
+    pos_ += char_len;
   }
 }
 
-bool Tokenizer::IsTermChar(char character) {
+bool Tokenizer::IsTermChar(size_t pos) const {
   // Boolean syntax is delimited only by whitespace, parentheses, and quotes.
   // All other characters, including ASCII punctuation in e-mail addresses,
   // versions, and language names such as "c++", are literal term characters.
+  // Checked via IsUnicodeWhitespace (not a bare std::isspace byte test) so a
+  // multi-byte separator like U+3000 is recognized from its leading byte,
+  // matching the TCP tokenizer this parser must agree with.
+  size_t whitespace_len = 0;
+  if (mygram::utils::IsUnicodeWhitespace(input_, pos, whitespace_len)) {
+    return false;
+  }
+  const char character = input_[pos];
   const auto byte = static_cast<unsigned char>(character);
-  return std::isspace(byte) == 0 && std::iscntrl(byte) == 0 && character != '(' && character != ')' &&
-         character != '"' && character != '\'';
+  return std::iscntrl(byte) == 0 && character != '(' && character != ')' && character != '"' && character != '\'';
 }
 
 std::string Tokenizer::ReadQuotedString(char quote_char) {
@@ -241,7 +252,7 @@ std::string Tokenizer::ReadQuotedString(char quote_char) {
 
 std::string Tokenizer::ReadTerm() {
   std::string result;
-  while (pos_ < input_.size() && IsTermChar(input_[pos_])) {
+  while (pos_ < input_.size() && IsTermChar(pos_)) {
     result += input_[pos_++];
   }
   return result;
@@ -284,7 +295,7 @@ std::vector<Token> Tokenizer::Tokenize() {
     }
 
     // Unquoted term or keyword
-    if (IsTermChar(character)) {
+    if (IsTermChar(pos_)) {
       std::string term = ReadTerm();
       std::string upper_term = ToUpper(term);
 
