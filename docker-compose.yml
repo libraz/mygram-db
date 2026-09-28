@@ -58,6 +58,10 @@ services:
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_USER: ${MYSQL_USER:-repl_user}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set}
+      # Not used to connect (mygramdb authenticates as MYSQL_USER); wired through
+      # so entrypoint.sh's placeholder check can see it and refuse to start
+      # while the mysql service is still running the published root password.
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD must be set}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-mydb}
       MYSQL_USE_GTID: ${MYSQL_USE_GTID:-true}
       MYSQL_CONNECT_TIMEOUT_MS: ${MYSQL_CONNECT_TIMEOUT_MS:-3000}
@@ -142,8 +146,10 @@ services:
     volumes:
       - mygramdb_data:/var/lib/mygramdb
     healthcheck:
-      # $$ defers expansion until the probe runs inside the container.
-      test: ["CMD-SHELL", "curl -sf \"http://localhost:$${API_HTTP_PORT:-8080}/health/live\""]
+      # $$ defers expansion until the probe runs inside the container. Skips
+      # the probe when API_HTTP_ENABLE=false: there is no HTTP listener to
+      # check in that case.
+      test: ["CMD-SHELL", "[ \"$${API_HTTP_ENABLE:-true}\" = \"false\" ] || curl -sf \"http://localhost:$${API_HTTP_PORT:-8080}/health/live\""]
       interval: 30s
       timeout: 3s
       retries: 3

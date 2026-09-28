@@ -93,8 +93,13 @@ EXPOSE 11016 8080
 # too, so NETWORK_ALLOW_CIDRS must contain this probe's source address
 # (127.0.0.1/32, plus ::1/128 if localhost resolves over IPv6) or the container
 # is reported unhealthy on a 403 that curl -sf hides.
+#
+# Follows API_HTTP_PORT so a custom port still gets probed correctly, and
+# skips the probe entirely when API_HTTP_ENABLE=false: there is no HTTP
+# listener to check in that case, and failing health forever for a feature
+# the operator explicitly disabled would be worse than not checking it.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
-    CMD curl -sf http://localhost:8080/health/live || exit 1
+    CMD [ "${API_HTTP_ENABLE:-true}" = "false" ] || curl -sf "http://localhost:${API_HTTP_PORT:-8080}/health/live" || exit 1
 
 # Entrypoint script handles configuration generation from env vars
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

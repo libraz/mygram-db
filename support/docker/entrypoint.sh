@@ -53,10 +53,22 @@ if [ "${SKIP_CONFIG_GEN}" = "true" ]; then
     exec "$@"
 fi
 
-# Handle special commands that don't need config
+# Handle special commands that don't need config. help/version are the
+# bare words a container caller naturally reaches for; mygramdb itself only
+# recognizes the -h/--help and -v/--version flags, so translate them before
+# exec instead of passing the literal word through as a positional argument
+# (which mygramdb would otherwise try to open as a config file).
 case "$1" in
-    --help|-h|--version|-v|help|version)
+    --help|-h|--version|-v)
         exec "$MYGRAMDB_BINARY" "$@"
+        ;;
+    help)
+        shift
+        exec "$MYGRAMDB_BINARY" --help "$@"
+        ;;
+    version)
+        shift
+        exec "$MYGRAMDB_BINARY" --version "$@"
         ;;
     /bin/sh|/bin/bash|sh|bash)
         # Shell access
