@@ -17,6 +17,7 @@ CクライアントとC++クライアントは同じwire protocolを使用しま
 | 非同期DUMP SAVE完了timeout | `ClientConfig::dump_save_timeout_ms` | `MygramClientConfigV2_C::dump_save_timeout_ms` |
 | DUMP LOAD / VERIFY timeout | `ClientConfig::dump_load_timeout_ms` / `dump_verify_timeout_ms` | 対応するV2 field |
 | OPTIMIZE timeout | `ClientConfig::optimize_timeout_ms` | `MygramClientConfigV2_C::optimize_timeout_ms` |
+| 応答frameの最大size | `ClientConfig::max_response_bytes` | `MygramClientConfigV2_C::max_response_bytes` |
 
 利用者が入力した通常の文字列には `Search` を使用してください。`AND`、`FILTER`、`LIMIT` などの単独予約語は自動的に引用されます。`alpha AND (xqz OR jkv)` のような意図的な式を型付きfilter、sort、fuzzy、highlightと組み合わせる場合は、`SearchOptions::query_mode` に `QueryMode::kBoolean` を設定します。`SearchRaw` は式だけを渡す簡潔なAPIとして残ります。
 
