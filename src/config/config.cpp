@@ -981,9 +981,14 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
 
   Config config;
 
-  // Parse MySQL config
-  if (root.contains("mysql")) {
-    auto mysql_result = ParseMysqlConfig(root["mysql"], apply_environment_overrides);
+  // Parse MySQL config. Called unconditionally (an absent mysql: key uses an
+  // empty object) so MYGRAM_MYSQL_HOST/PORT/USER/PASSWORD/DATABASE still take
+  // effect when the config file has no mysql: block at all -- the same
+  // "credentials stay out of the file" setup admin_token's env override
+  // supports below.
+  {
+    auto mysql_result =
+        ParseMysqlConfig(root.contains("mysql") ? root["mysql"] : json::object(), apply_environment_overrides);
     if (!mysql_result) {
       return MakeUnexpected(mysql_result.error());
     }
@@ -1200,6 +1205,20 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
     }
   }
 
+  // A restored dump sets its own snapshot GTID (ServerOrchestrator's
+  // RestoreDumpOnStartup), independently of auto_initial_snapshot's MySQL
+  // snapshot. start_from: latest/gtid=... ignores that restored GTID and
+  // resumes from a position of its own choosing, silently skipping every
+  // binlog event between the dump's GTID and that position.
+  if (config.replication.enable && config.dump.load_on_startup && config.replication.start_from != "snapshot") {
+    std::stringstream err_msg;
+    err_msg << "Replication configuration error: dump.load_on_startup requires start_from: snapshot\n";
+    err_msg << "  start_from '" << config.replication.start_from
+            << "' would ignore the GTID restored from the startup dump and can skip binlog events.\n";
+    err_msg << "  Use start_from: snapshot, or disable dump.load_on_startup and run SYNC/DUMP LOAD explicitly.";
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
+  }
+
   // Parse API config (both old "server" format and new "api" format)
   if (root.contains("server")) {
     // Legacy format: server.host, server.port
@@ -1345,15 +1364,20 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         }
       }
     }
-    {
-      std::optional<std::string> json_value;
-      if (api.contains("admin_token")) {
-        json_value = api["admin_token"].get<std::string>();
-      }
-      config.api.admin_token = apply_environment_overrides
-                                   ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_API_ADMIN_TOKEN")
-                                   : json_value.value_or(config.api.admin_token);
+  }
+
+  // Resolved unconditionally (not nested inside `if (root.contains("api"))`)
+  // so MYGRAM_API_ADMIN_TOKEN still takes effect when the config file has no
+  // api: block at all -- exactly the "credentials stay out of the file"
+  // setup the env-var override exists for.
+  {
+    std::optional<std::string> json_value;
+    if (root.contains("api") && root["api"].contains("admin_token")) {
+      json_value = root["api"]["admin_token"].get<std::string>();
     }
+    config.api.admin_token = apply_environment_overrides
+                                 ? GetConfigValueWithEnvOverride(json_value, "MYGRAM_API_ADMIN_TOKEN")
+                                 : json_value.value_or(config.api.admin_token);
   }
 
   // Parse network config

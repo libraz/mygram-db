@@ -299,6 +299,77 @@ TEST(ConfigTest, DefaultValues) {
   EXPECT_EQ(config.api.http.write_timeout_sec, defaults::kHttpTimeoutSec);
 }
 
+/**
+ * @brief Cache int fields above INT32_MAX must be rejected at load time.
+ *
+ * These fields are read with json_obj[...].get<int>(), which narrows without
+ * a range check, so a schema without a maximum lets an out-of-range value
+ * silently wrap to a negative int (e.g. ttl_seconds=3000000000 becomes
+ * negative, which query_cache.cpp then treats as "no expiration").
+ */
+TEST(ConfigTest, RejectsCacheIntFieldsAboveInt32RangeAtLoadTime) {
+  const std::vector<std::pair<std::string, std::string>> overflow_fields = {
+      {"cache:\n  ttl_seconds: 3000000000\n", "ttl_seconds"},
+      {"cache:\n  eviction_batch_size: 3000000000\n", "eviction_batch_size"},
+      {"cache:\n  invalidation:\n    batch_size: 3000000000\n", "batch_size"},
+      {"cache:\n  invalidation:\n    max_delay_ms: 3000000000\n", "max_delay_ms"},
+  };
+
+  for (const auto& [yaml_fragment, field_name] : overflow_fields) {
+    const auto path = TempConfigPath("cache_overflow_" + field_name + ".yaml");
+    std::ofstream f(path);
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << yaml_fragment;
+    f.close();
+
+    auto config_result = LoadConfig(path);
+    ASSERT_FALSE(config_result) << field_name;
+    EXPECT_NE(config_result.error().message().find(field_name), std::string::npos)
+        << field_name << ": " << config_result.error().to_string();
+  }
+}
+
+/**
+ * @brief The double-backed cache.min_query_cost_ms rejects nan/inf at load.
+ *
+ * ParseYamlScalar only recognizes strict digit-and-dot numeric literals, so
+ * a YAML "nan"/"inf" scalar (unlike a language that maps .nan/.inf to a
+ * native double) is carried through as the JSON string "nan"/"inf" -- which
+ * the schema's `type: number` then rejects as a type mismatch. This
+ * documents that the load path already independently rejects the value the
+ * runtime SET path rejects via std::isfinite(), even though the two paths
+ * reject it through different mechanisms.
+ */
+TEST(ConfigTest, RejectsNonFiniteCacheMinQueryCostAtLoadTime) {
+  for (const std::string& literal : {"nan", "-nan", "inf", "-inf"}) {
+    const auto path = TempConfigPath("cache_cost_" + literal + ".yaml");
+    std::ofstream f(path);
+    f << "mysql:\n";
+    f << "  host: localhost\n";
+    f << "  user: root\n";
+    f << "  password: pass\n";
+    f << "  database: testdb\n";
+    f << "tables:\n";
+    f << "  - name: test\n";
+    f << "    text_source:\n";
+    f << "      column: text\n";
+    f << "cache:\n";
+    f << "  min_query_cost_ms: " << literal << "\n";
+    f.close();
+
+    auto config_result = LoadConfig(path);
+    EXPECT_FALSE(config_result) << literal;
+  }
+}
+
 TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   std::ofstream f("schema_exposed_keys.yaml");
   f << "mysql:\n";
@@ -369,6 +440,7 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
 
 TEST(ConfigTest, SynonymsEnabledRequiresNonEmptyFile) {
   json no_file = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"tables",
        json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}, {"synonyms", {{"enable", true}}}}})}};
   auto missing = internal::ParseConfigFromJson(no_file);
@@ -382,7 +454,8 @@ TEST(ConfigTest, SynonymsEnabledRequiresNonEmptyFile) {
 }
 
 TEST(ConfigTest, GlobalNgramSizeAlsoAppliesToImplicitKanjiNgramSize) {
-  json config_json = {{"index", {{"ngram_size", 3}}},
+  json config_json = {{"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+                      {"index", {{"ngram_size", 3}}},
                       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
 
   auto config_result = internal::ParseConfigFromJson(config_json);
@@ -394,6 +467,7 @@ TEST(ConfigTest, GlobalNgramSizeAlsoAppliesToImplicitKanjiNgramSize) {
 
 TEST(ConfigTest, ImplicitGlobalNgramSizeMatchesSchemaDefault) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
@@ -406,6 +480,7 @@ TEST(ConfigTest, ImplicitGlobalNgramSizeMatchesSchemaDefault) {
 
 TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"index", {{"ngram_size", 3}}},
       {"tables", json::array({{{"name", "test"}, {"kanji_ngram_size", 1}, {"text_source", {{"column", "text"}}}}})}};
 
@@ -418,6 +493,7 @@ TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
 
 TEST(ConfigTest, ExplicitZeroKanjiNgramSizeInheritsLegacyGlobalNgramSize) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"index", {{"ngram_size", 3}}},
       {"tables", json::array({{{"name", "test"}, {"kanji_ngram_size", 0}, {"text_source", {{"column", "text"}}}}})}};
 
@@ -429,7 +505,8 @@ TEST(ConfigTest, ExplicitZeroKanjiNgramSizeInheritsLegacyGlobalNgramSize) {
 }
 
 TEST(ConfigTest, OmittedGlobalNgramSizeDefaultsToBigram) {
-  json config_json = {{"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
+  json config_json = {{"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+                      {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
 
   auto config_result = internal::ParseConfigFromJson(config_json);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
@@ -440,6 +517,7 @@ TEST(ConfigTest, OmittedGlobalNgramSizeDefaultsToBigram) {
 
 TEST(ConfigTest, InvalidNetworkAllowCidrIsRejectedSemantically) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"network", {{"allow_cidrs", json::array({"127.0.0.1/32", "999.0.0.1/24"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
@@ -452,6 +530,7 @@ TEST(ConfigTest, InvalidNetworkAllowCidrIsRejectedSemantically) {
 
 TEST(ConfigTest, IPv6NetworkAllowCidrsAreAcceptedSemantically) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"network", {{"allow_cidrs", json::array({"::1/128", "2001:db8::/32"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
@@ -463,6 +542,7 @@ TEST(ConfigTest, IPv6NetworkAllowCidrsAreAcceptedSemantically) {
 
 TEST(ConfigTest, RejectsEnabledCorsWithoutExplicitOrigin) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"http", {{"enable", true}, {"enable_cors", true}}}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
@@ -474,6 +554,7 @@ TEST(ConfigTest, RejectsEnabledCorsWithoutExplicitOrigin) {
 
 TEST(ConfigTest, RejectsNonNumericTrustedProxyAddress) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"http", {{"trusted_proxies", json::array({"proxy.internal"})}}}}},
   };
 
@@ -493,6 +574,7 @@ TEST(ConfigTest, RejectsDisabledGtidReplicationMode) {
 
 TEST(ConfigTest, RejectsPendingFrameLimitBelowValidQueryLimit) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"max_query_length", 65536}, {"tcp", {{"max_pending_frame_bytes", 4096}}}}},
   };
 
@@ -503,6 +585,7 @@ TEST(ConfigTest, RejectsPendingFrameLimitBelowValidQueryLimit) {
 
 TEST(ConfigTest, AllowsPendingFrameLimitEqualToQueryLimit) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"max_query_length", 65536}, {"tcp", {{"max_pending_frame_bytes", 65536}}}}},
   };
 
@@ -512,6 +595,7 @@ TEST(ConfigTest, AllowsPendingFrameLimitEqualToQueryLimit) {
 
 TEST(ConfigTest, RejectsUniversalAclWithPublicTcpBind) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"tcp", {{"bind", "0.0.0.0"}}}, {"admin_token", "test-admin-token"}}},
       {"network", {{"allow_cidrs", json::array({"0.0.0.0/0"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -525,6 +609,7 @@ TEST(ConfigTest, RejectsUniversalAclWithPublicTcpBind) {
 
 TEST(ConfigTest, RejectsUniversalIpv6AclWithPublicHttpBind) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"http", {{"enable", true}, {"bind", "::"}}}, {"admin_token", "test-admin-token"}}},
       {"network", {{"allow_cidrs", json::array({"::/0"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -538,6 +623,7 @@ TEST(ConfigTest, RejectsUniversalIpv6AclWithPublicHttpBind) {
 
 TEST(ConfigTest, AllowsUniversalAclForLoopbackBinds) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"tcp", {{"bind", "127.0.0.1"}}}, {"http", {{"enable", true}, {"bind", "::1"}}}}},
       {"network", {{"allow_cidrs", json::array({"0.0.0.0/0", "::/0"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -549,6 +635,7 @@ TEST(ConfigTest, AllowsUniversalAclForLoopbackBinds) {
 
 TEST(ConfigTest, AllowsPublicBindWithRestrictiveAcl) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"tcp", {{"bind", "0.0.0.0"}}}, {"admin_token", "test-admin-token"}}},
       {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -560,6 +647,7 @@ TEST(ConfigTest, AllowsPublicBindWithRestrictiveAcl) {
 
 TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminToken) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"tcp", {{"bind", "0.0.0.0"}}}}},
       {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -572,6 +660,7 @@ TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminToken) {
 
 TEST(ConfigTest, RejectsPublicHttpBindWithoutAdminToken) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"tcp", {{"bind", "127.0.0.1"}}}, {"http", {{"enable", true}, {"bind", "0.0.0.0"}}}}},
       {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -587,6 +676,7 @@ TEST(ConfigTest, RejectsPublicHttpBindWithoutAdminTokenBehindUnixSocket) {
   // A Unix socket removes the TCP listener but leaves the HTTP listener in
   // place, so it must not exempt a public HTTP bind from the token rule.
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"unix_socket", {{"path", "/tmp/mygramdb.sock"}}}, {"http", {{"enable", true}, {"bind", "0.0.0.0"}}}}},
       {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -600,6 +690,7 @@ TEST(ConfigTest, RejectsPublicHttpBindWithoutAdminTokenBehindUnixSocket) {
 
 TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminTokenWhenHttpIsLoopback) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"tcp", {{"bind", "0.0.0.0"}}}, {"http", {{"enable", true}, {"bind", "127.0.0.1"}}}}},
       {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -613,6 +704,7 @@ TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminTokenWhenHttpIsLoopback) {
 
 TEST(ConfigTest, AllowsMissingAdminTokenWhenBothListenersAreLocal) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"tcp", {{"bind", "127.0.0.1"}}}, {"http", {{"enable", true}, {"bind", "::1"}}}}},
       {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -624,6 +716,7 @@ TEST(ConfigTest, AllowsMissingAdminTokenWhenBothListenersAreLocal) {
 
 TEST(ConfigTest, AllowsMissingAdminTokenWhenHttpIsDisabledBehindUnixSocket) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"unix_socket", {{"path", "/tmp/mygramdb.sock"}}}, {"tcp", {{"bind", "0.0.0.0"}}}}},
       {"network", {{"allow_cidrs", json::array({"10.0.0.0/8"})}}},
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
@@ -966,6 +1059,124 @@ TEST(ConfigTest, MultiTableAutoInitialSnapshotAllowsSnapshotStartFrom) {
   auto result = LoadConfig(path);
   ASSERT_TRUE(result) << result.error().message();
   EXPECT_EQ(result->replication.start_from, "snapshot");
+}
+
+/**
+ * @brief dump.load_on_startup restores its own snapshot GTID; start_from
+ * must not bypass it.
+ *
+ * ServerOrchestrator's dump-restore path sets snapshot_gtid_ from the dump's
+ * embedded GTID independently of auto_initial_snapshot's fresh MySQL
+ * snapshot. start_from: latest resumes from MySQL's current GTID instead,
+ * silently skipping every binlog event between the dump's GTID and that
+ * later position.
+ */
+TEST(ConfigTest, DumpLoadOnStartupRejectsLatestStartFrom) {
+  const auto path = TempConfigPath("dump_load_on_startup_latest_start_from.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: latest\n";
+  f << "dump:\n";
+  f << "  load_on_startup: true\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  EXPECT_FALSE(result);
+  if (!result) {
+    std::string error_msg = result.error().message();
+    EXPECT_TRUE(error_msg.find("dump.load_on_startup requires start_from: snapshot") != std::string::npos) << error_msg;
+    EXPECT_TRUE(error_msg.find("restored from the startup dump") != std::string::npos) << error_msg;
+  }
+}
+
+TEST(ConfigTest, DumpLoadOnStartupRejectsExplicitGtidStartFrom) {
+  const auto path = TempConfigPath("dump_load_on_startup_gtid_start_from.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: \"gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1\"\n";
+  f << "dump:\n";
+  f << "  load_on_startup: true\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  EXPECT_FALSE(result);
+}
+
+TEST(ConfigTest, DumpLoadOnStartupAllowsSnapshotStartFrom) {
+  const auto path = TempConfigPath("dump_load_on_startup_snapshot_start_from.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: snapshot\n";
+  f << "dump:\n";
+  f << "  load_on_startup: true\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  ASSERT_TRUE(result) << result.error().message();
+  EXPECT_EQ(result->replication.start_from, "snapshot");
+  EXPECT_TRUE(result->dump.load_on_startup);
+}
+
+/**
+ * @brief dump.load_on_startup with replication disabled needs no GTID guard.
+ *
+ * Without replication there is no binlog stream to resume, so start_from's
+ * value is irrelevant and must not block a config that only restores a dump.
+ */
+TEST(ConfigTest, DumpLoadOnStartupWithoutReplicationIgnoresStartFrom) {
+  const auto path = TempConfigPath("dump_load_on_startup_no_replication.yaml");
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: articles\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
+  f << "  start_from: latest\n";
+  f << "dump:\n";
+  f << "  load_on_startup: true\n";
+  f.close();
+
+  auto result = LoadConfig(path);
+  ASSERT_TRUE(result) << result.error().message();
 }
 
 TEST(ConfigTest, UnimplementedConfigKnobsAreMarkedNotYetEnforcedInSchema) {
@@ -1900,6 +2111,69 @@ TEST(ConfigTest, MysqlPortEnvironmentOverrideEnforcesSchemaRange) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
   std::filesystem::remove(path);
+}
+
+/**
+ * @brief MYGRAM_API_ADMIN_TOKEN must apply even without an api: block.
+ *
+ * The env-var override exists precisely so credentials can stay out of the
+ * config file; admin_token resolution used to be nested inside
+ * `if (root.contains("api"))`, so a file with no api: section never
+ * consulted the environment at all and admin_token stayed empty.
+ */
+TEST(ConfigTest, AdminTokenEnvironmentOverrideAppliesWithoutApiBlock) {
+  const std::string path = TempConfigPath("env_admin_token_no_api_block.yaml");
+  std::ofstream file(path);
+  file << "mysql:\n"
+       << "  host: localhost\n"
+       << "  user: test\n"
+       << "  password: pass\n"
+       << "  database: test\n"
+       << "tables:\n"
+       << "  - name: docs\n"
+       << "    text_source: {column: body}\n";
+  file.close();
+
+  ASSERT_EQ(::setenv("MYGRAM_API_ADMIN_TOKEN", "env-admin-token", 1), 0);
+  auto result = LoadConfig(path);
+  ASSERT_EQ(::unsetenv("MYGRAM_API_ADMIN_TOKEN"), 0);
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->api.admin_token, "env-admin-token");
+}
+
+/**
+ * @brief MYGRAM_MYSQL_* env overrides must apply even without a mysql: block.
+ *
+ * The same "credentials stay out of the file" contract MYGRAM_API_ADMIN_TOKEN
+ * relies on: ParseMysqlConfig used to run only inside `if (root.contains
+ * ("mysql"))`, so a file with no mysql: section never consulted the
+ * environment at all and every mysql.* field stayed at its empty default.
+ */
+TEST(ConfigTest, MysqlEnvironmentOverridesApplyWithoutMysqlBlock) {
+  const std::string path = TempConfigPath("env_mysql_no_mysql_block.yaml");
+  std::ofstream file(path);
+  file << "tables:\n"
+       << "  - name: docs\n"
+       << "    text_source: {column: body}\n";
+  file.close();
+
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_HOST", "env-host", 1), 0);
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_PORT", "3307", 1), 0);
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_USER", "env-user", 1), 0);
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_PASSWORD", "env-password", 1), 0);
+  ASSERT_EQ(::setenv("MYGRAM_MYSQL_DATABASE", "env-database", 1), 0);
+  auto result = LoadConfig(path);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_HOST"), 0);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_PORT"), 0);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_USER"), 0);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_PASSWORD"), 0);
+  ASSERT_EQ(::unsetenv("MYGRAM_MYSQL_DATABASE"), 0);
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->mysql.host, "env-host");
+  EXPECT_EQ(result->mysql.port, 3307);
+  EXPECT_EQ(result->mysql.user, "env-user");
+  EXPECT_EQ(result->mysql.password, "env-password");
+  EXPECT_EQ(result->mysql.database, "env-database");
 }
 
 TEST(ConfigTest, ValidationOnlyLoadIgnoresEnvironmentOverrides) {

@@ -213,12 +213,13 @@ api:
     max_total_buffered_bytes: 268435456 # Shared pending-request + response cap (256 MiB)
   unix_socket:
     path: ""                          # Unix domain socket path (default: "" = disabled)
-                                      # Set to enable local connections without TCP overhead
+                                      # Set to replace the TCP listener with local-only access
+                                      # over this socket instead of api.tcp.bind/port
                                       # Example: "/tmp/mygramdb.sock"
   http:
     enable: false                   # Enable HTTP/JSON API (default: false)
                                      # - Set to true to enable HTTP API
-                                     # - TCP API is always enabled
+                                     # - TCP API is always enabled unless api.unix_socket.path is set
     bind: "127.0.0.1"               # HTTP bind address (default: 127.0.0.1)
     port: 8080                      # HTTP port (default: 8080)
     max_connections: 10000          # Maximum concurrent HTTP connections (default: 10000)
@@ -227,6 +228,8 @@ api:
     cors_allow_origin: ""           # Origin allowed when CORS is enabled (e.g., "https://app.example.com")
     max_body_bytes: 16777216        # Maximum HTTP request body size in bytes (16 MiB)
   # admin_token: ""                 # Shared secret for administrative TCP commands (AUTH <token>)
+                                    # and for the Authorization: Bearer credential on POST
+                                    # /optimize, GET /config, and GET /replication/status.
                                     # SECURITY: REQUIRED when any listener binds a non-loopback
                                     # address; the server refuses to start without it.
                                     # Generate with: openssl rand -hex 32
@@ -278,13 +281,13 @@ cache:
   min_query_cost_ms: 10.0           # Minimum query cost to cache in milliseconds (default: 10.0)
                                     # Only cache queries that take longer than this threshold
   ttl_seconds: 3600                 # Cache entry TTL in seconds (default: 3600 = 1 hour, 0 = no TTL)
-  invalidation_strategy: "ngram"    # "table" is reserved / not yet enforced (default: "ngram")
+  invalidation_strategy: "ngram"    # (default: "ngram")
                                     # - "ngram": Invalidate based on n-gram overlap (precise, efficient)
-                                    # - "table": Accepted for forward compatibility, not yet enforced
+                                    # - "table": Clear the whole table's cached entries on every row event
 
   # Advanced tuning (optional)
   compression_enabled: true         # Enable LZ4 compression for cached results (default: true)
-  eviction_batch_size: 10           # Maximum entries evicted per capacity pass (default: 10)
+  eviction_batch_size: 10           # Minimum entries evicted per capacity pass (default: 10)
 
   # Invalidation queue settings (optional)
   invalidation:

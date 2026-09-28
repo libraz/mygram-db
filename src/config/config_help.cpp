@@ -335,6 +335,14 @@ std::optional<nlohmann::json> NavigateJsonPath(const nlohmann::json& json, const
   return current;
 }
 
+/**
+ * @brief Flatten a config JSON tree into dotted-path variable=value pairs
+ *
+ * Every leaf is masked through MaskSensitiveValue so this stays the single
+ * choke point for SHOW VARIABLES / GET: the caller never sees a raw secret
+ * it forgot to mask itself, matching what CONFIG SHOW already does via
+ * FormatConfigForDisplay's MaskSensitiveFieldsRecursive.
+ */
 void FlattenConfigVariables(const nlohmann::json& value, const std::string& path,
                             std::map<std::string, std::string>& variables) {
   if (value.is_object()) {
@@ -360,7 +368,7 @@ void FlattenConfigVariables(const nlohmann::json& value, const std::string& path
           joined << value[index].dump();
         }
       }
-      variables[path] = joined.str();
+      variables[path] = MaskSensitiveValue(path, joined.str());
       return;
     }
     for (size_t index = 0; index < value.size(); ++index) {
@@ -370,9 +378,9 @@ void FlattenConfigVariables(const nlohmann::json& value, const std::string& path
   }
 
   if (value.is_string()) {
-    variables[path] = value.get<std::string>();
+    variables[path] = MaskSensitiveValue(path, value.get<std::string>());
   } else {
-    variables[path] = value.dump();
+    variables[path] = MaskSensitiveValue(path, value.dump());
   }
 }
 

@@ -133,7 +133,7 @@ Every key in this table is constrained by `src/config/config-schema.json`; a cel
 | `dump.default_filename` | string | non-empty basename (no `/`, no `\`), no `..` component | `mygramdb.dmp` | startup-only | `src/config/config.cpp` |
 | `dump.load_on_startup` | boolean | — | `false` | startup-only | `src/config/config-schema.json`, consumed at `src/app/server_orchestrator.cpp` |
 | `dump.interval_sec` | integer | 0–86400; `0` disables periodic dumps | `0` | startup-only | `src/config/config-schema.json`, consumed at `src/server/snapshot_scheduler.cpp` |
-| `dump.retain` | integer | 1–100 | `3` | startup-only · unread | `src/config/config-schema.json` |
+| `dump.retain` | integer | 1–100 | `3` | startup-only | `src/config/config-schema.json`, consumed at `src/server/snapshot_scheduler.cpp` |
 | `dump.restore_memory_budget_mb` | integer | 1–1048576 | `4096` | startup-only | `src/config/config-schema.json`, consumed at `src/app/server_orchestrator.cpp` |
 | `dump.restore_max_section_mb` | integer | 1–1048576 | `2048` | startup-only | `src/config/config-schema.json`, consumed at `src/app/server_orchestrator.cpp` |
 
@@ -233,13 +233,13 @@ When `logging.file` is set, the log is a rotating file sink capped at 100 MiB pe
 |---|---|---|---|---|---|
 | `cache.enabled` | boolean | — | `true` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
 | `cache.max_memory_mb` | integer | ≥ 1 in the schema; parser additionally rejects negative values, values above 1048576 MB, and — only when `cache.enabled` is true — any value above 50% of detected physical memory | `32` (stored as 33554432 bytes) | startup-only | `src/config/config.cpp` |
-| `cache.min_query_cost_ms` | number | ≥ 0.0 at load; ≥ 0 at runtime | `10.0` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
-| `cache.ttl_seconds` | integer | ≥ 0 at load; ≥ 0 at runtime; `0` = no TTL | `3600` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
+| `cache.min_query_cost_ms` | number | ≥ 0.0 at load; ≥ 0 and finite (nan/inf rejected) at runtime | `10.0` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
+| `cache.ttl_seconds` | integer | 0-2147483647 at load; ≥ 0 at runtime; `0` = no TTL | `3600` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
 | `cache.invalidation_strategy` | string | `ngram`, `table` | `ngram` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
 | `cache.compression_enabled` | boolean | — | `true` | startup-only | `src/config/config-schema.json` |
-| `cache.eviction_batch_size` | integer | ≥ 1 | `10` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
-| `cache.invalidation.batch_size` | integer | ≥ 1 | `1000` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
-| `cache.invalidation.max_delay_ms` | integer | ≥ 0 | `100` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
+| `cache.eviction_batch_size` | integer | 1-2147483647 | `10` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
+| `cache.invalidation.batch_size` | integer | 1-2147483647 | `1000` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
+| `cache.invalidation.max_delay_ms` | integer | 0-2147483647 | `100` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
 | `cache.invalidation.max_queue_size` | integer | ≥ 1 | `100000` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
 
 `cache.max_memory_mb` is the configuration key; the value is stored internally in bytes. The variable surface exposes both `cache.max_memory_mb` and a derived read-only `cache.max_memory_bytes` (`src/config/runtime_variable_manager.cpp`); the latter is not a configuration key and cannot appear in a config file.
@@ -267,7 +267,6 @@ These keys are accepted by the schema, parsed into the configuration structure, 
 - `build.parallelism`, `build.throttle_ms`
 - `replication.reconnect_backoff_min_ms`, `replication.reconnect_backoff_max_ms`
 - `memory.hard_limit_mb`, `memory.soft_target_mb`, `memory.arena_chunk_mb`, `memory.minute_epoch`
-- `dump.retain` — no dump-rotation code consumes it.
 
 ## Unschematized keys
 

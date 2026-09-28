@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <charconv>
+#include <cmath>
 #include <optional>
 #include <set>
 #include <shared_mutex>
@@ -89,46 +90,29 @@ Expected<void, Error> RuntimeVariableManager::SetVariable(const std::string& var
     return MakeUnexpected(MakeError(ErrorCode::kConfigUnknownVariable, "Unknown variable: " + variable_name));
   }
 
-  // Apply variable-specific logic under a single lock, then call callbacks outside.
-  // Static Apply* functions (logging) don't need the lock for their own work
-  // but we still hold it to update runtime_values_ atomically.
-
-  // For logging variables: lock -> update runtime_values_ -> unlock -> apply side effect.
-  // This ensures GetVariable() sees the new value promptly. The side effect
-  // (spdlog level / StructuredLog format) is an atomic/thread-safe global,
-  // so applying it after unlock is safe. On validation failure, rollback.
+  // Every branch below validates first and, once valid, holds mutex_ across
+  // both the state update (runtime_values_/base_config_) and the side effect
+  // on the backing component. That keeps GetVariable()/SHOW VARIABLES from
+  // ever reporting a value that failed validation, and keeps two concurrent
+  // SETs from applying their side effects in an order other than the one in
+  // which they acquired the lock (which would desync reported vs. effective
+  // state, e.g. between rate_limiting.capacity and .refill_rate).
   if (variable_name == "logging.level") {
-    std::string old_value;
-    {
-      std::unique_lock lock(mutex_);
-      old_value = runtime_values_[variable_name];
-      runtime_values_[variable_name] = value;
-      base_config_.logging.level = value;
-    }
+    std::unique_lock lock(mutex_);
     auto result = ApplyLoggingLevel(value);
     if (!result) {
-      // Rollback on validation failure
-      std::unique_lock lock(mutex_);
-      runtime_values_[variable_name] = old_value;
-      base_config_.logging.level = old_value;
       return result;
     }
+    runtime_values_[variable_name] = value;
+    base_config_.logging.level = value;
   } else if (variable_name == "logging.format") {
-    std::string old_value;
-    {
-      std::unique_lock lock(mutex_);
-      old_value = runtime_values_[variable_name];
-      runtime_values_[variable_name] = value;
-      base_config_.logging.format = value;
-    }
+    std::unique_lock lock(mutex_);
     auto result = ApplyLoggingFormat(value);
     if (!result) {
-      // Rollback on validation failure
-      std::unique_lock lock(mutex_);
-      runtime_values_[variable_name] = old_value;
-      base_config_.logging.format = old_value;
       return result;
     }
+    runtime_values_[variable_name] = value;
+    base_config_.logging.format = value;
   } else if (variable_name == "api.default_limit") {
     auto limit = ParseInt(value);
     if (!limit) {
@@ -333,17 +317,14 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiDefaultLimit(int value) {
                                                                         std::to_string(defaults::kMaxLimit) + ")"));
   }
 
-  int max_query_length = 0;
-  std::vector<std::function<void(int, int)>> callback_copies;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.api.default_limit = value;
-    runtime_values_["api.default_limit"] = std::to_string(value);
-    max_query_length = base_config_.api.max_query_length;
-    callback_copies = api_config_callbacks_;
-  }
-
-  for (const auto& callback : callback_copies) {
+  // Update and notify while still holding the lock, so a concurrent SET on
+  // api.max_query_length cannot apply its callback between this callback's
+  // capture of max_query_length and its invocation.
+  std::unique_lock lock(mutex_);
+  base_config_.api.default_limit = value;
+  runtime_values_["api.default_limit"] = std::to_string(value);
+  const int max_query_length = base_config_.api.max_query_length;
+  for (const auto& callback : api_config_callbacks_) {
     callback(value, max_query_length);
   }
   return {};
@@ -356,39 +337,30 @@ Expected<void, Error> RuntimeVariableManager::ApplyApiMaxQueryLength(int value) 
         "api.max_query_length must be between 0 and " + std::to_string(kMaxRuntimeQueryLength) + " (0 = unlimited)"));
   }
 
-  int default_limit = 0;
-  std::vector<std::function<void(int, int)>> callback_copies;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.api.max_query_length = value;
-    runtime_values_["api.max_query_length"] = std::to_string(value);
-    default_limit = base_config_.api.default_limit;
-    callback_copies = api_config_callbacks_;
-  }
-
-  for (const auto& callback : callback_copies) {
+  // See ApplyApiDefaultLimit: update and notify under the same lock so the
+  // pair of values a callback sees is never a mix of two concurrent SETs.
+  std::unique_lock lock(mutex_);
+  base_config_.api.max_query_length = value;
+  runtime_values_["api.max_query_length"] = std::to_string(value);
+  const int default_limit = base_config_.api.default_limit;
+  for (const auto& callback : api_config_callbacks_) {
     callback(default_limit, value);
   }
   return {};
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingEnable(bool value) {
-  // Lock → update config + runtime_values_ → capture callback data → unlock → call callback
-  size_t capacity = 0;
-  size_t refill_rate = 0;
-  std::function<void(bool, size_t, size_t)> callback_copy;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.api.rate_limiting.enable = value;
-    runtime_values_["api.rate_limiting.enable"] = value ? "true" : "false";
-    capacity = static_cast<size_t>(base_config_.api.rate_limiting.capacity);
-    refill_rate = static_cast<size_t>(base_config_.api.rate_limiting.refill_rate);
-    callback_copy = rate_limiter_callback_;
-  }
-
-  // Notify rate limiter outside lock
-  if (callback_copy) {
-    callback_copy(value, capacity, refill_rate);
+  // Update config + runtime_values_ and notify the rate limiter under one
+  // lock: a concurrent SET on capacity/refill_rate could otherwise apply its
+  // own callback between this call's capture and its invocation, leaving the
+  // rate limiter holding a stale pair of parameters.
+  std::unique_lock lock(mutex_);
+  base_config_.api.rate_limiting.enable = value;
+  runtime_values_["api.rate_limiting.enable"] = value ? "true" : "false";
+  const size_t capacity = static_cast<size_t>(base_config_.api.rate_limiting.capacity);
+  const size_t refill_rate = static_cast<size_t>(base_config_.api.rate_limiting.refill_rate);
+  if (rate_limiter_callback_) {
+    rate_limiter_callback_(value, capacity, refill_rate);
   }
 
   return {};
@@ -401,22 +373,14 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingCapacity(int valu
         "api.rate_limiting.capacity must be between 1 and " + std::to_string(ApiConfig::kMaxRateLimitCapacity)));
   }
 
-  // Lock → update config + runtime_values_ → capture callback data → unlock → call callback
-  bool enabled = false;
-  size_t refill_rate = 0;
-  std::function<void(bool, size_t, size_t)> callback_copy;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.api.rate_limiting.capacity = value;
-    runtime_values_["api.rate_limiting.capacity"] = std::to_string(value);
-    enabled = base_config_.api.rate_limiting.enable;
-    refill_rate = static_cast<size_t>(base_config_.api.rate_limiting.refill_rate);
-    callback_copy = rate_limiter_callback_;
-  }
-
-  // Apply to rate limiter outside lock
-  if (callback_copy) {
-    callback_copy(enabled, static_cast<size_t>(value), refill_rate);
+  // See ApplyRateLimitingEnable: update and notify under one lock.
+  std::unique_lock lock(mutex_);
+  base_config_.api.rate_limiting.capacity = value;
+  runtime_values_["api.rate_limiting.capacity"] = std::to_string(value);
+  const bool enabled = base_config_.api.rate_limiting.enable;
+  const size_t refill_rate = static_cast<size_t>(base_config_.api.rate_limiting.refill_rate);
+  if (rate_limiter_callback_) {
+    rate_limiter_callback_(enabled, static_cast<size_t>(value), refill_rate);
   }
 
   return {};
@@ -429,59 +393,44 @@ Expected<void, Error> RuntimeVariableManager::ApplyRateLimitingRefillRate(int va
         "api.rate_limiting.refill_rate must be between 1 and " + std::to_string(ApiConfig::kMaxRateLimitRefillRate)));
   }
 
-  // Lock → update config + runtime_values_ → capture callback data → unlock → call callback
-  bool enabled = false;
-  size_t capacity = 0;
-  std::function<void(bool, size_t, size_t)> callback_copy;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.api.rate_limiting.refill_rate = value;
-    runtime_values_["api.rate_limiting.refill_rate"] = std::to_string(value);
-    enabled = base_config_.api.rate_limiting.enable;
-    capacity = static_cast<size_t>(base_config_.api.rate_limiting.capacity);
-    callback_copy = rate_limiter_callback_;
-  }
-
-  // Apply to rate limiter outside lock
-  if (callback_copy) {
-    callback_copy(enabled, capacity, static_cast<size_t>(value));
+  // See ApplyRateLimitingEnable: update and notify under one lock.
+  std::unique_lock lock(mutex_);
+  base_config_.api.rate_limiting.refill_rate = value;
+  runtime_values_["api.rate_limiting.refill_rate"] = std::to_string(value);
+  const bool enabled = base_config_.api.rate_limiting.enable;
+  const size_t capacity = static_cast<size_t>(base_config_.api.rate_limiting.capacity);
+  if (rate_limiter_callback_) {
+    rate_limiter_callback_(enabled, capacity, static_cast<size_t>(value));
   }
 
   return {};
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyCacheEnabled(bool value) {
-  // Lock → update config + runtime_values_ → capture callback → unlock → call callback
-  std::function<Expected<void, Error>(bool)> callback_copy;
-  cache::CacheManager* cache_mgr = nullptr;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.cache.enabled = value;
-    runtime_values_["cache.enabled"] = value ? "true" : "false";
-    callback_copy = cache_toggle_callback_;
-    cache_mgr = cache_manager_;
-  }
+  // Update, toggle, and roll back on failure all under one lock: releasing
+  // the lock between the state update and the toggle would let a concurrent
+  // GetVariable()/SHOW VARIABLES observe cache.enabled=value before the
+  // toggle is known to succeed, and let a concurrent SET race the toggle.
+  std::unique_lock lock(mutex_);
+  base_config_.cache.enabled = value;
+  runtime_values_["cache.enabled"] = value ? "true" : "false";
 
-  // Trigger cache toggle callback outside lock
-  if (callback_copy) {
-    auto result = callback_copy(value);
+  if (cache_toggle_callback_) {
+    auto result = cache_toggle_callback_(value);
     if (!result) {
-      // Rollback
-      std::unique_lock lock(mutex_);
       base_config_.cache.enabled = !value;
       runtime_values_["cache.enabled"] = !value ? "true" : "false";
       return result;
     }
-  } else if (cache_mgr != nullptr) {
+  } else if (cache_manager_ != nullptr) {
     if (value) {
-      if (!cache_mgr->Enable()) {
-        std::unique_lock lock(mutex_);
+      if (!cache_manager_->Enable()) {
         base_config_.cache.enabled = false;
         runtime_values_["cache.enabled"] = "false";
         return MakeUnexpected(MakeError(ErrorCode::kCacheDisabled, "Cache cannot be enabled"));
       }
     } else {
-      cache_mgr->Disable();
+      cache_manager_->Disable();
     }
   }
 
@@ -489,22 +438,18 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheEnabled(bool value) {
 }
 
 Expected<void, Error> RuntimeVariableManager::ApplyCacheMinQueryCost(double value) {
+  // ParseDouble already rejects non-finite input before this is reached.
   if (value < 0) {
     return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "cache.min_query_cost_ms must be >= 0"));
   }
 
-  // Lock → update config + runtime_values_ → capture cache_manager → unlock → apply
-  cache::CacheManager* cache_mgr = nullptr;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.cache.min_query_cost_ms = value;
-    runtime_values_["cache.min_query_cost_ms"] = nlohmann::json(value).dump();
-    cache_mgr = cache_manager_;
-  }
-
-  // Apply to CacheManager outside lock
-  if (cache_mgr != nullptr) {
-    cache_mgr->SetMinQueryCost(value);
+  // Update config + runtime_values_ and apply to CacheManager under one lock
+  // (see ApplyCacheEnabled for why: keeps reported and effective in step).
+  std::unique_lock lock(mutex_);
+  base_config_.cache.min_query_cost_ms = value;
+  runtime_values_["cache.min_query_cost_ms"] = nlohmann::json(value).dump();
+  if (cache_manager_ != nullptr) {
+    cache_manager_->SetMinQueryCost(value);
   }
 
   return {};
@@ -515,18 +460,12 @@ Expected<void, Error> RuntimeVariableManager::ApplyCacheTtl(int value) {
     return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "cache.ttl_seconds must be >= 0"));
   }
 
-  // Lock → update config + runtime_values_ → capture cache_manager → unlock → apply
-  cache::CacheManager* cache_mgr = nullptr;
-  {
-    std::unique_lock lock(mutex_);
-    base_config_.cache.ttl_seconds = value;
-    runtime_values_["cache.ttl_seconds"] = std::to_string(value);
-    cache_mgr = cache_manager_;
-  }
-
-  // Apply to CacheManager outside lock
-  if (cache_mgr != nullptr) {
-    cache_mgr->SetTtl(value);
+  // Update config + runtime_values_ and apply to CacheManager under one lock.
+  std::unique_lock lock(mutex_);
+  base_config_.cache.ttl_seconds = value;
+  runtime_values_["cache.ttl_seconds"] = std::to_string(value);
+  if (cache_manager_ != nullptr) {
+    cache_manager_->SetTtl(value);
   }
 
   return {};
@@ -586,15 +525,9 @@ std::optional<std::string> RuntimeVariableManager::GetVariableInternal(const std
   if (variable_name == "mysql.ssl_enable") {
     return base_config_.mysql.ssl_enable ? "true" : "false";
   }
-  if (variable_name == "mysql.ssl_ca") {
-    return base_config_.mysql.ssl_ca;
-  }
-  if (variable_name == "mysql.ssl_cert") {
-    return base_config_.mysql.ssl_cert;
-  }
-  if (variable_name == "mysql.ssl_key") {
-    return base_config_.mysql.ssl_key;
-  }
+  // mysql.ssl_ca/ssl_cert/ssl_key are already reachable (and, for ssl_key,
+  // masked) through the canonical `variables` map above -- ConfigToJson
+  // includes them, so a dedicated branch here would never be reached.
   if (variable_name == "mysql.ssl_verify_server_cert") {
     return base_config_.mysql.ssl_verify_server_cert ? "true" : "false";
   }
@@ -863,6 +796,12 @@ Expected<double, Error> RuntimeVariableManager::ParseDouble(const std::string& v
   if (ptr != value.data() + value.size()) {
     return MakeUnexpected(
         MakeError(ErrorCode::kConfigInvalidValue, "Invalid double value (trailing characters): " + value));
+  }
+  // from_chars' floating-point grammar accepts "nan"/"inf"/"infinity", and a
+  // relational range check downstream (e.g. value >= 0) is always false for
+  // NaN, so it would pass validation by never tripping the rejection branch.
+  if (!std::isfinite(result)) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, "Double value must be finite: " + value));
   }
   return result;
 }

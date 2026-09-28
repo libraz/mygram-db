@@ -301,6 +301,31 @@ TEST(ConfigHelpTest, MaskSensitiveValueEmpty) {
   EXPECT_EQ(MaskSensitiveValue("mysql.password", ""), "");
 }
 
+/**
+ * @brief ConfigToVariableMap (SHOW VARIABLES / GET's source) masks ssl_key.
+ *
+ * mysql.ssl_key is a private-key file path; CONFIG SHOW already masks it via
+ * FormatConfigForDisplay's MaskSensitiveFieldsRecursive, and FlattenConfigVariables
+ * now applies the same MaskSensitiveValue so the two config-read commands agree.
+ * ssl_ca/ssl_cert are CA/certificate paths, not classified sensitive, and stay
+ * unmasked.
+ */
+TEST(ConfigHelpTest, ConfigToVariableMapMasksMysqlSslKey) {
+  Config config;
+  config.mysql.ssl_ca = "/etc/ssl/certs/ca.pem";
+  config.mysql.ssl_cert = "/etc/ssl/certs/client.pem";
+  config.mysql.ssl_key = "/etc/ssl/private/client.key";
+
+  const auto variables = ConfigToVariableMap(config);
+
+  ASSERT_NE(variables.find("mysql.ssl_key"), variables.end());
+  EXPECT_EQ(variables.at("mysql.ssl_key"), "***");
+  ASSERT_NE(variables.find("mysql.ssl_ca"), variables.end());
+  EXPECT_EQ(variables.at("mysql.ssl_ca"), "/etc/ssl/certs/ca.pem");
+  ASSERT_NE(variables.find("mysql.ssl_cert"), variables.end());
+  EXPECT_EQ(variables.at("mysql.ssl_cert"), "/etc/ssl/certs/client.pem");
+}
+
 // Test FormatConfigForDisplay
 TEST(ConfigHelpTest, FormatConfigForDisplayMasksSensitive) {
   Config config;

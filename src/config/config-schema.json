@@ -4,7 +4,7 @@
   "title": "MygramDB Configuration Schema",
   "description": "JSON Schema for MygramDB configuration validation",
   "type": "object",
-  "required": ["mysql", "tables"],
+  "required": ["tables"],
   "additionalProperties": false,
   "properties": {
     "mysql": {
@@ -830,7 +830,7 @@
         },
         "admin_token": {
           "type": "string",
-          "description": "Shared secret required by TCP clients before administrative commands. Set through MYGRAM_API_ADMIN_TOKEN in production.",
+          "description": "Shared secret required by TCP clients before administrative commands, and by HTTP clients as an Authorization: Bearer credential on POST /optimize, GET /config, and GET /replication/status. Set through MYGRAM_API_ADMIN_TOKEN in production.",
           "default": ""
         }
       }
@@ -916,7 +916,8 @@
           "type": "integer",
           "description": "Cache entry TTL (seconds, 0 = no TTL)",
           "default": 3600,
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 2147483647
         },
         "invalidation_strategy": {
           "type": "string",
@@ -933,7 +934,8 @@
           "type": "integer",
           "description": "Minimum number of entries evicted in one capacity-enforcement batch. Eviction continues past the point where enough space is free so that reverse-index callbacks are amortized under sustained memory pressure",
           "default": 10,
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 2147483647
         },
         "invalidation": {
           "type": "object",
@@ -944,13 +946,15 @@
               "type": "integer",
               "description": "Process after N unique pairs",
               "default": 1000,
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 2147483647
             },
             "max_delay_ms": {
               "type": "integer",
               "description": "Max delay before processing (ms)",
               "default": 100,
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 2147483647
             },
             "max_queue_size": {
               "type": "integer",

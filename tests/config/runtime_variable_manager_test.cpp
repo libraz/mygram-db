@@ -602,6 +602,30 @@ TEST(RuntimeVariableManagerTest, SetCacheMinQueryCostNegative) {
   EXPECT_DOUBLE_EQ(std::stod(*get_result), 10.0);
 }
 
+/**
+ * @brief SET cache.min_query_cost_ms must reject non-finite doubles.
+ *
+ * std::from_chars' floating-point grammar accepts "nan"/"inf"/"infinity", and
+ * a plain `value < 0` range check never trips for NaN, so it used to reach
+ * CacheManager::SetMinQueryCost() with a threshold that makes every
+ * cost-vs-threshold comparison downstream false, silently caching everything.
+ */
+TEST(RuntimeVariableManagerTest, SetCacheMinQueryCostRejectsNonFiniteValues) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  for (const std::string& value : {"nan", "-nan", "inf", "-inf", "infinity"}) {
+    auto result = manager->SetVariable("cache.min_query_cost_ms", value);
+    EXPECT_FALSE(result) << value;
+    EXPECT_EQ(result.error().code(), ErrorCode::kConfigInvalidValue) << value;
+  }
+
+  // Original value should remain unchanged
+  auto get_result = manager->GetVariable("cache.min_query_cost_ms");
+  ASSERT_TRUE(get_result);
+  EXPECT_DOUBLE_EQ(std::stod(*get_result), 10.0);
+}
+
 TEST(RuntimeVariableManagerTest, RuntimeSetEnforcesSchemaUpperBoundsAndConfigErrorCode) {
   auto manager = std::move(*RuntimeVariableManager::Create(CreateTestConfig()));
 
@@ -828,6 +852,84 @@ TEST(RuntimeVariableManagerTest, ConcurrentReadWriteAccess) {
 }
 
 /**
+ * @brief A rate-limiter SET must hold the lock through its callback.
+ *
+ * ApplyRateLimitingCapacity reads refill_rate (and vice versa) to pass the
+ * rate limiter's full parameter set on every call. If the lock were released
+ * before invoking the callback, a concurrent SET on the paired field could
+ * update state and invoke its own callback in between this call's read and
+ * its callback, so whichever callback happens to run last would win instead
+ * of whichever SET holds the lock last -- desyncing the rate limiter from
+ * what SHOW VARIABLES reports. This blocks one SET inside its callback and
+ * asserts a concurrent SET on the paired field cannot even acquire the lock
+ * until the first one releases it.
+ */
+TEST(RuntimeVariableManagerTest, RateLimiterCallbackHoldsTheLockAcrossAConcurrentSet) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  std::mutex callback_mutex;
+  std::condition_variable callback_cv;
+  bool callback_entered = false;
+  bool release_callback = false;
+  // Only the first callback invocation blocks; a second call (e.g. from
+  // refill_thread eventually running to completion) must not deadlock
+  // against a gate meant for capacity_thread alone.
+  std::atomic<bool> first_call_claimed{false};
+
+  manager->SetRateLimiterCallback([&](bool /*enabled*/, size_t /*capacity*/, size_t /*refill_rate*/) {
+    if (first_call_claimed.exchange(true)) {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(callback_mutex);
+    callback_entered = true;
+    callback_cv.notify_all();
+    callback_cv.wait(lock, [&] { return release_callback; });
+  });
+
+  std::thread capacity_thread([&]() {
+    auto result = manager->SetVariable("api.rate_limiting.capacity", "200");
+    EXPECT_TRUE(result) << result.error().to_string();
+  });
+
+  // Wait until capacity_thread is blocked inside the callback, holding mutex_.
+  {
+    std::unique_lock<std::mutex> lock(callback_mutex);
+    callback_cv.wait(lock, [&] { return callback_entered; });
+  }
+
+  std::atomic<bool> refill_set_completed{false};
+  std::thread refill_thread([&]() {
+    auto result = manager->SetVariable("api.rate_limiting.refill_rate", "50");
+    refill_set_completed = true;
+    EXPECT_TRUE(result) << result.error().to_string();
+  });
+
+  // Give refill_thread every chance to run. It must still be blocked trying
+  // to acquire mutex_ itself (not just stuck behind the callback gate, which
+  // only claims its *first* caller): capacity_thread's callback invocation
+  // is that first caller and is still parked holding mutex_, so refill_thread
+  // cannot even reach its own map write yet. GetVariable() is not called
+  // here -- it would need the same shared_mutex and block right alongside it.
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_FALSE(refill_set_completed.load());
+
+  // Release the first callback; both SETs can now finish.
+  {
+    std::lock_guard<std::mutex> lock(callback_mutex);
+    release_callback = true;
+  }
+  callback_cv.notify_all();
+
+  capacity_thread.join();
+  refill_thread.join();
+
+  auto final_refill = manager->GetVariable("api.rate_limiting.refill_rate");
+  ASSERT_TRUE(final_refill);
+  EXPECT_EQ(*final_refill, "50");
+}
+
+/**
  * @brief Test cache toggle callback failure
  */
 TEST(RuntimeVariableManagerTest, CacheToggleCallbackFailure) {
@@ -967,6 +1069,26 @@ TEST(RuntimeVariableManagerTest, SetCacheTtlSecondsNegative) {
   EXPECT_FALSE(result);
 
   // Original value should remain unchanged
+  auto get_result = manager->GetVariable("cache.ttl_seconds");
+  ASSERT_TRUE(get_result);
+  EXPECT_EQ(*get_result, "3600");
+}
+
+/**
+ * @brief SET must reject an int-backed value above INT32_MAX, not wrap it.
+ *
+ * ParseInt's target is a 32-bit int, and std::from_chars reports
+ * result_out_of_range rather than truncating, so this is already safe; this
+ * documents that guarantee so it is not lost to a future refactor that
+ * swaps ParseInt for something that narrows silently.
+ */
+TEST(RuntimeVariableManagerTest, SetCacheTtlSecondsAboveInt32RangeIsRejectedNotWrapped) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto result = manager->SetVariable("cache.ttl_seconds", "3000000000");
+  EXPECT_FALSE(result);
+
   auto get_result = manager->GetVariable("cache.ttl_seconds");
   ASSERT_TRUE(get_result);
   EXPECT_EQ(*get_result, "3600");
@@ -1296,9 +1418,12 @@ TEST(RuntimeVariableManagerTest, GetSslVariables) {
   ASSERT_TRUE(cert_result);
   EXPECT_EQ(*cert_result, "/path/to/cert.pem");
 
+  // ssl_key is classified sensitive (IsSensitiveField) and masked the same
+  // way CONFIG SHOW already masks it, unlike ssl_ca/ssl_cert (paths to
+  // non-secret certificate/CA material).
   auto key_result = manager->GetVariable("mysql.ssl_key");
   ASSERT_TRUE(key_result);
-  EXPECT_EQ(*key_result, "/path/to/key.pem");
+  EXPECT_EQ(*key_result, "***");
 
   auto verify_result = manager->GetVariable("mysql.ssl_verify_server_cert");
   ASSERT_TRUE(verify_result);
