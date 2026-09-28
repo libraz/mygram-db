@@ -125,7 +125,7 @@ act -j build-rpm --env GITHUB_REF=refs/tags/v1.1.1 --matrix arch:aarch64
 
 1. **Base Image**: Rocky Linux 9
 2. **Build Dependencies**:
-   - Oracle MySQL 8.0 repository and development libraries
+   - Oracle MySQL 8.4 repository and development libraries
    - CMake, GCC, and build tools
    - libicu-devel, readline-devel for dependencies
 3. **Build Type**: Static linking for minimal runtime dependencies
