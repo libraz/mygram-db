@@ -155,19 +155,24 @@ SHOW VARIABLES LIKE 'gtid_mode';
 -- Should show: gtid_mode = ON
 ```
 
-2. **Binary log format set to ROW:**
+2. **Binary log format set to ROW, with full row images:**
 
 ```sql
 SHOW VARIABLES LIKE 'binlog_format';
 -- Should show: binlog_format = ROW
+SHOW VARIABLES LIKE 'binlog_row_image';
+-- Should show: binlog_row_image = FULL
 ```
 
-3. **Replication user created:**
+3. **Replication user created, with SELECT on the source database:**
 
 ```sql
 CREATE USER 'repl_user'@'%' IDENTIFIED BY 'your_password';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl_user'@'%';
+GRANT SELECT ON your_database.* TO 'repl_user'@'%';
 FLUSH PRIVILEGES;
 ```
+
+SELECT is required for the initial table snapshot and schema checks, not just for replication; REPLICATION SLAVE/CLIENT alone is not enough.
 
 See the [Replication Guide](https://mygramdb.libraz.net/docs/replication) for more details.
