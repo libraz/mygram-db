@@ -45,14 +45,6 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
 
     case query::QueryType::REPLICATION_START: {
 #ifdef USE_MYSQL
-      // Check if MySQL reconnection is in progress (block manual restart)
-      if (ctx_.mysql_reconnecting.load()) {
-        return ResponseFormatter::FormatError(
-            "Cannot start replication while MySQL reconnection is in progress. "
-            "Replication will automatically restart after reconnection completes.",
-            mygram::utils::ErrorCode::kServerBusy);
-      }
-
       // Check if replication is paused for DUMP operation (block manual restart)
       if (ctx_.replication_paused_for_dump.load()) {
         return ResponseFormatter::FormatError(

@@ -451,7 +451,6 @@ struct HandlerContext {
   std::atomic<bool>& dump_save_in_progress;  // True when DUMP SAVE operation is in progress
   std::atomic<bool>& optimization_in_progress;
   std::atomic<bool>& replication_paused_for_dump;  // True when replication is paused for DUMP SAVE/LOAD
-  std::atomic<bool>& mysql_reconnecting;           // True when MySQL reconnection is in progress
   replication_pause::Counter* replication_pause_counter = nullptr;  // Shared DUMP/Snapshot pause counter
   // NOLINTEND(cppcoreguidelines-avoid-const-or-ref-data-members)
   mysql::IBinlogReader* binlog_reader = nullptr;

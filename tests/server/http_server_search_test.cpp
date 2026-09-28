@@ -215,6 +215,29 @@ TEST_F(HttpServerTest, SearchEndpoint) {
   EXPECT_EQ(paged_body["results"][1]["primary_key"], "article_1");
 }
 
+// cpp-httplib's std::regex-backed route matcher enforces
+// CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH (256 bytes) on the whole decoded
+// path. /tables/:identity/search now uses the path-param matcher instead
+// (no std::regex is ever built for it), so an identity long enough to push
+// the whole path past that cap still reaches the handler and gets the JSON
+// "table not found" error rather than a bare httplib 404.
+TEST_F(HttpServerTest, SearchWithIdentityLongerThanRegexRouteCapReachesHandler) {
+  ASSERT_TRUE(http_server_->Start());
+
+  const std::string long_identity(250, 'x');
+  ASSERT_GT(std::string("/tables/").size() + long_identity.size() + std::string("/search").size(), 256U);
+
+  httplib::Client client("127.0.0.1", port_);
+  json request_body;
+  request_body["q"] = "machine";
+  auto res = client.Post("/tables/" + long_identity + "/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  ASSERT_FALSE(res->body.empty()) << "a bare httplib 404 has no body; the handler must have been reached";
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kTableNotFound));
+}
+
 TEST_F(HttpServerTest, JsonEndpointsRequireApplicationJsonContentType) {
   ASSERT_TRUE(http_server_->Start());
 
@@ -797,6 +820,56 @@ TEST_F(HttpServerTest, SearchRejectsInvalidJsonFiltersType) {
 
   auto body = json::parse(res->body);
   EXPECT_EQ(body["error"], "Field 'filters' must be an object");
+}
+
+TEST_F(HttpServerTest, SearchRejectsNonStringFilterOp) {
+  // A non-string 'op' used to reach nlohmann's value<std::string>() conversion
+  // unguarded, throwing json::type_error, which surfaced as a 500 instead of
+  // the 400 every other malformed filter produces.
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+
+  json request_body;
+  request_body["q"] = "machine";
+  request_body["filters"]["score"]["op"] = 123;
+  request_body["filters"]["score"]["value"] = "50";
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["error"], "Field 'op' must be a string");
+}
+
+TEST_F(HttpServerTest, SearchFilterAcceptsUint64AboveInt64Max) {
+  // A BIGINT UNSIGNED value above INT64_MAX used to round-trip through
+  // get<int64_t>() and go negative, so the filter would never match.
+  constexpr uint64_t kAboveInt64Max = 18446744073709551615ULL;  // UINT64_MAX
+  storage::FilterMap filters;
+  filters["big_id"] = kAboveInt64Max;
+  auto doc_id = doc_store_->AddDocument("article_big", filters);
+  ASSERT_TRUE(doc_id.has_value());
+  index_->AddDocument(*doc_id, "gigantic value");
+
+  ASSERT_TRUE(http_server_->Start());
+  httplib::Client client("127.0.0.1", port_);
+
+  json request_body;
+  request_body["q"] = "gigantic";
+  request_body["filters"]["big_id"] = kAboveInt64Max;
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  ASSERT_EQ(res->status, 200) << res->body;
+
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["count"], 1);
+  ASSERT_EQ(body["results"].size(), 1);
+  EXPECT_EQ(body["results"][0]["primary_key"], "article_big");
 }
 
 TEST_F(HttpServerTest, SearchAllowsMaximumJsonFilterCount) {

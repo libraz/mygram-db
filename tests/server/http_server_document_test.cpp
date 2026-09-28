@@ -177,5 +177,47 @@ TEST_F(HttpServerTest, GetDocumentInvalidID) {
   EXPECT_EQ(res->status, 404);  // Route won't match non-numeric ID
 }
 
+// cpp-httplib's std::regex-backed route matcher enforces
+// CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH (256 bytes) on the whole decoded
+// path; this route is dispatched by hand instead (RouteDescriptor::
+// manually_routed) precisely so a key long enough to trip that cap still
+// reaches the handler and gets a JSON response rather than a bare httplib
+// 404 from the routing layer.
+TEST_F(HttpServerTest, GetDocumentWithKeyLongerThanRegexRouteCapReachesHandler) {
+  const std::string long_key(300, 'k');
+  ASSERT_GT(std::string("/tables/test/").size() + long_key.size(), 256U);
+
+  storage::FilterMap filters;
+  filters["status"] = static_cast<int64_t>(1);
+  auto doc_id = doc_store_->AddDocument(long_key, filters);
+  ASSERT_TRUE(doc_id.has_value());
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  auto res = client.Get("/tables/test/" + long_key);
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 200);
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["primary_key"], long_key);
+}
+
+TEST_F(HttpServerTest, GetDocumentNotFoundWithKeyLongerThanRegexRouteCapStillReturnsJson) {
+  const std::string long_key(300, 'z');
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  auto res = client.Get("/tables/test/" + long_key);
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 404);
+  // A bare httplib 404 (the pre-fix symptom for an overlong path) has an
+  // empty body; this must be the handler's own JSON error frame instead.
+  ASSERT_FALSE(res->body.empty());
+  auto body = json::parse(res->body);
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kIndexDocumentNotFound));
+}
+
 }  // namespace server
 }  // namespace mygramdb

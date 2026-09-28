@@ -135,7 +135,6 @@ class ReadinessAgreementTest : public ::testing::Test {
         .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
         .binlog_reader = &binlog_reader_,
 #ifdef USE_MYSQL
         .sync_manager = SyncManager(),
@@ -261,7 +260,6 @@ class ReadinessAgreementTest : public ::testing::Test {
   std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
-  std::atomic<bool> mysql_reconnecting_{false};
   std::atomic<bool> data_initialized_{true};
   int port_ = 0;
 };
@@ -411,8 +409,13 @@ TEST_F(ProbeAccountingTest, OrchestratorProbesAreNeverRateLimited) {
 
   // Drain the bucket through a route that is rate limited, so the probes below
   // are answered only if they are exempt rather than because tokens remain.
-  client.Get("/metrics");
-  client.Get("/metrics");
+  // Assert the second call actually hit 429: otherwise the probe loop below
+  // would pass vacuously (nothing was ever rejected to be exempt from).
+  auto first_metrics = client.Get("/metrics");
+  ASSERT_TRUE(first_metrics);
+  auto second_metrics = client.Get("/metrics");
+  ASSERT_TRUE(second_metrics);
+  ASSERT_EQ(second_metrics->status, 429) << "the bucket was not exhausted; the exemption check below is meaningless";
 
   for (const auto* path : {"/health", "/health/live", "/health/ready"}) {
     for (int attempt = 0; attempt < 5; ++attempt) {
@@ -427,9 +430,15 @@ TEST_F(ProbeAccountingTest, ProbesAreExcludedFromTotalRequestsOnEveryOutcome) {
   auto client = Client();
 
   // Exhaust the bucket first so the probes that follow exercise both the served
-  // and the rejected path of whatever accounting rule is in force.
-  client.Get("/metrics");
-  client.Get("/metrics");
+  // and the rejected path of whatever accounting rule is in force. Assert the
+  // second call actually hit 429, or the "excluded on every outcome" claim
+  // below never actually exercises the rejected outcome.
+  auto first_metrics = client.Get("/metrics");
+  ASSERT_TRUE(first_metrics);
+  auto second_metrics = client.Get("/metrics");
+  ASSERT_TRUE(second_metrics);
+  ASSERT_EQ(second_metrics->status, 429)
+      << "the bucket was not exhausted; the rejected-path check below is meaningless";
 
   const uint64_t before = server_->GetTotalRequests();
   for (int attempt = 0; attempt < 5; ++attempt) {

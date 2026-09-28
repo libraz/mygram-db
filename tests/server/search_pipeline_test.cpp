@@ -245,6 +245,39 @@ TEST_F(SearchPipelineFilterTest, NoFiltersReturnsAll) {
   EXPECT_EQ(result.size(), doc_ids_.size());
 }
 
+// --- Chunked evaluation (bounded lock/memory per DocumentStore chunk) ---
+
+// A GT/GE/LT/LE filter always falls back from the bitmap-accelerated EQ/NE
+// path to ApplyFilters, which fetches and evaluates filter values in bounded
+// chunks (DocumentStore::kSelectedNormalizedTextChunkSize) instead of one
+// batch call for the whole candidate set. A candidate count spanning several
+// chunk boundaries must still produce exactly the same matches a single
+// unchunked pass would.
+TEST(SearchPipelineFilterChunkingTest, RangeFilterMatchesAcrossMultipleChunkBoundaries) {
+  auto doc_store = std::make_unique<storage::DocumentStore>();
+  constexpr size_t kDocCount = 2500;  // Spans chunks [0,1024), [1024,2048), [2048,2500).
+  static_assert(kDocCount > 2 * storage::DocumentStore::kSelectedNormalizedTextChunkSize,
+                "test must exercise at least three chunks");
+
+  std::vector<storage::DocId> doc_ids;
+  doc_ids.reserve(kDocCount);
+  for (size_t i = 0; i < kDocCount; ++i) {
+    auto id =
+        doc_store->AddDocument("pk" + std::to_string(i), {{"score", storage::FilterValue{static_cast<int64_t>(i)}}});
+    ASSERT_TRUE(id.has_value());
+    doc_ids.push_back(*id);
+  }
+
+  std::vector<query::FilterCondition> filters = {{"score", query::FilterOp::GT, "2000"}};
+  auto result = ApplyFilters(doc_ids, filters, doc_store.get());
+
+  // Indices 2001..2499 match: 499 documents, straddling the 2048 chunk edge.
+  ASSERT_EQ(result.size(), kDocCount - 2001);
+  for (size_t i = 0; i < result.size(); ++i) {
+    EXPECT_EQ(result[i], doc_ids[2001 + i]);
+  }
+}
+
 // --- PostFilterByText ---
 
 TEST_F(SearchPipelineFilterTest, PostFilterByTextMatchesSubstring) {
@@ -564,6 +597,37 @@ TEST_F(SearchPipelineFuzzyTest, EmptyNgramsAmongMultipleTermsSetsEmptyTermDetect
 
   EXPECT_TRUE(result.empty_term_detected);
   EXPECT_TRUE(result.results.empty());
+}
+
+/**
+ * @brief A term too short for n-gram generation must fall back to the same
+ * substring search the non-fuzzy path uses, not be treated as unmatchable.
+ *
+ * Unlike the previous two tests, this term_info's normalized_term is
+ * non-empty: it represents a real, searchable short term (e.g. "x"), not a
+ * genuinely empty one. ExecuteWithFuzzy must find it via SearchTermDocuments'
+ * substring fallback so FUZZY's result set stays a superset of what the
+ * non-fuzzy path would find for the same query.
+ */
+TEST_F(SearchPipelineFuzzyTest, ShortTermFallsBackToSubstringSearchInsteadOfEmptyTermDetected) {
+  auto short_doc = doc_store_->AddDocument("pk_short", {}, "marker x here");
+  ASSERT_TRUE(short_doc.has_value());
+  index_->AddDocument(*short_doc, "marker x here");
+
+  std::vector<SearchTermInfo> term_infos;
+  term_infos.push_back({/* ngrams= */ {}, /* estimated_size= */ 0, /* term_doc_freq= */ 0,
+                        /* normalized_term= */ "x"});
+
+  query::Query query;
+  std::vector<std::string> all_terms = {"x"};
+
+  auto result = ExecuteWithFuzzy(query, term_infos, all_terms, /* max_distance= */ 1, index_.get(), doc_store_.get(),
+                                 /* full_config= */ nullptr,
+                                 /* ngram_size= */ 2, /* kanji_ngram_size= */ 1,
+                                 /* cross_boundary= */ true, /* filter_threshold= */ 100);
+
+  EXPECT_FALSE(result.empty_term_detected);
+  EXPECT_EQ(result.results, (std::vector<storage::DocId>{*short_doc}));
 }
 
 TEST_F(SearchPipelineFuzzyTest, EmptyTermInfosSetEmptyTermDetected) {
@@ -1618,6 +1682,197 @@ TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
 }
 
 /**
+ * @brief Two boolean expressions differing only in whitespace character type
+ * must not share a cache key, even when both are detected as boolean.
+ *
+ * query_ast.cpp's tokenizer treats only ASCII whitespace as a token
+ * boundary, so a non-breaking space (U+00A0) glued to one operator's
+ * neighbor changes which characters form a term versus a keyword -- but the
+ * index's NFKC text normalizer folds U+00A0 to a plain space, so both raw
+ * expressions still contain a real ASCII "AND" and are both classified
+ * kBooleanAst, and re-normalizing the raw expression for the cache key
+ * (instead of the tree it actually parsed into) would make them collide
+ * even though "OR" is a keyword in one and part of a literal term in the
+ * other.
+ */
+/**
+ * @brief A full-width paren/quote around a grouped operand must not collapse
+ * onto the same cache key as its ASCII-paren equivalent.
+ *
+ * query_ast.cpp's Tokenizer::IsTermChar only excludes ASCII '(' ')' and quote
+ * bytes; a full-width paren (multi-byte UTF-8, no byte equal to the ASCII
+ * one) is swallowed into the surrounding term instead of becoming LPAREN/
+ * RPAREN, so "cat AND (dog OR fox)" and "cat AND \xEF\xBC\x88" "dog OR
+ * fox\xEF\xBC\x89" (full-width parens) parse into different trees --
+ * grouped-OR-under-AND versus an OR of an AND-with-a-literal-paren-glued-
+ * term and a lone term. Both still contain a real ASCII AND/OR, so
+ * execution_mode alone does not separate them; only the AST-based cache key
+ * (fixed alongside cache-005/H-1's whitespace variant of the same root
+ * cause) does. This is the same mechanism, verified against the audit's own
+ * full-width example rather than a whitespace one.
+ */
+TEST_F(FullPipelineTest, FullWidthParenthesesGetDistinctCacheEntryFromAsciiParentheses) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  auto doc = doc_store_->AddDocument("pk_catdogfox2", {}, "cat dog or fox nearby");
+  ASSERT_TRUE(doc.has_value());
+  index_->AddDocument(*doc, "cat dog or fox nearby");
+
+  auto params = MakeParams();
+  params.cache_manager = &cache_manager;
+
+  query::Query ascii_query;
+  ascii_query.type = query::QueryType::SEARCH;
+  ascii_query.table = "test";
+  ascii_query.search_text = "cat AND (dog OR fox)";
+  ascii_query.limit = 100;
+
+  query::Query fullwidth_query = ascii_query;
+  fullwidth_query.search_text =
+      "cat AND \xEF\xBC\x88"
+      "dog OR fox\xEF\xBC\x89";
+
+  const query::Query ascii_cache_query = BuildCanonicalCacheQuery(ascii_query, params);
+  const query::Query fullwidth_cache_query = BuildCanonicalCacheQuery(fullwidth_query, params);
+  ASSERT_TRUE(ascii_cache_query.cache_key.has_value());
+  ASSERT_TRUE(fullwidth_cache_query.cache_key.has_value());
+  EXPECT_NE(ascii_cache_query.cache_key, fullwidth_cache_query.cache_key);
+
+  auto ascii_output = ExecuteFullPipeline(ascii_query, params);
+  ASSERT_TRUE(ascii_output.has_value()) << (ascii_output.has_value() ? std::string{} : ascii_output.error().message());
+  ASSERT_FALSE(ascii_output->cache_hit);
+
+  // If the two queries shared a cache key, this lookup would find the ASCII
+  // query's entry and report a hit -- the full-width query must instead run
+  // its own pipeline under its own key.
+  auto fullwidth_output = ExecuteFullPipeline(fullwidth_query, params);
+  ASSERT_TRUE(fullwidth_output.has_value())
+      << (fullwidth_output.has_value() ? std::string{} : fullwidth_output.error().message());
+  EXPECT_FALSE(fullwidth_output->cache_hit);
+}
+
+TEST_F(FullPipelineTest, UnicodeWhitespaceVariantsOfABooleanExpressionShareOneCacheEntry) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  auto doc = doc_store_->AddDocument("pk_catdogfox", {}, "cat dog or fox nearby");
+  ASSERT_TRUE(doc.has_value());
+  index_->AddDocument(*doc, "cat dog or fox nearby");
+
+  auto params = MakeParams();
+  params.cache_manager = &cache_manager;
+
+  // All-ASCII: OR binds at top level -- OR(AND(cat, dog), fox).
+  query::Query grouped_query;
+  grouped_query.type = query::QueryType::SEARCH;
+  grouped_query.table = "test";
+  grouped_query.search_text = "cat AND dog OR fox";
+  grouped_query.limit = 100;
+
+  // U+00A0 (non-breaking space, UTF-8 C2 A0) is a recognized separator
+  // (search-pipeline-004's Unicode-whitespace tokenizer fix), so it splits
+  // "dog" and "OR" exactly like an ASCII space -- the identical tree, and
+  // therefore the identical cache key, not a different one.
+  query::Query spaced_query = grouped_query;
+  spaced_query.search_text = "cat AND dog\xC2\xA0OR fox";
+
+  const query::Query grouped_cache_query = BuildCanonicalCacheQuery(grouped_query, params);
+  const query::Query spaced_cache_query = BuildCanonicalCacheQuery(spaced_query, params);
+  ASSERT_TRUE(grouped_cache_query.cache_key.has_value());
+  ASSERT_TRUE(spaced_cache_query.cache_key.has_value());
+  EXPECT_EQ(grouped_cache_query.cache_key, spaced_cache_query.cache_key);
+
+  auto grouped_output = ExecuteFullPipeline(grouped_query, params);
+  ASSERT_TRUE(grouped_output.has_value())
+      << (grouped_output.has_value() ? std::string{} : grouped_output.error().message());
+  ASSERT_FALSE(grouped_output->cache_hit);
+
+  // Sharing a cache key means this lookup finds the grouped query's entry
+  // (inserted just above) and reports a hit instead of running its own
+  // pipeline.
+  auto spaced_output = ExecuteFullPipeline(spaced_query, params);
+  ASSERT_TRUE(spaced_output.has_value()) << (spaced_output.has_value() ? std::string{}
+                                                                       : spaced_output.error().message());
+  EXPECT_TRUE(spaced_output->cache_hit);
+}
+
+TEST_F(FullPipelineTest, QuotingAKeywordInABooleanExpressionGetsADistinctCacheEntry) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  auto doc = doc_store_->AddDocument("pk_catdogorfox", {}, "cat dog or fox nearby");
+  ASSERT_TRUE(doc.has_value());
+  index_->AddDocument(*doc, "cat dog or fox nearby");
+
+  auto params = MakeParams();
+  params.cache_manager = &cache_manager;
+
+  // OR binds at top level -- OR(AND(cat, dog), fox).
+  query::Query grouped_query;
+  grouped_query.type = query::QueryType::SEARCH;
+  grouped_query.table = "test";
+  grouped_query.search_text = "cat AND dog OR fox";
+  grouped_query.limit = 100;
+
+  // Quoting "OR" makes it a literal term rather than a keyword (Tokenizer
+  // always emits a quoted string as TokenType::TERM), so this is a flat
+  // implicit AND over four terms instead -- a genuinely different tree,
+  // not just different whitespace.
+  query::Query quoted_query = grouped_query;
+  quoted_query.search_text = "cat AND dog \"OR\" fox";
+
+  const query::Query grouped_cache_query = BuildCanonicalCacheQuery(grouped_query, params);
+  const query::Query quoted_cache_query = BuildCanonicalCacheQuery(quoted_query, params);
+  ASSERT_TRUE(grouped_cache_query.cache_key.has_value());
+  ASSERT_TRUE(quoted_cache_query.cache_key.has_value());
+  EXPECT_NE(grouped_cache_query.cache_key, quoted_cache_query.cache_key);
+
+  auto grouped_output = ExecuteFullPipeline(grouped_query, params);
+  ASSERT_TRUE(grouped_output.has_value())
+      << (grouped_output.has_value() ? std::string{} : grouped_output.error().message());
+  ASSERT_FALSE(grouped_output->cache_hit);
+
+  // If the two queries shared a cache key, this lookup would find the
+  // grouped query's entry (inserted just above) and report a hit -- the
+  // quoted query must instead run its own pipeline under its own key.
+  auto quoted_output = ExecuteFullPipeline(quoted_query, params);
+  ASSERT_TRUE(quoted_output.has_value()) << (quoted_output.has_value() ? std::string{}
+                                                                       : quoted_output.error().message());
+  EXPECT_FALSE(quoted_output->cache_hit);
+}
+
+/**
  * @brief A term shorter than the n-gram size is cached, not rescanned each time
  *
  * Such a term produces no n-grams and is answered by a linear substring scan of
@@ -2031,6 +2286,169 @@ TEST(SearchTopNOptimizationTest, ExplicitSemanticsFlagPreservesPostFilteredResul
   EXPECT_EQ(post_filtered_results, expected);
 }
 
+/**
+ * @brief The optimized path must derive the page from the same intersection
+ * already computed, not query the index a second time.
+ *
+ * `results` is passed in as the full, ascending-sorted intersection the
+ * caller already paid for (matching what Execute() hands this function in
+ * production), and a document is added to the index strictly after that
+ * read. A second SearchAnd call inside the optimization would see the new
+ * document and could return it (never counted in total_results) while
+ * total_results itself still reflects the older read -- an inconsistency
+ * between the reported total and the returned page. Deriving the page by
+ * slicing the already-computed `results` instead cannot observe the
+ * mutation. order_by is left unset (default DESC on primary key), so the
+ * returned page must be the top `limit` DocIds of the ORIGINAL set, in
+ * descending order.
+ */
+TEST(SearchTopNOptimizationTest, OptimizedPathDoesNotObserveIndexMutationsAfterTheInitialRead) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+
+  std::vector<storage::DocId> doc_ids;
+  for (int i = 1; i <= 10; ++i) {
+    auto doc_id = doc_store.AddDocument(std::to_string(i), {}, "alpha");
+    ASSERT_TRUE(doc_id.has_value());
+    index.AddDocument(*doc_id, "alpha");
+    doc_ids.push_back(*doc_id);
+  }
+  ASSERT_TRUE(doc_store.IsPrimaryKeyDocIdOrderValid());
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.limit = 2;
+
+  auto term_infos = GenerateTermInfos({query.search_text}, &index, 2, 0, false);
+  std::vector<storage::DocId> results = doc_ids;  // the point-in-time read total_results below reflects
+
+  // Mutate strictly after that read.
+  auto extra_doc = doc_store.AddDocument("11", {}, "alpha");
+  ASSERT_TRUE(extra_doc.has_value());
+  index.AddDocument(*extra_doc, "alpha");
+
+  config::Config config;
+  config.memory.verify_text = "off";
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/true,
+                                          /*cache_hit=*/false, "id", results);
+
+  EXPECT_TRUE(topn.considered);
+  EXPECT_TRUE(topn.applicable);
+  EXPECT_TRUE(topn.optimized);
+  EXPECT_TRUE(topn.reverse);
+  EXPECT_EQ(topn.total_results, 10U);  // the read `results` reflects, not the later mutation
+  EXPECT_EQ(results, (std::vector<storage::DocId>{doc_ids[9], doc_ids[8]}));  // not extra_doc
+}
+
+/**
+ * @brief A cache hit for a single-term, PK-order query must take the same
+ * slice path a miss would, instead of falling through to a full re-sort.
+ *
+ * ExecuteFullPipeline's cache-hit branch never populates term_infos or
+ * semantics_reproducible_by_single_term_ngram_and (both stay at their
+ * defaults: empty and false), so this function's cache-hit eligibility must
+ * be derived from query shape alone -- exactly what this test exercises.
+ */
+TEST(SearchTopNOptimizationTest, CacheHitSingleTermQueryTakesTheSameSliceAMissWould) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+
+  std::vector<storage::DocId> doc_ids;
+  for (int i = 1; i <= 10; ++i) {
+    auto doc_id = doc_store.AddDocument(std::to_string(i), {}, "alpha");
+    ASSERT_TRUE(doc_id.has_value());
+    index.AddDocument(*doc_id, "alpha");
+    doc_ids.push_back(*doc_id);
+  }
+  ASSERT_TRUE(doc_store.IsPrimaryKeyDocIdOrderValid());
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.limit = 2;
+
+  // Matches what a real cache hit hands this function: no term_infos, the
+  // reconstructed scoring term list, and the flag at its unset default.
+  std::vector<SearchTermInfo> empty_term_infos;
+  std::vector<storage::DocId> results = doc_ids;
+
+  config::Config config;
+  config.memory.verify_text = "off";
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, empty_term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/false,
+                                          /*cache_hit=*/true, "id", results);
+
+  EXPECT_TRUE(topn.considered);
+  EXPECT_TRUE(topn.applicable);
+  EXPECT_TRUE(topn.optimized);
+  EXPECT_TRUE(topn.reverse);
+  EXPECT_FALSE(topn.single_ngram);  // cosmetic only; no term_infos to report it from
+  EXPECT_EQ(topn.total_results, 10U);
+  EXPECT_EQ(results, (std::vector<storage::DocId>{doc_ids[9], doc_ids[8]}));
+}
+
+TEST(SearchTopNOptimizationTest, CacheHitFuzzyQueryIsNotEligibleForTheSlice) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+  auto doc_id = doc_store.AddDocument("1", {}, "alpha");
+  ASSERT_TRUE(doc_id.has_value());
+  index.AddDocument(*doc_id, "alpha");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.fuzzy_max_distance = 1;
+  query.limit = 2;
+
+  std::vector<SearchTermInfo> empty_term_infos;
+  std::vector<storage::DocId> results{*doc_id};
+  const auto expected = results;
+
+  config::Config config;
+  config.memory.verify_text = "off";
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, empty_term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/false,
+                                          /*cache_hit=*/true, "id", results);
+
+  EXPECT_FALSE(topn.applicable) << "a fuzzy query's cached result set is not a plain ngram-AND intersection";
+  EXPECT_EQ(results, expected);
+}
+
+TEST(SearchTopNOptimizationTest, CacheHitWithSynonymDictConfiguredIsNotEligibleForTheSlice) {
+  index::Index index(2);
+  storage::DocumentStore doc_store;
+  auto doc_id = doc_store.AddDocument("1", {}, "alpha");
+  ASSERT_TRUE(doc_id.has_value());
+  index.AddDocument(*doc_id, "alpha");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "alpha";
+  query.limit = 2;
+
+  auto synonym_dict = MakeSynonymDictionary({{"alpha", "beta"}});
+  ASSERT_NE(synonym_dict, nullptr);
+
+  std::vector<SearchTermInfo> empty_term_infos;
+  std::vector<storage::DocId> results{*doc_id};
+  const auto expected = results;
+
+  config::Config config;
+  config.memory.verify_text = "off";
+  auto topn = ApplySearchTopNOptimization(query, &index, &doc_store, &config, empty_term_infos, {query.search_text},
+                                          /*semantics_reproducible_by_single_term_ngram_and=*/false,
+                                          /*cache_hit=*/true, "id", results, synonym_dict.get());
+
+  EXPECT_FALSE(topn.applicable) << "a synonym-configured table's cached result set is not a single-term ngram-AND";
+  EXPECT_EQ(results, expected);
+}
+
 TEST_F(FullPipelineTest, FuzzySearchPath) {
   query::Query query;
   query.type = query::QueryType::SEARCH;
@@ -2060,6 +2478,41 @@ TEST_F(FullPipelineTest, FuzzyCjkSearchVerifiesContinuousTextByCodepointWindow) 
   query.type = query::QueryType::SEARCH;
   query.table = "test";
   query.search_text = "東京市";
+  query.fuzzy_max_distance = 1;
+  query.limit = 100;
+
+  config::Config config;
+  config.memory.verify_text = "all";
+
+  auto params = MakeParams();
+  params.kanji_ngram_size = 1;
+  params.full_config = &config;
+  auto output = ExecuteFullPipeline(query, params);
+
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+  EXPECT_EQ(output->results, (std::vector<storage::DocId>{*cjk_doc}));
+}
+
+/**
+ * @brief The hybrid-fragment guard must accept a candidate that only
+ * fuzzy-matches, not just an exact substring match.
+ *
+ * "東京x" mixes CJK (kanji_ngram_size=1) and ASCII (ngram_size=2): the
+ * trailing single ASCII char never fits a 2-gram, so
+ * EnforceExactTextForHybridFragments engages. The stored document has
+ * "東京y" (one substitution from the query, edit distance 1) rather than an
+ * exact "東京x" match. An exact-only matcher would reject it even though
+ * FUZZY's own n-gram/threshold matching accepted it as a candidate.
+ */
+TEST_F(FullPipelineTest, FuzzyHybridFragmentGuardAcceptsFuzzyMatchNotJustExactSubstring) {
+  auto cjk_doc = doc_store_->AddDocument("pk_cjk_fuzzy", {}, "私は東京yに住む");
+  ASSERT_TRUE(cjk_doc.has_value());
+  index_->AddDocument(*cjk_doc, "私は東京yに住む");
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "東京x";
   query.fuzzy_max_distance = 1;
   query.limit = 100;
 
@@ -2555,6 +3008,38 @@ TEST_F(RelevanceSortTermPairingTest, ReorderedTermInfosKeepEachTermWithItsOwnDoc
   auto beta_doc = doc_store_->GetDocId("pk_beta");
   ASSERT_TRUE(beta_doc.has_value());
   EXPECT_EQ((*ordered)[0], *beta_doc) << "the rare term's document frequency must stay with the rare term";
+}
+
+// GetOriginalTextBatch and GetNormalizedTextBatch both copy full text
+// upfront; normalized text is only read below when a page document's
+// original text is absent. This test pins the three per-document branches
+// (original present; original absent, normalized present; both absent)
+// still produce the same snippets after fetching normalized text for just
+// the subset missing an original, instead of the whole page.
+TEST(GenerateHighlightSnippetsTest, FetchesNormalizedTextOnlyForDocumentsMissingOriginal) {
+  auto doc_store = std::make_unique<storage::DocumentStore>();
+  auto index = std::make_unique<index::Index>(2);
+
+  // Doc 0: original text present -- normalized text must never be consulted.
+  auto id0 = doc_store->AddDocument("pk0", {}, "cat", "cat original");
+  ASSERT_TRUE(id0.has_value());
+  // Doc 1: original text absent, falls back to normalized text.
+  auto id1 = doc_store->AddDocument("pk1", {}, "cat normalized", "");
+  ASSERT_TRUE(id1.has_value());
+  // Doc 2: neither original nor normalized text stored.
+  auto id2 = doc_store->AddDocument("pk2", {}, "", "");
+  ASSERT_TRUE(id2.has_value());
+
+  const std::vector<storage::DocId> page{*id0, *id1, *id2};
+  const std::vector<std::string> all_search_terms{"cat"};
+  const query::HighlightOptions options;
+
+  auto snippets = GenerateHighlightSnippets(options, all_search_terms, page, index.get(), doc_store.get(), nullptr);
+
+  ASSERT_EQ(snippets.size(), 3U);
+  EXPECT_NE(snippets[0].find("cat"), std::string::npos) << "doc 0 must highlight from its original text";
+  EXPECT_NE(snippets[1].find("cat"), std::string::npos) << "doc 1 must fall back to normalized text";
+  EXPECT_TRUE(snippets[2].empty()) << "doc 2 has neither text and must produce an empty snippet";
 }
 
 }  // namespace mygramdb::server::search_pipeline

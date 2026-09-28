@@ -42,7 +42,6 @@ class AdminHandlerTest : public ::testing::Test {
         .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
 #endif
@@ -57,7 +56,6 @@ class AdminHandlerTest : public ::testing::Test {
   std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
-  std::atomic<bool> mysql_reconnecting_{false};
   std::unique_ptr<HandlerContext> handler_ctx_;
   ConnectionContext conn_ctx_;
 };

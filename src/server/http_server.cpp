@@ -5,6 +5,9 @@
 
 #include "server/http_server.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -163,6 +166,12 @@ std::optional<std::string> JsonFilterValueToString(const json& val) {
   if (val.is_string()) {
     return val.get<std::string>();
   }
+  // Unsigned must be checked ahead of the general integer case: a BIGINT
+  // UNSIGNED value above INT64_MAX round-trips through get<int64_t>() and
+  // comes out negative.
+  if (val.is_number_unsigned()) {
+    return std::to_string(val.get<uint64_t>());
+  }
   if (val.is_number_integer()) {
     return std::to_string(val.get<int64_t>());
   }
@@ -175,15 +184,28 @@ std::optional<std::string> JsonFilterValueToString(const json& val) {
   return std::nullopt;
 }
 
+constexpr std::string_view kTablesPrefix = "/tables/";
+
 // Routes are single-segment `/tables/{identity}/...`, where {identity} is the
-// qualified `database.table` or a bare `table` (resolved in single-db configs).
-// The identity is always match[1]; GET carries the primary key in match[2].
+// qualified `database.table` or a bare `table` (resolved in single-db
+// configs). Parsed from req.path directly rather than from req.matches or
+// req.path_params: the search/count/facet routes use cpp-httplib's
+// path-param matcher (no captures in req.matches) and the trailing
+// primary-key route is dispatched by hand (see
+// RouteDescriptor::manually_routed, populates neither), so hand-parsing is
+// the one extraction that works the same way for every /tables/ route.
+// Callers only reach here once the route's own match/dispatch has already
+// confirmed the path starts with kTablesPrefix.
 std::string ExtractRouteTableKey(const httplib::Request& req) {
-  return req.matches[1];
+  const std::string_view rest = std::string_view(req.path).substr(kTablesPrefix.size());
+  const auto slash = rest.find('/');
+  return std::string(slash == std::string_view::npos ? rest : rest.substr(0, slash));
 }
 
 std::string ExtractRoutePrimaryKey(const httplib::Request& req) {
-  return req.matches[2];
+  const std::string_view rest = std::string_view(req.path).substr(kTablesPrefix.size());
+  const auto slash = rest.find('/');
+  return slash == std::string_view::npos ? std::string() : std::string(rest.substr(slash + 1));
 }
 
 /**
@@ -217,7 +239,13 @@ Expected<void, Error> ParseFiltersFromJson(const json& filters_json, query::Quer
 
     if (val.is_object() && val.contains("value")) {
       // Format 2: full operator support
-      std::string op_str = val.value("op", "EQ");
+      std::string op_str = "EQ";
+      if (val.contains("op")) {
+        if (!val["op"].is_string()) {
+          return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Field 'op' must be a string"));
+        }
+        op_str = val["op"].get<std::string>();
+      }
       auto parsed_op = query::QueryParser::ParseFilterOp(op_str);
       if (!parsed_op.has_value()) {
         return MakeUnexpected(MakeError(ErrorCode::kQueryInvalidFilter, "Invalid filter operator: " + op_str));
@@ -287,6 +315,46 @@ bool ConstantTimeEqual(std::string_view lhs, std::string_view rhs) {
     difference |= static_cast<size_t>(left ^ right);
   }
   return difference == 0;
+}
+
+/// @brief Canonicalize each trusted-proxy entry and add its IPv4-mapped-IPv6
+/// form when it is an IPv4 address.
+///
+/// cpp-httplib's set_trusted_proxies matches the peer address string from
+/// getnameinfo(NI_NUMERICHOST) by exact string equality, which always
+/// renders the lowercase, compressed form. Config validation only checks
+/// that an entry is *some* numeric IP (accepting uppercase hex digits or an
+/// uncompressed IPv6 literal), so a non-canonical entry would silently never
+/// match. A dual-stack listener (api.http.bind "::") also presents an IPv4
+/// peer as "::ffff:a.b.c.d", which never equals a plain "a.b.c.d" entry
+/// unless that form is registered too.
+std::vector<std::string> ExpandTrustedProxiesForDualStack(const std::vector<std::string>& configured) {
+  std::vector<std::string> expanded;
+  expanded.reserve(configured.size() * 2);
+  for (const auto& proxy : configured) {
+    if (auto ipv4 = mygram::utils::ParseIPv4(proxy); ipv4.has_value()) {
+      const std::string canonical = mygram::utils::IPv4ToString(*ipv4);
+      expanded.push_back(canonical);
+      expanded.push_back("::ffff:" + canonical);
+      continue;
+    }
+
+    struct in6_addr ipv6_addr = {};
+    if (inet_pton(AF_INET6, proxy.c_str(), &ipv6_addr) == 1) {
+      // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+      char canonical[INET6_ADDRSTRLEN];
+      if (inet_ntop(AF_INET6, &ipv6_addr, canonical, sizeof(canonical)) != nullptr) {
+        expanded.emplace_back(canonical);
+        continue;
+      }
+      // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
+    }
+
+    // Config validation already rejects a non-numeric entry, so this is
+    // unreachable in practice; keep the original text rather than drop it.
+    expanded.push_back(proxy);
+  }
+  return expanded;
 }
 
 int HttpStatusForQueryError(const Error& error) {
@@ -500,8 +568,10 @@ HttpServer::HttpServer(HttpServerConfig config, std::unordered_map<std::string, 
   // cpp-httplib only substitutes req.remote_addr from X-Forwarded-For when
   // the direct TCP peer exactly matches this allowlist. ACL and shared rate
   // limiting below therefore receive the original client identity without
-  // accepting spoofed forwarding headers from direct clients.
-  server_->set_trusted_proxies(config_.trusted_proxies);
+  // accepting spoofed forwarding headers from direct clients. Expanded so an
+  // IPv4 entry is still honored on a dual-stack listener (see
+  // ExpandTrustedProxiesForDualStack).
+  server_->set_trusted_proxies(ExpandTrustedProxiesForDualStack(config_.trusted_proxies));
 
   // Set timeouts
   server_->set_read_timeout(config_.read_timeout_sec, 0);
@@ -585,20 +655,28 @@ const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServ
   // would 404 every primary key that contains one — paths, URLs, hierarchical
   // SKUs — even though SEARCH returns those keys and TCP GET resolves them.
   // Greediness is safe here because no other GET route lives under /tables/.
+  //
+  // That same greediness is why this one route cannot use a `pattern` cpp-httplib
+  // actually matches: PathParamsMatcher (the `:name` syntax used for the
+  // search/count/facet routes below) captures only up to the next `/`, and a
+  // `(.+)`-style capture forces RegexMatcher, which enforces
+  // CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH (256 bytes) on the whole decoded
+  // path. `manually_routed` (see the field's doc comment) routes it by hand
+  // instead, so `pattern` here documents the shape without being registered.
   static const std::array<RouteDescriptor, kRouteCount> kRoutes = {{
-      {Method::kPost, R"(/tables/([^/]+)/search)", false, true, true, &HttpServer::HandleSearch},
-      {Method::kPost, R"(/tables/([^/]+)/count)", false, true, true, &HttpServer::HandleCount},
-      {Method::kPost, R"(/tables/([^/]+)/facet)", false, true, true, &HttpServer::HandleFacet},
-      {Method::kGet, "/info", false, true, true, &HttpServer::HandleInfo},
-      {Method::kGet, "/health", false, false, false, &HttpServer::HandleHealth},
-      {Method::kGet, "/health/live", false, false, false, &HttpServer::HandleHealthLive},
-      {Method::kGet, "/health/ready", false, false, false, &HttpServer::HandleHealthReady},
-      {Method::kGet, "/health/detail", false, false, true, &HttpServer::HandleHealthDetail},
-      {Method::kGet, "/config", true, true, true, &HttpServer::HandleConfig},
-      {Method::kGet, "/replication/status", true, true, true, &HttpServer::HandleReplicationStatus},
-      {Method::kPost, "/optimize", true, true, true, &HttpServer::HandleOptimize},
-      {Method::kGet, "/metrics", false, true, true, &HttpServer::HandleMetrics},
-      {Method::kGet, R"(/tables/([^/]+)/(.+))", false, true, true, &HttpServer::HandleGet},
+      {Method::kPost, "/tables/:identity/search", false, true, true, false, &HttpServer::HandleSearch},
+      {Method::kPost, "/tables/:identity/count", false, true, true, false, &HttpServer::HandleCount},
+      {Method::kPost, "/tables/:identity/facet", false, true, true, false, &HttpServer::HandleFacet},
+      {Method::kGet, "/info", false, true, true, false, &HttpServer::HandleInfo},
+      {Method::kGet, "/health", false, false, false, false, &HttpServer::HandleHealth},
+      {Method::kGet, "/health/live", false, false, false, false, &HttpServer::HandleHealthLive},
+      {Method::kGet, "/health/ready", false, false, false, false, &HttpServer::HandleHealthReady},
+      {Method::kGet, "/health/detail", false, false, true, false, &HttpServer::HandleHealthDetail},
+      {Method::kGet, "/config", true, true, true, false, &HttpServer::HandleConfig},
+      {Method::kGet, "/replication/status", true, true, true, false, &HttpServer::HandleReplicationStatus},
+      {Method::kPost, "/optimize", true, true, true, false, &HttpServer::HandleOptimize},
+      {Method::kGet, "/metrics", false, true, true, false, &HttpServer::HandleMetrics},
+      {Method::kGet, R"(/tables/([^/]+)/(.+))", false, true, true, true, &HttpServer::HandleGet},
   }};
   return kRoutes;
 }
@@ -607,6 +685,15 @@ const HttpServer::RouteDescriptor* HttpServer::FindLiteralRoute(const std::strin
   for (const auto& route : Routes()) {
     const bool method_matches = (route.method == RouteMethod::kGet) ? method == "GET" : method == "POST";
     if (method_matches && route.pattern == path) {
+      return &route;
+    }
+  }
+  return nullptr;
+}
+
+const HttpServer::RouteDescriptor* HttpServer::FindManuallyRoutedGetRoute() {
+  for (const auto& route : Routes()) {
+    if (route.manually_routed) {
       return &route;
     }
   }
@@ -632,23 +719,29 @@ bool HttpServer::AdminCredentialsAccepted(const httplib::Request& req) const {
   return has_bearer && ConstantTimeEqual(supplied, full_config_->api.admin_token);
 }
 
+void HttpServer::InvokeRoute(const RouteDescriptor& route, const httplib::Request& req, httplib::Response& res) {
+  // Credentials are checked here rather than inside each handler, so a
+  // route cannot serve administrative state to an uncredentialed caller by
+  // omitting a check of its own. The rejection happens before the handler
+  // reads any state or assembles any body.
+  if (route.requires_admin_token && !AdminCredentialsAccepted(req)) {
+    RecordRequest();
+    res.set_header("WWW-Authenticate", "Bearer");
+    SendError(res, kHttpUnauthorized, "Administrative endpoint requires a valid bearer token",
+              mygram::utils::ErrorCode::kPermissionDenied);
+    return;
+  }
+  (this->*route.handler)(req, res);
+}
+
 void HttpServer::SetupRoutes() {
   for (const auto& route : Routes()) {
-    auto invoke = [this, handler = route.handler, requires_admin_token = route.requires_admin_token](
-                      const httplib::Request& req, httplib::Response& res) {
-      // Credentials are checked here rather than inside each handler, so a
-      // route cannot serve administrative state to an uncredentialed caller by
-      // omitting a check of its own. The rejection happens before the handler
-      // reads any state or assembles any body.
-      if (requires_admin_token && !AdminCredentialsAccepted(req)) {
-        RecordRequest();
-        res.set_header("WWW-Authenticate", "Bearer");
-        SendError(res, kHttpUnauthorized, "Administrative endpoint requires a valid bearer token",
-                  mygram::utils::ErrorCode::kPermissionDenied);
-        return;
-      }
-      (this->*handler)(req, res);
-    };
+    if (route.manually_routed) {
+      // Dispatched by hand from SetupAccessControl() instead; see
+      // RouteDescriptor::manually_routed.
+      continue;
+    }
+    auto invoke = [this, route](const httplib::Request& req, httplib::Response& res) { InvokeRoute(route, req, res); };
     const std::string pattern(route.pattern);
     if (route.method == RouteMethod::kGet) {
       server_->Get(pattern, invoke);
@@ -660,7 +753,13 @@ void HttpServer::SetupRoutes() {
 
 void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
-    const std::string& client_ip = req.remote_addr.empty() ? "unknown" : req.remote_addr;
+    // cpp-httplib's getnameinfo()-derived remote_addr can carry an IPv6
+    // zone/scope suffix or the IPv4-mapped-IPv6 form; TCP's GetPeerIP never
+    // does. Normalizing here keeps the ACL check and the rate-limit/logging
+    // key below in agreement with what TCP would derive for the same peer
+    // (see NormalizePeerAddress's doc comment).
+    const std::string client_ip =
+        req.remote_addr.empty() ? "unknown" : mygram::utils::NormalizePeerAddress(req.remote_addr);
 
     // The route table decides how a request is accounted and whether it is
     // subject to the shared quota. Only fixed-path routes can be identified
@@ -673,7 +772,7 @@ void HttpServer::SetupAccessControl() {
     // Reject unauthorized peers before allocating or consuming a shared rate
     // bucket. ACL-denied traffic is already log-suppressed independently and
     // must not evict or exhaust quota state used by allowed clients.
-    if (!mygram::utils::IsIPAllowed(req.remote_addr, parsed_allow_cidrs_)) {
+    if (!mygram::utils::IsIPAllowed(client_ip, parsed_allow_cidrs_)) {
       if (counts_requests) {
         RecordRequest();
       }
@@ -706,6 +805,25 @@ void HttpServer::SetupAccessControl() {
       }
       SendError(res, kHttpTooManyRequests, "Rate limit exceeded", mygram::utils::ErrorCode::kServerBusy);
       return httplib::Server::HandlerResponse::Handled;
+    }
+
+    // The trailing `/tables/{identity}/{primary_key}` GET route is not
+    // registered with cpp-httplib (see RouteDescriptor::manually_routed);
+    // dispatch it here by hand, after the same ACL/rate-limit gate every
+    // other route just passed. Split on the first remaining '/' so identity
+    // stops there and primary_key keeps any further '/' it contains.
+    if (req.method == "GET" && req.path.compare(0, kTablesPrefix.size(), kTablesPrefix) == 0) {
+      const std::string_view rest = std::string_view(req.path).substr(kTablesPrefix.size());
+      const auto slash = rest.find('/');
+      // identity ([^/]+) and primary_key ((.+)) both require at least one
+      // character, matching the quantifiers this route has always matched.
+      if (slash != std::string_view::npos && slash > 0 && slash + 1 < rest.size()) {
+        const RouteDescriptor* get_route = FindManuallyRoutedGetRoute();
+        if (get_route != nullptr) {
+          InvokeRoute(*get_route, req, res);
+          return httplib::Server::HandlerResponse::Handled;
+        }
+      }
     }
 
     return httplib::Server::HandlerResponse::Unhandled;
@@ -1306,7 +1424,7 @@ void HttpServer::HandleSearch(const httplib::Request& req, httplib::Response& re
     auto topn = search_pipeline::ApplySearchTopNOptimization(
         *query, params.current_index, params.current_doc_store, full_config_, pipeline_output->term_infos,
         pipeline_output->all_search_terms, pipeline_output->semantics_reproducible_by_single_term_ngram_and,
-        pipeline_output->cache_hit, params.primary_key_column, results);
+        pipeline_output->cache_hit, params.primary_key_column, results, params.synonym_dict);
     if (topn.applicable) {
       total_count = topn.total_results;
     }

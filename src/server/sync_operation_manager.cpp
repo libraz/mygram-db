@@ -586,7 +586,19 @@ mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::CheckN
     std::string_view operation) const {
   std::vector<std::string> syncing_tables;
   if (!GetSyncingTablesIfAny(syncing_tables)) {
-    return {};
+    // StartSync claims operation_coordinator_'s kSync token (Step 1, under
+    // sync_mutex_) before it publishes the table into syncing_tables_ (Step
+    // 3, after joining any stale worker thread). A caller landing in that
+    // window must still see the SYNC-specific conflict here, or it passes
+    // this check and only fails later against OperationCoordinator with the
+    // generic "is in progress" error instead of kSyncAlreadyInProgress.
+    auto active = operation_coordinator_.GetActive();
+    if (!active.has_value() || active->type != LongOperation::kSync) {
+      return {};
+    }
+    if (!active->detail.empty()) {
+      syncing_tables.push_back(active->detail);
+    }
   }
   // Build the conflict message in the historical format:
   //   "Cannot {operation} while SYNC is in progress for tables: a b c"

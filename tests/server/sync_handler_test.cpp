@@ -60,7 +60,6 @@ class SyncHandlerTest : public ::testing::Test {
   std::atomic<bool> read_only_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
-  std::atomic<bool> mysql_reconnecting_{false};
   std::unordered_set<std::string> syncing_tables_;
   std::mutex syncing_tables_mutex_;
 };
@@ -78,7 +77,6 @@ TEST_F(SyncHandlerTest, CreateWithValidArgs_Succeeds) {
   std::atomic<bool> dump_save{false};
   std::atomic<bool> optimization{false};
   std::atomic<bool> replication_paused{false};
-  std::atomic<bool> reconnecting{false};
 
   HandlerContext ctx{
       .table_catalog = nullptr,
@@ -89,7 +87,6 @@ TEST_F(SyncHandlerTest, CreateWithValidArgs_Succeeds) {
       .dump_save_in_progress = dump_save,
       .optimization_in_progress = optimization,
       .replication_paused_for_dump = replication_paused,
-      .mysql_reconnecting = reconnecting,
       .binlog_reader = nullptr,
       .sync_manager = &sync_mgr,
       .cache_manager = nullptr,
@@ -108,7 +105,6 @@ TEST_F(SyncHandlerTest, CreateWithNullSyncManager_ReturnsError) {
   std::atomic<bool> dump_save{false};
   std::atomic<bool> optimization{false};
   std::atomic<bool> replication_paused{false};
-  std::atomic<bool> reconnecting{false};
 
   HandlerContext ctx{
       .table_catalog = nullptr,
@@ -119,7 +115,6 @@ TEST_F(SyncHandlerTest, CreateWithNullSyncManager_ReturnsError) {
       .dump_save_in_progress = dump_save,
       .optimization_in_progress = optimization,
       .replication_paused_for_dump = replication_paused,
-      .mysql_reconnecting = reconnecting,
       .binlog_reader = nullptr,
       .sync_manager = nullptr,
       .cache_manager = nullptr,
@@ -149,7 +144,6 @@ TEST_F(SyncHandlerTest, CreateWithNullSyncManagerReturnsCorrectErrorCode) {
   std::atomic<bool> dump_save{false};
   std::atomic<bool> optimization{false};
   std::atomic<bool> replication_paused{false};
-  std::atomic<bool> reconnecting{false};
 
   HandlerContext ctx{
       .table_catalog = nullptr,
@@ -160,7 +154,6 @@ TEST_F(SyncHandlerTest, CreateWithNullSyncManagerReturnsCorrectErrorCode) {
       .dump_save_in_progress = dump_save,
       .optimization_in_progress = optimization,
       .replication_paused_for_dump = replication_paused,
-      .mysql_reconnecting = reconnecting,
       .binlog_reader = nullptr,
       .sync_manager = nullptr,
       .cache_manager = nullptr,
@@ -213,7 +206,6 @@ TEST_F(SyncHandlerTest, BareSyncResolvesInSingleDatabaseConfig) {
   std::atomic<bool> dump_save{false};
   std::atomic<bool> optimization{false};
   std::atomic<bool> replication_paused{false};
-  std::atomic<bool> reconnecting{false};
 
   HandlerContext ctx{
       .table_catalog = &catalog,
@@ -224,7 +216,6 @@ TEST_F(SyncHandlerTest, BareSyncResolvesInSingleDatabaseConfig) {
       .dump_save_in_progress = dump_save,
       .optimization_in_progress = optimization,
       .replication_paused_for_dump = replication_paused,
-      .mysql_reconnecting = reconnecting,
       .binlog_reader = nullptr,
       .sync_manager = &sync_mgr,
       .cache_manager = nullptr,
@@ -258,7 +249,6 @@ TEST_F(SyncHandlerTest, SyncRejectedWhileOptimizeInProgress) {
   std::atomic<bool> dump_save{false};
   std::atomic<bool> optimization{true};
   std::atomic<bool> replication_paused{false};
-  std::atomic<bool> reconnecting{false};
 
   HandlerContext ctx{
       .table_catalog = &catalog,
@@ -269,7 +259,6 @@ TEST_F(SyncHandlerTest, SyncRejectedWhileOptimizeInProgress) {
       .dump_save_in_progress = dump_save,
       .optimization_in_progress = optimization,
       .replication_paused_for_dump = replication_paused,
-      .mysql_reconnecting = reconnecting,
       .binlog_reader = nullptr,
       .sync_manager = &sync_mgr,
       .cache_manager = nullptr,
@@ -298,7 +287,6 @@ TEST_F(SyncHandlerTest, SyncRejectedWhileDumpSaveInProgress) {
   std::atomic<bool> dump_save{true};
   std::atomic<bool> optimization{false};
   std::atomic<bool> replication_paused{false};
-  std::atomic<bool> reconnecting{false};
 
   HandlerContext ctx{
       .table_catalog = &catalog,
@@ -309,7 +297,6 @@ TEST_F(SyncHandlerTest, SyncRejectedWhileDumpSaveInProgress) {
       .dump_save_in_progress = dump_save,
       .optimization_in_progress = optimization,
       .replication_paused_for_dump = replication_paused,
-      .mysql_reconnecting = reconnecting,
       .binlog_reader = nullptr,
       .sync_manager = &sync_mgr,
       .cache_manager = nullptr,
@@ -338,7 +325,6 @@ TEST_F(SyncHandlerTest, SyncRejectedWhileDumpLoadInProgress) {
   std::atomic<bool> dump_save{false};
   std::atomic<bool> optimization{false};
   std::atomic<bool> replication_paused{false};
-  std::atomic<bool> reconnecting{false};
 
   HandlerContext ctx{
       .table_catalog = &catalog,
@@ -349,7 +335,6 @@ TEST_F(SyncHandlerTest, SyncRejectedWhileDumpLoadInProgress) {
       .dump_save_in_progress = dump_save,
       .optimization_in_progress = optimization,
       .replication_paused_for_dump = replication_paused,
-      .mysql_reconnecting = reconnecting,
       .binlog_reader = nullptr,
       .sync_manager = &sync_mgr,
       .cache_manager = nullptr,

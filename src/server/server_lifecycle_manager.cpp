@@ -33,8 +33,7 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
     const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
     std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
     std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
-    std::atomic<bool>& mysql_reconnecting, replication_pause::Counter& replication_pause_counter,
-    mysql::IBinlogReader* binlog_reader
+    replication_pause::Counter& replication_pause_counter, mysql::IBinlogReader* binlog_reader
 #ifdef USE_MYSQL
     ,
     SyncOperationManager* sync_manager
@@ -57,16 +56,15 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
 #endif
 
   // Constructor is private, so we use unique_ptr with raw new
-  auto manager = std::unique_ptr<ServerLifecycleManager>(
-      new ServerLifecycleManager(config, table_contexts, dump_dir, full_config, stats, dump_load_in_progress,
-                                 dump_save_in_progress, optimization_in_progress, replication_paused_for_dump,
-                                 mysql_reconnecting, replication_pause_counter, binlog_reader
+  auto manager = std::unique_ptr<ServerLifecycleManager>(new ServerLifecycleManager(
+      config, table_contexts, dump_dir, full_config, stats, dump_load_in_progress, dump_save_in_progress,
+      optimization_in_progress, replication_paused_for_dump, replication_pause_counter, binlog_reader
 #ifdef USE_MYSQL
-                                 ,
-                                 sync_manager
+      ,
+      sync_manager
 #endif
-                                 ,
-                                 rate_limiter, shutdown_requested, dump_progress));
+      ,
+      rate_limiter, shutdown_requested, dump_progress));
   return manager;
 }
 
@@ -75,8 +73,7 @@ ServerLifecycleManager::ServerLifecycleManager(
     const std::string& dump_dir, const config::Config* full_config, ServerStats& stats,
     std::atomic<bool>& dump_load_in_progress, std::atomic<bool>& dump_save_in_progress,
     std::atomic<bool>& optimization_in_progress, std::atomic<bool>& replication_paused_for_dump,
-    std::atomic<bool>& mysql_reconnecting, replication_pause::Counter& replication_pause_counter,
-    mysql::IBinlogReader* binlog_reader
+    replication_pause::Counter& replication_pause_counter, mysql::IBinlogReader* binlog_reader
 #ifdef USE_MYSQL
     ,
     SyncOperationManager* sync_manager
@@ -92,7 +89,6 @@ ServerLifecycleManager::ServerLifecycleManager(
       dump_save_in_progress_(dump_save_in_progress),
       optimization_in_progress_(optimization_in_progress),
       replication_paused_for_dump_(replication_paused_for_dump),
-      mysql_reconnecting_(mysql_reconnecting),
       replication_pause_counter_(replication_pause_counter),
       binlog_reader_(binlog_reader)
 #ifdef USE_MYSQL
@@ -302,7 +298,6 @@ ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::C
       .dump_save_in_progress = dump_save_in_progress_,
       .optimization_in_progress = optimization_in_progress_,
       .replication_paused_for_dump = replication_paused_for_dump_,
-      .mysql_reconnecting = mysql_reconnecting_,
       .replication_pause_counter = &replication_pause_counter_,
       .binlog_reader = binlog_reader_,
 #ifdef USE_MYSQL

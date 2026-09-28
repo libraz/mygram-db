@@ -412,8 +412,12 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    * up the newly enqueued frames when it next checks `pending_frames_`),
    * this is a no-op.
    *
-   * @return false if submission failed (thread pool queue full). The caller
-   *         should treat this as a fatal condition for the connection.
+   * @return false only if submission failed (thread pool queue full) and no
+   *         SERVER_BUSY response ended up queued for send; the caller should
+   *         treat that as safe to unregister immediately. Any other outcome,
+   *         including a failed submission that left a response queued,
+   *         returns true so the caller does not tear down the connection out
+   *         from under a pending write.
    */
   bool ScheduleDrainTask();
 

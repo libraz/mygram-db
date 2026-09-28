@@ -147,22 +147,34 @@ int ParseTcpErrorCode(const std::string& response) {
   return tag == "ERROR" ? code : -1;
 }
 
-// Extract the numeric "OK SEARCH N" / "OK COUNT N" prefix.
+// Extract the numeric "OK RESULTS N" / "OK COUNT N" prefix. Fails the
+// current test rather than silently returning 0 when the frame is not that
+// success verb, so a TCP-side regression that turns a legitimate response
+// into an ERROR frame cannot be coerced into a value that happens to match
+// an unrelated zero-result HTTP response. Callers that legitimately expect
+// an ERROR frame must check ParseTcpErrorCode first and never reach here.
 size_t ParseTcpCount(const std::string& response, const std::string& verb) {
   std::string prefix = "OK " + verb + " ";
   auto pos = response.find(prefix);
   if (pos == std::string::npos) {
+    ADD_FAILURE() << "expected an \"" << prefix << "...\" frame, got: " << response;
     return 0;
   }
   return std::stoul(response.substr(pos + prefix.size()));
 }
 
+// Same "fail instead of silently coercing an ERROR frame" contract as
+// ParseTcpCount, above.
 std::vector<std::string> ParseTcpSearchPrimaryKeys(const std::string& response) {
   std::istringstream iss(response);
   std::string ok;
   std::string results;
   size_t count = 0;
   iss >> ok >> results >> count;
+  if (ok != "OK" || results != "RESULTS") {
+    ADD_FAILURE() << "expected an \"OK RESULTS ...\" frame, got: " << response;
+    return {};
+  }
 
   std::vector<std::string> primary_keys;
   std::string pk;
@@ -339,16 +351,23 @@ class HttpTcpConsistencyTest : public ::testing::Test {
     auto id9 = doc_store->AddDocument("doc_9", filters4, "alpha only");
     auto id10 = doc_store->AddDocument("doc_10", filters4, "beta only");
 
-    index->AddDocument(*id1, "machine learning models");
-    index->AddDocument(*id2, "machine production lines");
-    index->AddDocument(*id3, "deep learning research");
-    index->AddDocument(*id4, "unrelated topic");
-    index->AddDocument(*id5, "COVID-19 status");
-    index->AddDocument(*id6, "C++ compiler");
-    index->AddDocument(*id7, "foo@example.com inbox");
-    index->AddDocument(*id8, "alpha AND beta");
-    index->AddDocument(*id9, "alpha only");
-    index->AddDocument(*id10, "beta only");
+    // Normalize before indexing, matching the production ingestion path
+    // (src/loader/initial_loader.cpp, src/mysql/binlog_event_processor.cpp):
+    // index_.NormalizeText(text) always runs before AddDocument. The search
+    // path normalizes every query term the same way (search_pipeline.cpp), so
+    // skipping it here would index "COVID-19" while every query for it is
+    // lowercased to "covid-19" first -- an n-gram mismatch no query could
+    // ever cross, silently hiding literal/quoting regressions.
+    index->AddDocument(*id1, index->NormalizeText("machine learning models"));
+    index->AddDocument(*id2, index->NormalizeText("machine production lines"));
+    index->AddDocument(*id3, index->NormalizeText("deep learning research"));
+    index->AddDocument(*id4, index->NormalizeText("unrelated topic"));
+    index->AddDocument(*id5, index->NormalizeText("COVID-19 status"));
+    index->AddDocument(*id6, index->NormalizeText("C++ compiler"));
+    index->AddDocument(*id7, index->NormalizeText("foo@example.com inbox"));
+    index->AddDocument(*id8, index->NormalizeText("alpha AND beta"));
+    index->AddDocument(*id9, index->NormalizeText("alpha only"));
+    index->AddDocument(*id10, index->NormalizeText("beta only"));
 
     table_ctx_.name = "articles";
     table_ctx_.config.name = "articles";
@@ -649,9 +668,19 @@ TEST_F(HttpTcpConsistencyTest, LiteralQueriesMatchAcrossHttpTcpCppAndCClients) {
     EXPECT_EQ(http_primary_keys, tcp_primary_keys) << "http_body=" << http_result->body;
     EXPECT_EQ(cpp_primary_keys, tcp_primary_keys);
     EXPECT_EQ(c_primary_keys, tcp_primary_keys);
-    if (query == "machine") {
-      EXPECT_FALSE(tcp_primary_keys.empty());
-    }
+
+    // A pinned, non-empty key set per query -- not just cross-surface
+    // equality, which is satisfied trivially if every surface returns
+    // empty. This is what actually catches a broken literal/quoting path
+    // (e.g. one surface splitting "COVID-19" into tokens instead of
+    // matching it as a literal phrase, or dropping "+"/"@" as punctuation).
+    static const std::map<std::string, std::vector<std::string>> kExpectedKeys = {
+        {"machine", {"doc_1", "doc_2"}}, {"COVID-19", {"doc_5"}},       {"C++", {"doc_6"}},
+        {"foo@example.com", {"doc_7"}},  {"alpha AND beta", {"doc_8"}},
+    };
+    auto expected = kExpectedKeys.at(query);
+    SortPrimaryKeys(expected);
+    EXPECT_EQ(tcp_primary_keys, expected);
   }
 }
 

@@ -73,7 +73,6 @@ class CommandHandlerLoadingTest : public ::testing::Test {
         .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
 #ifdef USE_MYSQL
         .sync_manager = sync_manager_.get(),
 #endif
@@ -100,7 +99,6 @@ class CommandHandlerLoadingTest : public ::testing::Test {
   std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
-  std::atomic<bool> mysql_reconnecting_{false};
   std::unique_ptr<HandlerContext> handler_ctx_;
   ConnectionContext conn_ctx_;
 };
@@ -306,7 +304,6 @@ class SingleDbResolutionTest : public ::testing::Test {
         .dump_save_in_progress = flag_,
         .optimization_in_progress = flag_,
         .replication_paused_for_dump = flag_,
-        .mysql_reconnecting = flag_,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
 #endif
@@ -400,7 +397,6 @@ class MultiDbResolutionTest : public ::testing::Test {
         .dump_save_in_progress = flag_,
         .optimization_in_progress = flag_,
         .replication_paused_for_dump = flag_,
-        .mysql_reconnecting = flag_,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
 #endif

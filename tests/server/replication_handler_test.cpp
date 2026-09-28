@@ -48,7 +48,6 @@ class ReplicationHandlerTest : public ::testing::Test {
                      .dump_save_in_progress = dump_save_in_progress_,
                      .optimization_in_progress = optimization_in_progress_,
                      .replication_paused_for_dump = replication_paused_for_dump_,
-                     .mysql_reconnecting = mysql_reconnecting_,
                      .sync_manager = nullptr,
                      .cache_manager = nullptr,
                      .variable_manager = nullptr} {}
@@ -67,7 +66,6 @@ class ReplicationHandlerTest : public ::testing::Test {
   std::atomic<bool> dump_save_in_progress_;
   std::atomic<bool> optimization_in_progress_;
   std::atomic<bool> replication_paused_for_dump_;
-  std::atomic<bool> mysql_reconnecting_{false};
   HandlerContext handler_ctx_;
 };
 

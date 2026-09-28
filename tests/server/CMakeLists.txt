@@ -1034,6 +1034,7 @@ mygramdb_add_split_gtests(io_reactor_test
 
 add_executable(reactor_connection_test
   reactor_connection_test.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/reactor/mock_event_multiplexer.cpp
 )
 
 target_link_libraries(reactor_connection_test
@@ -1042,6 +1043,10 @@ target_link_libraries(reactor_connection_test
 )
 
 target_compile_definitions(reactor_connection_test PRIVATE MYGRAMDB_REACTOR_CONNECTION_TEST_HOOKS)
+
+target_include_directories(reactor_connection_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/reactor
+)
 
 gtest_add_tests(
   TARGET reactor_connection_test

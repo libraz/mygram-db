@@ -337,10 +337,11 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     output.debug_info.offset_explicit = effective_query.offset_explicit;
   }
 
+  const auto* synonym_dict = output.table_context != nullptr ? output.table_context->synonym_dict.get() : nullptr;
   auto topn = search_pipeline::ApplySearchTopNOptimization(
       effective_query, output.current_index, output.current_doc_store, ctx_.full_config, output.term_infos,
       output.all_search_terms, output.semantics_reproducible_by_single_term_ngram_and, is_cache_hit, primary_key_column,
-      output.results);
+      output.results, synonym_dict);
   if (topn.applicable) {
     total_results = topn.total_results;
     if (conn_ctx.debug_mode) {

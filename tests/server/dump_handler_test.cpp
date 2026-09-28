@@ -74,7 +74,6 @@ class DumpHandlerTest : public ::testing::Test {
         .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
         .replication_pause_counter = &replication_pause_counter_,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
@@ -123,7 +122,6 @@ class DumpHandlerTest : public ::testing::Test {
   std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
-  std::atomic<bool> mysql_reconnecting_{false};
   replication_pause::Counter replication_pause_counter_;
 #ifdef USE_MYSQL
 #endif
@@ -680,7 +678,6 @@ TEST_F(DumpHandlerTest, DumpSaveWithNullConfig) {
       .dump_save_in_progress = dump_save_in_progress_,
       .optimization_in_progress = optimization_in_progress_,
       .replication_paused_for_dump = replication_paused_for_dump_,
-      .mysql_reconnecting = mysql_reconnecting_,
       .replication_pause_counter = &replication_pause_counter_,
 #ifdef USE_MYSQL
       .sync_manager = nullptr,
@@ -1341,7 +1338,6 @@ class DumpHandlerGtidTest : public ::testing::Test {
         .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
         .replication_pause_counter = &replication_pause_counter_,
         .binlog_reader = mock_binlog_reader_.get(),
         .sync_manager = nullptr,
@@ -1482,7 +1478,6 @@ class DumpHandlerGtidTest : public ::testing::Test {
   std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
-  std::atomic<bool> mysql_reconnecting_{false};
   replication_pause::Counter replication_pause_counter_;
 };
 
@@ -2392,7 +2387,6 @@ class DumpHandlerAsyncTest : public ::testing::Test {
         .dump_save_in_progress = dump_save_in_progress_,
         .optimization_in_progress = optimization_in_progress_,
         .replication_paused_for_dump = replication_paused_for_dump_,
-        .mysql_reconnecting = mysql_reconnecting_,
         .replication_pause_counter = &replication_pause_counter_,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
@@ -2432,7 +2426,6 @@ class DumpHandlerAsyncTest : public ::testing::Test {
   std::atomic<bool> dump_save_in_progress_{false};
   std::atomic<bool> optimization_in_progress_{false};
   std::atomic<bool> replication_paused_for_dump_{false};
-  std::atomic<bool> mysql_reconnecting_{false};
   replication_pause::Counter replication_pause_counter_;
   std::unique_ptr<HandlerContext> handler_ctx_;
   std::unique_ptr<DumpHandler> handler_;

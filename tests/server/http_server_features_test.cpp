@@ -485,6 +485,63 @@ TEST_F(HttpServerTest, TrustedProxyUsesForwardedClientForAclAndRateLimiting) {
   EXPECT_EQ(repeated_first->status, 429);
 }
 
+/**
+ * @brief A trusted proxy configured by its plain IPv4 form is still honored
+ * when the HTTP listener is dual-stack.
+ *
+ * cpp-httplib's set_trusted_proxies matches the peer address string from
+ * getnameinfo(NI_NUMERICHOST) by exact string equality. A dual-stack
+ * listener (bind "::") presents an IPv4 peer as "::ffff:127.0.0.1", which
+ * never equals a plain "127.0.0.1" trusted_proxies entry unless that form is
+ * also registered.
+ */
+TEST_F(HttpServerTest, TrustedProxyConfiguredAsIPv4IsHonoredOnDualStackListener) {
+  HttpServerConfig http_config;
+  http_config.bind = "::";
+  http_config.port = port_;
+  // Only the forwarded address is allowed, so a 200 proves the substitution
+  // happened; the real peer (127.0.0.1, or its ::ffff: form) is not in this
+  // CIDR and would otherwise be rejected with 403.
+  http_config.allow_cidrs = {"198.51.100.0/24"};
+  http_config.trusted_proxies = {"127.0.0.1"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  const httplib::Headers forwarded = {{"X-Forwarded-For", "198.51.100.10"}};
+  const auto response = client.Get("/info", forwarded);
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 200);
+}
+
+/**
+ * @brief A trusted proxy configured in a non-canonical IPv6 form still
+ * matches the canonical peer-address string cpp-httplib compares against.
+ *
+ * Config validation only checks that an entry is numerically a valid IP; it
+ * does not require the compressed, lowercase form getnameinfo(NI_NUMERICHOST)
+ * always produces. An uncompressed literal like "0:0:0:0:0:0:0:1" is
+ * numerically ::1 but would never match the exact string "::1" without
+ * canonicalizing it first.
+ */
+TEST_F(HttpServerTest, TrustedProxyConfiguredAsUncompressedIPv6IsHonored) {
+  HttpServerConfig http_config;
+  http_config.bind = "::1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"198.51.100.0/24"};
+  http_config.trusted_proxies = {"0:0:0:0:0:0:0:1"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("::1", port_);
+  const httplib::Headers forwarded = {{"X-Forwarded-For", "198.51.100.10"}};
+  const auto response = client.Get("/info", forwarded);
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 200);
+}
+
 TEST_F(HttpServerTest, UntrustedPeerCannotSpoofForwardedClientForAcl) {
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";

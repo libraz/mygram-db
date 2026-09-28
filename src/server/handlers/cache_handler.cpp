@@ -130,10 +130,8 @@ std::string CacheHandler::HandleEnable() {
 
   // Attempt to enable cache
   if (!ctx_.cache_manager->Enable()) {
-    return ResponseFormatter::FormatError(
-        "Cache cannot be enabled: server was started with cache disabled. "
-        "Please restart the server with cache.enabled = true in configuration.",
-        mygram::utils::ErrorCode::kCacheDisabled);
+    return ResponseFormatter::FormatError("Cache cannot be enabled: the invalidation worker could not be started.",
+                                          mygram::utils::ErrorCode::kCacheDisabled);
   }
 
   return ResponseFormatter::FormatStatus("CACHE_ENABLED");

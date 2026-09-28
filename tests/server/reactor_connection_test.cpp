@@ -37,12 +37,18 @@
 // Dispatcher harness dependencies (same pattern as request_dispatcher_test.cpp)
 #include "index/index.h"
 #include "server/handlers/search_handler.h"
+#include "server/io_reactor.h"
 #include "server/request_dispatcher.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
 #include "server/table_catalog.h"
 #include "server/thread_pool.h"
 #include "storage/document_store.h"
+
+// Deterministic multiplexer so a real IoReactor can back EnqueueResponse's
+// ArmWrite/Unregister bookkeeping without a live poll thread racing the
+// test's own direct OnReadable()/OnWritable() calls.
+#include "mock_event_multiplexer.h"
 
 using namespace mygramdb::server;
 using namespace mygramdb::index;
@@ -87,7 +93,6 @@ struct DispatcherHarness {
   std::atomic<bool> dump_save{false};
   std::atomic<bool> optimization{false};
   std::atomic<bool> repl_paused{false};
-  std::atomic<bool> mysql_reconnecting{false};
   std::unique_ptr<HandlerContext> hctx;
   std::unique_ptr<RequestDispatcher> dispatcher;
 
@@ -103,7 +108,6 @@ struct DispatcherHarness {
         .dump_save_in_progress = dump_save,
         .optimization_in_progress = optimization,
         .replication_paused_for_dump = repl_paused,
-        .mysql_reconnecting = mysql_reconnecting,
 #ifdef USE_MYSQL
         .sync_manager = nullptr,
 #endif
@@ -658,6 +662,110 @@ TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClos
   EXPECT_EQ(stats.GetRequestsDeniedPoolFullTcp(), 1U);
 
   release_worker.set_value();
+}
+
+// Same pool-exhaustion trigger as above, but with a response already queued
+// and write interest armed before the SERVER_BUSY frame is appended behind
+// it. IoReactor::DispatchEvent unregisters unconditionally on a false return
+// from OnReadable, so OnReadable/ScheduleDrainTask must report "keep me
+// registered" whenever CloseWithServerBusy leaves anything in write_queue_ —
+// otherwise the queued responses are discarded before OnWritable ever gets a
+// chance to drain them.
+TEST_F(ReactorConnectionTest, ThreadPoolExhaustionWithArmedWriteQueueDoesNotDiscardServerBusy) {
+  conn_.reset();
+  ::close(peer_fd_);
+  peer_fd_ = -1;
+  pool_.reset();
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  peer_fd_ = fds[0];
+  rc_fd_ = fds[1];
+  SetNonBlocking(rc_fd_);
+
+  // A real reactor backed by a deterministic mock multiplexer: ArmWrite and
+  // Unregister need a live, started IoReactor, but nothing is ever injected
+  // into the mock, so its poll thread never dispatches on this connection —
+  // only the test's own direct OnReadable()/OnWritable() calls do.
+  IoReactor reactor(ReactorConfig{});
+  reactor.SetMultiplexerFactoryForTest([]() { return std::make_unique<reactor::MockEventMultiplexer>(); });
+  ASSERT_TRUE(reactor.Start());
+
+  pool_ = std::make_unique<ThreadPool>(1, 1);
+  std::promise<void> worker_started;
+  auto worker_started_future = worker_started.get_future();
+  std::promise<void> release_worker;
+  auto release_worker_future = release_worker.get_future().share();
+
+  ASSERT_TRUE(pool_->Submit([&worker_started, release_worker_future]() {
+    worker_started.set_value();
+    release_worker_future.wait();
+  }));
+  ASSERT_EQ(worker_started_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  ASSERT_TRUE(pool_->Submit([] {})) << "fill the only queued task slot";
+
+  ServerStats stats;
+  conn_ = ReactorConnection::Create(rc_fd_, &reactor, harness_.dispatcher.get(), pool_.get(), &stats);
+  ASSERT_TRUE(reactor.Register(conn_));
+
+  // Larger than the socketpair's kernel send buffer, so the inline drain
+  // inside EnqueueResponse leaves residue and arms write interest instead of
+  // completing synchronously.
+  const std::string filler(1024 * 1024, 'A');
+  ASSERT_TRUE(conn_->EnqueueResponse(filler));
+  ASSERT_TRUE(conn_->WriteArmedForTest());
+  ASSERT_GT(conn_->WriteQueueDepthForTest(), 0U);
+
+  WriteAll(peer_fd_, "INFO\r\n");
+  const bool keep = conn_->OnReadable();
+  EXPECT_TRUE(keep) << "a response already queued for send must not be discarded by unregistering "
+                       "the connection while the thread pool is full";
+  EXPECT_TRUE(conn_->IsClosing());
+  EXPECT_GT(conn_->WriteQueueDepthForTest(), 0U) << "SERVER_BUSY must still be queued, not dropped";
+  EXPECT_EQ(stats.GetRequestsDeniedPoolFullTcp(), 1U);
+
+  // Mirror IoReactor::DispatchEvent's own decision: it only unregisters on a
+  // false return.
+  if (!keep) {
+    reactor.Unregister(rc_fd_, conn_.get());
+  }
+  EXPECT_EQ(reactor.ConnectionCount(), 1U) << "connection must stay registered until the queue drains";
+
+  release_worker.set_value();
+
+  // Drive the drain exactly as a real writable event would: read whatever
+  // the peer has received so far, then give the connection another chance to
+  // flush, until OnWritable reports the queue is fully drained.
+  std::string received;
+  const std::string expected_tail = "ERROR 6030 SERVER_BUSY Server is too busy, please try again later\r\n";
+  bool fully_drained = false;
+  for (int iteration = 0; iteration < 200 && !fully_drained; ++iteration) {
+    char buf[64 * 1024];
+    const ssize_t n = ::recv(peer_fd_, buf, sizeof(buf), MSG_DONTWAIT);
+    if (n > 0) {
+      received.append(buf, static_cast<size_t>(n));
+    }
+    fully_drained = !conn_->OnWritable();
+  }
+  // OnWritable's own last send() can hand the kernel bytes that outrace the
+  // recv() call earlier in the same iteration; sweep once more for them.
+  while (WaitReadable(peer_fd_, 200)) {
+    char buf[64 * 1024];
+    const ssize_t n = ::recv(peer_fd_, buf, sizeof(buf), MSG_DONTWAIT);
+    if (n <= 0) {
+      break;
+    }
+    received.append(buf, static_cast<size_t>(n));
+  }
+
+  EXPECT_TRUE(fully_drained) << "OnWritable never reported the write queue as fully drained";
+  EXPECT_EQ(conn_->WriteQueueDepthForTest(), 0U);
+  ASSERT_GE(received.size(), expected_tail.size());
+  EXPECT_EQ(received.substr(received.size() - expected_tail.size()), expected_tail)
+      << "SERVER_BUSY response must reach the peer intact instead of being discarded";
+
+  reactor.Unregister(rc_fd_, conn_.get());
+  conn_.reset();
 }
 
 TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {

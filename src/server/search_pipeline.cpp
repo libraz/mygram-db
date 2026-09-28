@@ -75,13 +75,6 @@ bool ShouldApplyVerifyText(const std::string& verify_mode, const std::vector<std
   return ShouldApplyVerifyText(verify_mode, terms.begin(), terms.end());
 }
 
-bool IsCjkIdeograph(uint32_t codepoint) {
-  return (codepoint >= 0x4E00 && codepoint <= 0x9FFF) || (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||
-         (codepoint >= 0x20000 && codepoint <= 0x2A6DF) || (codepoint >= 0x2A700 && codepoint <= 0x2B73F) ||
-         (codepoint >= 0x2B740 && codepoint <= 0x2B81F) || (codepoint >= 0x2B820 && codepoint <= 0x2CEAF) ||
-         (codepoint >= 0xF900 && codepoint <= 0xFAFF);
-}
-
 bool HasUncoveredHybridFragment(std::string_view normalized_term, int ngram_size, int kanji_ngram_size,
                                 bool cross_boundary_ngrams) {
   if (normalized_term.empty() || kanji_ngram_size <= 0) {
@@ -101,7 +94,7 @@ bool HasUncoveredHybridFragment(std::string_view normalized_term, int ngram_size
   bool has_cjk = false;
   bool has_non_cjk = false;
   for (uint32_t codepoint : codepoints) {
-    if (IsCjkIdeograph(codepoint)) {
+    if (mygram::utils::IsCJKIdeograph(codepoint)) {
       has_cjk = true;
     } else {
       has_non_cjk = true;
@@ -113,7 +106,7 @@ bool HasUncoveredHybridFragment(std::string_view normalized_term, int ngram_size
 
   std::vector<bool> covered(codepoints.size(), false);
   for (size_t i = 0; i < codepoints.size(); ++i) {
-    const bool start_is_cjk = IsCjkIdeograph(codepoints[i]);
+    const bool start_is_cjk = mygram::utils::IsCJKIdeograph(codepoints[i]);
     const int term_ngram_size = start_is_cjk ? kanji_ngram_size : ascii_ngram_size;
     if (term_ngram_size <= 0 || i + static_cast<size_t>(term_ngram_size) > codepoints.size()) {
       continue;
@@ -122,7 +115,7 @@ bool HasUncoveredHybridFragment(std::string_view normalized_term, int ngram_size
     if (!cross_boundary_ngrams) {
       bool boundary_crossed = false;
       for (int j = 1; j < term_ngram_size; ++j) {
-        if (IsCjkIdeograph(codepoints[i + static_cast<size_t>(j)]) != start_is_cjk) {
+        if (mygram::utils::IsCJKIdeograph(codepoints[i + static_cast<size_t>(j)]) != start_is_cjk) {
           boundary_crossed = true;
           break;
         }
@@ -543,6 +536,20 @@ auto MakeAllTermsPresentMatcher(std::vector<std::string> normalized_terms) {
   };
 }
 
+/// Predicate accepting a text where every normalized term is present either
+/// exactly or within max_distance edits (ContainsFuzzyMatch). The FUZZY
+/// path's hybrid-fragment guard must use this instead of
+/// MakeAllTermsPresentMatcher: an exact-only matcher would reject a
+/// candidate that only n-gram-intersected because it is a genuine fuzzy
+/// match, contradicting FUZZY's own matching semantics.
+auto MakeAllTermsFuzzyPresentMatcher(std::vector<std::string> normalized_terms, uint32_t max_distance) {
+  return [terms = std::move(normalized_terms), max_distance](const std::string& text) {
+    return std::all_of(terms.begin(), terms.end(), [&](const std::string& term) {
+      return text.find(term) != std::string::npos || mygram::utils::ContainsFuzzyMatch(text, term, max_distance);
+    });
+  };
+}
+
 /// Predicate accepting a text that contains at least one of the normalized
 /// terms (OR).
 auto MakeAnyTermPresentMatcher(std::vector<std::string> normalized_terms) {
@@ -700,8 +707,18 @@ query::Query BuildCanonicalCacheQuery(const query::Query& query, const FullPipel
     return params.current_index != nullptr ? params.current_index->NormalizeText(text) : std::string(text);
   };
   cache::CacheSemanticContext semantic_context;
+  // Parsed once here (in addition to ExecuteFullPipeline's own parse of the
+  // same expression) so the cache key is built from the tree that actually
+  // executes rather than from re-normalizing the raw expression text: the
+  // tokenizer's ASCII-only whitespace check and the index text normalizer's
+  // Unicode folding disagree on which characters separate tokens, so two
+  // raw expressions that fold to the same normalized text can still parse
+  // into different trees.
+  query::QueryASTParser ast_parser;
+  std::unique_ptr<query::QueryNode> boolean_ast;
   if (ContainsBooleanSyntax(SemanticSearchExpression(query))) {
     semantic_context.execution_mode = cache::CacheExecutionMode::kBooleanAst;
+    boolean_ast = ast_parser.Parse(SemanticSearchExpression(query));
   } else if (query.fuzzy_max_distance.has_value()) {
     semantic_context.execution_mode = cache::CacheExecutionMode::kFuzzy;
   } else if (params.synonym_dict != nullptr) {
@@ -714,7 +731,8 @@ query::Query BuildCanonicalCacheQuery(const query::Query& query, const FullPipel
     semantic_context.synonym_revision = params.synonym_dict->Revision();
   }
 
-  const std::string normalized = cache::QueryNormalizer::Normalize(cache_query, text_normalizer, semantic_context);
+  const std::string normalized =
+      cache::QueryNormalizer::Normalize(cache_query, text_normalizer, semantic_context, boolean_ast.get());
   if (!normalized.empty()) {
     const cache::CacheKey key = cache::CacheKeyGenerator::Generate(normalized);
     cache_query.cache_key = std::make_pair(key.hash_high, key.hash_low);
@@ -851,11 +869,33 @@ TopNOptimizationResult ApplySearchTopNOptimization(
     const query::Query& query, index::Index* current_index, storage::DocumentStore* current_doc_store,
     const config::Config* full_config, const std::vector<SearchTermInfo>& term_infos,
     const std::vector<std::string>& all_search_terms, bool semantics_reproducible_by_single_term_ngram_and,
-    bool cache_hit, const std::string& primary_key_column, std::vector<storage::DocId>& results) {
+    bool cache_hit, const std::string& primary_key_column, std::vector<storage::DocId>& results,
+    const query::SynonymDictionary* synonym_dict) {
   TopNOptimizationResult result;
-  if (cache_hit || current_index == nullptr || current_doc_store == nullptr || term_infos.empty() ||
-      term_infos[0].ngrams.empty() || term_infos[0].estimated_size == 0) {
+  if (current_index == nullptr || current_doc_store == nullptr) {
     return result;
+  }
+
+  // A cache hit never has term_infos, so its eligibility for a single-term
+  // ngram-AND slice is derived from the query shape instead: mirrors the
+  // miss path's own fuzzy path (a separate early return before
+  // semantics_reproducible_by_single_term_ngram_and is ever computed) and
+  // synonym path (params.synonym_dict != nullptr also returns early there),
+  // so a non-fuzzy, non-synonym-configured single-term query is exactly the
+  // shape that flag would have been true for.
+  bool single_term_ngram_and_shape = false;
+  if (cache_hit) {
+    const bool has_synonym_dict = synonym_dict != nullptr && !synonym_dict->IsEmpty();
+    const bool hybrid_exact_required = RequiresExactTextForHybridFragments(
+        all_search_terms, current_index, current_index->GetNgramSize(), current_index->GetKanjiNgramSize(),
+        current_index->GetCrossBoundaryNgrams());
+    single_term_ngram_and_shape = all_search_terms.size() == 1 && !query.fuzzy_max_distance.has_value() &&
+                                  !has_synonym_dict && !hybrid_exact_required;
+  } else {
+    if (term_infos.empty() || term_infos[0].ngrams.empty() || term_infos[0].estimated_size == 0) {
+      return result;
+    }
+    single_term_ngram_and_shape = semantics_reproducible_by_single_term_ngram_and && term_infos.size() == 1;
   }
 
   result.considered = true;
@@ -885,17 +925,19 @@ TopNOptimizationResult ApplySearchTopNOptimization(
   constexpr double kReuseThreshold = 0.5;
   // NOLINTEND(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 
-  result.applicable = semantics_reproducible_by_single_term_ngram_and && term_infos.size() == 1 &&
-                      query.not_terms.empty() && query.filters.empty() && query.limit > 0 &&
-                      query.offset <= kMaxOffsetForOptimization && is_primary_key_order && !is_score_sort &&
-                      !verify_text_required && doc_id_order_matches_primary_key;
+  result.applicable = single_term_ngram_and_shape && query.not_terms.empty() && query.filters.empty() &&
+                      query.limit > 0 && query.offset <= kMaxOffsetForOptimization && is_primary_key_order &&
+                      !is_score_sort && !verify_text_required && doc_id_order_matches_primary_key;
   if (!result.applicable) {
     return result;
   }
 
   result.total_results = results.size();
   result.reverse = order_by.order == query::SortOrder::DESC;
-  result.single_ngram = term_infos[0].ngrams.size() == 1;
+  // Debug-info cosmetic only (see search_handler.cpp's optimization_used
+  // string); a cache hit's slice is a pure vector operation either way, so
+  // there is no term_infos to report a single-ngram fast path from.
+  result.single_ngram = !cache_hit && term_infos[0].ngrams.size() == 1;
   if (result.total_results == 0) {
     result.no_results = true;
     return result;
@@ -909,7 +951,19 @@ TopNOptimizationResult ApplySearchTopNOptimization(
     return result;
   }
 
-  results = current_index->SearchAnd(term_infos[0].ngrams, index_limit, result.reverse);
+  // `results` is already the full, ascending-sorted intersection this
+  // function's own total_results was read from; slicing it directly (rather
+  // than re-running SearchAnd with a limit) keeps the reported total and the
+  // returned page derived from the same point-in-time index read, and avoids
+  // paying for posting-list intersection twice.
+  const size_t take = std::min(index_limit, results.size());
+  if (result.reverse) {
+    std::vector<storage::DocId> top(results.end() - static_cast<std::ptrdiff_t>(take), results.end());
+    std::reverse(top.begin(), top.end());
+    results = std::move(top);
+  } else {
+    results.resize(take);
+  }
   result.optimized = true;
   return result;
 }
@@ -1001,17 +1055,33 @@ std::vector<std::string> GenerateHighlightSnippets(const query::HighlightOptions
   auto normalized_terms = BuildHighlightTerms(all_search_terms, index, synonym_dict);
 
   auto original_texts = doc_store->GetOriginalTextBatch(page);
-  auto normalized_texts = doc_store->GetNormalizedTextBatch(page);
+
+  // Normalized text is only read below when a page document's original text
+  // is absent (binlog_event_processor.cpp populates original text for
+  // effectively every live document), so fetch it just for that subset
+  // instead of copying it for the whole page and discarding most of it.
+  std::vector<storage::DocId> missing_original;
+  for (size_t i = 0; i < page.size(); ++i) {
+    if (!original_texts[i].has_value()) {
+      missing_original.push_back(page[i]);
+    }
+  }
+  auto normalized_texts = doc_store->GetNormalizedTextBatch(missing_original);
+
   std::vector<std::string> snippets;
   snippets.reserve(page.size());
+  size_t missing_index = 0;
   for (size_t i = 0; i < page.size(); ++i) {
     if (original_texts[i].has_value()) {
       auto highlighted = query::Highlighter::GenerateOriginal(
           *original_texts[i], normalized_terms, [&](std::string_view text) { return index->NormalizeText(text); },
           options);
       snippets.push_back(std::move(highlighted.snippet));
-    } else if (normalized_texts[i].has_value()) {
-      auto highlighted = query::Highlighter::Generate(*normalized_texts[i], normalized_terms, options);
+      continue;
+    }
+    const auto& normalized_text = normalized_texts[missing_index++];
+    if (normalized_text.has_value()) {
+      auto highlighted = query::Highlighter::Generate(*normalized_text, normalized_terms, options);
       snippets.push_back(std::move(highlighted.snippet));
     } else {
       snippets.emplace_back();
@@ -1453,85 +1523,97 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
     parsed_values.push_back(ParseFilterValue(filter_cond.value));
   }
 
-  // Pre-fetch all filter values in a single lock acquisition (one shared lock
-  // for all columns) instead of per-column locking
   std::vector<std::string> columns;
   columns.reserve(resolved_filters.size());
   for (const auto& filter_cond : resolved_filters) {
     columns.push_back(filter_cond.column);
   }
-  auto batch_filter_values = doc_store->GetFilterValuesBatchMultiColumn(results, columns);
 
-  for (size_t doc_idx = 0; doc_idx < results.size(); ++doc_idx) {
-    bool matches_all_filters = true;
+  // Fetch filter values and evaluate them in bounded chunks, mirroring
+  // DocumentStore::VisitNormalizedTextsFor's contract: GetFilterValuesBatchMultiColumn
+  // takes one shared_lock and copies a [columns][chunk] block of FilterValue for its
+  // duration, then releases it before the next chunk. A single call for the whole
+  // candidate set would hold that lock, and the memory, for the entire scan instead
+  // of one chunk's worth -- the cost this reuses DocumentStore's own chunk size to
+  // bound, exactly as text verification already does.
+  constexpr size_t kFilterChunkSize = storage::DocumentStore::kSelectedNormalizedTextChunkSize;
+  for (size_t chunk_begin = 0; chunk_begin < results.size(); chunk_begin += kFilterChunkSize) {
+    const size_t chunk_end = std::min(chunk_begin + kFilterChunkSize, results.size());
+    const std::vector<storage::DocId> chunk_doc_ids(results.begin() + static_cast<std::ptrdiff_t>(chunk_begin),
+                                                    results.begin() + static_cast<std::ptrdiff_t>(chunk_end));
+    auto batch_filter_values = doc_store->GetFilterValuesBatchMultiColumn(chunk_doc_ids, columns);
 
-    for (size_t i = 0; i < resolved_filters.size(); ++i) {
-      const auto& filter_cond = resolved_filters[i];
-      const auto& parsed_value = parsed_values[i];
-      const auto& stored_value = batch_filter_values[i][doc_idx];
+    for (size_t doc_idx = 0; doc_idx < chunk_doc_ids.size(); ++doc_idx) {
+      bool matches_all_filters = true;
 
-      // NULL values: only match for NE operator
-      if (!stored_value) {
-        if (filter_cond.op != query::FilterOp::NE) {
+      for (size_t i = 0; i < resolved_filters.size(); ++i) {
+        const auto& filter_cond = resolved_filters[i];
+        const auto& parsed_value = parsed_values[i];
+        const auto& stored_value = batch_filter_values[i][doc_idx];
+
+        // NULL values: only match for NE operator
+        if (!stored_value) {
+          if (filter_cond.op != query::FilterOp::NE) {
+            matches_all_filters = false;
+            break;
+          }
+          continue;  // NULL != anything is true
+        }
+
+        // Evaluate filter condition based on operator
+        auto op_str = query::FilterOpToString(filter_cond.op);
+        bool matches = std::visit(
+            [&](const auto& val) -> bool {
+              using T = std::decay_t<decltype(val)>;
+              if constexpr (std::is_same_v<T, std::monostate>) {
+                // NULL value: handled above
+                return filter_cond.op == query::FilterOp::NE;
+              } else if constexpr (std::is_same_v<T, std::string>) {
+                return mygram::utils::CompareValues(val, filter_cond.value, op_str);
+              } else if constexpr (std::is_same_v<T, bool>) {
+                // Boolean: only EQ/NE are meaningful
+                return mygram::utils::CompareValues(val, parsed_value.bool_val, op_str);
+              } else if constexpr (std::is_same_v<T, double>) {
+                if (!parsed_value.double_valid) {
+                  return false;  // Invalid number
+                }
+                if (filter_cond.op == query::FilterOp::EQ) {
+                  return DoubleValuesIdentical(val, parsed_value.double_val);
+                }
+                if (filter_cond.op == query::FilterOp::NE) {
+                  return !DoubleValuesIdentical(val, parsed_value.double_val);
+                }
+                return mygram::utils::CompareDoubleValues(val, parsed_value.double_val, op_str,
+                                                          mygram::constants::kFilterValueEpsilon);
+              } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
+                if (!parsed_value.int64_valid) {
+                  return false;  // Invalid number
+                }
+                return mygram::utils::CompareValues(val.seconds, parsed_value.int64_val, op_str);
+              } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
+                                   std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
+                if (!parsed_value.uint64_valid) {
+                  return false;  // Invalid number
+                }
+                return mygram::utils::CompareValues(static_cast<uint64_t>(val), parsed_value.uint64_val, op_str);
+              } else {
+                if (!parsed_value.int64_valid) {
+                  return false;  // Invalid number
+                }
+                return mygram::utils::CompareValues(static_cast<int64_t>(val), parsed_value.int64_val, op_str);
+              }
+            },
+            stored_value.value());
+
+        if (!matches) {
           matches_all_filters = false;
           break;
         }
-        continue;  // NULL != anything is true
       }
 
-      // Evaluate filter condition based on operator
-      auto op_str = query::FilterOpToString(filter_cond.op);
-      bool matches = std::visit(
-          [&](const auto& val) -> bool {
-            using T = std::decay_t<decltype(val)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-              // NULL value: handled above
-              return filter_cond.op == query::FilterOp::NE;
-            } else if constexpr (std::is_same_v<T, std::string>) {
-              return mygram::utils::CompareValues(val, filter_cond.value, op_str);
-            } else if constexpr (std::is_same_v<T, bool>) {
-              // Boolean: only EQ/NE are meaningful
-              return mygram::utils::CompareValues(val, parsed_value.bool_val, op_str);
-            } else if constexpr (std::is_same_v<T, double>) {
-              if (!parsed_value.double_valid) {
-                return false;  // Invalid number
-              }
-              if (filter_cond.op == query::FilterOp::EQ) {
-                return DoubleValuesIdentical(val, parsed_value.double_val);
-              }
-              if (filter_cond.op == query::FilterOp::NE) {
-                return !DoubleValuesIdentical(val, parsed_value.double_val);
-              }
-              return mygram::utils::CompareDoubleValues(val, parsed_value.double_val, op_str,
-                                                        mygram::constants::kFilterValueEpsilon);
-            } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-              if (!parsed_value.int64_valid) {
-                return false;  // Invalid number
-              }
-              return mygram::utils::CompareValues(val.seconds, parsed_value.int64_val, op_str);
-            } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
-                                 std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
-              if (!parsed_value.uint64_valid) {
-                return false;  // Invalid number
-              }
-              return mygram::utils::CompareValues(static_cast<uint64_t>(val), parsed_value.uint64_val, op_str);
-            } else {
-              if (!parsed_value.int64_valid) {
-                return false;  // Invalid number
-              }
-              return mygram::utils::CompareValues(static_cast<int64_t>(val), parsed_value.int64_val, op_str);
-            }
-          },
-          stored_value.value());
-
-      if (!matches) {
-        matches_all_filters = false;
-        break;
+      if (matches_all_filters) {
+        filtered_results.push_back(chunk_doc_ids[doc_idx]);
       }
-    }
-
-    if (matches_all_filters) {
-      filtered_results.push_back(results[doc_idx]);
     }
   }
 
@@ -2061,11 +2143,26 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
   bool first_term = true;
   for (const auto& ti : term_infos) {
     if (ti.ngrams.empty()) {
-      // Term too short for n-gram generation -- no candidates can match it
-      result.results.clear();
-      result.empty_term_detected = true;
-      first_term = false;
-      break;
+      if (ti.normalized_term.empty()) {
+        // Genuinely empty term: no candidates can match it.
+        result.results.clear();
+        result.empty_term_detected = true;
+        first_term = false;
+        break;
+      }
+      // Term too short for n-gram generation. SubstringFallbackError (called
+      // before this path runs) already guarantees text storage is enabled,
+      // so fall back to the same substring search SearchTermDocuments uses
+      // for the non-fuzzy path -- otherwise FUZZY would treat a term the
+      // plain path can still match via substring scan as entirely
+      // unmatchable, breaking the superset guarantee over the non-fuzzy
+      // result set.
+      auto term_results = SearchTermDocuments(ti, current_index, current_doc_store);
+      if (first_term) {
+        result.total_candidates = term_results.size();
+      }
+      IntersectSorted(result.results, std::move(term_results), first_term);
+      continue;
     }
 
     // Compute effective n-gram size per-term: use kanji_ngram_size for CJK-dominant terms
@@ -2119,7 +2216,8 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
   }
   result.results = EnforceExactTextForHybridFragments(
       std::move(result.results), all_search_terms, current_index, current_doc_store, ngram_size, kanji_ngram_size,
-      cross_boundary, [&]() { return MakeAllTermsPresentMatcher(NormalizeTerms(all_search_terms, current_index)); });
+      cross_boundary,
+      [&]() { return MakeAllTermsFuzzyPresentMatcher(NormalizeTerms(all_search_terms, current_index), max_distance); });
 
   return result;
 }

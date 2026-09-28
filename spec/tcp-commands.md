@@ -797,7 +797,7 @@ and the same request succeeds once that window closes.
 | `OPTIMIZE` | any in-flight `SYNC` | 4011 | `src/server/handlers/debug_handler.cpp` |
 | `SYNC` | `OPTIMIZE`, `DUMP SAVE`, `DUMP LOAD` | 6030 | `src/server/handlers/sync_handler.cpp` |
 | `SYNC` | another long operation, or a `SYNC` already claiming the table | 4011 | `src/server/sync_operation_manager.cpp` |
-| `REPLICATION START` | MySQL reconnecting, replication paused for dump, `DUMP LOAD`, `DUMP SAVE` | 6030 | `src/server/handlers/replication_handler.cpp` |
+| `REPLICATION START` | replication paused for dump, `DUMP LOAD`, `DUMP SAVE` | 6030 | `src/server/handlers/replication_handler.cpp` |
 | `REPLICATION START` | any in-flight `SYNC` | 4011 | `src/server/handlers/replication_handler.cpp` |
 | `REPLICATION STOP` | replication paused for dump | 6030 | `src/server/handlers/replication_handler.cpp` |
 
@@ -986,7 +986,7 @@ Every citation in the table below is `src/server/handlers/cache_handler.cpp`.
 | `CACHE CLEAR` | `OK CACHE_CLEARED` | `ERROR 8001 Cache not configured`; `ERROR 8001 Cache is disabled` |
 | `CACHE CLEAR <table>` | `OK CACHE_CLEARED table=<resolved>` | `ERROR 4008 Table catalog is not available`; `ERROR 4007 Table not found or ambiguous: <name>` |
 | `CACHE STATS` | multi-line, see below | `ERROR 8001 Cache not configured` |
-| `CACHE ENABLE` | `OK CACHE_ENABLED` | `ERROR 8001 Cache not configured`; `ERROR 8001 Cache cannot be enabled: server was started with cache disabled. Please restart the server with cache.enabled = true in configuration.` |
+| `CACHE ENABLE` | `OK CACHE_ENABLED` | `ERROR 8001 Cache not configured`; `ERROR 8001 Cache cannot be enabled: the invalidation worker could not be started.` |
 | `CACHE DISABLE` | `OK CACHE_DISABLED` | `ERROR 8001 Cache not configured` |
 
 `CACHE STATS` response (`src/server/handlers/cache_handler.cpp`):

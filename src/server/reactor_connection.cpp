@@ -137,7 +137,12 @@ bool ReactorConnection::OnReadable() {
   last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
 
   if (closing_.load(std::memory_order_acquire)) {
-    return false;
+    // Some other path (CloseWithServerBusy, a DrainTask exception handler,
+    // ...) already decided to close and may have left a response queued
+    // for send. Only report "safe to unregister" once that queue has
+    // actually drained; a future OnWritable finishes the close otherwise.
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    return !write_queue_.empty();
   }
 
   {
@@ -188,8 +193,14 @@ bool ReactorConnection::OnReadable() {
             .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
             .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
             .Warn();
-        (void)TrySendErrorIfWriteQueueEmpty(wire_message, wire_code);
+        const bool error_sent = TrySendErrorIfWriteQueueEmpty(wire_message, wire_code);
         closing_.store(true, std::memory_order_release);
+        if (!error_sent) {
+          // A response is already queued for send; unregistering now would
+          // drop it. Defer to the armed write interest, which drains the
+          // queue and finishes the close once it is empty.
+          return true;
+        }
         return false;
       }
       {
@@ -468,7 +479,14 @@ bool ReactorConnection::SubmitDrainTaskToPool(std::string_view failure_event) {
   }
   mygram::utils::StructuredLog().Event(std::string(failure_event)).Field("fd", static_cast<int64_t>(fd_)).Warn();
   const bool response_pending = CloseWithServerBusy();
-  if (!response_pending && reactor_ != nullptr) {
+  if (response_pending) {
+    // The SERVER_BUSY response is now queued with write interest armed
+    // (EnqueueResponse arms it whenever it cannot complete inline). Report
+    // success so the caller does not unregister out from under it;
+    // OnWritable drains the queue and finishes the close on its own.
+    return true;
+  }
+  if (reactor_ != nullptr) {
     reactor_->Unregister(fd_, this);
   }
   return false;

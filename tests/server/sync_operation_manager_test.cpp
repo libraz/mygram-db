@@ -70,6 +70,26 @@ TEST_F(SyncOperationManagerApiTest, CheckNoSyncReturnsOkWhenIdle) {
   EXPECT_TRUE(result.has_value());
 }
 
+// StartSync claims operation_coordinator_'s kSync token (Step 1) before it
+// publishes the table into syncing_tables_ (Step 3). CheckNoSyncInProgress
+// must see the conflict from the token alone, not just from syncing_tables_,
+// or a caller landing in that window gets past this check and only fails
+// later with the generic OperationCoordinator busy error instead of
+// kSyncAlreadyInProgress.
+TEST_F(SyncOperationManagerApiTest, CheckNoSyncInProgressSeesCoordinatorTokenBeforeSyncingTablesPublish) {
+  auto token = manager_->GetOperationCoordinator().TryAcquire(LongOperation::kSync, "users");
+  ASSERT_TRUE(token.has_value());
+
+  std::vector<std::string> syncing_tables;
+  ASSERT_FALSE(manager_->GetSyncingTablesIfAny(syncing_tables))
+      << "the token is held directly here, bypassing StartSync's syncing_tables_ insert";
+
+  auto result = manager_->CheckNoSyncInProgress("save dump");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kSyncAlreadyInProgress);
+  EXPECT_NE(result.error().message().find("users"), std::string::npos);
+}
+
 // GetSyncingTablesIfAny should report no tables when idle.
 TEST_F(SyncOperationManagerApiTest, GetSyncingTablesIfAnyReturnsFalseWhenIdle) {
   std::vector<std::string> tables;

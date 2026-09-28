@@ -386,11 +386,21 @@ struct TopNOptimizationResult {
 };
 
 /// @brief Apply the SEARCH GetTopN optimization shared by TCP and HTTP handlers.
+///
+/// On a cache hit, term_infos is always empty (ExecuteFullPipeline's
+/// cache-hit branch returns before generating it), so eligibility for the
+/// same slice this function applies on a miss is derived from query shape,
+/// config, and synonym_dict instead -- the same inputs the miss path's own
+/// fuzzy/synonym early-outs and semantics_reproducible_by_single_term_ngram_and
+/// are built from. synonym_dict should be the table's dictionary exactly as
+/// passed to the miss path (nullptr when none is configured); it is only
+/// consulted when cache_hit is true.
 TopNOptimizationResult ApplySearchTopNOptimization(
     const query::Query& query, index::Index* current_index, storage::DocumentStore* current_doc_store,
     const config::Config* full_config, const std::vector<SearchTermInfo>& term_infos,
     const std::vector<std::string>& all_search_terms, bool semantics_reproducible_by_single_term_ngram_and,
-    bool cache_hit, const std::string& primary_key_column, std::vector<storage::DocId>& results);
+    bool cache_hit, const std::string& primary_key_column, std::vector<storage::DocId>& results,
+    const query::SynonymDictionary* synonym_dict = nullptr);
 
 /// @brief Table and configuration inputs required to order a result set by BM25 relevance.
 struct RelevanceSortParams {

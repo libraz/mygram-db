@@ -332,6 +332,23 @@ class HttpServer {
      * doing no index or document work per request.
      */
     bool rate_limited;
+    /**
+     * @brief True when this route is dispatched by hand from
+     * SetupAccessControl's pre-routing handler instead of via `pattern`
+     * registered with cpp-httplib.
+     *
+     * Only the trailing `/tables/{identity}/{primary_key}` GET route sets
+     * this: its primary-key segment must stay greedy (it may itself contain
+     * `/`, for URL-like or hierarchical keys), which neither of cpp-httplib's
+     * matchers can express without falling back to `std::regex`, and
+     * `std::regex`-backed routes refuse any request whose decoded path
+     * exceeds `CPPHTTPLIB_REGEX_ROUTE_PATH_MAX_LENGTH` (256 bytes) --
+     * well inside the 8192-byte URI limit this route must honor. `pattern`
+     * is kept as the same shape this route has always matched, purely for
+     * `SetupRoutes()`'s admin-token gate and for surface description; it is
+     * never handed to cpp-httplib for this entry.
+     */
+    bool manually_routed;
     void (HttpServer::*handler)(const httplib::Request&, httplib::Response&);  ///< Member handler.
   };
 
@@ -345,7 +362,10 @@ class HttpServer {
    * behavioural: the trailing `/tables/{identity}/{primary_key}` pattern would
    * shadow the more specific `/tables/{identity}/search` style routes if it
    * came first. SetupRoutes() and any surface description both read this
-   * table, so neither can describe a route the server does not register.
+   * table, so neither can describe a route the server does not register --
+   * except the one entry marked `manually_routed`, which SetupRoutes() skips
+   * registering with cpp-httplib and SetupAccessControl() dispatches by hand
+   * instead (see `RouteDescriptor::manually_routed`).
    */
   static const std::array<RouteDescriptor, kRouteCount>& Routes();
 
@@ -359,6 +379,14 @@ class HttpServer {
    * a regex route or an unrecognised path.
    */
   static const RouteDescriptor* FindLiteralRoute(const std::string& method, const std::string& path);
+
+  /**
+   * @brief Find the one route entry marked `manually_routed`.
+   *
+   * Used by SetupAccessControl() to dispatch the trailing GET route after
+   * hand-parsing its shape out of the request path.
+   */
+  static const RouteDescriptor* FindManuallyRoutedGetRoute();
 
   /**
    * @brief Collect the state the readiness verdict is computed from.
@@ -439,6 +467,15 @@ class HttpServer {
    * @brief Setup routes
    */
   void SetupRoutes();
+
+  /**
+   * @brief Run a route's admin-token gate, then dispatch to its handler.
+   *
+   * Shared by `SetupRoutes()`'s per-pattern cpp-httplib wrapper and
+   * `SetupAccessControl()`'s manual dispatch of the `manually_routed` GET
+   * route, so both paths enforce the same gate the same way.
+   */
+  void InvokeRoute(const RouteDescriptor& route, const httplib::Request& req, httplib::Response& res);
 
   /**
    * @brief Setup CIDR-based access control
