@@ -571,3 +571,20 @@ TEST(SearchExpressionTest, ToQueryStringWrapsOrInParens) {
   std::string query = *result;
   EXPECT_EQ(query, "(python OR ruby)");
 }
+
+/**
+ * @brief A literal term that collides with a server clause keyword (AND,
+ * OR, NOT, FILTER, SORT, LIMIT, OFFSET, HIGHLIGHT, FUZZY, FACET, ORDER --
+ * query_parser_internal.h::IsClauseKeyword plus the separate ORDER check)
+ * must be quoted, or the server's clause scanner and AST tokenizer both
+ * re-read it as the operator instead of search text (both are
+ * case-insensitive and both special-case only the bare, unquoted form).
+ */
+TEST(SearchExpressionTest, ToQueryStringQuotesLiteralTermsCollidingWithKeywords) {
+  EXPECT_EQ(*ConvertSearchExpression("golang not"), R"(golang AND "not")");
+  EXPECT_EQ(*ConvertSearchExpression("filter"), R"("filter")");
+  EXPECT_EQ(*ConvertSearchExpression("sort"), R"("sort")");
+  EXPECT_EQ(*ConvertSearchExpression("NOT"), R"("NOT")");
+  EXPECT_EQ(*ConvertSearchExpression("golang NOT old"), R"(golang AND "NOT" AND old)");
+  EXPECT_EQ(*ConvertSearchExpression("+not"), R"("not")");
+}

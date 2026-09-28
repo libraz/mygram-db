@@ -1014,6 +1014,29 @@ TEST_F(MygramClientTest, SearchRawHandlesQuotedPhraseWithEmbeddedQuote) {
   ASSERT_TRUE(result) << "SearchRaw error: " << result.error().message();
 }
 
+/**
+ * @brief A literal term equal to "not" must reach the server as search
+ * text, not as the AND-clause's NOT-fold operator (query_parser_clauses.cpp
+ * ParseAnd: `if (!IsQuotedToken(pos) && EqualsIgnoreCase(tokens[pos], "NOT"))
+ * return ParseNot(...)`, which then fails with no term following it).
+ * ToQueryString quotes it (wire_quoting.h), and the server's own
+ * quoted-token check is what makes that quoting effective: the identical
+ * bytes sent unquoted are rejected, proving quoting is what avoids the fold.
+ */
+TEST_F(MygramClientTest, SearchRawHandlesLiteralTermCollidingWithNotKeyword) {
+  ASSERT_TRUE(client_->Connect());
+
+  auto converted = ConvertSearchExpression("golang not");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, R"(golang AND "not")");
+
+  auto quoted_result = client_->SearchRaw("testdb.test", *converted, 10);
+  EXPECT_TRUE(quoted_result) << "SearchRaw error: " << quoted_result.error().message();
+
+  auto unquoted_result = client_->SearchRaw("testdb.test", "golang AND not", 10);
+  EXPECT_FALSE(unquoted_result) << "unquoted 'not' should hit the NOT-fold and fail with no term following it";
+}
+
 TEST_F(MygramClientTest, RejectsControlCharactersInQuery) {
   ASSERT_TRUE(client_->Connect());
 
