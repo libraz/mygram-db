@@ -73,7 +73,9 @@ class TestMemoryRelease:
             lambda: _used_memory(mygramdb) > baseline,
             timeout=30,
             interval=0.5,
-            description=f"indexing {len(added)} more rows to increase the reported memory above {baseline}",
+            description=(
+                f"indexing {len(added)} more rows to increase the reported memory above {baseline}"
+            ),
         )
 
         mysql.truncate("articles")
