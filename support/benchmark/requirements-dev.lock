@@ -10,21 +10,25 @@
 #   universal: false
 
 -e file:.
-flake8==7.3.0
+ast-serialize==0.11.2
+    # via mypy
+flake8==7.4.1
+librt==0.15.0
+    # via mypy
 mccabe==0.7.0
     # via flake8
-mypy==1.18.2
+mypy==2.3.1
 mypy-extensions==1.1.0
     # via mypy
-mysql-connector-python==9.5.0
+mysql-connector-python==26.7.0
     # via benchmark
-pathspec==0.12.1
+pathspec==1.1.1
     # via mypy
-pycodestyle==2.14.0
+pycodestyle==2.15.0
     # via flake8
-pyflakes==3.4.0
+pyflakes==4.0.0
     # via flake8
-tomli==2.3.0
+tomli==2.4.1
     # via mypy
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via mypy

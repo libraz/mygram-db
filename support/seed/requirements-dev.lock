@@ -9,4 +9,4 @@
 #   generate-hashes: false
 #   universal: false
 
-mysql-connector-python==9.7.0
+mysql-connector-python==26.7.0

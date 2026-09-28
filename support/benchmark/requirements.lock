@@ -10,5 +10,5 @@
 #   universal: false
 
 -e file:.
-mysql-connector-python==9.5.0
+mysql-connector-python==26.7.0
     # via benchmark
