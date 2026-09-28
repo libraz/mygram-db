@@ -113,7 +113,8 @@ TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesMysqlSslPathError) {
 }
 
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonRejectsSynonymsFilePathTraversal) {
-  json config_json = {{"tables", json::array({{{"name", "test"},
+  json config_json = {{"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+                      {"tables", json::array({{{"name", "test"},
                                                {"primary_key", "id"},
                                                {"text_source", {{"column", "body"}}},
                                                {"synonyms", {{"enable", true}, {"file", "../synonyms.tsv"}}}}})}};
@@ -126,6 +127,7 @@ TEST(ConfigErrorHandlingTest, ParseConfigFromJsonRejectsSynonymsFilePathTraversa
 
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonSucceedsForValidMinimalConfig) {
   json config_json = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"tables", json::array({{{"name", "test"}, {"primary_key", "id"}, {"text_source", {{"column", "body"}}}}})}};
 
   auto result = internal::ParseConfigFromJson(config_json);
@@ -190,7 +192,8 @@ TEST(ConfigErrorHandlingTest, RequiredFilterMissingTypeListsSchemaTypes) {
 }
 
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonPropagatesInvalidServerId) {
-  json config_json = {{"replication", {{"enable", true}, {"server_id", 0}, {"start_from", "snapshot"}}}};
+  json config_json = {{"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+                      {"replication", {{"enable", true}, {"server_id", 0}, {"start_from", "snapshot"}}}};
 
   auto result = internal::ParseConfigFromJson(config_json);
   ASSERT_FALSE(result.has_value()) << "ParseConfigFromJson should fail for zero server_id with replication enabled";

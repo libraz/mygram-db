@@ -398,28 +398,23 @@ TEST_F(SearchPathParityTest, ADictionaryThatDoesNotMentionTheTermChangesNothing)
 }
 
 // ---------------------------------------------------------------------------
-// Where the paths are not equivalent, stated rather than asserted away
+// Terms shorter than the n-gram size
 // ---------------------------------------------------------------------------
 
-// A term shorter than the n-gram size generates no n-grams. The plain path
-// falls back to a substring scan of the stored text; the fuzzy path has no such
-// fallback and reports the term as empty. This is a genuine difference in what
-// the two executors can answer, not a bug the parity tests above cover: the
-// comparisons above deliberately use terms long enough to avoid it.
-TEST_F(SearchPathParityTest, TermTooShortForNgramsIsNotAPathEquivalence) {
+// A term shorter than the n-gram size generates no n-grams, so both executors
+// answer it from the stored text. FUZZY must not return fewer documents than
+// the same query without FUZZY.
+TEST_F(SearchPathParityTest, TermTooShortForNgramsAgreesAcrossPaths) {
   const std::string short_term = "ab";  // Shorter than kNgramSize.
 
   auto regular = ExecuteFullPipeline(MakeQuery(Path::kRegular, short_term), MakeParams(Path::kRegular));
   auto fuzzy = ExecuteFullPipeline(MakeQuery(Path::kFuzzyZero, short_term), MakeParams(Path::kFuzzyZero));
 
-  // Whatever each returns, they are reached by different code and the suite
-  // does not claim they agree. Recording the current answers keeps a later
-  // change to either one visible.
   ASSERT_TRUE(regular.has_value()) << regular.error().message();
   ASSERT_TRUE(fuzzy.has_value()) << fuzzy.error().message();
   EXPECT_FALSE(regular->empty_term_detected);
-  EXPECT_TRUE(fuzzy->empty_term_detected);
-  EXPECT_TRUE(fuzzy->results.empty());
+  EXPECT_FALSE(fuzzy->empty_term_detected);
+  EXPECT_EQ(fuzzy->results, regular->results);
 }
 
 }  // namespace mygramdb::server::search_pipeline

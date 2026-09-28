@@ -28,6 +28,9 @@ TEST(ReactorIntegrationTest, PlatformNotSupported) {
 #include <spdlog/spdlog.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -455,6 +458,15 @@ TEST_F(ReactorIntegrationTest, ConcurrentClientsMany) {
   rlim_t effective = RaiseFdLimit(kDesiredFds);
   // Reserve ~64 fds for the test process itself
   int max_clients = std::min<int>(kMaxClients, static_cast<int>((effective - 64) / 2));
+#ifdef __APPLE__
+  // macOS clamps every listen backlog to kern.ipc.somaxconn and resets connects
+  // beyond it, so simultaneous clients cannot exceed that queue.
+  int somaxconn = 0;
+  size_t somaxconn_size = sizeof(somaxconn);
+  if (sysctlbyname("kern.ipc.somaxconn", &somaxconn, &somaxconn_size, nullptr, 0) == 0 && somaxconn > 0) {
+    max_clients = std::min(max_clients, somaxconn);
+  }
+#endif
 
   if (max_clients < kMinClientsToRun) {
     GTEST_SKIP() << "RLIMIT_NOFILE too small (" << effective << ") for meaningful concurrency test; "
