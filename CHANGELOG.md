@@ -10,9 +10,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-09-28
+
+Every change is corrective. Several change whether a configuration starts or
+whether replication keeps running; the release notes list the actions required
+before upgrading.
+
+### Changed
+
+- **Configurations that no longer start** — `dump.load_on_startup` with `replication.start_from` set to `latest` or `gtid=...` skipped every change between the dump and the restart; it is now refused. `cache.ttl_seconds`, `cache.eviction_batch_size`, `cache.invalidation.batch_size` and `cache.invalidation.max_delay_ms` above 2147483647 wrapped through a 32-bit integer and are now refused by the schema.
+- **Replication stops on a table map it cannot size** — an unknown column type in any table's `TABLE_MAP` event reconnects from the last applied GTID instead of reading the rest of the event from a guessed offset. Every type MySQL 8.4+/9.x and MariaDB 10.11+ write is decoded.
+- **`MYGRAM_API_ADMIN_TOKEN` and `MYGRAM_MYSQL_*` apply without their config blocks** — the admin token was ignored when the file had no `api` section.
+- **Renaming a table onto a configured name stops replication** — `ALTER TABLE ... RENAME TO` was classified as an ordinary `ALTER` and merged the renamed table's rows into the index.
+- **A `required_filters` datetime, date or timestamp value with a `Z`, an offset or other trailing text is refused** instead of having the suffix ignored.
+
 ### Fixed
 
+- **TABLE_MAP metadata is decoded per column type** — `CHAR`, `ENUM`, `SET` and `DECIMAL` metadata was byte-swapped and `JSON`/`GEOMETRY` metadata was not consumed, so later columns were decoded from the wrong offset.
+- **MariaDB `COMPRESSED` columns are decoded** — `VARCHAR`/`TEXT ... COMPRESSED` payloads are inflated from the row image, stored-as-is, raw-deflate and zlib-wrapped alike.
+- **Snapshot and replication agree** on fractional-second temporal filters and on `ENUM`/`SET` labels containing `SHOW COLUMNS` escapes.
+- **A malformed GTID event reconnects** instead of being skipped, and a row image with an extreme declared field length is rejected.
+- **Updates to documents restored without stored text** purge their old postings.
+- **A binlog reader failing to start after a dump restore** leaves the server serving the restored data, as the v1.10.0 notes said.
+- **`FUZZY` returns everything the non-fuzzy search does**, including short and mixed CJK/ASCII terms; `SORT` on `bigint_unsigned` orders values above 2^63; a quoted `'not'` after `AND` is a literal term; boolean queries differing only in full-width punctuation or whitespace no longer share a cache entry.
+- **The C++ SDK, C ABI and `mygram-cli` quote text by the server's rule** — Unicode whitespace, literal keywords and web-syntax expressions reach the server with the meaning they were written with; phrases and OR-groups are no longer double-escaped.
+- **Client robustness** — a failed send on a reset connection is an error rather than a crash, multi-line responses are read completely with a small buffer, and IPv6 servers are reachable.
+- **`mygram-cli`** prints one row per primary key with quoted keys decoded, `DUMP SAVE` reports error codes and retries under `--wait-ready`, and `--wait-ready INFO` waits for readiness.
+- **HTTP agrees with TCP** on `BIGINT UNSIGNED` filter values above `INT64_MAX`, Unicode whitespace in `mode: boolean`, `trusted_proxies` matching and client identity; a non-string `filters.op` returns 400, and `/tables/...` paths over 256 bytes reach their handler.
 - **A second instance can no longer take over an HTTP port already being served** — the HTTP listener allowed port sharing while the TCP listener did not, so starting a second server on a bound `api.http.port` succeeded instead of failing. The two instances hold independent indexes, and which one answered depended on the platform: Linux divides incoming connections between them, while macOS gives the whole surface to the one that started later and leaves the first listening but idle. A second instance now fails to start with `Bind failed (6000)`, matching the TCP surface. Restarting a server on a port it just released still works.
+- **TCP error paths** — a failed `SET cache.enabled = true` returns 8001, thread-pool exhaustion delivers `ERROR 6030` and queued responses before closing, `SHOW VARIABLES` masks `mysql.ssl_key`, concurrent related `SET`s no longer desynchronise `SHOW VARIABLES`, and `SET cache.min_query_cost_ms` refuses `nan`/`inf`.
+- **Dumps** — `DUMP SAVE` refuses documents the restore path would reject, a saved dump is no longer refused by a stricter restore memory check, a corrupted index payload fails as corrupted, and `DUMP SAVE .` is refused.
+- **Shutdown** — `SYNC STOP` and shutdown cancel a running initial load, and `SIGTERM` during the initial connection retries exits cleanly.
+- **Docker** — `docker compose up` refuses the placeholder `MYSQL_ROOT_PASSWORD` and passes it to the application container, the `HEALTHCHECK` follows `API_HTTP_PORT`/`API_HTTP_ENABLE`, and `docker run <image> version|help` work.
+
+### Build
+
+- CRoaring v5.2.2, cpp-httplib v0.58.0, googletest v1.18.0, Abseil 20260817.0; cpp-httplib's optional TLS and compression backends are disabled explicitly; the CMake floor is 3.16.
+
+### Testing
+
+- The e2e matrix covers MySQL 8.4 and 9.7 and MariaDB 10.11, 11.8 and 12.3.
+
+**Detailed Release Notes**: [docs/releases/v1.10.2.md](docs/releases/v1.10.2.md)
 
 ## [1.10.1] - 2026-08-27
 
@@ -931,7 +970,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.10.1...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.10.2...HEAD
+[1.10.2]: https://github.com/libraz/mygram-db/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/libraz/mygram-db/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/libraz/mygram-db/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/libraz/mygram-db/compare/v1.8.1...v1.9.0
