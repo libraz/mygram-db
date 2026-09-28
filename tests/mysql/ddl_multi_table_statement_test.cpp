@@ -151,6 +151,29 @@ TEST(DDLMultiTableStatementTest, TruncateAndAlterStillClassifyTheirOwnType) {
   ExpectNoDDLMatch("ALTER TABLE users ADD COLUMN status INT", config);
 }
 
+TEST(DDLMultiTableStatementTest, AlterTableRenameClassifiesAsRenameInBothDirections) {
+  const TableConfig config = MakeTableConfig("articles");
+
+  ExpectDDLMatch("ALTER TABLE staging RENAME TO articles", DDLType::kRename, config);
+  ExpectDDLMatch("ALTER TABLE staging RENAME AS articles", DDLType::kRename, config);
+  ExpectDDLMatch("ALTER TABLE staging RENAME articles", DDLType::kRename, config);
+  ExpectDDLMatch("ALTER TABLE staging ADD COLUMN marker INT, RENAME TO `articles`", DDLType::kRename, config);
+  ExpectDDLMatch("ALTER TABLE articles RENAME TO articles_old", DDLType::kRename, config);
+  ExpectDDLMatch("alter table `articles` rename as `articles_old`", DDLType::kRename, config);
+  ExpectDDLMatch("ALTER TABLE articles ADD COLUMN marker INT, RENAME articles_old", DDLType::kRename, config);
+}
+
+TEST(DDLMultiTableStatementTest, AlterTableRenamingSomethingInsideTheTableStaysAlter) {
+  const TableConfig config = MakeTableConfig("articles");
+
+  ExpectDDLMatch("ALTER TABLE articles RENAME COLUMN body TO content", DDLType::kAlter, config);
+  ExpectDDLMatch("ALTER TABLE articles RENAME INDEX idx_a TO idx_b", DDLType::kAlter, config);
+  ExpectDDLMatch("ALTER TABLE articles RENAME KEY idx_a TO idx_b", DDLType::kAlter, config);
+  ExpectDDLMatch("ALTER TABLE articles ADD COLUMN note VARCHAR(64) DEFAULT 'RENAME TO other'", DDLType::kAlter, config);
+  ExpectNoDDLMatch("ALTER TABLE staging RENAME COLUMN articles TO body", config);
+  ExpectNoDDLMatch("ALTER TABLE staging RENAME TO articles_old", config);
+}
+
 /**
  * @brief A configured-table DROP must be caught before the fail-open fallback.
  *

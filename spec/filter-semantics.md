@@ -272,9 +272,12 @@ declared type before any of this runs (`src/mysql/ddl_schema_validator.cpp`), so
 filter cannot be pointed at a
 `VARCHAR` column. `boolean` is accepted only against `tinyint(1)`
 (`src/mysql/ddl_schema_validator.cpp`); `string`/`varchar`/`text` are accepted
-against `char`, `varchar` and every `text` width, and also against `binary`, `varbinary`
-and every blob width (`IsFilterTypeCompatible`, `src/mysql/ddl_schema_validator.cpp`), so a
-string filter can be placed on a `BLOB` or `BINARY` column.
+against `char`, `varchar` and every `text` width (`IsFilterTypeCompatible`,
+`src/mysql/ddl_schema_validator.cpp`). A string filter cannot be placed on a `BINARY`,
+`VARBINARY` or `BLOB` column: every configured column, filters included, is refused with
+one of those types before the type match runs, because the snapshot and binlog paths do not
+share a lossless representation for binary strings (`ValidateConfiguredColumnEncoding`,
+`src/mysql/ddl_schema_validator.cpp`).
 
 ### 3.3 What neither side can observe
 

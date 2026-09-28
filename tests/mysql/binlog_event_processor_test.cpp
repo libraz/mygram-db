@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <sstream>
 #include <thread>
 
 #include "cache/cache_key.h"
@@ -487,8 +488,12 @@ TEST_F(BinlogEventProcessorTest, EmptyStringRequiredFilterHandlesUpdateTransitio
   insert_event.table_name = "test_table";
   ASSERT_TRUE(
       BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
-  ASSERT_TRUE(doc_store_->GetDocId("pk1").has_value());
+  auto pk1 = doc_store_->GetDocId("pk1");
+  ASSERT_TRUE(pk1.has_value());
+  ASSERT_EQ(index_->SearchAnd({"al", "lp", "ph", "ha"}), std::vector<storage::DocId>{*pk1});
 
+  // Store and index must agree after each transition: a document outside
+  // required_filters is in neither, one inside is searchable by its own text.
   BinlogEvent transition_out = insert_event;
   transition_out.type = BinlogEventType::UPDATE;
   transition_out.old_text = insert_event.text;
@@ -496,6 +501,7 @@ TEST_F(BinlogEventProcessorTest, EmptyStringRequiredFilterHandlesUpdateTransitio
   ASSERT_TRUE(
       BinlogEventProcessor::ProcessEvent(transition_out, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
   EXPECT_FALSE(doc_store_->GetDocId("pk1").has_value());
+  EXPECT_TRUE(index_->SearchOr({"al", "lp", "ph", "ha"}).empty()) << "left required_filters but still searchable";
 
   BinlogEvent transition_in = insert_event;
   transition_in.type = BinlogEventType::UPDATE;
@@ -505,7 +511,10 @@ TEST_F(BinlogEventProcessorTest, EmptyStringRequiredFilterHandlesUpdateTransitio
   transition_in.filters["status"] = std::string{};
   ASSERT_TRUE(
       BinlogEventProcessor::ProcessEvent(transition_in, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
-  EXPECT_TRUE(doc_store_->GetDocId("pk2").has_value());
+  auto pk2 = doc_store_->GetDocId("pk2");
+  ASSERT_TRUE(pk2.has_value());
+  EXPECT_EQ(index_->SearchAnd({"be", "et", "ta"}), std::vector<storage::DocId>{*pk2})
+      << "entered required_filters but not searchable";
 }
 
 /**
@@ -1389,6 +1398,71 @@ TEST_F(BinlogEventProcessorTest, ConcurrentApplyAndSearchIsTsanClean) {
   writer.join();
   reader.join();
   EXPECT_TRUE(writer_ok.load(std::memory_order_acquire));
+}
+
+/**
+ * @brief UPDATE and DELETE drop every posting of a document restored without text
+ *
+ * A dump written while text storage was off restores postings with no text to
+ * diff against. Applying a row change must still leave no posting list naming
+ * the old document.
+ */
+TEST_F(BinlogEventProcessorTest, ChangesToDocumentsRestoredWithoutTextLeaveNoStalePostings) {
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "int";
+  required_filter.op = "=";
+  required_filter.value = "1";
+  table_config_.required_filters.push_back(required_filter);
+
+  std::stringstream store_dump;
+  std::stringstream index_dump;
+  {
+    storage::DocumentStore source_store;
+    source_store.SetStoreTexts(false);
+    index::Index source_index;
+    for (const auto& [pk, text] :
+         std::vector<std::pair<std::string, std::string>>{{"pk1", "alpha"}, {"pk2", "bravo"}, {"pk3", "quiz"}}) {
+      const std::string normalized = source_index.NormalizeText(text);
+      auto doc_id = source_store.AddDocument(pk, {{"status", static_cast<int32_t>(1)}}, normalized, text);
+      ASSERT_TRUE(doc_id.has_value());
+      source_index.AddDocument(*doc_id, normalized);
+    }
+    ASSERT_TRUE(source_store.SaveToStream(store_dump).has_value());
+    ASSERT_TRUE(source_index.SaveToStream(index_dump).has_value());
+  }
+  ASSERT_TRUE(doc_store_->LoadFromStream(store_dump).has_value());
+  ASSERT_TRUE(index_->LoadFromStream(index_dump).has_value());
+  for (const char* pk : {"pk1", "pk2", "pk3"}) {
+    auto doc_id = doc_store_->GetDocId(pk);
+    ASSERT_TRUE(doc_id.has_value());
+    ASSERT_FALSE(doc_store_->GetNormalizedText(*doc_id).has_value()) << pk << " should restore without text";
+  }
+
+  auto delete_event = BinlogEvent::CreateDelete("test_table", "pk1", "alpha");
+  delete_event.filters["status"] = static_cast<int32_t>(1);
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(delete_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  auto modify_event = BinlogEvent::CreateUpdate("test_table", "pk2", "xenon", "bravo");
+  modify_event.filters["status"] = static_cast<int32_t>(1);
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(modify_event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  auto transition_out = BinlogEvent::CreateUpdate("test_table", "pk3", "quiz", "quiz");
+  transition_out.filters["status"] = static_cast<int32_t>(0);
+  ASSERT_TRUE(
+      BinlogEventProcessor::ProcessEvent(transition_out, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+
+  EXPECT_TRUE(index_->SearchOr({"al", "lp", "ph", "ha"}).empty()) << "deleted document still indexed";
+  EXPECT_TRUE(index_->SearchOr({"br", "ra", "av", "vo"}).empty()) << "old text of updated document still indexed";
+  EXPECT_TRUE(index_->SearchOr({"qu", "ui", "iz"}).empty()) << "document that left required_filters still indexed";
+
+  auto pk2 = doc_store_->GetDocId("pk2");
+  ASSERT_TRUE(pk2.has_value());
+  EXPECT_EQ(index_->SearchAnd({"xe", "en", "no", "on"}), std::vector<storage::DocId>{*pk2});
+  EXPECT_EQ(doc_store_->GetNormalizedText(*pk2), std::optional<std::string>("xenon"));
+  EXPECT_EQ(index_->TermCount(), 4U) << "only the new text's n-grams may remain";
 }
 
 }  // namespace mygramdb::mysql

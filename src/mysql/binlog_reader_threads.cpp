@@ -236,6 +236,81 @@ void BinlogReader::RejectTaggedGtidEvent(const std::optional<std::string>& tagge
       "unsupported_runtime_event", "GTID_TAGGED_LOG_EVENT");
 }
 
+BinlogReader::PositionEventAction BinlogReader::ObservePositionEvent(MySQLBinlogEventType event_type,
+                                                                     const unsigned char* event_buffer,
+                                                                     unsigned long event_length) {
+  // A malformed frame is not proof that the event cannot be decoded: a replay
+  // from the last processed GTID can deliver it intact, so this must not
+  // publish the undecodable-event code.
+  const auto reconnect_on_malformed = [this](const char* event_name) {
+    SetLastError(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                 std::string("Malformed ") + event_name + "; reconnecting from last processed GTID"));
+    mygram::utils::StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "malformed_position_event")
+        .Field("event_type", event_name)
+        .Error();
+    return PositionEventAction::kReconnect;
+  };
+
+  if (event_type == MySQLBinlogEventType::GTID_LOG_EVENT) {
+    auto gtid_opt = BinlogEventParser::ExtractGTID(event_buffer, event_length);
+    if (!gtid_opt) {
+      return reconnect_on_malformed("GTID_LOG_EVENT");
+    }
+    position_state_.ObserveReceivedGTID(*gtid_opt, false, false);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "reader_gtid_received")
+        .Field("gtid", position_state_.received_gtid())
+        .Debug();
+    return PositionEventAction::kContinue;
+  }
+
+  if (event_type == MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT) {
+    RejectTaggedGtidEvent(BinlogEventParser::ExtractTaggedGTID(event_buffer, event_length));
+    return PositionEventAction::kStop;
+  }
+
+  // MariaDB GTID event (type 162): extract domain-server-seq GTID
+  if (event_type == MySQLBinlogEventType::MARIADB_GTID_EVENT) {
+    const auto flags = MariaDBEventParser::ExtractGTIDFlags(event_buffer, event_length);
+    if (flags.has_value() && ((*flags & MariaDBEventParser::kXaFlagMask) != 0U)) {
+      RejectUnsupportedXaTransaction("MARIADB_GTID_EVENT", {});
+      return PositionEventAction::kStop;
+    }
+    auto gtid_opt = MariaDBEventParser::ExtractGTID(event_buffer, event_length);
+    if (!gtid_opt) {
+      return reconnect_on_malformed("MariaDB GTID_EVENT");
+    }
+    const bool transaction_open = flags.has_value() && BinlogEventParser::IsMariaDBGtidTransactionOpen(*flags);
+    const bool standalone = flags.has_value() && ((*flags & MariaDBEventParser::kStandaloneFlag) != 0U);
+    position_state_.ObserveReceivedGTID(*gtid_opt, transaction_open, standalone);
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "reader_mariadb_gtid_received")
+        .Field("gtid", position_state_.received_gtid())
+        .Debug();
+    return PositionEventAction::kContinue;
+  }
+
+  if (event_type == MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT) {
+    const auto positions = MariaDBEventParser::ParseGTIDList(event_buffer, event_length);
+    if (!positions.has_value()) {
+      return reconnect_on_malformed("MariaDB GTID_LIST_EVENT");
+    }
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "mariadb_gtid_list_received")
+        .Field("domain_count", static_cast<uint64_t>(positions->size()))
+        .Debug();
+    return PositionEventAction::kContinue;
+  }
+
+  return PositionEventAction::kNotPositionEvent;
+}
+
 void BinlogReader::RejectUnsupportedXaTransaction(std::string_view source_event, const std::string& statement) {
   // A transaction marked XA is rejected at whichever event reveals it: the
   // MariaDB GTID flags, the XA START statement, or XA_PREPARE_LOG_EVENT. All of
@@ -664,64 +739,16 @@ void BinlogReader::ReaderThreadFunc() {
         if (event_length >= mygram::constants::kBinlogEventHeaderLen) {
           event_type = static_cast<MySQLBinlogEventType>(event_buffer[4]);
 
-          if (event_type == MySQLBinlogEventType::GTID_LOG_EVENT) {
-            auto gtid_opt = BinlogEventParser::ExtractGTID(event_buffer, event_length);
-            if (gtid_opt) {
-              position_state_.ObserveReceivedGTID(*gtid_opt, false, false);
-              mygram::utils::StructuredLog()
-                  .Event("binlog_debug")
-                  .Field("action", "reader_gtid_received")
-                  .Field("gtid", position_state_.received_gtid())
-                  .Debug();
-            }
+          const PositionEventAction position_action = ObservePositionEvent(event_type, event_buffer, event_length);
+          if (position_action == PositionEventAction::kContinue) {
             continue;
           }
-
-          if (event_type == MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT) {
-            RejectTaggedGtidEvent(BinlogEventParser::ExtractTaggedGTID(event_buffer, event_length));
+          if (position_action == PositionEventAction::kReconnect) {
+            request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
             break;
           }
-
-          // MariaDB GTID event (type 162): extract domain-server-seq GTID
-          if (event_type == MySQLBinlogEventType::MARIADB_GTID_EVENT) {
-            const auto flags = MariaDBEventParser::ExtractGTIDFlags(event_buffer, event_length);
-            if (flags.has_value() && ((*flags & MariaDBEventParser::kXaFlagMask) != 0U)) {
-              RejectUnsupportedXaTransaction("MARIADB_GTID_EVENT", {});
-              break;
-            }
-            auto gtid_opt = MariaDBEventParser::ExtractGTID(event_buffer, event_length);
-            if (gtid_opt) {
-              const bool transaction_open =
-                  flags.has_value() && BinlogEventParser::IsMariaDBGtidTransactionOpen(*flags);
-              const bool standalone = flags.has_value() && ((*flags & MariaDBEventParser::kStandaloneFlag) != 0U);
-              position_state_.ObserveReceivedGTID(*gtid_opt, transaction_open, standalone);
-              mygram::utils::StructuredLog()
-                  .Event("binlog_debug")
-                  .Field("action", "reader_mariadb_gtid_received")
-                  .Field("gtid", position_state_.received_gtid())
-                  .Debug();
-            }
-            continue;
-          }
-
-          if (event_type == MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT) {
-            const auto positions = MariaDBEventParser::ParseGTIDList(event_buffer, event_length);
-            if (!positions.has_value()) {
-              // A malformed frame is not proof that the event cannot be
-              // decoded: a replay from the last processed GTID can deliver it
-              // intact, so this must not publish the undecodable-event code.
-              SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                                    "Malformed MariaDB GTID_LIST_EVENT; reconnecting from last "
-                                                    "processed GTID"));
-              request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
-              break;
-            }
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "mariadb_gtid_list_received")
-                .Field("domain_count", static_cast<uint64_t>(positions->size()))
-                .Debug();
-            continue;
+          if (position_action == PositionEventAction::kStop) {
+            break;
           }
 
           if (event_type == MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT) {

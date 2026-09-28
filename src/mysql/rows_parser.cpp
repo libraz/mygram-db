@@ -416,7 +416,8 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
     }
     // Advance pointer by field size (if not NULL)
     if (!is_null) {
-      uint32_t field_size = binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
+      const uint64_t field_size =
+          binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
       if (field_size == 0) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_warning")
@@ -431,7 +432,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
         }
         return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType, msg, col_meta.name));
       }
-      if (ptr + field_size > end) {
+      if (field_size > static_cast<uint64_t>(end - ptr)) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_error")
             .Field("type", "field_size_exceeds_buffer")
@@ -452,7 +453,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
             .Event("binlog_debug")
             .Field("action", "decoded_value")
             .Field("value_preview", logged_value.size() > 50 ? logged_value.substr(0, 50) + "..." : logged_value)
-            .Field("field_size", static_cast<uint64_t>(field_size))
+            .Field("field_size", field_size)
             .Debug();
       }
       ptr += field_size;

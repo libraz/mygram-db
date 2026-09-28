@@ -5,6 +5,7 @@
 
 #include "binlog_event_builder.h"
 #include "binlog_test_fixtures.h"
+#include "mysql/binlog_event_parser.h"
 #include "support/deterministic_gate.h"
 
 #ifdef USE_MYSQL
@@ -265,6 +266,13 @@ TEST(BinlogReaderDDLTest, ClassifyTruncateOnlyForTruncateTableStatement) {
   EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles DROP COLUMN truncate_data"), DDLType::kAlter);
   EXPECT_EQ(BinlogEvent::ClassifyDDL("SET @noop = 1; DROP TABLE articles"), DDLType::kDrop);
   EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE users ADD COLUMN x INT; DROP TABLE articles"), DDLType::kAlter);
+}
+
+TEST(BinlogReaderDDLTest, ClassifyAlterTableRenameAsRename) {
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE staging RENAME TO articles"), DDLType::kRename);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles RENAME AS articles_old"), DDLType::kRename);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles RENAME COLUMN a TO b"), DDLType::kAlter);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles ADD COLUMN c TEXT DEFAULT 'RENAME TO x'"), DDLType::kAlter);
 }
 
 /**
@@ -900,6 +908,40 @@ TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecove
   reader_->SetCurrentGTID("uuid:60");
   EXPECT_FALSE(reader_->HasSchemaIncompatibleError());
   EXPECT_TRUE(reader_->GetLastError().empty());
+}
+
+/**
+ * @brief ALTER TABLE ... RENAME in either direction halts replication as a rename.
+ *
+ * Swapping another table in under the configured name must not be treated as a
+ * compatible ALTER, and renaming the configured table away must report the
+ * rename rather than a failed schema read of a table that no longer exists.
+ */
+TEST_F(BinlogReaderFixture, AlterTableRenameHaltsWithTheRenameDiagnosticInBothDirections) {
+  const std::vector<std::string> queries = {
+      "ALTER TABLE staging RENAME TO articles",
+      "ALTER TABLE staging ADD COLUMN marker INT, RENAME AS articles",
+      "ALTER TABLE articles RENAME TO articles_old",
+      "alter table `articles` rename `articles_old`",
+  };
+
+  for (const auto& query : queries) {
+    reader_->SetCurrentGTID("uuid:50");
+    auto buffer = test::BinlogEventBuilder::BuildQueryEvent("testdb", query);
+    TableMetadataCache cache;
+    const std::unordered_map<std::string, server::TableContext*> table_contexts;
+    auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:51", cache, table_contexts,
+                                                      &table_config_, false);
+    ASSERT_EQ(events.size(), 1U) << query;
+    ASSERT_EQ(events[0].ddl_type, DDLType::kRename) << query;
+
+    EXPECT_FALSE(reader_->ProcessQueuedEvent(events[0])) << query;
+    EXPECT_TRUE(reader_->HasSchemaIncompatibleError()) << query;
+    EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLInvalidSchema) << query;
+    EXPECT_NE(reader_->GetLastError().find("configured table was renamed"), std::string::npos)
+        << query << ": " << reader_->GetLastError();
+    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50") << query;
+  }
 }
 
 TEST_F(BinlogReaderFixture, PermanentSchemaReadFailureIsNotRetried) {

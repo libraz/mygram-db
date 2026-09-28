@@ -224,75 +224,7 @@ struct BinlogEvent {
    * @param query DDL query string
    * @return DDLType classification
    */
-  static DDLType ClassifyDDL(const std::string& query) {
-    // Build uppercase copy for case-insensitive matching
-    std::string upper;
-    upper.reserve(query.size());
-    for (char c : query) {
-      upper += static_cast<char>(::toupper(static_cast<unsigned char>(c)));
-    }
-    std::vector<std::string> statement_tokens;
-    std::string token;
-    auto classify_statement = [&statement_tokens]() {
-      if (statement_tokens.empty()) {
-        return DDLType::kUnknown;
-      }
-      const std::string& first = statement_tokens[0];
-      const std::string second = (statement_tokens.size() > 1) ? statement_tokens[1] : "";
-      if (first == "TRUNCATE" && (second.empty() || second == "TABLE")) {
-        return DDLType::kTruncate;
-      }
-      if (first == "CREATE") {
-        size_t index = 1;
-        if (index + 1 < statement_tokens.size() && statement_tokens[index] == "OR" &&
-            statement_tokens[index + 1] == "REPLACE") {
-          index += 2;
-        }
-        if (index < statement_tokens.size() && statement_tokens[index] == "TEMPORARY") {
-          ++index;
-        }
-        if (index < statement_tokens.size() && statement_tokens[index] == "TABLE") {
-          return DDLType::kCreate;
-        }
-      }
-      if (first == "ALTER" && second == "TABLE") {
-        return DDLType::kAlter;
-      }
-      if (first == "DROP" && second == "TABLE") {
-        return DDLType::kDrop;
-      }
-      if (first == "RENAME" && second == "TABLE") {
-        return DDLType::kRename;
-      }
-      return DDLType::kUnknown;
-    };
-
-    for (char c : upper) {
-      if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
-        token += c;
-        continue;
-      }
-      if (!token.empty()) {
-        statement_tokens.push_back(std::move(token));
-        token.clear();
-      }
-      if (c == ';') {
-        DDLType type = classify_statement();
-        if (type != DDLType::kUnknown) {
-          return type;
-        }
-        statement_tokens.clear();
-      }
-    }
-    if (!token.empty()) {
-      statement_tokens.push_back(std::move(token));
-    }
-    DDLType type = classify_statement();
-    if (type != DDLType::kUnknown) {
-      return type;
-    }
-    return DDLType::kUnknown;
-  }
+  static DDLType ClassifyDDL(const std::string& query);
 };
 
 /**
@@ -659,6 +591,24 @@ class BinlogReader final : public IBinlogReader {
    * @param statement Originating statement when one is available
    */
   void RejectUnsupportedXaTransaction(std::string_view source_event, const std::string& statement);
+
+  /// What the reader loop does after offering an event to ObservePositionEvent.
+  enum class PositionEventAction : uint8_t {
+    kNotPositionEvent,  ///< Not a GTID-carrying event; dispatch continues.
+    kContinue,          ///< Position recorded; read the next event.
+    kReconnect,         ///< Frame did not decode; error published, reconnect from the last processed GTID.
+    kStop,              ///< Event can never be resumed from; replication stopped.
+  };
+
+  /**
+   * @brief Record the position a GTID-carrying event declares.
+   *
+   * Handles GTID_LOG_EVENT, GTID_TAGGED_LOG_EVENT, MARIADB_GTID_EVENT and
+   * MARIADB_GTID_LIST_EVENT alike: a frame that does not decode never leaves
+   * the received position silently behind.
+   */
+  PositionEventAction ObservePositionEvent(MySQLBinlogEventType event_type, const unsigned char* event_buffer,
+                                           unsigned long event_length);
 
   /**
    * @brief Fail closed for a statement that may carry row data the decoder never sees.

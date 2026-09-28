@@ -90,20 +90,14 @@ class BinlogReaderResourceTest : public ::testing::Test {
  * @brief Test multiple Start/Stop cycles
  */
 TEST_F(BinlogReaderResourceTest, MultipleStartStopCycles) {
-  // Connect to MySQL (skip test if connection fails)
+  // Connect to MySQL
   auto connect_result = connection_->Connect("test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
 
   // Check if GTID mode is enabled
   auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
-  }
-  if (!*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
@@ -118,10 +112,7 @@ TEST_F(BinlogReaderResourceTest, MultipleStartStopCycles) {
   // Perform multiple Start/Stop cycles
   for (int i = 0; i < 3; ++i) {
     auto start_result = reader_->Start();
-    if (!start_result) {
-      // Start might fail due to table validation, which is acceptable for this test
-      GTEST_SKIP() << "Start failed: " << reader_->GetLastError();
-    }
+    ASSERT_TRUE(start_result) << "Start failed: " << reader_->GetLastError();
 
     EXPECT_TRUE(reader_->IsRunning()) << "Reader should be running after Start() (cycle " << i << ")";
 
@@ -143,17 +134,11 @@ TEST_F(BinlogReaderResourceTest, MultipleStartStopCycles) {
 TEST_F(BinlogReaderResourceTest, ConcurrentStartAttempts) {
   // Connect to MySQL
   auto connect_result = connection_->Connect("test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
 
   auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
-  }
-  if (!*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
@@ -199,17 +184,11 @@ TEST_F(BinlogReaderResourceTest, ConcurrentStartAttempts) {
 TEST_F(BinlogReaderResourceTest, DestructorCleanup) {
   // Connect to MySQL
   auto connect_result = connection_->Connect("test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed";
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed";
 
   auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
-  }
-  if (!*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
@@ -239,17 +218,11 @@ TEST_F(BinlogReaderResourceTest, DestructorCleanup) {
  */
 TEST_F(BinlogReaderResourceTest, QueueSizeManagement) {
   auto connect_result = connection_->Connect("test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed";
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed";
 
   auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
-  }
-  if (!*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   BinlogReader::Config reader_config;
   reader_config.queue_size = 10;    // Small queue to test backpressure
@@ -262,9 +235,7 @@ TEST_F(BinlogReaderResourceTest, QueueSizeManagement) {
                                            reader_config, stats_.get());
 
   auto start_result = reader_->Start();
-  if (!start_result) {
-    GTEST_SKIP() << "Start failed: " << reader_->GetLastError();
-  }
+  ASSERT_TRUE(start_result) << "Start failed: " << reader_->GetLastError();
 
   // Let it run for a bit
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -281,17 +252,11 @@ TEST_F(BinlogReaderResourceTest, QueueSizeManagement) {
  */
 TEST_F(BinlogReaderResourceTest, GTIDPersistence) {
   auto connect_result = connection_->Connect("test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed";
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed";
 
   auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    GTEST_SKIP() << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
-  }
-  if (!*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
@@ -322,9 +287,7 @@ TEST_F(BinlogReaderResourceTest, GTIDPersistence) {
 
 TEST_F(BinlogReaderResourceTest, SnapshotAndLiveBinlogPreserveFilterTextAndEmptyStateParity) {
   auto connect_result = connection_->Connect("binlog-parity-main");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
   auto connection_config = mysql::testing::GetMySQLTestConfig();
   Connection writer(connection_config);
   auto writer_connect = writer.Connect("binlog-parity-writer");
@@ -478,9 +441,7 @@ TEST_F(BinlogReaderResourceTest, SnapshotAndLiveBinlogPreserveFilterTextAndEmpty
 
 TEST_F(BinlogReaderResourceTest, DdlSchemaValidationContinuesSafeChangesAndStopsBeforeUnsafeGtid) {
   auto connect_result = connection_->Connect("ddl-schema-main");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
   const auto connection_config = mysql::testing::GetMySQLTestConfig();
   Connection writer(connection_config);
   auto writer_connect = writer.Connect("ddl-schema-writer");
@@ -583,9 +544,7 @@ TEST_F(BinlogReaderResourceTest, DdlSchemaValidationContinuesSafeChangesAndStops
 
 TEST_F(BinlogReaderResourceTest, StatementBasedDmlStopsBeforePublishingItsGtid) {
   auto connect_result = connection_->Connect("statement-dml-main");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
   const auto connection_config = mysql::testing::GetMySQLTestConfig();
   Connection writer(connection_config);
   ASSERT_TRUE(writer.Connect("statement-dml-writer"));
@@ -640,9 +599,7 @@ TEST_F(BinlogReaderResourceTest, StatementBasedDmlStopsBeforePublishingItsGtid) 
 
 TEST_F(BinlogReaderResourceTest, XaTransactionStopsBeforePublishingPreparedGtid) {
   auto connect_result = connection_->Connect("xa-guard-main");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
   const auto connection_config = mysql::testing::GetMySQLTestConfig();
   Connection writer(connection_config);
   ASSERT_TRUE(writer.Connect("xa-guard-writer"));
@@ -710,13 +667,10 @@ TEST_F(BinlogReaderResourceTest, XaTransactionStopsBeforePublishingPreparedGtid)
  */
 TEST_F(BinlogReaderResourceTest, RestartClearsTheErrorTheStoppedRunEndedWith) {
   auto connect_result = connection_->Connect("test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
   auto gtid_mode_enabled = connection_->IsGTIDModeEnabled();
-  if (!gtid_mode_enabled || !*gtid_mode_enabled) {
-    GTEST_SKIP() << "MySQL GTID mode is not enabled";
-  }
+  ASSERT_TRUE(gtid_mode_enabled) << "Failed to query MySQL GTID mode: " << gtid_mode_enabled.error().message();
+  ASSERT_TRUE(*gtid_mode_enabled) << "MySQL GTID mode is not enabled";
 
   BinlogReader::Config reader_config;
   reader_config.queue_size = 100;
@@ -729,9 +683,7 @@ TEST_F(BinlogReaderResourceTest, RestartClearsTheErrorTheStoppedRunEndedWith) {
                                            reader_config, stats_.get());
 
   auto first_start = reader_->Start();
-  if (!first_start) {
-    GTEST_SKIP() << "Start failed: " << reader_->GetLastError();
-  }
+  ASSERT_TRUE(first_start) << "Start failed: " << reader_->GetLastError();
 
   // A redundant start is a benign, operator-reachable condition that records
   // an error on the reader. It stands in here for any recoverable failure: the

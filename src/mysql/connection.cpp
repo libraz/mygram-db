@@ -18,6 +18,12 @@
 #include <string_view>
 #include <utility>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#endif
+
 #include "mysql/gtid_encoder.h"
 #include "utils/numeric_parse.h"
 #include "utils/sql_utils.h"
@@ -437,6 +443,18 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Reconnect(bool s
 
   // Reconnect
   return Connect();
+}
+
+void Connection::ShutdownTransport() {
+  if (mysql_ == nullptr) {
+    return;
+  }
+#ifdef _WIN32
+  ::shutdown(mysql_->net.fd, SD_BOTH);
+#else
+  ::shutdown(mysql_->net.fd, SHUT_RDWR);
+#endif
+  mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "transport_shutdown").Debug();
 }
 
 void Connection::Close() {

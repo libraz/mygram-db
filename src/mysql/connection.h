@@ -175,6 +175,15 @@ class Connection {
   mygram::utils::Expected<MySQLResult, mygram::utils::Error> ExecuteStreaming(const std::string& query);
 
   /**
+   * @brief Cut the transport under an abandoned streaming result
+   *
+   * Freeing an unbuffered result reads every row still on the wire before it
+   * returns. Shutting the socket down first makes that read end at once. The
+   * connection is unusable afterwards and must be closed once the result is freed.
+   */
+  void ShutdownTransport();
+
+  /**
    * @brief Execute SQL query without result set (INSERT/UPDATE/DELETE)
    * @param query SQL query string
    * @return Expected<void, Error> - success or query execution error

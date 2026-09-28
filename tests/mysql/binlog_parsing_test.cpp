@@ -832,7 +832,7 @@ TEST(BinlogParsingTest, QueryEventDetectsAlterRenameDestinationForConfiguredTabl
 
   ASSERT_EQ(events.size(), 1U);
   EXPECT_EQ(events[0].type, BinlogEventType::DDL);
-  EXPECT_EQ(events[0].ddl_type, DDLType::kAlter);
+  EXPECT_EQ(events[0].ddl_type, DDLType::kRename);
   EXPECT_EQ(events[0].table_name, "articles");
 
   auto literal_only =

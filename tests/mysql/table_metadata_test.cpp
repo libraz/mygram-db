@@ -260,6 +260,14 @@ TEST(TableMetadataTest, ParsesEnumAndSetDeclarationLabels) {
   EXPECT_TRUE(ParseEnumSetColumnValues("enum('unterminated)").empty());
 }
 
+TEST(TableMetadataTest, DecodesServerEscapesInEnumAndSetLabels) {
+  // SHOW COLUMNS renders NUL, LF, CR and backslash in a label as \0, \n, \r and \\.
+  EXPECT_EQ(ParseEnumSetColumnValues(R"(enum('a\nb','c\rd','e\0f','g\\h','i\Zj'))"),
+            (std::vector<std::string>{"a\nb", "c\rd", std::string("e\0f", 3), "g\\h", "i\032j"}));
+  // An escaped backslash followed by a letter is a backslash and that letter, not a control character.
+  EXPECT_EQ(ParseEnumSetColumnValues(R"(set('x\\n','y'))"), (std::vector<std::string>{"x\\n", "y"}));
+}
+
 // ===========================================================================
 // Large table ID tests
 // ===========================================================================

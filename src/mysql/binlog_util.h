@@ -300,12 +300,16 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
  * Based on calc_field_size() from MySQL source:
  * libs/mysql/binlog/event/binary_log_funcs.cpp
  *
+ * The size is returned in 64 bits so that a declared 4-byte length near
+ * UINT32_MAX plus its prefix cannot wrap into a small value that passes the
+ * caller's bounds check.
+ *
  * @param col_type MySQL column type
  * @param master_data Pointer to the field data
  * @param metadata Type-specific metadata
- * @return Size of the field in bytes
+ * @return Size of the field in bytes, or 0 for an unsupported type or invalid metadata
  */
-inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_data, uint16_t metadata) {
+inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_data, uint16_t metadata) {
   switch (col_type) {
     // Fixed-size integer types
     case 1:  // MYSQL_TYPE_TINY
@@ -371,7 +375,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
           // Invalid metadata - return 0 to indicate error
           return 0;
       }
-      return blob_len_bytes + blob_len;  // length bytes + actual data
+      return uint64_t{blob_len_bytes} + blob_len;  // length bytes + actual data
     }
 
     // STRING (CHAR)
@@ -457,7 +461,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
           metadata = 4;
           break;
       }
-      return metadata + json_len;
+      return uint64_t{metadata} + json_len;
     }
 
     // BIT type
@@ -490,7 +494,7 @@ inline uint32_t calc_field_size(uint8_t col_type, const unsigned char* master_da
           // Invalid metadata - return 0 to indicate error
           return 0;
       }
-      return metadata + geo_len;  // length bytes + WKB data
+      return uint64_t{metadata} + geo_len;  // length bytes + WKB data
     }
 
     // For unsupported types, return 0 (will need to be handled specially)

@@ -63,9 +63,10 @@ std::vector<uint8_t> BuildDecimalTableMap(uint8_t precision, uint8_t scale) {
   buf.push_back(static_cast<uint8_t>(ColumnType::LONG));
   buf.push_back(static_cast<uint8_t>(ColumnType::NEWDECIMAL));
 
-  // Only NEWDECIMAL carries metadata here: (precision << 8) | scale.
+  // Only NEWDECIMAL carries metadata here: precision byte, then scale byte.
   BinlogEventBuilder::AppendPackedInt(buf, 2);
-  BinlogEventBuilder::AppendLittleEndian16(buf, static_cast<uint16_t>((precision << 8) | scale));
+  buf.push_back(precision);
+  buf.push_back(scale);
 
   buf.push_back(0x00);  // NULL bitmap: neither column is nullable
 

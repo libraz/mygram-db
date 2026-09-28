@@ -9,6 +9,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include <optional>
+#include <string>
+
 #include "cache/cache_manager.h"
 #include "mysql/binlog_filter_evaluator.h"
 #include "server/server_stats.h"
@@ -33,6 +36,31 @@ bool HasMaterializedAfterText(const BinlogEvent& event) {
   // tests/callers. Parsed FULL row images always set text_state explicitly,
   // which is what distinguishes a real empty value from an absent column.
   return event.text_state != TextValueState::kAbsent || !event.text.empty();
+}
+
+/// Drop a document's postings. A store restored from a dump written without
+/// text knows no text for it, so every posting list is searched instead.
+void RemoveFromIndex(index::Index& index, storage::DocId doc_id, const std::optional<std::string>& stored_text) {
+  if (stored_text.has_value()) {
+    index.RemoveDocument(doc_id, *stored_text);
+  } else {
+    index.PurgeDocument(doc_id);
+  }
+}
+
+/// Invalidate the cache entries the old text could have produced; without the
+/// old text they cannot be told apart, so the table's cache is cleared.
+void InvalidateCache(cache::CacheManager* cache_manager, const std::string& table_name,
+                     const std::optional<std::string>& old_text, const std::string& new_text,
+                     bool filter_columns_changed = false) {
+  if (cache_manager == nullptr) {
+    return;
+  }
+  if (old_text.has_value()) {
+    cache_manager->Invalidate(table_name, *old_text, new_text, filter_columns_changed);
+  } else {
+    cache_manager->ClearTable(table_name);
+  }
 }
 
 }  // namespace
@@ -133,13 +161,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
         // The store is the exact materialized text currently represented by
         // postings; it is safer than inferring availability from empty strings.
-        const std::string old_normalized = doc_store.GetNormalizedText(doc_id).value_or(std::string{});
-        if (!old_normalized.empty()) {
-          index.RemoveDocument(doc_id, old_normalized);
-
-          if (bm25_stats != nullptr) {
-            bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(old_normalized));
-          }
+        const std::optional<std::string> old_normalized = doc_store.GetNormalizedText(doc_id);
+        RemoveFromIndex(index, doc_id, old_normalized);
+        if (bm25_stats != nullptr && old_normalized.has_value()) {
+          bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(*old_normalized));
         }
 
         if (!doc_store.RemoveDocument(doc_id)) {
@@ -160,9 +185,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         if (stats != nullptr) {
           stats->IncrementReplUpdateRemoved();
         }
-        if (cache_manager != nullptr) {
-          cache_manager->Invalidate(event.table_name, old_normalized, "");
-        }
+        InvalidateCache(cache_manager, event.table_name, old_normalized, "");
 
       } else if (!exists && matches_required) {
         // Transitioned into required conditions -> INSERT into index
@@ -203,7 +226,8 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
       } else if (exists && matches_required) {
         // Still matches conditions -> UPDATE
         storage::DocId doc_id = doc_id_opt.value();
-        const std::string old_normalized = doc_store.GetNormalizedText(doc_id).value_or(std::string{});
+        const std::optional<std::string> stored_normalized = doc_store.GetNormalizedText(doc_id);
+        const std::string old_normalized = stored_normalized.value_or(std::string{});
         std::string new_normalized = old_normalized;
 
         // Save old filters to detect filter changes for cache invalidation
@@ -245,7 +269,16 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         if (HasMaterializedAfterText(event)) {
           new_normalized = index.NormalizeText(event.text);
           doc_store.SetOriginalText(doc_id, event.text);
-          if (old_normalized != new_normalized) {
+          if (!stored_normalized.has_value()) {
+            // Postings of a text the store never knew cannot be diffed, so they are dropped first.
+            index.PurgeDocument(doc_id);
+            index.AddDocument(doc_id, new_normalized);
+            doc_store.SetNormalizedText(doc_id, new_normalized);
+            if (bm25_stats != nullptr && !new_normalized.empty()) {
+              bm25_stats->AddDocument(mygram::utils::CountCodePoints(new_normalized));
+            }
+            text_changed = true;
+          } else if (old_normalized != new_normalized) {
             index.UpdateDocument(doc_id, old_normalized, new_normalized);
             doc_store.SetNormalizedText(doc_id, new_normalized);
             if (bm25_stats != nullptr) {
@@ -269,10 +302,8 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         if (stats != nullptr) {
           stats->IncrementReplUpdateModified();
         }
-        if (cache_manager != nullptr) {
-          bool filter_changed = (old_filters != event.filters);
-          cache_manager->Invalidate(event.table_name, old_normalized, new_normalized, filter_changed);
-        }
+        InvalidateCache(cache_manager, event.table_name, stored_normalized, new_normalized,
+                        old_filters != event.filters);
 
       } else {
         // !exists && !matches_required -> do nothing
@@ -292,14 +323,10 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
       if (exists) {
         // Remove document from index
         storage::DocId doc_id = doc_id_opt.value();
-        const std::string old_normalized = doc_store.GetNormalizedText(doc_id).value_or(std::string{});
-
-        if (!old_normalized.empty()) {
-          index.RemoveDocument(doc_id, old_normalized);
-
-          if (bm25_stats != nullptr) {
-            bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(old_normalized));
-          }
+        const std::optional<std::string> old_normalized = doc_store.GetNormalizedText(doc_id);
+        RemoveFromIndex(index, doc_id, old_normalized);
+        if (bm25_stats != nullptr && old_normalized.has_value()) {
+          bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(*old_normalized));
         }
 
         // Remove from document store
@@ -321,9 +348,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         if (stats != nullptr) {
           stats->IncrementReplDeleteApplied();
         }
-        if (cache_manager != nullptr) {
-          cache_manager->Invalidate(event.table_name, old_normalized, "");
-        }
+        InvalidateCache(cache_manager, event.table_name, old_normalized, "");
       } else {
         // Not in index, nothing to do
         mygram::utils::StructuredLog()

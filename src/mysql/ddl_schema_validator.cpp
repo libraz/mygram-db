@@ -141,9 +141,9 @@ bool IsFilterTypeCompatible(const std::string& configured_type, const std::strin
     return actual == "tinyint" && !actual_unsigned && lower.find("tinyint(1)") == 0;
   }
   if (configured_type == "string" || configured_type == "varchar" || configured_type == "text") {
+    // Binary string types never reach here: ValidateConfiguredColumnEncoding refuses them first.
     static const std::unordered_set<std::string> kStringTypes = {
-        "char",   "varchar",   "tinytext", "text", "mediumtext", "longtext",
-        "binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob",
+        "char", "varchar", "tinytext", "text", "mediumtext", "longtext",
     };
     return kStringTypes.find(actual) != kStringTypes.end();
   }

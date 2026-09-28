@@ -242,6 +242,71 @@ std::string FormatUUID(const unsigned char* bytes) {
   return std::string(buf, 36);
 }
 
+/**
+ * @brief How MySQL lays out one column's entry in the TABLE_MAP metadata block.
+ */
+enum class TableMapMetadataLayout : uint8_t {
+  kNone,                 ///< No bytes.
+  kOneByte,              ///< One byte.
+  kTwoByteLittleEndian,  ///< Two bytes, first byte least significant.
+  kTwoByteHighFirst,     ///< Two independent bytes, first one stored as the high half.
+};
+
+/**
+ * @brief Metadata layout for a column type, as MySQL's table_def reads what
+ *        Field::do_save_field_metadata wrote.
+ *
+ * @param type Column type code from the TABLE_MAP event
+ * @return The layout, or std::nullopt for a code outside ColumnType
+ */
+std::optional<TableMapMetadataLayout> TableMapMetadataLayoutFor(ColumnType type) {
+  switch (type) {
+    case ColumnType::TINY:
+    case ColumnType::SHORT:
+    case ColumnType::LONG:
+    case ColumnType::LONGLONG:
+    case ColumnType::INT24:
+    case ColumnType::DATE:
+    case ColumnType::DATETIME:
+    case ColumnType::TIMESTAMP:
+    case ColumnType::TIME:
+    case ColumnType::YEAR:
+    case ColumnType::NEWDATE:
+      return TableMapMetadataLayout::kNone;
+
+    // Length-prefix width for the BLOB family (JSON and GEOMETRY are stored as
+    // BLOBs), pack length for FLOAT/DOUBLE, fractional precision for the rest.
+    case ColumnType::TINY_BLOB:
+    case ColumnType::MEDIUM_BLOB:
+    case ColumnType::LONG_BLOB:
+    case ColumnType::BLOB:
+    case ColumnType::VECTOR:
+    case ColumnType::JSON:
+    case ColumnType::GEOMETRY:
+    case ColumnType::FLOAT:
+    case ColumnType::DOUBLE:
+    case ColumnType::TIMESTAMP2:
+    case ColumnType::DATETIME2:
+    case ColumnType::TIME2:
+      return TableMapMetadataLayout::kOneByte;
+
+    // VARCHAR: maximum byte length. BIT: bits in the partial byte, then whole bytes.
+    case ColumnType::VARCHAR:
+    case ColumnType::BIT:
+      return TableMapMetadataLayout::kTwoByteLittleEndian;
+
+    // STRING: real_type then length; ENUM/SET columns arrive as STRING with
+    // real_type 0xF7/0xF8 and the pack length. NEWDECIMAL: precision then scale.
+    case ColumnType::STRING:
+    case ColumnType::VAR_STRING:
+    case ColumnType::ENUM:
+    case ColumnType::SET:
+    case ColumnType::NEWDECIMAL:
+      return TableMapMetadataLayout::kTwoByteHighFirst;
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 std::optional<QueryEventData> ExtractQueryEventData(const unsigned char* buffer, unsigned long length);
@@ -1001,112 +1066,67 @@ std::optional<TableMetadata> BinlogEventParser::ParseTableMapEvent(const unsigne
     const unsigned char* metadata_start = ptr;
     const unsigned char* metadata_end = metadata_start + metadata_len;
 
-    // Parse type-specific metadata for each column
-    for (uint64_t i = 0; i < column_count && ptr < metadata_end; i++) {
+    // Every column's entry must be read at its own width: a type that cannot
+    // be sized, or a block that does not add up, would shift every later
+    // column's metadata, so either fails the event.
+    for (uint64_t i = 0; i < column_count; i++) {
       ColumnType type = metadata.columns[i].type;
+      auto layout = TableMapMetadataLayoutFor(type);
+      if (!layout) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_parse_error")
+            .Field("function", "ParseTableMapEvent")
+            .Field("reason", "unknown_column_type")
+            .Field("column_index", i)
+            .Field("column_type", static_cast<int64_t>(type))
+            .Error();
+        return {};
+      }
 
-      switch (type) {
-        case ColumnType::VARCHAR:
-        case ColumnType::VAR_STRING:
-          // 2 bytes: max length
-          if (ptr + 2 <= metadata_end) {
-            metadata.columns[i].metadata = binlog_util::uint2korr(ptr);
-            ptr += 2;
-          }
-          break;
+      size_t width = 0;
+      if (*layout == TableMapMetadataLayout::kOneByte) {
+        width = 1;
+      } else if (*layout != TableMapMetadataLayout::kNone) {
+        width = 2;
+      }
+      if (static_cast<size_t>(metadata_end - ptr) < width) {
+        mygram::utils::StructuredLog()
+            .Event("binlog_parse_error")
+            .Field("function", "ParseTableMapEvent")
+            .Field("reason", "truncated_column_metadata")
+            .Field("column_index", i)
+            .Field("column_type", static_cast<int64_t>(type))
+            .Error();
+        return {};
+      }
 
-        case ColumnType::BLOB:
-        case ColumnType::TINY_BLOB:
-        case ColumnType::MEDIUM_BLOB:
-        case ColumnType::LONG_BLOB:
-        case ColumnType::VECTOR:
-          // 1 byte: number of length bytes (1, 2, 3, or 4)
-          if (ptr + 1 <= metadata_end) {
-            metadata.columns[i].metadata = *ptr;
-            ptr += 1;
-          }
-          break;
-
-        case ColumnType::STRING:
-          // 2 bytes: (real_type << 8) | max_length
-          if (ptr + 2 <= metadata_end) {
-            metadata.columns[i].metadata = binlog_util::uint2korr(ptr);
-            ptr += 2;
-          }
-          break;
-
-        case ColumnType::FLOAT:
-        case ColumnType::DOUBLE:
-          // 1 byte: pack length
-          if (ptr + 1 <= metadata_end) {
-            metadata.columns[i].metadata = *ptr;
-            ptr += 1;
-          }
-          break;
-
-        case ColumnType::NEWDECIMAL:
-          // 2 bytes: (precision << 8) | scale
-          if (ptr + 2 <= metadata_end) {
-            metadata.columns[i].metadata = binlog_util::uint2korr(ptr);
-            ptr += 2;
-          }
-          break;
-
-        case ColumnType::BIT:
-          // 2 bytes: (bytes << 8) | bits
-          if (ptr + 2 <= metadata_end) {
-            metadata.columns[i].metadata = binlog_util::uint2korr(ptr);
-            ptr += 2;
-          }
-          break;
-
-        case ColumnType::TIMESTAMP2:
-        case ColumnType::DATETIME2:
-        case ColumnType::TIME2:
-          // 1 byte: fractional seconds precision (0-6)
-          if (ptr + 1 <= metadata_end) {
-            metadata.columns[i].metadata = *ptr;
-            ptr += 1;
-          }
-          break;
-
-        case ColumnType::ENUM:
-        case ColumnType::SET:
-          // 2 bytes: number of elements
-          if (ptr + 2 <= metadata_end) {
-            metadata.columns[i].metadata = binlog_util::uint2korr(ptr);
-            ptr += 2;
-          }
-          break;
-
-        // Types with no metadata
-        case ColumnType::TINY:
-        case ColumnType::SHORT:
-        case ColumnType::LONG:
-        case ColumnType::LONGLONG:
-        case ColumnType::INT24:
-        case ColumnType::DATE:
-        case ColumnType::DATETIME:
-        case ColumnType::TIMESTAMP:
-        case ColumnType::TIME:
-        case ColumnType::YEAR:
-          // No metadata for these types
+      switch (*layout) {
+        case TableMapMetadataLayout::kNone:
           metadata.columns[i].metadata = 0;
           break;
-
-        default:
-          // Unknown type - skip metadata
-          mygram::utils::StructuredLog()
-              .Event("mysql_binlog_warning")
-              .Field("type", "unknown_column_type")
-              .Field("column_type", static_cast<int64_t>(type))
-              .Warn();
+        case TableMapMetadataLayout::kOneByte:
+          metadata.columns[i].metadata = ptr[0];
+          break;
+        case TableMapMetadataLayout::kTwoByteLittleEndian:
+          metadata.columns[i].metadata = binlog_util::uint2korr(ptr);
+          break;
+        case TableMapMetadataLayout::kTwoByteHighFirst:
+          metadata.columns[i].metadata = static_cast<uint16_t>((ptr[0] << 8) | ptr[1]);
           break;
       }
+      ptr += width;
     }
 
-    // Skip to end of metadata block
-    ptr = metadata_start + metadata_len;
+    if (ptr != metadata_end) {
+      mygram::utils::StructuredLog()
+          .Event("binlog_parse_error")
+          .Field("function", "ParseTableMapEvent")
+          .Field("reason", "column_metadata_length_mismatch")
+          .Field("declared", metadata_len)
+          .Field("consumed", static_cast<uint64_t>(ptr - metadata_start))
+          .Error();
+      return {};
+    }
   }
 
   // Parse NULL bitmap. TABLE_MAP always carries one bit per column after the
@@ -1511,8 +1531,17 @@ bool MatchConfiguredTableInList(const std::string& statement_upper, size_t& pos,
   return false;
 }
 
-bool MatchAlterRenameTarget(const std::string& statement_upper, size_t pos, const std::string& event_db_upper,
-                            const std::string& target_db_upper, const std::string& table_upper) {
+/**
+ * @brief Find the new table name of an ALTER TABLE ... RENAME [TO|AS] clause.
+ *
+ * RENAME COLUMN/INDEX/KEY rename something inside the table and are skipped,
+ * as is anything inside a quoted literal or identifier.
+ *
+ * @param statement_upper Uppercased statement
+ * @param pos Position just past the altered table's reference
+ * @return Position of the new table name, or std::nullopt when no table rename is present
+ */
+std::optional<size_t> FindAlterTableRenameTarget(const std::string& statement_upper, size_t pos) {
   while (pos < statement_upper.size()) {
     const char chr = statement_upper[pos];
     if (chr == '\'' || chr == '"') {
@@ -1537,7 +1566,7 @@ bool MatchAlterRenameTarget(const std::string& statement_upper, size_t pos, cons
     if (chr == '`') {
       std::string ignored;
       if (!ReadSqlIdentifier(statement_upper, pos, ignored)) {
-        return false;
+        return std::nullopt;
       }
       continue;
     }
@@ -1556,16 +1585,30 @@ bool MatchAlterRenameTarget(const std::string& statement_upper, size_t pos, cons
     }
 
     size_t target_pos = pos;
-    if (!mygram::utils::SkipWhitespace(statement_upper, target_pos) ||
-        !mygram::utils::MatchKeyword(statement_upper, target_pos, "TO") ||
+    if (!mygram::utils::SkipWhitespace(statement_upper, target_pos)) {
+      continue;
+    }
+    size_t object_pos = target_pos;
+    if (mygram::utils::MatchKeyword(statement_upper, object_pos, "COLUMN") ||
+        mygram::utils::MatchKeyword(statement_upper, object_pos, "INDEX") ||
+        mygram::utils::MatchKeyword(statement_upper, object_pos, "KEY")) {
+      continue;
+    }
+    if ((mygram::utils::MatchKeyword(statement_upper, target_pos, "TO") ||
+         mygram::utils::MatchKeyword(statement_upper, target_pos, "AS")) &&
         !mygram::utils::SkipWhitespace(statement_upper, target_pos)) {
       continue;
     }
-    if (MatchConfiguredTableReference(statement_upper, target_pos, event_db_upper, target_db_upper, table_upper)) {
-      return true;
-    }
+    return target_pos;
   }
-  return false;
+  return std::nullopt;
+}
+
+bool MatchAlterRenameTarget(const std::string& statement_upper, size_t pos, const std::string& event_db_upper,
+                            const std::string& target_db_upper, const std::string& table_upper) {
+  auto target_pos = FindAlterTableRenameTarget(statement_upper, pos);
+  return target_pos.has_value() &&
+         MatchConfiguredTableReference(statement_upper, *target_pos, event_db_upper, target_db_upper, table_upper);
 }
 
 bool IsSingleStatementAffectingConfiguredTable(const std::string& query_upper, const std::string& event_db_upper,
@@ -1762,6 +1805,12 @@ DDLType ClassifySingleDDLStatement(const std::string& statement_upper) {
   if (mygram::utils::MatchKeyword(statement_upper, pos, "ALTER")) {
     if (mygram::utils::SkipWhitespace(statement_upper, pos) &&
         mygram::utils::MatchKeyword(statement_upper, pos, "TABLE")) {
+      // ALTER TABLE ... RENAME moves the table under another name in either
+      // direction, so it is the same event as RENAME TABLE.
+      if (mygram::utils::SkipWhitespace(statement_upper, pos) && SkipSqlTableReference(statement_upper, pos) &&
+          FindAlterTableRenameTarget(statement_upper, pos).has_value()) {
+        return DDLType::kRename;
+      }
       return DDLType::kAlter;
     }
   }
@@ -1800,6 +1849,24 @@ std::optional<MatchedConfiguredDDL> FindTableAffectingConfiguredDDL(const std::s
   }
 
   return std::nullopt;
+}
+
+DDLType BinlogEvent::ClassifyDDL(const std::string& query) {
+  std::string clean_query = mygram::utils::StripSQLComments(query);
+  clean_query = mygram::utils::NormalizeWhitespace(clean_query);
+  const std::string query_upper = ToUpperAscii(clean_query);
+
+  size_t start = 0;
+  while (start < query_upper.size()) {
+    size_t end = query_upper.find(';', start);
+    const DDLType type = ClassifySingleDDLStatement(
+        (end == std::string::npos) ? query_upper.substr(start) : query_upper.substr(start, end - start));
+    if (type != DDLType::kUnknown || end == std::string::npos) {
+      return type;
+    }
+    start = end + 1;
+  }
+  return DDLType::kUnknown;
 }
 
 bool IsTableAffectingConfiguredDDL(const std::string& query, const std::string& event_database,

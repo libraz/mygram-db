@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 
+#include "binlog_event_builder.h"
 #include "binlog_test_fixtures.h"
 
 #ifdef USE_MYSQL
@@ -253,6 +254,45 @@ TEST_F(BinlogReaderFixture, TransientAndReplayableFailuresDoNotPublishTheUndecod
     EXPECT_FALSE(reader_->RejectUnsupportedRuntimeEvent(type));
     EXPECT_NE(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
   }
+}
+
+/**
+ * @brief Every GTID-carrying event that fails to decode reconnects instead of being skipped.
+ *
+ * Skipping one leaves the received position at the previous transaction, so
+ * the rows that follow would be attributed to it.
+ */
+TEST_F(BinlogReaderFixture, MalformedPositionEventsReconnectFromTheLastProcessedGtid) {
+  using test::BinlogEventBuilder;
+  const std::array<uint8_t, 16> uuid = {0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa,
+                                        0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa};
+  const std::vector<std::pair<const char*, std::vector<uint8_t>>> events = {
+      {"GTID_LOG_EVENT", BinlogEventBuilder::BuildGtidEvent(uuid, 7)},
+      {"MariaDB GTID_EVENT", BinlogEventBuilder::BuildMariaDBGtidEvent(0, 1, 7)},
+      {"MariaDB GTID_LIST_EVENT", BinlogEventBuilder::BuildMariaDBGtidListEvent({{0, 1, 7}})},
+  };
+
+  for (const auto& [name, intact] : events) {
+    SCOPED_TRACE(name);
+    const auto type = static_cast<MySQLBinlogEventType>(intact[4]);
+    EXPECT_EQ(reader_->ObservePositionEvent(type, intact.data(), intact.size()),
+              BinlogReader::PositionEventAction::kContinue);
+    const std::string received_before = reader_->position_state_.received_gtid();
+
+    auto truncated = intact;
+    truncated.resize(mygram::constants::kBinlogEventHeaderLen + 2);
+    BinlogEventBuilder::FixEventSize(truncated);
+    EXPECT_EQ(reader_->ObservePositionEvent(type, truncated.data(), truncated.size()),
+              BinlogReader::PositionEventAction::kReconnect);
+    EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLBinlogError) << reader_->GetLastError();
+    EXPECT_NE(reader_->GetLastError().find(std::string("Malformed ") + name), std::string::npos)
+        << reader_->GetLastError();
+    EXPECT_EQ(reader_->position_state_.received_gtid(), received_before);
+  }
+
+  const auto query = BinlogEventBuilder::BuildQueryEvent("db", "BEGIN");
+  EXPECT_EQ(reader_->ObservePositionEvent(MySQLBinlogEventType::QUERY_EVENT, query.data(), query.size()),
+            BinlogReader::PositionEventAction::kNotPositionEvent);
 }
 
 #endif  // USE_MYSQL

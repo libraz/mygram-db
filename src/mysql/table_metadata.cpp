@@ -76,7 +76,26 @@ std::vector<std::string> ParseEnumSetColumnValues(const std::string& column_type
         if (pos >= end) {
           return {};
         }
-        value.push_back(column_type[pos++]);
+        // The server escapes NUL, LF and CR in a declared label (and \Z for
+        // Ctrl-Z in some versions); any other escaped byte stands for itself.
+        const char escaped = column_type[pos++];
+        switch (escaped) {
+          case '0':
+            value.push_back('\0');
+            break;
+          case 'n':
+            value.push_back('\n');
+            break;
+          case 'r':
+            value.push_back('\r');
+            break;
+          case 'Z':
+            value.push_back('\032');
+            break;
+          default:
+            value.push_back(escaped);
+            break;
+        }
       } else if (chr == '\'') {
         if (pos < end && column_type[pos] == '\'') {
           value.push_back('\'');

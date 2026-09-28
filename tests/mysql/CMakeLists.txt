@@ -120,6 +120,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
     DISCOVERY_TIMEOUT 30
   )
 
+  # TABLE_MAP per-column metadata tests (wire-level, no MySQL connection required)
+  add_executable(table_map_metadata_test
+    table_map_metadata_test.cpp
+  )
+
+  target_link_libraries(table_map_metadata_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(table_map_metadata_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # JSON field decoder tests
   add_executable(rows_parser_json_decode_test
     rows_parser_json_decode_test.cpp

@@ -324,9 +324,7 @@ TEST(MySQLConnectionIntegrationTest, ExecuteStreamingDoesNotMaterializeRowsClien
 
   Connection connection(mygramdb::mysql::testing::GetMySQLTestConfig());
   auto connect_result = connection.Connect("streaming-result-test");
-  if (!connect_result) {
-    GTEST_SKIP() << "MySQL connection failed: " << connect_result.error().message();
-  }
+  ASSERT_TRUE(connect_result) << "MySQL connection failed: " << connect_result.error().message();
 
   auto result = connection.ExecuteStreaming("SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3");
   ASSERT_TRUE(result) << result.error().message();

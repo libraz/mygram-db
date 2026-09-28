@@ -149,6 +149,20 @@ TEST(DDLSchemaValidatorTest, RejectsBinaryTextAndFilterColumns) {
   auto filter_result = DDLSchemaValidator::ValidateMetadata(MakeConfig(), columns, true);
   ASSERT_FALSE(filter_result);
   EXPECT_NE(filter_result.error().message().find("uses binary type 'varbinary(64)'"), std::string::npos);
+
+  // No binary width is reachable by a string filter.
+  for (const std::string& binary_type : {"binary(16)", "varbinary(64)", "tinyblob", "blob", "mediumblob", "longblob"}) {
+    for (const char* filter_type : {"string", "varchar", "text"}) {
+      auto config = MakeConfig();
+      config.filters[0].type = filter_type;
+      columns = MakeColumns();
+      columns[3].column_type = binary_type;
+      columns[3].collation.clear();
+      auto result = DDLSchemaValidator::ValidateMetadata(config, columns, true);
+      ASSERT_FALSE(result) << binary_type << " / " << filter_type;
+      EXPECT_NE(result.error().message().find("uses binary type"), std::string::npos) << result.error().message();
+    }
+  }
 }
 
 TEST(DDLSchemaValidatorTest, RejectsNonUtf8ConfiguredTextCharsets) {

@@ -176,6 +176,28 @@ class BinlogEventBuilder {
   }
 
   /**
+   * @brief Build a QUERY_EVENT with no status variables.
+   *
+   * Post-header: [thread_id(4B)][exec_time(4B)][db_len(1B)][error_code(2B)][status_vars_len(2B)]
+   * Body: [database][0x00][query]
+   * Tail: [CRC32 checksum placeholder(4B)]
+   */
+  static inline std::vector<uint8_t> BuildQueryEvent(const std::string& database, const std::string& query) {
+    auto buf = BuildHeader(MySQLBinlogEventType::QUERY_EVENT);
+    AppendLittleEndian32(buf, 1);  // thread_id
+    AppendLittleEndian32(buf, 0);  // query_exec_time
+    buf.push_back(static_cast<uint8_t>(database.size()));
+    AppendLittleEndian16(buf, 0);  // error_code
+    AppendLittleEndian16(buf, 0);  // status_vars_len
+    buf.insert(buf.end(), database.begin(), database.end());
+    buf.push_back(0x00);
+    buf.insert(buf.end(), query.begin(), query.end());
+    AppendLittleEndian32(buf, 0);
+    FixEventSizeWithChecksum(buf);
+    return buf;
+  }
+
+  /**
    * @brief Build a V2 WRITE_ROWS_EVENT (type 30).
    *
    * Post-header: [table_id(6B)][flags(2B)][var_header_len(2B)][extra_data]
