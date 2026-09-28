@@ -134,4 +134,25 @@ std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs);
  */
 std::string GetPeerIP(int fd);
 
+/**
+ * @brief Canonicalize a peer address string to the one form both the TCP and
+ * HTTP surfaces must agree on for ACL matching and rate-limit accounting.
+ *
+ * GetPeerIP() (TCP) and cpp-httplib's getnameinfo()-derived remote_addr
+ * (HTTP) can render the same peer differently: an IPv6 link-local address
+ * can carry a zone/scope suffix ("fe80::1%eth0") that CIDR::Contains's
+ * inet_pton rejects outright, and a dual-stack listener's IPv4 client can be
+ * rendered as IPv4-mapped IPv6 ("::ffff:1.2.3.4") on one surface and plain
+ * IPv4 on the other. Left unnormalized, the two surfaces disagree on ACL
+ * admission for the same peer and split its rate-limit accounting across two
+ * buckets. This strips a scope suffix, maps IPv4-mapped IPv6 to dotted IPv4,
+ * and lowercases the result so an uppercase-rendered IPv6 literal matches a
+ * lowercase one used as a map key elsewhere.
+ *
+ * @param ip_str Peer address as rendered by either surface.
+ * @return The canonical form; unrecognized input is returned lowercased and
+ * scope-stripped, unchanged otherwise.
+ */
+std::string NormalizePeerAddress(const std::string& ip_str);
+
 }  // namespace mygramdb::utils

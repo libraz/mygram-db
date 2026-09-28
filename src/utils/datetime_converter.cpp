@@ -64,6 +64,14 @@ constexpr int kMinDay = 1;      // Minimum day value
 constexpr int kMaxDay = 31;     // Maximum day value
 constexpr int kMaxSecond = 59;  // Maximum second value (same as kMaxMinute)
 
+// MySQL fractional-seconds precision (FSP) bounds: "." followed by 1-6
+// digits. The digits themselves are parsed but not carried into the
+// returned whole-second value; this only bounds and validates the syntax so
+// trailing garbage (a 'Z' marker, a numeric offset, or stray text) is
+// rejected instead of silently ignored.
+constexpr size_t kMinFractionalDigits = 1;
+constexpr size_t kMaxFractionalDigits = 6;
+
 // Leap year calculation constants
 constexpr int kLeapYearDivisor4 = 4;      // Divisible by 4
 constexpr int kLeapYearDivisor100 = 100;  // Not divisible by 100 (unless 400)
@@ -246,7 +254,8 @@ Expected<int64_t, Error> DateTimeProcessor::TimeToSeconds(std::string_view time_
   // Parse seconds
   pos = minute_end + 1;
   size_t second_end = time_str.find('.', pos);
-  if (second_end == std::string_view::npos) {
+  const bool has_fraction = second_end != std::string_view::npos;
+  if (!has_fraction) {
     second_end = time_str.length();
   }
   if (second_end != pos + 2) {
@@ -262,6 +271,23 @@ Expected<int64_t, Error> DateTimeProcessor::TimeToSeconds(std::string_view time_
   }
   if (seconds > kMaxMinute) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Seconds must be 0-59"));
+  }
+
+  // Optional fractional seconds: '.' followed by 1-6 digits and nothing
+  // else. The digits are parsed but not carried into the returned
+  // whole-second value; this only rejects trailing garbage after them
+  // instead of silently ignoring it.
+  if (has_fraction) {
+    const size_t frac_start = second_end + 1;
+    const size_t frac_len = time_str.length() - frac_start;
+    if (frac_len < kMinFractionalDigits || frac_len > kMaxFractionalDigits) {
+      return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid fractional seconds"));
+    }
+    for (size_t i = frac_start; i < time_str.length(); ++i) {
+      if (time_str[i] < '0' || time_str[i] > '9') {
+        return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid fractional second digit"));
+      }
+    }
   }
 
   // Calculate total seconds
@@ -417,6 +443,25 @@ std::optional<int64_t> ConvertToEpoch(std::string_view datetime_str, int32_t tim
         return std::nullopt;
       }
       second = second * kDecimalBase + (datetime_str[i] - '0');
+    }
+
+    // Optional fractional seconds: '.' followed by 1-6 digits. Anything else
+    // trailing the 19-character prefix -- a UTC 'Z' marker, a numeric
+    // offset, or stray text -- must be rejected rather than silently
+    // dropped.
+    if (datetime_str.size() > kDateTimeMinLength) {
+      if (datetime_str[kDateTimeMinLength] != '.') {
+        return std::nullopt;
+      }
+      const size_t frac_len = datetime_str.size() - kDateTimeMinLength - 1;
+      if (frac_len < kMinFractionalDigits || frac_len > kMaxFractionalDigits) {
+        return std::nullopt;
+      }
+      for (size_t i = kDateTimeMinLength + 1; i < datetime_str.size(); ++i) {
+        if (datetime_str[i] < '0' || datetime_str[i] > '9') {
+          return std::nullopt;
+        }
+      }
     }
   }
 

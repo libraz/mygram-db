@@ -297,4 +297,60 @@ TEST(NetworkUtilsTest, GetPeerIP_UnixSocketReturnsStableRateLimitKey) {
   ::close(fds[1]);
 }
 
+// NormalizePeerAddress: TCP (GetPeerIP) and HTTP (cpp-httplib's remote_addr)
+// must derive the same string for the same peer, or they disagree on ACL
+// admission and split rate-limit accounting for one client across two
+// buckets.
+TEST(NetworkUtilsTest, NormalizePeerAddress_StripsIPv6ScopeSuffix) {
+  EXPECT_EQ(NormalizePeerAddress("fe80::1%eth0"), "fe80::1");
+  EXPECT_EQ(NormalizePeerAddress("fe80::abcd%25"), "fe80::abcd");
+}
+
+TEST(NetworkUtilsTest, NormalizePeerAddress_LowercasesHexDigits) {
+  EXPECT_EQ(NormalizePeerAddress("FE80::1"), "fe80::1");
+  EXPECT_EQ(NormalizePeerAddress("2001:DB8::ABCD"), "2001:db8::abcd");
+}
+
+TEST(NetworkUtilsTest, NormalizePeerAddress_MapsIPv4MappedIPv6ToPlainIPv4) {
+  EXPECT_EQ(NormalizePeerAddress("::ffff:127.0.0.1"), "127.0.0.1");
+  EXPECT_EQ(NormalizePeerAddress("::FFFF:192.168.1.1"), "192.168.1.1");
+}
+
+TEST(NetworkUtilsTest, NormalizePeerAddress_PlainAddressesAreUnaffected) {
+  EXPECT_EQ(NormalizePeerAddress("127.0.0.1"), "127.0.0.1");
+  EXPECT_EQ(NormalizePeerAddress("192.168.1.1"), "192.168.1.1");
+  EXPECT_EQ(NormalizePeerAddress("::1"), "::1");
+  EXPECT_EQ(NormalizePeerAddress("unknown"), "unknown");
+  EXPECT_EQ(NormalizePeerAddress("unix"), "unix");
+}
+
+TEST(NetworkUtilsTest, NormalizePeerAddress_MakesHttpAndTcpRenderingsOfTheSamePeerAgree) {
+  // A link-local IPv6 peer with a zone id, as httplib's getnameinfo() would
+  // render it, must normalize to the same string GetPeerIP would derive
+  // (which never carries a scope suffix in the first place).
+  EXPECT_EQ(NormalizePeerAddress("FE80::1%en0"), NormalizePeerAddress("fe80::1"));
+  // An IPv4 client on a dual-stack listener, rendered as IPv4-mapped IPv6 on
+  // one surface and plain IPv4 on the other, must normalize to one form.
+  EXPECT_EQ(NormalizePeerAddress("::ffff:10.0.0.5"), NormalizePeerAddress("10.0.0.5"));
+}
+
+// Without normalization, a scoped and an unscoped rendering of the same
+// peer are different strings -- which is exactly what would split one
+// client's rate-limit accounting across two buckets depending on which
+// surface (TCP or HTTP) it connected through. glibc's inet_pton rejects the
+// scope suffix outright, so CIDR::Contains fails closed there too; some
+// libc implementations are more lenient about the CIDR check specifically,
+// but the plain-string rate-limit/logging key is never routed through
+// inet_pton, so it needs this normalization on every platform.
+TEST(NetworkUtilsTest, UnnormalizedScopedAndUnscopedRenderingsOfTheSamePeerAreDifferentStrings) {
+  EXPECT_NE(std::string("fe80::1%eth0"), std::string("fe80::1"));
+}
+
+TEST(NetworkUtilsTest, NormalizedScopedLinkLocalAddressPassesTheSameAclAsUnscoped) {
+  const std::vector<std::string> cidrs = {"fe80::/10"};
+  EXPECT_TRUE(IsIPAllowed(NormalizePeerAddress("fe80::1%eth0"), cidrs));
+  EXPECT_TRUE(IsIPAllowed(NormalizePeerAddress("fe80::1"), cidrs));
+  EXPECT_EQ(NormalizePeerAddress("fe80::1%eth0"), NormalizePeerAddress("fe80::1"));
+}
+
 }  // namespace mygramdb::utils

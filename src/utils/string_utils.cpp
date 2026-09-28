@@ -422,22 +422,6 @@ std::vector<std::string> GenerateNgrams(std::string_view text, int n) {
   return ngrams;
 }
 
-namespace {
-
-/**
- * @brief Check if codepoint is CJK Ideograph (Kanji only, excluding Hiragana/Katakana)
- *
- * CJK Unified Ideographs ranges:
- * - 4E00-9FFF: Common and uncommon Kanji
- * - 3400-4DBF: Extension A
- * - 20000-2A6DF: Extension B
- * - 2A700-2B73F: Extension C
- * - 2B740-2B81F: Extension D
- * - F900-FAFF: Compatibility Ideographs
- *
- * Note: Hiragana (3040-309F) and Katakana (30A0-30FF) are intentionally excluded.
- * They will be processed with ascii_ngram_size instead of kanji_ngram_size.
- */
 bool IsCJKIdeograph(uint32_t codepoint) {
   return (codepoint >= kCjkMainStart && codepoint <= kCjkMainEnd) ||    // Main block
          (codepoint >= kCjkExtAStart && codepoint <= kCjkExtAEnd) ||    // Extension A
@@ -446,8 +430,6 @@ bool IsCJKIdeograph(uint32_t codepoint) {
          (codepoint >= kCjkExtDStart && codepoint <= kCjkExtDEnd) ||    // Extension D
          (codepoint >= kCjkCompatStart && codepoint <= kCjkCompatEnd);  // Compatibility
 }
-
-}  // namespace
 
 std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_ngram_size, int kanji_ngram_size,
                                               bool cross_boundary_ngrams) {

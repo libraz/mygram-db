@@ -72,7 +72,11 @@ Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string
                                                                        : std::filesystem::weakly_canonical(filepath);
 
     auto rel = resolved.lexically_relative(base_canonical);
-    if (rel.empty() || *rel.begin() == std::filesystem::path("..")) {
+    // rel == "." means resolved is base_dir itself (e.g. input "."): not a
+    // descendant, so a caller that appends a suffix like ".tmp" for its
+    // in-progress write would create that temp file as a *sibling* of
+    // base_dir, outside the sandbox this function promises.
+    if (rel.empty() || rel == std::filesystem::path(".") || *rel.begin() == std::filesystem::path("..")) {
       return MakeUnexpected(MakeError(
           ErrorCode::kInvalidArgument,
           "Invalid filepath: path must be within " + std::string(base_dir_label) + " (" + std::string(base_dir) + ")"));

@@ -82,6 +82,22 @@ std::vector<std::string> GenerateHybridNgrams(std::string_view text, int ascii_n
                                               bool cross_boundary_ngrams = true);
 
 /**
+ * @brief Check if codepoint is CJK Ideograph (Kanji only, excluding Hiragana/Katakana)
+ *
+ * CJK Unified Ideographs ranges: 4E00-9FFF (Main), 3400-4DBF (Extension A),
+ * 20000-2A6DF (Extension B), 2A700-2B73F (Extension C), 2B740-2B81F
+ * (Extension D), F900-FAFF (Compatibility Ideographs).
+ *
+ * Note: Hiragana (3040-309F) and Katakana (30A0-30FF) are intentionally
+ * excluded; they are processed with ascii_ngram_size instead of
+ * kanji_ngram_size. This is the classifier GenerateHybridNgrams itself uses
+ * at index time; any query-time guard reasoning about the same term's
+ * n-gram coverage must call this rather than keep its own copy of these
+ * ranges, or the two can drift apart.
+ */
+bool IsCJKIdeograph(uint32_t codepoint);
+
+/**
  * @brief Convert UTF-8 string to codepoint vector
  *
  * @param text UTF-8 encoded string

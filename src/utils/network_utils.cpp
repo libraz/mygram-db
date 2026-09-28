@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstring>
 #include <iterator>
@@ -210,6 +211,22 @@ std::vector<CIDR> ParseAllowCidrs(const std::vector<std::string>& allow_cidrs) {
   return parsed;
 }
 
+std::string NormalizePeerAddress(const std::string& ip_str) {
+  std::string address = ip_str;
+  const auto scope_pos = address.find('%');
+  if (scope_pos != std::string::npos) {
+    address.erase(scope_pos);
+  }
+  std::transform(address.begin(), address.end(), address.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+  struct in6_addr ipv6_addr = {};
+  if (inet_pton(AF_INET6, address.c_str(), &ipv6_addr) == 1 && IsIpv4Mapped(ipv6_addr)) {
+    return IPv4ToString(MappedIpv4HostOrder(ipv6_addr));
+  }
+  return address;
+}
+
 std::string GetPeerIP(int fd) {
   struct sockaddr_storage addr_storage {};
   socklen_t addr_len = sizeof(addr_storage);
@@ -223,7 +240,7 @@ std::string GetPeerIP(int fd) {
     // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     char ip_buffer[INET_ADDRSTRLEN] = {};
     if (inet_ntop(AF_INET, &addr_in->sin_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
-      return {ip_buffer};
+      return NormalizePeerAddress(ip_buffer);
     }
     // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   } else if (addr_storage.ss_family == AF_INET6) {
@@ -232,7 +249,7 @@ std::string GetPeerIP(int fd) {
     // NOLINTBEGIN(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
     char ip_buffer[INET6_ADDRSTRLEN] = {};
     if (inet_ntop(AF_INET6, &addr_in6->sin6_addr, ip_buffer, sizeof(ip_buffer)) != nullptr) {
-      return {ip_buffer};
+      return NormalizePeerAddress(ip_buffer);
     }
     // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
   } else if (addr_storage.ss_family == AF_UNIX) {

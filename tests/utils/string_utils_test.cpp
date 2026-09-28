@@ -423,6 +423,37 @@ TEST(StringUtilsTest, EmojiNormalization) {
  *
  * For ASCII-only text with ascii_ngram_size=2, should generate bigrams
  */
+// IsCJKIdeograph is the classifier GenerateHybridNgrams uses at index time
+// to pick ascii_ngram_size vs kanji_ngram_size; any query-time guard
+// reasoning about the same term's coverage (search_pipeline.cpp's
+// HasUncoveredHybridFragment) must call this exact function rather than
+// keep its own copy of these ranges, or the two can drift apart.
+TEST(StringUtilsTest, IsCJKIdeographCoversDocumentedRanges) {
+  EXPECT_TRUE(IsCJKIdeograph(0x4E00));   // Main block start
+  EXPECT_TRUE(IsCJKIdeograph(0x9FFF));   // Main block end
+  EXPECT_TRUE(IsCJKIdeograph(0x3400));   // Extension A start
+  EXPECT_TRUE(IsCJKIdeograph(0x4DBF));   // Extension A end
+  EXPECT_TRUE(IsCJKIdeograph(0x20000));  // Extension B start
+  EXPECT_TRUE(IsCJKIdeograph(0x2A6DF));  // Extension B end
+  EXPECT_TRUE(IsCJKIdeograph(0x2A700));  // Extension C start
+  EXPECT_TRUE(IsCJKIdeograph(0x2B73F));  // Extension C end
+  EXPECT_TRUE(IsCJKIdeograph(0x2B740));  // Extension D start
+  EXPECT_TRUE(IsCJKIdeograph(0x2B81F));  // Extension D end
+  EXPECT_TRUE(IsCJKIdeograph(0xF900));   // Compatibility start
+  EXPECT_TRUE(IsCJKIdeograph(0xFAFF));   // Compatibility end
+}
+
+TEST(StringUtilsTest, IsCJKIdeographExcludesExtensionEAndFAndKana) {
+  // Extension E/F (2B820-2CEAF) is intentionally not covered: including it
+  // here without GenerateHybridNgrams also treating it as CJK is exactly
+  // the drift this function exists to prevent.
+  EXPECT_FALSE(IsCJKIdeograph(0x2B820));
+  EXPECT_FALSE(IsCJKIdeograph(0x2CEAF));
+  // Hiragana/Katakana are excluded by design; they use ascii_ngram_size.
+  EXPECT_FALSE(IsCJKIdeograph(0x3040));
+  EXPECT_FALSE(IsCJKIdeograph(0x30FF));
+}
+
 TEST(StringUtilsTest, GenerateHybridNgramsASCIIOnly) {
   // ascii_ngram_size=2, kanji_ngram_size=1
   auto ngrams = GenerateHybridNgrams("hello", 2, 1);

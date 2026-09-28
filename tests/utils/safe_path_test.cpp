@@ -73,6 +73,24 @@ TEST_F(SafePathTest, RejectsParentTraversal) {
   EXPECT_NE(result.error().message().find("must be within base directory"), std::string::npos);
 }
 
+// "." resolves to base_dir itself, not a descendant of it: lexically_relative
+// yields "." rather than an empty path or a ".." prefix, so it needs its own
+// check. A caller that appends a suffix like ".tmp" for its in-progress
+// write would otherwise create that temp file as a sibling of base_dir,
+// outside the sandbox this function promises.
+TEST_F(SafePathTest, RejectsBaseDirItself) {
+  auto result = mygram::utils::ResolveSafePath(".", base_dir_.string());
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("must be within base directory"), std::string::npos);
+}
+
+// An absolute path equal to base_dir itself is rejected the same way.
+TEST_F(SafePathTest, RejectsAbsolutePathEqualToBaseDirItself) {
+  auto result = mygram::utils::ResolveSafePath(base_dir_.string(), base_dir_.string());
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("must be within base directory"), std::string::npos);
+}
+
 // Absolute path outside base_dir is rejected.
 TEST_F(SafePathTest, RejectsAbsolutePathOutsideBaseDir) {
   auto result = mygram::utils::ResolveSafePath("/etc/passwd", base_dir_.string());

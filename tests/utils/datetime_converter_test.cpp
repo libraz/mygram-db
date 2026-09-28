@@ -351,4 +351,51 @@ TEST(ConvertToEpochBugFixTest, FractionalEpochTimestampTruncatesToSeconds) {
   EXPECT_EQ(*processor_epoch, 1704153600);
 }
 
+// ConvertToEpoch's 19-character prefix check only enforced a minimum
+// length; anything past it -- a UTC 'Z' marker, a numeric offset, or stray
+// text -- was silently ignored instead of rejected.
+TEST(ConvertToEpochBugFixTest, AcceptsOneToSixFractionalDigitsAndStillTruncates) {
+  for (std::string_view suffix : {".1", ".12", ".123", ".1234", ".12345", ".123456"}) {
+    auto epoch = ConvertToEpoch(std::string("2024-01-02 03:04:05") + std::string(suffix), 0);
+    ASSERT_TRUE(epoch.has_value()) << "suffix: " << suffix;
+    EXPECT_EQ(*epoch, ConvertToEpoch("2024-01-02 03:04:05", 0)) << "suffix: " << suffix;
+  }
+}
+
+TEST(ConvertToEpochBugFixTest, RejectsTrailingContentPastTheFractionalSeconds) {
+  for (std::string_view value : {
+           "2024-01-02 03:04:05Z",         // UTC marker
+           "2024-01-02 03:04:05+09:00",    // numeric offset
+           "2024-01-02 03:04:05junk",      // stray text
+           "2024-01-02 03:04:05.",         // dot with no digits
+           "2024-01-02 03:04:05.1234567",  // 7 fractional digits, MySQL FSP caps at 6
+           "2024-01-02 03:04:05.12a",      // non-digit inside the fraction
+       }) {
+    EXPECT_FALSE(ConvertToEpoch(value, 0).has_value()) << "value: " << value;
+  }
+}
+
+// TimeToSeconds has the same "microseconds ignored" comment as ConvertToEpoch
+// and the same gap: nothing validated what followed the first '.'.
+TEST(DateTimeProcessorTest, TimeToSecondsAcceptsOneToSixFractionalDigitsAndStillTruncates) {
+  DateTimeProcessor processor(TimezoneOffset::Parse("+00:00").value());
+  for (std::string_view suffix : {".1", ".12", ".123", ".1234", ".12345", ".123456"}) {
+    auto result = processor.TimeToSeconds(std::string("10:30:00") + std::string(suffix));
+    ASSERT_TRUE(result.has_value()) << "suffix: " << suffix;
+    EXPECT_EQ(*result, 10 * 3600 + 30 * 60) << "suffix: " << suffix;
+  }
+}
+
+TEST(DateTimeProcessorTest, TimeToSecondsRejectsTrailingContentPastTheFractionalSeconds) {
+  DateTimeProcessor processor(TimezoneOffset::Parse("+00:00").value());
+  for (std::string_view value : {
+           "10:30:00.",         // dot with no digits
+           "10:30:00.1234567",  // 7 fractional digits, MySQL FSP caps at 6
+           "10:30:00.12a",      // non-digit inside the fraction
+           "10:30:00.1.2",      // a second dot
+       }) {
+    EXPECT_FALSE(processor.TimeToSeconds(value).has_value()) << "value: " << value;
+  }
+}
+
 }  // namespace mygramdb::utils
