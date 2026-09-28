@@ -272,7 +272,8 @@ TEST(InitialLoadSelectQueryTest, TimestampFilterBecomesAnEpochExpression) {
   ASSERT_FALSE(query.empty());
   auto expected_epoch = mygram::utils::ParseDatetimeValue("2026-01-01 00:30:00", "+00:00");
   ASSERT_TRUE(expected_epoch.has_value());
-  EXPECT_NE(query.find("UNIX_TIMESTAMP(`published_at`) <= " + std::to_string(*expected_epoch)), std::string::npos)
+  EXPECT_NE(query.find("FLOOR(UNIX_TIMESTAMP(`published_at`)) <= " + std::to_string(*expected_epoch)),
+            std::string::npos)
       << query;
 
   auto unparseable = BaseTableConfig();

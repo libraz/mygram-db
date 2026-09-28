@@ -99,19 +99,22 @@ class RequiredFilterPredicate {
   struct DoublePrecision {
     double value;
   };
-  /// Compared as an instant, written back as the wall clock it was read as.
+  /// Compared as a whole-second wall clock instant, against the column
+  /// truncated to whole seconds so a fractional-second value compares the
+  /// same instant the binlog decode keeps.
   struct WallClock {
     int64_t epoch_seconds;
     std::string literal;
   };
-  /// Compared as UTC epoch seconds against UNIX_TIMESTAMP() of the column.
+  /// Compared as UTC epoch seconds against FLOOR(UNIX_TIMESTAMP()) of the
+  /// column, so a fractional-second value truncates the same way the binlog
+  /// decode does.
   struct UtcEpoch {
     int64_t epoch_seconds;
   };
-  /// Compared as seconds since midnight, written back as a TIME literal.
+  /// Compared as seconds since midnight, against TIME_TO_SEC() of the column.
   struct Clock {
     int64_t seconds;
-    std::string literal;
   };
   /// Compared as MySQL's 1/0 spelling of a TINYINT(1).
   struct Boolean {

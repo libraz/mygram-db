@@ -140,13 +140,21 @@ struct RequiredFilterPredicate::SqlRenderer {
     return Compare(column, mygramdb::utils::FormatMySQLDoubleLiteral(target.value));
   }
   std::string operator()(const WallClock& target) const {
-    return Compare(column, mygramdb::utils::EncodeMySQLStringLiteral(target.literal));
+    // DATE_FORMAT's %s drops any fractional seconds the column holds, so this
+    // compares the same whole-second instant Matches() compares against a
+    // value decoded from the same row.
+    return Compare("DATE_FORMAT(" + column + ", '%Y-%m-%d %H:%i:%s')",
+                   mygramdb::utils::EncodeMySQLStringLiteral(target.literal));
   }
   std::string operator()(const UtcEpoch& target) const {
-    return Compare("UNIX_TIMESTAMP(" + column + ")", std::to_string(target.epoch_seconds));
+    // UNIX_TIMESTAMP() keeps a TIMESTAMP column's fractional seconds; FLOOR()
+    // drops them the same way ConvertToEpoch does when decoding the column.
+    return Compare("FLOOR(UNIX_TIMESTAMP(" + column + "))", std::to_string(target.epoch_seconds));
   }
   std::string operator()(const Clock& target) const {
-    return Compare(column, mygramdb::utils::EncodeMySQLStringLiteral(target.literal));
+    // TIME_TO_SEC() truncates a TIME column's fractional seconds toward zero,
+    // matching TimeToSeconds's sign-magnitude truncation of the decoded value.
+    return Compare("TIME_TO_SEC(" + column + ")", std::to_string(target.seconds));
   }
   std::string operator()(const Boolean& target) const { return Compare(column, target.value ? "1" : "0"); }
 };
@@ -320,13 +328,12 @@ Expected<RequiredFilterPredicate, Error> RequiredFilterPredicate::Resolve(const 
     if (!seconds) {
       return MakeUnexpected(InvalidValue(filter, "not a second count or an HH:MM:SS clock"));
     }
-    // MySQL reads a bare number compared against a TIME column as packed
-    // HHMMSS, so the resolved seconds are written back as a clock literal.
-    auto literal = mygramdb::utils::FormatMySQLTimeLiteral(*seconds);
-    if (!literal) {
+    // FormatMySQLTimeLiteral's range check is reused here to reject a value
+    // no TIME column can hold; TIME_TO_SEC() rendering needs no literal.
+    if (!mygramdb::utils::FormatMySQLTimeLiteral(*seconds)) {
       return MakeUnexpected(InvalidValue(filter, "outside the TIME range of +/-838:59:59"));
     }
-    return RequiredFilterPredicate(filter.op, Clock{*seconds, std::move(*literal)});
+    return RequiredFilterPredicate(filter.op, Clock{*seconds});
   }
 
   return MakeUnexpected(
