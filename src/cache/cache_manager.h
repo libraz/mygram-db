@@ -153,15 +153,16 @@ class CacheManager {
 
   /**
    * @brief Restart the cache from a cold (empty) state.
-   * @return true if cache was enabled, false if cache was not initialized at startup
+   * @return true if cache was enabled, false if the invalidation worker could not be started
    *
    * After a previous Disable() the cache is empty, because Disable() drains
    * the invalidation queue and clears all entries to avoid serving stale
    * results. Enable() simply restarts the background workers.
    *
-   * Note: Cache can only be enabled if it was initialized at startup
-   * (cache.enabled = true). If the server was started with cache disabled,
-   * this operation will fail.
+   * The constructor always builds query_cache_/invalidation_mgr_/
+   * invalidation_queue_ regardless of cache.enabled, precisely so this
+   * runtime toggle works from a startup-disabled state; the only real
+   * failure path is the invalidation queue's worker thread failing to start.
    */
   bool Enable();
 

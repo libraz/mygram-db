@@ -244,7 +244,7 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
     invalidation_mgr_->RegisterCacheEntry(key, metadata);
     while (query_cache_->MemoryUsage() + invalidation_mgr_->MemoryUsage() + invalidation_queue_->MemoryUsage() >
            max_memory_bytes_) {
-      if (!query_cache_->EvictLeastRecentlyUsed()) {
+      if (query_cache_->EvictBatch() == 0) {
         query_cache_->IncrementMemoryBudgetRejection();
         return false;
       }

@@ -37,6 +37,30 @@ TEST(QueryCacheTest, BasicInsertLookup) {
   EXPECT_EQ(result, cached.value());
 }
 
+/**
+ * @brief An empty result with compression off must not memcpy null pointers.
+ *
+ * An empty std::vector's data() is permitted to be null, and Insert/Lookup's
+ * uncompressed path used to memcpy with that null pointer even though the
+ * length is zero, which UBSan flags regardless of the zero length.
+ */
+TEST(QueryCacheTest, EmptyResultRoundTripsWithoutCompression) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0, /*compression_enabled=*/false);
+
+  auto key = CacheKeyGenerator::Generate("empty result query");
+  std::vector<DocId> result;
+
+  CacheMetadata meta;
+  meta.table = "posts";
+  meta.ngrams = {"tes", "est"};
+
+  ASSERT_TRUE(cache.Insert(key, result, meta, 15.0));
+
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_TRUE(cached->empty());
+}
+
 TEST(QueryCacheTest, BackgroundWorkerCanBeStartedAfterCallbacksAreInstalled) {
   QueryCache cache(1024 * 1024, 0.0, 0, true, 1, false);
   EXPECT_FALSE(cache.IsBackgroundWorkerRunningForTesting());

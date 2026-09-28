@@ -1283,6 +1283,7 @@ TEST(CacheManagerTest, SharedMemoryBudgetIncludesInvalidationAndContainerOverhea
   config.min_query_cost_ms = 0.0;
   CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
 
+  int successful_inserts = 0;
   for (int i = 0; i < 500; ++i) {
     auto query = CreateQuery("posts", "memory_budget_" + std::to_string(i));
     std::vector<std::string> ngrams;
@@ -1290,11 +1291,19 @@ TEST(CacheManagerTest, SharedMemoryBudgetIncludesInvalidationAndContainerOverhea
     for (int n = 0; n < 64; ++n) {
       ngrams.push_back("ngram_" + std::to_string(i) + "_" + std::to_string(n));
     }
-    ASSERT_TRUE(mgr.Insert(query, {static_cast<DocId>(i)}, ngrams, 1.0, 3, 2, true));
+    // eviction_batch_size's minimum-batch guarantee (see cache_manager.cpp's
+    // use of QueryCache::EvictBatch) can remove more entries than are
+    // strictly needed, including the one just inserted, when this small
+    // budget holds fewer entries than the batch size -- so an occasional
+    // rejection here is expected, not a failure.
+    if (mgr.Insert(query, {static_cast<DocId>(i)}, ngrams, 1.0, 3, 2, true)) {
+      ++successful_inserts;
+    }
     const auto stats = mgr.GetStatistics();
     EXPECT_LE(stats.accounted_memory_bytes, stats.max_memory_bytes)
         << "shared cache budget exceeded after insertion " << i;
   }
+  EXPECT_GT(successful_inserts, 0);
 
   const auto final_stats = mgr.GetStatistics();
   EXPECT_GT(final_stats.evictions, 0U);
@@ -1309,6 +1318,40 @@ TEST(CacheManagerTest, SharedMemoryBudgetIncludesInvalidationAndContainerOverhea
     EXPECT_LE(rss_growth, config.max_memory_bytes + kAllocatorAndMeasurementTolerance)
         << "cache RSS growth exceeded the shared budget plus allocator tolerance";
   }
+}
+
+/**
+ * @brief Memory-pressure eviction removes a whole batch in one pass, not
+ * one entry at a time.
+ *
+ * CacheManager::Insert's budget loop calls QueryCache::EvictBatch, which
+ * removes at least cache.eviction_batch_size entries (or empties the cache)
+ * before returning -- so the very first insert that triggers eviction must
+ * already show at least that many evictions, not just one.
+ */
+TEST(CacheManagerTest, MemoryPressureEvictsAtLeastEvictionBatchSizeEntriesPerPass) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.eviction_batch_size = 5;
+  config.min_query_cost_ms = 0.0;
+  config.max_memory_bytes = 8 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const std::vector<std::string> small_ngrams = {"ab", "bc", "cd"};
+
+  auto stats = mgr.GetStatistics();
+  int i = 0;
+  while (stats.evictions == 0 && i < 10000) {
+    auto query = CreateQuery("posts", "batch_evict_" + std::to_string(i));
+    mgr.Insert(query, {static_cast<DocId>(i)}, small_ngrams, 1.0, 3, 2, true);
+    stats = mgr.GetStatistics();
+    ++i;
+  }
+  ASSERT_GT(stats.evictions, 0U) << "expected eviction to start within the fill loop";
+
+  // The pass that first triggered eviction must have removed at least
+  // eviction_batch_size entries in that single Insert call, not one.
+  EXPECT_GE(stats.evictions, static_cast<uint64_t>(config.eviction_batch_size));
 }
 
 }  // namespace mygramdb::cache

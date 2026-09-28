@@ -397,8 +397,19 @@ class QueryCache {
   /** Estimate all QueryCache-owned entry and container memory. */
   [[nodiscard]] size_t MemoryUsage() const;
 
-  /** Evict one least-recently-used entry and notify generation-aware observers. */
-  bool EvictLeastRecentlyUsed();
+  /**
+   * @brief Evict at least eviction_batch_size least-recently-used entries
+   * (or empty the cache) in one locked pass, notifying generation-aware
+   * observers afterward.
+   *
+   * For callers whose eviction decision is based on memory outside this
+   * cache -- CacheManager's combined budget across QueryCache,
+   * InvalidationManager, and the invalidation queue -- so their eviction
+   * loop still batches reverse-index callbacks under sustained pressure
+   * instead of evicting and re-checking one entry at a time.
+   * @return Number of entries evicted.
+   */
+  size_t EvictBatch();
 
   /** Record a CacheManager shared-budget rejection. */
   void IncrementMemoryBudgetRejection() { stats_.rejection_memory_budget.fetch_add(1, std::memory_order_relaxed); }

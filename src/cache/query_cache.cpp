@@ -225,7 +225,9 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
   } else {
     // No compression - interpret raw bytes as DocId array
     result.resize(original_size);
-    std::memcpy(result.data(), compressed_ptr->data(), compressed_ptr->size());
+    if (original_size > 0) {
+      std::memcpy(result.data(), compressed_ptr->data(), compressed_ptr->size());
+    }
   }
 
   // Publish access only after the payload decoded successfully. Reacquire a
@@ -307,7 +309,9 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
   } else {
     // Store raw bytes without compression
     compressed.resize(result.size() * sizeof(DocId));
-    std::memcpy(compressed.data(), result.data(), compressed.size());
+    if (!result.empty()) {
+      std::memcpy(compressed.data(), result.data(), compressed.size());
+    }
   }
 
   // Create cache entry to calculate accurate memory usage
@@ -677,11 +681,12 @@ size_t QueryCache::MemoryUsage() const {
   return total;
 }
 
-bool QueryCache::EvictLeastRecentlyUsed() {
+size_t QueryCache::EvictBatch() {
   std::vector<CacheEntryIdentity> evicted_entries;
   {
     std::unique_lock lock(mutex_);
-    while (!lru_list_.empty()) {
+    size_t removed_count = 0;
+    while (removed_count < eviction_batch_size_ && !lru_list_.empty()) {
       const CacheKey key = lru_list_.back();
       auto iter = cache_map_.find(key);
       if (iter == cache_map_.end()) {
@@ -690,11 +695,12 @@ bool QueryCache::EvictLeastRecentlyUsed() {
         continue;
       }
       RemoveEntryLocked(iter, RemovalReason::kLRUEviction, &evicted_entries);
-      break;
+      ++removed_count;
     }
+    stats_.current_memory_bytes = total_memory_bytes_;
   }
   FireEvictionCallbacks(evicted_entries);
-  return !evicted_entries.empty();
+  return evicted_entries.size();
 }
 
 bool QueryCache::EvictForSpace(size_t required_bytes, std::vector<CacheEntryIdentity>* evicted_entries) {
