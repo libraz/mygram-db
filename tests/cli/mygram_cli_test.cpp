@@ -27,6 +27,18 @@
 
 namespace {
 
+// The mock servers below send a canned response to the CLI-under-test on a
+// fresh accept()ed connection. cli_main() (renamed main(), where mygram-cli
+// ignores SIGPIPE process-wide) is never invoked by these tests, so an
+// unguarded send() to a client that has already closed or errored out would
+// raise SIGPIPE and kill this whole test binary rather than just failing
+// the one assertion.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
 /**
  * @brief RAII helper to capture stdout into a string.
  */
@@ -159,7 +171,7 @@ TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
     const char* response;
     bool expected;
   };
-  constexpr std::array<TestCase, 11> cases = {{
+  constexpr std::array<TestCase, 14> cases = {{
       {"ERROR 6028 Server is loading, please try again later", true},
       {"ERROR 6029 Replication is not running", true},
       {"ERROR 4000 Server is loading", false},
@@ -171,6 +183,16 @@ TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
       {"(error) SERVER_TIMEOUT: Server did not respond", true},
       {"OK INFO\r\nstatus: ready\r\nEND", false},
       {"OK RESULTS 1 SERVER_DISCONNECTED SERVER_TIMEOUT NOT_READY", false},
+      // Regression (cross-surface-001): INFO's own readiness field never
+      // arrives as an ERROR frame, so it must be retryable even though
+      // this response has no error code at all.
+      {"OK INFO\r\nversion: 1.0\r\nreadiness: not_ready\r\nEND", true},
+      {"OK INFO\r\nversion: 1.0\r\nreadiness: ready\r\nEND", false},
+      // Regression (client-cli-009): a typed error path (DUMP SAVE via
+      // client_->Save()) rebuilds the wire form "ERROR <code> <message>"
+      // instead of dropping the code, so this must retry like every other
+      // command's raw ERROR 6028/6029 response.
+      {"ERROR 6028 Server is loading, please try again later", true},
   }};
   for (const auto& test_case : cases) {
     SCOPED_TRACE(test_case.response);
@@ -215,11 +237,15 @@ TEST_F(CliConstantsTest, WaitReadyReconnectsAfterDroppedConnection) {
       if (connection < 0) {
         return;
       }
+#ifdef SO_NOSIGPIPE
+      int nosigpipe = 1;
+      (void)setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
       std::array<char, 256> request{};
       (void)recv(connection, request.data(), request.size(), 0);
       if (connection_index == 1) {
         constexpr std::string_view response = "OK INFO\r\nstatus: ready\r\nEND\r\n";
-        (void)send(connection, response.data(), response.size(), 0);
+        (void)send(connection, response.data(), response.size(), kSendFlags);
       }
       close(connection);
       served.fetch_add(1);
@@ -477,6 +503,32 @@ TEST_F(CliPrintResponseTest, SearchResponseWithHighlights) {
   EXPECT_NE(output.find("2) pk2"), std::string::npos);
   EXPECT_NE(output.find("second snippet"), std::string::npos);
   EXPECT_EQ(output.find('\r'), std::string::npos);
+}
+
+/**
+ * @brief Regression test for client-cli-010: a primary key containing
+ * whitespace is sent quoted/escaped per spec §11.1 (matching QuoteWireToken).
+ * Plain whitespace-splitting used to cut "a b" into two ids ("a and b");
+ * ParseWireToken now decodes it back to the single key "a b".
+ */
+TEST_F(CliPrintResponseTest, SearchResponseDecodesQuotedPrimaryKeyWithSpace) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse(R"(OK RESULTS 2 "a b" plain)");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("2 results"), std::string::npos);
+  EXPECT_NE(output.find("showing 2"), std::string::npos);
+  EXPECT_NE(output.find("1) a b"), std::string::npos);
+  EXPECT_NE(output.find("2) plain"), std::string::npos);
+}
+
+TEST_F(CliPrintResponseTest, SearchResponseWithHighlightsDecodesQuotedPrimaryKey) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse("OK RESULTS 1\r\n\"a b\"\thello <em>world</em>");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find("1) a b"), std::string::npos);
+  EXPECT_NE(output.find("hello <em>world</em>"), std::string::npos);
 }
 
 // =============================================================================
@@ -872,6 +924,10 @@ TEST_F(CliSingleCommandExitStatusTest, DumpSaveWaitsForCompletion) {
       timeval receive_timeout{};
       receive_timeout.tv_sec = 1;
       (void)setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout));
+#ifdef SO_NOSIGPIPE
+      int nosigpipe = 1;
+      (void)setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
       constexpr std::array<std::string_view, 2> responses = {
           "OK DUMP_STARTED /tmp/cli-dump.dmp\r\n",
           "OK DUMP_STATUS\r\nstatus: COMPLETED\r\nresult_filepath: /tmp/cli-dump.dmp\r\nEND\r\n",
@@ -883,7 +939,7 @@ TEST_F(CliSingleCommandExitStatusTest, DumpSaveWaitsForCompletion) {
           break;
         }
         requests.emplace_back(request.data(), static_cast<size_t>(received));
-        if (send(connection, response.data(), response.size(), 0) <= 0) {
+        if (send(connection, response.data(), response.size(), kSendFlags) <= 0) {
           break;
         }
       }
@@ -901,6 +957,79 @@ TEST_F(CliSingleCommandExitStatusTest, DumpSaveWaitsForCompletion) {
   ASSERT_EQ(requests.size(), 2U);
   EXPECT_EQ(requests[0], "DUMP SAVE /tmp/cli-dump.dmp\r\n");
   EXPECT_EQ(requests[1], "DUMP STATUS\r\n");
+}
+
+/**
+ * @brief Regression test for client-cli-009: DUMP SAVE dispatches through
+ * client_->Save() (a typed call), not the raw passthrough every other
+ * command uses, so a server ERROR 6028 used to reach SendCommand() as an
+ * Error object whose numeric code got dropped -- leaving --wait-ready
+ * unable to recognize it as retryable. SendCommand() now rebuilds the wire
+ * form "ERROR <code> <message>" for any error code below the client-code
+ * range, so this retries exactly like every other command's raw response.
+ */
+TEST_F(CliSingleCommandExitStatusTest, DumpSaveErrorRetriesUnderWaitReady) {
+  const int listener = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(listen(listener, 1), 0);
+  socklen_t address_size = sizeof(address);
+  ASSERT_EQ(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size), 0);
+
+  Config config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.timeout_ms = 1000;
+  config.wait_ready = true;
+  config.retry_count = 1;
+  config.retry_interval = 0;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::vector<std::string> requests;
+  std::thread server([&]() {
+    const int connection = accept(listener, nullptr, nullptr);
+    if (connection >= 0) {
+      timeval receive_timeout{};
+      receive_timeout.tv_sec = 1;
+      (void)setsockopt(connection, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout));
+#ifdef SO_NOSIGPIPE
+      int nosigpipe = 1;
+      (void)setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
+      constexpr std::array<std::string_view, 2> responses = {
+          "ERROR 6028 Server is loading, please try again later\r\n",
+          "OK SAVED /tmp/cli-dump-retry.dmp\r\n",
+      };
+      for (const auto response : responses) {
+        std::array<char, 256> request{};
+        const auto received = recv(connection, request.data(), request.size(), 0);
+        if (received <= 0) {
+          break;
+        }
+        requests.emplace_back(request.data(), static_cast<size_t>(received));
+        if (send(connection, response.data(), response.size(), kSendFlags) <= 0) {
+          break;
+        }
+      }
+      close(connection);
+    }
+    close(listener);
+  });
+
+  StdoutCapture capture;
+  const int exit_code = client.RunSingleCommand("DUMP SAVE /tmp/cli-dump-retry.dmp");
+  server.join();
+
+  EXPECT_EQ(exit_code, 0);
+  EXPECT_NE(capture.GetOutput().find("Snapshot saved to: /tmp/cli-dump-retry.dmp"), std::string::npos);
+  ASSERT_EQ(requests.size(), 2U);
+  EXPECT_EQ(requests[0], "DUMP SAVE /tmp/cli-dump-retry.dmp\r\n");
+  EXPECT_EQ(requests[1], "DUMP SAVE /tmp/cli-dump-retry.dmp\r\n");
 }
 
 // =============================================================================

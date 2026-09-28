@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "client/mygramclient.h"
+#include "client/wire_quoting.h"
 #include "config/config.h"
 #include "server/protocol_constants.h"
 #include "utils/error.h"
@@ -694,6 +695,18 @@ class MygramClient {
       case ErrorCode::kClientTimeout:
         return "(error) SERVER_TIMEOUT: " + err.message();
       default:
+        // Every client error code is >= kClientNotConnected (7000); a
+        // smaller value means CheckErrorResponse preserved a genuine
+        // "ERROR <code> ..." frame from the server (e.g. DUMP SAVE's own
+        // typed dispatch through client_->Save(), rather than the raw
+        // passthrough client_->SendCommand() every other command uses).
+        // Rebuilding the wire form here, instead of dropping the code,
+        // keeps PrintResponse/IsWaitReadyRetryableResponse/
+        // ExitCodeForSingleCommandResponse working the same way for a
+        // server error regardless of which dispatch path produced it.
+        if (err.code() < ErrorCode::kClientNotConnected) {
+          return std::string(proto::kErrorPrefix) + std::to_string(static_cast<int>(err.code())) + " " + err.message();
+        }
         return "(error) " + err.message();
     }
   }
@@ -950,6 +963,14 @@ class MygramClient {
   [[nodiscard]] static bool IsWaitReadyRetryableResponse(std::string_view response,
                                                          std::optional<mygram::utils::ErrorCode> error_code) {
     using mygram::utils::ErrorCode;
+    // INFO's own readiness field (response_formatter.cpp) is the one
+    // non-ready signal that never arrives as an ERROR frame -- an OK INFO
+    // response has no error_code at all -- so it is checked directly on
+    // the response body, ahead of every ERROR-frame-only branch below.
+    if (StartsWith(response, proto::kOkInfoPrefix) && response.find("readiness: not_ready") != std::string_view::npos) {
+      return true;
+    }
+
     if (error_code.has_value() && *error_code != ErrorCode::kClientServerError) {
       if (StartsWith(response, proto::kErrorPrefix)) {
         return *error_code == ErrorCode::kServerLoading || *error_code == ErrorCode::kServerNotReady;
@@ -1105,9 +1126,17 @@ class MygramClient {
       std::vector<std::string> snippets;
 
       if (main_response.find('\n') == std::string::npos) {
-        std::string token;
-        while (iss >> token) {
-          ids.push_back(token);
+        // Primary keys on the header line are quoted/escaped per spec
+        // §11.1 whenever they contain whitespace or special characters
+        // (ResponseFormatter, response_formatter.cpp); plain iss >> token
+        // whitespace-splitting would cut a quoted key like "a b" into two
+        // ids. ParseWireToken is the matching decoder for QuoteWireToken.
+        if (!iss.eof()) {
+          size_t token_pos = static_cast<size_t>(iss.tellg());
+          std::string token;
+          while (lib::detail::ParseWireToken(main_response, token_pos, token)) {
+            ids.push_back(token);
+          }
         }
       } else {
         size_t first_line_end = main_response.find('\n');
@@ -1122,11 +1151,13 @@ class MygramClient {
           }
 
           size_t tab_pos = line.find('\t');
+          const std::string pk_field = (tab_pos == std::string::npos) ? line : line.substr(0, tab_pos);
+          size_t pk_pos = 0;
+          std::string decoded_pk;
+          ids.push_back(lib::detail::ParseWireToken(pk_field, pk_pos, decoded_pk) ? decoded_pk : pk_field);
           if (tab_pos == std::string::npos) {
-            ids.push_back(line);
             snippets.emplace_back();
           } else {
-            ids.push_back(line.substr(0, tab_pos));
             snippets.push_back(line.substr(tab_pos + 1));
           }
         }
