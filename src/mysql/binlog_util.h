@@ -330,7 +330,8 @@ inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_da
       return 1;
 
     // VARCHAR
-    case 15: {  // MYSQL_TYPE_VARCHAR
+    case 15:     // MYSQL_TYPE_VARCHAR
+    case 141: {  // MariaDB MYSQL_TYPE_VARCHAR_COMPRESSED (same framing as VARCHAR)
       uint32_t length = metadata > 255 ? 2 : 1;
       if (length == 1) {
         length += static_cast<uint32_t>(*master_data);
@@ -341,6 +342,7 @@ inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     }
 
     // BLOB/TEXT types
+    case 140:    // MariaDB MYSQL_TYPE_BLOB_COMPRESSED (same framing as BLOB)
     case 242:    // MYSQL_TYPE_VECTOR (same encoding as BLOB)
     case 249:    // MYSQL_TYPE_TINY_BLOB
     case 250:    // MYSQL_TYPE_MEDIUM_BLOB

@@ -29,8 +29,9 @@ namespace {
 using internal::DecodeFieldValue;
 
 /// Every value of ColumnType, as it appears in a TABLE_MAP or a MYSQL_FIELD.
-constexpr uint8_t kEnumeratedTypeCodes[] = {1,  2,  3,  4,   5,   7,   8,   9,   10,  11,  12,  13,  14,  15,  16,
-                                            17, 18, 19, 242, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255};
+constexpr uint8_t kEnumeratedTypeCodes[] = {1,   2,   3,   4,   5,   7,   8,   9,   10,  11,  12,
+                                            13,  14,  15,  16,  17,  18,  19,  140, 141, 242, 245,
+                                            246, 247, 248, 249, 250, 251, 252, 253, 254, 255};
 
 /// Metadata words wide enough that every decodable type has a usable one.
 constexpr uint16_t kSampleMetadata[] = {0, 1, 2, 3, 4, 0x0A02, 0xFE28};

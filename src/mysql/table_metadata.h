@@ -23,36 +23,38 @@ namespace mygramdb::mysql {
  * Based on enum_field_types from MySQL source
  */
 enum class ColumnType : uint8_t {
-  TINY = 1,           // TINYINT
-  SHORT = 2,          // SMALLINT
-  LONG = 3,           // INT
-  FLOAT = 4,          // FLOAT
-  DOUBLE = 5,         // DOUBLE
-  TIMESTAMP = 7,      // TIMESTAMP
-  LONGLONG = 8,       // BIGINT
-  INT24 = 9,          // MEDIUMINT
-  DATE = 10,          // DATE
-  TIME = 11,          // TIME
-  DATETIME = 12,      // DATETIME
-  YEAR = 13,          // YEAR
-  NEWDATE = 14,       // Internal
-  VARCHAR = 15,       // VARCHAR
-  BIT = 16,           // BIT
-  TIMESTAMP2 = 17,    // TIMESTAMP with fractional seconds
-  DATETIME2 = 18,     // DATETIME with fractional seconds
-  TIME2 = 19,         // TIME with fractional seconds
-  VECTOR = 242,       // VECTOR (MySQL 9.0+)
-  JSON = 245,         // JSON
-  NEWDECIMAL = 246,   // DECIMAL
-  ENUM = 247,         // ENUM
-  SET = 248,          // SET
-  TINY_BLOB = 249,    // TINYBLOB/TINYTEXT
-  MEDIUM_BLOB = 250,  // MEDIUMBLOB/MEDIUMTEXT
-  LONG_BLOB = 251,    // LONGBLOB/LONGTEXT
-  BLOB = 252,         // BLOB/TEXT
-  VAR_STRING = 253,   // VARCHAR/VARBINARY
-  STRING = 254,       // CHAR/BINARY
-  GEOMETRY = 255      // Spatial types
+  TINY = 1,                  // TINYINT
+  SHORT = 2,                 // SMALLINT
+  LONG = 3,                  // INT
+  FLOAT = 4,                 // FLOAT
+  DOUBLE = 5,                // DOUBLE
+  TIMESTAMP = 7,             // TIMESTAMP
+  LONGLONG = 8,              // BIGINT
+  INT24 = 9,                 // MEDIUMINT
+  DATE = 10,                 // DATE
+  TIME = 11,                 // TIME
+  DATETIME = 12,             // DATETIME
+  YEAR = 13,                 // YEAR
+  NEWDATE = 14,              // Internal
+  VARCHAR = 15,              // VARCHAR
+  BIT = 16,                  // BIT
+  TIMESTAMP2 = 17,           // TIMESTAMP with fractional seconds
+  DATETIME2 = 18,            // DATETIME with fractional seconds
+  TIME2 = 19,                // TIME with fractional seconds
+  BLOB_COMPRESSED = 140,     // MariaDB TEXT/BLOB ... COMPRESSED
+  VARCHAR_COMPRESSED = 141,  // MariaDB VARCHAR/VARBINARY ... COMPRESSED
+  VECTOR = 242,              // VECTOR (MySQL 9.0+)
+  JSON = 245,                // JSON
+  NEWDECIMAL = 246,          // DECIMAL
+  ENUM = 247,                // ENUM
+  SET = 248,                 // SET
+  TINY_BLOB = 249,           // TINYBLOB/TINYTEXT
+  MEDIUM_BLOB = 250,         // MEDIUMBLOB/MEDIUMTEXT
+  LONG_BLOB = 251,           // LONGBLOB/LONGTEXT
+  BLOB = 252,                // BLOB/TEXT
+  VAR_STRING = 253,          // VARCHAR/VARBINARY
+  STRING = 254,              // CHAR/BINARY
+  GEOMETRY = 255             // Spatial types
 };
 
 /**

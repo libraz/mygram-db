@@ -280,6 +280,7 @@ std::optional<TableMapMetadataLayout> TableMapMetadataLayoutFor(ColumnType type)
     case ColumnType::MEDIUM_BLOB:
     case ColumnType::LONG_BLOB:
     case ColumnType::BLOB:
+    case ColumnType::BLOB_COMPRESSED:
     case ColumnType::VECTOR:
     case ColumnType::JSON:
     case ColumnType::GEOMETRY:
@@ -292,6 +293,7 @@ std::optional<TableMapMetadataLayout> TableMapMetadataLayoutFor(ColumnType type)
 
     // VARCHAR: maximum byte length. BIT: bits in the partial byte, then whole bytes.
     case ColumnType::VARCHAR:
+    case ColumnType::VARCHAR_COMPRESSED:
     case ColumnType::BIT:
       return TableMapMetadataLayout::kTwoByteLittleEndian;
 

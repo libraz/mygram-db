@@ -6,6 +6,8 @@
  * rows_parser.cpp for translation unit splitting.
  */
 
+#include <zlib.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -129,6 +131,57 @@ Expected<std::string, Error> DecodeEnumSetValue(EnumSetKind kind, const unsigned
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET bitmask is outside label table"));
   }
   return decoded_labels;
+}
+
+/**
+ * @brief Inflate the stored bytes of a MariaDB COMPRESSED column.
+ *
+ * An empty value is stored with no header. Otherwise the first byte's high
+ * nibble is the method: 0 keeps the value uncompressed after it, 8 is zlib,
+ * with the original length in the next (header & 7) big-endian bytes and bit 3
+ * selecting a raw deflate stream over a zlib-wrapped one.
+ */
+Expected<std::string, Error> InflateCompressedColumn(const unsigned char* data, uint32_t length, uint32_t max_length) {
+  if (length == 0) {
+    return std::string{};
+  }
+  constexpr unsigned kUncompressedMethod = 0;
+  constexpr unsigned kZlibMethod = 8;
+  const unsigned char header = data[0];
+  const unsigned method = header >> 4;
+  if (method == kUncompressedMethod) {
+    return std::string(reinterpret_cast<const char*>(data + 1), length - 1);
+  }
+  const unsigned length_bytes = header & 0x07;
+  if (method != kZlibMethod || length_bytes == 0 || length_bytes > 4 || length - 1 < length_bytes) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLUndecodableBinlogEvent,
+                                    "Unsupported compressed column header: " + std::to_string(header)));
+  }
+  uint64_t original_length = 0;
+  for (unsigned i = 0; i < length_bytes; ++i) {
+    original_length = (original_length << 8) | data[1 + i];
+  }
+  if (original_length > max_length) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Compressed column original length out of range"));
+  }
+
+  std::string inflated(original_length, '\0');
+  z_stream stream{};
+  stream.next_in = const_cast<Bytef*>(data + 1 + length_bytes);
+  stream.avail_in = static_cast<uInt>(length - 1 - length_bytes);
+  stream.next_out = reinterpret_cast<Bytef*>(inflated.data());
+  stream.avail_out = static_cast<uInt>(original_length);
+  const int window_bits = (header & 0x08) != 0 ? -MAX_WBITS : MAX_WBITS;
+  if (inflateInit2(&stream, window_bits) != Z_OK) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLUndecodableBinlogEvent, "Failed to initialize zlib"));
+  }
+  const int status = inflate(&stream, Z_FINISH);
+  const uLong produced = stream.total_out;
+  inflateEnd(&stream);
+  if (status != Z_STREAM_END || produced != original_length) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLUndecodableBinlogEvent, "Corrupt compressed column payload"));
+  }
+  return inflated;
 }
 
 Expected<size_t, Error> DecimalBinarySize(uint8_t precision, uint8_t scale) {
@@ -269,7 +322,8 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     }
 
     // String types
-    case 15: {  // MYSQL_TYPE_VARCHAR
+    case 15:     // MYSQL_TYPE_VARCHAR
+    case 141: {  // MariaDB MYSQL_TYPE_VARCHAR_COMPRESSED
       uint32_t str_len = 0;
       const unsigned char* str_data = nullptr;
       if (metadata > 255) {
@@ -293,9 +347,17 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
+      if (col_type == 141) {
+        auto inflated = InflateCompressedColumn(str_data, str_len, kMaxFieldLength);
+        if (!inflated) {
+          return MakeUnexpected(inflated.error());
+        }
+        return CanonicalizeColumnValue(*inflated, CanonicalValueKind::kText);
+      }
       return CanonicalizeColumnValue({reinterpret_cast<const char*>(str_data), str_len}, CanonicalValueKind::kText);
     }
 
+    case 140:    // MariaDB MYSQL_TYPE_BLOB_COMPRESSED
     case 249:    // MYSQL_TYPE_TINY_BLOB
     case 250:    // MYSQL_TYPE_MEDIUM_BLOB
     case 251:    // MYSQL_TYPE_LONG_BLOB
@@ -357,6 +419,13 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
             .Field("length", static_cast<uint64_t>(blob_len))
             .Error();
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
+      }
+      if (col_type == 140) {
+        auto inflated = InflateCompressedColumn(blob_data, blob_len, kMaxFieldLength);
+        if (!inflated) {
+          return MakeUnexpected(inflated.error());
+        }
+        return CanonicalizeColumnValue(*inflated, CanonicalValueKind::kText);
       }
       return CanonicalizeColumnValue({reinterpret_cast<const char*>(blob_data), blob_len}, CanonicalValueKind::kText);
     }

@@ -71,6 +71,14 @@ Bytes LengthPrefixed(const std::string& value, size_t prefix_width) {
   return bytes;
 }
 
+/// MariaDB COMPRESSED payload stored as-is: a 0x00 header before the bytes, and no header when empty.
+Bytes StoredUncompressed(const std::string& value, size_t prefix_width) {
+  if (value.empty()) {
+    return LengthPrefixed(value, prefix_width);
+  }
+  return LengthPrefixed(std::string(1, '\0') + value, prefix_width);
+}
+
 Bytes EncodeFloat(float value) {
   Bytes bytes(sizeof(float));
   std::memcpy(bytes.data(), &value, sizeof(float));
@@ -500,7 +508,55 @@ void AppendStringCases(std::vector<AgreementCase>& cases) {
                      LengthPrefixed(value, 4),
                      false,
                      {}});
+    // MariaDB COMPRESSED columns: the client reports the plain type and the
+    // inflated text; a value too short to deflate is stored behind a 0x00 header.
+    cases.push_back({"compressed varchar '" + value + "'",
+                     ColumnType::VAR_STRING,
+                     value,
+                     ColumnType::VARCHAR_COMPRESSED,
+                     1201,
+                     StoredUncompressed(value, 2),
+                     false,
+                     {}});
+    cases.push_back({"compressed text '" + value + "'",
+                     ColumnType::BLOB,
+                     value,
+                     ColumnType::BLOB_COMPRESSED,
+                     2,
+                     StoredUncompressed(value, 2),
+                     false,
+                     {}});
   }
+
+  // Captured from MariaDB 11.8: REPEAT('abc', 60) in a VARCHAR(300) COMPRESSED
+  // column and REPEAT('日本語テキスト', 40) in a TEXT COMPRESSED column, both
+  // deflated without the zlib wrapper.
+  std::string abc;
+  std::string japanese;
+  for (int i = 0; i < 60; ++i) {
+    abc += "abc";
+  }
+  for (int i = 0; i < 40; ++i) {
+    japanese += "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\xE3\x83\x86\xE3\x82\xAD\xE3\x82\xB9\xE3\x83\x88";
+  }
+  cases.push_back({"deflated varchar",
+                   ColumnType::VAR_STRING,
+                   abc,
+                   ColumnType::VARCHAR_COMPRESSED,
+                   1201,
+                   {0x0a, 0x00, 0x89, 0xb4, 0x4b, 0x4c, 0x4a, 0x4e, 0x1c, 0x6a, 0x08, 0x00},
+                   false,
+                   {}});
+  cases.push_back({"deflated text",
+                   ColumnType::BLOB,
+                   japanese,
+                   ColumnType::BLOB_COMPRESSED,
+                   2,
+                   {0x25, 0x00, 0x8a, 0x03, 0x48, 0x7b, 0x36, 0x7d, 0xe9, 0xb3, 0x39, 0x6b, 0x5e,
+                    0xac, 0x9a, 0xf7, 0xb8, 0xb9, 0xed, 0x71, 0xd3, 0xda, 0xc7, 0x4d, 0x3b, 0x1f,
+                    0x37, 0x77, 0x3c, 0x1b, 0x15, 0x1c, 0x15, 0x1c, 0x15, 0x24, 0x45, 0x10, 0x00},
+                   false,
+                   {}});
 
   // Measured: an ENUM column returns the member label and a SET column returns
   // the selected labels joined by commas, in declaration order. The client

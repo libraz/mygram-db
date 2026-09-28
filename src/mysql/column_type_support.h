@@ -134,6 +134,11 @@ constexpr ColumnTypeSupport DescribeColumnType(ColumnType type) {
     case ColumnType::MEDIUM_BLOB:
     case ColumnType::LONG_BLOB:
     case ColumnType::BLOB:
+    // MariaDB COMPRESSED columns. A result set returns the inflated text and
+    // reports the plain type; only a row event carries these codes, and the
+    // decoder inflates the payload to the same bytes.
+    case ColumnType::BLOB_COMPRESSED:
+    case ColumnType::VARCHAR_COMPRESSED:
     // ENUM and SET reach the row decoder as a member ordinal or a bitmask and
     // are turned back into the declared labels, which is what the result set
     // returns. A label list that changed under a running server is caught as a
