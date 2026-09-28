@@ -15,8 +15,8 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -37,7 +37,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         # The steps below diff against the commit this push started from, which
         # a depth-1 clone does not contain. Without it the diff resolved to
@@ -45,7 +45,7 @@ jobs:
         fetch-depth: 0
 
     - name: Cache CMake dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: build/_deps
         key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
@@ -53,7 +53,7 @@ jobs:
           ${{ runner.os }}-cmake-deps-
 
     - name: Cache ccache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.cache/ccache
         key: ${{ runner.os }}-ccache-${{ github.sha }}
@@ -62,7 +62,7 @@ jobs:
 
     - name: Cache LLVM installation
       id: cache-llvm
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           /usr/lib/llvm-18
@@ -153,7 +153,7 @@ jobs:
 
     - name: Upload build artifacts
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: build-logs-linux
         path: |

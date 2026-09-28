@@ -23,8 +23,8 @@ jobs:
       e2e: ${{ steps.filter.outputs.e2e }}
       docker: ${{ steps.filter.outputs.docker }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -63,10 +63,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Cache CMake dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: build/_deps
         key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
@@ -74,7 +74,7 @@ jobs:
           ${{ runner.os }}-cmake-deps-
 
     - name: Cache ccache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.cache/ccache
         key: ${{ runner.os }}-ccache-${{ github.sha }}
@@ -83,7 +83,7 @@ jobs:
 
     - name: Cache LLVM installation
       id: cache-llvm
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: |
           /usr/lib/llvm-18
@@ -168,7 +168,7 @@ jobs:
         ./build/bin/mygramdb -t examples/config-minimal.yaml
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v7
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ./build/coverage/coverage_filtered.info
@@ -178,14 +178,14 @@ jobs:
         verbose: true
 
     - name: Upload coverage HTML report
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: coverage-report
         path: build/coverage/html/
 
     - name: Upload build artifacts
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: build-logs-linux
         path: |
@@ -209,23 +209,23 @@ jobs:
   #     fail-fast: true  # Stop all jobs on first failure
   #   #   steps:
   #   - name: Checkout code
-  #     uses: actions/checkout@v4
+  #     uses: actions/checkout@v7
   #   #   - name: Cache CMake dependencies
-  #     uses: actions/cache@v4
+  #     uses: actions/cache@v6
   #     with:
   #       path: build/_deps
   #       key: ${{ runner.os }}-cmake-deps-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
   #       restore-keys: |
   #         ${{ runner.os }}-cmake-deps-
   #   #   - name: Cache ccache
-  #     uses: actions/cache@v4
+  #     uses: actions/cache@v6
   #     with:
   #       path: ~/Library/Caches/ccache
   #       key: ${{ runner.os }}-ccache-${{ github.sha }}
   #       restore-keys: |
   #         ${{ runner.os }}-ccache-
   #   #   - name: Cache Homebrew packages
-  #     uses: actions/cache@v4
+  #     uses: actions/cache@v6
   #     with:
   #       path: ~/Library/Caches/Homebrew
   #       key: ${{ runner.os }}-brew-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -277,7 +277,7 @@ jobs:
   #       ./build/bin/mygramdb -t examples/config-minimal.yaml
   #   #   - name: Upload build artifacts
   #     if: failure()
-  #     uses: actions/upload-artifact@v4
+  #     uses: actions/upload-artifact@v7
   #     with:
   #       name: build-logs-macos
   #       path: |
@@ -292,10 +292,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Cache CMake dependencies
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: build/_deps
         key: ${{ runner.os }}-cmake-deps-e2e-${{ hashFiles('CMakeLists.txt', 'third_party/**') }}
@@ -335,7 +335,7 @@ jobs:
 
     - name: Upload E2E artifacts
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: e2e-http-parity-artifacts
         path: |
@@ -348,13 +348,13 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
 
     - name: Build Docker image
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: ./Dockerfile
