@@ -26,7 +26,7 @@ LOG_FILE="/tmp/mygramdb-mariadb-e2e.log"
 DUMP_DIR="$SCRIPT_DIR/results/dumps-mariadb"
 
 # Configurable via environment variables
-MARIADB_VERSION="${MARIADB_VERSION:-11.4}"
+MARIADB_VERSION="${MARIADB_VERSION:-11.8}"
 MARIADB_HOST="127.0.0.1"
 MARIADB_PORT="${MYSQL_PORT:-13306}"
 MARIADB_USER="root"
