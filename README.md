@@ -24,7 +24,7 @@ traffic to MygramDB.
 
 ## What it includes
 
-- GTID-based MySQL 8.4+/9.x and MariaDB 10.11+/11.x replication
+- GTID-based MySQL 8.4+/9.x and MariaDB 10.11+/11.x/12.x replication
 - TCP protocol, HTTP API, and C/C++ client libraries
 - Multi-table indexing, runtime configuration, DUMP save/load, and automatic reconnection to the configured MySQL endpoint
 - ICU normalization for CJK and other multilingual text
@@ -71,7 +71,8 @@ non-loopback TCP bind, set a high-entropy `API_ADMIN_TOKEN`; MygramDB rejects
 the configuration when it is absent. Before a TCP connection can use an
 administrative command (`SET`, `SHOW VARIABLES`, `DUMP`, `SYNC`,
 `REPLICATION`, `OPTIMIZE`, `CACHE`, `CONFIG`, or `DEBUG`), it must send
-`AUTH <token>` on that same connection. The HTTP `POST /optimize` endpoint uses the same token as an
+`AUTH <token>` on that same connection. The HTTP `POST /optimize`, `GET /config`
+and `GET /replication/status` endpoints use the same token as an
 `Authorization: Bearer <token>` credential. Docker Compose deliberately refuses
 to start until the placeholder token in `.env` is replaced.
 

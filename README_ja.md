@@ -22,7 +22,7 @@
 
 ## 含まれるもの
 
-- GTID ベースの MySQL 8.4+/9.x、MariaDB 10.11+/11.x レプリケーション
+- GTID ベースの MySQL 8.4+/9.x、MariaDB 10.11+/11.x/12.x レプリケーション
 - TCP プロトコル、HTTP API、C/C++ クライアントライブラリ
 - 複数テーブルの index、runtime configuration、DUMP save/load、設定済み MySQL 接続先への自動再接続
 - CJK を含む多言語テキストの ICU 正規化
@@ -54,7 +54,7 @@ MySQL の接続設定は起動時のみ変更できます。`mysql.host` また�
 
 ## ネットワークの安全性
 
-同梱の Docker 環境は既定で localhost のみに公開します。非ループバックの TCP bind を使う場合は、高エントロピーの `API_ADMIN_TOKEN` が必須です。未設定なら MygramDB は設定を拒否します。TCP 接続では、管理コマンド（`SET`、`SHOW VARIABLES`、`DUMP`、`SYNC`、`REPLICATION`、`OPTIMIZE`、`CACHE`、`CONFIG`、`DEBUG`）の前に、同一接続で `AUTH <token>` を実行してください。HTTP の `POST /optimize` は同じトークンを `Authorization: Bearer <token>` として受け取ります。Docker Compose も `.env` のプレースホルダーを置換するまで起動を拒否します。
+同梱の Docker 環境は既定で localhost のみに公開します。非ループバックの TCP bind を使う場合は、高エントロピーの `API_ADMIN_TOKEN` が必須です。未設定なら MygramDB は設定を拒否します。TCP 接続では、管理コマンド（`SET`、`SHOW VARIABLES`、`DUMP`、`SYNC`、`REPLICATION`、`OPTIMIZE`、`CACHE`、`CONFIG`、`DEBUG`）の前に、同一接続で `AUTH <token>` を実行してください。HTTP の `POST /optimize`、`GET /config`、`GET /replication/status` は同じトークンを `Authorization: Bearer <token>` として受け取ります。Docker Compose も `.env` のプレースホルダーを置換するまで起動を拒否します。
 
 TCP ポートは必ず限定した `NETWORK_ALLOW_CIDRS` と、プライベートまたは暗号化されたネットワークの内側に置いてください。TCP プロトコル自体は `AUTH` トークンを暗号化しません。IPv4/IPv6 の全許可リストと public bind の組み合わせは、設定読み込み時にも拒否します。
 
