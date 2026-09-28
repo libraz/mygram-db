@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
+#include <variant>
 
 #include "server/log_field_names.h"
 #include "storage/document_store.h"
@@ -54,9 +56,66 @@ constexpr uint32_t kMaxFilterNameLength = 1024;
 constexpr uint32_t kMaxFilterStringLength = 64 * 1024;           // 64KB max for filter string
 constexpr uint32_t kMaxNormalizedTextLength = 16 * 1024 * 1024;  // 16MB
 
+// Longest primary key quoted verbatim in a serialization error.
+constexpr size_t kMaxQuotedPrimaryKeyLength = 64;
+
 }  // namespace
 
-bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const {
+Expected<void, Error> DocumentStore::ValidateSerializableLocked(const std::string& replication_gtid) const {
+  // Names the document by DocID; the primary key is quoted only while short.
+  auto refuse = [](const std::string& field, uint64_t length, uint64_t limit, std::optional<DocId> doc_id,
+                   const std::string& primary_key) {
+    std::string message = field + " length " + std::to_string(length) + " exceeds maximum allowed " +
+                          std::to_string(limit) + ", so the document store could not be loaded back";
+    if (doc_id.has_value()) {
+      message += " (document " + std::to_string(*doc_id);
+      if (primary_key.size() <= kMaxQuotedPrimaryKeyLength) {
+        message += ", primary key '" + primary_key + "'";
+      }
+      message += ")";
+    }
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, message));
+  };
+
+  if (replication_gtid.size() > kMaxGTIDLength) {
+    return refuse("GTID", replication_gtid.size(), kMaxGTIDLength, std::nullopt, "");
+  }
+  if (doc_id_to_pk_.size() > kMaxDocumentCount) {
+    return refuse("Document count", doc_id_to_pk_.size(), kMaxDocumentCount, std::nullopt, "");
+  }
+  for (const auto& [doc_id, primary_key] : doc_id_to_pk_) {
+    if (primary_key.size() > kMaxPKLength) {
+      return refuse("Primary key", primary_key.size(), kMaxPKLength, doc_id, primary_key);
+    }
+    if (auto filter_it = doc_filters_.find(doc_id); filter_it != doc_filters_.end()) {
+      if (filter_it->second.entries.size() > kMaxFilterCount) {
+        return refuse("Filter count", filter_it->second.entries.size(), kMaxFilterCount, doc_id, primary_key);
+      }
+      for (const auto& [column_id, value] : filter_it->second.entries) {
+        const std::string& name = filter_column_names_[column_id];
+        if (name.size() > kMaxFilterNameLength) {
+          return refuse("Filter name", name.size(), kMaxFilterNameLength, doc_id, primary_key);
+        }
+        if (const auto* string_value = std::get_if<std::string>(&value);
+            string_value != nullptr && string_value->size() > kMaxFilterStringLength) {
+          return refuse("Filter string '" + name + "'", string_value->size(), kMaxFilterStringLength, doc_id,
+                        primary_key);
+        }
+      }
+    }
+    if (auto text_it = doc_texts_.find(doc_id);
+        text_it != doc_texts_.end() && text_it->second.size() > kMaxNormalizedTextLength) {
+      return refuse("Normalized text", text_it->second.size(), kMaxNormalizedTextLength, doc_id, primary_key);
+    }
+    if (auto original_it = original_texts_.find(doc_id);
+        original_it != original_texts_.end() && original_it->second.size() > kMaxNormalizedTextLength) {
+      return refuse("Original text", original_it->second.size(), kMaxNormalizedTextLength, doc_id, primary_key);
+    }
+  }
+  return {};
+}
+
+Expected<void, Error> DocumentStore::SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const {
   // File format:
   // [4 bytes: magic "MGDS"] [4 bytes: version] [4 bytes: next_doc_id]
   // [4 bytes: gtid_length] [gtid_length bytes: GTID string]
@@ -64,6 +123,17 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   // [filters...]
   // v2+: [4 bytes: normalized_text_length] [normalized_text_length bytes: text]
   // v3+: [4 bytes: original_text_length] [original_text_length bytes: text]
+  const auto stream_error = [] {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Stream error while serializing documents"));
+  };
+
+  std::shared_lock lock(mutex_);
+
+  // Every field DeserializeDocuments bounds is checked before the first byte,
+  // so a store that serializes is one that loads back.
+  if (auto valid = ValidateSerializableLocked(replication_gtid); !valid) {
+    return valid;
+  }
 
   // Write magic number
   out.write("MGDS", 4);
@@ -75,8 +145,6 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
   // Write GTID (for replication position)
   auto gtid_len = static_cast<uint32_t>(replication_gtid.size());
   {
-    std::shared_lock lock(mutex_);
-
     // Write next_doc_id
     auto next_id = static_cast<uint32_t>(next_doc_id_);
     WriteBinary(out, next_id);
@@ -88,7 +156,7 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
 
     // Check stream after writing header section
     if (!out.good())
-      return false;
+      return stream_error();
 
     // Write document count
     auto doc_count = static_cast<uint64_t>(doc_id_to_pk_.size());
@@ -168,11 +236,14 @@ bool DocumentStore::SerializeDocuments(std::ostream& out, const std::string& rep
 
       // Periodic check to detect write failures early (e.g., disk full)
       if (!out.good())
-        return false;
+        return stream_error();
     }
   }
 
-  return out.good();
+  if (!out.good()) {
+    return stream_error();
+  }
+  return {};
 }
 
 Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std::string* replication_gtid,
@@ -550,6 +621,12 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Stream error after reading all documents", context));
   }
 
+  // The reservation assumed every document carries text. Release what went
+  // unused, so a restored store measures no larger than the one that wrote it;
+  // DUMP SAVE admits a table by the writer's measurement.
+  new_doc_texts.rehash(0);
+  new_original_texts.rehash(0);
+
   // Rebuild filter index from loaded data. A document the index cannot take
   // aborts the load: the alternative is a store that answers filters with fewer
   // documents than it holds.
@@ -614,9 +691,8 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                                       "Failed to open temp file for writing", temp_filepath));
     }
 
-    if (!SerializeDocuments(ofs, replication_gtid)) {
-      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
-                                      "Stream error while serializing documents", temp_filepath));
+    if (auto result = SerializeDocuments(ofs, replication_gtid); !result) {
+      return MakeUnexpected(MakeError(result.error().code(), result.error().message(), temp_filepath));
     }
 
     ofs.close();
@@ -669,9 +745,8 @@ Expected<void, Error> DocumentStore::LoadFromFile(const std::string& filepath, s
 Expected<void, Error> DocumentStore::SaveToStream(std::ostream& output_stream,
                                                   const std::string& replication_gtid) const {
   try {
-    if (!SerializeDocuments(output_stream, replication_gtid)) {
-      return MakeUnexpected(
-          MakeError(mygram::utils::ErrorCode::kStorageWriteError, "Stream error while saving document store"));
+    if (auto result = SerializeDocuments(output_stream, replication_gtid); !result) {
+      return result;
     }
 
     mygram::utils::StructuredLog()

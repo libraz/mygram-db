@@ -117,6 +117,17 @@ class Index {
   void RemoveDocument(DocId doc_id, std::string_view text);
 
   /**
+   * @brief Remove a document from every posting list that holds it
+   *
+   * For a document whose indexed text is not known, such as one restored from
+   * a dump written without text. Visits every term, so prefer RemoveDocument
+   * whenever the text is available.
+   *
+   * @param doc_id Document ID
+   */
+  void PurgeDocument(DocId doc_id);
+
+  /**
    * @brief Search for documents containing all terms (AND)
    *
    * @param terms Search terms

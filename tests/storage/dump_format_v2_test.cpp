@@ -2359,3 +2359,80 @@ TEST(DumpFormatV2Test, BoundedDecodeStreamTracksSectionCrcWithoutASeparatePass) 
       crc32(0, reinterpret_cast<const Bytef*>(payload.data()), static_cast<uInt>(payload.size())));
   EXPECT_EQ(section.Crc32(), expected);
 }
+
+/**
+ * @brief DUMP SAVE admits a table only when DUMP LOAD under the same limits restores it.
+ *
+ * The reader pre-screens an index at three times its encoded length before
+ * decoding it, which is stricter than the live memory the table occupies, so a
+ * writer checking live memory alone admits dumps the reader then refuses.
+ */
+TEST(DumpFormatV2Test, SaveAdmitsOnlyWhatLoadRestoresUnderTheSameLimits) {
+  Index source_index;
+  DocumentStore source_store;
+  for (uint32_t doc = 0; doc < 256; ++doc) {
+    const std::string text = "unique index text " + std::to_string(doc * 7919);
+    auto doc_id = source_store.AddDocument("pk-" + std::to_string(doc), {}, text);
+    ASSERT_TRUE(doc_id.has_value());
+    source_index.AddDocument(*doc_id, text);
+  }
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+  const uint64_t live_memory = source_index.MemoryUsage() + source_store.MemoryUsage();
+  const uint64_t index_bytes = SerializeIndex(source_index).size();
+
+  size_t refused_above_live_memory = 0;
+  size_t admitted = 0;
+  const uint64_t ceiling = std::max(live_memory, index_bytes * 3) * 2;
+  for (uint64_t budget = live_memory / 2; budget <= ceiling; budget += std::max<uint64_t>(ceiling / 64, 1)) {
+    SCOPED_TRACE("budget=" + std::to_string(budget));
+    const auto filepath = TempFilePath("save_load_parity");
+    ScopedCleanup cleanup(filepath);
+    const RestoreLimits limits{budget, budget};
+
+    auto saved = WriteDump(filepath, "", MakeTestConfig(), source_contexts, nullptr, nullptr, {}, limits);
+    if (!saved) {
+      EXPECT_EQ(saved.error().code(), mygram::utils::ErrorCode::kStorageDumpWriteError);
+      if (budget >= live_memory) {
+        ++refused_above_live_memory;
+      }
+      continue;
+    }
+    ++admitted;
+
+    std::string gtid;
+    Config loaded_config;
+    Index loaded_index;
+    DocumentStore loaded_store;
+    std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> loaded_contexts{
+        {"articles", {&loaded_index, &loaded_store}}};
+    auto loaded = ReadDumpV2(filepath, gtid, loaded_config, loaded_contexts, nullptr, nullptr, nullptr, {}, limits);
+    ASSERT_TRUE(loaded.has_value()) << "a dump that saved must load: " << loaded.error().message();
+    EXPECT_EQ(loaded_store.Size(), 256U);
+    // The writer admits by live memory, which holds only while a restore measures no larger.
+    EXPECT_LE(loaded_index.MemoryUsage() + loaded_store.MemoryUsage(), live_memory);
+  }
+  EXPECT_GT(admitted, 0U);
+  if (index_bytes * 3 > live_memory) {
+    EXPECT_GT(refused_above_live_memory, 0U) << "the index pre-screen must bind before live memory does";
+  }
+}
+
+TEST(DumpFormatV2Test, SaveRefusesDocumentTheLoaderWouldRejectWithoutReplacingTarget) {
+  const auto filepath = TempFilePath("save_oversized_field");
+  ScopedCleanup cleanup(filepath);
+  const std::string previous_contents = "previous-good-dump";
+  WriteFileBytes(filepath, std::vector<char>(previous_contents.begin(), previous_contents.end()));
+
+  Index index;
+  DocumentStore store;
+  ASSERT_TRUE(store.AddDocument("wide-row", {{"category", std::string(64 * 1024 + 1, 's')}}, "text"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&index, &store}}};
+
+  auto result = WriteDump(filepath, "", MakeTestConfig(), contexts);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpWriteError);
+  EXPECT_NE(result.error().message().find("'wide-row'"), std::string::npos) << result.error().message();
+  const auto bytes = ReadFileBytes(filepath);
+  EXPECT_EQ(std::string(bytes.begin(), bytes.end()), previous_contents);
+}

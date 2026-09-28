@@ -430,13 +430,20 @@ std::vector<DocId> PostingList::GetAll() const {
 }
 
 std::vector<DocId> PostingList::RetainPresent(const std::vector<DocId>& sorted_candidates) const {
+  if (sorted_candidates.empty()) {
+    return {};
+  }
+  std::shared_lock lock(mutex_);  // Protect read access
+  return RetainPresentLocked(sorted_candidates);
+}
+
+std::vector<DocId> PostingList::RetainPresentLocked(const std::vector<DocId>& sorted_candidates) const {
   std::vector<DocId> retained;
   if (sorted_candidates.empty()) {
     return retained;
   }
   retained.reserve(sorted_candidates.size());
 
-  std::shared_lock lock(mutex_);  // Protect read access
   if (strategy_.load(std::memory_order_relaxed) == PostingStrategy::kRoaringBitmap) {
     // The bulk context caches the container resolved for the previous lookup,
     // which ascending candidates hit repeatedly. The shared lock keeps the
@@ -695,13 +702,13 @@ std::unique_ptr<PostingList> PostingList::Intersect(const PostingList& other) co
       result->last_doc_id_ = roaring_bitmap_maximum(result->roaring_bitmap_.get());
     }
   } else {
-    // At least one is delta: fall back to sorted array intersection
-    // Note: GetAll() would try to acquire the lock again, so we inline the logic
-    std::vector<DocId> docs1 = get_docs_locked(*this);
-    std::vector<DocId> docs2 = get_docs_locked(other);
-
-    std::vector<DocId> intersection;
-    std::set_intersection(docs1.begin(), docs1.end(), docs2.begin(), docs2.end(), std::back_inserter(intersection));
+    // At least one is delta: materialize only the smaller side and probe the
+    // other, so the work and the copy never scale with the larger list.
+    const bool this_is_smaller =
+        doc_count_.load(std::memory_order_relaxed) <= other.doc_count_.load(std::memory_order_relaxed);
+    const PostingList& smaller = this_is_smaller ? *this : other;
+    const PostingList& larger = this_is_smaller ? other : *this;
+    const std::vector<DocId> intersection = larger.RetainPresentLocked(get_docs_locked(smaller));
     result->delta_encoded_ = EncodeDelta(intersection);
     result->doc_count_.store(intersection.size(), std::memory_order_relaxed);
     if (!intersection.empty()) {
@@ -1085,6 +1092,10 @@ bool PostingList::Deserialize(const std::vector<uint8_t>& buffer, size_t& offset
       return false;
     }
     if (!roaring_bitmap_internal_validate(decoded_bitmap.get(), nullptr)) {
+      return false;
+    }
+    // The declared size must be exactly the bitmap's own encoding; bytes past it are not part of any posting.
+    if (roaring_bitmap_portable_size_in_bytes(decoded_bitmap.get()) != size) {
       return false;
     }
 

@@ -582,8 +582,12 @@ class DocumentStore {
   mutable std::shared_mutex mutex_;
 
   /// Serialize all documents to an output stream (called by SaveToFile and SaveToStream)
-  /// @return true if all writes succeeded, false on stream error
-  bool SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const;
+  /// @return Error when a field exceeds a bound DeserializeDocuments enforces (nothing written), or on stream error
+  Expected<void, Error> SerializeDocuments(std::ostream& out, const std::string& replication_gtid) const;
+
+  /// Check every field SerializeDocuments would write against the bound DeserializeDocuments enforces for it
+  /// @pre Caller holds mutex_
+  Expected<void, Error> ValidateSerializableLocked(const std::string& replication_gtid) const;
 
   /// Deserialize all documents from an input stream (called by LoadFromFile and LoadFromStream)
   /// @param context Identifier for error messages (e.g., filepath or "stream")

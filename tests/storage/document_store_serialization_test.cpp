@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <sstream>
 #include <thread>
 
@@ -948,4 +949,97 @@ TEST_F(DocumentStoreSerializationTest, TinyStreamWithHugeDocumentCountFailsWitho
   auto result = store.LoadFromStream(input);
   EXPECT_FALSE(result.has_value());
   EXPECT_EQ(store.Size(), 0u);
+}
+
+/**
+ * @brief A store that serializes loads back: every bound the reader enforces is enforced first by the writer.
+ *
+ * Each case is written once at the reader's limit, which must round-trip, and once a byte past it, which must be
+ * refused before any byte reaches the stream.
+ */
+TEST_F(DocumentStoreSerializationTest, WriterRefusesEveryFieldTheReaderWouldRefuse) {
+  constexpr size_t kPkLimit = 1024 * 1024;
+  constexpr size_t kFilterNameLimit = 1024;
+  constexpr size_t kFilterStringLimit = 64 * 1024;
+  constexpr size_t kTextLimit = 16 * 1024 * 1024;
+  constexpr size_t kFilterCountLimit = 1000;
+  constexpr size_t kGtidLimit = 1024;
+
+  struct Case {
+    const char* name;
+    std::function<void(DocumentStore&, size_t)> populate;
+    size_t limit;
+    std::function<std::string(size_t)> gtid;
+  };
+  const auto no_gtid = [](size_t) { return std::string{}; };
+  const std::vector<Case> cases = {
+      {"primary key", [](DocumentStore& store, size_t size) { ASSERT_TRUE(store.AddDocument(std::string(size, 'k'))); },
+       kPkLimit, no_gtid},
+      {"filter name",
+       [](DocumentStore& store, size_t size) {
+         ASSERT_TRUE(store.AddDocument("pk", {{std::string(size, 'n'), int32_t{1}}}));
+       },
+       kFilterNameLimit, no_gtid},
+      {"filter string",
+       [](DocumentStore& store, size_t size) {
+         ASSERT_TRUE(store.AddDocument("pk", {{"category", std::string(size, 's')}}));
+       },
+       kFilterStringLimit, no_gtid},
+      {"filter count",
+       [](DocumentStore& store, size_t size) {
+         FilterMap filters;
+         for (size_t i = 0; i < size; ++i) {
+           filters.emplace("f" + std::to_string(i), int32_t{1});
+         }
+         ASSERT_TRUE(store.AddDocument("pk", filters));
+       },
+       kFilterCountLimit, no_gtid},
+      {"normalized text",
+       [](DocumentStore& store, size_t size) { ASSERT_TRUE(store.AddDocument("pk", {}, std::string(size, 't'))); },
+       kTextLimit, no_gtid},
+      {"original text",
+       [](DocumentStore& store, size_t size) { ASSERT_TRUE(store.AddDocument("pk", {}, "t", std::string(size, 'o'))); },
+       kTextLimit, no_gtid},
+      {"gtid", [](DocumentStore& store, size_t) { ASSERT_TRUE(store.AddDocument("pk")); }, kGtidLimit,
+       [](size_t size) { return std::string(size, 'g'); }},
+  };
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    {
+      DocumentStore at_limit;
+      test_case.populate(at_limit, test_case.limit);
+      std::stringstream stream;
+      ASSERT_TRUE(at_limit.SaveToStream(stream, test_case.gtid(test_case.limit)).has_value());
+      DocumentStore loaded;
+      auto load_result = loaded.LoadFromStream(stream);
+      ASSERT_TRUE(load_result.has_value()) << load_result.error().message();
+      EXPECT_EQ(loaded.Size(), 1U);
+    }
+    {
+      DocumentStore past_limit;
+      test_case.populate(past_limit, test_case.limit + 1);
+      std::stringstream stream;
+      auto save_result = past_limit.SaveToStream(stream, test_case.gtid(test_case.limit + 1));
+      ASSERT_FALSE(save_result.has_value());
+      EXPECT_EQ(save_result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+      EXPECT_NE(save_result.error().message().find("exceeds maximum allowed"), std::string::npos)
+          << save_result.error().message();
+      EXPECT_TRUE(stream.str().empty()) << "no byte may be written before the refusal";
+    }
+  }
+}
+
+TEST_F(DocumentStoreSerializationTest, WriterRefusalNamesTheDocument) {
+  DocumentStore store;
+  ASSERT_TRUE(store.AddDocument("short", {}));
+  auto doc_id = store.AddDocument("row-42", {{"category", std::string(64 * 1024 + 1, 's')}});
+  ASSERT_TRUE(doc_id.has_value());
+
+  std::stringstream stream;
+  auto result = store.SaveToStream(stream);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("document " + std::to_string(*doc_id)), std::string::npos)
+      << result.error().message();
+  EXPECT_NE(result.error().message().find("'row-42'"), std::string::npos) << result.error().message();
 }

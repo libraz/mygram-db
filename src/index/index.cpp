@@ -198,6 +198,32 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
       .Debug();
 }
 
+void Index::PurgeDocument(DocId doc_id) {
+  std::vector<std::string> terms;
+  {
+    std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    for (const auto& [term, posting] : term_postings_) {
+      if (posting->Contains(doc_id)) {
+        terms.push_back(term);
+      }
+    }
+  }
+
+  size_t empty_lists_removed = 0;
+  for (const auto& term : terms) {
+    if (RemoveFromPostingList(term, doc_id)) {
+      empty_lists_removed++;
+    }
+  }
+
+  mygram::utils::StructuredLog()
+      .Event("document_purged")
+      .Field("doc_id", static_cast<uint64_t>(doc_id))
+      .Field("ngrams_removed", static_cast<uint64_t>(terms.size()))
+      .Field("empty_lists_removed", static_cast<uint64_t>(empty_lists_removed))
+      .Debug();
+}
+
 std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_t limit, bool reverse) const {
   // RCU pattern: Take snapshot of posting lists under short lock, then search without lock
   // This reduces lock contention under high concurrency
@@ -341,23 +367,19 @@ std::vector<DocId> Index::SearchAnd(const std::vector<std::string>& terms, size_
     // Fall through to standard path
   }
 
-  // Standard path: Get all documents from all terms and intersect
-  // Note: snapshots are already validated above (no nullptr)
+  // Standard path: materialize the smallest list and narrow it against the
+  // rest, so neither the copy nor the work scales with the largest list.
+  // Sizes are captured once for the same reason as in the Roaring path above.
+  std::vector<std::pair<size_t, const PostingList*>> by_size;
+  by_size.reserve(snapshots.size());
+  for (const auto& snapshot : snapshots) {
+    by_size.emplace_back(snapshot->SizeApprox(), snapshot.get());
+  }
+  std::sort(by_size.begin(), by_size.end(), [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
 
-  // Start with first term's documents
-  auto result = snapshots[0]->GetAll();
-
-  // Intersect with each subsequent term
-  for (size_t i = 1; i < snapshots.size(); ++i) {
-    auto term_docs = snapshots[i]->GetAll();
-    std::vector<DocId> intersection;
-    std::set_intersection(result.begin(), result.end(), term_docs.begin(), term_docs.end(),
-                          std::back_inserter(intersection));
-    result = std::move(intersection);
-
-    if (result.empty()) {
-      break;  // Early termination if no matches
-    }
+  auto result = by_size[0].second->GetAll();
+  for (size_t i = 1; i < by_size.size() && !result.empty(); ++i) {
+    result = by_size[i].second->RetainPresent(result);
   }
 
   // Apply limit if specified (optimization: avoid returning more results than needed)

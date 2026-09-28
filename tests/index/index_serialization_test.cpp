@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -115,7 +116,68 @@ std::string BuildLegacyIndexHeader(uint32_t version, uint32_t ngram_size, uint32
   return data;
 }
 
+/**
+ * @brief Build a raw V1 MGIX payload from (term, posting blob) entries
+ *
+ * V1 carries no CRC32, so a structurally inconsistent payload reaches the term decoder.
+ */
+std::string BuildV1Index(const std::vector<std::pair<std::string, std::vector<uint8_t>>>& entries) {
+  std::string data = "MGIX";
+  auto append_le = [&](auto value) {
+    auto le = mygram::utils::ToLittleEndian(value);
+    data.append(reinterpret_cast<const char*>(&le), sizeof(le));
+  };
+  append_le(static_cast<uint32_t>(1));  // version
+  append_le(static_cast<uint32_t>(2));  // ngram_size
+  append_le(static_cast<uint64_t>(entries.size()));
+  for (const auto& [term, posting] : entries) {
+    append_le(static_cast<uint32_t>(term.size()));
+    data.append(term);
+    append_le(static_cast<uint64_t>(posting.size()));
+    data.append(posting.begin(), posting.end());
+  }
+  return data;
+}
+
+/// Fixed-width delta posting blob holding the single document @p doc_id.
+std::vector<uint8_t> SingleDocPosting(uint32_t doc_id) {
+  std::vector<uint8_t> blob = {0x00, 0x01, 0x00, 0x00, 0x00};
+  for (int shift = 0; shift < 32; shift += 8) {
+    blob.push_back(static_cast<uint8_t>(doc_id >> shift));
+  }
+  return blob;
+}
+
 }  // namespace
+
+TEST(IndexSerializationTest, LoadFromStreamRejectsDuplicateTermsAndTrailingPostingBytes) {
+  {
+    Index index(2);
+    std::istringstream valid(BuildV1Index({{"ab", SingleDocPosting(5)}, {"bc", SingleDocPosting(5)}}));
+    ASSERT_TRUE(index.LoadFromStream(valid).has_value());
+    EXPECT_EQ(index.TermCount(), 2U);
+  }
+  {
+    Index index(2);
+    index.AddDocument(1, "zz");
+    std::istringstream duplicate(BuildV1Index({{"ab", SingleDocPosting(5)}, {"ab", SingleDocPosting(6)}}));
+    auto result = index.LoadFromStream(duplicate);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code(), ErrorCode::kStorageCorrupted);
+    EXPECT_NE(result.error().message().find("Duplicate term"), std::string::npos) << result.error().message();
+    EXPECT_EQ(index.TermCount(), 1U) << "a refused load leaves the live index untouched";
+  }
+  {
+    Index index(2);
+    auto padded = SingleDocPosting(5);
+    padded.insert(padded.end(), {0xDE, 0xAD, 0xBE});
+    std::istringstream trailing(BuildV1Index({{"ab", padded}}));
+    auto result = index.LoadFromStream(trailing);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code(), ErrorCode::kStorageCorrupted);
+    EXPECT_NE(result.error().message().find("trailing bytes"), std::string::npos) << result.error().message();
+  }
+}
 
 /**
  * @brief Regression test: LoadFromStream rejects excessively large term_len
@@ -369,4 +431,29 @@ TEST(IndexSerializationTest, LoadFromStreamRejectsV4HeaderWithoutTermCount) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageInvalidFormat);
   EXPECT_NE(result.error().message().find("term count"), std::string::npos);
+}
+
+TEST(IndexSerializationTest, SaveRefusesTermLoadWouldRejectAndAcceptsOneAtTheLimit) {
+  // A single n-gram spanning the whole text makes the term exactly as long as the text.
+  auto build = [](size_t term_bytes) {
+    auto index = std::make_unique<Index>(static_cast<int>(term_bytes), static_cast<int>(term_bytes));
+    index->AddDocument(1, std::string(term_bytes, 'a'));
+    return index;
+  };
+
+  auto at_limit = build(10000);
+  std::stringstream saved;
+  ASSERT_TRUE(at_limit->SaveToStream(saved).has_value());
+  Index loaded(10000, 10000);
+  auto load_result = loaded.LoadFromStream(saved);
+  ASSERT_TRUE(load_result.has_value()) << load_result.error().message();
+  EXPECT_EQ(loaded.TermCount(), 1U);
+
+  auto past_limit = build(10001);
+  ASSERT_EQ(past_limit->TermCount(), 1U);
+  std::stringstream refused;
+  auto save_result = past_limit->SaveToStream(refused);
+  ASSERT_FALSE(save_result.has_value());
+  EXPECT_EQ(save_result.error().code(), ErrorCode::kIndexSerializationFailed);
+  EXPECT_NE(save_result.error().message().find("Term length"), std::string::npos) << save_result.error().message();
 }

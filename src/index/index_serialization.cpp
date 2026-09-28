@@ -42,6 +42,15 @@ using format::kFormatVersionV2;
 using format::kFormatVersionV3;
 using format::kFormatVersionV4;
 
+// Guard against malformed index files that could cause excessive memory allocation.
+// N-gram terms are typically under 40 UTF-8 bytes; 10000 is a generous safety
+// limit to reject corrupted data without false positives on valid indices.
+constexpr uint32_t kMaxTermLength = 10000;
+
+// 100M bytes is far beyond any realistic serialized posting list and prevents OOM
+// from corrupted size fields while still allowing very large production indices.
+constexpr uint64_t kMaxPostingSize = 100'000'000;
+
 }  // namespace
 
 Expected<void, Error> Index::SaveToFile(const std::string& filepath) const {
@@ -169,8 +178,14 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
     auto term_count = static_cast<uint64_t>(snapshot.size());
     crc_write_binary(term_count);
 
-    // Write each term and its posting list (lock-free)
+    // Write each term and its posting list (lock-free). A term or posting list
+    // LoadFromStream would refuse fails the save instead.
     for (const auto& [term, posting] : snapshot) {
+      if (term.size() > kMaxTermLength) {
+        return MakeUnexpected(MakeError(ErrorCode::kIndexSerializationFailed,
+                                        "Term length " + std::to_string(term.size()) + " exceeds maximum allowed " +
+                                            std::to_string(kMaxTermLength)));
+      }
       // Write term length and term
       crc_write_binary(static_cast<uint32_t>(term.size()));
       crc_write(term.data(), term.size());
@@ -190,6 +205,12 @@ Expected<void, Error> Index::SaveToStream(std::ostream& output_stream) const {
 
       // Write posting list size and data
       auto posting_size = static_cast<uint64_t>(posting_data.size());
+      if (posting_size > kMaxPostingSize) {
+        return MakeUnexpected(MakeError(ErrorCode::kIndexSerializationFailed,
+                                        "Posting list size " + std::to_string(posting_size) +
+                                            " exceeds maximum allowed " + std::to_string(kMaxPostingSize),
+                                        term));
+      }
       crc_write_binary(posting_size);
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) - Required for binary I/O of raw bytes
       crc_write(reinterpret_cast<const char*>(posting_data.data()), posting_data.size());
@@ -497,10 +518,6 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
       term_len = mygram::utils::FromLittleEndian(term_len);
       pos += sizeof(term_len);
 
-      // Guard against malformed index files that could cause excessive memory allocation.
-      // N-gram terms are typically under 40 UTF-8 bytes; 10000 is a generous safety
-      // limit to reject corrupted data without false positives on valid indices.
-      constexpr uint32_t kMaxTermLength = 10000;
       if (term_len > kMaxTermLength) {
         mygram::utils::StructuredLog()
             .Event("index_io_error")
@@ -539,10 +556,6 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
       posting_size = mygram::utils::FromLittleEndian(posting_size);
       pos += sizeof(posting_size);
 
-      // Guard against malformed index files that could cause excessive memory allocation.
-      // 100M entries is far beyond any realistic posting list size and prevents OOM
-      // from corrupted size fields while still allowing very large production indices.
-      constexpr uint64_t kMaxPostingSize = 100'000'000;
       if (posting_size > kMaxPostingSize) {
         mygram::utils::StructuredLog()
             .Event("index_io_error")
@@ -581,8 +594,26 @@ Expected<void, Error> Index::LoadFromData(std::string all_data) {
         return MakeUnexpected(
             MakeError(ErrorCode::kIndexDeserializationFailed, "Failed to deserialize posting list", term));
       }
+      if (offset != posting_data.size()) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "posting_list_trailing_bytes")
+            .Field("operation", "load_from_stream")
+            .Field("term", term)
+            .Error();
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageCorrupted, "Posting list payload has unconsumed trailing bytes", term));
+      }
 
-      new_postings[term] = std::move(posting);
+      if (!new_postings.try_emplace(term, std::move(posting)).second) {
+        mygram::utils::StructuredLog()
+            .Event("index_io_error")
+            .Field("type", "duplicate_term")
+            .Field("operation", "load_from_stream")
+            .Field("term", term)
+            .Error();
+        return MakeUnexpected(MakeError(ErrorCode::kStorageCorrupted, "Duplicate term in index data", term));
+      }
     }
 
     // Swap the loaded data in with minimal lock time

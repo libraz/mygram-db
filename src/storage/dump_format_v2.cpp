@@ -104,9 +104,13 @@ uint32_t ComputeCRC32(const std::string& data) {
 
 class CountingStreambuf : public std::streambuf {
  public:
-  explicit CountingStreambuf(std::ostream& destination) : destination_(destination) {}
+  explicit CountingStreambuf(std::ostream& destination, size_t prefix_capacity = 0)
+      : destination_(destination), prefix_capacity_(prefix_capacity) {}
 
   [[nodiscard]] uint64_t bytes_written() const { return bytes_written_; }
+
+  /// The first bytes written, up to the capacity given at construction.
+  [[nodiscard]] const std::string& prefix() const { return prefix_; }
 
  protected:
   int overflow(int ch) override {
@@ -141,20 +145,94 @@ class CountingStreambuf : public std::streambuf {
     if (!destination_.good()) {
       return false;
     }
+    if (prefix_.size() < prefix_capacity_) {
+      prefix_.append(data, std::min(size, prefix_capacity_ - prefix_.size()));
+    }
     bytes_written_ += size;
     return true;
   }
 
   std::ostream& destination_;
+  size_t prefix_capacity_;
+  std::string prefix_;
   uint64_t bytes_written_ = 0;
 };
+
+/// Leading bytes of a document-store payload that hold its document count:
+/// magic, version, next DocID and GTID length, a dump's empty GTID, then the count.
+constexpr size_t kDocumentSectionHeaderBytes = 4 + 4 + 4 + 4 + 8;
+
+/**
+ * @brief Sizes of a written table section, as ReadDumpV2 will read them back.
+ */
+struct WrittenTableSection {
+  uint64_t section_length = 0;
+  uint64_t index_length = 0;
+  uint64_t document_length = 0;
+  std::string document_prefix;  ///< Leading bytes of the document payload
+};
+
+/**
+ * @brief Refuse a written table section that ReadDumpV2 would refuse under the same limits.
+ *
+ * Runs the reader's size checks in the reader's order, through the same
+ * helpers. The live table's memory stands in for what the reader measures
+ * after decoding.
+ *
+ * @param section Sizes of the section just written
+ * @param staged_memory_bytes Memory the tables written before this one hold
+ * @param index_memory Memory of this table's index
+ * @param table_memory Memory of this table's index and document store
+ * @param restore_limits Limits the dump must be restorable under
+ */
+Expected<void, Error> ValidateTableSectionRestorable(const WrittenTableSection& section, uint64_t staged_memory_bytes,
+                                                     uint64_t index_memory, uint64_t table_memory,
+                                                     const RestoreLimits& restore_limits) {
+  auto refuse = [](const std::string& reason) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, reason + "; increase the limit before DUMP SAVE"));
+  };
+  const uint64_t budget = restore_limits.memory_budget_bytes;
+
+  if (section.section_length > restore_limits.max_section_bytes) {
+    return refuse("Table section exceeds dump.restore_max_section_mb");
+  }
+  if (staged_memory_bytes > budget || section.section_length > budget - staged_memory_bytes) {
+    return refuse("Table section exceeds dump.restore_memory_budget_mb");
+  }
+  if (auto result = dump_internal::ValidateRestoreMaterializationBudget(staged_memory_bytes, section.index_length,
+                                                                        budget, "Index data", "V2",
+                                                                        dump_internal::kIndexMaterializationFactor);
+      !result) {
+    return refuse(result.error().message());
+  }
+  if (index_memory > budget - staged_memory_bytes) {
+    return refuse("Index exceeds dump.restore_memory_budget_mb");
+  }
+
+  std::istringstream prefix_stream(section.document_prefix);
+  dump_internal::DocumentSectionHeader doc_header;
+  if (auto result = dump_internal::ReadDocumentSectionHeader(prefix_stream, section.document_length, doc_header);
+      !result) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, result.error().message()));
+  }
+  if (auto result = dump_internal::ValidateRestoreDocumentBudget(
+          staged_memory_bytes + index_memory, section.document_length, doc_header.document_count, budget, "V2");
+      !result) {
+    return refuse(result.error().message());
+  }
+  if (table_memory > budget - staged_memory_bytes) {
+    return refuse("Table exceeds dump.restore_memory_budget_mb");
+  }
+  return {};
+}
 
 #ifndef _WIN32
 Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, int file_descriptor,
                                                  const std::string& table_name, index::Index* index,
                                                  DocumentStore* doc_store,
                                                  const std::unordered_map<std::string, TableStatistics>* table_stats,
-                                                 const std::string& temp_filepath, uint64_t max_section_bytes) {
+                                                 const std::string& temp_filepath, WrittenTableSection& written) {
   output_stream.flush();
   if (!output_stream.good()) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -198,7 +276,7 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
     }
   }
 
-  auto write_sized_payload = [&](auto write_payload) -> Expected<void, Error> {
+  auto write_sized_payload = [&](auto write_payload, uint64_t& written_length) -> Expected<void, Error> {
     output_stream.flush();
     off_t length_offset = lseek(file_descriptor, 0, SEEK_CUR);
     if (length_offset < 0) {
@@ -226,42 +304,52 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to locate payload end"));
     }
     payload_length = static_cast<uint64_t>(payload_end - payload_start);
+    written_length = payload_length;
     if (!dump_internal::WriteBinaryAt(file_descriptor, payload_length, length_offset)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write payload length"));
     }
     return {};
   };
 
-  if (auto result = write_sized_payload([&](std::ostream& stream) -> Expected<void, Error> {
-        if (auto index_result = index->SaveToStream(stream); !index_result) {
-          StructuredLog()
-              .Event("storage_error")
-              .Field("operation", "save_index")
-              .Field("filepath", temp_filepath)
-              .Field("table", table_name)
-              .Field("error", index_result.error().message())
-              .Error();
-          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-        }
-        return {};
-      });
+  if (auto result = write_sized_payload(
+          [&](std::ostream& stream) -> Expected<void, Error> {
+            if (auto index_result = index->SaveToStream(stream); !index_result) {
+              StructuredLog()
+                  .Event("storage_error")
+                  .Field("operation", "save_index")
+                  .Field("filepath", temp_filepath)
+                  .Field("table", table_name)
+                  .Field("error", index_result.error().message())
+                  .Error();
+              return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+            }
+            return {};
+          },
+          written.index_length);
       !result) {
     return result;
   }
 
-  if (auto result = write_sized_payload([&](std::ostream& stream) -> Expected<void, Error> {
-        if (auto doc_result = doc_store->SaveToStream(stream, ""); !doc_result) {
-          StructuredLog()
-              .Event("storage_error")
-              .Field("operation", "save_documents")
-              .Field("filepath", temp_filepath)
-              .Field("table", table_name)
-              .Field("error", doc_result.error().message())
-              .Error();
-          return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-        }
-        return {};
-      });
+  if (auto result = write_sized_payload(
+          [&](std::ostream& stream) -> Expected<void, Error> {
+            CountingStreambuf doc_streambuf(stream, kDocumentSectionHeaderBytes);
+            std::ostream doc_stream(&doc_streambuf);
+            auto doc_result = doc_store->SaveToStream(doc_stream, "");
+            doc_stream.flush();
+            written.document_prefix = doc_streambuf.prefix();
+            if (!doc_result) {
+              StructuredLog()
+                  .Event("storage_error")
+                  .Field("operation", "save_documents")
+                  .Field("filepath", temp_filepath)
+                  .Field("table", table_name)
+                  .Field("error", doc_result.error().message())
+                  .Error();
+              return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, doc_result.error().message()));
+            }
+            return {};
+          },
+          written.document_length);
       !result) {
     return result;
   }
@@ -270,11 +358,7 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
   if (!section_stream.good() || !output_stream.good()) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
   }
-  if (counting_streambuf.bytes_written() > max_section_bytes) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kStorageDumpWriteError,
-                  "Table section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
-  }
+  written.section_length = counting_streambuf.bytes_written();
 
   auto section_crc = dump_internal::CalculateCRC32RangeFd(
       file_descriptor, section_start + dump_format::kSectionEnvelopeSize, counting_streambuf.bytes_written());
@@ -630,16 +714,26 @@ Expected<void, Error> WriteDumpV2(
 
     // Sections 3..N: TableData (one per table)
     size_t tables_processed = 0;
+    uint64_t staged_memory_bytes = 0;
     for (const auto& [table_name, ctx_pair] : table_contexts) {
       index::Index* index = ctx_pair.first;
       DocumentStore* doc_store = ctx_pair.second;
       if (table_progress_callback) {
         table_progress_callback(table_name, tables_processed);
       }
+      const uint64_t index_memory = index->MemoryUsage();
+      const uint64_t table_memory = index_memory + doc_store->MemoryUsage();
+      WrittenTableSection written;
 
 #ifndef _WIN32
       if (auto result = WriteStreamingTableSection(ofs, file_descriptor, table_name, index, doc_store, table_stats,
-                                                   temp_filepath, restore_limits.max_section_bytes);
+                                                   temp_filepath, written);
+          !result) {
+        LogStorageError("write_table_section", temp_filepath, result.error().message());
+        return result;
+      }
+      if (auto result =
+              ValidateTableSectionRestorable(written, staged_memory_bytes, index_memory, table_memory, restore_limits);
           !result) {
         LogStorageError("write_table_section", temp_filepath, result.error().message());
         return result;
@@ -687,6 +781,7 @@ Expected<void, Error> WriteDumpV2(
         }
         std::string index_data = index_stream.str();
         auto index_len = static_cast<uint64_t>(index_data.size());
+        written.index_length = index_len;
         if (!WriteBinary(table_stream, index_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
         }
@@ -707,6 +802,8 @@ Expected<void, Error> WriteDumpV2(
         }
         std::string doc_data = doc_stream.str();
         auto doc_len = static_cast<uint64_t>(doc_data.size());
+        written.document_length = doc_len;
+        written.document_prefix = doc_data.substr(0, kDocumentSectionHeaderBytes);
         if (!WriteBinary(table_stream, doc_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
         }
@@ -714,16 +811,19 @@ Expected<void, Error> WriteDumpV2(
       }
 
       // Write entire table as one section envelope
-      if (static_cast<uint64_t>(table_stream.tellp()) > restore_limits.max_section_bytes) {
-        return MakeUnexpected(
-            MakeError(ErrorCode::kStorageDumpWriteError,
-                      "Table section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+      written.section_length = static_cast<uint64_t>(table_stream.tellp());
+      if (auto result =
+              ValidateTableSectionRestorable(written, staged_memory_bytes, index_memory, table_memory, restore_limits);
+          !result) {
+        LogStorageError("write_table_section", temp_filepath, result.error().message());
+        return result;
       }
       if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kTableData, table_stream); !result) {
         LogStorageError("write_table_section", temp_filepath, result.error().message());
         return result;
       }
 #endif
+      staged_memory_bytes += table_memory;
       ++section_count;
       ++tables_processed;
 

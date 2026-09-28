@@ -191,3 +191,30 @@ TEST(PostingListSerializationTest, InvalidBodyDoesNotMutateExistingListOrOffset)
   EXPECT_EQ(deserialized.GetStrategy(), PostingStrategy::kFixedWidthDelta);
   EXPECT_EQ(deserialized.GetAll(), (std::vector<DocId>{10, 20}));
 }
+
+TEST(PostingListSerializationTest, RejectsRoaringSizeLargerThanTheBitmapEncoding) {
+  PostingList pl(0.01);
+  for (uint32_t i = 0; i < 200; i++) {
+    pl.Add(i * 3);
+  }
+  pl.Optimize(600);
+
+  std::vector<uint8_t> buffer;
+  ASSERT_TRUE(pl.Serialize(buffer));
+  ASSERT_EQ(buffer[0], static_cast<uint8_t>(PostingStrategy::kRoaringBitmap));
+
+  // Declare two more bytes than the bitmap encodes and supply them.
+  uint32_t declared = static_cast<uint32_t>(buffer[1]) | (static_cast<uint32_t>(buffer[2]) << 8) |
+                      (static_cast<uint32_t>(buffer[3]) << 16) | (static_cast<uint32_t>(buffer[4]) << 24);
+  declared += 2;
+  for (size_t i = 0; i < 4; ++i) {
+    buffer[1 + i] = static_cast<uint8_t>(declared >> (8 * i));
+  }
+  buffer.push_back(0xAB);
+  buffer.push_back(0xCD);
+
+  PostingList deserialized(0.01);
+  size_t offset = 0;
+  EXPECT_FALSE(deserialized.Deserialize(buffer, offset));
+  EXPECT_EQ(offset, 0u);
+}

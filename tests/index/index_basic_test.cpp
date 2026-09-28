@@ -407,6 +407,25 @@ TEST(IndexTest, RemoveDocumentRemovesEmptyPostingLists) {
 }
 
 /**
+ * @test PurgeDocument removes a document from every posting list without its text
+ */
+TEST(IndexTest, PurgeDocumentRemovesEveryPostingWithoutText) {
+  Index index(1);  // Unigram index
+
+  index.AddDocument(1, "ab");  // Terms: a, b
+  index.AddDocument(2, "bc");  // Terms: b, c
+
+  index.PurgeDocument(1);
+
+  EXPECT_TRUE(index.SearchOr({"a"}).empty());
+  EXPECT_EQ(index.SearchOr({"b", "c"}), std::vector<DocId>{2});
+  EXPECT_EQ(index.TermCount(), 2) << "the posting list only doc 1 held should be removed";
+
+  index.PurgeDocument(3);  // Not indexed: nothing changes
+  EXPECT_EQ(index.TermCount(), 2);
+}
+
+/**
  * @test RemoveDocument with multiple documents does partial cleanup
  */
 TEST(IndexTest, RemoveDocumentPartialCleanup) {

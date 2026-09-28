@@ -332,6 +332,21 @@ gtest_discover_tests(posting_list_benchmark_test
 )
 
 # Threshold search cost: transient allocation for one fuzzy request
+# Replaces the global allocator to account for one search, so it has its own executable.
+add_executable(search_and_allocation_test
+  search_and_allocation_test.cpp
+)
+
+target_link_libraries(search_and_allocation_test
+  mygramdb_index
+  GTest::gtest_main
+)
+
+gtest_discover_tests(search_and_allocation_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+)
+
 add_executable(index_threshold_cost_test
   index_threshold_cost_test.cpp
 )

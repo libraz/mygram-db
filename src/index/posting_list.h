@@ -246,6 +246,9 @@ class PostingList {
 #endif
 
  private:
+  /// RetainPresent() for a caller that already holds mutex_ (shared or exclusive).
+  [[nodiscard]] std::vector<DocId> RetainPresentLocked(const std::vector<DocId>& sorted_candidates) const;
+
   std::atomic<PostingStrategy> strategy_{PostingStrategy::kFixedWidthDelta};
   double roaring_threshold_;
 
