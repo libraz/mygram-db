@@ -11,6 +11,7 @@
 #ifdef USE_MYSQL
 
 #include <stdexcept>
+#include <string_view>
 
 using namespace binlog_test;
 
@@ -109,14 +110,18 @@ TEST_F(BinlogReaderFixture, RepeatedProcessingFailureAtSameGtidStopsOnThirdRepla
   std::string last_failure_gtid;
   int consecutive_failures = 0;
 
-  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:42", last_failure_gtid, consecutive_failures));
+  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("ffffffff-0000-0000-0000-000000000001:42",
+                                                               last_failure_gtid, consecutive_failures));
   EXPECT_EQ(consecutive_failures, 1);
-  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:42", last_failure_gtid, consecutive_failures));
+  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("ffffffff-0000-0000-0000-000000000001:42",
+                                                               last_failure_gtid, consecutive_failures));
   EXPECT_EQ(consecutive_failures, 2);
-  EXPECT_TRUE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:42", last_failure_gtid, consecutive_failures));
+  EXPECT_TRUE(reader_->ShouldStopForRepeatedProcessingFailure("ffffffff-0000-0000-0000-000000000001:42",
+                                                              last_failure_gtid, consecutive_failures));
   EXPECT_EQ(consecutive_failures, 3);
 
-  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("uuid:43", last_failure_gtid, consecutive_failures));
+  EXPECT_FALSE(reader_->ShouldStopForRepeatedProcessingFailure("ffffffff-0000-0000-0000-000000000001:43",
+                                                               last_failure_gtid, consecutive_failures));
   EXPECT_EQ(consecutive_failures, 1) << "a newly applied GTID starts a new retry budget";
 }
 
@@ -137,10 +142,10 @@ TEST_F(BinlogReaderFixture, UnsupportedRuntimeEventsStopBeforeGtidAdvance) {
     const auto decoded_type = static_cast<MySQLBinlogEventType>(wire_event[4]);
 
     reader_->should_stop_.store(false, std::memory_order_release);
-    reader_->SetCurrentGTID("uuid:17");
+    reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
     ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(decoded_type));
     EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:17");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17");
     EXPECT_FALSE(reader_->GetLastError().empty());
     // The code is what SYNC reads to decide it must restart past the event
     // rather than replay it; a generic binlog error would be replayed forever.
@@ -156,15 +161,15 @@ TEST_F(BinlogReaderFixture, UnsupportedRuntimeEventsStopBeforeGtidAdvance) {
 
 TEST(ReplicationPositionStateTest, ReceivedAppliedAndCommittedPositionsRemainDistinct) {
   ReplicationPositionState state;
-  state.ObserveReceivedGTID("uuid:41", true, false);
+  state.ObserveReceivedGTID("ffffffff-0000-0000-0000-000000000001:41", true, false);
 
-  EXPECT_EQ(state.received_gtid(), "uuid:41");
+  EXPECT_EQ(state.received_gtid(), "ffffffff-0000-0000-0000-000000000001:41");
   EXPECT_TRUE(state.reader_transaction_open());
   EXPECT_TRUE(state.TakeCommitGTID("").empty())
       << "A received GTID must never become committed before a mutation or explicit commit";
 
-  state.RecordAppliedMutation("uuid:41");
-  EXPECT_EQ(state.TakeCommitGTID(""), "uuid:41");
+  state.RecordAppliedMutation("ffffffff-0000-0000-0000-000000000001:41");
+  EXPECT_EQ(state.TakeCommitGTID(""), "ffffffff-0000-0000-0000-000000000001:41");
   EXPECT_TRUE(state.TakeCommitGTID("").empty());
 
   state.ObserveReceivedGTID("1-2-9", false, true);
@@ -193,17 +198,178 @@ TEST_F(BinlogReaderFixture, ReestablishedConnectionIsNotClosedBeforeNextStreamOp
   EXPECT_TRUE(BinlogReader::ShouldCloseStreamAfterReadLoop(false));
 }
 
-TEST_F(BinlogReaderFixture, SchemaChangeInvalidatesStaleColumnNamesBeforeRefresh) {
-  TableMetadata metadata;
-  metadata.database_name = "app";
-  metadata.table_name = "articles";
-  reader_->column_names_cache_["app.articles"] = {{"old_content", false, {}}};
-  reader_->column_names_cache_["app.other"] = {{"other", false, {}}};
+namespace {
 
-  reader_->InvalidateColumnNamesForSchemaChange(metadata);
+/// TABLE_MAP_EVENT whose columns carry no metadata bytes (LONG and unknown codes).
+std::vector<uint8_t> BuildBareTableMap(uint64_t table_id, const std::string& database, const std::string& table,
+                                       const std::vector<uint8_t>& column_types) {
+  using test::BinlogEventBuilder;
+  auto buf = BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::TABLE_MAP_EVENT);
+  BinlogEventBuilder::AppendTableId(buf, table_id);
+  BinlogEventBuilder::AppendLittleEndian16(buf, 0);  // flags
+  buf.push_back(static_cast<uint8_t>(database.size()));
+  buf.insert(buf.end(), database.begin(), database.end());
+  buf.push_back(0);
+  buf.push_back(static_cast<uint8_t>(table.size()));
+  buf.insert(buf.end(), table.begin(), table.end());
+  buf.push_back(0);
+  BinlogEventBuilder::AppendPackedInt(buf, column_types.size());
+  buf.insert(buf.end(), column_types.begin(), column_types.end());
+  BinlogEventBuilder::AppendPackedInt(buf, 0);                 // metadata block
+  buf.insert(buf.end(), (column_types.size() + 7) / 8, 0x00);  // NULL bitmap
+  BinlogEventBuilder::AppendLittleEndian32(buf, 0);            // checksum placeholder
+  BinlogEventBuilder::FixEventSizeWithChecksum(buf);
+  return buf;
+}
 
-  EXPECT_EQ(reader_->column_names_cache_.count("app.articles"), 0U);
-  EXPECT_EQ(reader_->column_names_cache_.count("app.other"), 1U);
+std::vector<unsigned char> BuildRowsEventHeader(uint64_t table_id) {
+  std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
+  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  for (int i = 0; i < 6; ++i) {
+    event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((table_id >> (i * 8)) & 0xFF);
+  }
+  return event;
+}
+
+}  // namespace
+
+/**
+ * @brief A DDL that can redefine the configured table drops its cached columns on the reader thread.
+ *
+ * The next TABLE_MAP of the table follows the DDL in the stream, so it must
+ * fetch the new column names, signedness and ENUM labels instead of copying the
+ * previous definition over a same-sized TABLE_MAP. No other table is touched.
+ */
+TEST_F(BinlogReaderFixture, ConfiguredTableDdlDropsOnlyThatTablesCachedColumns) {
+  const std::vector<std::string> redefinitions = {
+      "CREATE TABLE articles (id BIGINT UNSIGNED PRIMARY KEY, state ENUM('a','b'))",
+      "DROP TABLE articles",
+      "RENAME TABLE staging TO articles",
+      "ALTER TABLE articles MODIFY id BIGINT UNSIGNED",
+  };
+  for (const auto& query : redefinitions) {
+    SCOPED_TRACE(query);
+    reader_->schema_cache_.StoreColumns("app", "articles", {{"id", false, {}}});
+    reader_->schema_cache_.StoreColumns("app", "articles_archive", {{"id", false, {}}});
+    reader_->schema_cache_.StoreColumns("app", "other", {{"id", false, {}}});
+
+    const auto event = BinlogEvent::CreateDDL(table_config_, query, "ffffffff-0000-0000-0000-000000000001:5");
+    ASSERT_NE(event.ddl_type, DDLType::kUnknown);
+    EXPECT_TRUE(reader_->ObserveConfiguredTableDdl(event));
+
+    EXPECT_EQ(reader_->schema_cache_.FindColumns("app", "articles"), nullptr);
+    EXPECT_NE(reader_->schema_cache_.FindColumns("app", "articles_archive"), nullptr);
+    EXPECT_NE(reader_->schema_cache_.FindColumns("app", "other"), nullptr);
+    EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire));
+  }
+}
+
+/**
+ * @brief DDL that changes rows without row events stops with the code SYNC restarts past.
+ */
+TEST_F(BinlogReaderFixture, RowsReplacingDdlStopsWithTheUndecodableCode) {
+  const std::vector<std::string> queries = {
+      "ALTER TABLE articles DROP PARTITION p0",
+      "ALTER TABLE articles TRUNCATE PARTITION p0",
+      "ALTER TABLE staging EXCHANGE PARTITION p0 WITH TABLE articles",
+      "CREATE OR REPLACE TABLE articles (id BIGINT PRIMARY KEY)",
+  };
+  for (const auto& query : queries) {
+    SCOPED_TRACE(query);
+    reader_->should_stop_.store(false, std::memory_order_release);
+    reader_->SetCurrentGTID("3e11fa47-71ca-11e1-9e33-c80aa9429562:17");
+    const auto event = BinlogEvent::CreateDDL(table_config_, query, "3e11fa47-71ca-11e1-9e33-c80aa9429562:18");
+    ASSERT_EQ(event.ddl_type, DDLType::kRowsReplaced);
+
+    EXPECT_FALSE(reader_->ObserveConfiguredTableDdl(event));
+    EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
+    EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
+    EXPECT_NE(reader_->GetLastError().find("SYNC for every replicated table"), std::string::npos);
+    EXPECT_FALSE(reader_->HasSchemaIncompatibleError());
+    EXPECT_EQ(reader_->GetCurrentGTID(), "3e11fa47-71ca-11e1-9e33-c80aa9429562:17");
+    EXPECT_EQ(reader_->GetQueueSize(), 0U);
+  }
+  reader_->should_stop_.store(false, std::memory_order_release);
+
+  // A table whose SYNC snapshot already covers the DDL replays past it.
+  reader_->legacy_table_context_.replay_watermark->snapshot_gtid = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20";
+  const auto covered = BinlogEvent::CreateDDL(table_config_, "ALTER TABLE articles DROP PARTITION p0",
+                                              "3e11fa47-71ca-11e1-9e33-c80aa9429562:18");
+  EXPECT_TRUE(reader_->ObserveConfiguredTableDdl(covered));
+  EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire));
+}
+
+/**
+ * @brief A table id reused by an unreplicated table no longer decodes as the replicated one.
+ *
+ * Table ids are only unique within one server run, so after a reconnect an
+ * unmonitored table can receive an id a monitored table held. Its rows must not
+ * be decoded with the monitored table's schema and applied to its index.
+ */
+TEST_F(BinlogReaderFixture, ReusedTableIdForUnmonitoredTableDropsTheReplicatedMapping) {
+  constexpr uint64_t kTableId = 42;
+  TableMetadata monitored;
+  monitored.table_id = kTableId;
+  monitored.database_name = "app";
+  monitored.table_name = table_config_.name;
+  monitored.columns.resize(1);
+  reader_->schema_cache_.RecordTableMap(monitored);
+  const auto rows = BuildRowsEventHeader(kTableId);
+  ASSERT_TRUE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, rows.data(), rows.size()));
+
+  const auto table_map = BuildBareTableMap(kTableId, "app", "audit_log", {0x03});
+  BinlogReader::ProcessingFailureKind failure_kind = BinlogReader::ProcessingFailureKind::kNone;
+  EXPECT_EQ(reader_->HandleTableMapEvent(table_map.data(), table_map.size(), &failure_kind),
+            BinlogReader::TableMapAction::kContinue);
+
+  EXPECT_EQ(reader_->schema_cache_.table_maps().Get(kTableId), nullptr);
+  EXPECT_FALSE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, rows.data(), rows.size()));
+}
+
+/**
+ * @brief Every stream (re)open forgets table ids and column definitions.
+ */
+TEST_F(BinlogReaderFixture, SchemaCacheResetForgetsEveryTableIdAndColumnList) {
+  TableMetadata monitored;
+  monitored.table_id = 7;
+  monitored.database_name = "app";
+  monitored.table_name = table_config_.name;
+  reader_->schema_cache_.RecordTableMap(monitored);
+  reader_->schema_cache_.RecordSuppressedTableMap(8);
+  reader_->schema_cache_.StoreColumns("app", table_config_.name, {{"id", false, {}}});
+
+  reader_->schema_cache_.Reset();
+
+  EXPECT_EQ(reader_->schema_cache_.table_maps().Size(), 0U);
+  EXPECT_FALSE(reader_->schema_cache_.IsSuppressed(8));
+  EXPECT_EQ(reader_->schema_cache_.FindColumns("app", table_config_.name), nullptr);
+}
+
+/**
+ * @brief An intact TABLE_MAP with an unsizable column stops with 2017; a malformed one reconnects with 2008.
+ */
+TEST_F(BinlogReaderFixture, UnsizableTableMapStopsAndMalformedTableMapReconnects) {
+  BinlogReader::ProcessingFailureKind failure_kind = BinlogReader::ProcessingFailureKind::kNone;
+
+  const auto unsizable = BuildBareTableMap(51, "app", table_config_.name, {0x03, 0x63});
+  EXPECT_EQ(reader_->HandleTableMapEvent(unsizable.data(), unsizable.size(), &failure_kind),
+            BinlogReader::TableMapAction::kStop);
+  EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
+  EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
+  EXPECT_NE(reader_->GetLastError().find("type code 99"), std::string::npos) << reader_->GetLastError();
+  EXPECT_NE(reader_->GetLastError().find("SYNC for every replicated table"), std::string::npos);
+  reader_->should_stop_.store(false, std::memory_order_release);
+
+  auto truncated = BuildBareTableMap(52, "app", table_config_.name, {0x03, 0x03});
+  truncated.resize(mygram::constants::kBinlogEventHeaderLen + 12);
+  test::BinlogEventBuilder::FixEventSize(truncated);
+  EXPECT_EQ(reader_->HandleTableMapEvent(truncated.data(), truncated.size(), &failure_kind),
+            BinlogReader::TableMapAction::kReconnect);
+  EXPECT_EQ(failure_kind, BinlogReader::ProcessingFailureKind::kDeterministic);
+  EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLBinlogError);
+  EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire));
 }
 
 /**
@@ -260,19 +426,26 @@ TEST_F(BinlogReaderFixture, PushAndPopEvents) {
 }
 
 TEST(BinlogReaderDDLTest, ClassifyTruncateOnlyForTruncateTableStatement) {
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("TRUNCATE TABLE articles"), DDLType::kTruncate);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("truncate table `articles`"), DDLType::kTruncate);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles CHANGE old_col truncate_data TEXT"), DDLType::kAlter);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles DROP COLUMN truncate_data"), DDLType::kAlter);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("SET @noop = 1; DROP TABLE articles"), DDLType::kDrop);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE users ADD COLUMN x INT; DROP TABLE articles"), DDLType::kAlter);
+  const auto articles = MakeDefaultTableConfig();
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("TRUNCATE TABLE articles", articles), DDLType::kTruncate);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("truncate table `articles`", articles), DDLType::kTruncate);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles CHANGE old_col truncate_data TEXT", articles),
+            DDLType::kAlter);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles DROP COLUMN truncate_data", articles), DDLType::kAlter);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("SET @noop = 1; DROP TABLE articles", articles), DDLType::kDrop);
+  // The type comes from the first statement naming the table, not the first DDL.
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE users ADD COLUMN x INT; DROP TABLE articles", articles),
+            DDLType::kDrop);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("TRUNCATE TABLE users", articles), DDLType::kUnknown);
 }
 
 TEST(BinlogReaderDDLTest, ClassifyAlterTableRenameAsRename) {
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE staging RENAME TO articles"), DDLType::kRename);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles RENAME AS articles_old"), DDLType::kRename);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles RENAME COLUMN a TO b"), DDLType::kAlter);
-  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles ADD COLUMN c TEXT DEFAULT 'RENAME TO x'"), DDLType::kAlter);
+  const auto articles = MakeDefaultTableConfig();
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE staging RENAME TO articles", articles), DDLType::kRename);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles RENAME AS articles_old", articles), DDLType::kRename);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles RENAME COLUMN a TO b", articles), DDLType::kAlter);
+  EXPECT_EQ(BinlogEvent::ClassifyDDL("ALTER TABLE articles ADD COLUMN c TEXT DEFAULT 'RENAME TO x'", articles),
+            DDLType::kAlter);
 }
 
 /**
@@ -354,13 +527,13 @@ TEST(BinlogReaderTest, EventStructure) {
   event.table_name = "test_table";
   event.primary_key = "123";
   event.text = "test text";
-  event.gtid = "uuid:1";
+  event.gtid = "ffffffff-0000-0000-0000-000000000001:1";
 
   EXPECT_EQ(event.type, BinlogEventType::INSERT);
   EXPECT_EQ(event.table_name, "test_table");
   EXPECT_EQ(event.primary_key, "123");
   EXPECT_EQ(event.text, "test text");
-  EXPECT_EQ(event.gtid, "uuid:1");
+  EXPECT_EQ(event.gtid, "ffffffff-0000-0000-0000-000000000001:1");
 }
 
 /**
@@ -394,7 +567,7 @@ TEST(BinlogReaderTest, Construction) {
   table_config.primary_key = "id";
 
   BinlogReader::Config reader_config;
-  reader_config.start_gtid = "uuid:1";
+  reader_config.start_gtid = "ffffffff-0000-0000-0000-000000000001:1";
   reader_config.queue_size = 1000;
   reader_config.server_id = 12345;  // Test server ID
 
@@ -630,7 +803,7 @@ TEST(BinlogReaderTest, DestructorCallsStop) {
   table_config.name = "test_table";
 
   BinlogReader::Config reader_config;
-  reader_config.start_gtid = "uuid:1";
+  reader_config.start_gtid = "ffffffff-0000-0000-0000-000000000001:1";
   reader_config.server_id = 12345;  // Test server ID
 
   // Create reader in a scope
@@ -751,19 +924,20 @@ TEST_F(BinlogReaderFixture, GtidNotUpdatedOnProcessEventFailure) {
   ResetReader();
 
   // Set initial GTID
-  reader_->SetCurrentGTID("uuid:100");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:100");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:100");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:100");
 
-  // Create an event with GTID "uuid:101"
+  // Create an event with GTID "ffffffff-0000-0000-0000-000000000001:101"
   auto event = MakeEvent(BinlogEventType::INSERT, "101", 1, "test text");
-  event.gtid = "uuid:101";
+  event.gtid = "ffffffff-0000-0000-0000-000000000001:101";
 
   // Call ProcessEvent
   bool result = reader_->ProcessEvent(event);
 
   // If ProcessEvent failed, GTID should remain at original value
   if (!result) {
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:100") << "GTID was updated despite ProcessEvent failure";
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:100")
+        << "GTID was updated despite ProcessEvent failure";
   }
 }
 
@@ -778,12 +952,12 @@ TEST_F(BinlogReaderFixture, WorkerThreadGtidUpdateOnlyOnSuccess) {
   ResetReader();
 
   // Set initial state
-  reader_->SetCurrentGTID("uuid:50");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
   uint64_t initial_processed = reader_->GetProcessedEvents();
 
   // Create and push a test event
   auto event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "51", 0, "text"));
-  event->gtid = "uuid:51";
+  event->gtid = "ffffffff-0000-0000-0000-000000000001:51";
 
   // Push event to queue
   reader_->PushEvent(std::move(event));
@@ -798,57 +972,58 @@ TEST_F(BinlogReaderFixture, WorkerThreadGtidUpdateOnlyOnSuccess) {
   bool success = reader_->ProcessQueuedEvent(*popped_event);
 
   if (success) {
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
     EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed + 1);
 
     BinlogEvent commit_event;
     commit_event.type = BinlogEventType::COMMIT;
     commit_event.gtid = popped_event->gtid;
     EXPECT_TRUE(reader_->ProcessQueuedEvent(commit_event));
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
   } else {
     // Should NOT update GTID
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50") << "GTID should not be updated on ProcessEvent failure";
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50")
+        << "GTID should not be updated on ProcessEvent failure";
     EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed)
         << "processed_events should not be incremented on failure";
   }
 }
 
 TEST_F(BinlogReaderFixture, DmlGtidAdvancesOnlyAtCommitBoundary) {
-  reader_->SetCurrentGTID("uuid:50");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
   uint64_t initial_processed = reader_->GetProcessedEvents();
 
   BinlogEvent event = MakeEvent(BinlogEventType::INSERT, "51", 1, "text");
-  event.gtid = "uuid:51";
+  event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
 
   ASSERT_TRUE(reader_->ProcessQueuedEvent(event));
   EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed + 1);
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
 
   BinlogEvent commit_event;
   commit_event.type = BinlogEventType::COMMIT;
-  commit_event.gtid = "uuid:51";
+  commit_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
   ASSERT_TRUE(reader_->ProcessQueuedEvent(commit_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
 }
 
 TEST_F(BinlogReaderFixture, MismatchedCommitDoesNotDiscardPendingAppliedPosition) {
-  reader_->SetCurrentGTID("uuid:50");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
   BinlogEvent event = MakeEvent(BinlogEventType::INSERT, "51", 1, "text");
-  event.gtid = "uuid:51";
+  event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
   ASSERT_TRUE(reader_->ProcessQueuedEvent(event));
 
   BinlogEvent mismatched_commit;
   mismatched_commit.type = BinlogEventType::COMMIT;
-  mismatched_commit.gtid = "uuid:52";
+  mismatched_commit.gtid = "ffffffff-0000-0000-0000-000000000001:52";
   EXPECT_FALSE(reader_->ProcessQueuedEvent(mismatched_commit));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
 
   BinlogEvent matching_commit;
   matching_commit.type = BinlogEventType::COMMIT;
-  matching_commit.gtid = "uuid:51";
+  matching_commit.gtid = "ffffffff-0000-0000-0000-000000000001:51";
   EXPECT_TRUE(reader_->ProcessQueuedEvent(matching_commit));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
 }
 
 TEST_F(BinlogReaderFixture, PendingCommitPositionIsSerializedWithExplicitPositionReset) {
@@ -857,7 +1032,7 @@ TEST_F(BinlogReaderFixture, PendingCommitPositionIsSerializedWithExplicitPositio
 
   std::thread worker([&] {
     for (int sequence = 1; sequence <= 20; ++sequence) {
-      event.gtid = "uuid:" + std::to_string(sequence);
+      event.gtid = "ffffffff-0000-0000-0000-000000000001:" + std::to_string(sequence);
       if (!reader_->ProcessQueuedEvent(event)) {
         processing_succeeded.store(false, std::memory_order_release);
         return;
@@ -866,38 +1041,38 @@ TEST_F(BinlogReaderFixture, PendingCommitPositionIsSerializedWithExplicitPositio
   });
   std::thread position_resetter([&] {
     for (int sequence = 1000; sequence < 1020; ++sequence) {
-      reader_->SetCurrentGTID("uuid:" + std::to_string(sequence));
+      reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:" + std::to_string(sequence));
     }
   });
   worker.join();
   position_resetter.join();
   ASSERT_TRUE(processing_succeeded.load(std::memory_order_acquire));
 
-  reader_->SetCurrentGTID("uuid:2000");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:2000");
   BinlogEvent commit;
   commit.type = BinlogEventType::COMMIT;
   ASSERT_TRUE(reader_->ProcessQueuedEvent(commit));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:2000")
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:2000")
       << "SetCurrentGTID must atomically clear any worker-owned pending transaction";
 }
 
 TEST_F(BinlogReaderFixture, DdlGtidAdvancesImmediatelyAfterSuccess) {
-  reader_->SetCurrentGTID("uuid:50");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
 
-  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_.name, "TRUNCATE TABLE articles");
-  ddl_event.gtid = "uuid:51";
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_, "TRUNCATE TABLE articles");
+  ddl_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
 
   ASSERT_TRUE(reader_->ProcessQueuedEvent(ddl_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50-51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
 }
 
 TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecovery) {
-  reader_->SetCurrentGTID("uuid:50");
-  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_.name, "RENAME TABLE articles TO articles_v2");
-  ddl_event.gtid = "uuid:51";
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_, "RENAME TABLE articles TO articles_v2");
+  ddl_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
 
   EXPECT_FALSE(reader_->ProcessQueuedEvent(ddl_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
   EXPECT_TRUE(reader_->HasSchemaIncompatibleError());
   EXPECT_NE(reader_->GetLastError().find("SCHEMA_INCOMPATIBLE"), std::string::npos);
 
@@ -905,9 +1080,23 @@ TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecove
   EXPECT_FALSE(restart_without_rebuild);
   EXPECT_NE(reader_->GetLastError().find("requires SYNC"), std::string::npos);
 
-  reader_->SetCurrentGTID("uuid:60");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:60");
   EXPECT_FALSE(reader_->HasSchemaIncompatibleError());
   EXPECT_TRUE(reader_->GetLastError().empty());
+}
+
+TEST_F(BinlogReaderFixture, DroppedDatabaseStopsLikeADroppedTable) {
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
+  config::TableConfig in_app = table_config_;
+  in_app.database = "app";
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(in_app, "DROP SCHEMA IF EXISTS app");
+  ASSERT_EQ(ddl_event.ddl_type, DDLType::kDropDatabase);
+  ddl_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
+
+  EXPECT_FALSE(reader_->ProcessQueuedEvent(ddl_event));
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
+  EXPECT_TRUE(reader_->HasSchemaIncompatibleError());
+  EXPECT_NE(reader_->GetLastError().find("database was dropped"), std::string::npos) << reader_->GetLastError();
 }
 
 /**
@@ -926,12 +1115,13 @@ TEST_F(BinlogReaderFixture, AlterTableRenameHaltsWithTheRenameDiagnosticInBothDi
   };
 
   for (const auto& query : queries) {
-    reader_->SetCurrentGTID("uuid:50");
+    reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
     auto buffer = test::BinlogEventBuilder::BuildQueryEvent("testdb", query);
     TableMetadataCache cache;
     const std::unordered_map<std::string, server::TableContext*> table_contexts;
-    auto events = BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "uuid:51", cache, table_contexts,
-                                                      &table_config_, false);
+    auto events =
+        BinlogEventParser::ParseBinlogEvent(buffer.data(), buffer.size(), "ffffffff-0000-0000-0000-000000000001:51",
+                                            cache, table_contexts, &table_config_, false);
     ASSERT_EQ(events.size(), 1U) << query;
     ASSERT_EQ(events[0].ddl_type, DDLType::kRename) << query;
 
@@ -940,7 +1130,7 @@ TEST_F(BinlogReaderFixture, AlterTableRenameHaltsWithTheRenameDiagnosticInBothDi
     EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLInvalidSchema) << query;
     EXPECT_NE(reader_->GetLastError().find("configured table was renamed"), std::string::npos)
         << query << ": " << reader_->GetLastError();
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:50") << query;
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50") << query;
   }
 }
 
@@ -971,30 +1161,33 @@ TEST_F(BinlogReaderFixture, TransientProcessingFailuresDoNotConsumeDeterministic
   std::string last_failure_gtid;
   int consecutive_failures = 0;
 
-  EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(FailureKind::kDeterministic, "uuid:10", last_failure_gtid,
-                                                       consecutive_failures));
-  EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(FailureKind::kDeterministic, "uuid:10", last_failure_gtid,
-                                                       consecutive_failures));
+  EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(
+      FailureKind::kDeterministic, "ffffffff-0000-0000-0000-000000000001:10", last_failure_gtid, consecutive_failures));
+  EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(
+      FailureKind::kDeterministic, "ffffffff-0000-0000-0000-000000000001:10", last_failure_gtid, consecutive_failures));
   for (int attempt = 0; attempt < 5; ++attempt) {
-    EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(FailureKind::kTransientTransport, "uuid:10", last_failure_gtid,
+    EXPECT_FALSE(reader_->ShouldStopForProcessingFailure(FailureKind::kTransientTransport,
+                                                         "ffffffff-0000-0000-0000-000000000001:10", last_failure_gtid,
                                                          consecutive_failures));
   }
-  EXPECT_EQ(last_failure_gtid, "uuid:10");
+  EXPECT_EQ(last_failure_gtid, "ffffffff-0000-0000-0000-000000000001:10");
   EXPECT_EQ(consecutive_failures, 2);
 
-  EXPECT_TRUE(reader_->ShouldStopForProcessingFailure(FailureKind::kDeterministic, "uuid:10", last_failure_gtid,
-                                                      consecutive_failures));
+  EXPECT_TRUE(reader_->ShouldStopForProcessingFailure(
+      FailureKind::kDeterministic, "ffffffff-0000-0000-0000-000000000001:10", last_failure_gtid, consecutive_failures));
 }
 
 TEST_F(BinlogReaderFixture, ProcessingRecoveryBackoffResetsOnlyAfterAppliedGtidProgress) {
-  std::string last_recovery_gtid = "uuid:10";
+  std::string last_recovery_gtid = "ffffffff-0000-0000-0000-000000000001:10";
   int reconnect_attempt = 4;
 
-  reader_->ResetProcessingBackoffAfterProgress("uuid:10", last_recovery_gtid, reconnect_attempt);
+  reader_->ResetProcessingBackoffAfterProgress("ffffffff-0000-0000-0000-000000000001:10", last_recovery_gtid,
+                                               reconnect_attempt);
   EXPECT_EQ(reconnect_attempt, 4);
 
-  reader_->ResetProcessingBackoffAfterProgress("uuid:11", last_recovery_gtid, reconnect_attempt);
-  EXPECT_EQ(last_recovery_gtid, "uuid:11");
+  reader_->ResetProcessingBackoffAfterProgress("ffffffff-0000-0000-0000-000000000001:11", last_recovery_gtid,
+                                               reconnect_attempt);
+  EXPECT_EQ(last_recovery_gtid, "ffffffff-0000-0000-0000-000000000001:11");
   EXPECT_EQ(reconnect_attempt, 0);
 }
 
@@ -1080,7 +1273,8 @@ TEST_F(BinlogReaderFixture, ConcurrentStopCallsSafe) {
  * @brief Test ConvertSingleGtidToRange with single GTID
  */
 TEST(BinlogReaderTest, ConvertSingleGtidToRangeBasic) {
-  // Single GTID "uuid:101" should be converted to "uuid:1-101"
+  // Single GTID "ffffffff-0000-0000-0000-000000000001:101" should be converted to
+  // "ffffffff-0000-0000-0000-000000000001:1-101"
   std::string result = BinlogReader::ConvertSingleGtidToRange("61d5b289-bccc-11f0-b921-cabbb4ee51f6:101");
   EXPECT_EQ(result, "61d5b289-bccc-11f0-b921-cabbb4ee51f6:1-101");
 }
@@ -1125,7 +1319,7 @@ TEST(BinlogReaderTest, ConvertSingleGtidToRangeEmpty) {
  * @brief Test ConvertSingleGtidToRange with transaction 1
  */
 TEST(BinlogReaderTest, ConvertSingleGtidToRangeTransaction1) {
-  // Edge case: transaction 1 -> "uuid:1-1"
+  // Edge case: transaction 1 -> "ffffffff-0000-0000-0000-000000000001:1-1"
   std::string result = BinlogReader::ConvertSingleGtidToRange("00000000-0000-0000-0000-000000000001:1");
   EXPECT_EQ(result, "00000000-0000-0000-0000-000000000001:1-1");
 }
@@ -1175,14 +1369,14 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRequestsReconnectAndDropsQueuedEven
   broken_context.doc_store.reset();
 
   reader_->table_contexts_["broken"] = &broken_context;
-  reader_->current_gtid_ = "uuid:1";
+  reader_->current_gtid_ = "ffffffff-0000-0000-0000-000000000001:1";
 
   auto failing_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1));
   failing_event->table_name = "broken";
-  failing_event->gtid = "uuid:2";
+  failing_event->gtid = "ffffffff-0000-0000-0000-000000000001:2";
   auto later_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "3", 1));
   later_event->table_name = "broken";
-  later_event->gtid = "uuid:3";
+  later_event->gtid = "ffffffff-0000-0000-0000-000000000001:3";
 
   {
     std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
@@ -1202,7 +1396,7 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRequestsReconnectAndDropsQueuedEven
 
   EXPECT_EQ(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire),
             BinlogReader::ProcessingFailureKind::kDeterministic);
-  EXPECT_EQ(reader_->current_gtid_, "uuid:1");
+  EXPECT_EQ(reader_->current_gtid_, "ffffffff-0000-0000-0000-000000000001:1");
   {
     std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
     EXPECT_TRUE(reader_->event_queue_.empty());
@@ -1250,18 +1444,18 @@ TEST_F(BinlogReaderFixture, MidTransactionFailureDoesNotAdvanceGtidToFailedTrans
   broken_context.doc_store.reset();
 
   reader_->table_contexts_["broken"] = &broken_context;
-  reader_->current_gtid_ = "uuid:1";
+  reader_->current_gtid_ = "ffffffff-0000-0000-0000-000000000001:1";
 
   auto first_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1, "first row"));
-  first_event->gtid = "uuid:2";
+  first_event->gtid = "ffffffff-0000-0000-0000-000000000001:2";
 
   auto failing_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "3", 1, "second row"));
   failing_event->table_name = "broken";
-  failing_event->gtid = "uuid:2";
+  failing_event->gtid = "ffffffff-0000-0000-0000-000000000001:2";
 
   auto commit_event = std::make_unique<BinlogEvent>();
   commit_event->type = BinlogEventType::COMMIT;
-  commit_event->gtid = "uuid:2";
+  commit_event->gtid = "ffffffff-0000-0000-0000-000000000001:2";
 
   {
     std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
@@ -1283,7 +1477,8 @@ TEST_F(BinlogReaderFixture, MidTransactionFailureDoesNotAdvanceGtidToFailedTrans
   EXPECT_EQ(reader_->processing_failure_reconnect_requested_.load(std::memory_order_acquire),
             BinlogReader::ProcessingFailureKind::kDeterministic);
   EXPECT_TRUE(doc_store_.GetDocId("2").has_value()) << "first row was applied before the mid-transaction failure";
-  EXPECT_EQ(reader_->current_gtid_, "uuid:1") << "failed transaction GTID must not be persisted before XID";
+  EXPECT_EQ(reader_->current_gtid_, "ffffffff-0000-0000-0000-000000000001:1")
+      << "failed transaction GTID must not be persisted before XID";
   {
     std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
     EXPECT_TRUE(reader_->event_queue_.empty()) << "commit marker and later rows must be discarded after failure";
@@ -1301,24 +1496,22 @@ TEST_F(BinlogReaderFixture, MidTransactionFailureDoesNotAdvanceGtidToFailedTrans
 }
 
 TEST_F(BinlogReaderFixture, ProcessingFailureRejectsConcurrentCommitBeforeWorkerContinues) {
-  server::TableContext broken_context;
-  broken_context.name = "broken";
-  broken_context.config = table_config_;
-  broken_context.config.name = "broken";
-  broken_context.index.reset();
-  broken_context.doc_store.reset();
-
-  reader_->table_contexts_["broken"] = &broken_context;
-  reader_->SetCurrentGTID("uuid:1");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:1");
 
   mygramdb::testing::DeterministicGate failure_published;
   reader_->SetAfterProcessingFailurePublishedHookForTest([&]() { failure_published.ArriveAndWait(); });
 
   auto first_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "2", 1, "first row"));
-  first_event->gtid = "uuid:2";
-  auto failing_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "3", 1, "second row"));
-  failing_event->table_name = "broken";
-  failing_event->gtid = "uuid:2";
+  first_event->gtid = "ffffffff-0000-0000-0000-000000000001:2";
+  constexpr size_t kCodePointCount = 508401;
+  constexpr std::string_view kCompatibilityCharacter = "\xEF\xB7\xBA";  // U+FDFA
+  std::string oversized_source;
+  oversized_source.reserve(kCodePointCount * kCompatibilityCharacter.size());
+  for (size_t i = 0; i < kCodePointCount; ++i) {
+    oversized_source.append(kCompatibilityCharacter);
+  }
+  auto failing_event = std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "3", 1, oversized_source));
+  failing_event->gtid = "ffffffff-0000-0000-0000-000000000001:2";
 
   {
     std::lock_guard<std::mutex> lock(reader_->queue_mutex_);
@@ -1339,12 +1532,15 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRejectsConcurrentCommitBeforeWorker
 
   auto commit_event = std::make_unique<BinlogEvent>();
   commit_event->type = BinlogEventType::COMMIT;
-  commit_event->gtid = "uuid:2";
+  commit_event->gtid = "ffffffff-0000-0000-0000-000000000001:2";
   std::thread producer([this, event = std::move(commit_event)]() mutable { reader_->PushEvent(std::move(event)); });
   producer.join();
 
   EXPECT_EQ(reader_->GetQueueSize(), 0U) << "COMMIT must be rejected after failure publication";
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:1");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1");
+  EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(reader_->GetLastError().find("normalized_text length 16777233"), std::string::npos)
+      << reader_->GetLastError();
 
   failure_published.Release();
   reader_->should_stop_.store(true, std::memory_order_release);
@@ -1354,7 +1550,9 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRejectsConcurrentCommitBeforeWorker
   reader_->should_stop_.store(false, std::memory_order_release);
 
   EXPECT_TRUE(doc_store_.GetDocId("2").has_value()) << "the transaction was partially applied before failure";
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:1") << "rejected COMMIT must not advance the failed transaction GTID";
+  EXPECT_FALSE(doc_store_.GetDocId("3").has_value()) << "the oversized afterimage must not be inserted";
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1")
+      << "rejected COMMIT must not advance the failed transaction GTID";
 }
 
 // ===========================================================================

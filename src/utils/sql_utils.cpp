@@ -1,13 +1,15 @@
 /**
  * @file sql_utils.cpp
- * @brief SQL string utility functions for parsing and normalization
+ * @brief SQL identifier quoting, MySQL literal encoding and table-name matching
  */
 
 #include "utils/sql_utils.h"
 
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <cstdio>
+#include <system_error>
 
 namespace mygramdb::utils {
 
@@ -99,10 +101,17 @@ std::optional<std::string> FormatMySQLTimeLiteral(int64_t seconds) {
 
 std::optional<std::string> FormatMySQLDateTimeLiteral(int64_t epoch_seconds, int32_t timezone_offset_seconds) {
   constexpr int64_t kSecondsPerDay = 86400;
-  constexpr int kMinMySQLYear = 1000;
-  constexpr int kMaxMySQLYear = 9999;
+  constexpr int64_t kMinLocalEpoch = -30610224000;  // 1000-01-01 00:00:00
+  constexpr int64_t kMaxLocalEpoch = 253402300799;  // 9999-12-31 23:59:59
 
-  const int64_t local = epoch_seconds + timezone_offset_seconds;
+  const int64_t offset = timezone_offset_seconds;
+  if (epoch_seconds < kMinLocalEpoch - offset || epoch_seconds > kMaxLocalEpoch - offset) {
+    return std::nullopt;
+  }
+
+  // The local bound check above proves this addition remains representable and
+  // is inside MySQL's DATETIME range before calendar arithmetic begins.
+  const int64_t local = epoch_seconds + offset;
   // Floor division: a pre-epoch instant belongs to the day it falls in, not to
   // the day truncation toward zero would put it in.
   int64_t days = local / kSecondsPerDay;
@@ -124,10 +133,6 @@ std::optional<std::string> FormatMySQLDateTimeLiteral(int64_t epoch_seconds, int
   const int64_t month = month_index < 10 ? month_index + 3 : month_index - 9;
   const int64_t year = year_of_era + era * 400 + (month <= 2 ? 1 : 0);
 
-  if (year < kMinMySQLYear || year > kMaxMySQLYear) {
-    return std::nullopt;
-  }
-
   std::array<char, 32> buffer{};
   const int written = std::snprintf(
       buffer.data(), buffer.size(), "%04lld-%02lld-%02lld %02lld:%02lld:%02lld", static_cast<long long>(year),
@@ -141,114 +146,12 @@ std::optional<std::string> FormatMySQLDateTimeLiteral(int64_t epoch_seconds, int
 
 std::string FormatMySQLDoubleLiteral(double value) {
   std::array<char, 40> buffer{};
-  const int written = std::snprintf(buffer.data(), buffer.size(), "%.17e", value);
-  if (written <= 0) {
+  const auto result =
+      std::to_chars(buffer.data(), buffer.data() + buffer.size(), value, std::chars_format::scientific, 17);
+  if (result.ec != std::errc()) {
     return "0e0";
   }
-  return std::string(buffer.data(), static_cast<size_t>(written));
-}
-
-std::string StripSQLComments(const std::string& query) {
-  std::string result;
-  result.reserve(query.length());
-
-  size_t pos = 0;
-  while (pos < query.length()) {
-    // Check for block comment start
-    if (pos + 1 < query.length() && query[pos] == '/' && query[pos + 1] == '*') {
-      // Skip until end of block comment
-      pos += 2;
-      bool found_end = false;
-      while (pos + 1 < query.length()) {
-        if (query[pos] == '*' && query[pos + 1] == '/') {
-          pos += 2;
-          found_end = true;
-          break;
-        }
-        pos++;
-      }
-      // If unterminated, skip remaining characters
-      if (!found_end) {
-        pos = query.length();
-      }
-      // Add a space to preserve word boundaries
-      if (!result.empty() && result.back() != ' ') {
-        result += ' ';
-      }
-      continue;
-    }
-
-    // Check for line comment start
-    if (pos + 1 < query.length() && query[pos] == '-' && query[pos + 1] == '-') {
-      // Skip until end of line
-      pos += 2;
-      while (pos < query.length() && query[pos] != '\n' && query[pos] != '\r') {
-        pos++;
-      }
-      // Skip the newline if present
-      if (pos < query.length()) {
-        pos++;
-      }
-      continue;
-    }
-
-    result += query[pos];
-    pos++;
-  }
-
-  return result;
-}
-
-std::string NormalizeWhitespace(const std::string& str) {
-  std::string result;
-  result.reserve(str.length());
-
-  bool prev_was_space = false;
-  for (char cur_char : str) {
-    bool is_space = std::isspace(static_cast<unsigned char>(cur_char)) != 0;
-    if (is_space) {
-      if (!prev_was_space) {
-        result += ' ';
-        prev_was_space = true;
-      }
-    } else {
-      result += cur_char;
-      prev_was_space = false;
-    }
-  }
-
-  return result;
-}
-
-bool SkipWhitespace(const std::string& str, size_t& pos) {
-  while (pos < str.length() && std::isspace(static_cast<unsigned char>(str[pos])) != 0) {
-    ++pos;
-  }
-  return pos < str.length();
-}
-
-bool MatchKeyword(const std::string& str, size_t& pos, const std::string& keyword) {
-  // Check if there's enough space for the keyword
-  if (pos + keyword.length() > str.length()) {
-    return false;
-  }
-
-  // Check if keyword matches
-  if (str.compare(pos, keyword.length(), keyword) != 0) {
-    return false;
-  }
-
-  // Check that keyword is followed by whitespace, backtick, or end of string
-  size_t next_pos = pos + keyword.length();
-  if (next_pos < str.length()) {
-    char next_char = str[next_pos];
-    if (std::isspace(static_cast<unsigned char>(next_char)) == 0 && next_char != '`') {
-      return false;
-    }
-  }
-
-  pos = next_pos;
-  return true;
+  return std::string(buffer.data(), result.ptr);
 }
 
 bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name) {

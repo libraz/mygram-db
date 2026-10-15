@@ -41,8 +41,12 @@ struct GTID {
 
   /**
    * @brief Parse GTID from string format (UUID:transaction_id)
+   *
+   * Uses the GtidEncoder grammar: the UUID is validated and stored in
+   * lowercase, and a range "UUID:start-end" yields its end.
+   *
    * @param gtid_str GTID string in format "UUID:transaction_id"
-   * @return Expected<GTID, Error> with parsed GTID or error
+   * @return Expected<GTID, Error> with parsed GTID or kMySQLInvalidGTID
    */
   static mygram::utils::Expected<GTID, mygram::utils::Error> Parse(const std::string& gtid_str);
 

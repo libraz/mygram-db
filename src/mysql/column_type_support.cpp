@@ -8,8 +8,9 @@
 #ifdef USE_MYSQL
 
 #include <algorithm>
-#include <cctype>
 #include <unordered_map>
+
+#include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
 namespace {
@@ -18,8 +19,7 @@ namespace {
 std::string DeclaredBaseType(std::string_view column_type) {
   const size_t end = column_type.find_first_of("( ");
   std::string base(column_type.substr(0, end));
-  std::transform(base.begin(), base.end(), base.begin(),
-                 [](unsigned char chr) { return static_cast<char>(std::tolower(chr)); });
+  std::transform(base.begin(), base.end(), base.begin(), mygram::utils::AsciiToLower);
   return base;
 }
 

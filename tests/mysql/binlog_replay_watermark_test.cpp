@@ -58,10 +58,10 @@ TEST_F(BinlogReaderFixture, WorkerStopsOnUnevaluableReplayWatermarkWithoutSchema
  */
 TEST_F(BinlogReaderFixture, ClearingAnUnevaluableReplayWatermarkFailsClosed) {
   reader_->legacy_table_context_.replay_watermark->snapshot_gtid = kUnparsableWatermark;
-  reader_->SetCurrentGTID("uuid:10");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:10");
   reader_->should_stop_.store(false, std::memory_order_release);
 
-  const auto advanced = reader_->UpdateCurrentGTID("uuid:11");
+  const auto advanced = reader_->UpdateCurrentGTID("ffffffff-0000-0000-0000-000000000001:11");
 
   ASSERT_FALSE(advanced) << "an unevaluable fence was cleared silently";
   EXPECT_EQ(advanced.error().code(), ErrorCode::kMySQLInvalidGTID);
@@ -97,9 +97,10 @@ TEST_F(BinlogReaderFixture, EveryPathObservingOneUnevaluableFenceSharesOneRecove
 
   // The reader path: a TABLE_MAP for a table whose fence cannot be compared.
   const Observation reader_path = observe([this] {
-    const auto fence = GtidEncoder::PositionCoversAuto("uuid:5", kUnparsableWatermark);
+    const auto fence = GtidEncoder::PositionCoversAuto("ffffffff-0000-0000-0000-000000000001:5", kUnparsableWatermark);
     ASSERT_FALSE(fence);
-    reader_->FailClosedOnUnevaluableReplayWatermark(table_config_.name, "uuid:5", fence.error());
+    reader_->FailClosedOnUnevaluableReplayWatermark(table_config_.name, "ffffffff-0000-0000-0000-000000000001:5",
+                                                    fence.error());
   });
 
   // The worker path: a queued row event for the same table.
@@ -110,8 +111,8 @@ TEST_F(BinlogReaderFixture, EveryPathObservingOneUnevaluableFenceSharesOneRecove
 
   // The fence-clearing path: a commit that advances the applied position.
   const Observation clearing_path = observe([this] {
-    reader_->SetCurrentGTID("uuid:10");
-    EXPECT_FALSE(reader_->UpdateCurrentGTID("uuid:11"));
+    reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:10");
+    EXPECT_FALSE(reader_->UpdateCurrentGTID("ffffffff-0000-0000-0000-000000000001:11"));
   });
 
   EXPECT_EQ(reader_path.code, worker_path.code);

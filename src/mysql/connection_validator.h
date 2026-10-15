@@ -107,6 +107,18 @@ class ConnectionValidator {
       Connection& conn, const std::optional<std::string>& last_gtid);
 
   /**
+   * @brief Reject a MariaDB position whose transactions the server has purged
+   *
+   * @param processed_position Position replication resumes from
+   * @param purge_boundary GTID position at the start of the oldest binlog
+   *        (BINLOG_GTID_POS on its first event)
+   * @return kMySQLReplicationError when any boundary domain is ahead of, or
+   *         missing from, the processed position
+   */
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckMariaDBPositionNotPurged(
+      const std::string& processed_position, const std::string& purge_boundary);
+
+  /**
    * @brief Check if binlog transaction compression is enabled
    *
    * TRANSACTION_PAYLOAD_EVENT (MySQL) and compressed query/row events

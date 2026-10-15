@@ -9,14 +9,13 @@
 
 #include <mysql.h>
 
-#include <algorithm>
-#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "mysql/column_type_support.h"
 #include "mysql/connection.h"
 #include "utils/sql_utils.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
 namespace {
@@ -27,10 +26,8 @@ using mygram::utils::Expected;
 using mygram::utils::MakeError;
 using mygram::utils::MakeUnexpected;
 
-std::string Lower(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char chr) { return static_cast<char>(std::tolower(chr)); });
-  return value;
+std::string Lower(const std::string& value) {
+  return mygram::utils::ToLower(value);
 }
 
 std::string BaseType(const std::string& column_type) {

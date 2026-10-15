@@ -19,6 +19,7 @@
 #include "mysql/gtid_waiter.h"
 #include "mysql/mariadb_gtid.h"
 #include "utils/error.h"
+#include "utils/gtid_grammar.h"
 
 using namespace mygramdb::mysql;
 
@@ -899,4 +900,101 @@ TEST_F(GtidEncoderTest, PositionCoversRequiresEveryServerAndInterval) {
 TEST_F(GtidEncoderTest, PositionCoversRejectsMalformedInput) {
   auto covered = GtidEncoder::PositionCovers("not-a-gtid", "also-invalid");
   EXPECT_FALSE(covered.has_value());
+}
+
+/**
+ * @brief The compare path treats a source UUID the same however it is spelled.
+ *
+ * MySQL compares UUIDs case-insensitively, so a position written in uppercase
+ * must be covered by the server's lowercase report of the same source.
+ */
+TEST_F(GtidEncoderTest, PositionCoversComparesUuidsCaseInsensitively) {
+  auto covered = GtidEncoder::PositionCovers("3E11FA47-71CA-11E1-9E33-C80AA9429562:5",
+                                             "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-10");
+  ASSERT_TRUE(covered.has_value()) << covered.error().message();
+  EXPECT_TRUE(*covered);
+
+  auto merged = GtidEncoder::MergeSingleGtidIntoSet("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-4",
+                                                    "3e11fa47-71ca-11e1-9e33-c80aa9429562:5");
+  ASSERT_TRUE(merged.has_value());
+  EXPECT_EQ(*merged, "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5") << "one source must keep one key";
+}
+
+/**
+ * @brief Every path rejects exactly what Encode rejects.
+ */
+TEST_F(GtidEncoderTest, CompareAndMergeRejectWhatEncodeRejects) {
+  const std::string valid = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-10";
+  for (const char* malformed : {"3e11fa47-71ca-11e1-9e33-c80aa9429562:0-5", "3e11fa47-71ca-11e1-9e33-c80aa9429562:0",
+                                "uuid:1-5", "3e11fa47x71ca-11e1-9e33-c80aa9429562:1", "3e11fa47-71ca-11e1-9e33:1",
+                                "3e11fa47-71ca-11e1-9e33-c80aa9429562:5-3"}) {
+    SCOPED_TRACE(malformed);
+    EXPECT_FALSE(GtidEncoder::Encode(malformed).has_value());
+    EXPECT_FALSE(mygram::utils::ParseMysqlGtidSet(malformed).has_value());
+    EXPECT_FALSE(GtidEncoder::PositionCovers(malformed, valid).has_value());
+    EXPECT_FALSE(GtidEncoder::PositionCovers(valid, malformed).has_value());
+    EXPECT_FALSE(GtidEncoder::MergeSingleGtidIntoSet(valid, malformed).has_value());
+    EXPECT_FALSE(GtidEncoder::MergeSingleGtidIntoSet(malformed, "3e11fa47-71ca-11e1-9e33-c80aa9429562:11").has_value());
+  }
+
+  // A tagged set compares and merges, but has no COM_BINLOG_DUMP_GTID encoding.
+  const std::string tagged = "3e11fa47-71ca-11e1-9e33-c80aa9429562:Batch:1-3";
+  auto parsed = mygram::utils::ParseMysqlGtidSet(tagged);
+  ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+  EXPECT_EQ(mygram::utils::FormatMysqlGtidSet(*parsed), "3e11fa47-71ca-11e1-9e33-c80aa9429562:batch:1-3");
+  EXPECT_FALSE(GtidEncoder::Encode(tagged).has_value());
+}
+
+/**
+ * @brief Tagged MySQL 8.4 GTIDs parse, merge, cover and format; a tag switches the source of later intervals.
+ */
+TEST_F(GtidEncoderTest, TaggedGtidFormsRoundTripThroughTheGrammar) {
+  const std::string uuid = "3e11fa47-71ca-11e1-9e33-c80aa9429562";
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {uuid + ":Tag:5", uuid + ":tag:5"},
+      {uuid + ":tag:1-5", uuid + ":tag:1-5"},
+      {uuid + ":1-3:tag:7", uuid + ":1-3," + uuid + ":tag:7"},
+      {uuid + ":tag:7:1-2", uuid + ":tag:1-2:7"},
+      {uuid + ":1-3:alpha:4:beta:9-10", uuid + ":1-3," + uuid + ":alpha:4," + uuid + ":beta:9-10"},
+  };
+  for (const auto& [text, canonical] : cases) {
+    SCOPED_TRACE(text);
+    auto parsed = mygram::utils::ParseMysqlGtidSet(text);
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    EXPECT_EQ(mygram::utils::FormatMysqlGtidSet(*parsed), canonical);
+    auto covered = GtidEncoder::PositionCovers(text, canonical);
+    ASSERT_TRUE(covered.has_value()) << covered.error().message();
+    EXPECT_TRUE(*covered);
+  }
+
+  auto merged = GtidEncoder::MergeSingleGtidIntoSet(uuid + ":1-3:tag:7", uuid + ":tag:8");
+  ASSERT_TRUE(merged.has_value());
+  EXPECT_EQ(*merged, uuid + ":1-3," + uuid + ":tag:7-8");
+
+  // A tagged interval is a different source from the untagged one.
+  auto untagged_only = GtidEncoder::PositionCovers(uuid + ":tag:7", uuid + ":1-10");
+  ASSERT_TRUE(untagged_only.has_value());
+  EXPECT_FALSE(*untagged_only);
+
+  for (const std::string& malformed : {uuid + ":tag", uuid + ":1-3:tag", uuid + ":tag:other:5", uuid + ":tag:0"}) {
+    EXPECT_FALSE(mygram::utils::ParseMysqlGtidSet(malformed).has_value()) << malformed;
+  }
+}
+
+/**
+ * @brief A replication start position is valid in either server's GTID form, and only then.
+ */
+TEST_F(GtidEncoderTest, ValidateGtidPositionAcceptsBothFlavorsAndNothingElse) {
+  for (const char* position : {"3E11FA47-71CA-11E1-9E33-C80AA9429562:1", "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-5:7",
+                               "0-1-5", "0-1-5,1-1-3", " 0-1-5 , 1-1-3 "}) {
+    auto valid = mygram::utils::ValidateGtidPosition(position);
+    EXPECT_TRUE(valid.has_value()) << position << ": " << valid.error().message();
+  }
+  for (const char* position :
+       {"", "invalid-format", "0-1", "0-1-x", "uuid:7", "a' OR '1'='1:5", "3e11fa47-71ca-11e1-9e33-c80aa9429562:0",
+        "0-1-5,uuid:1", "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-18446744073709551615"}) {
+    auto invalid = mygram::utils::ValidateGtidPosition(position);
+    ASSERT_FALSE(invalid.has_value()) << position;
+    EXPECT_EQ(invalid.error().code(), mygram::utils::ErrorCode::kMySQLInvalidGTID) << position;
+  }
 }

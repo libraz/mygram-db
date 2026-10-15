@@ -13,6 +13,7 @@
 #include "index/index.h"
 #include "mysql/binlog_reader.h"
 #include "storage/document_store.h"
+#include "utils/error.h"
 
 // Forward declarations
 namespace mygramdb::server {
@@ -47,6 +48,17 @@ class BinlogEventProcessor {
                            const config::TableConfig& table_config, const config::MysqlConfig& mysql_config,
                            server::ServerStats* stats = nullptr, cache::CacheManager* cache_manager = nullptr,
                            server::BM25Stats* bm25_stats = nullptr);
+
+  /**
+   * @brief Process an event and preserve the typed error for callers that must publish it.
+   *
+   * The original bool overload remains the compatibility API. `error_out` is reset
+   * on entry and populated when a checked storage mutation rejects the event.
+   */
+  static bool ProcessEvent(const BinlogEvent& event, index::Index& index, storage::DocumentStore& doc_store,
+                           const config::TableConfig& table_config, const config::MysqlConfig& mysql_config,
+                           server::ServerStats* stats, cache::CacheManager* cache_manager,
+                           server::BM25Stats* bm25_stats, mygram::utils::Error* error_out);
 };
 
 }  // namespace mygramdb::mysql

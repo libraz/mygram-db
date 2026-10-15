@@ -197,7 +197,7 @@ TEST_F(BinlogReaderFixture, ProcessDdlTruncateClearsState) {
   ASSERT_TRUE(reader_->ProcessEvent(MakeEvent(BinlogEventType::INSERT, "5", 1, "Body")));
   EXPECT_EQ(doc_store_.Size(), 1);
 
-  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_.name, "TRUNCATE TABLE articles");
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_, "TRUNCATE TABLE articles");
   ASSERT_TRUE(reader_->ProcessEvent(ddl_event));
   EXPECT_EQ(doc_store_.Size(), 0);
 }
@@ -216,11 +216,11 @@ TEST_F(BinlogReaderFixture, SkipsEventsMissingRequiredFilters) {
  * @brief Exercise GTID setters/getters
  */
 TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
-  reader_->SetCurrentGTID("uuid:10");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:10");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:10");
   EXPECT_GT(reader_->GetLastAppliedUnixTime(), 0);
-  reader_->UpdateCurrentGTID("uuid:11");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:10-11");
+  reader_->UpdateCurrentGTID("ffffffff-0000-0000-0000-000000000001:11");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:10-11");
   EXPECT_GT(reader_->GetLastAppliedUnixTime(), 0);
 }
 
@@ -236,7 +236,7 @@ TEST_F(BinlogReaderFixture, EmptyParseForMonitoredRowsEventIsFailure) {
   metadata.table_id = kTableId;
   metadata.database_name = "app";
   metadata.table_name = table_config_.name;
-  reader_->table_metadata_cache_.Add(kTableId, metadata);
+  reader_->schema_cache_.RecordTableMap(metadata);
 
   EXPECT_TRUE(
       reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
@@ -254,7 +254,7 @@ TEST_F(BinlogReaderFixture, EmptyParseForUnmonitoredRowsEventIsSkipped) {
   metadata.table_id = kTableId;
   metadata.database_name = "app";
   metadata.table_name = "unmonitored";
-  reader_->table_metadata_cache_.Add(kTableId, metadata);
+  reader_->schema_cache_.RecordTableMap(metadata);
 
   EXPECT_FALSE(
       reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
@@ -275,7 +275,7 @@ TEST_F(BinlogReaderFixture, EmptyParseForSameTableDifferentDatabaseIsSkipped) {
   metadata.table_id = kTableId;
   metadata.database_name = "analytics";
   metadata.table_name = table_config_.name;
-  reader_->table_metadata_cache_.Add(kTableId, metadata);
+  reader_->schema_cache_.RecordTableMap(metadata);
 
   EXPECT_FALSE(
       reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
@@ -539,12 +539,15 @@ TEST_F(BinlogReaderFixture, UnsupportedFilterTypeRejectsEveryRow) {
 TEST_F(BinlogReaderFixture, HandlesTaggedGTIDFormat) {
   // Standard GTID format
   reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:42");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "01020304-0506-0708-090a-0b0c0d0e0f10:42,uuid:1");
+  EXPECT_EQ(reader_->GetCurrentGTID(),
+            "01020304-0506-0708-090a-0b0c0d0e0f10:42,"
+            "ffffffff-0000-0000-0000-000000000001:1");
 
   // Tagged GTID format (MySQL 8.4+)
   reader_->UpdateCurrentGTID("01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100");
   EXPECT_EQ(reader_->GetCurrentGTID(),
-            "01020304-0506-0708-090a-0b0c0d0e0f10:42,01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100,uuid:1");
+            "01020304-0506-0708-090a-0b0c0d0e0f10:42,01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100,"
+            "ffffffff-0000-0000-0000-000000000001:1");
 }
 
 /**

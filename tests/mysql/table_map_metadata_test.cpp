@@ -155,13 +155,18 @@ TEST(TableMapMetadataTest, UnknownColumnTypeFailsTheEvent) {
   // 244 is not a code this parser can size, so every later column would be misread.
   auto event = BuildTableMap({{Code(ColumnType::LONG), {}}, {244, {0x01}}, {Code(ColumnType::VARCHAR), {0xFF, 0x00}}});
 
-  EXPECT_FALSE(BinlogEventParser::ParseTableMapEvent(event.data(), event.size()).has_value());
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+  ASSERT_FALSE(metadata.has_value());
+  // The frame is intact, so every replay fails the same way: SYNC has to restart past it.
+  EXPECT_EQ(metadata.error().code(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
 }
 
 TEST(TableMapMetadataTest, MetadataBlockLongerThanTheColumnsNeedFailsTheEvent) {
   auto event = BuildTableMap({{Code(ColumnType::LONG), {}}, {Code(ColumnType::JSON), {0x04}}}, /*metadata_len_adj=*/1);
 
-  EXPECT_FALSE(BinlogEventParser::ParseTableMapEvent(event.data(), event.size()).has_value());
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+  ASSERT_FALSE(metadata.has_value());
+  EXPECT_EQ(metadata.error().code(), mygram::utils::ErrorCode::kMySQLBinlogError);
 }
 
 TEST(TableMapMetadataTest, MetadataBlockShorterThanTheColumnsNeedFailsTheEvent) {
@@ -169,7 +174,9 @@ TEST(TableMapMetadataTest, MetadataBlockShorterThanTheColumnsNeedFailsTheEvent) 
   auto event = BuildTableMap({{Code(ColumnType::LONG), {}}, {Code(ColumnType::NEWDECIMAL), {10, 2}}},
                              /*metadata_len_adj=*/-1);
 
-  EXPECT_FALSE(BinlogEventParser::ParseTableMapEvent(event.data(), event.size()).has_value());
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+  ASSERT_FALSE(metadata.has_value());
+  EXPECT_EQ(metadata.error().code(), mygram::utils::ErrorCode::kMySQLBinlogError);
 }
 
 TEST(TableMapMetadataTest, RowAfterJsonGeometryDecimalCharEnumSetDecodesAtTheRightOffsets) {

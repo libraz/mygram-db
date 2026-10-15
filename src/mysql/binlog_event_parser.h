@@ -15,6 +15,8 @@
 #include "mysql/binlog_reader.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
+#include "utils/error.h"
+#include "utils/expected.h"
 
 namespace mygramdb::mysql {
 
@@ -41,7 +43,7 @@ class BinlogEventParser {
    */
   static std::vector<BinlogEvent> ParseBinlogEvent(
       const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
-      TableMetadataCache& table_metadata_cache,
+      const TableMetadataCache& table_metadata_cache,
       const std::unordered_map<std::string, server::TableContext*>& table_contexts,
       const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone = "+00:00");
 
@@ -69,9 +71,11 @@ class BinlogEventParser {
    * @brief Parse TABLE_MAP_EVENT
    * @param buffer Event buffer (post-header)
    * @param length Buffer length
-   * @return TableMetadata if successfully parsed
+   * @return TableMetadata, kMySQLUndecodableBinlogEvent for an intact frame with a
+   *         column type that cannot be sized, or kMySQLBinlogError for a malformed frame
    */
-  static std::optional<TableMetadata> ParseTableMapEvent(const unsigned char* buffer, unsigned long length);
+  static mygram::utils::Expected<TableMetadata, mygram::utils::Error> ParseTableMapEvent(const unsigned char* buffer,
+                                                                                         unsigned long length);
 
   /**
    * @brief Extract SQL query string from QUERY_EVENT
@@ -110,20 +114,17 @@ class BinlogEventParser {
    * @brief Whether an ignored standalone QUERY_EVENT is proven not to mutate table rows.
    *
    * Statement-based DML must never advance the applied GTID because the row
-   * materializer has not applied its effects. Non-row DDL and administrative
-   * statements are safe once configured-table and configured-schema changes
-   * have been handled separately by the reader.
-   */
-  static bool IsSafeIgnoredQuery(std::string_view query);
-
-  /**
-   * @brief Whether a query drops the specified database/schema.
+   * materializer has not applied its effects. Only statements led by a verb
+   * known not to change rows (DDL, account and transaction control) are safe,
+   * once ParseBinlogEvent has emitted every configured-table and
+   * configured-schema DDL. Every statement of a multi-statement event must be
+   * safe, and a table DDL whose names cannot be read never is.
    *
-   * This is kept separate from IsSafeIgnoredQuery because a database-level
-   * statement is harmless for an unmonitored schema but destructive for every
-   * configured table contained by the named schema.
+   * @param query Query text as logged in the binlog
+   * @param ignored_prefixes `mysql.ignored_ddl_prefixes`; a statement beginning
+   *        with one of them is safe regardless of its verb
    */
-  static bool IsDatabaseAffectingDDL(std::string_view query, std::string_view database);
+  static bool IsSafeIgnoredQuery(std::string_view query, const std::vector<std::string>& ignored_prefixes = {});
 
   /**
    * @brief Check if DDL affects target table

@@ -478,7 +478,8 @@ TEST_F(RowsParserTest, ExtractFiltersBasic) {
   filter_configs.push_back({"category", "string", false, false, ""});
   filter_configs.push_back({"count", "int", false, false, ""});
 
-  auto filters = ExtractFilters(row_data, filter_configs);
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   EXPECT_EQ(filters.size(), 3);
   EXPECT_TRUE(std::holds_alternative<uint8_t>(filters["status"]));
@@ -500,7 +501,8 @@ TEST_F(RowsParserTest, ExtractFiltersWithNullValues) {
   filter_configs.push_back({"status", "int", false, false, ""});
   filter_configs.push_back({"category", "string", false, false, ""});
 
-  auto filters = ExtractFilters(row_data, filter_configs);
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   // Explicit NULL is a value state, distinct from a column absent from the row.
   EXPECT_EQ(filters.size(), 2);
@@ -518,7 +520,8 @@ TEST_F(RowsParserTest, ExtractFiltersPreservesEmptyStringValues) {
   std::vector<mygramdb::config::FilterConfig> filter_configs;
   filter_configs.push_back({"category", "string", false, false, ""});
 
-  auto filters = ExtractFilters(row_data, filter_configs);
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   ASSERT_EQ(filters.size(), 1);
   ASSERT_TRUE(std::holds_alternative<std::string>(filters["category"]));
@@ -534,7 +537,8 @@ TEST_F(RowsParserTest, ExtractFiltersMissingColumn) {
   filter_configs.push_back({"status", "int", false, false, ""});
   filter_configs.push_back({"missing_col", "string", false, false, ""});  // Column not in row data
 
-  auto filters = ExtractFilters(row_data, filter_configs);
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   // Should only extract existing columns
   EXPECT_EQ(filters.size(), 1);
@@ -551,7 +555,8 @@ TEST_F(RowsParserTest, ExtractFiltersDistinguishesAbsentFromExplicitNull) {
   filter_configs.push_back({"explicit_null", "string", false, false, ""});
   filter_configs.push_back({"absent", "string", false, false, ""});
 
-  auto filters = ExtractFilters(row_data, filter_configs);
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   ASSERT_EQ(filters.size(), 1);
   ASSERT_TRUE(filters.contains("explicit_null"));
@@ -620,7 +625,8 @@ TEST_F(RowsParserTest, ExtractFiltersInvalidTypeConversion) {
   std::vector<mygramdb::config::FilterConfig> filter_configs;
   filter_configs.push_back({"count", "int", false, false, ""});
 
-  auto filters = ExtractFilters(row_data, filter_configs);
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   // Invalid conversion should be skipped (exception caught internally)
   EXPECT_EQ(filters.size(), 0);
@@ -636,7 +642,8 @@ TEST_F(RowsParserTest, ExtractFiltersDateAndFractionalTimestamp) {
   filter_configs.push_back({"published_on", "date", false, false, ""});
   filter_configs.push_back({"updated_at", "timestamp", false, false, ""});
 
-  auto filters = ExtractFilters(row_data, filter_configs, "+00:00");
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   ASSERT_EQ(filters.size(), 2);
   ASSERT_TRUE(std::holds_alternative<int64_t>(filters["published_on"]));
@@ -650,7 +657,8 @@ TEST_F(RowsParserTest, ExtractFiltersPreservesPreEpochDateAsSignedEpoch) {
   row_data.columns["born_on"] = "1960-01-01";
   std::vector<mygramdb::config::FilterConfig> configs = {{"born_on", "date", false, false, ""}};
 
-  auto filters = ExtractFilters(row_data, configs, "+00:00");
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, configs, "+00:00", unconverted);
 
   ASSERT_EQ(filters.size(), 1);
   ASSERT_TRUE(std::holds_alternative<int64_t>(filters["born_on"]));
@@ -1365,7 +1373,8 @@ TEST_F(RowsParserTest, ExtractFiltersAllTypes) {
   filter_configs.push_back({"float_col", "float", false, false, ""});
   filter_configs.push_back({"string_col", "string", false, false, ""});
 
-  auto filters = ExtractFilters(row_data, filter_configs);
+  UnconvertedFilterText unconverted;
+  auto filters = ExtractFilters(row_data, filter_configs, "+00:00", unconverted);
 
   EXPECT_EQ(filters.size(), 11);
   EXPECT_EQ(std::get<bool>(filters["bool_col"]), true);
@@ -2928,6 +2937,43 @@ TEST_F(RowsParserTest, DecimalRejectsOutOfRangeMetadata) {
   EXPECT_EQ(zero_precision.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
   EXPECT_EQ(excessive_precision.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
   EXPECT_EQ(excessive_scale.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
+}
+
+/**
+ * @test A digit group above 10^digits - 1 is a decoding error, not a rendered value
+ */
+TEST_F(RowsParserTest, DecimalRejectsOutOfRangeDigitGroup) {
+  const struct {
+    const char* label;
+    std::vector<unsigned char> bytes;
+    uint8_t precision;
+    uint8_t scale;
+  } cases[] = {
+      // DECIMAL(9,0): one full group holding 1000000000.
+      {"full group 10^9", {0xBB, 0x9A, 0xCA, 0x00}, 9, 0},
+      // DECIMAL(18,0): second group 0xFFFFFFFF, past INT32_MAX once shifted.
+      {"second group all ones", {0x80, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF}, 18, 0},
+      // DECIMAL(3,2): one-digit integer remainder holding 10.
+      {"integer remainder 10", {0x8A, 0x00}, 3, 2},
+      // DECIMAL(3,2): two-digit fractional remainder holding 100.
+      {"fraction remainder 100", {0x80, 0x64}, 3, 2},
+  };
+
+  for (const auto& test_case : cases) {
+    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), test_case.bytes.data(),
+                                              static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
+                                              false, test_case.bytes.data() + test_case.bytes.size(), false);
+    ASSERT_FALSE(decoded.has_value()) << test_case.label << " decoded as " << *decoded;
+    EXPECT_EQ(decoded.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata) << test_case.label;
+  }
+
+  // The largest in-range groups still decode.
+  const std::vector<unsigned char> max_groups = {0x89, 0x63};
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), max_groups.data(),
+                                            static_cast<uint16_t>((3U << 8U) | 2U), false,
+                                            max_groups.data() + max_groups.size(), false);
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, "9.99");
 }
 
 /**

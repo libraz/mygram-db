@@ -76,6 +76,24 @@ class RequiredFilterPredicate {
    */
   [[nodiscard]] bool Matches(const storage::FilterValue& value) const;
 
+  /**
+   * @brief Membership verdict for a non-NULL column value that did not decode.
+   *
+   * A value outside what the declared type can represent (a TINYINT(1) holding
+   * 2, a zero TIMESTAMP, a zero date) never becomes a FilterValue, so
+   * Matches() cannot be asked about it. The initial-load WHERE clause still
+   * judges the row, and this returns the verdict that clause reaches, so a
+   * row's membership does not depend on which path indexed it.
+   *
+   * A zero or partly zero DATE, DATETIME or TIMESTAMP is ordered against the target the way the
+   * server orders it: as a datetime by its components, so `0000-00-00` sorts before every real
+   * instant and `2024-00-00` before `2024-01-01`.
+   *
+   * @param raw_text The column's text as the row decoder produced it.
+   * @return true when the row satisfies this filter.
+   */
+  [[nodiscard]] bool MatchesUndecodedValue(std::string_view raw_text) const;
+
  private:
   /// Tested for SQL NULL state; the operator carries the whole comparison.
   struct NullState {};
@@ -99,20 +117,21 @@ class RequiredFilterPredicate {
   struct DoublePrecision {
     double value;
   };
-  /// Compared as a whole-second wall clock instant, against the column
-  /// truncated to whole seconds so a fractional-second value compares the
-  /// same instant the binlog decode keeps.
+  /// Compared as a whole-second wall clock instant in the given offset, through
+  /// bounds on the bare column so a fractional-second value compares the same
+  /// instant the binlog decode keeps.
   struct WallClock {
     int64_t epoch_seconds;
-    std::string literal;
+    int32_t offset_seconds;
   };
-  /// Compared as UTC epoch seconds against FLOOR(UNIX_TIMESTAMP()) of the
-  /// column, so a fractional-second value truncates the same way the binlog
-  /// decode does.
+  /// Compared as UTC epoch seconds through bounds on the bare column (the
+  /// session reads TIMESTAMP in UTC), so a fractional-second value truncates
+  /// the same way the binlog decode does.
   struct UtcEpoch {
     int64_t epoch_seconds;
   };
-  /// Compared as seconds since midnight, against TIME_TO_SEC() of the column.
+  /// Compared as seconds since midnight, truncated toward zero, through bounds
+  /// on the bare column.
   struct Clock {
     int64_t seconds;
   };
@@ -126,6 +145,7 @@ class RequiredFilterPredicate {
 
   struct SqlRenderer;
   struct MembershipTest;
+  struct UndecodedValueTest;
 
   RequiredFilterPredicate(std::string comparison_operator, Target target)
       : op_(std::move(comparison_operator)), target_(std::move(target)) {}

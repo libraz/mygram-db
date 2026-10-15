@@ -46,33 +46,6 @@ static constexpr int kNoDataPollIntervalMs = 10;
 /// Stop after this many retryable processing failures replay the same applied position.
 static constexpr int kMaxConsecutiveProcessingFailuresAtSameGtid = 3;
 
-bool HasConfiguredIgnoredDdlPrefix(std::string_view query, const std::vector<std::string>& prefixes) {
-  const auto first = query.find_first_not_of(" \t\r\n");
-  if (first == std::string_view::npos)
-    return false;
-  const std::string_view normalized = query.substr(first);
-  for (const auto& prefix : prefixes) {
-    const auto prefix_first = prefix.find_first_not_of(" \t\r\n");
-    const auto prefix_last = prefix.find_last_not_of(" \t\r\n");
-    if (prefix_first == std::string::npos)
-      continue;
-    const std::string_view candidate(prefix.data() + prefix_first, prefix_last - prefix_first + 1);
-    if (normalized.size() < candidate.size())
-      continue;
-    bool equal = true;
-    for (size_t i = 0; i < candidate.size(); ++i) {
-      if (std::toupper(static_cast<unsigned char>(normalized[i])) !=
-          std::toupper(static_cast<unsigned char>(candidate[i]))) {
-        equal = false;
-        break;
-      }
-    }
-    if (equal)
-      return true;
-  }
-  return false;
-}
-
 bool IsRowsEventType(MySQLBinlogEventType event_type) {
   switch (event_type) {
     case MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1:
@@ -222,7 +195,7 @@ bool BinlogReader::RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type
   }
   FailClosedOnUnreplayableEvent(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
                                 UnreplayableEventRemediation(event_type), "unreplayable_binlog_event",
-                                GetEventTypeName(event_type));
+                                DescribeEventType(event_type));
   return true;
 }
 
@@ -346,6 +319,177 @@ void BinlogReader::RejectUnsafeStatementEvent(const std::string& statement) {
       "unsafe_query_event", "QUERY_EVENT");
 }
 
+bool BinlogReader::VerifyFetchedFrame(const unsigned char* event_buffer, size_t event_length) {
+  // A frame too short to hold a header and its checksum is malformed, so it
+  // fails here like a mismatch instead of reaching dispatch unverified.
+  auto checksum_result = VerifyBinlogEventChecksum(event_buffer, event_length);
+  if (checksum_result) {
+    return true;
+  }
+  crc_errors_++;
+  SetLastError(checksum_result.error());
+  mygram::utils::StructuredLog()
+      .Event("binlog_error")
+      .Field("type", "crc32_checksum_mismatch")
+      .Field("event_length", static_cast<uint64_t>(event_length))
+      .Field("gtid", position_state_.received_gtid())
+      .FieldError(checksum_result.error())
+      .Error();
+  return false;
+}
+
+BinlogReader::TableMapAction BinlogReader::HandleTableMapEvent(const unsigned char* event_buffer,
+                                                               unsigned long event_length,
+                                                               ProcessingFailureKind* failure_kind) {
+  *failure_kind = ProcessingFailureKind::kDeterministic;
+  auto metadata_opt = BinlogEventParser::ParseTableMapEvent(event_buffer, event_length);
+  if (!metadata_opt) {
+    if (metadata_opt.error().code() == mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent) {
+      FailClosedOnUnreplayableEvent(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
+                                    metadata_opt.error().message() + kUnreplayableEventRecovery, "unsizable_table_map",
+                                    "TABLE_MAP_EVENT");
+      return TableMapAction::kStop;
+    }
+    // Reconnecting replays this event, so it keeps the generic binlog code
+    // rather than the undecodable-event code that makes SYNC restart past the
+    // position.
+    SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                          "Failed to parse TABLE_MAP_EVENT from binlog; reconnecting from "
+                                          "last processed GTID"));
+    mygram::utils::StructuredLog().Event("binlog_error").Field("type", "table_map_parse_failed").Error();
+    return TableMapAction::kReconnect;
+  }
+
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "table_map_parsed")
+      .Field("database", metadata_opt->database_name)
+      .Field("table", metadata_opt->table_name)
+      .Field("table_id", metadata_opt->table_id)
+      .Debug();
+
+  // Table contexts are keyed by the database-qualified identity
+  // (e.g. "testdb.articles"). Match on the qualified key first and
+  // fall back to the bare table name for empty-database configs.
+  const bool is_monitored_table =
+      table_contexts_.find(config::QualifiedTableName(metadata_opt->database_name, metadata_opt->table_name)) !=
+          table_contexts_.end() ||
+      table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
+
+  const std::string qualified_table = config::QualifiedTableName(metadata_opt->database_name, metadata_opt->table_name);
+  auto suppress_replay = ShouldSuppressTableReplay(qualified_table, position_state_.received_gtid());
+  if (!suppress_replay) {
+    FailClosedOnUnevaluableReplayWatermark(qualified_table, position_state_.received_gtid(), suppress_replay.error());
+    return TableMapAction::kStop;
+  }
+  if (*suppress_replay) {
+    schema_cache_.RecordSuppressedTableMap(metadata_opt->table_id);
+    mygram::utils::StructuredLog()
+        .Event("binlog_replay_suppressed")
+        .Field("table", qualified_table)
+        .Field("gtid", position_state_.received_gtid())
+        .Field("reason", "covered_by_sync_snapshot")
+        .Debug();
+    return TableMapAction::kContinue;
+  }
+
+  if (!is_monitored_table) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_debug")
+        .Field("action", "skipping_non_monitored_table")
+        .Field("database", metadata_opt->database_name)
+        .Field("table", metadata_opt->table_name)
+        .Debug();
+    // Row events for an unmonitored table are ignored because their table id
+    // is absent from the cache. Do not retain metadata for arbitrary tables.
+    schema_cache_.RecordUnmonitoredTableMap(metadata_opt->table_id);
+    return TableMapAction::kContinue;
+  }
+
+  if (!FetchColumnNames(metadata_opt.value(), failure_kind)) {
+    mygram::utils::StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "column_fetch_failed")
+        .Field("database", metadata_opt->database_name)
+        .Field("table", metadata_opt->table_name)
+        .Field("gtid", GetCurrentGTID())
+        .Error();
+    return TableMapAction::kReconnect;
+  }
+
+  auto add_result = schema_cache_.RecordTableMap(metadata_opt.value());
+
+  if (add_result == TableMetadataCache::AddResult::kSchemaChanged) {
+    schema_cache_.InvalidateColumns(metadata_opt->database_name, metadata_opt->table_name);
+    if (!FetchColumnNames(metadata_opt.value(), failure_kind)) {
+      return TableMapAction::kReconnect;
+    }
+    schema_cache_.RecordTableMap(metadata_opt.value());
+    mygram::utils::StructuredLog()
+        .Event("binlog_schema_change")
+        .Field("database", metadata_opt->database_name)
+        .Field("table", metadata_opt->table_name)
+        .Field("table_id", metadata_opt->table_id)
+        .Field("gtid", GetCurrentGTID())
+        .Message("Schema change detected, column name cache invalidated")
+        .Warn();
+  }
+
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", add_result == TableMetadataCache::AddResult::kAdded ? "cached_table_map" : "updated_table_map")
+      .Field("database", metadata_opt->database_name)
+      .Field("table", metadata_opt->table_name)
+      .Field("table_id", metadata_opt->table_id)
+      .Debug();
+  return TableMapAction::kContinue;
+}
+
+bool BinlogReader::ObserveConfiguredTableDdl(const BinlogEvent& event) {
+  auto table_iter = table_contexts_.find(event.table_name);
+  if (table_iter != table_contexts_.end() && table_iter->second != nullptr) {
+    // The next TABLE_MAP of this table follows the DDL in the stream, so its
+    // columns are fetched after the redefinition rather than from the cache.
+    const config::TableConfig& table_config = table_iter->second->config;
+    schema_cache_.InvalidateColumns(table_config.database, table_config.name);
+  }
+
+  switch (event.ddl_type) {
+    case DDLType::kRowsReplaced: {
+      auto suppress_replay = ShouldSuppressTableReplay(event.table_name, event.gtid);
+      if (!suppress_replay) {
+        FailClosedOnUnevaluableReplayWatermark(event.table_name, event.gtid, suppress_replay.error());
+        return false;
+      }
+      if (*suppress_replay) {
+        return true;
+      }
+      mygram::utils::StructuredLog()
+          .Event("binlog_debug")
+          .Field("action", "rows_replaced_by_ddl")
+          .Field("table", event.table_name)
+          .Field("query", event.text)
+          .Debug();
+      FailClosedOnUnreplayableEvent(
+          mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
+          "Received DDL that removes, replaces or moves rows of configured table " + event.table_name +
+              " without row events (partition or tablespace maintenance, or CREATE OR REPLACE TABLE)" +
+              kUnreplayableEventRecovery,
+          "rows_replaced_by_ddl", "QUERY_EVENT");
+      return false;
+    }
+    case DDLType::kUnknown:
+    case DDLType::kTruncate:
+    case DDLType::kCreate:
+    case DDLType::kAlter:
+    case DDLType::kDrop:
+    case DDLType::kRename:
+    case DDLType::kDropDatabase:
+      return true;
+  }
+  return true;
+}
+
 void BinlogReader::MarkThreadExited() {
   uint8_t active = active_threads_.load(std::memory_order_acquire);
   while (active != 0 && !active_threads_.compare_exchange_weak(active, static_cast<uint8_t>(active - 1),
@@ -380,7 +524,6 @@ void BinlogReader::ReaderThreadFunc() {
     // distinction locally so ignored/non-target standalone statements still
     // advance the worker-owned applied GTID without publishing a received-but-
     // unapplied position.
-    replay_suppressed_table_ids_.clear();
 
     // Main reconnection loop (infinite retries)
     int reconnect_attempt = 0;
@@ -543,8 +686,10 @@ void BinlogReader::ReaderThreadFunc() {
       }
 
       // A reopened stream starts from the worker-owned applied position. Never
-      // carry an in-flight received GTID or transaction boundary across it.
+      // carry an in-flight received GTID or transaction boundary across it, nor
+      // a table id: the server may assign it to another table on this stream.
       position_state_.ResetReceived();
+      schema_cache_.Reset();
 
       // Reset no-data counter on successful stream open (reconnection)
       no_data_log_count_.store(0);
@@ -664,7 +809,9 @@ void BinlogReader::ReaderThreadFunc() {
           }
 
           case BinlogFetchResult::Status::kBinlogPurged: {
-            SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError, fetch.error_message));
+            SetLastError(mygram::utils::MakeError(
+                mygram::utils::ErrorCode::kMySQLBinlogError,
+                fetch.error_message + ". The binlog position is no longer available; run SYNC to establish a new one"));
             mygram::utils::StructuredLog()
                 .Event("binlog_error")
                 .Field("type", "binlog_purged")
@@ -715,22 +862,9 @@ void BinlogReader::ReaderThreadFunc() {
             .Field("size", static_cast<uint64_t>(event_length))
             .Debug();
 
-        // Verify CRC32 checksum for data integrity.
-        if (event_length >= mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize) {
-          auto checksum_result = VerifyBinlogEventChecksum(event_buffer, event_length);
-          if (!checksum_result) {
-            crc_errors_++;
-            SetLastError(checksum_result.error());
-            mygram::utils::StructuredLog()
-                .Event("binlog_error")
-                .Field("type", "crc32_checksum_mismatch")
-                .Field("event_length", static_cast<uint64_t>(event_length))
-                .Field("gtid", position_state_.received_gtid())
-                .FieldError(checksum_result.error())
-                .Error();
-            request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
-            break;
-          }
+        if (!VerifyFetchedFrame(event_buffer, event_length)) {
+          request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
+          break;
         }
 
         MySQLBinlogEventType event_type = MySQLBinlogEventType::UNKNOWN_EVENT;
@@ -775,114 +909,14 @@ void BinlogReader::ReaderThreadFunc() {
                 .Field("action", "table_map_event_detected")
                 .Field("event_num", static_cast<int64_t>(event_count))
                 .Debug();
-            auto metadata_opt = BinlogEventParser::ParseTableMapEvent(event_buffer, event_length);
-            if (!metadata_opt) {
-              // Reconnecting replays this event, so it keeps the generic binlog
-              // code rather than the undecodable-event code that makes SYNC
-              // restart past the position.
-              SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                                    "Failed to parse TABLE_MAP_EVENT from binlog; reconnecting from "
-                                                    "last processed GTID"));
-              mygram::utils::StructuredLog()
-                  .Event("binlog_error")
-                  .Field("type", "table_map_parse_failed")
-                  .Field("event_num", static_cast<int64_t>(event_count))
-                  .Error();
-              request_processing_failure_reconnect(ProcessingFailureKind::kDeterministic);
+            ProcessingFailureKind failure_kind = ProcessingFailureKind::kDeterministic;
+            const TableMapAction table_map_action = HandleTableMapEvent(event_buffer, event_length, &failure_kind);
+            if (table_map_action == TableMapAction::kReconnect) {
+              request_processing_failure_reconnect(failure_kind);
               break;
-            } else {
-              mygram::utils::StructuredLog()
-                  .Event("binlog_debug")
-                  .Field("action", "table_map_parsed")
-                  .Field("database", metadata_opt->database_name)
-                  .Field("table", metadata_opt->table_name)
-                  .Field("table_id", metadata_opt->table_id)
-                  .Debug();
-
-              // Table contexts are keyed by the database-qualified identity
-              // (e.g. "testdb.articles"). Match on the qualified key first and
-              // fall back to the bare table name for empty-database configs.
-              const bool is_monitored_table =
-                  table_contexts_.find(config::QualifiedTableName(metadata_opt->database_name,
-                                                                  metadata_opt->table_name)) != table_contexts_.end() ||
-                  table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
-
-              const std::string qualified_table =
-                  config::QualifiedTableName(metadata_opt->database_name, metadata_opt->table_name);
-              auto suppress_replay = ShouldSuppressTableReplay(qualified_table, position_state_.received_gtid());
-              if (!suppress_replay) {
-                FailClosedOnUnevaluableReplayWatermark(qualified_table, position_state_.received_gtid(),
-                                                       suppress_replay.error());
-                break;
-              }
-              if (*suppress_replay) {
-                replay_suppressed_table_ids_.insert(metadata_opt->table_id);
-                mygram::utils::StructuredLog()
-                    .Event("binlog_replay_suppressed")
-                    .Field("table", qualified_table)
-                    .Field("gtid", position_state_.received_gtid())
-                    .Field("reason", "covered_by_sync_snapshot")
-                    .Debug();
-                continue;
-              }
-              replay_suppressed_table_ids_.erase(metadata_opt->table_id);
-
-              if (is_monitored_table) {
-                ProcessingFailureKind failure_kind = ProcessingFailureKind::kDeterministic;
-                if (!FetchColumnNames(metadata_opt.value(), &failure_kind)) {
-                  mygram::utils::StructuredLog()
-                      .Event("binlog_error")
-                      .Field("type", "column_fetch_failed")
-                      .Field("database", metadata_opt->database_name)
-                      .Field("table", metadata_opt->table_name)
-                      .Field("gtid", GetCurrentGTID())
-                      .Error();
-                  request_processing_failure_reconnect(failure_kind);
-                  break;
-                }
-              } else {
-                mygram::utils::StructuredLog()
-                    .Event("binlog_debug")
-                    .Field("action", "skipping_non_monitored_table")
-                    .Field("database", metadata_opt->database_name)
-                    .Field("table", metadata_opt->table_name)
-                    .Debug();
-                // Row events for an unmonitored table are intentionally
-                // ignored when their table id is absent from this cache. Do
-                // not retain metadata for arbitrary server tables.
-                continue;
-              }
-
-              auto add_result = table_metadata_cache_.AddOrUpdate(metadata_opt->table_id, metadata_opt.value());
-
-              if (add_result == TableMetadataCache::AddResult::kSchemaChanged) {
-                InvalidateColumnNamesForSchemaChange(metadata_opt.value());
-                if (is_monitored_table) {
-                  ProcessingFailureKind failure_kind = ProcessingFailureKind::kDeterministic;
-                  if (!FetchColumnNames(metadata_opt.value(), &failure_kind)) {
-                    request_processing_failure_reconnect(failure_kind);
-                    break;
-                  }
-                  table_metadata_cache_.AddOrUpdate(metadata_opt->table_id, metadata_opt.value());
-                }
-                mygram::utils::StructuredLog()
-                    .Event("binlog_schema_change")
-                    .Field("database", metadata_opt->database_name)
-                    .Field("table", metadata_opt->table_name)
-                    .Field("table_id", metadata_opt->table_id)
-                    .Field("gtid", GetCurrentGTID())
-                    .Message("Schema change detected, column name cache invalidated")
-                    .Warn();
-              }
-
-              mygram::utils::StructuredLog()
-                  .Event("binlog_debug")
-                  .Field("action",
-                         add_result == TableMetadataCache::AddResult::kAdded ? "cached_table_map" : "updated_table_map")
-                  .Field("database", metadata_opt->database_name)
-                  .Field("table", metadata_opt->table_name)
-                  .Field("table_id", metadata_opt->table_id)
-                  .Debug();
+            }
+            if (table_map_action == TableMapAction::kStop) {
+              break;
             }
             continue;
           }
@@ -908,8 +942,7 @@ void BinlogReader::ReaderThreadFunc() {
           // apply the row image. Non-target tables in the same replay interval
           // continue through the normal path.
           if (IsRowsEventType(event_type) && event_length >= mygram::constants::kBinlogEventHeaderLen + 6 &&
-              replay_suppressed_table_ids_.find(ExtractRowsEventTableId(event_buffer)) !=
-                  replay_suppressed_table_ids_.end()) {
+              schema_cache_.IsSuppressed(ExtractRowsEventTableId(event_buffer))) {
             continue;
           }
         }
@@ -952,7 +985,7 @@ void BinlogReader::ReaderThreadFunc() {
 
         // Parse the binlog event using BinlogEventParser
         auto events = BinlogEventParser::ParseBinlogEvent(event_buffer, event_length, position_state_.received_gtid(),
-                                                          table_metadata_cache_, table_contexts_, nullptr, true,
+                                                          schema_cache_.table_maps(), table_contexts_, nullptr, true,
                                                           mysql_config_.datetime_timezone);
 
         if (!events.empty()) {
@@ -961,6 +994,19 @@ void BinlogReader::ReaderThreadFunc() {
               .Field("action", "parsed_events")
               .Field("count", static_cast<int64_t>(events.size()))
               .Debug();
+
+          // One QUERY_EVENT can carry DDL for several configured tables under
+          // one GTID; queue none of them if any has to stop replication.
+          bool ddl_stopped = false;
+          for (const auto& event : events) {
+            if (event.type == BinlogEventType::DDL && !ObserveConfiguredTableDdl(event)) {
+              ddl_stopped = true;
+              break;
+            }
+          }
+          if (ddl_stopped) {
+            break;
+          }
 
           for (auto& event : events) {
             if (spdlog::should_log(spdlog::level::debug)) {
@@ -1010,21 +1056,8 @@ void BinlogReader::ReaderThreadFunc() {
           // the applied position remains a complete, ordered server GTID set.
           // Never do this for BEGIN or for statements inside an explicit
           // transaction; those advance only at COMMIT/XID.
-          bool drops_configured_database = false;
-          if (event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed) {
-            for (const auto& [table_name, table_context] : table_contexts_) {
-              static_cast<void>(table_name);
-              if (table_context != nullptr &&
-                  BinlogEventParser::IsDatabaseAffectingDDL(query_text, table_context->config.database)) {
-                drops_configured_database = true;
-                break;
-              }
-            }
-          }
           const bool safe_ignored_query =
-              query_parsed && !drops_configured_database &&
-              (BinlogEventParser::IsSafeIgnoredQuery(query_text) ||
-               HasConfiguredIgnoredDdlPrefix(query_text, mysql_config_.ignored_ddl_prefixes));
+              query_parsed && BinlogEventParser::IsSafeIgnoredQuery(query_text, mysql_config_.ignored_ddl_prefixes);
           const bool standalone_query_completed =
               event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
               !position_state_.received_gtid().empty() &&
@@ -1287,7 +1320,11 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event, ProcessingFailur
     }
   }
 
-  if (!ProcessEvent(event)) {
+  mygram::utils::Error process_error;
+  if (!ProcessEvent(event, &process_error)) {
+    if (process_error.is_error()) {
+      SetLastError(process_error);
+    }
     return false;
   }
 
@@ -1321,7 +1358,7 @@ bool BinlogReader::IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_t
   }
 
   const uint64_t table_id = ExtractRowsEventTableId(buffer);
-  const TableMetadata* metadata = table_metadata_cache_.Get(table_id);
+  const TableMetadata* metadata = schema_cache_.table_maps().Get(table_id);
   if (metadata == nullptr) {
     return false;
   }

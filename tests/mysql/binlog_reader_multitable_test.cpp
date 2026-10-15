@@ -84,7 +84,7 @@ TEST(BinlogReaderTest, ServerStatsIntegration) {
   table_config.primary_key = "id";
 
   BinlogReader::Config reader_config;
-  reader_config.start_gtid = "uuid:1";
+  reader_config.start_gtid = "ffffffff-0000-0000-0000-000000000001:1";
 
   server::ServerStats stats;
 
@@ -225,7 +225,9 @@ TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
   article_row.text = "Article text";
   article_row.columns["author_id"] = "42";  // RowData.columns is string-to-string map
 
-  auto article_filters = BinlogFilterEvaluator::ExtractAllFilters(article_row, articles_ctx.config);
+  UnconvertedFilterText article_unconverted;
+  auto article_filters =
+      BinlogFilterEvaluator::ExtractAllFilters(article_row, articles_ctx.config, "+00:00", article_unconverted);
   // Verify articles table extracts author_id (not post_id)
   EXPECT_TRUE(article_filters.find("author_id") != article_filters.end());
   // Articles should NOT have post_id since it's not in the config
@@ -238,7 +240,9 @@ TEST_F(BinlogReaderFixture, MultiTableModeUsesCorrectTableConfig) {
   comment_row.columns["post_id"] = "999";   // RowData.columns is string-to-string map
   comment_row.columns["author_id"] = "42";  // Also add author_id to row data
 
-  auto comment_filters = BinlogFilterEvaluator::ExtractAllFilters(comment_row, comments_ctx.config);
+  UnconvertedFilterText comment_unconverted;
+  auto comment_filters =
+      BinlogFilterEvaluator::ExtractAllFilters(comment_row, comments_ctx.config, "+00:00", comment_unconverted);
   // Verify comments table extracts post_id (not author_id)
   EXPECT_TRUE(comment_filters.find("post_id") != comment_filters.end());
   // Comments should NOT have author_id since it's not in the config
@@ -301,12 +305,15 @@ TEST_F(BinlogReaderFixture, MultiTableModeRequiredFiltersPerTable) {
   filters_draft["status"] = static_cast<int64_t>(0);
 
   // Published table should accept status=1, reject status=0
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, published_ctx.config));
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, published_ctx.config));
+  EXPECT_TRUE(
+      BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, UnconvertedFilterText{}, published_ctx.config));
+  EXPECT_FALSE(
+      BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, UnconvertedFilterText{}, published_ctx.config));
 
   // Draft table should accept status=0, reject status=1
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, draft_ctx.config));
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, draft_ctx.config));
+  EXPECT_FALSE(
+      BinlogFilterEvaluator::EvaluateRequiredFilters(filters_published, UnconvertedFilterText{}, draft_ctx.config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters_draft, UnconvertedFilterText{}, draft_ctx.config));
 }
 
 /**
@@ -462,11 +469,12 @@ TEST_F(BinlogReaderFixture, LegacyConstructorSkipsNonMonitoredTables) {
  * for tables we'll never process.
  */
 TEST_F(BinlogReaderFixture, ColumnNamesCacheOnlyForMonitoredTables) {
-  // The column_names_cache_ should only contain entries for monitored tables
+  // The column cache should only contain entries for monitored tables
   // Since we can't call FetchColumnNames without a real MySQL connection,
   // we verify the cache starts empty and stays empty for non-monitored tables
 
-  EXPECT_TRUE(reader_->column_names_cache_.empty()) << "Column names cache should start empty";
+  EXPECT_EQ(reader_->schema_cache_.FindColumns("", table_config_.name), nullptr)
+      << "Column names cache should start empty";
 
   // Simulate the behavior: in the actual code, FetchColumnNames is only called
   // for monitored tables, so the cache will only contain monitored table entries

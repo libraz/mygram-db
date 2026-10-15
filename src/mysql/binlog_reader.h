@@ -19,7 +19,6 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "config/config.h"
@@ -29,10 +28,12 @@
 #include "mysql/binlog_stream.h"
 #include "mysql/connection.h"
 #include "mysql/connection_validator.h"
+#include "mysql/ddl_classifier.h"
 #include "mysql/ddl_schema_validator.h"
 #include "mysql/replication_position_state.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
+#include "mysql/table_schema_cache.h"
 #include "mysql/text_materializer.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
@@ -62,13 +63,6 @@ enum class BinlogEventType : uint8_t {
 };
 
 /**
- * @brief DDL operation type
- *
- * Classifies the DDL operation for structured handling in the event processor.
- */
-enum class DDLType : uint8_t { kUnknown = 0, kTruncate, kCreate, kAlter, kDrop, kRename };
-
-/**
  * @brief Binlog event
  *
  * Represents a parsed binlog event with validation and factory methods.
@@ -92,6 +86,9 @@ struct BinlogEvent {
   TextValueState text_state = TextValueState::kAbsent;
   TextValueState old_text_state = TextValueState::kAbsent;
   storage::FilterMap filters;
+  // Raw text of the filter columns (after image for UPDATE) whose conversion
+  // failed, so required_filters can judge them as the initial-load SQL does.
+  UnconvertedFilterText unconverted;
   std::string gtid;  // GTID for this event
 
   /**
@@ -99,7 +96,7 @@ struct BinlogEvent {
    *
    * Invariants by event type:
    * - INSERT: requires table_name, primary_key
-   * - UPDATE: requires table_name, primary_key
+   * - UPDATE: requires table_name, primary_key, and a before-image key that is not NULL
    * - DELETE: requires table_name, primary_key
    * - DDL: requires table_name
    * - UNKNOWN: always invalid
@@ -109,9 +106,10 @@ struct BinlogEvent {
   [[nodiscard]] bool IsValid() const {
     switch (type) {
       case BinlogEventType::INSERT:
-      case BinlogEventType::UPDATE:
       case BinlogEventType::DELETE:
         return !table_name.empty() && HasPrimaryKey();
+      case BinlogEventType::UPDATE:
+        return !table_name.empty() && HasPrimaryKey() && !old_primary_key_null;
       case BinlogEventType::DDL:
         return !table_name.empty();
       case BinlogEventType::COMMIT:
@@ -201,30 +199,31 @@ struct BinlogEvent {
   }
 
   /**
-   * @brief Create a DDL event
+   * @brief Create a DDL event for a configured table
    *
-   * @param table Table name affected by DDL
-   * @param query DDL query text
+   * @param table Configured table the DDL is emitted for
+   * @param query DDL query text, logged in the table's database
    * @param gtid_val GTID for this event
-   * @return BinlogEvent with DDL type
+   * @return BinlogEvent whose ddl_type is what replication assigns @p table
    */
-  static BinlogEvent CreateDDL(const std::string& table, const std::string& query = "",
+  static BinlogEvent CreateDDL(const config::TableConfig& table, const std::string& query = "",
                                const std::string& gtid_val = "") {
     BinlogEvent event;
     event.type = BinlogEventType::DDL;
-    event.table_name = table;
+    event.table_name = table.name;
     event.text = query;
     event.gtid = gtid_val;
-    event.ddl_type = ClassifyDDL(query);
+    event.ddl_type = ClassifyDDL(query, table);
     return event;
   }
 
   /**
-   * @brief Classify DDL type from query text
-   * @param query DDL query string
-   * @return DDLType classification
+   * @brief DDL type replication assigns a configured table for a query
+   * @param query DDL query string, logged in the table's database
+   * @param table Configured table
+   * @return The type FindConfiguredTableDDL reports, or kUnknown when no statement names @p table
    */
-  static DDLType ClassifyDDL(const std::string& query);
+  static DDLType ClassifyDDL(const std::string& query, const config::TableConfig& table);
 };
 
 /**
@@ -483,22 +482,10 @@ class BinlogReader final : public IBinlogReader {
   std::string last_server_uuid_;
   mutable std::mutex uuid_mutex_;
 
-  // Table metadata cache
-  TableMetadataCache table_metadata_cache_;
-  // Reader-thread-only set of table IDs whose rows belong to the replay
-  // interval already represented by an isolated table snapshot.
-  std::unordered_set<uint64_t> replay_suppressed_table_ids_;
+  // TABLE_MAP metadata, replay-suppressed table ids and SHOW COLUMNS results;
+  // reader thread only.
+  TableSchemaCache schema_cache_;
   std::unordered_map<std::string, ConfiguredTableSchema> configured_schema_baselines_;
-
-  struct ColumnDefinition {
-    std::string name;
-    bool is_unsigned = false;
-    std::vector<std::string> enum_set_values;
-  };
-
-  // Column definition cache: key = "database.table", value = column definitions in ordinal order
-  std::unordered_map<std::string, std::vector<ColumnDefinition>> column_names_cache_;
-  mutable std::mutex column_names_cache_mutex_;
 
   // Binlog stream protocol handler (MySQL or MariaDB)
   std::unique_ptr<IBinlogStream> binlog_stream_;
@@ -616,6 +603,38 @@ class BinlogReader final : public IBinlogReader {
   void RejectUnsafeStatementEvent(const std::string& statement);
 
   /**
+   * @brief Verify a fetched frame's CRC32 before anything reads it.
+   * @return false, with the error published, when the frame is shorter than a
+   *         header plus checksum or its checksum does not match
+   */
+  bool VerifyFetchedFrame(const unsigned char* event_buffer, size_t event_length);
+
+  /// What the reader loop does after offering an event to HandleTableMapEvent.
+  enum class TableMapAction : uint8_t {
+    kContinue,   ///< Map recorded, or deliberately dropped; read the next event.
+    kReconnect,  ///< Error published; reconnect from the last processed GTID.
+    kStop,       ///< Event can never be resumed from; replication stopped.
+  };
+
+  /**
+   * @brief Record what a TABLE_MAP_EVENT says about its table id.
+   * @param failure_kind Recovery class of a kReconnect result
+   */
+  TableMapAction HandleTableMapEvent(const unsigned char* event_buffer, unsigned long event_length,
+                                     ProcessingFailureKind* failure_kind);
+
+  /**
+   * @brief Apply what the reader thread owes a configured-table DDL before queueing it.
+   *
+   * Drops the table's cached column definitions so the next TABLE_MAP refetches
+   * them, and stops on DDL that changes rows without row events unless the
+   * table's SYNC snapshot already covers it.
+   *
+   * @return false when replication was stopped
+   */
+  bool ObserveConfiguredTableDdl(const BinlogEvent& event);
+
+  /**
    * @brief Return whether a table event is already represented by its SYNC snapshot.
    *
    * Comparison errors are returned to the caller and must stop replication;
@@ -645,7 +664,7 @@ class BinlogReader final : public IBinlogReader {
   /**
    * @brief Process single event (delegates to BinlogEventProcessor)
    */
-  bool ProcessEvent(const BinlogEvent& event);
+  bool ProcessEvent(const BinlogEvent& event, mygram::utils::Error* error_out = nullptr);
 
   enum class DDLSchemaCheck : uint8_t { kCompatible, kRetryableFailure, kIncompatible };
 
@@ -671,9 +690,6 @@ class BinlogReader final : public IBinlogReader {
    * @return true if successful, false otherwise
    */
   bool FetchColumnNames(TableMetadata& metadata, ProcessingFailureKind* failure_kind = nullptr);
-
-  /** Remove stale column definitions before refreshing a changed table map. */
-  void InvalidateColumnNamesForSchemaChange(const TableMetadata& metadata);
 
   /** A reconnect already owns an open transport for the next outer-loop iteration. */
   [[nodiscard]] static bool ShouldCloseStreamAfterReadLoop(bool connection_was_reestablished) {

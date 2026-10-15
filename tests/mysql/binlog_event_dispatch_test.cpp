@@ -18,6 +18,7 @@
 #ifdef USE_MYSQL
 
 #include "mysql/binlog_event_disposition.h"
+#include "utils/crc32.h"
 
 using namespace binlog_test;
 using mygram::utils::ErrorCode;
@@ -116,6 +117,21 @@ TEST(BinlogEventDispositionTest, WireBytesOutsideTheEnumerationFailClosed) {
 }
 
 /**
+ * @brief A stop on an unrecognized byte names the byte, so two different ones never read the same.
+ */
+TEST_F(BinlogReaderFixture, UnknownEventTypeStopReportsTheTypeByte) {
+  reader_->should_stop_.store(false, std::memory_order_release);
+  ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(static_cast<MySQLBinlogEventType>(200)));
+
+  EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
+  EXPECT_NE(reader_->GetLastError().find("type 200"), std::string::npos) << reader_->GetLastError();
+  EXPECT_EQ(DescribeEventType(static_cast<MySQLBinlogEventType>(200)), "event type 200");
+  EXPECT_EQ(DescribeEventType(MySQLBinlogEventType::UNKNOWN_EVENT), "UNKNOWN_EVENT");
+  EXPECT_EQ(DescribeEventType(MySQLBinlogEventType::TABLE_MAP_EVENT), "TABLE_MAP_EVENT");
+  reader_->should_stop_.store(false, std::memory_order_release);
+}
+
+/**
  * @brief Every fail-closed event stops with the code SYNC reads.
  *
  * A generic binlog error makes SYNC restart from the drained position and hit
@@ -132,11 +148,11 @@ TEST_F(BinlogReaderFixture, EveryFailClosedEventTypeStopsWithTheUndecodableCode)
     SCOPED_TRACE(std::string(GetEventTypeName(type)) + " (" + std::to_string(type_byte) + ")");
 
     reader_->should_stop_.store(false, std::memory_order_release);
-    reader_->SetCurrentGTID("uuid:17");
+    reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
     ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(type));
 
     EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-    EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:17");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17");
     EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
     EXPECT_EQ(reader_->GetReplicationState(), ReplicationState::kFailed);
     const std::string last_error = reader_->GetLastError();
@@ -155,15 +171,16 @@ TEST_F(BinlogReaderFixture, EveryFailClosedEventTypeStopsWithTheUndecodableCode)
  * and makes auto-positioning redeliver them on every reconnect.
  */
 TEST_F(BinlogReaderFixture, AnonymousGtidEventStopsWithoutAdvancingAnyPosition) {
-  reader_->SetCurrentGTID("uuid:17");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
   const int64_t applied_time_before = reader_->GetLastAppliedUnixTime();
-  reader_->position_state_.ObserveReceivedGTID("uuid:17", false, false);
+  reader_->position_state_.ObserveReceivedGTID("ffffffff-0000-0000-0000-000000000001:17", false, false);
   reader_->should_stop_.store(false, std::memory_order_release);
 
   ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(MySQLBinlogEventType::ANONYMOUS_GTID_LOG_EVENT));
 
   EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:17") << "an anonymous transaction has no position to record";
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17")
+      << "an anonymous transaction has no position to record";
   EXPECT_EQ(reader_->GetLastAppliedUnixTime(), applied_time_before)
       << "the lag gauge must not report progress for a transaction that was not applied";
   EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
@@ -184,13 +201,14 @@ TEST_F(BinlogReaderFixture, AnonymousGtidEventStopsWithoutAdvancingAnyPosition) 
  * surface still reports a running replica.
  */
 TEST_F(BinlogReaderFixture, IncidentEventStopsAndNamesTheOnlyRecovery) {
-  reader_->SetCurrentGTID("uuid:17");
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
   reader_->should_stop_.store(false, std::memory_order_release);
 
   ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(MySQLBinlogEventType::INCIDENT_EVENT));
 
   EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "uuid:17") << "the position must not advance past the declared gap";
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17")
+      << "the position must not advance past the declared gap";
   EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
   EXPECT_EQ(reader_->GetReplicationState(), ReplicationState::kFailed);
 
@@ -293,6 +311,32 @@ TEST_F(BinlogReaderFixture, MalformedPositionEventsReconnectFromTheLastProcessed
   const auto query = BinlogEventBuilder::BuildQueryEvent("db", "BEGIN");
   EXPECT_EQ(reader_->ObservePositionEvent(MySQLBinlogEventType::QUERY_EVENT, query.data(), query.size()),
             BinlogReader::PositionEventAction::kNotPositionEvent);
+}
+
+/**
+ * @brief A frame too short to hold a header and checksum reconnects instead of being skipped.
+ *
+ * Such a frame cannot be classified, so letting it through either drops it as
+ * an unknown event or dispatches bytes no checksum has covered.
+ */
+TEST_F(BinlogReaderFixture, FramesShorterThanHeaderPlusChecksumFailVerification) {
+  const std::vector<unsigned char> ok_byte_only(1, 0x00);
+  const std::vector<unsigned char> twenty_bytes(20, 0x00);
+  const uint64_t errors_before = reader_->crc_errors_.load();
+
+  EXPECT_FALSE(reader_->VerifyFetchedFrame(ok_byte_only.data(), 0));
+  EXPECT_FALSE(reader_->VerifyFetchedFrame(twenty_bytes.data(), twenty_bytes.size()));
+  EXPECT_EQ(reader_->crc_errors_.load(), errors_before + 2);
+  EXPECT_NE(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent)
+      << "a replay can deliver the frame intact, so it must not claim the event is undecodable";
+
+  auto intact = test::BinlogEventBuilder::BuildQueryEvent("db", "BEGIN");
+  const uint32_t crc = mygram::utils::ComputeCRC32(intact.data(), intact.size() - 4);
+  for (size_t i = 0; i < 4; ++i) {
+    intact[intact.size() - 4 + i] = static_cast<uint8_t>((crc >> (8 * i)) & 0xFFU);
+  }
+  EXPECT_TRUE(reader_->VerifyFetchedFrame(intact.data(), intact.size()));
+  EXPECT_EQ(reader_->crc_errors_.load(), errors_before + 2);
 }
 
 #endif  // USE_MYSQL

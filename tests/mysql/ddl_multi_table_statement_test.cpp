@@ -21,28 +21,16 @@
 #include "config/config.h"
 #include "mysql/binlog_event_parser.h"
 #include "mysql/binlog_reader.h"
-
-namespace mygramdb::mysql {
-
-// Defined in binlog_event_parser.cpp. The parser's public surface exposes only
-// a boolean predicate, so the DDL type carried by a match is reached directly.
-struct MatchedConfiguredDDL {
-  DDLType ddl_type = DDLType::kUnknown;
-};
-
-std::optional<MatchedConfiguredDDL> FindTableAffectingConfiguredDDL(const std::string& query,
-                                                                    const std::string& event_database,
-                                                                    const config::TableConfig& table_config);
-
-}  // namespace mygramdb::mysql
+#include "mysql/ddl_classifier.h"
 
 namespace {
 
 using mygramdb::config::TableConfig;
 using mygramdb::mysql::BinlogEventParser;
 using mygramdb::mysql::BinlogEventType;
+using mygramdb::mysql::ClassifyQueryEvent;
 using mygramdb::mysql::DDLType;
-using mygramdb::mysql::FindTableAffectingConfiguredDDL;
+using mygramdb::mysql::FindConfiguredTableDDL;
 using mygramdb::mysql::MySQLBinlogEventType;
 using mygramdb::mysql::TableMetadataCache;
 
@@ -55,14 +43,14 @@ TableConfig MakeTableConfig(const std::string& name, const std::string& database
 
 void ExpectDDLMatch(const std::string& query, DDLType expected, const TableConfig& table_config,
                     const std::string& event_database = "") {
-  const auto match = FindTableAffectingConfiguredDDL(query, event_database, table_config);
+  const auto match = FindConfiguredTableDDL(ClassifyQueryEvent(query), event_database, table_config);
   ASSERT_TRUE(match.has_value()) << "expected a DDL match for: " << query;
-  EXPECT_EQ(match->ddl_type, expected) << "wrong DDL type for: " << query;
+  EXPECT_EQ(*match, expected) << "wrong DDL type for: " << query;
 }
 
 void ExpectNoDDLMatch(const std::string& query, const TableConfig& table_config,
                       const std::string& event_database = "") {
-  const auto match = FindTableAffectingConfiguredDDL(query, event_database, table_config);
+  const auto match = FindConfiguredTableDDL(ClassifyQueryEvent(query), event_database, table_config);
   EXPECT_FALSE(match.has_value()) << "unexpected DDL match for: " << query;
 }
 

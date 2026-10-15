@@ -20,7 +20,7 @@ TEST(MySQLConnectionTest, GTIDParseBasic) {
   auto gtid = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562:1");
 
   ASSERT_TRUE(gtid) << "Failed to parse GTID: " << gtid.error().to_string();
-  EXPECT_EQ(gtid->server_uuid, "3E11FA47-71CA-11E1-9E33-C80AA9429562");
+  EXPECT_EQ(gtid->server_uuid, "3e11fa47-71ca-11e1-9e33-c80aa9429562");
   EXPECT_EQ(gtid->transaction_id, 1);
 }
 
@@ -31,7 +31,7 @@ TEST(MySQLConnectionTest, GTIDParseRange) {
   auto gtid = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100");
 
   ASSERT_TRUE(gtid) << "Failed to parse GTID: " << gtid.error().to_string();
-  EXPECT_EQ(gtid->server_uuid, "3E11FA47-71CA-11E1-9E33-C80AA9429562");
+  EXPECT_EQ(gtid->server_uuid, "3e11fa47-71ca-11e1-9e33-c80aa9429562");
   EXPECT_EQ(gtid->transaction_id, 100);  // Should parse end of range
 }
 
@@ -107,7 +107,7 @@ TEST(MySQLConnectionTest, GTIDEquality) {
  * @brief Test GTID round-trip (Parse -> ToString)
  */
 TEST(MySQLConnectionTest, GTIDRoundTrip) {
-  std::string original = "3E11FA47-71CA-11E1-9E33-C80AA9429562:123";
+  std::string original = "3e11fa47-71ca-11e1-9e33-c80aa9429562:123";
 
   auto gtid = GTID::Parse(original);
   ASSERT_TRUE(gtid) << "Failed to parse GTID: " << gtid.error().to_string();
@@ -315,6 +315,31 @@ TEST(MySQLConnectionTest, GTIDValidationEdgeCases) {
   EXPECT_FALSE(conn.SetGTIDNext("SELECT"));
   EXPECT_FALSE(conn.SetGTIDNext("DROP"));
   EXPECT_FALSE(conn.SetGTIDNext("INSERT"));
+}
+
+/**
+ * @brief Only a validated UUID and a transaction number of at least 1 reach SET GTID_NEXT.
+ *
+ * Every rejection below is reported as an invalid GTID, which the connection
+ * returns before it issues any statement.
+ */
+TEST(MySQLConnectionTest, SetGTIDNextRejectsMalformedGtidBeforeAnyQuery) {
+  Connection::Config config;
+  config.host = "localhost";
+  config.user = "test";
+  Connection conn(config);
+
+  for (const char* gtid : {"a' OR '1'='1:5", "3e11fa47-71ca-11e1-9e33-c80aa9429562:0",
+                           "3e11fa47-71ca-11e1-9e33-c80aa942956':5", "3e11fa47-71ca-11e1-9e33-c80aa9429562:tag:5",
+                           "3e11fa47-71ca-11e1-9e33-c80aa9429562:1,3e11fa47-71ca-11e1-9e33-c80aa9429563:1"}) {
+    auto result = conn.SetGTIDNext(gtid);
+    ASSERT_FALSE(result) << gtid;
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidGTID) << gtid;
+  }
+
+  auto canonical = GTID::Parse("3E11FA47-71CA-11E1-9E33-C80AA9429562:7");
+  ASSERT_TRUE(canonical) << canonical.error().to_string();
+  EXPECT_EQ(canonical->ToString(), "3e11fa47-71ca-11e1-9e33-c80aa9429562:7");
 }
 
 TEST(MySQLConnectionIntegrationTest, ExecuteStreamingDoesNotMaterializeRowsClientSide) {

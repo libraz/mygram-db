@@ -16,6 +16,7 @@
 
 #include "config/config.h"
 #include "mysql/binlog_filter_evaluator.h"
+#include "mysql/required_filter_predicate.h"
 #include "storage/document_store.h"
 
 using namespace mygramdb::mysql;
@@ -60,7 +61,7 @@ TEST_F(BinlogFilterEvaluatorTest, EmptyRequiredFiltersAlwaysReturnsTrue) {
   TableConfig config = MakeTableConfig({});
   FilterMap filters;
 
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, EmptyRequiredFiltersWithDataReturnsTrue) {
@@ -68,7 +69,7 @@ TEST_F(BinlogFilterEvaluatorTest, EmptyRequiredFiltersWithDataReturnsTrue) {
   FilterMap filters;
   filters["status"] = int64_t{1};
 
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
 }
 
 // ===========================================================================
@@ -345,21 +346,23 @@ TEST_F(BinlogFilterEvaluatorTest, ExtractedExplicitNullMatchesRequiredIsNull) {
   row_data.null_columns.insert("deleted_at");
   TableConfig config = MakeTableConfig({MakeFilter("deleted_at", "datetime", "IS NULL", "")});
 
-  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, config);
+  UnconvertedFilterText filters_unconverted;
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, config, "+00:00", filters_unconverted);
 
   ASSERT_TRUE(filters.contains("deleted_at"));
   ASSERT_TRUE(std::holds_alternative<std::monostate>(filters.at("deleted_at")));
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, ExtractedAbsentColumnDoesNotMatchRequiredIsNull) {
   RowData row_data;
   TableConfig config = MakeTableConfig({MakeFilter("deleted_at", "datetime", "IS NULL", "")});
 
-  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, config);
+  UnconvertedFilterText filters_unconverted;
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, config, "+00:00", filters_unconverted);
 
   EXPECT_FALSE(filters.contains("deleted_at"));
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, ExtractedBooleanRoundTripsThroughRequiredEvaluation) {
@@ -367,18 +370,22 @@ TEST_F(BinlogFilterEvaluatorTest, ExtractedBooleanRoundTripsThroughRequiredEvalu
   row_data.columns["enabled"] = "1";
   TableConfig true_config = MakeTableConfig({MakeFilter("enabled", "boolean", "=", "true")});
 
-  auto true_filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, true_config);
+  UnconvertedFilterText true_filters_unconverted;
+  auto true_filters =
+      BinlogFilterEvaluator::ExtractAllFilters(row_data, true_config, "+00:00", true_filters_unconverted);
   ASSERT_TRUE(true_filters.contains("enabled"));
   ASSERT_TRUE(std::holds_alternative<bool>(true_filters.at("enabled")));
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(true_filters, true_config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(true_filters, true_filters_unconverted, true_config));
 
   row_data.columns["enabled"] = "0";
   TableConfig false_config = MakeTableConfig({MakeFilter("enabled", "boolean", "=", "0")});
-  auto false_filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, false_config);
+  UnconvertedFilterText false_filters_unconverted;
+  auto false_filters =
+      BinlogFilterEvaluator::ExtractAllFilters(row_data, false_config, "+00:00", false_filters_unconverted);
   ASSERT_TRUE(false_filters.contains("enabled"));
   EXPECT_FALSE(std::get<bool>(false_filters.at("enabled")));
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(false_filters, false_config));
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(false_filters, true_config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(false_filters, false_filters_unconverted, false_config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(false_filters, false_filters_unconverted, true_config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, BooleanSupportsEqualityAndInequalityLiterals) {
@@ -472,7 +479,7 @@ TEST_F(BinlogFilterEvaluatorTest, SingleRequiredFilterMatch) {
   FilterMap filters;
   filters["status"] = int64_t{1};
 
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, SingleRequiredFilterMismatch) {
@@ -481,7 +488,7 @@ TEST_F(BinlogFilterEvaluatorTest, SingleRequiredFilterMismatch) {
   FilterMap filters;
   filters["status"] = int64_t{0};
 
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, EmptyStringRequiredFilterMatchesOnlyEmptyValue) {
@@ -489,11 +496,11 @@ TEST_F(BinlogFilterEvaluatorTest, EmptyStringRequiredFilterMatchesOnlyEmptyValue
 
   FilterMap empty_filters;
   empty_filters["status"] = std::string{};
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(empty_filters, config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(empty_filters, UnconvertedFilterText{}, config));
 
   FilterMap nonempty_filters;
   nonempty_filters["status"] = std::string{"active"};
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(nonempty_filters, config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(nonempty_filters, UnconvertedFilterText{}, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersAllMatch) {
@@ -504,7 +511,7 @@ TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersAllMatch) {
   filters["status"] = int64_t{1};
   filters["type"] = std::string{"article"};
 
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersOneMismatch) {
@@ -515,7 +522,7 @@ TEST_F(BinlogFilterEvaluatorTest, MultipleRequiredFiltersOneMismatch) {
   filters["status"] = int64_t{1};
   filters["type"] = std::string{"comment"};  // Mismatch
 
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, RequiredFilterColumnMissing) {
@@ -524,7 +531,128 @@ TEST_F(BinlogFilterEvaluatorTest, RequiredFilterColumnMissing) {
   FilterMap filters;
   // "status" column not present
 
-  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
+}
+
+// A required-filter value that does not decode is judged the way the initial-load
+// WHERE clause judges the row, so load and replication admit the same rows.
+TEST_F(BinlogFilterEvaluatorTest, ZeroDateIsNotNullAdmitsRowLikeTheInitialLoadPredicate) {
+  RowData row_data;
+  row_data.columns["published_at"] = "0000-00-00 00:00:00";
+
+  TableConfig not_null_config = MakeTableConfig({MakeFilter("published_at", "datetime", "IS NOT NULL", "")});
+  UnconvertedFilterText filters_unconverted;
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, not_null_config, "+00:00", filters_unconverted);
+  ASSERT_FALSE(filters.contains("published_at"));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, not_null_config));
+
+  TableConfig null_config = MakeTableConfig({MakeFilter("published_at", "datetime", "IS NULL", "")});
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, null_config));
+
+  TableConfig threshold_config = MakeTableConfig({MakeFilter("published_at", "datetime", ">=", "2020-01-01 00:00:00")});
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, threshold_config));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, ZeroTimestampComparesAsEpochZero) {
+  RowData row_data;
+  row_data.columns["updated_at"] = "0000-00-00 00:00:00";
+
+  TableConfig before_config = MakeTableConfig({MakeFilter("updated_at", "timestamp", "<", "1000")});
+  UnconvertedFilterText filters_unconverted;
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, before_config, "+00:00", filters_unconverted);
+  ASSERT_FALSE(filters.contains("updated_at"));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, before_config));
+
+  TableConfig after_config = MakeTableConfig({MakeFilter("updated_at", "timestamp", ">=", "1000")});
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, after_config));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, BooleanColumnOutsideZeroAndOneMatchesOnlyInequality) {
+  RowData row_data;
+  row_data.columns["enabled"] = "2";
+
+  TableConfig equal_config = MakeTableConfig({MakeFilter("enabled", "boolean", "=", "1")});
+  UnconvertedFilterText filters_unconverted;
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, equal_config, "+00:00", filters_unconverted);
+  ASSERT_FALSE(filters.contains("enabled"));
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, equal_config));
+
+  TableConfig not_equal_config = MakeTableConfig({MakeFilter("enabled", "boolean", "!=", "1")});
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, filters_unconverted, not_equal_config));
+}
+
+// With the raw text, a zero or partly zero date is ordered as the server orders it: as a
+// datetime by its components.
+namespace {
+
+bool AdmitsRawDatetime(const std::string& type, const std::string& op, const std::string& threshold,
+                       const std::string& raw) {
+  RowData row_data;
+  row_data.columns["happened_at"] = raw;
+  TableConfig config = MakeTableConfig({MakeFilter("happened_at", type, op, threshold)});
+  UnconvertedFilterText unconverted;
+  auto filters = BinlogFilterEvaluator::ExtractAllFilters(row_data, config, "+00:00", unconverted);
+  EXPECT_FALSE(filters.contains("happened_at")) << raw;
+  EXPECT_EQ(unconverted.count("happened_at"), 1U) << raw;
+  return BinlogFilterEvaluator::EvaluateRequiredFilters(filters, unconverted, config);
+}
+
+}  // namespace
+
+TEST_F(BinlogFilterEvaluatorTest, ZeroDateOrdersBeforeEveryRealInstant) {
+  const std::string zero = "0000-00-00 00:00:00";
+  const std::string threshold = "2024-01-01 00:00:00";
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", "<", threshold, zero));
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", "<=", threshold, zero));
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", "!=", threshold, zero));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", "=", threshold, zero));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", ">", threshold, zero));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", ">=", threshold, zero));
+  EXPECT_TRUE(AdmitsRawDatetime("date", "<", threshold, "0000-00-00"));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, PartlyZeroDateOrdersByComponents) {
+  const std::string partial = "2024-00-00 00:00:00";
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", "<", "2024-01-01 00:00:00", partial));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", ">=", "2024-01-01 00:00:00", partial));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", "=", "2024-01-01 00:00:00", partial));
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", "!=", "2024-01-01 00:00:00", partial));
+}
+
+// The rendered SQL turns <=, =, != and > into half-open bounds at x and x + 1; a value
+// sorting between those bounds must get the verdict the SQL gives it.
+TEST_F(BinlogFilterEvaluatorTest, PartlyZeroDateBetweenWholeSecondsFollowsHalfOpenBounds) {
+  const std::string partial = "2024-00-00 00:00:00";
+  const std::string just_before = "2023-12-31 23:59:59";
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", "<=", just_before, partial));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", ">", just_before, partial));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", "<", just_before, partial));
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", ">=", just_before, partial));
+  EXPECT_TRUE(AdmitsRawDatetime("datetime", "=", just_before, partial));
+  EXPECT_FALSE(AdmitsRawDatetime("datetime", "!=", just_before, partial));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, ZeroTimestampOrdersBeforeEveryInstantByItsText) {
+  EXPECT_TRUE(AdmitsRawDatetime("timestamp", "<", "2024-01-01 00:00:00", "0000-00-00 00:00:00"));
+  EXPECT_FALSE(AdmitsRawDatetime("timestamp", ">=", "1970-01-01 00:00:00", "0000-00-00 00:00:00"));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, ColumnMissingFromBothMapsIsRejectedWithRawTextOverload) {
+  TableConfig config = MakeTableConfig({MakeFilter("happened_at", "datetime", "!=", "2024-01-01 00:00:00")});
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(FilterMap{}, UnconvertedFilterText{}, config));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, PredicateJudgesRawUndecodedTextDirectly) {
+  auto predicate = RequiredFilterPredicate::Resolve(MakeFilter("c", "datetime", ">", "2024-01-01 00:00:00"), "+00:00");
+  ASSERT_TRUE(predicate.has_value());
+  EXPECT_FALSE(predicate->MatchesUndecodedValue("2024-00-00 00:00:00"));
+  EXPECT_FALSE(predicate->MatchesUndecodedValue("garbage"));
+}
+
+TEST_F(BinlogFilterEvaluatorTest, UndecodedValueUnderUnusableFilterIsRejected) {
+  TableConfig config = MakeTableConfig({MakeFilter("enabled", "boolean", "!=", "maybe")});
+
+  EXPECT_FALSE(BinlogFilterEvaluator::EvaluateRequiredFilters(FilterMap{}, UnconvertedFilterText{}, config));
 }
 
 TEST_F(BinlogFilterEvaluatorTest, ExtraColumnsInFiltersAreIgnored) {
@@ -534,7 +662,7 @@ TEST_F(BinlogFilterEvaluatorTest, ExtraColumnsInFiltersAreIgnored) {
   filters["status"] = int64_t{1};
   filters["extra_column"] = std::string{"ignored"};
 
-  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, config));
+  EXPECT_TRUE(BinlogFilterEvaluator::EvaluateRequiredFilters(filters, UnconvertedFilterText{}, config));
 }
 
 // ===========================================================================

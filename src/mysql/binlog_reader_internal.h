@@ -26,6 +26,19 @@ constexpr unsigned int kMySQLErrServerLost = 2013;
 /// MySQL error code: server has gone away (CR_SERVER_GONE_ERROR)
 constexpr unsigned int kMySQLErrGoneAway = 2006;
 
+/// MySQL error code: connection lost with a system error (CR_SERVER_LOST_EXTENDED)
+constexpr unsigned int kMySQLErrServerLostExtended = 2055;
+
+/// Server error codes that end a dump connection without saying anything about the position.
+constexpr unsigned int kMySQLErrServerShutdown = 1053;            ///< ER_SERVER_SHUTDOWN
+constexpr unsigned int kMySQLErrAbortingConnection = 1152;        ///< ER_ABORTING_CONNECTION
+constexpr unsigned int kMySQLErrNetReadError = 1158;              ///< ER_NET_READ_ERROR
+constexpr unsigned int kMySQLErrNetReadInterrupted = 1159;        ///< ER_NET_READ_INTERRUPTED
+constexpr unsigned int kMySQLErrNetErrorOnWrite = 1160;           ///< ER_NET_ERROR_ON_WRITE
+constexpr unsigned int kMySQLErrNetWriteInterrupted = 1161;       ///< ER_NET_WRITE_INTERRUPTED
+constexpr unsigned int kMariaDBErrConnectionKilled = 1927;        ///< MariaDB ER_CONNECTION_KILLED
+constexpr unsigned int kMySQLErrClientInteractionTimeout = 4031;  ///< ER_CLIENT_INTERACTION_TIMEOUT
+
 namespace internal {
 
 /// Create a sub-config from a source, optionally overriding the read timeout.

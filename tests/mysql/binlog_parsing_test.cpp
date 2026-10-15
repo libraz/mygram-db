@@ -856,7 +856,6 @@ TEST(BinlogParsingTest, QueryEventDetectsCreateTableDestinationForConfiguredTabl
       "CREATE TABLE app.articles (id BIGINT PRIMARY KEY)",
       "CREATE TABLE IF NOT EXISTS `app`.`articles` LIKE staging.rebuilt",
       "CREATE TABLE app.articles AS SELECT * FROM staging.rebuilt",
-      "CREATE OR REPLACE TABLE app.articles LIKE staging.rebuilt",
       "CREATE TEMPORARY TABLE app.articles SELECT * FROM staging.rebuilt",
   };
   for (const auto& query : target_queries) {
@@ -869,10 +868,52 @@ TEST(BinlogParsingTest, QueryEventDetectsCreateTableDestinationForConfiguredTabl
     EXPECT_EQ(events[0].table_name, "articles") << query;
   }
 
+  // CREATE OR REPLACE swaps the existing table's rows out without row events.
+  auto replace = BuildQueryEvent("staging", "CREATE OR REPLACE TABLE app.articles LIKE staging.rebuilt");
+  auto replace_events = BinlogEventParser::ParseBinlogEvent(replace.data(), replace.size(), "uuid:6", metadata_cache,
+                                                            table_contexts, nullptr, true);
+  ASSERT_EQ(replace_events.size(), 1U);
+  EXPECT_EQ(replace_events[0].ddl_type, DDLType::kRowsReplaced);
+
   auto other_database = BuildQueryEvent("staging", "CREATE TABLE analytics.articles LIKE staging.rebuilt");
   EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(other_database.data(), other_database.size(), "uuid:7",
                                                   metadata_cache, table_contexts, nullptr, true)
                   .empty());
+}
+
+/**
+ * @brief DROP DATABASE|SCHEMA reaches every configured table of that schema.
+ *
+ * The schema name is compared case-insensitively, a multi-statement event is
+ * split before matching, and an unrelated schema produces nothing.
+ */
+TEST(BinlogParsingTest, QueryEventDropDatabaseEmitsDdlForConfiguredTables) {
+  server::TableContext ctx;
+  ctx.name = "shop.articles";
+  ctx.config.name = "articles";
+  ctx.config.database = "shop";
+
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("shop.articles", &ctx);
+  TableMetadataCache metadata_cache;
+
+  for (const char* query : {"DROP DATABASE Shop", "DROP DATABASE shop; CREATE DATABASE x",
+                            "drop schema if exists `SHOP`", "/* cleanup */ DROP SCHEMA shop"}) {
+    auto event = BuildQueryEvent("", query);
+    auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:8", metadata_cache,
+                                                      table_contexts, nullptr, true);
+    ASSERT_EQ(events.size(), 1U) << query;
+    EXPECT_EQ(events[0].ddl_type, DDLType::kDropDatabase) << query;
+    EXPECT_EQ(events[0].table_name, "shop.articles") << query;
+  }
+
+  for (const char* query : {"DROP DATABASE unrelated", "CREATE DATABASE shop", "DROP DATABASE shop_archive"}) {
+    auto event = BuildQueryEvent("", query);
+    EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:9", metadata_cache,
+                                                    table_contexts, nullptr, true)
+                    .empty())
+        << query;
+  }
 }
 
 /**
@@ -1615,10 +1656,65 @@ TEST(BinlogParsingTest, IgnoredStandaloneQueryProgressIsFailClosed) {
   // the statement concerns no configured table.
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE articles (id BIGINT PRIMARY KEY)"));
 
-  EXPECT_TRUE(BinlogEventParser::IsDatabaseAffectingDDL("DROP DATABASE indexed", "indexed"));
-  EXPECT_TRUE(BinlogEventParser::IsDatabaseAffectingDDL("DROP SCHEMA IF EXISTS `indexed`", "indexed"));
-  EXPECT_FALSE(BinlogEventParser::IsDatabaseAffectingDDL("DROP DATABASE unrelated", "indexed"));
-  EXPECT_FALSE(BinlogEventParser::IsDatabaseAffectingDDL("CREATE DATABASE indexed", "indexed"));
+  // Comments never hide the statement MySQL executes.
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("# maintenance\nINSERT INTO articles VALUES (1, 'lost')"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("/*!40000 INSERT INTO articles VALUES (1, 'lost') */"));
+  // Every statement of a multi-statement event must be safe.
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE INDEX i ON unrelated (v); DELETE FROM articles"));
+  // A table DDL whose names cannot be read may name a configured table.
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("TRUNCATE TABLE"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("DROP TABLE IF EXISTS"));
+}
+
+TEST(BinlogParsingTest, IgnoredQueryWithUnlistedVerbFailsClosed) {
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("WITH c AS (SELECT 1 AS id) UPDATE articles SET content = 'x'"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("WITH c AS (SELECT 1 AS id) DELETE FROM articles"));
+  // A data-changing stored function is logged as the SELECT or DO that invoked it.
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("SELECT mutate_articles()"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("DO mutate_articles()"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("SET STATEMENT max_statement_time=1 FOR DELETE FROM articles"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("(SELECT mutate_articles())"));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("UNKNOWNVERB articles"));
+
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("REVOKE SELECT ON db.* FROM 'reader'@'%'"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("SET PASSWORD FOR 'reader'@'%' = 'x'"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("OPTIMIZE TABLE unrelated"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("DROP USER 'reader'@'%'"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("BEGIN"));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("COMMIT"));
+}
+
+TEST(BinlogParsingTest, StoredProgramDefinitionIsSafeDespiteItsBody) {
+  for (const char* query : {
+           "CREATE DEFINER=`root`@`%` PROCEDURE purge() BEGIN DELETE FROM articles; TRUNCATE articles; END",
+           "CREATE OR REPLACE DEFINER=CURRENT_USER() FUNCTION f() RETURNS INT BEGIN UPDATE articles SET n = 1; "
+           "RETURN 1; END",
+           "CREATE DEFINER='app'@'localhost' TRIGGER t AFTER INSERT ON a FOR EACH ROW BEGIN DELETE FROM articles; END",
+           "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN DELETE FROM articles; END",
+           "ALTER DEFINER=`root`@`%` EVENT e DO BEGIN DELETE FROM articles; END",
+           "CREATE AGGREGATE FUNCTION agg(x INT) RETURNS INT BEGIN RETURN x; END",
+           "DROP PROCEDURE IF EXISTS purge",
+           "ALTER PROCEDURE purge COMMENT 'x'",
+       }) {
+    EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery(query)) << query;
+  }
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE t (id INT); DELETE FROM articles"));
+}
+
+TEST(BinlogParsingTest, IgnoredDdlPrefixCoversOnlyTheStatementItLeads) {
+  const std::vector<std::string> prefixes = {"REPAIR TABLE", "CHECK TABLE tmp_"};
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("REPAIR TABLE unrelated", prefixes));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("  repair table unrelated", prefixes));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("/* maintenance */ REPAIR TABLE unrelated", prefixes));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CHECK TABLE tmp_work", prefixes));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CHECK TABLE other", prefixes));
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("REPAIR TABLE unrelated", {}));
+
+  // Every statement must be safe or prefixed on its own.
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("REPAIR TABLE unrelated; DELETE FROM articles", prefixes));
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("REPAIR TABLE unrelated; ANALYZE TABLE unrelated", prefixes));
+  // The prefix text inside a quoted span is not the statement's start.
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("DELETE FROM articles WHERE note = 'REPAIR TABLE'", prefixes));
 }
 
 /**

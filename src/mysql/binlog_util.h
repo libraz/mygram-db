@@ -18,6 +18,10 @@
 #include <optional>
 #include <string>
 
+#include "utils/checked_math.h"
+#include "utils/error.h"
+#include "utils/expected.h"
+
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-*,cppcoreguidelines-avoid-*,cppcoreguidelines-pro-type-vararg,readability-magic-numbers,readability-function-cognitive-complexity,readability-else-after-return,readability-redundant-casting,readability-math-missing-parentheses,readability-implicit-bool-conversion,modernize-avoid-c-arrays)
 
 namespace mygramdb::mysql::binlog_util {
@@ -156,6 +160,9 @@ inline std::optional<uint32_t> decimal_binary_size(uint8_t precision, uint8_t sc
                                kDecimalDigitsToBytes[frac_rem]);
 }
 
+/// Largest value a group of 0-9 decimal digits can hold (10^digits - 1).
+inline constexpr uint32_t kDecimalGroupMax[10] = {0, 9, 99, 999, 9999, 99999, 999999, 9999999, 99999999, 999999999};
+
 /**
  * @brief Decode MySQL DECIMAL/NEWDECIMAL binary format
  *
@@ -175,12 +182,18 @@ inline std::optional<uint32_t> decimal_binary_size(uint8_t precision, uint8_t sc
  * @param data Pointer to binary decimal data
  * @param precision Total number of digits
  * @param scale Number of digits after decimal point
- * @return String representation of the decimal value
+ * @return String representation of the decimal value, or kMySQLInvalidMetadata
+ *         when the metadata is invalid or a digit group exceeds its digit count
  */
-inline std::string decode_decimal(const unsigned char* data, uint8_t precision, uint8_t scale) {
+inline mygram::utils::Expected<std::string, mygram::utils::Error> decode_decimal(const unsigned char* data,
+                                                                                 uint8_t precision, uint8_t scale) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
   auto encoded_size = decimal_binary_size(precision, scale);
   if (!encoded_size) {
-    return "0";
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DECIMAL metadata"));
   }
 
   int intg = precision - scale;  // Integer part digits
@@ -190,16 +203,13 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
   int frac_rem = scale % 9;      // Remaining digits in fractional part
 
   auto total_size = static_cast<int>(*encoded_size);
-  if (total_size == 0) {
-    return "0";
-  }
 
   // MySQL DECIMAL precision is capped at 65 digits; the encoded byte length is
   // smaller than that, but 65 keeps this stack buffer aligned with the protocol
   // limit and avoids per-row heap allocation.
   constexpr size_t kMaxDecimalBufferBytes = 65;
   if (static_cast<size_t>(total_size) > kMaxDecimalBufferBytes) {
-    return "0";
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DECIMAL metadata"));
   }
 
   // Make a copy and apply sign-based transformation
@@ -228,28 +238,33 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
 
   const unsigned char* ptr = buf.data();
   std::string result;
+  bool group_in_range = true;
+
+  // Reads one big-endian group holding `digits` decimal digits; a value past
+  // 10^digits - 1 is a corrupt packet, not a number.
+  auto read_group = [&ptr, &group_in_range](int digits) {
+    uint32_t val = 0;
+    for (int i = 0; i < kDecimalDigitsToBytes[digits]; i++) {
+      if (!mygram::utils::CheckedShift<uint32_t>(val, 8, *ptr++, kDecimalGroupMax[digits])) {
+        group_in_range = false;
+      }
+    }
+    return val;
+  };
 
   // Process integer remainder (leading digits that don't fill a 4-byte group)
   if (intg_rem > 0) {
-    int bytes = kDecimalDigitsToBytes[intg_rem];
-    int32_t val = 0;
-    for (int i = 0; i < bytes; i++) {
-      val = (val << 8) | *ptr++;
-    }
-    result += std::to_string(val);
+    result += std::to_string(read_group(intg_rem));
   }
 
   // Process full 4-byte groups in integer part
   for (int i = 0; i < intg0; i++) {
-    int32_t val = 0;
-    for (int j = 0; j < 4; j++) {
-      val = (val << 8) | *ptr++;
-    }
+    uint32_t val = read_group(9);
     if (result.empty()) {
       result += std::to_string(val);
     } else {
       char buf_fmt[16];
-      snprintf(buf_fmt, sizeof(buf_fmt), "%09d", val);
+      snprintf(buf_fmt, sizeof(buf_fmt), "%09u", val);
       result += buf_fmt;
     }
   }
@@ -264,26 +279,21 @@ inline std::string decode_decimal(const unsigned char* data, uint8_t precision, 
 
     // Process full 4-byte groups in fractional part
     for (int i = 0; i < frac0; i++) {
-      int32_t val = 0;
-      for (int j = 0; j < 4; j++) {
-        val = (val << 8) | *ptr++;
-      }
       char buf_fmt[16];
-      snprintf(buf_fmt, sizeof(buf_fmt), "%09d", val);
+      snprintf(buf_fmt, sizeof(buf_fmt), "%09u", read_group(9));
       result += buf_fmt;
     }
 
     // Process fractional remainder
     if (frac_rem > 0) {
-      int bytes = kDecimalDigitsToBytes[frac_rem];
-      int32_t val = 0;
-      for (int i = 0; i < bytes; i++) {
-        val = (val << 8) | *ptr++;
-      }
       char buf_fmt[16];
-      snprintf(buf_fmt, sizeof(buf_fmt), "%0*d", frac_rem, val);
+      snprintf(buf_fmt, sizeof(buf_fmt), "%0*u", frac_rem, read_group(frac_rem));
       result += buf_fmt;
     }
+  }
+
+  if (!group_in_range) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "DECIMAL digit group out of range"));
   }
 
   // Add negative sign if needed

@@ -68,13 +68,6 @@ Expected<void, Error> RequireBytes(const unsigned char* data, const unsigned cha
   return {};
 }
 
-template <typename T>
-std::string FormatFloatingPoint(T value) {
-  std::ostringstream oss;
-  oss << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
-  return oss.str();
-}
-
 enum class EnumSetKind : uint8_t { kEnum, kSet };
 
 Expected<std::string, Error> DecodeEnumSetValue(EnumSetKind kind, const unsigned char* data, const unsigned char* end,
@@ -809,7 +802,11 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       if (auto available = RequireBytes(data, end, *decimal_size); !available) {
         return MakeUnexpected(available.error());
       }
-      return CanonicalizeColumnValue(binlog_util::decode_decimal(data, precision, scale), CanonicalValueKind::kDecimal);
+      auto decimal = binlog_util::decode_decimal(data, precision, scale);
+      if (!decimal) {
+        return MakeUnexpected(decimal.error());
+      }
+      return CanonicalizeColumnValue(*decimal, CanonicalValueKind::kDecimal);
     }
 
     case 242: {  // MYSQL_TYPE_VECTOR (same encoding as BLOB, binary float data)

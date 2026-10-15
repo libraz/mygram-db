@@ -15,6 +15,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "config/config.h"
 #include "index/index.h"
@@ -27,6 +28,8 @@
 namespace mygramdb::loader {
 
 namespace internal {
+
+struct InitialLoaderTestAccess;
 
 /**
  * @brief Build the initial-load SELECT for one table.
@@ -132,10 +135,14 @@ class InitialLoader {
   }
 
  private:
+  friend struct internal::InitialLoaderTestAccess;
+
   mysql::Connection& connection_;
   index::Index& index_;
   storage::DocumentStore& doc_store_;
   config::TableConfig table_config_;
+  // Derived once after table_config_ is moved in; row extraction reuses it.
+  const std::vector<config::FilterConfig> unified_filter_configs_;
   config::MysqlConfig mysql_config_;
   config::BuildConfig build_config_;
 
@@ -151,9 +158,9 @@ class InitialLoader {
    * @brief Flush accumulated document and index batches to storage
    *
    * Validates batch consistency, adds documents to the document store,
-   * assigns doc IDs, and indexes the batch. On error, rolls back the
-   * MySQL transaction cleanup remains the caller's responsibility so an
-   * unbuffered result can be released before any ROLLBACK is issued.
+   * assigns doc IDs, and indexes the batch. On error, MySQL transaction
+   * cleanup remains the caller's responsibility so an unbuffered result can be
+   * released before any ROLLBACK is issued.
    *
    * @param doc_batch Documents to store (cleared on success)
    * @param index_batch Corresponding index entries (cleared on success)

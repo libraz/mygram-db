@@ -12,6 +12,28 @@
 
 namespace mygramdb::mysql {
 
+BinlogFetchResult::Status ClassifyFetchError(unsigned int err_no) {
+  switch (err_no) {
+    case kMySQLErrServerLost:
+      return BinlogFetchResult::Status::kConnectionLost;
+    case kMySQLErrBinlogPurged:
+      return BinlogFetchResult::Status::kBinlogPurged;
+    case kMySQLErrGoneAway:
+    case kMySQLErrServerLostExtended:
+    case kMySQLErrServerShutdown:
+    case kMySQLErrAbortingConnection:
+    case kMySQLErrNetReadError:
+    case kMySQLErrNetReadInterrupted:
+    case kMySQLErrNetErrorOnWrite:
+    case kMySQLErrNetWriteInterrupted:
+    case kMariaDBErrConnectionKilled:
+    case kMySQLErrClientInteractionTimeout:
+      return BinlogFetchResult::Status::kServerGoneAway;
+    default:
+      return BinlogFetchResult::Status::kError;
+  }
+}
+
 BinlogFetchResult FetchBinlogEvent(Connection& conn, MYSQL_RPL& rpl, std::string_view log_action,
                                    std::string_view error_prefix) {
   BinlogFetchResult result;
@@ -26,15 +48,7 @@ BinlogFetchResult FetchBinlogEvent(Connection& conn, MYSQL_RPL& rpl, std::string
     result.error_message =
         std::string(error_prefix) + ": " + std::string(err_str) + " (errno: " + std::to_string(err_no) + ")";
 
-    if (err_no == kMySQLErrServerLost) {
-      result.status = BinlogFetchResult::Status::kConnectionLost;
-    } else if (err_no == kMySQLErrGoneAway) {
-      result.status = BinlogFetchResult::Status::kServerGoneAway;
-    } else if (err_no == kMySQLErrBinlogPurged) {
-      result.status = BinlogFetchResult::Status::kBinlogPurged;
-    } else {
-      result.status = BinlogFetchResult::Status::kError;
-    }
+    result.status = ClassifyFetchError(err_no);
     return result;
   }
 

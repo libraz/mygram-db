@@ -9,7 +9,6 @@
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <cctype>
 
 #include "mysql/connection.h"
@@ -17,7 +16,9 @@
 #include "mysql/server_flavor.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/gtid_grammar.h"
 #include "utils/numeric_parse.h"
+#include "utils/sql_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -52,15 +53,11 @@ bool ConnectionValidator::IsValidIdentifier(std::string_view identifier) {
 }
 
 bool ConnectionValidator::IsSupportedBinlogFormatValue(std::string_view value) {
-  std::string upper_value(value);
-  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
-  return upper_value == "ROW";
+  return mygram::utils::EqualsAsciiCaseInsensitive(value, "ROW");
 }
 
 bool ConnectionValidator::IsSupportedBinlogChecksumValue(std::string_view value) {
-  std::string upper_value(value);
-  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
-  return upper_value == "CRC32";
+  return mygram::utils::EqualsAsciiCaseInsensitive(value, "CRC32");
 }
 
 bool ConnectionValidator::ContainsTaggedGtid(std::string_view gtid_set) {
@@ -386,26 +383,54 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
                                           *last_gtid + "; available: " + *executed_gtid,
                                       *last_gtid));
     }
+
+    // MariaDB has no gtid_purged. The position at the start of the oldest
+    // binlog is the newest transaction the server can no longer send.
+    std::string oldest_binlog;
+    {
+      auto logs = conn.Execute("SHOW BINARY LOGS");
+      if (!logs) {
+        return MakeUnexpected(logs.error());
+      }
+      MYSQL_ROW row = mysql_fetch_row(logs->get());
+      if (row == nullptr || row[0] == nullptr) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "SHOW BINARY LOGS returned no binlog file"));
+      }
+      oldest_binlog = row[0];
+    }
+    auto boundary_result =
+        conn.Execute("SELECT BINLOG_GTID_POS(" + mygramdb::utils::EncodeMySQLStringLiteral(oldest_binlog) + ", 4)");
+    if (!boundary_result) {
+      return MakeUnexpected(boundary_result.error());
+    }
+    MYSQL_ROW boundary_row = mysql_fetch_row(boundary_result->get());
+    if (boundary_row == nullptr || boundary_row[0] == nullptr) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed,
+                                      "BINLOG_GTID_POS returned no position for the oldest binlog " + oldest_binlog));
+    }
+    const std::string purge_boundary(boundary_row[0]);
+    auto not_purged = CheckMariaDBPositionNotPurged(*last_gtid, purge_boundary);
+    if (!not_purged) {
+      return not_purged;
+    }
+
     mygram::utils::StructuredLog()
         .Event("gtid_consistency_check")
         .Field("executed_gtid", *executed_gtid)
+        .Field("purge_boundary", purge_boundary)
         .Field("flavor", "MariaDB")
         .Debug();
     return {};
   }
 
-  // Validate GTID format before embedding the internally captured position in
-  // SQL. Tagged GTID characters are allowed here and rejected separately when
-  // the server advertises unsupported tagged transactions.
-  const std::string& gtid_str = *last_gtid;
-  for (char chr : gtid_str) {  // NOLINT(readability-identifier-length)
-    if (std::isalnum(static_cast<unsigned char>(chr)) == 0 && chr != '-' && chr != '_' && chr != ':' && chr != ',' &&
-        chr != ' ' && chr != '\n' && chr != '\r') {
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID,
-                                      "Invalid GTID format: contains illegal character '" + std::string(1, chr) + "'",
-                                      gtid_str));
-    }
+  // Only the canonical text of a parsed position is embedded in SQL. Tagged
+  // GTIDs parse here and are rejected separately when the server advertises
+  // unsupported tagged transactions.
+  auto parsed_position = mygram::utils::ParseMysqlGtidSet(*last_gtid);
+  if (!parsed_position) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, parsed_position.error().message(), *last_gtid));
   }
+  const std::string gtid_str = mygram::utils::FormatMysqlGtidSet(*parsed_position);
 
   // A safe hand-off requires both: the candidate has executed everything we
   // processed, and it has not purged any transaction absent from our position.
@@ -442,6 +467,22 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
       .Field("unavailable_purged_gtid", unavailable)
       .Debug();
 
+  return {};
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckMariaDBPositionNotPurged(
+    const std::string& processed_position, const std::string& purge_boundary) {
+  auto covered = MariaDBGTID::PositionCovers(purge_boundary, processed_position);
+  if (!covered) {
+    return mygram::utils::MakeUnexpected(covered.error());
+  }
+  if (!*covered) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLReplicationError,
+                                 "Candidate has purged GTIDs absent from the processed position: binlogs before " +
+                                     purge_boundary + " are gone. Run SYNC to establish a new position.",
+                                 processed_position));
+  }
   return {};
 }
 
@@ -507,9 +548,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBi
   }
 
   std::string value(row[1]);
-  std::string upper_value = value;
-  std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
-  if (upper_value != "FULL") {
+  if (!mygram::utils::EqualsAsciiCaseInsensitive(value, "FULL")) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
                                  "binlog_row_image=" + value +
@@ -595,11 +634,17 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckPa
   }
 
   {
-    std::string value(row[1]);
+    const std::string_view value(row[1]);
     // Check if PARTIAL_JSON is in the value (case-insensitive)
-    std::string upper_value = value;
-    std::transform(upper_value.begin(), upper_value.end(), upper_value.begin(), ::toupper);
-    if (upper_value.find("PARTIAL_JSON") != std::string::npos) {
+    constexpr std::string_view kPartialJson = "PARTIAL_JSON";
+    bool contains_partial_json = false;
+    for (size_t offset = 0; offset + kPartialJson.size() <= value.size(); ++offset) {
+      if (mygram::utils::EqualsAsciiCaseInsensitive(value.substr(offset, kPartialJson.size()), kPartialJson)) {
+        contains_partial_json = true;
+        break;
+      }
+    }
+    if (contains_partial_json) {
       return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
           mygram::utils::ErrorCode::kMySQLBinlogError,
           "binlog_row_value_options contains PARTIAL_JSON. PARTIAL_UPDATE_ROWS_EVENT is not supported and cannot be "

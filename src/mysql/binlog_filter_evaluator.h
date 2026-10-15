@@ -27,12 +27,19 @@ class BinlogFilterEvaluator {
  public:
   /**
    * @brief Evaluate required_filters conditions for a binlog event
+   *
+   * A required column absent from @p filters held a value that did not decode; it is judged as the
+   * initial-load WHERE clause judges the row, from its raw text in @p unconverted
+   * (RequiredFilterPredicate::MatchesUndecodedValue). A column in neither map is rejected.
+   *
    * @param filters Filter values from binlog event
+   * @param unconverted Raw text of the filter columns whose conversion failed (from ExtractAllFilters)
    * @param table_config Table configuration containing required_filters
    * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
    * @return true if all required_filters conditions are satisfied
    */
-  static bool EvaluateRequiredFilters(const storage::FilterMap& filters, const config::TableConfig& table_config,
+  static bool EvaluateRequiredFilters(const storage::FilterMap& filters, const UnconvertedFilterText& unconverted,
+                                      const config::TableConfig& table_config,
                                       const std::string& datetime_timezone = "+00:00");
 
   /**
@@ -55,10 +62,12 @@ class BinlogFilterEvaluator {
    * @param row_data Row data from binlog
    * @param table_config Table configuration to use for filter extraction
    * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
+   * @param unconverted Receives column name -> raw text for values that failed conversion; pass it
+   *        to EvaluateRequiredFilters
    * @return Map of filter name to FilterValue
    */
   static storage::FilterMap ExtractAllFilters(const RowData& row_data, const config::TableConfig& table_config,
-                                              const std::string& datetime_timezone = "+00:00");
+                                              const std::string& datetime_timezone, UnconvertedFilterText& unconverted);
 };
 
 }  // namespace mygramdb::mysql

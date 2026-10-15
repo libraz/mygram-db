@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "mysql/binlog_event_types.h"
 
@@ -26,6 +27,20 @@ enum class BinlogEventDisposition : uint8_t {
   kDataNeutral,     ///< Informational; skipping it cannot lose a row or a position.
   kFailClosed,      ///< Cannot be applied and cannot be proven harmless to skip.
 };
+
+/**
+ * @brief Diagnostic name of an event type
+ *
+ * A byte outside MySQLBinlogEventType has no name of its own, so it is reported
+ * by value; otherwise every unrecognized byte would read the same.
+ */
+inline std::string DescribeEventType(MySQLBinlogEventType type) {
+  const std::string_view name = GetEventTypeName(type);
+  if (name == "UNKNOWN") {
+    return "event type " + std::to_string(static_cast<unsigned>(type));
+  }
+  return std::string(name);
+}
 
 /**
  * @brief Recovery sentence shared by every fail-closed binlog event.
@@ -210,7 +225,7 @@ inline std::string UnreplayableEventRemediation(MySQLBinlogEventType type) {
                "build decodes";
       break;
     default:
-      reason = std::string("Received ") + GetEventTypeName(type) +
+      reason = "Received " + DescribeEventType(type) +
                ", whose payload this build cannot decode. Accepting it would advance the replication position past "
                "data that was never applied";
       break;

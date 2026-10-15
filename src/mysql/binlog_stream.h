@@ -38,7 +38,7 @@ struct BinlogFetchResult {
     kOK,              ///< Event data available (event_data/event_length valid)
     kNoData,          ///< No data (heartbeat, keepalive, or EOF)
     kConnectionLost,  ///< Read timeout / CR_SERVER_LOST (2013)
-    kServerGoneAway,  ///< CR_SERVER_GONE_ERROR (2006)
+    kServerGoneAway,  ///< Server ended the connection (CR_SERVER_GONE_ERROR 2006, shutdown, kill, network error)
     kBinlogPurged,    ///< GTID position purged from binlog (1236)
     kError,           ///< Other non-recoverable error
   };
@@ -53,6 +53,14 @@ struct BinlogFetchResult {
   unsigned int error_code = 0;
   std::string error_message;
 };
+
+/**
+ * @brief Map a failed fetch's error number to the reader's recovery.
+ *
+ * Anything that ends the transport reconnects; only a purged position and
+ * protocol or other errors that a reconnect would hit again stop replication.
+ */
+BinlogFetchResult::Status ClassifyFetchError(unsigned int err_no);
 
 /**
  * @brief Shared MYSQL_RPL fetch implementation used by MySQL and MariaDB streams.

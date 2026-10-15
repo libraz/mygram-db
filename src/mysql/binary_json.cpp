@@ -11,12 +11,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <iomanip>
-#include <limits>
-#include <sstream>
 #include <string_view>
 #include <vector>
 
+#include "mysql/value_canonicalizer.h"
 #include "utils/error.h"
 
 namespace mygramdb::mysql {
@@ -359,9 +357,7 @@ class Decoder {
     if (!std::isfinite(value)) {
       return Invalid("Non-finite binary JSON number");
     }
-    std::ostringstream stream;
-    stream << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
-    return AppendText(stream.str(), output, max_output_bytes_);
+    return AppendText(FormatFloatingPoint(value), output, max_output_bytes_);
   }
 
   Expected<void, Error> AppendString(const unsigned char* data, size_t size, std::string& output) {

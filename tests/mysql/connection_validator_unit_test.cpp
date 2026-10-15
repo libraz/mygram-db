@@ -8,12 +8,21 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "mysql/binlog_event_types.h"
 #include "mysql/connection.h"
+#include "utils/error.h"
+#include "utils/expected.h"
+
+// The purge-boundary decision is private; reach it the way the binlog reader
+// tests reach reader internals (tests/mysql/binlog_test_fixtures.h).
+#define private public
 #include "mysql/connection_validator.h"
+#undef private
 
 namespace mygramdb::mysql {
 
@@ -179,6 +188,25 @@ TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsOnlyTaggedEntries) {
   EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10::100"));
   EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid(
       "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:tag:2"));
+}
+
+/**
+ * @brief A MariaDB position behind the oldest binlog's starting position is rejected before the stream opens.
+ */
+TEST(ConnectionValidatorUnitTest, MariaDBPositionBehindThePurgeBoundaryIsRejected) {
+  const std::string boundary = "0-1-100,1-2-5";
+
+  EXPECT_TRUE(ConnectionValidator::CheckMariaDBPositionNotPurged("0-1-100,1-2-5", boundary).has_value());
+  // Server IDs change on failover; only the per-domain sequence matters.
+  EXPECT_TRUE(ConnectionValidator::CheckMariaDBPositionNotPurged("0-3-150,1-4-9", boundary).has_value());
+  EXPECT_TRUE(ConnectionValidator::CheckMariaDBPositionNotPurged("0-1-1", "").has_value());
+
+  for (const char* position : {"0-1-99,1-2-5", "0-1-150"}) {
+    auto purged = ConnectionValidator::CheckMariaDBPositionNotPurged(position, boundary);
+    ASSERT_FALSE(purged.has_value()) << position;
+    EXPECT_EQ(purged.error().code(), mygram::utils::ErrorCode::kMySQLReplicationError) << position;
+    EXPECT_NE(purged.error().message().find("Run SYNC"), std::string::npos) << purged.error().message();
+  }
 }
 
 // ============================================================================

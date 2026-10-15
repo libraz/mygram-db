@@ -18,6 +18,7 @@
 #include "mysql/binlog_event_types.h"
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
+#include "storage/filter_index.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -146,6 +147,9 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteR
     const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
     const RetainedColumns* retained_columns = nullptr);
 
+/** Raw column text of each filter whose conversion failed, keyed by column name. */
+using UnconvertedFilterText = std::unordered_map<std::string, std::string>;
+
 /**
  * @brief Extract filter values from row data
  *
@@ -155,15 +159,15 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteR
  * @param row_data Parsed row data with all columns as strings
  * @param filter_configs Vector of filter configurations
  * @param datetime_timezone Timezone offset for DATETIME interpretation (e.g., "+09:00")
+ * @param unconverted Receives column name -> raw text for each filter column left out of the result
+ *        because its value could not be converted (cleared first)
  * @return Map of filter name to typed FilterValue
  */
 storage::FilterMap ExtractFilters(const RowData& row_data, const std::vector<config::FilterConfig>& filter_configs,
-                                  const std::string& datetime_timezone = "+00:00");
+                                  const std::string& datetime_timezone, UnconvertedFilterText& unconverted);
 
 /** Convert one present MySQL column through the shared filter value contract. */
-std::optional<storage::FilterValue> ConvertFilterValue(std::string_view value, bool is_null,
-                                                       std::string_view filter_type,
-                                                       const std::string& datetime_timezone = "+00:00");
+using storage::ConvertFilterValue;
 
 }  // namespace mygramdb::mysql
 

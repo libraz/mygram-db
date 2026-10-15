@@ -10,6 +10,7 @@
 #include <ctime>
 #include <iomanip>
 #include <limits>
+#include <locale>
 #include <sstream>
 
 #include "utils/string_utils.h"
@@ -17,6 +18,14 @@
 namespace mygramdb::mysql {
 
 namespace {
+
+template <typename T>
+std::string FormatClassicLocale(T value) {
+  std::ostringstream output;
+  output.imbue(std::locale::classic());
+  output << std::setprecision(std::numeric_limits<T>::max_digits10) << value;
+  return output.str();
+}
 
 template <typename T>
 std::string CanonicalizeFloatingPoint(std::string_view value) {
@@ -31,13 +40,18 @@ std::string CanonicalizeFloatingPoint(std::string_view value) {
     return std::string(value);
   }
 
-  std::ostringstream output;
-  output.imbue(std::locale::classic());
-  output << std::setprecision(std::numeric_limits<T>::max_digits10) << parsed;
-  return output.str();
+  return FormatClassicLocale(parsed);
 }
 
 }  // namespace
+
+std::string FormatFloatingPoint(float value) {
+  return FormatClassicLocale(value);
+}
+
+std::string FormatFloatingPoint(double value) {
+  return FormatClassicLocale(value);
+}
 
 std::string CanonicalizeColumnValue(std::string_view value, CanonicalValueKind kind) {
   if (kind == CanonicalValueKind::kText) {

@@ -31,6 +31,15 @@ enum class CanonicalValueKind : uint8_t {
 [[nodiscard]] std::string CanonicalizeColumnValue(std::string_view value, CanonicalValueKind kind);
 
 /**
+ * @brief Canonical text of a FLOAT or DOUBLE value: shortest digits that round-trip, classic locale.
+ *
+ * The one formatter for both ingestion paths, so the process locale cannot make the snapshot and
+ * binlog text of the same value differ.
+ */
+[[nodiscard]] std::string FormatFloatingPoint(float value);
+[[nodiscard]] std::string FormatFloatingPoint(double value);
+
+/**
  * @brief Format an epoch timestamp in the UTC representation returned by the snapshot connection.
  */
 [[nodiscard]] mygram::utils::Expected<std::string, mygram::utils::Error> FormatUtcTimestamp(uint32_t epoch_seconds,

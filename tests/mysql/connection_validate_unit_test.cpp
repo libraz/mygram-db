@@ -102,6 +102,34 @@ TEST(ConnectionValidateIntegrationTest, ValidatesRealKeyMetadataAndEncodesInputs
   EXPECT_EQ(injection.error().code(), mygram::utils::ErrorCode::kMySQLColumnNotFound);
 }
 
+TEST(ConnectionValidateIntegrationTest, CompositePrimaryKeyColumnIsRejected) {
+  if (!testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+
+  const auto config = testing::GetMySQLTestConfig();
+  Connection connection(config);
+  auto connect = connection.Connect("validate-composite-primary-integration-test");
+  ASSERT_TRUE(connect) << connect.error().message();
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "validate_composite_pk_" + suffix;
+  const std::string quoted_table = "`" + table + "`";
+  auto cleanup = utils::ScopeGuard([&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table); });
+
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
+                                       " (tenant INT, id BIGINT, email VARCHAR(255) UNIQUE, PRIMARY KEY (tenant, id))"
+                                       " ENGINE=InnoDB"));
+
+  // Rows sharing one part of a composite key would collapse into one document.
+  for (const std::string& column : {"tenant", "id"}) {
+    auto result = connection.ValidateUniqueColumn(config.database, table, column);
+    ASSERT_FALSE(result) << column;
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLDuplicateColumn) << column;
+  }
+  EXPECT_TRUE(connection.ValidateUniqueColumn(config.database, table, "email"));
+}
+
 /**
  * @brief Test that ValidateUniqueColumn returns Expected<void, Error> with proper error codes
  * Verifies the new Expected-based API preserves error information

@@ -256,6 +256,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
     PROPERTIES RESOURCE_LOCK mysql_connection
   )
 
+  # Floating-point canonical text (no MySQL connection required)
+  add_executable(floating_point_canonical_test
+    floating_point_canonical_test.cpp
+  )
+
+  target_link_libraries(floating_point_canonical_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(floating_point_canonical_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
   # Connection validation unit tests (no MySQL connection required)
   add_executable(connection_validate_unit_test
     connection_validate_unit_test.cpp
@@ -523,6 +538,21 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(ddl_multi_table_statement_test
+    DISCOVERY_MODE POST_BUILD
+    DISCOVERY_TIMEOUT 30
+  )
+
+  # DDL classification of binlog statements (no MySQL connection required)
+  add_executable(ddl_classifier_test
+    ddl_classifier_test.cpp
+  )
+
+  target_link_libraries(ddl_classifier_test
+    mygramdb_mysql
+    GTest::gtest_main
+  )
+
+  gtest_discover_tests(ddl_classifier_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
   )

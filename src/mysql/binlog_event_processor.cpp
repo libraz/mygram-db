@@ -11,10 +11,12 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "cache/cache_manager.h"
 #include "mysql/binlog_filter_evaluator.h"
 #include "server/server_stats.h"
+#include "storage/document_field_validation.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
@@ -65,30 +67,99 @@ void InvalidateCache(cache::CacheManager* cache_manager, const std::string& tabl
 
 }  // namespace
 
-bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& index,
-                                        storage::DocumentStore& doc_store, const config::TableConfig& table_config,
-                                        const config::MysqlConfig& mysql_config, server::ServerStats* stats,
-                                        cache::CacheManager* cache_manager, server::BM25Stats* bm25_stats) {
+static bool ProcessEventInternal(const BinlogEvent& event, index::Index& index, storage::DocumentStore& doc_store,
+                                 const config::TableConfig& table_config, const config::MysqlConfig& mysql_config,
+                                 server::ServerStats* stats, cache::CacheManager* cache_manager,
+                                 server::BM25Stats* bm25_stats, mygram::utils::Error* error_out,
+                                 const std::string* precomputed_normalized_text) {
+  // A row whose configured key is NULL or absent cannot be addressed, so it
+  // fails like the initial loader instead of landing under an empty key.
+  const bool is_row_event = event.type == BinlogEventType::INSERT || event.type == BinlogEventType::UPDATE ||
+                            event.type == BinlogEventType::DELETE;
+  if (is_row_event && !event.IsValid()) {
+    mygram::utils::StructuredLog()
+        .Event("mysql_binlog_error")
+        .Field("type", "row_without_primary_key")
+        .Field("table", event.table_name)
+        .Field("gtid", event.gtid)
+        .Error();
+    return false;
+  }
+
+  // Evaluate retention and look up both keys before handling a key change. A
+  // retained afterimage is normalized and validated before deleting the old
+  // key, so a storage-limit failure cannot leave a half-applied update.
+  const bool matches_required = BinlogFilterEvaluator::EvaluateRequiredFilters(
+      event.filters, event.unconverted, table_config, mysql_config.datetime_timezone);
+  auto doc_id_opt = doc_store.GetDocId(event.primary_key);
+  const bool exists = doc_id_opt.has_value();
+
   if (event.type == BinlogEventType::UPDATE && event.HasOldPrimaryKey() && event.old_primary_key != event.primary_key) {
+    std::optional<std::string> normalized_afterimage;
+    std::string afterimage_text = event.text;
+    if (matches_required) {
+      if (!HasMaterializedAfterText(event)) {
+        const auto old_doc_id = doc_store.GetDocId(event.old_primary_key);
+        if (old_doc_id.has_value()) {
+          const auto old_normalized = doc_store.GetNormalizedText(*old_doc_id);
+          const auto old_original = doc_store.GetOriginalText(*old_doc_id);
+          if (old_original.has_value()) {
+            afterimage_text = *old_original;
+          } else if (event.old_text_state != TextValueState::kAbsent || !event.old_text.empty()) {
+            afterimage_text = event.old_text;
+          } else if (old_normalized.has_value()) {
+            // A store configured not to retain source text can still preserve
+            // its materialized text when the row image omits the afterimage.
+            afterimage_text = *old_normalized;
+          } else {
+            afterimage_text.clear();
+          }
+          if (old_normalized.has_value()) {
+            normalized_afterimage = *old_normalized;
+          }
+        } else if (event.old_text_state != TextValueState::kAbsent || !event.old_text.empty()) {
+          afterimage_text = event.old_text;
+        }
+      }
+      if (!normalized_afterimage.has_value()) {
+        normalized_afterimage = index.NormalizeText(afterimage_text);
+      }
+      auto valid = storage::ValidateIncomingDocumentFields(event.primary_key, event.filters, *normalized_afterimage,
+                                                           afterimage_text);
+      if (!valid) {
+        if (error_out != nullptr) {
+          *error_out = valid.error();
+        }
+        mygram::utils::StructuredLog()
+            .Event("mysql_binlog_error")
+            .Field("type", "incoming_document_field_invalid")
+            .Field("event_type", "update_primary_key_change")
+            .Field("error", valid.error().message())
+            .Error();
+        return false;
+      }
+    }
+
     BinlogEvent delete_event = BinlogEvent::CreateDelete(
         event.table_name, event.old_primary_key, event.old_text.empty() ? event.text : event.old_text, event.gtid);
     delete_event.text_state = event.old_text_state;
     delete_event.filters = event.filters;
-    BinlogEvent insert_event = BinlogEvent::CreateInsert(event.table_name, event.primary_key, event.text, event.gtid);
+    delete_event.unconverted = event.unconverted;
+    BinlogEvent insert_event =
+        BinlogEvent::CreateInsert(event.table_name, event.primary_key, afterimage_text, event.gtid);
     insert_event.text_state = event.text_state;
+    if (event.text_state == TextValueState::kAbsent && !afterimage_text.empty()) {
+      insert_event.text_state = TextValueState::kPresent;
+    }
     insert_event.filters = event.filters;
+    insert_event.unconverted = event.unconverted;
 
-    return ProcessEvent(delete_event, index, doc_store, table_config, mysql_config, stats, cache_manager, bm25_stats) &&
-           ProcessEvent(insert_event, index, doc_store, table_config, mysql_config, stats, cache_manager, bm25_stats);
+    return ProcessEventInternal(delete_event, index, doc_store, table_config, mysql_config, stats, cache_manager,
+                                bm25_stats, error_out, nullptr) &&
+           ProcessEventInternal(insert_event, index, doc_store, table_config, mysql_config, stats, cache_manager,
+                                bm25_stats, error_out,
+                                normalized_afterimage.has_value() ? &*normalized_afterimage : nullptr);
   }
-
-  // Evaluate required_filters to determine if data should exist in index
-  bool matches_required =
-      BinlogFilterEvaluator::EvaluateRequiredFilters(event.filters, table_config, mysql_config.datetime_timezone);
-
-  // Check if document already exists in index
-  auto doc_id_opt = doc_store.GetDocId(event.primary_key);
-  bool exists = doc_id_opt.has_value();
 
   switch (event.type) {
     case BinlogEventType::INSERT: {
@@ -106,7 +177,21 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
       }
       if (matches_required) {
         // Condition satisfied -> add to index
-        std::string normalized = index.NormalizeText(event.text);
+        std::string normalized =
+            precomputed_normalized_text != nullptr ? *precomputed_normalized_text : index.NormalizeText(event.text);
+        auto valid = storage::ValidateIncomingDocumentFields(event.primary_key, event.filters, normalized, event.text);
+        if (!valid) {
+          if (error_out != nullptr) {
+            *error_out = valid.error();
+          }
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "incoming_document_field_invalid")
+              .Field("event_type", "insert")
+              .Field("error", valid.error().message())
+              .Error();
+          return false;
+        }
 
         auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized, event.text);
         if (!doc_id_result) {
@@ -117,6 +202,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Field("primary_key", event.primary_key)
               .Field("error", doc_id_result.error().message())
               .Error();
+          if (error_out != nullptr) {
+            *error_out = doc_id_result.error();
+          }
           return false;
         }
         storage::DocId doc_id = *doc_id_result;
@@ -189,7 +277,21 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
 
       } else if (!exists && matches_required) {
         // Transitioned into required conditions -> INSERT into index
-        std::string normalized = index.NormalizeText(event.text);
+        std::string normalized =
+            precomputed_normalized_text != nullptr ? *precomputed_normalized_text : index.NormalizeText(event.text);
+        auto valid = storage::ValidateIncomingDocumentFields(event.primary_key, event.filters, normalized, event.text);
+        if (!valid) {
+          if (error_out != nullptr) {
+            *error_out = valid.error();
+          }
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "incoming_document_field_invalid")
+              .Field("event_type", "update_add")
+              .Field("error", valid.error().message())
+              .Error();
+          return false;
+        }
 
         auto doc_id_result = doc_store.AddDocument(event.primary_key, event.filters, normalized, event.text);
         if (!doc_id_result) {
@@ -200,6 +302,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Field("primary_key", event.primary_key)
               .Field("error", doc_id_result.error().message())
               .Error();
+          if (error_out != nullptr) {
+            *error_out = doc_id_result.error();
+          }
           return false;
         }
         storage::DocId doc_id = *doc_id_result;
@@ -229,6 +334,34 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         const std::optional<std::string> stored_normalized = doc_store.GetNormalizedText(doc_id);
         const std::string old_normalized = stored_normalized.value_or(std::string{});
         std::string new_normalized = old_normalized;
+        const bool has_after_text = HasMaterializedAfterText(event);
+        const auto stored_original = has_after_text ? std::optional<std::string>{} : doc_store.GetOriginalText(doc_id);
+
+        // Validate the complete retained afterimage before changing filters or
+        // any index/store data. An absent text value keeps the old materialized
+        // text and uses the filter-only update overload below.
+        mygram::utils::Expected<void, mygram::utils::Error> valid;
+        if (has_after_text) {
+          new_normalized =
+              precomputed_normalized_text != nullptr ? *precomputed_normalized_text : index.NormalizeText(event.text);
+          valid = storage::ValidateIncomingDocumentFields(event.primary_key, event.filters, new_normalized, event.text);
+        } else {
+          valid = storage::ValidateIncomingDocumentFields(
+              event.primary_key, event.filters, old_normalized,
+              stored_original.has_value() ? std::string_view(*stored_original) : std::string_view{});
+        }
+        if (!valid) {
+          if (error_out != nullptr) {
+            *error_out = valid.error();
+          }
+          mygram::utils::StructuredLog()
+              .Event("mysql_binlog_error")
+              .Field("type", "incoming_document_field_invalid")
+              .Field("event_type", "update")
+              .Field("error", valid.error().message())
+              .Error();
+          return false;
+        }
 
         // Save old filters to detect filter changes for cache invalidation
         auto old_doc = doc_store.GetDocument(doc_id);
@@ -238,7 +371,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         }
 
         // Update document store filters (check return value for race condition)
-        auto update_result = doc_store.UpdateDocument(doc_id, event.filters);
+        auto update_result = has_after_text
+                                 ? doc_store.UpdateDocument(doc_id, event.filters, new_normalized, event.text)
+                                 : doc_store.UpdateDocument(doc_id, event.filters);
         if (!update_result) {
           // The filters MySQL reports could not be indexed. Carrying on would
           // leave this row's filters permanently disagreeing with MySQL, so
@@ -251,6 +386,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
               .Field("doc_id", static_cast<uint64_t>(doc_id))
               .Field("error", update_result.error().message())
               .Error();
+          if (error_out != nullptr) {
+            *error_out = update_result.error();
+          }
           return false;
         }
         if (!*update_result) {
@@ -266,21 +404,17 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
         }
 
         bool text_changed = false;
-        if (HasMaterializedAfterText(event)) {
-          new_normalized = index.NormalizeText(event.text);
-          doc_store.SetOriginalText(doc_id, event.text);
+        if (has_after_text) {
           if (!stored_normalized.has_value()) {
             // Postings of a text the store never knew cannot be diffed, so they are dropped first.
             index.PurgeDocument(doc_id);
             index.AddDocument(doc_id, new_normalized);
-            doc_store.SetNormalizedText(doc_id, new_normalized);
             if (bm25_stats != nullptr && !new_normalized.empty()) {
               bm25_stats->AddDocument(mygram::utils::CountCodePoints(new_normalized));
             }
             text_changed = true;
           } else if (old_normalized != new_normalized) {
             index.UpdateDocument(doc_id, old_normalized, new_normalized);
-            doc_store.SetNormalizedText(doc_id, new_normalized);
             if (bm25_stats != nullptr) {
               if (!old_normalized.empty()) {
                 bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(old_normalized));
@@ -408,8 +542,9 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           // Users should manually rebuild if text column type or PK changed
           break;
         }
-        case DDLType::kDrop: {
-          // DROP TABLE - clear all data and warn
+        case DDLType::kDrop:
+        case DDLType::kDropDatabase: {
+          // DROP TABLE / DROP DATABASE - clear all data and warn
           mygram::utils::StructuredLog()
               .Event("mysql_binlog_error")
               .Field("type", "drop_table_detected")
@@ -432,6 +567,7 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
           break;
         }
         case DDLType::kRename:
+        case DDLType::kRowsReplaced:
         case DDLType::kUnknown:
           // Log unhandled DDL for visibility
           mygram::utils::StructuredLog()
@@ -458,6 +594,25 @@ bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& 
   }
 
   return true;
+}
+
+bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& index,
+                                        storage::DocumentStore& doc_store, const config::TableConfig& table_config,
+                                        const config::MysqlConfig& mysql_config, server::ServerStats* stats,
+                                        cache::CacheManager* cache_manager, server::BM25Stats* bm25_stats) {
+  return ProcessEvent(event, index, doc_store, table_config, mysql_config, stats, cache_manager, bm25_stats, nullptr);
+}
+
+bool BinlogEventProcessor::ProcessEvent(const BinlogEvent& event, index::Index& index,
+                                        storage::DocumentStore& doc_store, const config::TableConfig& table_config,
+                                        const config::MysqlConfig& mysql_config, server::ServerStats* stats,
+                                        cache::CacheManager* cache_manager, server::BM25Stats* bm25_stats,
+                                        mygram::utils::Error* error_out) {
+  if (error_out != nullptr) {
+    *error_out = mygram::utils::Error{};
+  }
+  return ProcessEventInternal(event, index, doc_store, table_config, mysql_config, stats, cache_manager, bm25_stats,
+                              error_out, nullptr);
 }
 
 }  // namespace mygramdb::mysql

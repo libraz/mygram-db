@@ -29,13 +29,17 @@
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/numeric_parse.h"
 #include "utils/sql_utils.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
 
 namespace mygramdb::mysql {
 
-bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
+bool BinlogReader::ProcessEvent(const BinlogEvent& event, mygram::utils::Error* error_out) {
+  if (error_out != nullptr) {
+    *error_out = mygram::utils::Error{};
+  }
   auto table_iter = table_contexts_.find(event.table_name);
   if (table_iter == table_contexts_.end()) {
     // Event is for a table we're not tracking, skip silently. Log the first
@@ -75,38 +79,13 @@ bool BinlogReader::ProcessEvent(const BinlogEvent& event) {
     return false;
   }
 
-  // Invalidate column names cache on ALTER TABLE DDL to avoid stale column
-  // name mappings. The next monitored TABLE_MAP_EVENT fetches fresh names
-  // before AddOrUpdate(), allowing SchemaEquals() to detect column renames.
-  if (event.type == BinlogEventType::DDL) {
-    std::string query_upper = event.text;
-    std::transform(query_upper.begin(), query_upper.end(), query_upper.begin(), ::toupper);
-    if (query_upper.find("ALTER") != std::string::npos) {
-      std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
-      // Invalidate all cache entries containing this table name
-      for (auto it = column_names_cache_.begin(); it != column_names_cache_.end();) {
-        if (it->first.find(event.table_name) != std::string::npos) {
-          mygram::utils::StructuredLog()
-              .Event("binlog_cache_invalidation")
-              .Field("type", "alter_table_column_names")
-              .Field("table", event.table_name)
-              .Field("cache_key", it->first)
-              .Info();
-          it = column_names_cache_.erase(it);
-        } else {
-          ++it;
-        }
-      }
-    }
-  }
-
   // Get BM25 stats for the table (if available)
   server::BM25Stats* bm25_stats = &table_context->bm25_stats;
 
   // Delegate to BinlogEventProcessor
   return BinlogEventProcessor::ProcessEvent(event, *current_index, *current_doc_store, *current_config, mysql_config_,
                                             server_stats_.load(std::memory_order_acquire),
-                                            cache_manager_.load(std::memory_order_acquire), bm25_stats);
+                                            cache_manager_.load(std::memory_order_acquire), bm25_stats, error_out);
 }
 
 bool BinlogReader::IsRetryableSchemaValidationError(mygram::utils::ErrorCode code) {
@@ -118,10 +97,6 @@ bool BinlogReader::IsRetryableSchemaValidationError(mygram::utils::ErrorCode cod
 BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEvent& event) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
-
-  if (event.ddl_type == DDLType::kTruncate) {
-    return DDLSchemaCheck::kCompatible;
-  }
 
   auto incompatible = [&](const std::string& reason) {
     const std::string message = "SCHEMA_INCOMPATIBLE: " + reason +
@@ -140,14 +115,24 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
     return DDLSchemaCheck::kIncompatible;
   };
 
-  if (event.ddl_type == DDLType::kDrop) {
-    return incompatible("configured table was dropped");
-  }
-  if (event.ddl_type == DDLType::kRename) {
-    return incompatible("configured table was renamed; aliases are not followed automatically");
-  }
-  if (event.ddl_type != DDLType::kAlter && event.ddl_type != DDLType::kCreate) {
-    return incompatible("unclassified DDL affected a configured table");
+  switch (event.ddl_type) {
+    case DDLType::kTruncate:
+      return DDLSchemaCheck::kCompatible;
+    case DDLType::kDrop:
+      return incompatible("configured table was dropped");
+    case DDLType::kDropDatabase:
+      return incompatible("configured table's database was dropped");
+    case DDLType::kRename:
+      return incompatible("configured table was renamed; aliases are not followed automatically");
+    case DDLType::kRowsReplaced:
+      // The reader stops on these before queueing them unless a SYNC snapshot
+      // covers them, and covered events are suppressed before validation.
+      return incompatible("configured table's rows were replaced without row events");
+    case DDLType::kUnknown:
+      return incompatible("unclassified DDL affected a configured table");
+    case DDLType::kAlter:
+    case DDLType::kCreate:
+      break;
   }
 
   auto table_iter = table_contexts_.find(event.table_name);
@@ -191,11 +176,10 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata, ProcessingFailureKi
 
   // Check cache first
   {
-    std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
-    auto cache_it = column_names_cache_.find(cache_key);
-    if (cache_it != column_names_cache_.end()) {
+    const auto* cached = schema_cache_.FindColumns(metadata.database_name, metadata.table_name);
+    if (cached != nullptr) {
       // Cache hit: update column definitions from cache
-      const auto& column_definitions = cache_it->second;
+      const auto& column_definitions = *cached;
       if (column_definitions.size() == metadata.columns.size()) {
         for (size_t i = 0; i < metadata.columns.size(); i++) {
           metadata.columns[i].name = column_definitions[i].name;
@@ -221,7 +205,7 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata, ProcessingFailureKi
           .Field("current_count", static_cast<int64_t>(metadata.columns.size()))
           .Message("Cached column definitions have mismatched count")
           .Warn();
-      column_names_cache_.erase(cache_it);  // Remove stale cache entry
+      schema_cache_.InvalidateColumns(metadata.database_name, metadata.table_name);
     }
   }
 
@@ -279,18 +263,16 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata, ProcessingFailureKi
     if (column_type == nullptr) {
       return false;
     }
-    std::string type(column_type);
-    std::transform(type.begin(), type.end(), type.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const std::string type = mygram::utils::ToLower(column_type);
     return type.find("unsigned") != std::string::npos;
   };
 
-  std::vector<BinlogReader::ColumnDefinition> column_definitions;
+  std::vector<TableSchemaCache::ColumnDefinition> column_definitions;
   column_definitions.reserve(metadata.columns.size());
 
   MYSQL_ROW row = nullptr;
   while ((row = mysql_fetch_row(result_exp->get())) != nullptr) {
-    BinlogReader::ColumnDefinition column_definition;
+    TableSchemaCache::ColumnDefinition column_definition;
     column_definition.name = row[0] == nullptr ? std::string{} : std::string(row[0]);
     column_definition.is_unsigned = is_unsigned_type(row[1]);
     column_definition.enum_set_values =
@@ -323,11 +305,7 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata, ProcessingFailureKi
   }
   metadata.RebuildColumnOrdinals();
 
-  // Store in cache
-  {
-    std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
-    column_names_cache_[cache_key] = std::move(column_definitions);
-  }
+  schema_cache_.StoreColumns(metadata.database_name, metadata.table_name, std::move(column_definitions));
 
   mygram::utils::StructuredLog()
       .Event("binlog_debug")
@@ -338,11 +316,6 @@ bool BinlogReader::FetchColumnNames(TableMetadata& metadata, ProcessingFailureKi
       .Debug();
 
   return true;
-}
-
-void BinlogReader::InvalidateColumnNamesForSchemaChange(const TableMetadata& metadata) {
-  std::lock_guard<std::mutex> lock(column_names_cache_mutex_);
-  column_names_cache_.erase(metadata.database_name + "." + metadata.table_name);
 }
 
 std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
@@ -398,8 +371,7 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
 
   // It's a single transaction number (e.g., "uuid:101")
   // Convert to range "uuid:1-101" so the server excludes transactions 1 through 101
-  std::string uuid = GtidEncoder::ExtractUuid(gtid);
-  return uuid + ":1-" + after_colon;
+  return gtid.substr(0, colon_pos) + ":1-" + after_colon;
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::UpdateCurrentGTID(const std::string& gtid) {

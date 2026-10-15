@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "mysql/binlog_stream.h"
 #include "mysql/mariadb_binlog_stream.h"
 
 #ifdef USE_MYSQL
@@ -97,6 +98,25 @@ TEST(MariaDBGtidPositionTest, AcceptsExactlyTheDocumentedCharacterSet) {
     const std::string position(1, static_cast<char>(byte));
     EXPECT_EQ(IsSafeMariaDBGtidPosition(position), expected)
         << "byte 0x" << std::hex << value << " was classified against the documented set";
+  }
+}
+
+/**
+ * @brief A fetch error that ends the transport reconnects; only position and protocol errors stop.
+ */
+TEST(BinlogFetchErrorTest, TransportEndingErrorsReconnectAndOthersStop) {
+  using Status = BinlogFetchResult::Status;
+
+  EXPECT_EQ(ClassifyFetchError(2013), Status::kConnectionLost);
+  // Source restart, kill and network errors all leave the position intact.
+  for (const unsigned int err_no : {2006U, 2055U, 1053U, 1152U, 1158U, 1159U, 1160U, 1161U, 1927U, 4031U}) {
+    EXPECT_EQ(ClassifyFetchError(err_no), Status::kServerGoneAway) << err_no;
+  }
+
+  EXPECT_EQ(ClassifyFetchError(1236), Status::kBinlogPurged);
+  // A malformed packet, a parse error or an access denial does not heal on reconnect.
+  for (const unsigned int err_no : {2027U, 1064U, 1045U}) {
+    EXPECT_EQ(ClassifyFetchError(err_no), Status::kError) << err_no;
   }
 }
 

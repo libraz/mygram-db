@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <sstream>
+#include <string_view>
 #include <thread>
 
 #include "cache/cache_key.h"
@@ -20,8 +21,10 @@
 #include "index/index.h"
 #include "query/query_ast.h"
 #include "query/query_normalizer.h"
+#include "server/server_stats.h"
 #include "server/server_types.h"
 #include "storage/document_store.h"
+#include "storage/dump_format_limits.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
@@ -35,6 +38,17 @@ void AttachCanonicalCacheKey(query::Query& query, const index::Index& index) {
   query.cache_key = std::make_pair(key.hash_high, key.hash_low);
   query.cache_key_discriminator = normalized;
   query.cache_key_is_canonical = true;
+}
+
+std::string MakeNfkcExpansionSource() {
+  constexpr size_t kCodePointCount = 508401;
+  constexpr std::string_view kCompatibilityCharacter = "\xEF\xB7\xBA";  // U+FDFA
+  std::string source;
+  source.reserve(kCodePointCount * kCompatibilityCharacter.size());
+  for (size_t i = 0; i < kCodePointCount; ++i) {
+    source.append(kCompatibilityCharacter);
+  }
+  return source;
 }
 
 }  // namespace
@@ -99,6 +113,34 @@ TEST_F(BinlogEventProcessorTest, EmptyStringPrimaryKeyIsProcessed) {
   ASSERT_TRUE(doc_id.has_value());
   EXPECT_EQ(doc_store_->GetPrimaryKey(*doc_id), "");
   EXPECT_EQ(doc_store_->GetOriginalText(*doc_id), std::optional<std::string>("empty primary key document"));
+}
+
+/**
+ * @brief A row event whose configured key is NULL or absent fails instead of mutating anything.
+ *
+ * The initial loader refuses such a row; indexing it under the empty key would
+ * merge every later NULL-key row into one document.
+ */
+TEST_F(BinlogEventProcessorTest, RowEventWithoutUsablePrimaryKeyFailsClosed) {
+  BinlogEvent null_insert = BinlogEvent::CreateInsert("test_table", "", "null key document");
+  null_insert.primary_key_null = true;
+
+  BinlogEvent absent_delete;
+  absent_delete.type = BinlogEventType::DELETE;
+  absent_delete.table_name = "test_table";
+
+  BinlogEvent null_before_update = BinlogEvent::CreateUpdate("test_table", "pk1", "new text", "old text");
+  null_before_update.old_primary_key_present = true;
+  null_before_update.old_primary_key_null = true;
+
+  for (const BinlogEvent* event : {&null_insert, &absent_delete, &null_before_update}) {
+    EXPECT_FALSE(event->IsValid());
+    EXPECT_FALSE(
+        BinlogEventProcessor::ProcessEvent(*event, *index_, *doc_store_, table_config_, mysql_config_, nullptr));
+  }
+  EXPECT_FALSE(doc_store_->GetDocId("").has_value());
+  EXPECT_FALSE(doc_store_->GetDocId("pk1").has_value());
+  EXPECT_EQ(doc_store_->Size(), 0U);
 }
 
 TEST_F(BinlogEventProcessorTest, PrimaryKeyChangeFromEmptyStringRemovesOldDocument) {
@@ -949,7 +991,7 @@ TEST_F(BinlogEventProcessorTest, TruncateClearsAllData) {
   ASSERT_GT(bm25_stats.total_doc_length.load(std::memory_order_relaxed), 0);
 
   // Process TRUNCATE DDL event
-  BinlogEvent ddl_event = BinlogEvent::CreateDDL("test_table", "TRUNCATE TABLE test_table");
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_, "TRUNCATE TABLE test_table");
 
   bool result = BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_,
                                                    nullptr, nullptr, &bm25_stats);
@@ -991,7 +1033,7 @@ TEST_F(BinlogEventProcessorTest, DropClearsAllData) {
   ASSERT_GT(bm25_stats.total_doc_length.load(std::memory_order_relaxed), 0);
 
   // Process DROP DDL event
-  BinlogEvent ddl_event = BinlogEvent::CreateDDL("test_table", "DROP TABLE test_table");
+  BinlogEvent ddl_event = BinlogEvent::CreateDDL(table_config_, "DROP TABLE test_table");
 
   bool result = BinlogEventProcessor::ProcessEvent(ddl_event, *index_, *doc_store_, table_config_, mysql_config_,
                                                    nullptr, nullptr, &bm25_stats);
@@ -1228,6 +1270,135 @@ TEST_F(BinlogEventProcessorTest, EmptyTextInsertIsRetainedInDocumentStore) {
   EXPECT_FALSE(doc_store_->GetNormalizedText(*doc_id).has_value());
 }
 
+TEST_F(BinlogEventProcessorTest, OversizedRetainedAfterimagesFailBeforeChangingExistingDocument) {
+  const std::string oversized_source = MakeNfkcExpansionSource();
+  const std::string normalized_probe = index_->NormalizeText(oversized_source);
+  ASSERT_EQ(oversized_source.size(), 1'525'203U);
+  ASSERT_EQ(normalized_probe.size(), 16'777'233U);
+  ASSERT_GT(normalized_probe.size(), storage::dump_format_limits::docstore::kMaxNormalizedTextLength);
+
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache::NgramConfigMap ngram_configs;
+  cache::NgramConfig ngram_config{};
+  ngram_config.ngram_size = index_->GetNgramSize();
+  ngram_config.kanji_ngram_size = index_->GetKanjiNgramSize();
+  ngram_config.cross_boundary_ngrams = index_->GetCrossBoundaryNgrams();
+  ngram_configs[table_config_.name] = ngram_config;
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+  server::ServerStats stats;
+  server::BM25Stats bm25_stats;
+
+  BinlogEvent insert_event = BinlogEvent::CreateInsert(table_config_.name, "pk_large_update", "alpha beta");
+  insert_event.filters["status"] = static_cast<int32_t>(1);
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                 &stats, &cache_manager, &bm25_stats));
+  const auto doc_id = doc_store_->GetDocId("pk_large_update");
+  ASSERT_TRUE(doc_id.has_value());
+  const auto old_al_postings = index_->SearchAnd({"al"});
+  const auto old_be_postings = index_->SearchAnd({"be"});
+  const uint64_t old_bm25_length = bm25_stats.total_doc_length.load(std::memory_order_relaxed);
+  const uint64_t old_bm25_count = bm25_stats.doc_count.load(std::memory_order_relaxed);
+
+  query::Query cached_query;
+  cached_query.type = query::QueryType::SEARCH;
+  cached_query.table = table_config_.name;
+  cached_query.search_text = "alpha";
+  cached_query.limit = 100;
+  AttachCanonicalCacheKey(cached_query, *index_);
+  ASSERT_TRUE(cache_manager.Insert(cached_query, {*doc_id}, {"al", "lp", "ph", "ha"}, 15.0, index_->GetNgramSize(),
+                                   index_->GetKanjiNgramSize(), index_->GetCrossBoundaryNgrams()));
+  ASSERT_TRUE(cache_manager.Lookup(cached_query).has_value());
+  const uint64_t old_insert_applied = stats.GetReplInsertsApplied();
+  const uint64_t old_insert_skipped = stats.GetReplInsertsSkipped();
+  const uint64_t old_updates_applied = stats.GetReplUpdatesApplied();
+  const uint64_t old_updates_added = stats.GetReplUpdatesAdded();
+  const uint64_t old_updates_removed = stats.GetReplUpdatesRemoved();
+  const uint64_t old_updates_modified = stats.GetReplUpdatesModified();
+  const uint64_t old_updates_skipped = stats.GetReplUpdatesSkipped();
+  const uint64_t old_deletes_applied = stats.GetReplDeletesApplied();
+  const uint64_t old_deletes_skipped = stats.GetReplDeletesSkipped();
+
+  auto expect_unchanged_after_failure = [&]() {
+    EXPECT_EQ(doc_store_->GetDocId("pk_large_update"), doc_id);
+    EXPECT_FALSE(doc_store_->GetDocId("pk_large_update_new").has_value());
+    const auto document = doc_store_->GetDocument(*doc_id);
+    ASSERT_TRUE(document.has_value());
+    const auto status = document->filters.find("status");
+    ASSERT_NE(status, document->filters.end());
+    EXPECT_EQ(std::get<int32_t>(status->second), 1);
+    EXPECT_EQ(doc_store_->GetOriginalText(*doc_id), std::optional<std::string>{"alpha beta"});
+    EXPECT_EQ(doc_store_->GetNormalizedText(*doc_id), std::optional<std::string>{"alpha beta"});
+    EXPECT_EQ(index_->SearchAnd({"al"}), old_al_postings);
+    EXPECT_EQ(index_->SearchAnd({"be"}), old_be_postings);
+    EXPECT_EQ(bm25_stats.total_doc_length.load(std::memory_order_relaxed), old_bm25_length);
+    EXPECT_EQ(bm25_stats.doc_count.load(std::memory_order_relaxed), old_bm25_count);
+    EXPECT_EQ(stats.GetReplInsertsApplied(), old_insert_applied);
+    EXPECT_EQ(stats.GetReplInsertsSkipped(), old_insert_skipped);
+    EXPECT_EQ(stats.GetReplUpdatesApplied(), old_updates_applied);
+    EXPECT_EQ(stats.GetReplUpdatesAdded(), old_updates_added);
+    EXPECT_EQ(stats.GetReplUpdatesRemoved(), old_updates_removed);
+    EXPECT_EQ(stats.GetReplUpdatesModified(), old_updates_modified);
+    EXPECT_EQ(stats.GetReplUpdatesSkipped(), old_updates_skipped);
+    EXPECT_EQ(stats.GetReplDeletesApplied(), old_deletes_applied);
+    EXPECT_EQ(stats.GetReplDeletesSkipped(), old_deletes_skipped);
+    EXPECT_TRUE(cache_manager.Lookup(cached_query).has_value());
+  };
+
+  BinlogEvent oversized_update =
+      BinlogEvent::CreateUpdate(table_config_.name, "pk_large_update", oversized_source, "alpha beta");
+  oversized_update.filters["status"] = static_cast<int32_t>(2);
+  mygram::utils::Error update_error;
+  EXPECT_FALSE(BinlogEventProcessor::ProcessEvent(oversized_update, *index_, *doc_store_, table_config_, mysql_config_,
+                                                  &stats, &cache_manager, &bm25_stats, &update_error));
+  EXPECT_EQ(update_error.code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(update_error.message().find("normalized_text length 16777233"), std::string::npos);
+  expect_unchanged_after_failure();
+
+  BinlogEvent oversized_key_change =
+      BinlogEvent::CreateUpdate(table_config_.name, "pk_large_update_new", oversized_source, "alpha beta");
+  oversized_key_change.old_primary_key = "pk_large_update";
+  oversized_key_change.old_primary_key_present = true;
+  oversized_key_change.filters["status"] = static_cast<int32_t>(3);
+  mygram::utils::Error key_change_error;
+  EXPECT_FALSE(BinlogEventProcessor::ProcessEvent(oversized_key_change, *index_, *doc_store_, table_config_,
+                                                  mysql_config_, &stats, &cache_manager, &bm25_stats,
+                                                  &key_change_error));
+  EXPECT_EQ(key_change_error.code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(key_change_error.message().find("normalized_text length 16777233"), std::string::npos);
+  expect_unchanged_after_failure();
+}
+
+TEST_F(BinlogEventProcessorTest, DiscardedRowsDoNotValidateUnusedTextOrDeleteKeys) {
+  config::RequiredFilterConfig required_filter;
+  required_filter.name = "status";
+  required_filter.type = "int";
+  required_filter.op = "=";
+  required_filter.value = "1";
+  table_config_.required_filters.push_back(required_filter);
+
+  const std::string oversized_source = MakeNfkcExpansionSource();
+  BinlogEvent filtered_insert = BinlogEvent::CreateInsert(table_config_.name, "pk_filtered", oversized_source);
+  filtered_insert.filters["status"] = static_cast<int32_t>(0);
+  EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(filtered_insert, *index_, *doc_store_, table_config_, mysql_config_));
+  EXPECT_FALSE(doc_store_->GetDocId("pk_filtered").has_value());
+
+  BinlogEvent long_missing_delete = BinlogEvent::CreateDelete(table_config_.name, std::string(1024 * 1024 + 1, 'k'));
+  EXPECT_TRUE(
+      BinlogEventProcessor::ProcessEvent(long_missing_delete, *index_, *doc_store_, table_config_, mysql_config_));
+
+  BinlogEvent insert_event = BinlogEvent::CreateInsert(table_config_.name, "pk_transition_out", "old text");
+  insert_event.filters["status"] = static_cast<int32_t>(1);
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_event, *index_, *doc_store_, table_config_, mysql_config_));
+  auto out_of_required =
+      BinlogEvent::CreateUpdate(table_config_.name, "pk_transition_out", oversized_source, "old text");
+  out_of_required.filters["status"] = static_cast<int32_t>(0);
+  EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(out_of_required, *index_, *doc_store_, table_config_, mysql_config_));
+  EXPECT_FALSE(doc_store_->GetDocId("pk_transition_out").has_value());
+  EXPECT_TRUE(index_->SearchAnd({"ol"}).empty());
+}
+
 /**
  * @brief Test that cache_manager parameter defaults to nullptr (backwards compatibility)
  */
@@ -1242,11 +1413,11 @@ TEST_F(BinlogEventProcessorTest, CacheInvalidationUsesNormalizedBinlogText) {
   cache_config.max_memory_bytes = 10 * 1024 * 1024;
 
   cache::NgramConfigMap ngram_configs;
-  ngram_configs[table_config_.name] = cache::NgramConfig{
-      .ngram_size = index_->GetNgramSize(),
-      .kanji_ngram_size = index_->GetKanjiNgramSize(),
-      .cross_boundary_ngrams = index_->GetCrossBoundaryNgrams(),
-  };
+  cache::NgramConfig ngram_config{};
+  ngram_config.ngram_size = index_->GetNgramSize();
+  ngram_config.kanji_ngram_size = index_->GetKanjiNgramSize();
+  ngram_config.cross_boundary_ngrams = index_->GetCrossBoundaryNgrams();
+  ngram_configs[table_config_.name] = ngram_config;
   cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
 
   query::Query query;
@@ -1276,11 +1447,11 @@ TEST_F(BinlogEventProcessorTest, AlterTableClearsTableCacheWithoutClearingData) 
   cache_config.max_memory_bytes = 10 * 1024 * 1024;
 
   cache::NgramConfigMap ngram_configs;
-  ngram_configs[table_config_.name] = cache::NgramConfig{
-      .ngram_size = index_->GetNgramSize(),
-      .kanji_ngram_size = index_->GetKanjiNgramSize(),
-      .cross_boundary_ngrams = index_->GetCrossBoundaryNgrams(),
-  };
+  cache::NgramConfig ngram_config{};
+  ngram_config.ngram_size = index_->GetNgramSize();
+  ngram_config.kanji_ngram_size = index_->GetKanjiNgramSize();
+  ngram_config.cross_boundary_ngrams = index_->GetCrossBoundaryNgrams();
+  ngram_configs[table_config_.name] = ngram_config;
   cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
 
   BinlogEvent insert_event = BinlogEvent::CreateInsert(table_config_.name, "pk1", "alpha beta");
@@ -1297,7 +1468,7 @@ TEST_F(BinlogEventProcessorTest, AlterTableClearsTableCacheWithoutClearingData) 
                                    index_->GetKanjiNgramSize(), index_->GetCrossBoundaryNgrams()));
   ASSERT_TRUE(cache_manager.Lookup(query).has_value());
 
-  BinlogEvent alter_event = BinlogEvent::CreateDDL(table_config_.name, "ALTER TABLE test_table ADD COLUMN status INT");
+  BinlogEvent alter_event = BinlogEvent::CreateDDL(table_config_, "ALTER TABLE test_table ADD COLUMN status INT");
   EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(alter_event, *index_, *doc_store_, table_config_, mysql_config_,
                                                  nullptr, &cache_manager));
 
@@ -1310,41 +1481,46 @@ TEST_F(BinlogEventProcessorTest, AlterTableClearsTableCacheWithoutClearingData) 
  * @brief Test DDLType classification via CreateDDL factory
  */
 TEST_F(BinlogEventProcessorTest, DDLTypeClassification) {
+  config::TableConfig t;
+  t.name = "t";
+
   // TRUNCATE
-  auto truncate_event = BinlogEvent::CreateDDL("t", "TRUNCATE TABLE t");
+  auto truncate_event = BinlogEvent::CreateDDL(t, "TRUNCATE TABLE t");
   EXPECT_EQ(truncate_event.ddl_type, DDLType::kTruncate);
 
   // ALTER
-  auto alter_event = BinlogEvent::CreateDDL("t", "ALTER TABLE t ADD COLUMN x INT");
+  auto alter_event = BinlogEvent::CreateDDL(t, "ALTER TABLE t ADD COLUMN x INT");
   EXPECT_EQ(alter_event.ddl_type, DDLType::kAlter);
 
-  auto create_event = BinlogEvent::CreateDDL("t", "CREATE TABLE IF NOT EXISTS t (id BIGINT PRIMARY KEY)");
+  auto create_event = BinlogEvent::CreateDDL(t, "CREATE TABLE IF NOT EXISTS t (id BIGINT PRIMARY KEY)");
   EXPECT_EQ(create_event.ddl_type, DDLType::kCreate);
 
   // DROP
-  auto drop_event = BinlogEvent::CreateDDL("t", "DROP TABLE t");
+  auto drop_event = BinlogEvent::CreateDDL(t, "DROP TABLE t");
   EXPECT_EQ(drop_event.ddl_type, DDLType::kDrop);
 
   // RENAME
-  auto rename_event = BinlogEvent::CreateDDL("t", "RENAME TABLE t TO t2");
+  auto rename_event = BinlogEvent::CreateDDL(t, "RENAME TABLE t TO t2");
   EXPECT_EQ(rename_event.ddl_type, DDLType::kRename);
 
   // Unknown DDL
-  auto unknown_event = BinlogEvent::CreateDDL("t", "CREATE INDEX idx ON t(x)");
+  auto unknown_event = BinlogEvent::CreateDDL(t, "CREATE INDEX idx ON t(x)");
   EXPECT_EQ(unknown_event.ddl_type, DDLType::kUnknown);
 
   // Case insensitive
-  auto lower_truncate = BinlogEvent::CreateDDL("t", "truncate table t");
+  auto lower_truncate = BinlogEvent::CreateDDL(t, "truncate table t");
   EXPECT_EQ(lower_truncate.ddl_type, DDLType::kTruncate);
 }
 
 /**
  * @brief Test that ALTER TABLE ... DROP COLUMN is classified as ALTER, not DROP
  *
- * The ClassifyDDL function checks ALTER before DROP to handle this case correctly.
+ * The statement is classified by its leading verb, so a DROP inside ALTER TABLE stays ALTER.
  */
 TEST_F(BinlogEventProcessorTest, AlterDropColumnClassifiedAsAlter) {
-  auto event = BinlogEvent::CreateDDL("t", "ALTER TABLE t DROP COLUMN old_col");
+  config::TableConfig t;
+  t.name = "t";
+  auto event = BinlogEvent::CreateDDL(t, "ALTER TABLE t DROP COLUMN old_col");
   EXPECT_EQ(event.ddl_type, DDLType::kAlter);
 }
 
@@ -1359,7 +1535,7 @@ TEST_F(BinlogEventProcessorTest, DDLTypeUsedInProcessing) {
   ASSERT_EQ(doc_store_->Size(), 1);
 
   // Process ALTER DDL - should NOT clear data (only logs warning)
-  BinlogEvent alter_event = BinlogEvent::CreateDDL("test_table", "ALTER TABLE test_table ADD COLUMN x INT");
+  BinlogEvent alter_event = BinlogEvent::CreateDDL(table_config_, "ALTER TABLE test_table ADD COLUMN x INT");
   EXPECT_TRUE(BinlogEventProcessor::ProcessEvent(alter_event, *index_, *doc_store_, table_config_, mysql_config_));
 
   // Data should still be present after ALTER

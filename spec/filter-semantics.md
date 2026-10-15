@@ -25,7 +25,7 @@ configuration file, and nothing else. Neither one constrains the other.
 A document excluded by `required_filters` is not in the index, so no query filter can
 return it. A document admitted by `required_filters` is subject to query filters
 independently — the same column may be used by both, with different results, because the
-comparison rules differ (section 4).
+comparison rules differ (sections 2 and 3).
 
 Both features conjoin their conditions. Query filters are ANDed
 (`src/server/search_pipeline.cpp`);
@@ -60,26 +60,30 @@ constructs a `FilterIndex` eagerly (`src/storage/document_store.cpp`) and replac
 rather than clearing it (`src/storage/document_store_persistence.cpp`), so `GetFilterIndex()`
 (`src/storage/document_store_retrieval.cpp`) never returns null.
 
-### 2.2 Filter-value parsing
+### 2.2 Filter-value conversion
 
-The filter value arrives as an unstructured string on both surfaces. It is parsed once per
-request into every interpretation it admits, before the candidate loop
-(`src/server/search_pipeline.cpp`):
+The filter value arrives as an unstructured string on both surfaces. It is converted once per
+request, before the candidate loop, into every interpretation it admits
+(`src/server/search_pipeline.cpp`). Each interpretation is produced by `ConvertFilterValue`
+(`src/storage/filter_index.cpp`), the same function that converts column values at initial load
+and in replication, called with the type named below:
 
-| Interpretation | Rule |
-|---|---|
-| `bool` | true only for the exact byte strings `1` and `true`; every other string, including `TRUE` and `True`, yields false with no failure flag |
-| `double` | `std::from_chars`, whole string must be consumed; sets `double_valid` |
-| `int64_t` | `std::from_chars`, whole string must be consumed; sets `int64_valid` |
-| `uint64_t` | `std::from_chars`, whole string must be consumed; sets `uint64_valid` |
+| Interpretation | Converter type | Rule |
+|---|---|---|
+| `bool` | `boolean` | lowercased, then `1`/`true` is true and `0`/`false` is false; so `TRUE` and `True` are recognized |
+| `double` | `double` | `std::from_chars`, whole string must be consumed; `nan` and `inf` are accepted |
+| `int64_t` | `bigint` | `std::from_chars`, whole string must be consumed |
+| `uint64_t` | `bigint_unsigned` | `std::from_chars`, whole string must be consumed |
 
-All four interpretations are produced in `src/server/search_pipeline.cpp`.
+An interpretation the converter refuses is absent. Because `std::from_chars` accepts neither a
+leading `+` nor leading whitespace, a filter value written as `+5` has no numeric
+interpretation.
 
-Because `std::from_chars` accepts neither a leading `+` nor leading whitespace, a filter
-value written as `+5` sets none of the numeric validity flags.
-
-The bool interpretation carries no validity flag. Its default of `false` is what makes the
-two paths disagree for boolean columns (section 4.1).
+**A value no interpretation of the stored type admits matches nothing under `=` and keeps
+every candidate under `!=`, on both paths.** The ordering operators match nothing. This is the
+rule for `FILTER flag = yes`, `FILTER flag != maybe`, `FILTER n != abc` and a negative value
+against an unsigned column, whether or not another condition in the request moved it onto the
+fallback path.
 
 ### 2.3 Comparison rule per stored type
 
@@ -91,11 +95,11 @@ therefore behave as a dispatch on the stored type. Every citation in this table 
 | Stored type | Configured `type` that produces it | Operators | Fallback rule | Bitmap rule (`=`/`!=` only) | Agree? |
 |---|---|---|---|---|---|
 | `std::string` | `string`, `varchar`, `text` | all six | Byte-exact lexicographic compare of the stored bytes against the raw filter value; no collation, no case folding (`src/server/search_pipeline.cpp`, `src/utils/comparison_utils.h`) | Key is `\x0B` + the raw bytes; equality is byte-exact (`src/storage/filter_index.cpp`, `src/server/search_pipeline.cpp`) | Yes |
-| `bool` | `boolean` | all six (`<`/`>` order `false` before `true`) | Compares the stored bool against the parsed bool, which is `false` for any string outside `{1, true}` | A bool key is emitted only for `1`, `true`, `0`, `false`; any other value contributes no bool key | **No** — see 4.1 |
-| `double` | `double` | all six | `=`/`!=` compare the 64-bit object representation; `<` `>` `<=` `>=` compare numerically | Key is `\x0C` + the little-endian object representation; equality is bit-exact (`src/storage/filter_index.cpp`) | Yes — by construction, see 2.4 |
-| `TimeValue` | `time` | all six | Compares `seconds` against the `int64_t` interpretation; requires `int64_valid`, so `01:00:00` never matches | A `TimeValue` key is emitted only when the value parses as `int64_t` | Yes |
-| `int8_t`, `int16_t`, `int32_t`, `int64_t` | `tinyint`, `smallint`, `int`/`mediumint`, `bigint`, and also `datetime`, `date`, `timestamp` (stored as an epoch-second `int64_t`) | all six | Widens the stored value to `int64_t` and compares against the `int64_t` interpretation; requires `int64_valid` | Keys for `int64_t` and every narrower signed width the value fits are all ORed in | Yes |
-| `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t` | `tinyint_unsigned`, `smallint_unsigned`, `int_unsigned`/`mediumint_unsigned`, `bigint_unsigned` | all six | Widens the stored value to `uint64_t` and compares against the `uint64_t` interpretation; requires `uint64_valid`, so a negative filter value never matches | Keys for `uint64_t` and every narrower unsigned width the value fits are all ORed in | Yes |
+| `bool` | `boolean` | all six (`<`/`>` order `false` before `true`) | Compares the stored bool against the bool interpretation; with none, the rule in 2.2 | A bool key is emitted only for a value with a bool interpretation (`1`, `true`, `0`, `false`, any case) | Yes |
+| `double` | `double` | all six | `=`/`!=` compare the 64-bit object representation; `<` `>` `<=` `>=` compare numerically; requires the `double` interpretation | Key is `\x0C` + the little-endian object representation; equality is bit-exact (`src/storage/filter_index.cpp`) | Yes — by construction, see 2.4 |
+| `TimeValue` | `time` | all six | Compares `seconds` against the `int64_t` interpretation; requires it, so `01:00:00` never matches | A `TimeValue` key is emitted only when the value parses as `int64_t` | Yes |
+| `int8_t`, `int16_t`, `int32_t`, `int64_t` | `tinyint`, `smallint`, `int`/`mediumint`, `bigint`, and also `datetime`, `date`, `timestamp` (stored as an epoch-second `int64_t`) | all six | Widens the stored value to `int64_t` and compares against the `int64_t` interpretation; requires it | Keys for `int64_t` and every narrower signed width the value fits are all ORed in | Yes |
+| `uint8_t`, `uint16_t`, `uint32_t`, `uint64_t` | `tinyint_unsigned`, `smallint_unsigned`, `int_unsigned`/`mediumint_unsigned`, `bigint_unsigned` | all six | Widens the stored value to `uint64_t` and compares against the `uint64_t` interpretation; requires it, so a negative filter value never matches under `=` or an ordering operator | Keys for `uint64_t` and every narrower unsigned width the value fits are all ORed in | Yes |
 | `std::monostate` (SQL NULL) | any | all six | Matches `!=` and nothing else | NULLs are never inserted into the index (`src/storage/filter_index.cpp`), so `=` cannot select them and `!=` cannot subtract them | Yes |
 
 Consequences worth stating explicitly, because they follow from the table rather than from
@@ -103,8 +107,8 @@ any per-type special case:
 
 - **Temporal query filters take epoch seconds only.** `datetime`, `date` and `timestamp`
   columns are stored as `int64_t` epoch seconds (`src/mysql/rows_parser_filter.cpp`),
-  so a query filter value must parse as an integer. `FILTER created_at >= 2024-01-01` sets
-  `int64_valid` false and matches nothing. This is the opposite of `required_filters`,
+  so a query filter value must parse as an integer. `FILTER created_at >= 2024-01-01` has no
+  integer interpretation and matches nothing. This is the opposite of `required_filters`,
   which accepts ISO 8601 (section 3.2).
 - **`time` query filters take seconds only**, for the same reason
   (`src/server/search_pipeline.cpp`) — again the opposite of `required_filters`,
@@ -146,13 +150,11 @@ The two paths therefore agree, and both differ from IEEE 754 `==` in two places:
 | stored `-0.0`, filter value `-0.0` | true | true — `std::from_chars` produces `-0.0` (`src/server/search_pipeline.cpp`) and the representations match |
 | stored NaN, filter value NaN with the same payload | false | true — the comparison is on bits, not on IEEE equality |
 
-The NaN row is unreachable through normal ingest. Filter values are converted by
-`ParseNumeric<double>`, which rejects any non-finite result
-(`src/utils/numeric_parse.h`), so neither NaN nor an infinity can ever become a stored
-filter value. A query filter value of `nan` or `inf` does parse — `std::from_chars` accepts
-those spellings and sets `double_valid` (`src/server/search_pipeline.cpp`) — so
-`FILTER x = nan` is a well-formed request that matches nothing and `FILTER x != nan` is one
-that matches every non-NULL row.
+The NaN row is unreachable through normal ingest. Stored `double` values come from a MySQL
+`DOUBLE`, which cannot hold NaN or an infinity, so neither can ever become a stored filter
+value. A query filter value of `nan` or `inf` does parse — `std::from_chars` accepts those
+spellings (`src/storage/filter_index.cpp`) — so `FILTER x = nan` is a well-formed request that
+matches nothing and `FILTER x != nan` is one that matches every non-NULL row.
 
 Ordinary decimal values are affected by the exactness rule whenever the decimal is not
 representable: a column storing the result of `0.1 + 0.2` is not matched by the filter value
@@ -237,23 +239,35 @@ the configured value and `` `c` `` the quoted column. Every citation in this tab
 | `float` | single-precision — unreachable | **Rejected at configuration load** with `kConfigValidationError` (1002) from the schema enum and `kConfigInvalidValue` (1004) from `ValidateFilterType` (`src/config/config.cpp`); the domain is implemented in `Resolve`, `SqlRenderer` and `MembershipTest` and would emit `` `c` op CAST(<double literal> AS FLOAT) ``, but no configuration reaches it | not reached |
 | `double` | IEEE double | `` `c` op <double literal> `` | exact `double` compare |
 | `boolean` | 1/0 | `` `c` op 1 `` or `` `c` op 0 `` | `V` lowercased, then `1`/`true` → true and `0`/`false` → false |
-| `datetime`, `date` | wall clock | `` `c` op _utf8mb4 X'<YYYY-MM-DD HH:MM:SS>' ``, where the literal is `V` resolved to an instant and written back in `mysql.datetime_timezone` | epoch compare against the epoch the column's wall clock was read as |
-| `timestamp` | UTC epoch | `` UNIX_TIMESTAMP(`c`) op <epoch> `` | epoch compare |
-| `time` | seconds since midnight | `` `c` op _utf8mb4 X'<[-]HH:MM:SS>' ``, where the literal is `V` resolved to seconds and written back as a clock | seconds compare against the decoded `TimeValue.seconds` |
+| `datetime`, `date` | wall clock | bare-column bounds (below) against whole-second literals `_utf8mb4 X'<YYYY-MM-DD HH:MM:SS>'`, `V` resolved to an instant and written back in `mysql.datetime_timezone` | epoch compare against the epoch the column's wall clock was read as |
+| `timestamp` | UTC epoch | bare-column bounds against whole-second literals written in UTC | epoch compare |
+| `time` | seconds since midnight | bare-column bounds against clock literals `_utf8mb4 X'<[-]HH:MM:SS>'`, `V` resolved to seconds and written back as a clock | seconds compare against the decoded `TimeValue.seconds` |
 | any type, `IS NULL` / `IS NOT NULL` | NULL state | `` `c` IS NULL `` / `` `c` IS NOT NULL `` | tests for `std::monostate` |
 
-Three of the domains deliberately do extra work so that the server decides membership the way
-the evaluator does. Each rests on a measured MySQL 8.4 result:
+Two of the domains deliberately do extra work so that the server decides membership the way
+the evaluator does:
 
 - **Text is cast to `BINARY`** because the default `utf8mb4_0900_ai_ci` is case-insensitive
   and would admit rows the byte comparison rejects.
-- **`TIMESTAMP` is reduced to `UNIX_TIMESTAMP()`** because the connection renders it in UTC
-  and the binlog decodes it to the same UTC epoch.
-- **A `datetime`/`date` target is re-rendered as a wall clock** because a bare epoch is not a
-  datetime to MySQL. Written back in `mysql.datetime_timezone`, the offsets cancel on the SQL
-  side exactly as they do in C++. A `DATE` column compared against a datetime-shaped literal
-  is promoted to midnight rather than the literal being truncated to a date, so the
-  comparison is on the same instants the evaluator compares.
+- **Temporal comparisons are bounds on the bare column.** The binlog decode keeps whole
+  seconds, so with `x` the target in whole seconds the SQL is, from one builder
+  (`RenderTruncatedRange`, `src/mysql/required_filter_predicate.cpp`):
+
+  | Operator | SQL |
+  |---|---|
+  | `=` | `c >= L(x) AND c < L(x+1)` |
+  | `!=` | `c < L(x) OR c >= L(x+1)` |
+  | `<` / `<=` | `c < L(x)` / `c < L(x+1)` |
+  | `>` / `>=` | `c >= L(x+1)` / `c >= L(x)` |
+
+  `L` is the literal for an instant (`datetime`, `date`: wall clock in `mysql.datetime_timezone`;
+  `timestamp`: wall clock in UTC, which is how the connection reads a `TIMESTAMP`). A `DATE`
+  column compared against a datetime-shaped literal is promoted to midnight rather than the
+  literal being truncated to a date. For `time`, whose decode truncates toward zero, a
+  non-positive `x` uses `c > L(x-1)` for "at least `x`" and `c <= L(x-1)` for "below `x`", so
+  `-10:00:00.500` is seen as `-10:00:00` exactly as the decode sees it. A bound past the end of
+  the column's range is the constant it implies (`c IS NOT NULL` or `1 = 0`), and a NULL
+  column satisfies no bound.
 
 **The same threshold string means different instants on `datetime` and on `timestamp`.**
 This is not a disagreement between the two evaluation sites — they agree with each other for
@@ -291,6 +305,29 @@ in a space never matches a `CHAR(N)` row on either surface. `CHAR` columns are r
 DDL validator accepts `char` for the `string`/`varchar`/`text` filter types
 (`src/mysql/ddl_schema_validator.cpp`).
 
+### 3.4 A value that fails conversion
+
+When a column's text cannot be converted to the configured type — a `TINYINT(1)` holding `2`,
+a zero `TIMESTAMP`, a zero `DATE` or `DATETIME` — both ingest paths log a warning and omit
+that filter from the document's filter map (`src/loader/initial_loader.cpp`,
+`src/mysql/rows_parser_filter.cpp`). Membership is still decided by the same verdict on both
+routes. The initial load's `WHERE` clause has already judged the row; replication reaches that
+verdict with `RequiredFilterPredicate::MatchesUndecodedValue`
+(`src/mysql/required_filter_predicate.cpp`), called when a required column is absent from a
+row's filter map (`src/mysql/binlog_filter_evaluator.cpp`; row images are always `FULL`, so
+absence means the value did not decode), given the column's raw text:
+
+| Domain | Verdict for a non-NULL value that did not decode |
+|---|---|
+| `IS NULL` / `IS NOT NULL` | `IS NOT NULL` holds, `IS NULL` does not |
+| `boolean` | the value is neither 0 nor 1, so `!=` holds and `=` does not |
+| `timestamp` | the zero timestamp orders before every instant: `!=`, `<` and `<=` hold, the rest do not (its raw text is ordered like a `datetime`) |
+| `datetime`, `date` | the server compares a zero or partly zero date as a datetime ordered by its components (`0000-00-00` before every real instant, `2024-00-00` before `2024-01-01`). The verdict applies the same half-open bounds the `WHERE` clause renders for target `x`: `<` is `< L(x)`, `<=` is `< L(x+1)`, `>` is `>= L(x+1)`, `>=` is `>= L(x)`, `=` is both `>= L(x)` and `< L(x+1)`, `!=` is either `< L(x)` or `>= L(x+1)`, where `L` is the whole-second literal. A value ordered between `L(x)` and `L(x+1)` therefore satisfies `<=`, `>=` and `!=` but not `<`, `>` or `=` (`2024-00-00 00:00:00` satisfies `<= 2023-12-31 23:59:59`) |
+| every other type | no stored value fails to decode; the row is rejected |
+
+The same row content is therefore in the index after a cold start and after the next update to
+that row.
+
 ---
 
 ## 4. Known divergences
@@ -298,58 +335,13 @@ DDL validator accepts `char` for the `string`/`varchar`/`text` filter types
 Each entry states both sides with citations. These are descriptions of what the code does,
 not a list of intentions.
 
-### 4.1 Boolean query filters: the two query paths disagree on unrecognized value text
-
-The fallback path parses the filter value into a bool with no validity flag: `bool_val` is
-true only for the exact strings `1` and `true`, and silently `false` for everything else
-(`src/server/search_pipeline.cpp`). It then compares that against the stored bool
-(`src/server/search_pipeline.cpp`).
-
-The bitmap path emits a bool key only for `1`, `true`, `0` and `false`
-(`src/server/search_pipeline.cpp`); for any other value no bool key enters the
-union, and no stored boolean can be selected.
-
-For a filter value outside `{1, true, 0, false}` — for example `TRUE`, `True`, `yes` or `2`:
-
-| Request | Path taken | Result |
-|---|---|---|
-| `FILTER flag = TRUE` | bitmap | matches nothing |
-| `FILTER flag = TRUE AND score > 3` | fallback | matches rows where `flag` is **false** |
-| `FILTER flag != TRUE` | bitmap | matches every candidate |
-| `FILTER flag != TRUE AND score > 3` | fallback | matches rows where `flag` is **true** |
-
-The comparison is byte-exact and case-sensitive in both places, so `TRUE` and `True` are
-both outside the recognized set. Note that required-filter resolution lowercases before
-matching the same token set (`src/mysql/required_filter_predicate.cpp`), and so does the
-ingest converter (`src/mysql/rows_parser_filter.cpp`) — the query side is the only one
-of the three that is case-sensitive.
-
-### 4.2 The initial-load text predicate is not sargable
+### 4.1 The initial-load text predicate is not sargable
 
 `` CAST(`c` AS BINARY) `` wraps the column in a function, which prevents MySQL from using an
-index on that column (`src/mysql/required_filter_predicate.cpp`). The same applies to
-`` UNIX_TIMESTAMP(`c`) `` for `timestamp` (`src/mysql/required_filter_predicate.cpp`).
-Both wraps exist to make the SQL agree with the evaluator, and both cost the index. See
-section 5.
+index on that column (`src/mysql/required_filter_predicate.cpp`). The wrap exists to make the
+SQL agree with the evaluator, and it costs the index. See section 5.
 
-### 4.3 A value that fails conversion is admitted by the initial load and rejected by replication
-
-When a column's text cannot be converted to the configured type, both ingest paths log a
-warning and omit that filter from the document's filter map
-(`src/loader/initial_loader.cpp`, `src/mysql/rows_parser_filter.cpp`). The
-consequences then differ:
-
-- Initial load: membership was already decided by the SQL `WHERE`, which the row passed. The
-  document is indexed, with that filter column absent.
-- Replication: `EvaluateRequiredFilters` looks the column up in the filter map, does not
-  find it, logs `required_filter_column_not_found` and rejects the row
-  (`src/mysql/binlog_filter_evaluator.cpp`).
-
-The same row content is therefore in the index after a cold start and removed from it after
-the next update to that row. This is a disagreement about the *stored* value, not about the
-predicate: the predicate is never reached, because the value never became one.
-
-### 4.4 Configuration does not check that a value is comparable under its declared type
+### 4.2 Configuration does not check that a value is comparable under its declared type
 
 The configured `value` is validated for presence, for compatibility with `IS NULL`, and for
 emptiness — all three in `ParseRequiredFilterConfig` (`src/config/config.cpp`), each
@@ -375,19 +367,17 @@ Every predicate below is emitted by `src/mysql/required_filter_predicate.cpp`.
 |---|---|---|---|
 | any type, `IS NULL` / `IS NOT NULL` | bare column | — | Yes |
 | `string`, `varchar`, `text` | `` CAST(`c` AS BINARY) `` | character literal | **No** — the column is wrapped in a function |
-| `timestamp` | `` UNIX_TIMESTAMP(`c`) `` | integer literal | **No** — the column is wrapped in a function |
-| `date`, `datetime` | bare column | character literal | Yes — MySQL folds the constant to the column's temporal type |
-| `time` | bare column | character literal `_utf8mb4 X'<hex [-]HH:MM:SS>'` | Yes — same constant folding |
+| `date`, `datetime`, `timestamp` | bare column | character literals, as range bounds | Yes — MySQL folds each constant to the column's temporal type |
+| `time` | bare column | clock literals `_utf8mb4 X'<hex [-]HH:MM:SS>'`, as range bounds | Yes — same constant folding |
 | all integer types, `double`, `boolean` | bare column | bare numeric literal | Yes |
 | `float` | bare column | `CAST(<double literal> AS FLOAT)` | n/a — the domain is implemented but unreachable, because the type is refused at configuration load, so no predicate is ever emitted (§3.2) |
 
 Three further properties bear on the cost of an initial load:
 
-- **The two non-sargable cases are the common ones.** A `required_filters` entry on a status
-  or category `VARCHAR` — the most common shape — forces a full scan of the table, and so
-  does any `timestamp` cutoff. A `datetime` column carrying the same cutoff is sargable, so
-  the choice of MySQL column type for a load-narrowing filter decides whether the load scans
-  or seeks.
+- **The one non-sargable case is the common one.** A `required_filters` entry on a status
+  or category `VARCHAR` — the most common shape — forces a full scan of the table. Every
+  temporal cutoff is sargable, so the choice of MySQL column type for a load-narrowing filter
+  can decide whether the load scans or seeks.
 - **The `SELECT` is always ordered by the primary key**
   (`src/loader/initial_loader.cpp`). With a non-sargable `WHERE` this is a scan plus
   either a primary-key-ordered traversal or a filesort of the surviving rows.

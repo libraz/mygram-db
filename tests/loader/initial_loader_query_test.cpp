@@ -20,6 +20,8 @@
 #include <chrono>
 #include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -31,6 +33,7 @@
 #include "mysql/text_materializer.h"
 #include "mysql_test_helpers.h"
 #include "storage/document_store.h"
+#include "storage/dump_format_limits.h"
 #include "utils/datetime_converter.h"
 #include "utils/sql_utils.h"
 
@@ -272,7 +275,7 @@ TEST(InitialLoadSelectQueryTest, TimestampFilterBecomesAnEpochExpression) {
   ASSERT_FALSE(query.empty());
   auto expected_epoch = mygram::utils::ParseDatetimeValue("2026-01-01 00:30:00", "+00:00");
   ASSERT_TRUE(expected_epoch.has_value());
-  EXPECT_NE(query.find("FLOOR(UNIX_TIMESTAMP(`published_at`)) <= " + std::to_string(*expected_epoch)),
+  EXPECT_NE(query.find("`published_at` < " + mygramdb::utils::EncodeMySQLStringLiteral("2026-01-01 00:30:01")),
             std::string::npos)
       << query;
 
@@ -326,6 +329,18 @@ class BatchProcessingTest : public ::testing::Test {
   std::unique_ptr<storage::DocumentStore> doc_store_;
   std::unique_ptr<index::Index> index_;
 };
+
+namespace internal {
+
+struct InitialLoaderTestAccess {
+  static mygram::utils::Expected<void, mygram::utils::Error> FlushBatch(
+      InitialLoader& loader, std::vector<storage::DocumentStore::DocumentItem>& doc_batch,
+      std::vector<index::Index::DocumentItem>& index_batch) {
+    return loader.FlushBatch(doc_batch, index_batch);
+  }
+};
+
+}  // namespace internal
 
 /**
  * @brief Test that final batch is properly indexed
@@ -399,43 +414,82 @@ TEST_F(BatchProcessingTest, FinalBatchIsIndexed) {
 }
 
 /**
- * @brief Test batch processing with duplicates
- *
- * When duplicates exist, doc_ids may not match index_batch properly.
+ * @brief FlushBatch preserves preexisting documents and indexes only the first new duplicate key.
  */
 TEST_F(BatchProcessingTest, DuplicatesHandledCorrectly) {
+  mysql::Connection connection(mysql::Connection::Config{});
+  InitialLoader loader(connection, *index_, *doc_store_, BaseTableConfig());
+
+  const storage::FilterMap existing_filters{{"status", int32_t{1}}};
+  auto existing_doc_id = doc_store_->AddDocument("existing_pk", existing_filters, "stone old", "stone old");
+  ASSERT_TRUE(existing_doc_id.has_value());
+  ASSERT_TRUE(index_->AddDocument(*existing_doc_id, "stone old"));
+
   std::vector<storage::DocumentStore::DocumentItem> doc_batch;
   std::vector<index::Index::DocumentItem> index_batch;
 
-  // Add items with one duplicate
-  doc_batch.push_back({"pk1", {}});
-  index_batch.push_back({0, "first text"});
+  // The first batch row conflicts with a preexisting document. The next two
+  // rows share a new key but carry different text; the first row must win.
+  doc_batch.push_back({"existing_pk", {{"status", int32_t{2}}}, "quartz replacement", "quartz replacement"});
+  index_batch.push_back({0, "quartz replacement"});
+  doc_batch.push_back({"new_pk", {{"status", int32_t{3}}}, "alpha first", "alpha first"});
+  index_batch.push_back({0, "alpha first"});
+  doc_batch.push_back({"new_pk", {{"status", int32_t{4}}}, "bronze later", "bronze later"});
+  index_batch.push_back({0, "bronze later"});
 
-  doc_batch.push_back({"pk2", {}});
-  index_batch.push_back({0, "second text"});
+  storage::DocumentStore order_store;
+  auto order_store_existing = order_store.AddDocument("existing_pk", existing_filters, "stone old", "stone old");
+  ASSERT_TRUE(order_store_existing.has_value());
+  const auto ordered_ids_result = order_store.AddDocumentBatch(doc_batch);
+  ASSERT_TRUE(ordered_ids_result.has_value());
+  const auto& ordered_ids = *ordered_ids_result;
+  ASSERT_EQ(ordered_ids.size(), 3U);
+  ASSERT_NE(ordered_ids[1], *order_store_existing);
+  EXPECT_EQ(ordered_ids, (std::vector<storage::DocId>{*order_store_existing, ordered_ids[1], ordered_ids[1]}));
+  EXPECT_EQ(order_store.GetDocId("new_pk"), std::optional<storage::DocId>{ordered_ids[1]});
+  EXPECT_EQ(order_store.Size(), 2U);
 
-  doc_batch.push_back({"pk1", {}});  // Duplicate!
-  index_batch.push_back({0, "third text"});
+  auto flush_result = internal::InitialLoaderTestAccess::FlushBatch(loader, doc_batch, index_batch);
+  ASSERT_TRUE(flush_result.has_value()) << flush_result.error().message();
+  EXPECT_TRUE(doc_batch.empty());
+  EXPECT_TRUE(index_batch.empty());
+  EXPECT_EQ(loader.GetProcessedRows(), 3U);
 
-  doc_batch.push_back({"pk3", {}});
-  index_batch.push_back({0, "fourth text"});
+  const auto existing_after = doc_store_->GetDocId("existing_pk");
+  const auto new_after = doc_store_->GetDocId("new_pk");
+  ASSERT_TRUE(existing_after.has_value());
+  ASSERT_TRUE(new_after.has_value());
 
-  auto doc_ids_result = doc_store_->AddDocumentBatch(doc_batch);
-  ASSERT_TRUE(doc_ids_result.has_value());
-  auto doc_ids = *doc_ids_result;
+  // IDs assigned through FlushBatch prove that the first row for the new key
+  // retained its position and the later duplicate reused that identity.
+  EXPECT_EQ(*existing_after, *existing_doc_id);
 
-  // AddDocumentBatch returns same size (returns existing doc_id for duplicates)
-  ASSERT_EQ(doc_ids.size(), doc_batch.size());
+  EXPECT_EQ(doc_store_->Size(), 2U);
+  EXPECT_EQ(doc_store_->GetOriginalText(*existing_doc_id), std::optional<std::string>{"stone old"});
+  EXPECT_EQ(doc_store_->GetNormalizedText(*existing_doc_id), std::optional<std::string>{"stone old"});
+  EXPECT_EQ(doc_store_->GetOriginalText(*new_after), std::optional<std::string>{"alpha first"});
+  EXPECT_EQ(doc_store_->GetNormalizedText(*new_after), std::optional<std::string>{"alpha first"});
 
-  // The issue: doc_ids[2] will be the same as doc_ids[0] (existing doc_id)
-  // But index_batch[2] has different text ("third text")
-  // This causes incorrect indexing if we blindly map them
+  const auto existing_document = doc_store_->GetDocument(*existing_doc_id);
+  ASSERT_TRUE(existing_document.has_value());
+  ASSERT_TRUE(existing_document->filters.contains("status"));
+  EXPECT_EQ(std::get<int32_t>(existing_document->filters.at("status")), 1);
+  const auto new_document = doc_store_->GetDocument(*new_after);
+  ASSERT_TRUE(new_document.has_value());
+  ASSERT_TRUE(new_document->filters.contains("status"));
+  EXPECT_EQ(std::get<int32_t>(new_document->filters.at("status")), 3);
 
-  // Verify the duplicate behavior
-  EXPECT_EQ(doc_ids[0], doc_ids[2]) << "Duplicate should return same doc_id";
+  EXPECT_EQ(index_->SearchAnd({"to"}), (std::vector<storage::DocId>{*existing_doc_id}));
+  EXPECT_EQ(index_->SearchAnd({"qu"}), std::vector<storage::DocId>{});
+  EXPECT_EQ(index_->SearchAnd({"al"}), (std::vector<storage::DocId>{*new_after}));
+  EXPECT_EQ(index_->SearchAnd({"fi"}), (std::vector<storage::DocId>{*new_after}));
+  EXPECT_TRUE(index_->SearchAnd({"br"}).empty());
+  EXPECT_TRUE(index_->SearchAnd({"la"}).empty());
 
-  // To fix Need to skip duplicates when indexing
-  // Current implementation would incorrectly index "third text" with doc_ids[0]
+  auto indexed_doc_ids = index_->SearchOr({"to", "al"});
+  std::sort(indexed_doc_ids.begin(), indexed_doc_ids.end());
+  EXPECT_EQ(indexed_doc_ids.size(), doc_store_->Size());
+  EXPECT_EQ(indexed_doc_ids, (std::vector<storage::DocId>{*existing_doc_id, *new_after}));
 }
 
 /**
@@ -621,7 +675,9 @@ TEST(InitialLoaderIntegrationTest, CancellationDoesNotDrainTheRemainingRows) {
   cleanup();
   ASSERT_TRUE(
       writer.ExecuteUpdate("CREATE TABLE " + quoted_table + " (id INT PRIMARY KEY, content MEDIUMTEXT) ENGINE=InnoDB"));
-  ASSERT_TRUE(writer.ExecuteUpdate("SET SESSION cte_max_recursion_depth = 100000"));
+  const std::string recursion_setting =
+      writer.GetFlavor() == mysql::ServerFlavor::kMariaDB ? "max_recursive_iterations" : "cte_max_recursion_depth";
+  ASSERT_TRUE(writer.ExecuteUpdate("SET SESSION " + recursion_setting + " = 100000"));
   ASSERT_TRUE(
       writer.ExecuteUpdate("INSERT INTO " + quoted_table +
                            " WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 40000)"
@@ -738,6 +794,69 @@ TEST(InitialLoaderIntegrationTest, CanonicalizesEnumSetDecimalAndTemporalValues)
   EXPECT_EQ(std::get<storage::TimeValue>(*elapsed).seconds, -(10 * 3600 + 20 * 60 + 30));
 
   cleanup();
+}
+
+TEST(InitialLoaderIntegrationTest, RejectsExpandedTextBeforeFlushingSnapshotBatch) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
+  }
+
+  auto connection_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection writer(connection_config);
+  auto writer_connect = writer.Connect("initial-loader-text-limit-writer");
+  ASSERT_TRUE(writer_connect) << "MySQL connection failed: " << writer_connect.error().message();
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "text_limit_" + suffix;
+  const std::string quoted_table = "`" + table + "`";
+  struct TableCleanup {
+    mysql::Connection& connection;
+    const std::string& table;
+    ~TableCleanup() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table); }
+  } cleanup{writer, quoted_table};
+
+  ASSERT_TRUE(writer.ExecuteUpdate("CREATE TABLE " + quoted_table +
+                                   " (id VARCHAR(32) PRIMARY KEY, content MEDIUMTEXT) ENGINE=InnoDB"));
+  ASSERT_TRUE(writer.ExecuteUpdate("INSERT INTO " + quoted_table +
+                                   " VALUES ('a_valid', 'valid text'), ('z_expanded', "
+                                   "REPEAT(CONVERT(0xEFB7BA USING utf8mb4), 508401))"));
+
+  config::TableConfig table_config;
+  table_config.name = table;
+  table_config.database = connection_config.database;
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  table_config.ngram_size = 2;
+  config::BuildConfig build_config;
+  build_config.batch_size = 2;
+
+  index::Index index(2);
+  constexpr size_t kCompatibilityCharacterCount = 508401;
+  constexpr std::string_view kCompatibilityCharacter = "\xEF\xB7\xBA";  // U+FDFA
+  {
+    std::string source_probe;
+    source_probe.reserve(kCompatibilityCharacterCount * kCompatibilityCharacter.size());
+    for (size_t i = 0; i < kCompatibilityCharacterCount; ++i) {
+      source_probe.append(kCompatibilityCharacter);
+    }
+    const std::string normalized_probe = index.NormalizeText(source_probe);
+    ASSERT_EQ(source_probe.size(), 1'525'203U);
+    ASSERT_EQ(normalized_probe.size(), 16'777'233U);
+    ASSERT_GT(normalized_probe.size(), storage::dump_format_limits::docstore::kMaxNormalizedTextLength);
+  }
+
+  mysql::Connection loader_connection(connection_config);
+  auto loader_connect = loader_connection.Connect("initial-loader-text-limit-test");
+  ASSERT_TRUE(loader_connect) << "MySQL connection failed: " << loader_connect.error().message();
+  storage::DocumentStore store;
+  InitialLoader loader(loader_connection, index, store, table_config, {}, build_config);
+  auto load = loader.Load();
+  ASSERT_FALSE(load.has_value());
+  EXPECT_EQ(load.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(load.error().message().find("normalized_text length 16777233"), std::string::npos)
+      << load.error().message();
+  EXPECT_EQ(loader.GetProcessedRows(), 0U);
+  EXPECT_EQ(store.Size(), 0U);
 }
 
 TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGtid) {
@@ -1126,11 +1245,12 @@ TEST(InitialLoaderIntegrationTest, SessionTimezoneAndTimestampFilterUseOneEpochC
   mysql::RowData binlog_row;
   binlog_row.primary_key = "1";
   binlog_row.columns["published_at"] = std::to_string(*expected_epoch);
-  auto binlog_filters =
-      mysql::BinlogFilterEvaluator::ExtractAllFilters(binlog_row, table_config, mysql_config.datetime_timezone);
+  mysql::UnconvertedFilterText binlog_unconverted;
+  auto binlog_filters = mysql::BinlogFilterEvaluator::ExtractAllFilters(
+      binlog_row, table_config, mysql_config.datetime_timezone, binlog_unconverted);
   ASSERT_TRUE(binlog_filters.contains("published_at"));
   EXPECT_EQ(binlog_filters.at("published_at"), *snapshot_value);
-  EXPECT_TRUE(mysql::BinlogFilterEvaluator::EvaluateRequiredFilters(binlog_filters, table_config,
+  EXPECT_TRUE(mysql::BinlogFilterEvaluator::EvaluateRequiredFilters(binlog_filters, binlog_unconverted, table_config,
                                                                     mysql_config.datetime_timezone));
 
   cleanup();

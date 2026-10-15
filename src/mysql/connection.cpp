@@ -24,7 +24,7 @@
 #include <sys/socket.h>
 #endif
 
-#include "mysql/gtid_encoder.h"
+#include "utils/gtid_grammar.h"
 #include "utils/numeric_parse.h"
 #include "utils/sql_utils.h"
 #include "utils/structured_log.h"
@@ -88,38 +88,24 @@ mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_er
 // GTID implementation
 
 mygram::utils::Expected<GTID, mygram::utils::Error> GTID::Parse(const std::string& gtid_str) {
-  using mygram::utils::Error;
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  // Format: "UUID:transaction_id" or "UUID:start-end"
-  std::string uuid = GtidEncoder::ExtractUuid(gtid_str);
-  if (uuid.empty()) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format: missing colon separator", gtid_str));
+  // Format: "UUID:transaction_id" or "UUID:start-end"; a range yields its end.
+  auto parsed = mygram::utils::ParseMysqlGtidSet(gtid_str);
+  if (!parsed) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, parsed.error().message(), gtid_str));
+  }
+  if (parsed->size() != 1 || parsed->begin()->first.size() != mygram::utils::kGtidUuidTextLength ||
+      parsed->begin()->second.size() != 1) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID,
+                                    "Invalid GTID format: expected a single untagged UUID:transaction_id", gtid_str));
   }
 
   GTID gtid;
-  gtid.server_uuid = uuid;
-
-  size_t colon_pos = gtid_str.find(':');
-  std::string txn_part = gtid_str.substr(colon_pos + 1);
-
-  // Handle range format (UUID:1-10) - take the end value
-  size_t dash_pos = txn_part.find('-');
-  if (dash_pos != std::string::npos) {
-    txn_part = txn_part.substr(dash_pos + 1);
-  }
-
-  uint64_t txn_id = 0;
-  auto [ptr, ec] = std::from_chars(txn_part.data(), txn_part.data() + txn_part.size(), txn_id);
-  if (ec != std::errc{} || ptr != txn_part.data() + txn_part.size()) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format: invalid transaction ID", gtid_str));
-  }
-  gtid.transaction_id = txn_id;
-
+  gtid.server_uuid = parsed->begin()->first;
+  gtid.transaction_id = parsed->begin()->second.front().end;
   return gtid;
 }
 
@@ -625,7 +611,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::SetGTIDNext(cons
     return ExecuteUpdate(query);
   }
 
-  // Validate and normalize GTID format to prevent injection
+  // Only a canonical lowercase UUID and a number reach the statement.
   auto parsed = GTID::Parse(gtid);
   if (!parsed) {
     mygram::utils::StructuredLog()
@@ -637,7 +623,6 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::SetGTIDNext(cons
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format", gtid));
   }
 
-  // Use normalized GTID string to prevent injection
   std::string normalized = parsed->ToString();
   std::string query = "SET GTID_NEXT = '" + normalized + "'";
   return ExecuteUpdate(query);
@@ -833,19 +818,20 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
   const std::string table_literal = mygram::utils::EncodeMySQLStringLiteral(table);
   const std::string column_literal = mygram::utils::EncodeMySQLStringLiteral(column);
 
-  // Query to check if the column is part of a PRIMARY KEY or UNIQUE KEY
+  // Count PRIMARY KEY and UNIQUE constraints made of exactly this column. A
+  // composite key of either kind does not identify a row by this column alone.
   std::string query =
       "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE "
       "WHERE TABLE_SCHEMA = " +
       database_literal + " AND TABLE_NAME = " + table_literal + " AND COLUMN_NAME = " + column_literal +
-      " AND (CONSTRAINT_NAME = 'PRIMARY' OR CONSTRAINT_NAME IN "
+      " AND CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.TABLE_CONSTRAINTS "
       "WHERE TABLE_SCHEMA = " +
       database_literal + " AND TABLE_NAME = " + table_literal +
-      " AND CONSTRAINT_TYPE = 'UNIQUE' AND CONSTRAINT_NAME IN "
+      " AND CONSTRAINT_TYPE IN ('PRIMARY KEY', 'UNIQUE') AND CONSTRAINT_NAME IN "
       "(SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE "
       "WHERE TABLE_SCHEMA = " +
-      database_literal + " AND TABLE_NAME = " + table_literal + " GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1)))";
+      database_literal + " AND TABLE_NAME = " + table_literal + " GROUP BY CONSTRAINT_NAME HAVING COUNT(*) = 1))";
 
   auto result_exp = Execute(query);
   if (!result_exp) {

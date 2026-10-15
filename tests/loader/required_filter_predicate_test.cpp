@@ -57,7 +57,8 @@ bool BinlogAccepts(const config::TableConfig& table_config, const storage::Filte
                    const std::string& datetime_timezone = "+00:00") {
   storage::FilterMap filters;
   filters[table_config.required_filters.front().name] = stored_value;
-  return mysql::BinlogFilterEvaluator::EvaluateRequiredFilters(filters, table_config, datetime_timezone);
+  return mysql::BinlogFilterEvaluator::EvaluateRequiredFilters(filters, mysql::UnconvertedFilterText{}, table_config,
+                                                               datetime_timezone);
 }
 
 std::string Literal(const std::string& value) {
@@ -160,9 +161,9 @@ TEST(RequiredFilterPredicateTest, NonTextPredicatesKeepTheBareColumn) {
 // ===========================================================================
 
 /**
- * TIME_TO_SEC() converts a TIME value to seconds since midnight, truncating
- * any fractional seconds toward zero the same way TimeToSeconds decodes a
- * binlog row - see RequiredFilterPredicate::SqlRenderer::operator()(Clock).
+ * A TIME comparison is a pair of bounds on the bare column that treat a
+ * fractional value as the whole second it truncates to toward zero, the same
+ * way TimeToSeconds decodes a binlog row - see RenderTruncatedRange.
  */
 constexpr int64_t kNineAmSeconds = 9 * 3600;
 
@@ -176,16 +177,15 @@ TEST(RequiredFilterPredicateTest, ClockFormattedTimeFilterBuildsAQuery) {
   const auto query =
       internal::BuildInitialLoadSelectQuery(TableWithRequiredFilter("elapsed", "time", ">=", "09:00:00"), {});
   ASSERT_FALSE(query.empty()) << "a time value the evaluator accepts must also be expressible in the SELECT";
-  EXPECT_NE(query.find("TIME_TO_SEC(`elapsed`) >= " + std::to_string(kNineAmSeconds)), std::string::npos) << query;
+  EXPECT_NE(query.find("`elapsed` >= " + Literal("09:00:00")), std::string::npos) << query;
 }
 
 /**
  * @brief A time filter written in seconds and one written as a clock render
  * the same query.
  *
- * Comparing TIME_TO_SEC(column) against a plain integer has no packed-HHMMSS
- * ambiguity to avoid, so both spellings of the same instant collapse to one
- * predicate instead of needing a clock literal.
+ * Both spellings resolve to one second count, which is rendered once as a
+ * clock literal, so they collapse to one predicate.
  */
 TEST(RequiredFilterPredicateTest, TimeFilterInSecondsAndInClockFormRenderTheSameQuery) {
   const auto seconds_query =
@@ -194,26 +194,31 @@ TEST(RequiredFilterPredicateTest, TimeFilterInSecondsAndInClockFormRenderTheSame
       internal::BuildInitialLoadSelectQuery(TableWithRequiredFilter("elapsed", "time", "=", "09:00:00"), {});
   ASSERT_FALSE(seconds_query.empty());
   ASSERT_FALSE(clock_query.empty());
-  EXPECT_NE(seconds_query.find("TIME_TO_SEC(`elapsed`) = " + std::to_string(kNineAmSeconds)), std::string::npos)
+  EXPECT_NE(
+      seconds_query.find("(`elapsed` >= " + Literal("09:00:00") + " AND `elapsed` < " + Literal("09:00:01") + ")"),
+      std::string::npos)
       << seconds_query;
   EXPECT_EQ(seconds_query, clock_query);
 }
 
 /**
- * @brief Negative and over-a-day times render as their seconds count.
+ * @brief Negative and over-a-day times render as clock bounds on the column.
  */
-TEST(RequiredFilterPredicateTest, NegativeAndOverdayTimeFiltersRenderAsSeconds) {
+TEST(RequiredFilterPredicateTest, NegativeAndOverdayTimeFiltersRenderAsClockBounds) {
   const auto negative_clock =
       internal::BuildInitialLoadSelectQuery(TableWithRequiredFilter("elapsed", "time", "=", "-10:20:30"), {});
-  EXPECT_NE(negative_clock.find("TIME_TO_SEC(`elapsed`) = -37230"), std::string::npos) << negative_clock;
+  // Toward zero, -10:20:30 is every value in (-10:20:31, -10:20:30].
+  const std::string negative_equal =
+      "(`elapsed` > " + Literal("-10:20:31") + " AND `elapsed` <= " + Literal("-10:20:30") + ")";
+  EXPECT_NE(negative_clock.find(negative_equal), std::string::npos) << negative_clock;
 
   const auto negative_seconds =
       internal::BuildInitialLoadSelectQuery(TableWithRequiredFilter("elapsed", "time", "=", "-37230"), {});
-  EXPECT_NE(negative_seconds.find("TIME_TO_SEC(`elapsed`) = -37230"), std::string::npos) << negative_seconds;
+  EXPECT_NE(negative_seconds.find(negative_equal), std::string::npos) << negative_seconds;
 
   const auto overday =
       internal::BuildInitialLoadSelectQuery(TableWithRequiredFilter("elapsed", "time", "<", "100:00:00"), {});
-  EXPECT_NE(overday.find("TIME_TO_SEC(`elapsed`) < 360000"), std::string::npos) << overday;
+  EXPECT_NE(overday.find("`elapsed` < " + Literal("100:00:00")), std::string::npos) << overday;
 }
 
 /**
@@ -245,9 +250,8 @@ TEST(RequiredFilterPredicateTest, TimeLiteralFormattingCoversTheWholeMySQLRange)
 /**
  * Measured on MySQL 8.4: FROM_UNIXTIME() is NULL outside [0, 32536771199], and
  * a WHERE clause built around a NULL is UNKNOWN for every row, so the whole
- * initial load selects nothing and still reports success. UNIX_TIMESTAMP() on
- * the column returns the stored epoch, which is the value the binlog path
- * compares.
+ * initial load selects nothing and still reports success. The bound is
+ * therefore a UTC wall-clock literal, which exists for a pre-epoch instant too.
  */
 constexpr const char* kTimestampBeforeEpoch = "1970-01-01 08:00:00";  // -3600 at +09:00
 
@@ -267,8 +271,7 @@ TEST(RequiredFilterPredicateTest, TimestampFilterBeforeTheEpochStillSelectsRows)
   ASSERT_FALSE(query.empty());
   EXPECT_EQ(query.find("FROM_UNIXTIME"), std::string::npos)
       << "FROM_UNIXTIME is NULL for a negative epoch, which makes the WHERE clause UNKNOWN for every row: " << query;
-  EXPECT_NE(query.find("FLOOR(UNIX_TIMESTAMP(`published_at`)) >= " + std::to_string(*epoch)), std::string::npos)
-      << query;
+  EXPECT_NE(query.find("`published_at` >= " + Literal("1969-12-31 23:00:00")), std::string::npos) << query;
 
   EXPECT_TRUE(BinlogAccepts(table_config, static_cast<int64_t>(0), mysql_config.datetime_timezone));
 }
@@ -286,8 +289,7 @@ TEST(RequiredFilterPredicateTest, TimestampFilterComparesTheStoredEpoch) {
 
   const auto query = internal::BuildInitialLoadSelectQuery(table_config, mysql_config);
   ASSERT_FALSE(query.empty());
-  EXPECT_NE(query.find("FLOOR(UNIX_TIMESTAMP(`published_at`)) <= " + std::to_string(*epoch)), std::string::npos)
-      << query;
+  EXPECT_NE(query.find("`published_at` < " + Literal("2026-01-01 00:30:01")), std::string::npos) << query;
 
   EXPECT_TRUE(BinlogAccepts(table_config, *epoch, mysql_config.datetime_timezone));
   EXPECT_FALSE(BinlogAccepts(table_config, *epoch + 1, mysql_config.datetime_timezone));
@@ -303,6 +305,7 @@ TEST(RequiredFilterPredicateTest, TimestampFilterComparesTheStoredEpoch) {
 struct EmittedConjunct {
   std::string left;
   std::string literal;
+  std::string whole;  ///< the conjunct as emitted, for shapes with no single operator to split at
 };
 
 /// Pull the single WHERE conjunct out of a generated SELECT.
@@ -320,11 +323,11 @@ std::optional<EmittedConjunct> EmittedPredicate(const std::string& query, const 
     const std::string suffix = " " + comparison_operator;
     if (conjunct.size() > suffix.size() &&
         conjunct.compare(conjunct.size() - suffix.size(), suffix.size(), suffix) == 0) {
-      return EmittedConjunct{conjunct.substr(0, conjunct.size() - suffix.size()), ""};
+      return EmittedConjunct{conjunct.substr(0, conjunct.size() - suffix.size()), "", conjunct};
     }
-    return std::nullopt;
+    return EmittedConjunct{"", "", conjunct};
   }
-  return EmittedConjunct{conjunct.substr(0, split), conjunct.substr(split + separator.size())};
+  return EmittedConjunct{conjunct.substr(0, split), conjunct.substr(split + separator.size()), conjunct};
 }
 
 /// Read back the bytes of a `_utf8mb4 X'..'` literal.
@@ -362,6 +365,125 @@ bool Holds(const storage::FilterValue& value) {
   return std::holds_alternative<T>(value);
 }
 
+/// Compare a raw column value against a whole-second bound.
+bool CompareRaw(double raw, int64_t bound, std::string_view comparison_operator) {
+  if (comparison_operator == ">=") {
+    return raw >= static_cast<double>(bound);
+  }
+  if (comparison_operator == ">") {
+    return raw > static_cast<double>(bound);
+  }
+  if (comparison_operator == "<") {
+    return raw < static_cast<double>(bound);
+  }
+  if (comparison_operator == "<=") {
+    return raw <= static_cast<double>(bound);
+  }
+  return false;
+}
+
+/// One bound of a temporal range conjunct, evaluated for a non-NULL raw value.
+std::optional<bool> EvaluateTemporalAtom(const std::string& atom, const std::string& type,
+                                         const std::string& quoted_column, double raw) {
+  if (atom == "1 = 0") {
+    return false;
+  }
+  const std::string prefix = quoted_column + " ";
+  if (atom.compare(0, prefix.size(), prefix) != 0) {
+    return std::nullopt;
+  }
+  const std::string rest = atom.substr(prefix.size());
+  if (rest == "IS NOT NULL") {
+    return true;
+  }
+  const size_t split = rest.find(' ');
+  if (split == std::string::npos) {
+    return std::nullopt;
+  }
+  auto text = DecodeByteLiteral(rest.substr(split + 1));
+  if (!text) {
+    return std::nullopt;
+  }
+  std::optional<int64_t> bound;
+  if (type == "time") {
+    auto seconds = mygram::utils::DateTimeProcessor::TimeToSeconds(*text);
+    if (seconds) {
+      bound = *seconds;
+    }
+  } else {
+    bound = mygram::utils::ConvertToEpoch(*text, type == "timestamp" ? 0 : kDifferentialTimezoneOffsetSeconds);
+  }
+  if (!bound) {
+    return std::nullopt;
+  }
+  return CompareRaw(raw, *bound, rest.substr(0, split));
+}
+
+/// A temporal conjunct: one bound, or two joined by AND / OR inside parentheses.
+std::optional<bool> EvaluateTemporalConjunct(const std::string& conjunct, const std::string& type,
+                                             const std::string& quoted_column, double raw) {
+  if (conjunct.size() < 2 || conjunct.front() != '(' || conjunct.back() != ')') {
+    return EvaluateTemporalAtom(conjunct, type, quoted_column, raw);
+  }
+  const std::string inner = conjunct.substr(1, conjunct.size() - 2);
+  const std::vector<std::pair<std::string, bool>> joiners = {{" AND ", true}, {" OR ", false}};
+  for (const auto& [joiner, is_and] : joiners) {
+    const size_t at = inner.find(joiner);
+    if (at == std::string::npos) {
+      continue;
+    }
+    auto lhs = EvaluateTemporalAtom(inner.substr(0, at), type, quoted_column, raw);
+    auto rhs = EvaluateTemporalAtom(inner.substr(at + joiner.size()), type, quoted_column, raw);
+    if (!lhs || !rhs) {
+      return std::nullopt;
+    }
+    return is_and ? (*lhs && *rhs) : (*lhs || *rhs);
+  }
+  return std::nullopt;
+}
+
+/**
+ * @brief The verdict of a temporal range conjunct for one decoded value.
+ *
+ * The column may hold a fraction the decode drops, so the conjunct is judged
+ * at the whole second and at a fraction past it (the fraction toward zero for
+ * TIME, forward in time otherwise). It must give one verdict for all of them,
+ * or the SQL and the decode would disagree on some row.
+ */
+std::optional<bool> TemporalVerdict(const std::string& type, const std::string& quoted_column,
+                                    const std::string& conjunct, const storage::FilterValue& stored) {
+  int64_t whole = 0;
+  if (type == "time") {
+    if (!Holds<storage::TimeValue>(stored)) {
+      return std::nullopt;
+    }
+    whole = std::get<storage::TimeValue>(stored).seconds;
+  } else {
+    if (!Holds<int64_t>(stored)) {
+      return std::nullopt;
+    }
+    whole = std::get<int64_t>(stored);
+  }
+
+  std::vector<double> raws = {static_cast<double>(whole)};
+  if (type == "time" && whole <= 0) {
+    raws.push_back(static_cast<double>(whole) - 0.5);
+  }
+  if (type != "time" || whole >= 0) {
+    raws.push_back(static_cast<double>(whole) + 0.5);
+  }
+
+  std::optional<bool> verdict;
+  for (const double raw : raws) {
+    auto each = EvaluateTemporalConjunct(conjunct, type, quoted_column, raw);
+    if (!each || (verdict && *verdict != *each)) {
+      return std::nullopt;
+    }
+    verdict = each;
+  }
+  return verdict;
+}
+
 /**
  * @brief What MySQL 8.4 makes of the emitted conjunct for one stored value.
  *
@@ -378,18 +500,16 @@ bool Holds(const storage::FilterValue& value) {
  *   `c` op <double literal>                - measured: an exponent literal is
  *                                            read as DOUBLE, and 17 digits
  *                                            round-trip exactly
- *   DATE_FORMAT(`c`, '%Y-%m-%d %H:%i:%s')
- *     op _utf8mb4 X'<wall clock>'          - measured: a DATE column compares
+ *   `c` >= / < _utf8mb4 X'<wall clock>'    - bounds on the bare column,
+ *     (joined by AND / OR for = and !=)      combined from `c` >= L(x) and
+ *                                            `c` < L(x); a DATE column compares
  *                                            against a datetime-shaped string
  *                                            as a datetime, promoting the
- *                                            column to midnight; DATE_FORMAT's
- *                                            %s drops any fractional seconds
- *   FLOOR(UNIX_TIMESTAMP(`c`)) op <epoch>  - the stored UTC epoch, floored to
- *                                            whole seconds
- *   TIME_TO_SEC(`c`) op <seconds>          - seconds since midnight, truncated
- *                                            toward zero the same way a bare
- *                                            number or a clock string both
- *                                            resolve to one seconds count
+ *                                            column to midnight
+ *   `c` >= / > / < / <= _utf8mb4 X'<clock>' - the same for TIME, with the
+ *                                            bounds that make a fractional
+ *                                            value count as the whole second it
+ *                                            truncates to toward zero
  *   `c` op 1 | 0                           - numeric comparison on TINYINT(1)
  *
  * @return The verdict, or std::nullopt when the emitted shape is not one this
@@ -460,41 +580,8 @@ std::optional<bool> SqlVerdict(const std::string& type, const std::string& compa
                    static_cast<int64_t>(emitted.literal == "1" ? 1 : 0));
   }
 
-  if (type == "datetime" || type == "date") {
-    if (emitted.left != "DATE_FORMAT(" + quoted_column + ", '%Y-%m-%d %H:%i:%s')" || !Holds<int64_t>(stored)) {
-      return std::nullopt;
-    }
-    auto wall_clock = DecodeByteLiteral(emitted.literal);
-    if (!wall_clock) {
-      return std::nullopt;
-    }
-    auto target = mygram::utils::ConvertToEpoch(*wall_clock, kDifferentialTimezoneOffsetSeconds);
-    if (!target) {
-      return std::nullopt;
-    }
-    return compare(std::get<int64_t>(stored), *target);
-  }
-
-  if (type == "timestamp") {
-    if (emitted.left != "FLOOR(UNIX_TIMESTAMP(" + quoted_column + "))" || !Holds<int64_t>(stored)) {
-      return std::nullopt;
-    }
-    auto target = mygram::utils::ParseNumeric<int64_t>(emitted.literal);
-    if (!target) {
-      return std::nullopt;
-    }
-    return compare(std::get<int64_t>(stored), *target);
-  }
-
-  if (type == "time") {
-    if (emitted.left != "TIME_TO_SEC(" + quoted_column + ")" || !Holds<storage::TimeValue>(stored)) {
-      return std::nullopt;
-    }
-    auto target = mygram::utils::ParseNumeric<int64_t>(emitted.literal);
-    if (!target) {
-      return std::nullopt;
-    }
-    return compare(std::get<storage::TimeValue>(stored).seconds, *target);
+  if (type == "datetime" || type == "date" || type == "timestamp" || type == "time") {
+    return TemporalVerdict(type, quoted_column, emitted.whole, stored);
   }
 
   if (type == "bigint_unsigned") {
@@ -638,21 +725,9 @@ TEST(RequiredFilterPredicateTest, EveryFilterTypeDecidesMembershipTheSameWayOnBo
  *
  * ConvertToEpoch and TimeToSeconds drop a decoded row's fractional seconds
  * before Matches() ever sees them, so every stored value at T.000 through
- * T.999999 decodes to the same integer T. Before this fix, SqlPredicate
- * compared MySQL's full-precision column directly against T, so a row at
- * T.5 disagreed with the evaluator on '>' (SQL admits, since 0.5s is greater;
- * the evaluator rejects, since its decoded value equals T) and on '='
- * (SQL rejects; the evaluator admits) -- the exact case this finding reports.
- *
- * The MySQL reference manual documents DATE_FORMAT's %s (seconds, no
- * fraction; %f is the separate specifier for microseconds), TIME_TO_SEC, and
- * FLOOR as dropping/flooring any fractional part before the value reaches the
- * comparison operator, so the column-side expression this predicate now
- * renders can no longer distinguish T from T.5 either -- both reduce to T,
- * the same integer the evaluator decoded. Asserting agreement at the
- * truncated boundary T is therefore sufficient: nothing downstream of the
- * wrapping function retains the information a fractional row would need to
- * decide differently.
+ * T.999999 decodes to the same integer T. The temporal predicates are bounds on
+ * the bare column, so the model judges each one at T and at a fraction past T
+ * (toward zero for TIME) and requires a single verdict equal to the evaluator's.
  */
 TEST(RequiredFilterPredicateTest, FractionalSecondBoundaryAgreesAcrossBothSurfaces) {
   config::MysqlConfig mysql_config;
@@ -800,9 +875,7 @@ TEST(RequiredFilterPredicateTest, AnEpochValuedDatetimeBoundIsEmittedAsAWallCloc
     const auto table_config = TableWithRequiredFilter("published_at", type, ">=", "1704067200");
     const auto query = internal::BuildInitialLoadSelectQuery(table_config, mysql_config);
     ASSERT_FALSE(query.empty()) << type;
-    EXPECT_NE(query.find("DATE_FORMAT(`published_at`, '%Y-%m-%d %H:%i:%s') >= " + Literal("2024-01-01 09:00:00")),
-              std::string::npos)
-        << query;
+    EXPECT_NE(query.find("`published_at` >= " + Literal("2024-01-01 09:00:00")), std::string::npos) << query;
     EXPECT_EQ(query.find(Literal("1704067200")), std::string::npos)
         << "an epoch reached MySQL as a character literal, which no DATETIME comparison reads: " << query;
   }
@@ -822,9 +895,7 @@ TEST(RequiredFilterPredicateTest, ADatetimeBoundKeepsTheConfiguredOffsetsCancell
   const auto table_config = TableWithRequiredFilter("published_at", "datetime", ">=", "2024-01-01 12:00:00");
   const auto query = internal::BuildInitialLoadSelectQuery(table_config, mysql_config);
   ASSERT_FALSE(query.empty());
-  EXPECT_NE(query.find("DATE_FORMAT(`published_at`, '%Y-%m-%d %H:%i:%s') >= " + Literal("2024-01-01 12:00:00")),
-            std::string::npos)
-      << query;
+  EXPECT_NE(query.find("`published_at` >= " + Literal("2024-01-01 12:00:00")), std::string::npos) << query;
 }
 
 /**

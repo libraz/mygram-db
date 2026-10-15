@@ -62,7 +62,7 @@ class BinlogReaderFixture : public ::testing::Test {
 
   void SetUp() override {
     table_config_ = MakeDefaultTableConfig();
-    reader_config_.start_gtid = "uuid:1";
+    reader_config_.start_gtid = "ffffffff-0000-0000-0000-000000000001:1";
     reader_config_.queue_size = 2;
     reader_config_.reconnect_delay_ms = 10;
     reader_config_.server_id = 12345;
@@ -90,7 +90,7 @@ class BinlogReaderFixture : public ::testing::Test {
     event.table_name = table_config_.name;
     event.primary_key = pk;
     event.text = text;
-    event.gtid = "uuid:" + pk;
+    event.gtid = "ffffffff-0000-0000-0000-000000000001:" + pk;
     event.filters["status"] = static_cast<int64_t>(status);
     event.filters["category"] = std::string("news");
     return event;

@@ -8,7 +8,8 @@
 #ifdef USE_MYSQL
 
 #include <algorithm>
-#include <cctype>
+
+#include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
 
@@ -38,23 +39,13 @@ std::optional<size_t> TableMetadata::FindColumnOrdinal(std::string_view name) co
 
 std::vector<std::string> ParseEnumSetColumnValues(const std::string& column_type) {
   size_t prefix_length = 0;
-  if (column_type.size() >= 5) {
-    std::string prefix = column_type.substr(0, 5);
-    for (char& chr : prefix) {
-      chr = static_cast<char>(std::tolower(static_cast<unsigned char>(chr)));
-    }
-    if (prefix == "enum(") {
-      prefix_length = 5;
-    }
+  if (column_type.size() >= 5 &&
+      mygram::utils::EqualsAsciiCaseInsensitive(std::string_view(column_type).substr(0, 5), "enum(")) {
+    prefix_length = 5;
   }
-  if (prefix_length == 0 && column_type.size() >= 4) {
-    std::string prefix = column_type.substr(0, 4);
-    for (char& chr : prefix) {
-      chr = static_cast<char>(std::tolower(static_cast<unsigned char>(chr)));
-    }
-    if (prefix == "set(") {
-      prefix_length = 4;
-    }
+  if (prefix_length == 0 && column_type.size() >= 4 &&
+      mygram::utils::EqualsAsciiCaseInsensitive(std::string_view(column_type).substr(0, 4), "set(")) {
+    prefix_length = 4;
   }
   if (prefix_length == 0 || column_type.back() != ')') {
     return {};

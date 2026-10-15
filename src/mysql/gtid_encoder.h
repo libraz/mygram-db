@@ -1,7 +1,6 @@
 #ifndef MYGRAM_MYSQL_GTID_ENCODER_H_
 #define MYGRAM_MYSQL_GTID_ENCODER_H_
 
-#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -36,24 +35,12 @@ class GtidEncoder {
  public:
   /**
    * @brief Encodes a GTID set string into binary format
+   *
+   * The text is read by utils::ParseMysqlGtidSet, the grammar every GTID path shares.
    * @param gtid_set String like "uuid:1-3,5-7" or "uuid1:1-3,uuid2:5-7"
-   * @return Expected containing binary encoded GTID set, or Error on invalid input
+   * @return Expected containing binary encoded GTID set, or Error on invalid or tagged input
    */
   static mygram::utils::Expected<std::vector<uint8_t>, mygram::utils::Error> Encode(const std::string& gtid_set);
-
-  /**
-   * @brief Extract UUID part from a GTID string
-   * @param gtid_str GTID string like "uuid:1-5" or "uuid:42"
-   * @return UUID portion (e.g., "uuid"), or empty string if format is invalid
-   */
-  static std::string ExtractUuid(const std::string& gtid_str);
-
-  /**
-   * @brief Validate GTID set format
-   * @param gtid_set GTID set string (e.g., "uuid:1-5" or "uuid1:1-3,uuid2:1-5")
-   * @return true if the GTID set has valid format (each entry has UUID:intervals)
-   */
-  static bool IsValidGtidSet(const std::string& gtid_set);
 
   /**
    * @brief Merge one MySQL GTID event into an existing textual GTID set.
@@ -84,32 +71,6 @@ class GtidEncoder {
                                                                                 std::string_view available);
 
  private:
-  struct Interval {
-    uint64_t start;
-    uint64_t end;  // exclusive
-  };
-
-  struct Sid {
-    std::array<uint8_t, 16> uuid = {};  // NOLINT(*-magic-numbers) - UUID is 16 bytes by spec
-    std::vector<Interval> intervals;
-  };
-
-  /**
-   * @brief Parses a UUID string into 16 bytes
-   * @param uuid_str UUID string like "61d5b289-bccc-11f0-b921-cabbb4ee51f6"
-   * @param uuid_bytes Output buffer (16 bytes)
-   * @return Expected containing void on success, or Error on invalid UUID format
-   */
-  static mygram::utils::Expected<void, mygram::utils::Error> ParseUuid(const std::string& uuid_str,
-                                                                       uint8_t* uuid_bytes);
-
-  /**
-   * @brief Parses an interval string like "1-3" or "5"
-   * @param interval_str Interval string
-   * @return Expected containing parsed interval, or Error on invalid format
-   */
-  static mygram::utils::Expected<Interval, mygram::utils::Error> ParseInterval(const std::string& interval_str);
-
   /**
    * @brief Stores a 64-bit integer in little-endian format
    * @param buffer Output buffer

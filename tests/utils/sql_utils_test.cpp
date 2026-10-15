@@ -7,6 +7,9 @@
 
 #include <gtest/gtest.h>
 
+#include <clocale>
+#include <cstdint>
+#include <limits>
 #include <string>
 
 using namespace mygramdb::utils;
@@ -88,141 +91,60 @@ TEST(EncodeMySQLStringLiteralTest, EncodesUtf8BytesWithoutLoss) {
   EXPECT_EQ(EncodeMySQLStringLiteral("日本語"), "_utf8mb4 X'E697A5E69CACE8AA9E'");
 }
 
-// --- StripSQLComments Tests ---
+TEST(FormatMySQLDateTimeLiteralTest, EnforcesMySQLYearBoundsBeforeCalendarConversion) {
+  constexpr int64_t kFirstSupportedLocalEpoch = -30610224000;
+  constexpr int64_t kLastSupportedLocalEpoch = 253402300799;
 
-TEST(StripSQLCommentsTest, NoComments) {
-  std::string sql = "SELECT * FROM users";
-  EXPECT_EQ(StripSQLComments(sql), sql);
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(kFirstSupportedLocalEpoch, 0), "1000-01-01 00:00:00");
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(kLastSupportedLocalEpoch, 0), "9999-12-31 23:59:59");
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(kFirstSupportedLocalEpoch - 1, 0).has_value());
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(kLastSupportedLocalEpoch + 1, 0).has_value());
+
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(std::numeric_limits<int64_t>::min(), 0).has_value());
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(std::numeric_limits<int64_t>::max(), 0).has_value());
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(std::numeric_limits<int64_t>::max(), 9 * 60 * 60).has_value());
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(std::numeric_limits<int64_t>::min(), INT32_MIN).has_value());
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(std::numeric_limits<int64_t>::max(), INT32_MAX).has_value());
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(0, INT32_MIN), "1901-12-13 20:45:52");
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(0, INT32_MAX), "2038-01-19 03:14:07");
 }
 
-TEST(StripSQLCommentsTest, BlockComment) {
-  std::string sql = "SELECT /* column list */ * FROM users";
-  std::string result = StripSQLComments(sql);
-  EXPECT_EQ(result, "SELECT  * FROM users");
+TEST(FormatMySQLDateTimeLiteralTest, AppliesOffsetAtTheSupportedYearBoundaries) {
+  constexpr int64_t kFirstSupportedLocalEpoch = -30610224000;
+  constexpr int64_t kLastSupportedLocalEpoch = 253402300799;
+  constexpr int32_t kOneHour = 3600;
+
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(kFirstSupportedLocalEpoch - kOneHour, kOneHour), "1000-01-01 00:00:00");
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(kFirstSupportedLocalEpoch + kOneHour, -kOneHour), "1000-01-01 00:00:00");
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(kLastSupportedLocalEpoch - kOneHour, kOneHour), "9999-12-31 23:59:59");
+  EXPECT_EQ(FormatMySQLDateTimeLiteral(kLastSupportedLocalEpoch + kOneHour, -kOneHour), "9999-12-31 23:59:59");
+
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(kFirstSupportedLocalEpoch - kOneHour - 1, kOneHour).has_value());
+  EXPECT_FALSE(FormatMySQLDateTimeLiteral(kLastSupportedLocalEpoch + kOneHour + 1, -kOneHour).has_value());
 }
 
-TEST(StripSQLCommentsTest, LineComment) {
-  std::string sql = "SELECT * FROM users -- fetch all\nWHERE id = 1";
-  std::string result = StripSQLComments(sql);
-  EXPECT_EQ(result, "SELECT * FROM users WHERE id = 1");
-}
+TEST(FormatMySQLDoubleLiteralTest, IsIndependentOfNumericLocale) {
+  const char* current_locale = std::setlocale(LC_NUMERIC, nullptr);
+  ASSERT_NE(current_locale, nullptr);
+  struct NumericLocaleGuard {
+    explicit NumericLocaleGuard(const char* locale) : original_locale(locale) {}
+    ~NumericLocaleGuard() { std::setlocale(LC_NUMERIC, original_locale.c_str()); }
 
-TEST(StripSQLCommentsTest, MultipleComments) {
-  std::string sql = "/* start */ SELECT * /* mid */ FROM users -- end";
-  std::string result = StripSQLComments(sql);
-  // Block comments add space for word boundary preservation
-  EXPECT_NE(result.find("SELECT"), std::string::npos);
-  EXPECT_NE(result.find("FROM users"), std::string::npos);
-}
+    std::string original_locale;
+  } locale_guard(current_locale);
 
-TEST(StripSQLCommentsTest, UnterminatedBlockComment) {
-  std::string sql = "SELECT /* no end";
-  std::string result = StripSQLComments(sql);
-  EXPECT_EQ(result, "SELECT ");
-}
+  bool selected_locale = false;
+  for (const char* candidate : {"de_DE.UTF-8", "de_DE.utf8", "de_DE"}) {
+    if (std::setlocale(LC_NUMERIC, candidate) != nullptr) {
+      selected_locale = true;
+      break;
+    }
+  }
+  if (!selected_locale) {
+    GTEST_SKIP() << "No German numeric locale is installed";
+  }
 
-TEST(StripSQLCommentsTest, EmptyInput) {
-  EXPECT_EQ(StripSQLComments(""), "");
-}
-
-// --- NormalizeWhitespace Tests ---
-
-TEST(NormalizeWhitespaceTest, CollapseSpaces) {
-  EXPECT_EQ(NormalizeWhitespace("a   b"), "a b");
-}
-
-TEST(NormalizeWhitespaceTest, CollapseTabs) {
-  EXPECT_EQ(NormalizeWhitespace("a\t\tb"), "a b");
-}
-
-TEST(NormalizeWhitespaceTest, CollapseNewlines) {
-  EXPECT_EQ(NormalizeWhitespace("a\n\n\nb"), "a b");
-}
-
-TEST(NormalizeWhitespaceTest, MixedWhitespace) {
-  EXPECT_EQ(NormalizeWhitespace("a \t\n b"), "a b");
-}
-
-TEST(NormalizeWhitespaceTest, NoChange) {
-  EXPECT_EQ(NormalizeWhitespace("a b c"), "a b c");
-}
-
-TEST(NormalizeWhitespaceTest, EmptyInput) {
-  EXPECT_EQ(NormalizeWhitespace(""), "");
-}
-
-// --- SkipWhitespace Tests ---
-
-TEST(SkipWhitespaceTest, SkipsSpaces) {
-  std::string str = "   hello";
-  size_t pos = 0;
-  EXPECT_TRUE(SkipWhitespace(str, pos));
-  EXPECT_EQ(pos, 3U);
-}
-
-TEST(SkipWhitespaceTest, NoWhitespace) {
-  std::string str = "hello";
-  size_t pos = 0;
-  EXPECT_TRUE(SkipWhitespace(str, pos));
-  EXPECT_EQ(pos, 0U);
-}
-
-TEST(SkipWhitespaceTest, AllWhitespace) {
-  std::string str = "   ";
-  size_t pos = 0;
-  EXPECT_FALSE(SkipWhitespace(str, pos));
-  EXPECT_EQ(pos, 3U);
-}
-
-TEST(SkipWhitespaceTest, EmptyString) {
-  std::string str;
-  size_t pos = 0;
-  EXPECT_FALSE(SkipWhitespace(str, pos));
-}
-
-// --- MatchKeyword Tests ---
-
-TEST(MatchKeywordTest, MatchAtStart) {
-  std::string str = "SELECT * FROM";
-  size_t pos = 0;
-  EXPECT_TRUE(MatchKeyword(str, pos, "SELECT"));
-  EXPECT_EQ(pos, 6U);
-}
-
-TEST(MatchKeywordTest, MatchAtMiddle) {
-  std::string str = "SELECT * FROM USERS";
-  size_t pos = 9;
-  EXPECT_TRUE(MatchKeyword(str, pos, "FROM"));
-  EXPECT_EQ(pos, 13U);
-}
-
-TEST(MatchKeywordTest, NoMatchPartial) {
-  std::string str = "SELECTED";
-  size_t pos = 0;
-  // "SELECT" is a prefix of "SELECTED" so it should not match
-  // (next char is not whitespace or backtick)
-  EXPECT_FALSE(MatchKeyword(str, pos, "SELECT"));
-  EXPECT_EQ(pos, 0U);
-}
-
-TEST(MatchKeywordTest, MatchAtEnd) {
-  std::string str = "INSERT INTO USERS";
-  size_t pos = 12;
-  EXPECT_TRUE(MatchKeyword(str, pos, "USERS"));
-  EXPECT_EQ(pos, 17U);
-}
-
-TEST(MatchKeywordTest, MatchFollowedByBacktick) {
-  std::string str = "FROM`users`";
-  size_t pos = 0;
-  EXPECT_TRUE(MatchKeyword(str, pos, "FROM"));
-  EXPECT_EQ(pos, 4U);
-}
-
-TEST(MatchKeywordTest, NotEnoughChars) {
-  std::string str = "SEL";
-  size_t pos = 0;
-  EXPECT_FALSE(MatchKeyword(str, pos, "SELECT"));
+  EXPECT_EQ(FormatMySQLDoubleLiteral(1.1), "1.10000000000000009e+00");
 }
 
 // --- MatchTableName Tests ---

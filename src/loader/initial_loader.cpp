@@ -32,6 +32,7 @@
 #include "mysql/required_filter_predicate.h"
 #include "mysql/rows_parser.h"
 #include "mysql/value_canonicalizer.h"
+#include "storage/document_field_validation.h"
 #include "utils/sql_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -63,6 +64,7 @@ InitialLoader::InitialLoader(mysql::Connection& connection, index::Index& index,
       index_(index),
       doc_store_(doc_store),
       table_config_(std::move(table_config)),
+      unified_filter_configs_(config::BuildUnifiedFilterConfigs(table_config_)),
       mysql_config_(std::move(mysql_config)),
       build_config_(std::move(build_config)) {}
 
@@ -347,9 +349,25 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
     // Extract filters (using pre-built field index map for O(1) lookup)
     auto filters = ExtractFilters(row, lengths, fields, field_map);
 
-    // Add to batch
-    doc_batch.push_back({std::move(*primary_key), filters, normalized_text, text});
+    // A retained document must satisfy the same limits as every other store
+    // entry before either batch is changed. In particular, NFKC can expand a
+    // source value beyond the persisted normalized-text limit.
+    auto valid = storage::ValidateIncomingDocumentFields(*primary_key, filters, normalized_text, text);
+    if (!valid) {
+      mygram::utils::StructuredLog()
+          .Event("loader_error")
+          .Field("operation", "initial_load")
+          .Field("type", "incoming_document_field_invalid")
+          .Field("error", valid.error().message())
+          .Error();
+      abort_stream();
+      return MakeUnexpected(valid.error());
+    }
+
+    // Index batch must receive its copy before normalized_text is moved into
+    // the document batch; both entries for this row must retain the same text.
     index_batch.push_back({0, normalized_text});  // DocId will be set after AddDocumentBatch
+    doc_batch.push_back({std::move(*primary_key), std::move(filters), std::move(normalized_text), std::move(text)});
 
     // Process batch when full
     if (doc_batch.size() >= batch_size) {
@@ -469,7 +487,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
   if (!doc_ids_result) {
     return MakeUnexpected(doc_ids_result.error());
   }
-  std::vector<storage::DocId> doc_ids = *doc_ids_result;
+  const auto& doc_ids = *doc_ids_result;
 
   // Verify doc_ids size matches index_batch size (defensive check)
   if (doc_ids.size() != index_batch.size()) {
@@ -485,13 +503,16 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::FlushBatch(
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed, error_msg));
   }
 
-  // Build filtered index batch excluding duplicate PKs (which returned existing doc_ids)
+  // The set starts with IDs that existed before this batch. Inserting each
+  // returned ID also records the first new row, so later rows with the same
+  // primary key cannot replace its text in the index.
+  existing_doc_ids.reserve(existing_doc_ids.size() + doc_ids.size());
   std::vector<index::Index::DocumentItem> filtered_index_batch;
   filtered_index_batch.reserve(doc_ids.size());
   for (size_t i = 0; i < doc_ids.size(); ++i) {
-    if (existing_doc_ids.count(doc_ids[i]) == 0) {
+    if (existing_doc_ids.insert(doc_ids[i]).second) {
       index_batch[i].doc_id = doc_ids[i];
-      filtered_index_batch.push_back(index_batch[i]);
+      filtered_index_batch.push_back(std::move(index_batch[i]));
     }
   }
 
@@ -683,7 +704,7 @@ storage::FilterMap InitialLoader::ExtractFilters(MYSQL_ROW row, const unsigned l
                                                  const FieldIndexMap& field_map) const {
   storage::FilterMap filters;
 
-  for (const auto& filter_config : config::BuildUnifiedFilterConfigs(table_config_)) {
+  for (const auto& filter_config : unified_filter_configs_) {
     auto it = field_map.find(filter_config.name);
     if (it == field_map.end()) {
       continue;
