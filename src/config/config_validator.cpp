@@ -7,6 +7,9 @@
 #ifndef _WIN32
 #include <arpa/inet.h>
 #endif
+#include <charconv>
+#include <cmath>
+#include <cstdint>
 #include <nlohmann/json-schema.hpp>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -16,12 +19,45 @@
 #include "config/config.h"
 #include "config/config_internal.h"
 #include "config_schema_embedded.h"  // Auto-generated embedded schema
+#include "utils/constants.h"
+#include "utils/memory_utils.h"
+#include "utils/numeric_parse.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::config {
 
 namespace internal {
 namespace {
+
+using json = nlohmann::json;
+
+const json& BuiltInSchema() {
+  static const json schema = json::parse(kConfigSchemaJson);
+  return schema;
+}
+
+const json* FindScalarSchema(std::string_view dotted_key) {
+  const json* current = &BuiltInSchema();
+  size_t start = 0;
+  while (start < dotted_key.size()) {
+    const size_t end = dotted_key.find('.', start);
+    const auto component = dotted_key.substr(start, end == std::string_view::npos ? end : end - start);
+    if (!current->is_object() || !current->contains("properties")) {
+      return nullptr;
+    }
+    const auto& properties = (*current)["properties"];
+    if (!properties.is_object() || !properties.contains(std::string(component))) {
+      return nullptr;
+    }
+    current = &properties[std::string(component)];
+    if (end == std::string_view::npos) {
+      return current;
+    }
+    start = end + 1;
+  }
+  return nullptr;
+}
 
 bool IsValidIpLiteral(const std::string& address) {
 #ifndef _WIN32
@@ -84,6 +120,121 @@ bool IsValidHostname(const std::string& address) {
 }
 
 }  // namespace
+
+mygram::utils::Expected<json, mygram::utils::Error> ValidateConfigValue(std::string_view dotted_key,
+                                                                        std::string_view raw_value) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  const auto invalid_value = [dotted_key](const std::string& reason) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kConfigInvalidValue, "Invalid value for '" + std::string(dotted_key) + "': " + reason));
+  };
+
+  const json* leaf_schema = nullptr;
+  try {
+    leaf_schema = FindScalarSchema(dotted_key);
+  } catch (const std::exception& error) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigSchemaError,
+                                    "Failed to load built-in configuration schema: " + std::string(error.what())));
+  }
+  if (leaf_schema == nullptr || !leaf_schema->is_object() || !leaf_schema->contains("type") ||
+      !(*leaf_schema)["type"].is_string()) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigSchemaError,
+                                    "No scalar schema leaf for runtime variable '" + std::string(dotted_key) + "'"));
+  }
+
+  const std::string type = (*leaf_schema)["type"].get<std::string>();
+  json parsed_value;
+  if (type == "boolean") {
+    if (raw_value == "true" || raw_value == "1" || raw_value == "yes" || raw_value == "on") {
+      parsed_value = true;
+    } else if (raw_value == "false" || raw_value == "0" || raw_value == "no" || raw_value == "off") {
+      parsed_value = false;
+    } else {
+      return invalid_value("Invalid boolean value: " + std::string(raw_value));
+    }
+  } else if (type == "integer") {
+    const auto parsed = mygram::utils::ParseNumeric<int64_t>(raw_value);
+    if (!parsed.has_value()) {
+      return invalid_value("Invalid integer value: " + std::string(raw_value));
+    }
+    parsed_value = *parsed;
+  } else if (type == "number") {
+    const auto parsed = mygram::utils::ParseNumeric<double>(raw_value);
+    if (!parsed.has_value()) {
+      // ParseNumeric rejects non-finite values. Distinguish those from malformed
+      // or out-of-range input to preserve the configuration error message.
+      double non_finite = 0.0;
+      const auto [end, error] = std::from_chars(raw_value.data(), raw_value.data() + raw_value.size(), non_finite,
+                                                std::chars_format::general);
+      if (error == std::errc{} && end == raw_value.data() + raw_value.size() && !std::isfinite(non_finite)) {
+        return invalid_value("Double value must be finite: " + std::string(raw_value));
+      }
+      return invalid_value("Invalid double value: " + std::string(raw_value));
+    }
+    parsed_value = *parsed;
+  } else if (type == "string") {
+    parsed_value = std::string(raw_value);
+  } else {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kConfigSchemaError,
+        "Unsupported scalar schema type '" + type + "' for runtime variable '" + std::string(dotted_key) + "'"));
+  }
+
+  try {
+    nlohmann::json_schema::json_validator validator;
+    validator.set_root_schema(*leaf_schema);
+    validator.validate(parsed_value);
+  } catch (const std::exception& error) {
+    return invalid_value(error.what());
+  }
+  return parsed_value;
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ValidateFinalConfigState(
+    const Config& config, std::optional<std::uint64_t> physical_memory_bytes, std::string* offending_key) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  if (config.replication.enable && config.replication.server_id == 0) {
+    if (offending_key != nullptr) {
+      *offending_key = "replication.server_id";
+    }
+    return MakeUnexpected(MakeError(
+        ErrorCode::kConfigValidationError,
+        "Replication configuration error: server_id must be set to a non-zero value when replication is enabled"));
+  }
+
+  if (!config.cache.enabled || config.cache.max_memory_bytes == 0 || !physical_memory_bytes.has_value()) {
+    return {};
+  }
+
+  const std::uint64_t max_allowed_cache = *physical_memory_bytes / 2;
+  if (config.cache.max_memory_bytes <= max_allowed_cache) {
+    return {};
+  }
+
+  if (offending_key != nullptr) {
+    *offending_key = "cache.enabled";
+  }
+  constexpr std::uint64_t kBytesPerMegabyte = mygram::constants::kBytesPerMegabyte;
+  std::stringstream error_message;
+  error_message << "Cache configuration error: max_memory_mb exceeds safe limit\n";
+  error_message << "  Configured cache size: " << mygram::utils::FormatBytes(config.cache.max_memory_bytes) << "\n";
+  error_message << "  Physical memory: " << mygram::utils::FormatBytes(*physical_memory_bytes) << "\n";
+  error_message << "  Maximum allowed (50% of physical memory): " << mygram::utils::FormatBytes(max_allowed_cache)
+                << "\n";
+  error_message << "  Recommendation:\n";
+  error_message << "    - Set cache.max_memory_mb to at most " << (max_allowed_cache / kBytesPerMegabyte) << " MB\n";
+  error_message << "    - Consider system memory requirements for index and operations\n";
+  error_message << "  Example:\n";
+  error_message << "    cache:\n";
+  error_message << "      max_memory_mb: " << (max_allowed_cache / kBytesPerMegabyte);
+  return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, error_message.str()));
+}
 
 mygram::utils::Expected<void, mygram::utils::Error> ValidatePathNoTraversal(const std::string& path,
                                                                             const std::string& field_name) {
@@ -180,10 +331,10 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigJson(const std
   try {
     json config_json = json::parse(config_json_str);
 
-    auto validate_against = [&](std::string_view schema_text,
+    auto validate_against = [&](const json& schema,
                                 const std::string& schema_name) -> mygram::utils::Expected<void, Error> {
       json_validator validator;
-      validator.set_root_schema(json::parse(schema_text.begin(), schema_text.end()));
+      validator.set_root_schema(schema);
 
       try {
         validator.validate(config_json);
@@ -192,7 +343,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigJson(const std
         err_msg << "Configuration validation failed (" << schema_name << "):\n";
         err_msg << "  " << e.what() << "\n\n";
         err_msg << "  Common configuration issues:\n";
-        err_msg << "    - Missing required fields (mysql.host, mysql.user, tables, etc.)\n";
+        err_msg << "    - Missing required schema fields (such as tables); startup also requires effective mysql.user "
+                   "and mysql.database values\n";
         err_msg << "    - Invalid data types (string instead of number, etc.)\n";
         err_msg << "    - Invalid enum values (check allowed values)\n";
         err_msg << "    - Table configuration missing 'name' or 'text_source'\n";
@@ -207,12 +359,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateConfigJson(const std
     // A custom schema adds deployment-specific constraints; it must never
     // replace the built-in safety contract and relax ranges, enums, required
     // fields, or additionalProperties checks understood by the executable.
-    auto built_in_result = validate_against(kConfigSchemaJson, "built-in schema");
+    auto built_in_result = validate_against(internal::BuiltInSchema(), "built-in schema");
     if (!built_in_result) {
       return MakeUnexpected(built_in_result.error());
     }
     if (!schema_json_str.empty()) {
-      auto custom_result = validate_against(schema_json_str, "custom schema");
+      auto custom_result = validate_against(json::parse(schema_json_str), "custom schema");
       if (!custom_result) {
         return MakeUnexpected(custom_result.error());
       }

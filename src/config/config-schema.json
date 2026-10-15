@@ -9,7 +9,7 @@
   "properties": {
     "mysql": {
       "type": "object",
-      "description": "MySQL connection settings. Values can be overridden via environment variables: MYGRAM_MYSQL_USER, MYGRAM_MYSQL_PASSWORD, MYGRAM_MYSQL_HOST, MYGRAM_MYSQL_DATABASE (env vars take precedence over config file values)",
+      "description": "MySQL connection settings. Values can be overridden via environment variables: MYGRAM_MYSQL_USER, MYGRAM_MYSQL_PASSWORD, MYGRAM_MYSQL_HOST, MYGRAM_MYSQL_PORT, MYGRAM_MYSQL_DATABASE (env vars take precedence over config file values)",
       "additionalProperties": false,
       "properties": {
         "host": {
@@ -285,7 +285,7 @@
           },
           "kanji_ngram_size": {
             "type": "integer",
-            "description": "N-gram size for CJK (kanji/kana/hanzi) characters. 0 or omit to use ngram_size.",
+            "description": "N-gram size for CJK ideographs (kanji/hanzi); kana and other scripts use ngram_size. 0 or omit to use ngram_size.",
             "default": 0,
             "minimum": 0,
             "maximum": 10
@@ -415,8 +415,8 @@
         },
         "server_id": {
           "type": "integer",
-          "description": "MySQL server ID (REQUIRED, must be non-zero and unique)",
-          "minimum": 1,
+          "description": "MySQL server ID; required and non-zero when replication is enabled, and unique among replication clients",
+          "minimum": 0,
           "maximum": 4294967295
         },
         "start_from": {
@@ -466,13 +466,15 @@
           "type": "integer",
           "description": "Reserved / not yet enforced: hard memory limit in MB",
           "default": 8192,
-          "minimum": 256
+          "minimum": 256,
+          "maximum": 2147483647
         },
         "soft_target_mb": {
           "type": "integer",
           "description": "Reserved / not yet enforced: soft memory target in MB",
           "default": 4096,
-          "minimum": 128
+          "minimum": 128,
+          "maximum": 2147483647
         },
         "arena_chunk_mb": {
           "type": "integer",
@@ -605,7 +607,7 @@
             },
             "worker_threads": {
               "type": "integer",
-              "description": "Number of worker threads in the TCP thread pool. In the blocking I/O model each persistent client holds one worker for its entire lifetime (blocking recv loop with 60s idle keepalive), so this is also the cap on concurrent persistent clients. 0 = auto (max(hardware_concurrency() * 4, 64)). Set explicitly when you know your client concurrency.",
+              "description": "Number of worker threads in the TCP thread pool. Persistent connections are managed by the reactor and use workers only while processing complete requests. 0 = auto (max(hardware_concurrency() * 2, 4); if hardware_concurrency() reports 0, the pool assumes four CPUs).",
               "default": 0,
               "minimum": 0,
               "maximum": 16384
@@ -640,7 +642,7 @@
             },
             "keepalive": {
               "type": "object",
-              "description": "Per-connection TCP keepalive settings applied to accepted client sockets. Tightens Linux's multi-hour defaults so half-open connections (dead peer host) are detected within a few minutes. See docs/ja/design/reactor-io-refactor.md §1.1.",
+              "description": "TCP keepalive settings applied to accepted client sockets to detect half-open connections.",
               "additionalProperties": false,
               "properties": {
                 "enabled": {
@@ -694,7 +696,7 @@
             },
             "max_pending_frame_bytes": {
               "type": "integer",
-              "description": "Per-connection hard cap on bytes held by completed request frames awaiting worker dispatch. Must be at least api.max_query_length (capped by the reactor's 1 MiB frame limit) so a valid request is not rejected as SERVER_BUSY. Reads pause at 75% of this limit.",
+              "description": "Per-connection hard cap on bytes held by completed request frames awaiting worker dispatch. This byte budget is independent of api.max_query_length, which counts Unicode characters. Reads pause at 75% of this limit.",
               "default": 4194304,
               "minimum": 4096,
               "maximum": 1073741824
@@ -738,12 +740,12 @@
             },
             "enable_cors": {
               "type": "boolean",
-              "description": "Enable CORS headers",
+              "description": "Enable CORS headers. Requires a non-empty cors_allow_origin when the HTTP server is enabled.",
               "default": false
             },
             "cors_allow_origin": {
               "type": "string",
-              "description": "Value for Access-Control-Allow-Origin header when CORS is enabled",
+              "description": "Value for Access-Control-Allow-Origin when CORS is enabled. Must be non-empty when both HTTP and CORS are enabled; otherwise configuration loading fails.",
               "default": ""
             },
             "read_timeout_sec": {
@@ -902,9 +904,10 @@
         },
         "max_memory_mb": {
           "type": "integer",
-          "description": "Shared cache budget in MB, including entry payloads, cache containers, LRU/table indexes, invalidation metadata, and the deferred invalidation queue. The accounted total is exported by INFO and Prometheus metrics.",
+          "description": "Shared cache budget in MB, including entry payloads, cache containers, LRU/table indexes, invalidation metadata, and the deferred invalidation queue. The accounted total is exported by INFO and Prometheus metrics. When enabled, this value must not exceed 50% of detected physical memory; if detection is unavailable, this check is skipped.",
           "default": 32,
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 1048576
         },
         "min_query_cost_ms": {
           "type": "number",

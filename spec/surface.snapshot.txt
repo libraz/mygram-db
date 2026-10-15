@@ -262,7 +262,7 @@ cache.invalidation.batch_size type=integer default=1000 minimum=1 maximum=214748
 cache.invalidation.max_delay_ms type=integer default=100 minimum=0 maximum=2147483647 mutable=no
 cache.invalidation.max_queue_size type=integer default=100000 minimum=1 mutable=no
 cache.invalidation_strategy type=string default="ngram" enum=["ngram","table"] mutable=no
-cache.max_memory_mb type=integer default=32 minimum=1 mutable=no
+cache.max_memory_mb type=integer default=32 minimum=1 maximum=1048576 mutable=no
 cache.min_query_cost_ms type=number default=10.0 minimum=0.0 mutable=yes
 cache.ttl_seconds type=integer default=3600 minimum=0 maximum=2147483647 mutable=yes
 dump type=object mutable=no
@@ -281,14 +281,14 @@ logging.format type=string default="json" enum=["json","text"] mutable=yes
 logging.level type=string default="info" enum=["debug","info","warn","error"] mutable=yes
 memory type=object mutable=no
 memory.arena_chunk_mb type=integer default=64 minimum=1 maximum=1024 mutable=no
-memory.hard_limit_mb type=integer default=8192 minimum=256 mutable=no
+memory.hard_limit_mb type=integer default=8192 minimum=256 maximum=2147483647 mutable=no
 memory.minute_epoch type=boolean default=true mutable=no
 memory.normalize type=object mutable=no
 memory.normalize.lower type=boolean default=false mutable=no
 memory.normalize.nfkc type=boolean default=true mutable=no
 memory.normalize.width type=string default="narrow" enum=["keep","narrow","wide"] mutable=no
 memory.roaring_threshold type=number default=0.18 minimum=0.0 maximum=1.0 mutable=no
-memory.soft_target_mb type=integer default=4096 minimum=128 mutable=no
+memory.soft_target_mb type=integer default=4096 minimum=128 maximum=2147483647 mutable=no
 memory.verify_text type=string default="off" enum=["off","ascii","all"] mutable=no
 mysql type=object mutable=no
 mysql.binlog_format type=string default="ROW" enum=["ROW"] mutable=no
@@ -318,7 +318,7 @@ replication.enable type=boolean default=true mutable=no
 replication.queue_size type=integer default=10000 minimum=100 maximum=1000000 mutable=no
 replication.reconnect_backoff_max_ms type=integer default=10000 minimum=1000 maximum=600000 mutable=no
 replication.reconnect_backoff_min_ms type=integer default=500 minimum=100 maximum=60000 mutable=no
-replication.server_id type=integer minimum=1 maximum=4294967295 mutable=no
+replication.server_id type=integer minimum=0 maximum=4294967295 mutable=no
 replication.start_from type=string default="snapshot" mutable=no
 server type=object mutable=no
 server.host type=string mutable=no

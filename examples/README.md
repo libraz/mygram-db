@@ -103,7 +103,8 @@ If validation fails, MygramDB will display a detailed error message pointing to 
 
 **Custom Schema (Advanced):**
 
-If you need to validate against a custom schema (e.g., for testing or extending the configuration), you can use the `--schema` option:
+Use `--schema` to add deployment-specific validation constraints on top of the
+built-in schema. It cannot make unsupported configuration keys valid:
 
 ```bash
 ./build/bin/mygramdb config.yaml --schema custom-schema.json

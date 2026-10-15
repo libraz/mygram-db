@@ -14,12 +14,14 @@
 #include <cstdint>
 #include <cstring>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <sstream>
 
 #include "config/config_internal.h"
 #include "utils/constants.h"
 #include "utils/datetime_converter.h"
+#include "utils/gtid_grammar.h"
 #include "utils/memory_utils.h"
 #include "utils/network_utils.h"
 #include "utils/numeric_parse.h"
@@ -174,24 +176,6 @@ mygram::utils::Expected<void, mygram::utils::Error> ValidateNetworkExposure(cons
     if (auto result = reject_public_bind(config.api.http.bind, "api.http.bind"); !result) {
       return result;
     }
-  }
-  return {};
-}
-
-mygram::utils::Expected<void, mygram::utils::Error> ValidateReactorFrameLimits(const Config& config) {
-  // ReactorConnection permits one unframed request up to 1 MiB. A smaller
-  // completed-frame queue would turn a valid request into a queue-overflow
-  // close before QueryParser can apply api.max_query_length and return a
-  // normal client error. Keep the queue capable of holding one valid frame.
-  constexpr int64_t kReactorReadBufferLimit = mygram::constants::kBytesPerMegabyte;
-  const int64_t effective_query_limit = config.api.max_query_length > 0
-                                            ? std::min<int64_t>(config.api.max_query_length, kReactorReadBufferLimit)
-                                            : kReactorReadBufferLimit;
-  if (config.api.tcp.max_pending_frame_bytes < effective_query_limit) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kConfigInvalidValue,
-        "api.tcp.max_pending_frame_bytes must be at least the effective api.max_query_length (" +
-            std::to_string(effective_query_limit) + ") so one valid request can be queued"));
   }
   return {};
 }
@@ -601,8 +585,11 @@ mygram::utils::Expected<MysqlConfig, mygram::utils::Error> ParseMysqlConfig(cons
       const auto space = verb.find_first_of(" \t\r\n");
       if (space != std::string::npos)
         verb.resize(space);
-      std::transform(verb.begin(), verb.end(), verb.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+      std::transform(verb.begin(), verb.end(), verb.begin(), [](char character) {
+        const auto byte = static_cast<unsigned char>(character);
+        const auto upper_byte = mygram::utils::AsciiToUpper(byte);
+        return upper_byte == byte ? character : static_cast<char>(upper_byte);
+      });
       if (verb != "ALTER" && verb != "ANALYZE" && verb != "CHECK" && verb != "CREATE" && verb != "DROP" &&
           verb != "OPTIMIZE" && verb != "RENAME" && verb != "REPAIR" && verb != "TRUNCATE") {
         return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kConfigInvalidValue,
@@ -668,9 +655,8 @@ mygram::utils::Expected<RequiredFilterConfig, mygram::utils::Error> ParseRequire
     return MakeUnexpected(type_validation.error());
   }
 
-  if (json_obj.contains("op") || json_obj.contains("operator")) {
-    // Support both "op" and "operator" as key names
-    config.op = json_obj.contains("op") ? json_obj["op"].get<std::string>() : json_obj["operator"].get<std::string>();
+  if (json_obj.contains("op")) {
+    config.op = json_obj["op"].get<std::string>();
   }
   const bool has_value = json_obj.contains("value");
   if (has_value) {
@@ -1078,18 +1064,6 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       config.replication.reconnect_backoff_max_ms = repl["reconnect_backoff_max_ms"].get<int>();
     }
 
-    // Validate server_id
-    if (config.replication.enable && config.replication.server_id == 0) {
-      std::stringstream err_msg;
-      err_msg << "Replication configuration error: server_id must be set when replication is enabled\n";
-      err_msg << "  The server_id must be a unique non-zero value.\n";
-      err_msg << "  Example:\n";
-      err_msg << "    replication:\n";
-      err_msg << "      enable: true\n";
-      err_msg << "      server_id: 100";
-      return MakeUnexpected(MakeError(ErrorCode::kConfigValidationError, err_msg.str()));
-    }
-
     // Validate start_from
     if (config.replication.enable) {
       const auto& start = config.replication.start_from;
@@ -1105,7 +1079,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         err_msg << "  Valid options:\n";
         err_msg << "    - snapshot    : Start from snapshot GTID\n";
         err_msg << "    - latest      : Start from current GTID\n";
-        err_msg << "    - gtid=<UUID:txn> : Start from specific GTID\n";
+        err_msg << "    - gtid=<position> : Start from a MySQL UUID:txn set or a MariaDB domain-server-seq list\n";
         err_msg << "  Example:\n";
         err_msg << "    replication:\n";
         err_msg << "      start_from: snapshot";
@@ -1115,13 +1089,12 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       // If gtid= format, validate the GTID format
       if (start.find("gtid=") == 0) {
         std::string gtid_str = start.substr(kGtidPrefixLength);  // Remove "gtid=" prefix
-        // Basic GTID format check: UUID:transaction_id
-        // Full validation will be done when connecting to MySQL
-        if (gtid_str.find(':') == std::string::npos) {
+        if (auto position = mygramdb::utils::ValidateGtidPosition(gtid_str); !position) {
           std::stringstream err_msg;
           err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
-          err_msg << "  Expected format: gtid=UUID:transaction_id\n";
-          err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1";
+          err_msg << "  " << position.error().message() << "\n";
+          err_msg << "  Expected format: gtid=UUID:transaction_id (MySQL) or gtid=domain-server-seq (MariaDB)\n";
+          err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1 or gtid=0-1-5,1-1-3";
           return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
         }
       }
@@ -1397,9 +1370,6 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
   if (auto v = ValidateNetworkExposure(config); !v) {
     return MakeUnexpected(v.error());
   }
-  if (auto v = ValidateReactorFrameLimits(config); !v) {
-    return MakeUnexpected(v.error());
-  }
 
   // Parse logging config
   if (root.contains("logging")) {
@@ -1471,39 +1441,6 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
         config.cache.invalidation.max_queue_size = invalidation["max_queue_size"].get<size_t>();
       }
     }
-
-    // Validate cache memory against physical memory
-    if (config.cache.enabled && config.cache.max_memory_bytes > 0) {
-      auto system_info = mygram::utils::GetSystemMemoryInfo();
-      if (system_info) {
-        constexpr double kMaxCacheRatio = 0.5;  // Maximum 50% of physical memory
-        constexpr size_t kBytesPerMB = mygram::constants::kBytesPerMegabyte;
-        auto max_allowed_cache =
-            static_cast<uint64_t>(static_cast<double>(system_info->total_physical_bytes) * kMaxCacheRatio);
-
-        if (config.cache.max_memory_bytes > max_allowed_cache) {
-          std::stringstream err_msg;
-          err_msg << "Cache configuration error: max_memory_mb exceeds safe limit\n";
-          err_msg << "  Configured cache size: " << mygram::utils::FormatBytes(config.cache.max_memory_bytes) << "\n";
-          err_msg << "  Physical memory: " << mygram::utils::FormatBytes(system_info->total_physical_bytes) << "\n";
-          err_msg << "  Maximum allowed (50% of physical memory): " << mygram::utils::FormatBytes(max_allowed_cache)
-                  << "\n";
-          err_msg << "  Recommendation:\n";
-          err_msg << "    - Set cache.max_memory_mb to at most " << (max_allowed_cache / kBytesPerMB) << " MB\n";
-          err_msg << "    - Consider system memory requirements for index and operations\n";
-          err_msg << "  Example:\n";
-          err_msg << "    cache:\n";
-          err_msg << "      max_memory_mb: " << (max_allowed_cache / kBytesPerMB);
-          return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));
-        }
-      } else {
-        mygram::utils::StructuredLog()
-            .Event("config_warning")
-            .Field("type", "cache_memory_validation_skipped")
-            .Field("reason", "system_memory_info_unavailable")
-            .Warn();
-      }
-    }
   }
 
   // BM25 scoring configuration
@@ -1518,6 +1455,24 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
     if (bm25.contains("b")) {
       config.bm25.b = bm25["b"].get<double>();
     }
+  }
+
+  std::optional<uint64_t> physical_memory_bytes;
+  if (config.cache.enabled && config.cache.max_memory_bytes > 0) {
+    const auto system_info = mygram::utils::GetSystemMemoryInfo();
+    if (system_info.has_value()) {
+      physical_memory_bytes = system_info->total_physical_bytes;
+    }
+  }
+  if (auto validation = internal::ValidateFinalConfigState(config, physical_memory_bytes); !validation) {
+    return MakeUnexpected(validation.error());
+  }
+  if (config.cache.enabled && config.cache.max_memory_bytes > 0 && !physical_memory_bytes.has_value()) {
+    mygram::utils::StructuredLog()
+        .Event("config_warning")
+        .Field("type", "cache_memory_validation_skipped")
+        .Field("reason", "system_memory_info_unavailable")
+        .Warn();
   }
 
   return config;

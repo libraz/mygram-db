@@ -6,21 +6,29 @@
 #include "config/runtime_variable_manager.h"
 
 #include <gtest/gtest.h>
+#include <spdlog/spdlog.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 #include <vector>
 
+#include "cache/cache_key.h"
 #include "cache/cache_manager.h"
 #include "config/config.h"
 #include "config/config_help.h"
+#include "query/query_normalizer.h"
+#include "query/query_parser.h"
 #include "utils/error.h"
 #include "utils/expected.h"
+#include "utils/structured_log.h"
 
 using namespace mygramdb::config;
 using namespace mygram::utils;
@@ -42,6 +50,8 @@ Config CreateTestConfig() {
   config.mysql.use_gtid = true;
   config.mysql.binlog_format = "ROW";
   config.mysql.binlog_row_image = "FULL";
+  config.replication.enable = true;
+  config.replication.server_id = 100;
 
   // API config
   config.api.default_limit = 100;
@@ -62,6 +72,20 @@ Config CreateTestConfig() {
   config.logging.format = "json";
 
   return config;
+}
+
+mygramdb::query::Query CreateCacheTestQuery() {
+  mygramdb::query::Query query;
+  query.type = mygramdb::query::QueryType::SEARCH;
+  query.table = "docs";
+  query.search_text = "sample text";
+  query.limit = 10;
+  const std::string normalized = mygramdb::cache::QueryNormalizer::Normalize(query);
+  const auto key = mygramdb::cache::CacheKeyGenerator::Generate(normalized);
+  query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  query.cache_key_discriminator = normalized;
+  query.cache_key_is_canonical = true;
+  return query;
 }
 
 }  // namespace
@@ -303,19 +327,102 @@ TEST(RuntimeVariableManagerTest, ShowVariablesUsesCanonicalConfigProjectionForEv
   table.synonyms.file = "synonyms.tsv";
   config.tables.push_back(table);
   config.network.allow_cidrs = {"127.0.0.1/32", "10.0.0.0/8"};
+  config.mysql.ssl_key = "/etc/ssl/private/mysql.key";
+  config.api.admin_token = "admin-secret";
 
   auto manager = std::move(*RuntimeVariableManager::Create(config));
-  const auto canonical = ConfigToVariableMap(config);
+  auto expected = ConfigToVariableMap(config);
+  expected["cache.max_memory_bytes"] = std::to_string(config.cache.max_memory_bytes);
+  expected.try_emplace("network.allow_cidrs", "");
   const auto variables = manager->GetAllVariables();
 
-  for (const auto& [name, value] : canonical) {
+  EXPECT_EQ(variables.size(), expected.size());
+  for (const auto& [name, value] : expected) {
     const auto found = variables.find(name);
-    ASSERT_NE(found, variables.end()) << "SHOW VARIABLES omitted canonical Config leaf " << name;
+    if (found == variables.end()) {
+      ADD_FAILURE() << "SHOW VARIABLES omitted canonical Config leaf " << name;
+      continue;
+    }
     EXPECT_EQ(found->second.value, value) << name;
+    EXPECT_EQ(found->second.mutable_, RuntimeVariableManager::IsMutable(name)) << name;
+
+    auto current = manager->GetVariable(name);
+    if (!current) {
+      ADD_FAILURE() << "GET omitted SHOW VARIABLES leaf " << name;
+      continue;
+    }
+    EXPECT_EQ(*current, found->second.value) << name;
   }
   ASSERT_NE(variables.find("cache.eviction_batch_size"), variables.end());
   ASSERT_NE(variables.find("tables[0].required_filters[0].value"), variables.end());
   ASSERT_NE(variables.find("tables[0].filters[0].bucket"), variables.end());
+
+  EXPECT_EQ(variables.at("mysql.password").value, "***");
+  EXPECT_EQ(variables.at("mysql.ssl_key").value, "***");
+  EXPECT_EQ(variables.at("api.admin_token").value, "***");
+}
+
+TEST(RuntimeVariableManagerTest, EmptyNetworkAllowCidrsRemainInGetAndShow) {
+  Config config = CreateTestConfig();
+  config.network.allow_cidrs.clear();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto current = manager->GetVariable("network.allow_cidrs");
+  ASSERT_TRUE(current);
+  EXPECT_TRUE(current->empty());
+
+  const auto network_variables = manager->GetAllVariables("NETWORK.");
+  ASSERT_EQ(network_variables.size(), 1U);
+  EXPECT_EQ(network_variables.at("network.allow_cidrs").value, *current);
+  EXPECT_FALSE(network_variables.at("network.allow_cidrs").mutable_);
+}
+
+TEST(RuntimeVariableManagerTest, MutableUpdatesAreVisibleInGetAllVariables) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+  const auto previous_spdlog_level = spdlog::get_level();
+  const auto previous_log_format = StructuredLog::GetFormat();
+
+  const std::vector<std::pair<std::string, std::string>> updates = {
+      {"logging.level", "debug"},
+      {"logging.format", "text"},
+      {"api.default_limit", "101"},
+      {"api.max_query_length", "1234"},
+      {"api.rate_limiting.enable", "false"},
+      {"api.rate_limiting.capacity", "101"},
+      {"api.rate_limiting.refill_rate", "11"},
+      {"cache.enabled", "false"},
+      {"cache.min_query_cost_ms", "12.5"},
+      {"cache.ttl_seconds", "301"},
+  };
+
+  for (const auto& [name, value] : updates) {
+    auto set_result = manager->SetVariable(name, value);
+    if (!set_result) {
+      ADD_FAILURE() << name << ": " << set_result.error().to_string();
+      continue;
+    }
+
+    const auto variables = manager->GetAllVariables();
+    const auto found = variables.find(name);
+    if (found == variables.end()) {
+      ADD_FAILURE() << name << " is missing from SHOW VARIABLES";
+      continue;
+    }
+    EXPECT_EQ(found->second.value, value) << name;
+    EXPECT_TRUE(found->second.mutable_) << name;
+
+    auto current = manager->GetVariable(name);
+    if (!current) {
+      ADD_FAILURE() << name << " is missing from GET: " << current.error().to_string();
+      continue;
+    }
+    EXPECT_EQ(*current, found->second.value) << name;
+  }
+
+  // Restore process-wide logging settings even if an expectation above fails.
+  spdlog::set_level(previous_spdlog_level);
+  StructuredLog::SetFormat(previous_log_format);
 }
 
 /**
@@ -933,23 +1040,42 @@ TEST(RuntimeVariableManagerTest, RateLimiterCallbackHoldsTheLockAcrossAConcurren
  * @brief Test cache toggle callback failure
  */
 TEST(RuntimeVariableManagerTest, CacheToggleCallbackFailure) {
-  Config config = CreateTestConfig();
-  auto manager = std::move(*RuntimeVariableManager::Create(config));
+  struct Scenario {
+    bool previous_enabled;
+    bool requested_enabled;
+  };
+  const std::vector<Scenario> scenarios = {
+      {false, false},  // Repeating the current value must preserve false.
+      {true, true},    // Repeating the current value must preserve true.
+      {false, true},   // A failed state change must preserve false.
+      {true, false},   // A failed state change must preserve true.
+  };
 
-  // Set callback that always fails
-  manager->SetCacheToggleCallback([](bool /*enabled*/) -> Expected<void, Error> {
-    return MakeUnexpected(MakeError(ErrorCode::kInternalError, "Simulated cache toggle failure"));
-  });
+  for (const auto& scenario : scenarios) {
+    SCOPED_TRACE("previous=" + std::string(scenario.previous_enabled ? "true" : "false") +
+                 ", requested=" + (scenario.requested_enabled ? "true" : "false"));
+    Config config = CreateTestConfig();
+    config.cache.enabled = scenario.previous_enabled;
+    auto manager_result = RuntimeVariableManager::Create(config);
+    ASSERT_TRUE(manager_result);
+    auto manager = std::move(*manager_result);
 
-  // Try to toggle cache (should fail)
-  auto result = manager->SetVariable("cache.enabled", "false");
-  EXPECT_FALSE(result);
-  EXPECT_EQ(static_cast<int>(result.error().code()), static_cast<int>(ErrorCode::kInternalError));
+    bool callback_called = false;
+    manager->SetCacheToggleCallback([&callback_called](bool /*enabled*/) -> Expected<void, Error> {
+      callback_called = true;
+      return MakeUnexpected(MakeError(ErrorCode::kInternalError, "Simulated cache toggle failure"));
+    });
 
-  // Original value should remain unchanged
-  auto get_result = manager->GetVariable("cache.enabled");
-  ASSERT_TRUE(get_result);
-  EXPECT_EQ(*get_result, "true");
+    auto result = manager->SetVariable("cache.enabled", scenario.requested_enabled ? "true" : "false");
+    ASSERT_FALSE(result);
+    EXPECT_EQ(result.error().code(), ErrorCode::kInternalError);
+    EXPECT_TRUE(callback_called);
+
+    EXPECT_EQ(manager->GetCurrentConfig().cache.enabled, scenario.previous_enabled);
+    auto current = manager->GetVariable("cache.enabled");
+    ASSERT_TRUE(current);
+    EXPECT_EQ(*current, scenario.previous_enabled ? "true" : "false");
+  }
 }
 
 /**
@@ -1465,6 +1591,169 @@ TEST(RuntimeVariableManagerTest, SetVariableImmediatelyVisibleToGet) {
   EXPECT_EQ(*after, "50") << "SetVariable change should be immediately visible to GetVariable";
 }
 
+TEST(RuntimeVariableManagerTest, InvalidBatchLeavesCachePayloadAndRuntimeStateUntouched) {
+  Config config = CreateTestConfig();
+  config.cache.max_memory_bytes = 32 * 1024 * 1024;
+  mygramdb::cache::NgramConfigMap ngram_configs;
+  mygramdb::cache::NgramConfig ngram_config{};
+  ngram_config.ngram_size = 3;
+  ngram_config.kanji_ngram_size = 2;
+  ngram_configs.emplace("docs", ngram_config);
+  mygramdb::cache::CacheManager cache_manager(config.cache, std::move(ngram_configs));
+  const auto query = CreateCacheTestQuery();
+  ASSERT_TRUE(cache_manager.Insert(query, {1, 2}, {"sam", "amp", "mpl", "ple"}, 15.0));
+  ASSERT_TRUE(cache_manager.Lookup(query).has_value());
+
+  auto manager = std::move(
+      *RuntimeVariableManager::Create(config, [] { return std::optional<std::uint64_t>{64ULL * 1024 * 1024}; }));
+  manager->SetCacheManager(&cache_manager);
+  const auto original_level = spdlog::get_level();
+
+  const auto result =
+      manager->SetVariables({{"logging.level", "debug"}, {"cache.enabled", "false"}, {"api.default_limit", "0"}});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().variable_name, "api.default_limit");
+  EXPECT_EQ(result.error().error.code(), ErrorCode::kConfigInvalidValue);
+  EXPECT_TRUE(cache_manager.IsEnabled());
+  EXPECT_TRUE(cache_manager.Lookup(query).has_value());
+  EXPECT_EQ(manager->GetCurrentConfig().logging.level, "info");
+  EXPECT_TRUE(manager->GetCurrentConfig().cache.enabled);
+  EXPECT_EQ(spdlog::get_level(), original_level);
+  EXPECT_EQ(*manager->GetVariable("cache.enabled"), "true");
+}
+
+TEST(RuntimeVariableManagerTest, FailedCacheTogglePreventsEveryOtherBatchEffect) {
+  Config config = CreateTestConfig();
+  config.cache.enabled = false;
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  int cache_toggles = 0;
+  int api_callbacks = 0;
+  int rate_callbacks = 0;
+  manager->SetCacheToggleCallback([&](bool enabled) -> Expected<void, Error> {
+    ++cache_toggles;
+    EXPECT_TRUE(enabled);
+    return MakeUnexpected(MakeError(ErrorCode::kCacheDisabled, "injected cache failure"));
+  });
+  manager->SetApiConfigCallback([&](int, int) { ++api_callbacks; });
+  manager->SetRateLimiterCallback([&](bool, size_t, size_t) { ++rate_callbacks; });
+
+  const auto result = manager->SetVariables(
+      {{"api.default_limit", "200"}, {"api.rate_limiting.capacity", "200"}, {"cache.enabled", "true"}});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().variable_name, "cache.enabled");
+  EXPECT_EQ(result.error().error.code(), ErrorCode::kCacheDisabled);
+  EXPECT_EQ(cache_toggles, 1);
+  EXPECT_EQ(api_callbacks, 0);
+  EXPECT_EQ(rate_callbacks, 0);
+  EXPECT_EQ(manager->GetCurrentConfig().api.default_limit, 100);
+  EXPECT_EQ(manager->GetCurrentConfig().api.rate_limiting.capacity, 100);
+  EXPECT_FALSE(manager->GetCurrentConfig().cache.enabled);
+  EXPECT_EQ(*manager->GetVariable("api.default_limit"), "100");
+  EXPECT_EQ(*manager->GetVariable("cache.enabled"), "false");
+}
+
+TEST(RuntimeVariableManagerTest, BatchCoalescesApiAndRateLimiterCallbacksToFinalValues) {
+  auto manager = std::move(*RuntimeVariableManager::Create(CreateTestConfig()));
+  int api_callbacks = 0;
+  int rate_callbacks = 0;
+  std::pair<int, int> api_values{};
+  std::tuple<bool, size_t, size_t> rate_values{};
+  manager->SetApiConfigCallback([&](int default_limit, int max_query_length) {
+    ++api_callbacks;
+    api_values = {default_limit, max_query_length};
+  });
+  manager->SetRateLimiterCallback([&](bool enabled, size_t capacity, size_t refill_rate) {
+    ++rate_callbacks;
+    rate_values = {enabled, capacity, refill_rate};
+  });
+
+  const auto result = manager->SetVariables({{"api.default_limit", "150"},
+                                             {"api.max_query_length", "512"},
+                                             {"api.default_limit", "200"},
+                                             {"api.max_query_length", "2048"},
+                                             {"api.rate_limiting.enable", "false"},
+                                             {"api.rate_limiting.capacity", "200"},
+                                             {"api.rate_limiting.refill_rate", "20"},
+                                             {"api.rate_limiting.capacity", "300"}});
+
+  ASSERT_TRUE(result);
+  EXPECT_EQ(api_callbacks, 1);
+  EXPECT_EQ(api_values, (std::pair<int, int>{200, 2048}));
+  EXPECT_EQ(rate_callbacks, 1);
+  EXPECT_EQ(rate_values, (std::tuple<bool, size_t, size_t>{false, 300, 20}));
+  EXPECT_EQ(manager->GetCurrentConfig().api.default_limit, 200);
+  EXPECT_EQ(manager->GetCurrentConfig().api.max_query_length, 2048);
+}
+
+TEST(RuntimeVariableManagerTest, ConcurrentSetCannotOverwriteFinalBatchState) {
+  auto manager = std::move(*RuntimeVariableManager::Create(CreateTestConfig()));
+  std::mutex callback_mutex;
+  std::condition_variable callback_cv;
+  bool callback_entered = false;
+  bool release_callback = false;
+  std::vector<std::pair<int, int>> callback_values;
+  manager->SetApiConfigCallback([&](int default_limit, int max_query_length) {
+    callback_values.emplace_back(default_limit, max_query_length);
+    if (callback_values.size() == 1) {
+      std::unique_lock lock(callback_mutex);
+      callback_entered = true;
+      callback_cv.notify_all();
+      callback_cv.wait(lock, [&] { return release_callback; });
+    }
+  });
+
+  std::thread batch_thread([&] {
+    const auto result = manager->SetVariables({{"api.default_limit", "200"}, {"api.max_query_length", "2048"}});
+    EXPECT_TRUE(result);
+  });
+  {
+    std::unique_lock lock(callback_mutex);
+    callback_cv.wait(lock, [&] { return callback_entered; });
+  }
+  std::atomic<bool> competing_set_completed{false};
+  std::thread competing_thread([&] {
+    const auto result = manager->SetVariable("api.default_limit", "300");
+    EXPECT_TRUE(result);
+    competing_set_completed = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  EXPECT_FALSE(competing_set_completed.load());
+  {
+    std::lock_guard lock(callback_mutex);
+    release_callback = true;
+  }
+  callback_cv.notify_all();
+  batch_thread.join();
+  competing_thread.join();
+
+  EXPECT_EQ(callback_values, (std::vector<std::pair<int, int>>{{200, 2048}, {300, 2048}}));
+  EXPECT_EQ(manager->GetCurrentConfig().api.default_limit, 300);
+  EXPECT_EQ(manager->GetCurrentConfig().api.max_query_length, 2048);
+}
+
+TEST(RuntimeVariableManagerTest, CacheEnableUsesDeterministicPhysicalMemoryLimit) {
+  Config config = CreateTestConfig();
+  config.cache.enabled = false;
+  config.cache.max_memory_bytes = 9ULL * 1024 * 1024;
+  mygramdb::cache::NgramConfigMap ngram_configs;
+  mygramdb::cache::CacheManager cache_manager(config.cache, std::move(ngram_configs));
+  auto manager = std::move(
+      *RuntimeVariableManager::Create(config, [] { return std::optional<std::uint64_t>{16ULL * 1024 * 1024}; }));
+  manager->SetCacheManager(&cache_manager);
+
+  const auto result = manager->SetVariables({{"cache.enabled", "true"}, {"api.default_limit", "200"}});
+
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().variable_name, "cache.enabled");
+  EXPECT_EQ(result.error().error.code(), ErrorCode::kConfigInvalidValue);
+  EXPECT_FALSE(cache_manager.IsEnabled());
+  EXPECT_FALSE(manager->GetCurrentConfig().cache.enabled);
+  EXPECT_EQ(manager->GetCurrentConfig().api.default_limit, 100);
+}
+
 TEST(RuntimeVariableManagerTest, GetCurrentConfigReflectsMutableRuntimeValues) {
   Config config = CreateTestConfig();
   auto manager = std::move(*RuntimeVariableManager::Create(config));
@@ -1601,4 +1890,28 @@ TEST(RuntimeVariableManagerTest, CacheEnableFailureReportsACacheCode) {
   const auto code = static_cast<std::uint16_t>(result.error().code());
   EXPECT_GE(code, 8000) << "cache failure returned " << code;
   EXPECT_LE(code, 8999) << "cache failure returned " << code;
+  EXPECT_FALSE(manager->GetCurrentConfig().cache.enabled);
+  auto current = manager->GetVariable("cache.enabled");
+  ASSERT_TRUE(current);
+  EXPECT_EQ(*current, "false");
+}
+
+TEST(RuntimeVariableManagerTest, CacheEnableFailureRestoresPreviouslyEnabledState) {
+  Config config = CreateTestConfig();
+  config.cache.enabled = true;
+  mygramdb::cache::NgramConfigMap ngram_configs;
+  mygramdb::cache::CacheManager cache_manager(
+      config.cache, std::move(ngram_configs),
+      [](const std::function<void()>&) -> std::thread { throw std::runtime_error("worker unavailable"); });
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+  manager->SetCacheManager(&cache_manager);
+
+  EXPECT_FALSE(cache_manager.IsEnabled());
+  auto result = manager->SetVariable("cache.enabled", "true");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kCacheDisabled);
+  EXPECT_TRUE(manager->GetCurrentConfig().cache.enabled);
+  auto current = manager->GetVariable("cache.enabled");
+  ASSERT_TRUE(current);
+  EXPECT_EQ(*current, "true");
 }

@@ -46,6 +46,9 @@ mysql:
   user: test
   database: testdb
 
+replication:
+  enable: false
+
 tables:
   - name: test_table
     text_source: {column: content}
@@ -70,6 +73,9 @@ TEST_F(ConfigRateLimitingTest, EnableRateLimiting) {
 mysql:
   user: test
   database: testdb
+
+replication:
+  enable: false
 
 tables:
   - name: test_table
@@ -98,6 +104,9 @@ TEST_F(ConfigRateLimitingTest, CustomConfiguration) {
 mysql:
   user: test
   database: testdb
+
+replication:
+  enable: false
 
 tables:
   - name: test_table
@@ -130,6 +139,9 @@ mysql:
   user: test
   database: testdb
 
+replication:
+  enable: false
+
 tables:
   - name: test_table
     text_source: {column: content}
@@ -159,6 +171,9 @@ TEST_F(ConfigRateLimitingTest, PartialConfiguration) {
 mysql:
   user: test
   database: testdb
+
+replication:
+  enable: false
 
 tables:
   - name: test_table

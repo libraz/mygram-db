@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -31,6 +32,12 @@ namespace mygramdb::config {
 struct VariableInfo {
   std::string value;     ///< Current value as string
   bool mutable_{false};  ///< True if variable can be changed at runtime
+};
+
+/** @brief Error returned by a multi-variable SET, including the assignment that failed. */
+struct VariableSetError {
+  std::string variable_name;
+  mygram::utils::Error error;
 };
 
 /**
@@ -69,13 +76,15 @@ struct VariableInfo {
  */
 class RuntimeVariableManager {
  public:
+  using PhysicalMemoryProvider = std::function<std::optional<std::uint64_t>()>;
+
   /**
    * @brief Create manager from initial config
    * @param initial_config Initial configuration
    * @return Expected with unique_ptr or error
    */
   static mygram::utils::Expected<std::unique_ptr<RuntimeVariableManager>, mygram::utils::Error> Create(
-      const Config& initial_config);
+      const Config& initial_config, PhysicalMemoryProvider physical_memory_provider = {});
 
   RuntimeVariableManager(const RuntimeVariableManager&) = delete;
   RuntimeVariableManager& operator=(const RuntimeVariableManager&) = delete;
@@ -100,6 +109,16 @@ class RuntimeVariableManager {
    */
   mygram::utils::Expected<void, mygram::utils::Error> SetVariable(const std::string& variable_name,
                                                                   const std::string& value);
+
+  /**
+   * @brief Validate and apply a SET containing multiple variable assignments atomically.
+   *
+   * All scalar values and final-state constraints are checked before any side
+   * effects. A failure identifies the assignment that failed; a cache toggle
+   * is the only fallible effect and runs before the remaining coalesced effects.
+   */
+  mygram::utils::Expected<void, VariableSetError> SetVariables(
+      const std::vector<std::pair<std::string, std::string>>& assignments);
 
   /**
    * @brief Get variable value
@@ -179,65 +198,19 @@ class RuntimeVariableManager {
   // Original config (immutable variables + defaults)
   Config base_config_;
 
+  // Masked Config projection cached at creation time. Runtime-mutated fields
+  // are overlaid from runtime_values_ when reading.
+  std::map<std::string, std::string> cached_config_variables_;
+
   // Callbacks and component references
   std::function<mygram::utils::Expected<void, mygram::utils::Error>(bool enabled)> cache_toggle_callback_;
   std::function<void(bool enabled, size_t capacity, size_t refill_rate)> rate_limiter_callback_;
   std::vector<std::function<void(int default_limit, int max_query_length)>> api_config_callbacks_;
   // Non-owning pointer for cache configuration updates.
-  // Thread-safe: always accessed under mutex_ (SetCacheManager acquires unique_lock,
-  // ApplyCache* methods acquire shared_lock). Set during initialization before
+  // Thread-safe: always accessed under mutex_. Set during initialization before
   // worker threads start, and the lock also protects later updates.
   cache::CacheManager* cache_manager_ = nullptr;
-
-  /**
-   * @brief Apply logging.level change
-   */
-  static mygram::utils::Expected<void, mygram::utils::Error> ApplyLoggingLevel(const std::string& value);
-
-  /**
-   * @brief Apply logging.format change
-   */
-  static mygram::utils::Expected<void, mygram::utils::Error> ApplyLoggingFormat(const std::string& value);
-
-  /**
-   * @brief Apply api.default_limit change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyApiDefaultLimit(int value);
-
-  /**
-   * @brief Apply api.max_query_length change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyApiMaxQueryLength(int value);
-
-  /**
-   * @brief Apply api.rate_limiting.enable change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyRateLimitingEnable(bool value);
-
-  /**
-   * @brief Apply api.rate_limiting.capacity change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyRateLimitingCapacity(int value);
-
-  /**
-   * @brief Apply api.rate_limiting.refill_rate change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyRateLimitingRefillRate(int value);
-
-  /**
-   * @brief Apply cache.enabled change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyCacheEnabled(bool value);
-
-  /**
-   * @brief Apply cache.min_query_cost_ms change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyCacheMinQueryCost(double value);
-
-  /**
-   * @brief Apply cache.ttl_seconds change
-   */
-  mygram::utils::Expected<void, mygram::utils::Error> ApplyCacheTtl(int value);
+  PhysicalMemoryProvider physical_memory_provider_;
 
   /**
    * @brief Get current value for a variable (internal, caller must hold mutex_)
@@ -249,21 +222,6 @@ class RuntimeVariableManager {
    * @brief Initialize runtime values from config
    */
   void InitializeRuntimeValues();
-
-  /**
-   * @brief Parse boolean value
-   */
-  static mygram::utils::Expected<bool, mygram::utils::Error> ParseBool(const std::string& value);
-
-  /**
-   * @brief Parse integer value
-   */
-  static mygram::utils::Expected<int, mygram::utils::Error> ParseInt(const std::string& value);
-
-  /**
-   * @brief Parse double value
-   */
-  static mygram::utils::Expected<double, mygram::utils::Error> ParseDouble(const std::string& value);
 };
 
 }  // namespace mygramdb::config

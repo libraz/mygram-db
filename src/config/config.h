@@ -209,7 +209,9 @@ struct TableConfig {
   std::vector<RequiredFilterConfig> required_filters;  // Data existence conditions
   std::vector<FilterConfig> filters;                   // Optional filters for search-time filtering
   int ngram_size = 2;                                  // N-gram size for ASCII/alphanumeric characters
-  int kanji_ngram_size = 0;           // N-gram size for CJK (kanji/kana) characters (0 = use ngram_size)
+  /// N-gram size for CJK ideographs. 0 uses ngram_size; kana and other scripts
+  /// always use ngram_size.
+  int kanji_ngram_size = 0;
   bool cross_boundary_ngrams = true;  // Generate N-grams that span CJK/non-CJK boundaries
   PostingConfig posting;
   SynonymConfig synonyms;
@@ -303,9 +305,11 @@ struct BuildConfig {
  */
 struct ReplicationConfig {
   bool enable = true;
-  bool auto_initial_snapshot = false;   // Automatically build snapshots on server startup (default: false)
-  uint32_t server_id = 0;               // MySQL server ID for replication (must be unique, 0 = disabled)
-  std::string start_from = "snapshot";  // "snapshot", "gtid=<UUID:txn>", "latest"
+  bool auto_initial_snapshot = false;  // Automatically build snapshots on server startup (default: false)
+  // MySQL server ID for replication (must be unique; 0 is valid only when replication is disabled)
+  uint32_t server_id = 0;
+  // "snapshot", "latest", "gtid=<MySQL GTID set | MariaDB GTID list>"
+  std::string start_from = "snapshot";
   int queue_size = defaults::kReplicationQueueSize;
   int reconnect_backoff_min_ms = defaults::kReconnectBackoffMinMs;  // Reserved / not yet enforced
   int reconnect_backoff_max_ms = defaults::kReconnectBackoffMaxMs;  // Reserved / not yet enforced
@@ -326,7 +330,7 @@ struct MemoryConfig {
     std::string width = "narrow";
     bool lower = false;
   } normalize;
-  std::string verify_text = "off";  ///< N-gram post-filter: "off", "ascii", "all"
+  std::string verify_text = "off";  ///< Substring post-filter mode: "off", "ascii", "all"
 };
 
 /**
@@ -358,11 +362,9 @@ struct ApiConfig {
     std::string bind = "127.0.0.1";
     int port = defaults::kTcpPort;
     int max_connections = kDefaultMaxConnections;  ///< Maximum concurrent connections
-    /// Number of worker threads in the TCP thread pool.
-    /// Architecture note: each persistent client holds one worker for its entire
-    /// lifetime (blocking recv loop with 60s idle timeout), so this cap is also
-    /// the maximum number of concurrent persistent clients the server can serve.
-    /// 0 = auto (see ThreadPool: max(hardware_concurrency() * 4, 64))
+    /// Number of worker threads in the TCP thread pool. Reactor connections do
+    /// not hold workers while idle. 0 = auto: max(2 * CPU count, 4); if CPU
+    /// detection fails, the pool assumes 4 CPUs.
     int worker_threads = 0;
 
     /// Initial TCP read timeout (seconds).
@@ -384,7 +386,7 @@ struct ApiConfig {
     /// another admission limit bounds producer growth. Default: 1000.
     int thread_pool_queue_size = 1000;  // NOLINT(readability-magic-numbers)
 
-    /// Per-connection soft cap on unsent response bytes (design doc §7 R3).
+    /// Per-connection soft cap on unsent response bytes.
     /// When a single connection's write queue exceeds this cap, the reactor
     /// forcibly closes the connection to protect the server from slow-reader
     /// OOM. Default: 16 MiB. A production operator who sees

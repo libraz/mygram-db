@@ -36,6 +36,9 @@ mysql:
   password: "test"
   database: "test"
 
+replication:
+  enable: false
+
 tables:
   - name: "test_table"
     primary_key: "id"
@@ -106,6 +109,9 @@ mysql:
   password: "test"
   database: "test"
 
+replication:
+  enable: false
+
 tables:
   - name: "test_table"
     primary_key: "id"
@@ -173,6 +179,9 @@ mysql:
   password: "test"
   database: "test"
 
+replication:
+  enable: false
+
 tables:
   - name: "test_table"
     primary_key: "id"
@@ -233,6 +242,9 @@ mysql:
   user: "test"
   password: "test"
   database: "test"
+
+replication:
+  enable: false
 
 tables:
   - name: "test_table"
@@ -300,6 +312,9 @@ mysql:
   user: "test"
   password: "test"
   database: "test"
+
+replication:
+  enable: false
 
 tables:
   - name: "test_table"

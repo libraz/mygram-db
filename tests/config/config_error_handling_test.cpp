@@ -128,6 +128,7 @@ TEST(ConfigErrorHandlingTest, ParseConfigFromJsonRejectsSynonymsFilePathTraversa
 TEST(ConfigErrorHandlingTest, ParseConfigFromJsonSucceedsForValidMinimalConfig) {
   json config_json = {
       {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+      {"replication", {{"enable", false}}},
       {"tables", json::array({{{"name", "test"}, {"primary_key", "id"}, {"text_source", {{"column", "body"}}}}})}};
 
   auto result = internal::ParseConfigFromJson(config_json);

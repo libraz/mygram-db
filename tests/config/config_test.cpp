@@ -76,6 +76,13 @@ class ConfigTestEnvironment : public ::testing::Environment {
 
 [[maybe_unused]] auto* const kConfigTestEnvironment = ::testing::AddGlobalTestEnvironment(new ConfigTestEnvironment());
 
+mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigWithReplicationDisabledByDefault(json config_json) {
+  if (!config_json.contains("replication")) {
+    config_json["replication"] = {{"enable", false}};
+  }
+  return internal::ParseConfigFromJson(config_json);
+}
+
 }  // namespace
 
 /**
@@ -271,6 +278,8 @@ TEST(ConfigTest, DefaultValues) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -297,6 +306,25 @@ TEST(ConfigTest, DefaultValues) {
   // specified in the YAML; they are no longer hardcoded inside HttpServer.
   EXPECT_EQ(config.api.http.read_timeout_sec, defaults::kHttpTimeoutSec);
   EXPECT_EQ(config.api.http.write_timeout_sec, defaults::kHttpTimeoutSec);
+}
+
+TEST(ConfigTest, ReplicationDefaultsEnabledAndRequiresServerId) {
+  const json base_config = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+      {"tables", json::array({{{"name", "docs"}, {"text_source", {{"column", "body"}}}}})},
+      {"cache", {{"enabled", false}}},
+  };
+
+  const auto omitted_replication = internal::ParseConfigFromJson(base_config);
+  ASSERT_FALSE(omitted_replication);
+  EXPECT_NE(omitted_replication.error().message().find("server_id"), std::string::npos);
+
+  json disabled_config = base_config;
+  disabled_config["replication"] = {{"enable", false}, {"server_id", 0}};
+  const auto disabled = internal::ParseConfigFromJson(disabled_config);
+  ASSERT_TRUE(disabled) << disabled.error().to_string();
+  EXPECT_FALSE(disabled->replication.enable);
+  EXPECT_EQ(disabled->replication.server_id, 0U);
 }
 
 /**
@@ -377,6 +405,8 @@ TEST(ConfigTest, SchemaExposedConfigKeysAreParsedFromYaml) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "index:\n";
   f << "  ngram_size: 3\n";
   f << "tables:\n";
@@ -443,12 +473,12 @@ TEST(ConfigTest, SynonymsEnabledRequiresNonEmptyFile) {
       {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"tables",
        json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}, {"synonyms", {{"enable", true}}}}})}};
-  auto missing = internal::ParseConfigFromJson(no_file);
+  auto missing = ParseConfigWithReplicationDisabledByDefault(no_file);
   ASSERT_FALSE(missing);
   EXPECT_NE(missing.error().message().find("synonyms.file"), std::string::npos);
 
   no_file["tables"][0]["synonyms"]["file"] = "";
-  auto empty = internal::ParseConfigFromJson(no_file);
+  auto empty = ParseConfigWithReplicationDisabledByDefault(no_file);
   ASSERT_FALSE(empty);
   EXPECT_NE(empty.error().message().find("synonyms.file"), std::string::npos);
 }
@@ -458,7 +488,7 @@ TEST(ConfigTest, GlobalNgramSizeAlsoAppliesToImplicitKanjiNgramSize) {
                       {"index", {{"ngram_size", 3}}},
                       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   ASSERT_EQ(config_result->tables.size(), 1);
   EXPECT_EQ(config_result->tables[0].ngram_size, 3);
@@ -471,7 +501,7 @@ TEST(ConfigTest, ImplicitGlobalNgramSizeMatchesSchemaDefault) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  const auto config_result = internal::ParseConfigFromJson(config_json);
+  const auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
   ASSERT_EQ(config_result->tables.size(), 1U);
   EXPECT_EQ(config_result->tables[0].ngram_size, 2);
@@ -484,7 +514,7 @@ TEST(ConfigTest, ExplicitKanjiNgramSizeOverridesGlobalNgramSize) {
       {"index", {{"ngram_size", 3}}},
       {"tables", json::array({{{"name", "test"}, {"kanji_ngram_size", 1}, {"text_source", {{"column", "text"}}}}})}};
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   ASSERT_EQ(config_result->tables.size(), 1);
   EXPECT_EQ(config_result->tables[0].ngram_size, 3);
@@ -497,7 +527,7 @@ TEST(ConfigTest, ExplicitZeroKanjiNgramSizeInheritsLegacyGlobalNgramSize) {
       {"index", {{"ngram_size", 3}}},
       {"tables", json::array({{{"name", "test"}, {"kanji_ngram_size", 0}, {"text_source", {{"column", "text"}}}}})}};
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   ASSERT_EQ(config_result->tables.size(), 1);
   EXPECT_EQ(config_result->tables[0].ngram_size, 3);
@@ -508,7 +538,7 @@ TEST(ConfigTest, OmittedGlobalNgramSizeDefaultsToBigram) {
   json config_json = {{"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
                       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})}};
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   ASSERT_EQ(config_result->tables.size(), 1);
   EXPECT_EQ(config_result->tables[0].ngram_size, 2);
@@ -522,7 +552,7 @@ TEST(ConfigTest, InvalidNetworkAllowCidrIsRejectedSemantically) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("network.allow_cidrs"), std::string::npos);
   EXPECT_NE(config_result.error().message().find("999.0.0.1/24"), std::string::npos);
@@ -535,7 +565,7 @@ TEST(ConfigTest, IPv6NetworkAllowCidrsAreAcceptedSemantically) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
   EXPECT_EQ(config_result->network.allow_cidrs, (std::vector<std::string>{"::1/128", "2001:db8::/32"}));
 }
@@ -547,7 +577,7 @@ TEST(ConfigTest, RejectsEnabledCorsWithoutExplicitOrigin) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("api.http.cors_allow_origin"), std::string::npos);
 }
@@ -558,7 +588,7 @@ TEST(ConfigTest, RejectsNonNumericTrustedProxyAddress) {
       {"api", {{"http", {{"trusted_proxies", json::array({"proxy.internal"})}}}}},
   };
 
-  const auto config_result = internal::ParseConfigFromJson(config_json);
+  const auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("trusted_proxies"), std::string::npos);
 }
@@ -568,19 +598,20 @@ TEST(ConfigTest, RejectsDisabledGtidReplicationMode) {
       {"mysql", {{"use_gtid", false}}},
   };
 
-  const auto config_result = internal::ParseConfigFromJson(config_json);
+  const auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
 }
 
-TEST(ConfigTest, RejectsPendingFrameLimitBelowValidQueryLimit) {
+TEST(ConfigTest, AcceptsSmallPendingFrameBudgetWithLargerQueryLimit) {
   json config_json = {
       {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
       {"api", {{"max_query_length", 65536}, {"tcp", {{"max_pending_frame_bytes", 4096}}}}},
   };
 
-  const auto config_result = internal::ParseConfigFromJson(config_json);
-  ASSERT_FALSE(config_result);
-  EXPECT_NE(config_result.error().message().find("max_pending_frame_bytes"), std::string::npos);
+  const auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
+  ASSERT_TRUE(config_result) << config_result.error().to_string();
+  EXPECT_EQ(config_result->api.max_query_length, 65536U);
+  EXPECT_EQ(config_result->api.tcp.max_pending_frame_bytes, 4096);
 }
 
 TEST(ConfigTest, AllowsPendingFrameLimitEqualToQueryLimit) {
@@ -589,7 +620,7 @@ TEST(ConfigTest, AllowsPendingFrameLimitEqualToQueryLimit) {
       {"api", {{"max_query_length", 65536}, {"tcp", {{"max_pending_frame_bytes", 65536}}}}},
   };
 
-  const auto config_result = internal::ParseConfigFromJson(config_json);
+  const auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
 }
 
@@ -601,7 +632,7 @@ TEST(ConfigTest, RejectsUniversalAclWithPublicTcpBind) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("network.allow_cidrs"), std::string::npos);
   EXPECT_NE(config_result.error().message().find("api.tcp.bind"), std::string::npos);
@@ -615,7 +646,7 @@ TEST(ConfigTest, RejectsUniversalIpv6AclWithPublicHttpBind) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("network.allow_cidrs"), std::string::npos);
   EXPECT_NE(config_result.error().message().find("api.http.bind"), std::string::npos);
@@ -629,7 +660,7 @@ TEST(ConfigTest, AllowsUniversalAclForLoopbackBinds) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
 }
 
@@ -641,7 +672,7 @@ TEST(ConfigTest, AllowsPublicBindWithRestrictiveAcl) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
 }
 
@@ -653,7 +684,7 @@ TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminToken) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
 }
@@ -666,7 +697,7 @@ TEST(ConfigTest, RejectsPublicHttpBindWithoutAdminToken) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
   EXPECT_NE(config_result.error().message().find("api.http.bind"), std::string::npos);
@@ -682,7 +713,7 @@ TEST(ConfigTest, RejectsPublicHttpBindWithoutAdminTokenBehindUnixSocket) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
   EXPECT_NE(config_result.error().message().find("api.http.bind"), std::string::npos);
@@ -696,7 +727,7 @@ TEST(ConfigTest, RejectsPublicTcpBindWithoutAdminTokenWhenHttpIsLoopback) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_FALSE(config_result);
   EXPECT_NE(config_result.error().message().find("api.admin_token"), std::string::npos);
   EXPECT_NE(config_result.error().message().find("api.tcp.bind"), std::string::npos);
@@ -710,7 +741,7 @@ TEST(ConfigTest, AllowsMissingAdminTokenWhenBothListenersAreLocal) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
 }
 
@@ -722,7 +753,7 @@ TEST(ConfigTest, AllowsMissingAdminTokenWhenHttpIsDisabledBehindUnixSocket) {
       {"tables", json::array({{{"name", "test"}, {"text_source", {{"column", "text"}}}}})},
   };
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << config_result.error().to_string();
 }
 
@@ -734,7 +765,7 @@ TEST(ConfigTest, TableDatabaseDefaultsToMysqlDatabaseAndCanOverride) {
                      {{"name", "archive"}, {"database", "archive_db"}, {"text_source", {{"column", "body"}}}},
                  })}};
 
-  auto config_result = internal::ParseConfigFromJson(config_json);
+  auto config_result = ParseConfigWithReplicationDisabledByDefault(config_json);
   ASSERT_TRUE(config_result) << "Failed to load config: " << config_result.error().to_string();
   ASSERT_EQ(config_result->tables.size(), 2);
   EXPECT_EQ(config_result->tables[0].database, "app_db");
@@ -747,6 +778,8 @@ TEST(ConfigTest, DuplicateQualifiedTableIdentityIsRejected) {
        << "  host: 127.0.0.1\n"
        << "  user: test\n"
        << "  database: app_db\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: articles\n"
        << "    database: archive_db\n"
@@ -770,6 +803,8 @@ TEST(ConfigTest, SameTableNameInDifferentDatabasesIsAccepted) {
        << "  host: 127.0.0.1\n"
        << "  user: test\n"
        << "  database: app_db\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: articles\n"
        << "    database: archive_db\n"
@@ -804,6 +839,8 @@ TEST(ConfigTest, HttpTimeoutsParsedFromYaml) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -834,6 +871,8 @@ TEST(ConfigTest, ConcatenatedTextSource) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: articles\n";
   f << "    text_source:\n";
@@ -940,6 +979,52 @@ TEST(ConfigTest, InvalidStartFrom) {
     EXPECT_TRUE(error_msg.find("Replication configuration error") != std::string::npos);
     EXPECT_TRUE(error_msg.find("Invalid start_from value") != std::string::npos);
   }
+}
+
+namespace {
+
+/** Writes a minimal valid config whose replication.start_from is @p start_from. */
+std::string WriteStartFromConfig(const std::string& file_name, const std::string& start_from) {
+  const auto path = TempConfigPath(file_name);
+  std::ofstream f(path);
+  f << "mysql:\n";
+  f << "  host: localhost\n";
+  f << "  user: root\n";
+  f << "  password: pass\n";
+  f << "  database: testdb\n";
+  f << "tables:\n";
+  f << "  - name: test\n";
+  f << "    text_source:\n";
+  f << "      column: content\n";
+  f << "replication:\n";
+  f << "  enable: true\n";
+  f << "  server_id: 100\n";
+  f << "  start_from: " << start_from << "\n";
+  return path;
+}
+
+}  // namespace
+
+/**
+ * @brief A MariaDB GTID list is a valid start_from position
+ */
+TEST(ConfigTest, StartFromAcceptsMariaDbGtidList) {
+  const auto path = WriteStartFromConfig("mariadb_gtid_start_from.yaml", "gtid=0-1-5,1-1-3");
+
+  auto result = LoadConfig(path);
+  ASSERT_TRUE(result) << result.error().message();
+  EXPECT_EQ(result->replication.start_from, "gtid=0-1-5,1-1-3");
+}
+
+/**
+ * @brief A gtid= value that is neither a MySQL GTID set nor a MariaDB GTID list is rejected
+ */
+TEST(ConfigTest, StartFromRejectsMalformedGtid) {
+  const auto path = WriteStartFromConfig("garbage_gtid_start_from.yaml", "gtid=0-1-5,not-a-gtid");
+
+  auto result = LoadConfig(path);
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("Invalid GTID format"), std::string::npos) << result.error().message();
 }
 
 TEST(ConfigTest, MultiTableAutoInitialSnapshotRejectsLatestStartFrom) {
@@ -1164,13 +1249,13 @@ TEST(ConfigTest, DumpLoadOnStartupWithoutReplicationIgnoresStartFrom) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
+  f << "  start_from: latest\n";
   f << "tables:\n";
   f << "  - name: articles\n";
   f << "    text_source:\n";
   f << "      column: content\n";
-  f << "replication:\n";
-  f << "  enable: false\n";
-  f << "  start_from: latest\n";
   f << "dump:\n";
   f << "  load_on_startup: true\n";
   f.close();
@@ -1429,6 +1514,8 @@ TEST(ConfigTest, AutoDetectFormat) {
   yaml_file << "  user: root\n";
   yaml_file << "  password: pass\n";
   yaml_file << "  database: testdb\n";
+  yaml_file << "replication:\n";
+  yaml_file << "  enable: false\n";
   yaml_file << "tables:\n";
   yaml_file << "  - name: test\n";
   yaml_file << "    text_source:\n";
@@ -1450,6 +1537,8 @@ TEST(ConfigTest, UnknownExtensionYamlFallbackHonorsCustomSchema) {
   yaml_file << "  user: root\n";
   yaml_file << "  password: pass\n";
   yaml_file << "  database: testdb\n";
+  yaml_file << "replication:\n";
+  yaml_file << "  enable: false\n";
   yaml_file << "tables:\n";
   yaml_file << "  - name: test\n";
   yaml_file << "    text_source:\n";
@@ -1516,6 +1605,8 @@ TEST(ConfigTest, LoadConfigYamlLegacy) {
   f << "  user: legacy_user\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -1557,6 +1648,8 @@ TEST(ConfigTest, MysqlSslDefaults) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -1590,6 +1683,8 @@ TEST(ConfigTest, MysqlSslConfiguration) {
   f << "  ssl_cert: /path/to/client-cert.pem\n";
   f << "  ssl_key: /path/to/client-key.pem\n";
   f << "  ssl_verify_server_cert: false\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -1611,6 +1706,7 @@ TEST(ConfigTest, MysqlIgnoredDdlPrefixesRejectDml) {
   std::ofstream valid("ignored_ddl_prefixes.yaml");
   valid << "mysql:\n  host: localhost\n  user: root\n  password: pass\n  database: testdb\n";
   valid << "  ignored_ddl_prefixes: [\"CREATE OR REPLACE TABLE\", \"ANALYZE TABLE\"]\n";
+  valid << "replication:\n  enable: false\n";
   valid << "tables:\n  - name: test\n    text_source:\n      column: text\n";
   valid.close();
   auto valid_result = LoadConfig("ignored_ddl_prefixes.yaml");
@@ -1620,6 +1716,7 @@ TEST(ConfigTest, MysqlIgnoredDdlPrefixesRejectDml) {
   std::ofstream invalid("ignored_ddl_prefixes_dml.yaml");
   invalid << "mysql:\n  host: localhost\n  user: root\n  password: pass\n  database: testdb\n";
   invalid << "  ignored_ddl_prefixes: [\"UPDATE posts\"]\n";
+  invalid << "replication:\n  enable: false\n";
   invalid << "tables:\n  - name: test\n    text_source:\n      column: text\n";
   invalid.close();
   auto invalid_result = LoadConfig("ignored_ddl_prefixes_dml.yaml");
@@ -1639,6 +1736,8 @@ TEST(ConfigTest, MysqlSslPartialConfiguration) {
   f << "  database: testdb\n";
   f << "  ssl_enable: true\n";
   f << "  ssl_ca: /path/to/ca-cert.pem\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -1694,6 +1793,8 @@ TEST(ConfigTest, CacheMemoryExceedsPhysicalMemoryLimit) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -1731,6 +1832,8 @@ TEST(ConfigTest, CacheMemoryWithinPhysicalMemoryLimit) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -1767,6 +1870,8 @@ TEST(ConfigTest, CacheDisabledNoMemoryValidation) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -2038,6 +2143,8 @@ TEST(ConfigTest, QuotedNumericYamlScalarsRemainStrings) {
        << "  user: \"12345\"\n"
        << "  password: \"67890\"\n"
        << "  database: \"24680\"\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: \"13579\"\n"
        << "    primary_key: \"123\"\n"
@@ -2062,6 +2169,8 @@ TEST(ConfigTest, MediumintFilterTypesPassSchemaAndParser) {
   file << "mysql:\n"
        << "  user: test\n"
        << "  database: test\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: docs\n"
        << "    text_source:\n"
@@ -2100,6 +2209,8 @@ TEST(ConfigTest, MysqlPortEnvironmentOverrideEnforcesSchemaRange) {
   file << "mysql:\n"
        << "  user: test\n"
        << "  database: test\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: docs\n"
        << "    text_source: {column: body}\n";
@@ -2129,6 +2240,8 @@ TEST(ConfigTest, AdminTokenEnvironmentOverrideAppliesWithoutApiBlock) {
        << "  user: test\n"
        << "  password: pass\n"
        << "  database: test\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: docs\n"
        << "    text_source: {column: body}\n";
@@ -2152,7 +2265,9 @@ TEST(ConfigTest, AdminTokenEnvironmentOverrideAppliesWithoutApiBlock) {
 TEST(ConfigTest, MysqlEnvironmentOverridesApplyWithoutMysqlBlock) {
   const std::string path = TempConfigPath("env_mysql_no_mysql_block.yaml");
   std::ofstream file(path);
-  file << "tables:\n"
+  file << "replication:\n"
+       << "  enable: false\n"
+       << "tables:\n"
        << "  - name: docs\n"
        << "    text_source: {column: body}\n";
   file.close();
@@ -2185,6 +2300,8 @@ TEST(ConfigTest, ValidationOnlyLoadIgnoresEnvironmentOverrides) {
        << "  user: file-user\n"
        << "  password: file-password\n"
        << "  database: file-database\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: docs\n"
        << "    text_source: {column: body}\n";
@@ -2206,6 +2323,8 @@ TEST(ConfigTest, ValidationOnlyMissingUserDoesNotOfferEnvironmentOverrideAsRemed
   std::ofstream file(path);
   file << "mysql:\n"
        << "  database: file-database\n"
+       << "replication:\n"
+       << "  enable: false\n"
        << "tables:\n"
        << "  - name: docs\n"
        << "    text_source: {column: body}\n";
@@ -2234,6 +2353,46 @@ TEST(ConfigTest, RuntimeRateLimitBoundsMatchSchema) {
   const auto& rate_limiting = schema["properties"]["api"]["properties"]["rate_limiting"]["properties"];
   EXPECT_EQ(rate_limiting["capacity"]["maximum"].get<int>(), ApiConfig::kMaxRateLimitCapacity);
   EXPECT_EQ(rate_limiting["refill_rate"]["maximum"].get<int>(), ApiConfig::kMaxRateLimitRefillRate);
+}
+
+TEST(ConfigTest, MemoryHardAndSoftLimitsAcceptIntMaxAndRejectLargerValues) {
+  const json permissive_schema = {{"type", "object"}};
+  const json base_config = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+      {"tables", json::array({{{"name", "docs"}, {"text_source", {{"column", "body"}}}}})},
+  };
+
+  for (const auto* field : {"hard_limit_mb", "soft_target_mb"}) {
+    json at_int_max = base_config;
+    at_int_max["memory"][field] = 2147483647;
+    const auto accepted = ValidateConfigJson(at_int_max.dump(), permissive_schema.dump());
+    ASSERT_TRUE(accepted) << field << ": " << accepted.error().to_string();
+
+    json above_int_max = base_config;
+    above_int_max["memory"][field] = 2147483648LL;
+    const auto rejected = ValidateConfigJson(above_int_max.dump(), permissive_schema.dump());
+    ASSERT_FALSE(rejected) << field;
+    EXPECT_NE(rejected.error().message().find(field), std::string::npos) << rejected.error().to_string();
+  }
+}
+
+TEST(ConfigTest, CacheMemorySchemaMatchesParserUpperBound) {
+  const json permissive_schema = {{"type", "object"}};
+  const json base_config = {
+      {"mysql", {{"user", "test_user"}, {"database", "test_db"}}},
+      {"tables", json::array({{{"name", "docs"}, {"text_source", {{"column", "body"}}}}})},
+  };
+
+  json at_maximum = base_config;
+  at_maximum["cache"]["max_memory_mb"] = 1048576;
+  const auto accepted = ValidateConfigJson(at_maximum.dump(), permissive_schema.dump());
+  ASSERT_TRUE(accepted) << accepted.error().to_string();
+
+  json above_maximum = base_config;
+  above_maximum["cache"]["max_memory_mb"] = 1048577;
+  const auto rejected = ValidateConfigJson(above_maximum.dump(), permissive_schema.dump());
+  ASSERT_FALSE(rejected);
+  EXPECT_NE(rejected.error().message().find("max_memory_mb"), std::string::npos) << rejected.error().to_string();
 }
 
 TEST(ConfigTest, CustomSchemaCannotRelaxBuiltInRangeOrEnumConstraints) {
@@ -2397,6 +2556,8 @@ TEST(ConfigTest, ValidConfigReturnsExpectedValue) {
   f << "  user: root\n";
   f << "  password: pass\n";
   f << "  database: testdb\n";
+  f << "replication:\n";
+  f << "  enable: false\n";
   f << "tables:\n";
   f << "  - name: test\n";
   f << "    text_source:\n";
@@ -2500,6 +2661,8 @@ TEST(ConfigTest, UnifiesSameTypeRequiredAndOptionalFilterColumn) {
     f << "  user: root\n";
     f << "  password: pass\n";
     f << "  database: testdb\n";
+    f << "replication:\n";
+    f << "  enable: false\n";
     f << "tables:\n";
     f << "  - name: test\n";
     f << "    text_source:\n";
@@ -2577,6 +2740,8 @@ TEST(ConfigTest, NgramSizeRangeValidation) {
     f << "  user: root\n";
     f << "  password: pass\n";
     f << "  database: testdb\n";
+    f << "replication:\n";
+    f << "  enable: false\n";
     f << "tables:\n";
     f << "  - name: test\n";
     f << "    ngram_size: 0\n";
@@ -2597,6 +2762,8 @@ TEST(ConfigTest, NgramSizeRangeValidation) {
     f << "  user: root\n";
     f << "  password: pass\n";
     f << "  database: testdb\n";
+    f << "replication:\n";
+    f << "  enable: false\n";
     f << "tables:\n";
     f << "  - name: test\n";
     f << "    ngram_size: 11\n";
@@ -2617,6 +2784,8 @@ TEST(ConfigTest, NgramSizeRangeValidation) {
     f << "  user: root\n";
     f << "  password: pass\n";
     f << "  database: testdb\n";
+    f << "replication:\n";
+    f << "  enable: false\n";
     f << "tables:\n";
     f << "  - name: test\n";
     f << "    ngram_size: 5\n";

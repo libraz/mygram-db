@@ -4,7 +4,7 @@ This file is normative for MygramDB's configuration surface. It describes what t
 
 Configuration is loaded from a YAML (`.yaml`, `.yml`) or JSON (`.json`) file. Format is chosen by extension; an unrecognized extension is tried as YAML and then as JSON (`src/config/config_loader.cpp`). YAML is converted to JSON before anything else, so YAML and JSON accept exactly the same key set (`src/config/config.cpp`). Every configuration is validated against a JSON Schema that is compiled into the binary from `src/config/config-schema.json` (`src/config/CMakeLists.txt`); this happens for every load and cannot be turned off.
 
-The root object requires `mysql` and `tables`, and rejects unknown top-level keys. Every object in the schema sets `additionalProperties: false`, so a misspelled key anywhere is a hard startup failure rather than a silently ignored value.
+The root object requires `tables`; `mysql` is optional because connection values may come from environment variables. Startup still requires a non-empty effective `mysql.user` and `mysql.database`. Unknown top-level keys are rejected. Every object in the schema sets `additionalProperties: false`, so a misspelled key anywhere is a hard startup failure rather than a silently ignored value.
 
 ## Reading the tables
 
@@ -25,7 +25,7 @@ Runtime mutation is available through the variable surface. The mutable set is a
 |---|---|---|---|---|---|
 | `mysql.host` | string | any | `127.0.0.1` | startup-only | `src/config/config-schema.json` |
 | `mysql.port` | integer | 1–65535 | `3306` | startup-only | `src/config/config-schema.json`, env path `src/config/config.cpp` |
-| `mysql.user` | string | minLength 1; must be non-empty after env override | (none — required) | startup-only | `src/config/config.cpp` |
+| `mysql.user` | string | minLength 1; must be non-empty after environment override | (none — required from file or environment) | startup-only | `src/config/config.cpp` |
 | `mysql.password` | string | any | `""` | startup-only | `src/config/config-schema.json` |
 | `mysql.database` | string | minLength 1, no NUL; must be a quotable SQL identifier | (none — required) | startup-only | `src/config/config.cpp`, `src/utils/sql_utils.cpp` |
 | `mysql.use_gtid` | boolean | `true` only | `true` | startup-only · unread | `src/config/config.cpp` |
@@ -76,7 +76,13 @@ Each element requires `name` and `text_source`. Table identity is `(database, na
 | `tables[].synonyms.enable` | boolean | — | `false` | startup-only | `src/config/config-schema.json` |
 | `tables[].synonyms.file` | string | minLength 1, no `..` component, no NUL; required when `enable` is true | `""` | startup-only | `src/config/config.cpp`, `src/config/config-schema.json` |
 
-A column named in both `required_filters` and `filters` must carry the same `type` in both places; conflicting types are a hard failure (`src/config/config.cpp`). `tables[].where_clause` is not accepted: the schema rejects it as an unknown property, and the parser carries an explicit rejection with a migration message (`src/config/config.cpp`).
+`tables[].kanji_ngram_size` applies only to CJK ideographs; kana and other scripts use `ngram_size` (`src/utils/string_utils.cpp`). A column named in both `required_filters` and `filters` must carry the same `type` in both places; conflicting types are a hard failure (`src/config/config.cpp`). `tables[].where_clause` is not accepted: the schema rejects it as an unknown property, and the parser carries an explicit rejection with a migration message (`src/config/config.cpp`).
+
+## Ingestion value limits
+
+Snapshot loading, `SYNC`, and binlog ingestion share these document-field limits, measured in bytes: primary keys 1 MiB; at most 1,000 filters per document; filter names 1 KiB; string filter values 64 KiB; normalized text and original text 16 MiB each. The persisted document store uses the same bounds ([persistence format, §3](persistence-formats.md#3-document-store-serialization-format)).
+
+If normalization expands text beyond its limit, snapshot loading or `SYNC` fails explicitly and does not publish that candidate document. Binlog ingestion reports the limit error without advancing its GTID position; recovery must be explicit after the source data or configuration is corrected.
 
 ## `index` (legacy)
 
@@ -101,8 +107,8 @@ This value is applied only to tables that do not carry their own `ngram_size` (`
 |---|---|---|---|---|---|
 | `replication.enable` | boolean | — | `true` | startup-only | `src/config/config-schema.json` |
 | `replication.auto_initial_snapshot` | boolean | — | `false` | startup-only | `src/config/config-schema.json`, cross-check `src/config/config.cpp` |
-| `replication.server_id` | integer | 1–4294967295; must be non-zero when `enable` is true | `0` | startup-only | `src/config/config.cpp`, `src/config/config-schema.json` |
-| `replication.start_from` | string | `snapshot`, `latest`, or `gtid=<UUID:txn>` (the GTID form must contain a `:`) | `snapshot` | startup-only | `src/config/config.cpp` |
+| `replication.server_id` | integer | 0–4294967295; must be non-zero when replication is enabled (including when the block is omitted) and operationally unique among replication clients | `0` (valid only when disabled) | startup-only | `src/config/config-schema.json`, final-state validation in `src/config/config_validator.cpp` |
+| `replication.start_from` | string | `snapshot`, `latest`, or `gtid=<position>`, where the position is a MySQL GTID set (`UUID:txn[-txn]`, comma-separated per source) or a MariaDB GTID list (`domain-server-seq`, comma-separated per domain); a value neither grammar accepts is rejected | `snapshot` | startup-only | `src/config/config.cpp`, `src/utils/gtid_grammar.cpp` |
 | `replication.queue_size` | integer | 100–1000000 | `10000` | startup-only | `src/config/config-schema.json` |
 | `replication.reconnect_backoff_min_ms` | integer | 100–60000 | `500` | startup-only · unread | `src/config/config-schema.json` |
 | `replication.reconnect_backoff_max_ms` | integer | 1000–600000 | `10000` | startup-only · unread | `src/config/config-schema.json` |
@@ -115,8 +121,8 @@ Every key in this table is constrained by `src/config/config-schema.json`; a cel
 
 | Key | Type | Valid range / allowed values | Default | Mutability | Validated where |
 |---|---|---|---|---|---|
-| `memory.hard_limit_mb` | integer | ≥ 256 | `8192` | startup-only · unread | |
-| `memory.soft_target_mb` | integer | ≥ 128 | `4096` | startup-only · unread | |
+| `memory.hard_limit_mb` | integer | 256–2147483647 | `8192` | startup-only · unread | `src/config/config-schema.json` |
+| `memory.soft_target_mb` | integer | 128–2147483647 | `4096` | startup-only · unread | `src/config/config-schema.json` |
 | `memory.arena_chunk_mb` | integer | 1–1024 | `64` | startup-only · unread | |
 | `memory.roaring_threshold` | number | 0.0–1.0 | `0.18` | startup-only | `src/config/config-schema.json`, consumed at `src/app/server_orchestrator.cpp` |
 | `memory.minute_epoch` | boolean | — | `true` | startup-only · unread | |
@@ -156,7 +162,7 @@ Every key in this table is constrained by `src/config/config-schema.json`; a cel
 | `api.tcp.max_write_queue_bytes` | integer | 4096–1073741824 | `16777216` (16 MiB) | startup-only | `src/config/config-schema.json` |
 | `api.tcp.max_total_buffered_bytes` | integer | 1048576–68719476736 | `268435456` (256 MiB) | startup-only | `src/config/config-schema.json` |
 | `api.tcp.max_pending_frames` | integer | 4–1000000 | `1024` | startup-only | `src/config/config-schema.json` |
-| `api.tcp.max_pending_frame_bytes` | integer | 4096–1073741824; must be ≥ min(`api.max_query_length`, 1 MiB), or 1 MiB when `max_query_length` is 0 | `4194304` (4 MiB) | startup-only | `src/config/config.cpp` |
+| `api.tcp.max_pending_frame_bytes` | integer | 4096–1073741824; an independent byte budget from `api.max_query_length`, which counts characters | `4194304` (4 MiB) | startup-only | `src/config/config-schema.json` |
 
 ## `api.http`
 
@@ -232,9 +238,9 @@ When `logging.file` is set, the log is a rotating file sink capped at 100 MiB pe
 | Key | Type | Valid range / allowed values | Default | Mutability | Validated where |
 |---|---|---|---|---|---|
 | `cache.enabled` | boolean | — | `true` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
-| `cache.max_memory_mb` | integer | ≥ 1 in the schema; parser additionally rejects negative values, values above 1048576 MB, and — only when `cache.enabled` is true — any value above 50% of detected physical memory | `32` (stored as 33554432 bytes) | startup-only | `src/config/config.cpp` |
-| `cache.min_query_cost_ms` | number | ≥ 0.0 at load; ≥ 0 and finite (nan/inf rejected) at runtime | `10.0` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
-| `cache.ttl_seconds` | integer | 0-2147483647 at load; ≥ 0 at runtime; `0` = no TTL | `3600` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
+| `cache.max_memory_mb` | integer | 1–1048576; when `cache.enabled` is true, also at most 50% of detected physical memory (check skipped if detection is unavailable) | `32` (stored as 33554432 bytes) | startup-only | `src/config/config-schema.json`, final-state validation in `src/config/config_validator.cpp` |
+| `cache.min_query_cost_ms` | number | ≥ 0.0 at load and at runtime; runtime also rejects nan/inf | `10.0` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
+| `cache.ttl_seconds` | integer | 0-2147483647 at load and at runtime; `0` = no TTL | `3600` | runtime-mutable | `src/config/config-schema.json`, runtime `src/config/runtime_variable_manager.cpp` |
 | `cache.invalidation_strategy` | string | `ngram`, `table` | `ngram` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
 | `cache.compression_enabled` | boolean | — | `true` | startup-only | `src/config/config-schema.json` |
 | `cache.eviction_batch_size` | integer | 1-2147483647 | `10` | startup-only | `src/config/config-schema.json`, consumed at `src/cache/cache_manager.cpp` |
@@ -270,9 +276,7 @@ These keys are accepted by the schema, parsed into the configuration structure, 
 
 ## Unschematized keys
 
-- `tables[].required_filters[].operator` — the parser accepts `operator` as an alias for `op` (`src/config/config.cpp`). The schema declares `additionalProperties: false` on the required-filter object and does not list `operator` (`src/config/config-schema.json`), so schema validation rejects the key before the parser sees it. The alias is unreachable through the normal load path.
-
-No other key read by the parser is absent from the schema.
+No other accepted key is absent from the schema.
 
 ## CLI flags (server binary)
 
@@ -355,7 +359,7 @@ The process exits non-zero. Config-file problems surface before any socket or lo
 
 **Schema**
 
-- Any violation of the built-in schema: unknown property at any level, wrong type, out-of-range number, invalid enum member, missing `mysql`/`tables`, a table missing `name` or `text_source`, `text_source` with neither or both of `column`/`concat`, `tables` empty, `synonyms.enable: true` without `file` — `src/config/config_validator.cpp`
+- Any violation of the built-in schema: unknown property at any level, wrong type, out-of-range number, invalid enum member, missing `tables`, a table missing `name` or `text_source`, `text_source` with neither or both of `column`/`concat`, `tables` empty, `synonyms.enable: true` without `file` — `src/config/config_validator.cpp`
 - Any violation of a `--schema` file, checked after the built-in schema passes — `src/config/config_validator.cpp`
 
 **MySQL**
@@ -404,10 +408,11 @@ The types that pass are the ones both paths render identically: the integer widt
 
 **Replication**
 
-- `replication.enable: true` with `server_id` of 0 — `src/config/config.cpp`
+- `replication.enable: true` with `server_id` of 0, including when the `replication` block is omitted and `enable` defaults to true — final-state validation in `src/config/config_validator.cpp`
 - `start_from` that is not `snapshot`, `latest`, or `gtid=…` — `src/config/config.cpp`
-- `gtid=` value with no `:` — `src/config/config.cpp`
+- `gtid=` value that neither the MySQL GTID-set grammar nor the MariaDB GTID-list grammar accepts — `src/config/config.cpp`, `src/utils/gtid_grammar.cpp`
 - `auto_initial_snapshot: true` with a `start_from` other than `snapshot` — `src/config/config.cpp`
+- `dump.load_on_startup: true` with replication enabled and `start_from` other than `snapshot` — `src/config/config.cpp`
 
 **Network and API**
 
@@ -417,7 +422,6 @@ The types that pass are the ones both paths render identically: the integer widt
 - `network.allow_cidrs` containing a universal CIDR while `api.tcp.bind` or an enabled `api.http.bind` is non-loopback — `src/config/config.cpp`
 - `network.allow_cidrs` entry that is not a valid CIDR — `src/config/config.cpp`
 - `api.http.trusted_proxies` entry that is not a numeric IP address — `src/config/config.cpp`
-- `api.tcp.max_pending_frame_bytes` below the effective `api.max_query_length` — `src/config/config.cpp`
 - Bind address containing `/`, `..`, whitespace, or NUL, or that is neither a valid IP literal nor a valid hostname — `src/config/config_validator.cpp`
 - `..` component or NUL in `api.unix_socket.path` — `src/config/config.cpp`
 
@@ -425,7 +429,7 @@ The types that pass are the ones both paths render identically: the integer widt
 
 - Negative `cache.max_memory_mb` — `src/config/config.cpp`
 - `cache.max_memory_mb` above 1048576 — `src/config/config.cpp`
-- `cache.max_memory_mb` above 50% of detected physical memory, checked only when `cache.enabled` is true — `src/config/config.cpp`
+- `cache.max_memory_mb` above 50% of detected physical memory, checked only when `cache.enabled` is true — final-state validation in `src/config/config_validator.cpp`
 - `..` component or NUL in `dump.dir` — `src/config/config.cpp`
 - `dump.default_filename` that is empty, contains a separator, or contains `..` — `src/config/config.cpp`
 - `..` component or NUL in `logging.file` — `src/config/config.cpp`
@@ -446,26 +450,8 @@ The types that pass are the ones both paths render identically: the integer widt
 
 ## Known divergences
 
-Each item states both sides with citations. No fixes are proposed.
+These are the remaining known differences between descriptions and behavior. Each item states both sides with citations.
 
-1. **`api.tcp.worker_threads` auto-sizing formula.** The schema description and the header comment both say `0` means `max(hardware_concurrency() * 4, 64)` (`src/config/config-schema.json`, `src/config/config.h`). The implementation computes `max(hardware_concurrency() * 2, 4)`, substituting 4 for `hardware_concurrency()` when the runtime reports 0 (`src/server/thread_pool.cpp`).
-
-2. **`replication.server_id` is unchecked when the `replication` block is omitted.** The schema's `if`/`then` requiring `server_id` lives inside the `replication` subschema (`src/config/config-schema.json`), so it does not apply when the block is absent. The parser's `server_id != 0` check is likewise inside `if (root.contains("replication"))` (`src/config/config.cpp`). With `replication` omitted the configuration loads cleanly with `enable = true` (`src/config/config.h`) and `server_id = 0`; the failure surfaces later when the binlog reader starts (`src/mysql/binlog_reader.cpp`).
-
-3. **`--schema` is additive, not an override.** The server's help text says "Use `--schema` only to override with a custom schema" (`src/app/command_line_parser.cpp`). The validator runs the built-in schema first and only then the custom one, so a custom schema can add constraints but cannot relax any (`src/config/config_validator.cpp`).
-
-4. **`tables[].required_filters[].operator` alias is unreachable.** The parser accepts `operator` as a synonym for `op` (`src/config/config.cpp`), but the required-filter schema sets `additionalProperties: false` and does not declare it (`src/config/config-schema.json`).
-
-5. **`mysql` description omits two environment variables.** The schema's `mysql` description lists `MYGRAM_MYSQL_USER`, `MYGRAM_MYSQL_PASSWORD`, `MYGRAM_MYSQL_HOST`, and `MYGRAM_MYSQL_DATABASE` (`src/config/config-schema.json`). The parser also honors `MYGRAM_MYSQL_PORT` (`src/config/config.cpp`). Separately, `MYGRAM_API_ADMIN_TOKEN` is documented on `api.admin_token` (`src/config/config-schema.json`) but is read outside the `mysql` block (`src/config/config.cpp`).
-
-6. **`cache.max_memory_mb` has no schema maximum but two code maxima.** The schema declares only `minimum: 1` (`src/config/config-schema.json`). The parser caps the value at 1048576 MB (`src/config/config.cpp`) and additionally rejects anything above 50% of detected physical memory, that second check running only when `cache.enabled` is true (`src/config/config.cpp`).
-
-7. **`api.tcp.keepalive` description cites a design document by path.** The schema description ends with a reference to `docs/ja/design/reactor-io-refactor.md §1.1` (`src/config/config-schema.json`); no such file exists in the repository.
-
-8. **`api.tcp.worker_threads` is described against a superseded I/O model.** The schema and the header state that each persistent client holds one worker for its entire lifetime, making the worker count the cap on concurrent persistent clients (`src/config/config-schema.json`, `src/config/config.h`). The server runs a reactor (`src/server/io_reactor.cpp`, `src/server/reactor_connection.cpp`) in which persistent connections live in the reactor's connection map and consume a worker only briefly per completed frame (`src/server/thread_pool.cpp`), so the worker count does not bound concurrent persistent clients.
-
-9. **`api.max_query_length` is bounds-checked against `api.tcp.max_pending_frame_bytes` only at load.** The load path rejects a `max_pending_frame_bytes` below the effective query limit (`src/config/config.cpp`). The runtime setter validates only the 0–4096 range (`src/config/runtime_variable_manager.cpp`) and does not re-check the frame-byte cap, so raising `api.max_query_length` at runtime can put the pair into a combination the loader would have refused.
-
-10. **`mysql.datetime_timezone` is validated for format at load but parsed later.** The schema enforces the `±HH:MM` pattern (`src/config/config-schema.json`); the value is turned into a timezone offset on demand (`src/config/config.cpp`), so a schema-passing but otherwise unusable value would surface as a runtime error rather than a load error.
+1. **`mysql.datetime_timezone` is validated for format at load but parsed later.** The schema enforces the `±HH:MM` pattern (`src/config/config-schema.json`); the value is turned into a timezone offset on demand (`src/config/config.cpp`), so a schema-passing but otherwise unusable value would surface as a runtime error rather than a load error.
 
 Neither `README.md` nor anything under `docs/` states a configuration default, so there are no README/docs default divergences to report. `examples/config.yaml`, `examples/config.json`, `examples/config-minimal.yaml`, and `examples/config-minimal.json` are sample configurations rather than statements of default values.

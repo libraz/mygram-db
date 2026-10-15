@@ -396,6 +396,7 @@ TEST(RequiredFiltersTest, EmptyStringValueIsPresentAndValidForStringTypes) {
   for (const std::string& type : {"string", "varchar", "text"}) {
     const std::string json_content = R"({
   "mysql": {"user": "test_user", "database": "test"},
+  "replication": {"enable": false},
   "tables": [{
     "name": "articles",
     "text_source": {"column": "content"},

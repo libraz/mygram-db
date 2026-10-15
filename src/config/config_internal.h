@@ -7,14 +7,32 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <cstdint>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "config/config.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
 namespace mygramdb::config::internal {
+
+/**
+ * @brief Parse and validate one scalar runtime value against its built-in schema leaf.
+ */
+mygram::utils::Expected<nlohmann::json, mygram::utils::Error> ValidateConfigValue(std::string_view dotted_key,
+                                                                                  std::string_view raw_value);
+
+/**
+ * @brief Validate constraints that apply to the completed configuration state.
+ * @param config Candidate final configuration
+ * @param physical_memory_bytes Detected physical memory, if available
+ * @param[out] offending_key If non-null, set to the dotted key whose final state failed validation
+ */
+mygram::utils::Expected<void, mygram::utils::Error> ValidateFinalConfigState(
+    const Config& config, std::optional<std::uint64_t> physical_memory_bytes, std::string* offending_key = nullptr);
 
 /**
  * @brief Convert YAML node to JSON object recursively
