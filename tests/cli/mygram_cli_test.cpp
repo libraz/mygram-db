@@ -397,7 +397,12 @@ TEST_F(CliStringHelperTest, JoinArgsForCommand) {
 TEST_F(CliStringHelperTest, ParsesDumpSaveFilepath) {
   ASSERT_TRUE(ParseDumpSaveFilepath("DUMP SAVE").has_value());
   EXPECT_TRUE(ParseDumpSaveFilepath("DUMP SAVE")->empty());
-  EXPECT_EQ(ParseDumpSaveFilepath("dump save /tmp/a b.dmp"), "/tmp/a b.dmp");
+  // Like the server parser, the last non-empty token is the path.
+  EXPECT_EQ(ParseDumpSaveFilepath("dump save /tmp/a b.dmp"), "b.dmp");
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE /tmp/a.dmp "")"), "/tmp/a.dmp");
+  // A flag is left to the server, which rejects it.
+  EXPECT_FALSE(ParseDumpSaveFilepath("DUMP SAVE --with-stats /tmp/a.dmp").has_value());
+  EXPECT_FALSE(ParseDumpSaveFilepath(R"(DUMP SAVE "-x")").has_value());
   EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE "/tmp/a b.dmp")"), "/tmp/a b.dmp");
   EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE '/tmp/a b.dmp')"), "/tmp/a b.dmp");
   EXPECT_FALSE(ParseDumpSaveFilepath("DUMP STATUS").has_value());

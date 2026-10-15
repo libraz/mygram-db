@@ -184,13 +184,18 @@ std::optional<std::string> ParseDumpSaveFilepath(std::string_view command) {
       !lib::detail::EqualsIgnoreAsciiCase(tokens[1].text, "SAVE")) {
     return std::nullopt;
   }
-  const size_t after_save = static_cast<size_t>(tokens[1].text.data() - command.data()) + tokens[1].text.size();
-
-  std::string filepath = TrimAsciiWhitespace(command.substr(after_save));
-  if (filepath.size() >= 2 && (filepath.front() == '"' || filepath.front() == '\'') &&
-      filepath.back() == filepath.front()) {
-    // Decode with the server tokenizer's escape set, since Save() re-quotes the path.
-    filepath = lib::detail::DecodeRequestToken({std::string_view(filepath).substr(1, filepath.size() - 2), true});
+  // Same rule as the server parser: the last non-empty token is the path, and a
+  // flag leaves the line to the server so it answers with its own error.
+  std::string filepath;
+  for (size_t i = 2; i < tokens.size(); ++i) {
+    std::string token = lib::detail::DecodeRequestToken(tokens[i]);
+    if (token.empty()) {
+      continue;
+    }
+    if (token.front() == '-') {
+      return std::nullopt;
+    }
+    filepath = std::move(token);
   }
   return filepath;
 }

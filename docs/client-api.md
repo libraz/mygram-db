@@ -38,8 +38,9 @@ application moves between surfaces.
 `mygram-cli` sends each command line, and the space-joined arguments of a
 single command, to the server as typed; it quotes nothing on your behalf. In
 arguments a tab becomes a space and other control bytes are dropped. A
-`DUMP SAVE` path goes through the typed save call: an unquoted path is the
-rest of the line, and a quoted one is decoded with the server's escape set.
+`DUMP SAVE` path goes through the typed save call and is read as the server
+reads it: the last non-empty token, decoded with the server's escape set. A
+line carrying a `-` flag is sent as typed, so the server rejects it.
 
 For the C options API, zero-initialize `MygramSearchOptions_C`, set
 `struct_size`, and use `limit == 0` for the server default. The zero default

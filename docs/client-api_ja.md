@@ -35,7 +35,7 @@ typed clientとHTTPはリテラル検索が既定です。boolean syntaxは常�
 | C | `mygramclient_search` | `mygramclient_search_raw` | `MygramSearchOptions_C` |
 | `mygram-cli` | 利用者が protocol text 内で引用符を付ける | protocol Boolean 式 | protocol clause |
 
-`mygram-cli` は入力した command 行、および単発実行時に空白で連結した引数を入力どおり server へ送ります。quote は代行しません。引数中の tab は空白に置き換え、その他の制御 byte は取り除きます。`DUMP SAVE` の path は型付きの save 呼び出しを経由します。quote しない path は行の残り全体、quote した path は server と同じ escape 規則で decode します。
+`mygram-cli` は入力した command 行、および単発実行時に空白で連結した引数を入力どおり server へ送ります。quote は代行しません。引数中の tab は空白に置き換え、その他の制御 byte は取り除きます。`DUMP SAVE` の path は型付きの save 呼び出しを経由します。path は server と同じ規則で読み取ります。空でない最後の token を path とし、server と同じ escape 規則で decode します。`-` で始まる flag を含む行は入力どおり送り、server がエラーを返します。
 
 C options APIでは `MygramSearchOptions_C` をゼロ初期化し、`struct_size` を
 設定してください。`limit == 0` はserver既定値を使います。ゼロ既定の
