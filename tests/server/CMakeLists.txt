@@ -151,7 +151,7 @@ gtest_discover_tests(tcp_server_advanced_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
-# CR-3 / CR-10 lifecycle / shutdown-ordering tests
+# Lifecycle / shutdown-ordering tests
 add_executable(tcp_server_lifecycle_test
   tcp_server_lifecycle_test.cpp
 )
@@ -483,7 +483,7 @@ gtest_discover_tests(request_dispatcher_test
   PROPERTIES RESOURCE_LOCK server_port
 )
 
-# SyncOperationManager Cancel Replication Restart tests (H-3 regression)
+# SyncOperationManager Cancel Replication Restart tests
 
 add_executable(sync_cancel_replication_test
   sync_cancel_replication_test.cpp
@@ -674,7 +674,7 @@ else()
   )
 endif()
 
-# ReplicationHandler tests (regression tests for replication bugs)
+# ReplicationHandler tests
 
 add_executable(replication_handler_test
   replication_handler_test.cpp
@@ -862,7 +862,7 @@ gtest_discover_tests(command_handler_test
   PROPERTIES RESOURCE_LOCK server_state
 )
 
-# SyncInstancePreservation tests (Bug fix: replication events not reflected in search)
+# SyncInstancePreservation tests (instance pointers survive SYNC cleanup)
 
 add_executable(sync_instance_preservation_test
   sync_instance_preservation_test.cpp
@@ -998,7 +998,7 @@ gtest_discover_tests(replication_pause_counter_test
 
 add_subdirectory(reactor)
 
-# IoReactor tests (Step 2.T5)
+# IoReactor tests
 
 add_executable(io_reactor_test
   io_reactor_test.cpp
@@ -1033,7 +1033,7 @@ mygramdb_add_split_gtests(io_reactor_test
     IoReactorTest.RegisterPublishIsSerializedBeforeStopClear
 )
 
-# ReactorConnection unit tests (Step 2.T4)
+# ReactorConnection unit tests
 
 add_executable(reactor_connection_test
   reactor_connection_test.cpp

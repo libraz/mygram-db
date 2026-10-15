@@ -277,12 +277,9 @@ Expected<void, Error> KqueueMultiplexer::Modify(int fd, uint8_t interest, Regist
   }
 
   // Hold interest_mutex_ across the read of the previous interest, the
-  // kevent() diff syscall, and the in-memory write. Previously the syscall
-  // happened outside the lock, which let two concurrent Modify(fd, ...)
-  // callers each compute their delta from the same `old_interest` snapshot
-  // and race to publish their result, leaving `interest_` and the kernel
-  // filter set divergent. The race manifested at Remove() time as residual
-  // EVFILT_WRITE filters (see P1-1).
+  // kevent() diff syscall, and the in-memory write, so concurrent Modify(fd, ...)
+  // callers cannot diff from the same `old_interest` snapshot and leave
+  // `interest_` and the kernel filter set divergent (residual EVFILT_WRITE).
   std::lock_guard<std::mutex> lock(interest_mutex_);
   const auto it = interest_.find(fd);
   if (it == interest_.end()) {

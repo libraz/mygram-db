@@ -1,7 +1,6 @@
 """Test that replication events are reflected in SEARCH results (not just COUNT).
 
-Bug report: "Replication progresses but search results don't update"
-Root cause candidates:
+Search results must update as replication progresses. Two layers could fail:
   1. Index not updated after replication event (cache-independent)
   2. Cache not invalidated after replication event (cache-dependent)
 
@@ -378,8 +377,8 @@ class TestSearchFreshnessCacheToggle:
     def test_disable_during_replication_then_reenable(self, mysql, mygramdb, seed_data):
         """Cache ON → cache result → DISABLE → replication → ENABLE → must see fresh data.
 
-        Regression: Disable() stops invalidation queue, so replication events
-        during the OFF window are never processed. Re-enabling may serve stale entries.
+        Disable() stops the invalidation queue, so replication events during the
+        OFF window are never processed; re-enabling must not serve stale entries.
         """
         marker = f"toggle1_{uuid.uuid4().hex[:8]}"
         new_marker = f"toggle1new_{uuid.uuid4().hex[:8]}"

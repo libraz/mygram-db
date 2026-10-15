@@ -153,8 +153,7 @@ TEST(DocumentStoreConcurrentTest, ConcurrentLoadAndRead) {
  * @brief Test concurrent Size() calls with Add/Remove operations
  *
  * This test is designed to detect data races in DocumentStore::Size().
- * Before the fix, Size() was called without acquiring a lock, which could
- * lead to data races when called concurrently with AddDocument/RemoveDocument.
+ * Size() acquires a lock, so concurrent calls with AddDocument/RemoveDocument are race-free.
  */
 TEST(DocumentStoreConcurrentTest, ConcurrentSizeCalls) {
   DocumentStore store;
@@ -270,7 +269,7 @@ TEST(DocumentStoreConcurrentTest, SetStoreTextsDuringConcurrentWrites) {
 }
 
 /**
- * @brief Test for next_doc_id_ double setting fix
+ * @brief Test for next_doc_id_ single assignment on load
  *
  * Verifies that LoadFromFile() and LoadFromStream() only set next_doc_id_ once
  * under lock, preventing race conditions in multi-threaded environments.

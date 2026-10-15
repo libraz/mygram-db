@@ -305,11 +305,11 @@ TEST_F(HighlighterTest, Generate_WholeTextFitsInSnippet) {
 }
 
 // ============================================================================
-// Bug fix regression tests: incremental codepoint counting
+// Incremental codepoint counting
 // ============================================================================
 
 /**
- * @brief Regression test: FindMatchPositions with many matches is efficient
+ * @brief FindMatchPositions with many matches is efficient
  *
  * Verifies that incremental codepoint counting produces correct results
  * for text with many repeated matches (the optimization target).
@@ -335,7 +335,7 @@ TEST_F(HighlighterTest, FindMatchPositions_ManyMatches) {
 }
 
 /**
- * @brief Regression test: FindMatchPositions with multi-byte UTF-8
+ * @brief FindMatchPositions with multi-byte UTF-8
  *
  * Ensures the incremental codepoint counter handles multi-byte sequences correctly.
  */

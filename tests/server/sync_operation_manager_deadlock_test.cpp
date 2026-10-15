@@ -265,13 +265,11 @@ TEST_F(SyncOperationManagerDeadlockTest, WaitForCompletionReturnsPromptly) {
 }
 
 /**
- * @brief Regression test: StartSync must not deadlock while joining a previous sync thread
+ * @brief StartSync must not deadlock while joining a previous sync thread
  *
- * Bug: StartSync used to hold sync_mutex_ via std::lock_guard while calling
- * thread.join() on the previous sync thread. BuildSnapshotAsync's terminal
- * update_state lambda also acquires sync_mutex_, so if StartSync is invoked
- * while the previous thread is waiting for sync_mutex_ inside update_state,
- * the two threads deadlock.
+ * StartSync must not hold sync_mutex_ while calling thread.join() on the
+ * previous sync thread: BuildSnapshotAsync's terminal update_state lambda
+ * also acquires sync_mutex_, so holding it across the join would deadlock.
  *
  * This test exercises the "join previous thread" code path by calling
  * StartSync twice for the same table. Without MySQL available, the first
@@ -296,7 +294,7 @@ TEST_F(SyncOperationManagerDeadlockTest, StartSyncDoesNotDeadlockWhenJoiningPrev
   ASSERT_TRUE(manager->WaitForCompletion(10)) << "First sync did not complete in time";
 
   // Run the second StartSync on a worker thread guarded by a condition
-  // variable timeout. With the deadlock bug, StartSync would hang while
+  // variable timeout. A deadlock would leave StartSync hanging while
   // attempting to join the previous thread under sync_mutex_; this surfaces
   // as a timeout instead of an indefinite freeze.
   std::mutex done_mutex;

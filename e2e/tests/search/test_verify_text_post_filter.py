@@ -1,4 +1,4 @@
-"""Real-MySQL regression coverage for the verify_text post-filter."""
+"""Real-MySQL coverage for the verify_text post-filter."""
 
 from __future__ import annotations
 

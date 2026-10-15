@@ -483,7 +483,7 @@ ServerLifecycleManager::InitDispatcher(HandlerContext& handler_context, const In
 
   // Startup completeness check: verify every QueryType that callers can
   // actually produce has a registered handler. Forgetting to RegisterHandler
-  // a newly added enum value (the historical SYNC_STOP regression) silently
+  // a newly added enum value silently
   // turns it into "Unknown query type" at runtime; surfacing it here keeps the
   // dispatcher table in lockstep with the QueryType enum.
   //

@@ -225,10 +225,9 @@ TEST_F(TcpServerTest, ConcurrentConnections) {
 }
 
 /**
- * @brief Test FILTER operators (regression test for bug where only EQ was implemented)
+ * @brief Test FILTER operators
  *
  * This test verifies that all FILTER operators (NE, GT, GTE, LT, LTE) actually filter results.
- * Before the fix, only EQ was implemented and other operators were ignored.
  */
 TEST_F(TcpServerTest, FilterOperators) {
   mygramdb::test::SkipIfSocketCreationBlocked();
@@ -263,23 +262,23 @@ TEST_F(TcpServerTest, FilterOperators) {
   std::string eq_response = SendRequest(sock, "SEARCH test hello FILTER score = 20");
   EXPECT_TRUE(eq_response.find("OK RESULTS 1") == 0) << "EQ filter should return 1 result";
 
-  // Test NE (would fail in old code - operator ignored, returns all 3)
+  // Test NE
   std::string ne_response = SendRequest(sock, "SEARCH test hello FILTER status != active");
   EXPECT_TRUE(ne_response.find("OK RESULTS 1") == 0) << "NE filter should return 1 result (doc2), not all results";
 
-  // Test GT (would fail in old code - operator ignored, returns all 3)
+  // Test GT
   std::string gt_response = SendRequest(sock, "SEARCH test hello FILTER score > 20");
   EXPECT_TRUE(gt_response.find("OK RESULTS 1") == 0) << "GT filter should return 1 result (doc3), not all results";
 
-  // Test GTE (would fail in old code - operator ignored, returns all 3)
+  // Test GTE
   std::string gte_response = SendRequest(sock, "SEARCH test hello FILTER score >= 20");
   EXPECT_TRUE(gte_response.find("OK RESULTS 2") == 0) << "GTE filter should return 2 results (doc2, doc3), not all";
 
-  // Test LT (would fail in old code - operator ignored, returns all 3)
+  // Test LT
   std::string lt_response = SendRequest(sock, "SEARCH test hello FILTER score < 20");
   EXPECT_TRUE(lt_response.find("OK RESULTS 1") == 0) << "LT filter should return 1 result (doc1), not all results";
 
-  // Test LTE (would fail in old code - operator ignored, returns all 3)
+  // Test LTE
   std::string lte_response = SendRequest(sock, "SEARCH test hello FILTER score <= 20");
   EXPECT_TRUE(lte_response.find("OK RESULTS 2") == 0) << "LTE filter should return 2 results (doc1, doc2), not all";
 

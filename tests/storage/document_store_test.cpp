@@ -431,9 +431,7 @@ TEST(DocumentStoreTest, MemoryUsageNoDoubleCount) {
 
   // Upper bound: each document has a short primary key (~4-6 chars).
   // With 500 docs, total memory should be well under 1 MB.
-  // Before the fix, double-counting could inflate this by ~2x.
-  // sizeof(DocId) + sizeof(string) ~ 40 bytes, counted twice per doc per map
-  // means ~80 bytes * 500 * 2 maps = 80KB of over-counting.
+  // Each entry is counted once: double-counting (~80 bytes * 500 * 2 maps = 80KB) would exceed this.
   constexpr size_t kReasonableUpperBound = 512 * 1024;  // 512 KB
   EXPECT_LT(usage, kReasonableUpperBound)
       << "MemoryUsage() returned " << usage << " bytes for 500 small documents, which suggests double-counting";
@@ -1409,7 +1407,7 @@ TEST(DocumentStoreTest, Bug20_ClearReclaimsMemory) {
   // Memory should be minimal after clear
   size_t memory_after_clear = store.MemoryUsage();
 
-  // After fix, Clear() should release most memory
+  // Clear() should release most memory
   EXPECT_LT(memory_after_clear, memory_after_add * 0.1) << "Clear() should release most memory";
 }
 
@@ -1418,11 +1416,10 @@ TEST(DocumentStoreTest, Bug20_ClearReclaimsMemory) {
  *
  * This test verifies that stream read operations during snapshot loading
  * have proper error checking to detect corrupted or truncated files.
- * The fix adds ifs.good() checks after ifs.read() operations.
+ * ifs.good() is checked after each ifs.read().
  *
  * Note: Direct testing of stream errors requires creating corrupted files,
- * which is complex in unit tests. This test verifies basic load functionality
- * still works correctly after the fix.
+ * which is complex in unit tests. This test verifies basic load functionality.
  */
 TEST(DocumentStoreTest, Bug36_LoadFromFileBasicValidation) {
   DocumentStore store;

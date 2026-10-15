@@ -1,6 +1,6 @@
 /**
  * @file index_serialization_test.cpp
- * @brief Regression tests for Index::LoadFromStream validation
+ * @brief Tests for Index::LoadFromStream validation
  *
  * Tests that malformed index data is rejected with proper error codes
  * instead of causing excessive memory allocation or crashes.
@@ -208,7 +208,7 @@ TEST(IndexSerializationTest, LoadFromStreamRejectsDuplicateTermsAndTrailingPosti
 }
 
 /**
- * @brief Regression test: LoadFromStream rejects excessively large term_len
+ * @brief LoadFromStream rejects excessively large term_len
  *
  * A malformed index file with term_len > 10000 should return kStorageCorrupted
  * instead of attempting a multi-GB allocation.

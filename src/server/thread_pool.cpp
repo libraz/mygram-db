@@ -146,9 +146,8 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
     if (timeout_ms > 0) {
       // Wait for the queue to drain and all workers to become idle.
       //
-      // Previously this was a 10ms polling loop; now a condition_variable is
-      // used so the waiter wakes promptly when the last in-flight task
-      // finishes. The cv lives under its own mutex (idle_cv_mutex_) and is
+      // A condition_variable wakes the waiter promptly when the last
+      // in-flight task finishes. The cv lives under its own mutex (idle_cv_mutex_) and is
       // never acquired while queue_mutex_ is held — this preserves the lock
       // ordering invariant the worker hot path depends on.
       auto start = std::chrono::steady_clock::now();

@@ -1,11 +1,11 @@
 /**
  * @file replication_handler_test.cpp
- * @brief Unit tests for replication handler bug fixes
+ * @brief Unit tests for the replication handler
  *
- * This file contains regression tests for the following bugs:
- * 1. Replication can be started without GTID (should be prevented)
- * 2. Binlog reader thread doesn't clear running_ flag on exit
- * 3. SYNC doesn't restart replication when already running
+ * Covers:
+ * 1. Replication cannot be started without GTID
+ * 2. Binlog reader thread clears running_ flag on exit
+ * 3. SYNC restarts replication when already running
  */
 
 #ifdef USE_MYSQL
@@ -102,8 +102,8 @@ class ReplicationHandlerTrackingReader final : public mysql::IBinlogReader {
 /**
  * @brief Test that REPLICATION START is rejected when GTID is not set
  *
- * Regression test for Replication could be started without GTID,
- * leading to binlog purge errors and inconsistent state.
+ * Starting without GTID would lead to binlog purge errors and inconsistent
+ * state.
  *
  * Expected behavior:
  * - REPLICATION START should return an error when GTID is empty
@@ -129,8 +129,6 @@ TEST_F(ReplicationHandlerTest, RejectReplicationStartWithoutGTID) {
 
 /**
  * @brief Test that REPLICATION STATUS returns stopped when not running
- *
- * Regression test for Verify that status reflects actual state
  */
 TEST_F(ReplicationHandlerTest, StatusReflectsNotRunningState) {
   query::Query query;

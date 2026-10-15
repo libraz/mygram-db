@@ -172,7 +172,7 @@ TEST(OperationGuardTest, MoveConstructionTransfersOwnership) {
 }
 
 TEST(OperationGuardTest, FailedAcquireDoesNotResetOnDestruction) {
-  // Regression guard: a disengaged guard must NEVER reset the flag, even if
+  // A disengaged guard must NEVER reset the flag, even if
   // some unrelated code resets the flag during the guard's lifetime. This
   // protects the "another DUMP is in progress" branch in handlers from
   // ever clobbering the legitimate holder's state.
@@ -193,7 +193,7 @@ TEST(OperationGuardTest, DefaultConstructedGuardIsDisengaged) {
 }
 
 TEST(OperationGuardTest, DismissDisengagesWithoutClearingFlag) {
-  // Regression for the DUMP SAVE async path: when ownership of the held
+  // DUMP SAVE async path: when ownership of the held
   // flag is being transferred to a worker thread (which has its own RAII
   // reset at the end of its work), the outer guard must Dismiss(),
   // NOT Release(). Release() would clear the flag immediately and let a

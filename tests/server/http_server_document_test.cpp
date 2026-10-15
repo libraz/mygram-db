@@ -212,7 +212,7 @@ TEST_F(HttpServerTest, GetDocumentNotFoundWithKeyLongerThanRegexRouteCapStillRet
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 404);
-  // A bare httplib 404 (the pre-fix symptom for an overlong path) has an
+  // A bare httplib 404 has an
   // empty body; this must be the handler's own JSON error frame instead.
   ASSERT_FALSE(res->body.empty());
   auto body = json::parse(res->body);

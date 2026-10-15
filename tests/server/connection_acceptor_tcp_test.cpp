@@ -487,7 +487,7 @@ TEST_F(ConnectionAcceptorTcpTest, NormalFlowStartSetHandlerStartAccepting) {
 
 // --- Per-client socket options ---
 
-// Fix N-1: ConnectionAcceptor sets TCP_NODELAY on accepted TCP sockets so the
+// ConnectionAcceptor sets TCP_NODELAY on accepted TCP sockets so the
 // kernel does not delay small responses while waiting for ACK coalescing.
 // Verifies that the option is observable on the server-side fd reported to
 // the reactor handler.
@@ -530,15 +530,12 @@ TEST_F(ConnectionAcceptorTcpTest, AcceptedSocketsHaveTcpNoDelay) {
 }
 
 // ---------------------------------------------------------------------------
-// Fix H-N4 regression: AcceptLoop's EMFILE/ENFILE backoff must be
-// shutdown-aware. Pre-fix it called std::this_thread::sleep_for(100ms)
-// without any predicate check, so a Stop() during the backoff window had to
-// wait the full duration. The fix replaces the sleep with a CV wait that
-// returns the moment Stop() publishes should_stop_=true.
+// AcceptLoop's EMFILE/ENFILE backoff must be shutdown-aware: it is a CV wait
+// that returns the moment Stop() publishes should_stop_=true.
 //
 // We force the backoff path by lowering RLIMIT_NOFILE far enough that
 // accept() returns EMFILE on every iteration, then assert that Stop()
-// returns within a small fraction of the legacy 100ms backoff. Note that
+// returns within a small fraction of the 100ms backoff. Note that
 // dropping the soft limit affects the whole process for the duration of
 // the test; we restore it in the destructor and pin the test to a single
 // thread group so we don't trip unrelated tests.
@@ -597,10 +594,8 @@ TEST_F(ConnectionAcceptorTcpTest, StopWakesEmfileBackoffLoop) {
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  // 5) Stop() should now interrupt the CV wait immediately. Pre-fix this
-  //    would block for the full 100ms backoff (or longer if the loop made
-  //    multiple EMFILE iterations). We assert a generous bound that's still
-  //    well below a single legacy backoff cycle.
+  // 5) Stop() should now interrupt the CV wait immediately. We assert a
+  //    generous bound that's still well below a single 100ms backoff cycle.
   const auto t0 = std::chrono::steady_clock::now();
   acceptor.Stop();
   const auto elapsed = std::chrono::steady_clock::now() - t0;

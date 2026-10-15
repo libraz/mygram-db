@@ -78,8 +78,8 @@ class ConnectionAcceptor {
    * Creates the listening socket, applies socket options, binds, and listens.
    * The accept loop thread is **not** started here — the caller must invoke
    * `StartAccepting()` after `SetReactorHandler()` is wired up. This split
-   * exists to fix a data race on `reactor_handler_`: previously the accept
-   * thread could read the handler before the embedder finished writing it.
+   * ensures the accept thread never reads `reactor_handler_` before the
+   * embedder has written it.
    *
    * After a successful return, `IsRunning()` reports true and `GetPort()`
    * reports the actual bound port. Calling `Start()` again before `Stop()`

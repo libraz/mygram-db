@@ -347,11 +347,6 @@ TEST_F(ServerStatsTest, CombinedStatisticsScenario) {
 /**
  * @brief Every QueryType increments GetTotalCommands exactly once.
  *
- * Regression test for the bug where IncrementCommand only handled SEARCH /
- * COUNT / GET / INFO / SAVE / LOAD / REPLICATION_* / CONFIG_* / UNKNOWN, and
- * silently no-op'd for DUMP_*, SYNC*, OPTIMIZE, DEBUG_*, CACHE_*, SET,
- * SHOW_VARIABLES, FACET. GetTotalCommands therefore undercounted.
- *
  * All values of QueryType must be covered by either a specific counter or the
  * cmd_other_ aggregate counter.
  */

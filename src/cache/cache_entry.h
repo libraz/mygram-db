@@ -30,8 +30,7 @@ namespace {
  * NOT a strict accounting figure — exact size depends on the standard library
  * implementation, allocator padding, and whether shared_ptr is constructed
  * with make_shared (combined block) versus the two-arg form (separate block).
- * This constant avoids the 5-10% under-report seen in fleet
- * memory profiles before this fix.
+ * This constant avoids a 5-10% under-report of memory use.
  */
 constexpr size_t kSharedPtrControlBlockOverhead = 24;
 

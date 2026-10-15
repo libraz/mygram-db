@@ -341,8 +341,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::StartAcc
 
   // The thread constructor synchronizes-with the new thread's first action,
   // so any writes to reactor_handler_ that happened-before this call are
-  // visible inside AcceptLoop. This is the actual fix for the prior data
-  // race on reactor_handler_.
+  // visible inside AcceptLoop, so reactor_handler_ is race-free.
   accept_thread_ = std::make_unique<std::thread>(&ConnectionAcceptor::AcceptLoop, this);
   return {};
 }

@@ -1,6 +1,6 @@
 /**
  * @file http_server_test.cpp
- * @brief Tests for HttpServer startup race condition fix (promise/future pattern)
+ * @brief Tests for HttpServer startup and bind-failure handling
  */
 
 #include "server/http_server.h"
@@ -152,21 +152,15 @@ TEST_F(HttpServerStartupTest, StartOnOccupiedPortReturnsError) {
 }
 
 /**
- * @brief H-N1 regression: bind-failure path returns within milliseconds and
- *        leaves the server in a fresh state ready for reuse.
+ * @brief Bind-failure path returns within milliseconds and leaves the server
+ *        in a fresh state ready for reuse.
  *
- * Pre-fix, Start() spawned a worker thread that called bind_to_port and
- * signalled the parent through a promise/future with a 5s timeout. If
- * bind_to_port stalled (or was simply slow to schedule on a loaded host),
- * the parent's wait_for could time out, then it would call
- * server_->stop() (a no-op when listen_after_bind had not started) and
- * server_thread_->join(), which could hang indefinitely. Now bind_to_port
- * runs synchronously on the calling thread, so the failure path returns
- * with no thread to join.
+ * bind_to_port runs synchronously on the calling thread, so the failure path
+ * returns with no thread to join.
  *
  * The assertion is on wall-clock time: a synchronous bind to an occupied
- * port returns in microseconds; if the join-deadlock regression returns,
- * this test would block on the destructor for tens of seconds.
+ * port returns in microseconds; a join deadlock would block the destructor
+ * for tens of seconds.
  */
 TEST_F(HttpServerStartupTest, BindFailureReturnsPromptly) {
   // Occupy a port so the second Start() has to fail bind.
@@ -191,7 +185,7 @@ TEST_F(HttpServerStartupTest, BindFailureReturnsPromptly) {
   auto cfg = MakeConfig(occupied_port);
 
   // Wrap Start() in a future so we can assert on completion time without
-  // letting a regression deadlock the test process.
+  // letting a deadlock hang the test process.
   auto start_done = std::async(std::launch::async, [&]() {
     HttpServer server(cfg, table_contexts_, config_.get());
     auto result = server.Start();
@@ -199,8 +193,7 @@ TEST_F(HttpServerStartupTest, BindFailureReturnsPromptly) {
   });
 
   // Synchronous bind should return well under a second on any reasonable
-  // platform. The previous 5-second timeout for the worker-thread design is
-  // 5x this budget, so a regression manifests as a wait_for hit.
+  // platform; a stall manifests as a wait_for hit.
   auto status = start_done.wait_for(std::chrono::seconds(2));
   ASSERT_EQ(status, std::future_status::ready) << "Start() did not return promptly on bind failure";
   EXPECT_FALSE(start_done.get()) << "Start() unexpectedly succeeded on occupied port";
@@ -308,13 +301,11 @@ TEST_F(HttpServerStartupTest, ConcurrentStopsJoinExactlyOnce) {
 }
 
 /**
- * @brief P0-C regression: concurrent Start() calls must serialize through a
- *        single CAS, with at most one success.
+ * @brief Concurrent Start() calls must serialize through a single CAS, with
+ *        at most one success.
  *
- * Pre-fix, Start() did a relaxed `if (running_) return` followed by a relaxed
- * `running_ = true` store. Two threads could both observe running_=false and
- * both proceed past the gate, racing the spawning of the server thread. The
- * fix replaces the check-then-set with compare_exchange_strong; this test
+ * Start() gates on compare_exchange_strong, so two threads cannot both pass
+ * the gate and race the spawning of the server thread. This test
  * spawns N threads that all call Start() at the same time and asserts that
  * exactly one succeeds while the rest receive the "already running" error.
  */
@@ -374,7 +365,7 @@ TEST_F(HttpServerStartupTest, ConcurrentStartCallsNoRace) {
 }
 
 /**
- * @brief Fix N-2: HttpServer caps request body size with `set_payload_max_length`.
+ * @brief HttpServer caps request body size with `set_payload_max_length`.
  *
  * Configuring `max_body_bytes = 1024` and POSTing a 2 KiB body must elicit
  * a 4xx response from cpp-httplib, NOT crash and NOT route into the search
@@ -404,13 +395,11 @@ TEST_F(HttpServerStartupTest, RejectsBodyExceedingMaxSize) {
 }
 
 /**
- * @brief Regression: GET /{table}/:primary_key must apply the same table-name
+ * @brief GET /{table}/:primary_key must apply the same table-name
  *        whitelist as SEARCH/COUNT.
  *
- * Pre-fix, HandleGet only checked table_contexts_.find() for the URL-bound
- * table name. A name containing characters outside the parser-grammar safe
- * set (e.g. `te$st`) would fall through to a 404 ("Table not found") even
- * though the input was syntactically invalid. Now ResolveHttpTableContext
+ * A name containing characters outside the parser-grammar safe set
+ * (e.g. `te$st`) is syntactically invalid. ResolveHttpTableContext
  * is shared, so GET returns a 400 for invalid names just like SEARCH.
  */
 TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
@@ -433,7 +422,7 @@ TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
 }
 
 /**
- * @brief Fix N-2: bodies at or below the cap are still accepted.
+ * @brief Bodies at or below the cap are still accepted.
  *
  * Companion to RejectsBodyExceedingMaxSize: confirms the cap doesn't break
  * normal traffic. A small valid body should be processed normally (the
@@ -460,13 +449,11 @@ TEST_F(HttpServerStartupTest, AcceptsBodyWithinMaxSize) {
 }
 
 /**
- * @brief H-N8 regression: HttpServerConfig::FromConfig must propagate the
+ * @brief HttpServerConfig::FromConfig must propagate the
  *        api.http.read_timeout_sec / write_timeout_sec values from the
  *        parsed Config struct into the HttpServerConfig used by HttpServer.
  *
- * Pre-fix, those fields did not exist on `ApiConfig::http` and FromConfig had
- * no source data, so HttpServer always ran with the hardcoded 5s defaults
- * regardless of YAML. This test verifies the wiring all the way from Config
+ * This test verifies the wiring all the way from Config
  * to HttpServerConfig (HttpServer itself applies the values to httplib via
  * set_read_timeout / set_write_timeout, which is unit-tested at httplib's
  * own layer).

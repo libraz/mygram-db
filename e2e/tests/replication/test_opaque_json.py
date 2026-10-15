@@ -1,4 +1,4 @@
-"""Regression coverage for opaque values in MySQL binary JSON row events."""
+"""Coverage for opaque values in MySQL binary JSON row events."""
 
 from __future__ import annotations
 

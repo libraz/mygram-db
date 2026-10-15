@@ -219,10 +219,7 @@ class OperationGuard {
    * Symmetric with utils::ScopeGuard::Release(): Dismiss "lets go without
    * cleaning up". Use Release() (clear+disengage) when this scope is the
    * sole owner, and Dismiss() (just disengage) when ownership is moving
-   * elsewhere. Mixing the two semantics in one method (the original
-   * mistake during the OperationGuard rollout) caused the DUMP SAVE async
-   * path to clear the flag before the worker thread observed it, allowing
-   * a second concurrent DUMP SAVE to slip through.
+   * elsewhere (e.g. an async worker that must still observe the flag).
    */
   void Dismiss() noexcept {
     flag_ = nullptr;

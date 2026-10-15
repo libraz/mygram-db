@@ -2,12 +2,9 @@
  * @file sync_instance_preservation_test.cpp
  * @brief Tests that SYNC cleanup preserves Index/DocumentStore instance pointers
  *
- * Bug: Replication events not reflected in search after SYNC
- * Root cause: SYNC cleanup created new Index/DocumentStore instances, breaking
- * pointers that BinlogReader holds through TableContext.
- *
- * Fix: side-build candidates and reversibly swap their state into the live
- * objects, preserving both the old data and instance pointers until commit.
+ * BinlogReader holds Index/DocumentStore pointers through TableContext, so
+ * SYNC side-builds candidates and reversibly swaps their state into the live
+ * objects, preserving both the data and instance pointers until commit.
  */
 
 #include <gtest/gtest.h>
@@ -20,7 +17,7 @@
 namespace mygramdb::server {
 
 /**
- * @brief Test that demonstrates the bug and verifies the fix
+ * @brief Test that instance pointers survive SYNC cleanup
  *
  * This test simulates what happens when:
  * 1. TableContext is created with Index and DocumentStore
@@ -40,7 +37,7 @@ class InstancePreservationTest : public ::testing::Test {
 };
 
 /**
- * @brief Test that Clear() preserves instance pointer (the fix)
+ * @brief Test that Clear() preserves instance pointer
  */
 TEST_F(InstancePreservationTest, ClearPreservesInstancePointer) {
   // Get raw pointers before (simulating what BinlogReader holds)
@@ -81,7 +78,7 @@ TEST_F(InstancePreservationTest, ClearPreservesInstancePointer) {
 }
 
 /**
- * @brief Test that make_unique changes instance pointer (the old bug)
+ * @brief Test that make_unique changes instance pointer
  */
 TEST_F(InstancePreservationTest, MakeUniqueChangesInstancePointer) {
   // Get raw pointers before (simulating what BinlogReader holds)
@@ -93,7 +90,7 @@ TEST_F(InstancePreservationTest, MakeUniqueChangesInstancePointer) {
   ASSERT_TRUE(doc_id.has_value());
   index_->AddDocument(*doc_id, "test document");
 
-  // Replace with new instances, matching the previously broken behavior.
+  // Replace with new instances.
   index_ = std::make_unique<index::Index>();
   doc_store_ = std::make_unique<storage::DocumentStore>();
 
@@ -101,7 +98,7 @@ TEST_F(InstancePreservationTest, MakeUniqueChangesInstancePointer) {
   index::Index* index_ptr_after = index_.get();
   storage::DocumentStore* doc_store_ptr_after = doc_store_.get();
 
-  // These pointers are DIFFERENT - this demonstrates the bug
+  // These pointers are DIFFERENT
   EXPECT_NE(index_ptr_before, index_ptr_after) << "Index pointer should change with make_unique";
   EXPECT_NE(doc_store_ptr_before, doc_store_ptr_after) << "DocumentStore pointer should change with make_unique";
 

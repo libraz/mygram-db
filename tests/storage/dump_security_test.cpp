@@ -364,11 +364,11 @@ TEST(DumpSecurityTest, PathTraversalDetection) {
 }
 
 /**
- * @brief Test that fd-based write produces a valid dump file (TOCTOU fix verification)
+ * @brief Test that fd-based write produces a valid dump file
  *
  * This test verifies that the fd-based ostream used in WriteDumpV1 (instead of
  * closing the fd and reopening by path) produces a dump file that passes
- * integrity verification. This serves as a regression test for the TOCTOU fix.
+ * integrity verification.
  */
 TEST(DumpSecurityTest, FdBasedWriteProducesValidDump) {
 #ifndef _WIN32

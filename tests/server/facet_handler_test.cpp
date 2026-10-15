@@ -2,10 +2,10 @@
  * @file facet_handler_test.cpp
  * @brief Unit tests for FacetHandler pipeline integration
  *
- * Validates that FacetHandler now routes through ExecuteFullPipeline so
+ * Validates that FacetHandler routes through ExecuteFullPipeline so
  * facet-scoped searches share synonym expansion, fuzzy matching, and
- * result caching with SearchHandler. Before this fix, FACET went through
- * search_pipeline::Execute directly and silently bypassed those features.
+ * result caching with SearchHandler. Routing through
+ * search_pipeline::Execute directly would bypass those features.
  */
 
 #include "server/handlers/facet_handler.h"
@@ -136,12 +136,9 @@ class FacetHandlerTest : public ::testing::Test {
 /**
  * @brief FACET must apply the table's synonym dictionary.
  *
- * This is the central H-1 regression test. With the old code (direct call
- * to search_pipeline::Execute), querying "automobile" returned zero results
- * because no document literally contained the substring; the synonym
- * "car" was never expanded. After the fix, FACET goes through
- * ExecuteFullPipeline which performs synonym expansion identically to
- * SearchHandler, so "automobile" matches the documents indexed under "car".
+ * FACET goes through ExecuteFullPipeline, which performs synonym expansion
+ * identically to SearchHandler, so "automobile" matches the documents
+ * indexed under "car".
  */
 TEST_F(FacetHandlerTest, FacetSearchUsesSynonymExpansion) {
   // Synonym group: "car" and "automobile" are interchangeable.

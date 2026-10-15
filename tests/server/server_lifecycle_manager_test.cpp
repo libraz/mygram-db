@@ -354,7 +354,7 @@ TEST_F(ServerLifecycleManagerTest, Initialize_HandlerContextHasCorrectDependenci
  * @note This test should be run with AddressSanitizer to detect leaks
  *
  * This test verifies that if initialization fails partway through,
- * all previously initialized components are properly cleaned up.
+ * all already-initialized components are properly cleaned up.
  * We use an invalid bind address to force a failure at InitAcceptor.
  */
 TEST_F(ServerLifecycleManagerTest, Initialize_PartialFailure_NoLeaks) {
@@ -399,11 +399,11 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithCacheEnabled) {
  * @test Initialize_Success_WithSchedulerEnabled
  * @brief Test initialization with snapshot scheduler enabled
  *
- * Regression test for the contract enforced by InitScheduler():
+ * Contract enforced by InitScheduler():
  *   - When dump.interval_sec > 0 and TableCatalog is non-null, the scheduler
  *     is constructed but not started. TcpServer starts it only after the
- *     pre-accept wiring callback. SnapshotScheduler's constructor no longer
- *     silently accepts a null catalog (the precondition was hoisted up to
+ *     pre-accept wiring callback. SnapshotScheduler's constructor does not
+ *     accept a null catalog (the precondition is checked in
  *     ServerLifecycleManager::InitScheduler).
  */
 TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithSchedulerEnabled) {
@@ -503,15 +503,10 @@ TEST_F(ServerLifecycleManagerTest, Initialize_SyncHandlerReceivesSyncManager) {
 
 /**
  * @test Initialize_DispatcherRegistersAllSyncQueryTypes
- * @brief Regression test for fix CR-8: SYNC, SYNC_STATUS, and SYNC_STOP must
- *        all be wired into the RequestDispatcher.
+ * @brief SYNC, SYNC_STATUS, and SYNC_STOP must all be wired into the
+ *        RequestDispatcher.
  *
- * Pre-fix, SYNC_STOP was parsed by query_parser.cpp and handled inside
- * sync_handler.cpp but never registered in ServerLifecycleManager::InitDispatcher.
- * Clients sending "SYNC STOP <table>" therefore received "Unknown query type"
- * even though the handler logic was reachable from the rest of the code.
- *
- * The completeness check inside InitDispatcher now fails fast on missing
+ * The completeness check inside InitDispatcher fails fast on missing
  * registrations; this test pins the contract for the SYNC family explicitly.
  */
 TEST_F(ServerLifecycleManagerTest, Initialize_DispatcherRegistersAllSyncQueryTypes) {
@@ -523,7 +518,7 @@ TEST_F(ServerLifecycleManagerTest, Initialize_DispatcherRegistersAllSyncQueryTyp
   EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC));
   EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC_STATUS));
   EXPECT_TRUE(result->dispatcher->HasHandler(query::QueryType::SYNC_STOP))
-      << "SYNC_STOP must be registered in RequestDispatcher (regression CR-8)";
+      << "SYNC_STOP must be registered in RequestDispatcher";
 
   // Cleanup
   result->acceptor->Stop();

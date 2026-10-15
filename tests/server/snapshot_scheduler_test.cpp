@@ -695,21 +695,13 @@ TEST_F(SnapshotSchedulerTest, StartStopRapidly) {
 }
 
 /**
- * @brief Regression for the Start/Stop race that could leak a thread.
+ * @brief Concurrent Start/Stop must not leak a thread.
  *
- * Before the fix, Start() would set running_=true and *then* construct
- * scheduler_thread_. A concurrent Stop() observing running_=true between
- * those two steps would skip joining (because scheduler_thread_ was still
- * null) and Start() would later spawn a thread that exited immediately
- * because Stop() had already cleared running_, leaving an unjoined
- * std::thread that detached on destruction.
+ * Start()/Stop() are serialized by start_stop_mutex_, so the thread is
+ * always joined and IsRunning() is consistent on return.
  *
- * After the fix Start()/Stop() are serialized by start_stop_mutex_, so
- * the thread is always joined and IsRunning() is consistent on return.
- *
- * The test is structured so that even on the racy code path the failure
- * mode (std::terminate from destructing a joinable thread) would show up
- * as a process abort, not just a soft test failure.
+ * A leaked joinable thread surfaces as std::terminate (a process abort),
+ * not just a soft test failure.
  */
 TEST_F(SnapshotSchedulerTest, StartStopConcurrentDoesNotLeakThread) {
   DumpConfig dump_config;
@@ -1015,18 +1007,15 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotRejectsEmptyGtidAfterManualStopRace) {
 }
 
 /**
- * @brief H-C3 regression: when another operation is already holding the
+ * @brief When another operation is already holding the
  *        replication-pause counter, the auto-snapshot must NOT call
  *        binlog Start() at the end of its work. The other operation's
  *        ReleasePause() is responsible for the eventual restart.
  *
- * Pre-fix behaviour: the auto-snapshot independently called Stop() at
- * the start and Start() at the end. If a manual DUMP LOAD was holding
- * the pause, the snapshot's Start() at the end would erroneously
- * resume replication while DUMP LOAD was still iterating data —
- * leading to inconsistent dumps and Index/DocumentStore races.
+ * Resuming replication while a DUMP LOAD is still iterating data would
+ * produce inconsistent dumps and Index/DocumentStore races.
  *
- * Post-fix behaviour: the snapshot increments the shared counter at
+ * The snapshot increments the shared counter at
  * the start; only the FIRST pauser actually calls Stop(). At the end
  * the snapshot decrements the counter; only the LAST releaser calls
  * Start(). When another operation pre-incremented the counter, the
@@ -1078,7 +1067,7 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotDoesNotRestartWhenAnotherOperationHold
 }
 
 /**
- * @brief H-C3 regression: independent verification that the snapshot
+ * @brief Independent verification that the snapshot
  *        leaves the counter clean even when its own pause/release was a
  *        no-op (pre-paused scenario from the previous test).
  *

@@ -1,6 +1,6 @@
 /**
  * @file http_server_features_test.cpp
- * @brief HTTP server advanced features and regression tests
+ * @brief HTTP server advanced features tests
  */
 
 #include <arpa/inet.h>
@@ -961,8 +961,6 @@ TEST_F(HttpServerKanjiTest, SearchWithKanjiNgramSize) {
 
 /**
  * @brief Test HTTP /info and /metrics reflect TCP server statistics
- *
- * Regression test for: HTTP の /info と /metrics が TCP 側の統計値を一切反映していない
  */
 TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
   // Create table context
@@ -1087,7 +1085,7 @@ TEST(HttpServerIntegrationTest, InfoAndMetricsReflectTcpStats) {
 }
 
 // ============================================================================
-// Regression Tests for Code Review Issues
+// Additional HTTP Server Tests
 // ============================================================================
 
 // Test for Issue 1: HTTP routes should support non-alphanumeric table names

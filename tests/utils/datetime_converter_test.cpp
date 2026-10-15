@@ -331,7 +331,7 @@ TEST(DateTimeProcessorTest, CompareTimeValues) {
   EXPECT_LT(*time3, 0);       // Negative time
 }
 
-//  fix: ConvertToEpoch consistency
+// ConvertToEpoch consistency
 TEST(ConvertToEpochBugFixTest, KnownUTCEpochValue) {
   // 2000-01-01 00:00:00 UTC = 946684800
   auto epoch = ConvertToEpoch("2000-01-01 00:00:00", 0);

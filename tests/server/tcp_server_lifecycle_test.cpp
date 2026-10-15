@@ -1,6 +1,6 @@
 /**
  * @file tcp_server_lifecycle_test.cpp
- * @brief Lifecycle / shutdown-ordering tests for TcpServer (CR-3 / CR-10).
+ * @brief Lifecycle / shutdown-ordering tests for TcpServer.
  *
  * These tests verify that TcpServer::Stop() correctly orders the teardown
  * of internal components so that:
@@ -165,10 +165,9 @@ class TcpServerLifecycleTest : public ::testing::Test {
 };
 
 /**
- * @brief CR-3: Server shuts down cleanly even with no clients connected.
+ * @brief Server shuts down cleanly even with no clients connected.
  *
- * Smoke test for the new ordering — confirms no regression in the trivial
- * lifecycle.
+ * Smoke test for the shutdown ordering in the trivial lifecycle.
  */
 TEST_F(TcpServerLifecycleTest, CleanStartStop) {
   BuildAndStart();
@@ -319,10 +318,9 @@ TEST_F(TcpServerLifecycleTest, MysqlEndpointRuntimeChangesAreRejectedAndSyncUses
 #endif
 
 /**
- * @brief CR-3: Calling Stop() multiple times is idempotent and does not
- *               crash.
+ * @brief Calling Stop() multiple times is idempotent and does not crash.
  *
- * The new shutdown ordering relies on dump_progress_.JoinWorker() being
+ * The shutdown ordering relies on dump_progress_.JoinWorker() being
  * idempotent (already covered by DumpProgressTest) and on
  * thread_pool_->Shutdown() being safe to call after the reactor stopped.
  * This test exercises the ordering path with no in-flight work.
@@ -392,12 +390,12 @@ TEST_F(TcpServerLifecycleTest, SyncDrainTimeoutReturnsErrorWithoutTearingDownNet
 #endif
 
 /**
- * @brief CR-3 / CR-10: Stop() is safe when called while DumpProgress holds
+ * @brief Stop() is safe when called while DumpProgress holds
  *                      a worker thread that is about to call binlog Start.
  *
  * We can't easily wedge a real DUMP SAVE through the network in a unit
  * test (it would need a working SYNC + non-empty GTID + reader interaction).
- * Instead we exercise the new ordering directly: TcpServer constructs the
+ * Instead we exercise the ordering directly: TcpServer constructs the
  * dump_progress_ as a member; we manually push a worker thread onto it
  * BEFORE calling Stop() to confirm Stop() joins it before tearing down
  * the rest of the server.
@@ -496,7 +494,7 @@ TEST_F(TcpServerLifecycleTest, StopWaitsForDumpAdmittedBeforeWorkerPublication) 
   const bool shutdown_announced = coordinator->DescribeActive() == "server shutdown";
   EXPECT_TRUE(shutdown_announced) << "Stop must close coordinator admission before draining workers";
   EXPECT_FALSE(stop_finished.load(std::memory_order_acquire))
-      << "Stop returned while a previously admitted DUMP SAVE had not published its worker";
+      << "Stop returned while an already-admitted DUMP SAVE had not published its worker";
   EXPECT_FALSE(coordinator->TryAcquire(LongOperation::kSync).has_value())
       << "shutdown must reject new coordinator operations";
   EXPECT_FALSE(request_finished.load(std::memory_order_acquire))

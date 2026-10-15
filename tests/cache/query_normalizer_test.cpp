@@ -732,7 +732,7 @@ TEST(QueryNormalizerTest, ParagraphSeparatorRemainsDistinctWithoutAnIndexNormali
 }
 
 // =============================================================================
-// Bug 5: Primary key normalization in sort clause
+// Primary key normalization in sort clause
 // =============================================================================
 
 /**
@@ -785,7 +785,7 @@ TEST(QueryNormalizerTest, SortByNonPKProducesSameKeyAsDefault) {
 }
 
 // =============================================================================
-// Bug 8: Sort column name case sensitivity
+// Sort column name case sensitivity
 // =============================================================================
 
 /**
@@ -828,7 +828,7 @@ TEST(QueryNormalizerTest, SortColumnCaseInsensitive) {
 }
 
 // =============================================================================
-// Bug 6: SEARCH and COUNT produce the same cache key
+// SEARCH and COUNT produce the same cache key
 // =============================================================================
 
 /**

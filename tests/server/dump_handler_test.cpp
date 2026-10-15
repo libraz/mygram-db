@@ -596,9 +596,8 @@ TEST_F(DumpHandlerTest, DumpStatusSanitizesDelimitedProgressFields) {
 TEST_F(DumpHandlerTest, GtidPreservationAcrossSaveLoad) {
   // Note: Full GTID restoration testing via BinlogReader is verified through
   // manual integration tests (requires MySQL connection).
-  // Fix for GTID restoration bug was verified in issue #XXX.
   //
-  // Bug fixed: DUMP LOAD now sets GTID on BinlogReader regardless of whether
+  // DUMP LOAD sets GTID on BinlogReader regardless of whether
   // replication was running before, enabling manual REPLICATION START after LOAD.
   //
   // For now, verify that GTID is empty when no binlog_reader is present.
@@ -1542,9 +1541,7 @@ TEST_F(DumpHandlerGtidTest, DumpSaveCapturesGtid) {
 /**
  * @brief Test that DUMP LOAD restores GTID even when replication was NOT running
  *
- * This is the critical bug fix test: Previously, GTID was only restored when
- * replication was running before DUMP LOAD. Now it should be restored regardless
- * of replication state, enabling manual REPLICATION START after DUMP LOAD.
+ * GTID is restored regardless of replication state, enabling manual REPLICATION START after DUMP LOAD.
  */
 TEST_F(DumpHandlerGtidTest, DumpLoadRestoresGtidWhenReplicationNotRunning) {
   const std::string original_gtid = "uuid:99999";
@@ -2113,19 +2110,15 @@ TEST_F(DumpHandlerGtidTest, Bm25StatsRebuiltBeforeReplicationRestart) {
 }
 
 // ============================================================================
-// P0-A regression tests: DUMP LOAD must restore replication on early-return
+// DUMP LOAD must restore replication on early-return
 // error paths (empty filepath, path-traversal validation, ReadDump failure)
 // and clear the dump_load_in_progress flag.
 // ============================================================================
 
 /**
- * @brief P0-A: DUMP LOAD with empty filepath must NOT stop replication.
+ * @brief DUMP LOAD with empty filepath must NOT stop replication.
  *
- * The pre-fix behavior was: replication is stopped first, then filepath
- * validation runs and returns an error. The function returned without
- * restarting replication, leaving the server permanently paused.
- *
- * The fix moves validation BEFORE any replication state mutation, so an
+ * Validation runs BEFORE any replication state mutation, so an
  * empty filepath fails fast with replication still running.
  */
 TEST_F(DumpHandlerGtidTest, DumpLoadEmptyFilepathDoesNotStopReplication) {
@@ -2156,7 +2149,7 @@ TEST_F(DumpHandlerGtidTest, DumpLoadEmptyFilepathDoesNotStopReplication) {
 }
 
 /**
- * @brief P0-A: DUMP LOAD with a path-traversal filepath must NOT stop
+ * @brief DUMP LOAD with a path-traversal filepath must NOT stop
  *        replication.
  *
  * Same pattern as the empty-filepath test but exercising the
@@ -2183,12 +2176,12 @@ TEST_F(DumpHandlerGtidTest, DumpLoadInvalidFilepathDoesNotStopReplication) {
 }
 
 /**
- * @brief P0-A: DUMP LOAD whose ReadDump fails (file does not exist) must
+ * @brief DUMP LOAD whose ReadDump fails (file does not exist) must
  *        restart replication on the way out.
  *
  * Filepath validation succeeds (the path is inside dump_dir and does not
  * traverse), but the file itself is missing so ReadDump returns an error.
- * The fix installs a ScopeGuard that restarts replication on every error
+ * A ScopeGuard restarts replication on every error
  * path past the validation gate.
  */
 TEST_F(DumpHandlerGtidTest, DumpLoadRestartsReplicationOnReadFailure) {
@@ -2218,7 +2211,7 @@ TEST_F(DumpHandlerGtidTest, DumpLoadRestartsReplicationOnReadFailure) {
 }
 
 /**
- * @brief P0-A: DUMP LOAD failure must clear the loading flag.
+ * @brief DUMP LOAD failure must clear the loading flag.
  *
  * Mirrors the prior test but focuses on the dump_load_in_progress flag in
  * isolation (the AtomicFlagGuard contract). A subsequent DUMP LOAD attempt
@@ -2255,7 +2248,7 @@ TEST_F(DumpHandlerGtidTest, DumpLoadClearsLoadingFlagOnError) {
 #endif  // USE_MYSQL
 
 // ============================================================================
-// H-C3 regression tests: replication-pause counter coordinates concurrent
+// Replication-pause counter coordinates concurrent
 // pause requests so that binlog Stop()/Start() are not called more than once
 // across overlapping operations.
 // ============================================================================
@@ -2639,9 +2632,8 @@ TEST_F(DumpHandlerTest, DumpSaveRejectedByShutdownBeforeReadingReplicationState)
 /**
  * @brief Verify DumpSaveWorker stops replication before capturing GTID
  *
- * Previously, GetCurrentGTID() was called before Stop(), creating a race
- * condition where the worker thread could process events between GTID
- * capture and Stop(), making the captured GTID stale.
+ * Capturing the GTID before Stop() would race with event processing and
+ * leave the captured GTID stale.
  */
 TEST_F(DumpHandlerTest, DumpSaveStopsReplicationBeforeCapturingGtid) {
   // Add test documents
@@ -2762,18 +2754,18 @@ TEST_F(DumpHandlerTest, DumpVerifyDotDotSlashBlocked) {
 }
 
 // ============================================================================
-// CR-2 / H-C1 regression tests
+// Dump slot exclusivity and release tests
 // ----------------------------------------------------------------------------
-// CR-2: HandleDumpSave / HandleDumpLoad must use compare_exchange_strong on
+// HandleDumpSave / HandleDumpLoad must use compare_exchange_strong on
 //       the in-progress flag, not load() + store(true), to prevent two
 //       concurrent clients from both spawning workers / load passes.
-// H-C1: DumpSaveWorker must release dump_save_in_progress at thread EXIT
+// DumpSaveWorker must release dump_save_in_progress at thread EXIT
 //       (RAII), AFTER any Complete()/Fail() notification, so the slot is
 //       observably free as soon as the worker thread terminates.
 // ============================================================================
 
 /**
- * @brief CR-2: Two threads racing into HandleDumpSave must not both succeed.
+ * @brief Two threads racing into HandleDumpSave must not both succeed.
  *
  * We hammer HandleDumpSave from N threads simultaneously and verify the
  * compare_exchange invariant: at any instant, only one thread can hold the
@@ -2838,18 +2830,17 @@ TEST_F(DumpHandlerAsyncTest, ConcurrentDumpSaveRaceProducesExactlyOneSuccess) {
     EXPECT_LE(success_count.load(), kThreadCount) << "Success count must not exceed thread count in round " << round;
 
     // Wait for the winning worker thread to fully terminate before the next
-    // round so H-C1's flag release is observable.
+    // round so the flag release is observable.
     dump_progress_->JoinWorker();
   }
 }
 
 /**
- * @brief H-C1: Worker thread exit makes the slot immediately reusable.
+ * @brief Worker thread exit makes the slot immediately reusable.
  *
  * After the worker finishes (Complete()/Fail() returned and thread joined),
  * a fresh DUMP SAVE from a different client must succeed on the next
- * compare_exchange. This catches the regression where dump_save_in_progress
- * was reset BEFORE Complete() (or via a non-RAII path that left a window).
+ * compare_exchange. dump_save_in_progress must be reset only AFTER Complete(), via RAII.
  */
 TEST_F(DumpHandlerAsyncTest, DumpSaveSlotImmediatelyReusableAfterWorkerExits) {
   // First DUMP SAVE
@@ -2859,13 +2850,13 @@ TEST_F(DumpHandlerAsyncTest, DumpSaveSlotImmediatelyReusableAfterWorkerExits) {
   std::string resp1 = handler_->Handle(q1, conn_ctx_);
   EXPECT_TRUE(resp1.find("OK DUMP_STARTED") == 0) << "Response: " << resp1;
 
-  // Wait for the worker to finish — H-C1 promises that once JoinWorker
-  // returns, the flag is observable as false.
+  // Wait for the worker to finish — once JoinWorker returns,
+  // the flag is observable as false.
   dump_progress_->JoinWorker();
   EXPECT_FALSE(dump_save_in_progress_.load(std::memory_order_acquire)) << "After worker exit, flag must be released";
 
-  // Second DUMP SAVE on the same handler. Without H-C1, this could see the
-  // flag still set if Complete() raced with the flag store.
+  // Second DUMP SAVE on the same handler. The flag must already be clear;
+  // Complete() must not race with the flag store.
   query::Query q2;
   q2.type = query::QueryType::DUMP_SAVE;
   q2.filepath = "second_" + test_filepath_;
@@ -2877,7 +2868,7 @@ TEST_F(DumpHandlerAsyncTest, DumpSaveSlotImmediatelyReusableAfterWorkerExits) {
 }
 
 /**
- * @brief CR-2: HandleDumpLoad must also use compare_exchange.
+ * @brief HandleDumpLoad must also use compare_exchange.
  *
  * Two threads racing on DUMP LOAD: exactly one should reach the load path,
  * the other must get the busy error. We use a non-existent file so the
@@ -2923,7 +2914,7 @@ TEST_F(DumpHandlerTest, ConcurrentDumpLoadRaceProducesExactlyOneAttempt) {
     t.join();
   }
 
-  // All threads must have run. The critical invariant for CR-2 is that the
+  // All threads must have run. The critical invariant is that the
   // attempt count never exceeds 1 + (sequential retries). Since we don't
   // hold the flag artificially, after each attempter clears it the next
   // attempter may take the slot. So at minimum 1 attempt path; busy_count
@@ -2939,7 +2930,7 @@ TEST_F(DumpHandlerTest, ConcurrentDumpLoadRaceProducesExactlyOneAttempt) {
 
 #ifdef USE_MYSQL
 /**
- * @brief CR-10: DumpSaveWorker must skip binlog Start() when shutdown is
+ * @brief DumpSaveWorker must skip binlog Start() when shutdown is
  *               in progress.
  *
  * Set the shutdown flag before invoking the handler. Because IsRunning()
@@ -2976,7 +2967,7 @@ TEST_F(DumpHandlerTest, DumpSaveSkipsBinlogStartWhenShutdownInProgress) {
   auto stop_it = std::find(log.begin(), log.end(), "Stop");
   ASSERT_NE(stop_it, log.end()) << "Worker must call Stop() before writing dump";
 
-  // After Stop(), there must be NO Start() call (CR-10).
+  // After Stop(), there must be NO Start() call.
   auto start_after_stop = std::find(stop_it, log.end(), "Start");
   EXPECT_EQ(start_after_stop, log.end()) << "DumpSaveWorker must NOT call binlog Start() when shutdown is in progress";
 

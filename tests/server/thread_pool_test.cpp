@@ -388,13 +388,10 @@ TEST_F(ThreadPoolTest, TaskOrdering) {
 /**
  * @brief Shutdown(timeout_ms > 0) wakes promptly when the queue drains
  *
- * Regression test for Perf-2: previously the shutdown timeout path slept in
- * 10ms increments waiting for active workers to finish. After replacing the
- * polling loop with a condition_variable, shutdown should return as soon as
- * the last task finishes, not at the next 10ms polling boundary.
+ * The shutdown timeout path waits on a condition_variable, so shutdown
+ * returns as soon as the last task finishes, not at a polling boundary.
  *
- * With one ~50ms task, the previous implementation could take up to ~60ms
- * (50ms task + 10ms poll alignment). With the cv, total elapsed should be
+ * With one ~50ms task, total elapsed should be
  * close to 50ms and well under 100ms.
  */
 TEST_F(ThreadPoolTest, ShutdownWithTimeoutWakesPromptlyOnDrain) {

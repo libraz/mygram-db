@@ -3,9 +3,8 @@
  * @brief Small helpers around setsockopt() that centralize structured logging.
  *
  * The acceptor sets a dozen-plus socket options on the listening socket and on
- * each accepted client fd. Each call previously had its own inline boilerplate
- * (setsockopt + errno snapshot + StructuredLog warning). This helper keeps
- * that duplication in one place so that:
+ * each accepted client fd. This helper keeps the per-call boilerplate
+ * (setsockopt + errno snapshot + StructuredLog warning) in one place so that:
  *   - the warning event name (`setsockopt_failed`) and field shape stay
  *     consistent across call sites, and
  *   - adding a new tunable (e.g. SO_LINGER) is a one-line change.
@@ -23,8 +22,8 @@ namespace mygramdb::server::socket_utils {
  * @brief Tries to set a socket option, logging a structured warning on failure.
  *
  * This helper centralizes the per-option boilerplate (setsockopt() call,
- * errno preservation, structured warning emission) that previously lived
- * inline at every call site in connection_acceptor.cpp. For optional
+ * errno preservation, structured warning emission) shared by every
+ * call site in connection_acceptor.cpp. For optional
  * tunings (TCP_KEEPALIVE_*, SO_RCVBUF, etc.) failure is non-fatal — the
  * socket continues to operate with the kernel's default value.
  *

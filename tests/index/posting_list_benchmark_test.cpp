@@ -134,8 +134,8 @@ TEST_F(PostingListBenchmarkTest, CandidateFilteringCostAcrossStrategies) {
   EXPECT_EQ(delta_retain, roaring_retain) << "the two strategies disagree about which candidates are present";
 
   // The delta separation is a complexity difference, so it holds with a wide
-  // margin even on a loaded machine. A regression that reintroduces the rescan
-  // collapses it.
+  // margin even on a loaded machine. Reintroducing the rescan
+  // would collapse it.
   EXPECT_GT(delta_probe_ms, delta_retain_ms * 5.0)
       << "single-walk filtering lost its advantage over per-candidate probing on the delta strategy";
 }

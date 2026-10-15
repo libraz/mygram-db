@@ -713,8 +713,7 @@ TEST(RuntimeVariableManagerTest, SetCacheMinQueryCostNegative) {
  * @brief SET cache.min_query_cost_ms must reject non-finite doubles.
  *
  * std::from_chars' floating-point grammar accepts "nan"/"inf"/"infinity", and
- * a plain `value < 0` range check never trips for NaN, so it used to reach
- * CacheManager::SetMinQueryCost() with a threshold that makes every
+ * a plain `value < 0` range check never trips for NaN, and a NaN threshold would make every
  * cost-vs-threshold comparison downstream false, silently caching everything.
  */
 TEST(RuntimeVariableManagerTest, SetCacheMinQueryCostRejectsNonFiniteValues) {

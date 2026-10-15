@@ -107,7 +107,7 @@ class MockEventMultiplexer final : public EventMultiplexer {
    * @brief Force the next (and subsequent) Add() calls to return
    *        kNetworkReactorRegisterFailed until cleared.
    *
-   * Used to validate IoReactor::Register's failure path (Fix N-5):
+   * Used to validate IoReactor::Register's failure path:
    * connections_ must remain untouched if mux_->Add fails.
    */
   void SetAddShouldFail(bool should_fail);

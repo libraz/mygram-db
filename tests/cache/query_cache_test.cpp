@@ -154,11 +154,9 @@ TEST(QueryCacheTest, LRUEviction) {
   // 3 * (kPayloadDocs * sizeof(DocId)). Account for per-entry overhead
   // (CacheKey, lru_list iterator, metadata strings, atomics, hash-map node
   // overhead, shared_ptr control block) by leaving generous headroom in the
-  // inequality. After H-M1 (shared_ptr control block accounting, +24 B)
-  // and H-M7 (hash-map node accounting, +32 B), per-entry overhead grew by
-  // ~56 bytes, so the cache budget needed bumping to keep this test's
-  // "fits 3 entries" invariant — otherwise the third Insert evicts the
-  // first and the assertion at line ~119 fails.
+  // inequality. Per-entry overhead includes the shared_ptr control block
+  // (+24 B) and hash-map node (+32 B), so the budget must keep this test's
+  // "fits 3 entries" invariant — otherwise the third Insert evicts the first.
   constexpr size_t kPayloadDocs = 200;  // 800 bytes per entry payload
   constexpr size_t kCacheBytes = 4096;  // fits ~3 entries; 4 must evict
   QueryCache cache(kCacheBytes, /*min_query_cost_ms=*/10.0);
@@ -386,12 +384,10 @@ TEST(QueryCacheTest, Clear) {
 }
 
 /**
- * @brief Regression test for P0-G: QueryCache::Clear() must invoke
- *        eviction_callback_ for every removed entry.
+ * @brief QueryCache::Clear() must invoke eviction_callback_ for every removed entry.
  *
- * Bug: Clear() swap-discarded entries without invoking eviction_callback_,
- * so external bookkeeping (e.g. InvalidationManager) leaked metadata.
- * Fix: iterate entries and invoke eviction_callback_(key) before swap.
+ * Clear() iterates entries and invokes eviction_callback_(key) before the swap,
+ * so external bookkeeping (e.g. InvalidationManager) does not leak metadata.
  */
 TEST(QueryCacheTest, ClearInvokesEvictionCallbackForEveryEntry) {
   QueryCache cache(1024 * 1024, 0.0);
@@ -561,7 +557,7 @@ TEST(QueryCacheTest, InvalidatedNoHit) {
 /**
  * @brief Test concurrent lookup and erase to detect use-after-free
  *
- * This test attempts to trigger a use-after-free bug that existed when
+ * This test attempts to trigger a use-after-free if
  * QueryCache::Lookup released the lock before accessing entry.query_cost_ms.
  * Multiple threads perform lookups while other threads aggressively erase entries.
  */
@@ -664,9 +660,8 @@ TEST(QueryCacheTest, ConcurrentLookupAndErase) {
 /**
  * @brief Test timing statistics are properly recorded for hits and misses
  *
- * This is a regression test to ensure that total_cache_hit_time_ms and
- * total_cache_miss_time_ms are actually updated during Lookup operations.
- * Previously these fields existed but were never populated.
+Verifies that total_cache_hit_time_ms and total_cache_miss_time_ms are
+ * updated during Lookup operations.
  */
 TEST(QueryCacheTest, TimingStatistics) {
   QueryCache cache(10 * 1024 * 1024, 1.0);  // 10MB, low threshold
@@ -744,9 +739,8 @@ TEST(QueryCacheTest, TimingStatistics) {
 /**
  * @brief Test memory accounting consistency (Insert uses same calculation as Erase)
  *
- * This is a regression test for a bug where Insert used compressed.size()
- * but Erase used compressed.capacity(), causing total_memory_bytes_ to
- * underflow or accumulate errors over time.
+ * Insert and Erase must use the same size measure, otherwise total_memory_bytes_
+ * would underflow or accumulate errors over time.
  */
 TEST(QueryCacheTest, MemoryAccountingConsistency) {
   QueryCache cache(10 * 1024 * 1024, 1.0);  // 10MB
@@ -789,7 +783,7 @@ TEST(QueryCacheTest, MemoryAccountingConsistency) {
 }
 
 /**
- * @brief Test for lock upgrade race condition fix
+ * @brief Test the lock upgrade race condition
  *
  * Verifies that when an entry is evicted and re-inserted during a Lookup operation,
  * the metadata update is correctly handled (using created_at timestamp verification).
@@ -901,7 +895,7 @@ TEST(QueryCacheTest, ConcurrentLookupsNoMetadataCorruption) {
 
 /**
  * @brief Test that stats_.total_queries is accurately counted under concurrent access
- * Regression test for: stats_.total_queries++ was incremented before mutex lock
+ * stats_.total_queries is incremented under the mutex
  */
 TEST(QueryCacheTest, ConcurrentQueryCountAccuracy) {
   QueryCache cache(10 * 1024 * 1024, 10.0);  // 10MB
@@ -939,7 +933,6 @@ TEST(QueryCacheTest, ConcurrentQueryCountAccuracy) {
   }
 
   // Verify total_queries is exactly what we expect
-  // Before the fix: this could be less than expected due to race condition
   auto stats = cache.GetStatistics();
   EXPECT_EQ(num_threads * lookups_per_thread, stats.total_queries);
 
@@ -960,7 +953,7 @@ TEST(QueryCacheTest, ConcurrentQueryCountAccuracy) {
  * 3. Thread 2: Evicts the entry and inserts new entry with same key
  * 4. Thread 1: Acquires unique_lock, should detect entry changed
  *
- * The fix uses pointer address comparison instead of timestamp comparison
+ * The check uses pointer address comparison instead of timestamp comparison
  * to detect if the entry has been replaced.
  */
 TEST(QueryCacheTest, ABAProofLockUpgrade) {
@@ -1011,7 +1004,7 @@ TEST(QueryCacheTest, ABAProofLockUpgrade) {
   t2.join();
 
   // The test passes if no crash occurs
-  // With the fix, the pointer address check prevents touching wrong entry
+  // The pointer address check prevents touching the wrong entry
   EXPECT_TRUE(thread2_replaced_entry.load());
 
   // Verify cache is in consistent state
@@ -1297,8 +1290,7 @@ TEST(QueryCacheTest, Bug19_ClearTableCallsEvictionCallback) {
   // ClearTable should trigger eviction callbacks
   cache.ClearTable("posts");
 
-  // Before fix, evicted_keys would be empty
-  // After fix: evicted_keys should contain all 3 keys
+  // evicted_keys should contain all 3 keys
   EXPECT_EQ(3, evicted_keys.size()) << "ClearTable should call eviction callback for each removed entry";
 
   // Verify all keys were evicted
@@ -1482,8 +1474,7 @@ TEST(QueryCacheTest, Bug33_ClearTableCallbackReceivesAllKeys) {
 /**
  * @test Verify concurrent lookups don't block each other due to lock upgrade
  *
- * Before fix: Each cache hit required lock upgrade which serialized readers
- * After fix: Atomic access count update allows full reader concurrency
+ * Atomic access count update allows full reader concurrency (no lock upgrade per hit).
  */
 TEST(QueryCacheTest, Bug0070_ConcurrentLookupsNoLockUpgrade) {
   QueryCache cache(10 * 1024 * 1024, 1.0);  // 10MB
@@ -1790,18 +1781,12 @@ TEST(QueryCacheTest, TTLExpiredEntryNotReturned) {
 }
 
 /**
- * @brief Regression test for P0-H: stats_.current_memory_bytes must be
- *        updated immediately when entries are removed, not deferred to the
- *        end of RefreshLRU.
+ * @brief stats_.current_memory_bytes must be updated immediately when entries
+ *        are removed, not deferred to the end of RefreshLRU.
  *
- * Bug: Insert/Erase synced stats_.current_memory_bytes inline, but
  * RemoveEntryLocked (called by RefreshLRU when draining TTL-expired keys
- * detected at Lookup time) only decremented total_memory_bytes_ /
- * stats_.current_entries; stats_.current_memory_bytes was synced once at the
- * very end of RefreshLRU. Between RemoveEntryLocked and that final sync,
- * GetStatistics() returned stale (higher) values.
- *
- * Fix: store stats_.current_memory_bytes inside RemoveEntryLocked.
+ * detected at Lookup time) stores stats_.current_memory_bytes itself, so
+ * GetStatistics() never returns stale (higher) values.
  *
  * Test scenario: insert N entries with TTL=1s, sleep past TTL, then trigger
  * a Lookup that queues the keys into pending_expired_keys_. After RefreshLRU
@@ -1840,9 +1825,8 @@ TEST(QueryCacheTest, TTLExpiredEntryRemovalUpdatesStatsImmediately) {
 
   auto stats = cache.GetStatistics();
   EXPECT_EQ(stats.current_entries, 0u);
-  // Critical assertion: with the fix, RemoveEntryLocked updates
-  // current_memory_bytes inline. Without the fix, this could read a stale
-  // value if Lookup raced with RefreshLRU.
+  // RemoveEntryLocked updates current_memory_bytes inline, so no stale value
+  // is visible even if Lookup races with RefreshLRU.
   EXPECT_EQ(stats.current_memory_bytes, 0u)
       << "current_memory_bytes must be synced inside RemoveEntryLocked, not deferred to the end of RefreshLRU";
 }
@@ -1947,16 +1931,16 @@ TEST(QueryCacheTest, TTLExpirationStats) {
  * Verifies that the decompression_failures counter is initialized to 0
  * and is included in the statistics snapshot. A full decompression failure
  * test would require injecting corrupted compressed data into a cache entry,
- * which requires internal access (the fix ensures such entries are cleaned up
+ * which requires internal access (such entries are cleaned up
  * by RefreshLRU via pending_decompression_keys_).
  */
 TEST(QueryCacheTest, LargeConfiguredBudgetDoesNotPreallocateHashBucketsAtStartup) {
   constexpr size_t kEightGiB = 8ULL * 1024 * 1024 * 1024;
   QueryCache cache(kEightGiB, 0.0, 3600, true, 10, false);
 
-  // An empty cache should retain only tiny baseline container state. Before
-  // the regression fix, the constructor reserved about 33 million buckets
-  // from the configured ceiling and consumed roughly 536 MiB immediately.
+  // An empty cache should retain only tiny baseline container state. The
+  // constructor must not reserve buckets from the configured ceiling (8 GiB
+  // would otherwise reserve ~33 million buckets, roughly 536 MiB).
   EXPECT_LT(cache.MemoryUsage(), 1024U * 1024U);
 }
 
@@ -1991,9 +1975,8 @@ TEST(QueryCacheTest, DecompressionFailureStatInitialized) {
 /**
  * @brief Test TTL expiration is counted immediately when Lookup detects it
  *
- * Before fix: ttl_expirations was only incremented when RefreshLRU removed
- * the entry, leaving a window where stats were inconsistent.
- * After fix: ttl_expirations is incremented at Lookup detection time.
+ * ttl_expirations is incremented at Lookup detection time, not when RefreshLRU
+ * later removes the entry.
  */
 TEST(QueryCacheTest, M4_TTLExpirationCountedAtLookupTime) {
   QueryCache cache(1024 * 1024, 0.0, 1);  // 1 second TTL
@@ -2146,15 +2129,12 @@ TEST(QueryCacheTest, M5_DecompressionFailureEntryEventuallyRemoved) {
 }
 
 /**
- * @brief Regression test for P0-E: decompression_failures counter must be
- *        deduplicated per entry (not per Lookup call).
+ * @brief decompression_failures counter must be deduplicated per entry
+ *        (not per Lookup call).
  *
- * Bug: two concurrent Lookups of the same broken entry both incremented
- * stats_.decompression_failures, even though the entry is logically a single
- * failure event.
- *
- * Fix: only increment when the key was newly inserted into
- * pending_decompression_keys_ (i.e. unordered_set::insert returned true).
+ * An entry is a single failure event, so the counter is incremented only when
+ * the key is newly inserted into pending_decompression_keys_ (i.e.
+ * unordered_set::insert returned true).
  *
  * Test: insert one entry, corrupt its compressed payload, fire 4 concurrent
  * Lookups, then assert decompression_failures == 1.
@@ -2206,8 +2186,8 @@ TEST(QueryCacheTest, DecompressionFailureCountedOncePerEntry) {
 /**
  * @brief Test TTL-expired entries increment cache_misses_ttl_expired (not cache_misses_not_found)
  *
- * Regression test for: TTL-expired entries were counted as cache_misses_not_found
- * instead of the dedicated cache_misses_ttl_expired counter.
+ * They are counted in the dedicated cache_misses_ttl_expired counter rather
+ * than cache_misses_not_found.
  *
  * Note: The background RefreshLRU thread may remove the entry before Lookup runs,
  * causing a not_found miss instead. We use a longer TTL and check immediately
@@ -2281,8 +2261,7 @@ TEST(QueryCacheTest, TTLExpiredWithMetadataIncrementsTTLExpiredCounter) {
 /**
  * @brief Test that lookup returns correct data after shared_ptr compressed change
  *
- * Regression test for: changing compressed from vector<uint8_t> to
- * shared_ptr<const vector<uint8_t>> should not affect lookup results.
+ * Storing compressed data as shared_ptr<const vector<uint8_t>> does not affect lookup results.
  */
 TEST(QueryCacheTest, SharedPtrCompressedLookupCorrectness) {
   QueryCache cache(1024 * 1024, 0.0);
@@ -2669,11 +2648,11 @@ TEST_F(QueryCacheNoCompressionTest, LookupOfMissingEntryReturnsMissNotFound) {
 }
 
 // =============================================================================
-// CR-5 regression: cache_map_ rehash safety
+// cache_map_ rehash safety
 // =============================================================================
 
 /**
- * @brief CR-5 regression: incremental bucket growth preserves all entries.
+ * @brief Incremental bucket growth preserves all entries.
  *
  * QueryCache deliberately does not reserve buckets from the configured byte
  * ceiling at construction. The shared mutex must therefore make ordinary
@@ -2690,8 +2669,8 @@ TEST(QueryCacheTest, IncrementalBucketGrowthPreservesStableInsertSequence) {
 
   // We can't read bucket_count() directly (cache_map_ is private), but we
   // can verify functional correctness: 1024 inserts must all succeed and
-  // all 1024 keys must remain looked-up-able afterwards. Under a rehash
-  // bug that invalidated outstanding iterators, concurrent Lookups during
+  // all 1024 keys must remain looked-up-able afterwards. If a rehash
+  // invalidated outstanding iterators, concurrent Lookups during
   // these inserts would crash; here we keep it single-threaded to focus on
   // the structural invariant. The Concurrent* tests cover the multi-thread
   // case.
@@ -2709,7 +2688,7 @@ TEST(QueryCacheTest, IncrementalBucketGrowthPreservesStableInsertSequence) {
 
   // All inserted keys must still be retrievable. If rehash had invalidated
   // iterators in flight (it cannot under the shared_mutex contract, but the
-  // test guards against future regressions to that invariant), some lookups
+  // test guards that invariant), some lookups
   // would either miss or crash.
   for (size_t i = 0; i < keys.size(); ++i) {
     auto found = cache.Lookup(keys[i]);
@@ -2805,19 +2784,14 @@ TEST(QueryCacheTest, StaleEntryIdentityCannotInvalidateOrEraseReinsertedValue) {
 }
 
 // =============================================================================
-// Step 3 (HIGH): H-M3 / H-M6 / H-M7 regression tests
+// Eviction callback locking and related tests
 // =============================================================================
 
 /**
- * @brief H-M3: eviction_callback_ must fire AFTER QueryCache::mutex_ is released.
+ * @brief eviction_callback_ must fire AFTER QueryCache::mutex_ is released.
  *
- * Bug class: with the old code path, RemoveEntryLocked called eviction_callback_
- * while holding QueryCache::mutex_. If the callback recurses into QueryCache
- * (for example to inspect via GetMetadata or Lookup) the call would hang on
- * a re-entrant lock acquisition.
- *
- * After the fix, the callback runs after mutex_ is released, so a callback
- * that calls back into QueryCache::Lookup must succeed without deadlocking.
+ * The callback runs after mutex_ is released, so a callback that calls back
+ * into QueryCache (GetMetadata, Lookup) must succeed without deadlocking.
  */
 TEST(QueryCacheTest, EvictionCallbackFiresWithoutHoldingCacheLock) {
   QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
@@ -2861,7 +2835,7 @@ TEST(QueryCacheTest, EvictionCallbackFiresWithoutHoldingCacheLock) {
 }
 
 /**
- * @brief H-M7: BatchEvictionCallback fires once per bulk operation.
+ * @brief BatchEvictionCallback fires once per bulk operation.
  *
  * When a batch callback is wired up, Clear/ClearTable/EvictForSpace/RefreshLRU
  * must call it exactly once with all evicted keys instead of looping the
@@ -2921,7 +2895,7 @@ TEST(QueryCacheTest, MemoryPressureHonorsConfiguredEvictionBatchSize) {
 }
 
 /**
- * @brief H-M7: per-key callback fallback when BatchEvictionCallback is unset.
+ * @brief Per-key callback fallback when BatchEvictionCallback is unset.
  *
  * Backward-compatibility check: callers that only set the per-key callback
  * (the original API) still receive one callback per evicted entry on bulk
@@ -2946,7 +2920,7 @@ TEST(QueryCacheTest, BulkPathFallsBackToPerKeyCallbackWhenBatchUnset) {
 }
 
 /**
- * @brief H-M6: stale LRU entry detection bumps the stale_lru_entries counter.
+ * @brief Stale LRU entry detection bumps the stale_lru_entries counter.
  *
  * Note: this test directly exercises the defensive code path in
  * EvictForSpace. The "stale" condition (key in lru_list_ but not in
@@ -2954,8 +2928,8 @@ TEST(QueryCacheTest, BulkPathFallsBackToPerKeyCallbackWhenBatchUnset) {
  * requires invariant violation. We use the test-only CorruptEntryForTest
  * variant pattern, but since QueryCache does not expose a way to push a
  * stale key into lru_list_, we instead validate the counter is initialised
- * to 0 and never increments under normal operation. A regression that
- * breaks the invariant elsewhere will subsequently bump this counter and be
+ * to 0 and never increments under normal operation. A break in the
+ * invariant elsewhere will subsequently bump this counter and be
  * caught by a fleet alert keyed on stale_lru_entries.
  */
 TEST(QueryCacheTest, StaleLruCounterStartsAtZeroAndStaysZeroUnderNormalOps) {
@@ -2980,14 +2954,14 @@ TEST(QueryCacheTest, StaleLruCounterStartsAtZeroAndStaysZeroUnderNormalOps) {
 }
 
 /**
- * @brief H-M7 smoke test: Clear() releases mutex_ before per-key callbacks.
+ * @brief Smoke test: Clear() releases mutex_ before per-key callbacks.
  *
  * If Clear() were still holding mutex_ when invoking per-key callbacks, then
  * a callback that calls cache.GetStatistics() would block on the shared_mutex
  * (GetStatistics takes a shared_lock through stats_.timing_mutex_ — wait,
  * actually it doesn't take mutex_; it takes only timing_mutex_. So the
- * regression here is more subtle: we test that a callback can call
- * GetMetadata() which DOES take a shared_lock on mutex_. Without the fix,
+ * check here is more subtle: we test that a callback can call
+ * GetMetadata() which DOES take a shared_lock on mutex_. Otherwise
  * GetMetadata under the eviction callback would deadlock on a self-held
  * unique_lock.)
  */
@@ -3019,17 +2993,15 @@ TEST(QueryCacheTest, EvictionCallbackCanCallGetMetadataWithoutDeadlock) {
 }
 
 // =============================================================================
-// Step 3 (HIGH): H-M1 memory accounting overhead
+// Memory accounting overhead
 // =============================================================================
 
 /**
- * @brief H-M1: MemoryUsage now includes the shared_ptr control block overhead.
+ * @brief MemoryUsage includes the shared_ptr control block overhead.
  *
- * Before the fix, MemoryUsage attributed only the heap vector for the
- * compressed payload. With make_shared, libstdc++/libc++ allocate one
- * additional control block (~16-24 B) per entry. We verify the reported
- * usage strictly exceeds the old lower bound by the kSharedPtrControlBlockOverhead
- * constant (24).
+ * With make_shared, libstdc++/libc++ allocate one additional control block
+ * (~16-24 B) per entry. The reported usage must exceed the payload-only lower
+ * bound by kSharedPtrControlBlockOverhead (24).
  */
 TEST(QueryCacheTest, MemoryUsageIncludesSharedPtrControlBlockOverhead) {
   CacheEntry entry;
@@ -3037,7 +3009,7 @@ TEST(QueryCacheTest, MemoryUsageIncludesSharedPtrControlBlockOverhead) {
   entry.metadata.table = "t";
   entry.metadata.ngrams = {"abc"};
 
-  // Old formula (without shared_ptr control block):
+  // Lower bound without the shared_ptr control block:
   size_t old_lower_bound = sizeof(CacheEntry) + sizeof(std::vector<uint8_t>) + entry.compressed->capacity() +
                            entry.metadata.table.capacity() + entry.metadata.ngrams.capacity() * sizeof(std::string);
   for (const auto& ngram : entry.metadata.ngrams) {
@@ -3045,7 +3017,7 @@ TEST(QueryCacheTest, MemoryUsageIncludesSharedPtrControlBlockOverhead) {
   }
 
   EXPECT_GE(entry.MemoryUsage(), old_lower_bound + 24)
-      << "H-M1: MemoryUsage must include shared_ptr control block overhead (~24 bytes)";
+      << "MemoryUsage must include shared_ptr control block overhead (~24 bytes)";
 }
 
 /**

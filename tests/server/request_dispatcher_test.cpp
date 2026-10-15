@@ -570,7 +570,7 @@ TEST_F(RequestDispatcherTest, DispatchWhitespaceQuery) {
 }
 
 /**
- * @brief Regression test: long requests must be truncated in the dispatch log.
+ * @brief Long requests must be truncated in the dispatch log.
  *
  * The debug log emitted at the start of Dispatch() includes the raw request
  * string. Untrusted client input may contain log-injection sequences and
@@ -671,7 +671,7 @@ TEST_F(RequestDispatcherTest, RequestLogTruncationDoesNotSplitUtf8) {
 }
 
 /**
- * @brief Regression test for CR-8: HasHandler reports registered handlers.
+ * @brief HasHandler reports registered handlers.
  *
  * The startup completeness check in ServerLifecycleManager::InitDispatcher
  * relies on RequestDispatcher::HasHandler returning true exactly when a
@@ -689,10 +689,8 @@ TEST_F(RequestDispatcherTest, HasHandlerReturnsTrueForRegisteredTypes) {
 }
 
 /**
- * @brief Regression test: dispatching commands must bump total_requests.
- *
- * Previously RequestDispatcher::Dispatch only called IncrementCommand, so the
- * INFO total_requests field stayed pinned at 0 even under heavy load.
+ * @brief Dispatching commands must bump total_requests (the INFO total_requests
+ * field), not only the per-command counters.
  */
 TEST_F(RequestDispatcherTest, DispatchIncrementsTotalRequests) {
   ConnectionContext conn_ctx;

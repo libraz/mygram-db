@@ -261,7 +261,7 @@ class PostingList {
   // Roaring bitmap storage
   utils::RoaringBitmapPtr roaring_bitmap_;
 
-  // Approximate document count for lock-free reads (H-14).
+  // Approximate document count for lock-free reads.
   // Updated atomically inside mutation methods that already hold the exclusive lock.
   std::atomic<uint64_t> doc_count_{0};
 

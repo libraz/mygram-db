@@ -137,11 +137,9 @@ TEST_F(SyncHandlerTest, CreateWithNullSyncManager_ReturnsError) {
  * @brief Create() should report null sync_manager via the SYNC-domain error
  *        code (kSyncManagerNull), not a Network-range code.
  *
- * Regression test for H-5: previously the factory used kNetworkNullDependency
- * (6024), which mis-attributed a SYNC/Index-domain error to the Network
- * range and made it harder to filter by error class in observability tools.
- * The fix introduces kSyncManagerNull (4014) in the 4000-4999 Index/Business
- * range so the error code matches the module that surfaces it.
+ * The factory reports kSyncManagerNull (4014) in the 4000-4999 Index/Business
+ * range so the error code matches the module that surfaces it, rather than
+ * a Network-range code.
  */
 TEST_F(SyncHandlerTest, CreateWithNullSyncManagerReturnsCorrectErrorCode) {
   std::atomic<bool> dump_load{false};
@@ -515,8 +513,8 @@ TEST_F(SyncHandlerTest, SyncStateFailure) {
 /**
  * @brief Test SyncOperationManager properly manages sync threads (no detached threads)
  *
- * Verifies the fix where sync threads are stored and joined on destruction,
- * preventing the resource leaks that occurred with detached threads.
+ * Verifies that sync threads are stored and joined on destruction,
+ * rather than detached.
  */
 TEST(SyncOperationManagerTest, SyncThreadsProperlyManaged) {
   // Create minimal setup for SyncOperationManager
@@ -564,10 +562,9 @@ TEST(SyncOperationManagerTest, SyncThreadsProperlyManaged) {
  * @brief SYNC STATUS reply when no sync is running must use the canonical
  *        FormatStatus framing.
  *
- * Previously SyncOperationManager returned a bare "status=IDLE message=..."
- * line, while every other status reply produced by the TCP protocol carries
- * an "OK ..." prefix. Mixing the two confused log scrapers and frustrated
- * grep-based diagnostics. After Step 3-C the IDLE response is wrapped via
+ * Every other status reply produced by the TCP protocol carries an "OK ..."
+ * prefix, so a bare "status=IDLE message=..." line would break log scrapers
+ * and grep-based diagnostics. The IDLE response is wrapped via
  * ResponseFormatter::FormatStatus so the prefix matches the active-sync
  * branch produced by SendResponse.
  */
@@ -649,8 +646,7 @@ TEST(SyncOperationManagerTest, RapidCreateDestroyNoThreadLeak) {
 
 /**
  * @brief Test concurrent StartSync calls with thread safety
- * Regression test for: sync_threads_ and sync_states_ race condition
- * Ensures both are protected by the same mutex (sync_mutex_)
+ * Ensures sync_threads_ and sync_states_ are protected by the same mutex (sync_mutex_)
  *
  * NOTE: This test requires a running MySQL server because StartSync
  * actually attempts to connect. Skip if MySQL is not available.
@@ -715,17 +711,10 @@ TEST(SyncOperationManagerTest, ConcurrentStartSyncThreadSafe) {
 }
 
 /**
- * @brief H-C4 regression: StartSync must reject any new SYNC after
+ * @brief StartSync must reject any new SYNC after
  *        RequestShutdown() has been called.
  *
- * Pre-fix behaviour: RequestShutdown() set shutdown_requested_ = true
- * but StartSync()'s early checks did not consult that flag. A request
- * dispatcher with a stale reference to the SyncOperationManager could
- * therefore slip a new SYNC past shutdown, claim the sync slot, and
- * spawn a worker thread that the manager destructor would try to join
- * for up to ~30 seconds before timing out.
- *
- * Post-fix behaviour: StartSync()'s first action is an acquire-load on
+ * StartSync()'s first action is an acquire-load on
  * shutdown_requested_; any new request after RequestShutdown() returns
  * an Error with code kServerShuttingDown so the dispatcher can fail
  * fast instead of starting a doomed sync.
@@ -769,10 +758,10 @@ TEST(SyncOperationManagerTest, StartSyncAfterRequestShutdownReturnsError) {
 }
 
 /**
- * @brief H-C4 regression: shutdown rejection must be observable
+ * @brief Shutdown rejection must be observable
  *        immediately even if RequestShutdown() and StartSync() race.
  *
- * The fix uses an acquire-load in StartSync paired with a release-store
+ * StartSync uses an acquire-load paired with a release-store
  * in RequestShutdown so the StartSync racer that starts strictly AFTER
  * RequestShutdown's release-store always observes the shutdown flag and
  * fails fast. Racers that started strictly BEFORE may still proceed

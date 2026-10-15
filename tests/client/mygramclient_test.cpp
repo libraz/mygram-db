@@ -755,9 +755,8 @@ TEST_F(MygramClientTest, SearchCountGetAndFacetAcceptDatabaseQualifiedTableName)
 }
 
 /**
- * @brief Regression test: Connect() used to hardcode AF_INET, so a server
- * bound to an IPv6 address (or reached via a hostname resolving only to an
- * AAAA record) was unreachable. getaddrinfo now resolves with AF_UNSPEC and
+ * @brief Connect() reaches a server bound to an IPv6 address (or a hostname
+ * resolving only to an AAAA record). getaddrinfo resolves with AF_UNSPEC and
  * every candidate address is tried in turn (see Connect(), mygramclient.cpp).
  */
 TEST_F(MygramClientTest, ConnectsToIpv6Loopback) {
@@ -1144,12 +1143,10 @@ TEST_F(MygramClientTest, SearchRawPreservesConvertedOrExpression) {
   EXPECT_EQ(simplified.error().code(), mygram::utils::ErrorCode::kClientExpressionParseError);
 }
 
-// Regression tests for ConvertSearchExpression round-tripping ordinary
-// English words that collide with reserved clause keywords. Before the
-// shared wire_quoting.h predicate, ToQueryString emitted these terms raw,
-// so the server's own tokenizer (case-insensitive on AND/OR/NOT/ORDER --
-// query_parser_commands.cpp, query_ast.cpp) re-read them as operators
-// instead of search text.
+// ConvertSearchExpression round-trips ordinary English words that collide with
+// reserved clause keywords. The shared wire_quoting.h predicate quotes them, so
+// the server's tokenizer (case-insensitive on AND/OR/NOT/ORDER --
+// query_parser_commands.cpp, query_ast.cpp) reads them as search text, not operators.
 TEST_F(MygramClientTest, SearchRawHandlesOrdinaryWordOrder) {
   ASSERT_TRUE(
       doc_store_->AddDocument("order_doc", {}, mygram::utils::NormalizeText("order history", true, "keep", true)));
@@ -1641,7 +1638,7 @@ TEST_F(MygramClientTest, Info) {
  *
  * Validates that the multi-line INFO response is fully received, including
  * all sections (Server, Stats, Memory, Index, Tables, Clients, Cache).
- * This tests the fix for premature \r\n termination on multi-line responses.
+ * A \r\n inside the response must not terminate it prematurely.
  */
 TEST_F(MygramClientTest, InfoMultiLineComplete) {
   AddTestDocuments();
@@ -1839,8 +1836,7 @@ TEST_F(MygramClientTest, SearchWithDebugInfo) {
   EXPECT_GT(dbg.terms, 0u) << "Debug 'terms' should be > 0";
   EXPECT_GT(dbg.final, 0u) << "Debug 'final' should be > 0";
 
-  // Result IDs must not include the literal "#" token (regression test for
-  // the old whitespace-tokenised parser that captured "# DEBUG").
+  // Result IDs must not include the literal "#" token (the "# DEBUG" header).
   for (const auto& r : resp.results) {
     EXPECT_NE(r.primary_key, "#") << "Result IDs must not include the '#' header token";
     EXPECT_NE(r.primary_key, "DEBUG") << "Result IDs must not include the 'DEBUG' header token";
@@ -1990,7 +1986,7 @@ TEST_F(MygramClientTest, SendCommandDisconnectsAfterReceiveFailure) {
   closer.join();
 }
 
-// Regression test for a client-side SIGPIPE: the server answers one command
+// Client-side SIGPIPE: the server answers one command
 // normally, then RSTs the connection. A later send() on that same socket
 // must surface as kClientSendFailed rather than raising SIGPIPE and killing
 // the process (see ApplyPostConnectSocketOptions / kSendFlags).
@@ -2883,10 +2879,9 @@ TEST_F(MygramClientTest, EmojiWithAndSearch) {
 }
 
 /**
- * @brief Test large response handling (tests recv loop fix)
+ * @brief Test large response handling (recv loop)
  *
- * This test validates the fix for the issue where MygramClient::SendCommand
- * only called recv() once, causing large responses to be truncated.
+ * MygramClient::SendCommand must keep calling recv() until the response is complete.
  * We create many documents so the search response exceeds the recv buffer size.
  */
 TEST_F(MygramClientTest, LargeResponseHandling) {
@@ -2928,7 +2923,7 @@ TEST_F(MygramClientTest, LargeResponseHandling) {
   EXPECT_LE(resp.results.size(), num_docs + 10) << "Too many results - parsing issue";
 
   // Most importantly: verify that we can receive a large response >65KB
-  // The old code would have truncated at first recv (65KB buffer)
+  // A single recv() would truncate at the 65KB buffer
   // With 1000 docs, the response is approximately 70-80KB with DEBUG info
   EXPECT_GT(resp.results.size(), 500) << "Response was definitely truncated - received less than half";
 
@@ -3278,8 +3273,8 @@ TEST_F(MygramClientTest, ConnectInvalidHostnameReturnsError) {
  *
  * Uses a non-routable IP from the TEST-NET-1 documentation range
  * (RFC 5737, 192.0.2.0/24) so the OS should silently drop the SYN.
- * Without the non-blocking-connect+poll fix, blocking connect() would hang
- * for the OS default of ~75s; with the fix it must fail within ~timeout_ms.
+ * Connect uses non-blocking connect+poll, so it must fail within ~timeout_ms
+ * instead of hanging for the OS default of ~75s.
  */
 TEST(MygramClientConnectTimeoutTest, ConnectTimeoutOnUnreachableHost) {
   ClientConfig config;
@@ -3296,7 +3291,7 @@ TEST(MygramClientConnectTimeoutTest, ConnectTimeoutOnUnreachableHost) {
 
   ASSERT_FALSE(result) << "Expected connect() to fail against an unreachable host";
   // Must complete well below the OS default (~75s). 5s gives generous slack on
-  // CI without masking real regressions.
+  // CI without masking a real slowdown.
   EXPECT_LT(elapsed_ms, 5000) << "Connect did not honor timeout_ms (took " << elapsed_ms << "ms)";
 
   // The error code should be kClientTimeout when poll() actually times out.
@@ -3445,9 +3440,8 @@ TEST_F(MygramClientTest, SetVariableRejectsNameThatWouldSplitTheCommand) {
 /**
  * @brief Test that Search emits OFFSET when limit==0 and offset>0
  *
- * Regression test: the client used to silently drop the offset entirely when
- * limit was zero. Now it must emit a bare "OFFSET <n>" clause so the server
- * still skips the first N matches.
+ * When limit is zero the client must emit a bare "OFFSET <n>" clause so the
+ * server still skips the first N matches.
  */
 TEST_F(MygramClientTest, SearchWithOffsetOnlyAppliesOffset) {
   AddTestDocuments();
@@ -3653,9 +3647,8 @@ TEST(MygramClientLocaleTest, CacheStatisticsParsesDotDecimalUnderCommaLocale) {
 /**
  * @brief Test C API search NULL terms guard
  *
- * Regression test: previously, calling search_advanced with and_count > 0 but
- * and_terms == nullptr (or the same pattern for not / filter) would deference
- * NULL and segfault. Now those cases must return -1 with a descriptive error.
+ * Calling search_advanced with and_count > 0 but and_terms == nullptr (or the
+ * same pattern for not / filter) must return -1 with a descriptive error.
  */
 TEST_F(MygramClientTest, CApiSearchNullTermsCrashGuard) {
   // Create a C API client (no need to connect — validation runs first).

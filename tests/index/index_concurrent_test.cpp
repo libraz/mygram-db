@@ -287,11 +287,9 @@ TEST(IndexConcurrentTest, LoadFromFile) {
 /**
  * @brief Test that LoadFromStream during Optimize discards stale optimization results
  *
- * Regression test for: Optimize held shared_ptr copies of old posting lists while
- * working outside the lock. If LoadFromStream replaced term_postings_ concurrently,
- * Optimize would overwrite the new data with stale optimized copies in Step 2.
- * Fix: load_generation_ counter incremented by LoadFromStream; Optimize checks it
- * before applying results and discards them if generation changed.
+ * Optimize works on shared_ptr copies of posting lists outside the lock. LoadFromStream
+ * increments the load_generation_ counter; Optimize checks it before applying results
+ * and discards them if the generation changed.
  */
 TEST(IndexConcurrentTest, LoadFromStreamDuringOptimizeDiscardsStaleResults) {
   // Create index with initial data (using "abc" terms)
@@ -504,18 +502,10 @@ TEST(IndexConcurrentTest, OptimizeWithConcurrentAdditions) {
 }
 
 /**
- * @brief Test for thread-unsafe Optimize() fix
+ * @brief Test Optimize() thread safety
  *
- * Regression test for: Optimize() had dangling pointer issue causing SEGFAULT
- *
- * The bug (discovered during code review):
- * - Optimize() created a snapshot with raw pointers: vector<pair<string, PostingList*>>
- * - After releasing shared_lock, other threads could delete entries from term_postings_
- * - When unique_ptr was destroyed, the raw pointers in snapshot became dangling
- * - Calling posting->Optimize() on dangling pointer caused SEGFAULT
- *
- * The fix:
- * - Changed from unique_ptr to shared_ptr for reference counting
+ * Design:
+ * - Posting lists are held by shared_ptr for reference counting
  * - Optimize() creates snapshot with shared_ptr copies (increments reference count)
  * - Even if entries are removed from term_postings_, snapshot keeps them alive
  * - Concurrent searches can continue during optimization (maintains high concurrency)
@@ -558,7 +548,7 @@ TEST(IndexConcurrentTest, OptimizeThreadSafety) {
 
     try {
       // Perform searches (shared access)
-      // With shared_ptr fix, searches should succeed even during optimization
+      // Searches succeed even during optimization
       for (int i = 0; i < 100; ++i) {
         auto results = index.SearchAnd({"do"});  // Search for bigram "do" from "document"
         // Searches should return results (all initial documents contain "do")
@@ -593,11 +583,9 @@ TEST(IndexConcurrentTest, OptimizeThreadSafety) {
 }
 
 /**
- * @brief Test Optimize() dangling pointer bug with document removal
+ * @brief Test Optimize() snapshot lifetime with document removal
  *
- * This is a more aggressive test specifically targeting the dangling pointer bug.
- * By removing documents during optimization, we increase the likelihood of
- * triggering the bug if the fix is reverted.
+ * Removing documents during optimization must not leave the snapshot with dangling pointers.
  */
 TEST(IndexConcurrentTest, OptimizeDanglingPointerRegression) {
   Index index;
@@ -613,7 +601,7 @@ TEST(IndexConcurrentTest, OptimizeDanglingPointerRegression) {
   std::atomic<bool> test_passed{true};
   std::atomic<int> operations_during_optimize{0};
 
-  // Thread 1: Call Optimize() - this is where the bug manifests
+  // Thread 1: Call Optimize()
   std::thread optimize_thread([&]() {
     optimization_running = true;
     try {

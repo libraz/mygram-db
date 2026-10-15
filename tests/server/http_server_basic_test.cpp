@@ -501,7 +501,7 @@ TEST_F(HttpServerTest, MultipleRequests) {
   httplib::Client client("127.0.0.1", port_);
 
   // Make multiple non-health requests. Health probes are intentionally not
-  // counted in total_requests (fix N-7); use /info as the counted endpoint.
+  // counted in total_requests; use /info as the counted endpoint.
   for (int i = 0; i < 10; i++) {
     auto res = client.Get("/info");
     ASSERT_TRUE(res);
@@ -526,8 +526,8 @@ TEST_F(HttpServerTest, MultipleRequests) {
 /**
  * @brief Test that HTTP API rejects requests during DUMP LOAD
  *
- * This test validates the fix for the issue where HTTP endpoints did not check
- * the loading flag, allowing requests to proceed during snapshot loading.
+ * HTTP endpoints check the loading flag, so requests do not proceed during
+ * snapshot loading.
  */
 TEST_F(HttpServerTest, RejectsRequestsDuringLoading) {
   std::atomic<bool> loading_flag{false};

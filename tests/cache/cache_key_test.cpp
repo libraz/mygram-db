@@ -163,9 +163,9 @@ TEST(CacheKeyTest, StdHashFunction) {
  * @brief Test hash function avoids the swapped-pair collision that plain
  *        XOR would produce.
  *
- * With the previous `hash_high ^ hash_low` combiner, (a, b) and (b, a)
- * hashed to the same value because XOR is commutative. This regression
- * test ensures the new combiner mixes the two halves asymmetrically.
+ * A symmetric combiner such as `hash_high ^ hash_low` maps (a, b) and (b, a)
+ * to the same value because XOR is commutative. This test ensures the
+ * combiner mixes the two halves asymmetrically.
  */
 TEST(CacheKeyHashAvoidsSwappedCollision, SwappedPairsDiffer) {
   std::hash<CacheKey> hasher;
@@ -186,9 +186,8 @@ TEST(CacheKeyHashAvoidsSwappedCollision, SwappedPairsDiffer) {
  * @brief Distribution sanity test for the CacheKey hash combiner.
  *
  * Hashes 1000 deterministic-but-varied keys and asserts that fewer than
- * 10% of them collide modulo a small bucket count. With the old XOR
- * combiner, generated keys whose halves happened to swap would collide
- * deterministically; the Fibonacci combiner spreads them across buckets.
+ * 10% of them collide modulo a small bucket count. Keys whose halves swap must not
+ * collide deterministically; the Fibonacci combiner spreads them across buckets.
  */
 TEST(CacheKeyHashAvoidsSwappedCollision, DistributionSanity) {
   std::hash<CacheKey> hasher;

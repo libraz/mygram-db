@@ -503,41 +503,27 @@ TEST(MockEventMultiplexerTest, InjectErrorDeliversKErrorBit) {
 }
 
 // ===========================================================================
-// Kqueue-specific regression tests
+// Kqueue-specific tests
 // ===========================================================================
 //
-// P1-1: Concurrent Modify() on the same fd previously read `old_interest`
-// outside the mutex, performed the kevent() syscall outside the mutex, and
-// then re-took the mutex to write the new value. Two concurrent Modify(fd,X)
-// and Modify(fd,Y) calls could thus race so that the kernel filter set ended
-// up at the value chosen by the *first* successful syscall while `interest_`
-// was overwritten by the *last* writer, leaving Remove() unable to emit the
-// correct EV_DELETE for residual filters.
-//
-// The fix folds the read, the syscall, and the write into a single critical
-// section. This test exercises that path with many threads racing on a
-// single fd. Under the old code, ThreadSanitizer flags the data race on the
-// `interest_` map, and even without TSan the final Remove() can leak a
-// kqueue filter. With the fix, both go away.
+// Concurrent Modify() on the same fd must keep the kernel filter set and
+// `interest_` consistent, so Remove() emits the correct EV_DELETE for
+// residual filters. The read, the syscall, and the write happen in a single
+// critical section; the test races many threads on a single fd (TSan flags
+// any data race on `interest_`, and a leaked kqueue filter fails Remove()).
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
 
-// CR-4 (audit, May 2026): kevent(2) does not report partial application of a
-// change list. The previous implementation packed up to two change records
-// (EVFILT_READ + EVFILT_WRITE) into a single kevent() call, which meant that
-// if the kernel applied the first record and then rejected the second, the
-// in-process `interest_` map would diverge from the kernel filter set: the
-// caller saw a failed Add/Modify and did not record the partial state, so a
-// subsequent Remove() emitted no EV_DELETE for the leaked filter.
-//
-// The fix is to issue one kevent() syscall per change record and update the
-// `applied_interest` running mask after each successful syscall. The tests
-// below exercise the resulting code paths.
+// kevent(2) does not report partial application of a change list, so the
+// implementation issues one kevent() syscall per change record and updates the
+// `applied_interest` running mask after each successful syscall. This keeps
+// `interest_` in step with the kernel filter set, so Remove() emits EV_DELETE
+// for every applied filter. The tests below exercise these code paths.
 
 // Verify that toggling both filters via Modify never leaves a stale EVFILT_*
 // behind. This is the basic correctness invariant the per-record loop is
 // supposed to preserve. Each iteration flips both bits at once, which is
-// exactly the multi-record case CR-4 was concerned about.
+// exactly the multi-record case.
 TEST(KqueueMultiplexerTest, ApplyInterestBothFiltersFlipCleanly) {
   KqueueMultiplexer mux;
   ASSERT_TRUE(mux.Open().has_value());
@@ -599,7 +585,7 @@ TEST(KqueueMultiplexerTest, AddOnClosedFdFailsCleanlyAndRemoveIsNoop) {
   }
 
   // Remove() must be a strict no-op: nothing in `interest_`, nothing to
-  // clean up. (If a future implementation regression let a stale interest_
+  // clean up. (If a stale interest_
   // entry leak in, Remove would attempt EV_DELETE on a closed fd and either
   // swallow EBADF — fine — or surface a different errno — bad.)
   EXPECT_TRUE(mux.Remove(closed_fd).has_value());
@@ -607,14 +593,12 @@ TEST(KqueueMultiplexerTest, AddOnClosedFdFailsCleanlyAndRemoveIsNoop) {
 
 // Partial failure of Modify: register a fd successfully with kReadable, then
 // close it from underneath the multiplexer. A subsequent Modify that wants
-// to ADD kWritable will see EBADF and fail. The fix guarantees that the
+// to ADD kWritable will see EBADF and fail. Modify guarantees that the
 // `interest_` map after the failure reflects exactly what's still armed in
 // the kernel — which, since the syscall failed, is the original kReadable.
 //
-// The previous batched implementation, on a partial failure, left
-// `interest_` untouched (taking the conservative "we don't know what
-// happened" path). With per-record syscalls we know exactly what got
-// through, so the post-failure state is deterministic.
+// With per-record syscalls we know exactly what got through, so the
+// post-failure state is deterministic.
 TEST(KqueueMultiplexerTest, ModifyPartialFailurePreservesArmedFilters) {
   KqueueMultiplexer mux;
   ASSERT_TRUE(mux.Open().has_value());
@@ -644,11 +628,9 @@ TEST(KqueueMultiplexerTest, ModifyPartialFailurePreservesArmedFilters) {
     EXPECT_EQ(mod.error().code(), mygram::utils::ErrorCode::kNetworkReactorModifyFailed);
   }
 
-  // Best-observable post-condition: a follow-up Remove() must succeed. With
-  // the previous batched code, any in-flight diff was untouched in
-  // `interest_`, so Remove() would re-emit a now-stale EV_DELETE list. The
-  // kqueue swallows EBADF on EV_DELETE (idempotent teardown), so this
-  // doesn't blow up either way — but with the fix, Remove() emits only the
+  // Best-observable post-condition: a follow-up Remove() must succeed. The
+  // kqueue swallows EBADF on EV_DELETE (idempotent teardown), so a stale
+  // list would not blow up either way — but Remove() emits only the
   // EV_DELETE entries that were actually in the kernel right before the
   // close, which is the cleaner contract.
   EXPECT_TRUE(mux.Remove(r).has_value());
@@ -756,8 +738,8 @@ TEST(KqueueMultiplexerTest, ConcurrentModifyDoesNotRace) {
 
   // Tear down. If the race had left a stale EVFILT_WRITE in the kernel that
   // the map didn't know about, Remove() would emit no EV_DELETE for it and
-  // a subsequent Poll() would re-fire the writable event below. With the
-  // fix, Remove() is consistent with the kernel.
+  // a subsequent Poll() would re-fire the writable event below. Remove() is
+  // consistent with the kernel.
   ASSERT_TRUE(mux.Remove(r).has_value());
 
   // Re-add as write-only on the same fd. The peer end is empty so the

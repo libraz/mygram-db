@@ -495,7 +495,7 @@ TEST(QueryParserTest, SearchMissingArgs) {
   QueryParser parser;
   auto query = parser.Parse("SEARCH articles");
 
-  // After  fix: error paths now return MakeUnexpected instead of partial Query
+  // Error paths return MakeUnexpected instead of a partial Query
   EXPECT_FALSE(query.has_value());
 }
 
@@ -1748,8 +1748,7 @@ TEST(QueryParserTest, DumpSaveWithFilepath) {
 /**
  * @brief Test DUMP SAVE with empty quoted string does not cause UB
  *
- * Regression test: an empty quoted argument (e.g., DUMP SAVE "") previously
- * caused undefined behavior by accessing token[0] on an empty string.
+ * An empty quoted argument (e.g., DUMP SAVE "") must not access token[0] on an empty string.
  */
 TEST(QueryParserTest, DumpSaveEmptyQuotedString) {
   QueryParser parser;
@@ -1845,13 +1844,10 @@ TEST(QueryParserTest, DumpCommandsCaseInsensitive) {
 }
 
 /**
- * @brief Test case-insensitive command parsing (optimization fix)
+ * @brief Test case-insensitive command parsing (EqualsIgnoreCase)
  *
- * This test verifies that the EqualsIgnoreCase optimization correctly
- * handles case-insensitive command parsing without string allocations.
- *
- * The fix replaces ToUpper(token) + string comparison with
- * EqualsIgnoreCase(string_view, string_view) to avoid allocations.
+ * Command matching uses EqualsIgnoreCase(string_view, string_view), which
+ * avoids string allocations.
  */
 TEST(QueryParserTest, CaseInsensitiveCommandsOptimization) {
   QueryParser parser;
@@ -2342,7 +2338,6 @@ TEST(QueryParserTest, OverflowLimitHandled) {
  *
  * std::from_chars requires the entire string to be a valid integer.
  * "10.5" is not a valid uint32_t, so it is rejected with an error.
- * (Previously, std::stoul silently truncated "10.5" to 10.)
  */
 TEST(QueryParserTest, LimitFloatingPointRejected) {
   QueryParser parser;
@@ -2356,7 +2351,6 @@ TEST(QueryParserTest, LimitFloatingPointRejected) {
  *
  * std::from_chars requires the entire string to be a valid integer.
  * "10.5" is not a valid uint32_t, so it is rejected with an error.
- * (Previously, std::stoul silently truncated "10.5" to 10.)
  */
 TEST(QueryParserTest, OffsetFloatingPointRejected) {
   QueryParser parser;
@@ -2378,7 +2372,7 @@ TEST(QueryParserTest, LargeOffsetWithMaxLimit) {
 }
 
 // =============================================================================
-// Unicode whitespace tokenization tests (#4)
+// Unicode whitespace tokenization tests
 // =============================================================================
 
 /**
@@ -2738,7 +2732,7 @@ TEST(CountParensInTokenTest, EscapedQuoteDoesNotEndQuoteState) {
 }
 
 // ============================================================================
-// Error return validation tests ( fixes)
+// Error return validation tests
 // ============================================================================
 
 TEST(QueryParserBugFixTest, SearchMissingArgsReturnsError) {

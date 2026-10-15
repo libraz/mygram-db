@@ -201,7 +201,7 @@ TEST(ResultCompressorTest, CompressSizeOverflow) {
   // that the guard exists. The overflow guard is tested indirectly via
   // DecompressOriginalSizeOverflow above.
 
-  // Verify that an empty vector still works (regression check)
+  // Verify that an empty vector still works
   std::vector<DocId> empty;
   auto result = ResultCompressor::Compress(empty);
   ASSERT_TRUE(result.has_value());

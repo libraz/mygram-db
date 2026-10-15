@@ -394,12 +394,9 @@ struct DumpProgress {
   /**
    * @brief Spawn a new worker thread under DumpProgress::mutex.
    *
-   * Race fix: the previous code assigned worker_thread directly from the
-   * handler thread without holding mutex, while JoinWorker() reads
-   * worker_thread under mutex. If TcpServer::Stop() (which calls JoinWorker)
-   * raced with HandleDumpSave's worker_thread assignment, that was a data
-   * race on the unique_ptr by the C++ memory model. Centralizing the
-   * assignment here eliminates the unguarded write.
+   * Assigning worker_thread under mutex keeps it consistent with JoinWorker(),
+   * which reads it under the same mutex (TcpServer::Stop() may race with the
+   * handler thread).
    *
    * Pre-condition: caller has already drained any prior worker via
    * JoinWorker(). This method asserts worker_thread is empty so a misuse

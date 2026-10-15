@@ -18,20 +18,11 @@
 using namespace mygramdb::storage;
 
 /**
- * @brief Stress test for RemoveDocument to detect use-after-free bugs
+ * @brief Stress test for RemoveDocument to detect use-after-free
  *
  * This test targets the RemoveDocument function with high concurrency and memory
- * pressure. It was added to prevent regression of the use-after-free bug where
- * RemoveDocument held a reference to the primary key string after erasing the
- * map entry (the reference became dangling).
- *
- * The bug manifested as:
- * - const std::string& primary_key = pk_it->second;  // Reference to string
- * - doc_id_to_pk_.erase(doc_id);                     // Invalidates reference
- * - StructuredLog()...Field("primary_key", primary_key)  // Use after free!
- *
- * The fix was to copy the string before erasing:
- * - std::string primary_key = pk_it->second;  // Copy the string
+ * pressure. RemoveDocument copies the primary key
+ * string before erasing the map entry, so the logged key never dangles.
  */
 TEST(DocumentStoreStressTest, RemoveDocumentUseAfterFreeRegression) {
   constexpr int kIterations = 10;
@@ -73,7 +64,6 @@ TEST(DocumentStoreStressTest, RemoveDocumentUseAfterFreeRegression) {
 
         for (int i = start; i < end; ++i) {
           // RemoveDocument should not crash even with concurrent access
-          // The bug was that primary_key reference became invalid after erase
           bool removed = store.RemoveDocument(doc_ids[i]);
           if (removed) {
             delete_count++;

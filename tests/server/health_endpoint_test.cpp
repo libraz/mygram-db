@@ -452,8 +452,7 @@ TEST_F(HealthEndpointTest, ConcurrentHealthChecks) {
  * of actual application traffic, so HandleHealth/HandleHealthLive/
  * HandleHealthReady/HandleHealthDetail intentionally skip RecordRequest().
  *
- * Regression test for fix N-7: previously all four health endpoints called
- * RecordRequest(), inflating total_requests by ~3x of probe rate.
+ * Counting probes would inflate total_requests by the probe rate.
  */
 TEST_F(HealthEndpointTest, HealthChecksAreNotCountedInTotalRequests) {
   httplib::Client client(base_url_);

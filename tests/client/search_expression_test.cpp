@@ -480,7 +480,7 @@ TEST(SearchExpressionTest, EmojiToQueryString) {
  * consumer of main_term (Search(), mygramclient_search_advanced) re-applies
  * wire quoting to it, which would wrap "python OR ruby" as one opaque
  * literal-phrase term instead of parsing it as boolean OR. Returning an
- * error is correct; synthesizing a main_term from it is the bug.
+ * error is correct; synthesizing a main_term from it is wrong.
  */
 TEST(SearchExpressionTest, SimplifyOrOnly) {
   auto simplified = SimplifySearchExpression("python OR ruby");

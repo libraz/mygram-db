@@ -863,7 +863,7 @@ TEST_F(ReactorIntegrationTest, ClientSendsLargeFrame) {
 // ============================================================================
 
 /**
- * Design-doc §7 R3 invariant: a client that accepts bytes into its kernel
+ * Invariant: a client that accepts bytes into its kernel
  * recv buffer but never calls recv() must NOT be able to stall the server
  * or starve other clients. The reactor's per-connection write queue
  * decouples the slow reader from the rest of the server:
@@ -1011,15 +1011,15 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
 }
 
 // ============================================================================
-// Test 13 — G1 goal: many idle persistent clients + 1 active (LOAD)
+// Test 13 — many idle persistent clients + 1 active (LOAD)
 // ============================================================================
 
 /**
- * Design-doc §3.1 G1: with a small worker pool and a large number of idle
+ * With a small worker pool and a large number of idle
  * persistent connections, a newly-arriving active client must be served in
- * well under 500 ms.  This is the Step 3 upgrade of
- * `ReactorServesPersistentFleetWithoutStarvation`: instead of 128 idle
- * clients, this test pushes the scale up to the per-process fd budget.
+ * well under 500 ms.  Unlike
+ * `ReactorServesPersistentFleetWithoutStarvation` (128 idle clients), this
+ * test pushes the scale up to the per-process fd budget.
  *
  * Tagged as LOAD because it stresses RLIMIT_NOFILE and may take noticeably
  * longer than the other reactor tests.  Skipped if the fd budget cannot
@@ -1028,9 +1028,8 @@ TEST_F(ReactorIntegrationTest, WriteBackpressureHandledGracefully) {
 TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
   constexpr rlim_t kDesiredFds = 4096;
   // Target: as many idle clients as the fd budget allows, up to 2048.
-  // The design doc targets 10k; most CI runners can't provide that many
-  // fds, so we scale to whatever is available and still prove the
-  // invariant.
+  // Most CI runners can't provide 10k fds, so we scale to whatever is
+  // available and still prove the invariant.
   constexpr int kTargetIdleClients = 2048;
   constexpr int kMinIdleClientsToRun = 256;
 
@@ -1039,8 +1038,7 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
   // each idle client needs ~2 fds (client side + server side).
   int idle_count = std::min<int>(kTargetIdleClients, static_cast<int>((effective - 128) / 2));
   if (idle_count < kMinIdleClientsToRun) {
-    GTEST_SKIP() << "RLIMIT_NOFILE too small (" << effective
-                 << ") for the G1 starvation test; re-run with ulimit -n 4096 "
+    GTEST_SKIP() << "RLIMIT_NOFILE too small (" << effective << ") for the starvation test; re-run with ulimit -n 4096 "
                  << "to exercise the many-idle-clients invariant";
   }
 
@@ -1097,7 +1095,7 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
 
   EXPECT_FALSE(resp.empty()) << "Active client starved with " << idle_socks.size()
-                             << " idle persistent connections — the G1 invariant failed";
+                             << " idle persistent connections — the starvation invariant failed";
   if (!resp.empty()) {
     EXPECT_EQ(resp.substr(0, 7), "OK INFO");
     EXPECT_LT(elapsed_ms, 500) << "Active client responded but took " << elapsed_ms << "ms (>500ms) with "
@@ -1111,7 +1109,7 @@ TEST_F(ReactorIntegrationTest, ManyIdleConnectionsDoNotBlockActiveClient) {
 }
 
 // ============================================================================
-// Reactor-path regression guards
+// Reactor-path guards
 // ============================================================================
 //
 // These tests pin reactor-path invariants for rate limiting, max_query_length
@@ -1272,14 +1270,13 @@ TEST_F(ReactorIntegrationTest, MaxQueryLengthEnforcedInReactorMode) {
 }
 
 // ----------------------------------------------------------------------------
-// Gap C — UDS (Unix domain socket) end-to-end under reactor default
+// UDS (Unix domain socket) end-to-end under reactor default
 // ----------------------------------------------------------------------------
 //
 // Currently TcpServer routes UDS fds through the blocking HandleConnection
 // path unconditionally (tcp_server.cpp historical line ~306). This test
-// passes today because of that fallback, but we need a regression gate:
-// Step 4 deletes HandleConnection, so UDS must be migrated to the reactor
-// handler before then. Keep this test green through the transition.
+// passes because of that fallback, and guards the UDS path once it is
+// served by the reactor handler instead.
 TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
   // Unique socket path per run so parallel test runs don't collide.
   const auto pid = ::getpid();
@@ -1356,13 +1353,12 @@ TEST_F(ReactorIntegrationTest, UnixSocketServedUnderReactorDefault) {
 }
 
 // ----------------------------------------------------------------------------
-// Gap D — TCP half-close (shutdown(SHUT_WR)) must still receive the response
+// TCP half-close (shutdown(SHUT_WR)) must still receive the response
 // ----------------------------------------------------------------------------
 //
-// Regression guard for a bug in the initial reactor: when a client sent a
-// request and then `shutdown(SHUT_WR)`, the server's recv() returned 0 and
-// the reactor set `closing_`, which caused `EnqueueResponse` to reject the
-// outgoing response. The client saw a RST instead of the INFO body.
+// When a client sends a request and then `shutdown(SHUT_WR)`, the server's
+// recv() returns 0 and the reactor sets `closing_`; `EnqueueResponse` must
+// still accept the outgoing response so the client sees the INFO body, not a RST.
 //
 // This test mirrors e2e/tests/load/test_connection_stress.py::
 // test_half_close_write and locks in the invariant that the server must

@@ -86,9 +86,8 @@ class CacheHandlerTest : public ::testing::Test {
 /**
  * @brief CACHE_ENABLE and CACHE_DISABLE must be routed through FormatStatus.
  *
- * Before the H-2 fix, these handlers built bare "OK CACHE_ENABLED" /
- * "OK CACHE_DISABLED" strings instead of going through
- * ResponseFormatter::FormatStatus. Aligning all status responses under the
+ * These handlers go through ResponseFormatter::FormatStatus rather than
+ * building bare "OK CACHE_ENABLED" / "OK CACHE_DISABLED" strings. Aligning all status responses under the
  * single formatter means any future framing change (e.g., CRLF policy) only
  * has to be updated in one place.
  */

@@ -666,13 +666,9 @@ TEST_F(PostingListTest, ContainsThresholdBoundary) {
 /**
  * @brief Test Optimize() correctly converts from Roaring to Delta without deadlock
  *
- * This is a regression test for a critical bug where ConvertToDelta() called
- * GetAll(), which tried to acquire a shared_lock on mutex_ while the caller
- * Optimize() already held a unique_lock. With std::shared_mutex, re-acquiring
- * a lock (even shared) on the same thread is undefined behavior and typically
- * causes a deadlock.
- *
- * The fix accesses the roaring bitmap directly instead of going through GetAll().
+ * ConvertToDelta() runs under Optimize()'s unique_lock, so it reads the roaring
+ * bitmap directly rather than through GetAll(): re-acquiring a std::shared_mutex
+ * on the same thread is undefined behavior and typically deadlocks.
  */
 TEST_F(PostingListTest, OptimizeRoaringToDeltaNoDeadlock) {
   // Use a very low threshold so that even a few docs trigger Roaring conversion
@@ -694,7 +690,6 @@ TEST_F(PostingListTest, OptimizeRoaringToDeltaNoDeadlock) {
   // Now convert back to Delta by calling Optimize with very large total_docs
   // density = 50/100000 = 0.0005, hysteresis threshold = 0.01 * 0.5 = 0.005
   // 0.0005 < 0.005, so this should trigger ConvertToDelta()
-  // Before the fix, this would deadlock due to recursive lock acquisition
   posting.Optimize(100000);
   EXPECT_EQ(posting.GetStrategy(), PostingStrategy::kFixedWidthDelta);
 
@@ -1117,8 +1112,7 @@ TEST_F(PostingListTest, SelfUnionEmpty) {
  * @brief Test self-intersection on Roaring bitmap strategy
  *
  * Uses a large dataset to trigger Roaring conversion, then verifies that
- * self-intersection returns a correct copy without crashing (previously
- * this path had a double-unlock UB).
+ * self-intersection returns a correct copy without crashing.
  */
 TEST_F(PostingListTest, SelfIntersectRoaring) {
   // Use a very low threshold so even a small batch triggers Roaring
@@ -1282,7 +1276,7 @@ TEST_F(PostingListTest, IntersectSetsLastDocId) {
 }
 
 // =============================================================================
-// Delta encoding roundtrip tests (#3)
+// Delta encoding roundtrip tests
 // =============================================================================
 
 /**
@@ -1364,7 +1358,7 @@ TEST_F(PostingListTest, DeltaEncodingConsecutive) {
 }
 
 // =============================================================================
-// ConvertToRoaring data preservation test (#5)
+// ConvertToRoaring data preservation test
 // =============================================================================
 
 /**
@@ -1398,7 +1392,7 @@ TEST_F(PostingListTest, ConvertToRoaringPreservesData) {
 }
 
 // =============================================================================
-// Deserialize truncated buffer test (#5)
+// Deserialize truncated buffer test
 // =============================================================================
 
 /**
@@ -1442,7 +1436,7 @@ TEST_F(PostingListTest, DeserializeEmptyBuffer) {
 }
 
 // =============================================================================
-// Deserialize increments version test (#12)
+// Deserialize increments version test
 // =============================================================================
 
 /**
@@ -1492,7 +1486,7 @@ TEST_F(PostingListTest, DeserializeFailDoesNotIncrementVersion) {
 /**
  * @brief Test Intersect of two Roaring-strategy PostingLists returns valid result
  *
- * Regression test for NULL safety in roaring_bitmap_and. When both PostingLists
+ * NULL safety in roaring_bitmap_and: when both PostingLists
  * use Roaring strategy, Intersect must produce a valid (non-null) result with
  * the correct cardinality.
  */
@@ -1522,7 +1516,7 @@ TEST_F(PostingListTest, IntersectRoaringBitmapReturnsValidResult) {
 /**
  * @brief Test Union of two Roaring-strategy PostingLists returns valid result
  *
- * Regression test for NULL safety in roaring_bitmap_or. When both PostingLists
+ * NULL safety in roaring_bitmap_or: when both PostingLists
  * use Roaring strategy, Union must produce a valid (non-null) result with the
  * correct cardinality.
  */

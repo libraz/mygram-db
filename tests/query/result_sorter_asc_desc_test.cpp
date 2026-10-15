@@ -1,6 +1,6 @@
 /**
  * @file result_sorter_asc_desc_test.cpp
- * @brief Test to reproduce ASC/DESC bug - same input should produce reverse order
+ * @brief ASC and DESC on the same input produce exact reverse order
  */
 
 #include <gtest/gtest.h>
@@ -23,9 +23,6 @@ class ResultSorterAscDescTest : public ::testing::Test {
 
 /**
  * @brief Test that ASC and DESC produce EXACT reverse order for the same input
- *
- * This test reproduces the bug: "プライマリキーをasc/descで並び替えたときの順が変わらない"
- * (Primary key sorting with asc/desc doesn't change order)
  */
 TEST_F(ResultSorterAscDescTest, SameInputReverseOrderNumeric) {
   // Add documents with numeric primary keys

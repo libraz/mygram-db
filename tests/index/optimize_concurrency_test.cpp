@@ -136,8 +136,7 @@ TEST_F(OptimizeConcurrencyTest, WritesDuringOptimization) {
     writer.join();
   }
 
-  // After fix: writes should succeed during optimization
-  // Before fix: writes may be blocked
+  // Writes should succeed during optimization
   std::cout << "Successful writes during optimization: " << successful_writes.load() << std::endl;
 }
 
@@ -334,18 +333,12 @@ TEST_F(OptimizeConcurrencyTest, MassiveConcurrentAdditionsDuringOptimization) {
 }
 
 /**
- * @brief Regression test for OptimizeInBatches() data loss bug
+ * @brief OptimizeInBatches() must not lose documents added during optimization
  *
- * Bug description:
- * OptimizeInBatches() was taking a single snapshot at the start, then processing
- * multiple batches using that stale snapshot. When documents were added during
- * batch 1 processing, batch 2 would use the old snapshot and lose those additions.
- *
- * Fix:
- * OptimizeInBatches() now takes per-batch snapshots and merges concurrent additions
+ * OptimizeInBatches() takes per-batch snapshots and merges concurrent additions
  * using Union() to preserve all documents added during optimization.
  *
- * This test specifically targets that bug by:
+ * This test:
  * 1. Using small batch size to ensure multiple batches
  * 2. Adding documents continuously during optimization
  * 3. Verifying ALL added documents are searchable after optimization
@@ -358,7 +351,7 @@ TEST_F(OptimizeConcurrencyTest, OptimizeInBatchesDataLossRegression) {
   const size_t total_expected = docs_per_thread * num_writer_threads;
 
   // Start optimization with very small batches (5 terms per batch)
-  // This ensures many batches are processed, increasing chance of data loss bug
+  // This ensures many batches are processed, increasing the chance of exposing data loss
   std::thread optimizer([&]() {
     optimization_started = true;
     bool result = index_->OptimizeInBatches(5000, 5);  // Very small batches
@@ -563,12 +556,10 @@ TEST_F(OptimizeConcurrencyTest, ConcurrentOperationsDuringBatchedOptimization) {
 }
 
 /**
- * @brief Regression test: Remove+Add during Optimize() (size unchanged) must detect change
+ * @brief Remove+Add during Optimize() (size unchanged) must detect change
  *
- * Bug: When a Remove and Add happen during Optimize() such that the posting list
- * size remains the same, the size-based detection misses the change, causing
- * data loss (new doc lost) or resurrection (deleted doc restored).
- * Fix: Use version counter instead of size for change detection.
+ * A Remove and Add during Optimize() can leave the posting list size unchanged,
+ * so change detection uses a version counter instead of size.
  */
 TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringOptimizeDetectsChange) {
   // Create a fresh index with known documents
@@ -619,7 +610,7 @@ TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringOptimizeDetectsChange) {
 }
 
 /**
- * @brief Regression test: Remove+Add during OptimizeInBatches() must detect change
+ * @brief Remove+Add during OptimizeInBatches() must detect change
  */
 TEST_F(OptimizeConcurrencyTest, RemoveAndAddDuringBatchOptimizeDetectsChange) {
   auto test_index = std::make_unique<Index>(2, 1);
@@ -687,16 +678,12 @@ TEST_F(OptimizeConcurrencyTest, RecreatedPostingListIsNotOverwrittenByStaleBatch
 }
 
 /**
- * @brief Regression test: Remove during Optimize() must not resurrect deleted documents
+ * @brief Remove during Optimize() must not resurrect deleted documents
  *
- * Bug: When a posting list's version changes during optimization, the old code used
- * Union(optimized_posting, current_posting) to merge. This resurrected documents
- * that were removed between Clone() and Step 2, because the optimized_posting
- * (cloned before removal) still contained the removed doc IDs.
- *
- * Fix: When version mismatch is detected, skip the swap for that term and keep
- * the current posting as-is (source of truth). The term will be optimized in the
- * next optimization cycle.
+ * The optimized posting is cloned before the removal and still holds the removed
+ * doc IDs. When a version mismatch is detected, the swap for that term is skipped and
+ * the current posting is kept as the source of truth; the term is optimized in the
+ * next cycle.
  */
 TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
   // Run multiple iterations to increase the chance of hitting the race condition
@@ -744,8 +731,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
     std::set<uint32_t> result_set(results.begin(), results.end());
 
     for (uint32_t id = remove_start; id < remove_end; ++id) {
-      EXPECT_FALSE(result_set.count(id) > 0) << "Iteration " << iteration << ": Document " << id
-                                             << " was removed but still found in search results (resurrection bug)";
+      EXPECT_FALSE(result_set.count(id) > 0)
+          << "Iteration " << iteration << ": Document " << id << " was removed but still found in search results";
     }
 
     // Verify: Non-removed documents should still be found
@@ -764,10 +751,9 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringOptimizeDoesNotResurrect) {
 }
 
 /**
- * @brief Regression test: Remove during OptimizeInBatches() must not resurrect
- * deleted documents
+ * @brief Remove during OptimizeInBatches() must not resurrect deleted documents
  *
- * Same bug as RemoveDuringOptimizeDoesNotResurrect but targeting the batched
+ * Same invariant as RemoveDuringOptimizeDoesNotResurrect but for the batched
  * optimization path. Uses small batch sizes to increase the window for
  * concurrent removals to interleave with batch processing.
  */
@@ -813,8 +799,8 @@ TEST_F(OptimizeConcurrencyTest, RemoveDuringBatchOptimizeDoesNotResurrect) {
     std::set<uint32_t> result_set(results.begin(), results.end());
 
     for (uint32_t id = remove_start; id < remove_end; ++id) {
-      EXPECT_FALSE(result_set.count(id) > 0) << "Iteration " << iteration << ": Document " << id
-                                             << " was removed but still found in search results (resurrection bug)";
+      EXPECT_FALSE(result_set.count(id) > 0)
+          << "Iteration " << iteration << ": Document " << id << " was removed but still found in search results";
     }
 
     // Verify: Non-removed documents should still be found

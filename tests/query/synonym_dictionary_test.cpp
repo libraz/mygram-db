@@ -294,14 +294,14 @@ TEST_F(SynonymDictionaryTest, ForEachTermIteratesAllTerms) {
 }
 
 // =============================================================================
-// Japanese / NFKC normalization tests (TC-SD-01..07)
+// Japanese / NFKC normalization tests
 //
 // These tests use the real Index normalizer (nfkc=true, width="half",
 // lower=true) to validate that kana/kanji and half-width / full-width
 // variants collapse or expand correctly during dictionary loading.
 // =============================================================================
 
-// TC-SD-01: Half-width kana and full-width katakana normalize to the same
+// Half-width kana and full-width katakana normalize to the same
 // token. After dedup only one term remains, so the group is skipped entirely.
 TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationCollapseHiraganaKatakana) {
   auto path = CreateTempTSV(std::string(kHalfKanaTest) + "\t" + kKatakanaTest + "\n");
@@ -311,7 +311,7 @@ TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationCollapseHiraganaKat
   EXPECT_TRUE(dict.IsEmpty());
 }
 
-// TC-SD-02: Hiragana and katakana remain distinct after NFKC; both map into
+// Hiragana and katakana remain distinct after NFKC; both map into
 // the same synonym group and expand to each other.
 TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationHiraganaKatakanaDistinct) {
   auto path = CreateTempTSV(std::string(kHiraganaApple) + "\t" + kKatakanaApple + "\n");
@@ -327,7 +327,7 @@ TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationHiraganaKatakanaDis
   EXPECT_TRUE(std::find(expanded.begin(), expanded.end(), kKatakanaApple) != expanded.end());
 }
 
-// TC-SD-03: Hiragana + katakana + kanji all remain distinct under NFKC and
+// Hiragana + katakana + kanji all remain distinct under NFKC and
 // form a single three-element synonym group.
 TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationKanaKanjiGroup) {
   auto path = CreateTempTSV(std::string(kHiraganaApple) + "\t" + kKatakanaApple + "\t" + kKanjiApple + "\n");
@@ -344,7 +344,7 @@ TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationKanaKanjiGroup) {
   EXPECT_TRUE(std::find(expanded.begin(), expanded.end(), kKanjiApple) != expanded.end());
 }
 
-// TC-SD-04: Full-width ASCII is folded to half-width + lowercased; a katakana
+// Full-width ASCII is folded to half-width + lowercased; a katakana
 // kana phrase and lowercase "database" remain distinct. All three form one
 // group.
 TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationWidthAndCase) {
@@ -367,7 +367,7 @@ TEST_F(RealNormalizerSynonymDictionaryTest, NfkcNormalizationWidthAndCase) {
   EXPECT_TRUE(std::find(from_database.begin(), from_database.end(), kKatakanaDatabase) != from_database.end());
 }
 
-// TC-SD-05: Half-width kana + full-width katakana normalize to the same token
+// Half-width kana + full-width katakana normalize to the same token
 // and get deduped; the surviving pair {データベース, db} forms the group.
 TEST_F(RealNormalizerSynonymDictionaryTest, NfkcTripleEquivalence) {
   auto path = CreateTempTSV(std::string(kHalfKanaDatabase) + "\t" + kKatakanaDatabase + "\tDB\n");
@@ -388,7 +388,7 @@ TEST_F(RealNormalizerSynonymDictionaryTest, NfkcTripleEquivalence) {
   EXPECT_TRUE(std::find(from_db.begin(), from_db.end(), "db") != from_db.end());
 }
 
-// TC-SD-06: Two independent mixed-script groups coexist without cross-talk.
+// Two independent mixed-script groups coexist without cross-talk.
 TEST_F(RealNormalizerSynonymDictionaryTest, MultipleNfkcGroupsWithMixedScript) {
   auto path = CreateTempTSV(std::string(kHiraganaApple) + "\t" + kKatakanaApple + "\t" + kKanjiApple + "\n" +
                             kKatakanaServer + "\tserver\n");
@@ -413,7 +413,7 @@ TEST_F(RealNormalizerSynonymDictionaryTest, MultipleNfkcGroupsWithMixedScript) {
   EXPECT_TRUE(std::find(server.begin(), server.end(), kKanjiApple) == server.end());
 }
 
-// TC-SD-07: When a later group would reuse a term from an earlier group, the
+// When a later group would reuse a term from an earlier group, the
 // existing loader keeps the first group and drops the second entirely (since
 // after filtering only one new term remains).
 TEST_F(RealNormalizerSynonymDictionaryTest, FirstEntryWinsWhenTermConflictsAcrossGroups) {

@@ -849,7 +849,7 @@ TEST_F(TcpServerTest, OptimizationStrategySelection) {
 }
 
 /**
- * @brief Regression test for P1-10: SearchHandler must format SortAndPaginate
+ * @brief SearchHandler must format SortAndPaginate
  * errors through ResponseFormatter::FormatError so the response begins with
  * the canonical `ERROR ` prefix instead of leaking the internal Error
  * to_string() representation (e.g. `[Error 1004 (...)] message`).

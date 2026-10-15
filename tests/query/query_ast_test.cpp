@@ -748,11 +748,8 @@ TEST(QueryASTEvaluationTest, SingleCharTermWithBigrams) {
 /**
  * @brief Test Japanese keyword search with proper text normalization
  *
- * This test verifies the fix for the Japanese search bug where text
- * normalization parameters differed between indexing and querying.
- * The bug caused Japanese keywords to return 0 results.
- *
- * Fix: Ensure both index and query use:
+ * Text normalization parameters must match between indexing and querying,
+ * otherwise Japanese keywords return 0 results. Both index and query use:
  * - NormalizeText(text, true, "keep", true)
  * - GenerateHybridNgrams (not GenerateNgrams)
  */

@@ -1117,7 +1117,7 @@ TEST_F(HttpServerTest, SearchInvalidJSON) {
   EXPECT_TRUE(body["error"].get<std::string>().find("Invalid JSON") != std::string::npos);
 }
 
-// Regression tests for HTTP API bug fixes
+// HTTP API search tests
 TEST_F(HttpServerTest, SearchWithNumericFilters) {
   ASSERT_TRUE(http_server_->Start());
 
@@ -1258,8 +1258,8 @@ TEST_F(HttpServerTest, SearchTreatsSortKeywordInQAsLiteralText) {
 /**
  * @brief Test that HTTP search uses CacheManager
  *
- * This test validates the fix for the issue where HTTP search did not utilize
- * the cache, always performing full index scans even when cache was enabled.
+ * With the cache enabled, HTTP search is served from the cache instead of
+ * performing a full index scan.
  */
 TEST_F(HttpServerTest, SearchUsesCacheManager) {
   // Create a simple TcpServer to get cache manager
@@ -1343,9 +1343,7 @@ TEST_F(HttpServerTest, SearchUsesCacheManager) {
 /**
  * @brief Test for concurrent search requests to detect QueryParser data race
  *
- * This test validates the fix for the issue where HTTP server shared a single
- * QueryParser instance across threads, causing data races when multiple requests
- * were processed concurrently.
+ * Each request uses its own QueryParser, so concurrent requests do not race.
  */
 TEST_F(HttpServerTest, ConcurrentSearchRequestsNoDataRace) {
   ASSERT_TRUE(http_server_->Start());
@@ -1394,9 +1392,6 @@ TEST_F(HttpServerTest, ConcurrentSearchRequestsNoDataRace) {
 
 /**
  * @brief Test HTTP /search respects api.default_limit configuration
- *
- * Regression test for: HTTP /search は api.default_limit の設定を無視して
- * 常に 100 件固定で実行される
  */
 TEST(HttpServerIntegrationTest, SearchRespectsDefaultLimit) {
   // Create table context with many documents
@@ -1687,7 +1682,7 @@ TEST_F(HttpServerTest, CountErrorCases) {
 /**
  * @brief Test that query text with CR character is rejected
  *
- * Regression test for CRLF injection prevention in HTTP search handler.
+ * CRLF injection prevention in HTTP search handler.
  * The handler validates query text for control characters (\r, \n, \0)
  * to prevent CRLF injection attacks.
  */
@@ -1917,7 +1912,7 @@ TEST_F(HttpServerTest, CountRejectsIntegerQField) {
 }
 
 // ============================================================
-// HTTP JSON q direct-storage tests (P3-2)
+// HTTP JSON q direct-storage tests
 // ============================================================
 
 /**

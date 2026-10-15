@@ -1309,7 +1309,7 @@ TEST(StringUtilsTest, Utf8ToCodepointsBufferMatchesVectorOverload) {
   }
 }
 
-//  fix: GenerateHybridNgrams zero/negative guard
+// GenerateHybridNgrams zero/negative guard
 TEST(StringUtilsBugFixTest, GenerateHybridNgramsZeroSizeReturnsEmpty) {
   EXPECT_TRUE(GenerateHybridNgrams("hello", 0, 1).empty());
   EXPECT_TRUE(GenerateHybridNgrams("hello", 2, 0).empty());
@@ -1324,8 +1324,7 @@ TEST(StringUtilsBugFixTest, GenerateHybridNgramsNegativeSizeReturnsEmpty) {
 /**
  * @brief Test CountCodePoints with invalid UTF-8 continuation bytes
  *
- * Regression test for: bare continuation bytes (0x80-0xBF) were counted
- * as codepoints instead of being skipped.
+ * Bare continuation bytes (0x80-0xBF) are skipped, not counted as codepoints.
  */
 TEST(StringUtilsBugFixTest, CountCodePointsSkipsBareContinuationBytes) {
   // Valid ASCII
@@ -1506,15 +1505,13 @@ TEST(StringUtilsTest, IsUnicodeWhitespace_TruncatedSequence) {
 }
 
 // ============================================================================
-// Bug fix regression tests
+// GenerateQueryNgrams default ASCII size
 // ============================================================================
 
 /**
- * @brief Regression test: ngram_size=0 with kanji_ngram_size>0 must not return empty
+ * @brief ngram_size=0 with kanji_ngram_size>0 must not return empty
  *
- * Previously, GenerateQueryNgrams(text, 0, 1, true) called GenerateHybridNgrams
- * with ascii_ngram_size=0, which hit an early-return guard and produced zero
- * n-grams for all input. The fix substitutes the default ASCII n-gram size (2).
+ * GenerateQueryNgrams(text, 0, 1, true) substitutes the default ASCII n-gram size (2).
  */
 TEST(StringUtilsBugFixTest, GenerateQueryNgramsZeroNgramSizeWithKanjiSize) {
   // Pure ASCII with kanji_ngram_size=1, ngram_size=0 (default) — must produce bigrams

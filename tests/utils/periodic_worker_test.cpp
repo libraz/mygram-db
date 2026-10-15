@@ -123,33 +123,13 @@ TEST(PeriodicWorkerTest, ThrowingCallbackDoesNotKillWorker) {
 }
 
 TEST(PeriodicWorkerTest, NoExtraTaskAfterStopRequested) {
-  // Regression test for the post-unlock recheck in Loop(). Without the
-  // recheck, the worker could fire one extra task() invocation AFTER
-  // Stop() had already published should_stop_ = true, because the
-  // original code released mutex_ between the in-lock should_stop_
-  // check and the task() call. A Stop() that arrived in that unlocked
-  // window would set should_stop_ and notify, but the worker had
-  // already committed to calling task() once more.
+  // Loop() rechecks should_stop_ after unlocking, so no task() call starts
+  // once Stop() has published should_stop_. The test sets `stop_requested`
+  // immediately before Stop(); the callback records any invocation that sees
+  // it as true, which must never happen.
   //
-  // Stop() joins the worker, so any "extra" task DOES complete before
-  // Stop() returns; what the fix actually prevents is a task() call
-  // that happens *after the program logically requested shutdown*.
-  // We detect that by having the callback observe should_stop_-style
-  // state via a test-controlled atomic: the test sets `stop_requested`
-  // immediately before Stop(), and the callback records any invocation
-  // that sees `stop_requested == true`. With the fix, no callback
-  // observes the request flag; without the fix, occasional callbacks
-  // do, because they raced past the in-lock check before
-  // stop_requested + Stop() were issued, and then re-acquired the cpu
-  // after the unlock with the request flag already true.
-  //
-  // We use a long-running callback (sleep) and a short interval so the
-  // worker spends most time inside task_(). Right after the worker
-  // exits a task call and re-enters Loop(), the test thread sets
-  // stop_requested + calls Stop(). The buggy code would, on the very
-  // next loop turn, fall through the unlock-to-task_() window with
-  // stop_requested already true; the fix observes should_stop_ in the
-  // post-unlock recheck and breaks first.
+  // A long-running callback and short interval keep the worker inside task_()
+  // so the test thread's Stop() lands in the narrow unlock-to-task_() window.
   //
   // 200 iterations to make the narrow window reliable on slow CI.
   constexpr int kIterations = 200;
@@ -183,10 +163,9 @@ TEST(PeriodicWorkerTest, NoExtraTaskAfterStopRequested) {
     }
 
     // Set stop_requested BEFORE Stop(). Stop() inside takes mutex_,
-    // sets should_stop_, notifies, and joins. Under the bug, a worker
-    // thread sitting between lock.unlock() and task_() will still call
-    // task_() once more — and because we set stop_requested first,
-    // that invocation will be counted in ticks_after_stop_requested.
+    // sets should_stop_, notifies, and joins. A worker thread sitting
+    // between lock.unlock() and task_() must not call task_() again;
+    // any such invocation would be counted in ticks_after_stop_requested.
     stop_requested.store(true, std::memory_order_release);
     worker.Stop();
 

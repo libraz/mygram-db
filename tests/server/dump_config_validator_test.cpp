@@ -120,9 +120,8 @@ TEST(DumpConfigValidatorTest, KanjiNgramSizeIsComparedIndependentlyOfNgramSize) 
   EXPECT_NE(mismatch->find("kanji_ngram_size mismatch"), std::string::npos) << *mismatch;
 }
 
-// The one behavior this check changed: a dump entry naming a database that is
-// not configured is skipped, where matching on the bare name would have compared
-// it against a same-named table in a different database.
+// A dump entry naming a database that is not configured is skipped, rather than
+// matching on the bare name and comparing it against a same-named table in a different database.
 TEST(DumpConfigValidatorTest, DumpTableInAnUnconfiguredDatabaseIsNotComparedAgainstTheSameBareName) {
   Config live_config;
   live_config.tables.push_back(MakeTable("db1", "articles", 2));

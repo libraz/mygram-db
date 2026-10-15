@@ -516,7 +516,7 @@ TEST(InvalidationManagerTest, MultipleQueriesSameNgrams) {
 }
 
 /**
- * @brief Test for deadlock risk fix in ClearTable()
+ * @brief Test that ClearTable() does not deadlock
  *
  * Verifies that ClearTable() uses internal unlocked helper to avoid deadlock
  * when calling UnregisterCacheEntry() while holding the mutex.
@@ -635,8 +635,7 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterCacheEntryCleansUpStaleNgrams) {
   // Entry count should still be 1
   EXPECT_EQ(1, mgr.GetTrackedEntryCount());
 
-  // Before fix, ngram count would be 3 (aaa still in reverse index)
-  // After fix: ngram count should be 2 (bbb, ccc)
+  // Only bbb and ccc remain in the reverse index
   EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "Stale ngram 'aaa' should be removed from reverse index";
 
   // Verify invalidation works correctly with new ngrams
@@ -733,8 +732,7 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterCompletelyDifferentNgrams) {
   meta2.ngrams = {"aaa", "bbb"};
   mgr.RegisterCacheEntry(key, meta2);
 
-  // Before fix, ngram count would be 5
-  // After fix: ngram count should be 2
+  // Only the two new ngrams remain
   EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "All old ngrams should be cleaned up";
 
   // Verify old ngrams don't cause invalidation
@@ -1151,7 +1149,7 @@ TEST(InvalidationManagerTest, C2_ConfigChangeInvalidatesOldEntries) {
   // INSERT "hello world" - trigrams would be: "hel", "ell", "llo", "wor", "orl", "rld"
   // With bigrams (old settings): "he", "el", "ll", "lo", "wo", "or", "rl", "ld"
   // The reverse index has bigrams, so trigram-based lookup would miss them.
-  // With the fix, historical settings (ngram_size=2) are also checked.
+  // Historical settings (ngram_size=2) are also checked.
   auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello world", 3, 1, true);
 
   // key1 should be invalidated because historical bigram generation finds "he", "el", etc.
@@ -1205,7 +1203,7 @@ TEST(InvalidationManagerTest, C2_MultipleHistoricalSettings) {
  * @brief Test that entries with current settings still work normally
  *
  * When all entries use the same ngram settings as the current config,
- * invalidation should work exactly as before (no regression).
+ * invalidation works as it does without historical tracking.
  */
 TEST(InvalidationManagerTest, C2_CurrentSettingsNoRegression) {
   QueryCache cache(1024 * 1024, 0.0);
@@ -1231,7 +1229,7 @@ TEST(InvalidationManagerTest, C2_CurrentSettingsNoRegression) {
 /**
  * @brief Test that entries with zero ngram_size (legacy) are handled gracefully
  *
- * Entries created before this fix will have ngram_size=0. They should not
+ * Legacy entries have ngram_size=0. They should not
  * trigger historical settings lookup (treated as "unknown/current").
  */
 TEST(InvalidationManagerTest, C2_LegacyZeroNgramSizeHandled) {
@@ -1254,7 +1252,7 @@ TEST(InvalidationManagerTest, C2_LegacyZeroNgramSizeHandled) {
 }
 
 // =============================================================================
-// Bug 3: Filter-only changes don't invalidate cache
+// Filter-only changes don't invalidate cache
 // =============================================================================
 
 /**
@@ -1289,9 +1287,9 @@ TEST(InvalidationManagerTest, FilterChangeInvalidatesFilteredEntries) {
   // Only the entry with filters should be invalidated
   EXPECT_EQ(1, invalidated.size());
   EXPECT_TRUE(invalidated.find(key1) != invalidated.end())
-      << "Bug 3: Entry with filters should be invalidated on filter-only change";
+      << "Entry with filters should be invalidated on filter-only change";
   EXPECT_FALSE(invalidated.find(key2) != invalidated.end())
-      << "Bug 3: Entry without filters should NOT be invalidated on filter-only change";
+      << "Entry without filters should NOT be invalidated on filter-only change";
 }
 
 /**
@@ -1318,7 +1316,7 @@ TEST(InvalidationManagerTest, FilterChangeDoesNotInvalidateUnfilteredEntries) {
   auto invalidated = InvalidatedKeys(mgr, "posts", "hello", "hello", 3, 2, true, true);
 
   // No entries should be invalidated (none have filters)
-  EXPECT_EQ(0, invalidated.size()) << "Bug 3: Entries without filters should not be invalidated on filter-only change";
+  EXPECT_EQ(0, invalidated.size()) << "Entries without filters should not be invalidated on filter-only change";
 }
 
 /**
@@ -1357,15 +1355,14 @@ TEST(InvalidationManagerTest, TextChangeWithFilterChangeUsesNormalInvalidation) 
 }
 
 // =============================================================================
-// P1-2: table_ngram_settings_ auxiliary index consistency
+// table_ngram_settings_ auxiliary index consistency
 // =============================================================================
 
 /**
  * @brief Test that historical settings lookup is consistent after register/unregister cycles
  *
- * Regression test for P1-2 optimization: After switching from O(N) scan to
- * O(1) refcounted lookup via table_ngram_settings_, verify that config change
- * invalidation still works after entries are unregistered.
+ * Verifies that config change invalidation via the refcounted
+ * table_ngram_settings_ lookup still works after entries are unregistered.
  */
 TEST(InvalidationManagerTest, P1_2_HistoricalSettingsAfterUnregister) {
   QueryCache cache(1024 * 1024, 0.0);
@@ -1398,8 +1395,7 @@ TEST(InvalidationManagerTest, P1_2_HistoricalSettingsAfterUnregister) {
   auto invalidated = InvalidatedKeys(mgr, "posts", "", "world", 3, 1, true);
 
   EXPECT_EQ(1, invalidated.size());
-  EXPECT_TRUE(invalidated.find(key2) != invalidated.end())
-      << "P1-2: Historical settings should survive partial unregister";
+  EXPECT_TRUE(invalidated.find(key2) != invalidated.end()) << "Historical settings should survive partial unregister";
 }
 
 /**
@@ -1529,16 +1525,14 @@ TEST(InvalidationManagerTest, P1_2_ClearTableCleansSettings) {
 }
 
 // =============================================================================
-// C-8: Filter invalidation bypassed when text also changes
+// Filter invalidation when text also changes
 // =============================================================================
 
 /**
  * @brief Test that filter-bearing entries are invalidated even when text also changes
  *
- * Bug C-8: When both filter columns AND text change simultaneously, filter-bearing
- * cache entries must still be invalidated. Previously, the condition
- * `filter_columns_changed && changed_ngrams.empty()` meant filter-only entries
- * were skipped when text also changed.
+ * When both filter columns AND text change simultaneously, filter-bearing
+ * cache entries must still be invalidated.
  */
 TEST(InvalidationManagerTest, C8_FilterInvalidationNotBypassedWhenTextAlsoChanges) {
   QueryCache cache(1024 * 1024, 0.0);
@@ -1561,20 +1555,20 @@ TEST(InvalidationManagerTest, C8_FilterInvalidationNotBypassedWhenTextAlsoChange
   mgr.RegisterCacheEntry(key_no_filter, meta_no_filter);
 
   // Both text AND filter columns changed: "hello" -> "world" with filter_columns_changed=true
-  // changed_ngrams is NOT empty (text changed), so the old bug would skip filter invalidation
+  // changed_ngrams is NOT empty (text changed)
   auto invalidated = InvalidatedKeys(mgr, "posts", "hello", "world", 3, 2, true, true);
 
   // The filter-bearing entry should be invalidated even though changed_ngrams is non-empty
   EXPECT_TRUE(invalidated.find(key_filter) != invalidated.end())
-      << "C-8: Filter-bearing entry must be invalidated when both text and filters change";
+      << "Filter-bearing entry must be invalidated when both text and filters change";
 
   // The no-filter entry should NOT be invalidated (no ngram overlap, no filters)
   EXPECT_FALSE(invalidated.find(key_no_filter) != invalidated.end())
-      << "C-8: Entry without filters should not be invalidated by filter change alone";
+      << "Entry without filters should not be invalidated by filter change alone";
 }
 
 // =============================================================================
-// Perf-1: ClearTable uses table -> cache_keys reverse index for O(k) cost
+// ClearTable uses table -> cache_keys reverse index for O(k) cost
 // =============================================================================
 
 /**
@@ -1666,7 +1660,7 @@ TEST(InvalidationManagerTest, ClearTableUpdatesReverseIndex) {
 }
 
 // =============================================================================
-// Step 3 (HIGH): H-M2 / H-M7 regression tests
+// Filter invalidation scoping and related tests
 // =============================================================================
 
 /**
@@ -1717,7 +1711,7 @@ TEST(InvalidationManagerTest, UnregisterCacheEntryIdentitiesRemovesBatch) {
 }
 
 /**
- * @brief H-M2: filter_columns_changed invalidation only walks entries that
+ * @brief filter_columns_changed invalidation only walks entries that
  *        belong to the affected table. Entries on OTHER tables that happen to
  *        have filters must not be touched, and the cost must scale with the
  *        affected table's size, not the global cache size.

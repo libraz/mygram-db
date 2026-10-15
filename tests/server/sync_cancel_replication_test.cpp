@@ -2,10 +2,9 @@
  * @file sync_cancel_replication_test.cpp
  * @brief Tests that SYNC cancellation/failure restarts replication
  *
- * Regression test for H-3: BuildSnapshotAsync does not restart replication
- * after SYNC cancel. When SYNC starts, replication is stopped. If SYNC is
- * then cancelled or fails, replication must be restarted from the saved
- * GTID position.
+ * When SYNC starts, replication is stopped. If SYNC is then cancelled or
+ * fails, BuildSnapshotAsync must restart replication from the saved GTID
+ * position.
  */
 
 #ifdef USE_MYSQL

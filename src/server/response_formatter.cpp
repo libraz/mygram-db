@@ -385,11 +385,9 @@ std::string ResponseFormatter::FormatCountResponse(uint64_t count, const query::
     return response;
   }
 
-  // Debug path: use ostringstream for convenience. Cache section is now
+  // Debug path: use ostringstream for convenience. Cache section is
   // produced by the same WriteCacheDebugLines helper used by SEARCH so the
-  // two response formats cannot drift (the previous implementation emitted
-  // "cache: miss (not found)\r\nquery_cost_ms: ..." here while SEARCH emitted
-  // "cache: miss\r\ncache_reason: not_found\r\ncache_cost_ms: ...").
+  // two response formats cannot drift.
   std::ostringstream oss;
   oss << protocol::kOkCountWithSpacePrefix << count;
   oss << "\r\n\r\n# DEBUG\r\n";

@@ -35,7 +35,7 @@ std::vector<std::string> SplitLines(const std::string& text) {
 
 std::string RegenerationHint() {
   return "A difference here means the server's static external surface changed. Decide whether that change is\n"
-         "intended before regenerating the golden: an unintended difference is a behavioural regression, and an\n"
+         "intended before regenerating the golden: an unintended difference is a behavioural defect, and an\n"
          "intended one needs the golden updated in the same change.\n"
          "Regenerate with: make surface-snapshot";
 }

@@ -2,7 +2,7 @@
  * @file posting_list_thread_safety_test.cpp
  * @brief Thread safety tests for PostingList
  *
- * Tests the fix for the critical data race issue identified in the improvement report:
+ * Covers concurrent access:
  * - PostingList::Clone() can be called concurrently with GetTopN(), GetAll(), etc.
  * - Roaring bitmap is not thread-safe and requires internal synchronization
  */

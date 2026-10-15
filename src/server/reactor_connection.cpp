@@ -273,13 +273,11 @@ bool ReactorConnection::OnReadable() {
   // drain task (or OnWritable, after the write queue drains) will do the
   // close for us.
   //
-  // Bug fix (P1-3): the empty-queue test must hold BOTH mutexes
-  // simultaneously. Releasing frame_mutex_ before acquiring write_mutex_
-  // opens a window where an in-flight DrainTask can finish dispatching the
-  // last frame and call EnqueueResponse → write_queue_.push_back AFTER we
-  // observed pending_frames_/drain_scheduled_ both empty but BEFORE we read
-  // write_queue_. The result was a closing_=true decision while a fresh
-  // response sat in the write queue, dropping the response on the floor.
+  // The empty-queue test must hold BOTH mutexes simultaneously. Releasing
+  // frame_mutex_ before acquiring write_mutex_ would let an in-flight
+  // DrainTask enqueue a response after pending_frames_/drain_scheduled_ were
+  // observed empty but before write_queue_ is read, closing with a response
+  // still queued.
   //
   // Lock ordering (consistent with the rest of this file):
   //   frame_mutex_ -> write_mutex_
@@ -779,20 +777,11 @@ void ReactorConnection::DrainTask() {
   // confirm that no new frames arrived in the window between the last
   // queue-empty check and now. If frames did arrive, reschedule ourselves.
   //
-  // Bug fix (P1-4): the previous version cleared `drain_scheduled_=false`
-  // OUTSIDE the frame_mutex_ critical section and BEFORE calling
-  // ScheduleDrainTask. That created a window where another thread's
-  // ScheduleDrainTask CAS could succeed (because drain_scheduled_ was
-  // momentarily false) AND this task's subsequent ScheduleDrainTask CAS
-  // would also succeed (after the other task's CAS reset it to false), so
-  // two drain tasks ran concurrently against the same connection,
-  // violating the "at most one drain task per connection" invariant.
-  //
-  // The fix: do the empty/closing test under frame_mutex_, and only flip
-  // drain_scheduled_ to false in the path where we are NOT going to
-  // reschedule. When we ARE going to reschedule, leave drain_scheduled_
-  // as true so any concurrent ScheduleDrainTask CAS fails; this task then
-  // submits the follow-up drain externally and returns.
+  // The empty/closing test runs under frame_mutex_, and drain_scheduled_ is
+  // cleared only on the path that does NOT reschedule. When rescheduling,
+  // drain_scheduled_ stays true so any concurrent ScheduleDrainTask CAS
+  // fails; this task then submits the follow-up drain and returns. This keeps
+  // the "at most one drain task per connection" invariant.
   bool reschedule = false;
   {
     std::lock_guard<std::mutex> lock(frame_mutex_);

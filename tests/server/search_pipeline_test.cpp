@@ -712,8 +712,8 @@ TEST_F(SearchPipelineFuzzyTest, ExecuteZeroEstimatedSizeTriggersEmptyTermDetecte
 // =============================================================================
 // This validates that Execute() applies NOT terms and column filters internally,
 // so callers (like FacetHandler) must NOT re-apply them when using Execute().
-// The regression was that facet_handler applied NOT/filters AFTER Execute(),
-// causing double-filtering that removed too many documents.
+// Re-applying them after Execute() would double-filter and remove too many
+// documents.
 // =============================================================================
 
 TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesNotFilterInternally) {
@@ -744,7 +744,7 @@ TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesNotFilterInternally) {
   auto double_filtered = ApplyNotFilter(result.results, query.not_terms, index_.get(), doc_store_.get(), 2, 1, true);
   EXPECT_EQ(double_filtered.size(), result.results.size())
       << "NOT filter was not applied inside Execute(); applying it again "
-         "changed the result set (double-filter bug)";
+         "changed the result set (double filtering)";
 }
 
 TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesColumnFiltersInternally) {
@@ -776,7 +776,7 @@ TEST_F(SearchPipelineFuzzyTest, ExecuteAppliesColumnFiltersInternally) {
   auto double_filtered = ApplyFilters(result.results, query.filters, doc_store_.get());
   EXPECT_EQ(double_filtered.size(), result.results.size())
       << "Column filters were not applied inside Execute(); applying them again "
-         "changed the result set (double-filter bug)";
+         "changed the result set (double filtering)";
 }
 
 // =============================================================================
@@ -1893,9 +1893,7 @@ TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
  * grouped-OR-under-AND versus an OR of an AND-with-a-literal-paren-glued-
  * term and a lone term. Both still contain a real ASCII AND/OR, so
  * execution_mode alone does not separate them; only the AST-based cache key
- * (fixed alongside cache-005/H-1's whitespace variant of the same root
- * cause) does. This is the same mechanism, verified against the audit's own
- * full-width example rather than a whitespace one.
+ * does, as it does for whitespace variants.
  */
 TEST_F(FullPipelineTest, FullWidthParenthesesGetDistinctCacheEntryFromAsciiParentheses) {
   config::CacheConfig cache_config;
@@ -1981,7 +1979,7 @@ TEST_F(FullPipelineTest, UnicodeWhitespaceVariantsOfABooleanExpressionShareOneCa
   grouped_query.limit = 100;
 
   // U+00A0 (non-breaking space, UTF-8 C2 A0) is a recognized separator
-  // (search-pipeline-004's Unicode-whitespace tokenizer fix), so it splits
+  // (the tokenizer treats Unicode whitespace as a separator), so it splits
   // "dog" and "OR" exactly like an ASCII space -- the identical tree, and
   // therefore the identical cache key, not a different one.
   query::Query spaced_query = grouped_query;
@@ -2774,11 +2772,10 @@ TEST_F(FullPipelineTest, QueryTimeMsPopulated) {
 // =============================================================================
 // FullPipelineOutput::cache_hit and cache_miss_reason tests
 // =============================================================================
-// Regression coverage for the bug where SearchHandler relied on
-// debug_info.cache_info.status to detect cache hits, which is only populated
-// when conn_ctx.debug_mode == true. The non-debug fast path therefore never
-// observed a cache hit. cache_hit (and cache_miss_reason) must be set on
-// FullPipelineOutput regardless of debug mode.
+// debug_info.cache_info.status is populated only when conn_ctx.debug_mode ==
+// true, so SearchHandler cannot rely on it to detect cache hits.
+// cache_hit (and cache_miss_reason) must be set on FullPipelineOutput
+// regardless of debug mode.
 // =============================================================================
 
 class FullPipelineCacheTest : public ::testing::Test {

@@ -71,7 +71,7 @@ gtest_discover_tests(stress_test
     TIMEOUT 300  # 5 minutes timeout
 )
 
-# Thread pool saturation regression tests
+# Thread pool saturation tests
 #
 # Positive-control suite for the reactor I/O model: confirms that idle
 # persistent clients do NOT pin worker threads and that late clients are
@@ -135,7 +135,7 @@ gtest_discover_tests(verify_text_integration_test
     RESOURCE_LOCK server_port
 )
 
-# Reactor starvation regression tests (Step 2.T7)
+# Reactor starvation tests
 #
 # Reactor-mode invariant checks:
 #   T1 — 128 persistent clients + late client served promptly
@@ -158,7 +158,7 @@ gtest_discover_tests(reactor_starvation_regression_test
     TIMEOUT 120
 )
 
-# Reactor I/O model integration tests (Step 2.T6)
+# Reactor I/O model integration tests
 #
 # Exercises the end-to-end reactor path: IoReactor (epoll/kqueue) ->
 # ReactorConnection drain-task pattern -> RequestDispatcher.

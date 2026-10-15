@@ -454,9 +454,8 @@ TEST_F(ConfigSchemaExplorerTest, PathNavigationArraySchema) {
 /**
  * @brief Test that ConfigToJson masks non-empty MySQL password
  *
- * Validates the security fix where ConfigToJson was updated to mask
- * the password field as "***" when non-empty, preventing credential
- * leakage in configuration display output.
+ * ConfigToJson masks the password field as "***" when non-empty, preventing
+ * credential leakage in configuration display output.
  */
 TEST(ConfigHelpTest, ConfigToJsonMasksNonEmptyPassword) {
   Config config;

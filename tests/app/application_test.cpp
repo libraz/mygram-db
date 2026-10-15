@@ -203,7 +203,7 @@ class DumpDirectoryValidationTest : public ::testing::Test {
 };
 
 /**
- * @brief Test that an absolute path outside CWD succeeds (the bug we fixed)
+ * @brief Test that an absolute path outside CWD succeeds
  */
 TEST_F(DumpDirectoryValidationTest, AbsolutePathOutsideCwd) {
   std::filesystem::path dump_path = base_dir_ / "dumps";
@@ -239,7 +239,7 @@ TEST_F(DumpDirectoryValidationTest, RelativePathInsideCwd) {
 }
 
 /**
- * @brief Test that the /tmp path succeeds (previously rejected by CWD check)
+ * @brief Test that the /tmp path succeeds
  */
 TEST_F(DumpDirectoryValidationTest, TmpPathSucceeds) {
   std::filesystem::path dump_path = std::filesystem::temp_directory_path() / "mygramdb_dump_test_tmp";

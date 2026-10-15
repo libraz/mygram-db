@@ -153,7 +153,7 @@ class JapaneseSynonymPipelineTest : public ::testing::Test {
 
 std::atomic<int> JapaneseSynonymPipelineTest::g_counter_{0};
 
-// TC-SP-01: Hiragana query expands to katakana and kanji documents.
+// Hiragana query expands to katakana and kanji documents.
 TEST_F(JapaneseSynonymPipelineTest, KanaKanjiSynonymExpansion_SearchByHiragana) {
   LoadDict(std::string(kHiraganaApple) + "\t" + kKatakanaApple + "\t" + kKanjiApple + "\n");
 
@@ -177,7 +177,7 @@ TEST_F(JapaneseSynonymPipelineTest, KanaKanjiSynonymExpansion_SearchByHiragana) 
   EXPECT_FALSE(Contains(output->results, pk3));
 }
 
-// TC-SP-02: Kanji query returns the same set via synonym expansion.
+// Kanji query returns the same set via synonym expansion.
 TEST_F(JapaneseSynonymPipelineTest, KanaKanjiSynonymExpansion_SearchByKanji) {
   LoadDict(std::string(kHiraganaApple) + "\t" + kKatakanaApple + "\t" + kKanjiApple + "\n");
 
@@ -201,7 +201,7 @@ TEST_F(JapaneseSynonymPipelineTest, KanaKanjiSynonymExpansion_SearchByKanji) {
   EXPECT_FALSE(Contains(output->results, pk3));
 }
 
-// TC-SP-03: Half-width kana query normalizes to full-width katakana and
+// Half-width kana query normalizes to full-width katakana and
 // reaches the katakana-tagged synonym group (which also contains "db").
 TEST_F(JapaneseSynonymPipelineTest, HalfWidthKanaQueryMatchesFullWidthDocument) {
   // Use "database" (7 chars) as the ASCII alternative so that ngram_size=3
@@ -227,7 +227,7 @@ TEST_F(JapaneseSynonymPipelineTest, HalfWidthKanaQueryMatchesFullWidthDocument) 
   EXPECT_FALSE(Contains(output->results, pk3));
 }
 
-// TC-SP-04: Kanji bigrams (kanji_ngram_size=2) still allow synonym expansion
+// Kanji bigrams (kanji_ngram_size=2) still allow synonym expansion
 // where "東京" and "東京都" are synonyms, and a document with "東京" alone
 // is reachable via the shorter term even though "東京都" is its synonym.
 TEST_F(JapaneseSynonymPipelineTest, KanjiNgramSizeDoesNotBreakSynonymExpansion) {
@@ -252,7 +252,7 @@ TEST_F(JapaneseSynonymPipelineTest, KanjiNgramSizeDoesNotBreakSynonymExpansion) 
   EXPECT_FALSE(Contains(output->results, pk3));
 }
 
-// TC-SP-05: OR within a group, AND across groups. Fruit + phone both required.
+// OR within a group, AND across groups. Fruit + phone both required.
 TEST_F(JapaneseSynonymPipelineTest, SynonymOrSemantics_MultipleQueryTerms_AndAcrossGroups) {
   std::string tsv =
       std::string(kHiraganaApple) + "\t" + kKanjiApple + "\n" + kSmartphone + "\t" + kSumaho + "\t" + kKeitai + "\n";
@@ -280,7 +280,7 @@ TEST_F(JapaneseSynonymPipelineTest, SynonymOrSemantics_MultipleQueryTerms_AndAcr
   EXPECT_FALSE(Contains(output->results, pk4));
 }
 
-// TC-SP-06: verify_text="all" must accept documents that match only via a
+// verify_text="all" must accept documents that match only via a
 // synonym expansion. Ensures PostFilterByTextWithSynonyms checks every term
 // in the group's normalized_terms, not just the original query term.
 TEST_F(JapaneseSynonymPipelineTest, PostFilterByTextWithSynonyms_VerifyText) {

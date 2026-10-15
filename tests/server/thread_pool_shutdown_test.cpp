@@ -295,8 +295,6 @@ TEST_F(ThreadPoolShutdownTest, QueueSizeAfterShutdown) {
  * 1. The task queue to be empty
  * 2. All active workers to finish executing their current tasks
  *
- * Previously, the timeout only checked queue size, which could cause premature
- * timeout if workers were still executing tasks.
  */
 TEST_F(ThreadPoolShutdownTest, TimeoutWithActiveWorkers) {
   std::atomic<int> completed_tasks{0};
@@ -347,8 +345,7 @@ TEST_F(ThreadPoolShutdownTest, TimeoutWithActiveWorkers) {
  * waits for all workers to complete before destruction. This ensures no
  * use-after-free issues can occur.
  *
- * Previously, workers were detached after timeout, which could cause crashes.
- * Now, we always join workers to ensure safe cleanup.
+ * Workers are always joined to ensure safe cleanup.
  */
 TEST_F(ThreadPoolShutdownTest, WorkersJoinedAfterTimeout) {
   auto shared_counter = std::make_shared<std::atomic<int>>(0);

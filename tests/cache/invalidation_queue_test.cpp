@@ -403,8 +403,7 @@ TEST(InvalidationQueueTest, HighFrequencyEnqueuing) {
 /**
  * @brief Test that invalidation batches are counted correctly
  *
- * This is a regression test to ensure that the batch counter is incremented
- * exactly once per batch, even when processing happens on a separate thread.
+ * The batch counter is incremented exactly once per batch, even when processing happens on a separate thread.
  */
 TEST(InvalidationQueueTest, BatchStatisticsCount) {
   QueryCache cache(1024 * 1024, 1.0);
@@ -503,10 +502,9 @@ TEST(InvalidationQueueTest, SingleBatchCount) {
 /**
  * @brief Test that synchronous invalidation path cleans up metadata
  *
- * This is a regression test for a bug where the synchronous invalidation path
- * (when worker is not running) called cache_->Erase() but did not call
- * invalidation_mgr_->UnregisterCacheEntry(), causing cache_metadata_ and
- * ngram_to_cache_keys_ to grow unbounded.
+ * The synchronous invalidation path (when worker is not running) must call
+ * invalidation_mgr_->UnregisterCacheEntry() as well as cache_->Erase(), so
+ * cache_metadata_ and ngram_to_cache_keys_ do not grow unbounded.
  */
 TEST(InvalidationQueueTest, SynchronousInvalidationCleansUpMetadata) {
   QueryCache cache(1024 * 1024, 1.0);
@@ -555,7 +553,7 @@ TEST(InvalidationQueueTest, SynchronousInvalidationCleansUpMetadata) {
 /**
  * @brief Test metadata is cleaned up even if Erase() throws (exception safety)
  *
- * Verifies the fix where UnregisterCacheEntry() is called BEFORE Erase(),
+ * Verifies UnregisterCacheEntry() is called BEFORE Erase(),
  * ensuring metadata is cleaned up even if Erase() were to throw an exception.
  */
 TEST(InvalidationQueueTest, MetadataCleanupExceptionSafe) {
@@ -583,12 +581,12 @@ TEST(InvalidationQueueTest, MetadataCleanupExceptionSafe) {
   queue.Enqueue("posts", "", "test");
 
   // Metadata should be cleaned up regardless of Erase() success
-  // (in the fixed version, UnregisterCacheEntry is called first)
+  // (UnregisterCacheEntry is called first)
   EXPECT_EQ(0, mgr.GetTrackedEntryCount()) << "Metadata should be cleaned up even if subsequent operations fail";
 }
 
 /**
- * @brief Test for spurious wakeup handling fix
+ * @brief Test spurious wakeup handling
  *
  * Verifies that WorkerLoop() correctly handles spurious wakeups and
  * checks running_ flag after waking up from condition variable.
@@ -692,8 +690,7 @@ TEST(InvalidationQueueTest, StopWithPendingItemsNoHang) {
 }
 
 /**
- * @brief Test empty queue handling (time calculation bug regression test)
- * Regression test for: pending_cache_keys_ empty caused negative time calculation
+ * @brief Test empty queue handling (no negative time calculation when pending_cache_keys_ is empty)
  */
 TEST(InvalidationQueueTest, EmptyQueueStartAndEnqueue) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -724,7 +721,7 @@ TEST(InvalidationQueueTest, EmptyQueueStartAndEnqueue) {
 
 /**
  * @brief Test resource cleanup order (Unregister before Erase)
- * Regression test for: Erase() exception could prevent UnregisterCacheEntry()
+ * An Erase() exception must not prevent UnregisterCacheEntry()
  */
 TEST(InvalidationQueueTest, ResourceCleanupOrder) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -767,7 +764,7 @@ TEST(InvalidationQueueTest, ResourceCleanupOrder) {
 
 /**
  * @brief Test concurrent Start() calls are thread-safe
- * Regression test for: running_ flag was not atomically checked-and-set
+ * The running_ flag is checked-and-set atomically
  */
 TEST(InvalidationQueueTest, ConcurrentStartCallsThreadSafe) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -858,7 +855,7 @@ TEST(InvalidationQueueTest, StartAndStopSerializeCompleteThreadOwnershipTransiti
 
 /**
  * @brief Test concurrent Stop() calls are thread-safe
- * Regression test for: running_ flag was not atomically checked-and-cleared
+ * The running_ flag is checked-and-cleared atomically
  */
 TEST(InvalidationQueueTest, ConcurrentStopCallsThreadSafe) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -890,7 +887,7 @@ TEST(InvalidationQueueTest, ConcurrentStopCallsThreadSafe) {
 
 /**
  * @brief Test concurrent Start() calls followed by Stop()
- * Regression test for: concurrent Start() and Stop() should be atomic
+ * Concurrent Start() and Stop() are atomic
  */
 TEST(InvalidationQueueTest, ConcurrentStartThenStop) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -928,18 +925,15 @@ TEST(InvalidationQueueTest, ConcurrentStartThenStop) {
 }
 
 /**
- * @brief Test TOCTOU race condition fix in Enqueue
+ * @brief Test Enqueue has no TOCTOU race between the running_ check and queue insertion
  *
- * This test verifies that the TOCTOU (Time-Of-Check-Time-Of-Use) race
- * condition between running_ check and queue insertion has been fixed.
- *
- * Scenario without fix:
+ * Racy scenario:
  * 1. Thread 1: Checks running_ == true
  * 2. Thread 2: Calls Stop(), sets running_ = false
  * 3. Thread 1: Inserts to queue (but worker is stopped)
  * 4. Result: Metadata leak (UnregisterCacheEntry never called)
  *
- * With fix:
+ * Enqueue avoids this:
  * - running_ check is done inside the queue_mutex_ lock
  * - If not running, immediately process and call UnregisterCacheEntry
  * - No metadata leak occurs
@@ -987,7 +981,7 @@ TEST(InvalidationQueueTest, TOCTOURaceConditionFix) {
   EXPECT_TRUE(stop_called.load());
   EXPECT_GT(enqueue_count.load(), 0);
 
-  // With the fix, all metadata should be properly cleaned up
+  // All metadata should be properly cleaned up
   // No way to directly test metadata leak, but no crash/assertion failure = success
 }
 
@@ -1098,9 +1092,8 @@ TEST(InvalidationQueueTest, ConcurrentEnqueueStop) {
 /**
  * @brief Test that table names containing ':' are handled correctly
  *
- * Regression test for: composite key "table:cache_key_hex" was split using
- * find(':') which broke when table name contained ':'. Using rfind(':')
- * fixes this since the hex cache key (32 chars) never contains ':'.
+ * The composite key "table:cache_key_hex" is split with rfind(':'), since the
+ * hex cache key (32 chars) never contains ':'.
  */
 TEST(InvalidationQueueTest, TableNameWithColonInvalidatesCorrectly) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -1144,9 +1137,8 @@ TEST(InvalidationQueueTest, TableNameWithColonInvalidatesCorrectly) {
 /**
  * @brief Test that re-enqueuing preserves original timestamp
  *
- * Regression test for: re-enqueuing a key overwrote its timestamp with now(),
- * making oldest_timestamp_ stale (pointing to a time earlier than any entry).
- * Fix uses emplace() so existing entries keep their original timestamp.
+ * Re-enqueuing a key uses emplace(), so existing entries keep their original
+ * timestamp and oldest_timestamp_ stays accurate.
  */
 TEST(InvalidationQueueTest, ReEnqueuePreservesOriginalTimestamp) {
   QueryCache cache(1024 * 1024, 10.0);
@@ -1171,8 +1163,8 @@ TEST(InvalidationQueueTest, ReEnqueuePreservesOriginalTimestamp) {
   queue.Start();
 
   // Enqueue the same invalidation multiple times with delays
-  // Without the fix, each re-enqueue would update the timestamp to now(),
-  // making oldest_timestamp_ stale and delaying batch processing.
+  // A re-enqueue must not refresh the timestamp, or oldest_timestamp_ goes
+  // stale and batch processing is delayed.
   queue.Enqueue("posts", "", "golang tutorial");
   std::this_thread::sleep_for(std::chrono::milliseconds(30));
   queue.Enqueue("posts", "", "golang tutorial");
@@ -1193,10 +1185,8 @@ TEST(InvalidationQueueTest, ReEnqueuePreservesOriginalTimestamp) {
 /**
  * @brief Large-batch processing without string-key allocation overhead
  *
- * Regression test for the typed-composite-key fix: previously each Enqueue
- * built a "table:cache_key_hex" string per affected key (allocating O(n)
- * strings), and ProcessBatch parsed each back via stoull. The typed
- * (table, CacheKey) pair eliminates both. This test enqueues a large
+ * The typed (table, CacheKey) pair avoids building a string per affected
+ * key in Enqueue and parsing it back in ProcessBatch. This test enqueues a large
  * number of distinct invalidations and verifies all are processed.
  */
 TEST(InvalidationQueueTest, EnqueueWithLargeBatchAvoidsStringAllocation) {
@@ -1308,23 +1298,17 @@ TEST(InvalidationQueueTest, EnqueueRoundtripPreservesIdentity) {
 }
 
 // =============================================================================
-// CR-6 regression: single-source UnregisterCacheEntry contract
+// Single-source UnregisterCacheEntry contract
 // =============================================================================
 
 /**
- * @brief CR-6 regression: ProcessBatch + concurrent Erase does not corrupt
+ * @brief ProcessBatch + concurrent Erase does not corrupt
  *        InvalidationManager reverse indexes.
  *
- * Before the CR-6 fix, ProcessBatch called UnregisterCacheEntry directly AND
- * cache_->Erase() — but with a CacheManager-style eviction callback wired to
- * UnregisterCacheEntry, that meant double-unregister. The double-unregister
- * was a no-op for the metadata map (find() returned end()) but the auxiliary
- * reverse indexes (table_to_cache_keys_, ngram_to_cache_keys_) could
- * desynchronize from cache_metadata_ when a concurrent Insert re-registered
- * the same key between the two unregisters.
- *
- * Fix: ProcessBatch now uses EraseWithoutCallback + explicit
- * UnregisterCacheEntry, so cleanup fires exactly once per affected key.
+ * ProcessBatch uses EraseWithoutCallback + explicit UnregisterCacheEntry, so
+ * cleanup fires exactly once per affected key and the reverse indexes
+ * (table_to_cache_keys_, ngram_to_cache_keys_) stay in sync with
+ * cache_metadata_ even if a concurrent Insert re-registers the same key.
  *
  * This test wires an eviction callback that ALSO calls UnregisterCacheEntry
  * (mirroring the CacheManager configuration) and verifies the manager's
@@ -1337,7 +1321,7 @@ TEST(InvalidationQueueTest, ProcessBatchWithEvictionCallbackNoDoubleUnregister) 
   InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Wire eviction callback to call UnregisterCacheEntry (mirrors
-  // CacheManager). With the CR-6 fix, ProcessBatch uses EraseWithoutCallback
+  // CacheManager). ProcessBatch uses EraseWithoutCallback
   // so this callback never fires for queue-driven cleanup.
   cache.SetIdentityEvictionCallback([&mgr](const CacheEntryIdentity& identity) { mgr.UnregisterCacheEntry(identity); });
 
@@ -1382,8 +1366,8 @@ TEST(InvalidationQueueTest, ProcessBatchWithEvictionCallbackNoDoubleUnregister) 
   queue.Stop();
 
   // After processing, all entries must be erased AND the InvalidationManager
-  // must reflect zero tracked entries / zero tracked ngrams. Under the bug,
-  // the double-unregister could leave dangling refs in
+  // must reflect zero tracked entries / zero tracked ngrams. A
+  // double unregister could leave dangling refs in
   // table_to_cache_keys_ / ngram_to_cache_keys_ if a re-registration raced
   // between the two unregisters; even without a race, a single-threaded
   // run must end with consistent counts.
@@ -1395,13 +1379,13 @@ TEST(InvalidationQueueTest, ProcessBatchWithEvictionCallbackNoDoubleUnregister) 
 }
 
 /**
- * @brief CR-6 regression: ProcessBatch concurrent with re-registration keeps
+ * @brief ProcessBatch concurrent with re-registration keeps
  *        tracked-entry count consistent.
  *
  * Stress variant of the above: while the worker is processing batches,
  * another thread re-registers cache entries with the same keys (simulating
- * a hot key being repeatedly cached). Under the old double-unregister bug,
- * the auxiliary reverse indexes could desync. After the fix, GetTrackedEntryCount
+ * a hot key being repeatedly cached). A double unregister would
+ * desync the auxiliary reverse indexes. GetTrackedEntryCount
  * must always equal the number of currently-cached entries — this is the
  * fundamental invariant.
  */
@@ -1445,25 +1429,22 @@ TEST(InvalidationQueueTest, ProcessBatchConcurrentWithReRegisterTrackedCountCons
 
   // After draining, the tracked entry count must match the number of cache
   // entries currently in QueryCache (could be 0 or up to 8 depending on
-  // timing). Under the bug, the manager could end up with more or fewer
+  // timing). A double unregister could leave more or fewer
   // tracked entries than the cache actually holds.
   const auto stats = cache.GetStatistics();
   EXPECT_EQ(mgr.GetTrackedEntryCount(), stats.current_entries);
 }
 
 // =============================================================================
-// H-M5 regression: Stop()/Start() cycle restores Enqueue functionality
+// Stop()/Start() cycle restores Enqueue functionality
 // =============================================================================
 
 /**
- * @brief H-M5 regression: Start() resets stopped_ so that Enqueue works
+ * @brief Start() resets stopped_ so that Enqueue works
  *        after a Stop()/Start() cycle.
  *
- * Before the fix, InvalidationQueue::Stop() set stopped_ = true and
- * Start() did not reset it. A Stop()/Start() pair therefore left stopped_
- * permanently true, and every subsequent Enqueue was silently dropped at
- * the early-out in Enqueue. CacheManager's Disable()/Enable() cycle hit
- * exactly this bug.
+ * Stop() sets stopped_ = true and Start() resets it, so Enqueue is not
+ * dropped after CacheManager's Disable()/Enable() cycle.
  */
 TEST(InvalidationQueueTest, StartAfterStopReenablesEnqueue) {
   QueryCache cache(1024 * 1024, 1.0);
@@ -1491,8 +1472,8 @@ TEST(InvalidationQueueTest, StartAfterStopReenablesEnqueue) {
   queue.Start();
   ASSERT_TRUE(queue.IsRunning());
 
-  // Enqueue an invalidation — under the bug, stopped_ would still be true
-  // and the call would be silently dropped, leaving the entry intact.
+  // Enqueue an invalidation — stopped_ must be false after Start(),
+  // otherwise the call would be silently dropped, leaving the entry intact.
   queue.Enqueue("posts", "", "foo bar");
 
   // Allow the worker to drain and stop again.
@@ -1500,12 +1481,12 @@ TEST(InvalidationQueueTest, StartAfterStopReenablesEnqueue) {
   queue.Stop();
 
   // Entry must have been erased; if Enqueue had been dropped, this fails.
-  EXPECT_FALSE(cache.Lookup(key).has_value()) << "Enqueue after Stop()/Start() cycle was silently dropped (H-M5)";
+  EXPECT_FALSE(cache.Lookup(key).has_value()) << "Enqueue after Stop()/Start() cycle was silently dropped";
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
 }
 
 /**
- * @brief H-M5 regression: multiple Stop/Start cycles each leave Enqueue
+ * @brief Multiple Stop/Start cycles each leave Enqueue
  *        functional.
  */
 TEST(InvalidationQueueTest, MultipleStopStartCyclesEachReenableEnqueue) {

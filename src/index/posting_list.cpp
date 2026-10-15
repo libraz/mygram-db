@@ -528,8 +528,8 @@ std::vector<DocId> PostingList::GetTopN(size_t limit, bool reverse) const {
   result.reserve(actual_limit);
 
   // CRoaring exposes an in-place iterator initializer, so use stack storage.
-  // This removes the allocation-failure path that previously returned an
-  // indistinguishable empty result for a non-empty posting list.
+  // This has no allocation-failure path that could yield an empty result for
+  // a non-empty posting list.
   roaring_uint32_iterator_t iter;
   if (reverse) {
     roaring_iterator_init_last(roaring_bitmap_.get(), &iter);

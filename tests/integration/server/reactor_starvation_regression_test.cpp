@@ -305,7 +305,7 @@ TEST_F(ReactorStarvationRegressionTest, ReactorServesPersistentFleetWithoutStarv
 
   // --- Assertions ---
   EXPECT_FALSE(late_resp.empty()) << "Late client received no response within 500 ms despite reactor mode "
-                                     "being active. Starvation regression: reactor is not decoupling "
+                                     "being active. Starvation: reactor is not decoupling "
                                      "worker count from persistent-client count.";
 
   if (!late_resp.empty()) {

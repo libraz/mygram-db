@@ -291,8 +291,7 @@ TEST(IndexTest, UpdateDocumentRemovesEmptyPostingLists) {
   EXPECT_EQ(index.Count("z"), 1);
 
   // Empty posting lists for old terms should be removed
-  // Before fix: term_postings_ would still contain entries for a, b, c with empty lists
-  // After fix: term_postings_ should only contain x, y, z
+  // term_postings_ should only contain x, y, z, with no empty entries for a, b, c
   EXPECT_EQ(index.Count("a"), 0) << "Old term 'a' should have count 0";
   EXPECT_EQ(index.Count("b"), 0) << "Old term 'b' should have count 0";
   EXPECT_EQ(index.Count("c"), 0) << "Old term 'c' should have count 0";

@@ -393,9 +393,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::StartInternal(Bef
 
   // Spawn the accept loop AFTER SetReactorHandler so the new thread observes a
   // fully-published handler via the std::thread constructor's happens-before
-  // edge. Previously the acceptor started its thread inside Start() (during
-  // ServerLifecycleManager::InitAcceptor) and then the handler was installed
-  // afterwards, which was a documented data race on reactor_handler_.
+  // edge.
   {
     auto accept_result = acceptor_->StartAccepting();
     if (!accept_result) {

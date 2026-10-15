@@ -2,12 +2,11 @@
  * @file pagination_test.cpp
  * @brief Integration tests for cache behavior with OFFSET/LIMIT pagination
  *
- * This test suite verifies the fix for the bug where cache hits would return
- * unpaginated results, ignoring OFFSET and LIMIT parameters.
+ * Cache hits return paginated results that honor the OFFSET and LIMIT parameters.
  *
  * Test Coverage:
  * - Cache miss with OFFSET/LIMIT
- * - Cache hit with OFFSET/LIMIT (critical bug fix verification)
+ * - Cache hit with OFFSET/LIMIT
  * - Multiple pagination combinations
  * - Cache statistics tracking
  * - Edge cases (offset beyond results, limit exceeding results)
@@ -174,7 +173,7 @@ TEST_F(CacheOffsetLimitIntegrationTest, CacheMissRespectsOffsetLimit) {
 }
 
 /**
- * @brief Test that cache HIT respects OFFSET/LIMIT (this is the critical bug fix test)
+ * @brief Test that cache HIT respects OFFSET/LIMIT
  */
 TEST_F(CacheOffsetLimitIntegrationTest, CacheHitRespectsOffsetLimit) {
   int sock = CreateClientSocket();
@@ -193,7 +192,7 @@ TEST_F(CacheOffsetLimitIntegrationTest, CacheHitRespectsOffsetLimit) {
 
   ASSERT_TRUE(result2.success) << "Response: " << response2;
   EXPECT_EQ(result2.total_count, 100);
-  // Before the pagination fix, this returned 100 IDs. It should now return 5.
+  // Only 5 IDs are returned, not all 100.
   EXPECT_EQ(result2.ids.size(), 5) << "Cache hit should respect LIMIT 5, got " << result2.ids.size() << " results";
 
   close(sock);

@@ -354,7 +354,7 @@ TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigFormat) {
 }
 
 /**
- * @brief Test that file logger receives correct log level (regression test for bug)
+ * @brief Test that file logger receives correct log level
  */
 TEST_F(ConfigurationManagerTestFixture, ApplyLoggingConfigFileLoggerReceivesLevel) {
   std::string log_file = "/tmp/test_file_logger_level_" + std::to_string(getpid()) + ".log";

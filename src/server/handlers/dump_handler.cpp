@@ -138,7 +138,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
   //
   // On the async path, ownership of the flag transfers to the worker thread
   // (via flag_guard.Release() below) and the worker's own RAII guard resets
-  // it (H-C1). On the sync path / thread-creation-failure path, the guard's
+  // it. On the sync path / thread-creation-failure path, the guard's
   // destructor resets the flag.
   auto flag_guard = mygram::utils::OperationGuard::TryAcquire(ctx_.dump_save_in_progress);
   if (!flag_guard.engaged()) {
@@ -248,23 +248,11 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 }
 
 bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
-  // H-C1: Release dump_save_in_progress at thread exit, AFTER Complete()/Fail()
-  // notifications and AFTER any binlog Start() restart. The previous code
-  // released the flag at a fixed `store(false)` line at the end of this
-  // function, but Complete()/Fail() were called BEFORE that store, leaving
-  // a window where:
-  //   1. worker thread runs `dump_progress_->Complete()` (unblocks waiters)
-  //   2. another client observes "completed", calls HandleDumpSave, sees
-  //      the flag still true, and gets ERROR busy.
-  // OR worse:
-  //   1. worker thread runs Complete()
-  //   2. another client observes "completed", calls HandleDumpSave,
-  //      compare_exchange_strong fails because the flag is still true,
-  //      they get a misleading busy error.
-  //
-  // Releasing via ScopeGuard at the END of the worker scope makes the flag
-  // visible-as-false strictly after every other worker side-effect, so any
-  // post-Complete() observer correctly sees the slot as free.
+  // Release dump_save_in_progress at thread exit, AFTER Complete()/Fail()
+  // notifications and AFTER any binlog Start() restart. Releasing via
+  // ScopeGuard at the END of the worker scope makes the flag visible-as-false
+  // strictly after every other worker side-effect, so any post-Complete()
+  // observer sees the slot as free instead of a misleading busy error.
   //
   // The release still uses memory_order_release to pair with the
   // acquire on the next compare_exchange_strong in HandleDumpSave.
@@ -342,7 +330,7 @@ bool DumpHandler::DumpSaveWorker(const std::string& filepath) {
 #endif
 
   // Update progress. The dump_save_in_progress flag is released by the
-  // ScopeGuard installed at the top of this function (H-C1). Releasing
+  // ScopeGuard installed at the top of this function. Releasing
   // AFTER Complete()/Fail() ensures any client that observed completion
   // sees the slot as free on the next compare_exchange_strong.
   bool success = result.has_value();
@@ -397,10 +385,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
   }
 
   // Validate filepath BEFORE mutating any replication or load-flag state.
-  // Previously, the empty()/ResolveDumpFilepath check was performed AFTER
-  // stopping replication, which left replication permanently paused on
-  // validation failure (P0-A). Failing fast here keeps the server in a clean
-  // state.
+  // Failing fast here leaves replication running when validation fails.
   if (query.filepath.empty()) {
     return ResponseFormatter::FormatError("DUMP LOAD requires a filepath", mygram::utils::ErrorCode::kQuerySyntaxError);
   }

@@ -670,7 +670,7 @@ TEST_F(ResultSorterTest, MixedNumericAndNonNumericPrimaryKeys) {
 
 /**
  * @brief Test offset + limit overflow handling
- * Regression test for: offset + limit could overflow uint32_t
+ * offset + limit must not overflow uint32_t
  */
 TEST_F(ResultSorterTest, OffsetLimitOverflow) {
   // Create test documents
@@ -1009,7 +1009,7 @@ TEST_F(ResultSorterTest, SchwartzianPartialSortMissingPrimaryKeyUsesNumericKeyWi
  * @brief Test sorting negative doubles in ascending order
  *
  * Verifies that negative floating-point values are sorted correctly.
- * Previously, "-1.0" > "-20.0" lexicographically, causing incorrect order.
+ * Numeric order, not lexicographic: -20.0 sorts before -1.0.
  */
 TEST_F(ResultSorterTest, NegativeDoubleSortAsc) {
   std::vector<DocId> doc_ids;
@@ -1130,11 +1130,7 @@ TEST_F(ResultSorterTest, NegativeZeroVsPositiveZero) {
 /**
  * @brief Test sorting INT64 extreme values (INT64_MIN, -1, 0, 1, INT64_MAX)
  *
- * Previously, kSignedOffset = (1LL << 60) caused:
- * - INT64_MAX + kSignedOffset → signed overflow (undefined behavior)
- * - INT64_MIN + kSignedOffset → still negative (incorrect sort order)
- *
- * Fixed by using XOR with (1ULL << 63) which avoids overflow.
+ * The sort key is built with XOR against (1ULL << 63), which avoids signed overflow.
  */
 TEST_F(ResultSorterTest, SignedInt64SortExtremeValues) {
   std::vector<DocId> doc_ids;

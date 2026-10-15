@@ -148,19 +148,9 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
-  // H-C4: Reject any new SYNC if RequestShutdown() has been called.
-  //
-  // Prior to this check there was a narrow race window where
-  // RequestShutdown() set shutdown_requested_ = true but a concurrent
-  // StartSync() (still holding a reference to the manager from the
-  // request dispatcher) could slip past the early checks, claim the
-  // sync slot, and spawn a worker thread — only for the worker to be
-  // immediately Cancel()'d by the same RequestShutdown(). The cancelled
-  // worker would race the manager destructor's join phase (~30s timeout)
-  // and leave the dispatcher waiting on a SYNC that will never make
-  // progress. Failing fast here matches the contract documented in
-  // RequestShutdown(): once shutdown is requested no new long-running
-  // operations are accepted; existing ones are cancelled and joined.
+  // Reject any new SYNC once RequestShutdown() has been called: no new
+  // long-running operations are accepted; existing ones are cancelled and
+  // joined, so a SYNC started now could never make progress.
   //
   // The acquire fence pairs with the release-store in RequestShutdown()
   // so any state RequestShutdown() published before flipping the flag
@@ -206,10 +196,8 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
 
     // CRITICAL: claim the slot unconditionally before releasing the lock.
     // Concurrent StartSync racers checking is_running above must see this
-    // claim and bail out. Earlier versions only claimed when a previous
-    // thread existed; for the first concurrent burst (no stale thread), all
-    // racers passed the check and Step 3 spawned multiple threads -> abort
-    // (regression test ConcurrentStartSyncIsRaceFree).
+    // claim and bail out, so only one racer proceeds to spawn the thread
+    // in Step 3, including the first burst with no stale thread.
     sync_states_[table_name].is_running = true;
     sync_states_[table_name].status = "JOINING_PREVIOUS";
 

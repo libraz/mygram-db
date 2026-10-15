@@ -63,9 +63,8 @@ class AdminHandlerTest : public ::testing::Test {
 /**
  * @brief Handle should return an ERROR response when table_catalog is null.
  *
- * Before the defensive guard was added, AdminHandler::Handle dereferenced
- * ctx_.table_catalog unconditionally, so a null catalog crashed the process.
- * The fix returns a formatted ERROR instead of segfaulting.
+ * AdminHandler::Handle checks ctx_.table_catalog and returns a formatted
+ * ERROR instead of dereferencing a null catalog.
  */
 TEST_F(AdminHandlerTest, HandleReturnsErrorWhenCatalogNull) {
   AdminHandler handler(*handler_ctx_);

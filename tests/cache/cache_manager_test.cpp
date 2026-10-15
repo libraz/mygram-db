@@ -933,10 +933,9 @@ TEST(CacheManagerTest, DisableRetainsDiagnosticStatistics) {
 /**
  * @brief Disable() clears all entries to avoid serving stale results
  *
- * Regression test for the cache-correctness fix: invalidation events
- * arriving while the cache is disabled would be silently dropped (the
+ * Invalidation events arriving while the cache is disabled are dropped (the
  * InvalidationQueue is stopped). To prevent stale entries from surviving
- * a Disable/Enable cycle, Disable() now drains the queue, clears all
+ * a Disable/Enable cycle, Disable() drains the queue, clears all
  * entries, then disables.
  */
 TEST(CacheManagerTest, DisableClearsCacheToAvoidStaleness) {
@@ -1131,9 +1130,8 @@ TEST(CacheManagerTest, PerTableNgramSettings) {
 /**
  * @brief Test that LRU eviction cleans up invalidation metadata
  *
- * This is a regression test for a bug where LRU eviction removed entries
- * from the cache but did not unregister them from the InvalidationManager,
- * causing metadata to leak.
+ * LRU eviction must unregister evicted entries from the InvalidationManager
+ * so that no metadata leaks.
  */
 TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
   config::CacheConfig config;
@@ -1213,9 +1211,8 @@ TEST(CacheManagerTest, LRUEvictionCleansUpMetadata) {
 /**
  * @brief Test CacheManager destructor safety with short TTL entries
  *
- * Regression test for P0 use-after-free: QueryCache's LRU background thread
- * could fire eviction callbacks referencing already-destroyed InvalidationManager
- * during CacheManager destruction. The fix explicitly destroys QueryCache before
+ * QueryCache's LRU background thread may fire eviction callbacks that reference
+ * the InvalidationManager. CacheManager destroys QueryCache before
  * InvalidationManager, letting QueryCache join its LRU worker before the
  * callback target disappears.
  */
@@ -1247,20 +1244,16 @@ TEST(CacheManagerTest, DestructorSafeWithShortTTLEntries) {
     // CacheManager destructor runs here - should not crash with use-after-free
   }
 
-  // If we reach here without crash/ASAN/TSAN error, the fix works
+  // If we reach here without crash/ASAN/TSAN error, destruction is safe
   SUCCEED();
 }
 
 /**
- * @brief Regression test for P0-B: Clear/Insert race must not leave
- *        phantom invalidation metadata.
+ * @brief Clear/Insert race must not leave phantom invalidation metadata.
  *
- * Bug: CacheManager::Clear() called query_cache_->Clear() then
- * invalidation_mgr_->Clear() as two independent locked sections. A concurrent
- * Insert() between them registered a key in InvalidationManager pointing to
- * a now-empty QueryCache, leaving phantom metadata.
- *
- * Fix: serialize_mutex_ protects the combined Insert / Clear / ClearTable.
+ * serialize_mutex_ protects the combined Insert / Clear / ClearTable, so an
+ * Insert() cannot register a key in InvalidationManager between the two Clear
+ * steps and point it at an empty QueryCache.
  *
  * Invariant verified: after concurrent Insert + Clear traffic, the
  * InvalidationManager's tracked entry count must equal the QueryCache's
@@ -1353,7 +1346,7 @@ TEST(CacheManagerTest, ClearWaitsForAtomicInsertRegistrationBoundary) {
 /**
  * @brief Test CacheManager destructor safety with small cache triggering evictions
  *
- * Regression test for Exercises LRU eviction during destruction by using
+ * Exercises LRU eviction during destruction by using
  * a very small cache that has active evictions happening.
  */
 TEST(CacheManagerTest, DestructorSafeWithActiveEvictions) {
@@ -1430,21 +1423,14 @@ TEST(CacheManagerTest, ExactCaseTableIdentitiesDoNotShareEntries) {
 }
 
 // =============================================================================
-// CR-7 regression: Disable race
+// Disable race
 // =============================================================================
 
 /**
- * @brief CR-7 regression: a concurrent Insert during Disable() must not leave
+ * @brief A concurrent Insert during Disable() must not leave
  *        entries in the cache after Disable() returns.
  *
- * Before the fix, Disable() ran:
- *   Stop()  -> Clear()  -> enabled_ = false
- *
- * That ordering left a window where Clear() released serialize_mutex_ but
- * enabled_ was still true; an Insert that arrived between Clear's release
- * and the enabled_ flip could re-populate the cache. After the fix, the
- * order is:
- *
+ * Disable() runs:
  *   Stop()  -> enabled_ = false  -> Clear()
  *
  * so any Insert observing enabled_ == false short-circuits and can't
@@ -1506,11 +1492,11 @@ TEST(CacheManagerTest, DisableConcurrentInsertNoResidualEntries) {
   // the race).
   EXPECT_GT(insert_attempts.load(), 0);
 
-  // CR-7 invariant: after Disable() returns, the cache must be empty.
+  // Invariant: after Disable() returns, the cache must be empty.
   // No prior Insert may persist beyond Disable's Clear, regardless of the
   // race timing.
   const auto stats = mgr.GetStatistics();
-  EXPECT_EQ(stats.current_entries, 0U) << "Disable() left entries behind after concurrent Insert (CR-7)";
+  EXPECT_EQ(stats.current_entries, 0U) << "Disable() left entries behind after concurrent Insert";
 
   // Every pre-populated query must miss.
   for (const auto& q : queries) {
@@ -1518,27 +1504,19 @@ TEST(CacheManagerTest, DisableConcurrentInsertNoResidualEntries) {
   }
 
   // Tracked invalidation entries must be zero (no phantom metadata).
-  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U)
-      << "Disable() left InvalidationManager metadata behind (CR-7 phantom)";
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U) << "Disable() left InvalidationManager metadata behind";
 }
 
 // =============================================================================
-// H-C2 regression: Enable order — Invalidate after Enable goes through queue
+// Enable order — Invalidate after Enable goes through queue
 // =============================================================================
 
 /**
- * @brief H-C2 regression: an Invalidate() called immediately after Enable()
+ * @brief An Invalidate() called immediately after Enable()
  *        must not be silently dropped.
  *
- * Before the fix, Enable() set enabled_ = true BEFORE starting the queue.
- * In combination with H-M5 (stopped_ not reset on Start()), an Invalidate()
- * arriving in that window would observe running_ == false, fall into the
- * synchronous Enqueue path — which checked stopped_ first and dropped the
- * call. After the fix, Enable() starts the queue first (which resets
- * stopped_) and only then flips enabled_ = true.
- *
- * Combined coverage of H-C2 and H-M5 via CacheManager: Disable -> Enable ->
- * Invalidate must work end-to-end.
+ * Enable() starts the queue first (which resets stopped_) and only then
+ * flips enabled_ = true, so Disable -> Enable -> Invalidate works end-to-end.
  */
 TEST(CacheManagerTest, EnableThenImmediateInvalidateDelivers) {
   config::CacheConfig config;
@@ -1564,19 +1542,18 @@ TEST(CacheManagerTest, EnableThenImmediateInvalidateDelivers) {
   ASSERT_TRUE(mgr.Insert(query, result, ngrams, 15.0));
   ASSERT_TRUE(mgr.Lookup(query).has_value());
 
-  // Immediately invalidate. Under H-M5/H-C2 bugs, this would have been
-  // silently dropped (stopped_ stuck at true OR Enqueue's running_ check
-  // failing because Start hadn't run yet).
+  // Immediately invalidate; it must not be dropped by a stale stopped_
+  // flag or a queue that has not started yet.
   mgr.Invalidate("posts", "", "golang tutorial");
 
   // Wait briefly for the worker to process the invalidation.
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
-  EXPECT_FALSE(mgr.Lookup(query).has_value()) << "Invalidate after Disable/Enable cycle was dropped (H-C2 + H-M5)";
+  EXPECT_FALSE(mgr.Lookup(query).has_value()) << "Invalidate after Disable/Enable cycle was dropped";
 }
 
 /**
- * @brief Combined H-C2 + H-M5 regression: many Disable/Enable cycles each
+ * @brief Many Disable/Enable cycles each
  *        leave Invalidate() functional.
  */
 TEST(CacheManagerTest, DisableEnableCycleInvalidationStillWorks) {

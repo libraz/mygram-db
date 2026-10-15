@@ -1,6 +1,6 @@
 /**
  * @file thread_pool_saturation_test.cpp
- * @brief Regression tests anchoring the reactor I/O model's thread-pool
+ * @brief Tests anchoring the reactor I/O model's thread-pool
  *        invariants.
  *
  * Under the reactor I/O model, persistent idle connections live in the
@@ -231,7 +231,7 @@ TEST_F(ThreadPoolSaturationTest, LateClientServedDespitePinnedIdleClientsInDefau
 }
 
 /**
- * Regression test for the auto-sized thread pool under the reactor I/O
+ * Auto-sized thread pool under the reactor I/O
  * model.
  *
  * With `worker_threads=0` → auto-size = max(hw*2, 4), persistent idle

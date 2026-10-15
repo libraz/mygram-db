@@ -1,6 +1,6 @@
 /**
  * @file reactor_connection_test.cpp
- * @brief Unit tests for ReactorConnection (Step 2.T4).
+ * @brief Unit tests for ReactorConnection .
  *
  * Test harness uses a socketpair(AF_UNIX, SOCK_STREAM) so the test controls
  * one end and ReactorConnection owns the other.  The RC-owned fd is put into
@@ -358,13 +358,13 @@ TEST_F(ReactorConnectionNoDispatcherTest, UnixPeerGetsStableRateLimitIdentity) {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 stubs
+// Stubs
 // ---------------------------------------------------------------------------
 
-// SKIP — Step 3: non-blocking write queue not yet implemented.
+// SKIP — non-blocking write queue not yet implemented.
 // TEST(..., QueueCapRejectsOversizedWrite) {}
 
-// SKIP — Step 2 has no EnqueueResponse method.
+// SKIP — no EnqueueResponse method.
 // TEST(..., EnqueueResponseFailsWhenClosing) {}
 
 // ---------------------------------------------------------------------------
@@ -1289,28 +1289,23 @@ TEST_F(ReactorConnectionTest, DrainTaskOrderingPreserved) {
 
 // SKIP — DrainTaskReschedulesAfterEmptyCheck: deterministic triggering of the
 // reschedule window requires injecting artificial delays between queue-empty
-// check and drain_scheduled_ CAS; covered by TSan stress runs in Step 2.T5.
+// check and drain_scheduled_ CAS; covered by TSan stress runs.
 
 // ---------------------------------------------------------------------------
-// Bug fix regression (P1-3): EofWithFrameDispatchedDoesNotDropResponse
+// EofWithFrameDispatchedDoesNotDropResponse
 //
-// Reproduces the race where:
+// Race covered:
 //   1. peer half-closes (recv()==0 → read_eof_=true).
-//   2. OnReadable's tail check formerly released frame_mutex_ before
-//      acquiring write_mutex_, so a concurrent DrainTask finishing between
-//      the two locks could push a response into write_queue_ AFTER the
-//      first lock observed pending_frames_ empty but BEFORE the second lock
-//      observed write_queue_, leading the close-decision to fire and drop
-//      the response.
+//   2. A concurrent DrainTask pushes a response into write_queue_ while
+//      OnReadable's tail check decides whether to close.
 //
-// Post-fix: the empty-queue test holds both mutexes simultaneously, so the
+// The empty-queue test holds both frame_mutex_ and write_mutex_ simultaneously, so the
 // drain task's response push is either fully observed (close suppressed)
 // or fully invisible (drain task hasn't dispatched yet, but pending_frames_
 // is non-empty so close is suppressed via the first condition).
 //
 // This test sends a frame, half-closes the write side from the peer, and
-// asserts the response arrives on the peer fd. With the bug, the response
-// is occasionally lost; with the fix, it is always delivered.
+// asserts the response always arrives on the peer fd.
 // ---------------------------------------------------------------------------
 
 TEST_F(ReactorConnectionTest, EofWithFrameDispatchedDoesNotDropResponse) {
@@ -1326,7 +1321,7 @@ TEST_F(ReactorConnectionTest, EofWithFrameDispatchedDoesNotDropResponse) {
   EXPECT_TRUE(conn_->OnReadable());
 
   // The drain task dispatches the frame and enqueues a response. Wait for
-  // it to arrive on the peer fd. If the bug's race triggers, this read
+  // it to arrive on the peer fd. If the race triggers, this read
   // either times out (response dropped) or sees only EOF.
   ASSERT_TRUE(WaitReadable(peer_fd_, 3000)) << "Response was dropped — close decision raced with drain task";
   char buf[256] = {};

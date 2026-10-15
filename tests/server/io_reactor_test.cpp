@@ -1,6 +1,6 @@
 /**
  * @file io_reactor_test.cpp
- * @brief Unit tests for IoReactor (Step 2.T5).
+ * @brief Unit tests for IoReactor.
  *
  * Uses MockEventMultiplexer injected via SetMultiplexerFactoryForTest() to
  * exercise registration, unregistration, event dispatch, and lifecycle without
@@ -719,14 +719,12 @@ TEST_F(IoReactorTest, ShutdownWith500ActiveConnectionsIsClean) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 18: StartStopRapidCycleNoThreadLeak (Bug P1-6 regression)
+// Test 18: StartStopRapidCycleNoThreadLeak
 //
-// Repeats Start()→Stop() many times. Without the start_stop_mutex_ added in
-// the P1-6 fix, a Stop() that observed running_=true set by an interleaving
-// Start could exchange running_ back to false, find event_loop_thread_
-// non-joinable (Start had not yet assigned it), and silently let the
-// subsequently-spawned thread leak. The test process completing without
-// thread-sanitizer warnings or hangs validates the fix.
+// Repeats Start()→Stop() many times. Without start_stop_mutex_, a Stop() that observed running_=true set by an
+// interleaving Start could exchange running_ back to false, find event_loop_thread_ non-joinable (Start had not yet
+// assigned it), and silently let the subsequently-spawned thread leak. The test process completing without
+// thread-sanitizer warnings or hangs passes the test.
 // ---------------------------------------------------------------------------
 
 TEST_F(IoReactorTest, StartStopRapidCycleNoThreadLeak) {
@@ -743,7 +741,7 @@ TEST_F(IoReactorTest, StartStopRapidCycleNoThreadLeak) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 19: StartStopConcurrentNoLeak (Bug P1-6 regression)
+// Test 19: StartStopConcurrentNoLeak
 //
 // Drives Start/Stop from two threads simultaneously and confirms the reactor
 // reaches a consistent stopped state without orphaning the event-loop thread.
@@ -779,10 +777,10 @@ TEST_F(IoReactorTest, StartStopConcurrentNoLeak) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 20: RegisterRaceWithStopLeavesNoStaleEntries (Bug P1-2 regression)
+// Test 20: RegisterRaceWithStopLeavesNoStaleEntries
 //
 // Hammers Register from a worker thread while the main thread issues Stop().
-// The bug fix moves connections_ insertion under mux_lifecycle_'s shared
+// connections_ insertion happens under mux_lifecycle_'s shared
 // lock, so a Register either succeeds (connection is registered AND added to
 // the mux before Stop's exclusive mux_lifecycle_ acquisition can proceed) or
 // fails cleanly (running_=false observed, no map insert).
@@ -793,7 +791,7 @@ TEST_F(IoReactorTest, StartStopConcurrentNoLeak) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Test 21: IdleConnectionIsReaped (Fix N-3)
+// Test 21: IdleConnectionIsReaped
 //
 // Configures a reactor with idle_timeout_sec=1 and reaper_interval_sec=1,
 // registers a connection, and waits past the idle deadline. The reactor's
@@ -838,7 +836,7 @@ TEST_F(IoReactorTest, IdleConnectionIsReaped) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 22: ActiveConnectionIsNotReaped (Fix N-3)
+// Test 22: ActiveConnectionIsNotReaped
 //
 // Same setup as IdleConnectionIsReaped but the test continuously writes
 // non-frame data to the peer end of the socket so the reactor sees
@@ -965,11 +963,10 @@ TEST_F(IoReactorTest, InitialReadTimeoutClosesConnectionDespitePartialBytes) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 23: RegisterRollbackOnMuxAddFailure (Fix N-5)
+// Test 23: RegisterRollbackOnMuxAddFailure
 //
-// MockEventMultiplexer can be configured to fail Add(). The fix reorders
-// Register so that mux_->Add runs before connections_.emplace, eliminating
-// the rollback path. This test confirms that on Add failure, the
+// MockEventMultiplexer can be configured to fail Add(). Register
+// runs mux_->Add before connections_.emplace, so there is no rollback path. This test confirms that on Add failure, the
 // connections_ map is left untouched (no leftover entries to clean up).
 // ---------------------------------------------------------------------------
 
@@ -987,9 +984,8 @@ TEST_F(IoReactorTest, RegisterRollbackOnMuxAddFailure) {
   auto result = reactor_->Register(conn);
   ASSERT_FALSE(result) << "Register should have failed because mux_->Add was forced to fail";
 
-  // Critical invariant: connections_ must be empty. Pre-fix this could be 1
-  // (entry inserted before the mux_->Add attempt, never rolled back if the
-  // rollback path itself raced).
+  // Critical invariant: connections_ must be empty (no entry is
+  // inserted before the mux_->Add attempt).
   EXPECT_EQ(reactor_->ConnectionCount(), 0u) << "connections_ must remain empty when mux_->Add fails";
 
   // Allow re-registration after the mock recovers — confirms the failed
@@ -1000,22 +996,19 @@ TEST_F(IoReactorTest, RegisterRollbackOnMuxAddFailure) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 24: StopReturnsPromptlyWithLongPollTimeout (Fix H-N3)
+// Test 24: StopReturnsPromptlyWithLongPollTimeout
 //
-// Pre-fix, Stop() set running_=false but had to wait for the in-flight
-// Poll(timeout_ms) to elapse before the event loop observed the flag. With
-// poll_timeout_ms set to several seconds, Stop() blocked the calling
-// thread (and start_stop_mutex_) for that whole duration, which made
-// rapid restart cycles (HttpServer / TcpServer reconfiguration) extremely
-// slow.
+// Without a wake, Stop() would wait for the in-flight Poll(timeout_ms) to
+// elapse, blocking the caller (and start_stop_mutex_) for the whole
+// poll_timeout_ms and slowing rapid restart cycles.
 //
-// The fix wires up EventMultiplexer::Wake() (EVFILT_USER on kqueue,
+// EventMultiplexer::Wake() (EVFILT_USER on kqueue,
 // eventfd on epoll, cv-signal on the mock) so Stop() can interrupt the
 // blocked Poll() immediately. We assert that Stop() returns within a
 // bound that's well under the configured poll_timeout_ms.
 // ---------------------------------------------------------------------------
 TEST_F(IoReactorTest, StopReturnsPromptlyWithLongPollTimeout) {
-  // Configure a long poll timeout so the regression would manifest as a
+  // Configure a long poll timeout so a missed wake would manifest as a
   // multi-second wait inside Stop().
   ReactorConfig cfg;
   cfg.poll_timeout_ms = 5000;
@@ -1040,7 +1033,7 @@ TEST_F(IoReactorTest, StopReturnsPromptlyWithLongPollTimeout) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 25: StopReturnsPromptlyWithRealBackend (Fix H-N3)
+// Test 25: StopReturnsPromptlyWithRealBackend
 //
 // Same intent as the mock-backed test, but exercises the real kqueue or
 // epoll wake primitive end-to-end. The real backends arm a sentinel filter
@@ -1115,7 +1108,7 @@ TEST_F(IoReactorTest, RegisterRaceWithStopLeavesNoStaleEntries) {
     stopper.join();
 
     // Invariant: after Stop, the connection map is empty regardless of how
-    // many registers succeeded/failed. The bug being regressed against
+    // many registers succeeded/failed. A stale entry
     // would manifest as ConnectionCount() > 0 (entries inserted by a
     // Register that won the race after Stop's clear()).
     //

@@ -208,7 +208,7 @@ gtest_discover_tests(dump_format_v2_test
   PROPERTIES RESOURCE_LOCK storage_io
 )
 
-# DocumentStore retrieval regression tests
+# DocumentStore retrieval tests
 add_executable(document_store_retrieval_test
   document_store_retrieval_test.cpp
 )

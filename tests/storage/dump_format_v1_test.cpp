@@ -642,7 +642,7 @@ TEST(DumpFormatV1Test, WriteRejectsOverLengthTableContextNameWithoutReplacingTar
 }
 
 // ============================================================================
-// Config section bounds check (#6)
+// Config section bounds check
 // ============================================================================
 
 /**
@@ -701,7 +701,7 @@ TEST(DumpFormatV1Test, WriteHeaderRejectsOverLengthGtidWithoutEmittingBytes) {
 }
 
 // ============================================================================
-// VerifyDumpIntegrity with corrupted header (#27)
+// VerifyDumpIntegrity with corrupted header
 // ============================================================================
 
 namespace {
@@ -865,7 +865,7 @@ TEST(DumpFormatV1Test, RejectsZeroFileCrcHeader) {
 /**
  * @brief Test that ReadDumpV1 returns kStorageVersionMismatch for version too new
  *
- * Validates that the error propagation fix correctly returns a
+ * Validates that ReadDumpV1 returns a
  * kStorageVersionMismatch error code when the dump file has a version
  * number higher than the maximum supported version.
  */

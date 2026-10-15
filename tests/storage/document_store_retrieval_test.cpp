@@ -1,6 +1,6 @@
 /**
  * @file document_store_retrieval_test.cpp
- * @brief Regression tests for DocumentStore multi-column batch retrieval
+ * @brief Tests for DocumentStore multi-column batch retrieval
  *
  * Verifies that GetFilterValuesBatchMultiColumn (transposed loop order)
  * produces the same results as single-column GetFilterValuesBatch.
@@ -17,7 +17,7 @@
 using namespace mygramdb::storage;
 
 /**
- * @brief Regression test: GetFilterValuesBatchMultiColumn loop order optimization
+ * @brief GetFilterValuesBatchMultiColumn loop order
  *
  * Verifies that the transposed loop order (doc_ids outer, columns inner)
  * produces the same results as single-column retrieval.

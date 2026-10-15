@@ -139,7 +139,7 @@ TEST_F(EditDistanceTest, ExactWordAmongMany) {
   EXPECT_TRUE(ContainsFuzzyMatch("a b c hello d e", "hello", 0));
 }
 
-// --- PERF-1: Stack allocation - verify correctness for various lengths ---
+// --- Stack allocation - verify correctness for various lengths ---
 
 TEST_F(EditDistanceTest, LongAsciiStrings) {
   // Strings longer than typical but still ASCII
@@ -149,7 +149,7 @@ TEST_F(EditDistanceTest, LongAsciiStrings) {
   EXPECT_EQ(LevenshteinDistance(a, b, 5), 1);
 }
 
-// --- EDGE-1: Whitespace splitting - tabs and newlines ---
+// --- Whitespace splitting - tabs and newlines ---
 
 TEST_F(EditDistanceTest, TabSeparatedWords) {
   EXPECT_TRUE(ContainsFuzzyMatch("hello\tworld", "hello", 0));

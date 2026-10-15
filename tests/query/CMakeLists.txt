@@ -120,7 +120,7 @@ gtest_discover_tests(highlighter_test
   DISCOVERY_TIMEOUT 30
 )
 
-# Result sorter ASC/DESC bug reproduction test
+# Result sorter ASC/DESC test
 
 add_executable(result_sorter_asc_desc_test
   result_sorter_asc_desc_test.cpp

@@ -302,8 +302,7 @@ TEST(ConfigTest, DefaultValues) {
   EXPECT_FALSE(config.memory.normalize.lower);
   EXPECT_EQ(config.api.tcp.port, 11016);
   EXPECT_FALSE(config.api.http.enable);
-  // H-N8: HTTP read/write timeouts must default to kHttpTimeoutSec when not
-  // specified in the YAML; they are no longer hardcoded inside HttpServer.
+  // HTTP read/write timeouts default to kHttpTimeoutSec when not specified in the YAML.
   EXPECT_EQ(config.api.http.read_timeout_sec, defaults::kHttpTimeoutSec);
   EXPECT_EQ(config.api.http.write_timeout_sec, defaults::kHttpTimeoutSec);
 }
@@ -824,13 +823,9 @@ TEST(ConfigTest, SameTableNameInDifferentDatabasesIsAccepted) {
 }
 
 /**
- * @brief Regression test for H-N8: api.http.read_timeout_sec /
- *        write_timeout_sec must propagate from YAML into Config.
+ * @brief api.http.read_timeout_sec / write_timeout_sec propagate from YAML into Config.
  *
- * Pre-fix the fields did not exist on `ApiConfig::http`, so the corresponding
- * YAML keys were silently dropped and HttpServer always ran with the
- * hardcoded 5-second defaults. This test pins the wiring: an operator that
- * sets these keys must see them on the parsed Config struct.
+ * An operator that sets these keys must see them on the parsed Config struct.
  */
 TEST(ConfigTest, HttpTimeoutsParsedFromYaml) {
   std::ofstream f("http_timeout.yaml");
@@ -2228,9 +2223,8 @@ TEST(ConfigTest, MysqlPortEnvironmentOverrideEnforcesSchemaRange) {
  * @brief MYGRAM_API_ADMIN_TOKEN must apply even without an api: block.
  *
  * The env-var override exists precisely so credentials can stay out of the
- * config file; admin_token resolution used to be nested inside
- * `if (root.contains("api"))`, so a file with no api: section never
- * consulted the environment at all and admin_token stayed empty.
+ * config file; admin_token resolution is independent of the api: section, so a
+ * file without it still consults the environment.
  */
 TEST(ConfigTest, AdminTokenEnvironmentOverrideAppliesWithoutApiBlock) {
   const std::string path = TempConfigPath("env_admin_token_no_api_block.yaml");
@@ -2258,9 +2252,8 @@ TEST(ConfigTest, AdminTokenEnvironmentOverrideAppliesWithoutApiBlock) {
  * @brief MYGRAM_MYSQL_* env overrides must apply even without a mysql: block.
  *
  * The same "credentials stay out of the file" contract MYGRAM_API_ADMIN_TOKEN
- * relies on: ParseMysqlConfig used to run only inside `if (root.contains
- * ("mysql"))`, so a file with no mysql: section never consulted the
- * environment at all and every mysql.* field stayed at its empty default.
+ * relies on: ParseMysqlConfig runs even without a mysql: section, so the
+ * environment is still consulted for the mysql.* fields.
  */
 TEST(ConfigTest, MysqlEnvironmentOverridesApplyWithoutMysqlBlock) {
   const std::string path = TempConfigPath("env_mysql_no_mysql_block.yaml");

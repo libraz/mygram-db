@@ -458,7 +458,7 @@ query::DebugInfo MakeCacheDebugInfo(query::CacheDebugInfo::Status status) {
 }  // namespace
 
 /**
- * @brief Regression: SEARCH and COUNT must emit the same cache-debug lines
+ * @brief SEARCH and COUNT must emit the same cache-debug lines
  *        for any given cache state.
  *
  * Pre-unification, FormatSearchResponse used "cache: miss\r\ncache_reason:

@@ -115,7 +115,7 @@ TEST_F(DocumentStoreDocIdOverflowTest, NormalOperationBeforeOverflow) {
   ASSERT_FALSE(result3);
   EXPECT_EQ(result3.error().code(), ErrorCode::kStorageDocIdExhausted);
 
-  // Verify previously added documents are still retrievable
+  // Verify the earlier documents are still retrievable
   auto doc1 = store_.GetDocument(1);
   ASSERT_TRUE(doc1.has_value());
   EXPECT_EQ(doc1->primary_key, "pk_1");
@@ -243,14 +243,13 @@ TEST_F(DocumentStoreDocIdOverflowTest, ExhaustionPersistsAfterHighestIdAndAllDoc
 }
 
 // ============================================================================
-// DocID rollback regression tests
+// DocID rollback
 // ============================================================================
 
 /**
- * @brief Regression test: next_doc_id_ is restored on AddDocument failure
+ * @brief next_doc_id_ is restored on AddDocument failure
  *
- * Previously, when filter_index_->AddDocument threw an exception in AddDocument,
- * next_doc_id_ was not decremented, permanently leaking a DocID.
+ * When filter_index_->AddDocument throws, next_doc_id_ is decremented so no DocID leaks.
  */
 TEST(DocumentStoreDocIdRollbackTest, NextDocIdRestoredAfterSingleDocFailure) {
   TestableDocumentStore store;

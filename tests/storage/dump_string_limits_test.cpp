@@ -314,7 +314,7 @@ TEST(DumpStringLimitsTest, FilterNameExceedsIdentifierLimit) {
 
 TEST(DumpStringLimitsTest, MassiveStringLengthRejected) {
   // Simulate a malicious dump field claiming 256MB string length.
-  // The old limit (256MB) would have accepted this; new limits reject it.
+  // 256MB exceeds the string limits and must be rejected.
   uint32_t malicious_length = 256 * 1024 * 1024;  // 256MB
 
   // Test via GTID field (limit: 8KB)

@@ -143,7 +143,7 @@ class TestDDLEdgeCases:
     """Test edge cases in DDL handling.
 
     Tests are ordered to run non-destructive tests first, then destructive ones.
-    Replication recovery failures are test failures; no stale known-bug skip is
+    Replication recovery failures are test failures; no skip is
     allowed to hide a stopped reader.
     """
 

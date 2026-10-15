@@ -463,9 +463,8 @@ TEST_F(RateLimiterTest, AtomicStatsConsistencyUnderConcurrency) {
 /**
  * @brief Test that ResetStats is thread-safe with concurrent AllowRequest/GetStats
  *
- * Regression test: ResetStats previously did not acquire mutex_, causing
- * GetStats (which reads under mutex) to observe inconsistent counter values
- * where total < allowed + blocked.
+ * ResetStats acquires mutex_, so GetStats (which reads under mutex) never
+ * observes inconsistent counter values where total < allowed + blocked.
  */
 TEST_F(RateLimiterTest, ResetStatsConcurrentConsistency) {
   RateLimiter limiter(5, 5, 10000, std::chrono::seconds(2), 300);
@@ -511,8 +510,8 @@ TEST_F(RateLimiterTest, ResetStatsConcurrentConsistency) {
 /**
  * @brief Test that IPv6 addresses are treated as distinct clients
  *
- * Regression test: IPv6 clients previously all shared the "unknown" bucket
- * because only AF_INET was handled in peer address extraction.
+ * Peer address extraction handles AF_INET6, so IPv6 clients do not share the
+ * "unknown" bucket.
  */
 TEST_F(RateLimiterTest, IPv6DistinctClients) {
   RateLimiter limiter(5, 5);
@@ -565,7 +564,7 @@ TEST_F(RateLimiterTest, IPv6FullAddressFormat) {
 }
 
 /**
- * @brief Fix N-4: a single shared RateLimiter instance enforces a unified
+ * @brief A single shared RateLimiter instance enforces a unified
  *        per-client quota across multiple call sites.
  *
  * The intent of the production wiring is that TcpServer and HttpServer
@@ -595,7 +594,7 @@ TEST_F(RateLimiterTest, SharedInstanceAccountsAcrossCallers) {
   EXPECT_TRUE(http_caller->AllowRequest(client_ip));
 
   // Bucket is now empty for this client. Subsequent requests from EITHER
-  // caller MUST be denied — the failure mode the fix prevents is one caller
+  // caller MUST be denied — the failure mode is one caller
   // having its own private bucket, which would let the client effectively
   // double its quota by talking to both protocols.
   EXPECT_FALSE(tcp_caller->AllowRequest(client_ip)) << "TCP request must be denied after shared bucket exhausted";
@@ -611,15 +610,12 @@ TEST_F(RateLimiterTest, SharedInstanceAccountsAcrossCallers) {
 }
 
 /**
- * @brief H-N2 smoke test: GetStats() does not block the AllowRequest hot
+ * @brief Smoke test: GetStats() does not block the AllowRequest hot
  *        path on the per-client buckets mutex.
  *
- * Pre-fix, GetStats() acquired `mutex_` for the entire body, including the
- * three atomic counter loads. AllowRequest contends for the same mutex, so
- * an /info request that lands during a busy traffic burst would block
- * every concurrent AllowRequest until it finished. The fix narrows the
- * lock to only `client_buckets_.size()` and reads the atomic counters
- * outside the critical section.
+ * GetStats() locks only for `client_buckets_.size()` and reads the atomic
+ * counters outside the critical section, so an /info request during a busy
+ * traffic burst does not block concurrent AllowRequest calls.
  *
  * This is a smoke test (per the spec): timing-based "GetStats does not
  * block AllowRequest" assertions are flaky on shared CI hosts. We instead
@@ -679,12 +675,10 @@ TEST_F(RateLimiterTest, GetStatsDoesNotBlockAllowRequest) {
 }
 
 /**
- * @brief Perf-3 regression: the background sweeper removes expired buckets
+ * @brief The background sweeper removes expired buckets
  *        without requiring AllowRequest to be invoked.
  *
- * Cleanup was previously inline inside AllowRequest, so a tracked client
- * could only be evicted by a subsequent call. The sweeper now runs on a
- * dedicated thread; we wait long enough for one sweep cycle and assert the
+ * The sweeper runs on a dedicated thread; we wait long enough for one sweep cycle and assert the
  * bucket count drops to zero without any further AllowRequest calls.
  */
 TEST_F(RateLimiterTest, BackgroundSweeperRemovesExpiredBuckets) {
@@ -706,10 +700,9 @@ TEST_F(RateLimiterTest, BackgroundSweeperRemovesExpiredBuckets) {
 }
 
 /**
- * @brief Perf-3 regression: AllowRequest no longer performs cleanup inline.
+ * @brief AllowRequest does not perform cleanup inline.
  *
- * This test exercises the same scenario the legacy inline-cleanup tests
- * used (rapid bursts from many clients) but without relying on AllowRequest
+ * Exercises rapid bursts from many clients without relying on AllowRequest
  * to trigger the sweep. After the sweeper runs, ephemeral buckets should be
  * gone; without a sweeper, GetTrackedClientCount would remain at the burst
  * size until the next AllowRequest call.
