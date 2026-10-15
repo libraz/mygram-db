@@ -381,6 +381,18 @@ class Index {
   std::atomic<uint64_t> load_generation_{0};
 
   /**
+   * @brief Estimate memory for one posting while postings_mutex_ is held
+   * @pre Caller holds postings_mutex_ (shared or exclusive)
+   */
+  [[nodiscard]] size_t PostingMemoryUsageLocked(const std::string& term, const PostingList& posting) const;
+
+  /**
+   * @brief Estimate flat-map storage while postings_mutex_ is held
+   * @pre Caller holds postings_mutex_ (shared or exclusive)
+   */
+  [[nodiscard]] size_t PostingMapMemoryUsageLocked() const;
+
+  /**
    * @brief Get posting list for term (read-only)
    * @param term Search term
    * @return Pointer to posting list, or nullptr if not found

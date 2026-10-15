@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <sstream>
 
 #include "storage/document_store.h"
 
@@ -167,6 +168,78 @@ TEST_F(DocumentStoreDocIdOverflowTest, DuplicatePrimaryKeySkipsOverflowCheck) {
   // Should succeed and return the existing DocId (before overflow check)
   ASSERT_TRUE(result2);
   EXPECT_EQ(*result2, first_id);
+}
+
+TEST_F(DocumentStoreDocIdOverflowTest, ExhaustedCounterRoundTripsWithMaximumDocId) {
+  const DocId max_doc_id = std::numeric_limits<DocId>::max();
+  store_.SetNextDocIdForTest(max_doc_id);
+
+  const auto added = store_.AddDocument("max_doc_id");
+  ASSERT_TRUE(added.has_value());
+  EXPECT_EQ(*added, max_doc_id);
+  EXPECT_EQ(store_.GetNextDocIdForTest(), 0);
+
+  std::stringstream snapshot;
+  ASSERT_TRUE(store_.SaveToStream(snapshot));
+
+  TestableDocumentStore restored;
+  ASSERT_TRUE(restored.LoadFromStream(snapshot));
+  EXPECT_EQ(restored.GetNextDocIdForTest(), 0);
+  const auto restored_id = restored.GetDocId("max_doc_id");
+  ASSERT_TRUE(restored_id.has_value());
+  EXPECT_EQ(*restored_id, max_doc_id);
+
+  const auto next = restored.AddDocument("after_max_doc_id");
+  ASSERT_FALSE(next.has_value());
+  EXPECT_EQ(next.error().code(), ErrorCode::kStorageDocIdExhausted);
+}
+
+TEST_F(DocumentStoreDocIdOverflowTest, ExhaustionPersistsAfterHighestIdAndAllDocumentsAreRemoved) {
+  const DocId max_doc_id = std::numeric_limits<DocId>::max();
+  store_.SetNextDocIdForTest(max_doc_id - 1);
+
+  const auto lower = store_.AddDocument("lower_doc_id");
+  ASSERT_TRUE(lower.has_value());
+  EXPECT_EQ(*lower, max_doc_id - 1);
+  const auto highest = store_.AddDocument("highest_doc_id");
+  ASSERT_TRUE(highest.has_value());
+  EXPECT_EQ(*highest, max_doc_id);
+  EXPECT_EQ(store_.GetNextDocIdForTest(), 0);
+
+  ASSERT_TRUE(store_.RemoveDocument(*highest));
+  EXPECT_EQ(store_.Size(), 1);
+  EXPECT_EQ(store_.GetNextDocIdForTest(), 0);
+
+  std::stringstream nonempty_snapshot;
+  ASSERT_TRUE(store_.SaveToStream(nonempty_snapshot));
+  TestableDocumentStore restored;
+  ASSERT_TRUE(restored.LoadFromStream(nonempty_snapshot));
+  EXPECT_EQ(restored.Size(), 1);
+  EXPECT_EQ(restored.GetNextDocIdForTest(), 0);
+
+  const auto while_nonempty = restored.AddDocument("still_exhausted");
+  ASSERT_FALSE(while_nonempty.has_value());
+  EXPECT_EQ(while_nonempty.error().code(), ErrorCode::kStorageDocIdExhausted);
+
+  ASSERT_TRUE(restored.RemoveDocument(*lower));
+  EXPECT_EQ(restored.Size(), 0);
+
+  std::stringstream empty_snapshot;
+  ASSERT_TRUE(restored.SaveToStream(empty_snapshot));
+  TestableDocumentStore empty_restored;
+  ASSERT_TRUE(empty_restored.LoadFromStream(empty_snapshot));
+  EXPECT_EQ(empty_restored.Size(), 0);
+  EXPECT_EQ(empty_restored.GetNextDocIdForTest(), 0);
+
+  const auto while_empty = empty_restored.AddDocument("still_exhausted_after_clear");
+  ASSERT_FALSE(while_empty.has_value());
+  EXPECT_EQ(while_empty.error().code(), ErrorCode::kStorageDocIdExhausted);
+
+  empty_restored.Clear();
+  EXPECT_EQ(empty_restored.GetNextDocIdForTest(), 1);
+  const auto after_clear = empty_restored.AddDocument("recovered_after_clear");
+  ASSERT_TRUE(after_clear.has_value());
+  EXPECT_EQ(*after_clear, 1);
 }
 
 // ============================================================================

@@ -177,6 +177,99 @@ TEST(IndexTest, SearchOrLargeDataset) {
   }
 }
 
+TEST(IndexTest, SearchOrAndSearchNotUnionRoaringSnapshotsWithoutMutation) {
+  Index index(1, 0, /*roaring_threshold=*/0.1);
+  std::vector<DocId> all_docs;
+  all_docs.reserve(14);
+
+  for (DocId doc_id = 1; doc_id <= 14; ++doc_id) {
+    std::string text;
+    if (doc_id <= 8) {
+      text += 'a';
+    }
+    if (doc_id >= 5 && doc_id <= 12) {
+      text += 'b';
+    }
+    if (doc_id >= 9 && doc_id <= 13) {
+      text += 'c';
+    }
+    if (text.empty()) {
+      text = "z";
+    }
+    ASSERT_TRUE(index.AddDocument(doc_id, text));
+    all_docs.push_back(doc_id);
+  }
+  index.Optimize(all_docs.size());
+
+  const auto expected_a = std::vector<DocId>{1, 2, 3, 4, 5, 6, 7, 8};
+  const auto expected_b = std::vector<DocId>{5, 6, 7, 8, 9, 10, 11, 12};
+  const auto expected_c = std::vector<DocId>{9, 10, 11, 12, 13};
+  const auto expected_union = std::vector<DocId>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+  const auto expected_not = std::vector<DocId>{14};
+  const auto before = index.GetStatistics();
+  ASSERT_EQ(before.roaring_bitmap_lists, 3U);
+  ASSERT_EQ(index.SearchAnd({"a"}), expected_a);
+  ASSERT_EQ(index.SearchAnd({"b"}), expected_b);
+  ASSERT_EQ(index.SearchAnd({"c"}), expected_c);
+
+  EXPECT_EQ(index.SearchOr({"a", "missing", "a", "b", "c"}), expected_union);
+  EXPECT_EQ(index.SearchNot(all_docs, {"a", "missing", "a", "b", "c"}), expected_not);
+
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  PostingList::FailNextRoaringOperationForTest(PostingList::TestRoaringFault::kOr);
+  EXPECT_EQ(index.SearchOr({"a", "b", "c"}), expected_union);
+  PostingList::FailNextRoaringOperationForTest(PostingList::TestRoaringFault::kOr);
+  EXPECT_EQ(index.SearchNot(all_docs, {"a", "b", "c"}), expected_not);
+#endif
+
+  EXPECT_EQ(index.SearchAnd({"a"}), expected_a);
+  EXPECT_EQ(index.SearchAnd({"b"}), expected_b);
+  EXPECT_EQ(index.SearchAnd({"c"}), expected_c);
+  const auto after = index.GetStatistics();
+  EXPECT_EQ(after.roaring_bitmap_lists, before.roaring_bitmap_lists);
+  EXPECT_EQ(after.total_postings, before.total_postings);
+}
+
+TEST(IndexTest, SearchOrAndSearchNotUnionMixedSnapshotsWithSortedVectors) {
+  Index index(1, 0, /*roaring_threshold=*/0.2);
+  std::vector<DocId> all_docs;
+  all_docs.reserve(10);
+
+  for (DocId doc_id = 1; doc_id <= 10; ++doc_id) {
+    std::string text;
+    if (doc_id <= 5) {
+      text += 'a';
+    }
+    if (doc_id == 1) {
+      text += 'b';
+    }
+    if (text.empty()) {
+      text = "z";
+    }
+    ASSERT_TRUE(index.AddDocument(doc_id, text));
+    all_docs.push_back(doc_id);
+  }
+  index.Optimize(all_docs.size());
+
+  const auto expected_a = std::vector<DocId>{1, 2, 3, 4, 5};
+  const auto expected_b = std::vector<DocId>{1};
+  const auto expected_union = expected_a;
+  const auto expected_not = std::vector<DocId>{6, 7, 8, 9, 10};
+  const auto before = index.GetStatistics();
+  ASSERT_EQ(before.roaring_bitmap_lists, 2U);
+  ASSERT_EQ(before.delta_encoded_lists, 1U);
+
+  EXPECT_EQ(index.SearchOr({"a", "missing", "b", "a"}), expected_union);
+  EXPECT_EQ(index.SearchNot(all_docs, {"b", "a", "missing", "a"}), expected_not);
+
+  EXPECT_EQ(index.SearchAnd({"a"}), expected_a);
+  EXPECT_EQ(index.SearchAnd({"b"}), expected_b);
+  const auto after = index.GetStatistics();
+  EXPECT_EQ(after.roaring_bitmap_lists, before.roaring_bitmap_lists);
+  EXPECT_EQ(after.delta_encoded_lists, before.delta_encoded_lists);
+  EXPECT_EQ(after.total_postings, before.total_postings);
+}
+
 /**
  * @brief Test NOT search with single term
  */

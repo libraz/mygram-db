@@ -14,6 +14,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "utils/roaring_bitmap_ptr.h"
@@ -313,4 +314,43 @@ TEST_F(FilterIndexTest, ConcurrentReadWriteSafety) {
     EXPECT_NE(std::find(final_ids.begin(), final_ids.end(), doc_id), final_ids.end())
         << "seeded document " << doc_id << " was lost";
   }
+}
+
+// --- ConvertFilterValue ---
+
+TEST(ConvertFilterValueTest, BooleanIsCaseInsensitiveAndRejectsOtherSpellings) {
+  for (const char* spelling : {"1", "true", "TRUE", "True"}) {
+    auto converted = ConvertFilterValue(spelling, false, "boolean");
+    ASSERT_TRUE(converted.has_value()) << spelling;
+    EXPECT_EQ(std::get<bool>(*converted), true) << spelling;
+  }
+  for (const char* spelling : {"0", "false", "FALSE"}) {
+    auto converted = ConvertFilterValue(spelling, false, "boolean");
+    ASSERT_TRUE(converted.has_value()) << spelling;
+    EXPECT_EQ(std::get<bool>(*converted), false) << spelling;
+  }
+  for (const char* spelling : {"yes", "2", "", " 1"}) {
+    EXPECT_FALSE(ConvertFilterValue(spelling, false, "boolean").has_value()) << spelling;
+  }
+}
+
+TEST(ConvertFilterValueTest, NumericRejectsTextTheTypeCannotHold) {
+  EXPECT_TRUE(ConvertFilterValue("-5", false, "bigint").has_value());
+  EXPECT_FALSE(ConvertFilterValue("abc", false, "bigint").has_value());
+  EXPECT_FALSE(ConvertFilterValue("-1", false, "bigint_unsigned").has_value());
+  EXPECT_TRUE(ConvertFilterValue("inf", false, "double").has_value());
+  EXPECT_FALSE(ConvertFilterValue("abc", false, "double").has_value());
+  EXPECT_FALSE(ConvertFilterValue("+1.5", false, "double").has_value());
+  EXPECT_FALSE(ConvertFilterValue("+5", false, "bigint").has_value());
+  EXPECT_FALSE(ConvertFilterValue("300", false, "tinyint").has_value());
+}
+
+TEST(ConvertFilterValueTest, NullYieldsMonostateForAnyType) {
+  auto converted = ConvertFilterValue("", true, "boolean");
+  ASSERT_TRUE(converted.has_value());
+  EXPECT_TRUE(std::holds_alternative<std::monostate>(*converted));
+}
+
+TEST(ConvertFilterValueTest, UnknownTypeFailsConversion) {
+  EXPECT_FALSE(ConvertFilterValue("1", false, "no_such_type").has_value());
 }

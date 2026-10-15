@@ -15,8 +15,10 @@
 #include <variant>
 
 #include "server/log_field_names.h"
+#include "storage/document_field_validation.h"
 #include "storage/document_store.h"
 #include "storage/document_store_internal.h"
+#include "storage/dump_format_limits.h"
 #include "storage/filter_index.h"
 #include "utils/atomic_file_writer.h"
 #include "utils/binary_io.h"
@@ -48,13 +50,14 @@ namespace {
 using mygram::constants::kBytesPerMegabyte;
 
 // Validation constants for deserialization bounds checking
-constexpr uint32_t kMaxGTIDLength = 1024;
-constexpr uint64_t kMaxDocumentCount = 1000000000;  // 1 billion documents
-constexpr uint32_t kMaxPKLength = 1024 * 1024;      // 1MB max for primary key
-constexpr uint32_t kMaxFilterCount = 1000;
-constexpr uint32_t kMaxFilterNameLength = 1024;
-constexpr uint32_t kMaxFilterStringLength = 64 * 1024;           // 64KB max for filter string
-constexpr uint32_t kMaxNormalizedTextLength = 16 * 1024 * 1024;  // 16MB
+using dump_format_limits::docstore::kMaxDocumentCount;
+using dump_format_limits::docstore::kMaxFilterCount;
+using dump_format_limits::docstore::kMaxFilterNameLength;
+using dump_format_limits::docstore::kMaxFilterStringLength;
+using dump_format_limits::docstore::kMaxGtidLength;
+using dump_format_limits::docstore::kMaxNormalizedTextLength;
+using dump_format_limits::docstore::kMaxOriginalTextLength;
+using dump_format_limits::docstore::kMaxPrimaryKeyLength;
 
 // Longest primary key quoted verbatim in a serialization error.
 constexpr size_t kMaxQuotedPrimaryKeyLength = 64;
@@ -77,39 +80,40 @@ Expected<void, Error> DocumentStore::ValidateSerializableLocked(const std::strin
     return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, message));
   };
 
-  if (replication_gtid.size() > kMaxGTIDLength) {
-    return refuse("GTID", replication_gtid.size(), kMaxGTIDLength, std::nullopt, "");
+  if (replication_gtid.size() > kMaxGtidLength) {
+    return refuse("GTID", replication_gtid.size(), kMaxGtidLength, std::nullopt, "");
   }
   if (doc_id_to_pk_.size() > kMaxDocumentCount) {
     return refuse("Document count", doc_id_to_pk_.size(), kMaxDocumentCount, std::nullopt, "");
   }
   for (const auto& [doc_id, primary_key] : doc_id_to_pk_) {
-    if (primary_key.size() > kMaxPKLength) {
-      return refuse("Primary key", primary_key.size(), kMaxPKLength, doc_id, primary_key);
+    if (!IsDocumentFieldLengthValid(primary_key.size(), kMaxPrimaryKeyLength)) {
+      return refuse("Primary key", primary_key.size(), kMaxPrimaryKeyLength, doc_id, primary_key);
     }
     if (auto filter_it = doc_filters_.find(doc_id); filter_it != doc_filters_.end()) {
-      if (filter_it->second.entries.size() > kMaxFilterCount) {
+      if (!IsDocumentFieldLengthValid(filter_it->second.entries.size(), kMaxFilterCount)) {
         return refuse("Filter count", filter_it->second.entries.size(), kMaxFilterCount, doc_id, primary_key);
       }
       for (const auto& [column_id, value] : filter_it->second.entries) {
         const std::string& name = filter_column_names_[column_id];
-        if (name.size() > kMaxFilterNameLength) {
+        if (!IsDocumentFieldLengthValid(name.size(), kMaxFilterNameLength)) {
           return refuse("Filter name", name.size(), kMaxFilterNameLength, doc_id, primary_key);
         }
         if (const auto* string_value = std::get_if<std::string>(&value);
-            string_value != nullptr && string_value->size() > kMaxFilterStringLength) {
+            string_value != nullptr && !IsDocumentFieldLengthValid(string_value->size(), kMaxFilterStringLength)) {
           return refuse("Filter string '" + name + "'", string_value->size(), kMaxFilterStringLength, doc_id,
                         primary_key);
         }
       }
     }
     if (auto text_it = doc_texts_.find(doc_id);
-        text_it != doc_texts_.end() && text_it->second.size() > kMaxNormalizedTextLength) {
+        text_it != doc_texts_.end() && !IsDocumentFieldLengthValid(text_it->second.size(), kMaxNormalizedTextLength)) {
       return refuse("Normalized text", text_it->second.size(), kMaxNormalizedTextLength, doc_id, primary_key);
     }
     if (auto original_it = original_texts_.find(doc_id);
-        original_it != original_texts_.end() && original_it->second.size() > kMaxNormalizedTextLength) {
-      return refuse("Original text", original_it->second.size(), kMaxNormalizedTextLength, doc_id, primary_key);
+        original_it != original_texts_.end() &&
+        !IsDocumentFieldLengthValid(original_it->second.size(), kMaxOriginalTextLength)) {
+      return refuse("Original text", original_it->second.size(), kMaxOriginalTextLength, doc_id, primary_key);
     }
   }
   return {};
@@ -280,24 +284,19 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     return MakeUnexpected(
         MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID length from snapshot", context));
   }
-  if (gtid_len > kMaxGTIDLength) {
+  if (gtid_len > kMaxGtidLength) {
     return MakeUnexpected(MakeError(
         mygram::utils::ErrorCode::kStorageCorrupted,
-        "GTID length " + std::to_string(gtid_len) + " exceeds maximum allowed " + std::to_string(kMaxGTIDLength),
+        "GTID length " + std::to_string(gtid_len) + " exceeds maximum allowed " + std::to_string(kMaxGtidLength),
         context));
   }
+  std::string loaded_gtid(gtid_len, '\0');
   if (gtid_len > 0) {
-    std::string gtid(gtid_len, '\0');
-    in.read(gtid.data(), static_cast<std::streamsize>(gtid_len));
+    in.read(loaded_gtid.data(), static_cast<std::streamsize>(gtid_len));
     if (in.gcount() != static_cast<std::streamsize>(gtid_len)) {
       return MakeUnexpected(
           MakeError(mygram::utils::ErrorCode::kStorageReadError, "Failed to read GTID data from snapshot", context));
     }
-    if (replication_gtid != nullptr) {
-      *replication_gtid = gtid;
-    }
-  } else if (replication_gtid != nullptr) {
-    replication_gtid->clear();
   }
 
   // Read document count
@@ -343,6 +342,10 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
                                       "Failed to read doc_id for document " + std::to_string(i), context));
     }
     auto doc_id = static_cast<DocId>(doc_id_value);
+    if (doc_id == 0) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Document " + std::to_string(i) + " uses the reserved doc_id 0", context));
+    }
     if (doc_id > max_loaded_doc_id) {
       max_loaded_doc_id = doc_id;
     }
@@ -354,11 +357,11 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
                                       "Failed to read primary key length for doc_id " + std::to_string(doc_id),
                                       context));
     }
-    if (pk_len > kMaxPKLength) {
-      return MakeUnexpected(MakeError(
-          mygram::utils::ErrorCode::kStorageCorrupted,
-          "Primary key length " + std::to_string(pk_len) + " exceeds maximum allowed " + std::to_string(kMaxPKLength),
-          context));
+    if (pk_len > kMaxPrimaryKeyLength) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
+                                      "Primary key length " + std::to_string(pk_len) + " exceeds maximum allowed " +
+                                          std::to_string(kMaxPrimaryKeyLength),
+                                      context));
     }
 
     std::string primary_key_str(pk_len, '\0');
@@ -597,10 +600,10 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
                                         "Failed to read original text length for doc_id " + std::to_string(doc_id),
                                         context));
       }
-      if (text_len > kMaxNormalizedTextLength) {
+      if (text_len > kMaxOriginalTextLength) {
         return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                         "Original text length " + std::to_string(text_len) +
-                                            " exceeds maximum allowed " + std::to_string(kMaxNormalizedTextLength),
+                                            " exceeds maximum allowed " + std::to_string(kMaxOriginalTextLength),
                                         context));
       }
       if (text_len > 0) {
@@ -638,7 +641,7 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     }
   }
 
-  if (doc_count > 0 && (max_loaded_doc_id == UINT32_MAX || next_id <= max_loaded_doc_id)) {
+  if (next_id != 0 && doc_count > 0 && (max_loaded_doc_id == UINT32_MAX || next_id <= max_loaded_doc_id)) {
     return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageCorrupted,
                                     "next_doc_id must be greater than every loaded document ID", context));
   }
@@ -654,35 +657,41 @@ Expected<void, Error> DocumentStore::DeserializeDocuments(std::istream& in, std:
     }
   }
 
-  // Swap the loaded data in with minimal lock time
+  // Finish every allocation against a temporary store before touching the
+  // live store. Interning columns and recomputing DocID order can allocate, so
+  // keeping those operations staged makes a failed load atomic as well.
+  DocumentStore loaded_store;
   {
-    std::unique_lock lock(mutex_);
-    doc_id_to_pk_ = std::move(new_doc_id_to_pk);
-    pk_to_doc_id_ = std::move(new_pk_to_doc_id);
+    std::unique_lock lock(loaded_store.mutex_);
+    loaded_store.doc_id_to_pk_ = std::move(new_doc_id_to_pk);
+    loaded_store.pk_to_doc_id_ = std::move(new_pk_to_doc_id);
 
     // Rebuild the interned column table for the loaded documents, so the ids in
-    // doc_filters_ always refer to this store's own name table.
-    decltype(filter_column_names_)().swap(filter_column_names_);
-    decltype(filter_column_ids_)().swap(filter_column_ids_);
-    decltype(doc_filters_)().swap(doc_filters_);
-    doc_filters_.reserve(new_doc_filters.size());
+    // doc_filters_ always refer to the staged store's own name table.
+    loaded_store.doc_filters_.reserve(new_doc_filters.size());
     for (const auto& [loaded_doc_id, loaded_filters] : new_doc_filters) {
-      doc_filters_.emplace(loaded_doc_id, InternFilterMapLocked(loaded_filters));
+      loaded_store.doc_filters_.emplace(loaded_doc_id, loaded_store.InternFilterMapLocked(loaded_filters));
     }
 
-    doc_texts_ = std::move(new_doc_texts);
-    original_texts_ = std::move(new_original_texts);
-    filter_index_ = std::move(new_filter_index);
-    next_doc_id_ = next_id;
-    RecomputePrimaryKeyDocIdOrderLocked();
+    loaded_store.doc_texts_ = std::move(new_doc_texts);
+    loaded_store.original_texts_ = std::move(new_original_texts);
+    loaded_store.filter_index_ = std::move(new_filter_index);
+    loaded_store.next_doc_id_ = next_id;
+    loaded_store.RecomputePrimaryKeyDocIdOrderLocked();
   }
 
+  // ReplaceWithLoaded only swaps staged state while holding both store locks;
+  // no allocation remains after the live store starts changing.
+  ReplaceWithLoaded(loaded_store);
+  if (replication_gtid != nullptr) {
+    replication_gtid->swap(loaded_gtid);
+  }
   return {};
 }
 
 Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
                                                 const std::string& replication_gtid) const {
-  mygram::utils::AtomicFileWriter writer(filepath);
+  mygram::utils::AtomicFileWriter writer(filepath, true);
   const auto& temp_filepath = writer.GetTempPath();
   try {
     std::ofstream ofs(temp_filepath, std::ios::binary);
@@ -696,6 +705,10 @@ Expected<void, Error> DocumentStore::SaveToFile(const std::string& filepath,
     }
 
     ofs.close();
+    if (!ofs) {
+      return MakeUnexpected(MakeError(mygram::utils::ErrorCode::kStorageWriteError,
+                                      "Failed to flush document store to temp file", temp_filepath));
+    }
 
     // Atomic commit: fsync temp file, rename to final path, fsync directory
     if (auto result = writer.Commit(); !result) {

@@ -12,8 +12,15 @@
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <unordered_set>
+#include <utility>
 
+#include "storage/document_field_validation.h"
 #include "storage/filter_index.h"
+#include "utils/fd_guard.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::storage {
@@ -35,6 +42,65 @@ std::optional<uint64_t> ParseUnsignedPrimaryKey(std::string_view primary_key) {
   }
   return value;
 }
+
+template <typename TextMap>
+class StagedTextUpdate {
+ public:
+  StagedTextUpdate(TextMap& text_map, DocId doc_id, std::string_view text)
+      : text_map_(text_map), doc_id_(doc_id), clear_on_commit_(text.empty()) {
+    if (clear_on_commit_) {
+      return;
+    }
+
+    std::string replacement(text);
+    const auto existing = text_map_.find(doc_id_);
+    if (existing != text_map_.end()) {
+      existed_ = true;
+      previous_.swap(existing->second);
+      existing->second.swap(replacement);
+      return;
+    }
+
+    text_map_.emplace(doc_id_, std::move(replacement));
+    inserted_ = true;
+  }
+
+  StagedTextUpdate(const StagedTextUpdate&) = delete;
+  StagedTextUpdate& operator=(const StagedTextUpdate&) = delete;
+  ~StagedTextUpdate() noexcept { Rollback(); }
+
+  void Commit() noexcept {
+    if (clear_on_commit_) {
+      text_map_.erase(doc_id_);
+    }
+    committed_ = true;
+  }
+
+ private:
+  void Rollback() noexcept {
+    if (committed_) {
+      return;
+    }
+    if (inserted_) {
+      text_map_.erase(doc_id_);
+      return;
+    }
+    if (existed_) {
+      const auto existing = text_map_.find(doc_id_);
+      if (existing != text_map_.end()) {
+        existing->second.swap(previous_);
+      }
+    }
+  }
+
+  TextMap& text_map_;
+  DocId doc_id_;
+  std::string previous_;
+  bool clear_on_commit_ = false;
+  bool existed_ = false;
+  bool inserted_ = false;
+  bool committed_ = false;
+};
 
 }  // namespace
 
@@ -97,6 +163,10 @@ Expected<DocId, Error> DocumentStore::AddDocument(std::string_view primary_key, 
         .Field("existing_doc_id", static_cast<uint64_t>(iterator->second))
         .Debug();
     return iterator->second;
+  }
+
+  if (auto valid = ValidateIncomingDocumentFields(primary_key, filters, normalized_text, original_text); !valid) {
+    return MakeUnexpected(std::move(valid).error());
   }
 
   // Check for DocID exhaustion: 0 is reserved or already wrapped
@@ -186,6 +256,38 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
   // Single lock for entire batch
   std::unique_lock lock(mutex_);
 
+  // Validate every distinct new key before changing the store or the caller's
+  // duplicate set. Payloads for keys already present (or repeated later in
+  // this batch) retain insert-or-ignore semantics and are deliberately skipped.
+  std::unordered_set<std::string_view> new_primary_keys;
+  new_primary_keys.reserve(documents.size());
+  uint64_t new_document_count = 0;
+  for (const auto& doc : documents) {
+    if (pk_to_doc_id_.find(doc.primary_key) != pk_to_doc_id_.end()) {
+      continue;
+    }
+    if (auto valid = ValidateDocumentPrimaryKey(doc.primary_key); !valid) {
+      return MakeUnexpected(std::move(valid).error());
+    }
+    const auto [unused, inserted] = new_primary_keys.insert(doc.primary_key);
+    (void)unused;
+    if (!inserted) {
+      continue;
+    }
+    if (auto valid =
+            ValidateIncomingDocumentFields(doc.primary_key, doc.filters, doc.normalized_text, doc.original_text);
+        !valid) {
+      return MakeUnexpected(std::move(valid).error());
+    }
+    ++new_document_count;
+  }
+
+  const uint64_t available_doc_ids = next_doc_id_ == 0 ? 0 : static_cast<uint64_t>(UINT32_MAX) - next_doc_id_ + 1;
+  if (new_document_count > available_doc_ids) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDocIdExhausted,
+                                    "DocID space exhausted (4 billion limit reached) during batch add", ""));
+  }
+
   for (const auto& doc : documents) {
     // Check if primary key already exists
     auto iterator = pk_to_doc_id_.find(doc.primary_key);
@@ -196,7 +298,7 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
           .Field("primary_key", doc.primary_key)
           .Field("existing_doc_id", static_cast<uint64_t>(iterator->second))
           .Warn();
-      if (existing_doc_ids_out != nullptr) {
+      if (existing_doc_ids_out != nullptr && new_primary_keys.find(doc.primary_key) == new_primary_keys.end()) {
         existing_doc_ids_out->insert(iterator->second);
       }
       doc_ids.push_back(iterator->second);
@@ -279,6 +381,17 @@ Expected<std::vector<DocId>, Error> DocumentStore::AddDocumentBatch(const std::v
 }
 
 Expected<bool, Error> DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters) {
+  return UpdateDocumentImpl(doc_id, filters, false, {}, {});
+}
+
+Expected<bool, Error> DocumentStore::UpdateDocument(DocId doc_id, const FilterMap& filters,
+                                                    std::string_view normalized_text, std::string_view original_text) {
+  return UpdateDocumentImpl(doc_id, filters, true, normalized_text, original_text);
+}
+
+Expected<bool, Error> DocumentStore::UpdateDocumentImpl(DocId doc_id, const FilterMap& filters, bool replace_texts,
+                                                        std::string_view normalized_text,
+                                                        std::string_view original_text) {
   std::unique_lock lock(mutex_);
 
   // Check if document exists
@@ -292,16 +405,68 @@ Expected<bool, Error> DocumentStore::UpdateDocument(DocId doc_id, const FilterMa
     return false;
   }
 
+  if (auto valid = ValidateDocumentFilterFields(filters); !valid) {
+    return MakeUnexpected(std::move(valid).error());
+  }
+  if (replace_texts) {
+    if (auto valid = ValidateDocumentTextFields(normalized_text, original_text); !valid) {
+      return MakeUnexpected(std::move(valid).error());
+    }
+  }
+
   // filter_index_ works in terms of FilterMap, so the previous values are
   // rebuilt from their interned form first. That copy is bounded by the number
   // of configured filter columns, not by the document count.
   auto old_filter_it = doc_filters_.find(doc_id);
   const FilterMap old_filters =
       old_filter_it != doc_filters_.end() ? MaterializeFiltersLocked(old_filter_it->second) : FilterMap{};
+
+  const size_t old_interned_column_count = filter_column_names_.size();
+  mygram::utils::ScopeGuard rollback_new_columns([&] {
+    while (filter_column_names_.size() > old_interned_column_count) {
+      filter_column_ids_.erase(filter_column_names_.back());
+      filter_column_names_.pop_back();
+    }
+  });
+  DocumentFilterValues new_filter_values = InternFilterMapLocked(filters);
+
+  // Reserve the flat-hash table before the index is changed. With this room
+  // reserved, moving the prepared vector into the entry does not allocate.
+  const auto current_filter_it = doc_filters_.find(doc_id);
+  const bool had_stored_filters = current_filter_it != doc_filters_.end();
+  DocumentFilterValues previous_filter_values;
+  if (!had_stored_filters) {
+    doc_filters_.reserve(doc_filters_.size() + 1);
+  }
+  if (had_stored_filters) {
+    previous_filter_values = std::move(current_filter_it->second);
+    current_filter_it->second = std::move(new_filter_values);
+  } else {
+    doc_filters_.emplace(doc_id, std::move(new_filter_values));
+  }
+  mygram::utils::ScopeGuard rollback_stored_filters([&] {
+    if (had_stored_filters) {
+      const auto current = doc_filters_.find(doc_id);
+      if (current != doc_filters_.end()) {
+        current->second = std::move(previous_filter_values);
+      }
+    } else {
+      doc_filters_.erase(doc_id);
+    }
+  });
+
+  const bool store_texts = replace_texts && store_texts_.load(std::memory_order_relaxed);
+  std::optional<StagedTextUpdate<decltype(doc_texts_)>> normalized_update;
+  std::optional<StagedTextUpdate<decltype(original_texts_)>> original_update;
+  if (store_texts) {
+    normalized_update.emplace(doc_texts_, doc_id, normalized_text);
+    original_update.emplace(original_texts_, doc_id, original_text);
+  }
+
   auto indexed = filter_index_->UpdateDocument(doc_id, old_filters, filters);
   if (!indexed) {
-    // The index still holds the previous values, so doc_filters_ keeps them too
-    // rather than advertising values no bitmap selects.
+    // The index restores its old values itself; scope guards restore matching
+    // stored filters/text and discard newly interned column names.
     mygram::utils::StructuredLog()
         .Event("storage_error")
         .Field("type", "filter_index_update_failed")
@@ -310,7 +475,12 @@ Expected<bool, Error> DocumentStore::UpdateDocument(DocId doc_id, const FilterMa
         .Error();
     return MakeUnexpected(std::move(indexed).error());
   }
-  doc_filters_[doc_id] = InternFilterMapLocked(filters);
+  rollback_stored_filters.Release();
+  rollback_new_columns.Release();
+  if (normalized_update.has_value()) {
+    normalized_update->Commit();
+    original_update->Commit();
+  }
 
   mygram::utils::StructuredLog()
       .Event("document_updated")
@@ -361,21 +531,45 @@ bool DocumentStore::RemoveDocument(DocId doc_id) {
 }
 
 void DocumentStore::SetNormalizedText(DocId doc_id, std::string_view text) {
-  std::unique_lock lock(mutex_);
-  if (text.empty()) {
-    doc_texts_.erase(doc_id);
-  } else {
-    doc_texts_[doc_id] = std::string(text);
+  auto result = SetNormalizedTextChecked(doc_id, text);
+  if (!result) {
+    throw std::length_error(result.error().message());
   }
 }
 
-void DocumentStore::SetOriginalText(DocId doc_id, std::string_view text) {
+Expected<void, Error> DocumentStore::SetNormalizedTextChecked(DocId doc_id, std::string_view text) {
+  if (auto valid = ValidateDocumentTextFields(text, {}); !valid) {
+    return MakeUnexpected(std::move(valid).error());
+  }
+  std::string owned_text(text);
   std::unique_lock lock(mutex_);
-  if (text.empty()) {
+  if (owned_text.empty()) {
+    doc_texts_.erase(doc_id);
+  } else {
+    doc_texts_[doc_id] = std::move(owned_text);
+  }
+  return {};
+}
+
+void DocumentStore::SetOriginalText(DocId doc_id, std::string_view text) {
+  auto result = SetOriginalTextChecked(doc_id, text);
+  if (!result) {
+    throw std::length_error(result.error().message());
+  }
+}
+
+Expected<void, Error> DocumentStore::SetOriginalTextChecked(DocId doc_id, std::string_view text) {
+  if (auto valid = ValidateDocumentTextFields({}, text); !valid) {
+    return MakeUnexpected(std::move(valid).error());
+  }
+  std::string owned_text(text);
+  std::unique_lock lock(mutex_);
+  if (owned_text.empty()) {
     original_texts_.erase(doc_id);
   } else {
-    original_texts_[doc_id] = std::string(text);
+    original_texts_[doc_id] = std::move(owned_text);
   }
+  return {};
 }
 
 void DocumentStore::Clear() {

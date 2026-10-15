@@ -20,6 +20,8 @@
 
 using namespace mygramdb::storage::dump_v1;
 using mygram::utils::WriteBinary;
+using mygramdb::storage::dump_format_limits::docstore::kMaxNormalizedTextLength;
+using mygramdb::storage::dump_format_limits::docstore::kMaxOriginalTextLength;
 
 namespace {
 
@@ -227,7 +229,8 @@ TEST(DumpStringLimitsTest, TableNameAtMaxIdentifierLength) {
   EXPECT_EQ(kMaxIdentifierLength, 1024u);
   EXPECT_EQ(kMaxConfigValueLength, 4096u);
   EXPECT_EQ(kMaxPathLength, 8192u);
-  EXPECT_EQ(kMaxTextContentLength, 16u * 1024u * 1024u);
+  EXPECT_EQ(kMaxNormalizedTextLength, 16u * 1024u * 1024u);
+  EXPECT_EQ(kMaxOriginalTextLength, 16u * 1024u * 1024u);
   EXPECT_EQ(kMaxGeneralStringLength, 1024u * 1024u);
 }
 
@@ -388,12 +391,13 @@ TEST(DumpStringLimitsTest, ConstantValues) {
   EXPECT_EQ(kMaxConfigValueLength, 4u * 1024u) << "Config value limit should be 4KB";
   EXPECT_EQ(kMaxPathLength, 8u * 1024u) << "Path limit should be 8KB";
   EXPECT_EQ(kMaxGtidLength, 64u * 1024u) << "GTID limit should be 64KB";
-  EXPECT_EQ(kMaxTextContentLength, 16u * 1024u * 1024u) << "Text content limit should be 16MB";
+  EXPECT_EQ(kMaxNormalizedTextLength, 16u * 1024u * 1024u) << "Normalized text limit should be 16MB";
+  EXPECT_EQ(kMaxOriginalTextLength, 16u * 1024u * 1024u) << "Original text limit should be 16MB";
   EXPECT_EQ(kMaxGeneralStringLength, 1u * 1024u * 1024u) << "General string limit should be 1MB";
 
   // Verify hierarchy: identifier < config value < path < general < text content
   EXPECT_LT(kMaxIdentifierLength, kMaxConfigValueLength);
   EXPECT_LT(kMaxConfigValueLength, kMaxPathLength);
   EXPECT_LT(kMaxPathLength, kMaxGeneralStringLength);
-  EXPECT_LT(kMaxGeneralStringLength, kMaxTextContentLength);
+  EXPECT_LT(kMaxGeneralStringLength, kMaxNormalizedTextLength);
 }

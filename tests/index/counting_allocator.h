@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <gtest/gtest.h>
 #include <roaring/memory.h>
 
 #include <algorithm>
@@ -183,5 +184,13 @@ void InstallRoaringAllocationCounter() {
   hooks.aligned_free = CountedAlignedFree;
   roaring_init_memory_hook(hooks);
 }
+
+class RoaringAllocationCounterEnvironment final : public ::testing::Environment {
+ public:
+  void SetUp() override { InstallRoaringAllocationCounter(); }
+};
+
+[[maybe_unused]] ::testing::Environment* const kRoaringAllocationCounterEnvironment =
+    ::testing::AddGlobalTestEnvironment(new RoaringAllocationCounterEnvironment);
 
 }  // namespace

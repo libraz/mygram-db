@@ -320,6 +320,21 @@ Expected<void, Error> WriteDumpV1(
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
                                     "V1 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
   }
+  if (table_contexts.size() > dump_format_limits::config::kMaxTableCount) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Serialized table context count " +
+                                                         std::to_string(table_contexts.size()) + " exceeds maximum " +
+                                                         std::to_string(dump_format_limits::config::kMaxTableCount)));
+  }
+  for (const auto& [table_name, context] : table_contexts) {
+    (void)context;
+    if (table_name.size() > dump_format_limits::container::kMaxTableContextNameLength) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                      "Table context name length " + std::to_string(table_name.size()) +
+                                          " exceeds maximum " +
+                                          std::to_string(dump_format_limits::container::kMaxTableContextNameLength)));
+    }
+  }
 
   // Atomic write strategy:
   // 1. Write to temporary file with unique suffix to avoid concurrent write collisions
@@ -399,6 +414,11 @@ Expected<void, Error> WriteDumpV1(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
+    if (auto result = writer.TrackDumpTempFile(file_descriptor); !result) {
+      LogStorageError("track_dump_temp", temp_filepath, result.error().message());
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+    }
+
     // SECURITY: Use the already-open file descriptor directly to prevent TOCTOU attacks.
     // Closing the fd and reopening by path would allow an attacker to replace the file
     // with a symlink between close() and reopen().
@@ -458,6 +478,11 @@ Expected<void, Error> WriteDumpV1(
       return result;
     }
     std::string config_data = config_stream.str();
+    if (config_data.size() > kMaxConfigSectionLength) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                      "V1 combined config and compatibility metadata exceed maximum size " +
+                                          std::to_string(kMaxConfigSectionLength)));
+    }
     auto config_len = static_cast<uint32_t>(config_data.size());
     if (!WriteBinary(ofs, config_len)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -472,6 +497,11 @@ Expected<void, Error> WriteDumpV1(
         return result;
       }
       std::string stats_data = stats_stream.str();
+      if (stats_data.size() > kMaxStatsSectionLength) {
+        return MakeUnexpected(
+            MakeError(ErrorCode::kStorageDumpWriteError,
+                      "V1 statistics section exceeds maximum size " + std::to_string(kMaxStatsSectionLength)));
+      }
       auto stats_len = static_cast<uint32_t>(stats_data.size());
       if (!WriteBinary(ofs, stats_len)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -490,12 +520,14 @@ Expected<void, Error> WriteDumpV1(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
-    for (const auto& [table_name, ctx_pair] : table_contexts) {
+    for (const auto& table_context : table_contexts) {
+      const auto& table_name = table_context.first;
+      const auto& ctx_pair = table_context.second;
       index::Index* index = ctx_pair.first;
       DocumentStore* doc_store = ctx_pair.second;
 
       // Write table name
-      if (!WriteString(ofs, table_name)) {
+      if (!WriteString(ofs, table_name, dump_format_limits::container::kMaxTableContextNameLength)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
 
@@ -513,6 +545,11 @@ Expected<void, Error> WriteDumpV1(
           return result;
         }
         std::string table_stats_data = table_stats_stream.str();
+        if (table_stats_data.size() > kMaxStatsSectionLength) {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageDumpWriteError,
+                        "V1 table statistics section exceeds maximum size " + std::to_string(kMaxStatsSectionLength)));
+        }
         auto table_stats_len = static_cast<uint32_t>(table_stats_data.size());
         if (!WriteBinary(ofs, table_stats_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));

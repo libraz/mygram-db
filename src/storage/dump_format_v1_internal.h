@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 
 #include "storage/dump_format_v1.h"
@@ -26,6 +27,9 @@ using mygram::utils::WriteBinary;
  * @brief Write string to stream (length-prefixed)
  */
 inline bool WriteString(std::ostream& output_stream, const std::string& str) {
+  if (str.size() > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
   auto len = static_cast<uint32_t>(str.size());
   if (!WriteBinary(output_stream, len)) {
     return false;
@@ -34,6 +38,13 @@ inline bool WriteString(std::ostream& output_stream, const std::string& str) {
     output_stream.write(str.data(), len);
   }
   return output_stream.good();
+}
+
+/**
+ * @brief Write a length-prefixed string when it must satisfy a field limit
+ */
+inline bool WriteString(std::ostream& output_stream, const std::string& str, uint32_t max_length) {
+  return str.size() <= max_length && WriteString(output_stream, str);
 }
 
 /**

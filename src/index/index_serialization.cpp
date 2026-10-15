@@ -10,13 +10,8 @@
 
 #include "index/index.h"
 #include "index/index_format.h"
-
-#ifndef _WIN32
-#include <fcntl.h>
-#include <unistd.h>
-#endif
-
 #include "server/log_field_names.h"
+#include "utils/atomic_file_writer.h"
 #include "utils/binary_io.h"
 #include "utils/constants.h"
 #include "utils/crc32.h"
@@ -54,16 +49,19 @@ constexpr uint64_t kMaxPostingSize = 100'000'000;
 }  // namespace
 
 Expected<void, Error> Index::SaveToFile(const std::string& filepath) const {
+  mygram::utils::AtomicFileWriter writer(filepath, true);
+  const auto& temp_filepath = writer.GetTempPath();
   try {
-    std::ofstream ofs(filepath, std::ios::binary);
+    std::ofstream ofs(temp_filepath, std::ios::binary | std::ios::trunc);
     if (!ofs) {
       mygram::utils::StructuredLog()
           .Event("index_io_error")
           .Field("type", "file_open_failed")
           .Field("operation", "save")
-          .Field("filepath", filepath)
+          .Field("filepath", temp_filepath)
           .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Failed to open file for writing", filepath));
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageWriteError, "Failed to open temp file for writing", temp_filepath));
     }
 
     // Serialize to stream (includes CRC32 trailer in V2 format)
@@ -79,23 +77,20 @@ Expected<void, Error> Index::SaveToFile(const std::string& filepath) const {
     }
 
     ofs.close();
-
-    // Ensure data is flushed to disk to prevent data loss on OS crash
-#ifndef _WIN32
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg) - open() requires varargs
-    int file_desc = open(filepath.c_str(), O_RDWR);
-    if (file_desc >= 0) {
-      if (fsync(file_desc) != 0) {
-        mygram::utils::StructuredLog()
-            .Event("storage_warning")
-            .Field("operation", "fsync")
-            .Field("filepath", filepath)
-            .Field("errno", static_cast<int64_t>(errno))
-            .Warn();
-      }
-      close(file_desc);
+    if (!ofs) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError,
+                                      "Failed to flush index temp file before save completed", temp_filepath));
     }
-#endif
+
+    if (auto commit_result = writer.Commit(); !commit_result) {
+      mygram::utils::StructuredLog()
+          .Event("index_io_error")
+          .Field("type", "atomic_commit_failed")
+          .Field("filepath", filepath)
+          .Field("error", commit_result.error().message())
+          .Error();
+      return commit_result;
+    }
 
     mygram::utils::StructuredLog()
         .Event("index_saved")

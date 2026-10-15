@@ -26,6 +26,60 @@ namespace {
 constexpr double kSelectivityThreshold = 0.5;  // 50% threshold
 constexpr size_t kMinSizeThreshold = 10000;    // Don't optimize for tiny lists
 
+std::vector<DocId> UnionPostingSnapshots(const std::vector<std::shared_ptr<PostingList>>& snapshots) {
+  if (snapshots.empty()) {
+    return {};
+  }
+  if (snapshots.size() == 1) {
+    return snapshots.front() != nullptr ? snapshots.front()->GetAll() : std::vector<DocId>{};
+  }
+
+  std::vector<std::shared_ptr<PostingList>> unique_snapshots;
+  unique_snapshots.reserve(snapshots.size());
+  std::unordered_set<const PostingList*> seen;
+  seen.reserve(snapshots.size());
+  for (const auto& snapshot : snapshots) {
+    if (snapshot != nullptr && seen.insert(snapshot.get()).second) {
+      unique_snapshots.push_back(snapshot);
+    }
+  }
+
+  if (unique_snapshots.empty()) {
+    return {};
+  }
+  if (unique_snapshots.size() == 1) {
+    return unique_snapshots.front()->GetAll();
+  }
+
+  const bool all_roaring = std::all_of(unique_snapshots.begin(), unique_snapshots.end(), [](const auto& snapshot) {
+    return snapshot->GetStrategy() == PostingStrategy::kRoaringBitmap;
+  });
+  if (all_roaring) {
+    // Union returns a fresh PostingList, so immutable search snapshots remain
+    // untouched while Roaring performs the OR without materializing each side.
+    auto united = unique_snapshots[0]->Union(*unique_snapshots[1]);
+    for (size_t i = 2; i < unique_snapshots.size() && united->GetStrategy() == PostingStrategy::kRoaringBitmap; ++i) {
+      united = united->Union(*unique_snapshots[i]);
+    }
+    if (united->GetStrategy() == PostingStrategy::kRoaringBitmap) {
+      return united->GetAll();
+    }
+    // PostingList::Union falls back to delta storage if Roaring allocation
+    // fails. Re-run the established sorted-vector path over the snapshots.
+  }
+
+  std::vector<DocId> result;
+  std::vector<DocId> temp;
+  for (const auto& snapshot : unique_snapshots) {
+    auto term_docs = snapshot->GetAll();
+    temp.clear();
+    temp.reserve(result.size() + term_docs.size());
+    std::set_union(result.begin(), result.end(), term_docs.begin(), term_docs.end(), std::back_inserter(temp));
+    result.swap(temp);
+  }
+  return result;
+}
+
 }  // namespace
 
 Index::Index(int ngram_size, int kanji_ngram_size, double roaring_threshold, bool cross_boundary_ngrams,
@@ -456,27 +510,8 @@ std::vector<DocId> Index::SearchOr(const std::vector<std::string>& terms) const 
   // Take snapshot of all posting lists (short lock)
   auto snapshots = TakePostingSnapshots(terms);
 
-  // From here, no lock is held - search operates on immutable snapshots
-  // GetAll() + set_union is used here because PostingList::Union() operates
-  // on the internal bitmap in-place, which is not suitable for read-only
-  // snapshots. The snapshot-based approach ensures thread safety without
-  // modifying the original posting lists. Roaring native OR would require a
-  // temporary bitmap and is not clearly faster for the typical number of OR
-  // terms.
-  std::vector<DocId> result;
-  std::vector<DocId> temp;
-
-  for (const auto& snapshot : snapshots) {
-    if (snapshot != nullptr) {
-      auto term_docs = snapshot->GetAll();
-      temp.clear();
-      temp.reserve(result.size() + term_docs.size());
-      std::set_union(result.begin(), result.end(), term_docs.begin(), term_docs.end(), std::back_inserter(temp));
-      result.swap(temp);
-    }
-  }
-
-  return result;
+  // From here, no lock is held - search operates on immutable snapshots.
+  return UnionPostingSnapshots(snapshots);
 }
 
 std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const std::vector<std::string>& terms) const {
@@ -487,27 +522,8 @@ std::vector<DocId> Index::SearchNot(const std::vector<DocId>& all_docs, const st
   // RCU pattern: Take snapshot of posting lists under short lock, then search without lock
   auto snapshots = TakePostingSnapshots(terms);
 
-  // From here, no lock is held - search operates on immutable snapshots
-  // GetAll() + set_union is used here because PostingList::Union() operates
-  // on the internal bitmap in-place, which is not suitable for read-only
-  // snapshots. The snapshot-based approach ensures thread safety without
-  // modifying the original posting lists. Roaring native OR would require a
-  // temporary bitmap and is not clearly faster for the typical number of OR
-  // terms.
-  // Get union of all documents containing any of the NOT terms
-  std::vector<DocId> excluded_docs;
-  std::vector<DocId> temp;
-
-  for (const auto& snapshot : snapshots) {
-    if (snapshot != nullptr) {
-      auto term_docs = snapshot->GetAll();
-      temp.clear();
-      temp.reserve(excluded_docs.size() + term_docs.size());
-      std::set_union(excluded_docs.begin(), excluded_docs.end(), term_docs.begin(), term_docs.end(),
-                     std::back_inserter(temp));
-      excluded_docs.swap(temp);
-    }
-  }
+  // From here, no lock is held - search operates on immutable snapshots.
+  const std::vector<DocId> excluded_docs = UnionPostingSnapshots(snapshots);
 
   // Return set difference: all_docs - excluded_docs
   std::vector<DocId> result;
@@ -632,31 +648,55 @@ uint64_t Index::Count(std::string_view term) const {
   return PostingSize(term);
 }
 
+size_t Index::PostingMapMemoryUsageLocked() const {
+  constexpr size_t kControlByteSize = 1;
+  return term_postings_.capacity() * (sizeof(std::pair<std::string, std::shared_ptr<PostingList>>) + kControlByteSize);
+}
+
+size_t Index::PostingMemoryUsageLocked(const std::string& term, const PostingList& posting) const {
+  // make_shared co-allocates each PostingList and its control block. The map
+  // slot below already includes the shared_ptr object, so count only the
+  // control block's vptr and reference counters here.
+  constexpr size_t kSharedControlBlockBytes = sizeof(void*) + 2 * sizeof(size_t);
+  constexpr size_t kDeltaVectorObjectBytes = sizeof(std::vector<uint32_t>);
+  static const size_t kSmallStringCapacity = std::string{}.capacity();
+
+  size_t total = sizeof(PostingList) + kSharedControlBlockBytes;
+
+  // The flat-map slot already includes the string object. Count only heap
+  // storage when the term exceeds this implementation's inline capacity.
+  if (term.capacity() > kSmallStringCapacity) {
+    total += term.capacity();
+  }
+
+  // Delta lists cache the vector's inline object size as well as its heap
+  // capacity. sizeof(PostingList) already includes that member, so retain
+  // only the separately allocated vector storage here.
+  size_t posting_bytes = posting.MemoryUsageApprox();
+  if (posting.GetStrategy() == PostingStrategy::kFixedWidthDelta) {
+    posting_bytes = posting_bytes >= kDeltaVectorObjectBytes ? posting_bytes - kDeltaVectorObjectBytes : 0;
+  }
+  total += posting_bytes;
+  return total;
+}
+
 size_t Index::MemoryUsage() const {
-  // Acquire shared lock for read-only access (allows concurrent readers).
-  // Use SizeApprox/MemoryUsageApprox to avoid redundant inner lock acquisition
-  // on each PostingList — the outer shared lock on postings_mutex_ already
-  // prevents structural changes to the map and its entries.
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-  size_t total = 0;
+  size_t total = PostingMapMemoryUsageLocked();
   for (const auto& [term, posting] : term_postings_) {
-    total += term.size();                   // Term string
-    total += posting->MemoryUsageApprox();  // Posting list (no inner lock)
+    total += PostingMemoryUsageLocked(term, *posting);
   }
   return total;
 }
 
 Index::IndexStatistics Index::GetStatistics() const {
-  // Acquire shared lock for read-only access (allows concurrent readers).
-  // Use SizeApprox/MemoryUsageApprox to avoid redundant inner lock acquisition
-  // on each PostingList — the outer shared lock prevents structural changes.
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
   IndexStatistics stats;
   stats.total_terms = term_postings_.size();
   stats.total_postings = 0;
   stats.delta_encoded_lists = 0;
   stats.roaring_bitmap_lists = 0;
-  stats.memory_usage_bytes = 0;
+  stats.memory_usage_bytes = PostingMapMemoryUsageLocked();
 
   for (const auto& [term, posting] : term_postings_) {
     // Count postings (no inner lock — outer shared lock is sufficient)
@@ -669,9 +709,7 @@ Index::IndexStatistics Index::GetStatistics() const {
       stats.roaring_bitmap_lists++;
     }
 
-    // Memory usage (no inner lock — outer shared lock is sufficient)
-    stats.memory_usage_bytes += term.size();
-    stats.memory_usage_bytes += posting->MemoryUsageApprox();
+    stats.memory_usage_bytes += PostingMemoryUsageLocked(term, *posting);
   }
 
   return stats;

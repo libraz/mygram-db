@@ -6,18 +6,81 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
+#include <mutex>
 #include <sstream>
 #include <thread>
+#include <utility>
+#include <vector>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#include <sys/wait.h>
+#endif
 
 #include "storage/document_store.h"
 #include "storage/document_store_internal.h"
 
 using namespace mygramdb::storage;
+
+namespace mygramdb::storage {
+
+/// Bypass admission validation to prove the serializer still defends against
+/// invalid in-memory states created by older binaries or internal corruption.
+struct DocumentStoreSerializationTestAccess {
+  static void SetRawDocument(DocumentStore& store, std::string primary_key, const FilterMap& filters = {},
+                             std::string normalized_text = {}, std::string original_text = {}) {
+    std::unique_lock lock(store.mutex_);
+    store.next_doc_id_ = 2;
+    store.doc_id_to_pk_[1] = primary_key;
+    store.pk_to_doc_id_[primary_key] = 1;
+    if (!filters.empty()) {
+      store.doc_filters_[1] = store.InternFilterMapLocked(filters);
+    }
+    if (!normalized_text.empty()) {
+      store.doc_texts_[1] = std::move(normalized_text);
+    }
+    if (!original_text.empty()) {
+      store.original_texts_[1] = std::move(original_text);
+    }
+  }
+};
+
+}  // namespace mygramdb::storage
+
+namespace {
+
+std::vector<std::filesystem::path> FindTemporaryArtifacts(const std::filesystem::path& final_path) {
+  std::vector<std::filesystem::path> artifacts;
+  const auto directory = final_path.parent_path().empty() ? std::filesystem::path(".") : final_path.parent_path();
+  const std::string prefix = final_path.filename().string() + ".tmp";
+  std::error_code error;
+  std::filesystem::directory_iterator current(directory, error);
+  const std::filesystem::directory_iterator end;
+  for (; !error && current != end; current.increment(error)) {
+    const std::string filename = current->path().filename().string();
+    if (filename.compare(0, prefix.size(), prefix) == 0) {
+      artifacts.push_back(current->path());
+    }
+  }
+  return artifacts;
+}
+
+void ExpectNoTemporaryArtifacts(const std::filesystem::path& final_path) {
+  const auto artifacts = FindTemporaryArtifacts(final_path);
+  EXPECT_TRUE(artifacts.empty()) << "Temporary artifact remains for " << final_path.string() << ": "
+                                 << (artifacts.empty() ? std::string{} : artifacts.front().string());
+}
+
+}  // namespace
 
 /**
  * @brief Test fixture for serialization tests
@@ -25,18 +88,18 @@ using namespace mygramdb::storage;
 class DocumentStoreSerializationTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Create unique test file path for parallel test execution
+    // Keep every save target and its .tmp* artifacts in a private test directory.
     std::stringstream ss;
-    ss << "/tmp/test_docstore_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
+    ss << "test_docstore_" << getpid() << "_" << std::hash<std::thread::id>{}(std::this_thread::get_id()) << "_"
        << std::chrono::steady_clock::now().time_since_epoch().count();
-    test_file_ = ss.str();
+    test_directory_ = std::filesystem::temp_directory_path() / ss.str();
+    std::filesystem::create_directories(test_directory_);
+    test_file_ = (test_directory_ / "snapshot").string();
   }
 
-  void TearDown() override {
-    std::remove((test_file_ + ".docs").c_str());
-    std::remove((test_file_ + ".docs.tmp").c_str());
-  }
+  void TearDown() override { std::filesystem::remove_all(test_directory_); }
 
+  std::filesystem::path test_directory_;
   std::string test_file_;
 };
 
@@ -473,7 +536,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationWithGTID) {
 
   // Deserialize and verify GTID
   DocumentStore store2;
-  std::string loaded_gtid;
+  std::string loaded_gtid = "stale-gtid";
   ASSERT_TRUE(store2.LoadFromStream(stream, &loaded_gtid));
 
   EXPECT_EQ(loaded_gtid, original_gtid);
@@ -501,7 +564,7 @@ TEST_F(DocumentStoreSerializationTest, StreamSerializationEmptyGTID) {
 
   // Deserialize and verify empty GTID
   DocumentStore store2;
-  std::string loaded_gtid;
+  std::string loaded_gtid = "stale-gtid";
   ASSERT_TRUE(store2.LoadFromStream(stream, &loaded_gtid));
 
   EXPECT_EQ(loaded_gtid, "");
@@ -604,11 +667,36 @@ TEST_F(DocumentStoreSerializationTest, CorruptedStreamInvalidGTIDLength) {
   stream.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
 
   // Write invalid GTID length (exceeds maximum)
-  const uint32_t gtid_len = 2000;  // Exceeds kMaxGTIDLength (1024)
+  const uint32_t gtid_len = 2000;  // Exceeds docstore::kMaxGtidLength (1024)
   stream.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
 
   DocumentStore store;
   EXPECT_FALSE(store.LoadFromStream(stream));
+}
+
+/**
+ * @brief Test that the reserved DocID 0 is rejected as corruption
+ */
+TEST_F(DocumentStoreSerializationTest, CorruptedStreamReservedDocIdZero) {
+  std::stringstream stream;
+
+  const uint64_t kMagic = 0x4752414D4442534EUL;  // "MYGRAMDB"
+  stream.write(reinterpret_cast<const char*>(&kMagic), sizeof(kMagic));
+  const uint32_t kVersion = 1;
+  stream.write(reinterpret_cast<const char*>(&kVersion), sizeof(kVersion));
+  const uint32_t next_id = 2;
+  stream.write(reinterpret_cast<const char*>(&next_id), sizeof(next_id));
+  const uint32_t gtid_len = 0;
+  stream.write(reinterpret_cast<const char*>(&gtid_len), sizeof(gtid_len));
+  const uint64_t doc_count = 1;
+  stream.write(reinterpret_cast<const char*>(&doc_count), sizeof(doc_count));
+  const uint32_t doc_id = 0;
+  stream.write(reinterpret_cast<const char*>(&doc_id), sizeof(doc_id));
+
+  DocumentStore store;
+  auto result = store.LoadFromStream(stream);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageCorrupted);
 }
 
 /**
@@ -656,8 +744,8 @@ TEST_F(DocumentStoreSerializationTest, SaveToFileAtomicWritePattern) {
   std::string filepath = test_file_ + ".docs";
   ASSERT_TRUE(store1.SaveToFile(filepath));
 
-  // Verify no temp file remains after successful save
-  EXPECT_FALSE(std::filesystem::exists(filepath + ".tmp"));
+  // Verify no default or uniquely suffixed temp file remains after successful save.
+  ExpectNoTemporaryArtifacts(filepath);
 
   // Verify the final file exists and data loads correctly
   EXPECT_TRUE(std::filesystem::exists(filepath));
@@ -675,43 +763,83 @@ TEST_F(DocumentStoreSerializationTest, SaveToFileAtomicWritePattern) {
  * @brief Test that original file is preserved when rename fails
  */
 TEST_F(DocumentStoreSerializationTest, SaveToFilePreservesOriginalOnFailure) {
-  DocumentStore store1;
-
   FilterMap filters;
-  filters["id"] = static_cast<int32_t>(1);
-  EXPECT_TRUE(store1.AddDocument("doc1", filters));
+  filters["id"] = static_cast<int32_t>(2);
 
-  // Save a valid file first
-  std::string filepath = test_file_ + ".docs";
-  ASSERT_TRUE(store1.SaveToFile(filepath));
-
-  // Try to save to a path inside a non-existent subdirectory (rename will fail)
+  // Rename a complete temp file onto a non-empty directory to force commit failure.
   std::string existing_dir = test_file_ + "_rename_fail_dir";
   std::filesystem::create_directories(existing_dir);
-  std::string bad_filepath = existing_dir + "/nonexistent_subdir/snapshot.docs";
+  std::string bad_filepath = existing_dir + "/snapshot.docs";
+  std::filesystem::create_directories(bad_filepath);
+  const auto sentinel_path = std::filesystem::path(bad_filepath) / "preserved.txt";
+  const std::string original_contents = "preserved target contents";
+  {
+    std::ofstream sentinel(sentinel_path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(sentinel);
+    sentinel.write(original_contents.data(), static_cast<std::streamsize>(original_contents.size()));
+    ASSERT_TRUE(sentinel.good());
+  }
 
-  // The temp file can be created in existing_dir, but rename to
-  // nonexistent_subdir/snapshot.docs will fail
   DocumentStore store2;
-  filters["id"] = static_cast<int32_t>(2);
   EXPECT_TRUE(store2.AddDocument("doc2", filters));
 
   auto result = store2.SaveToFile(bad_filepath);
   EXPECT_FALSE(result.has_value());
 
-  // Verify the temp file is cleaned up
-  EXPECT_FALSE(std::filesystem::exists(bad_filepath + ".tmp"));
+  ExpectNoTemporaryArtifacts(bad_filepath);
 
-  // Verify the original file is still intact
-  DocumentStore store3;
-  ASSERT_TRUE(store3.LoadFromFile(filepath));
-  auto doc = store3.GetDocument(1);
-  ASSERT_TRUE(doc.has_value());
-  EXPECT_EQ(std::get<int32_t>(doc->filters["id"]), 1);
+  std::ifstream sentinel(sentinel_path, std::ios::binary);
+  ASSERT_TRUE(sentinel);
+  const std::string final_contents{std::istreambuf_iterator<char>(sentinel), std::istreambuf_iterator<char>()};
+  EXPECT_EQ(final_contents, original_contents);
 
   // Clean up
   std::filesystem::remove_all(existing_dir);
 }
+
+#ifndef _WIN32
+TEST_F(DocumentStoreSerializationTest, SaveToFileRejectsCloseFlushFailureAndPreservesOriginal) {
+  const std::string filepath = test_file_ + ".docs";
+  const std::string original_contents = "previous-good-document-store";
+  {
+    std::ofstream output(filepath, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(output);
+    output.write(original_contents.data(), static_cast<std::streamsize>(original_contents.size()));
+    ASSERT_TRUE(output.good());
+  }
+
+  const pid_t child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    struct rlimit file_limit {};
+    if (getrlimit(RLIMIT_FSIZE, &file_limit) != 0) {
+      _exit(2);
+    }
+    file_limit.rlim_cur = std::min<rlim_t>(32, file_limit.rlim_max);
+    if (setrlimit(RLIMIT_FSIZE, &file_limit) != 0 || std::signal(SIGXFSZ, SIG_IGN) == SIG_ERR) {
+      _exit(2);
+    }
+
+    DocumentStore store;
+    if (!store.AddDocument("document", {}, std::string(256, 'x'))) {
+      _exit(3);
+    }
+    const auto result = store.SaveToFile(filepath);
+    _exit(result.has_value() ? 1 : 0);
+  }
+
+  int child_status = 0;
+  ASSERT_EQ(waitpid(child, &child_status, 0), child);
+  ASSERT_TRUE(WIFEXITED(child_status));
+  EXPECT_EQ(WEXITSTATUS(child_status), 0) << "the constrained child must report a failed save";
+
+  std::ifstream input(filepath, std::ios::binary);
+  ASSERT_TRUE(input);
+  const std::string final_contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  EXPECT_EQ(final_contents, original_contents);
+  ExpectNoTemporaryArtifacts(filepath);
+}
+#endif
 
 /**
  * @brief Test that temp file is cleaned up after a failed save attempt
@@ -731,7 +859,7 @@ TEST_F(DocumentStoreSerializationTest, SaveToFileTempFileCleanedOnError) {
   // Save successfully and verify no .tmp file lingers
   ASSERT_TRUE(store1.SaveToFile(filepath_in_temp));
   EXPECT_TRUE(std::filesystem::exists(filepath_in_temp));
-  EXPECT_FALSE(std::filesystem::exists(filepath_in_temp + ".tmp"));
+  ExpectNoTemporaryArtifacts(filepath_in_temp);
 
   // Now try saving to a path where temp file write will fail
   // (directory does not exist, so ofstream open fails)
@@ -739,8 +867,7 @@ TEST_F(DocumentStoreSerializationTest, SaveToFileTempFileCleanedOnError) {
   auto result = store1.SaveToFile(bad_filepath);
   EXPECT_FALSE(result.has_value());
 
-  // Verify no temp file remains
-  EXPECT_FALSE(std::filesystem::exists(bad_filepath + ".tmp"));
+  ExpectNoTemporaryArtifacts(bad_filepath);
 
   // Clean up
   std::filesystem::remove_all(temp_dir);
@@ -824,8 +951,13 @@ TEST_F(DocumentStoreSerializationTest, LoadFromStreamTruncatedBeforeDocCount) {
   std::istringstream truncated_stream(truncated);
 
   DocumentStore store;
-  auto result = store.LoadFromStream(truncated_stream);
+  ASSERT_TRUE(store.AddDocument("preserved-document"));
+  std::string loaded_gtid = "preserved-gtid";
+  auto result = store.LoadFromStream(truncated_stream, &loaded_gtid);
   EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(loaded_gtid, "preserved-gtid");
+  EXPECT_TRUE(store.GetDocId("preserved-document").has_value());
+  EXPECT_EQ(store.Size(), 1u);
 }
 
 TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsTruncatedPrimitiveFilterValue) {
@@ -851,8 +983,14 @@ TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsTruncatedPrimitiveFi
 
   std::istringstream truncated_stream(out.str());
   DocumentStore store;
-  auto result = store.LoadFromStream(truncated_stream);
+  ASSERT_TRUE(store.AddDocument("preserved-document"));
+  std::string loaded_gtid = "preserved-gtid";
+  auto result = store.LoadFromStream(truncated_stream, &loaded_gtid);
   EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(loaded_gtid, "preserved-gtid");
+  EXPECT_TRUE(store.GetDocId("preserved-document").has_value());
+  EXPECT_FALSE(store.GetDocId("pk").has_value());
+  EXPECT_EQ(store.Size(), 1u);
 }
 
 TEST_F(DocumentStoreSerializationTest, LoadFromStreamRejectsNextDocIdNotAboveLoadedMaxAndPreservesLiveStore) {
@@ -973,16 +1111,19 @@ TEST_F(DocumentStoreSerializationTest, WriterRefusesEveryFieldTheReaderWouldRefu
   };
   const auto no_gtid = [](size_t) { return std::string{}; };
   const std::vector<Case> cases = {
-      {"primary key", [](DocumentStore& store, size_t size) { ASSERT_TRUE(store.AddDocument(std::string(size, 'k'))); },
+      {"primary key",
+       [](DocumentStore& store, size_t size) {
+         DocumentStoreSerializationTestAccess::SetRawDocument(store, std::string(size, 'k'));
+       },
        kPkLimit, no_gtid},
       {"filter name",
        [](DocumentStore& store, size_t size) {
-         ASSERT_TRUE(store.AddDocument("pk", {{std::string(size, 'n'), int32_t{1}}}));
+         DocumentStoreSerializationTestAccess::SetRawDocument(store, "pk", {{std::string(size, 'n'), int32_t{1}}});
        },
        kFilterNameLimit, no_gtid},
       {"filter string",
        [](DocumentStore& store, size_t size) {
-         ASSERT_TRUE(store.AddDocument("pk", {{"category", std::string(size, 's')}}));
+         DocumentStoreSerializationTestAccess::SetRawDocument(store, "pk", {{"category", std::string(size, 's')}});
        },
        kFilterStringLimit, no_gtid},
       {"filter count",
@@ -991,17 +1132,21 @@ TEST_F(DocumentStoreSerializationTest, WriterRefusesEveryFieldTheReaderWouldRefu
          for (size_t i = 0; i < size; ++i) {
            filters.emplace("f" + std::to_string(i), int32_t{1});
          }
-         ASSERT_TRUE(store.AddDocument("pk", filters));
+         DocumentStoreSerializationTestAccess::SetRawDocument(store, "pk", filters);
        },
        kFilterCountLimit, no_gtid},
       {"normalized text",
-       [](DocumentStore& store, size_t size) { ASSERT_TRUE(store.AddDocument("pk", {}, std::string(size, 't'))); },
+       [](DocumentStore& store, size_t size) {
+         DocumentStoreSerializationTestAccess::SetRawDocument(store, "pk", {}, std::string(size, 't'));
+       },
        kTextLimit, no_gtid},
       {"original text",
-       [](DocumentStore& store, size_t size) { ASSERT_TRUE(store.AddDocument("pk", {}, "t", std::string(size, 'o'))); },
+       [](DocumentStore& store, size_t size) {
+         DocumentStoreSerializationTestAccess::SetRawDocument(store, "pk", {}, {}, std::string(size, 'o'));
+       },
        kTextLimit, no_gtid},
-      {"gtid", [](DocumentStore& store, size_t) { ASSERT_TRUE(store.AddDocument("pk")); }, kGtidLimit,
-       [](size_t size) { return std::string(size, 'g'); }},
+      {"gtid", [](DocumentStore& store, size_t) { DocumentStoreSerializationTestAccess::SetRawDocument(store, "pk"); },
+       kGtidLimit, [](size_t size) { return std::string(size, 'g'); }},
   };
 
   for (const auto& test_case : cases) {
@@ -1032,14 +1177,12 @@ TEST_F(DocumentStoreSerializationTest, WriterRefusesEveryFieldTheReaderWouldRefu
 
 TEST_F(DocumentStoreSerializationTest, WriterRefusalNamesTheDocument) {
   DocumentStore store;
-  ASSERT_TRUE(store.AddDocument("short", {}));
-  auto doc_id = store.AddDocument("row-42", {{"category", std::string(64 * 1024 + 1, 's')}});
-  ASSERT_TRUE(doc_id.has_value());
+  DocumentStoreSerializationTestAccess::SetRawDocument(store, "row-42",
+                                                       {{"category", std::string(64 * 1024 + 1, 's')}});
 
   std::stringstream stream;
   auto result = store.SaveToStream(stream);
   ASSERT_FALSE(result.has_value());
-  EXPECT_NE(result.error().message().find("document " + std::to_string(*doc_id)), std::string::npos)
-      << result.error().message();
+  EXPECT_NE(result.error().message().find("document 1"), std::string::npos) << result.error().message();
   EXPECT_NE(result.error().message().find("'row-42'"), std::string::npos) << result.error().message();
 }

@@ -38,7 +38,6 @@ constexpr size_t kThreshold = 2;
 class IndexThresholdCostTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
-    InstallRoaringAllocationCounter();
     index_ = new Index(
         /*ngram_size=*/2, /*kanji_ngram_size=*/2,
         /*roaring_threshold=*/0.1, /*cross_boundary_ngrams=*/false,

@@ -9,8 +9,14 @@
 
 #include <cstdio>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
+#include <unordered_set>
+#include <utility>
 #include <vector>
+
+#include "storage/dump_format_limits.h"
+#include "storage/filter_index.h"
 
 using namespace mygramdb::storage;
 
@@ -56,6 +62,106 @@ TEST(DocumentStoreTest, AddDocumentWithFilters) {
   auto score = store.GetFilterValue(doc_id, "score");
   ASSERT_TRUE(score.has_value());
   EXPECT_DOUBLE_EQ(std::get<double>(score.value()), 95.5);
+}
+
+TEST(DocumentStoreTest, AddDocumentAcceptsFieldsAtTheirLimits) {
+  using namespace dump_format_limits::docstore;
+  DocumentStore store;
+  const std::string primary_key(kMaxPrimaryKeyLength, 'p');
+  const std::string filter_name(kMaxFilterNameLength, 'n');
+  const std::string filter_value(kMaxFilterStringLength, 'v');
+  const std::string normalized(kMaxNormalizedTextLength, 'x');
+  const std::string original(kMaxOriginalTextLength, 'o');
+  FilterMap filters{{filter_name, filter_value}};
+
+  auto added = store.AddDocument(primary_key, filters, normalized, original);
+  ASSERT_TRUE(added.has_value()) << added.error().message();
+  auto stored_primary_key = store.GetPrimaryKey(*added);
+  ASSERT_TRUE(stored_primary_key.has_value());
+  EXPECT_EQ(stored_primary_key->size(), primary_key.size());
+  auto stored_filter = store.GetFilterValue(*added, filter_name);
+  ASSERT_TRUE(stored_filter.has_value());
+  EXPECT_EQ(std::get<std::string>(*stored_filter).size(), filter_value.size());
+  auto stored_normalized = store.GetNormalizedText(*added);
+  ASSERT_TRUE(stored_normalized.has_value());
+  EXPECT_EQ(stored_normalized->size(), normalized.size());
+  auto stored_original = store.GetOriginalText(*added);
+  ASSERT_TRUE(stored_original.has_value());
+  EXPECT_EQ(stored_original->size(), original.size());
+
+  FilterMap max_count;
+  max_count.reserve(kMaxFilterCount);
+  for (size_t i = 0; i < kMaxFilterCount; ++i) {
+    max_count.emplace("f" + std::to_string(i), static_cast<int32_t>(i));
+  }
+  DocumentStore count_store;
+  EXPECT_TRUE(count_store.AddDocument("max-count", max_count));
+}
+
+TEST(DocumentStoreTest, AddDocumentRejectsEveryOversizedFieldWithoutMutation) {
+  using namespace dump_format_limits::docstore;
+  DocumentStore store;
+
+  auto expect_limit_error = [](const auto& result, std::string_view field, size_t actual, size_t limit) {
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+    EXPECT_NE(result.error().message().find(field), std::string::npos) << result.error().message();
+    EXPECT_NE(result.error().message().find(std::to_string(actual)), std::string::npos) << result.error().message();
+    EXPECT_NE(result.error().message().find(std::to_string(limit)), std::string::npos) << result.error().message();
+    EXPECT_LT(result.error().message().size(), 128U) << "the diagnostic must not echo field contents";
+  };
+
+  const std::string oversized_primary_key(kMaxPrimaryKeyLength + 1, 'p');
+  expect_limit_error(store.AddDocument(oversized_primary_key), "primary_key", oversized_primary_key.size(),
+                     kMaxPrimaryKeyLength);
+  EXPECT_EQ(store.Size(), 0U);
+
+  FilterMap too_many_filters;
+  for (size_t i = 0; i <= kMaxFilterCount; ++i) {
+    too_many_filters.emplace("f" + std::to_string(i), static_cast<int32_t>(i));
+  }
+  expect_limit_error(store.AddDocument("too-many-filters", too_many_filters), "filter_count", kMaxFilterCount + 1,
+                     kMaxFilterCount);
+  EXPECT_EQ(store.Size(), 0U);
+
+  FilterMap too_long_name{{std::string(kMaxFilterNameLength + 1, 'n'), int32_t{1}}};
+  expect_limit_error(store.AddDocument("too-long-name", too_long_name), "filter_name", kMaxFilterNameLength + 1,
+                     kMaxFilterNameLength);
+  EXPECT_EQ(store.Size(), 0U);
+
+  FilterMap too_long_value{{"category", std::string(kMaxFilterStringLength + 1, 'v')}};
+  expect_limit_error(store.AddDocument("too-long-value", too_long_value), "filter_string", kMaxFilterStringLength + 1,
+                     kMaxFilterStringLength);
+  EXPECT_EQ(store.Size(), 0U);
+
+  const std::string oversized_normalized(kMaxNormalizedTextLength + 1, 'x');
+  expect_limit_error(store.AddDocument("too-long-normalized", {}, oversized_normalized), "normalized_text",
+                     oversized_normalized.size(), kMaxNormalizedTextLength);
+  EXPECT_EQ(store.Size(), 0U);
+
+  const std::string oversized_original(kMaxOriginalTextLength + 1, 'o');
+  expect_limit_error(store.AddDocument("too-long-original", {}, {}, oversized_original), "original_text",
+                     oversized_original.size(), kMaxOriginalTextLength);
+  EXPECT_EQ(store.Size(), 0U);
+
+  auto first_valid = store.AddDocument("valid-after-rejections");
+  ASSERT_TRUE(first_valid.has_value());
+  EXPECT_EQ(*first_valid, 1U);
+}
+
+TEST(DocumentStoreTest, AddDocumentRejectsOversizedTextWhenTextStorageIsDisabled) {
+  DocumentStore store;
+  store.SetStoreTexts(false);
+
+  const std::string oversized(dump_format_limits::docstore::kMaxNormalizedTextLength + 1, 'x');
+  auto result = store.AddDocument("pk", {}, oversized);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(result.error().message().find("normalized_text"), std::string::npos);
+  EXPECT_EQ(store.Size(), 0U);
+  auto valid = store.AddDocument("valid");
+  ASSERT_TRUE(valid.has_value());
+  EXPECT_EQ(*valid, 1U);
 }
 
 /**
@@ -631,6 +737,141 @@ TEST(DocumentStoreTest, AddDocumentBatchDuplicates) {
   auto status1 = store.GetFilterValue(1, "status");
   ASSERT_TRUE(status1.has_value());
   EXPECT_EQ(std::get<int32_t>(status1.value()), 1);  // Original value
+}
+
+TEST(DocumentStoreTest, AddDocumentBatchExistingIdsOnlyContainsPreexistingDocuments) {
+  DocumentStore store;
+  ASSERT_TRUE(store.AddDocument("preexisting"));
+
+  const std::vector<DocumentStore::DocumentItem> batch = {
+      {"preexisting"},
+      {"new"},
+      {"new"},
+  };
+  std::unordered_set<DocId> existing_doc_ids{777};
+
+  auto result = store.AddDocumentBatch(batch, &existing_doc_ids);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(result->size(), 3U);
+  EXPECT_EQ((*result)[0], 1U);
+  EXPECT_EQ((*result)[1], 2U);
+  EXPECT_EQ((*result)[2], 2U);
+  EXPECT_EQ(existing_doc_ids, (std::unordered_set<DocId>{777, 1}));
+  EXPECT_EQ(store.Size(), 2U);
+}
+
+TEST(DocumentStoreTest, AddDocumentBatchPreflightsAllNewRowsBeforeMutation) {
+  using namespace dump_format_limits::docstore;
+  DocumentStore store;
+  auto existing = store.AddDocument("existing", {{"status", int32_t{1}}});
+  ASSERT_TRUE(existing.has_value());
+
+  DocumentStore::DocumentItem duplicate_with_invalid_payload{
+      "existing",
+      {{"category", std::string(kMaxFilterStringLength + 1, 'x')}},
+      std::string(kMaxNormalizedTextLength + 1, 'n'),
+      std::string(kMaxOriginalTextLength + 1, 'o')};
+  std::vector<DocumentStore::DocumentItem> invalid_batch;
+  invalid_batch.push_back({"valid-before-error", {{"status", int32_t{2}}}});
+  invalid_batch.push_back(std::move(duplicate_with_invalid_payload));
+  invalid_batch.push_back({"invalid-new-row", {}, std::string(kMaxNormalizedTextLength + 1, 'x')});
+  std::unordered_set<DocId> existing_ids{777};
+
+  auto result = store.AddDocumentBatch(invalid_batch, &existing_ids);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(result.error().message().find("normalized_text"), std::string::npos);
+  EXPECT_EQ(store.Size(), 1U);
+  EXPECT_FALSE(store.GetDocId("valid-before-error").has_value());
+  EXPECT_EQ(existing_ids, (std::unordered_set<DocId>{777}));
+  auto next_id = store.AddDocument("next-after-error");
+  ASSERT_TRUE(next_id.has_value());
+  EXPECT_EQ(*next_id, 2U);
+
+  DocumentStore duplicate_store;
+  ASSERT_TRUE(duplicate_store.AddDocument("existing"));
+  std::vector<DocumentStore::DocumentItem> duplicate_payload_batch;
+  duplicate_payload_batch.push_back(
+      {"existing", {}, std::string(kMaxNormalizedTextLength + 1, 'x'), std::string(kMaxOriginalTextLength + 1, 'y')});
+  duplicate_payload_batch.push_back({"new", {}});
+  std::unordered_set<DocId> duplicate_ids;
+  auto duplicate_result = duplicate_store.AddDocumentBatch(duplicate_payload_batch, &duplicate_ids);
+  ASSERT_TRUE(duplicate_result.has_value()) << duplicate_result.error().message();
+  EXPECT_EQ((*duplicate_result)[0], 1U);
+  EXPECT_EQ((*duplicate_result)[1], 2U);
+  EXPECT_EQ(duplicate_ids, (std::unordered_set<DocId>{1}));
+}
+
+TEST(DocumentStoreTest, UpdateDocumentRejectsOversizedFieldsBeforeIndexOrTextChanges) {
+  using namespace dump_format_limits::docstore;
+  DocumentStore store;
+  auto doc_id = store.AddDocument("pk", {{"status", int32_t{1}}}, "old normalized", "old original");
+  ASSERT_TRUE(doc_id.has_value());
+
+  FilterMap too_many_filters;
+  for (size_t i = 0; i <= kMaxFilterCount; ++i) {
+    too_many_filters.emplace("f" + std::to_string(i), static_cast<int32_t>(i));
+  }
+  auto filter_result = store.UpdateDocument(*doc_id, too_many_filters);
+  ASSERT_FALSE(filter_result.has_value());
+  EXPECT_EQ(filter_result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(filter_result.error().message().find("filter_count"), std::string::npos);
+
+  FilterMap replacement_filters{{"status", int32_t{2}}};
+  const std::string oversized_text(kMaxNormalizedTextLength + 1, 'x');
+  auto text_result = store.UpdateDocument(*doc_id, replacement_filters, oversized_text, "new original");
+  ASSERT_FALSE(text_result.has_value());
+  EXPECT_EQ(text_result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(text_result.error().message().find("normalized_text"), std::string::npos);
+
+  auto stored_status = store.GetFilterValue(*doc_id, "status");
+  ASSERT_TRUE(stored_status.has_value());
+  EXPECT_EQ(std::get<int32_t>(*stored_status), 1);
+  EXPECT_EQ(store.GetNormalizedText(*doc_id), std::optional<std::string>("old normalized"));
+  EXPECT_EQ(store.GetOriginalText(*doc_id), std::optional<std::string>("old original"));
+
+  std::vector<DocId> selected_doc_ids;
+  const auto index = store.GetFilterIndex();
+  EXPECT_TRUE(
+      index->CollectEqDocIds("status", FilterIndex::SerializeFilterValue(FilterValue{int32_t{1}}), selected_doc_ids));
+  EXPECT_EQ(selected_doc_ids, (std::vector<DocId>{*doc_id}));
+  EXPECT_FALSE(
+      index->CollectEqDocIds("status", FilterIndex::SerializeFilterValue(FilterValue{int32_t{2}}), selected_doc_ids));
+
+  auto updated = store.UpdateDocument(*doc_id, replacement_filters, "new normalized", "new original");
+  ASSERT_TRUE(updated.has_value()) << updated.error().message();
+  EXPECT_TRUE(*updated);
+  EXPECT_EQ(store.GetNormalizedText(*doc_id), std::optional<std::string>("new normalized"));
+  EXPECT_EQ(store.GetOriginalText(*doc_id), std::optional<std::string>("new original"));
+  auto updated_status = store.GetFilterValue(*doc_id, "status");
+  ASSERT_TRUE(updated_status.has_value());
+  EXPECT_EQ(std::get<int32_t>(*updated_status), 2);
+}
+
+TEST(DocumentStoreTest, CheckedTextSettersReportBoundsAndPreservePreviousText) {
+  using namespace dump_format_limits::docstore;
+  DocumentStore store;
+  auto doc_id = store.AddDocument("pk", {}, "old normalized", "old original");
+  ASSERT_TRUE(doc_id.has_value());
+
+  const std::string oversized_normalized(kMaxNormalizedTextLength + 1, 'x');
+  auto normalized_result = store.SetNormalizedTextChecked(*doc_id, oversized_normalized);
+  ASSERT_FALSE(normalized_result.has_value());
+  EXPECT_EQ(normalized_result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(normalized_result.error().message().find("normalized_text"), std::string::npos);
+  EXPECT_EQ(store.GetNormalizedText(*doc_id), std::optional<std::string>("old normalized"));
+
+  const std::string oversized_original(kMaxOriginalTextLength + 1, 'o');
+  auto original_result = store.SetOriginalTextChecked(*doc_id, oversized_original);
+  ASSERT_FALSE(original_result.has_value());
+  EXPECT_EQ(original_result.error().code(), mygram::utils::ErrorCode::kStorageWriteError);
+  EXPECT_NE(original_result.error().message().find("original_text"), std::string::npos);
+  EXPECT_EQ(store.GetOriginalText(*doc_id), std::optional<std::string>("old original"));
+
+  EXPECT_THROW(store.SetNormalizedText(*doc_id, oversized_normalized), std::length_error);
+  EXPECT_THROW(store.SetOriginalText(*doc_id, oversized_original), std::length_error);
+  EXPECT_EQ(store.GetNormalizedText(*doc_id), std::optional<std::string>("old normalized"));
+  EXPECT_EQ(store.GetOriginalText(*doc_id), std::optional<std::string>("old original"));
 }
 
 /**
@@ -1510,12 +1751,7 @@ TEST(DocumentStoreTest, AddDocument_ZeroSentinelReturnsError) {
 }
 
 /**
- * @brief Test AddDocumentBatch UINT32_MAX boundary: assigns UINT32_MAX then errors
- *
- * When next_doc_id_ == UINT32_MAX, AddDocumentBatch should:
- * 1. Successfully assign UINT32_MAX for the first new document
- * 2. Set next_doc_id_ to 0 (sentinel)
- * 3. Return an error for the second new document in the same batch
+ * @brief A batch requiring more IDs than remain fails before consuming any ID.
  */
 TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxBoundary) {
   TestableDocumentStore store;
@@ -1523,13 +1759,15 @@ TEST(DocumentStoreTest, AddDocumentBatch_Uint32MaxBoundary) {
   // Position next_doc_id_ at UINT32_MAX
   store.SetNextDocIdForTest(UINT32_MAX);
 
-  // Batch with two new documents - first should succeed, second should fail
+  // Batch with two new documents cannot fit in the one remaining ID.
   std::vector<DocumentStore::DocumentItem> batch;
   batch.push_back({"pk_max", {}, ""});
   batch.push_back({"pk_overflow", {}, ""});
 
   auto result = store.AddDocumentBatch(batch);
-  EXPECT_FALSE(result.has_value()) << "AddDocumentBatch should fail when DocID space is exhausted mid-batch";
+  EXPECT_FALSE(result.has_value()) << "AddDocumentBatch should reject a batch that cannot fit in remaining IDs";
+  EXPECT_EQ(store.Size(), 0U);
+  EXPECT_EQ(store.GetNextDocIdForTest(), UINT32_MAX);
 }
 
 /**
@@ -1918,6 +2156,68 @@ TEST(DocumentStoreTest, VisitNormalizedTextChunksInvokesVisitorWithoutStoreLock)
 
   EXPECT_EQ(callback_count, 1);
   EXPECT_EQ(store.GetNormalizedText(*first), std::optional<std::string>("after"));
+}
+
+TEST(DocumentStoreTest, VisitNormalizedTextChunksHandlesSparseIdsAtExhaustedHighWaterMark) {
+  TestableDocumentStore store;
+  const auto first = store.AddDocument("first", {}, "first text");
+  const auto removed = store.AddDocument("removed", {}, "removed text");
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(removed.has_value());
+
+  store.SetNextDocIdForTest(UINT32_MAX);
+  const auto last = store.AddDocument("last", {}, "last text");
+  ASSERT_TRUE(last.has_value());
+  EXPECT_EQ(*last, UINT32_MAX);
+  EXPECT_TRUE(store.RemoveDocument(*removed));
+
+  // SetNormalizedText historically allowed keys without a live document; the
+  // high-water-bounded walk must continue to include those stored texts.
+  store.SetNormalizedText(3, "orphan text");
+
+  std::vector<DocId> visited;
+  size_t callback_count = 0;
+  store.VisitNormalizedTextChunks(2, [&](const std::vector<DocumentStore::NormalizedTextEntry>& chunk) {
+    ++callback_count;
+    EXPECT_LE(chunk.size(), 2U);
+    for (const auto& entry : chunk) {
+      visited.push_back(entry.doc_id);
+    }
+    return true;
+  });
+
+  EXPECT_EQ(callback_count, 2U);
+  EXPECT_EQ(visited, (std::vector<DocId>{*first, 3, UINT32_MAX}));
+}
+
+TEST(DocumentStoreTest, VisitNormalizedTextChunksSkipsDeletedAndLaterAddedIds) {
+  DocumentStore store;
+  const auto first = store.AddDocument("first", {}, "first text");
+  const auto second = store.AddDocument("second", {}, "second text");
+  ASSERT_TRUE(first.has_value());
+  ASSERT_TRUE(second.has_value());
+
+  std::vector<DocId> visited;
+  size_t callback_count = 0;
+  store.VisitNormalizedTextChunks(1, [&](const std::vector<DocumentStore::NormalizedTextEntry>& chunk) {
+    ++callback_count;
+    EXPECT_EQ(chunk.size(), 1U);
+    if (chunk.empty()) {
+      return false;
+    }
+    visited.push_back(chunk.front().doc_id);
+    EXPECT_TRUE(store.RemoveDocument(*second));
+    const auto later = store.AddDocument("later", {}, "later text");
+    EXPECT_TRUE(later.has_value());
+    if (!later.has_value()) {
+      return false;
+    }
+    EXPECT_EQ(*later, 3U);
+    return true;
+  });
+
+  EXPECT_EQ(callback_count, 1U);
+  EXPECT_EQ(visited, (std::vector<DocId>{*first}));
 }
 
 /**

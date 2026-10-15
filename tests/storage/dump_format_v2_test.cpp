@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -30,6 +31,31 @@ using mygram::utils::WriteBinary;
 using mygramdb::config::Config;
 using mygramdb::config::TableConfig;
 using mygramdb::index::Index;
+
+namespace mygramdb::storage {
+
+/// Inject a legacy invalid document so dump save validation remains covered
+/// after admission rejects the same value through public mutation APIs.
+struct DocumentStoreSerializationTestAccess {
+  static void SetRawDocument(DocumentStore& store, std::string primary_key, const FilterMap& filters = {},
+                             std::string normalized_text = {}, std::string original_text = {}) {
+    std::unique_lock lock(store.mutex_);
+    store.next_doc_id_ = 2;
+    store.doc_id_to_pk_[1] = primary_key;
+    store.pk_to_doc_id_[primary_key] = 1;
+    if (!filters.empty()) {
+      store.doc_filters_[1] = store.InternFilterMapLocked(filters);
+    }
+    if (!normalized_text.empty()) {
+      store.doc_texts_[1] = std::move(normalized_text);
+    }
+    if (!original_text.empty()) {
+      store.original_texts_[1] = std::move(original_text);
+    }
+  }
+};
+
+}  // namespace mygramdb::storage
 
 namespace {
 
@@ -240,6 +266,23 @@ void RewriteFileCrc(std::vector<char>& file_data) {
   auto crc = static_cast<uint32_t>(
       crc32(0, reinterpret_cast<const Bytef*>(file_data.data()), static_cast<uInt>(file_data.size())));
   std::memcpy(&file_data[file_crc_offset], &crc, sizeof(crc));
+}
+
+void AppendUnknownSectionWithoutChangingCount(std::vector<char>& file_data, const std::string& payload) {
+  std::ostringstream section;
+  ASSERT_TRUE(WriteBinary(section, uint32_t{99}));
+  const auto section_crc = static_cast<uint32_t>(
+      crc32(0, reinterpret_cast<const Bytef*>(payload.data()), static_cast<uInt>(payload.size())));
+  ASSERT_TRUE(WriteBinary(section, section_crc));
+  ASSERT_TRUE(WriteBinary(section, static_cast<uint64_t>(payload.size())));
+  section.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+  ASSERT_TRUE(section.good());
+
+  const std::string section_data = section.str();
+  file_data.insert(file_data.end(), section_data.begin(), section_data.end());
+  const auto file_size = static_cast<uint64_t>(file_data.size());
+  std::memcpy(&file_data[static_cast<size_t>(kV2HeaderTotalFileSizeOffset)], &file_size, sizeof(file_size));
+  RewriteFileCrc(file_data);
 }
 
 void RewriteV1FileCrc(std::vector<char>& file_data) {
@@ -1113,6 +1156,61 @@ TEST(DumpFormatV2Test, IntegrityVerificationPasses) {
   EXPECT_EQ(error.type, dump_format::CRCErrorType::None);
 }
 
+TEST(DumpFormatV2Test, V2SectionLengthLimitIsInclusiveAndFixed) {
+  EXPECT_TRUE(dump_format_limits::container::IsValidV2SectionDataLength(kMaxSectionDataLength));
+  EXPECT_FALSE(dump_format_limits::container::IsValidV2SectionDataLength(kMaxSectionDataLength + 1));
+}
+
+TEST(DumpFormatV2Test, SaveRejectsConfigSectionAboveConfiguredLimitWithoutReplacingTarget) {
+  const auto filepath = TempFilePath("save_config_section_ceiling");
+  ScopedCleanup cleanup(filepath);
+  const std::string previous_contents = "previous-good-dump";
+  WriteFileBytes(filepath, std::vector<char>(previous_contents.begin(), previous_contents.end()));
+
+  Index index;
+  DocumentStore store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&index, &store}}};
+  const RestoreLimits limits{16 * 1024 * 1024, 1};
+  const auto result = WriteDumpV2(filepath, "", MakeTestConfig(), contexts, nullptr, nullptr, {}, limits);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Config section"), std::string::npos) << result.error().message();
+  const auto bytes = ReadFileBytes(filepath);
+  EXPECT_EQ(std::string(bytes.begin(), bytes.end()), previous_contents);
+}
+
+TEST(DumpFormatV2Test, V2ConfigCanExceedV1CombinedConfigLimit) {
+  const auto filepath = TempFilePath("v2_config_above_v1_limit");
+  ScopedCleanup cleanup(filepath);
+  Config config = MakeTestConfig();
+  config.network.allow_cidrs.assign(4097, std::string(kMaxConfigValueLength, 'x'));
+  Index index;
+  DocumentStore store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&index, &store}}};
+
+  const auto result = WriteDumpV2(filepath, "", config, contexts);
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  EXPECT_GT(std::filesystem::file_size(filepath), dump_format_limits::container::kMaxConfigSectionLength);
+}
+
+TEST(DumpFormatV2Test, SaveRejectsOverLengthTableContextNameWithoutReplacingTarget) {
+  const auto filepath = TempFilePath("save_table_context_name_ceiling");
+  ScopedCleanup cleanup(filepath);
+  const std::string previous_contents = "previous-good-dump";
+  WriteFileBytes(filepath, std::vector<char>(previous_contents.begin(), previous_contents.end()));
+
+  Index index;
+  DocumentStore store;
+  const std::string table_name(dump_format_limits::container::kMaxTableContextNameLength + 1, 't');
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{table_name, {&index, &store}}};
+  const auto result = WriteDumpV2(filepath, "", MakeTestConfig(), contexts);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_NE(result.error().message().find("Table context name"), std::string::npos) << result.error().message();
+  const auto bytes = ReadFileBytes(filepath);
+  EXPECT_EQ(std::string(bytes.begin(), bytes.end()), previous_contents);
+}
+
 TEST(DumpFormatV2Test, VerifyRejectsSectionAboveConfiguredRestoreLimitBeforeMaterializingIt) {
   const auto filepath = TempFilePath("verify_section_restore_limit");
   ScopedCleanup cleanup(filepath);
@@ -1323,6 +1421,97 @@ TEST(DumpFormatV2Test, ReadRejectsZeroFileCrcWhenCrcFlagSet) {
   EXPECT_FALSE(read_result.has_value());
   EXPECT_EQ(error.type, dump_format::CRCErrorType::FileCRC);
   EXPECT_NE(error.message.find("CRC32 checksum mismatch"), std::string::npos);
+}
+
+TEST(DumpFormatV2Test, ReadAndVerifyRejectV2WithoutRequiredFileCrcFlag) {
+  const auto filepath = TempFilePath("missing_file_crc_flag");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index source_index;
+  DocumentStore source_store;
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+  ASSERT_TRUE(WriteDumpV2(filepath, "GTID:crc-flag", cfg, source_contexts).has_value());
+
+  auto file_data = ReadFileBytes(filepath);
+  constexpr size_t kV2HeaderFlagsOffset = 12;
+  uint32_t flags = 0;
+  std::memcpy(&flags, &file_data[kV2HeaderFlagsOffset], sizeof(flags));
+  flags &= ~static_cast<uint32_t>(dump_format::flags_v2::kWithCRC);
+  std::memcpy(&file_data[kV2HeaderFlagsOffset], &flags, sizeof(flags));
+  RewriteFileCrc(file_data);
+  WriteFileBytes(filepath, file_data);
+
+  std::string read_gtid = "unchanged";
+  Config read_config;
+  read_config.mysql.host = "unchanged-host";
+  Index read_index;
+  DocumentStore read_store;
+  ASSERT_TRUE(read_store.AddDocument("preserved"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts{
+      {"articles", {&read_index, &read_store}}};
+  dump_format::IntegrityError load_error;
+
+  const auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts, nullptr, nullptr, &load_error);
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_EQ(read_result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_EQ(load_error.type, dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(load_error.message.find("file CRC32 is required"), std::string::npos);
+  EXPECT_EQ(read_gtid, "unchanged");
+  EXPECT_EQ(read_config.mysql.host, "unchanged-host");
+  EXPECT_TRUE(read_store.GetDocId("preserved").has_value());
+
+  dump_format::IntegrityError verify_error;
+  const auto verify_result = VerifyDumpIntegrity(filepath, verify_error);
+  EXPECT_FALSE(verify_result.has_value());
+  EXPECT_EQ(verify_result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_EQ(verify_error.type, dump_format::CRCErrorType::FileCRC);
+  EXPECT_NE(verify_error.message.find("file CRC32 is required"), std::string::npos);
+}
+
+TEST(DumpFormatV2Test, ReadAndVerifyRejectValidTrailingSectionWithoutLiveMutation) {
+  const auto filepath = TempFilePath("trailing_unknown_section");
+  ScopedCleanup cleanup(filepath);
+
+  Config cfg = MakeTestConfig();
+  Index source_index;
+  DocumentStore source_store;
+  ASSERT_TRUE(source_store.AddDocument("from-dump", {}, "new value"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> source_contexts{
+      {"articles", {&source_index, &source_store}}};
+  ASSERT_TRUE(WriteDumpV2(filepath, "GTID:trailing-section", cfg, source_contexts).has_value());
+
+  auto file_data = ReadFileBytes(filepath);
+  AppendUnknownSectionWithoutChangingCount(file_data, "valid uncounted section");
+  WriteFileBytes(filepath, file_data);
+
+  std::string read_gtid = "unchanged";
+  Config read_config;
+  read_config.mysql.host = "unchanged-host";
+  Index read_index;
+  DocumentStore read_store;
+  ASSERT_TRUE(read_store.AddDocument("preserved", {}, "old value"));
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> read_contexts{
+      {"articles", {&read_index, &read_store}}};
+  dump_format::IntegrityError load_error;
+
+  const auto read_result = ReadDumpV2(filepath, read_gtid, read_config, read_contexts, nullptr, nullptr, &load_error);
+  ASSERT_FALSE(read_result.has_value());
+  EXPECT_EQ(read_result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_EQ(load_error.type, dump_format::CRCErrorType::SectionCRC);
+  EXPECT_NE(load_error.message.find("does not consume the entire file"), std::string::npos);
+  EXPECT_EQ(read_gtid, "unchanged");
+  EXPECT_EQ(read_config.mysql.host, "unchanged-host");
+  EXPECT_TRUE(read_store.GetDocId("preserved").has_value());
+  EXPECT_FALSE(read_store.GetDocId("from-dump").has_value());
+
+  dump_format::IntegrityError verify_error;
+  const auto verify_result = VerifyDumpIntegrity(filepath, verify_error);
+  EXPECT_FALSE(verify_result.has_value());
+  EXPECT_EQ(verify_result.error().code(), mygram::utils::ErrorCode::kStorageDumpReadError);
+  EXPECT_EQ(verify_error.type, dump_format::CRCErrorType::SectionCRC);
+  EXPECT_NE(verify_error.message.find("does not consume the entire file"), std::string::npos);
 }
 
 TEST(DumpFormatV2Test, SectionCRCCorruptionDetected) {
@@ -1589,6 +1778,11 @@ TEST(DumpFormatV2Test, UnknownSectionSkipped) {
   auto read_result = ReadDump(filepath, read_gtid, read_config, read_contexts);
   ASSERT_TRUE(read_result.has_value()) << read_result.error().message();
   EXPECT_EQ(read_gtid, "GTID:1");
+
+  dump_format::IntegrityError verify_error;
+  auto verify_result = VerifyDumpIntegrity(filepath, verify_error);
+  ASSERT_TRUE(verify_result.has_value()) << verify_error.message;
+  EXPECT_EQ(verify_error.type, dump_format::CRCErrorType::None);
 
   // DumpInfo should show the unknown section
   DumpV2Info info;
@@ -1897,6 +2091,21 @@ TEST(DumpFormatV2Test, DocumentSectionFloorScalesWithDocumentCount) {
   // A count that cannot be multiplied out saturates rather than wrapping.
   EXPECT_EQ(dump_internal::EstimateDocumentSectionResidentFloor(0, std::numeric_limits<uint64_t>::max()),
             std::numeric_limits<uint64_t>::max());
+}
+
+TEST(DumpFormatV2Test, DocumentSectionHeaderRejectsOversizedGtidLengthBeforeAllocating) {
+  const uint32_t gtid_length = dump_format_limits::docstore::kMaxGtidLength + 1;
+  std::string payload(16, '\0');
+  const uint32_t le_length = mygramdb::utils::ToLittleEndian(gtid_length);
+  std::memcpy(payload.data() + 12, &le_length, sizeof(le_length));
+  // Enough trailing bytes that the section-length bound alone would accept the length.
+  payload.append(gtid_length + 8, 'g');
+
+  std::istringstream stream(payload);
+  dump_internal::DocumentSectionHeader header;
+  auto result = dump_internal::ReadDocumentSectionHeader(stream, payload.size(), header);
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message().find("GTID length exceeds maximum"), std::string::npos);
 }
 
 TEST(DumpFormatV2Test, V2RefusesDocumentSectionThatCannotFitBeforeDecoding) {
@@ -2426,7 +2635,8 @@ TEST(DumpFormatV2Test, SaveRefusesDocumentTheLoaderWouldRejectWithoutReplacingTa
 
   Index index;
   DocumentStore store;
-  ASSERT_TRUE(store.AddDocument("wide-row", {{"category", std::string(64 * 1024 + 1, 's')}}, "text"));
+  DocumentStoreSerializationTestAccess::SetRawDocument(store, "wide-row",
+                                                       {{"category", std::string(64 * 1024 + 1, 's')}}, "text");
   std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts{{"articles", {&index, &store}}};
 
   auto result = WriteDump(filepath, "", MakeTestConfig(), contexts);

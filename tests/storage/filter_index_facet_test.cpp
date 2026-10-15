@@ -279,3 +279,81 @@ TEST_F(FilterIndexFacetTest, FilteredFacetIdempotentWithSameBitmap) {
     EXPECT_EQ(counts1[i].second, counts2[i].second);
   }
 }
+
+// --- Tie order ---
+
+namespace {
+
+// Two documents per value for the even indices, one for the odd, so many values tie.
+void FillTiedFacetIndex(FilterIndex& index, const std::vector<int>& insertion_order) {
+  DocId next_doc = 1;
+  for (int value : insertion_order) {
+    const int copies = value % 2 == 0 ? 2 : 1;
+    for (int copy = 0; copy < copies; ++copy) {
+      FilterMap filters;
+      filters["tag"] = std::string("tag-") + std::to_string(value);
+      EXPECT_TRUE(index.AddDocument(next_doc++, filters));
+    }
+  }
+}
+
+}  // namespace
+
+TEST(FilterIndexFacetTieOrderTest, EqualCountsAreOrderedByValueWhateverTheInsertionOrder) {
+  std::vector<int> ascending;
+  for (int i = 0; i < 64; ++i) {
+    ascending.push_back(i);
+  }
+  std::vector<int> descending(ascending.rbegin(), ascending.rend());
+
+  FilterIndex ascending_index;
+  FilterIndex descending_index;
+  FillTiedFacetIndex(ascending_index, ascending);
+  FillTiedFacetIndex(descending_index, descending);
+  const auto from_ascending = ascending_index.GetColumnValueCounts("tag");
+  const auto from_descending = descending_index.GetColumnValueCounts("tag");
+
+  ASSERT_EQ(from_ascending.size(), 64U);
+  EXPECT_EQ(from_ascending, from_descending);
+  for (size_t i = 1; i < from_ascending.size(); ++i) {
+    const auto& previous = from_ascending[i - 1];
+    const auto& current = from_ascending[i];
+    ASSERT_GE(previous.second, current.second);
+    if (previous.second == current.second) {
+      EXPECT_LT(previous.first, current.first) << "tied counts must be ordered by serialized value";
+    }
+  }
+}
+
+TEST(FilterIndexFacetTieOrderTest, OffsetPagesOverTiedCountsAreDisjointAndCoverEveryValue) {
+  std::vector<int> order;
+  for (int i = 0; i < 64; ++i) {
+    order.push_back((i * 37) % 64);
+  }
+  FilterIndex index;
+  FillTiedFacetIndex(index, order);
+
+  roaring_bitmap_t* all_docs = roaring_bitmap_create();
+  roaring_bitmap_add_range(all_docs, 1, 200);
+  const auto full = index.GetColumnValueCountsFiltered("tag", all_docs);
+
+  constexpr size_t kPageSize = 7;
+  std::vector<std::string> paged;
+  for (size_t offset = 0; offset < full.size(); offset += kPageSize) {
+    // Each page re-reads the index, as consecutive FACET requests do.
+    const auto page = index.GetColumnValueCountsFiltered("tag", all_docs);
+    for (size_t i = offset; i < std::min(offset + kPageSize, page.size()); ++i) {
+      paged.push_back(page[i].first);
+    }
+  }
+  roaring_bitmap_free(all_docs);
+
+  std::vector<std::string> expected;
+  for (const auto& entry : full) {
+    expected.push_back(entry.first);
+  }
+  EXPECT_EQ(paged, expected);
+  std::sort(paged.begin(), paged.end());
+  EXPECT_EQ(std::adjacent_find(paged.begin(), paged.end()), paged.end()) << "a value appeared on two pages";
+  EXPECT_EQ(paged.size(), 64U);
+}

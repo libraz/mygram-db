@@ -88,10 +88,9 @@ using dump_v1::kMaxGtidLength;
 using dump_v1::kMaxIdentifierLength;
 using dump_v1::kMaxPathLength;
 using dump_v1::kMaxStatsSectionLength;
-using dump_v1::kMaxTextContentLength;
 
-/// Maximum allowed section data length (4 GB - prevents OOM from malicious files)
-constexpr uint64_t kMaxSectionDataLength = 4ULL * 1024 * 1024 * 1024;
+/// Maximum allowed section data length (4 GiB hard format limit)
+using dump_format_limits::container::kMaxSectionDataLength;
 
 using RestoreLimits = dump_format::RestoreLimits;
 

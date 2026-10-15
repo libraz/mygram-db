@@ -10,6 +10,9 @@
 
 #include <roaring/roaring.h>
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <shared_mutex>
@@ -19,6 +22,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/hash/hash.h"
 #include "storage/document_store.h"
 #include "types/doc_id.h"
 #include "utils/hash_utils.h"
@@ -46,13 +50,12 @@ class FilterIndex {
   FilterIndex& operator=(FilterIndex&&) = delete;
 
   /// Add doc_id to bitmaps for each filter value.
-  /// A bitmap that cannot be allocated is reported instead of skipped: the
-  /// entries this call had already applied are rolled back, so the document is
-  /// either indexed under all of its filter values or under none of them.
+  /// Bitmap storage is prepared before any membership changes, so allocation
+  /// failure leaves the index unchanged and is reported to the caller.
   Expected<void, Error> AddDocument(DocId doc_id, const FilterMap& filters);
 
   /// Update bitmaps when filter values change.
-  /// On failure the previous values are put back and the error is reported;
+  /// On failure the previous values remain untouched and the error is reported;
   /// the document is never left indexed under a partially applied new set.
   Expected<void, Error> UpdateDocument(DocId doc_id, const FilterMap& old_filters, const FilterMap& new_filters);
 
@@ -103,18 +106,44 @@ class FilterIndex {
   static std::string DeserializeToDisplayString(const std::string& serialized);
 
  private:
-  /// Add doc_id to bitmaps for given filters. Caller must hold unique_lock on mutex_.
-  [[nodiscard]] Expected<void, Error> AddDocToBitmapsLocked(DocId doc_id, const FilterMap& filters);
+  static constexpr size_t kSerializedValuePayloadBytes = sizeof(double) > sizeof(uint64_t) ? sizeof(double)
+                                                                                           : sizeof(uint64_t);
+  using SerializedValueStorage = std::array<char, kSerializedValuePayloadBytes>;
 
-  /// Remove doc_id from bitmaps for given filters. Caller must hold unique_lock on mutex_.
-  void RemoveDocFromBitmapsLocked(DocId doc_id, const FilterMap& filters);
+  struct SerializedValueProbe {
+    uint8_t tag = 0;
+    std::string_view payload;
+  };
 
-  /// Undo one (column, value) entry of a document. Caller must hold unique_lock on mutex_.
-  void RemoveFilterEntryLocked(DocId doc_id, const std::string& column, const FilterValue& value);
+  struct SerializedValueHash {
+    using is_transparent = void;
 
-  /// Undo the first @p visited entries of an interrupted add, in the same
-  /// iteration order that applied them. Caller must hold unique_lock on mutex_.
-  void RollbackPartialAddLocked(DocId doc_id, const FilterMap& filters, size_t visited);
+    size_t operator()(std::string_view serialized) const {
+      const uint8_t tag = serialized.empty() ? 0 : static_cast<uint8_t>(static_cast<unsigned char>(serialized[0]));
+      return absl::HashOf(tag, serialized.empty() ? std::string_view{} : serialized.substr(1));
+    }
+    size_t operator()(const std::string& serialized) const { return (*this)(std::string_view(serialized)); }
+    size_t operator()(SerializedValueProbe probe) const { return absl::HashOf(probe.tag, probe.payload); }
+  };
+
+  struct SerializedValueEqual {
+    using is_transparent = void;
+
+    bool operator()(std::string_view lhs, std::string_view rhs) const { return lhs == rhs; }
+    bool operator()(std::string_view serialized, SerializedValueProbe probe) const {
+      return serialized.size() == probe.payload.size() + 1 &&
+             static_cast<uint8_t>(static_cast<unsigned char>(serialized[0])) == probe.tag &&
+             serialized.substr(1) == probe.payload;
+    }
+    bool operator()(SerializedValueProbe probe, std::string_view serialized) const {
+      return (*this)(serialized, probe);
+    }
+  };
+
+  /// Prepare then atomically apply filter membership changes. Caller holds the unique lock.
+  [[nodiscard]] Expected<void, Error> ApplyFilterChangesLocked(DocId doc_id, const FilterMap* old_filters,
+                                                               const FilterMap* new_filters);
+  static SerializedValueProbe MakeSerializedValueProbe(const FilterValue& value, SerializedValueStorage& storage);
 
   /// Protects all bitmap data from concurrent read/write access.
   /// Readers (CollectEqDocIds, OrEqBitmapInto, ResolveColumnName, MemoryUsage) take shared_lock;
@@ -123,10 +152,9 @@ class FilterIndex {
 
   /// column_name -> { serialized_value -> owning bitmap handle }
   /// The mapped type owns its bitmap, so erasing an entry frees it.
-  /// Uses transparent hash for heterogeneous lookup (string_view without allocation)
+  /// Uses transparent hashing for serialized views and allocation-free FilterValue probes.
   using ValueBitmapMap =
-      absl::flat_hash_map<std::string, mygram::utils::RoaringBitmapPtr, mygram::utils::TransparentStringHash,
-                          mygram::utils::TransparentStringEqual>;
+      absl::flat_hash_map<std::string, mygram::utils::RoaringBitmapPtr, SerializedValueHash, SerializedValueEqual>;
   absl::flat_hash_map<std::string, ValueBitmapMap, mygram::utils::TransparentStringHash,
                       mygram::utils::TransparentStringEqual>
       eq_bitmaps_;
@@ -136,5 +164,21 @@ class FilterIndex {
   absl::flat_hash_map<std::string, size_t, mygram::utils::TransparentStringHash, mygram::utils::TransparentStringEqual>
       column_ref_counts_;
 };
+
+/**
+ * @brief Convert one column value to the FilterValue of a configured filter type
+ *
+ * The single conversion shared by the initial load, replication and query-side
+ * filter literals, so all three agree on what a value means and on which text
+ * cannot be converted.
+ *
+ * @param value Column value (or query filter literal) as text
+ * @param is_null True when the column is SQL NULL; yields a monostate
+ * @param filter_type Configured filter type (e.g. "bigint", "boolean", "datetime")
+ * @param datetime_timezone Offset DATETIME and DATE values are read in (e.g. "+09:00")
+ * @return The converted value, or std::nullopt when @p value is not valid for @p filter_type
+ */
+std::optional<FilterValue> ConvertFilterValue(std::string_view value, bool is_null, std::string_view filter_type,
+                                              const std::string& datetime_timezone = "+00:00");
 
 }  // namespace mygramdb::storage

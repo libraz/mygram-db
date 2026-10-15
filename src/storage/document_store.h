@@ -197,7 +197,8 @@ class DocumentStore {
    *
    * @param documents Vector of documents to add
    * @param existing_doc_ids_out If non-null, populated with DocIds of documents
-   *        that already existed (duplicates). Caller can use this to skip indexing.
+   *        that existed before this batch (duplicates). Repeated new keys in the
+   *        same batch are not included. Caller can use this to skip indexing.
    * @return Expected<std::vector<DocId>, Error> Vector of assigned DocIDs (same order as input,
    *         existing DocIDs for duplicates) or error (e.g., DocID exhausted mid-batch)
    * @note This method is thread-safe
@@ -215,6 +216,12 @@ class DocumentStore {
    *         the document keeps the values it had.
    */
   [[nodiscard]] Expected<bool, Error> UpdateDocument(DocId doc_id, const FilterMap& filters);
+
+  /// Update filters and the document's stored text under one store lock. Text
+  /// fields are validated even when text storage is disabled; in that mode
+  /// they are validated and then skipped, matching AddDocument semantics.
+  [[nodiscard]] Expected<bool, Error> UpdateDocument(DocId doc_id, const FilterMap& filters,
+                                                     std::string_view normalized_text, std::string_view original_text);
 
   /**
    * @brief Remove document
@@ -378,8 +385,12 @@ class DocumentStore {
    *
    * @param doc_id Document ID
    * @param text Normalized text to store
+   * @throws std::length_error if the text exceeds the dump format text limit
    */
   void SetNormalizedText(DocId doc_id, std::string_view text);
+
+  /// Checked form of SetNormalizedText for callers that need typed errors.
+  [[nodiscard]] Expected<void, Error> SetNormalizedTextChecked(DocId doc_id, std::string_view text);
 
   /**
    * @brief Get normalized text for a document (for n-gram verification)
@@ -418,17 +429,22 @@ class DocumentStore {
   /**
    * @brief Visit stored normalized texts in bounded DocID chunks
    *
-   * Each chunk owns at most @p max_doc_ids_per_chunk texts and the visitor runs
-   * without holding the store mutex. Returning false stops iteration.
-   * The DocID high-water mark is captured when iteration starts.
+   * The DocID high-water mark is captured when iteration starts, and each
+   * chunk copies at most @p max_doc_ids_per_chunk texts before invoking the
+   * visitor without the store mutex. Texts removed before their chunk is read
+   * are skipped. Returning false stops iteration.
    *
-   * @param max_doc_ids_per_chunk Maximum DocID range copied per lock acquisition
+   * @param max_doc_ids_per_chunk Maximum DocID span or candidate count fetched per chunk (0 = no visit)
    * @param visitor Callback invoked for each non-empty chunk
    */
   void VisitNormalizedTextChunks(size_t max_doc_ids_per_chunk, const NormalizedTextChunkVisitor& visitor) const;
 
   /// Set original, non-normalized source text for user-facing highlights.
+  /// @throws std::length_error if the text exceeds the dump format text limit
   void SetOriginalText(DocId doc_id, std::string_view text);
+
+  /// Checked form of SetOriginalText for callers that need typed errors.
+  [[nodiscard]] Expected<void, Error> SetOriginalTextChecked(DocId doc_id, std::string_view text);
 
   /// Get original, non-normalized source text for one document.
   [[nodiscard]] std::optional<std::string> GetOriginalText(DocId doc_id) const;
@@ -517,6 +533,7 @@ class DocumentStore {
 
  private:
   friend struct DumpLoadAccess;
+  friend struct DocumentStoreSerializationTestAccess;
 
   // Next DocID to assign
   DocId next_doc_id_ = 1;
@@ -552,6 +569,11 @@ class DocumentStore {
   /// Convert a caller-supplied FilterMap into the interned stored form.
   /// @note Caller must hold mutex_ exclusively
   [[nodiscard]] DocumentFilterValues InternFilterMapLocked(const FilterMap& filters);
+
+  /// Update filters, optionally replacing text, after validation and staging.
+  [[nodiscard]] Expected<bool, Error> UpdateDocumentImpl(DocId doc_id, const FilterMap& filters, bool replace_texts,
+                                                         std::string_view normalized_text,
+                                                         std::string_view original_text);
 
   /// Rebuild a FilterMap from the interned stored form.
   /// @note Caller must hold mutex_ at least in shared mode

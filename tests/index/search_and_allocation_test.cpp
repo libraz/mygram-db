@@ -28,7 +28,6 @@ constexpr DocId kRareEvery = 5000;  // "qz" appears in every 5000th document
 class SearchAndAllocationTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
-    InstallRoaringAllocationCounter();
     index_ = new Index(/*ngram_size=*/2);
     for (DocId doc_id = 1; doc_id <= kCommonDocs; ++doc_id) {
       index_->AddDocument(doc_id, doc_id % kRareEvery == 0 ? "ab qz" : "ab");
@@ -84,19 +83,45 @@ TEST_F(SearchAndAllocationTest, MixedStrategyAndNeverCopiesTheLargeList) {
 }
 
 TEST(PostingListIntersectTest, MixedStrategyIntersectMatchesAndProbesTheLargerSide) {
+  // Prove both Roaring allocation paths are counted even when this test runs
+  // alone with a gtest filter.
+  const size_t live_before_allocations = g_live_bytes.load(std::memory_order_relaxed);
+  g_peak_bytes.store(live_before_allocations, std::memory_order_relaxed);
+  void* roaring_allocation = roaring_malloc(64);
+  const bool roaring_allocation_succeeded = roaring_allocation != nullptr;
+  const size_t live_after_roaring_malloc = g_live_bytes.load(std::memory_order_relaxed);
+  const size_t peak_after_roaring_malloc = g_peak_bytes.load(std::memory_order_relaxed);
+  void* aligned_allocation = roaring_aligned_malloc(64, 128);
+  const bool aligned_allocation_succeeded = aligned_allocation != nullptr;
+  const size_t live_after_aligned_malloc = g_live_bytes.load(std::memory_order_relaxed);
+  const size_t peak_after_aligned_malloc = g_peak_bytes.load(std::memory_order_relaxed);
+  roaring_free(roaring_allocation);
+  roaring_aligned_free(aligned_allocation);
+  const size_t live_after_frees = g_live_bytes.load(std::memory_order_relaxed);
+
+  ASSERT_TRUE(roaring_allocation_succeeded);
+  ASSERT_TRUE(aligned_allocation_succeeded);
+  EXPECT_GT(live_after_roaring_malloc, live_before_allocations);
+  EXPECT_GT(peak_after_roaring_malloc, live_before_allocations);
+  EXPECT_GT(live_after_aligned_malloc, live_after_roaring_malloc);
+  EXPECT_GT(peak_after_aligned_malloc, peak_after_roaring_malloc);
+  EXPECT_EQ(live_after_frees, live_before_allocations);
+
   PostingList rare;
   PostingList common(0.01);
-  for (DocId doc_id = 1; doc_id <= 10000; ++doc_id) {
+  // Even IDs fill a Roaring bitset container, so copying it exceeds the cap below.
+  for (DocId doc_id = 2; doc_id <= 20000; doc_id += 2) {
     common.Add(doc_id);
   }
   common.Optimize(10000);
+  ASSERT_EQ(common.Size(), 10000);
   ASSERT_EQ(common.GetStrategy(), PostingStrategy::kRoaringBitmap);
   for (DocId doc_id : {3U, 700U, 9999U, 20000U}) {
     rare.Add(doc_id);
   }
   ASSERT_EQ(rare.GetStrategy(), PostingStrategy::kFixedWidthDelta);
 
-  const std::vector<DocId> expected = {3, 700, 9999};
+  const std::vector<DocId> expected = {700, 20000};
   for (const auto& [lhs, rhs] : {std::pair<PostingList*, PostingList*>{&rare, &common}, {&common, &rare}}) {
     const size_t live_before = g_live_bytes.load(std::memory_order_relaxed);
     g_peak_bytes.store(live_before, std::memory_order_relaxed);

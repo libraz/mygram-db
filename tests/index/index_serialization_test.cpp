@@ -8,11 +8,23 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <csignal>
+#endif
 
 #include "index/index.h"
 #include "utils/crc32.h"
@@ -23,6 +35,22 @@ using namespace mygramdb::index;
 using mygram::utils::ErrorCode;
 
 namespace {
+
+std::vector<std::filesystem::path> FindTemporaryArtifacts(const std::filesystem::path& final_path) {
+  std::vector<std::filesystem::path> artifacts;
+  const auto directory = final_path.parent_path().empty() ? std::filesystem::path(".") : final_path.parent_path();
+  const std::string prefix = final_path.filename().string() + ".tmp";
+  std::error_code error;
+  std::filesystem::directory_iterator current(directory, error);
+  const std::filesystem::directory_iterator end;
+  for (; !error && current != end; current.increment(error)) {
+    const std::string filename = current->path().filename().string();
+    if (filename.compare(0, prefix.size(), prefix) == 0) {
+      artifacts.push_back(current->path());
+    }
+  }
+  return artifacts;
+}
 
 /**
  * @brief Helper to build a raw V1 index stream with configurable term_len
@@ -327,6 +355,51 @@ TEST(IndexSerializationTest, LoadFromStreamRejectsNgramSizeMismatch) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), ErrorCode::kStorageVersionMismatch);
 }
+
+#ifndef _WIN32
+TEST(IndexSerializationTest, SaveToFilePreservesExistingTargetWhenWriteLimitIsReached) {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("mygramdb_index_atomic_save_" + std::to_string(static_cast<long long>(getpid())));
+  std::filesystem::create_directories(directory);
+  const auto filepath = directory / "index.bin";
+  const std::string original_contents = "previous-good-index";
+  {
+    std::ofstream output(filepath, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(output);
+    output.write(original_contents.data(), static_cast<std::streamsize>(original_contents.size()));
+    ASSERT_TRUE(output.good());
+  }
+
+  const pid_t child = fork();
+  ASSERT_NE(child, -1);
+  if (child == 0) {
+    struct rlimit file_limit {};
+    if (getrlimit(RLIMIT_FSIZE, &file_limit) != 0) {
+      _exit(2);
+    }
+    file_limit.rlim_cur = std::min<rlim_t>(32, file_limit.rlim_max);
+    if (setrlimit(RLIMIT_FSIZE, &file_limit) != 0 || std::signal(SIGXFSZ, SIG_IGN) == SIG_ERR)
+      _exit(2);
+
+    Index index(2);
+    index.AddDocument(1, "abcdef");
+    const auto result = index.SaveToFile(filepath.string());
+    _exit(result.has_value() ? 1 : 0);
+  }
+
+  int child_status = 0;
+  ASSERT_EQ(waitpid(child, &child_status, 0), child);
+  ASSERT_TRUE(WIFEXITED(child_status));
+  EXPECT_EQ(WEXITSTATUS(child_status), 0) << "the constrained child must report a failed save";
+
+  std::ifstream input(filepath, std::ios::binary);
+  ASSERT_TRUE(input);
+  const std::string final_contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  EXPECT_EQ(final_contents, original_contents);
+  EXPECT_TRUE(FindTemporaryArtifacts(filepath).empty()) << "Unique temp files remain after failed save";
+  std::filesystem::remove_all(directory);
+}
+#endif
 
 TEST(IndexSerializationTest, LoadFromStreamRejectsKanjiNgramSizeMismatch) {
   Index source(2, 1);

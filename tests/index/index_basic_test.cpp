@@ -203,6 +203,22 @@ TEST(IndexTest, Optimize) {
   EXPECT_GT(after_usage, 0);
 }
 
+TEST(IndexTest, MemoryUsageAndStatisticsIncludePostingAndRetainedMapOverhead) {
+  Index index(1);
+  ASSERT_TRUE(index.AddDocument(1, "abc"));
+
+  const size_t populated_usage = index.MemoryUsage();
+  const auto populated_stats = index.GetStatistics();
+  EXPECT_EQ(populated_stats.memory_usage_bytes, populated_usage);
+  EXPECT_EQ(populated_stats.total_terms, 3U);
+  EXPECT_GE(populated_usage, populated_stats.total_terms * sizeof(PostingList));
+
+  index.Clear();
+  EXPECT_EQ(index.TermCount(), 0U);
+  EXPECT_GT(index.MemoryUsage(), 0U) << "The cleared flat map retains allocated slot capacity";
+  EXPECT_EQ(index.GetStatistics().memory_usage_bytes, index.MemoryUsage());
+}
+
 /**
  * @brief Test large document set
  */

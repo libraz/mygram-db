@@ -5,6 +5,7 @@
 
 #include <array>
 #include <string>
+#include <string_view>
 
 #include "storage/dump_format_v1.h"
 #include "storage/dump_format_v1_internal.h"
@@ -20,6 +21,135 @@ using internal::WriteString;
 namespace {
 
 constexpr uint32_t kTableConfigIncludesDatabaseFlag = 0x80000000U;
+using dump_format_limits::config::kMaxCidrCount;
+using dump_format_limits::config::kMaxConcatColumnCount;
+using dump_format_limits::config::kMaxOptionalFilterCount;
+using dump_format_limits::config::kMaxRequiredFilterCount;
+using dump_format_limits::config::kMaxTableCount;
+
+Expected<void, Error> ValidateSerializedString(const std::string& field, std::string_view value, uint32_t max_length) {
+  if (value.size() > max_length) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    "Serialized field " + field + " length " + std::to_string(value.size()) +
+                                        " exceeds maximum " + std::to_string(max_length)));
+  }
+  return {};
+}
+
+Expected<void, Error> ValidateSerializedCount(const std::string& field, size_t count, uint32_t max_count) {
+  if (count > max_count) {
+    return MakeUnexpected(MakeError(
+        ErrorCode::kStorageDumpWriteError,
+        "Serialized count " + field + " is " + std::to_string(count) + ", maximum is " + std::to_string(max_count)));
+  }
+  return {};
+}
+
+Expected<void, Error> ValidateConfigForSerialization(const config::Config& config) {
+  const auto validate_string = [](const std::string& field, const std::string& value, uint32_t max_length) {
+    return ValidateSerializedString(field, value, max_length);
+  };
+
+  if (auto result = validate_string("mysql.host", config.mysql.host, kMaxConfigValueLength); !result)
+    return result;
+  if (auto result = validate_string("mysql.database", config.mysql.database, kMaxIdentifierLength); !result)
+    return result;
+  if (auto result = validate_string("mysql.binlog_format", config.mysql.binlog_format, kMaxIdentifierLength); !result)
+    return result;
+  if (auto result = validate_string("mysql.binlog_row_image", config.mysql.binlog_row_image, kMaxIdentifierLength);
+      !result)
+    return result;
+  if (auto result = ValidateSerializedCount("tables", config.tables.size(), kMaxTableCount); !result)
+    return result;
+
+  for (size_t table_index = 0; table_index < config.tables.size(); ++table_index) {
+    const auto& table = config.tables[table_index];
+    const std::string prefix = "tables[" + std::to_string(table_index) + "].";
+    if (auto result = validate_string(prefix + "name", table.name, kMaxIdentifierLength); !result)
+      return result;
+    if (auto result = validate_string(prefix + "database", table.database, kMaxIdentifierLength); !result)
+      return result;
+    if (auto result = validate_string(prefix + "primary_key", table.primary_key, kMaxIdentifierLength); !result)
+      return result;
+    if (auto result = validate_string(prefix + "text_source.column", table.text_source.column, kMaxIdentifierLength);
+        !result)
+      return result;
+    if (auto result = ValidateSerializedCount(prefix + "text_source.concat", table.text_source.concat.size(),
+                                              kMaxConcatColumnCount);
+        !result)
+      return result;
+    for (size_t column_index = 0; column_index < table.text_source.concat.size(); ++column_index) {
+      if (auto result = validate_string(prefix + "text_source.concat[" + std::to_string(column_index) + "]",
+                                        table.text_source.concat[column_index], kMaxIdentifierLength);
+          !result)
+        return result;
+    }
+    if (auto result =
+            validate_string(prefix + "text_source.delimiter", table.text_source.delimiter, kMaxIdentifierLength);
+        !result)
+      return result;
+    if (auto result = ValidateSerializedCount(prefix + "required_filters", table.required_filters.size(),
+                                              kMaxRequiredFilterCount);
+        !result)
+      return result;
+    for (size_t filter_index = 0; filter_index < table.required_filters.size(); ++filter_index) {
+      const auto& filter = table.required_filters[filter_index];
+      const std::string filter_prefix = prefix + "required_filters[" + std::to_string(filter_index) + "].";
+      if (auto result = validate_string(filter_prefix + "name", filter.name, kMaxIdentifierLength); !result)
+        return result;
+      if (auto result = validate_string(filter_prefix + "type", filter.type, kMaxIdentifierLength); !result)
+        return result;
+      if (auto result = validate_string(filter_prefix + "op", filter.op, kMaxIdentifierLength); !result)
+        return result;
+      if (auto result = validate_string(filter_prefix + "value", filter.value, kMaxConfigValueLength); !result)
+        return result;
+    }
+    if (auto result = ValidateSerializedCount(prefix + "filters", table.filters.size(), kMaxOptionalFilterCount);
+        !result)
+      return result;
+    for (size_t filter_index = 0; filter_index < table.filters.size(); ++filter_index) {
+      const auto& filter = table.filters[filter_index];
+      const std::string filter_prefix = prefix + "filters[" + std::to_string(filter_index) + "].";
+      if (auto result = validate_string(filter_prefix + "name", filter.name, kMaxIdentifierLength); !result)
+        return result;
+      if (auto result = validate_string(filter_prefix + "type", filter.type, kMaxIdentifierLength); !result)
+        return result;
+      if (auto result = validate_string(filter_prefix + "bucket", filter.bucket, kMaxIdentifierLength); !result)
+        return result;
+    }
+    if (auto result = validate_string(prefix + "posting.use_roaring", table.posting.use_roaring, kMaxIdentifierLength);
+        !result)
+      return result;
+  }
+
+  if (auto result = validate_string("build.mode", config.build.mode, kMaxIdentifierLength); !result)
+    return result;
+  if (auto result = validate_string("replication.start_from", config.replication.start_from, kMaxPathLength); !result)
+    return result;
+  if (auto result = validate_string("memory.normalize.width", config.memory.normalize.width, kMaxIdentifierLength);
+      !result)
+    return result;
+  if (auto result = validate_string("dump.dir", config.dump.dir, kMaxPathLength); !result)
+    return result;
+  if (auto result = validate_string("api.tcp.bind", config.api.tcp.bind, kMaxConfigValueLength); !result)
+    return result;
+  if (auto result = validate_string("api.http.bind", config.api.http.bind, kMaxConfigValueLength); !result)
+    return result;
+  if (auto result = ValidateSerializedCount("network.allow_cidrs", config.network.allow_cidrs.size(), kMaxCidrCount);
+      !result)
+    return result;
+  for (size_t cidr_index = 0; cidr_index < config.network.allow_cidrs.size(); ++cidr_index) {
+    if (auto result = validate_string("network.allow_cidrs[" + std::to_string(cidr_index) + "]",
+                                      config.network.allow_cidrs[cidr_index], kMaxConfigValueLength);
+        !result)
+      return result;
+  }
+  if (auto result = validate_string("logging.level", config.logging.level, kMaxIdentifierLength); !result)
+    return result;
+  if (auto result = validate_string("logging.format", config.logging.format, kMaxIdentifierLength); !result)
+    return result;
+  return {};
+}
 
 /**
  * @brief Serialize FilterConfig to stream
@@ -231,8 +361,6 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   }
 
   // text_source
-  constexpr uint32_t kMaxConcatColumns = 1000;
-  constexpr uint32_t kMaxFilterCount = 1000;
   if (!ReadString(input_stream, table.text_source.column, kMaxIdentifierLength)) {
     return false;
   }
@@ -240,12 +368,12 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   if (!ReadBinary(input_stream, concat_size)) {
     return false;
   }
-  if (concat_size > kMaxConcatColumns) {
+  if (concat_size > kMaxConcatColumnCount) {
     StructuredLog()
         .Event("storage_validation_error")
         .Field("type", "concat_columns_exceeded")
         .Field("count", static_cast<uint64_t>(concat_size))
-        .Field("max_count", static_cast<uint64_t>(kMaxConcatColumns))
+        .Field("max_count", static_cast<uint64_t>(kMaxConcatColumnCount))
         .Error();
     return false;
   }
@@ -264,12 +392,12 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   if (!ReadBinary(input_stream, req_filter_count)) {
     return false;
   }
-  if (req_filter_count > kMaxFilterCount) {
+  if (req_filter_count > kMaxRequiredFilterCount) {
     StructuredLog()
         .Event("storage_validation_error")
         .Field("type", "required_filters_exceeded")
         .Field("count", static_cast<uint64_t>(req_filter_count))
-        .Field("max_count", static_cast<uint64_t>(kMaxFilterCount))
+        .Field("max_count", static_cast<uint64_t>(kMaxRequiredFilterCount))
         .Error();
     return false;
   }
@@ -285,12 +413,12 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
   if (!ReadBinary(input_stream, filter_count)) {
     return false;
   }
-  if (filter_count > kMaxFilterCount) {
+  if (filter_count > kMaxOptionalFilterCount) {
     StructuredLog()
         .Event("storage_validation_error")
         .Field("type", "filters_exceeded")
         .Field("count", static_cast<uint64_t>(filter_count))
-        .Field("max_count", static_cast<uint64_t>(kMaxFilterCount))
+        .Field("max_count", static_cast<uint64_t>(kMaxOptionalFilterCount))
         .Error();
     return false;
   }
@@ -343,6 +471,10 @@ bool DeserializeTableConfig(std::istream& input_stream, config::TableConfig& tab
 }  // namespace
 
 Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config::Config& config) {
+  if (auto result = ValidateConfigForSerialization(config); !result) {
+    return result;
+  }
+
   // MySQL config (excluding sensitive credentials)
   if (!WriteString(output_stream, config.mysql.host)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write mysql.host"));
@@ -514,7 +646,6 @@ Expected<void, Error> SerializeConfig(std::ostream& output_stream, const config:
 }
 
 Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Config& config) {
-  constexpr uint32_t kMaxTableCount = 10000;  // Reasonable limit for table count
   // The legacy config payload never persisted this semantic setting. Keep an
   // explicit unknown sentinel until a flagged V1 extension or the dedicated
   // V2 compatibility section supplies it.
@@ -674,12 +805,11 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
   }
 
   // Network config
-  constexpr uint32_t kMaxCIDRCount = 10000;
   uint32_t cidr_count = 0;
   if (!ReadBinary(input_stream, cidr_count)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Failed to read cidr_count"));
   }
-  if (cidr_count > kMaxCIDRCount) {
+  if (cidr_count > kMaxCidrCount) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError,
                                     "CIDR count exceeds maximum allowed: " + std::to_string(cidr_count)));
   }
@@ -714,6 +844,15 @@ Expected<void, Error> DeserializeConfig(std::istream& input_stream, config::Conf
 Expected<void, Error> SerializeCompatibilityMetadata(std::ostream& output_stream, const config::Config& config,
                                                      std::string_view source_server_uuid) {
   constexpr uint32_t kCompatibilityMetadataVersion = 2;
+  if (auto result = ValidateSerializedString("memory.verify_text", config.memory.verify_text, kMaxIdentifierLength);
+      !result) {
+    return result;
+  }
+  if (auto result = ValidateSerializedString("source_server_uuid", source_server_uuid, kMaxConfigValueLength);
+      !result) {
+    return result;
+  }
+
   if (!WriteBinary(output_stream, kCompatibilityMetadataVersion)) {
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write compatibility metadata version"));

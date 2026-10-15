@@ -322,32 +322,86 @@ void DocumentStore::VisitNormalizedTextChunks(size_t max_doc_ids_per_chunk,
   }
 
   uint64_t end_doc_id_exclusive;
+  size_t normalized_text_count;
   {
     std::shared_lock lock(mutex_);
     end_doc_id_exclusive =
         next_doc_id_ == 0 ? static_cast<uint64_t>(UINT32_MAX) + 1 : static_cast<uint64_t>(next_doc_id_);
+    normalized_text_count = doc_texts_.size();
+  }
+  if (end_doc_id_exclusive <= 1 || normalized_text_count == 0) {
+    return;
   }
 
-  for (uint64_t begin_doc_id = 1; begin_doc_id < end_doc_id_exclusive;) {
-    const uint64_t range_size =
-        std::min<uint64_t>(static_cast<uint64_t>(max_doc_ids_per_chunk), end_doc_id_exclusive - begin_doc_id);
-    const uint64_t end_doc_id = begin_doc_id + range_size;
+  // Walking a dense numeric range avoids allocating and sorting one DocId per
+  // stored text. Sparse stores still snapshot only their candidate IDs so the
+  // walk does not scan a large exhausted ID range.
+  const uint64_t max_dense_range = static_cast<uint64_t>(normalized_text_count) * 4;
+  const uint64_t last_doc_id = end_doc_id_exclusive - 1;
+  const bool dense_range = last_doc_id <= max_dense_range;
+
+  const auto append_text_if_present_locked = [this](DocId doc_id, std::vector<NormalizedTextEntry>& chunk) {
+    const auto it = doc_texts_.find(doc_id);
+    if (it != doc_texts_.end()) {
+      chunk.push_back({it->first, it->second});
+    }
+  };
+  const auto visit_nonempty_chunk = [&visitor](const std::vector<NormalizedTextEntry>& chunk) {
+    return chunk.empty() || visitor(chunk);
+  };
+
+  if (dense_range) {
+    for (uint64_t begin_doc_id = 1; begin_doc_id < end_doc_id_exclusive;) {
+      const uint64_t range_size =
+          std::min<uint64_t>(static_cast<uint64_t>(max_doc_ids_per_chunk), end_doc_id_exclusive - begin_doc_id);
+      const uint64_t end_doc_id = begin_doc_id + range_size;
+      std::vector<NormalizedTextEntry> chunk;
+      chunk.reserve(static_cast<size_t>(end_doc_id - begin_doc_id));
+      {
+        std::shared_lock lock(mutex_);
+        for (uint64_t doc_id = begin_doc_id; doc_id < end_doc_id; ++doc_id) {
+          const auto it = doc_texts_.find(static_cast<DocId>(doc_id));
+          if (it != doc_texts_.end()) {
+            chunk.push_back({it->first, it->second});
+          }
+        }
+      }
+      if (!chunk.empty() && !visitor(chunk)) {
+        return;
+      }
+      begin_doc_id = end_doc_id;
+    }
+    return;
+  }
+
+  std::vector<DocId> text_doc_ids;
+  {
+    std::shared_lock lock(mutex_);
+    text_doc_ids.reserve(doc_texts_.size());
+    for (const auto& [doc_id, unused_text] : doc_texts_) {
+      (void)unused_text;
+      if (doc_id != 0 && static_cast<uint64_t>(doc_id) < end_doc_id_exclusive) {
+        text_doc_ids.push_back(doc_id);
+      }
+    }
+  }
+  std::sort(text_doc_ids.begin(), text_doc_ids.end());
+
+  for (size_t begin = 0; begin < text_doc_ids.size();) {
+    const size_t end = begin + std::min(max_doc_ids_per_chunk, text_doc_ids.size() - begin);
     std::vector<NormalizedTextEntry> chunk;
-    chunk.reserve(static_cast<size_t>(end_doc_id - begin_doc_id));
+    chunk.reserve(end - begin);
     {
       std::shared_lock lock(mutex_);
-      for (uint64_t doc_id = begin_doc_id; doc_id < end_doc_id; ++doc_id) {
-        auto it = doc_texts_.find(static_cast<DocId>(doc_id));
-        if (it != doc_texts_.end()) {
-          chunk.push_back({it->first, it->second});
-        }
+      for (size_t i = begin; i < end; ++i) {
+        append_text_if_present_locked(text_doc_ids[i], chunk);
       }
     }
 
-    if (!chunk.empty() && !visitor(chunk)) {
+    if (!visit_nonempty_chunk(chunk)) {
       return;
     }
-    begin_doc_id = end_doc_id;
+    begin = end;
   }
 }
 

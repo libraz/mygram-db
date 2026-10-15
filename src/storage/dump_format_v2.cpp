@@ -84,6 +84,26 @@ Expected<void, Error> ValidateHeaderIntegrityFields(const HeaderV2& header) {
   if (header.section_count == 0) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V2 header: section_count is zero"));
   }
+  if ((header.flags & dump_format::flags_v2::kWithCRC) == 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Invalid V2 header: file CRC32 is required"));
+  }
+  return {};
+}
+
+Expected<void, Error> ValidateSectionStreamConsumed(std::istream& input_stream, uint64_t file_size) {
+  const std::streampos position = input_stream.tellg();
+  if (position < 0) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Failed to determine position after V2 sections"));
+  }
+
+  const uint64_t consumed_bytes = static_cast<uint64_t>(position);
+  if (consumed_bytes != file_size) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "V2 section count does not consume the entire file: expected " +
+                                                        std::to_string(file_size) + " bytes, consumed " +
+                                                        std::to_string(consumed_bytes)));
+  }
   return {};
 }
 
@@ -192,6 +212,10 @@ Expected<void, Error> ValidateTableSectionRestorable(const WrittenTableSection& 
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDumpWriteError, reason + "; increase the limit before DUMP SAVE"));
   };
+  if (!dump_format_limits::container::IsValidV2SectionDataLength(section.section_length)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Table section exceeds the fixed 4 GiB V2 section limit"));
+  }
   const uint64_t budget = restore_limits.memory_budget_bytes;
 
   if (section.section_length > restore_limits.max_section_bytes) {
@@ -227,12 +251,32 @@ Expected<void, Error> ValidateTableSectionRestorable(const WrittenTableSection& 
   return {};
 }
 
+Expected<uint64_t, Error> GetV2SectionDataLength(std::ostringstream& section_stream, const std::string& section_name) {
+  const std::streampos position = section_stream.tellp();
+  if (position < 0) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Failed to determine " + section_name + " section length"));
+  }
+  const auto section_length = static_cast<uint64_t>(position);
+  if (!dump_format_limits::container::IsValidV2SectionDataLength(section_length)) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    section_name + " section exceeds the fixed 4 GiB V2 section limit"));
+  }
+  return section_length;
+}
+
 #ifndef _WIN32
 Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, int file_descriptor,
                                                  const std::string& table_name, index::Index* index,
                                                  DocumentStore* doc_store,
                                                  const std::unordered_map<std::string, TableStatistics>* table_stats,
                                                  const std::string& temp_filepath, WrittenTableSection& written) {
+  if (table_name.size() > dump_format_limits::container::kMaxTableContextNameLength) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    "Table context name length " + std::to_string(table_name.size()) +
+                                        " exceeds maximum " +
+                                        std::to_string(dump_format_limits::container::kMaxTableContextNameLength)));
+  }
   output_stream.flush();
   if (!output_stream.good()) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -264,6 +308,10 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
       return result;
     }
     std::string ts_data = ts_stream.str();
+    if (ts_data.size() > kMaxStatsSectionLength) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kStorageDumpWriteError, "Table statistics section exceeds maximum size"));
+    }
     auto ts_len = static_cast<uint32_t>(ts_data.size());
     if (!WriteBinary(section_stream, ts_len)) {
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -359,6 +407,10 @@ Expected<void, Error> WriteStreamingTableSection(std::ostream& output_stream, in
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
   }
   written.section_length = counting_streambuf.bytes_written();
+  if (!dump_format_limits::container::IsValidV2SectionDataLength(written.section_length)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Table section exceeds the fixed 4 GiB V2 section limit"));
+  }
 
   auto section_crc = dump_internal::CalculateCRC32RangeFd(
       file_descriptor, section_start + dump_format::kSectionEnvelopeSize, counting_streambuf.bytes_written());
@@ -441,6 +493,12 @@ Expected<void, Error> ReadHeaderV2(std::istream& input_stream, HeaderV2& header)
 
 Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_format::SectionType type,
                                            const std::string& data) {
+  const auto length = static_cast<uint64_t>(data.size());
+  if (!dump_format_limits::container::IsValidV2SectionDataLength(length)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Section exceeds the fixed 4 GiB V2 section limit"));
+  }
+
   auto type_val = static_cast<uint32_t>(type);
   if (!WriteBinary(output_stream, type_val)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write section type"));
@@ -451,7 +509,6 @@ Expected<void, Error> WriteSectionEnvelope(std::ostream& output_stream, dump_for
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write section CRC32"));
   }
 
-  auto length = static_cast<uint64_t>(data.size());
   if (!WriteBinary(output_stream, length)) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Failed to write section data length"));
   }
@@ -490,7 +547,7 @@ Expected<void, Error> ReadSectionEnvelope(std::istream& input_stream, dump_forma
   }
 
   // Validate data length against maximum
-  if (envelope.data_length > kMaxSectionDataLength) {
+  if (!dump_format_limits::container::IsValidV2SectionDataLength(envelope.data_length)) {
     StructuredLog()
         .Event("storage_validation_error")
         .Field("type", "section_data_length_exceeded")
@@ -498,7 +555,8 @@ Expected<void, Error> ReadSectionEnvelope(std::istream& input_stream, dump_forma
         .Field("data_length", static_cast<uint64_t>(envelope.data_length))
         .Field("max_length", static_cast<uint64_t>(kMaxSectionDataLength))
         .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Section data length exceeds maximum"));
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpReadError, "Section data length exceeds the fixed 4 GiB V2 limit"));
   }
 
   return {};
@@ -517,6 +575,21 @@ Expected<void, Error> WriteDumpV2(
   if (gtid.size() > kMaxGtidLength) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
                                     "V2 GTID length exceeds maximum allowed " + std::to_string(kMaxGtidLength)));
+  }
+  if (table_contexts.size() > dump_format_limits::config::kMaxTableCount) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageDumpWriteError, "Serialized table context count " +
+                                                         std::to_string(table_contexts.size()) + " exceeds maximum " +
+                                                         std::to_string(dump_format_limits::config::kMaxTableCount)));
+  }
+  for (const auto& [table_name, context] : table_contexts) {
+    (void)context;
+    if (table_name.size() > dump_format_limits::container::kMaxTableContextNameLength) {
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                      "Table context name length " + std::to_string(table_name.size()) +
+                                          " exceeds maximum " +
+                                          std::to_string(dump_format_limits::container::kMaxTableContextNameLength)));
+    }
   }
   if (restore_limits.memory_budget_bytes == 0 || restore_limits.max_section_bytes == 0) {
     return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
@@ -604,6 +677,11 @@ Expected<void, Error> WriteDumpV2(
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
 
+    if (auto result = writer.TrackDumpTempFile(file_descriptor); !result) {
+      LogStorageError("track_dump_temp", temp_filepath, result.error().message());
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
+    }
+
     dump_internal::FdStreambuf fd_streambuf(file_descriptor);
     std::ostream ofs(&fd_streambuf);
     if (!ofs) {
@@ -656,7 +734,11 @@ Expected<void, Error> WriteDumpV2(
         LogStorageError("serialize_config", temp_filepath, result.error().message());
         return result;
       }
-      if (static_cast<uint64_t>(config_stream.tellp()) > restore_limits.max_section_bytes) {
+      const auto config_length = GetV2SectionDataLength(config_stream, "Config");
+      if (!config_length) {
+        return MakeUnexpected(config_length.error());
+      }
+      if (config_length.value() > restore_limits.max_section_bytes) {
         return MakeUnexpected(
             MakeError(ErrorCode::kStorageDumpWriteError,
                       "Config section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
@@ -679,7 +761,11 @@ Expected<void, Error> WriteDumpV2(
         LogStorageError("serialize_compatibility_metadata", temp_filepath, result.error().message());
         return result;
       }
-      if (static_cast<uint64_t>(compatibility_stream.tellp()) > restore_limits.max_section_bytes) {
+      const auto compatibility_length = GetV2SectionDataLength(compatibility_stream, "Compatibility");
+      if (!compatibility_length) {
+        return MakeUnexpected(compatibility_length.error());
+      }
+      if (compatibility_length.value() > restore_limits.max_section_bytes) {
         return MakeUnexpected(MakeError(
             ErrorCode::kStorageDumpWriteError,
             "Compatibility section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
@@ -700,7 +786,11 @@ Expected<void, Error> WriteDumpV2(
         LogStorageError("serialize_statistics", temp_filepath, result.error().message());
         return result;
       }
-      if (static_cast<uint64_t>(stats_stream.tellp()) > restore_limits.max_section_bytes) {
+      const auto stats_length = GetV2SectionDataLength(stats_stream, "Statistics");
+      if (!stats_length) {
+        return MakeUnexpected(stats_length.error());
+      }
+      if (stats_length.value() > restore_limits.max_section_bytes) {
         return MakeUnexpected(
             MakeError(ErrorCode::kStorageDumpWriteError,
                       "Statistics section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
@@ -743,7 +833,8 @@ Expected<void, Error> WriteDumpV2(
       std::ostringstream table_stream;
 
       // Table name
-      if (!dump_v1::internal::WriteString(table_stream, table_name)) {
+      if (!dump_v1::internal::WriteString(table_stream, table_name,
+                                          dump_format_limits::container::kMaxTableContextNameLength)) {
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
       }
 
@@ -754,6 +845,10 @@ Expected<void, Error> WriteDumpV2(
           return result;
         }
         std::string ts_data = ts_stream.str();
+        if (ts_data.size() > kMaxStatsSectionLength) {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kStorageDumpWriteError, "Table statistics section exceeds maximum size"));
+        }
         auto ts_len = static_cast<uint32_t>(ts_data.size());
         if (!WriteBinary(table_stream, ts_len)) {
           return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
@@ -1038,39 +1133,36 @@ Expected<void, Error> ReadDumpV2(
       }
     }
 
-    // Verify file-level CRC32 when the format flag declares one. A checksum
-    // value of zero is valid and must be compared normally.
-    if ((header.flags & dump_format::flags_v2::kWithCRC) != 0) {
-      std::streampos current_pos = ifs.tellg();
-      ifs.seekg(0, std::ios::end);
-      auto file_size = static_cast<uint64_t>(ifs.tellg());
+    // V2 requires a whole-file CRC. A checksum value of zero is valid and is
+    // compared normally after the mandatory flag check above.
+    std::streampos current_pos = ifs.tellg();
+    ifs.seekg(0, std::ios::end);
+    auto file_size = static_cast<uint64_t>(ifs.tellg());
 
-      const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
-      uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs, file_size, crc_offset);
+    const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
+    uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs, file_size, crc_offset);
 
-      if (calculated_crc != header.file_crc32) {
-        StructuredLog()
-            .Event("storage_validation_error")
-            .Field("type", "crc32_mismatch")
-            .Field("filepath", filepath)
-            .Field("expected_crc", static_cast<uint64_t>(header.file_crc32))
-            .Field("actual_crc", static_cast<uint64_t>(calculated_crc))
-            .Error();
-        if (integrity_error != nullptr) {
-          integrity_error->type = dump_format::CRCErrorType::FileCRC;
-          integrity_error->message = "CRC32 checksum mismatch";
-        }
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
+    if (calculated_crc != header.file_crc32) {
+      StructuredLog()
+          .Event("storage_validation_error")
+          .Field("type", "crc32_mismatch")
+          .Field("filepath", filepath)
+          .Field("expected_crc", static_cast<uint64_t>(header.file_crc32))
+          .Field("actual_crc", static_cast<uint64_t>(calculated_crc))
+          .Error();
+      if (integrity_error != nullptr) {
+        integrity_error->type = dump_format::CRCErrorType::FileCRC;
+        integrity_error->message = "CRC32 checksum mismatch";
       }
-
-      ifs.seekg(current_pos);
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Read operation failed"));
     }
+
+    ifs.seekg(current_pos);
 
     // Read sections
     bool config_found = false;
     bool compatibility_metadata_found = false;
     bool statistics_found = false;
-    uint32_t sections_read = 0;
     config::Config loaded_config;
     DumpStatistics loaded_stats;
     std::unordered_map<std::string, TableStatistics> loaded_table_stats;
@@ -1363,22 +1455,21 @@ Expected<void, Error> ReadDumpV2(
         }
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Section CRC32 verification failed"));
       }
-
-      ++sections_read;
     }
 
-    // Validate section count matches header
-    if (sections_read != header.section_count) {
+    if (auto result = ValidateSectionStreamConsumed(ifs, actual_file_size); !result) {
       StructuredLog()
           .Event("storage_validation_error")
-          .Field("type", "section_count_mismatch")
+          .Field("type", "unconsumed_file_data")
           .Field("filepath", filepath)
-          .Field("expected", static_cast<uint64_t>(header.section_count))
-          .Field("actual", static_cast<uint64_t>(sections_read))
+          .Field("expected_file_size", actual_file_size)
+          .Field("message", result.error().message())
           .Error();
-      return MakeUnexpected(MakeError(
-          ErrorCode::kStorageDumpReadError,
-          "Expected " + std::to_string(header.section_count) + " sections but found " + std::to_string(sections_read)));
+      if (integrity_error != nullptr) {
+        integrity_error->type = dump_format::CRCErrorType::SectionCRC;
+        integrity_error->message = result.error().message();
+      }
+      return result;
     }
 
     // Validate required sections
@@ -1401,10 +1492,11 @@ Expected<void, Error> ReadDumpV2(
       }
     }
 
+    std::string loaded_gtid = std::move(header.gtid);
     if (auto result = ApplyPendingTableLoads(pending_table_loads); !result) {
       return result;
     }
-    gtid = header.gtid;
+    gtid.swap(loaded_gtid);
     config = std::move(loaded_config);
     if (stats != nullptr && statistics_found) {
       *stats = loaded_stats;
@@ -1416,7 +1508,7 @@ Expected<void, Error> ReadDumpV2(
     StructuredLog()
         .Event("dump_v2_loaded")
         .Field("filepath", filepath)
-        .Field("sections_read", static_cast<uint64_t>(sections_read))
+        .Field("sections_read", static_cast<uint64_t>(header.section_count))
         .Info();
 
     return {};
@@ -1568,24 +1660,21 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
 
-    // Verify file-level CRC32 when the format flag declares one. A checksum
-    // value of zero is valid and must be compared normally.
-    if ((header.flags & dump_format::flags_v2::kWithCRC) != 0) {
-      ifs2.seekg(0, std::ios::end);
-      auto file_size = static_cast<uint64_t>(ifs2.tellg());
-      const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
-      uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs2, file_size, crc_offset);
+    // V2 requires a whole-file CRC. A checksum value of zero is valid and is
+    // compared normally after the mandatory flag check above.
+    ifs2.seekg(0, std::ios::end);
+    auto file_size = static_cast<uint64_t>(ifs2.tellg());
+    const auto crc_offset = static_cast<size_t>(kV2HeaderFileCRC32Offset);
+    uint32_t calculated_crc = dump_internal::CalculateCRC32Streaming(ifs2, file_size, crc_offset);
 
-      if (calculated_crc != header.file_crc32) {
-        integrity_error.type = dump_format::CRCErrorType::FileCRC;
-        integrity_error.message = "CRC32 checksum mismatch";
-        return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
-      }
+    if (calculated_crc != header.file_crc32) {
+      integrity_error.type = dump_format::CRCErrorType::FileCRC;
+      integrity_error.message = "CRC32 checksum mismatch";
+      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
 
     ifs2.clear();
     ifs2.seekg(section_start);
-    uint32_t sections_read = 0;
     for (uint32_t i = 0; i < header.section_count; ++i) {
       dump_format::SectionEnvelope envelope;
       if (auto result = ReadSectionEnvelope(ifs2, envelope); !result) {
@@ -1621,13 +1710,11 @@ Expected<void, Error> VerifyDumpIntegrity(const std::string& filepath, dump_form
         integrity_error.message = "Section CRC32 mismatch";
         return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
       }
-      ++sections_read;
     }
 
-    if (sections_read != header.section_count) {
+    if (auto result = ValidateSectionStreamConsumed(ifs2, actual_size); !result) {
       integrity_error.type = dump_format::CRCErrorType::SectionCRC;
-      integrity_error.message = "Section count mismatch: expected " + std::to_string(header.section_count) +
-                                " sections, got " + std::to_string(sections_read);
+      integrity_error.message = result.error().message();
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Integrity verification failed"));
     }
 

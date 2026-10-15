@@ -12,6 +12,7 @@
 #include <cstring>
 #include <sstream>
 
+#include "storage/dump_format_limits.h"
 #include "storage/dump_load_access.h"
 #include "utils/structured_log.h"
 
@@ -330,6 +331,10 @@ Expected<void, Error> ReadDocumentSectionHeader(std::istream& input_stream, uint
   if (gtid_length > encoded_length - kFixedPrefixBytes - kDocumentCountBytes) {
     return MakeUnexpected(
         MakeError(ErrorCode::kStorageDumpReadError, "Document data GTID length exceeds the section bytes remaining"));
+  }
+
+  if (gtid_length > dump_format_limits::docstore::kMaxGtidLength) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpReadError, "Document data GTID length exceeds maximum"));
   }
 
   const auto tail_bytes = static_cast<std::streamsize>(gtid_length + kDocumentCountBytes);

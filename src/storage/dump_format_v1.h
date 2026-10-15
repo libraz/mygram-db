@@ -67,6 +67,7 @@
 #include "index/index.h"
 #include "storage/document_store.h"
 #include "storage/dump_format.h"
+#include "storage/dump_format_limits.h"
 #include "storage/dump_source_identity.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -124,29 +125,26 @@ class DumpConfigValidationCallback {
 /// @{
 
 /// Maximum length for identifier fields (table names, column names, filter names/types/ops)
-constexpr uint32_t kMaxIdentifierLength = 1024;  // 1KB
+using dump_format_limits::config::kMaxIdentifierLength;
 
 /// Maximum length for short config values (host, bind address, mode, format, CIDR, etc.)
-constexpr uint32_t kMaxConfigValueLength = 4 * 1024;  // 4KB
+using dump_format_limits::config::kMaxConfigValueLength;
 
 /// Maximum length for path fields (dump directory)
-constexpr uint32_t kMaxPathLength = 8 * 1024;  // 8KB
+using dump_format_limits::config::kMaxPathLength;
 
 /// Maximum length for replication GTID strings. Shared by the V1 and V2 header
 /// writers and readers so a GTID a writer accepts always reads back.
-constexpr uint32_t kMaxGtidLength = 64 * 1024;  // 64KB
-
-/// Maximum length for text content fields (document content in table data section)
-constexpr uint32_t kMaxTextContentLength = 16 * 1024 * 1024;  // 16MB
+using dump_format_limits::container::kMaxGtidLength;
 
 /// Maximum length for general/fallback string fields
-constexpr uint32_t kMaxGeneralStringLength = 1024 * 1024;  // 1MB
+using dump_format_limits::container::kMaxGeneralStringLength;
 
 /// Maximum length for config section (prevents OOM from malicious dump files)
-constexpr uint32_t kMaxConfigSectionLength = 16 * 1024 * 1024;  // 16 MB
+using dump_format_limits::container::kMaxConfigSectionLength;
 
 /// Maximum length for statistics section (prevents OOM from malicious dump files)
-constexpr uint32_t kMaxStatsSectionLength = 16 * 1024 * 1024;  // 16 MB
+using dump_format_limits::container::kMaxStatsSectionLength;
 
 /// @}
 
