@@ -25,17 +25,11 @@ constexpr size_t kBytesPerKilobyte = 1024;
 /// Bytes per megabyte (1024 * 1024)
 constexpr size_t kBytesPerMegabyte = kBytesPerKilobyte * 1024;
 
-/// Bytes per gigabyte (1024 * 1024 * 1024)
-constexpr size_t kBytesPerGigabyte = kBytesPerMegabyte * 1024;
-
 /// Bytes per kilobyte as double (for floating-point calculations)
 constexpr double kBytesPerKilobyteDouble = 1024.0;
 
 /// Bytes per megabyte as double (for floating-point calculations)
 constexpr double kBytesPerMegabyteDouble = kBytesPerKilobyteDouble * 1024.0;
-
-/// Bytes per gigabyte as double (for floating-point calculations)
-constexpr double kBytesPerGigabyteDouble = kBytesPerMegabyteDouble * 1024.0;
 
 // ============================================================================
 // Time constants
@@ -46,12 +40,6 @@ constexpr int64_t kMillisecondsPerSecond = 1000;
 
 /// Microseconds per millisecond
 constexpr int64_t kMicrosecondsPerMillisecond = 1000;
-
-/// Microseconds per second
-constexpr int64_t kMicrosecondsPerSecond = 1000000;
-
-/// Nanoseconds per second
-constexpr int64_t kNanosecondsPerSecond = 1000000000;
 
 /// Seconds per minute
 constexpr int kSecondsPerMinute = 60;

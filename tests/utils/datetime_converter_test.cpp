@@ -123,6 +123,26 @@ TEST(DateTimeProcessorTest, TimeToSecondsInvalid) {
   EXPECT_FALSE(processor.TimeToSeconds("-839:00:00").has_value());  // Hour < -838
 }
 
+TEST(DateTimeProcessorTest, TimeToSecondsRejectsEmptyAndOverflowingHours) {
+  DateTimeProcessor processor(TimezoneOffset::Parse("+00:00").value());
+
+  for (std::string_view value : {
+           ":00:00",                       // Empty hour
+           "-:00:00",                      // Empty negative hour
+           "+1:00:00",                     // Leading plus is not part of MySQL TIME syntax
+           "--1:00:00",                    // A second sign is not a digit
+           "--0:00:00",                    // A second sign must not pass for zero
+           "--000:01:00",                  // Nor for a zero-padded hour
+           "999999999999999999999:00:00",  // Must not overflow while parsing
+       }) {
+    EXPECT_FALSE(processor.TimeToSeconds(value).has_value()) << "value: " << value;
+  }
+
+  auto maximum = processor.TimeToSeconds("838:59:59");
+  ASSERT_TRUE(maximum.has_value());
+  EXPECT_EQ(*maximum, 838 * 3600 + 59 * 60 + 59);
+}
+
 TEST(DateTimeProcessorTest, TimeToSecondsEdgeCases) {
   DateTimeProcessor processor(TimezoneOffset::Parse("+00:00").value());
 

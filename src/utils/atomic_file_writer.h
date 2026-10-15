@@ -6,13 +6,34 @@
 #ifndef MYGRAMDB_UTILS_ATOMIC_FILE_WRITER_H_
 #define MYGRAMDB_UTILS_ATOMIC_FILE_WRITER_H_
 
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <string>
+#include <string_view>
 
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/namespace_compat.h"
 
 namespace mygramdb::utils {
+
+/// Prefix used to discover dump temp ownership markers during startup cleanup.
+inline constexpr std::string_view kDumpTempOwnerMarkerPrefix = ".mygramdb-dump-owner.";
+
+/**
+ * @brief Remove one abandoned, validated dump temp and its owner marker.
+ *
+ * Only markers created by AtomicFileWriter::TrackDumpTempFile are accepted.
+ * The temp file is removed only when its directory entry still identifies the
+ * recorded regular file, the marker and temp are at least min_age old, and the
+ * recorded owner process no longer exists.
+ *
+ * @return true if cleanup removed an artifact, false if it was retained or
+ *         already absent, or an error if a filesystem operation failed.
+ */
+Expected<bool, Error> RemoveOrphanDumpTempFile(const std::filesystem::path& directory,
+                                               const std::string& marker_basename, std::chrono::seconds min_age);
 
 /**
  * @brief Fsync the parent directory of a committed path.
@@ -55,6 +76,14 @@ class AtomicFileWriter {
   /// @return Temp file path
   [[nodiscard]] const std::string& GetTempPath() const { return temp_filepath_; }
 
+  /**
+   * @brief Record ownership of an already-open dump temp file for crash cleanup.
+   *
+   * The descriptor must refer to the regular temp file created by this writer.
+   * A durable owner marker is created before the caller writes the dump bytes.
+   */
+  Expected<void, Error> TrackDumpTempFile(int already_open_fd);
+
   /// @brief Fsync the temp file, atomically rename to final path, fsync directory.
   /// @return Success or error
   ///
@@ -69,6 +98,12 @@ class AtomicFileWriter {
  private:
   std::string filepath_;
   std::string temp_filepath_;
+  std::string owner_marker_filepath_;
+  uint64_t tracked_temp_device_ = 0;
+  uint64_t tracked_temp_inode_ = 0;
+  uint64_t owner_marker_device_ = 0;
+  uint64_t owner_marker_inode_ = 0;
+  bool dump_temp_tracked_ = false;
   bool committed_ = false;
   bool rolled_back_ = false;
 };

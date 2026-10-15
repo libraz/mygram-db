@@ -38,8 +38,9 @@ namespace mygramdb::utils {
  *      (e.g. `{".yaml", ".yml"}`).
  *
  * Errors:
- *   - `ErrorCode::kInvalidArgument` for empty input, traversal attempts,
- *     resolution failures, or disallowed extensions.
+ *   - `ErrorCode::kInvalidArgument` for empty input, control bytes in the
+ *     input path, traversal attempts, resolution failures, or disallowed
+ *     extensions.
  *
  * @param input Raw filepath (relative or absolute).
  * @param base_dir Base directory that the resolved path must reside within.

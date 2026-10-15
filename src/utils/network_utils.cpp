@@ -9,13 +9,13 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <cstring>
 #include <iterator>
 #include <optional>
 #include <sstream>
 
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::utils {
@@ -54,6 +54,26 @@ std::string IPv4ToString(uint32_t ip_addr) {
   return {buf};
   // NOLINTEND(cppcoreguidelines-avoid-c-arrays,modernize-avoid-c-arrays,cppcoreguidelines-pro-bounds-array-to-pointer-decay)
 }
+
+namespace {
+
+CIDR MakeIPv4Cidr(uint32_t address, int prefix_length) {
+  uint32_t netmask = 0;
+  if (prefix_length > 0) {
+    netmask = ~((1U << (kIPv4BitCount - prefix_length)) - 1);
+  }
+
+  CIDR cidr;
+  cidr.network = address & netmask;
+  cidr.netmask = netmask;
+  cidr.prefix_length = prefix_length;
+  cidr.family = AF_INET;
+  const uint32_t network_order = htonl(cidr.network);
+  std::memcpy(cidr.network_bytes.data(), &network_order, sizeof(network_order));
+  return cidr;
+}
+
+}  // namespace
 
 bool CIDR::Contains(uint32_t ip_addr) const {
   return family == AF_INET && (ip_addr & netmask) == network;
@@ -118,24 +138,20 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
     if (prefix_length < 0 || prefix_length > kIPv4BitCount) {
       return std::nullopt;
     }
-    uint32_t netmask = 0;
-    if (prefix_length > 0) {
-      netmask = ~((1U << (kIPv4BitCount - prefix_length)) - 1);
-    }
-    CIDR cidr;
-    cidr.network = ip_opt.value() & netmask;
-    cidr.netmask = netmask;
-    cidr.prefix_length = prefix_length;
-    cidr.family = AF_INET;
-    const uint32_t network_order = htonl(cidr.network);
-    std::memcpy(cidr.network_bytes.data(), &network_order, sizeof(network_order));
-    return cidr;
+    return MakeIPv4Cidr(*ip_opt, prefix_length);
   }
 
   struct in6_addr ipv6_addr = {};
   if (inet_pton(AF_INET6, ip_part.c_str(), &ipv6_addr) != 1 || prefix_length < 0 || prefix_length > kIPv6BitCount) {
     return std::nullopt;
   }
+  if (IsIpv4Mapped(ipv6_addr)) {
+    if (prefix_length < 96) {
+      return std::nullopt;
+    }
+    return MakeIPv4Cidr(MappedIpv4HostOrder(ipv6_addr), prefix_length - 96);
+  }
+
   CIDR cidr;
   cidr.network = 0;
   cidr.netmask = 0;
@@ -217,8 +233,11 @@ std::string NormalizePeerAddress(const std::string& ip_str) {
   if (scope_pos != std::string::npos) {
     address.erase(scope_pos);
   }
-  std::transform(address.begin(), address.end(), address.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(address.begin(), address.end(), address.begin(), [](char character) {
+    const auto byte = static_cast<unsigned char>(character);
+    const auto lower_byte = AsciiToLower(byte);
+    return lower_byte == byte ? character : static_cast<char>(lower_byte);
+  });
 
   struct in6_addr ipv6_addr = {};
   if (inet_pton(AF_INET6, address.c_str(), &ipv6_addr) == 1 && IsIpv4Mapped(ipv6_addr)) {

@@ -220,17 +220,16 @@ Expected<int64_t, Error> DateTimeProcessor::TimeToSeconds(std::string_view time_
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Missing hour separator"));
   }
 
-  // Parse hours (can be 0-838)
-  int hours = 0;
-  for (size_t i = pos; i < hour_end; ++i) {
-    if (time_str[i] < '0' || time_str[i] > '9') {
-      return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid hour digit"));
-    }
-    hours = hours * kDecimalBase + (time_str[i] - '0');
+  // Parsing the whole field at once rejects empty and overflowing hour fields
+  // before any arithmetic can overflow.
+  auto parsed_hours = ParseNumeric<unsigned int>(time_str.substr(pos, hour_end - pos));
+  if (!parsed_hours.has_value()) {
+    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid hour"));
   }
-  if (hours > kMaxMySQLTimeHours) {
+  if (*parsed_hours > static_cast<unsigned int>(kMaxMySQLTimeHours)) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Hours must be 0-838"));
   }
+  const int hours = static_cast<int>(*parsed_hours);
 
   // Find minute separator
   pos = hour_end + 1;

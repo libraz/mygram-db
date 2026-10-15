@@ -103,6 +103,59 @@ TEST(NetworkUtilsTest, CIDR_ParseAndContainsIPv6) {
   EXPECT_FALSE(CIDR::Parse("2001:db8::/129").has_value());
 }
 
+TEST(NetworkUtilsTest, CIDR_ParseIPv4MappedPrefixAsIPv4Range) {
+  const auto mapped = CIDR::Parse("::ffff:10.0.0.0/104");
+  const auto ipv4 = CIDR::Parse("10.0.0.0/8");
+  ASSERT_TRUE(mapped.has_value());
+  ASSERT_TRUE(ipv4.has_value());
+  EXPECT_EQ(mapped->family, AF_INET);
+  EXPECT_EQ(mapped->network, ipv4->network);
+  EXPECT_EQ(mapped->netmask, ipv4->netmask);
+  EXPECT_EQ(mapped->prefix_length, ipv4->prefix_length);
+  EXPECT_EQ(mapped->network_bytes, ipv4->network_bytes);
+
+  EXPECT_TRUE(mapped->Contains("10.0.0.5"));
+  EXPECT_TRUE(mapped->Contains("::ffff:10.0.0.5"));
+  EXPECT_TRUE(mapped->Contains("10.255.255.255"));
+  EXPECT_FALSE(mapped->Contains("11.0.0.1"));
+  EXPECT_FALSE(mapped->Contains("2001:db8::1"));
+
+  const auto mapped_hex = CIDR::Parse("::ffff:a00:0/104");
+  ASSERT_TRUE(mapped_hex.has_value());
+  EXPECT_EQ(mapped_hex->family, AF_INET);
+  EXPECT_EQ(mapped_hex->network, ipv4->network);
+  EXPECT_EQ(mapped_hex->netmask, ipv4->netmask);
+  EXPECT_EQ(mapped_hex->prefix_length, ipv4->prefix_length);
+  EXPECT_EQ(mapped_hex->network_bytes, ipv4->network_bytes);
+}
+
+TEST(NetworkUtilsTest, CIDR_ParseIPv4MappedPrefixBounds) {
+  const auto mapped_all = CIDR::Parse("::ffff:203.0.113.9/96");
+  ASSERT_TRUE(mapped_all.has_value());
+  EXPECT_EQ(mapped_all->family, AF_INET);
+  EXPECT_EQ(mapped_all->network, 0U);
+  EXPECT_EQ(mapped_all->netmask, 0U);
+  EXPECT_EQ(mapped_all->prefix_length, 0);
+  EXPECT_TRUE(mapped_all->Contains("0.0.0.0"));
+  EXPECT_TRUE(mapped_all->Contains("255.255.255.255"));
+  EXPECT_TRUE(mapped_all->Contains("::ffff:192.0.2.1"));
+  EXPECT_FALSE(mapped_all->Contains("::1"));
+  EXPECT_FALSE(mapped_all->Contains("2001:db8::1"));
+
+  const auto mapped_host = CIDR::Parse("::ffff:10.0.0.5/128");
+  ASSERT_TRUE(mapped_host.has_value());
+  EXPECT_EQ(mapped_host->family, AF_INET);
+  EXPECT_EQ(mapped_host->network, 0x0A000005U);
+  EXPECT_EQ(mapped_host->netmask, 0xFFFFFFFFU);
+  EXPECT_EQ(mapped_host->prefix_length, 32);
+  EXPECT_TRUE(mapped_host->Contains("10.0.0.5"));
+  EXPECT_TRUE(mapped_host->Contains("::ffff:10.0.0.5"));
+  EXPECT_FALSE(mapped_host->Contains("10.0.0.6"));
+  EXPECT_FALSE(mapped_host->Contains("::ffff:10.0.0.6"));
+
+  EXPECT_FALSE(CIDR::Parse("::ffff:10.0.0.0/95").has_value());
+}
+
 TEST(NetworkUtilsTest, CIDR_Contains) {
   auto cidr = CIDR::Parse("192.168.1.0/24");
   ASSERT_TRUE(cidr.has_value());
@@ -237,6 +290,28 @@ TEST(NetworkUtilsTest, IsIPAllowedSupportsIPv6AndMappedIPv4) {
   EXPECT_FALSE(IsIPAllowed("2001:db9::1", cidrs));
   EXPECT_TRUE(IsIPAllowed("::ffff:127.0.0.1", cidrs));
   EXPECT_FALSE(IsIPAllowed("::ffff:192.0.2.1", cidrs));
+}
+
+TEST(NetworkUtilsTest, IsIPAllowedSupportsMappedCidrsWithBothAclOverloads) {
+  const std::vector<std::string> mapped_cidrs = {"::ffff:10.0.0.0/104"};
+  EXPECT_TRUE(IsIPAllowed("10.0.0.5", mapped_cidrs));
+  EXPECT_TRUE(IsIPAllowed("::ffff:10.0.0.5", mapped_cidrs));
+  EXPECT_FALSE(IsIPAllowed("11.0.0.5", mapped_cidrs));
+  EXPECT_FALSE(IsIPAllowed("2001:db8::5", mapped_cidrs));
+
+  const auto parsed_mapped_cidrs = ParseAllowCidrs(mapped_cidrs);
+  ASSERT_EQ(parsed_mapped_cidrs.size(), 1U);
+  EXPECT_TRUE(IsIPAllowed("10.0.0.5", parsed_mapped_cidrs));
+  EXPECT_TRUE(IsIPAllowed("::ffff:10.0.0.5", parsed_mapped_cidrs));
+  EXPECT_FALSE(IsIPAllowed("11.0.0.5", parsed_mapped_cidrs));
+  EXPECT_FALSE(IsIPAllowed("2001:db8::5", parsed_mapped_cidrs));
+
+  const std::vector<std::string> native_ipv6_cidrs = {"2001:db8::/32"};
+  EXPECT_TRUE(IsIPAllowed("2001:db8:1::5", native_ipv6_cidrs));
+  EXPECT_FALSE(IsIPAllowed("2001:db9::5", native_ipv6_cidrs));
+  const auto parsed_native_ipv6_cidrs = ParseAllowCidrs(native_ipv6_cidrs);
+  EXPECT_TRUE(IsIPAllowed("2001:db8:1::5", parsed_native_ipv6_cidrs));
+  EXPECT_FALSE(IsIPAllowed("2001:db9::5", parsed_native_ipv6_cidrs));
 }
 
 TEST(NetworkUtilsTest, ParseAllowCidrs_ValidEntries) {

@@ -5,26 +5,14 @@
 
 #include "utils/safe_path.h"
 
-#include <algorithm>
-#include <cctype>
 #include <filesystem>
 #include <string>
+
+#include "utils/string_utils.h"
 
 namespace mygramdb::utils {
 
 namespace {
-
-/**
- * @brief Lowercase an ASCII string in place (extension comparison helper).
- */
-std::string ToLowerAscii(std::string_view s) {
-  std::string result;
-  result.reserve(s.size());
-  for (char c : s) {
-    result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-  }
-  return result;
-}
 
 /**
  * @brief Check whether `ext` (case-insensitive) is one of `allowed`.
@@ -33,9 +21,8 @@ bool ExtensionAllowed(const std::string& ext, std::initializer_list<std::string_
   if (allowed.size() == 0) {
     return true;
   }
-  std::string ext_lower = ToLowerAscii(ext);
   for (std::string_view a : allowed) {
-    if (ext_lower == ToLowerAscii(a)) {
+    if (EqualsAsciiCaseInsensitive(ext, a)) {
       return true;
     }
   }
@@ -52,6 +39,14 @@ Expected<std::string, Error> ResolveSafePath(std::string_view input, std::string
   }
   if (base_dir.empty()) {
     return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Empty base directory"));
+  }
+
+  for (char character : input) {
+    const auto value = static_cast<unsigned char>(character);
+    if (value < 0x20 || value == 0x7F) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kInvalidArgument, "Invalid filepath: control characters are not allowed"));
+    }
   }
 
   std::string filepath{input};

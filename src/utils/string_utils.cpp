@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cctype>
 #include <cstdio>
 #include <memory>
 
@@ -17,6 +16,7 @@
 
 #ifdef USE_ICU
 #include <unicode/brkiter.h>
+#include <unicode/locid.h>
 #include <unicode/normalizer2.h>
 #include <unicode/translit.h>
 #include <unicode/unistr.h>
@@ -63,6 +63,18 @@ constexpr uint32_t kSurrogateEnd = 0xDFFF;
 // Minimum codepoint values for each UTF-8 encoding length (to detect overlong encoding)
 constexpr uint32_t kMinThreeByteCodepoint = 0x800;
 constexpr uint32_t kMinFourByteCodepoint = 0x10000;
+
+char ToLowerAsciiChar(char character) {
+  const auto byte = static_cast<unsigned char>(character);
+  const auto lower_byte = AsciiToLower(byte);
+  return lower_byte == byte ? character : static_cast<char>(lower_byte);
+}
+
+char ToUpperAsciiChar(char character) {
+  const auto byte = static_cast<unsigned char>(character);
+  const auto upper_byte = AsciiToUpper(byte);
+  return upper_byte == byte ? character : static_cast<char>(upper_byte);
+}
 
 std::atomic<uint64_t> g_text_normalization_failures{0};
 
@@ -349,7 +361,7 @@ std::string NormalizeTextICU(std::string_view text, bool nfkc, std::string_view 
 
   // Lowercase conversion
   if (lower) {
-    ustr.toLower();
+    ustr.toLower(icu::Locale::getRoot());
   }
 
   // Convert back to UTF-8
@@ -368,11 +380,11 @@ std::string NormalizeText(std::string_view text, bool nfkc, std::string_view wid
 #ifdef USE_ICU
   return NormalizeTextICU(text, nfkc, width, lower);
 #else
-  // Fallback implementation: simple lowercasing only
+  // Fallback implementation: simple ASCII lowercasing only
   std::string result(text);
 
   if (lower) {
-    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return std::tolower(c); });
+    std::transform(result.begin(), result.end(), result.begin(), ToLowerAsciiChar);
   }
 
   return result;
@@ -585,15 +597,13 @@ std::string TrimAsciiWhitespace(std::string_view str) {
 
 std::string ToLower(std::string_view str) {
   std::string result(str);
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char character) { return std::tolower(character); });
+  std::transform(result.begin(), result.end(), result.begin(), ToLowerAsciiChar);
   return result;
 }
 
 std::string ToUpper(std::string_view str) {
   std::string result(str);
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char character) { return std::toupper(character); });
+  std::transform(result.begin(), result.end(), result.begin(), ToUpperAsciiChar);
   return result;
 }
 
@@ -658,15 +668,18 @@ bool IsUnicodeWhitespace(std::string_view text, size_t pos, size_t& char_len) {
   auto byte = static_cast<unsigned char>(text[pos]);
 
   // ASCII whitespace (space, tab, newline, etc.)
-  if (std::isspace(byte) != 0) {
+  if ((byte >= 0x09 && byte <= 0x0D) || byte == 0x20) {
     char_len = 1;
     return true;
   }
 
-  // U+00A0 (No-Break Space): 0xC2 0xA0
-  if (byte == 0xC2 && pos + 1 < text.size() && static_cast<unsigned char>(text[pos + 1]) == 0xA0) {
-    char_len = 2;
-    return true;
+  // Unicode White_Space includes U+0085 (NEL) and U+00A0 (NBSP).
+  if (byte == 0xC2 && pos + 1 < text.size()) {
+    const auto byte2 = static_cast<unsigned char>(text[pos + 1]);
+    if (byte2 == 0x85 || byte2 == 0xA0) {
+      char_len = 2;
+      return true;
+    }
   }
 
   // 3-byte sequences
@@ -681,8 +694,8 @@ bool IsUnicodeWhitespace(std::string_view text, size_t pos, size_t& char_len) {
     }
 
     if (byte == 0xE2) {
-      // U+2000-U+200B: 0xE2 0x80 0x80-0x8B
-      if (byte2 == 0x80 && byte3 >= 0x80 && byte3 <= 0x8B) {
+      // U+2000-U+200A: 0xE2 0x80 0x80-0x8A. U+200B is not whitespace.
+      if (byte2 == 0x80 && byte3 >= 0x80 && byte3 <= 0x8A) {
         char_len = 3;
         return true;
       }

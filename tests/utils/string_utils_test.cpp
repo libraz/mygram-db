@@ -8,11 +8,67 @@
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <clocale>
+
+#ifdef USE_ICU
+#include <unicode/locid.h>
+#include <unicode/utypes.h>
+#endif
 
 #include "utils/errno_utils.h"
 #include "utils/numeric_parse.h"
 
 using namespace mygramdb::utils;
+
+namespace {
+
+class CtypeLocaleGuard {
+ public:
+  CtypeLocaleGuard() {
+    if (const char* locale = std::setlocale(LC_CTYPE, nullptr); locale != nullptr) {
+      original_ = locale;
+    }
+  }
+
+  ~CtypeLocaleGuard() {
+    if (!original_.empty()) {
+      std::setlocale(LC_CTYPE, original_.c_str());
+    }
+  }
+
+  bool Set(const char* locale) { return std::setlocale(LC_CTYPE, locale) != nullptr; }
+
+ private:
+  std::string original_;
+};
+
+}  // namespace
+
+#ifdef USE_ICU
+namespace {
+
+class IcuDefaultLocaleGuard {
+ public:
+  explicit IcuDefaultLocaleGuard(const icu::Locale& locale) : original_(icu::Locale::getDefault()) {
+    UErrorCode status = U_ZERO_ERROR;
+    icu::Locale::setDefault(locale, status);
+    changed_ = U_SUCCESS(status);
+  }
+
+  ~IcuDefaultLocaleGuard() {
+    UErrorCode status = U_ZERO_ERROR;
+    icu::Locale::setDefault(original_, status);
+  }
+
+  bool changed() const { return changed_; }
+
+ private:
+  icu::Locale original_;
+  bool changed_ = false;
+};
+
+}  // namespace
+#endif
 
 /**
  * @brief Test UTF-8 to codepoints conversion
@@ -180,6 +236,13 @@ TEST(StringUtilsTest, NormalizeTextNFKC) {
   // Half-width katakana to full-width: "ｱｲｳ" -> "アイウ"
   normalized = NormalizeText("ｱｲｳ", true, "keep", false);
   EXPECT_EQ(normalized, "アイウ");
+}
+
+TEST(StringUtilsTest, NormalizeTextLowercaseUsesRootLocale) {
+  IcuDefaultLocaleGuard locale_guard(icu::Locale("tr", "TR"));
+  ASSERT_TRUE(locale_guard.changed());
+
+  EXPECT_EQ(NormalizeText("I", false, "keep", true), "i");
 }
 
 /**
@@ -826,6 +889,62 @@ TEST(StringUtilsTest, ToLowerBasic) {
   EXPECT_EQ(ToLower(""), "");
 }
 
+TEST(StringUtilsTest, AsciiCaseMappingCoversEveryByte) {
+  for (unsigned int value = 0; value <= 0xFF; ++value) {
+    const auto byte = static_cast<unsigned char>(value);
+    const auto expected_lower = byte >= 'A' && byte <= 'Z' ? static_cast<unsigned char>(byte + ('a' - 'A')) : byte;
+    const auto expected_upper = byte >= 'a' && byte <= 'z' ? static_cast<unsigned char>(byte - ('a' - 'A')) : byte;
+    EXPECT_EQ(AsciiToLower(byte), expected_lower) << "byte=" << value;
+    EXPECT_EQ(AsciiToUpper(byte), expected_upper) << "byte=" << value;
+  }
+
+  std::string all_bytes;
+  all_bytes.reserve(0x100);
+  for (unsigned int value = 0; value <= 0xFF; ++value) {
+    all_bytes.push_back(static_cast<char>(value));
+  }
+  const auto lower = ToLower(all_bytes);
+  const auto upper = ToUpper(all_bytes);
+  ASSERT_EQ(lower.size(), all_bytes.size());
+  ASSERT_EQ(upper.size(), all_bytes.size());
+  for (size_t i = 0; i < all_bytes.size(); ++i) {
+    EXPECT_EQ(static_cast<unsigned char>(lower[i]), AsciiToLower(static_cast<unsigned char>(all_bytes[i])))
+        << "byte=" << i;
+    EXPECT_EQ(static_cast<unsigned char>(upper[i]), AsciiToUpper(static_cast<unsigned char>(all_bytes[i])))
+        << "byte=" << i;
+  }
+}
+
+TEST(StringUtilsTest, EqualsAsciiCaseInsensitiveUsesAsciiOnlyFolding) {
+  EXPECT_TRUE(EqualsAsciiCaseInsensitive("Auth", "aUtH"));
+  EXPECT_TRUE(EqualsAsciiCaseInsensitive("", ""));
+  EXPECT_FALSE(EqualsAsciiCaseInsensitive(std::string_view("AUTH\0", 5), "AUTH"));
+  EXPECT_FALSE(EqualsAsciiCaseInsensitive("\xC3\x84", "\xC3\xA4"));
+  EXPECT_FALSE(EqualsAsciiCaseInsensitive("\xC3\x84", "\xC3\x84x"));
+}
+
+TEST(StringUtilsTest, AsciiCaseMappingIsIndependentOfTurkishCtypeLocale) {
+  CtypeLocaleGuard locale_guard;
+  bool turkish_locale_available = false;
+  const char* const turkish_locales[] = {"tr_TR.UTF-8", "tr_TR.utf8", "Turkish_Turkey.1254", "tr_TR"};
+  for (const char* locale : turkish_locales) {
+    if (locale_guard.Set(locale)) {
+      turkish_locale_available = true;
+      break;
+    }
+  }
+
+  EXPECT_EQ(ToLower("I"), "i");
+  EXPECT_EQ(ToUpper("i"), "I");
+  EXPECT_TRUE(EqualsAsciiCaseInsensitive("I", "i"));
+  EXPECT_TRUE(EqualsAsciiCaseInsensitive("INFO", "info"));
+  if (turkish_locale_available) {
+    EXPECT_EQ(ToLower("I"), "i");
+    EXPECT_EQ(ToUpper("i"), "I");
+    EXPECT_TRUE(EqualsAsciiCaseInsensitive("INFO", "info"));
+  }
+}
+
 TEST(StringUtilsTest, FormatErrnoIncludesSyscallMessageAndCode) {
   std::string message = FormatErrno("open", EACCES);
   EXPECT_NE(message.find("open failed:"), std::string::npos);
@@ -1298,12 +1417,27 @@ TEST(StringUtilsTest, IsUnicodeWhitespace_EnSpace) {
   EXPECT_EQ(len, 3u);
 }
 
-TEST(StringUtilsTest, IsUnicodeWhitespace_ZeroWidthSpace) {
-  // U+200B (Zero Width Space) = 0xE2 0x80 0x8B
+TEST(StringUtilsTest, IsUnicodeWhitespace_HairSpace) {
+  // U+200A (Hair Space), the last whitespace code point in this range.
+  std::string hair_space("\xE2\x80\x8A");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(hair_space, 0, len));
+  EXPECT_EQ(len, 3u);
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespace_ZeroWidthSpaceIsNotWhitespace) {
+  // U+200B (Zero Width Space) = 0xE2 0x80 0x8B; it is not Unicode White_Space.
   std::string zws("\xE2\x80\x8B");
   size_t len = 0;
-  EXPECT_TRUE(IsUnicodeWhitespace(zws, 0, len));
-  EXPECT_EQ(len, 3u);
+  EXPECT_FALSE(IsUnicodeWhitespace(zws, 0, len));
+}
+
+TEST(StringUtilsTest, IsUnicodeWhitespaceNextLine) {
+  // U+0085 (Next Line) = 0xC2 0x85
+  std::string next_line("\xC2\x85");
+  size_t len = 0;
+  EXPECT_TRUE(IsUnicodeWhitespace(next_line, 0, len));
+  EXPECT_EQ(len, 2u);
 }
 
 TEST(StringUtilsTest, IsUnicodeWhitespace_LineSeparator) {

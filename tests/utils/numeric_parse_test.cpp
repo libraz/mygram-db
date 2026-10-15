@@ -7,8 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <clocale>
 #include <cstdint>
 #include <limits>
+#include <string>
 
 using namespace mygramdb::utils;
 
@@ -143,4 +145,56 @@ TEST(ParseNumericTest, DoubleRejectsNonFiniteValues) {
   EXPECT_FALSE(ParseNumeric<double>("inf").has_value());
   EXPECT_FALSE(ParseNumeric<double>("-inf").has_value());
   EXPECT_FALSE(ParseNumeric<double>("nan").has_value());
+}
+
+TEST(ParseNumericTest, FloatValidAndRejectsTargetTypeOverflow) {
+  auto result = ParseNumeric<float>("1.25e1");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FLOAT_EQ(*result, 12.5F);
+
+  EXPECT_FALSE(ParseNumeric<float>("3.5e38").has_value());
+}
+
+TEST(ParseNumericTest, LongDoublePreservesTheSupportedDecimalParsingContract) {
+  auto result = ParseNumeric<long double>("17.25");
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, 17.25L);
+
+  EXPECT_FALSE(ParseNumeric<long double>("17.25tail").has_value());
+}
+
+TEST(ParseNumericTest, DoubleRejectsOverflow) {
+  EXPECT_FALSE(ParseNumeric<double>("1e309").has_value());
+}
+
+TEST(ParseNumericTest, FloatingPointUsesDecimalGeneralFormat) {
+  EXPECT_FALSE(ParseNumeric<double>("0x1p2").has_value());
+}
+
+TEST(ParseNumericTest, FloatingPointParsingIsIndependentOfNumericLocale) {
+  const char* current_locale = std::setlocale(LC_NUMERIC, nullptr);
+  ASSERT_NE(current_locale, nullptr);
+  struct NumericLocaleGuard {
+    explicit NumericLocaleGuard(const std::string& locale) : original_locale(locale) {}
+    ~NumericLocaleGuard() { std::setlocale(LC_NUMERIC, original_locale.c_str()); }
+
+    std::string original_locale;
+  } locale_guard(current_locale);
+
+  bool selected_locale = false;
+  for (const char* candidate : {"de_DE.UTF-8", "de_DE.utf8", "de_DE"}) {
+    if (std::setlocale(LC_NUMERIC, candidate) != nullptr) {
+      selected_locale = true;
+      break;
+    }
+  }
+  if (!selected_locale) {
+    GTEST_SKIP() << "No German numeric locale is installed";
+  }
+
+  auto result = ParseNumeric<double>("3.14");
+  EXPECT_TRUE(result.has_value());
+  if (result) {
+    EXPECT_DOUBLE_EQ(*result, 3.14);
+  }
 }

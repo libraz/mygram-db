@@ -17,6 +17,43 @@
 namespace mygramdb::utils {
 
 /**
+ * @brief Convert one ASCII byte to lowercase, leaving every other byte unchanged.
+ */
+constexpr unsigned char AsciiToLower(unsigned char character) noexcept {
+  if (character >= 'A' && character <= 'Z') {
+    return static_cast<unsigned char>(character + ('a' - 'A'));
+  }
+  return character;
+}
+
+/**
+ * @brief Convert one ASCII byte to uppercase, leaving every other byte unchanged.
+ */
+constexpr unsigned char AsciiToUpper(unsigned char character) noexcept {
+  if (character >= 'a' && character <= 'z') {
+    return static_cast<unsigned char>(character - ('a' - 'A'));
+  }
+  return character;
+}
+
+/**
+ * @brief Compare strings using ASCII-only case folding without allocating.
+ *
+ * Bytes outside ASCII are compared exactly.
+ */
+inline bool EqualsAsciiCaseInsensitive(std::string_view lhs, std::string_view rhs) noexcept {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    if (AsciiToLower(static_cast<unsigned char>(lhs[i])) != AsciiToLower(static_cast<unsigned char>(rhs[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * @brief Normalize text according to configuration
  *
  * Applies NFKC normalization, width conversion, and case conversion
@@ -239,7 +276,7 @@ size_t CountCodePoints(std::string_view text);
  * @brief Check if a Unicode whitespace character starts at the given position
  *
  * Detects ASCII whitespace and Unicode whitespace characters including:
- * U+00A0 (No-Break Space), U+1680 (Ogham Space Mark), U+2000-U+200B,
+ * U+0085 (Next Line), U+00A0 (No-Break Space), U+1680 (Ogham Space Mark), U+2000-U+200A,
  * U+2028 (Line Separator), U+2029 (Paragraph Separator), U+202F (Narrow No-Break Space),
  * U+205F (Medium Mathematical Space), U+3000 (Ideographic Space).
  *

@@ -105,6 +105,41 @@ TEST_F(SafePathTest, RejectsEmptyInput) {
   EXPECT_NE(result.error().message().find("Empty filepath"), std::string::npos);
 }
 
+TEST_F(SafePathTest, RejectsControlBytesBeforeFilesystemResolution) {
+  const auto missing_base = base_dir_ / "missing_base";
+  const auto expect_rejected = [&missing_base](unsigned int control_byte) {
+    std::string input = "path";
+    input.push_back(static_cast<char>(control_byte));
+    input += ".dat";
+
+    auto result = mygram::utils::ResolveSafePath(input, missing_base.string());
+    if (result) {
+      ADD_FAILURE() << "Accepted control byte " << control_byte;
+      return;
+    }
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kInvalidArgument) << "byte " << control_byte;
+    EXPECT_NE(result.error().message().find("control character"), std::string::npos)
+        << "byte " << control_byte << ": " << result.error().message();
+  };
+
+  for (unsigned int control_byte = 0; control_byte <= 0x1F; ++control_byte) {
+    expect_rejected(control_byte);
+  }
+  expect_rejected(0x7F);
+
+  // A missing base would fail canonicalization if validation happened later.
+  // Its continued absence also confirms the rejected path caused no writes.
+  EXPECT_FALSE(std::filesystem::exists(missing_base));
+  EXPECT_TRUE(std::filesystem::is_empty(base_dir_));
+}
+
+TEST_F(SafePathTest, AcceptsControlFreeUtf8Path) {
+  const std::string relative_path = "資料_日本語.dat";
+  auto result = mygram::utils::ResolveSafePath(relative_path, base_dir_.string());
+  ASSERT_TRUE(result) << result.error().message();
+  EXPECT_EQ(*result, (base_dir_ / relative_path).string());
+}
+
 // Empty base_dir is rejected.
 TEST_F(SafePathTest, RejectsEmptyBaseDir) {
   auto result = mygram::utils::ResolveSafePath("foo.dat", "");
