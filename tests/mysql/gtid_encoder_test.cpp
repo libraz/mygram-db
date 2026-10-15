@@ -767,7 +767,7 @@ TEST_F(GtidEncoderTest, ConvertedRangeGtidCreatesCorrectInterval) {
 }
 
 // ===========================================================================
-// Duplicate UUID merging tests (P1-2)
+// Duplicate UUID merging tests
 // ===========================================================================
 
 TEST_F(GtidEncoderTest, DuplicateUuidsMergedIntoSingleSid) {

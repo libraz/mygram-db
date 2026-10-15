@@ -656,7 +656,7 @@ TEST(InitialLoaderIntegrationTest, LoadsConfiguredDatabaseWhenSameTableExistsInD
  * @brief Cancelling mid-stream returns without reading the rest of the table.
  *
  * Freeing an unbuffered result drains every row still on the wire, so a
- * cancelled load of a large table used to take as long as a complete one.
+ * cancelled load of a large table would take as long as a complete one.
  */
 TEST(InitialLoaderIntegrationTest, CancellationDoesNotDrainTheRemainingRows) {
   if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {

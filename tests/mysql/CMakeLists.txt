@@ -45,7 +45,7 @@ gtest_discover_tests(null_binlog_reader_test
   DISCOVERY_TIMEOUT 30
 )
 
-# IBinlogReader::Stop() synchronous-contract tests (CR-9, no MySQL dependency)
+# IBinlogReader::Stop() synchronous-contract tests (no MySQL dependency)
 add_executable(binlog_reader_stop_contract_test
   binlog_reader_stop_contract_test.cpp
 )

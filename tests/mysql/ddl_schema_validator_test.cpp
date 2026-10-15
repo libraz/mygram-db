@@ -253,17 +253,17 @@ TEST(DDLSchemaValidatorIntegrationTest, RejectsBinaryConfiguredColumnReportedByM
   }
   Connection connection(MakeIntegrationConnectionConfig());
   ASSERT_TRUE(connection.Connect("ddl-encoding-binary-test"));
-  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS audit_f19_binary"));
+  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS binary_pk_table"));
   ASSERT_TRUE(connection.ExecuteUpdate(
-      "CREATE TABLE audit_f19_binary (id BINARY(16) PRIMARY KEY, content TEXT CHARACTER SET utf8mb4 NOT NULL)"));
+      "CREATE TABLE binary_pk_table (id BINARY(16) PRIMARY KEY, content TEXT CHARACTER SET utf8mb4 NOT NULL)"));
 
   config::TableConfig table_config;
   table_config.database = MakeIntegrationConnectionConfig().database;
-  table_config.name = "audit_f19_binary";
+  table_config.name = "binary_pk_table";
   table_config.primary_key = "id";
   table_config.text_source.column = "content";
   auto result = DDLSchemaValidator::Capture(connection, table_config);
-  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE audit_f19_binary"));
+  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE binary_pk_table"));
 
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);
@@ -276,17 +276,17 @@ TEST(DDLSchemaValidatorIntegrationTest, RejectsCp932ConfiguredColumnReportedByMy
   }
   Connection connection(MakeIntegrationConnectionConfig());
   ASSERT_TRUE(connection.Connect("ddl-encoding-cp932-test"));
-  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS audit_f20_cp932"));
+  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS cp932_text_table"));
   ASSERT_TRUE(connection.ExecuteUpdate(
-      "CREATE TABLE audit_f20_cp932 (id BIGINT PRIMARY KEY, content TEXT CHARACTER SET cp932 NOT NULL)"));
+      "CREATE TABLE cp932_text_table (id BIGINT PRIMARY KEY, content TEXT CHARACTER SET cp932 NOT NULL)"));
 
   config::TableConfig table_config;
   table_config.database = MakeIntegrationConnectionConfig().database;
-  table_config.name = "audit_f20_cp932";
+  table_config.name = "cp932_text_table";
   table_config.primary_key = "id";
   table_config.text_source.column = "content";
   auto result = DDLSchemaValidator::Capture(connection, table_config);
-  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE audit_f20_cp932"));
+  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE cp932_text_table"));
 
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);

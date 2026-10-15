@@ -3422,9 +3422,9 @@ class RowsParserV2Test : public RowsParserTest {};
 /**
  * @test V2 WRITE_ROWS_EVENT with flags=0x0000 (no STMT_END_F).
  *
- * This is the core bug case: in a batch INSERT, intermediate events have
- * flags=0x0000. The old code only read var_header_len when flags & 0x0001,
- * so the 2-byte var_header_len was not consumed and column_count misparsed.
+ * In a batch INSERT, intermediate events have
+ * flags=0x0000. var_header_len is read regardless of flags & 0x0001,
+ * so the 2-byte field is always consumed before column_count.
  */
 TEST_F(RowsParserV2Test, V2WriteRowsWithoutStmtEndFlag) {
   auto table_meta = CreateTestTableMeta();

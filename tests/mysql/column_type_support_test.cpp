@@ -2,9 +2,9 @@
  * @file column_type_support_test.cpp
  * @brief The column type table is what all three type decisions read
  *
- * Whether a MySQL type can back a configured column used to be answered
- * separately by configuration-time validation, by the initial-load path and by
- * the row decoder's case labels. These tests hold the table to the behaviour of
+ * Whether a MySQL type can back a configured column is answered once, for
+ * configuration-time validation, the initial-load path and
+ * the row decoder alike. These tests hold the table to the behaviour of
  * the code that reads it: a type it calls decodable has to decode, a type it
  * accepts has to be usable on both paths, and a type it rejects has to be
  * refused before replication starts rather than during it.

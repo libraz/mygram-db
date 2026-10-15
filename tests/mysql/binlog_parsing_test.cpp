@@ -244,7 +244,7 @@ TEST(BinlogParsingTest, ExtractGTIDRejectsBuffersTruncatedBeforeGno) {
   std::array<unsigned char, kHeaderLength + kGtidPayloadLength> event{};
 
   // The UUID is complete at offset 36, but ExtractGTID also reads the full
-  // eight-byte GNO that follows it. Reject both formerly accepted lengths.
+  // eight-byte GNO that follows it. Reject both shorter lengths.
   event[4] = static_cast<unsigned char>(MySQLBinlogEventType::GTID_LOG_EVENT);
   EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 2).has_value());
   EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 1).has_value());
@@ -2334,8 +2334,7 @@ TEST(BinlogParsingTest, TruncatedRowsEventsBeforeCompleteTableIdAreRejected) {
  *
  * Verifies that IsTableAffectingDDL correctly finds the target table
  * when it appears as the destination in a multi-pair RENAME statement.
- * Previously, a broken skip loop (while-break no-op) could fail to
- * advance past non-matching table names.
+ * The skip loop must advance past non-matching table names.
  */
 TEST(BinlogParsingTest, RenameTableMultiplePairsTargetInDestination) {
   // Target table appears only as destination in the second pair

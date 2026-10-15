@@ -5,7 +5,7 @@
  * A configured column is read twice: once as text from the initial-load result
  * set, once as a binary row image from the binlog. A type is only usable when
  * the two produce the same string for the same stored value, so the three
- * decisions that used to be made separately - how the snapshot text is
+ * decisions - how the snapshot text is
  * normalized, whether the row decoder can decode the type, and whether a
  * configured column may have the type at all - are recorded here together.
  *

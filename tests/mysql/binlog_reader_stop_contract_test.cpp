@@ -1,6 +1,6 @@
 /**
  * @file binlog_reader_stop_contract_test.cpp
- * @brief Tests for the IBinlogReader::Stop() synchronous contract (CR-9).
+ * @brief Tests for the IBinlogReader::Stop() synchronous contract.
  *
  * The contract: Stop() MUST NOT return until the reader's internal worker
  * thread(s) have fully terminated and are guaranteed to make no further
@@ -88,7 +88,7 @@ class SynchronousStopMockReader final : public IBinlogReader {
 };
 
 /**
- * @brief CR-9: After Stop() returns, the worker thread is fully exited.
+ * @brief After Stop() returns, the worker thread is fully exited.
  */
 TEST(BinlogReaderStopContractTest, StopJoinsWorkerThreadSynchronously) {
   SynchronousStopMockReader reader;
@@ -106,7 +106,7 @@ TEST(BinlogReaderStopContractTest, StopJoinsWorkerThreadSynchronously) {
 }
 
 /**
- * @brief CR-9: After Stop(), tick_count is stable (worker truly stopped).
+ * @brief After Stop(), tick_count is stable (worker truly stopped).
  *
  * If Stop() returned before joining, the worker would continue to tick for
  * some time afterward. We capture tick_count immediately after Stop(),
@@ -128,7 +128,7 @@ TEST(BinlogReaderStopContractTest, NoWorkActivityAfterStopReturns) {
 }
 
 /**
- * @brief CR-9: Stop() is idempotent — calling it twice does not crash or hang.
+ * @brief Stop() is idempotent — calling it twice does not crash or hang.
  */
 TEST(BinlogReaderStopContractTest, StopIsIdempotent) {
   SynchronousStopMockReader reader;
@@ -141,7 +141,7 @@ TEST(BinlogReaderStopContractTest, StopIsIdempotent) {
 }
 
 /**
- * @brief CR-9: NullBinlogReader's Stop() trivially satisfies the contract.
+ * @brief NullBinlogReader's Stop() trivially satisfies the contract.
  *
  * The null reader has no worker thread, so Stop() is a no-op. The contract
  * is still satisfied (trivially).
