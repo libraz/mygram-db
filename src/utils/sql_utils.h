@@ -1,6 +1,6 @@
 /**
  * @file sql_utils.h
- * @brief SQL identifier quoting, MySQL literal encoding and table-name matching
+ * @brief SQL identifier quoting and MySQL literal encoding
  */
 
 #pragma once
@@ -91,14 +91,5 @@ std::optional<std::string> FormatMySQLDateTimeLiteral(int64_t epoch_seconds, int
  * @return Literal text in exponent form, such as "1.10000000000000009e+00".
  */
 std::string FormatMySQLDoubleLiteral(double value);
-
-/// @brief Match a table name (with optional backtick quoting) at the given
-/// position.
-/// @param str Input string (should be uppercase)
-/// @param pos Starting position (updated to position after table name if
-/// matched)
-/// @param table_name Table name to match (should be uppercase)
-/// @return true if table_name matches at pos
-bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name);
 
 }  // namespace mygramdb::utils

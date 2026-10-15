@@ -1,12 +1,11 @@
 /**
  * @file sql_utils.cpp
- * @brief SQL identifier quoting, MySQL literal encoding and table-name matching
+ * @brief SQL identifier quoting and MySQL literal encoding
  */
 
 #include "utils/sql_utils.h"
 
 #include <array>
-#include <cctype>
 #include <charconv>
 #include <cstdio>
 #include <system_error>
@@ -152,51 +151,6 @@ std::string FormatMySQLDoubleLiteral(double value) {
     return "0e0";
   }
   return std::string(buffer.data(), result.ptr);
-}
-
-bool MatchTableName(const std::string& str, size_t& pos, const std::string& table_name) {
-  size_t saved_pos = pos;
-
-  // Skip optional backtick
-  bool has_backtick = false;
-  if (pos < str.length() && str[pos] == '`') {
-    has_backtick = true;
-    ++pos;
-  }
-
-  // Match table name
-  if (pos + table_name.length() > str.length()) {
-    pos = saved_pos;
-    return false;
-  }
-
-  if (str.compare(pos, table_name.length(), table_name) != 0) {
-    pos = saved_pos;
-    return false;
-  }
-
-  pos += table_name.length();
-
-  // Skip optional closing backtick
-  if (has_backtick && pos < str.length() && str[pos] == '`') {
-    ++pos;
-  }
-
-  // Ensure the match is a complete word (not a prefix of a longer identifier)
-  // After the table name (and optional backtick), the next character must be:
-  // - End of string
-  // - Whitespace
-  // - Semicolon
-  // - Not an identifier character (alphanumeric or underscore)
-  if (pos < str.length()) {
-    char next_char = str[pos];
-    if (std::isalnum(static_cast<unsigned char>(next_char)) != 0 || next_char == '_') {
-      pos = saved_pos;
-      return false;  // Table name is a prefix of a longer identifier
-    }
-  }
-
-  return true;
 }
 
 }  // namespace mygramdb::utils
