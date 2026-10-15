@@ -2974,9 +2974,6 @@ TEST_F(MygramClientCApiTest, ParseSearchExpression_Simple) {
   // No NOT terms
   EXPECT_EQ(parsed->not_count, 0);
 
-  // No optional terms (all are treated as required)
-  EXPECT_EQ(parsed->optional_count, 0);
-
   mygramclient_free_parsed_expression(parsed);
 }
 

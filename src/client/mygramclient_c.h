@@ -608,22 +608,13 @@ void mygramclient_free_string(char* str);
 
 /**
  * @brief Parsed search expression components
- *
- * Note: the optional_terms / optional_count fields are deprecated and
- * are always emitted as NULL / 0 since the implicit-AND parser change.
- * They are retained here for ABI compatibility only — new code should
- * use and_terms (required terms) and not_terms (excluded terms).
  */
 typedef struct {
-  char* main_term;        // Main search term (first required or optional term)
-  char** and_terms;       // Array of additional required terms (AND)
-  size_t and_count;       // Number of AND terms
-  char** not_terms;       // Array of excluded terms (NOT)
-  size_t not_count;       // Number of NOT terms
-  char** optional_terms;  // Deprecated: always NULL since the implicit-AND change.
-                          // Reserved for ABI compatibility.
-  size_t optional_count;  // Deprecated: always 0 since the implicit-AND change.
-                          // Reserved for ABI compatibility.
+  char* main_term;   // Main search term (first required or optional term)
+  char** and_terms;  // Array of additional required terms (AND)
+  size_t and_count;  // Number of AND terms
+  char** not_terms;  // Array of excluded terms (NOT)
+  size_t not_count;  // Number of NOT terms
 } MygramParsedExpression_C;
 
 /**

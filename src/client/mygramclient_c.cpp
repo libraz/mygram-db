@@ -1457,8 +1457,6 @@ int mygramclient_parse_search_expression_ex(const char* expression, MygramParsed
   result->and_count = 0;
   result->not_terms = nullptr;
   result->not_count = 0;
-  result->optional_terms = nullptr;
-  result->optional_count = 0;
 
   // Copy main term
   result->main_term = strdup_safe(simplified->main_term);
@@ -1483,13 +1481,6 @@ int mygramclient_parse_search_expression_ex(const char* expression, MygramParsed
     return -1;
   }
   result->not_count = simplified->not_terms.size();
-
-  // optional_terms / optional_count are deprecated since the implicit-AND
-  // parser change: every parsed term is now classified as required (AND)
-  // or excluded (NOT). Emit NULL / 0 explicitly so consumers do not need
-  // to defensively check string_vector_to_c_array's empty-input behavior.
-  result->optional_terms = nullptr;
-  result->optional_count = 0;
 
   *parsed = result;
   return 0;
@@ -1540,7 +1531,6 @@ void mygramclient_free_parsed_expression(MygramParsedExpression_C* parsed) {
   free(parsed->main_term);
   free_c_string_array(parsed->and_terms, parsed->and_count);
   free_c_string_array(parsed->not_terms, parsed->not_count);
-  free_c_string_array(parsed->optional_terms, parsed->optional_count);
   free(parsed);
 }
 

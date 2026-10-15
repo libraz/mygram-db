@@ -37,7 +37,6 @@ namespace mygramdb::client {
 struct SearchExpression {
   std::vector<std::string> required_terms;  // Terms with a + prefix, and unprefixed terms (implicit AND)
   std::vector<std::string> excluded_terms;  // Terms with - prefix (NOT)
-  std::vector<std::string> optional_terms;  // Unused; kept for source compatibility
   std::string raw_expression;               // Formatted AST-syntax text for a bare OR/grouped sub-expression
   std::vector<bool> required_is_group;      // Parallel to required_terms: entry is a formatted (...) group
   std::vector<bool> excluded_is_group;      // Parallel to excluded_terms: entry is a formatted (...) group
@@ -86,7 +85,7 @@ struct SimplifiedExpression {
  * auto expr = ParseSearchExpression("+golang tutorial");
  * if (expr) {
  *   // expr->required_terms = ["golang", "tutorial"]
- *   // optional_terms is unused; every unprefixed term is required (implicit AND)
+ *   // every unprefixed term is required (implicit AND)
  * }
  *
  * auto expr = ParseSearchExpression("+golang +(tutorial OR guide) -old");

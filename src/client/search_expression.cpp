@@ -508,8 +508,7 @@ std::string SearchExpression::ToQueryString() const {
     oss << "(" << raw_expression << ")";
   }
 
-  // Note: optional_terms is no longer used (kept for backward compatibility)
-  // All terms are now treated as required (implicit AND)
+  // All terms are treated as required (implicit AND)
 
   return oss.str();
 }

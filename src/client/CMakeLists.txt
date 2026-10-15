@@ -43,8 +43,8 @@ add_library(mygramclient_shared SHARED
 # Set library properties
 set_target_properties(mygramclient_shared PROPERTIES
   OUTPUT_NAME mygramclient
-  VERSION 1.0.0
-  SOVERSION 1
+  VERSION 2.0.0
+  SOVERSION 2
   EXPORT_NAME client_shared
 )
 

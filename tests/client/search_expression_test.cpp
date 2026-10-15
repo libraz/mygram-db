@@ -20,7 +20,6 @@ TEST(SearchExpressionTest, SimpleRequiredTerm) {
   EXPECT_EQ(expr.required_terms.size(), 1);
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_TRUE(expr.excluded_terms.empty());
-  EXPECT_TRUE(expr.optional_terms.empty());
 }
 
 /**
@@ -34,7 +33,6 @@ TEST(SearchExpressionTest, SimpleExcludedTerm) {
   EXPECT_TRUE(expr.required_terms.empty());
   EXPECT_EQ(expr.excluded_terms.size(), 1);
   EXPECT_EQ(expr.excluded_terms[0], "old");
-  EXPECT_TRUE(expr.optional_terms.empty());
 }
 
 /**
@@ -76,7 +74,6 @@ TEST(SearchExpressionTest, RequiredAndExcluded) {
   EXPECT_EQ(expr.required_terms[0], "golang");
   EXPECT_EQ(expr.excluded_terms.size(), 1);
   EXPECT_EQ(expr.excluded_terms[0], "old");
-  EXPECT_TRUE(expr.optional_terms.empty());
 }
 
 /**

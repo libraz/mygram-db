@@ -418,7 +418,7 @@ class MygramClient {
                                                                   const std::string& value) const;
   mygram::utils::Expected<std::string, mygram::utils::Error> ShowVariables(const std::string& like_pattern = "") const;
   mygram::utils::Expected<void, mygram::utils::Error> CacheClear(const std::string& table = "") const;
-  /** Raw protocol response retained for source and ABI compatibility. */
+  /** Raw CACHE STATS protocol response, returned verbatim by mygramclient_cache_stats(). */
   mygram::utils::Expected<std::string, mygram::utils::Error> CacheStats() const;
   /** Parsed CACHE STATS response. */
   mygram::utils::Expected<CacheStatistics, mygram::utils::Error> GetCacheStatistics() const;
