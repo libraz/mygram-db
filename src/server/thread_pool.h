@@ -28,14 +28,21 @@ namespace mygramdb::server {
 class ThreadPool {
  public:
   using Task = std::function<void()>;
+  /// Optional factory seam for deterministic thread-creation failure tests.
+  using WorkerThreadFactory = std::function<std::thread(std::function<void()>)>;
+  /// Optional observer invoked after dequeue/accounting and before task execution.
+  using TaskDequeuedHook = std::function<void(size_t active_workers)>;
   static constexpr uint32_t kDefaultShutdownTimeoutMs = 30000;
 
   /**
    * @brief Construct thread pool
    * @param num_threads Number of worker threads (0 = CPU count)
    * @param queue_size Maximum queue size (0 = unbounded)
+   * @param worker_thread_factory Optional worker-thread factory, primarily for tests
+   * @param task_dequeued_hook Optional callback for observing active-worker accounting
    */
-  explicit ThreadPool(size_t num_threads = 0, size_t queue_size = 0);
+  explicit ThreadPool(size_t num_threads = 0, size_t queue_size = 0, WorkerThreadFactory worker_thread_factory = {},
+                      TaskDequeuedHook task_dequeued_hook = {});
 
   /**
    * @brief Destructor - waits for all tasks to complete
@@ -87,7 +94,7 @@ class ThreadPool {
   mutable std::mutex queue_mutex_;
   std::condition_variable condition_;
   std::atomic<bool> shutdown_{false};
-  std::atomic<size_t> active_workers_{0};  // Number of workers currently executing tasks
+  std::atomic<size_t> active_workers_{0};  // Workers that dequeued a task but have not finished it
 
   // Idle-state notification used by Shutdown(timeout_ms) to avoid the previous
   // 10ms polling loop. Lives under a separate mutex so signalling never
@@ -96,6 +103,7 @@ class ThreadPool {
   std::condition_variable idle_cv_;
 
   size_t max_queue_size_;
+  TaskDequeuedHook task_dequeued_hook_;
 
   /**
    * @brief Worker thread function

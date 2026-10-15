@@ -337,7 +337,9 @@ TEST_F(ResponseFormatterTest, FormatFacetResponseTerminatesTransportFrame) {
 
   std::string response = ResponseFormatter::FormatFacetResponse(value_counts, value_counts.size());
 
-  EXPECT_TRUE(client::detail::IsResponseComplete(response)) << response;
+  // The transport appends one CRLF to every response body.
+  auto frame = client::detail::BeginResponseFrame("FACET t c", /*debug_mode=*/false);
+  EXPECT_TRUE(client::detail::IsResponseComplete(response + "\r\n", frame)) << response;
 }
 
 /**
@@ -593,7 +595,38 @@ TEST_F(ResponseFormatterTest, FormatPrometheusMetricsExposesReplicationDiagnosti
             std::string::npos);
   EXPECT_NE(response.find("mygramdb_requests_denied_total{reason=\"pool_full\",surface=\"tcp\"} 1"), std::string::npos);
 }
+
+TEST_F(ResponseFormatterTest, FormattersCanOmitEveryReplicationFieldAndCounter) {
+  AggregatedMetrics metrics;
+  ServerStats stats;
+  stats.IncrementReplInsertApplied();
+  MockResponseBinlogReader reader;
+
+  const std::string hidden_info =
+      ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, &reader, nullptr, true, true, false);
+  EXPECT_EQ(hidden_info.find("replication_"), std::string::npos) << hidden_info;
+
+  const std::string hidden_metrics =
+      ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, &reader, nullptr, nullptr, false);
+  EXPECT_EQ(hidden_metrics.find("mygramdb_replication_"), std::string::npos) << hidden_metrics;
+  EXPECT_NE(hidden_metrics.find("mygramdb_server_info"), std::string::npos) << hidden_metrics;
+
+  const std::string visible_info =
+      ResponseFormatter::FormatInfoResponse(metrics, stats, table_contexts_, &reader, nullptr, true, true, true);
+  EXPECT_NE(visible_info.find("replication_gtid: " + reader.current_gtid), std::string::npos);
+  EXPECT_NE(visible_info.find("replication_inserts_applied: 1"), std::string::npos);
+
+  const std::string visible_metrics =
+      ResponseFormatter::FormatPrometheusMetrics(metrics, stats, table_contexts_, &reader, nullptr, nullptr, true);
+  EXPECT_NE(visible_metrics.find("# HELP mygramdb_replication_events_processed"), std::string::npos);
+  EXPECT_NE(visible_metrics.find("mygramdb_replication_inserts_total{status=\"applied\"} 1"), std::string::npos);
+}
 #endif
+
+TEST_F(ResponseFormatterTest, SaveAndLoadResponsesSanitizeDelimitedPaths) {
+  EXPECT_EQ(ResponseFormatter::FormatSaveResponse("/tmp/snapshot\r\nOK\tother"), "OK SAVED /tmp/snapshot  OK other");
+  EXPECT_EQ(ResponseFormatter::FormatLoadResponse("/tmp/snapshot\r\nOK\tother"), "OK LOADED /tmp/snapshot  OK other");
+}
 
 /**
  * @brief Test error response formatting

@@ -66,8 +66,7 @@ class InvalidationQueue {
    * @brief Constructor
    * @param cache Pointer to query cache
    * @param invalidation_mgr Pointer to invalidation manager
-   * @param table_contexts Map of table name to TableContext pointer (for per-table ngram settings)
-   * @note table_contexts must remain valid for the lifetime of this InvalidationQueue instance
+   * @param ngram_configs Per-table ngram settings used to extract changed ngrams
    */
   InvalidationQueue(QueryCache* cache, InvalidationManager* invalidation_mgr, NgramConfigMap ngram_configs,
                     WorkerThreadFactory worker_thread_factory = {});
@@ -149,15 +148,7 @@ class InvalidationQueue {
   InvalidationManager* invalidation_mgr_;  ///< Pointer to invalidation manager
   NgramConfigMap ngram_configs_;           ///< Per-table N-gram settings for invalidation
 
-  /**
-   * @brief Typed composite key for the pending-invalidation map.
-   *
-   * Keying directly on a (table, CacheKey) pair avoids the previous
-   * CacheKey -> hex string -> CacheKey round-trip on the invalidation hot
-   * path. The previous string-based encoding allocated O(n) strings per
-   * Enqueue and parsed them back in ProcessBatch via stoull(); this typed
-   * pair eliminates both the allocation and the parsing.
-   */
+  /** Typed (table, CacheKey) composite key for the pending-invalidation map. */
   struct PendingKey {
     std::string table;
     CacheEntryIdentity identity;

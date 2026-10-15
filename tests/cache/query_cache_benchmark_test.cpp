@@ -90,7 +90,8 @@ TEST_F(QueryCacheBenchmarkTest, FilterChangeSweepCostIsFlatAcrossCacheSize) {
       for (size_t i = 0; i < kSweeps; ++i) {
         // Identical old and new text: no ngram changed and no text-sensitive
         // entry qualifies, so only the filter sweep does any work.
-        affected += manager.InvalidateAffectedEntries(kTable, "unchanged", "unchanged", 3, 2, true, true).size();
+        affected +=
+            manager.InvalidateAffectedEntryIdentities(kTable, "unchanged", "unchanged", 3, 2, true, true).size();
       }
     });
     EXPECT_EQ(affected, kSweeps * kMatching) << "the sweep matched a different set at " << entries << " entries";
@@ -129,7 +130,7 @@ TEST_F(QueryCacheBenchmarkTest, TextSensitiveSweepCostIsFlatAcrossCacheSize) {
       for (size_t i = 0; i < kSweeps; ++i) {
         // The changed text shares no ngram with any registered entry, so every
         // match below comes from the text-sensitive sweep alone.
-        affected += manager.InvalidateAffectedEntries(kTable, "aaaa", "bbbb", 3, 2, true, false).size();
+        affected += manager.InvalidateAffectedEntryIdentities(kTable, "aaaa", "bbbb", 3, 2, true, false).size();
       }
     });
     EXPECT_EQ(affected, kSweeps * kMatching) << "the sweep matched a different set at " << entries << " entries";

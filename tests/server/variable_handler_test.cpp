@@ -29,6 +29,8 @@ class VariableHandlerTest : public ::testing::Test {
     config_->api.rate_limiting.enable = true;
     config_->api.rate_limiting.capacity = 100;
     config_->api.rate_limiting.refill_rate = 10;
+    config_->replication.enable = true;
+    config_->replication.server_id = 100;
     config_->cache.enabled = true;
     config_->cache.min_query_cost_ms = 10.0;
     config_->cache.ttl_seconds = 300;
@@ -119,6 +121,18 @@ TEST_F(VariableHandlerTest, ShowVariablesWithPrefix) {
   EXPECT_TRUE(response.find("logging.format") != std::string::npos) << "Response: " << response;
   // Should not contain non-logging variables
   EXPECT_TRUE(response.find("cache.enabled") == std::string::npos) << "Response: " << response;
+}
+
+TEST_F(VariableHandlerTest, ShowVariablesLikePrefixIsCaseInsensitive) {
+  query::Query query;
+  query.type = query::QueryType::SHOW_VARIABLES;
+  query.variable_like_pattern = "API.%";
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_NE(response.find("api.default_limit"), std::string::npos) << response;
+  EXPECT_NE(response.find("api.max_query_length"), std::string::npos) << response;
+  EXPECT_EQ(response.find("cache.enabled"), std::string::npos) << response;
 }
 
 TEST_F(VariableHandlerTest, ShowVariablesLikeMultipleWildcards) {

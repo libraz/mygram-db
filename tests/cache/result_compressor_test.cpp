@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <climits>
+#include <limits>
 #include <vector>
 
 namespace mygramdb::cache {
@@ -177,6 +178,17 @@ TEST(ResultCompressorTest, DecompressOriginalSizeOverflow) {
   auto result = ResultCompressor::Decompress(compressed, kOverflowCount);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kCacheDecompressionFailed);
+}
+
+TEST(ResultCompressorTest, DecompressRejectsElementCountBeforeSizeMultiplication) {
+  const std::vector<uint8_t> compressed = {0x10, 0x01};
+  constexpr size_t kOverflowCount = std::numeric_limits<size_t>::max() / sizeof(DocId) + 1;
+
+  EXPECT_NO_THROW({
+    auto result = ResultCompressor::Decompress(compressed, kOverflowCount);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kCacheDecompressionFailed);
+  });
 }
 
 /**

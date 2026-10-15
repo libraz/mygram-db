@@ -8,11 +8,10 @@
 #include <algorithm>
 #include <iomanip>
 #include <sstream>
-#include <vector>
 
 #include "config/runtime_variable_manager.h"
 #include "server/response_formatter.h"
-#include "utils/structured_log.h"
+#include "utils/string_utils.h"
 
 namespace mygramdb::server {
 
@@ -46,35 +45,11 @@ std::string VariableHandler::HandleSet(const Query& query) {
                                           mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
 
-  std::vector<std::pair<std::string, std::string>> applied_old_values;
-  applied_old_values.reserve(query.variable_assignments.size());
-
-  // Apply each variable assignment. If a later assignment fails, roll back
-  // the earlier successful changes so multi-SET is all-or-nothing from the
-  // user's perspective.
-  for (const auto& [variable_name, value] : query.variable_assignments) {
-    auto old_value = ctx_.variable_manager->GetVariable(variable_name);
-    if (!old_value) {
-      return ResponseFormatter::FormatError(mygram::utils::MakeError(
-          old_value.error().code(), "Failed to set variable '" + variable_name + "': " + old_value.error().message()));
-    }
-
-    auto result = ctx_.variable_manager->SetVariable(variable_name, value);
-    if (!result) {
-      for (auto it = applied_old_values.rbegin(); it != applied_old_values.rend(); ++it) {
-        auto rollback = ctx_.variable_manager->SetVariable(it->first, it->second);
-        if (!rollback) {
-          mygram::utils::StructuredLog()
-              .Event("variable_set_rollback_failed")
-              .Field("variable", it->first)
-              .Field("error", rollback.error().to_string())
-              .Error();
-        }
-      }
-      return ResponseFormatter::FormatError(mygram::utils::MakeError(
-          result.error().code(), "Failed to set variable '" + variable_name + "': " + result.error().message()));
-    }
-    applied_old_values.emplace_back(variable_name, *old_value);
+  auto result = ctx_.variable_manager->SetVariables(query.variable_assignments);
+  if (!result) {
+    const auto& failure = result.error();
+    return ResponseFormatter::FormatError(mygram::utils::MakeError(
+        failure.error.code(), "Failed to set variable '" + failure.variable_name + "': " + failure.error.message()));
   }
 
   // Success
@@ -186,15 +161,16 @@ std::string VariableHandler::FormatVariablesTable(const std::map<std::string, co
 bool VariableHandler::MatchLikePattern(const std::string& value, const std::string& pattern) {
   // Two-pointer LIKE pattern matching (O(n*m) worst-case, no allocations).
   // Supports: % (any sequence of characters), _ (single character).
-  // MySQL LIKE is case-insensitive by default.
+  // Runtime variable names use ASCII case-insensitive matching.
   size_t v = 0;
   size_t p = 0;
   size_t star = std::string::npos;
   size_t match = 0;
 
   while (v < value.size()) {
-    if (p < pattern.size() && (pattern[p] == '_' || std::tolower(static_cast<unsigned char>(pattern[p])) ==
-                                                        std::tolower(static_cast<unsigned char>(value[v])))) {
+    if (p < pattern.size() &&
+        (pattern[p] == '_' || mygram::utils::AsciiToLower(static_cast<unsigned char>(pattern[p])) ==
+                                  mygram::utils::AsciiToLower(static_cast<unsigned char>(value[v])))) {
       ++v;
       ++p;
     } else if (p < pattern.size() && pattern[p] == '%') {

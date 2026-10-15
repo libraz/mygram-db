@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -121,7 +122,8 @@ class ServerLifecycleManager {
 #endif
       ,
       RateLimiter* rate_limiter = nullptr, std::atomic<bool>* shutdown_requested = nullptr,
-      DumpProgress* dump_progress = nullptr);
+      DumpProgress* dump_progress = nullptr, OperationCoordinator* operation_coordinator = nullptr,
+      std::function<bool()> initial_data_ready_checker = {});
 
   ~ServerLifecycleManager() = default;
 
@@ -135,14 +137,15 @@ class ServerLifecycleManager {
    * @brief Initialize all components in dependency order
    *
    * Initialization order (follows dependency graph):
-   * 1. ThreadPool (no dependencies)
-   * 2. TableCatalog (no dependencies)
-   * 3. CacheManager (depends on config)
-   * 4. HandlerContext (depends on catalog, cache)
-   * 5. Handlers (depend on HandlerContext)
-   * 6. Dispatcher (depends on handlers)
-   * 7. Acceptor (depends on thread pool)
-   * 8. Scheduler (depends on catalog)
+   * 1. Sweep old, dead-owner dump temporaries
+   * 2. ThreadPool (no dependencies)
+   * 3. TableCatalog (no dependencies)
+   * 4. CacheManager (depends on config)
+   * 5. HandlerContext (depends on catalog, cache)
+   * 6. Handlers (depend on HandlerContext)
+   * 7. Dispatcher (depends on handlers)
+   * 8. Acceptor (binds/listens, accept loop starts later)
+   * 9. Scheduler (constructed here, started after startup wiring)
    *
    * @return Expected with initialized components or error
    */
@@ -162,7 +165,8 @@ class ServerLifecycleManager {
                          SyncOperationManager* sync_manager
 #endif
                          ,
-                         RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress);
+                         RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress,
+                         OperationCoordinator* operation_coordinator, std::function<bool()> initial_data_ready_checker);
 
   // Configuration (const references)
   const ServerConfig& config_;
@@ -185,6 +189,8 @@ class ServerLifecycleManager {
   RateLimiter* rate_limiter_;
   std::atomic<bool>* shutdown_requested_;
   DumpProgress* dump_progress_;
+  OperationCoordinator* operation_coordinator_;
+  std::function<bool()> initial_data_ready_checker_;
 
   // Initialization steps (each returns Expected<unique_ptr<T>, Error>)
   mygram::utils::Expected<std::unique_ptr<ThreadPool>, mygram::utils::Error> InitThreadPool() const;

@@ -61,6 +61,7 @@ markers = [
     "resilience: Fault recovery",
     "multi_table: Multiple table tests",
     "security: Administrative authentication and access control",
+    "dedicated_process: Runs an isolated MygramDB process instead of the shared session daemon",
 ]
 timeout = 120
 junit_family = "xunit2"

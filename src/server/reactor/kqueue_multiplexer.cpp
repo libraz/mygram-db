@@ -256,11 +256,17 @@ Expected<void, Error> KqueueMultiplexer::Add(int fd, uint8_t interest, Registrat
     // Remove() can clean it up. If nothing was applied we omit the entry
     // entirely so Remove() remains a no-op.
     if (applied != 0U) {
-      interest_[fd] = Registration{.interest = applied, .token = registration_token};
+      Registration registration{};
+      registration.interest = applied;
+      registration.token = registration_token;
+      interest_[fd] = registration;
     }
     return result;
   }
-  interest_[fd] = Registration{.interest = interest, .token = registration_token};
+  Registration registration{};
+  registration.interest = interest;
+  registration.token = registration_token;
+  interest_[fd] = registration;
   return {};
 }
 

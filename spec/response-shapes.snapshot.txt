@@ -144,20 +144,6 @@
 < # Clients\r
 < connected_clients: <INT>\r
 < \r
-< # Replication\r
-< replication_status: disabled\r
-< replication_inserts_applied: 0\r
-< replication_inserts_skipped: 0\r
-< replication_updates_applied: 0\r
-< replication_updates_added: 0\r
-< replication_updates_removed: 0\r
-< replication_updates_modified: 0\r
-< replication_updates_skipped: 0\r
-< replication_deletes_applied: 0\r
-< replication_deletes_skipped: 0\r
-< replication_ddl_executed: 0\r
-< replication_events_skipped_other_tables: 0\r
-< \r
 < # Cache\r
 < cache_enabled: 1\r
 < cache_hits: <INT>\r
@@ -1043,28 +1029,6 @@
 < # TYPE mygramdb_thread_pool_workers gauge
 < mygramdb_thread_pool_workers <INT>
 <
-< # HELP mygramdb_replication_inserts_total Total number of INSERT operations
-< # TYPE mygramdb_replication_inserts_total counter
-< mygramdb_replication_inserts_total{status="applied"} 0
-< mygramdb_replication_inserts_total{status="skipped"} 0
-<
-< # HELP mygramdb_replication_updates_total Total number of UPDATE operations
-< # TYPE mygramdb_replication_updates_total counter
-< mygramdb_replication_updates_total{status="applied"} 0
-< mygramdb_replication_updates_total{status="added"} 0
-< mygramdb_replication_updates_total{status="removed"} 0
-< mygramdb_replication_updates_total{status="modified"} 0
-< mygramdb_replication_updates_total{status="skipped"} 0
-<
-< # HELP mygramdb_replication_deletes_total Total number of DELETE operations
-< # TYPE mygramdb_replication_deletes_total counter
-< mygramdb_replication_deletes_total{status="applied"} 0
-< mygramdb_replication_deletes_total{status="skipped"} 0
-<
-< # HELP mygramdb_replication_ddl_total Total number of DDL operations executed
-< # TYPE mygramdb_replication_ddl_total counter
-< mygramdb_replication_ddl_total 0
-<
 < # HELP mygramdb_cache_hits_total Total number of cache hits
 < # TYPE mygramdb_cache_hits_total counter
 < mygramdb_cache_hits_total <INT>
@@ -1094,7 +1058,7 @@
 < # TYPE mygramdb_cache_ttl_expirations_total counter
 < mygramdb_cache_ttl_expirations_total <INT>
 <
-< # HELP mygramdb_cache_rejections_total Total inserts rejected for being below the cost threshold
+< # HELP mygramdb_cache_rejections_total Total inserts rejected by cost or concurrent invalidation
 < # TYPE mygramdb_cache_rejections_total counter
 < mygramdb_cache_rejections_total <INT>
 <
@@ -1230,6 +1194,7 @@
 < cache: miss\r
 < cache_reason: not_found\r
 < cache_cost_ms: <DURATION_MS>\r
+< cache_key: <CACHE_KEY>\r
 < \r
 ### 097 TCP DEBUG OFF
 > DEBUG OFF

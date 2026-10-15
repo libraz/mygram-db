@@ -113,6 +113,8 @@ const std::vector<Normalization>& NormalizationRules() {
       {"DEBUG blocks report the per-stage timings of the query that produced them",
        R"RE((\n|^)([<\s]*(query_time|parse_time|index_time|filter_time|cache_cost_ms|cache_age_ms|cache_saved_ms)\s*:\s*)[0-9]+(\.[0-9]+)?)RE",
        "$1$2<DURATION_MS>"},
+      {"the canonical cache key is a hash of the query text and varies with the build's hashing",
+       R"RE((\n|^)([<\s]*cache_key\s*:\s*)[0-9a-f]+)RE", "$1$2<CACHE_KEY>"},
       {"cache latency averages are measured from the queries earlier cases ran",
        R"RE((\n|^)([<\s]*"?(avg_hit_latency_ms|avg_miss_latency_ms|avg_cache_miss_time_ms|total_time_saved_ms|cache_avg_hit_latency_ms|cache_avg_miss_latency_ms|cache_total_time_saved_ms)"?"?\s*:\s*)[0-9]+(\.[0-9]+)?(e-?[0-9]+)?)RE",
        "$1$2<DURATION_MS>"},
@@ -315,21 +317,15 @@ class TcpSession {
   /// response is complete. Returns a marker instead of blocking forever when
   /// the server never completes a frame.
   ///
-  /// Mirrors MygramClient::Impl::SendCommand's own use of
-  /// ResponseCompletionState (src/client/mygramclient.cpp): a SEARCH/COUNT
-  /// header line reads identically whether or not a HIGHLIGHT/DEBUG body
-  /// follows it, so the recv loop needs to be told from the command text
-  /// (and this session's own DEBUG ON/OFF state) when that can't happen.
+  /// Frames the reply exactly as MygramClient::Impl::SendCommand does: by the
+  /// command sent and this session's own DEBUG ON/OFF state.
   std::string Send(const std::string& request) {
     const std::string wire = request + "\r\n";
     if (::send(fd_, wire.data(), wire.size(), 0) < 0) {
       return "<SEND_FAILED>";
     }
     std::string response;
-    client::detail::ResponseCompletionState state;
-    const bool is_search_or_count = IsSearchOrCountCommand(request);
-    state.expect_multiline_tail = is_search_or_count && (debug_mode_ || RequestsHighlight(request));
-    state.expect_debug_marker = is_search_or_count && debug_mode_;
+    auto state = client::detail::BeginResponseFrame(request, debug_mode_);
     std::array<char, 8192> buffer{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -351,23 +347,6 @@ class TcpSession {
   }
 
  private:
-  static bool IsSearchOrCountCommand(const std::string& request) {
-    const size_t verb_end = request.find_first_of(" \t");
-    const std::string verb = request.substr(0, verb_end);
-    return verb == "SEARCH" || verb == "COUNT";
-  }
-
-  static bool RequestsHighlight(const std::string& request) {
-    std::istringstream tokens(request);
-    std::string token;
-    while (tokens >> token) {
-      if (token == "HIGHLIGHT") {
-        return true;
-      }
-    }
-    return false;
-  }
-
   int fd_ = -1;
   bool debug_mode_ = false;
 };
@@ -453,6 +432,7 @@ class ResponseShapeSnapshotTest : public ::testing::Test {
 
   void BuildConfig() {
     config_ = std::make_unique<config::Config>();
+    config_->replication.enable = false;
     config_->api.tcp.bind = "127.0.0.1";
     config_->api.tcp.port = 0;
     config_->api.http.enable = true;

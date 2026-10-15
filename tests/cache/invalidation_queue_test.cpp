@@ -1339,7 +1339,7 @@ TEST(InvalidationQueueTest, ProcessBatchWithEvictionCallbackNoDoubleUnregister) 
   // Wire eviction callback to call UnregisterCacheEntry (mirrors
   // CacheManager). With the CR-6 fix, ProcessBatch uses EraseWithoutCallback
   // so this callback never fires for queue-driven cleanup.
-  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+  cache.SetIdentityEvictionCallback([&mgr](const CacheEntryIdentity& identity) { mgr.UnregisterCacheEntry(identity); });
 
   // Register cache entries with distinct ngrams.
   constexpr int kNumEntries = 50;
@@ -1412,7 +1412,7 @@ TEST(InvalidationQueueTest, ProcessBatchConcurrentWithReRegisterTrackedCountCons
   InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // CacheManager-style eviction callback.
-  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+  cache.SetIdentityEvictionCallback([&mgr](const CacheEntryIdentity& identity) { mgr.UnregisterCacheEntry(identity); });
 
   queue.SetBatchSize(5);
   queue.SetMaxDelay(20);
@@ -1472,7 +1472,7 @@ TEST(InvalidationQueueTest, StartAfterStopReenablesEnqueue) {
   InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
   // Wire eviction callback (mirrors CacheManager).
-  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+  cache.SetIdentityEvictionCallback([&mgr](const CacheEntryIdentity& identity) { mgr.UnregisterCacheEntry(identity); });
 
   // First Start/Stop cycle: queue is functional.
   queue.Start();
@@ -1514,7 +1514,7 @@ TEST(InvalidationQueueTest, MultipleStopStartCyclesEachReenableEnqueue) {
   auto ngram_configs = CreateTestNgramConfigs(3, 2);
   InvalidationQueue queue(&cache, &mgr, std::move(ngram_configs));
 
-  cache.SetEvictionCallback([&mgr](const CacheKey& key) { mgr.UnregisterCacheEntry(key); });
+  cache.SetIdentityEvictionCallback([&mgr](const CacheEntryIdentity& identity) { mgr.UnregisterCacheEntry(identity); });
 
   for (int cycle = 0; cycle < 3; ++cycle) {
     auto key = CacheKeyGenerator::Generate("hm5_cycle_" + std::to_string(cycle));

@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "config/config.h"
@@ -20,6 +21,7 @@
 #include "query/query_parser.h"
 #include "server/connection_acceptor.h"
 #include "server/io_reactor.h"
+#include "server/operation_coordinator.h"
 #include "server/rate_limiter.h"
 #include "server/request_dispatcher.h"
 #include "server/server_stats.h"
@@ -63,6 +65,7 @@ namespace mygramdb::server {
 
 using SyncCompletionCallback = std::function<void(const std::string&)>;
 using InitialDataReadyChecker = std::function<bool()>;
+using BeforeAcceptCallback = std::function<mygram::utils::Expected<void, mygram::utils::Error>(cache::CacheManager*)>;
 
 /**
  * @brief Simple TCP server for text protocol
@@ -99,6 +102,12 @@ class TcpServer {
    * @return Expected<void, Error> - Success or error details
    */
   mygram::utils::Expected<void, mygram::utils::Error> Start();
+
+  /**
+   * @brief Start after giving the embedder access to initialized shared cache
+   *        components, before scheduled work or network command dispatch begins.
+   */
+  mygram::utils::Expected<void, mygram::utils::Error> Start(BeforeAcceptCallback before_accept);
 
   /**
    * @brief Stop server
@@ -155,12 +164,13 @@ class TcpServer {
    */
   std::atomic<bool>* GetReplicationPausedForDumpFlag() { return &replication_paused_for_dump_; }
 
-  OperationCoordinator* GetOperationCoordinator() {
-#ifdef USE_MYSQL
-    return sync_manager_ != nullptr ? &sync_manager_->GetOperationCoordinator() : nullptr;
-#else
-    return nullptr;
-#endif
+  OperationCoordinator* GetOperationCoordinator() { return &operation_coordinator_; }
+
+  /** Test hook for holding a DUMP SAVE after admission and before worker publication. */
+  void SetAfterDumpSaveFlagAcquiredHookForTest(std::function<void()> hook) {
+    if (handler_context_ != nullptr) {
+      handler_context_->after_dump_save_flag_acquired = std::move(hook);
+    }
   }
 
   /**
@@ -219,6 +229,8 @@ class TcpServer {
 #endif
 
  private:
+  mygram::utils::Expected<void, mygram::utils::Error> StartInternal(BeforeAcceptCallback before_accept);
+
   // Configuration
   ServerConfig config_;
   const config::Config* full_config_;
@@ -237,6 +249,9 @@ class TcpServer {
   // replication_was_running=true at entry will call binlog_reader_->Start()
   // during shutdown — racing the binlog_reader's destructor.
   std::atomic<bool> shutdown_in_progress_{false};
+  // Owns admission for all long operations, including no-MySQL builds.
+  // Declared before SyncOperationManager so it outlives the manager.
+  OperationCoordinator operation_coordinator_;
   DumpProgress dump_progress_;  // Progress tracking for async dump operations
 
   // Services (composition) - NEW

@@ -31,7 +31,7 @@ The *Rate limited* and *Counted in `total_requests`* columns are declared per ro
 
 `OPTIONS` is the exception to that generalization. `FindLiteralRoute` compares the request method against `GET` or `POST` only (`src/server/http_server.cpp`), so a preflight never resolves to a descriptor and is treated as an unnamed path: a preflight denied by the network ACL or the rate limiter increments `total_requests`, while a preflight that is served does not, because the CORS handler records nothing (`HttpServer::SetupCors`, `src/server/http_server.cpp`).
 
-The *Auth* column is the descriptor's `requires_admin_token` flag, declared in the same table and enforced by the shared route wrapper before the handler is dispatched (`src/server/http_server.cpp`). Three routes carry it: `GET /config`, `GET /replication/status` and `POST /optimize`. The credential gate lives only in that wrapper, so an uncredentialed request on those three routes never reaches handler code — see *Authentication*. Two handlers read the credential without gating on it: `HandleHealthReady` and `HandleHealthDetail` call `AdminCredentialsAccepted` to decide which replication fields to expose, not whether to admit the request (`src/server/http_server.cpp`).
+The *Auth* column is the descriptor's `requires_admin_token` flag, declared in the same table and enforced by the shared route wrapper before the handler is dispatched (`src/server/http_server.cpp`). Three routes carry it: `GET /config`, `GET /replication/status` and `POST /optimize`. The credential gate lives only in that wrapper, so an uncredentialed request on those three routes never reaches handler code — see *Authentication*. Three handlers read the credential without gating on it: `HandleHealthReady`, `HandleHealthDetail` and `HandleMetrics` call `AdminCredentialsAccepted` to decide which replication fields to expose, not whether to admit the request (`src/server/http_server.cpp`).
 
 ### Path matching rules
 
@@ -79,7 +79,7 @@ Caps applied to `filters`:
 | Value type | string, integer, float, boolean only (`JsonFilterValueToString`) | `src/server/http_server.cpp` |
 | Value length | ≤ 1024 bytes (`kMaxFilterValueLength`) | `QueryParser::ValidateFilterCondition`, shared with the TCP `FILTER` clause |
 
-Non-string filter values are coerced to strings: integers via `std::to_string(int64_t)`, floats via `std::to_string(double)` (fixed six decimals), booleans to `"1"`/`"0"` (`src/server/http_server.cpp`). Because `filters` is a JSON object, at most one condition per column can be expressed.
+Non-string filter values are coerced to strings: integers via `std::to_string(int64_t)`, floats via `nlohmann::json::dump()` (shortest round-trip representation), booleans to `"1"`/`"0"` (`src/server/http_server.cpp`). Because `filters` is a JSON object, at most one condition per column can be expressed.
 
 **`sort`** (`src/server/http_server.cpp`):
 
@@ -142,19 +142,20 @@ After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, h
 | 400 | `q` contains `\r`/`\n`/`\0` | `kQueryInvalidToken` (3001) | `src/server/http_server.cpp` |
 | 400 | `q` empty | `kQuerySyntaxError` (3000) | `src/server/http_server.cpp` |
 | 400 | Assembled query exceeds `api.max_query_length` characters | `kQueryTooLong` (3005) | `src/query/query_parser.cpp` |
-| 400 | Bad `limit` | `kQueryInvalidLimit` (3008) | `HttpServer::ApplyHttpQueryOptions`, `src/server/http_server.cpp` |
+| 400 | `limit` is not an integer or is below 1 | `kQueryInvalidLimit` (3008) | `HttpServer::ApplyHttpQueryOptions`, `src/server/http_server.cpp` |
+| 400 | `limit` exceeds 1000 | `kQuerySyntaxError` (3000), matching TCP | `HttpServer::ApplyHttpQueryOptions`, `src/server/http_server.cpp` |
 | 400 | Bad `offset` | `kQueryInvalidOffset` (3009) | `HttpServer::ApplyHttpQueryOptions`, `src/server/http_server.cpp` |
 | 400 | `filters` not an object / bad condition | `kQueryInvalidFilter` (3006) | `HttpServer::ApplyHttpQueryOptions` and `ParseFiltersFromJson`, `src/server/http_server.cpp` |
+| 400 | More than 64 filter conditions | `kQuerySyntaxError` (3000), matching TCP | `ParseFiltersFromJson`, `src/server/http_server.cpp` |
 | 400 | Bad `sort` | `kQueryInvalidSort` (3007) | `ParseSortFromJson`, `src/server/http_server.cpp` |
 | 400 | Bad `highlight` / `fuzzy` | `kQuerySyntaxError` (3000) | `ParseHighlightFromJson` / `ParseFuzzyFromJson`, `src/server/http_server.cpp` |
 | 400 | Invalid table name | `kQueryInvalidToken` (3001) | `src/server/http_server.cpp` |
-| 400 | Bare table name under a multi-database configuration | `kQuerySyntaxError` (3000) | `HttpServer::ResolveHttpTableContext`, `src/server/http_server.cpp` |
 | 400 | `HIGHLIGHT` requested but normalized text storage is off | `kNotImplemented` (4) | `HttpServer::HandleSearch`, `src/server/http_server.cpp` |
 | 400 | `sort._score` with BM25 disabled | `kQueryInvalidSort` (3007) | `src/server/search_pipeline.cpp` |
 | 400 | `sort._score` with normalized text storage off | `kNotImplemented` (4) | `src/server/search_pipeline.cpp` |
-| 400 | `sort._score` when the table's index or BM25 statistics are missing | `kTableNotFound` (4007) | `src/server/search_pipeline.cpp` |
+| 404 | `sort._score` when the table's index or BM25 statistics are missing | `kTableNotFound` (4007) | `src/server/search_pipeline.cpp` |
 | 400 | Any other pipeline / sorter error | error's own code | `src/server/search_pipeline.cpp` |
-| 404 | Table not resolvable | `kTableNotFound` (4007) | `src/server/http_server.cpp` |
+| 404 | Table not resolvable, including a bare name under multi-database configuration | `kTableNotFound` (4007) | `src/server/http_server.cpp` |
 | 415 | `Content-Type` not `application/json` | `kNetworkInvalidRequest` (6007) | `src/server/http_server.cpp` |
 | 500 | Resolved table has a null index or document store | `kInternalError` (5) | `HttpServer::ResolveHttpTableContext`, `src/server/http_server.cpp` |
 | 500 | Unhandled exception in the handler | `kInternalError` (5) | `HttpServer::HandleSearch`'s `catch`, `src/server/http_server.cpp` |
@@ -233,10 +234,10 @@ Errors: as `/search`, plus three of this route's own (all 400):
 | Condition | `error_code` | Citation |
 |---|---|---|
 | Missing / non-string `column` | `kQuerySyntaxError` (3000) | `PrepareHttpFacetQuery`, `src/server/http_server.cpp` |
-| `column` fails `IsSafeColumnName` — `Invalid facet column` | `kQueryInvalidToken` (3001) | `PrepareHttpFacetQuery`, `src/server/http_server.cpp` |
+| `column` fails `IsSafeColumnName` — `Invalid facet column` | `kQuerySyntaxError` (3000), matching TCP | `PrepareHttpFacetQuery`, `src/server/http_server.cpp` |
 | `column` is well-formed but resolves to no configured filter column — `Facet column "…" not found` | `kIndexNotFound` (4000) | `ExecuteFacetPipeline`, `src/server/search_pipeline.cpp` |
 
-The last of these is raised inside the pipeline, so it reaches the client through `HttpStatusForQueryError` and is 400 rather than 404 (`src/server/http_server.cpp`).
+The last of these is raised inside the pipeline and is mapped to HTTP 400 by `HttpServer::SendError(res, Error)` (`src/server/http_server.cpp`).
 
 ---
 
@@ -260,8 +261,7 @@ Success: `200`, `application/json`.
 | Status | Condition | `error_code` |
 |---|---|---|
 | 400 | Invalid table name | `kQueryInvalidToken` (3001) |
-| 400 | Bare table name under multi-database config | `kQuerySyntaxError` (3000) |
-| 404 | Table not resolvable | `kTableNotFound` (4007) |
+| 404 | Bare table name under multi-database config or other unresolved identity | `kTableNotFound` (4007) |
 | 404 | No such primary key, or document fetch returned empty | `kIndexDocumentNotFound` (4004) |
 | 500 | Null index or document store; unhandled exception | `kInternalError` (5) |
 | 503 | Server loading | `kServerLoading` (6028) |
@@ -275,7 +275,7 @@ Every row in this table is implemented in `src/server/http_server.cpp`.
 
 Server, memory, index, per-table and cache statistics. No parameters. Success `200`, `application/json` (`src/server/http_server.cpp`).
 
-Statistics are read from the shared TCP `ServerStats` when one was injected, otherwise from the HTTP-local instance (`src/server/http_server.h`). Memory accounting comes from a snapshot cache shared with `/metrics`, rebuilt at most once a second, so two reads inside that window report identical numbers (`StatisticsSnapshotCache`, `src/server/statistics_service.h`). The TCP `INFO` command reports the same figures under the same rule.
+Statistics are read from the shared TCP `ServerStats` when one was injected, otherwise from the HTTP-local instance (`src/server/http_server.h`). Memory accounting comes from a snapshot cache shared with `/metrics`, rebuilt at most once a second, so two reads inside that window report identical numbers (`StatisticsSnapshotCache`, `src/server/statistics_service.h`). The TCP `INFO` command reports the corresponding server, memory, index and cache figures under the same rule; its replication details are credential-conditional (`src/server/handlers/admin_handler.cpp`, `src/server/response_formatter.cpp`). The HTTP `/info` response contains no replication fields (`src/server/http_server.cpp`).
 
 ```json
 {
@@ -496,7 +496,7 @@ Requires a bearer token when `api.admin_token` is configured (`src/server/http_s
 | Status | Condition | `error_code` |
 |---|---|---|
 | 401 | Missing or wrong bearer token (adds `WWW-Authenticate: Bearer`) | `kPermissionDenied` (7) |
-| 500 | No configuration wired | `kInternalError` (5) |
+| 503 | No configuration wired | `kServerInitMissingDependency` (6026), same error message as TCP `CONFIG SHOW` |
 | 500 | Unhandled exception | `kInternalError` (5) |
 
 Every row in this table is implemented in `src/server/http_server.cpp`.
@@ -529,14 +529,14 @@ Requires a bearer token when `api.admin_token` is configured (`src/server/http_s
 - `status` is the reader's lifecycle value rendered by `ToString(ReplicationState)`, one of `running`, `stopped` or `failed` (`src/mysql/binlog_reader_interface.h`).
 - `last_error` is the reader's raw `GetLastError()` text, which is MySQL's own message (`src/server/http_server.cpp`). This route is the only place that surface text is exposed: `GET /health/ready` and `GET /health/detail` report the same fault as the error code's description instead.
 
+With a `USE_MYSQL` build and no reader, the route returns `200` with `{"enabled":false,"status":"not_configured"}` and no replication details (`src/server/http_server.cpp`). Without MySQL support, it returns `503` with `kNotImplemented` (4).
+
 | Status | Condition | `error_code` |
 |---|---|---|
 | 401 | Missing or wrong bearer token (adds `WWW-Authenticate: Bearer`) | `kPermissionDenied` (7) |
 | 500 | Unhandled exception | `kInternalError` (5) |
-| 503 | Replication not configured (null binlog reader) | `kNotImplemented` (4) |
-| 503 | Built without MySQL support | `kNotImplemented` (4) |
 
-Every row in this table is implemented in `src/server/http_server.cpp`.
+Every error row in this table is implemented in `src/server/http_server.cpp`.
 
 ---
 
@@ -593,7 +593,9 @@ Prometheus text exposition. `200`, `Content-Type: text/plain; version=0.0.4; cha
 
 Metric families emitted (all prefixed `mygramdb_`): `server_info`, `server_uptime_seconds`, `server_commands_total`, `text_normalization_failures_total`, `command_total{command}`, `memory_used_bytes{type}`, `memory_peak_bytes`, `memory_fragmentation_ratio`, `memory_system_total_bytes`, `memory_system_available_bytes`, `memory_system_usage_ratio`, `memory_process_rss_bytes`, `memory_process_rss_peak_bytes`, `memory_health_status`, `index_documents_total{table}`, `index_terms_total{table}`, `index_postings_total{table}`, `index_postings_per_term_avg{table}`, `index_delta_encoded_lists{table}`, `index_roaring_bitmap_lists{table}`, `index_optimization_in_progress{table}`, `clients_connected`, `clients_total`, `dump_last_success_timestamp_seconds`, `dump_failures_total{trigger}`, `requests_denied_total{reason,surface}`, `thread_pool_queue_depth`, `thread_pool_queue_capacity`, `thread_pool_workers`, `replication_*`, `cache_*` (`src/server/response_formatter.cpp`).
 
-`requests_denied_total` carries a `surface` label with values `tcp` and `http`, so ACL and rate-limit denials are attributable per protocol (`src/server/response_formatter.cpp`).
+`requests_denied_total` carries a `surface` label with values `tcp` and `http`, so ACL and rate-limit denials are attributable per protocol (`src/server/response_formatter.cpp`). The route remains public, but without accepted admin credentials the response omits every `mygramdb_replication_` metric, including HELP/TYPE declarations and operation counters; an empty configured token counts as accepted (`src/server/http_server.cpp`, `src/server/response_formatter.cpp`).
+
+The open health routes (`/health/ready`, `/health/detail`) expose the readiness-relevant replication state (replication state, last error code, last applied time, seconds since last applied) for probing; `/metrics` withholds the replication counters and gauges before authentication.
 
 Errors: `500` `kInternalError` (`application/json`) on an unhandled exception (`src/server/http_server.cpp`).
 
@@ -620,7 +622,7 @@ An empty `api.admin_token` leaves the three routes above open. Configuration val
 
 There is no session, cookie, API-key-parameter or query-string authentication path; credentials are presented per request.
 
-Two routes consult `api.admin_token` without requiring it. `GET /health/ready` and `GET /health/detail` answer every caller, but suppress the replication fields that `GET /replication/status` protects unless the request carries accepted credentials (`src/server/http_server.cpp`). No other route reads the token.
+Three routes consult `api.admin_token` without requiring it. `GET /health/ready`, `GET /health/detail` and `GET /metrics` answer every caller, but suppress the replication fields that `GET /replication/status` protects unless the request carries accepted credentials (`src/server/http_server.cpp`). `/metrics` omits the complete replication metric family, including HELP/TYPE declarations and operation counters, from unauthenticated responses. An empty configured token counts as accepted credentials. No other route reads the token.
 
 ## Network ACL
 
@@ -681,51 +683,42 @@ No other security headers are emitted: there is no `Strict-Transport-Security`, 
 
 ## Status-code mapping
 
-Only three internal codes are mapped by range/identity; every other query-path error becomes `400` (`src/server/http_server.cpp`):
+Handlers normally pass one `Error` to `HttpServer::SendError(res, Error)`, which chooses the HTTP status from the error code (`src/server/http_server.cpp`):
 
-| Internal code | Numeric | HTTP status |
-|---|---|---|
-| `kServerShuttingDown` | 6027 | 503 |
-| `kServerLoading` | 6028 | 503 |
-| `kInternalError` | 5 | 500 |
-| anything else reaching `HttpStatusForQueryError` | — | 400 |
+| Error | HTTP status |
+|---|---|
+| `kTableNotFound` (4007), `kIndexDocumentNotFound` (4004), `kNotFound` | 404 |
+| `kInternalError` (5), and unclassified codes | 500 |
+| `kInvalidArgument` (2), `kNotImplemented` (4), codes 3000–3999 and 4000–4999 | 400 |
+| `kServerInitMissingDependency` (6026), `kServerShuttingDown` (6027), `kServerLoading` (6028), `kServerNotReady` (6029), `kServerBusy` (6030) | 503 |
 
-Statuses chosen directly by the pre-routing handler, the route wrapper and the route handlers, independent of that helper:
+A small set of handlers supplies a status explicitly because the transport or operation contract requires it:
 
 | Condition | Status | Internal code |
 |---|---|---|
 | ACL denial | 403 | `kPermissionDenied` (7) |
-| Rate limit | 429 | `kServerBusy` (6030) |
+| Missing/bad bearer token on a protected route | 401 | `kPermissionDenied` (7) |
 | Wrong `Content-Type` | 415 | `kNetworkInvalidRequest` (6007) |
-| Missing/bad bearer token on a route that requires one | 401 | `kPermissionDenied` (7) |
-| Table not found | 404 | `kTableNotFound` (4007) |
-| Document not found | 404 | `kIndexDocumentNotFound` (4004) |
-| Null index/doc store | 500 | `kInternalError` (5) |
-| Server loading | 503 | `kServerLoading` (6028) |
-| Table synchronizing | 503 | `kServerNotReady` (6029) |
-| Replication not configured / not compiled | 503 | `kNotImplemented` (4) |
-| Optimize callback failure | 503 | frame code or `kInternalError` |
+| Rate limit | 429 | `kServerBusy` (6030) |
+| Replication endpoint in a build without MySQL support | 503 | `kNotImplemented` (4) |
+| Optimize callback failure | 503 | callback frame code or `kInternalError` (5) |
 | Optimize callback missing | 503 | `kServerInitMissingDependency` (6026) |
-| Not ready (`/health/ready`) | 503 | — (health bodies carry no `error_code`) |
+| Not ready (`/health/ready`) | 503 | — (health body has no `error_code`) |
 
-Every row in this table is implemented in `src/server/http_server.cpp`.
+Every row in these tables is implemented in `src/server/http_server.cpp`. The JSON error envelope remains exactly `{"error": ..., "error_code": ...}`; an explicit HTTP status does not replace or rewrite the error code.
 
 By error-code range (ranges from the project's error taxonomy, `src/utils/error.h`):
 
-| Range | Module | HTTP statuses actually produced |
+| Range | Module | HTTP statuses produced |
 |---|---|---|
-| 0–999 | General | 500 (`kInternalError` 5), 401/403 (`kPermissionDenied` 7), 400 (`kInvalidArgument` 2, `kNotImplemented` 4), 503 (`kNotImplemented` 4 on the replication route) |
-| 3000–3999 | Query/Request parsing | 400 exclusively |
-| 4000–4999 | Index/Search | 404 for `kIndexDocumentNotFound` (4004); 404 for `kTableNotFound` (4007) raised during table resolution, 400 when the same code arrives from `ScoreAndSortByRelevance` through `HttpStatusForQueryError`; 400 for `kIndexNotFound` (4000) and for every other code reaching `HttpStatusForQueryError` |
-| 6000–6999 | Network/Server | 415 (6007), 503 (6026/6027/6028/6029), 429 (6030) |
-
-`kNotImplemented` (4) maps to 400 when it arrives through `HttpStatusForQueryError` (e.g. the highlight/text-storage error at `src/server/http_server.cpp`) and to 503 when a handler picks the status directly.
-
----
+| 0–999 | General | 404 (`kNotFound`), 500 (`kInternalError`), 403 (`kPermissionDenied` through the mapper or ACL status), 401 (`kPermissionDenied` for protected-route authentication), 400 (`kInvalidArgument`, `kNotImplemented` through the mapper), 503 (`kNotImplemented` for non-MySQL replication) |
+| 3000–3999 | Query/Request parsing | 400 |
+| 4000–4999 | Index/Search | 404 for `kIndexDocumentNotFound` (4004) and `kTableNotFound` (4007); 400 for other codes in this range |
+| 6000–6999 | Network/Server | 415 (6007), 429 (6030), 503 (6026–6030) |
 
 ## Divergences from the TCP surface
 
-The TCP surface is normative. The differences below are recorded as observed, with no fix implied.
+The TCP surface is normative. Remaining differences are listed below; shared validation errors and HTTP status mapping are described in the route tables above.
 
 In every table of this section, a citation in the *HTTP behaviour* column is `src/server/http_server.cpp` unless the cell names another file.
 
@@ -742,7 +735,6 @@ Which operations are administrative does not differ between the surfaces: a rout
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
 | 5 | Table-name character set | No whitelist; the token is whatever the tokenizer produced (`src/query/query_parser_commands.cpp`) | `QueryParser::IsSafeTableName`: ≤ `kMaxTableNameLength` (256) bytes, ASCII limited to `[A-Za-z0-9_.-]` plus well-formed non-ASCII UTF-8; anything else is 400 `kQueryInvalidToken` (3001). The check is `QueryParser::IsSafeTableName` (`src/query/query_parser.cpp`) and the rejection is emitted by `ResolveHttpTableContext` |
-| 6 | Bare name under a multi-database configuration | `kTableNotFound` (4007) with message `Bare table names are not supported; use <database>.<table>: …` (`src/server/handlers/command_handler.cpp`) | Same message and the same `QueryParser::IsDatabaseQualifiedTableName` test, but `kQuerySyntaxError` (3000) and HTTP 400 (`ResolveHttpTableContext`) |
 | 7 | Partially initialised table context | Reported as `Index not available` / `Document store not available`, `kInternalError` (`src/server/handlers/search_handler.cpp`) | Reported earlier during resolution as `Table context has null index or doc_store`, `kInternalError` / 500 |
 
 ### Accepted parameters
@@ -751,7 +743,7 @@ Which operations are administrative does not differ between the surfaces: a rout
 |---|---|---|---|
 | 8 | Repeated conditions on one filter column | `FILTER` clauses are a list; the same column may appear more than once (`src/query/query_parser_clauses.cpp`) | `filters` is a JSON object, so at most one condition per column survives |
 | 9 | Filter value starting with an operator character | Rejected: `FILTER value must not start with an operator character`, `kQueryInvalidFilter` (`src/query/query_parser_clauses.cpp`) | No such check; the value is accepted |
-| 10 | Non-string filter values | Values arrive as text tokens only (`src/query/query_parser_clauses.cpp`) | JSON integers, floats and booleans are coerced: `true`→`"1"`, `false`→`"0"`, floats via `std::to_string(double)` (fixed six decimals) |
+| 10 | Non-string filter values | Values arrive as text tokens only (`src/query/query_parser_clauses.cpp`) | JSON integers, floats and booleans are coerced: `true`→`"1"`, `false`→`"0"`, floats via `nlohmann::json::dump()` (shortest round-trip representation) |
 | 12 | Boolean-expression validation | `q` goes through `ParseSearchTextTokens`, which rejects unmatched/unclosed parentheses, the deprecated `ORDER` keyword, comma-separated table lists, and splits flat `AND`/`NOT` clauses (`src/query/query_parser_commands.cpp`) | `mode:"boolean"` assigns `q` straight to `search_text`/`search_expression`; none of those checks or the clause split run |
 | 13 | FACET search text | Runs through the parser's shared search-text extraction (`src/query/query_parser_commands.cpp`) | Assembled field by field; `QueryParser::Parse` is never invoked on the facet path |
 | 14 | COUNT clause rejection | Rejects `SORT`, `ORDER`, and any clause other than `AND`/`NOT`/`FILTER`, including `LIMIT`/`OFFSET`, all as `kQuerySyntaxError` (`src/query/query_parser_commands.cpp`) | Rejects exactly the fields `limit`, `offset`, `sort`, `highlight`, `fuzzy` as `kQuerySyntaxError`; other unknown JSON fields are silently ignored |
@@ -761,9 +753,6 @@ Which operations are administrative does not differ between the surfaces: a rout
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 16 | LIMIT above 1000 | `kQuerySyntaxError` (3000), message `LIMIT exceeds maximum of 1000` (`src/query/query_parser_commands.cpp`) | `kQueryInvalidLimit` (3008), message `Invalid limit: must be between 1 and 1000` |
-| 17 | More than 64 filter conditions | `kQuerySyntaxError` (3000) (`src/query/query_parser_commands.cpp`) | `kQueryInvalidFilter` (3006) |
-| 18 | Invalid facet column | `kQuerySyntaxError` (3000) (`src/query/query_parser_commands.cpp`) | `kQueryInvalidToken` (3001) |
 | 19 | Highlight tag over 256 bytes | `kQuerySyntaxError`, message names `HIGHLIGHT TAG open/close tag` (`src/query/query_parser_clauses.cpp`) | `kQuerySyntaxError`, message names `Field 'highlight.open_tag'`. At the default `api.max_query_length` of 128 characters a 256-byte tag makes the assembled TCP command 268 characters, so that surface answers `kQueryTooLong` (`src/query/query_parser.cpp`) before the tag cap is reached; only the rejection can be compared |
 | 21 | Control characters in search text | No explicit `\r`/`\n`/`\0` rejection in the parser; framing removes the line terminator | `q` containing `\r`, `\n` or `\0` is 400 `kQueryInvalidToken` |
 

@@ -268,9 +268,11 @@ Expected<void, Error> IoReactor::Register(std::shared_ptr<ReactorConnection> con
   // the mux_->Add we just performed so the kernel poll set stays clean.
   {
     std::unique_lock<std::shared_mutex> conn_lock(connections_mutex_);
-    auto [it, inserted] = connections_.emplace(
-        fd, ConnectionEntry{
-                .connection = conn, .interest = reactor::event::kReadable, .registration_token = registration_token});
+    ConnectionEntry connection_entry{};
+    connection_entry.connection = conn;
+    connection_entry.interest = reactor::event::kReadable;
+    connection_entry.registration_token = registration_token;
+    auto [it, inserted] = connections_.emplace(fd, std::move(connection_entry));
     if (!inserted) {
       // Lost the race against a concurrent Register with the same fd. Pull
       // our entry back out of the multiplexer to avoid leaking interest.

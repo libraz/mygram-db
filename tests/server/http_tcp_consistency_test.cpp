@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -28,6 +29,7 @@
 #include "client/mygramclient.h"
 #include "client/mygramclient_c.h"
 #include "config/config.h"
+#include "mysql/binlog_reader_interface.h"
 #include "server/http_server.h"
 #include "server/response_formatter.h"
 #include "server/tcp_server.h"
@@ -40,6 +42,22 @@ namespace mygramdb {
 namespace server {
 
 namespace {
+
+#ifdef USE_MYSQL
+class StubInfoBinlogReader final : public mysql::IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override { return {}; }
+  void Stop() override {}
+  bool IsRunning() const override { return true; }
+  std::string GetCurrentGTID() const override { return current_gtid; }
+  void SetCurrentGTID(const std::string& gtid) override { current_gtid = gtid; }
+  std::string GetLastError() const override { return {}; }
+  uint64_t GetProcessedEvents() const override { return 4321; }
+  size_t GetQueueSize() const override { return 0; }
+
+  std::string current_gtid = "uuid:1-42";
+};
+#endif
 
 // Send a single TCP request and read the full response (until "OK ..." or
 // "ERROR ..." line is received). Frames that carry a body after the header
@@ -395,7 +413,11 @@ class HttpTcpConsistencyTest : public ::testing::Test {
     tcp_cfg.port = 0;
     tcp_cfg.allow_cidrs = {"127.0.0.1/32"};
     tcp_cfg.admin_token = config_->api.admin_token;
+#ifdef USE_MYSQL
+    tcp_server_ = std::make_unique<TcpServer>(tcp_cfg, table_contexts_, "./dumps", config_.get(), &binlog_reader_);
+#else
     tcp_server_ = std::make_unique<TcpServer>(tcp_cfg, table_contexts_, "./dumps", config_.get());
+#endif
     ASSERT_TRUE(tcp_server_->Start());
     tcp_port_ = tcp_server_->GetPort();
 
@@ -429,11 +451,39 @@ class HttpTcpConsistencyTest : public ::testing::Test {
   TableContext table_ctx_;
   std::unordered_map<std::string, TableContext*> table_contexts_;
   std::unique_ptr<config::Config> config_;
+#ifdef USE_MYSQL
+  StubInfoBinlogReader binlog_reader_;
+#endif
   std::unique_ptr<TcpServer> tcp_server_;
   std::unique_ptr<HttpServer> http_server_;
   uint16_t tcp_port_ = 0;
   uint16_t http_port_ = 0;
 };
+
+#ifdef USE_MYSQL
+TEST_F(HttpTcpConsistencyTest, TcpInfoReplicationFieldsRequireAuthenticationOnTheLiveConnection) {
+  client::ClientConfig client_config;
+  client_config.host = "127.0.0.1";
+  client_config.port = tcp_port_;
+  client::MygramClient client(client_config);
+  ASSERT_TRUE(client.Connect());
+
+  const auto unauthenticated = client.SendCommand("INFO");
+  ASSERT_TRUE(unauthenticated);
+  EXPECT_NE(unauthenticated->find("OK INFO"), std::string::npos) << *unauthenticated;
+  EXPECT_EQ(unauthenticated->find("replication_"), std::string::npos) << *unauthenticated;
+
+  const auto authenticated = client.SendCommand("AUTH maintenance-secret");
+  ASSERT_TRUE(authenticated);
+  EXPECT_EQ(*authenticated, "OK AUTHENTICATED");
+
+  const auto info = client.SendCommand("INFO");
+  ASSERT_TRUE(info);
+  EXPECT_NE(info->find("replication_gtid: uuid:1-42"), std::string::npos) << *info;
+  EXPECT_NE(info->find("replication_events: 4321"), std::string::npos) << *info;
+  EXPECT_NE(info->find("replication_inserts_applied:"), std::string::npos) << *info;
+}
+#endif
 
 TEST_F(HttpTcpConsistencyTest, HttpOptimizeUsesSharedMaintenanceHandler) {
   httplib::Client client("127.0.0.1", http_port_);
@@ -1531,24 +1581,23 @@ TEST_F(HttpTcpConsistencyTest, UnknownInputIsRejectedOnTcpAndIgnoredOnHttp) {
   EXPECT_EQ(rejected->status, 400) << rejected->body;
 }
 
-// Rows 16, 17 and 18: three validation limits both surfaces enforce, each
-// reported under a different error code.
-TEST_F(HttpTcpConsistencyTest, SharedValidationLimitsAreReportedUnderDifferentCodes) {
+// Validation limits must retain the TCP parser's code on both surfaces.
+TEST_F(HttpTcpConsistencyTest, SharedValidationLimitsUseTheTcpErrorCodes) {
   httplib::Client client("127.0.0.1", http_port_);
 
-  // Row 16: LIMIT above the shared ceiling of 1000.
+  // LIMIT above the shared ceiling of 1000.
   const auto tcp_limit = SendTcpRequest(tcp_port_, "SEARCH app.articles machine LIMIT 1001");
   EXPECT_EQ(ParseTcpErrorCode(tcp_limit), static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError)) << tcp_limit;
   auto http_limit = client.Post("/tables/app.articles/search", R"({"q":"machine","limit":1001})", "application/json");
   ASSERT_TRUE(http_limit);
-  EXPECT_EQ(json::parse(http_limit->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidLimit))
+  EXPECT_EQ(json::parse(http_limit->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError))
       << http_limit->body;
 
-  // Row 17: more than the shared cap of 64 filter conditions.
+  // More than the shared cap of 64 filter conditions.
   std::string tcp_filters = "SEARCH app.articles machine";
   json many_filters;
   many_filters["q"] = "machine";
-  for (int i = 0; i <= query::QueryParser::kMaxTermCount; ++i) {
+  for (std::size_t i = 0; i <= query::QueryParser::kMaxTermCount; ++i) {
     const std::string column = "col" + std::to_string(i);
     tcp_filters += " FILTER " + column + " = value";
     many_filters["filters"][column] = "value";
@@ -1559,15 +1608,15 @@ TEST_F(HttpTcpConsistencyTest, SharedValidationLimitsAreReportedUnderDifferentCo
   auto http_filter_cap = client.Post("/tables/app.articles/search", many_filters.dump(), "application/json");
   ASSERT_TRUE(http_filter_cap);
   EXPECT_EQ(json::parse(http_filter_cap->body)["error_code"],
-            static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidFilter))
+            static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError))
       << http_filter_cap->body;
 
-  // Row 18: a facet column outside the shared column-name grammar.
+  // A facet column outside the shared column-name grammar.
   const auto tcp_facet = SendTcpRequest(tcp_port_, R"(FACET app.articles "bad col")");
   EXPECT_EQ(ParseTcpErrorCode(tcp_facet), static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError)) << tcp_facet;
   auto http_facet = client.Post("/tables/app.articles/facet", R"({"column":"bad col"})", "application/json");
   ASSERT_TRUE(http_facet);
-  EXPECT_EQ(json::parse(http_facet->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidToken))
+  EXPECT_EQ(json::parse(http_facet->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError))
       << http_facet->body;
 }
 
@@ -1677,6 +1726,94 @@ TEST_F(HttpTcpConsistencyTest, FloatingPointFilterValuesAreRenderedDifferently) 
 
   // Both surfaces still name the same document.
   EXPECT_EQ(body["primary_key"].get<std::string>(), "doc_float");
+}
+
+TEST_F(HttpTcpConsistencyTest, FloatingPointFilterOperatorsMatchTcpWithRoundTripValues) {
+  const std::array<std::pair<const char*, double>, 9> values = {{{"doc_float_negative", -1.0},
+                                                                 {"doc_float_zero", 0.0},
+                                                                 {"doc_float_tiny", 5e-8},
+                                                                 {"doc_float_boundary", 1e-7},
+                                                                 {"doc_float_above_tiny", 2e-7},
+                                                                 {"doc_float_low", 3.14159264},
+                                                                 {"doc_float_precise", 3.14159265},
+                                                                 {"doc_float_high", 3.14159266},
+                                                                 {"doc_float_huge", 1e300}}};
+  for (const auto& [primary_key, rating] : values) {
+    storage::FilterMap filters;
+    filters["rating"] = rating;
+    auto doc_id = table_ctx_.doc_store->AddDocument(primary_key, std::move(filters), "machine number");
+    ASSERT_TRUE(doc_id.has_value());
+    table_ctx_.index->AddDocument(*doc_id, table_ctx_.index->NormalizeText("machine number"));
+  }
+
+  httplib::Client client("127.0.0.1", http_port_);
+  struct OperatorCase {
+    const char* tcp_operator;
+    const char* json_operator;
+    std::vector<std::string> expected;
+  };
+  const std::vector<std::string> below = {"doc_float_above_tiny", "doc_float_boundary", "doc_float_low",
+                                          "doc_float_negative",   "doc_float_tiny",     "doc_float_zero"};
+  const std::vector<std::string> above = {"doc_float_high", "doc_float_huge"};
+  const std::vector<std::string> at_or_above = {"doc_float_high", "doc_float_huge", "doc_float_precise"};
+  // NE includes documents without a rating filter (NULL != anything).
+  std::vector<std::string> not_equal = {"doc_1", "doc_2"};
+  not_equal.insert(not_equal.end(), below.begin(), below.end());
+  not_equal.insert(not_equal.end(), above.begin(), above.end());
+  std::vector<std::string> at_or_below = below;
+  at_or_below.push_back("doc_float_precise");
+  std::sort(not_equal.begin(), not_equal.end());
+  std::sort(at_or_below.begin(), at_or_below.end());
+
+  const std::array<OperatorCase, 6> operators = {{{"=", "EQ", {"doc_float_precise"}},
+                                                  {"!=", "NE", not_equal},
+                                                  {">", "GT", above},
+                                                  {">=", "GTE", at_or_above},
+                                                  {"<", "LT", below},
+                                                  {"<=", "LTE", at_or_below}}};
+  for (const auto& test_case : operators) {
+    SCOPED_TRACE(test_case.tcp_operator);
+    const std::string tcp_command =
+        "SEARCH app.articles machine FILTER rating " + std::string(test_case.tcp_operator) + " 3.14159265";
+    auto tcp_keys = ParseTcpSearchPrimaryKeys(SendTcpRequest(tcp_port_, tcp_command));
+    SortPrimaryKeys(tcp_keys);
+    EXPECT_EQ(tcp_keys, test_case.expected) << tcp_command;
+
+    json body = {{"q", "machine"}, {"filters", {{"rating", {{"op", test_case.json_operator}, {"value", 3.14159265}}}}}};
+    auto http_response = client.Post("/tables/app.articles/search", body.dump(), "application/json");
+    ASSERT_TRUE(http_response);
+    ASSERT_EQ(http_response->status, 200) << http_response->body;
+    auto http_keys = HttpSearchPrimaryKeys(http_response->body);
+    SortPrimaryKeys(http_keys);
+    EXPECT_EQ(http_keys, tcp_keys) << http_response->body;
+  }
+
+  // Small magnitudes must survive serialization too: std::to_string used to
+  // turn this threshold into 0.000000, changing GT results.
+  auto tcp_tiny =
+      ParseTcpSearchPrimaryKeys(SendTcpRequest(tcp_port_, "SEARCH app.articles machine FILTER rating > 1e-7"));
+  SortPrimaryKeys(tcp_tiny);
+  EXPECT_EQ(tcp_tiny, (std::vector<std::string>{"doc_float_above_tiny", "doc_float_high", "doc_float_huge",
+                                                "doc_float_low", "doc_float_precise"}));
+  auto tiny_response =
+      client.Post("/tables/app.articles/search", R"({"q":"machine","filters":{"rating":{"op":"GT","value":1e-7}}})",
+                  "application/json");
+  ASSERT_TRUE(tiny_response);
+  ASSERT_EQ(tiny_response->status, 200) << tiny_response->body;
+  auto http_tiny = HttpSearchPrimaryKeys(tiny_response->body);
+  SortPrimaryKeys(http_tiny);
+  EXPECT_EQ(http_tiny, tcp_tiny) << tiny_response->body;
+
+  // The exponent form keeps a very large finite value within query limits.
+  auto tcp_huge =
+      ParseTcpSearchPrimaryKeys(SendTcpRequest(tcp_port_, "SEARCH app.articles machine FILTER rating = 1e300"));
+  EXPECT_EQ(tcp_huge, (std::vector<std::string>{"doc_float_huge"}));
+  auto huge_response =
+      client.Post("/tables/app.articles/search", R"({"q":"machine","filters":{"rating":{"op":"EQ","value":1e300}}})",
+                  "application/json");
+  ASSERT_TRUE(huge_response);
+  ASSERT_EQ(huge_response->status, 200) << huge_response->body;
+  EXPECT_EQ(HttpSearchPrimaryKeys(huge_response->body), tcp_huge) << huge_response->body;
 }
 
 // Row 32: a TCP SEARCH frame lists primary keys only; the HTTP response carries
@@ -1789,7 +1926,7 @@ TEST_F(HttpTcpConsistencyTest, TheSurfacesReportDifferentFaultsForADoublyInvalid
       << http_response->body;
 }
 
-// A table set spread over two databases, so the bare-name rule (row 6) can be
+// A table set spread over two databases, so the bare-name rule can be
 // reached: it only applies when a bare name cannot be resolved unambiguously.
 class HttpTcpMultiDatabaseTest : public ::testing::Test {
  protected:
@@ -1840,10 +1977,8 @@ class HttpTcpMultiDatabaseTest : public ::testing::Test {
   uint16_t http_port_ = 0;
 };
 
-// Row 6: both surfaces refuse a bare table name under a multi-database
-// configuration and both say the same thing; they file it under different
-// codes.
-TEST_F(HttpTcpMultiDatabaseTest, ABareTableNameIsRefusedUnderDifferentCodes) {
+// Both surfaces report a missing-table error for an ambiguous bare name.
+TEST_F(HttpTcpMultiDatabaseTest, ABareTableNameUsesTheSharedErrorCode) {
   const auto tcp_response = SendTcpRequest(tcp_port_, "SEARCH articles shared");
   EXPECT_EQ(ParseTcpErrorCode(tcp_response), static_cast<int>(mygram::utils::ErrorCode::kTableNotFound))
       << tcp_response;
@@ -1852,9 +1987,9 @@ TEST_F(HttpTcpMultiDatabaseTest, ABareTableNameIsRefusedUnderDifferentCodes) {
   httplib::Client client("127.0.0.1", http_port_);
   auto http_response = client.Post("/tables/articles/search", R"({"q":"shared"})", "application/json");
   ASSERT_TRUE(http_response);
-  EXPECT_EQ(http_response->status, 400) << http_response->body;
+  EXPECT_EQ(http_response->status, 404) << http_response->body;
   const auto body = json::parse(http_response->body);
-  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError)) << http_response->body;
+  EXPECT_EQ(body["error_code"], static_cast<int>(mygram::utils::ErrorCode::kTableNotFound)) << http_response->body;
   EXPECT_NE(body["error"].get<std::string>().find("Bare table names are not supported"), std::string::npos)
       << http_response->body;
 

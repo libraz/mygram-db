@@ -7,7 +7,6 @@
 #include "server/snapshot_scheduler.h"
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <ctime>
 #include <exception>
@@ -17,6 +16,7 @@
 
 #include "mysql/binlog_reader_interface.h"
 #include "server/log_field_names.h"
+#include "server/operation_coordinator.h"
 #include "server/replication_pause_counter.h"
 #include "server/replication_pause_guard.h"
 #include "server/server_stats.h"
@@ -34,49 +34,15 @@
 namespace mygramdb::server {
 
 constexpr int kShutdownCheckIntervalMs = 1000;  ///< Check for shutdown every second
-constexpr auto kOrphanTempSnapshotMaxAge = std::chrono::hours(1);
 
-bool IsDumpTempFile(const std::filesystem::path& path) {
-  // AtomicFileWriter derives its temp name from the target path alone: either
-  // "<target>.tmp.<pid>.<random>" or, without a unique suffix, "<target>.tmp".
-  // The target of a manual DUMP SAVE is whatever the operator named — the dump
-  // handler resolves it without an extension whitelist — so requiring ".dmp"
-  // here would leave those temporaries in the dump directory forever. Anything
-  // that cannot be derived from a target path this way is left untouched.
-  constexpr std::string_view kTempSuffix = ".tmp";
-  const std::string filename = path.filename().string();
-  if (filename.size() <= kTempSuffix.size()) {
-    return false;
-  }
-  if (filename.compare(filename.size() - kTempSuffix.size(), kTempSuffix.size(), kTempSuffix) == 0) {
-    return true;
-  }
-
-  const auto marker = filename.rfind(".tmp.");
-  if (marker == std::string::npos || marker == 0) {
-    return false;
-  }
-  const auto suffix_offset = marker + std::string_view(".tmp.").size();
-  const std::string_view unique_suffix(filename.data() + suffix_offset, filename.size() - suffix_offset);
-  const auto separator = unique_suffix.find('.');
-  if (separator == std::string_view::npos || separator == 0 || separator + 1 == unique_suffix.size()) {
-    return false;
-  }
-  const auto is_decimal = [](std::string_view value) {
-    return std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; });
-  };
-  return is_decimal(unique_suffix.substr(0, separator)) && is_decimal(unique_suffix.substr(separator + 1));
-}
-
-SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* catalog,
-                                     const config::Config* full_config, std::string dump_dir,
-                                     mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
-                                     std::atomic<bool>& replication_paused_for_dump,
-                                     replication_pause::Counter* replication_pause_counter,
-                                     std::atomic<bool>* dump_load_in_progress, SyncOperationManager* sync_manager,
-                                     std::function<bool()> sync_in_progress_checker,
-                                     std::atomic<bool>* optimization_in_progress, std::atomic<bool>* shutdown_requested,
-                                     DumpProgress* dump_progress, ServerStats* stats)
+SnapshotScheduler::SnapshotScheduler(
+    config::DumpConfig config, TableCatalog* catalog, const config::Config* full_config, std::string dump_dir,
+    mysql::IBinlogReader* binlog_reader, std::atomic<bool>& dump_save_in_progress,
+    std::atomic<bool>& replication_paused_for_dump, replication_pause::Counter* replication_pause_counter,
+    std::atomic<bool>* dump_load_in_progress, SyncOperationManager* sync_manager,
+    std::function<bool()> sync_in_progress_checker, std::atomic<bool>* optimization_in_progress,
+    std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress, ServerStats* stats,
+    OperationCoordinator* operation_coordinator, std::function<bool()> initial_data_ready_checker)
     : config_(std::move(config)),
       catalog_(catalog),
       full_config_(full_config),
@@ -89,10 +55,18 @@ SnapshotScheduler::SnapshotScheduler(config::DumpConfig config, TableCatalog* ca
       replication_pause_counter_(replication_pause_counter != nullptr ? replication_pause_counter
                                                                       : &local_replication_pause_counter_),
       sync_manager_(sync_manager),
+      operation_coordinator_(operation_coordinator != nullptr
+                                 ? operation_coordinator
+#ifdef USE_MYSQL
+                                 : (sync_manager_ != nullptr ? &sync_manager_->GetOperationCoordinator() : nullptr)),
+#else
+                                 : nullptr),
+#endif
       sync_in_progress_checker_(std::move(sync_in_progress_checker)),
       shutdown_requested_(shutdown_requested),
       dump_progress_(dump_progress),
-      stats_(stats) {
+      stats_(stats),
+      initial_data_ready_checker_(std::move(initial_data_ready_checker)) {
   // Precondition: catalog must be non-null. Enforced by ServerLifecycleManager::InitScheduler,
   // which is the only production caller. Tests must also provide a non-null catalog.
 }
@@ -103,10 +77,6 @@ SnapshotScheduler::~SnapshotScheduler() {
 
 mygram::utils::Expected<void, mygram::utils::Error> SnapshotScheduler::Start() {
   if (config_.interval_sec <= 0) {
-    // Orphan cleanup is a dump-directory responsibility, not an auto-snapshot
-    // retention feature. Manual DUMP SAVE uses the same atomic temp naming and
-    // must still be reclaimed when periodic snapshots are disabled.
-    CleanupOldSnapshots();
     mygram::utils::StructuredLog().Event("snapshot_scheduler_disabled").Field("reason", "interval_sec <= 0").Info();
     return {};
   }
@@ -195,8 +165,7 @@ void SnapshotScheduler::SchedulerLoop() {
 
     // Check if it's time to save
     if (now >= next_save_time) {
-      TakeSnapshot();
-      CleanupOldSnapshots();
+      RunSnapshotCycle();
 
       // Schedule next save
       next_save_time = std::chrono::steady_clock::now() + std::chrono::seconds(interval_sec);
@@ -215,25 +184,38 @@ void SnapshotScheduler::SchedulerLoop() {
   mygram::utils::StructuredLog().Event("snapshot_scheduler_thread_exiting").Info();
 }
 
-void SnapshotScheduler::TakeSnapshot() {
+void SnapshotScheduler::RunSnapshotCycle() {
+  if (TakeSnapshot()) {
+    CleanupOldSnapshots();
+  }
+}
+
+bool SnapshotScheduler::TakeSnapshot() {
   try {
     if (shutdown_requested_ != nullptr && shutdown_requested_->load(std::memory_order_acquire)) {
       mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "server shutdown").Info();
-      return;
+      return false;
     }
 
     OperationCoordinator::Token operation_token;
-    if (sync_manager_ != nullptr) {
-      auto& coordinator = sync_manager_->GetOperationCoordinator();
-      auto acquired = coordinator.TryAcquire(LongOperation::kAutoSnapshot, "scheduled");
+    if (operation_coordinator_ != nullptr) {
+      auto acquired = operation_coordinator_->TryAcquire(LongOperation::kAutoSnapshot, "scheduled");
       if (!acquired.has_value()) {
         mygram::utils::StructuredLog()
             .Event("auto_snapshot_skipped")
-            .Field("reason", coordinator.DescribeActive() + " is in progress")
+            .Field("reason", operation_coordinator_->DescribeActive() + " is in progress")
             .Info();
-        return;
+        return false;
       }
       operation_token = std::move(*acquired);
+    }
+
+    // A scheduled save cannot create a useful snapshot until every configured
+    // table has initialized. Keep this gate before guards, progress changes,
+    // replication pause, and counters so readiness skips are inert.
+    if (initial_data_ready_checker_ && !initial_data_ready_checker_()) {
+      mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "initial data is not ready").Info();
+      return false;
     }
 
     // Atomic test-and-set with scope-bound release via OperationGuard::TryAcquire.
@@ -246,22 +228,27 @@ void SnapshotScheduler::TakeSnapshot() {
           .Event("auto_snapshot_skipped")
           .Field("reason", "another DUMP operation is in progress")
           .Info();
-      return;
+      return false;
     }
     if (dump_load_in_progress_ != nullptr && dump_load_in_progress_->load(std::memory_order_acquire)) {
       mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "DUMP LOAD is in progress").Info();
-      return;
+      return false;
     }
     if (optimization_in_progress_ != nullptr && optimization_in_progress_->load(std::memory_order_acquire)) {
       mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "OPTIMIZE is in progress").Info();
-      return;
+      return false;
     }
-    const bool sync_in_progress = sync_in_progress_checker_  ? sync_in_progress_checker_()
-                                  : sync_manager_ != nullptr ? sync_manager_->IsAnySyncing()
-                                                             : false;
+    bool sync_in_progress = false;
+    if (sync_in_progress_checker_) {
+      sync_in_progress = sync_in_progress_checker_();
+#ifdef USE_MYSQL
+    } else if (sync_manager_ != nullptr) {
+      sync_in_progress = sync_manager_->IsAnySyncing();
+#endif
+    }
     if (sync_in_progress) {
       mygram::utils::StructuredLog().Event("auto_snapshot_skipped").Field("reason", "SYNC is in progress").Info();
-      return;
+      return false;
     }
 
     // Generate timestamp-based filename
@@ -309,7 +296,7 @@ void SnapshotScheduler::TakeSnapshot() {
       if (stats_ != nullptr) {
         stats_->IncrementDumpFailureAuto();
       }
-      return;
+      return false;
     }
 #endif
 
@@ -346,6 +333,9 @@ void SnapshotScheduler::TakeSnapshot() {
       if (stats_ != nullptr) {
         stats_->RecordDumpSuccess();
       }
+      // restore_replication runs here (when in scope), resuming replication
+      // before dump_save_guard releases the dump_save_in_progress flag.
+      return true;
     } else {
       mygram::utils::StructuredLog()
           .Event("snapshot_save_failed")
@@ -358,10 +348,8 @@ void SnapshotScheduler::TakeSnapshot() {
       if (stats_ != nullptr) {
         stats_->IncrementDumpFailureAuto();
       }
+      return false;
     }
-
-    // restore_replication runs here (when in scope), resuming replication
-    // before dump_save_guard releases the dump_save_in_progress flag.
   } catch (const std::exception& e) {
     mygram::utils::StructuredLog().Event("snapshot_save_exception").Field(log_fields::kFieldError, e.what()).Error();
     if (dump_progress_ != nullptr) {
@@ -370,6 +358,7 @@ void SnapshotScheduler::TakeSnapshot() {
     if (stats_ != nullptr) {
       stats_->IncrementDumpFailureAuto();
     }
+    return false;
   }
 }
 
@@ -383,19 +372,12 @@ void SnapshotScheduler::CleanupOldSnapshots() {
 
     // Collect all .dmp files with their modification times
     std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> dump_files;
-    std::vector<std::filesystem::path> old_temp_files;
-    const auto now = std::filesystem::file_time_type::clock::now();
 
     for (const auto& entry : std::filesystem::directory_iterator(dump_path)) {
       if (entry.is_regular_file() && entry.path().extension() == ".dmp") {
         // Only manage auto-saved files (starting with "auto_")
         if (entry.path().filename().string().rfind("auto_", 0) == 0) {
           dump_files.emplace_back(entry.path(), std::filesystem::last_write_time(entry));
-        }
-      } else if (entry.is_regular_file() && IsDumpTempFile(entry.path())) {
-        const auto last_write_time = std::filesystem::last_write_time(entry);
-        if (now - last_write_time >= kOrphanTempSnapshotMaxAge) {
-          old_temp_files.push_back(entry.path());
         }
       }
     }
@@ -422,22 +404,6 @@ void SnapshotScheduler::CleanupOldSnapshots() {
               .Warn();
           // Continue with remaining files
         }
-      }
-    }
-
-    for (const auto& temp_file : old_temp_files) {
-      mygram::utils::StructuredLog()
-          .Event("snapshot_removing_orphan_temp")
-          .Field(log_fields::kFieldFilepath, temp_file.string())
-          .Info();
-      std::error_code ec;
-      std::filesystem::remove(temp_file, ec);
-      if (ec) {
-        mygram::utils::StructuredLog()
-            .Event("snapshot_cleanup_error")
-            .Field(log_fields::kFieldFilepath, temp_file.string())
-            .Field(log_fields::kFieldError, ec.message())
-            .Warn();
       }
     }
 

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "client/mygramclient.h"
+#include "client/protocol_detection.h"
 #include "client/wire_quoting.h"
 #include "config/config.h"
 #include "server/protocol_constants.h"
@@ -82,19 +83,6 @@ bool StartsWith(std::string_view str, std::string_view prefix) {
   return str.size() >= prefix.size() && str.compare(0, prefix.size(), prefix) == 0;
 }
 
-int HexValue(char ch) {
-  if (ch >= '0' && ch <= '9') {
-    return ch - '0';
-  }
-  if (ch >= 'a' && ch <= 'f') {
-    return ch - 'a' + 10;
-  }
-  if (ch >= 'A' && ch <= 'F') {
-    return ch - 'A' + 10;
-  }
-  return -1;
-}
-
 /**
  * @brief Replace all CRLF (\r\n) sequences with LF (\n).
  *
@@ -137,6 +125,12 @@ std::string StripTrailingEndMarker(std::string str) {
   return str;
 }
 
+/**
+ * @brief Decode the quoted `key="..."` values of a DOC body for display
+ *
+ * Uses ParseWireToken, the decoder the client library applies to the same
+ * values (spec/tcp-commands.md §11.1). A malformed value is shown as received.
+ */
 std::string DecodeGetDocBodyForDisplay(std::string_view body) {
   std::string result;
   result.reserve(body.size());
@@ -147,87 +141,16 @@ std::string DecodeGetDocBodyForDisplay(std::string_view body) {
       continue;
     }
 
-    ++i;  // Skip opening quote.
-    while (++i < body.size()) {
-      if (body[i] == '\\' && i + 1 < body.size()) {
-        char escaped = body[++i];
-        switch (escaped) {
-          case 'n':
-            result += '\n';
-            break;
-          case 'r':
-            result += '\r';
-            break;
-          case 't':
-            result += '\t';
-            break;
-          case '\\':
-          case '"':
-            result += escaped;
-            break;
-          case 'x':
-            if (i + 2 < body.size()) {
-              const int high = HexValue(body[i + 1]);
-              const int low = HexValue(body[i + 2]);
-              if (high >= 0 && low >= 0) {
-                result += static_cast<char>((high << 4) | low);
-                i += 2;
-                break;
-              }
-            }
-            result += escaped;
-            break;
-          default:
-            result += escaped;
-            break;
-        }
-        continue;
-      }
-      if (body[i] == '"') {
-        break;
-      }
-      result += body[i];
-    }
-  }
-
-  return result;
-}
-
-/**
- * @brief Quote an argument for the wire protocol if it contains whitespace
- *        or special characters that would otherwise be split into multiple
- *        tokens. Backslash and double-quote are escaped within the quotes.
- */
-[[maybe_unused]] std::string QuoteArgIfNeeded(const std::string& arg) {
-  bool needs_quotes = arg.empty();
-  for (char character : arg) {
-    if (character == ' ' || character == '\t' || character == '"' || character == '\\' || character == '\'') {
-      needs_quotes = true;
+    size_t pos = i + 1;
+    std::string value;
+    if (!lib::detail::ParseWireToken(body, pos, value)) {
+      result.append(body.substr(i + 1));
       break;
     }
-    // Refuse control characters silently (caller already validates input)
-    if (static_cast<unsigned char>(character) < kAsciiPrintableMin) {
-      needs_quotes = true;
-      break;
-    }
+    result += value;
+    i = pos - 1;
   }
-  if (!needs_quotes) {
-    return arg;
-  }
-  std::string result;
-  result.reserve(arg.size() + 2);
-  result += '"';
-  for (char character : arg) {
-    if (static_cast<unsigned char>(character) < kAsciiPrintableMin) {
-      // Drop control chars to prevent protocol injection
-      continue;
-    }
-    if (character == '"' || character == '\\') {
-      result += '\\';
-    }
-    result += character;
-  }
-  result += '"';
+
   return result;
 }
 
@@ -240,10 +163,13 @@ std::string JoinArgsForCommand(const std::vector<std::string>& args) {
     // argv already preserves the caller's argument boundaries. Re-quoting an
     // argument containing spaces changes boolean groups such as
     // "(golang OR python)" into a literal phrase. Preserve the text exactly,
-    // while dropping frame-breaking control bytes.
+    // except that a tab separates words like a space and other control bytes,
+    // which would break the frame, are dropped.
     for (char character : args[i]) {
       const auto byte = static_cast<unsigned char>(character);
-      if (byte >= kAsciiPrintableMin || byte >= 0x80U) {
+      if (character == '\t') {
+        result += ' ';
+      } else if (byte >= kAsciiPrintableMin || byte >= 0x80U) {
         result += character;
       }
     }
@@ -252,31 +178,19 @@ std::string JoinArgsForCommand(const std::vector<std::string>& args) {
 }
 
 std::optional<std::string> ParseDumpSaveFilepath(std::string_view command) {
-  const std::string trimmed = TrimAsciiWhitespace(command);
-  constexpr std::string_view kDumpSave = "DUMP SAVE";
-  const std::string upper = ToUpper(trimmed);
-  if (upper == kDumpSave) {
-    return std::string{};
-  }
-  if (upper.size() <= kDumpSave.size() || upper.compare(0, kDumpSave.size(), kDumpSave) != 0 ||
-      std::isspace(static_cast<unsigned char>(upper[kDumpSave.size()])) == 0) {
+  // Match the keywords the way the server dispatches them (case-insensitive, any whitespace between).
+  const auto tokens = lib::detail::TokenizeRequest(command);
+  if (tokens.size() < 2 || tokens[1].quoted || !lib::detail::EqualsIgnoreAsciiCase(tokens[0].text, "DUMP") ||
+      !lib::detail::EqualsIgnoreAsciiCase(tokens[1].text, "SAVE")) {
     return std::nullopt;
   }
+  const size_t after_save = static_cast<size_t>(tokens[1].text.data() - command.data()) + tokens[1].text.size();
 
-  std::string filepath = TrimAsciiWhitespace(std::string_view(trimmed).substr(kDumpSave.size()));
+  std::string filepath = TrimAsciiWhitespace(command.substr(after_save));
   if (filepath.size() >= 2 && (filepath.front() == '"' || filepath.front() == '\'') &&
       filepath.back() == filepath.front()) {
-    const char quote = filepath.front();
-    std::string decoded;
-    decoded.reserve(filepath.size() - 2);
-    for (size_t index = 1; index + 1 < filepath.size(); ++index) {
-      if (filepath[index] == '\\' && index + 2 < filepath.size() &&
-          (filepath[index + 1] == quote || filepath[index + 1] == '\\')) {
-        ++index;
-      }
-      decoded += filepath[index];
-    }
-    filepath = std::move(decoded);
+    // Decode with the server tokenizer's escape set, since Save() re-quotes the path.
+    filepath = lib::detail::DecodeRequestToken({std::string_view(filepath).substr(1, filepath.size() - 2), true});
   }
   return filepath;
 }
@@ -811,6 +725,11 @@ class MygramClient {
       }
     }
     PrintResponse(response);
+    // An exhausted retry budget still leaves a not-ready reply, which is a failure under --wait-ready.
+    if (config_.wait_ready && IsWaitReadyRetryableResponse(response, error_code)) {
+      std::cerr << "Server did not become ready after " << max_attempts << " attempts\n";
+      return kExitFailure;
+    }
     return ExitCodeForSingleCommandResponse(response);
   }
 
@@ -1054,7 +973,9 @@ class MygramClient {
  public:
   /** Print the interactive command reference. */
   static void PrintHelp() {
-    std::cout << "Available commands:\n"
+    std::cout << "Commands are sent to the server verbatim; quote search text yourself where needed.\n"
+              << '\n'
+              << "Available commands:\n"
               << "  SEARCH <db.table> <text> [(AND|OR|NOT) <term>...] [FILTER <col=val>...]\n"
               << "         [SORT [BY] <col>|ASC|DESC] [LIMIT <n>] [OFFSET <n>]\n"
               << "         [HIGHLIGHT [TAG <open> <close>] [SNIPPET_LEN <n>] [MAX_FRAGMENTS <n>]]\n"
@@ -1201,6 +1122,8 @@ class MygramClient {
 
 void PrintUsage(const char* program_name) {
   std::cout << "Usage: " << program_name << " [OPTIONS] [COMMAND]\n"
+            << '\n'
+            << "COMMAND is sent to the server verbatim; quote search text yourself where needed.\n"
             << '\n'
             << "Options:\n"
             << "  -h HOST         Server hostname (default: 127.0.0.1)\n"

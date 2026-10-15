@@ -33,6 +33,13 @@ application moves between surfaces.
 | HTTP | `"mode": "literal"` (default) | `"mode": "boolean"` | JSON fields |
 | C++ | `Search` | `SearchRaw` | `SearchOptions` |
 | C | `mygramclient_search` | `mygramclient_search_raw` | `MygramSearchOptions_C` |
+| `mygram-cli` | caller quotes the protocol token | protocol Boolean expression | protocol clauses |
+
+`mygram-cli` sends each command line, and the space-joined arguments of a
+single command, to the server as typed; it quotes nothing on your behalf. In
+arguments a tab becomes a space and other control bytes are dropped. A
+`DUMP SAVE` path goes through the typed save call: an unquoted path is the
+rest of the line, and a quoted one is decoded with the server's escape set.
 
 For the C options API, zero-initialize `MygramSearchOptions_C`, set
 `struct_size`, and use `limit == 0` for the server default. The zero default
@@ -89,6 +96,14 @@ while another thread is using the handle. Its error state is synchronized, and
 `mygramclient_get_last_error()` returns a thread-local snapshot valid until the
 same thread calls that getter again. Every writable out-parameter is initialized
 to `NULL` (or zero for numeric outputs) before an operation that can fail.
+
+`SendCommand` and `mygramclient_send_command` read exactly one reply, framed
+by the command that was sent, so a reply is never cut short. The one byte
+sequence left on the socket is the trailing CRLF after an `OK FACET` reply whose
+header omits the distinct-value total; the next read skips it as a leading
+blank line. A `DEBUG ON` or `DEBUG OFF` sent through them is tracked the same
+way as `EnableDebug` / `DisableDebug`. Keywords that select the DUMP LOAD,
+DUMP VERIFY and OPTIMIZE deadlines are matched case-insensitively.
 
 Future V2 fields may be appended. A caller must initialize the structure to zero and set `struct_size` to the size it knows. The library ignores fields beyond that size and rejects unknown version values or a structure shorter than the original V2 prefix.
 

@@ -114,7 +114,7 @@ class ResponseFormatter {
                                         const std::unordered_map<std::string, TableContext*>& table_contexts,
                                         mysql::IBinlogReader* binlog_reader = nullptr,
                                         cache::CacheManager* cache_manager = nullptr, bool data_initialized = true,
-                                        bool ready = true);
+                                        bool ready = true, bool include_replication = true);
 
   /**
    * @brief Format SAVE response
@@ -162,7 +162,7 @@ class ResponseFormatter {
                                              const std::unordered_map<std::string, TableContext*>& table_contexts,
                                              mysql::IBinlogReader* binlog_reader = nullptr,
                                              cache::CacheManager* cache_manager = nullptr,
-                                             const ThreadPool* thread_pool = nullptr);
+                                             const ThreadPool* thread_pool = nullptr, bool include_replication = true);
 
   /**
    * @brief Format error response

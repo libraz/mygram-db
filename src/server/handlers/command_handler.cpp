@@ -68,14 +68,14 @@ mygram::utils::Expected<CommandHandler::TableContextResult, mygram::utils::Error
 
   std::shared_lock<std::shared_mutex> generation_lock(*table_ctx->generation_mutex);
 
-  return TableContextResult{
-      .table_context = table_ctx,
-      .index = table_ctx->index.get(),
-      .doc_store = table_ctx->doc_store.get(),
-      .ngram_size = table_ctx->config.ngram_size,
-      .kanji_ngram_size = table_ctx->config.kanji_ngram_size,
-      .generation_lock = std::move(generation_lock),
-  };
+  TableContextResult result{};
+  result.table_context = table_ctx;
+  result.index = table_ctx->index.get();
+  result.doc_store = table_ctx->doc_store.get();
+  result.ngram_size = table_ctx->config.ngram_size;
+  result.kanji_ngram_size = table_ctx->config.kanji_ngram_size;
+  result.generation_lock = std::move(generation_lock);
+  return result;
 }
 
 std::string CommandHandler::CheckNotLoading() const {

@@ -75,18 +75,6 @@ std::string DumpHandler::Handle(const query::Query& query, ConnectionContext& co
 
 std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 #ifdef USE_MYSQL
-  // Check if GTID is set (required for consistent dump)
-  std::string current_gtid;
-  if (ctx_.binlog_reader != nullptr) {
-    current_gtid = ctx_.binlog_reader->GetCurrentGTID();
-    if (current_gtid.empty()) {
-      return ResponseFormatter::FormatError(
-          "Cannot save dump without GTID position. "
-          "Please run SYNC command first to establish initial position.",
-          mygram::utils::ErrorCode::kServerNotReady);
-    }
-  }
-
   // Block if any table is currently syncing
   if (ctx_.sync_manager != nullptr) {
     auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kSaveDump);
@@ -177,17 +165,26 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
         mygram::utils::ErrorCode::kServerBusy);
   }
 
-  // Capture the current GTID once for both async/sync log paths so the
-  // dump_save_started event records the position the operator would expect
-  // the dump to anchor against. We keep the field optional: empty/null reader
-  // means we omit it rather than emit an empty string.
+  // Read the GTID only after operation admission and the competing-flag
+  // checks. A request rejected during shutdown must not touch the reader, and
+  // this one value is shared by the start log and worker admission result.
   std::string started_gtid;
 #ifdef USE_MYSQL
   if (ctx_.binlog_reader != nullptr) {
     started_gtid = ctx_.binlog_reader->GetCurrentGTID();
+    if (started_gtid.empty()) {
+      return ResponseFormatter::FormatError(
+          "Cannot save dump without GTID position. "
+          "Please run SYNC command first to establish initial position.",
+          mygram::utils::ErrorCode::kServerNotReady);
+    }
   }
 #endif
 
+  // Capture the current GTID once for both async/sync log paths so the
+  // dump_save_started event records the position the operator would expect
+  // the dump to anchor against. We keep the field optional: empty/null reader
+  // means we omit it rather than emit an empty string.
   auto log_dump_save_started = [&](const char* mode) {
     auto log = mygram::utils::StructuredLog()
                    .Event("dump_save_started")
@@ -232,7 +229,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     // Return immediately with started message (async mode)
     // Do NOT embed \r\n in the response -- the TCP protocol uses \r\n as the
     // frame terminator, so the client would truncate at the first \r\n.
-    return ResponseFormatter::FormatStatus("DUMP_STARTED " + filepath);
+    return ResponseFormatter::FormatStatus("DUMP_STARTED " + ResponseFormatter::SanitizeDelimitedField(filepath));
   }
 
   // Fallback: run synchronously if no progress tracking available (e.g., in tests)
@@ -245,7 +242,7 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
 
   // Check result and return appropriate response (sync mode)
   if (success) {
-    return ResponseFormatter::FormatStatus("SAVED " + filepath);
+    return ResponseFormatter::FormatStatus("SAVED " + ResponseFormatter::SanitizeDelimitedField(filepath));
   }
   return ResponseFormatter::FormatError("Dump save failed", mygram::utils::ErrorCode::kStorageDumpWriteError);
 }
@@ -688,7 +685,7 @@ std::string DumpHandler::HandleDumpLoad(const query::Query& query) {
       ctx_.dump_progress->Complete(filepath);
     }
     loading_guard.Release();
-    return ResponseFormatter::FormatLoadResponse(filepath);
+    return ResponseFormatter::FormatLoadResponse(ResponseFormatter::SanitizeDelimitedField(filepath));
   }
 
   // Failure path: loading_guard and restore_replication will run via their

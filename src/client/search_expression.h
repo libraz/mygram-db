@@ -39,6 +39,8 @@ struct SearchExpression {
   std::vector<std::string> excluded_terms;  // Terms with - prefix (NOT)
   std::vector<std::string> optional_terms;  // Unused; kept for source compatibility
   std::string raw_expression;               // Formatted AST-syntax text for a bare OR/grouped sub-expression
+  std::vector<bool> required_is_group;      // Parallel to required_terms: entry is a formatted (...) group
+  std::vector<bool> excluded_is_group;      // Parallel to excluded_terms: entry is a formatted (...) group
 
   /**
    * @brief Check if expression has OR operators or grouping
@@ -90,6 +92,7 @@ struct SimplifiedExpression {
  * auto expr = ParseSearchExpression("+golang +(tutorial OR guide) -old");
  * if (expr) {
  *   // expr->required_terms = ["golang", "(tutorial OR guide)"]
+ *   // expr->required_is_group = [false, true]
  *   // expr->excluded_terms = ["old"]
  *   // raw_expression stays empty: a parenthesized group after +/- is kept
  *   // as one required_terms entry, not folded into raw_expression

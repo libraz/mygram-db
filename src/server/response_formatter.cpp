@@ -475,8 +475,11 @@ std::string ResponseFormatter::FormatGetResponse(const std::optional<storage::Do
 std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metrics, const ServerStats& stats,
                                                   const std::unordered_map<std::string, TableContext*>& table_contexts,
                                                   mysql::IBinlogReader* binlog_reader,
-                                                  cache::CacheManager* cache_manager, bool data_initialized,
-                                                  bool ready) {
+                                                  cache::CacheManager* cache_manager, bool data_initialized, bool ready,
+                                                  bool include_replication) {
+#ifndef USE_MYSQL
+  (void)include_replication;
+#endif
   std::ostringstream oss;
   oss << protocol::kOkInfoPrefix << "\r\n\r\n";
 
@@ -620,28 +623,30 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
 
   // Replication information
 #ifdef USE_MYSQL
-  oss << "# Replication\r\n";
-  if (binlog_reader != nullptr) {
-    oss << "replication_status: " << (binlog_reader->IsRunning() ? "running" : "stopped") << "\r\n";
-    oss << "replication_gtid: " << binlog_reader->GetCurrentGTID() << "\r\n";
-    oss << "replication_events: " << binlog_reader->GetProcessedEvents() << "\r\n";
-  } else {
-    oss << "replication_status: disabled\r\n";
-  }
+  if (include_replication) {
+    oss << "# Replication\r\n";
+    if (binlog_reader != nullptr) {
+      oss << "replication_status: " << (binlog_reader->IsRunning() ? "running" : "stopped") << "\r\n";
+      oss << "replication_gtid: " << binlog_reader->GetCurrentGTID() << "\r\n";
+      oss << "replication_events: " << binlog_reader->GetProcessedEvents() << "\r\n";
+    } else {
+      oss << "replication_status: disabled\r\n";
+    }
 
-  // Event statistics
-  oss << "replication_inserts_applied: " << stats.GetReplInsertsApplied() << "\r\n";
-  oss << "replication_inserts_skipped: " << stats.GetReplInsertsSkipped() << "\r\n";
-  oss << "replication_updates_applied: " << stats.GetReplUpdatesApplied() << "\r\n";
-  oss << "replication_updates_added: " << stats.GetReplUpdatesAdded() << "\r\n";
-  oss << "replication_updates_removed: " << stats.GetReplUpdatesRemoved() << "\r\n";
-  oss << "replication_updates_modified: " << stats.GetReplUpdatesModified() << "\r\n";
-  oss << "replication_updates_skipped: " << stats.GetReplUpdatesSkipped() << "\r\n";
-  oss << "replication_deletes_applied: " << stats.GetReplDeletesApplied() << "\r\n";
-  oss << "replication_deletes_skipped: " << stats.GetReplDeletesSkipped() << "\r\n";
-  oss << "replication_ddl_executed: " << stats.GetReplDdlExecuted() << "\r\n";
-  oss << "replication_events_skipped_other_tables: " << stats.GetReplEventsSkippedOtherTables() << "\r\n";
-  oss << "\r\n";
+    // Event statistics
+    oss << "replication_inserts_applied: " << stats.GetReplInsertsApplied() << "\r\n";
+    oss << "replication_inserts_skipped: " << stats.GetReplInsertsSkipped() << "\r\n";
+    oss << "replication_updates_applied: " << stats.GetReplUpdatesApplied() << "\r\n";
+    oss << "replication_updates_added: " << stats.GetReplUpdatesAdded() << "\r\n";
+    oss << "replication_updates_removed: " << stats.GetReplUpdatesRemoved() << "\r\n";
+    oss << "replication_updates_modified: " << stats.GetReplUpdatesModified() << "\r\n";
+    oss << "replication_updates_skipped: " << stats.GetReplUpdatesSkipped() << "\r\n";
+    oss << "replication_deletes_applied: " << stats.GetReplDeletesApplied() << "\r\n";
+    oss << "replication_deletes_skipped: " << stats.GetReplDeletesSkipped() << "\r\n";
+    oss << "replication_ddl_executed: " << stats.GetReplDdlExecuted() << "\r\n";
+    oss << "replication_events_skipped_other_tables: " << stats.GetReplEventsSkippedOtherTables() << "\r\n";
+    oss << "\r\n";
+  }
 #endif
 
   // Cache statistics
@@ -700,14 +705,14 @@ std::string ResponseFormatter::FormatInfoResponse(const AggregatedMetrics& metri
 std::string ResponseFormatter::FormatSaveResponse(const std::string& filepath) {
   std::string response;
   response.append(protocol::kOkSavedPrefix);
-  response += filepath;
+  response += SanitizeDelimitedField(filepath);
   return response;
 }
 
 std::string ResponseFormatter::FormatLoadResponse(const std::string& filepath) {
   std::string response;
   response.append(protocol::kOkLoadedPrefix);
-  response += filepath;
+  response += SanitizeDelimitedField(filepath);
   return response;
 }
 
@@ -750,7 +755,7 @@ std::string ResponseFormatter::FormatReplicationStartResponse() {
 std::string ResponseFormatter::FormatPrometheusMetrics(
     const AggregatedMetrics& metrics, const ServerStats& stats,
     const std::unordered_map<std::string, TableContext*>& table_contexts, mysql::IBinlogReader* binlog_reader,
-    cache::CacheManager* cache_manager, const ThreadPool* thread_pool) {
+    cache::CacheManager* cache_manager, const ThreadPool* thread_pool, bool include_replication) {
   (void)table_contexts;  // Per-table values are already part of the immutable aggregate snapshot.
   std::ostringstream oss;
 
@@ -1026,7 +1031,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
 
   // Replication statistics
 #ifdef USE_MYSQL
-  if (binlog_reader != nullptr) {
+  if (include_replication && binlog_reader != nullptr) {
     oss << "# HELP mygramdb_replication_running Replication status (0=stopped, 1=running)\n";
     oss << "# TYPE mygramdb_replication_running gauge\n";
     oss << "mygramdb_replication_running " << (binlog_reader->IsRunning() ? 1 : 0) << "\n";
@@ -1070,34 +1075,37 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "\n";
   }
 
-  // Replication operation counters
-  oss << "# HELP mygramdb_replication_inserts_total Total number of INSERT operations\n";
-  oss << "# TYPE mygramdb_replication_inserts_total counter\n";
-  oss << "mygramdb_replication_inserts_total{status=\"applied\"} " << stats.GetReplInsertsApplied() << "\n";
-  oss << "mygramdb_replication_inserts_total{status=\"skipped\"} " << stats.GetReplInsertsSkipped() << "\n";
-  oss << "\n";
+  if (include_replication) {
+    // Replication operation counters
+    oss << "# HELP mygramdb_replication_inserts_total Total number of INSERT operations\n";
+    oss << "# TYPE mygramdb_replication_inserts_total counter\n";
+    oss << "mygramdb_replication_inserts_total{status=\"applied\"} " << stats.GetReplInsertsApplied() << "\n";
+    oss << "mygramdb_replication_inserts_total{status=\"skipped\"} " << stats.GetReplInsertsSkipped() << "\n";
+    oss << "\n";
 
-  oss << "# HELP mygramdb_replication_updates_total Total number of UPDATE operations\n";
-  oss << "# TYPE mygramdb_replication_updates_total counter\n";
-  oss << "mygramdb_replication_updates_total{status=\"applied\"} " << stats.GetReplUpdatesApplied() << "\n";
-  oss << "mygramdb_replication_updates_total{status=\"added\"} " << stats.GetReplUpdatesAdded() << "\n";
-  oss << "mygramdb_replication_updates_total{status=\"removed\"} " << stats.GetReplUpdatesRemoved() << "\n";
-  oss << "mygramdb_replication_updates_total{status=\"modified\"} " << stats.GetReplUpdatesModified() << "\n";
-  oss << "mygramdb_replication_updates_total{status=\"skipped\"} " << stats.GetReplUpdatesSkipped() << "\n";
-  oss << "\n";
+    oss << "# HELP mygramdb_replication_updates_total Total number of UPDATE operations\n";
+    oss << "# TYPE mygramdb_replication_updates_total counter\n";
+    oss << "mygramdb_replication_updates_total{status=\"applied\"} " << stats.GetReplUpdatesApplied() << "\n";
+    oss << "mygramdb_replication_updates_total{status=\"added\"} " << stats.GetReplUpdatesAdded() << "\n";
+    oss << "mygramdb_replication_updates_total{status=\"removed\"} " << stats.GetReplUpdatesRemoved() << "\n";
+    oss << "mygramdb_replication_updates_total{status=\"modified\"} " << stats.GetReplUpdatesModified() << "\n";
+    oss << "mygramdb_replication_updates_total{status=\"skipped\"} " << stats.GetReplUpdatesSkipped() << "\n";
+    oss << "\n";
 
-  oss << "# HELP mygramdb_replication_deletes_total Total number of DELETE operations\n";
-  oss << "# TYPE mygramdb_replication_deletes_total counter\n";
-  oss << "mygramdb_replication_deletes_total{status=\"applied\"} " << stats.GetReplDeletesApplied() << "\n";
-  oss << "mygramdb_replication_deletes_total{status=\"skipped\"} " << stats.GetReplDeletesSkipped() << "\n";
-  oss << "\n";
+    oss << "# HELP mygramdb_replication_deletes_total Total number of DELETE operations\n";
+    oss << "# TYPE mygramdb_replication_deletes_total counter\n";
+    oss << "mygramdb_replication_deletes_total{status=\"applied\"} " << stats.GetReplDeletesApplied() << "\n";
+    oss << "mygramdb_replication_deletes_total{status=\"skipped\"} " << stats.GetReplDeletesSkipped() << "\n";
+    oss << "\n";
 
-  oss << "# HELP mygramdb_replication_ddl_total Total number of DDL operations executed\n";
-  oss << "# TYPE mygramdb_replication_ddl_total counter\n";
-  oss << "mygramdb_replication_ddl_total " << stats.GetReplDdlExecuted() << "\n";
-  oss << "\n";
+    oss << "# HELP mygramdb_replication_ddl_total Total number of DDL operations executed\n";
+    oss << "# TYPE mygramdb_replication_ddl_total counter\n";
+    oss << "mygramdb_replication_ddl_total " << stats.GetReplDdlExecuted() << "\n";
+    oss << "\n";
+  }
 #else
   (void)binlog_reader;  // Suppress unused parameter warning
+  (void)include_replication;
 #endif
 
   // Cache statistics. Keep the complete metric family present while caching
@@ -1144,7 +1152,7 @@ std::string ResponseFormatter::FormatPrometheusMetrics(
     oss << "mygramdb_cache_ttl_expirations_total " << cache_stats.ttl_expirations << "\n";
     oss << "\n";
 
-    oss << "# HELP mygramdb_cache_rejections_total Total inserts rejected for being below the cost threshold\n";
+    oss << "# HELP mygramdb_cache_rejections_total Total inserts rejected by cost or concurrent invalidation\n";
     oss << "# TYPE mygramdb_cache_rejections_total counter\n";
     oss << "mygramdb_cache_rejections_total " << cache_stats.rejection_count << "\n";
     oss << "\n";

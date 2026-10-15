@@ -233,7 +233,6 @@ class RateLimiter {
   mutable std::mutex mutex_;  ///< Protects client_buckets_ and lru_order_
 
   // Statistics (atomic counters avoid the need for a separate stats_mutex_)
-  std::atomic<uint64_t> total_requests_{0};
   std::atomic<uint64_t> allowed_requests_{0};
   std::atomic<uint64_t> blocked_requests_{0};
   std::atomic<uint64_t> evicted_clients_{0};

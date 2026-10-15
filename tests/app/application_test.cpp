@@ -785,6 +785,7 @@ TEST(ServerOrchestratorStartupRetryTest, ShutdownAlreadyRequestedCancelsBeforeTh
 
 TEST(ServerOrchestratorStartupTest, CacheThatCannotBeEnabledAnswersSetWithCacheDisabled) {
   mygramdb::config::Config config;
+  config.replication.enable = false;
   config.cache.enabled = false;
   config.cache.max_memory_bytes = 1024 * 1024;
   mygramdb::cache::CacheManager cache_manager(config.cache, {}, [](std::function<void()>) -> std::thread {

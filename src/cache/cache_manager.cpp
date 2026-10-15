@@ -25,7 +25,7 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
                                               static_cast<size_t>(cache_config.eviction_batch_size), false);
 
   // Create invalidation manager
-  invalidation_mgr_ = std::make_unique<InvalidationManager>(query_cache_.get());
+  invalidation_mgr_ = std::make_shared<InvalidationManager>(query_cache_.get());
 
   // Set eviction callback to clean up invalidation metadata. Per-key path
   // is used by Erase(); bulk paths (Clear/ClearTable/EvictForSpace/RefreshLRU)
@@ -49,8 +49,9 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
   // Only publish the maintenance worker after all callbacks it can invoke are
   // installed. This removes the construction-time window where an eviction
   // could bypass InvalidationManager cleanup.
-  if (auto start_result = query_cache_->StartBackgroundWorker(); !start_result) {
-    mygram::utils::StructuredLog().Event("cache_lru_worker_start_failed").FieldError(start_result.error()).Error();
+  const auto lru_start_result = query_cache_->StartBackgroundWorker();
+  if (!lru_start_result) {
+    mygram::utils::StructuredLog().Event("cache_lru_worker_start_failed").FieldError(lru_start_result.error()).Error();
   }
 
   // Create invalidation queue with per-table ngram settings
@@ -59,7 +60,7 @@ CacheManager::CacheManager(const config::CacheConfig& cache_config, NgramConfigM
   invalidation_queue_->SetBatchSize(cache_config.invalidation.batch_size);
   invalidation_queue_->SetMaxDelay(cache_config.invalidation.max_delay_ms);
   invalidation_queue_->SetMaxQueueSize(cache_config.invalidation.max_queue_size);
-  if (cache_config.enabled) {
+  if (cache_config.enabled && lru_start_result.has_value()) {
     const auto start_result = invalidation_queue_->Start();
     if (start_result.has_value()) {
       enabled_.store(true, std::memory_order_release);
@@ -82,10 +83,60 @@ CacheManager::~CacheManager() {
   // rewrite callbacks here: QueryCache invokes them outside its mutex, and the
   // callback setters are intentionally not synchronized.
   query_cache_.reset();
+  if (invalidation_mgr_) {
+    invalidation_mgr_->Clear();
+  }
+}
+
+CacheManager::PendingInsert::PendingInsert(CacheEntryIdentity identity,
+                                           std::shared_ptr<InvalidationManager> invalidation_manager)
+    : identity_(identity), invalidation_manager_(std::move(invalidation_manager)), active_(true) {}
+
+CacheManager::PendingInsert::~PendingInsert() {
+  Cancel();
+}
+
+CacheManager::PendingInsert::PendingInsert(PendingInsert&& other) noexcept
+    : identity_(other.identity_),
+      invalidation_manager_(std::move(other.invalidation_manager_)),
+      active_(other.active_) {
+  other.active_ = false;
+}
+
+CacheManager::PendingInsert& CacheManager::PendingInsert::operator=(PendingInsert&& other) noexcept {
+  if (this != &other) {
+    Cancel();
+    identity_ = other.identity_;
+    invalidation_manager_ = std::move(other.invalidation_manager_);
+    active_ = other.active_;
+    other.active_ = false;
+  }
+  return *this;
+}
+
+void CacheManager::PendingInsert::Cancel() noexcept {
+  if (active_ && invalidation_manager_) {
+    invalidation_manager_->CancelPendingCacheEntry(identity_);
+  }
+  active_ = false;
+  invalidation_manager_.reset();
+}
+
+void CacheManager::PendingInsert::Consume() noexcept {
+  active_ = false;
+  invalidation_manager_.reset();
 }
 
 std::optional<CacheManager::ResolvedCacheKey> CacheManager::ResolveCacheKey(const query::Query& query) const {
   if (!enabled_ || !query_cache_) {
+    return std::nullopt;
+  }
+
+  return ResolveCanonicalCacheKey(query);
+}
+
+std::optional<CacheManager::ResolvedCacheKey> CacheManager::ResolveCanonicalCacheKey(const query::Query& query) const {
+  if (!query_cache_) {
     return std::nullopt;
   }
 
@@ -164,6 +215,129 @@ bool CacheManager::Insert(const query::Query& query, const std::vector<DocId>& r
                          kanji_ngram_size, cross_boundary_ngrams, invalidate_on_any_text_change);
 }
 
+std::optional<CacheManager::PendingInsert> CacheManager::BeginInsert(const query::Query& query,
+                                                                     const std::vector<std::string>& ngrams,
+                                                                     int ngram_size, int kanji_ngram_size,
+                                                                     bool cross_boundary_ngrams,
+                                                                     bool invalidate_on_any_text_change) {
+  const auto resolved_key = ResolveCacheKey(query);
+  if (!resolved_key.has_value() || !invalidation_mgr_ || !query_cache_ || !invalidation_queue_) {
+    return std::nullopt;
+  }
+
+  CacheMetadata metadata;
+  metadata.key = resolved_key->key;
+  metadata.cache_discriminator = resolved_key->discriminator;
+  metadata.table = query.table;
+  metadata.ngrams = ngrams;
+  metadata.filters = query.filters;
+  metadata.ngram_size = ngram_size;
+  metadata.kanji_ngram_size = kanji_ngram_size;
+  metadata.cross_boundary_ngrams = cross_boundary_ngrams;
+  metadata.has_not_terms = !query.not_terms.empty();
+  metadata.invalidate_on_any_text_change = invalidate_on_any_text_change;
+
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  if (!enabled_.load(std::memory_order_acquire)) {
+    return std::nullopt;
+  }
+
+  const auto table_version_it = table_data_versions_.find(query.table);
+  metadata.data_version = table_version_it == table_data_versions_.end()
+                              ? last_global_clear_version_
+                              : std::max(last_global_clear_version_, table_version_it->second);
+  metadata.entry_generation = next_entry_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
+  const CacheEntryIdentity identity{resolved_key->key, metadata.entry_generation};
+  if (!invalidation_mgr_->RegisterPendingCacheEntry(identity, std::move(metadata))) {
+    return std::nullopt;
+  }
+
+  if (query_cache_->MemoryUsage() + invalidation_mgr_->MemoryUsage() + invalidation_queue_->MemoryUsage() >
+      max_memory_bytes_) {
+    invalidation_mgr_->CancelPendingCacheEntry(identity);
+    query_cache_->IncrementMemoryBudgetRejection();
+    return std::nullopt;
+  }
+
+  return PendingInsert(identity, invalidation_mgr_);
+}
+
+bool CacheManager::InsertIfPending(PendingInsert&& pending, const query::Query& query, const std::vector<DocId>& result,
+                                   double query_cost_ms) {
+  if (!pending.active_) {
+    return false;
+  }
+
+  const auto resolved_key = ResolveCanonicalCacheKey(query);
+  if (!resolved_key.has_value() || resolved_key->key != pending.identity_.key ||
+      pending.invalidation_manager_.get() != invalidation_mgr_.get()) {
+    pending.Cancel();
+    return false;
+  }
+
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  if (!invalidation_mgr_ || !query_cache_ || !invalidation_queue_) {
+    pending.Cancel();
+    return false;
+  }
+
+  CacheMetadata metadata;
+  const auto copy_status =
+      invalidation_mgr_->CopyPendingCacheMetadata(pending.identity_, resolved_key->discriminator, metadata);
+  if (copy_status != InvalidationManager::PendingRegistrationStatus::kValid) {
+    if (copy_status == InvalidationManager::PendingRegistrationStatus::kMissing ||
+        copy_status == InvalidationManager::PendingRegistrationStatus::kInvalidated) {
+      query_cache_->IncrementInvalidationRejection();
+    }
+    pending.Cancel();
+    return false;
+  }
+  if (!enabled_.load(std::memory_order_acquire)) {
+    pending.Cancel();
+    return false;
+  }
+
+  const bool inserted = query_cache_->Insert(pending.identity_.key, result, metadata, query_cost_ms);
+  if (inserted && after_query_cache_insert_hook_for_test_) {
+    try {
+      after_query_cache_insert_hook_for_test_();
+    } catch (...) {
+      query_cache_->EraseForAdmissionRollback(pending.identity_);
+      pending.Cancel();
+      throw;
+    }
+  }
+  if (!inserted) {
+    pending.Cancel();
+    return false;
+  }
+
+  InvalidationManager::PendingRegistrationStatus promote_status;
+  try {
+    promote_status = invalidation_mgr_->PromotePendingCacheEntry(pending.identity_, resolved_key->discriminator);
+  } catch (...) {
+    // Promotion allocates the resident compatibility-index node before it
+    // changes the pending metadata. On allocation failure, erase the exact
+    // payload without a callback, cancel the still-pending registration, and
+    // preserve the exception for the caller.
+    query_cache_->EraseForAdmissionRollback(pending.identity_);
+    pending.Cancel();
+    throw;
+  }
+  if (promote_status != InvalidationManager::PendingRegistrationStatus::kValid) {
+    query_cache_->Erase(pending.identity_);
+    if (promote_status == InvalidationManager::PendingRegistrationStatus::kMissing ||
+        promote_status == InvalidationManager::PendingRegistrationStatus::kInvalidated) {
+      query_cache_->IncrementInvalidationRejection();
+    }
+    pending.Cancel();
+    return false;
+  }
+
+  pending.Consume();
+  return AdmitInsertedEntryLocked(CacheEntryIdentity{metadata.key, metadata.entry_generation});
+}
+
 uint64_t CacheManager::CaptureDataVersion(const std::string& table_name) const {
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
   auto it = table_data_versions_.find(table_name);
@@ -228,6 +402,7 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
                                              ? last_global_clear_version_
                                              : std::max(last_global_clear_version_, table_version_it->second);
   if (current_table_version != expected_data_version) {
+    query_cache_->IncrementInvalidationRejection();
     return false;
   }
   metadata.data_version = expected_data_version;
@@ -236,28 +411,55 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   // Insert into cache
   const bool inserted = query_cache_->Insert(key, result, metadata, query_cost_ms);
   if (inserted && after_query_cache_insert_hook_for_test_) {
-    after_query_cache_insert_hook_for_test_();
+    try {
+      after_query_cache_insert_hook_for_test_();
+    } catch (...) {
+      query_cache_->EraseForAdmissionRollback(CacheEntryIdentity{key, metadata.entry_generation});
+      throw;
+    }
   }
 
   // Register with invalidation manager
   if (inserted) {
-    invalidation_mgr_->RegisterCacheEntry(key, metadata);
-    while (query_cache_->MemoryUsage() + invalidation_mgr_->MemoryUsage() + invalidation_queue_->MemoryUsage() >
-           max_memory_bytes_) {
-      if (query_cache_->EvictBatch() == 0) {
-        query_cache_->IncrementMemoryBudgetRejection();
-        return false;
-      }
+    const CacheEntryIdentity inserted_identity{key, metadata.entry_generation};
+    try {
+      invalidation_mgr_->RegisterCacheEntry(key, metadata);
+    } catch (...) {
+      // RegisterCacheEntry rolls back partial index updates. Remove the payload
+      // without invoking a second, out-of-order invalidation callback.
+      query_cache_->EraseForAdmissionRollback(inserted_identity);
+      throw;
     }
+    return AdmitInsertedEntryLocked(inserted_identity);
+  }
 
-    const auto surviving_metadata = query_cache_->GetMetadata(key);
-    if (!surviving_metadata.has_value() || surviving_metadata->entry_generation != metadata.entry_generation) {
+  return inserted;
+}
+
+bool CacheManager::AdmitInsertedEntryLocked(const CacheEntryIdentity& identity) {
+  while (query_cache_->MemoryUsage() + invalidation_mgr_->MemoryUsage() + invalidation_queue_->MemoryUsage() >
+         max_memory_bytes_) {
+    if (query_cache_->EvictBatch(identity) == 0) {
+      // The protected new entry is the only one left to remove, so the
+      // combined footprint cannot fit. Erase by incarnation to roll back both
+      // payload and registration.
+      query_cache_->EraseForAdmissionRollback(identity);
+      invalidation_mgr_->UnregisterCacheEntry(identity);
       query_cache_->IncrementMemoryBudgetRejection();
       return false;
     }
   }
 
-  return inserted;
+  const auto surviving_metadata = query_cache_->GetMetadata(identity.key);
+  if (!surviving_metadata.has_value() || surviving_metadata->entry_generation != identity.generation) {
+    // An LRU/TTL callback may run after payload insertion but before the
+    // invalidation registration is published. Remove any late registration
+    // for this exact incarnation before reporting the failed admission.
+    invalidation_mgr_->UnregisterCacheEntry(identity);
+    query_cache_->IncrementMemoryBudgetRejection();
+    return false;
+  }
+  return true;
 }
 
 void CacheManager::Invalidate(const std::string& table_name, const std::string& old_text, const std::string& new_text,
@@ -275,12 +477,17 @@ void CacheManager::Invalidate(const std::string& table_name, const std::string& 
     return;
   }
 
-  {
-    std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
-    table_data_versions_[table_name] = data_version_.fetch_add(1, std::memory_order_acq_rel) + 1;
+  // Serialize the data-version update and synchronous pending/resident mark as
+  // one mutation boundary with pending insert commit. The queue worker never
+  // takes serialize_mutex_, so the worker remains independent of this lock.
+  std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+  if (!enabled_.load(std::memory_order_acquire) || !invalidation_queue_) {
+    return;
   }
+  table_data_versions_[table_name] = data_version_.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-  // Enqueue for asynchronous invalidation
+  // Enqueue for asynchronous invalidation while the mutation boundary remains
+  // closed; Enqueue performs the immediate registration mark synchronously.
   invalidation_queue_->Enqueue(table_name, old_text, new_text, filter_columns_changed);
 }
 
@@ -297,13 +504,8 @@ void CacheManager::Clear() {
   table_data_versions_.clear();
 
   if (query_cache_) {
-    // QueryCache::Clear() invokes eviction_callback_ for every entry, which
-    // calls invalidation_mgr_->UnregisterCacheEntry and keeps the per-key
-    // metadata consistent with the cache. We still call invalidation_mgr_->
-    // Clear() afterwards because eviction callbacks only unregister keys we
-    // know about; they do not free the bucket-level allocations of
-    // ngram_to_cache_keys_/table_ngram_settings_, and Clear() additionally
-    // releases that capacity.
+    // Clear() fires the eviction callbacks, which unregister every identity; the
+    // invalidation_mgr_->Clear() below additionally releases index capacity.
     query_cache_->Clear();
   }
   if (invalidation_mgr_) {
@@ -359,6 +561,18 @@ bool CacheManager::Enable() {
     return false;
   }
 
+  // Retry an LRU worker start that failed at construction.
+  if (!query_cache_->IsBackgroundWorkerRunning()) {
+    if (const auto lru_start_result = query_cache_->StartBackgroundWorker(); !lru_start_result) {
+      enabled_.store(false, std::memory_order_release);
+      mygram::utils::StructuredLog()
+          .Event("cache_lru_worker_start_failed")
+          .FieldError(lru_start_result.error())
+          .Error();
+      return false;
+    }
+  }
+
   // Enable order: start the invalidation queue BEFORE flipping
   // enabled_ to true. Otherwise an Invalidate() observing enabled_ == true
   // would call invalidation_queue_->Enqueue while running_ is still false;
@@ -391,17 +605,8 @@ void CacheManager::Disable() {
   // This keeps enabled_ and the invalidation worker in one coherent state.
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
 
-  // Disable race: flip enabled_ to false BEFORE Clear() so that any
-  // concurrent Insert observing the post-flip state short-circuits at the
-  // enabled_ check and never inserts after Clear() has finished. The previous
-  // ordering (Clear() then enabled_ = false) left a window where Insert and
-  // Clear serialized on serialize_mutex_; once Clear released the mutex,
-  // Insert could acquire it (with enabled_ still true) and re-populate the
-  // cache that Disable() had just emptied.
-  //
-  // We use std::memory_order_release so the flip happens-before the Clear
-  // call below from this thread's perspective and is visible to readers that
-  // pair it with an acquire load on enabled_.
+  // Flip enabled_ before Clear() so a concurrent Insert observing the new state short-circuits
+  // at the enabled_ check and cannot repopulate the cache after it is emptied.
   enabled_.store(false, std::memory_order_release);
 
   // Stop the invalidation queue after closing the public enabled_ gate so no

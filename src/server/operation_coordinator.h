@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -19,6 +22,8 @@ enum class LongOperation : uint8_t {
   kOptimize,
   kAutoSnapshot,
   kMysqlReconnect,
+  kReplicationStart,
+  kReplicationStop,
 };
 
 class OperationCoordinator {
@@ -75,7 +80,26 @@ class OperationCoordinator {
   [[nodiscard]] std::string DescribeActive() const;
 
   /** Prevent all new long-running work while allowing an existing token to drain. */
-  void BlockNewOperationsForShutdown();
+  void BlockNewOperationsForShutdown(std::atomic<bool>* shutdown_flag = nullptr);
+
+  /**
+   * Reopen admission for a fresh server start. Fails without changing state if
+   * an operation is still active. Token generations remain monotonic across
+   * stop/start cycles so stale releases can never clear a newer operation.
+   */
+  [[nodiscard]] bool ReopenForStartup(std::atomic<bool>* shutdown_flag = nullptr);
+
+  /**
+   * Wait until the active operation releases its token.
+   *
+   * The caller must close admission first. This lets shutdown drain operations
+   * that acquired admission before shutdown began without holding component
+   * locks while waiting.
+   */
+  [[nodiscard]] bool WaitForIdle(std::chrono::milliseconds timeout);
+
+  /** Wait without a deadline. Used as the final lifetime guard during destruction. */
+  void WaitForIdle();
 
   static const char* Name(LongOperation type);
 
@@ -83,6 +107,7 @@ class OperationCoordinator {
   void Release(uint64_t generation);
 
   mutable std::mutex mutex_;
+  std::condition_variable idle_cv_;
   std::optional<ActiveOperation> active_;
   uint64_t active_generation_ = 0;
   uint64_t next_generation_ = 1;

@@ -111,7 +111,12 @@ class ServerWiringTest : public ::testing::Test {
     signal_manager_ = std::move(*signal_manager);
 
     config_ = std::make_unique<mygramdb::config::Config>(std::move(config));
-    dump_dir_ = std::filesystem::temp_directory_path().string();
+    const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+    const auto dump_path = std::filesystem::temp_directory_path() /
+                           ("server_wiring_" + std::string(test_info->name()) + "_" + std::to_string(getpid()));
+    std::filesystem::remove_all(dump_path);
+    std::filesystem::create_directories(dump_path);
+    dump_dir_ = dump_path.string();
 
     mygramdb::app::ServerOrchestrator::Dependencies deps{
         .config = *config_,
@@ -128,6 +133,9 @@ class ServerWiringTest : public ::testing::Test {
   void TearDown() override {
     if (orchestrator_) {
       EXPECT_TRUE(orchestrator_->Stop());
+    }
+    if (!dump_dir_.empty()) {
+      std::filesystem::remove_all(dump_dir_);
     }
   }
 

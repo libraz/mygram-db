@@ -9,8 +9,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
+#include <stdexcept>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace mygramdb {
@@ -42,6 +46,68 @@ TEST_F(ThreadPoolTest, Construction) {
   ThreadPool pool3(2, 100);
   EXPECT_EQ(pool3.GetThreadCount(), 2);
   EXPECT_FALSE(pool3.IsShutdown());
+}
+
+TEST_F(ThreadPoolTest, DequeuedTaskCountsAsActiveBeforeExecution) {
+  std::promise<size_t> active_workers_at_dequeue;
+  auto active_workers_future = active_workers_at_dequeue.get_future();
+  std::promise<void> release_hook;
+  auto release_future = release_hook.get_future().share();
+  std::atomic<bool> task_started{false};
+
+  ThreadPool pool(1, 0, {}, [&active_workers_at_dequeue, release_future](size_t active_workers) {
+    active_workers_at_dequeue.set_value(active_workers);
+    release_future.wait();
+  });
+
+  ASSERT_TRUE(pool.Submit([&task_started]() { task_started.store(true); }));
+
+  const auto hook_status = active_workers_future.wait_for(std::chrono::seconds(1));
+  size_t active_workers = 0;
+  if (hook_status == std::future_status::ready) {
+    active_workers = active_workers_future.get();
+  }
+  const bool task_started_before_release = task_started.load();
+
+  // Release even when the hook was not reached so a failed assertion cannot
+  // strand a worker in the callback and hang ThreadPool's destructor.
+  release_hook.set_value();
+  pool.Shutdown();
+
+  EXPECT_EQ(hook_status, std::future_status::ready);
+  EXPECT_EQ(active_workers, 1U);
+  EXPECT_FALSE(task_started_before_release);
+  EXPECT_TRUE(task_started.load());
+}
+
+TEST_F(ThreadPoolTest, JoinsStartedWorkersWhenThreadCreationFails) {
+  const std::string failure_message = "injected worker thread creation failure";
+  std::atomic<size_t> creation_attempts{0};
+  std::atomic<size_t> exited_workers{0};
+  ThreadPool::WorkerThreadFactory thread_factory = [&creation_attempts, &exited_workers,
+                                                    &failure_message](std::function<void()> worker) {
+    const size_t attempt = creation_attempts.fetch_add(1);
+    if (attempt == 2) {
+      throw std::runtime_error(failure_message);
+    }
+    return std::thread([worker = std::move(worker), &exited_workers]() mutable {
+      worker();
+      exited_workers.fetch_add(1);
+    });
+  };
+
+  bool caught_expected_exception = false;
+  try {
+    ThreadPool pool(4, 0, std::move(thread_factory));
+    FAIL() << "ThreadPool construction should propagate a worker creation failure";
+  } catch (const std::runtime_error& error) {
+    caught_expected_exception = true;
+    EXPECT_STREQ(error.what(), failure_message.c_str());
+  }
+
+  EXPECT_TRUE(caught_expected_exception);
+  EXPECT_EQ(creation_attempts.load(), 3U);
+  EXPECT_EQ(exited_workers.load(), 2U);
 }
 
 TEST_F(ThreadPoolTest, ExplicitZeroQueueAcceptsMoreThanLegacyThousandTasks) {

@@ -143,7 +143,8 @@ class VariableHandlerTest : public ::testing::Test {
     table_contexts_["test_table"] = &table_context_;
 
     // Create server config
-    config_.port = 0;  // Random port
+    full_config_.replication.enable = false;  // This fixture has no MySQL reader.
+    config_.port = 0;                         // Random port
     config_.host = "127.0.0.1";
     config_.allow_cidrs = {"127.0.0.1/32"};
 

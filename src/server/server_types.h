@@ -487,6 +487,10 @@ struct HandlerContext {
   /// Returns whether every configured table has received an initial data
   /// generation. TCP INFO exposes this alongside its overall readiness.
   std::function<bool()> initial_data_ready_checker;
+
+  /// Token the dispatcher gates administrative commands on (ServerConfig::admin_token);
+  /// empty means open. INFO reads the same value to decide what to withhold.
+  std::string admin_token;
 };
 
 }  // namespace mygramdb::server

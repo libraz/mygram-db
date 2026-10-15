@@ -22,7 +22,11 @@ namespace mygramdb::cache {
 class CacheMetricsTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    ngram_configs_["test_table"] = NgramConfig{.ngram_size = 2, .kanji_ngram_size = 1, .cross_boundary_ngrams = true};
+    NgramConfig ngram_config{};
+    ngram_config.ngram_size = 2;
+    ngram_config.kanji_ngram_size = 1;
+    ngram_config.cross_boundary_ngrams = true;
+    ngram_configs_["test_table"] = ngram_config;
 
     // Create cache config
     cache_config_.enabled = true;

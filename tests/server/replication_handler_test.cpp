@@ -21,9 +21,11 @@
 #include "mysql/connection.h"
 #include "mysql/null_binlog_reader.h"
 #include "query/query_parser.h"
+#include "server/operation_coordinator.h"
 #include "server/response_formatter.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
+#include "server/sync_operation_manager.h"
 #include "storage/document_store.h"
 
 namespace mygramdb::server {
@@ -67,6 +69,34 @@ class ReplicationHandlerTest : public ::testing::Test {
   std::atomic<bool> optimization_in_progress_;
   std::atomic<bool> replication_paused_for_dump_;
   HandlerContext handler_ctx_;
+};
+
+class ReplicationHandlerTrackingReader final : public mysql::IBinlogReader {
+ public:
+  mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+    calls.fetch_add(1, std::memory_order_relaxed);
+    running = true;
+    return {};
+  }
+  void Stop() override {
+    calls.fetch_add(1, std::memory_order_relaxed);
+    running = false;
+  }
+  bool IsRunning() const override {
+    calls.fetch_add(1, std::memory_order_relaxed);
+    return running;
+  }
+  std::string GetCurrentGTID() const override {
+    calls.fetch_add(1, std::memory_order_relaxed);
+    return "uuid:42";
+  }
+  void SetCurrentGTID(const std::string&) override {}
+  std::string GetLastError() const override { return {}; }
+  uint64_t GetProcessedEvents() const override { return 0; }
+  size_t GetQueueSize() const override { return 0; }
+
+  mutable std::atomic<int> calls{0};
+  bool running = false;
 };
 
 /**
@@ -129,6 +159,47 @@ TEST_F(ReplicationHandlerTest, StopWhenNotRunningReturnsError) {
 
   // Should return error about replication not configured
   EXPECT_NE(response.find("Replication is not configured"), std::string::npos);
+}
+
+TEST_F(ReplicationHandlerTest, ReplicationStartAndStopAreRejectedByDumpOrSyncCoordinatorTokens) {
+  OperationCoordinator coordinator;
+  handler_ctx_.operation_coordinator = &coordinator;
+  ReplicationHandlerTrackingReader reader;
+  handler_ctx_.binlog_reader = &reader;
+
+  std::unordered_map<std::string, TableContext*> table_contexts;
+  config::Config config;
+  SyncOperationManager sync_manager(table_contexts, &config, nullptr, nullptr, nullptr, &coordinator);
+  handler_ctx_.sync_manager = &sync_manager;
+
+  ReplicationHandler handler(handler_ctx_);
+  ConnectionContext conn_ctx;
+  for (LongOperation blocker : {LongOperation::kDumpSave, LongOperation::kSync}) {
+    for (query::QueryType command : {query::QueryType::REPLICATION_START, query::QueryType::REPLICATION_STOP}) {
+      reader.calls.store(0, std::memory_order_relaxed);
+      reader.running = command == query::QueryType::REPLICATION_STOP;
+      auto token = coordinator.TryAcquire(blocker, "test operation");
+      ASSERT_TRUE(token.has_value());
+
+      query::Query request;
+      request.type = command;
+      const std::string response = handler.Handle(request, conn_ctx);
+
+      EXPECT_TRUE(response.rfind("ERROR ", 0) == 0) << response;
+      EXPECT_EQ(reader.calls.load(std::memory_order_relaxed), 0)
+          << "rejected replication command must not touch the binlog reader";
+      if (blocker == LongOperation::kSync && command == query::QueryType::REPLICATION_START) {
+        EXPECT_NE(response.find("ERROR 4011"), std::string::npos) << response;
+      } else {
+        EXPECT_NE(response.find("ERROR 6030"), std::string::npos) << response;
+      }
+      token->Release();
+    }
+  }
+
+  handler_ctx_.binlog_reader = nullptr;
+  handler_ctx_.sync_manager = nullptr;
+  handler_ctx_.operation_coordinator = nullptr;
 }
 
 TEST_F(ReplicationHandlerTest, ReplicationStopBlockedWhenPausedForDump) {

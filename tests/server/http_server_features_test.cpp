@@ -313,10 +313,18 @@ TEST_F(HttpServerTest, ReplicationStatusNotConfigured) {
   auto res = client.Get("/replication/status");
 
   ASSERT_TRUE(res);
+#ifdef USE_MYSQL
+  EXPECT_EQ(res->status, 200);
+
+  const auto body = json::parse(res->body);
+  EXPECT_EQ(body, json({{"enabled", false}, {"status", "not_configured"}}));
+#else
   EXPECT_EQ(res->status, 503);
 
-  auto body = json::parse(res->body);
-  EXPECT_TRUE(body.contains("error"));
+  const auto body = json::parse(res->body);
+  EXPECT_EQ(body["error"], "MySQL replication not compiled");
+  EXPECT_EQ(body["error_code"], static_cast<std::uint16_t>(mygram::utils::ErrorCode::kNotImplemented));
+#endif
 }
 
 #ifdef USE_MYSQL

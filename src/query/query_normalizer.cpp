@@ -128,9 +128,13 @@ std::string QueryNormalizer::Normalize(const query::Query& query, const TextNorm
     AppendAstNode(encoded_ast, *boolean_ast, text_normalizer);
     AppendField(result, FieldTag::kBooleanAst, encoded_ast);
   } else {
+    // Outside boolean mode the executed term is search_text; search_expression
+    // also carries the parser's quoting syntax, which index normalization can
+    // fold into ordinary text (e.g. U+FF02 into '"').
+    const bool use_expression =
+        semantic_context.execution_mode == CacheExecutionMode::kBooleanAst && !query.search_expression.empty();
     AppendField(result, FieldTag::kSearchText,
-                NormalizeSearchText(query.search_expression.empty() ? query.search_text : query.search_expression,
-                                    text_normalizer));
+                NormalizeSearchText(use_expression ? query.search_expression : query.search_text, text_normalizer));
   }
 
   std::vector<std::string> and_terms;

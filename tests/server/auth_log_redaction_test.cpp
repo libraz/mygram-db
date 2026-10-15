@@ -25,6 +25,7 @@
 #include "server/server_stats.h"
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
+#include "utils/secure_compare.h"
 
 namespace mygramdb::server {
 namespace {
@@ -69,6 +70,30 @@ class LogCapture {
 };
 
 }  // namespace
+
+TEST(ConstantTimeEqualTest, MatchesEqualByteStrings) {
+  EXPECT_TRUE(mygram::utils::ConstantTimeEqual("admin-token", "admin-token"));
+}
+
+TEST(ConstantTimeEqualTest, RejectsDifferentBytesAtTheBeginningAndEnd) {
+  EXPECT_FALSE(mygram::utils::ConstantTimeEqual("x-admin-token", "y-admin-token"));
+  EXPECT_FALSE(mygram::utils::ConstantTimeEqual("admin-token-x", "admin-token-y"));
+}
+
+TEST(ConstantTimeEqualTest, RejectsUnequalLengthsWithSharedPrefixes) {
+  EXPECT_FALSE(mygram::utils::ConstantTimeEqual("admin", "administrator"));
+  EXPECT_FALSE(mygram::utils::ConstantTimeEqual("administrator", "admin"));
+}
+
+TEST(ConstantTimeEqualTest, ComparesEmbeddedNulBytesAsOrdinaryBytes) {
+  const std::string token_with_nul("ab\0cd", 5);
+  const std::string same_token_with_nul("ab\0cd", 5);
+  const std::string different_after_nul("ab\0ce", 5);
+
+  EXPECT_TRUE(mygram::utils::ConstantTimeEqual(token_with_nul, same_token_with_nul));
+  EXPECT_FALSE(mygram::utils::ConstantTimeEqual(token_with_nul, different_after_nul));
+  EXPECT_FALSE(mygram::utils::ConstantTimeEqual(token_with_nul, "ab"));
+}
 
 class AuthLogRedactionTest : public ::testing::Test {
  protected:

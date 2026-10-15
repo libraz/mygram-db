@@ -64,7 +64,7 @@ struct CacheStatisticsSnapshot {
   uint64_t evictions = 0;
   uint64_t ttl_expirations = 0;         ///< TTL-expired entries removed
   uint64_t decompression_failures = 0;  ///< Entries removed due to decompression failure
-  uint64_t rejection_count = 0;         ///< Inserts rejected for being below min_query_cost_ms threshold
+  uint64_t rejection_count = 0;         ///< Inserts rejected by cost threshold or invalidation/version guards
   uint64_t rejection_oversize = 0;      ///< Inserts rejected because the entry exceeds max_memory_bytes
   uint64_t rejection_memory_budget =
       0;  ///< Inserts rejected because cache + invalidation metadata exceed the shared budget
@@ -157,8 +157,8 @@ struct CacheStatistics {
   std::atomic<uint64_t> evictions{0};
   std::atomic<uint64_t> ttl_expirations{0};
   std::atomic<uint64_t> decompression_failures{0};
-  std::atomic<uint64_t> rejection_count{0};          ///< Inserts rejected for being below min_query_cost_ms threshold
-  std::atomic<uint64_t> rejection_oversize{0};       ///< Inserts rejected because the entry exceeds max_memory_bytes
+  std::atomic<uint64_t> rejection_count{0};     ///< Inserts rejected by cost threshold or invalidation/version guards
+  std::atomic<uint64_t> rejection_oversize{0};  ///< Inserts rejected because the entry exceeds max_memory_bytes
   std::atomic<uint64_t> rejection_memory_budget{0};  ///< Inserts rejected because the shared budget cannot retain them
   std::atomic<uint64_t> rejection_duplicate{0};      ///< Inserts rejected because cache key is already present
   std::atomic<uint64_t> rejection_compression{0};    ///< Inserts rejected because compressing the payload failed
@@ -193,24 +193,10 @@ enum class RemovalReason : std::uint8_t {
  */
 class QueryCache {
  public:
-  /**
-   * @brief Callback type for eviction notifications
-   * @param key The cache key being evicted
-   */
-  using EvictionCallback = std::function<void(const CacheKey&)>;
+  /** Callback invoked with the identity of each entry removed from the cache. */
   using IdentityEvictionCallback = std::function<void(const CacheEntryIdentity&)>;
 
-  /**
-   * @brief Callback type for batch eviction notifications
-   * @param keys Cache keys being evicted in a single bulk operation
-   *
-   * Optional optimization for callers that have a batch unregister API
-   * (e.g. InvalidationManager::UnregisterCacheEntries) and want to amortize
-   * lock-acquisition cost across many evictions. When set, this is called
-   * INSTEAD OF EvictionCallback for bulk paths (Clear, ClearTable, EvictForSpace,
-   * RefreshLRU). Per-key Erase still uses EvictionCallback.
-   */
-  using BatchEvictionCallback = std::function<void(const std::vector<CacheKey>&)>;
+  /** Callback invoked once per bulk removal (Clear, ClearTable, EvictForSpace, RefreshLRU). */
   using BatchIdentityEvictionCallback = std::function<void(const std::vector<CacheEntryIdentity>&)>;
 
   /**
@@ -240,8 +226,8 @@ class QueryCache {
   /** Start periodic LRU maintenance after all eviction callbacks are installed. */
   mygram::utils::Expected<void, mygram::utils::Error> StartBackgroundWorker();
 
-  /** Test-only lifecycle observation. */
-  [[nodiscard]] bool IsBackgroundWorkerRunningForTesting() const { return lru_refresh_worker_.IsRunning(); }
+  /** Whether the LRU maintenance worker is running. */
+  [[nodiscard]] bool IsBackgroundWorkerRunning() const { return lru_refresh_worker_.IsRunning(); }
 
   /**
    * @brief Run one periodic-maintenance pass synchronously.
@@ -299,10 +285,9 @@ class QueryCache {
 
   /**
    * @brief Mark cache entry as invalidated (Step 1: immediate)
-   * @param key Cache key
+   * @param identity Exact entry incarnation
    * @return true if entry was found and marked
    */
-  bool MarkInvalidated(const CacheKey& key);
   bool MarkInvalidated(const CacheEntryIdentity& identity);
 
   /**
@@ -314,24 +299,29 @@ class QueryCache {
   bool Erase(const CacheEntryIdentity& identity);
 
   /**
-   * @brief Erase cache entry without firing eviction_callback_
-   * @param key Cache key
+   * @brief Erase one exact entry incarnation without firing eviction callbacks
+   * @param identity Exact entry incarnation
    * @return true if entry was found and erased
    *
-   * Identical to Erase() except the eviction callback is suppressed. Used by
-   * InvalidationQueue, which performs its own InvalidationManager cleanup and
-   * must not double-unregister via the eviction callback.
-   *
-   * Callers that take this path are responsible for any external bookkeeping
-   * that the eviction callback would otherwise have performed.
+   * Used by InvalidationQueue, which performs its own InvalidationManager
+   * cleanup. Increments invalidations_deferred; admission rollback should use
+   * EraseForAdmissionRollback() instead.
    */
-  bool EraseWithoutCallback(const CacheKey& key);
   bool EraseWithoutCallback(const CacheEntryIdentity& identity);
+
+  /**
+   * @brief Remove one exact entry incarnation while rolling back admission.
+   *
+   * Suppresses eviction callbacks and does not count the removal as a stale
+   * entry or deferred invalidation. The caller owns removal of any external
+   * bookkeeping associated with the rejected admission.
+   */
+  bool EraseForAdmissionRollback(const CacheEntryIdentity& identity);
 
   /**
    * @brief Clear all cache entries
    *
-   * Removes all entries. Invokes eviction_callback_ for each removed entry
+   * Removes all entries. Invokes the eviction callbacks for each removed entry
    * with RemovalReason::kClear, allowing external bookkeeping (e.g.
    * InvalidationManager) to stay consistent with the cache.
    */
@@ -398,9 +388,11 @@ class QueryCache {
   [[nodiscard]] size_t MemoryUsage() const;
 
   /**
-   * @brief Evict at least eviction_batch_size least-recently-used entries
-   * (or empty the cache) in one locked pass, notifying generation-aware
-   * observers afterward.
+   * @brief Evict up to eviction_batch_size least-recently-used entries in one
+   * locked pass, notifying generation-aware observers afterward. When
+   * @p protected_identity is supplied, that exact entry incarnation is
+   * skipped while the rest of the LRU tail is searched; the pass stops when
+   * no eligible entries remain.
    *
    * For callers whose eviction decision is based on memory outside this
    * cache -- CacheManager's combined budget across QueryCache,
@@ -409,10 +401,13 @@ class QueryCache {
    * instead of evicting and re-checking one entry at a time.
    * @return Number of entries evicted.
    */
-  size_t EvictBatch();
+  size_t EvictBatch(std::optional<CacheEntryIdentity> protected_identity = std::nullopt);
 
   /** Record a CacheManager shared-budget rejection. */
   void IncrementMemoryBudgetRejection() { stats_.rejection_memory_budget.fetch_add(1, std::memory_order_relaxed); }
+
+  /** Record a cache admission refused because an invalidation made its result stale. */
+  void IncrementInvalidationRejection() { stats_.rejection_count.fetch_add(1, std::memory_order_relaxed); }
 
   /**
    * @brief Increment invalidation batch counter
@@ -421,29 +416,18 @@ class QueryCache {
    */
   void IncrementInvalidationBatches() { stats_.invalidations_batches++; }
 
-  /**
-   * @brief Set callback to be notified when entries are evicted
-   * @param callback Function to call when an entry is evicted via LRU
-   */
-  void SetEvictionCallback(EvictionCallback callback) { eviction_callback_ = std::move(callback); }
+  /** Set the callback notified of each entry removed by a per-entry path (Erase). */
   void SetIdentityEvictionCallback(IdentityEvictionCallback callback) {
     identity_eviction_callback_ = std::move(callback);
   }
 
   /**
-   * @brief Set batch eviction callback (optional, for bulk-path optimization)
-   * @param callback Function to call with the list of evicted keys
+   * @brief Set the batch eviction callback for bulk paths
    *
-   * If set, bulk eviction paths (Clear, ClearTable, EvictForSpace, RefreshLRU)
-   * call this once with all evicted keys INSTEAD OF calling the per-key
-   * EvictionCallback. This lets observers (e.g. InvalidationManager) take a
-   * single mutex acquisition rather than one per key.
-   *
-   * Per-key paths (Erase) continue to use the per-key EvictionCallback. If
-   * BatchEvictionCallback is unset on a bulk path, the bulk path falls back to
-   * looping the per-key callback to preserve backward compatibility.
+   * Bulk paths (Clear, ClearTable, EvictForSpace, RefreshLRU) call it once with
+   * all removed identities instead of looping the per-entry callback, so
+   * observers take one mutex acquisition per batch.
    */
-  void SetBatchEvictionCallback(BatchEvictionCallback callback) { batch_eviction_callback_ = std::move(callback); }
   void SetBatchIdentityEvictionCallback(BatchIdentityEvictionCallback callback) {
     batch_identity_eviction_callback_ = std::move(callback);
   }
@@ -497,6 +481,22 @@ class QueryCache {
   bool CorruptEntryForTest(const CacheKey& key);
 
  private:
+  enum class EraseReason : std::uint8_t {
+    kStaleEntry,
+    kDeferredInvalidation,
+    kAdmissionRollback,
+  };
+
+  /**
+   * @brief Shared single-entry erase path; callback delivery happens after unlock.
+   * @param identity Optional exact incarnation. Null erases the current key.
+   * @param reason Statistics to attribute the removal to.
+   * @param callback_identity Receives the removed identity only when callbacks
+   *                          should be fired by the caller.
+   */
+  bool EraseInternal(const CacheKey& key, const CacheEntryIdentity* identity, EraseReason reason,
+                     std::optional<CacheEntryIdentity>& callback_identity);
+
   // LRU list: most recently used at front
   std::list<CacheKey> lru_list_;
 
@@ -531,13 +531,11 @@ class QueryCache {
   // Statistics
   CacheStatistics stats_;
 
-  // Eviction callback (per-key, fired by Erase)
-  EvictionCallback eviction_callback_;
+  // Per-entry eviction callback (fired by Erase)
   IdentityEvictionCallback identity_eviction_callback_;
 
-  // Optional batch eviction callback (fired by Clear/ClearTable/EvictForSpace/
-  // RefreshLRU when set). Falls back to looping eviction_callback_ if unset.
-  BatchEvictionCallback batch_eviction_callback_;
+  // Batch eviction callback (fired by Clear/ClearTable/EvictForSpace/RefreshLRU);
+  // falls back to looping identity_eviction_callback_ if unset.
   BatchIdentityEvictionCallback batch_identity_eviction_callback_;
 
   // Keys pending cleanup (collected by Lookup, processed by RefreshLRU)
@@ -556,9 +554,8 @@ class QueryCache {
   /**
    * @brief Evict entries to make room for new entry
    * @param required_bytes Bytes needed for new entry
-   * @param[out] evicted_keys If non-null, removed keys are appended here so the
-   *             caller can fire eviction_callback_ AFTER releasing mutex_
-   *             (lock-order safety).
+   * @param[out] evicted_entries If non-null, removed identities are appended here so the
+   *             caller can fire the eviction callbacks after releasing mutex_.
    * @return true if enough space was freed
    * @pre Caller must hold exclusive lock on mutex_
    */
@@ -568,16 +565,11 @@ class QueryCache {
    * @brief Remove a single cache entry while holding exclusive lock
    * @param iter Iterator to entry in cache_map_
    * @param reason Why the entry is being removed
-   * @param[out] evicted_keys If non-null, the removed key is appended here so
-   *             that the caller can invoke eviction_callback_ AFTER releasing
-   *             the lock (avoids QueryCache::mutex_ ->
-   *             InvalidationManager::mutex_ acquisition order while a reverse
-   *             code path acquires the locks in the opposite order).
+   * @param[out] evicted_entries If non-null, the removed identity is appended here so
+   *             the caller can fire the eviction callbacks after releasing the lock.
    * @pre Caller must hold exclusive lock on mutex_
    *
-   * @note This function never calls eviction_callback_ directly. Callers that
-   *       need external bookkeeping must pass @p evicted_keys and invoke the
-   *       callback themselves after releasing the lock.
+   * @note Never invokes eviction callbacks itself.
    */
   void RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalReason reason,
                          std::vector<CacheEntryIdentity>* evicted_entries = nullptr);
@@ -589,12 +581,10 @@ class QueryCache {
   void RemoveTableIndexEntryLocked(const CacheKey& key, const std::string& table);
 
   /**
-   * @brief Invoke eviction_callback_ for each key in @p keys.
+   * @brief Invoke the eviction callbacks for @p entries.
    *
-   * MUST be called WITHOUT holding mutex_. The callback typically acquires
-   * InvalidationManager::mutex_ which is a foreign lock; calling it while
-   * holding our shared/unique_lock risks lock-order inversion deadlocks
-   * with InvalidateAffectedEntries.
+   * MUST be called WITHOUT holding mutex_: the callbacks acquire
+   * InvalidationManager::mutex_.
    *
    * @note Safe to call with an empty vector (no-op).
    */

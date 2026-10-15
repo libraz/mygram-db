@@ -9,8 +9,10 @@
 #include <chrono>
 #include <iterator>
 
+#include "cache/cache_key.h"
 #include "cache/cache_manager.h"
 #include "query/synonym_dictionary.h"
+#include "server/log_field_names.h"
 #include "server/search_pipeline.h"
 #include "server/table_catalog.h"
 #include "utils/string_utils.h"
@@ -155,8 +157,7 @@ void SearchHandler::PopulatePostPipelineDebugInfo(const query::Query& query,
   // Map the pipeline's authoritative miss reason to the debug protocol's
   // CacheDebugInfo::Status. The pipeline distinguishes Stale vs NotFound vs
   // Disabled; we collapse Stale and Disabled into the matching debug enums
-  // and report NotFound otherwise. Falling through to a single MISS_NOT_FOUND
-  // (the previous behaviour) hid genuinely-disabled and stale cases.
+  // and report NotFound otherwise.
   switch (pipeline_output.cache_miss_reason) {
     case search_pipeline::CacheMissReason::kHit:
       // Should not reach here: the cache-hit branch is handled by
@@ -233,6 +234,10 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   output.cache_hit = pipeline_output->cache_hit;
   output.semantics_reproducible_by_single_term_ngram_and =
       pipeline_output->semantics_reproducible_by_single_term_ngram_and;
+  if (conn_ctx.debug_mode && pipeline_output->canonical_cache_key.has_value()) {
+    const auto& [hash_high, hash_low] = *pipeline_output->canonical_cache_key;
+    output.debug_info.cache_info.cache_key = cache::CacheKey{hash_high, hash_low}.ToString();
+  }
 
   // Populate debug_info if requested. The cache-hit path produces a different
   // set of debug fields than the cache-miss paths.
@@ -262,7 +267,7 @@ std::string SearchHandler::ExecuteSearchPipeline(const query::Query& query, Conn
   const double elapsed_ms = std::chrono::duration<double, std::milli>(request_elapsed).count();
   mygram::utils::StructuredLog()
       .Event("search_completed")
-      .Field("table", query.table)
+      .Field(log_fields::kFieldTable, query.table)
       .Field("query_time_ms", elapsed_ms)
       .Field("result_count", static_cast<int64_t>(output.results.size()))
       .Field("cache_hit", output.cache_hit)
@@ -360,11 +365,13 @@ std::string SearchHandler::HandleSearch(const query::Query& query, ConnectionCon
     }
   }
 
-  // Validate HIGHLIGHT is possible (requires stored normalized text)
+  // This defensive guard covers stores with text retention disabled. In
+  // production, normalized text is retained regardless of memory.verify_text.
   if (effective_query.highlight.has_value() && output.current_doc_store != nullptr &&
       !output.current_doc_store->IsStoreTextsEnabled()) {
     return ResponseFormatter::FormatError(
-        "HIGHLIGHT requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in configuration.",
+        "HIGHLIGHT requires normalized text in the document store. memory.verify_text controls substring "
+        "post-filtering only; it does not enable text retention.",
         mygram::utils::ErrorCode::kNotImplemented);
   }
 

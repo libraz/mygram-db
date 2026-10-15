@@ -6,13 +6,79 @@
 #include "app/signal_manager.h"
 
 #include <gtest/gtest.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
+#include <array>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <thread>
 
 namespace mygramdb::app {
 namespace {
+
+int g_sigaction_call_count = 0;
+int g_sigaction_fail_at = 0;
+
+void PriorSignalHandler(int) {}
+
+int FailSigactionAtConfiguredCall(int signal, const struct sigaction* action, struct sigaction* old_action) {
+  ++g_sigaction_call_count;
+  if (g_sigaction_call_count == g_sigaction_fail_at) {
+    errno = EIO;
+    return -1;
+  }
+  return ::sigaction(signal, action, old_action);
+}
+
+bool HasExpectedDisposition(int signal, const struct sigaction& expected) {
+  struct sigaction actual {};
+  if (::sigaction(signal, nullptr, &actual) != 0 || actual.sa_handler != expected.sa_handler ||
+      actual.sa_flags != expected.sa_flags) {
+    return false;
+  }
+  for (const int masked_signal : {SIGINT, SIGTERM, SIGUSR1, SIGPIPE}) {
+    if (sigismember(&actual.sa_mask, masked_signal) != sigismember(&expected.sa_mask, masked_signal)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+int CheckRegistrationFailureRestoresDispositions() {
+  constexpr std::array<int, 4> signals = {SIGINT, SIGTERM, SIGUSR1, SIGPIPE};
+  std::array<struct sigaction, signals.size()> expected_actions{};
+
+  for (size_t i = 0; i < signals.size(); ++i) {
+    struct sigaction action {};
+    action.sa_handler = (signals[i] == SIGPIPE) ? SIG_IGN : PriorSignalHandler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    if (::sigaction(signals[i], &action, nullptr) != 0 || ::sigaction(signals[i], nullptr, &expected_actions[i]) != 0) {
+      return 10 + static_cast<int>(i);
+    }
+  }
+
+  for (int fail_at = 1; fail_at <= static_cast<int>(signals.size()); ++fail_at) {
+    g_sigaction_call_count = 0;
+    g_sigaction_fail_at = fail_at;
+    auto result = SignalManager::Create(&FailSigactionAtConfiguredCall);
+    if (result.has_value()) {
+      result.value().reset();
+      return 20 + fail_at;
+    }
+    if (g_sigaction_call_count != fail_at) {
+      return 30 + fail_at;
+    }
+    for (size_t i = 0; i < signals.size(); ++i) {
+      if (!HasExpectedDisposition(signals[i], expected_actions[i])) {
+        return 40 + static_cast<int>(i);
+      }
+    }
+  }
+  return 0;
+}
 
 class SignalManagerTest : public ::testing::Test {
  protected:
@@ -22,6 +88,19 @@ class SignalManagerTest : public ::testing::Test {
     SignalManager::signal_flags_.log_reopen_requested = 0;
   }
 };
+
+TEST_F(SignalManagerTest, RegistrationFailureRestoresOnlySuccessfullyInstalledHandlers) {
+  const pid_t child = ::fork();
+  ASSERT_NE(child, -1) << "fork failed";
+  if (child == 0) {
+    ::_exit(CheckRegistrationFailureRestoresDispositions());
+  }
+
+  int status = 0;
+  ASSERT_EQ(::waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0) << "child failure code";
+}
 
 TEST_F(SignalManagerTest, CreateSucceeds) {
   auto result = SignalManager::Create();

@@ -43,6 +43,7 @@ class SyncOperationManagerApiTest : public ::testing::Test {
     table_owners_["users"] = std::move(ctx);
 
     config_ = std::make_unique<config::Config>();
+    config_->replication.server_id = 123;
     config_->mysql.host = "localhost";
     config_->mysql.port = 3306;
     config_->mysql.user = "test";
@@ -151,10 +152,39 @@ TEST_F(SyncOperationManagerApiTest, ActiveSyncStatusUsesClientCompletableFrame) 
 
   const std::string status = manager_->GetSyncStatus();
   EXPECT_TRUE(status.rfind("OK SYNC_STATUS\r\n", 0) == 0) << status;
-  EXPECT_TRUE(client::detail::IsResponseComplete(status)) << status;
+  // The transport appends one CRLF to every response body.
+  auto frame = client::detail::BeginResponseFrame("SYNC STATUS", /*debug_mode=*/false);
+  EXPECT_TRUE(client::detail::IsResponseComplete(status + "\r\n", frame)) << status;
 
   manager_->RequestShutdown();
   EXPECT_TRUE(manager_->WaitForCompletion(/*timeout_sec=*/30));
+}
+
+TEST_F(SyncOperationManagerApiTest, CompletedSyncStatusKeepsItsCompletionDuration) {
+  using Clock = std::chrono::steady_clock;
+  const auto start = Clock::now() - std::chrono::seconds(3);
+  const auto end = start + std::chrono::milliseconds(1500);
+  manager_->SetTerminalSyncStateForTest("users", "COMPLETED", start, end, 7);
+
+  const auto read_elapsed = [this]() {
+    const std::string status = manager_->GetSyncStatus();
+    const auto begin = status.find(" time=");
+    EXPECT_NE(begin, std::string::npos) << status;
+    if (begin == std::string::npos) {
+      return std::string{};
+    }
+    const auto value_begin = begin + std::string(" time=").size();
+    const auto value_end = status.find('s', value_begin);
+    EXPECT_NE(value_end, std::string::npos) << status;
+    return status.substr(value_begin, value_end - value_begin);
+  };
+
+  const std::string first = read_elapsed();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const std::string second = read_elapsed();
+
+  EXPECT_EQ(first, "1.5");
+  EXPECT_EQ(second, first);
 }
 
 TEST_F(SyncOperationManagerApiTest, StopSyncSignalsCancellationWithoutJoiningWorker) {
@@ -176,79 +206,48 @@ TEST_F(SyncOperationManagerApiTest, StopSyncSignalsCancellationWithoutJoiningWor
   EXPECT_TRUE(manager_->WaitForCompletion(/*timeout_sec=*/2));
 }
 
-/**
- * @brief P0-D regression: concurrent StartSync calls for the same table must
- *        be serialized.
- *
- * Pre-fix StartSync had this sequence under sync_mutex_:
- *   1. mark sync_states_[t].is_running = true
- *   2. move out the previous std::thread for table t
- *   3. unlock sync_mutex_
- *   4. join the previous thread
- *   5. relock sync_mutex_
- *   6. spawn the new std::thread
- *
- * During the unlock window, sync_states_[t].is_running was true but
- * sync_threads_ no longer contained the table - a partially-modified state
- * that another StartSync/StopSync racing in could observe. The fix uses a
- * "JOINING_PREVIOUS" status flag and re-validates state after the join.
- *
- * This test spawns several threads each calling StartSync("users") at the
- * same time. With the fix, at any instant at most one of them holds the
- * slot: a winner returns OK and the others receive an "already in progress"
- * error rather than racing into a duplicate thread launch or a deadlock.
- *
- * NOTE: BuildSnapshotAsync attempts a real MySQL connection that will fail
- * (no MySQL is available in unit tests). That is fine - the worker thread
- * will set state to FAILED and exit. The point of this test is the
- * StartSync return values from the racing callers, not the snapshot
- * outcome.
- *
- * IMPORTANT - why we assert "no two concurrent winners" rather than a total
- * count of exactly one winner: the spawned worker fails its MySQL connection
- * almost immediately (no server in unit tests) and releases the slot. Under
- * slow/contended scheduling (e.g. the coverage CI runner) a thread that was
- * late to reach StartSync can then legitimately win the *freed* slot, so the
- * total number of successful StartSync calls across the burst can exceed one
- * without any race. The genuine invariant of "race-free concurrent StartSync"
- * is that two callers never hold the slot at the same time, which is what we
- * verify here by tracking the peak number of simultaneously-active winners.
- */
+/** Race eight StartSync calls while the winning worker holds the coordinator. */
 TEST_F(SyncOperationManagerApiTest, ConcurrentStartSyncIsRaceFree) {
   constexpr int kThreadCount = 8;
 
   std::atomic<int> ready{0};
   std::atomic<bool> go{false};
-  std::atomic<int> active_winners{0};
-  std::atomic<int> peak_concurrent_winners{0};
+  std::atomic<int> config_provider_calls{0};
+  std::atomic<int> worker_starts{0};
+  std::promise<void> worker_entered_promise;
+  auto worker_entered = worker_entered_promise.get_future();
+  std::promise<void> release_worker_promise;
+  const auto release_worker = release_worker_promise.get_future().share();
+  manager_->SetCurrentConfigProvider(
+      [this, &config_provider_calls, &worker_starts, &worker_entered_promise, &release_worker]() {
+        const int call = config_provider_calls.fetch_add(1, std::memory_order_relaxed);
+        if (call == 1) {
+          worker_starts.fetch_add(1, std::memory_order_relaxed);
+          worker_entered_promise.set_value();
+          release_worker.wait();
+        }
+        return *config_;
+      });
+
   std::atomic<int> success_count{0};
+  std::atomic<int> already_running_count{0};
   std::vector<std::future<bool>> futures;
   futures.reserve(kThreadCount);
 
   for (int i = 0; i < kThreadCount; ++i) {
-    futures.push_back(std::async(
-        std::launch::async, [this, &ready, &go, &active_winners, &peak_concurrent_winners, &success_count]() {
-          ready.fetch_add(1, std::memory_order_release);
-          while (!go.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-          }
-          auto r = manager_->StartSync("users");
-          if (r.has_value()) {
-            // We hold the slot. Record how many winners are simultaneously
-            // inside this window; the manager's serialization guarantees this
-            // can never exceed one. The background worker only releases the
-            // slot after StartSync returns, so the window opened here cannot
-            // overlap another winner's window unless StartSync double-launched.
-            const int now_active = active_winners.fetch_add(1, std::memory_order_acq_rel) + 1;
-            int prev_peak = peak_concurrent_winners.load(std::memory_order_relaxed);
-            while (now_active > prev_peak &&
-                   !peak_concurrent_winners.compare_exchange_weak(prev_peak, now_active, std::memory_order_relaxed)) {
-            }
-            success_count.fetch_add(1, std::memory_order_relaxed);
-            active_winners.fetch_sub(1, std::memory_order_acq_rel);
-          }
-          return r.has_value();
-        }));
+    futures.push_back(std::async(std::launch::async, [this, &ready, &go, &success_count, &already_running_count]() {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      auto r = manager_->StartSync("users");
+      if (r.has_value()) {
+        success_count.fetch_add(1, std::memory_order_relaxed);
+      } else if (r.error().code() == mygram::utils::ErrorCode::kSyncAlreadyInProgress) {
+        already_running_count.fetch_add(1, std::memory_order_relaxed);
+      }
+      return r.has_value();
+    }));
   }
 
   while (ready.load(std::memory_order_acquire) < kThreadCount) {
@@ -256,35 +255,30 @@ TEST_F(SyncOperationManagerApiTest, ConcurrentStartSyncIsRaceFree) {
   }
   go.store(true, std::memory_order_release);
 
+  const bool worker_held = worker_entered.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+  bool release_sent = false;
+  if (!worker_held) {
+    release_worker_promise.set_value();
+    release_sent = true;
+  }
+
   int completed = 0;
   for (auto& f : futures) {
     f.get();
     ++completed;
   }
 
-  // The core race-freedom invariant: two StartSync callers must never hold
-  // the slot at the same time. A pre-fix double-launch would let two winners
-  // observe an active count of two here.
-  EXPECT_LE(peak_concurrent_winners.load(), 1)
-      << "Two concurrent StartSync calls held the slot simultaneously (double-launch race)";
-
-  // At least one caller must win; the slot cannot be permanently lost.
-  EXPECT_GE(success_count.load(), 1) << "At least one concurrent StartSync should win the slot";
-  // Every thread must return cleanly (no exception / hang); winners + losers
-  // account for all callers.
+  EXPECT_TRUE(worker_held) << "the winning SYNC worker did not reach the test gate";
+  EXPECT_EQ(worker_starts.load(), 1);
+  EXPECT_EQ(success_count.load(), 1) << "exactly one caller must start while its worker holds the slot";
+  EXPECT_EQ(already_running_count.load(), kThreadCount - 1);
   EXPECT_EQ(completed, kThreadCount);
 
-  // After the race resolves, only 'users' may ever appear as syncing; no
-  // OTHER table has spuriously become syncing, and there is no deadlock.
-  EXPECT_LE(manager_->GetSyncingTables().size(), static_cast<size_t>(1))
-      << "Only 'users' should ever appear in syncing_tables_";
-
-  // Wait for the background sync thread to terminate so the destructor's
-  // shutdown path is exercised cleanly. WaitForCompletion returns once the
-  // worker (which is failing to connect to MySQL) exits.
+  if (!release_sent) {
+    release_worker_promise.set_value();
+  }
   manager_->RequestShutdown();
-  EXPECT_TRUE(manager_->WaitForCompletion(/*timeout_sec=*/30))
-      << "Sync worker should exit within timeout (likely via MySQL connection failure)";
+  EXPECT_TRUE(manager_->WaitForCompletion(/*timeout_sec=*/30));
 }
 
 }  // namespace

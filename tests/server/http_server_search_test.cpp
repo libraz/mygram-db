@@ -573,7 +573,29 @@ TEST_F(HttpServerTest, SearchScoreSortRejectsWhenTextStorageDisabled) {
 
   ASSERT_TRUE(res);
   EXPECT_EQ(res->status, 400);
-  EXPECT_NE(res->body.find("SORT _score requires normalized text storage"), std::string::npos);
+  EXPECT_NE(res->body.find("SORT _score requires normalized text in the document store"), std::string::npos);
+  EXPECT_NE(res->body.find("memory.verify_text controls substring post-filtering only"), std::string::npos);
+  EXPECT_EQ(res->body.find("Set memory.verify_text"), std::string::npos);
+}
+
+TEST_F(HttpServerTest, HighlightReportsMissingTextWithoutMisleadingVerifyTextHint) {
+  doc_store_->SetStoreTexts(false);
+
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  const json request_body = {
+      {"q", "machine"},
+      {"highlight", {{"open_tag", "<b>"}, {"close_tag", "</b>"}}},
+  };
+
+  auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400);
+  EXPECT_NE(res->body.find("HIGHLIGHT requires normalized text in the document store"), std::string::npos);
+  EXPECT_NE(res->body.find("memory.verify_text controls substring post-filtering only"), std::string::npos);
+  EXPECT_EQ(res->body.find("Set memory.verify_text"), std::string::npos);
 }
 
 TEST_F(HttpServerTest, SearchSupportsJsonFuzzy) {
@@ -1043,39 +1065,41 @@ TEST_F(HttpServerTest, SearchRejectsInvalidPaginationBounds) {
 
   httplib::Client client("127.0.0.1", port_);
 
-  auto expect_bad_request = [&](json request_body, const std::string& expected_error_fragment) {
+  auto expect_bad_request = [&](json request_body, mygram::utils::ErrorCode expected_code,
+                                const std::string& expected_error_fragment) {
     auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
     ASSERT_TRUE(res);
     EXPECT_EQ(res->status, 400);
     auto body = json::parse(res->body);
     ASSERT_TRUE(body.contains("error"));
+    EXPECT_EQ(body["error_code"], static_cast<int>(expected_code));
     EXPECT_NE(body["error"].get<std::string>().find(expected_error_fragment), std::string::npos);
   };
 
   json negative_limit;
   negative_limit["q"] = "machine";
   negative_limit["limit"] = -1;
-  expect_bad_request(negative_limit, "Invalid limit");
+  expect_bad_request(negative_limit, mygram::utils::ErrorCode::kQueryInvalidLimit, "Invalid limit");
 
   json zero_limit;
   zero_limit["q"] = "machine";
   zero_limit["limit"] = 0;
-  expect_bad_request(zero_limit, "Invalid limit");
+  expect_bad_request(zero_limit, mygram::utils::ErrorCode::kQueryInvalidLimit, "Invalid limit");
 
   json too_large_limit;
   too_large_limit["q"] = "machine";
   too_large_limit["limit"] = config::defaults::kMaxLimit + 1;
-  expect_bad_request(too_large_limit, "Invalid limit");
+  expect_bad_request(too_large_limit, mygram::utils::ErrorCode::kQuerySyntaxError, "LIMIT exceeds maximum");
 
   json negative_offset;
   negative_offset["q"] = "machine";
   negative_offset["offset"] = -1;
-  expect_bad_request(negative_offset, "Invalid offset");
+  expect_bad_request(negative_offset, mygram::utils::ErrorCode::kQueryInvalidOffset, "Invalid offset");
 
   json too_large_offset;
   too_large_offset["q"] = "machine";
   too_large_offset["offset"] = 4294967296LL;
-  expect_bad_request(too_large_offset, "Invalid offset");
+  expect_bad_request(too_large_offset, mygram::utils::ErrorCode::kQueryInvalidOffset, "Invalid offset");
 }
 
 TEST_F(HttpServerTest, SearchInvalidJSON) {

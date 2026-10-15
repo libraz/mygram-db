@@ -151,7 +151,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
               .Event("optimize_rejected")
               .Field("reason", "insufficient_memory")
               .Field("details", oss.str())
-              .Field("table", table_name)
+              .Field(log_fields::kFieldTable, table_name)
               .Warn();
           return ResponseFormatter::FormatError("Insufficient memory for optimization: " + oss.str(),
                                                 mygram::utils::ErrorCode::kServerBusy);
@@ -159,7 +159,7 @@ std::string DebugHandler::Handle(const query::Query& query, ConnectionContext& c
 
         mygram::utils::StructuredLog()
             .Event("index_optimization_starting")
-            .Field("table", table_name)
+            .Field(log_fields::kFieldTable, table_name)
             .Field("memory_health", mygram::utils::MemoryHealthStatusToString(memory_health))
             .Field("estimated_memory", mygram::utils::FormatBytes(estimated_memory))
             .Field("index_size", mygram::utils::FormatBytes(index_memory))

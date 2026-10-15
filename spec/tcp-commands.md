@@ -201,7 +201,8 @@ on the same connection; otherwise they return
 `CACHE CLEAR`, `CACHE STATS`, `CACHE ENABLE`, `CACHE DISABLE`,
 `SET`, `SHOW VARIABLES`.
 
-**Permitted pre-auth:** `AUTH`, `SEARCH`, `COUNT`, `GET`, `FACET`, `INFO`. When
+**Permitted pre-auth:** `AUTH`, `SEARCH`, `COUNT`, `GET`, `FACET`, `INFO` (its
+`# Replication` section is withheld until `AUTH`; see §10.1). When
 `api.admin_token` is empty, the gate is disabled entirely and every command is permitted
 (`src/server/request_dispatcher.cpp`).
 
@@ -388,6 +389,9 @@ cache: hit|miss|disabled\r\n
 [cache_key: <v>\r\n]
 ```
 
+`cache_key` is emitted by both `SEARCH` and `COUNT` whenever a canonical query key exists,
+whatever the `cache:` status (including `disabled`).
+
 The bracketed pipeline-stage counts and extended cache fields are emitted for the
 non-highlight form only; the highlight form emits `highlight: on` and the headline cache line
 only (`src/server/response_formatter.cpp`). Stage counts are also suppressed on a
@@ -401,12 +405,12 @@ cache hit (`src/server/response_formatter.cpp`, `src/server/handlers/search_hand
 | Unknown table | `ERROR 4007 Table not found: <name>` | `src/server/handlers/command_handler.cpp` |
 | `DUMP LOAD` in progress | `ERROR 6028 Server is loading, please try again later` | `src/server/handlers/command_handler.cpp` |
 | Table is being rebuilt by `SYNC` | `ERROR 6029 Table '<name>' is synchronizing, please try again later` | `src/server/handlers/command_handler.cpp` |
-| `HIGHLIGHT` without stored normalized text | `ERROR 4 HIGHLIGHT requires normalized text storage. Set memory.verify_text to "ascii" or "all" in configuration.` | `src/server/handlers/search_handler.cpp` |
+| `HIGHLIGHT` when normalized text is unavailable in the document store | `ERROR 4 HIGHLIGHT requires normalized text in the document store. memory.verify_text controls substring post-filtering only; it does not enable text retention.` | `src/server/handlers/search_handler.cpp` |
 | `SORT _score` with BM25 disabled | `ERROR 3007 SORT _score requires BM25 to be enabled in configuration` | `src/server/search_pipeline.cpp` |
-| `SORT _score` without stored normalized text | `ERROR 4 SORT _score requires normalized text storage. ...` | `src/server/search_pipeline.cpp` |
+| `SORT _score` when normalized text is unavailable in the document store | `ERROR 4 SORT _score requires normalized text in the document store. memory.verify_text controls substring post-filtering only; it does not enable text retention.` | `src/server/search_pipeline.cpp` |
 | `SORT <col>` where `<col>` is neither a filter column of the resolved table nor its primary key | `ERROR 3007 Sort column '<col>' not found. Column does not exist as filter column or primary key. Check column name spelling.` | `ResultSorter::SortAndPaginate` (`src/query/result_sorter.cpp`) |
 | Index or document store unavailable | `ERROR 5 Index not available` / `ERROR 5 Document store not available` | `src/server/handlers/search_handler.cpp` |
-| A search term too short to produce n-grams, with normalized text not stored | `ERROR 4000 Query term is too short for n-gram search and requires normalized text storage. Set memory.verify_text to "ascii" or "all" in configuration.` | `src/server/search_pipeline.cpp` |
+| A search term too short to produce n-grams, when normalized text is unavailable for substring fallback | `ERROR 4000 Query term is too short for n-gram search and requires normalized text for substring fallback. memory.verify_text controls substring post-filtering only; it does not enable text retention.` | `src/server/search_pipeline.cpp` |
 
 **The sort-column check is result-set dependent.** `SortAndPaginateResults`
 (`src/server/search_pipeline.cpp`) routes every non-`_score` `SEARCH` through
@@ -701,6 +705,9 @@ END
 `USE_MYSQL` builds (`src/server/response_formatter.cpp`). Command counters are emitted
 only when non-zero (`src/server/response_formatter.cpp`). `INFO` refreshes the
 peak-memory statistic as a side effect (`src/server/handlers/admin_handler.cpp`).
+When `api.admin_token` is set, the `# Replication` section is withheld from a
+connection that has not completed `AUTH`; with no token configured it is always
+present (`src/server/handlers/admin_handler.cpp`).
 
 Memory, index and per-table figures come from a snapshot shared with the HTTP
 surface and rebuilt at most once a second, so two `INFO` calls inside that window
@@ -986,7 +993,7 @@ Every citation in the table below is `src/server/handlers/cache_handler.cpp`.
 | `CACHE CLEAR` | `OK CACHE_CLEARED` | `ERROR 8001 Cache not configured`; `ERROR 8001 Cache is disabled` |
 | `CACHE CLEAR <table>` | `OK CACHE_CLEARED table=<resolved>` | `ERROR 4008 Table catalog is not available`; `ERROR 4007 Table not found or ambiguous: <name>` |
 | `CACHE STATS` | multi-line, see below | `ERROR 8001 Cache not configured` |
-| `CACHE ENABLE` | `OK CACHE_ENABLED` | `ERROR 8001 Cache not configured`; `ERROR 8001 Cache cannot be enabled: the invalidation worker could not be started.` |
+| `CACHE ENABLE` | `OK CACHE_ENABLED` | `ERROR 8001 Cache not configured`; `ERROR 8001 Cache cannot be enabled` (runtime-variable manager); `ERROR 8001 Cache cannot be enabled: the invalidation worker could not be started.` (fallback without a runtime-variable manager) |
 | `CACHE DISABLE` | `OK CACHE_DISABLED` | `ERROR 8001 Cache not configured` |
 
 `CACHE STATS` response (`src/server/handlers/cache_handler.cpp`):
@@ -1204,7 +1211,7 @@ ERROR <numeric-code> <message>
 | 3008 | `kQueryInvalidLimit` | LIMIT rejections |
 | 3009 | `kQueryInvalidOffset` | OFFSET rejections |
 | 3010 | `kQueryExpressionParseError` | malformed boolean search expression |
-| 4000 | `kIndexNotFound` | search term too short for n-gram search without stored normalized text; unknown `FACET` column; index, document store or filter index missing behind a resolved table |
+| 4000 | `kIndexNotFound` | search term too short for n-gram search when normalized text needed for substring fallback is unavailable; unknown `FACET` column; index, document store or filter index missing behind a resolved table |
 | 4004 | `kIndexDocumentNotFound` | `GET` miss |
 | 4007 | `kTableNotFound` | unknown/ambiguous table; bare name under multi-database config; empty catalog on `OPTIMIZE` |
 | 4008 | `kCatalogNotInitialized` | catalog missing on `INFO`, `OPTIMIZE`, `CACHE CLEAR <table>`, `SYNC` |

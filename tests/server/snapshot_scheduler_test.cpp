@@ -24,6 +24,7 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "mysql/binlog_reader_interface.h"
+#include "server/operation_coordinator.h"
 #include "server/replication_pause_counter.h"
 #include "server/server_stats.h"
 #include "server/server_types.h"
@@ -34,6 +35,13 @@ using namespace mygramdb::server;
 using namespace mygramdb::config;
 using namespace mygramdb::index;
 using namespace mygramdb::storage;
+
+namespace mygramdb::server {
+class SnapshotSchedulerTestAccess {
+ public:
+  static void RunCycle(SnapshotScheduler& scheduler) { scheduler.RunSnapshotCycle(); }
+};
+}  // namespace mygramdb::server
 
 namespace {
 
@@ -224,6 +232,107 @@ TEST_F(SnapshotSchedulerTest, DisabledWithNegativeInterval) {
   EXPECT_FALSE(scheduler.IsRunning());
 }
 
+TEST_F(SnapshotSchedulerTest, ReadinessSkipLeavesStateCountersAndRetentionUntouched) {
+  DumpConfig dump_config;
+  dump_config.interval_sec = 60;
+  dump_config.retain = 1;
+  const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+  const auto old_dump_a = test_dir_ / "auto_old_a.dmp";
+  const auto old_dump_b = test_dir_ / "auto_old_b.dmp";
+  CreateDummyDmpFile(test_dir_, old_dump_a.filename().string());
+  CreateDummyDmpFile(test_dir_, old_dump_b.filename().string());
+  std::filesystem::last_write_time(old_dump_a, old_time);
+  std::filesystem::last_write_time(old_dump_b, old_time);
+
+  DumpProgress progress;
+  progress.Reset(DumpStatus::FAILED, "prior.dmp", 4);
+  progress.Fail("previous failure");
+  const auto progress_before = progress.GetSnapshot();
+  ServerStats stats;
+  replication_pause::Counter pause_counter;
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_, &pause_counter, nullptr, nullptr,
+                              {}, &optimization_in_progress_, nullptr, &progress, &stats, nullptr,
+                              [] { return false; });
+  mygramdb::server::SnapshotSchedulerTestAccess::RunCycle(scheduler);
+
+  const auto progress_after = progress.GetSnapshot();
+  EXPECT_EQ(progress_after.status, progress_before.status);
+  EXPECT_EQ(progress_after.filepath, progress_before.filepath);
+  EXPECT_EQ(progress_after.current_table, progress_before.current_table);
+  EXPECT_EQ(progress_after.tables_processed, progress_before.tables_processed);
+  EXPECT_EQ(progress_after.tables_total, progress_before.tables_total);
+  EXPECT_EQ(progress_after.start_time, progress_before.start_time);
+  EXPECT_EQ(progress_after.end_time, progress_before.end_time);
+  EXPECT_EQ(progress_after.error_message, progress_before.error_message);
+  EXPECT_EQ(progress_after.last_result_filepath, progress_before.last_result_filepath);
+  EXPECT_EQ(stats.GetDumpFailuresAuto(), 0U);
+  EXPECT_FALSE(dump_save_in_progress_.load(std::memory_order_acquire));
+  EXPECT_FALSE(replication_paused_for_dump_.load(std::memory_order_acquire));
+  EXPECT_FALSE(pause_counter.IsPaused());
+  EXPECT_TRUE(std::filesystem::exists(old_dump_a));
+  EXPECT_TRUE(std::filesystem::exists(old_dump_b));
+}
+
+TEST_F(SnapshotSchedulerTest, FailedSnapshotDoesNotRunRetention) {
+  DumpConfig dump_config;
+  dump_config.interval_sec = 60;
+  dump_config.retain = 1;
+  Config failing_config = full_config_;
+  failing_config.dump.restore_memory_budget_mb = 0;
+  const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+  const auto old_dump_a = test_dir_ / "auto_old_a.dmp";
+  const auto old_dump_b = test_dir_ / "auto_old_b.dmp";
+  CreateDummyDmpFile(test_dir_, old_dump_a.filename().string());
+  CreateDummyDmpFile(test_dir_, old_dump_b.filename().string());
+  std::filesystem::last_write_time(old_dump_a, old_time);
+  std::filesystem::last_write_time(old_dump_b, old_time);
+
+  ServerStats stats;
+  DumpProgress progress;
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &failing_config, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_, nullptr, nullptr, nullptr, {},
+                              &optimization_in_progress_, nullptr, &progress, &stats);
+  mygramdb::server::SnapshotSchedulerTestAccess::RunCycle(scheduler);
+
+  EXPECT_EQ(stats.GetDumpFailuresAuto(), 1U);
+  EXPECT_EQ(progress.GetSnapshot().status, DumpStatus::FAILED);
+  EXPECT_TRUE(std::filesystem::exists(old_dump_a));
+  EXPECT_TRUE(std::filesystem::exists(old_dump_b));
+}
+
+TEST_F(SnapshotSchedulerTest, SuccessfulSnapshotRunsRetention) {
+  DumpConfig dump_config;
+  dump_config.interval_sec = 60;
+  dump_config.retain = 1;
+  const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+  const auto old_dump_a = test_dir_ / "auto_old_a.dmp";
+  const auto old_dump_b = test_dir_ / "auto_old_b.dmp";
+  const auto manual_dump = test_dir_ / "operator.dmp";
+  CreateDummyDmpFile(test_dir_, old_dump_a.filename().string());
+  CreateDummyDmpFile(test_dir_, old_dump_b.filename().string());
+  CreateDummyDmpFile(test_dir_, manual_dump.filename().string());
+  std::filesystem::last_write_time(old_dump_a, old_time);
+  std::filesystem::last_write_time(old_dump_b, old_time);
+
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_);
+  mygramdb::server::SnapshotSchedulerTestAccess::RunCycle(scheduler);
+
+  EXPECT_FALSE(std::filesystem::exists(old_dump_a));
+  EXPECT_FALSE(std::filesystem::exists(old_dump_b));
+  EXPECT_TRUE(std::filesystem::exists(manual_dump));
+  bool found_new_snapshot = false;
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.is_regular_file() && entry.path().filename().string().rfind("auto_", 0) == 0 &&
+        entry.path().extension() == ".dmp") {
+      found_new_snapshot = true;
+    }
+  }
+  EXPECT_TRUE(found_new_snapshot);
+}
+
 TEST_F(SnapshotSchedulerTest, AutoSnapshotSkipsWhileDumpLoadInProgress) {
   DumpConfig dump_config;
   dump_config.interval_sec = 1;
@@ -300,6 +409,33 @@ TEST_F(SnapshotSchedulerTest, AutoSnapshotSkipsWhileSyncInProgress) {
       << "sync-skipped auto snapshot must release the dump-save guard";
 }
 
+TEST_F(SnapshotSchedulerTest, AutoSnapshotUsesCoordinatorWithoutSyncManager) {
+  OperationCoordinator coordinator;
+  auto competing_operation = coordinator.TryAcquire(LongOperation::kDumpSave, "manual save");
+  ASSERT_TRUE(competing_operation.has_value());
+
+  DumpConfig dump_config;
+  dump_config.interval_sec = 1;
+  dump_config.retain = 3;
+  SnapshotScheduler scheduler(dump_config, catalog_.get(), &full_config_, test_dir_.string(), nullptr,
+                              dump_save_in_progress_, replication_paused_for_dump_, nullptr, nullptr, nullptr, {},
+                              nullptr, nullptr, nullptr, nullptr, &coordinator);
+
+  ASSERT_TRUE(scheduler.Start().has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+  scheduler.Stop();
+
+  size_t snapshot_count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(test_dir_)) {
+    if (entry.path().filename().string().rfind("auto_", 0) == 0 && entry.path().extension() == ".dmp") {
+      ++snapshot_count;
+    }
+  }
+  EXPECT_EQ(snapshot_count, 0U);
+  EXPECT_FALSE(dump_save_in_progress_.load(std::memory_order_acquire));
+  competing_operation->Release();
+}
+
 // ===========================================================================
 // Cleanup tests
 // ===========================================================================
@@ -338,7 +474,7 @@ TEST_F(SnapshotSchedulerTest, CleanupRetainZeroSkipsCleanup) {
   EXPECT_TRUE(std::filesystem::exists(test_dir_ / "auto_20240102_120000.dmp"));
 }
 
-TEST_F(SnapshotSchedulerTest, DisabledSchedulerStillCleansOldManualDumpTempFiles) {
+TEST_F(SnapshotSchedulerTest, DisabledSchedulerPreservesUnmarkedOldManualDumpTempFiles) {
   const auto old_manual_temp = test_dir_ / "manual_backup.dmp.tmp.123.456";
   std::ofstream(old_manual_temp) << "manual temp";
   std::filesystem::last_write_time(old_manual_temp,
@@ -351,10 +487,10 @@ TEST_F(SnapshotSchedulerTest, DisabledSchedulerStillCleansOldManualDumpTempFiles
                               dump_save_in_progress_, replication_paused_for_dump_);
 
   ASSERT_TRUE(scheduler.Start().has_value());
-  EXPECT_FALSE(std::filesystem::exists(old_manual_temp));
+  EXPECT_TRUE(std::filesystem::exists(old_manual_temp));
 }
 
-TEST_F(SnapshotSchedulerTest, CleanupRemovesOldAutoAndManualDumpTempFiles) {
+TEST_F(SnapshotSchedulerTest, CleanupPreservesUnmarkedTempFiles) {
   const auto old_auto_temp = test_dir_ / "auto_20240101_120000.dmp.tmp.123.456";
   const auto recent_auto_temp = test_dir_ / "auto_20240102_120000.dmp.tmp.123.456";
   const auto old_manual_temp = test_dir_ / "manual_backup.dmp.tmp.123.456";
@@ -387,19 +523,17 @@ TEST_F(SnapshotSchedulerTest, CleanupRemovesOldAutoAndManualDumpTempFiles) {
   std::this_thread::sleep_for(std::chrono::milliseconds(1300));
   scheduler.Stop();
 
-  EXPECT_FALSE(std::filesystem::exists(old_auto_temp));
+  EXPECT_TRUE(std::filesystem::exists(old_auto_temp));
   EXPECT_TRUE(std::filesystem::exists(recent_auto_temp));
-  EXPECT_FALSE(std::filesystem::exists(old_manual_temp));
-  EXPECT_FALSE(std::filesystem::exists(old_legacy_temp));
+  EXPECT_TRUE(std::filesystem::exists(old_manual_temp));
+  EXPECT_TRUE(std::filesystem::exists(old_legacy_temp));
   EXPECT_TRUE(std::filesystem::exists(recent_manual_temp));
   EXPECT_TRUE(std::filesystem::exists(unrelated_temp));
 }
 
-// DUMP SAVE accepts any filename: the dump handler resolves the requested path
-// with no extension whitelist, so AtomicFileWriter derives the temp name from
-// whatever the operator asked for. The orphan sweep must key on the temp naming
-// AtomicFileWriter produces, not on a ".dmp" that may never be part of the name.
-TEST_F(SnapshotSchedulerTest, CleanupRemovesOldManualDumpTempFilesWithoutDmpExtension) {
+// A .tmp-shaped filename does not prove ownership by AtomicFileWriter. Keep
+// unmarked files even when their names resemble manual dump temporaries.
+TEST_F(SnapshotSchedulerTest, CleanupPreservesUnmarkedTempFilesWithoutDmpExtension) {
   const auto old_extensionless_temp = test_dir_ / "backup-20240101.tmp.123.456";
   const auto old_other_extension_temp = test_dir_ / "backup-20240101.bak.tmp.987.654";
   const auto old_legacy_extensionless_temp = test_dir_ / "backup-20240102.tmp";
@@ -429,9 +563,9 @@ TEST_F(SnapshotSchedulerTest, CleanupRemovesOldManualDumpTempFilesWithoutDmpExte
 
   ASSERT_TRUE(scheduler.Start().has_value());
 
-  EXPECT_FALSE(std::filesystem::exists(old_extensionless_temp));
-  EXPECT_FALSE(std::filesystem::exists(old_other_extension_temp));
-  EXPECT_FALSE(std::filesystem::exists(old_legacy_extensionless_temp));
+  EXPECT_TRUE(std::filesystem::exists(old_extensionless_temp));
+  EXPECT_TRUE(std::filesystem::exists(old_other_extension_temp));
+  EXPECT_TRUE(std::filesystem::exists(old_legacy_extensionless_temp));
   EXPECT_TRUE(std::filesystem::exists(recent_extensionless_temp));
   EXPECT_TRUE(std::filesystem::exists(undeliverable_suffix));
   EXPECT_TRUE(std::filesystem::exists(unrelated_file));

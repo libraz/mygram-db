@@ -560,9 +560,8 @@ TEST(SearchExpressionTest, LeadingPlusAndMinusRemainUnaryOperators) {
 /**
  * @brief Test ToQueryString wraps OR sub-expressions in parentheses
  *
- * Doc-vs-behavior regression: docstring used to claim no parens were added,
- * but the implementation always wrapped raw_expression in parens. Lock the
- * actual behaviour with a test so future doc/code drift is caught.
+ * ToQueryString always wraps raw_expression in parens; this pins that
+ * behaviour against its documentation.
  */
 TEST(SearchExpressionTest, ToQueryStringWrapsOrInParens) {
   auto result = ConvertSearchExpression("python OR ruby");
@@ -587,4 +586,69 @@ TEST(SearchExpressionTest, ToQueryStringQuotesLiteralTermsCollidingWithKeywords)
   EXPECT_EQ(*ConvertSearchExpression("NOT"), R"("NOT")");
   EXPECT_EQ(*ConvertSearchExpression("golang NOT old"), R"(golang AND "NOT" AND old)");
   EXPECT_EQ(*ConvertSearchExpression("+not"), R"("not")");
+}
+
+TEST(SearchExpressionTest, QuotedPhraseShapedLikeAGroupStaysLiteral) {
+  auto converted = ConvertSearchExpression("\"(a OR b)\"");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "\"(a OR b)\"");
+
+  auto parsed = ParseSearchExpression("\"(beta)\"");
+  ASSERT_TRUE(parsed) << parsed.error().message();
+  EXPECT_FALSE(parsed->HasComplexExpression());
+
+  auto simplified = SimplifySearchExpression("\"(beta)\"");
+  ASSERT_TRUE(simplified) << simplified.error().message();
+  EXPECT_EQ(simplified->main_term, "(beta)");
+
+  simplified = SimplifySearchExpression("foo -\"(x)\"");
+  ASSERT_TRUE(simplified) << simplified.error().message();
+  ASSERT_EQ(simplified->not_terms.size(), 1U);
+  EXPECT_EQ(simplified->not_terms[0], "(x)");
+}
+
+TEST(SearchExpressionTest, PrefixedGroupIsTaggedStructurally) {
+  auto parsed = ParseSearchExpression("+golang +(tutorial OR guide) -(old)");
+  ASSERT_TRUE(parsed) << parsed.error().message();
+  ASSERT_EQ(parsed->required_terms.size(), 2U);
+  EXPECT_EQ(parsed->required_is_group, (std::vector<bool>{false, true}));
+  ASSERT_EQ(parsed->excluded_terms.size(), 1U);
+  EXPECT_EQ(parsed->excluded_is_group, (std::vector<bool>{true}));
+  EXPECT_EQ(parsed->ToQueryString(), "golang AND (tutorial OR guide) AND NOT (old)");
+}
+
+TEST(SearchExpressionTest, MinusInsideGroupNegatesOnlyTheNextOperand) {
+  auto converted = ConvertSearchExpression("(a -(b c))");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "((a NOT (b c)))");
+
+  converted = ConvertSearchExpression("(a -) b");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "b AND ((a))");
+
+  converted = ConvertSearchExpression("(a - OR b)");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "((a OR b))");
+}
+
+TEST(SearchExpressionTest, OrIsAnOperatorOnlyAsAWholeToken) {
+  for (const std::string term : {"OR-tools", "OR.", "or's", "OR\xE5\x9B\x9E\xE8\xB7\xAF"}) {
+    auto parsed = ParseSearchExpression(term);
+    ASSERT_TRUE(parsed) << term << ": " << parsed.error().message();
+    EXPECT_FALSE(parsed->HasComplexExpression()) << term;
+    ASSERT_EQ(parsed->required_terms.size(), 1U) << term;
+    EXPECT_EQ(parsed->required_terms[0], term);
+  }
+
+  auto converted = ConvertSearchExpression("python OR-tools");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "python AND OR-tools");
+
+  converted = ConvertSearchExpression("OR\xE5\x9B\x9E\xE8\xB7\xAF \xE5\x85\xA5\xE9\x96\x80");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "OR\xE5\x9B\x9E\xE8\xB7\xAF AND \xE5\x85\xA5\xE9\x96\x80");
+
+  converted = ConvertSearchExpression("python\xE3\x80\x80OR\xE3\x80\x80ruby");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "(python OR ruby)");
 }

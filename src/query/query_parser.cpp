@@ -583,6 +583,24 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateFilterC
   return {};
 }
 
+mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateFilterCount(size_t count) {
+  if (count > kMaxTermCount) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kQuerySyntaxError,
+                                 "Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")"));
+  }
+  return {};
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateLimitUpperBound(uint64_t limit) {
+  if (limit > internal::kMaxLimit) {
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kQuerySyntaxError,
+                                 "LIMIT exceeds maximum of " + std::to_string(internal::kMaxLimit)));
+  }
+  return {};
+}
+
 mygram::utils::Expected<void, mygram::utils::Error> QueryParser::ValidateQueryLength(const Query& query) {
   if (max_query_length_ == 0) {
     return {};

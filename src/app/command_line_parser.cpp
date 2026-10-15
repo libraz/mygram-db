@@ -117,7 +117,7 @@ void CommandLineParser::PrintHelp(const char* program_name) {
   std::cout << "  -c, --config <file>            Configuration file path\n";
   std::cout << "  -d, --daemon                   Run as daemon (background process)\n";
   std::cout << "  -t, --config-test              Test configuration file and exit\n";
-  std::cout << "  -s, --schema <schema.json>     Use custom JSON Schema (optional)\n";
+  std::cout << "  -s, --schema <schema.json>     Add deployment-specific JSON Schema constraints\n";
   std::cout << "      --print-surface            Print the external surface snapshot and exit\n";
   std::cout << "  -h, --help                     Show this help message\n";
   std::cout << "  -v, --version                  Show version information\n";
@@ -131,8 +131,8 @@ void CommandLineParser::PrintHelp(const char* program_name) {
   std::cout << "  - YAML (.yaml, .yml) - validated against built-in schema\n";
   std::cout << "  - JSON (.json)       - validated against built-in schema\n";
   std::cout << "\n";
-  std::cout << "Note: All configurations are validated automatically using the built-in\n";
-  std::cout << "      JSON Schema. Use --schema only to override with a custom schema.\n";
+  std::cout << "Note: All configurations are validated against the built-in JSON Schema.\n";
+  std::cout << "      --schema adds constraints but cannot allow unsupported keys.\n";
 }
 
 void CommandLineParser::PrintVersion() {

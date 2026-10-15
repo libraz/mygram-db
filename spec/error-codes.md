@@ -48,7 +48,7 @@ return MakeError(static_cast<ErrorCode>(*frame->code), std::string(frame->messag
 
 The resulting `Error` flows into every `Expected<T, Error>` returned by the C++ SDK, into `mygramclient_get_last_error_code()` via `set_last_error` (`src/client/mygramclient_c.cpp`), and into `mygram-cli`'s printed output. Therefore any code the server can place in a TCP `ERROR` frame is automatically observable on the CLI, the C++ SDK, and the C ABI. `TCP+` is the shorthand for that set.
 
-The HTTP surface does not have an equivalent blanket path: `HttpServer::SendError` is called with an explicit code at each site, and the only place HTTP re-reads a code out of a TCP frame is `POST /optimize` (`src/server/http_server.cpp`).
+HTTP error codes are carried in an `Error` to `HttpServer::SendError`, which uses a shared status mapper for the ordinary path. A small set of routes supplies an explicit status for route policy; `POST /optimize` also preserves a code parsed from the TCP error frame (`src/server/http_server.cpp`).
 
 ## Registry
 
@@ -71,7 +71,7 @@ The HTTP surface does not have an equivalent blanket path: `HttpServer::SendErro
 
 ### Configuration (1000-1999)
 
-All Configuration codes except 1007 reach TCP through the administrative commands `CONFIG VERIFY`, `CONFIG SHOW`, `CONFIG HELP`, and `SET`, which forward the underlying code verbatim (`src/server/handlers/admin_handler.cpp`; `src/server/handlers/variable_handler.cpp`). None of them reach the HTTP surface: `GET /config` reports failures as 5.
+All Configuration codes except 1007 reach TCP through the administrative commands `CONFIG VERIFY`, `CONFIG SHOW`, `CONFIG HELP`, and `SET`, which forward the underlying code verbatim (`src/server/handlers/admin_handler.cpp`; `src/server/handlers/variable_handler.cpp`). HTTP does not forward these Configuration-range errors: if `GET /config` has no configuration object, it constructs 6026 `kServerInitMissingDependency`, which maps to 503.
 
 | Code | Symbolic name | Meaning | Surfaces | Emitting site(s) |
 |------|---------------|---------|----------|------------------|
@@ -106,10 +106,10 @@ All Configuration codes except 1007 reach TCP through the administrative command
 | 2011 | `kMySQLDuplicateColumn` | Duplicate column | `undetermined` — constructed in a column-metadata helper; no traced call chain reaches a client surface | `src/mysql/connection.cpp` |
 | 2012 | `kMySQLInvalidSchema` | Invalid schema | `TCP+` (`REPLICATION START`), `status field` | `src/mysql/binlog_reader.cpp`, `src/mysql/ddl_schema_validator.cpp`, `src/mysql/binlog_reader_utils.cpp` (15 sites total) |
 | 2013 | `kMySQLFieldTruncated` | Field data truncated | `status field` (checksum path only, `src/mysql/binlog_reader_threads.cpp`); `internal` on the row-decode path, where the outer handler masks it into 2008 | `src/mysql/binlog_checksum.h`, `src/mysql/rows_parser_field_decoder.cpp`, `src/mysql/binary_json.cpp` (39 sites total) |
-| 2014 | `kMySQLInvalidMetadata` | Invalid field metadata | `status field` (column-metadata path only, `src/mysql/binlog_reader_utils.cpp`, where `SHOW COLUMNS` disagrees with the `TABLE_MAP` column count); `internal` on the row-decode path, where the outer handler reports 2008 instead | `src/mysql/rows_parser_field_decoder.cpp`, `src/mysql/binary_json.cpp`, `src/mysql/value_canonicalizer.cpp` (27 sites total) |
+| 2014 | `kMySQLInvalidMetadata` | Invalid field metadata | `status field` (column-metadata path only, `src/mysql/binlog_reader_utils.cpp`, where `SHOW COLUMNS` disagrees with the `TABLE_MAP` column count); `internal` on the row-decode path, where the outer handler reports 2008 instead | `src/mysql/rows_parser_field_decoder.cpp`, `src/mysql/binary_json.cpp`, `src/mysql/value_canonicalizer.cpp`, `src/mysql/binlog_util.h` (30 sites total) |
 | 2015 | `kMySQLUnsupportedType` | Unsupported column type | `internal` — row-decode only; the outer handler reports 2008 instead | `src/mysql/rows_parser.cpp`, `src/mysql/rows_parser_field_decoder.cpp` |
 | 2016 | `kMySQLBinlogChecksumMismatch` | Binlog checksum mismatch | `status field` | `src/mysql/binlog_checksum.h` |
-| 2017 | `kMySQLUndecodableBinlogEvent` | Undecodable binlog event | `status field` (reader-thread path); `internal` on the row-decode path, where a MariaDB `COMPRESSED` column payload that does not inflate is masked into 2008 | `src/mysql/binlog_reader_threads.cpp`, `src/mysql/rows_parser_field_decoder.cpp` |
+| 2017 | `kMySQLUndecodableBinlogEvent` | Undecodable binlog event | `status field` (reader-thread path); `internal` on the row-decode path, where a MariaDB `COMPRESSED` column payload that does not inflate is masked into 2008 | `src/mysql/binlog_reader_threads.cpp`, `src/mysql/binlog_event_parser.cpp`, `src/mysql/rows_parser_field_decoder.cpp` |
 | 2020 | `kMariaDBInvalidGTID` | Invalid MariaDB GTID | `undetermined` — constructed in GTID parsing shared by the reader thread and the validator; no single call chain traced to a surface | `src/mysql/mariadb_gtid.cpp` (6 sites total) |
 | 2021 | `kMariaDBProtocolError` | MariaDB protocol error | `status field` — reaches `SetLastError` through `SetupSession`/`Open` (`src/mysql/binlog_reader_threads.cpp`) | `src/mysql/mariadb_binlog_stream.cpp` (6 sites total) |
 | 2022 | `kMariaDBUnsupportedVersion` | MariaDB version not supported | `unreferenced` | — |
@@ -204,7 +204,7 @@ Codes 6000-6025 are lifecycle and socket-layer failures raised before or outside
 | 6023 | `kNetworkReactorAlreadyOpen` | Event multiplexer already opened | `internal` | `src/server/reactor/epoll_multiplexer.cpp`, `src/server/reactor/kqueue_multiplexer.cpp` |
 | 6024 | `kNetworkNullDependency` | Required dependency is null | `unreferenced` | — |
 | 6025 | `kNetworkAcceptorNoHandler` | Acceptor reactor handler not installed | `internal` — startup | `src/server/connection_acceptor.cpp` |
-| 6026 | `kServerInitMissingDependency` | Server initialization missing required dependency | `TCP+`, `HTTP` (503 on `POST /optimize`), `internal` (startup) | `src/server/handlers/admin_handler.cpp`, `src/server/handlers/variable_handler.cpp`, `src/server/http_server.cpp` (9 sites total) |
+| 6026 | `kServerInitMissingDependency` | Server initialization missing required dependency | `TCP+`, `HTTP` (503 on `GET /config` and `POST /optimize`), `internal` (startup) | `src/server/handlers/admin_handler.cpp`, `src/server/handlers/variable_handler.cpp`, `src/server/http_server.cpp` (9 sites total) |
 | 6027 | `kServerShuttingDown` | Server is shutting down | `TCP+` (`SYNC`), `internal` (TCP shutdown) | `src/server/sync_operation_manager.cpp`, `src/server/tcp_server.cpp` |
 | 6028 | `kServerLoading` | Server is loading | `TCP+`, `HTTP` (503) | `src/server/handlers/command_handler.cpp`, `src/server/search_pipeline.cpp`, `src/server/http_server.cpp` (4 sites total) |
 | 6029 | `kServerNotReady` | Server is not ready | `TCP+`, `HTTP` (503) | `src/server/handlers/command_handler.cpp`, `src/server/handlers/replication_handler.cpp`, `src/server/http_server.cpp` (6 sites total) |
@@ -240,42 +240,35 @@ Client codes are produced inside the client library and `mygram-cli`; they never
 | 8001 | `kCacheDisabled` | Cache disabled | `TCP+` (`CACHE` commands, `SET cache.enabled`) | `src/server/handlers/cache_handler.cpp`, `src/config/runtime_variable_manager.cpp` (7 sites total) |
 | 8002 | `kCacheCompressionFailed` | Cache compression failed | `internal` — the caller degrades to "not stored" (`src/cache/query_cache.cpp`) | `src/cache/result_compressor.cpp` |
 | 8003 | `kCacheDecompressionFailed` | Cache decompression failed | `internal` — the caller degrades to a cache miss (`src/cache/query_cache.cpp`) | `src/cache/result_compressor.cpp` (4 sites total) |
-| 8004 | `kCacheWorkerStartFailed` | Cache worker start failed | `internal` — logged, and the cache is left disabled (`src/cache/cache_manager.cpp`) | `src/cache/invalidation_queue.cpp` |
+| 8004 | `kCacheWorkerStartFailed` | Cache worker start failed | `internal` — logged, and the cache is left disabled, and `Enable()` retries the start (`src/cache/cache_manager.cpp`) | `src/cache/invalidation_queue.cpp`, `src/cache/query_cache.cpp` |
 
 ## Code-to-HTTP-status mapping
 
-There is no table mapping error codes to HTTP statuses. The status is chosen at each call site and passed to `HttpServer::SendError` alongside the code, so the same code can appear under different statuses.
+`SendError(res, error)` applies `HttpStatusForError` (`src/server/http_server.cpp`) to ordinary HTTP errors:
 
-The only code-driven status function is `HttpStatusForQueryError` (`src/server/http_server.cpp`), applied to search, count, and facet pipeline failures:
+| Error code | Status |
+|------------|--------|
+| 4004 `kIndexDocumentNotFound`, 4007 `kTableNotFound`, 8 `kNotFound` | 404 Not Found |
+| 5 `kInternalError` | 500 Internal Server Error |
+| 7 `kPermissionDenied` | 403 Forbidden |
+| 6026 `kServerInitMissingDependency`, 6027 `kServerShuttingDown`, 6028 `kServerLoading`, 6029 `kServerNotReady`, 6030 `kServerBusy` | 503 Service Unavailable |
+| 2 `kInvalidArgument`, 4 `kNotImplemented`, and codes 3000–3999 or 4000–4999 other than the specific 404 codes above | 400 Bad Request |
+| Any other code | 500 Internal Server Error |
 
-```cpp
-int HttpStatusForQueryError(const Error& error) {
-  if (error.code() == ErrorCode::kServerShuttingDown || error.code() == ErrorCode::kServerLoading) {
-    return kHttpServiceUnavailable;
-  }
-  if (error.code() == ErrorCode::kInternalError) {
-    return kHttpInternalServerError;
-  }
-  return kHttpBadRequest;
-}
-```
+Some routes choose an explicit status while still passing an `Error`, so the JSON error code and context remain intact:
 
-A second, narrower pairing lives in `ResolveHttpTableContext` (`src/server/http_server.cpp`), which returns a status and a code together: 400 with 3001 for a malformed table name, 400 with 3000 for an unqualified name under a multi-database configuration, 404 with 4007 for an unknown table, and 500 with 5 for a table context missing its index or document store.
+| Route condition | Status and code |
+|-----------------|-----------------|
+| Missing or invalid bearer credentials on a protected route when an admin token is configured | 401 Unauthorized, 7 `kPermissionDenied` |
+| Request blocked by the CIDR allow-list | 403 Forbidden, 7 `kPermissionDenied` |
+| Non-JSON `Content-Type` on JSON endpoints | 415 Unsupported Media Type, 6007 `kNetworkInvalidRequest` |
+| HTTP rate limit exceeded | 429 Too Many Requests, 6030 `kServerBusy` |
+| `GET /replication/status` in a build without MySQL support | 503 Service Unavailable, 4 `kNotImplemented` |
+| `POST /optimize` has no callback | 503 Service Unavailable, 6026 `kServerInitMissingDependency` |
+| `POST /optimize` callback returns an error frame | 503 Service Unavailable, the frame's code (or 1 `kUnknown` if absent) |
+| `POST /optimize` callback returns another failure string | 503 Service Unavailable, 5 `kInternalError` |
 
-Everywhere else the status is a literal at the call site; the code is either a literal too, or is forwarded from an `Error` the handler received. `SendError(res, kHttpBadRequest, result.error())` and its siblings pass a literal status alongside whichever code the failing operation produced, which is how codes with no HTTP construction site reach the surface — 2, 3005 and 3007 appear on the 400 row that way, and 3005 `kQueryTooLong` has its only construction site in `QueryParser` (`src/query/query_parser.cpp`). The status constants are defined at `src/server/http_server.cpp`. The pairings observed across the HTTP handlers:
-
-| Status | Codes seen with it |
-|--------|--------------------|
-| 400 Bad Request | 2, 4, 3000, 3001, 3005, 3006, 3007, 3008, 3009 |
-| 401 Unauthorized | 7 |
-| 403 Forbidden | 7 |
-| 404 Not Found | 4004, 4007 |
-| 415 Unsupported Media Type | 6007 |
-| 429 Too Many Requests | 6030 |
-| 500 Internal Server Error | 5 |
-| 503 Service Unavailable | 1, 4, 5, 6026, 6028, 6029, and any code parsed out of an `OPTIMIZE` frame |
-
-The 503 row is the widest because `POST /optimize` re-parses the TCP frame returned by the OPTIMIZE handler and reuses whatever code it finds, always under 503 (`src/server/http_server.cpp`). 4 `kNotImplemented` appears on two rows: under 400 when a search request asks for `HIGHLIGHT` and the table's document store has text storage disabled, and under 503 when a replication route is served by a build or a configuration without replication (`src/server/http_server.cpp`).
+Protected routes accept requests without a bearer token when no admin token is configured. `/info` and `/metrics` remain public; they do not return 401 for absent or invalid credentials, but withhold replication details or `mygramdb_replication_` metrics unless credentials are accepted. Thus 4 `kNotImplemented` normally maps to 400, but the no-MySQL replication route explicitly returns 503. The readiness endpoint also returns 503 when not ready, as a readiness response rather than an error envelope.
 
 ## Message rendering
 
@@ -311,7 +304,7 @@ The `Error` overload (`src/server/http_server.cpp`) builds the `error` string wi
 {"error":"<message> (context: <context>)","error_code":<code>}
 ```
 
-Context is therefore included on HTTP whenever the call site passes an `Error`. Sites that call the four-argument overload with a literal message string have no `Error` object and so carry no context, exactly as `FormatError(std::string_view, ErrorCode)` does on TCP.
+Both HTTP overloads receive an `Error`; the ordinary overload chooses a status from its code, while the explicit-status overload applies route policy. Both format the message through `ResponseFormatter::FormatErrorMessage`, so a non-empty context is included in either case.
 
 ### CLI
 
@@ -377,8 +370,6 @@ Factual observations about the current behaviour.
 - **Replication connect failures record one code and return another.** On a failed binlog or metadata connection, `SetLastError` stores 2000 while the value returned to the caller — and thus to a `REPLICATION START` frame — is whatever `Connection::Connect` produced (`src/mysql/binlog_reader.cpp`). The `last_error_code` field and the error frame can therefore disagree for the same event.
 
 - **Row-decode codes are dropped in favour of 2008.** `SetLastError` has a single overload and always carries an explicit code (`src/mysql/binlog_reader.h`), but the row-decode path does not hand it the decoder's `Error`: when a monitored `ROWS_EVENT` fails to decode, the reader constructs a fresh 2008 `kMySQLBinlogError` and publishes that as the replication status (`src/mysql/binlog_reader_threads.cpp`). The 2013, 2014, 2015, and 2017 codes raised inside the decoder therefore never reach `last_error_code` from this path. The condition survives only as the decoder's own structured log event, which names the column and event type but not the numeric code (`src/mysql/rows_parser.cpp`).
-
-- **`HttpStatusForQueryError`'s 6027 branch is unreachable.** The function maps `kServerShuttingDown` to 503 (`src/server/http_server.cpp`), but the only constructors of 6027 are `SyncOperationManager::StartSync` and `TcpServer::Stop` (`src/server/sync_operation_manager.cpp`, `src/server/tcp_server.cpp`), neither of which feeds the search, count, or facet pipelines that call the function.
 
 - **Any 16-bit value the server sends becomes an `ErrorCode` on the client.** `ParseServerErrorResponse` casts the frame's numeric token without checking membership in the enum (`src/client/mygramclient.cpp`). A code the client's build does not know renders as `Unknown error code` in `Error::to_string()` while `code()` returns the raw number.
 

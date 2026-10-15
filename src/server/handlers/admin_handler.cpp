@@ -35,8 +35,6 @@ void EnsureEndsWithCrLf(std::string& result) {
 }  // namespace
 
 std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
-  (void)conn_ctx;  // Unused for admin commands
-
   switch (query.type) {
     case query::QueryType::INFO: {
       // INFO is the only AdminHandler command that requires table_catalog.
@@ -68,8 +66,9 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
       readiness.sync_in_progress = ctx_.sync_manager != nullptr && ctx_.sync_manager->IsAnySyncing();
 #endif
       const ReadinessVerdict verdict = EvaluateReadiness(readiness);
+      const bool include_replication = ctx_.admin_token.empty() || conn_ctx.admin_authenticated;
       return ResponseFormatter::FormatInfoResponse(metrics, ctx_.stats, tables, ctx_.binlog_reader, ctx_.cache_manager,
-                                                   verdict.data_initialized, verdict.ready);
+                                                   verdict.data_initialized, verdict.ready, include_replication);
     }
 
     case query::QueryType::CONFIG_HELP:

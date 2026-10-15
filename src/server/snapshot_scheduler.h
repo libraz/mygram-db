@@ -27,7 +27,9 @@ namespace mygramdb::server {
 // Forward declarations
 class TableCatalog;
 class SyncOperationManager;
+class OperationCoordinator;
 class ServerStats;
+class SnapshotSchedulerTestAccess;
 struct DumpProgress;
 
 /**
@@ -72,7 +74,8 @@ class SnapshotScheduler {
                     std::function<bool()> sync_in_progress_checker = {},
                     std::atomic<bool>* optimization_in_progress = nullptr,
                     std::atomic<bool>* shutdown_requested = nullptr, DumpProgress* dump_progress = nullptr,
-                    ServerStats* stats = nullptr);
+                    ServerStats* stats = nullptr, OperationCoordinator* operation_coordinator = nullptr,
+                    std::function<bool()> initial_data_ready_checker = {});
 
   // Disable copy and move
   SnapshotScheduler(const SnapshotScheduler&) = delete;
@@ -103,15 +106,23 @@ class SnapshotScheduler {
   bool IsRunning() const { return running_.load(std::memory_order_acquire); }
 
  private:
+  friend class SnapshotSchedulerTestAccess;
+
   /**
    * @brief Scheduler loop (runs in separate thread)
    */
   void SchedulerLoop();
 
   /**
-   * @brief Take a snapshot
+   * @brief Run one complete scheduled cycle. Retention runs only after a
+   *        successful save.
    */
-  void TakeSnapshot();
+  void RunSnapshotCycle();
+
+  /**
+   * @brief Take a snapshot and report whether a dump was written.
+   */
+  bool TakeSnapshot();
 
   /**
    * @brief Clean up old snapshots based on retention policy
@@ -149,10 +160,12 @@ class SnapshotScheduler {
   replication_pause::Counter local_replication_pause_counter_;
   replication_pause::Counter* replication_pause_counter_;
   SyncOperationManager* sync_manager_;
+  OperationCoordinator* operation_coordinator_;
   std::function<bool()> sync_in_progress_checker_;
   std::atomic<bool>* shutdown_requested_;
   DumpProgress* dump_progress_;
   ServerStats* stats_;
+  std::function<bool()> initial_data_ready_checker_;
 };
 
 }  // namespace mygramdb::server

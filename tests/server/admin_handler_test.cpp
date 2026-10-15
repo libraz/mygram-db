@@ -102,4 +102,16 @@ TEST_F(AdminHandlerTest, HandleConfigHelpWorksWhenCatalogNull) {
   EXPECT_EQ(response.find("Table catalog not initialized"), std::string::npos) << "Response: " << response;
 }
 
+TEST_F(AdminHandlerTest, ConfigShowReportsMissingConfigurationWithSharedServerCode) {
+  handler_ctx_->full_config = nullptr;
+  AdminHandler handler(*handler_ctx_);
+
+  query::Query query;
+  query.type = query::QueryType::CONFIG_SHOW;
+
+  const std::string response = handler.Handle(query, conn_ctx_);
+
+  EXPECT_EQ(response, "ERROR 6026 Server configuration is not available");
+}
+
 }  // namespace mygramdb::server

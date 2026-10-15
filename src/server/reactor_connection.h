@@ -29,13 +29,16 @@
  *     extract an already-buffered suffix while reads are paused.
  *   - `pending_frames_` is shared between the event-loop thread (producer)
  *     and a worker thread (consumer) and is protected by `frame_mutex_`.
- *   - `write_queue_`, `write_queue_bytes_`, `front_offset_`, `write_armed_`
+ *   - `write_queue_`, `write_queue_bytes_`, `front_offset_`, `write_armed_`,
+ *     and `close_after_write_drain_`
  *     are shared between the worker thread (via `EnqueueResponse` → inline
  *     drain) and the event-loop thread (via `OnWritable`) and are protected
  *     by `write_mutex_`. The contract is: holders of `write_mutex_` may
  *     call `reactor_->ArmWrite/DisarmWrite` while the mutex is held. The
  *     reverse is never done (no IoReactor method acquires `write_mutex_`).
- *   - `closing_` and `drain_scheduled_` are atomics.
+ *   - `closing_` and `drain_scheduled_` are atomics. Writers publish
+ *     `closing_` while holding `write_mutex_`, so response enqueue and
+ *     terminal-close decisions are serialized.
  *   - `fd_` is owned by this object after construction unless `ReleaseFd()`
  *     is called before reactor registration succeeds. The destructor closes
  *     owned fds exactly once via `closed_` guard.
@@ -135,17 +138,11 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
     kInterestUpdateFailed,  ///< The multiplexer rejected the backpressure interest update.
   };
 
-  /// Default read buffer reservation. Grows on demand up to kMaxReadBufferBytes.
-  static constexpr size_t kDefaultReadBufferBytes = 4096;
-
-  /// Hard cap on the read accumulation buffer. This is an OOM safety rail
-  /// only — per-query size enforcement (`api.max_query_length`) is the
-  /// responsibility of the downstream query parser, which rejects oversized
-  /// requests with a structured error. 1 MiB is comfortably above the
-  /// default `max_query_length` (~64 KiB) and is deliberately decoupled
-  /// from config so that lowering `max_query_length` at runtime cannot make
-  /// the reactor drop well-formed but large requests that are still in
-  /// flight on an existing connection.
+  /// Hard cap on bytes accumulated before a complete frame is found. This
+  /// reactor safety limit is independent of the query parser's
+  /// `api.max_query_length` check and the pending-frame byte limits below. A
+  /// request that exceeds this cap before framing is rejected here; changing
+  /// the parser limit does not change the reactor buffer cap.
   static constexpr size_t kMaxReadBufferBytes = mygram::constants::kBytesPerMegabyte;  // 1 MiB
 
   /// Hard upper bound on unsent response bytes; once exceeded the reactor
@@ -166,8 +163,6 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   static constexpr size_t kMaxPendingFrameBytes = 4 * mygram::constants::kBytesPerMegabyte;
   static constexpr size_t kPendingFramesHighWatermark = kMaxPendingFrames * 3 / 4;
   static constexpr size_t kPendingFramesLowWatermark = kMaxPendingFrames / 2;
-  static constexpr size_t kPendingFrameBytesHighWatermark = kMaxPendingFrameBytes * 3 / 4;
-  static constexpr size_t kPendingFrameBytesLowWatermark = kMaxPendingFrameBytes / 2;
 
   /// Conservative charge for deque node/string bookkeeping, including empty frames.
   static constexpr size_t kQueueEntryOverheadBytes = 64;
@@ -351,7 +346,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
 
   [[nodiscard]] bool SendReadOverflowErrorForTest(std::string_view message, mygram::utils::ErrorCode code,
                                                   const std::function<void()>& under_lock_hook = {}) {
-    return TrySendErrorIfWriteQueueEmpty(message, code, under_lock_hook);
+    return CloseWithError(message, code, under_lock_hook);
   }
 
   void DrainPendingFramesForTest(size_t count) {
@@ -396,9 +391,18 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
  private:
   ReadAppendStatus AppendReadBytes(const char* data, size_t len, size_t& enqueued);
   bool ShouldSendReadOverflowError();
-  bool TrySendErrorIfWriteQueueEmpty(std::string_view message, mygram::utils::ErrorCode code,
-                                     const std::function<void()>& under_lock_hook = {});
+  /// Publish a terminal close before deciding whether an error can be sent.
+  /// Returns true when the caller may unregister immediately; false means an
+  /// already-accepted write remains queued and must drain first.
+  bool CloseWithError(std::string_view message, mygram::utils::ErrorCode code,
+                      const std::function<void()>& under_lock_hook = {});
   [[nodiscard]] bool CloseWithServerBusy();
+  /// Queue a response while `write_mutex_` is held. Terminal responses are
+  /// accepted after publishing `closing_`; ordinary responses are rejected
+  /// once closing has started.
+  bool EnqueueResponseLocked(std::string response, bool terminal);
+  void MarkClosingImmediately();
+  void MarkClosingImmediatelyLocked();
   bool MaybeResumeReadsLocked();
   bool PublishReadEofLocked();
   bool SubmitDrainTaskToPool(std::string_view failure_event);
@@ -501,14 +505,14 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   std::deque<std::string> write_queue_;
   size_t write_queue_bytes_ = 0;  ///< Sum of byte lengths in write_queue_.
   size_t write_queue_overhead_bytes_ = 0;
-  size_t front_offset_ = 0;   ///< Bytes of write_queue_.front() already sent.
-  bool write_armed_ = false;  ///< Whether reactor_->ArmWrite was called for this fd.
+  size_t front_offset_ = 0;               ///< Bytes of write_queue_.front() already sent.
+  bool write_armed_ = false;              ///< Whether reactor_->ArmWrite was called for this fd.
+  bool close_after_write_drain_ = false;  ///< Protected by write_mutex_; retain accepted writes before terminal close.
 
   // Atomic flags.
-  /// Hard-close flag: connection must be torn down as soon as inflight work
-  /// completes. Set on I/O errors, overflow, or after a half-closed client's
-  /// pending frames have been fully dispatched *and* the write queue has
-  /// drained. `EnqueueResponse` refuses to accept new writes when this is set.
+  /// Terminal flag: stop accepting normal responses and finish closing after
+  /// any accepted writes explicitly marked by `close_after_write_drain_` have
+  /// drained. Hard failures leave that flag false and close immediately.
   std::atomic<bool> closing_{false};
   /// Peer-has-stopped-writing flag: set when recv() returns 0 (orderly FIN
   /// from the client, including shutdown(SHUT_WR) half-close). Distinct from

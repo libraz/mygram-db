@@ -8,8 +8,6 @@
 #include <roaring/roaring.h>
 
 #include <algorithm>
-#include <cctype>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -17,10 +15,12 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 
 #include "cache/cache_key.h"
 #include "cache/cache_manager.h"
@@ -284,13 +284,15 @@ bool RequiresSubstringFallback(const std::vector<SearchTermInfo>& term_infos) {
 
 std::optional<mygram::utils::Error> SubstringFallbackError(const std::vector<SearchTermInfo>& term_infos,
                                                            const storage::DocumentStore* doc_store) {
+  // Production stores retain normalized text in every verify_text mode. Keep
+  // this guard for stores that explicitly disable retention.
   if (doc_store == nullptr || doc_store->IsStoreTextsEnabled() || !RequiresSubstringFallback(term_infos)) {
     return std::nullopt;
   }
   return mygram::utils::MakeError(
       mygram::utils::ErrorCode::kIndexNotFound,
-      "Query term is too short for n-gram search and requires normalized text storage. Set memory.verify_text to "
-      "\"ascii\" or \"all\" in configuration.");
+      "Query term is too short for n-gram search and requires normalized text for substring fallback. "
+      "memory.verify_text controls substring post-filtering only; it does not enable text retention.");
 }
 
 bool BooleanAstMatchesExpandedText(const query::QueryNode& node,
@@ -643,24 +645,6 @@ std::vector<storage::DocId> SearchTermDocuments(const SearchTermInfo& term_info,
   return current_index->SearchAnd(term_info.ngrams);
 }
 
-std::vector<SearchTermInfo> BuildCacheTermInfos(const std::vector<SearchTermInfo>& term_infos,
-                                                const query::Query& query, index::Index* current_index, int ngram_size,
-                                                int kanji_ngram_size, bool cross_boundary_ngrams) {
-  if (query.not_terms.empty()) {
-    return term_infos;
-  }
-
-  std::vector<SearchTermInfo> cache_term_infos = term_infos;
-  auto not_term_infos =
-      GenerateTermInfos(query.not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
-  for (auto& not_term_info : not_term_infos) {
-    not_term_info.is_not_term = true;
-  }
-  cache_term_infos.insert(cache_term_infos.end(), std::make_move_iterator(not_term_infos.begin()),
-                          std::make_move_iterator(not_term_infos.end()));
-  return cache_term_infos;
-}
-
 SynonymTermGroup ExpandNormalizedTermWithSynonyms(std::string_view normalized,
                                                   const query::SynonymDictionary* synonym_dict,
                                                   index::Index* current_index, int ngram_size, int kanji_ngram_size,
@@ -707,13 +691,9 @@ query::Query BuildCanonicalCacheQuery(const query::Query& query, const FullPipel
     return params.current_index != nullptr ? params.current_index->NormalizeText(text) : std::string(text);
   };
   cache::CacheSemanticContext semantic_context;
-  // Parsed once here (in addition to ExecuteFullPipeline's own parse of the
-  // same expression) so the cache key is built from the tree that actually
-  // executes rather than from re-normalizing the raw expression text: the
-  // tokenizer's ASCII-only whitespace check and the index text normalizer's
-  // Unicode folding disagree on which characters separate tokens, so two
-  // raw expressions that fold to the same normalized text can still parse
-  // into different trees.
+  // The key is built from the parsed tree, not re-normalized raw text, so
+  // expressions that fold to the same text but parse differently (for example
+  // full-width parentheses) get distinct keys.
   query::QueryASTParser ast_parser;
   std::unique_ptr<query::QueryNode> boolean_ast;
   if (ContainsBooleanSyntax(SemanticSearchExpression(query))) {
@@ -787,41 +767,59 @@ void PopulateTermDocumentFrequency(SearchTermInfo& term_info, index::Index* curr
   term_info.term_doc_freq = matching;
 }
 
+SearchTermInfo GenerateTermInfoNgrams(const std::string& search_term, index::Index* current_index, int ngram_size,
+                                      int kanji_ngram_size, bool cross_boundary_ngrams) {
+  std::string normalized = current_index->NormalizeText(search_term);
+  auto ngrams = mygram::utils::GenerateQueryNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  mygram::utils::DeduplicateSorted(ngrams);
+  return {std::move(ngrams), std::numeric_limits<size_t>::max(), 0, std::move(normalized), false};
+}
+
+std::vector<SearchTermInfo> GenerateTermInfoNgrams(const std::vector<std::string>& search_terms,
+                                                   index::Index* current_index, int ngram_size, int kanji_ngram_size,
+                                                   bool cross_boundary_ngrams) {
+  std::vector<SearchTermInfo> term_infos;
+  term_infos.reserve(search_terms.size());
+  for (const auto& search_term : search_terms) {
+    term_infos.push_back(
+        GenerateTermInfoNgrams(search_term, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams));
+  }
+  return term_infos;
+}
+
+void EstimateTermInfoPostingSize(SearchTermInfo& term_info, index::Index* current_index) {
+  size_t min_size = std::numeric_limits<size_t>::max();
+  for (const auto& ngram : term_info.ngrams) {
+    const uint64_t posting_size = current_index->EstimatePostingSize(ngram);
+    if (posting_size == 0) {
+      min_size = 0;
+      break;
+    }
+    min_size = std::min(min_size, static_cast<size_t>(posting_size));
+  }
+  term_info.estimated_size = min_size;
+}
+
+void EstimateTermInfoPostingSizes(std::vector<SearchTermInfo>& term_infos, index::Index* current_index) {
+  for (auto& term_info : term_infos) {
+    EstimateTermInfoPostingSize(term_info, current_index);
+  }
+}
+
 }  // namespace
 
 std::vector<SearchTermInfo> GenerateTermInfos(const std::vector<std::string>& search_terms, index::Index* current_index,
                                               int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams,
                                               bool compute_term_doc_freq,
                                               const storage::DocumentStore* current_doc_store) {
-  std::vector<SearchTermInfo> term_infos;
-  term_infos.reserve(search_terms.size());
-
-  for (const auto& search_term : search_terms) {
-    std::string normalized = current_index->NormalizeText(search_term);
-    auto ngrams = mygram::utils::GenerateQueryNgrams(normalized, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
-
-    // Deduplicate n-grams to avoid redundant PostingList lookups
-    mygram::utils::DeduplicateSorted(ngrams);
-
-    // Estimate result size by checking the smallest posting list (thread-safe)
-    size_t min_size = std::numeric_limits<size_t>::max();
-    for (const auto& ngram : ngrams) {
-      uint64_t posting_size = current_index->EstimatePostingSize(ngram);
-      if (posting_size > 0) {
-        min_size = std::min(min_size, static_cast<size_t>(posting_size));
-      } else {
-        min_size = 0;
-        break;
-      }
-    }
-
-    SearchTermInfo term_info{std::move(ngrams), min_size, 0, std::move(normalized), false};
+  auto term_infos =
+      GenerateTermInfoNgrams(search_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  EstimateTermInfoPostingSizes(term_infos, current_index);
+  for (auto& term_info : term_infos) {
     if (compute_term_doc_freq) {
       PopulateTermDocumentFrequency(term_info, current_index, current_doc_store);
     }
-    term_infos.push_back(std::move(term_info));
   }
-
   return term_infos;
 }
 
@@ -830,7 +828,8 @@ namespace {
 using TermInfoLookup = std::unordered_map<std::string, SearchTermInfo>;
 
 TermInfoLookup GenerateUniqueTermInfoLookup(const std::vector<std::string>& terms, index::Index* current_index,
-                                            int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams) {
+                                            int ngram_size, int kanji_ngram_size, bool cross_boundary_ngrams,
+                                            bool estimate_posting_sizes = true) {
   std::vector<std::string> unique_terms;
   unique_terms.reserve(terms.size());
   std::unordered_set<std::string> seen;
@@ -842,7 +841,10 @@ TermInfoLookup GenerateUniqueTermInfoLookup(const std::vector<std::string>& term
   }
 
   auto unique_infos =
-      GenerateTermInfos(unique_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+      GenerateTermInfoNgrams(unique_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  if (estimate_posting_sizes) {
+    EstimateTermInfoPostingSizes(unique_infos, current_index);
+  }
   TermInfoLookup lookup;
   lookup.reserve(unique_terms.size());
   for (size_t i = 0; i < unique_terms.size(); ++i) {
@@ -909,9 +911,7 @@ TopNOptimizationResult ApplySearchTopNOptimization(
   }
 
   auto equals_ignore_case = [](const std::string& lhs, const std::string& rhs) {
-    return lhs.size() == rhs.size() &&
-           std::equal(lhs.begin(), lhs.end(), rhs.begin(),
-                      [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); });
+    return mygram::utils::EqualsAsciiCaseInsensitive(lhs, rhs);
   };
 
   const bool is_primary_key_order = order_by.IsPrimaryKey() || equals_ignore_case(order_by.column, primary_key_column);
@@ -980,11 +980,12 @@ mygram::utils::Expected<std::vector<storage::DocId>, mygram::utils::Error> Score
     return MakeUnexpected(
         MakeError(ErrorCode::kQueryInvalidSort, "SORT _score requires BM25 to be enabled in configuration"));
   }
+  // Production stores retain normalized text regardless of memory.verify_text.
   if (params.doc_store == nullptr || !params.doc_store->IsStoreTextsEnabled()) {
     return MakeUnexpected(
         MakeError(ErrorCode::kNotImplemented,
-                  "SORT _score requires normalized text storage. Set memory.verify_text to \"ascii\" or \"all\" in "
-                  "configuration."));
+                  "SORT _score requires normalized text in the document store. memory.verify_text controls substring "
+                  "post-filtering only; it does not enable text retention."));
   }
   if (params.index == nullptr || params.bm25_stats == nullptr) {
     return MakeUnexpected(MakeError(ErrorCode::kTableNotFound, "table not found"));
@@ -1332,57 +1333,38 @@ using mygram::utils::MakeEmptyRoaring;
 using mygram::utils::MakeRoaringFromVector;
 using mygram::utils::RoaringBitmapPtr;
 
-// Pre-parsed filter values to avoid repeated string parsing in the inner loop
-struct ParsedFilterValue {
-  double double_val = 0.0;
-  int64_t int64_val = 0;
-  uint64_t uint64_val = 0;
-  bool bool_val = false;
-  bool double_valid = false;
-  bool int64_valid = false;
-  bool uint64_valid = false;
+/// A query filter literal converted once per class of stored value.
+///
+/// Every class goes through storage::ConvertFilterValue, the converter ingest
+/// uses, so the literal means what the stored value means. A class whose
+/// conversion failed is empty and matches nothing under = and keeps every
+/// candidate under !=, on the bitmap and fallback paths alike.
+struct FilterOperands {
+  std::string text;
+  std::optional<bool> boolean;
+  std::optional<int64_t> signed_integer;
+  std::optional<uint64_t> unsigned_integer;
+  std::optional<double> real;
 };
 
-inline ParsedFilterValue ParseFilterValue(const std::string& value) {
-  ParsedFilterValue parsed_value;
-
-  // Parse as bool
-  parsed_value.bool_val = (value == "1" || value == "true");
-
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic) - Required for from_chars range
-  const char* end = value.data() + value.size();
-
-  // Parse as double (locale-independent, no exceptions)
-  {
-    double result = 0.0;
-    auto [ptr, ec] = std::from_chars(value.data(), end, result);
-    if (ec == std::errc() && ptr == end) {
-      parsed_value.double_val = result;
-      parsed_value.double_valid = true;
-    }
+template <typename T>
+std::optional<T> ConvertOperand(const std::string& literal, std::string_view filter_type) {
+  auto converted = storage::ConvertFilterValue(literal, /*is_null=*/false, filter_type);
+  if (!converted.has_value()) {
+    return std::nullopt;
   }
+  const T* operand = std::get_if<T>(&*converted);
+  return operand != nullptr ? std::optional<T>{*operand} : std::nullopt;
+}
 
-  // Parse as int64_t (locale-independent, no exceptions)
-  {
-    int64_t result = 0;
-    auto [ptr, ec] = std::from_chars(value.data(), end, result);
-    if (ec == std::errc() && ptr == end) {
-      parsed_value.int64_val = result;
-      parsed_value.int64_valid = true;
-    }
-  }
-
-  // Parse as uint64_t (locale-independent, no exceptions)
-  {
-    uint64_t result = 0;
-    auto [ptr, ec] = std::from_chars(value.data(), end, result);
-    if (ec == std::errc() && ptr == end) {
-      parsed_value.uint64_val = result;
-      parsed_value.uint64_valid = true;
-    }
-  }
-
-  return parsed_value;
+FilterOperands BuildFilterOperands(const std::string& literal) {
+  FilterOperands operands;
+  operands.text = literal;
+  operands.boolean = ConvertOperand<bool>(literal, "boolean");
+  operands.signed_integer = ConvertOperand<int64_t>(literal, "bigint");
+  operands.unsigned_integer = ConvertOperand<uint64_t>(literal, "bigint_unsigned");
+  operands.real = ConvertOperand<double>(literal, "double");
+  return operands;
 }
 
 /// Compare two doubles the way the bitmap index does: on their stored
@@ -1439,64 +1421,48 @@ RoaringBitmapPtr BuildTypeUnionBitmap(const storage::FilterIndex* filter_index, 
     filter_index->OrEqBitmapInto(column, key, union_bm.get());
   };
 
-  // Try string
-  try_add(storage::FilterValue{value});
+  const FilterOperands operands = BuildFilterOperands(value);
 
-  // Try bool
-  if (value == "1" || value == "true") {
-    try_add(storage::FilterValue{true});
-  } else if (value == "0" || value == "false") {
-    try_add(storage::FilterValue{false});
+  try_add(storage::FilterValue{operands.text});
+
+  if (operands.boolean.has_value()) {
+    try_add(storage::FilterValue{*operands.boolean});
   }
 
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-  const char* end = value.data() + value.size();
+  // int64_t and narrower signed types
+  if (operands.signed_integer.has_value()) {
+    const int64_t val = *operands.signed_integer;
+    try_add(storage::FilterValue{val});
+    if (val >= INT8_MIN && val <= INT8_MAX) {
+      try_add(storage::FilterValue{static_cast<int8_t>(val)});
+    }
+    if (val >= INT16_MIN && val <= INT16_MAX) {
+      try_add(storage::FilterValue{static_cast<int16_t>(val)});
+    }
+    if (val >= INT32_MIN && val <= INT32_MAX) {
+      try_add(storage::FilterValue{static_cast<int32_t>(val)});
+    }
+    // TimeValue (TIME columns stored as seconds)
+    try_add(storage::FilterValue{storage::TimeValue{val}});
+  }
 
-  // Try int64_t and narrower signed types
-  {
-    int64_t val = 0;
-    auto [ptr, ec] = std::from_chars(value.data(), end, val);
-    if (ec == std::errc() && ptr == end) {
-      try_add(storage::FilterValue{val});
-      if (val >= INT8_MIN && val <= INT8_MAX) {
-        try_add(storage::FilterValue{static_cast<int8_t>(val)});
-      }
-      if (val >= INT16_MIN && val <= INT16_MAX) {
-        try_add(storage::FilterValue{static_cast<int16_t>(val)});
-      }
-      if (val >= INT32_MIN && val <= INT32_MAX) {
-        try_add(storage::FilterValue{static_cast<int32_t>(val)});
-      }
-      // Try TimeValue (TIME columns stored as seconds)
-      try_add(storage::FilterValue{storage::TimeValue{val}});
+  // uint64_t and narrower unsigned types
+  if (operands.unsigned_integer.has_value()) {
+    const uint64_t val = *operands.unsigned_integer;
+    try_add(storage::FilterValue{val});
+    if (val <= UINT8_MAX) {
+      try_add(storage::FilterValue{static_cast<uint8_t>(val)});
+    }
+    if (val <= UINT16_MAX) {
+      try_add(storage::FilterValue{static_cast<uint16_t>(val)});
+    }
+    if (val <= UINT32_MAX) {
+      try_add(storage::FilterValue{static_cast<uint32_t>(val)});
     }
   }
 
-  // Try uint64_t and narrower unsigned types
-  {
-    uint64_t val = 0;
-    auto [ptr, ec] = std::from_chars(value.data(), end, val);
-    if (ec == std::errc() && ptr == end) {
-      try_add(storage::FilterValue{val});
-      if (val <= UINT8_MAX) {
-        try_add(storage::FilterValue{static_cast<uint8_t>(val)});
-      }
-      if (val <= UINT16_MAX) {
-        try_add(storage::FilterValue{static_cast<uint16_t>(val)});
-      }
-      if (val <= UINT32_MAX) {
-        try_add(storage::FilterValue{static_cast<uint32_t>(val)});
-      }
-    }
-  }
-
-  // Try double
-  {
-    double val = 0.0;
-    auto [ptr, ec] = std::from_chars(value.data(), end, val);
-    if (ec == std::errc() && ptr == end) {
-      try_add(storage::FilterValue{val});
-    }
+  if (operands.real.has_value()) {
+    try_add(storage::FilterValue{*operands.real});
   }
 
   return union_bm;
@@ -1516,11 +1482,11 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
   std::vector<storage::DocId> filtered_results;
   filtered_results.reserve(results.size());
 
-  // Pre-parse all filter values once before the main loop
-  std::vector<ParsedFilterValue> parsed_values;
-  parsed_values.reserve(resolved_filters.size());
+  // Convert all filter values once before the main loop
+  std::vector<FilterOperands> operands_per_filter;
+  operands_per_filter.reserve(resolved_filters.size());
   for (const auto& filter_cond : resolved_filters) {
-    parsed_values.push_back(ParseFilterValue(filter_cond.value));
+    operands_per_filter.push_back(BuildFilterOperands(filter_cond.value));
   }
 
   std::vector<std::string> columns;
@@ -1548,7 +1514,7 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
 
       for (size_t i = 0; i < resolved_filters.size(); ++i) {
         const auto& filter_cond = resolved_filters[i];
-        const auto& parsed_value = parsed_values[i];
+        const auto& operands = operands_per_filter[i];
         const auto& stored_value = batch_filter_values[i][doc_idx];
 
         // NULL values: only match for NE operator
@@ -1562,6 +1528,9 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
 
         // Evaluate filter condition based on operator
         auto op_str = query::FilterOpToString(filter_cond.op);
+        // A literal the stored type cannot hold matches nothing under =, and
+        // every candidate under != (the bitmap path's NOT-in-empty-set).
+        const bool unconvertible_result = filter_cond.op == query::FilterOp::NE;
         bool matches = std::visit(
             [&](const auto& val) -> bool {
               using T = std::decay_t<decltype(val)>;
@@ -1572,35 +1541,38 @@ std::vector<storage::DocId> ApplyFilters(const std::vector<storage::DocId>& resu
                 return mygram::utils::CompareValues(val, filter_cond.value, op_str);
               } else if constexpr (std::is_same_v<T, bool>) {
                 // Boolean: only EQ/NE are meaningful
-                return mygram::utils::CompareValues(val, parsed_value.bool_val, op_str);
+                if (!operands.boolean.has_value()) {
+                  return unconvertible_result;
+                }
+                return mygram::utils::CompareValues(val, *operands.boolean, op_str);
               } else if constexpr (std::is_same_v<T, double>) {
-                if (!parsed_value.double_valid) {
-                  return false;  // Invalid number
+                if (!operands.real.has_value()) {
+                  return unconvertible_result;
                 }
                 if (filter_cond.op == query::FilterOp::EQ) {
-                  return DoubleValuesIdentical(val, parsed_value.double_val);
+                  return DoubleValuesIdentical(val, *operands.real);
                 }
                 if (filter_cond.op == query::FilterOp::NE) {
-                  return !DoubleValuesIdentical(val, parsed_value.double_val);
+                  return !DoubleValuesIdentical(val, *operands.real);
                 }
-                return mygram::utils::CompareDoubleValues(val, parsed_value.double_val, op_str,
+                return mygram::utils::CompareDoubleValues(val, *operands.real, op_str,
                                                           mygram::constants::kFilterValueEpsilon);
               } else if constexpr (std::is_same_v<T, storage::TimeValue>) {
-                if (!parsed_value.int64_valid) {
-                  return false;  // Invalid number
+                if (!operands.signed_integer.has_value()) {
+                  return unconvertible_result;
                 }
-                return mygram::utils::CompareValues(val.seconds, parsed_value.int64_val, op_str);
+                return mygram::utils::CompareValues(val.seconds, *operands.signed_integer, op_str);
               } else if constexpr (std::is_same_v<T, uint64_t> || std::is_same_v<T, uint32_t> ||
                                    std::is_same_v<T, uint16_t> || std::is_same_v<T, uint8_t>) {
-                if (!parsed_value.uint64_valid) {
-                  return false;  // Invalid number
+                if (!operands.unsigned_integer.has_value()) {
+                  return unconvertible_result;
                 }
-                return mygram::utils::CompareValues(static_cast<uint64_t>(val), parsed_value.uint64_val, op_str);
+                return mygram::utils::CompareValues(static_cast<uint64_t>(val), *operands.unsigned_integer, op_str);
               } else {
-                if (!parsed_value.int64_valid) {
-                  return false;  // Invalid number
+                if (!operands.signed_integer.has_value()) {
+                  return unconvertible_result;
                 }
-                return mygram::utils::CompareValues(static_cast<int64_t>(val), parsed_value.int64_val, op_str);
+                return mygram::utils::CompareValues(static_cast<int64_t>(val), *operands.signed_integer, op_str);
               }
             },
             stored_value.value());
@@ -1784,33 +1756,46 @@ void InsertToCache(cache::CacheManager* cache_manager, const query::Query& query
 
 namespace {
 
-SynonymTermGroup ExpandNormalizedTermWithSynonyms(std::string_view normalized,
-                                                  const query::SynonymDictionary* synonym_dict,
-                                                  index::Index* current_index, int ngram_size, int kanji_ngram_size,
-                                                  bool cross_boundary_ngrams) {
+SynonymTermGroup GenerateNormalizedTermWithSynonymsNgrams(std::string_view normalized,
+                                                          const query::SynonymDictionary* synonym_dict, int ngram_size,
+                                                          int kanji_ngram_size, bool cross_boundary_ngrams) {
   SynonymTermGroup group;
   auto synonyms = synonym_dict->Expand(std::string(normalized));
 
   for (const auto& synonym : synonyms) {
     auto ngrams = mygram::utils::GenerateQueryNgrams(synonym, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
     mygram::utils::DeduplicateSorted(ngrams);
-
-    size_t min_size = std::numeric_limits<size_t>::max();
-    for (const auto& ngram : ngrams) {
-      uint64_t posting_size = current_index->EstimatePostingSize(ngram);
-      if (posting_size > 0) {
-        min_size = std::min(min_size, static_cast<size_t>(posting_size));
-      } else {
-        min_size = 0;
-        break;
-      }
-    }
-
-    // Synonym execution needs posting-size estimates for ordering, but does
-    // not consume per-variant BM25 document frequency.
-    group.variants.push_back({std::move(ngrams), min_size, 0, synonym, false});
+    group.variants.push_back({std::move(ngrams), std::numeric_limits<size_t>::max(), 0, synonym, false});
     group.normalized_terms.push_back(synonym);
   }
+  return group;
+}
+
+std::vector<SynonymTermGroup> GenerateTermsWithSynonymsNgrams(const std::vector<std::string>& search_terms,
+                                                              const query::SynonymDictionary* synonym_dict,
+                                                              index::Index* current_index, int ngram_size,
+                                                              int kanji_ngram_size, bool cross_boundary_ngrams) {
+  std::vector<SynonymTermGroup> groups;
+  groups.reserve(search_terms.size());
+  for (const auto& term : search_terms) {
+    const std::string normalized = current_index->NormalizeText(term);
+    groups.push_back(GenerateNormalizedTermWithSynonymsNgrams(normalized, synonym_dict, ngram_size, kanji_ngram_size,
+                                                              cross_boundary_ngrams));
+  }
+  return groups;
+}
+
+void EstimateSynonymGroupPostingSizes(SynonymTermGroup& group, index::Index* current_index) {
+  EstimateTermInfoPostingSizes(group.variants, current_index);
+}
+
+SynonymTermGroup ExpandNormalizedTermWithSynonyms(std::string_view normalized,
+                                                  const query::SynonymDictionary* synonym_dict,
+                                                  index::Index* current_index, int ngram_size, int kanji_ngram_size,
+                                                  bool cross_boundary_ngrams) {
+  auto group = GenerateNormalizedTermWithSynonymsNgrams(normalized, synonym_dict, ngram_size, kanji_ngram_size,
+                                                        cross_boundary_ngrams);
+  EstimateSynonymGroupPostingSizes(group, current_index);
   return group;
 }
 
@@ -1820,15 +1805,11 @@ std::vector<SynonymTermGroup> ExpandTermsWithSynonyms(const std::vector<std::str
                                                       const query::SynonymDictionary* synonym_dict,
                                                       index::Index* current_index, int ngram_size, int kanji_ngram_size,
                                                       bool cross_boundary_ngrams) {
-  std::vector<SynonymTermGroup> groups;
-  groups.reserve(search_terms.size());
-
-  for (const auto& term : search_terms) {
-    const std::string normalized = current_index->NormalizeText(term);
-    groups.push_back(ExpandNormalizedTermWithSynonyms(normalized, synonym_dict, current_index, ngram_size,
-                                                      kanji_ngram_size, cross_boundary_ngrams));
+  auto groups = GenerateTermsWithSynonymsNgrams(search_terms, synonym_dict, current_index, ngram_size, kanji_ngram_size,
+                                                cross_boundary_ngrams);
+  for (auto& group : groups) {
+    EstimateSynonymGroupPostingSizes(group, current_index);
   }
-
   return groups;
 }
 
@@ -2233,6 +2214,41 @@ std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::Doc
   });
 }
 
+namespace {
+
+/// Fail like a positive term does when an exclusion would rest on a term the
+/// n-gram index cannot see and no normalized text is stored to scan instead.
+std::optional<mygram::utils::Error> NotTermsFallbackError(
+    const std::vector<std::string>& not_terms, const query::SynonymDictionary* synonym_dict,
+    index::Index* current_index, storage::DocumentStore* current_doc_store, int ngram_size, int kanji_ngram_size,
+    bool cross_boundary, const std::vector<SynonymTermGroup>* precomputed_groups = nullptr,
+    const std::vector<SearchTermInfo>* precomputed_infos = nullptr) {
+  if (not_terms.empty() || current_doc_store == nullptr || current_doc_store->IsStoreTextsEnabled()) {
+    return std::nullopt;
+  }
+  if (synonym_dict == nullptr) {
+    if (precomputed_infos != nullptr) {
+      return SubstringFallbackError(*precomputed_infos, current_doc_store);
+    }
+    return SubstringFallbackError(
+        GenerateTermInfoNgrams(not_terms, current_index, ngram_size, kanji_ngram_size, cross_boundary),
+        current_doc_store);
+  }
+  const auto generated_groups = precomputed_groups == nullptr
+                                    ? GenerateTermsWithSynonymsNgrams(not_terms, synonym_dict, current_index,
+                                                                      ngram_size, kanji_ngram_size, cross_boundary)
+                                    : std::vector<SynonymTermGroup>{};
+  const auto& groups = precomputed_groups != nullptr ? *precomputed_groups : generated_groups;
+  for (const auto& group : groups) {
+    if (auto error = SubstringFallbackError(group.variants, current_doc_store)) {
+      return error;
+    }
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
 mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPipeline(
     const query::Query& query, const FullPipelineParams& params) {
   FullPipelineOutput output;
@@ -2262,6 +2278,7 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
   }
 
   const query::Query cache_query = BuildCanonicalCacheQuery(query, params);
+  output.canonical_cache_key = cache_query.cache_key;
 
   // Try cache lookup first (skip if caller already checked)
   auto cache_lookup_start = std::chrono::high_resolution_clock::now();
@@ -2300,13 +2317,7 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
       return output;
     }
   }
-  const std::optional<uint64_t> cache_data_version =
-      (params.cache_manager != nullptr && params.cache_manager->IsEnabled())
-          ? std::optional<uint64_t>{params.cache_manager->CaptureDataVersion(query.table)}
-          : std::nullopt;
-
-  // Start timing
-  auto start_time = std::chrono::high_resolution_clock::now();
+  const auto query_work_start = std::chrono::high_resolution_clock::now();
 
   // Collect all search terms (main + AND terms)
   if (!query.search_text.empty()) {
@@ -2314,29 +2325,139 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
   }
   output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
 
-  bool cross_boundary = params.cross_boundary_ngrams;
+  const bool cross_boundary = params.cross_boundary_ngrams;
   const bool compute_term_doc_freq = query.order_by.has_value() && query.order_by->IsScoreSort() &&
                                      params.full_config != nullptr && params.full_config->bm25.enable;
+  const bool boolean_path = boolean_ast != nullptr && has_boolean_syntax;
+  const bool fuzzy_path = query.fuzzy_max_distance.has_value();
+  const bool synonym_path = !fuzzy_path && params.synonym_dict != nullptr;
 
-  if (boolean_ast && has_boolean_syntax) {
-    output.path_taken = query.fuzzy_max_distance.has_value()
-                            ? PipelinePath::FUZZY
-                            : (params.synonym_dict != nullptr ? PipelinePath::SYNONYM : PipelinePath::REGULAR);
+  std::vector<std::string> all_boolean_terms;
+  std::vector<std::string> verify_terms_for_mode;
+  TermInfoLookup term_info_lookup;
+  std::vector<SearchTermInfo> not_term_infos;
+  std::vector<SearchTermInfo> boolean_not_fallback_infos;
+  if (!boolean_path) {
+    not_term_infos = GenerateTermInfoNgrams(query.not_terms, params.current_index, params.ngram_size,
+                                            params.kanji_ngram_size, cross_boundary);
+  }
+  for (auto& not_term_info : not_term_infos) {
+    not_term_info.is_not_term = true;
+  }
+  std::vector<SynonymTermGroup> synonym_groups;
+  std::vector<SynonymTermGroup> not_synonym_groups;
+  std::vector<SearchTermInfo> cache_registration_infos;
 
-    std::vector<std::string> all_boolean_terms;
+  // Prepare every term dependency without touching posting lists. The cache
+  // miss must register these n-grams before estimates, document frequencies,
+  // or result materialization can race an invalidating mutation.
+  if (boolean_path) {
+    output.path_taken = fuzzy_path ? PipelinePath::FUZZY
+                                   : (params.synonym_dict != nullptr ? PipelinePath::SYNONYM : PipelinePath::REGULAR);
     CollectAstTerms(*boolean_ast, all_boolean_terms);
-
-    std::vector<std::string> boolean_scoring_terms;
-    CollectAstScoringTerms(*boolean_ast, boolean_scoring_terms);
-    output.all_search_terms = boolean_scoring_terms;
+    output.all_search_terms.clear();
+    CollectAstScoringTerms(*boolean_ast, output.all_search_terms);
     output.all_search_terms.insert(output.all_search_terms.end(), query.and_terms.begin(), query.and_terms.end());
-
-    std::vector<std::string> verify_terms_for_mode = all_boolean_terms;
+    verify_terms_for_mode = all_boolean_terms;
     verify_terms_for_mode.insert(verify_terms_for_mode.end(), query.and_terms.begin(), query.and_terms.end());
     std::vector<std::string> metadata_terms = verify_terms_for_mode;
     metadata_terms.insert(metadata_terms.end(), query.not_terms.begin(), query.not_terms.end());
-    auto term_info_lookup = GenerateUniqueTermInfoLookup(metadata_terms, params.current_index, params.ngram_size,
-                                                         params.kanji_ngram_size, cross_boundary);
+    term_info_lookup = GenerateUniqueTermInfoLookup(metadata_terms, params.current_index, params.ngram_size,
+                                                    params.kanji_ngram_size, cross_boundary,
+                                                    /*estimate_posting_sizes=*/false);
+    cache_registration_infos.reserve(term_info_lookup.size() + query.not_terms.size());
+    for (const auto& [term, term_info] : term_info_lookup) {
+      cache_registration_infos.push_back(term_info);
+    }
+    boolean_not_fallback_infos = SelectTermInfos(query.not_terms, term_info_lookup);
+    if (params.synonym_dict != nullptr) {
+      not_synonym_groups = GenerateTermsWithSynonymsNgrams(query.not_terms, params.synonym_dict, params.current_index,
+                                                           params.ngram_size, params.kanji_ngram_size, cross_boundary);
+      for (const auto& group : not_synonym_groups) {
+        cache_registration_infos.insert(cache_registration_infos.end(), group.variants.begin(), group.variants.end());
+      }
+    }
+    if (params.synonym_dict != nullptr && !fuzzy_path) {
+      synonym_groups = GenerateTermsWithSynonymsNgrams(verify_terms_for_mode, params.synonym_dict, params.current_index,
+                                                       params.ngram_size, params.kanji_ngram_size, cross_boundary);
+      for (const auto& group : synonym_groups) {
+        cache_registration_infos.insert(cache_registration_infos.end(), group.variants.begin(), group.variants.end());
+      }
+    }
+  } else {
+    output.path_taken =
+        fuzzy_path ? PipelinePath::FUZZY : (synonym_path ? PipelinePath::SYNONYM : PipelinePath::REGULAR);
+    output.term_infos = GenerateTermInfoNgrams(output.all_search_terms, params.current_index, params.ngram_size,
+                                               params.kanji_ngram_size, cross_boundary);
+    cache_registration_infos = output.term_infos;
+    cache_registration_infos.insert(cache_registration_infos.end(), not_term_infos.begin(), not_term_infos.end());
+    if (synonym_path) {
+      synonym_groups =
+          GenerateTermsWithSynonymsNgrams(output.all_search_terms, params.synonym_dict, params.current_index,
+                                          params.ngram_size, params.kanji_ngram_size, cross_boundary);
+      not_synonym_groups = GenerateTermsWithSynonymsNgrams(query.not_terms, params.synonym_dict, params.current_index,
+                                                           params.ngram_size, params.kanji_ngram_size, cross_boundary);
+      for (const auto& group : synonym_groups) {
+        cache_registration_infos.insert(cache_registration_infos.end(), group.variants.begin(), group.variants.end());
+      }
+      for (const auto& group : not_synonym_groups) {
+        cache_registration_infos.insert(cache_registration_infos.end(), group.variants.begin(), group.variants.end());
+      }
+    }
+  }
+
+  // These validations inspect only normalized terms and n-gram shapes, so
+  // they can fail without opening a pending cache registration.
+  if (boolean_path) {
+    const auto boolean_term_infos_for_fallback = SelectTermInfos(verify_terms_for_mode, term_info_lookup);
+    if (auto error = SubstringFallbackError(boolean_term_infos_for_fallback, params.current_doc_store)) {
+      return mygram::utils::MakeUnexpected(std::move(*error));
+    }
+  } else if (synonym_path) {
+    for (const auto& group : synonym_groups) {
+      if (auto error = SubstringFallbackError(group.variants, params.current_doc_store)) {
+        return mygram::utils::MakeUnexpected(std::move(*error));
+      }
+    }
+  } else if (auto error = SubstringFallbackError(output.term_infos, params.current_doc_store)) {
+    return mygram::utils::MakeUnexpected(std::move(*error));
+  }
+  const query::SynonymDictionary* not_term_synonym_dict = boolean_path || synonym_path ? params.synonym_dict : nullptr;
+  if (auto error = NotTermsFallbackError(
+          query.not_terms, not_term_synonym_dict, params.current_index, params.current_doc_store, params.ngram_size,
+          params.kanji_ngram_size, cross_boundary, not_term_synonym_dict != nullptr ? &not_synonym_groups : nullptr,
+          not_term_synonym_dict == nullptr ? (boolean_path ? &boolean_not_fallback_infos : &not_term_infos)
+                                           : nullptr)) {
+    return mygram::utils::MakeUnexpected(std::move(*error));
+  }
+
+  const bool verify_text_required =
+      params.full_config != nullptr &&
+      ShouldApplyVerifyText(params.full_config->memory.verify_text, output.all_search_terms);
+  const bool hybrid_exact_required = RequiresExactTextForHybridFragments(
+      output.all_search_terms, params.current_index, params.ngram_size, params.kanji_ngram_size, cross_boundary);
+  const bool invalidate_on_any_text_change = boolean_path || fuzzy_path || synonym_path ||
+                                             RequiresSubstringFallback(cache_registration_infos) ||
+                                             verify_text_required || hybrid_exact_required;
+
+  // Query execution cost includes normalization and n-gram construction, but
+  // excludes the cache's registration bookkeeping and later payload commit.
+  const auto cache_admission_start = std::chrono::high_resolution_clock::now();
+  auto registration_ngrams = MergeSortedTermNgramsForCache(cache_registration_infos);
+  std::optional<cache::CacheManager::PendingInsert> pending_cache_insert;
+  if (params.cache_manager != nullptr && params.cache_manager->IsEnabled() && !cache_registration_infos.empty()) {
+    pending_cache_insert =
+        params.cache_manager->BeginInsert(cache_query, registration_ngrams, params.ngram_size, params.kanji_ngram_size,
+                                          cross_boundary, invalidate_on_any_text_change);
+  }
+  const auto cache_admission_end = std::chrono::high_resolution_clock::now();
+  const double cache_admission_ms =
+      std::chrono::duration<double, std::milli>(cache_admission_end - cache_admission_start).count();
+
+  if (boolean_path) {
+    for (auto& entry : term_info_lookup) {
+      EstimateTermInfoPostingSize(entry.second, params.current_index);
+    }
     if (compute_term_doc_freq) {
       std::unordered_set<std::string> scoring_terms(output.all_search_terms.begin(), output.all_search_terms.end());
       for (const auto& scoring_term : scoring_terms) {
@@ -2347,11 +2468,25 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
       }
     }
     output.term_infos = SelectTermInfos(output.all_search_terms, term_info_lookup);
-
-    auto boolean_term_infos_for_fallback = SelectTermInfos(verify_terms_for_mode, term_info_lookup);
-    if (auto error = SubstringFallbackError(boolean_term_infos_for_fallback, params.current_doc_store)) {
-      return mygram::utils::MakeUnexpected(std::move(*error));
+  } else if (synonym_path) {
+    for (auto& group : synonym_groups) {
+      EstimateSynonymGroupPostingSizes(group, params.current_index);
     }
+  } else {
+    EstimateTermInfoPostingSizes(output.term_infos, params.current_index);
+    if (compute_term_doc_freq) {
+      for (auto& term_info : output.term_infos) {
+        PopulateTermDocumentFrequency(term_info, params.current_index, params.current_doc_store);
+      }
+    }
+  }
+
+  const auto query_cost_ms_at = [&](std::chrono::high_resolution_clock::time_point end_time) {
+    return std::max(
+        0.0, std::chrono::duration<double, std::milli>(end_time - query_work_start).count() - cache_admission_ms);
+  };
+
+  if (boolean_path) {
     auto pipeline_result =
         ExecuteWithBooleanAst(query, *boolean_ast, params.current_index, params.current_doc_store, params.full_config,
                               verify_terms_for_mode, params.ngram_size, params.kanji_ngram_size, cross_boundary,
@@ -2375,7 +2510,7 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
-    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    output.query_time_ms = query_cost_ms_at(end_time);
 
     if (!output.empty_term_detected) {
       auto cache_term_infos = SelectTermInfos(all_boolean_terms, term_info_lookup);
@@ -2385,22 +2520,16 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
       }
       cache_term_infos.insert(cache_term_infos.end(), std::make_move_iterator(not_term_infos.begin()),
                               std::make_move_iterator(not_term_infos.end()));
-      InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
-                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version, true);
+      if (!ContainsEmptyPostingTerm(cache_term_infos, invalidate_on_any_text_change) && pending_cache_insert) {
+        params.cache_manager->InsertIfPending(std::move(*pending_cache_insert), cache_query, output.results,
+                                              output.query_time_ms);
+      }
     }
     return output;
   }
 
   // Fuzzy search path (takes precedence over synonyms)
   if (query.fuzzy_max_distance.has_value()) {
-    output.path_taken = PipelinePath::FUZZY;
-    output.term_infos =
-        GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size, params.kanji_ngram_size,
-                          cross_boundary, compute_term_doc_freq, params.current_doc_store);
-    if (auto error = SubstringFallbackError(output.term_infos, params.current_doc_store)) {
-      return mygram::utils::MakeUnexpected(std::move(*error));
-    }
-
     auto pipeline_result =
         ExecuteWithFuzzy(query, output.term_infos, output.all_search_terms, *query.fuzzy_max_distance,
                          params.current_index, params.current_doc_store, params.full_config, params.ngram_size,
@@ -2418,31 +2547,24 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
-    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    output.query_time_ms = query_cost_ms_at(end_time);
 
     // Do not cache early-exit (empty posting list) results: a missing posting
     // list during one query may not be missing for the next, and a cached
     // empty entry would mask future legitimate results until invalidated.
     if (!output.empty_term_detected) {
-      auto cache_term_infos = BuildCacheTermInfos(output.term_infos, query, params.current_index, params.ngram_size,
-                                                  params.kanji_ngram_size, cross_boundary);
-      InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
-                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version, true);
+      auto cache_term_infos = output.term_infos;
+      cache_term_infos.insert(cache_term_infos.end(), not_term_infos.begin(), not_term_infos.end());
+      if (!ContainsEmptyPostingTerm(cache_term_infos, invalidate_on_any_text_change) && pending_cache_insert) {
+        params.cache_manager->InsertIfPending(std::move(*pending_cache_insert), cache_query, output.results,
+                                              output.query_time_ms);
+      }
     }
     return output;
   }
 
   // Synonym-aware search path
   if (params.synonym_dict != nullptr) {
-    output.path_taken = PipelinePath::SYNONYM;
-    auto synonym_groups = ExpandTermsWithSynonyms(output.all_search_terms, params.synonym_dict, params.current_index,
-                                                  params.ngram_size, params.kanji_ngram_size, cross_boundary);
-    for (const auto& group : synonym_groups) {
-      if (auto error = SubstringFallbackError(group.variants, params.current_doc_store)) {
-        return mygram::utils::MakeUnexpected(std::move(*error));
-      }
-    }
-
     auto pipeline_result = ExecuteWithSynonyms(query, synonym_groups, params.current_index, params.current_doc_store,
                                                params.full_config, params.ngram_size, params.kanji_ngram_size,
                                                cross_boundary, params.filter_threshold, params.synonym_dict);
@@ -2459,34 +2581,26 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
-    output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    output.query_time_ms = query_cost_ms_at(end_time);
 
     // Skip caching for early-exit (empty posting list) -- see fuzzy path comment.
     if (!output.empty_term_detected) {
-      // Collect all n-grams for cache invalidation
       std::vector<SearchTermInfo> all_term_infos;
       for (const auto& group : synonym_groups) {
         for (const auto& variant : group.variants) {
           all_term_infos.push_back(variant);
         }
       }
-      all_term_infos = BuildCacheTermInfos(all_term_infos, query, params.current_index, params.ngram_size,
-                                           params.kanji_ngram_size, cross_boundary);
-      InsertToCache(params.cache_manager, cache_query, output.results, all_term_infos, output.query_time_ms,
-                    params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version, true);
+      all_term_infos.insert(all_term_infos.end(), not_term_infos.begin(), not_term_infos.end());
+      if (!ContainsEmptyPostingTerm(all_term_infos, invalidate_on_any_text_change) && pending_cache_insert) {
+        params.cache_manager->InsertIfPending(std::move(*pending_cache_insert), cache_query, output.results,
+                                              output.query_time_ms);
+      }
     }
     return output;
   }
 
   // Standard search path: generate n-grams for each term and estimate result sizes
-  output.path_taken = PipelinePath::REGULAR;
-  output.term_infos =
-      GenerateTermInfos(output.all_search_terms, params.current_index, params.ngram_size, params.kanji_ngram_size,
-                        cross_boundary, compute_term_doc_freq, params.current_doc_store);
-  if (auto error = SubstringFallbackError(output.term_infos, params.current_doc_store)) {
-    return mygram::utils::MakeUnexpected(std::move(*error));
-  }
-
   // Sort terms by estimated size (smallest first for faster intersection)
   std::sort(
       output.term_infos.begin(), output.term_infos.end(),
@@ -2507,31 +2621,23 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
   } else {
     output.results = std::move(pipeline_result.results);
   }
-  const bool verify_text_required =
-      params.full_config != nullptr &&
-      ShouldApplyVerifyText(params.full_config->memory.verify_text, output.all_search_terms);
-  const bool hybrid_exact_required = RequiresExactTextForHybridFragments(
-      output.all_search_terms, params.current_index, params.ngram_size, params.kanji_ngram_size, cross_boundary);
   output.semantics_reproducible_by_single_term_ngram_and =
       output.all_search_terms.size() == 1 && output.term_infos.size() == 1 && query.not_terms.empty() &&
       query.filters.empty() && !verify_text_required && !hybrid_exact_required;
 
   // Calculate query execution time
   auto end_time = std::chrono::high_resolution_clock::now();
-  output.query_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+  output.query_time_ms = query_cost_ms_at(end_time);
 
   // Store in cache if enabled. Skip on early-exit (empty posting list); see
   // the fuzzy path for the rationale.
   if (!output.empty_term_detected) {
-    auto cache_term_infos = BuildCacheTermInfos(output.term_infos, query, params.current_index, params.ngram_size,
-                                                params.kanji_ngram_size, cross_boundary);
-    InsertToCache(params.cache_manager, cache_query, output.results, cache_term_infos, output.query_time_ms,
-                  params.ngram_size, params.kanji_ngram_size, cross_boundary, cache_data_version,
-                  RequiresSubstringFallback(cache_term_infos) ||
-                      (params.full_config != nullptr &&
-                       ShouldApplyVerifyText(params.full_config->memory.verify_text, output.all_search_terms)) ||
-                      RequiresExactTextForHybridFragments(output.all_search_terms, params.current_index,
-                                                          params.ngram_size, params.kanji_ngram_size, cross_boundary));
+    auto cache_term_infos = output.term_infos;
+    cache_term_infos.insert(cache_term_infos.end(), not_term_infos.begin(), not_term_infos.end());
+    if (!ContainsEmptyPostingTerm(cache_term_infos, invalidate_on_any_text_change) && pending_cache_insert) {
+      params.cache_manager->InsertIfPending(std::move(*pending_cache_insert), cache_query, output.results,
+                                            output.query_time_ms);
+    }
   }
 
   return output;
@@ -2554,9 +2660,8 @@ mygram::utils::Expected<FacetPipelineOutput, mygram::utils::Error> ExecuteFacetP
 
   auto resolved_column = current_doc_store->ResolveFilterColumnName(query.facet_column);
   if (!resolved_column.has_value()) {
-    const std::string requested_lower = mygram::utils::ToLower(query.facet_column);
     for (const auto& configured : params.configured_filter_columns) {
-      if (mygram::utils::ToLower(configured) == requested_lower) {
+      if (mygram::utils::EqualsAsciiCaseInsensitive(configured, query.facet_column)) {
         resolved_column = configured;
         break;
       }
@@ -2590,6 +2695,11 @@ mygram::utils::Expected<FacetPipelineOutput, mygram::utils::Error> ExecuteFacetP
       }
       results = std::move(pipeline_output->results);
     } else {
+      if (auto error = NotTermsFallbackError(query.not_terms, params.search.synonym_dict, current_index,
+                                             current_doc_store, params.search.ngram_size,
+                                             params.search.kanji_ngram_size, params.search.cross_boundary_ngrams)) {
+        return MakeUnexpected(std::move(*error));
+      }
       results = current_doc_store->GetAllDocIds();
       if (has_not) {
         results = ApplyNotFilter(

@@ -370,7 +370,7 @@ TEST_F(SearchPipelineFilterTest, InsertToCacheWithStaleDataVersionDoesNotInsert)
   const query::Query cache_query = BuildCanonicalCacheQuery(query, pipeline_params);
 
   std::vector<SearchTermInfo> term_infos = {{{"al", "lp", "ph", "ha"}, 4, 0, "alpha"}};
-  const auto stale_version = cache_manager.CaptureDataVersion();
+  const auto stale_version = cache_manager.CaptureDataVersion("test");
   cache_manager.Invalidate("test", "", "unrelated mutation");
 
   InsertToCache(&cache_manager, cache_query, doc_ids_, term_infos, 1.0, 2, 0, false, stale_version);
@@ -974,6 +974,105 @@ TEST_F(SearchPipelineFilterParityTest, MixedEqAndRangeFiltersBitmapMatchesFallba
 }
 
 // =============================================================================
+// Query filter literals are converted like stored values, on both paths
+// =============================================================================
+
+class SearchPipelineFilterLiteralTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    doc_store_ = std::make_unique<storage::DocumentStore>();
+    auto d0 = doc_store_->AddDocument("pk0",
+                                      {{"flag", storage::FilterValue{true}},
+                                       {"n", storage::FilterValue{int64_t{5}}},
+                                       {"u", storage::FilterValue{uint32_t{5}}},
+                                       {"d", storage::FilterValue{1.5}}},
+                                      "text zero");
+    auto d1 = doc_store_->AddDocument("pk1",
+                                      {{"flag", storage::FilterValue{false}},
+                                       {"n", storage::FilterValue{int64_t{-3}}},
+                                       {"u", storage::FilterValue{uint32_t{0}}},
+                                       {"d", storage::FilterValue{2.5}}},
+                                      "text one");
+    auto d2 = doc_store_->AddDocument("pk2", {}, "text two");
+    ASSERT_TRUE(d0.has_value());
+    ASSERT_TRUE(d1.has_value());
+    ASSERT_TRUE(d2.has_value());
+    doc_ids_ = {*d0, *d1, *d2};
+  }
+
+  std::vector<storage::DocId> Bitmap(const std::string& column, query::FilterOp op, const std::string& value) {
+    return ApplyFiltersWithBitmap(doc_ids_, {{column, op, value}}, doc_store_.get());
+  }
+
+  std::vector<storage::DocId> Fallback(const std::string& column, query::FilterOp op, const std::string& value) {
+    return ApplyFilters(doc_ids_, {{column, op, value}}, doc_store_.get());
+  }
+
+  std::unique_ptr<storage::DocumentStore> doc_store_;
+  std::vector<storage::DocId> doc_ids_;
+};
+
+TEST_F(SearchPipelineFilterLiteralTest, EveryLiteralGivesTheSameRowsOnBitmapAndFallbackPaths) {
+  const std::vector<std::string> literals = {"TRUE", "True", "true", "1",  "0", "FALSE", "yes",
+                                             "2",    "",     "abc",  "-1", "5", "1.5",   "nan"};
+  for (const std::string column : {"flag", "n", "u", "d"}) {
+    for (const auto op : {query::FilterOp::EQ, query::FilterOp::NE}) {
+      for (const auto& literal : literals) {
+        EXPECT_EQ(Bitmap(column, op, literal), Fallback(column, op, literal))
+            << column << " " << query::FilterOpToString(op) << " '" << literal << "'";
+      }
+    }
+  }
+}
+
+TEST_F(SearchPipelineFilterLiteralTest, BooleanLiteralIsCaseInsensitive) {
+  for (const std::string literal : {"TRUE", "True", "true", "1"}) {
+    EXPECT_EQ(Bitmap("flag", query::FilterOp::EQ, literal), (std::vector<storage::DocId>{doc_ids_[0]})) << literal;
+    EXPECT_EQ(Fallback("flag", query::FilterOp::EQ, literal), (std::vector<storage::DocId>{doc_ids_[0]})) << literal;
+  }
+  EXPECT_EQ(Bitmap("flag", query::FilterOp::EQ, "FALSE"), (std::vector<storage::DocId>{doc_ids_[1]}));
+  EXPECT_EQ(Fallback("flag", query::FilterOp::EQ, "FALSE"), (std::vector<storage::DocId>{doc_ids_[1]}));
+}
+
+TEST_F(SearchPipelineFilterLiteralTest, UnconvertibleLiteralMatchesNothingUnderEqAndKeepsEveryCandidateUnderNe) {
+  const std::vector<storage::DocId> none;
+  for (const std::string column : {"flag", "n", "u", "d"}) {
+    for (const std::string literal : {"yes", "abc", "2x"}) {
+      EXPECT_EQ(Bitmap(column, query::FilterOp::EQ, literal), none) << column << " " << literal;
+      EXPECT_EQ(Fallback(column, query::FilterOp::EQ, literal), none) << column << " " << literal;
+      EXPECT_EQ(Bitmap(column, query::FilterOp::NE, literal), doc_ids_) << column << " " << literal;
+      EXPECT_EQ(Fallback(column, query::FilterOp::NE, literal), doc_ids_) << column << " " << literal;
+    }
+  }
+  // A negative literal cannot be an unsigned value
+  EXPECT_EQ(Bitmap("u", query::FilterOp::NE, "-1"), doc_ids_);
+  EXPECT_EQ(Fallback("u", query::FilterOp::NE, "-1"), doc_ids_);
+}
+
+TEST_F(SearchPipelineFilterLiteralTest, AddingAnOrderingConditionNeverAddsRows) {
+  // An ordering operator moves the whole request onto the fallback path; the
+  // rows must be those the bitmap path gave for the equality conditions alone.
+  const std::vector<std::pair<std::string, std::string>> cases = {
+      {"flag", "yes"}, {"flag", "TRUE"}, {"n", "abc"}, {"u", "-1"}, {"d", "nan"}};
+  for (const auto& [column, literal] : cases) {
+    for (const auto op : {query::FilterOp::EQ, query::FilterOp::NE}) {
+      const auto alone = Bitmap(column, op, literal);
+      const auto combined = ApplyFiltersWithBitmap(
+          doc_ids_, {{column, op, literal}, {"n", query::FilterOp::GT, "-100"}}, doc_store_.get());
+      for (const auto doc_id : combined) {
+        EXPECT_NE(std::find(alone.begin(), alone.end(), doc_id), alone.end()) << column << " '" << literal << "'";
+      }
+    }
+  }
+  EXPECT_EQ(ApplyFiltersWithBitmap(doc_ids_, {{"flag", query::FilterOp::NE, "yes"}, {"n", query::FilterOp::GT, "0"}},
+                                   doc_store_.get()),
+            (std::vector<storage::DocId>{doc_ids_[0]}));
+  EXPECT_EQ(ApplyFiltersWithBitmap(doc_ids_, {{"flag", query::FilterOp::EQ, "TRUE"}, {"n", query::FilterOp::GT, "0"}},
+                                   doc_store_.get()),
+            (std::vector<storage::DocId>{doc_ids_[0]}));
+}
+
+// =============================================================================
 // ExecuteFullPipeline tests - unified pipeline used by both TCP and HTTP
 // =============================================================================
 
@@ -1553,6 +1652,107 @@ TEST_F(FullPipelineTest, BooleanShortNotWithoutStoredTextReturnsExplicitError) {
             std::string::npos);
 }
 
+namespace {
+
+void ExpectShortTermError(const mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error>& output) {
+  ASSERT_FALSE(output.has_value());
+  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kIndexNotFound);
+  EXPECT_NE(output.error().message().find("too short for n-gram search"), std::string::npos);
+  EXPECT_NE(output.error().message().find("memory.verify_text controls substring post-filtering only"),
+            std::string::npos);
+  EXPECT_EQ(output.error().message().find("Set memory.verify_text"), std::string::npos);
+}
+
+}  // namespace
+
+TEST_F(FullPipelineTest, LegacyShortNotTermWithoutStoredTextReturnsExplicitError) {
+  doc_store_->SetStoreTexts(false);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.not_terms = {"x"};
+  query.limit = 100;
+
+  ExpectShortTermError(ExecuteFullPipeline(query, MakeParams()));
+}
+
+TEST_F(FullPipelineTest, FuzzyShortNotTermWithoutStoredTextReturnsExplicitError) {
+  doc_store_->SetStoreTexts(false);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.not_terms = {"x"};
+  query.fuzzy_max_distance = 1;
+  query.limit = 100;
+
+  ExpectShortTermError(ExecuteFullPipeline(query, MakeParams()));
+}
+
+TEST_F(FullPipelineTest, SynonymShortNotTermWithoutStoredTextReturnsExplicitError) {
+  doc_store_->SetStoreTexts(false);
+  auto synonyms = MakeSynonymDictionary({{"car", "automobile"}});
+  ASSERT_NE(synonyms, nullptr);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.not_terms = {"x"};
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.synonym_dict = synonyms.get();
+  ExpectShortTermError(ExecuteFullPipeline(query, params));
+}
+
+TEST_F(FullPipelineTest, BooleanLegacyShortNotTermWithoutStoredTextReturnsExplicitError) {
+  doc_store_->SetStoreTexts(false);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning OR cats";
+  query.not_terms = {"x"};
+  query.limit = 100;
+
+  ExpectShortTermError(ExecuteFullPipeline(query, MakeParams()));
+}
+
+TEST_F(FullPipelineTest, FacetWithOnlyShortNotTermWithoutStoredTextReturnsExplicitError) {
+  doc_store_->SetStoreTexts(false);
+
+  query::Query query;
+  query.type = query::QueryType::FACET;
+  query.table = "test";
+  query.facet_column = "status";
+  query.not_terms = {"x"};
+
+  FacetPipelineParams params;
+  params.search = MakeParams();
+  auto output = ExecuteFacetPipeline(query, params);
+
+  ASSERT_FALSE(output.has_value());
+  EXPECT_EQ(output.error().code(), mygram::utils::ErrorCode::kIndexNotFound);
+}
+
+TEST_F(FullPipelineTest, NotTermWithNgramCoverageDoesNotNeedStoredText) {
+  doc_store_->SetStoreTexts(false);
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.not_terms = {"deep"};
+  query.limit = 100;
+
+  auto output = ExecuteFullPipeline(query, MakeParams());
+  ASSERT_TRUE(output.has_value()) << (output.has_value() ? std::string{} : output.error().message());
+}
+
 TEST_F(FullPipelineTest, MixedScriptBoundaryFragmentRequiresExactTextMatch) {
   auto cjk_only = doc_store_->AddDocument("pk_kyoto", {}, "京都");
   auto mixed_match = doc_store_->AddDocument("pk_kyo_tower", {}, "京タワー");
@@ -1682,20 +1882,6 @@ TEST_F(FullPipelineTest, NotTermNgramsAreRegisteredForCacheInvalidation) {
 }
 
 /**
- * @brief Two boolean expressions differing only in whitespace character type
- * must not share a cache key, even when both are detected as boolean.
- *
- * query_ast.cpp's tokenizer treats only ASCII whitespace as a token
- * boundary, so a non-breaking space (U+00A0) glued to one operator's
- * neighbor changes which characters form a term versus a keyword -- but the
- * index's NFKC text normalizer folds U+00A0 to a plain space, so both raw
- * expressions still contain a real ASCII "AND" and are both classified
- * kBooleanAst, and re-normalizing the raw expression for the cache key
- * (instead of the tree it actually parsed into) would make them collide
- * even though "OR" is a keyword in one and part of a literal term in the
- * other.
- */
-/**
  * @brief A full-width paren/quote around a grouped operand must not collapse
  * onto the same cache key as its ASCII-paren equivalent.
  *
@@ -1762,6 +1948,10 @@ TEST_F(FullPipelineTest, FullWidthParenthesesGetDistinctCacheEntryFromAsciiParen
   EXPECT_FALSE(fullwidth_output->cache_hit);
 }
 
+/**
+ * @brief Boolean expressions that differ only in ASCII versus Unicode
+ * whitespace (U+00A0) parse into the same tree and share one cache key.
+ */
 TEST_F(FullPipelineTest, UnicodeWhitespaceVariantsOfABooleanExpressionShareOneCacheEntry) {
   config::CacheConfig cache_config;
   cache_config.enabled = true;
@@ -1815,6 +2005,45 @@ TEST_F(FullPipelineTest, UnicodeWhitespaceVariantsOfABooleanExpressionShareOneCa
   ASSERT_TRUE(spaced_output.has_value()) << (spaced_output.has_value() ? std::string{}
                                                                        : spaced_output.error().message());
   EXPECT_TRUE(spaced_output->cache_hit);
+}
+
+// The key is built from what executes (search_text), not from the parser's
+// quoting syntax: index normalization folds U+FF02 to '"' and U+FF3C to '\\',
+// which would otherwise make plain text indistinguishable from a quoted token.
+TEST_F(FullPipelineTest, FullWidthQuoteTextAndQuotedTokenGetDistinctCacheKeys) {
+  query::QueryParser parser;
+  auto quoted = parser.Parse("SEARCH test \"x\"");
+  auto fullwidth = parser.Parse("SEARCH test \xEF\xBC\x82x\xEF\xBC\x82");
+  ASSERT_TRUE(quoted) << quoted.error().message();
+  ASSERT_TRUE(fullwidth) << fullwidth.error().message();
+
+  auto params = MakeParams();
+  const query::Query quoted_cache_query = BuildCanonicalCacheQuery(*quoted, params);
+  const query::Query fullwidth_cache_query = BuildCanonicalCacheQuery(*fullwidth, params);
+  ASSERT_TRUE(quoted_cache_query.cache_key.has_value());
+  ASSERT_TRUE(fullwidth_cache_query.cache_key.has_value());
+  EXPECT_NE(quoted_cache_query.cache_key, fullwidth_cache_query.cache_key);
+  EXPECT_NE(quoted_cache_query.cache_key_discriminator, fullwidth_cache_query.cache_key_discriminator);
+}
+
+TEST_F(FullPipelineTest, FullWidthBackslashTextAndEscapedQuoteTokenGetDistinctCacheKeys) {
+  query::QueryParser parser;
+  // Quoted token a"b, versus the unquoted full-width spelling of its quoted form.
+  auto quoted = parser.Parse("SEARCH test \"a\\\"b\"");
+  auto fullwidth = parser.Parse(
+      "SEARCH test \xEF\xBC\x82"
+      "a\xEF\xBC\xBC\xEF\xBC\x82"
+      "b\xEF\xBC\x82");
+  ASSERT_TRUE(quoted) << quoted.error().message();
+  ASSERT_TRUE(fullwidth) << fullwidth.error().message();
+  ASSERT_EQ(quoted->search_text, "a\"b");
+
+  auto params = MakeParams();
+  const query::Query quoted_cache_query = BuildCanonicalCacheQuery(*quoted, params);
+  const query::Query fullwidth_cache_query = BuildCanonicalCacheQuery(*fullwidth, params);
+  ASSERT_TRUE(quoted_cache_query.cache_key.has_value());
+  ASSERT_TRUE(fullwidth_cache_query.cache_key.has_value());
+  EXPECT_NE(quoted_cache_query.cache_key, fullwidth_cache_query.cache_key);
 }
 
 TEST_F(FullPipelineTest, QuotingAKeywordInABooleanExpressionGetsADistinctCacheEntry) {
@@ -2790,6 +3019,159 @@ TEST_F(FullPipelineCacheTest, CacheMissReasonDisabledWhenCacheManagerNull) {
   ASSERT_TRUE(output.has_value());
   EXPECT_FALSE(output->cache_hit);
   EXPECT_EQ(output->cache_miss_reason, CacheMissReason::kDisabled);
+}
+
+TEST_F(FullPipelineCacheTest, CanonicalCacheKeyIsReturnedForMissAndHit) {
+  query::Query uppercase;
+  uppercase.type = query::QueryType::SEARCH;
+  uppercase.table = "test";
+  uppercase.search_text = "LEARNING";
+  uppercase.limit = 100;
+
+  auto params = MakeParams();
+  const auto canonical = BuildCanonicalCacheQuery(uppercase, params);
+  ASSERT_TRUE(canonical.cache_key.has_value());
+
+  const auto miss = ExecuteFullPipeline(uppercase, params);
+  ASSERT_TRUE(miss.has_value()) << (miss ? "" : miss.error().message());
+  EXPECT_FALSE(miss->cache_hit);
+  EXPECT_EQ(miss->canonical_cache_key, canonical.cache_key);
+
+  query::Query normalized = uppercase;
+  normalized.search_text = "learning";
+  const auto hit = ExecuteFullPipeline(normalized, params);
+  ASSERT_TRUE(hit.has_value()) << (hit ? "" : hit.error().message());
+  EXPECT_TRUE(hit->cache_hit);
+  EXPECT_EQ(hit->canonical_cache_key, canonical.cache_key);
+
+  query::Query different = normalized;
+  different.search_text = "machine";
+  const auto different_output = ExecuteFullPipeline(different, params);
+  ASSERT_TRUE(different_output.has_value()) << (different_output ? "" : different_output.error().message());
+  ASSERT_TRUE(different_output->canonical_cache_key.has_value());
+  EXPECT_NE(different_output->canonical_cache_key, canonical.cache_key);
+}
+
+TEST_F(FullPipelineCacheTest, PendingAdmissionIsUsedForBooleanFuzzyAndSynonymPaths) {
+  auto params = MakeParams();
+
+  query::Query boolean_query;
+  boolean_query.type = query::QueryType::SEARCH;
+  boolean_query.table = "test";
+  boolean_query.search_text = "learning AND machine";
+  boolean_query.search_expression = boolean_query.search_text;
+  boolean_query.limit = 100;
+  auto boolean_miss = ExecuteFullPipeline(boolean_query, params);
+  ASSERT_TRUE(boolean_miss.has_value()) << (boolean_miss ? "" : boolean_miss.error().message());
+  ASSERT_FALSE(boolean_miss->results.empty());
+  auto boolean_hit = ExecuteFullPipeline(boolean_query, params);
+  ASSERT_TRUE(boolean_hit.has_value()) << (boolean_hit ? "" : boolean_hit.error().message());
+  EXPECT_TRUE(boolean_hit->cache_hit);
+
+  query::Query fuzzy_query;
+  fuzzy_query.type = query::QueryType::SEARCH;
+  fuzzy_query.table = "test";
+  fuzzy_query.search_text = "machin";
+  fuzzy_query.fuzzy_max_distance = 1;
+  fuzzy_query.limit = 100;
+  auto fuzzy_miss = ExecuteFullPipeline(fuzzy_query, params);
+  ASSERT_TRUE(fuzzy_miss.has_value()) << (fuzzy_miss ? "" : fuzzy_miss.error().message());
+  ASSERT_FALSE(fuzzy_miss->results.empty());
+  auto fuzzy_hit = ExecuteFullPipeline(fuzzy_query, params);
+  ASSERT_TRUE(fuzzy_hit.has_value()) << (fuzzy_hit ? "" : fuzzy_hit.error().message());
+  EXPECT_TRUE(fuzzy_hit->cache_hit);
+
+  auto synonyms = MakeSynonymDictionary({{"machine", "automobile"}});
+  ASSERT_NE(synonyms, nullptr);
+  params.synonym_dict = synonyms.get();
+  // Every synonym variant needs a posting list for this cache-admission test:
+  // the pipeline intentionally skips caching when a variant has an empty
+  // posting, since a later document could make that result visible.
+  const auto automobile_doc = doc_store_->AddDocument("pk_synonym_automobile", {}, "automobile transport");
+  ASSERT_TRUE(automobile_doc.has_value());
+  index_->AddDocument(*automobile_doc, "automobile transport");
+  query::Query synonym_query;
+  synonym_query.type = query::QueryType::SEARCH;
+  synonym_query.table = "test";
+  synonym_query.search_text = "machine";
+  synonym_query.limit = 100;
+  auto synonym_miss = ExecuteFullPipeline(synonym_query, params);
+  ASSERT_TRUE(synonym_miss.has_value()) << (synonym_miss ? "" : synonym_miss.error().message());
+  ASSERT_FALSE(synonym_miss->results.empty());
+  auto synonym_hit = ExecuteFullPipeline(synonym_query, params);
+  ASSERT_TRUE(synonym_hit.has_value()) << (synonym_hit ? "" : synonym_hit.error().message());
+  EXPECT_TRUE(synonym_hit->cache_hit);
+}
+
+TEST_F(FullPipelineCacheTest, EmptyPostingEarlyExitCancelsPendingRegistration) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "unlistedterm";
+  query.limit = 100;
+
+  const auto output = ExecuteFullPipeline(query, MakeParams());
+  ASSERT_TRUE(output.has_value()) << (output ? "" : output.error().message());
+  EXPECT_TRUE(output->empty_term_detected);
+  EXPECT_TRUE(output->results.empty());
+  EXPECT_EQ(cache_manager_->GetTrackedInvalidationEntries(), 0U);
+  EXPECT_EQ(cache_manager_->GetStatistics().invalidation_index_memory_bytes, 0U);
+}
+
+TEST_F(FullPipelineCacheTest, CacheClearRemovesPromotedPipelineAdmission) {
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  const auto first = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(first.has_value()) << (first ? "" : first.error().message());
+  ASSERT_FALSE(first->results.empty());
+  ASSERT_EQ(cache_manager_->GetTrackedInvalidationEntries(), 1U);
+
+  cache_manager_->Clear();
+  EXPECT_EQ(cache_manager_->GetTrackedInvalidationEntries(), 0U);
+  const auto after_clear = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(after_clear.has_value()) << (after_clear ? "" : after_clear.error().message());
+  EXPECT_FALSE(after_clear->cache_hit);
+  EXPECT_EQ(after_clear->results, first->results);
+  EXPECT_EQ(cache_manager_->GetTrackedInvalidationEntries(), 1U);
+}
+
+TEST_F(FullPipelineCacheTest, PendingBudgetRejectionDoesNotFallBackToUnguardedInsert) {
+  config::CacheConfig tiny_cache_config;
+  tiny_cache_config.enabled = true;
+  tiny_cache_config.max_memory_bytes = 1;
+  tiny_cache_config.min_query_cost_ms = 0.0;
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 0,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager tiny_cache(tiny_cache_config, std::move(ngram_configs));
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+  auto params = MakeParams();
+  params.cache_manager = &tiny_cache;
+
+  const auto first = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(first.has_value()) << (first ? "" : first.error().message());
+  ASSERT_FALSE(first->results.empty());
+  EXPECT_FALSE(first->cache_hit);
+  const auto second = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(second.has_value()) << (second ? "" : second.error().message());
+  EXPECT_FALSE(second->cache_hit);
+  EXPECT_EQ(second->results, first->results);
+  EXPECT_EQ(tiny_cache.GetStatistics().rejection_memory_budget, 2U);
+  EXPECT_EQ(tiny_cache.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_EQ(tiny_cache.GetStatistics().invalidation_index_memory_bytes, 0U);
 }
 
 TEST_F(FullPipelineCacheTest, CacheMissReasonStaleVsNotFound) {

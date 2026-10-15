@@ -57,6 +57,7 @@ class CacheOffsetLimitIntegrationTest : public ::testing::Test {
 
     // Configure server with cache enabled
     config::Config full_config;
+    full_config.replication.enable = false;  // This fixture has no MySQL reader.
     full_config.cache.enabled = true;
     full_config.cache.max_memory_bytes = 10 * 1024 * 1024;  // 10MB
     full_config.cache.min_query_cost_ms = 0.0;              // Cache all queries for testing

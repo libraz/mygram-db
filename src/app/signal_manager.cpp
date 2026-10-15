@@ -5,8 +5,10 @@
 
 #include "app/signal_manager.h"
 
+#include <cerrno>
 #include <csignal>
-#include <cstring>  // for memset
+#include <cstring>
+#include <string>
 
 namespace mygramdb::app {
 
@@ -39,11 +41,21 @@ void SignalHandlerFunction(int signal) {
 }  // namespace
 
 Expected<std::unique_ptr<SignalManager>, mygram::utils::Error> SignalManager::Create() {
+  return Create(&::sigaction);
+}
+
+Expected<std::unique_ptr<SignalManager>, mygram::utils::Error> SignalManager::Create(
+    SigactionFunction sigaction_function) {
+  if (sigaction_function == nullptr) {
+    return MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kInvalidArgument,
+                                                   "Signal action function must not be null"));
+  }
+
   // Process invariant: SignalManager is designed for one live instance per
   // process. POSIX handlers are process-global and this instance captures the
   // previous handlers for RAII restoration; overlapping instances would make
   // destructor restore order ambiguous.
-  auto manager = std::unique_ptr<SignalManager>(new SignalManager());
+  auto manager = std::unique_ptr<SignalManager>(new SignalManager(sigaction_function));
 
   auto register_result = manager->RegisterHandlers();
   if (!register_result) {
@@ -80,65 +92,74 @@ bool SignalManager::ConsumeLogReopenRequest() {  // static
 Expected<void, mygram::utils::Error> SignalManager::RegisterHandlers() {
   // Prepare signal action structure
   struct sigaction sig_action {};
-  std::memset(&sig_action, 0, sizeof(sig_action));
   sig_action.sa_handler = SignalHandlerFunction;
   sigemptyset(&sig_action.sa_mask);
   sig_action.sa_flags = 0;  // No special flags
 
   // Register SIGINT handler
-  if (sigaction(SIGINT, &sig_action, &original_sigint_) != 0) {
+  if (sigaction_function_(SIGINT, &sig_action, &original_sigint_) != 0) {
+    const int signal_error = errno;
     return MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
-                                 "Failed to register SIGINT handler: " + std::string(std::strerror(errno))));
+                                 "Failed to register SIGINT handler: " + std::string(std::strerror(signal_error))));
   }
+  sigint_installed_ = true;
 
   // Register SIGTERM handler
-  if (sigaction(SIGTERM, &sig_action, &original_sigterm_) != 0) {
-    // Restore SIGINT before returning error
-    sigaction(SIGINT, &original_sigint_, nullptr);
+  if (sigaction_function_(SIGTERM, &sig_action, &original_sigterm_) != 0) {
+    const int signal_error = errno;
     return MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
-                                 "Failed to register SIGTERM handler: " + std::string(std::strerror(errno))));
+                                 "Failed to register SIGTERM handler: " + std::string(std::strerror(signal_error))));
   }
+  sigterm_installed_ = true;
 
   // Register SIGUSR1 handler (for log rotation)
-  if (sigaction(SIGUSR1, &sig_action, &original_sigusr1_) != 0) {
-    // Restore SIGINT and SIGTERM before returning error
-    sigaction(SIGINT, &original_sigint_, nullptr);
-    sigaction(SIGTERM, &original_sigterm_, nullptr);
+  if (sigaction_function_(SIGUSR1, &sig_action, &original_sigusr1_) != 0) {
+    const int signal_error = errno;
     return MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
-                                 "Failed to register SIGUSR1 handler: " + std::string(std::strerror(errno))));
+                                 "Failed to register SIGUSR1 handler: " + std::string(std::strerror(signal_error))));
   }
+  sigusr1_installed_ = true;
 
   // Ignore SIGPIPE to prevent crashes when writing to closed connections
   // writev() doesn't support MSG_NOSIGNAL, so we must ignore SIGPIPE process-wide
   // macOS also uses SO_NOSIGPIPE per-socket, but this provides a fallback
   struct sigaction sigpipe_action {};
-  std::memset(&sigpipe_action, 0, sizeof(sigpipe_action));
   sigpipe_action.sa_handler = SIG_IGN;
   sigemptyset(&sigpipe_action.sa_mask);
   sigpipe_action.sa_flags = 0;
 
-  if (sigaction(SIGPIPE, &sigpipe_action, &original_sigpipe_) != 0) {
-    // Restore all handlers before returning error
-    sigaction(SIGINT, &original_sigint_, nullptr);
-    sigaction(SIGTERM, &original_sigterm_, nullptr);
-    sigaction(SIGUSR1, &original_sigusr1_, nullptr);
+  if (sigaction_function_(SIGPIPE, &sigpipe_action, &original_sigpipe_) != 0) {
+    const int signal_error = errno;
     return MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
-                                 "Failed to register SIGPIPE handler: " + std::string(std::strerror(errno))));
+                                 "Failed to register SIGPIPE handler: " + std::string(std::strerror(signal_error))));
   }
+  sigpipe_installed_ = true;
 
   return {};
 }
 
 void SignalManager::RestoreHandlers() {
   // Restore original signal handlers (ignore errors - best effort cleanup)
-  sigaction(SIGINT, &original_sigint_, nullptr);
-  sigaction(SIGTERM, &original_sigterm_, nullptr);
-  sigaction(SIGUSR1, &original_sigusr1_, nullptr);
-  sigaction(SIGPIPE, &original_sigpipe_, nullptr);
+  if (sigpipe_installed_) {
+    ::sigaction(SIGPIPE, &original_sigpipe_, nullptr);
+    sigpipe_installed_ = false;
+  }
+  if (sigusr1_installed_) {
+    ::sigaction(SIGUSR1, &original_sigusr1_, nullptr);
+    sigusr1_installed_ = false;
+  }
+  if (sigterm_installed_) {
+    ::sigaction(SIGTERM, &original_sigterm_, nullptr);
+    sigterm_installed_ = false;
+  }
+  if (sigint_installed_) {
+    ::sigaction(SIGINT, &original_sigint_, nullptr);
+    sigint_installed_ = false;
+  }
 }
 
 }  // namespace mygramdb::app

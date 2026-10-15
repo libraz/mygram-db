@@ -11,7 +11,11 @@
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <future>
+#include <thread>
 
 #include "query/query_parser.h"
 #include "server/table_catalog.h"
@@ -531,22 +535,29 @@ TEST(SyncOperationManagerTest, SyncThreadsProperlyManaged) {
   table_config.name = "test_table";
   full_config.tables.push_back(table_config);
 
-  // Create SyncOperationManager
-  {
-    SyncOperationManager sync_mgr(table_contexts, &full_config, nullptr);
+  auto sync_mgr = std::make_unique<SyncOperationManager>(table_contexts, &full_config, nullptr);
+  std::promise<void> worker_entered;
+  std::promise<void> release_worker;
+  const auto release = release_worker.get_future().share();
+  std::atomic<bool> worker_finished{false};
+  sync_mgr->InstallSyncThreadForTest("test_table", std::thread([&worker_entered, &release, &worker_finished]() {
+                                       worker_entered.set_value();
+                                       release.wait();
+                                       worker_finished.store(true, std::memory_order_release);
+                                     }));
+  // Let the destructor proceed directly to its join path; this test is about
+  // joining the owned std::thread, not waiting for a SYNC table marker.
+  sync_mgr->ClearSyncingTableForTest("test_table");
+  worker_entered.get_future().wait();
 
-    // Note: We cannot actually start a SYNC without a real MySQL connection
-    // This test verifies that:
-    // 1. SyncOperationManager can be created and destroyed cleanly
-    // 2. Destructor properly joins threads (verified by not hanging)
-    // 3. No detached threads are left running after destruction
+  auto destruction = std::async(std::launch::async, [&sync_mgr]() { sync_mgr.reset(); });
+  const bool destructor_waited_for_worker =
+      destruction.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout;
+  release_worker.set_value();
+  destruction.get();
 
-    // If detached threads were still used, the destructor might not wait
-    // for them, causing undefined behavior when threads access destroyed objects
-  }  // Destructor should join all sync threads here
-
-  // If we reach this point without hanging, thread management is correct
-  SUCCEED();
+  EXPECT_TRUE(destructor_waited_for_worker) << "manager destruction returned while its worker was held";
+  EXPECT_TRUE(worker_finished.load(std::memory_order_acquire));
 }
 
 /**
@@ -609,15 +620,31 @@ TEST(SyncOperationManagerTest, RapidCreateDestroyNoThreadLeak) {
   table_config.name = "test_table";
   full_config.tables.push_back(table_config);
 
-  // Rapidly create and destroy multiple SyncOperationManagers
-  for (int i = 0; i < 10; ++i) {
-    SyncOperationManager sync_mgr(table_contexts, &full_config, nullptr);
-    // Destructor cleans up immediately
-  }
+  // Repeatedly destroy managers with an actually started, held worker. The
+  // table marker is cleared so destruction reaches the thread join path.
+  for (int i = 0; i < 3; ++i) {
+    auto sync_mgr = std::make_unique<SyncOperationManager>(table_contexts, &full_config, nullptr);
+    std::promise<void> worker_entered;
+    std::promise<void> release_worker;
+    const auto release = release_worker.get_future().share();
+    std::atomic<bool> worker_finished{false};
+    sync_mgr->InstallSyncThreadForTest("test_table", std::thread([&worker_entered, &release, &worker_finished]() {
+                                         worker_entered.set_value();
+                                         release.wait();
+                                         worker_finished.store(true, std::memory_order_release);
+                                       }));
+    sync_mgr->ClearSyncingTableForTest("test_table");
+    worker_entered.get_future().wait();
 
-  // If detached threads were used, some might still be running and accessing
-  // destroyed objects. This test verifies clean shutdown.
-  SUCCEED();
+    auto destruction = std::async(std::launch::async, [&sync_mgr]() { sync_mgr.reset(); });
+    const bool destructor_waited_for_worker =
+        destruction.wait_for(std::chrono::milliseconds(10)) == std::future_status::timeout;
+    release_worker.set_value();
+    destruction.get();
+
+    EXPECT_TRUE(destructor_waited_for_worker) << "iteration " << i;
+    EXPECT_TRUE(worker_finished.load(std::memory_order_acquire)) << "iteration " << i;
+  }
 }
 
 /**

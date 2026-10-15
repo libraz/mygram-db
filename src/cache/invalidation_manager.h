@@ -6,6 +6,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <shared_mutex>
@@ -40,6 +42,7 @@ class QueryCache;
  */
 struct InvalidationMetadata {
   uint64_t entry_generation = 0;
+  uint64_t data_version = 0;
   std::string table;                  ///< Table name
   std::vector<std::string> ngrams;    ///< Ngrams (sorted) for reverse index cleanup
   int ngram_size = 0;                 ///< N-gram size used when entry was created
@@ -48,11 +51,25 @@ struct InvalidationMetadata {
   bool has_filters = false;           ///< Whether the cached query used filter conditions
   bool has_not_terms = false;         ///< Whether the cached query used NOT terms
   bool invalidate_on_any_text_change = false;
-  size_t estimated_bytes = 0;  ///< Incremental memory charge for this registration
+  bool pending = false;                    ///< Query execution has started but no resident payload exists yet
+  bool invalidated = false;                ///< A matching mutation occurred while the insert was pending
+  bool ngram_settings_registered = false;  ///< This identity incremented the table's settings reference count
+  std::string pending_discriminator;       ///< Temporary canonical key retained only until promotion
+  std::vector<query::FilterCondition> pending_filters;  ///< Temporary filter details retained until promotion
+  size_t estimated_bytes = 0;                           ///< Incremental memory charge for this registration
 };
 
 class InvalidationManager {
  public:
+  enum class PendingRegistrationStatus : uint8_t {
+    kValid,
+    kMissing,
+    kInvalidated,
+    kDiscriminatorMismatch,
+    kNotPending,
+    kResidentConflict,
+  };
+
   /**
    * @brief Constructor
    * @param cache Pointer to query cache
@@ -77,6 +94,27 @@ class InvalidationManager {
    */
   void RegisterCacheEntry(const CacheKey& key, const CacheMetadata& metadata);
 
+  /** Register a query whose execution is in progress. */
+  bool RegisterPendingCacheEntry(const CacheEntryIdentity& identity, CacheMetadata metadata);
+
+  /** Promote a still-valid pending registration to a resident entry. */
+  PendingRegistrationStatus PromotePendingCacheEntry(const CacheEntryIdentity& identity,
+                                                     const std::string& expected_discriminator);
+
+  /** Copy full cache metadata from a valid pending registration. */
+  PendingRegistrationStatus CopyPendingCacheMetadata(const CacheEntryIdentity& identity,
+                                                     const std::string& expected_discriminator,
+                                                     CacheMetadata& metadata) const;
+
+  /** Remove a pending registration. This is safe after Clear()/ClearTable(). */
+  void CancelPendingCacheEntry(const CacheEntryIdentity& identity);
+
+  /** Test seam that can throw after any partial registration index update. */
+  void SetAfterRegistrationStepHookForTest(std::function<void()> hook);
+
+  /** Test seam invoked immediately before allocating the resident identity slot. */
+  void SetBeforeResidentIdentityInsertHookForTest(std::function<void()> hook);
+
   /**
    * @brief Invalidate cache entries affected by text change
    *
@@ -89,13 +127,8 @@ class InvalidationManager {
    * @param new_text New text content (empty if DELETE)
    * @param ngram_size N-gram size (for ASCII/alphanumeric)
    * @param kanji_ngram_size N-gram size (for CJK characters)
-   * @return Set of cache keys that were marked invalidated
+   * @return Set of resident entry identities that were marked invalidated
    */
-  std::unordered_set<CacheKey> InvalidateAffectedEntries(const std::string& table_name, const std::string& old_text,
-                                                         const std::string& new_text, int ngram_size,
-                                                         int kanji_ngram_size, bool cross_boundary_ngrams = true,
-                                                         bool filter_columns_changed = false);
-
   std::unordered_set<CacheEntryIdentity> InvalidateAffectedEntryIdentities(
       const std::string& table_name, const std::string& old_text, const std::string& new_text, int ngram_size,
       int kanji_ngram_size, bool cross_boundary_ngrams = true, bool filter_columns_changed = false);
@@ -105,26 +138,12 @@ class InvalidationManager {
    *
    * Called when entry is evicted or explicitly erased from cache.
    *
-   * @param key Cache key to unregister
+   * @param key Resident cache key to unregister
    */
   void UnregisterCacheEntry(const CacheKey& key);
   void UnregisterCacheEntry(const CacheEntryIdentity& identity);
 
-  /**
-   * @brief Unregister a batch of cache entries under a single mutex acquisition.
-   *
-   * Equivalent to calling UnregisterCacheEntry() for every key in @p keys, but
-   * with O(1) lock acquires instead of O(N). Used by QueryCache bulk-eviction
-   * paths (Clear, ClearTable, EvictForSpace, RefreshLRU) to amortize lock
-   * overhead and avoid pathological contention when emptying a full cache.
-   *
-   * Missing keys are silently ignored — the call is idempotent on a per-key
-   * basis, matching the single-key API.
-   *
-   * @param keys Cache keys to unregister (may contain duplicates; safely
-   *             tolerated by the underlying find/erase calls).
-   */
-  void UnregisterCacheEntries(const std::vector<CacheKey>& keys);
+  /** Unregister a batch of entry identities under a single mutex acquisition; missing identities are ignored. */
   void UnregisterCacheEntryIdentities(const std::vector<CacheEntryIdentity>& identities);
 
   /**
@@ -142,6 +161,9 @@ class InvalidationManager {
    * @brief Get number of tracked cache entries
    */
   [[nodiscard]] size_t GetTrackedEntryCount() const;
+
+  /** @brief Get number of pending query registrations. */
+  [[nodiscard]] size_t GetTrackedPendingEntryCount() const;
 
   /**
    * @brief Get number of tracked ngrams for a table
@@ -166,35 +188,40 @@ class InvalidationManager {
  private:
   QueryCache* cache_;  ///< Pointer to query cache
 
-  // Reverse index: (table, ngram) -> set of cache keys using this ngram
-  std::unordered_map<std::string,                                      // table_name
-                     std::unordered_map<std::string,                   // ngram
-                                        std::unordered_set<CacheKey>>  // cache keys
+  // Reverse index: (table, ngram) -> concrete resident and pending identities.
+  std::unordered_map<std::string,                                                // table_name
+                     std::unordered_map<std::string,                             // ngram
+                                        std::unordered_set<CacheEntryIdentity>>  // entry identities
                      >
-      ngram_to_cache_keys_;
+      ngram_to_entry_identities_;
 
-  // Map: cache key -> minimal invalidation metadata (table + ngrams only)
-  std::unordered_map<CacheKey, InvalidationMetadata> cache_metadata_;
+  // Identity keyed so a new in-flight query can coexist with an older resident
+  // incarnation of the same canonical key.
+  std::unordered_map<CacheEntryIdentity, InvalidationMetadata> entry_metadata_;
 
-  // Reverse index: table -> set of cache keys registered for that table.
+  // Compatibility index for legacy key-only unregister APIs. It contains
+  // residents only; pending registrations are always addressed by identity.
+  std::unordered_map<CacheKey, CacheEntryIdentity> resident_identities_;
+
+  // Reverse index: table -> set of resident and pending entry identities.
   //
-  // Performance: This auxiliary index trades O(k) extra memory per cache entry
+  // Performance: This auxiliary index trades O(k) extra memory per entry
   // (one set membership per table) for O(k) ClearTable cost where k is the
   // number of entries in the affected table — instead of an O(N) scan of
-  // cache_metadata_ across all tables. Maintained alongside cache_metadata_
+  // entry_metadata_ across all tables. Maintained alongside entry_metadata_
   // under the same mutex_, so the two views are always consistent.
-  std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_cache_keys_;
+  std::unordered_map<std::string, std::unordered_set<CacheEntryIdentity>> table_to_entry_identities_;
 
   // Reverse indexes for the two invalidation triggers that are not keyed by
-  // ngram. Without them every row event walks every cache key registered for
+  // ngram. Without them every row event walks every entry registered for
   // the table just to test one boolean per entry, which turns binlog apply into
   // an O(entries per table) sweep per changed row. Both are strict subsets of
-  // table_to_cache_keys_ and are maintained under the same mutex.
-  std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_filtered_cache_keys_;
-  std::unordered_map<std::string, std::unordered_set<CacheKey>> table_to_text_sensitive_cache_keys_;
+  // table_to_entry_identities_ and are maintained under the same mutex.
+  std::unordered_map<std::string, std::unordered_set<CacheEntryIdentity>> table_to_filtered_entry_identities_;
+  std::unordered_map<std::string, std::unordered_set<CacheEntryIdentity>> table_to_text_sensitive_entry_identities_;
 
   // Per-table ngram settings reference count: table -> (ngram_size, kanji_ngram_size, cross_boundary) -> count
-  // Enables O(1) lookup of distinct historical ngram settings instead of O(N) scan over cache_metadata_
+  // Enables O(1) lookup of distinct historical ngram settings instead of O(N) scan over entry_metadata_
   std::unordered_map<std::string, std::map<std::tuple<int, int, bool>, size_t>> table_ngram_settings_;
 
   // Hot-path memory estimate. Each registration receives a conservative,
@@ -205,12 +232,20 @@ class InvalidationManager {
   // Thread safety
   mutable std::shared_mutex mutex_;
 
+  // Hooks are configured before a test operation and invoked only while mutex_
+  // is held. They let exception-safety tests fail between index mutations.
+  std::function<void()> after_registration_step_hook_for_test_;
+  std::function<void()> before_resident_identity_insert_hook_for_test_;
+
   /**
    * @brief Internal helper: unregister cache entry without locking
-   * @param key Cache key to unregister
+   * @param key Resident cache key to unregister
    * @note Assumes mutex_ is already held by caller
    */
-  void UnregisterCacheEntryUnlocked(const CacheKey& key, const uint64_t* expected_generation = nullptr);
+  void UnregisterCacheEntryUnlocked(const CacheEntryIdentity& identity);
+  void RegisterCacheEntryUnlocked(const CacheEntryIdentity& identity, CacheMetadata metadata, bool pending);
+  void RunRegistrationStepHookForTest();
+  void RunBeforeResidentIdentityInsertHookForTest();
 
   /**
    * @brief Extract ngrams from text

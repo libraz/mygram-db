@@ -189,6 +189,7 @@ mygramdb_add_split_gtests(thread_pool_test
   SLOW_TIMEOUT 30
   ALL_CONCURRENCY
   SLOW_TESTS
+    ThreadPoolTest.DequeuedTaskCountsAsActiveBeforeExecution
     ThreadPoolTest.SubmitAndExecute
     ThreadPoolTest.MultipleTasks
     ThreadPoolTest.QueueSize
@@ -436,6 +437,8 @@ target_link_libraries(sync_handler_test
   GTest::gtest_main
   GTest::gmock
 )
+
+target_compile_definitions(sync_handler_test PRIVATE MYGRAMDB_SYNC_TEST_HOOKS)
 
 # RESOURCE_LOCK: Prevent parallel execution to avoid MySQL connection conflicts
 gtest_discover_tests(sync_handler_test
@@ -812,7 +815,7 @@ mygramdb_add_split_gtests(snapshot_scheduler_test
     SnapshotSchedulerTest.AutoSnapshotSkipsWhileDumpLoadInProgress
     SnapshotSchedulerTest.AutoSnapshotSkipsWhileOptimizeInProgress
     SnapshotSchedulerTest.AutoSnapshotSkipsWhileSyncInProgress
-    SnapshotSchedulerTest.CleanupRemovesOldAutoAndManualDumpTempFiles
+    SnapshotSchedulerTest.CleanupPreservesUnmarkedTempFiles
     SnapshotSchedulerTest.CleanupContinuesOnDeleteFailure
     SnapshotSchedulerTest.StartStopRapidly
     SnapshotSchedulerTest.TakeSnapshotPausesAndResumesReplication
@@ -1057,7 +1060,7 @@ set_tests_properties(${reactor_connection_registered_tests}
   PROPERTIES RESOURCE_LOCK thread_resources
 )
 foreach(reactor_connection_concurrency_test
-    "ReactorConnectionNoDispatcherTest.ReadOverflowErrorHoldsWriteMutexAcrossSend"
+    "ReactorConnectionNoDispatcherTest.ReadOverflowPublishesClosingBeforeConcurrentEnqueue"
     "ReactorConnectionTest.ThreadPoolQueueExhaustionSendsServerBusyBeforeClosing")
   list(FIND reactor_connection_registered_tests
     "${reactor_connection_concurrency_test}"

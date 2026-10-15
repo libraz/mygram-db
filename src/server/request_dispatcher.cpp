@@ -6,13 +6,12 @@
 
 #include "server/request_dispatcher.h"
 
-#include <algorithm>
-#include <cctype>
-
 #include "server/handlers/command_handler.h"
 #include "server/rate_limiter.h"
 #include "server/response_formatter.h"
 #include "server/table_catalog.h"
+#include "utils/secure_compare.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
@@ -50,17 +49,6 @@ bool IsAdministrativeCommand(query::QueryType type) {
 
 namespace {
 
-bool ConstantTimeEqual(std::string_view lhs, std::string_view rhs) {
-  size_t difference = lhs.size() ^ rhs.size();
-  const size_t length = std::max(lhs.size(), rhs.size());
-  for (size_t i = 0; i < length; ++i) {
-    const unsigned char left = i < lhs.size() ? static_cast<unsigned char>(lhs[i]) : 0;
-    const unsigned char right = i < rhs.size() ? static_cast<unsigned char>(rhs[i]) : 0;
-    difference |= static_cast<size_t>(left ^ right);
-  }
-  return difference == 0;
-}
-
 /**
  * @brief True when a request mentions AUTH anywhere, ignoring case.
  *
@@ -75,14 +63,7 @@ bool MentionsAuth(std::string_view request) {
     return false;
   }
   for (size_t offset = 0; offset + kAuth.size() <= request.size(); ++offset) {
-    bool matched = true;
-    for (size_t i = 0; i < kAuth.size(); ++i) {
-      if (std::toupper(static_cast<unsigned char>(request[offset + i])) != kAuth[i]) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched) {
+    if (mygram::utils::EqualsAsciiCaseInsensitive(request.substr(offset, kAuth.size()), kAuth)) {
       return true;
     }
   }
@@ -173,7 +154,7 @@ std::string RequestDispatcher::Dispatch(const std::string& request, ConnectionCo
     // returns before reaching. An uncounted AUTH would let repeated token
     // guesses run without appearing in command traffic at all.
     ctx_.stats.IncrementCommand(query->type);
-    if (admin_token_.empty() || !ConstantTimeEqual(query->auth_token, admin_token_)) {
+    if (admin_token_.empty() || !mygram::utils::ConstantTimeEqual(query->auth_token, admin_token_)) {
       conn_ctx.admin_authenticated.store(false, std::memory_order_release);
       return ResponseFormatter::FormatError("Authentication failed", mygram::utils::ErrorCode::kPermissionDenied);
     }

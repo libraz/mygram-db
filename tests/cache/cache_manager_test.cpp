@@ -7,11 +7,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <future>
 #include <iostream>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -30,6 +32,7 @@
 #include "query/query_normalizer.h"
 #include "query/query_parser.h"
 #include "support/deterministic_gate.h"
+#include "utils/fd_guard.h"
 
 namespace mygramdb::cache {
 
@@ -73,6 +76,15 @@ std::optional<size_t> CurrentResidentBytes() {
 #endif
 }
 
+std::vector<std::string> CreateBudgetTestNgrams(int entry_id) {
+  std::vector<std::string> ngrams;
+  ngrams.reserve(64);
+  for (int n = 0; n < 64; ++n) {
+    ngrams.push_back("budget_" + std::to_string(entry_id) + "_ngram_" + std::to_string(n) + std::string(64, 'x'));
+  }
+  return ngrams;
+}
+
 }  // namespace
 
 /**
@@ -106,6 +118,14 @@ query::Query CreateQuery(const std::string& table, const std::string& search_tex
   query.cache_key_discriminator = normalized;
   query.cache_key_is_canonical = true;
   return query;
+}
+
+void RefreshCanonicalCacheKey(query::Query& query) {
+  const std::string normalized = QueryNormalizer::Normalize(query);
+  const CacheKey key = CacheKeyGenerator::Generate(normalized);
+  query.cache_key = std::make_pair(key.hash_high, key.hash_low);
+  query.cache_key_discriminator = normalized;
+  query.cache_key_is_canonical = true;
 }
 
 /**
@@ -266,13 +286,14 @@ TEST(CacheManagerTest, InsertIfVersionRejectsStaleResultAfterInvalidate) {
   std::vector<DocId> result = {1, 2, 3};
   std::vector<std::string> ngrams = {"ang", "gol", "lan", "ola"};
 
-  const uint64_t version_before_mutation = mgr.CaptureDataVersion();
+  const uint64_t version_before_mutation = mgr.CaptureDataVersion("posts");
   mgr.Invalidate("posts", "", "unrelated mutation text");
 
   EXPECT_FALSE(mgr.InsertIfVersion(query, result, ngrams, 15.0, version_before_mutation));
+  EXPECT_EQ(mgr.GetStatistics().rejection_count, 1U);
   EXPECT_FALSE(mgr.Lookup(query).has_value());
 
-  const uint64_t current_version = mgr.CaptureDataVersion();
+  const uint64_t current_version = mgr.CaptureDataVersion("posts");
   EXPECT_TRUE(mgr.InsertIfVersion(query, result, ngrams, 15.0, current_version));
 
   auto cached = mgr.Lookup(query);
@@ -303,6 +324,313 @@ TEST(CacheManagerTest, InsertIfVersionAllowsUnrelatedTableInvalidation) {
   EXPECT_EQ(result, cached.value());
 }
 
+TEST(CacheManagerTest, PendingInsertAllowsUnrelatedNgramMutation) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "golang");
+  auto pending = mgr.BeginInsert(query, {"gol", "ola", "lan", "ang"}, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_GT(mgr.GetStatistics().invalidation_index_memory_bytes, 0U);
+
+  // A table-wide generation changed, but this text cannot affect the query's
+  // registered ngrams, so precise admission remains safe.
+  mgr.Invalidate("posts", "", "unrelated text");
+  const std::vector<DocId> result = {1, 2, 3};
+  EXPECT_TRUE(mgr.InsertIfPending(std::move(*pending), query, result, 15.0));
+  EXPECT_EQ(mgr.Lookup(query), std::optional<std::vector<DocId>>(result));
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 1U);
+}
+
+TEST(CacheManagerTest, PendingInsertRejectsRelatedMutationAndCountsOnce) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "golang");
+  auto pending = mgr.BeginInsert(query, {"gol", "ola", "lan", "ang"}, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+  EXPECT_GT(mgr.GetStatistics().invalidation_index_memory_bytes, 0U);
+  mgr.Invalidate("posts", "", "golang");
+
+  EXPECT_FALSE(mgr.InsertIfPending(std::move(*pending), query, {1, 2, 3}, 15.0));
+  const auto stats = mgr.GetStatistics();
+  EXPECT_EQ(stats.rejection_count, 1U);
+  EXPECT_EQ(stats.rejection_memory_budget, 0U);
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+}
+
+TEST(CacheManagerTest, PendingInsertRejectsDifferentCanonicalDiscriminator) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "canonical ownership");
+  auto pending = mgr.BeginInsert(query, {"can"}, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+  auto mismatched_query = query;
+  mismatched_query.cache_key_discriminator.append("different query");
+
+  EXPECT_FALSE(mgr.InsertIfPending(std::move(*pending), mismatched_query, {1}, 15.0));
+  EXPECT_EQ(mgr.GetStatistics().rejection_count, 0U);
+  EXPECT_EQ(mgr.GetStatistics().invalidation_index_memory_bytes, 0U);
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+}
+
+TEST(CacheManagerTest, PendingInsertTracksFilterAndNotSemantics) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  auto query = CreateQuery("posts", "golang");
+  query.filters = {{"status", query::FilterOp::EQ, "published"}};
+  query.not_terms = {"draft"};
+  query.and_terms = {"database"};
+  RefreshCanonicalCacheKey(query);
+  auto pending = mgr.BeginInsert(query, {"gol", "ola"}, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+
+  // Filter changes and broad text-sensitive semantics are both registered
+  // before execution finishes, even though the changed text has no matching
+  // query ngram.
+  mgr.Invalidate("posts", "", "", true);
+  EXPECT_FALSE(mgr.InsertIfPending(std::move(*pending), query, {1}, 15.0));
+  EXPECT_EQ(mgr.GetStatistics().rejection_count, 1U);
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+}
+
+TEST(CacheManagerTest, PendingInsertHonorsFuzzyBooleanAndVerificationTextSensitivity) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto rejects_after_unrelated_mutation = [&](query::Query query) {
+    RefreshCanonicalCacheKey(query);
+    auto pending = mgr.BeginInsert(query, {"zzz"}, 3, 2, true, true);
+    EXPECT_TRUE(pending.has_value());
+    if (!pending.has_value()) {
+      return false;
+    }
+    mgr.Invalidate("posts", "", "unrelated mutation");
+    return !mgr.InsertIfPending(std::move(*pending), query, {1}, 15.0);
+  };
+
+  auto fuzzy_query = CreateQuery("posts", "fuzzy pending");
+  fuzzy_query.fuzzy_max_distance = 1;
+  EXPECT_TRUE(rejects_after_unrelated_mutation(fuzzy_query));
+
+  auto boolean_query = CreateQuery("posts", "boolean pending");
+  boolean_query.and_terms = {"database"};
+  EXPECT_TRUE(rejects_after_unrelated_mutation(boolean_query));
+
+  // The boolean indicates short verification or another execution mode whose
+  // exact result can change when text changes outside the query ngrams.
+  const auto verified_query = CreateQuery("posts", "verified pending");
+  EXPECT_TRUE(rejects_after_unrelated_mutation(verified_query));
+  EXPECT_EQ(mgr.GetStatistics().rejection_count, 3U);
+}
+
+TEST(CacheManagerTest, MultiplePendingGenerationsForOneKeyCancelIndependently) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "same-key pending");
+  auto older = mgr.BeginInsert(query, {"key"}, 3, 2, true);
+  auto newer = mgr.BeginInsert(query, {"key"}, 3, 2, true);
+  ASSERT_TRUE(older.has_value());
+  ASSERT_TRUE(newer.has_value());
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+
+  older.reset();
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_TRUE(mgr.InsertIfPending(std::move(*newer), query, {7, 8}, 15.0));
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 1U);
+  const auto cached = mgr.Lookup(query);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(cached.value(), (std::vector<DocId>{7, 8}));
+}
+
+TEST(CacheManagerTest, PendingCommitSerializesWithMutationAfterPayloadInsert) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "ordered commit");
+  auto pending = mgr.BeginInsert(query, {"ord", "rde", "der"}, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+
+  mygramdb::testing::DeterministicGate payload_inserted;
+  mgr.SetAfterQueryCacheInsertHookForTest([&] { payload_inserted.ArriveAndWait(); });
+  auto commit =
+      std::async(std::launch::async, [&] { return mgr.InsertIfPending(std::move(*pending), query, {10}, 15.0); });
+  auto release_gate_on_exit = mygramdb::utils::ScopeGuard([&] { payload_inserted.Release(); });
+  ASSERT_TRUE(payload_inserted.WaitUntilArrived(std::chrono::seconds(2)));
+
+  std::promise<void> invalidation_started;
+  auto invalidation = std::async(std::launch::async, [&] {
+    invalidation_started.set_value();
+    mgr.Invalidate("posts", "", "ordered");
+  });
+  invalidation_started.get_future().wait();
+  payload_inserted.Release();
+
+  EXPECT_TRUE(commit.get());
+  invalidation.get();
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+  mgr.SetAfterQueryCacheInsertHookForTest({});
+}
+
+TEST(CacheManagerTest, PendingInsertClearDisableCancelAndOwnerDestructionAreSafe) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  auto query = CreateQuery("posts", "pending lifecycle");
+
+  {
+    CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+    auto cancelled = mgr.BeginInsert(query, {"pen"}, 3, 2, true);
+    ASSERT_TRUE(cancelled.has_value());
+    cancelled.reset();
+    EXPECT_EQ(mgr.GetStatistics().rejection_count, 0U);
+    EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+    EXPECT_EQ(mgr.GetStatistics().invalidation_index_memory_bytes, 0U);
+
+    auto cleared = mgr.BeginInsert(query, {"pen"}, 3, 2, true);
+    ASSERT_TRUE(cleared.has_value());
+    mgr.Clear();
+    EXPECT_FALSE(mgr.InsertIfPending(std::move(*cleared), query, {1}, 15.0));
+    EXPECT_EQ(mgr.GetStatistics().rejection_count, 1U);
+
+    auto disabled = mgr.BeginInsert(query, {"pen"}, 3, 2, true);
+    ASSERT_TRUE(disabled.has_value());
+    mgr.Disable();
+    EXPECT_FALSE(mgr.InsertIfPending(std::move(*disabled), query, {1}, 15.0));
+    EXPECT_EQ(mgr.GetStatistics().rejection_count, 2U);
+  }
+
+  std::optional<CacheManager::PendingInsert> outliving_token;
+  {
+    CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+    outliving_token = mgr.BeginInsert(query, {"pen"}, 3, 2, true);
+    ASSERT_TRUE(outliving_token.has_value());
+  }
+  outliving_token.reset();
+}
+
+TEST(CacheManagerTest, PendingPromotionExceptionRollsBackPayloadAndMetadata) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "promotion allocation failure");
+  auto pending = mgr.BeginInsert(query, {"pro", "rom"}, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+
+  mgr.SetBeforeResidentIdentityInsertHookForTest([] { throw std::bad_alloc(); });
+  EXPECT_THROW(mgr.InsertIfPending(std::move(*pending), query, {1, 2}, 15.0), std::bad_alloc);
+  EXPECT_EQ(mgr.GetStatistics().current_entries, 0U);
+  EXPECT_EQ(mgr.GetStatistics().invalidations_deferred, 0U);
+  EXPECT_EQ(mgr.GetStatistics().stale_entry_removals, 0U);
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_EQ(mgr.GetStatistics().invalidation_index_memory_bytes, 0U);
+
+  mgr.SetBeforeResidentIdentityInsertHookForTest({});
+}
+
+TEST(CacheManagerTest, EmptyTextMutationInvalidatesTopLevelNotResidentAndPendingEntries) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  auto query = CreateQuery("posts", "positive search");
+  query.not_terms = {"excluded"};
+  RefreshCanonicalCacheKey(query);
+  ASSERT_TRUE(mgr.Insert(query, {1, 2}, {"pos", "osi"}, 15.0, 3, 2, true));
+  auto pending = mgr.BeginInsert(query, {"pos", "osi"}, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+
+  mgr.Invalidate("posts", "", "");
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+  EXPECT_FALSE(mgr.InsertIfPending(std::move(*pending), query, {3, 4}, 15.0));
+  EXPECT_EQ(mgr.GetStatistics().rejection_count, 1U);
+
+  const auto cleanup_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (mgr.GetTrackedInvalidationEntries() != 0U && std::chrono::steady_clock::now() < cleanup_deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_EQ(mgr.GetStatistics().invalidation_index_memory_bytes, 0U);
+}
+
+TEST(CacheManagerTest, ExpirationBeforeLegacyRegistrationDoesNotLeavePhantomMetadata) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.ttl_seconds = 1;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "ttl registration race");
+  mygramdb::testing::DeterministicGate payload_inserted;
+  mgr.SetAfterQueryCacheInsertHookForTest([&] { payload_inserted.ArriveAndWait(); });
+  auto insert = std::async(std::launch::async, [&] { return mgr.Insert(query, {1, 2}, {"ttl"}, 15.0, 3, 2, true); });
+  auto release_gate_on_exit = mygramdb::utils::ScopeGuard([&] { payload_inserted.Release(); });
+  ASSERT_TRUE(payload_inserted.WaitUntilArrived(std::chrono::seconds(2)));
+
+  // Keep the legacy insert between QueryCache::Insert and invalidation
+  // registration until the real LRU worker expires the payload and fires its
+  // callback while there is still no reverse-index entry to remove.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+  payload_inserted.Release();
+
+  EXPECT_FALSE(insert.get());
+  mgr.SetAfterQueryCacheInsertHookForTest({});
+  const auto stats = mgr.GetStatistics();
+  EXPECT_GE(stats.ttl_expirations, 1U);
+  EXPECT_EQ(stats.current_entries, 0U);
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_EQ(stats.invalidation_index_memory_bytes, 0U);
+}
+
+TEST(CacheManagerTest, PendingBudgetRejectionDoesNotEvictResidentAndCountsOnce) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 16 * 1024;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+  const auto resident_query = CreateQuery("posts", "resident query");
+  ASSERT_TRUE(mgr.Insert(resident_query, {1, 2}, {"res"}, 15.0, 3, 2, true));
+
+  auto pending_query = CreateQuery("posts", "large pending query");
+  std::vector<std::string> ngrams;
+  ngrams.reserve(256);
+  for (size_t index = 0; index < 256; ++index) {
+    ngrams.push_back("pending_" + std::to_string(index) + std::string(256, 'x'));
+  }
+  EXPECT_FALSE(mgr.BeginInsert(pending_query, ngrams, 3, 2, true).has_value());
+
+  const auto resident = mgr.Lookup(resident_query);
+  ASSERT_TRUE(resident.has_value());
+  EXPECT_EQ(resident.value(), (std::vector<DocId>{1, 2}));
+  const auto stats = mgr.GetStatistics();
+  EXPECT_EQ(stats.rejection_memory_budget, 1U);
+  EXPECT_EQ(stats.rejection_count, 0U);
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 1U);
+}
+
 TEST(CacheManagerTest, EmptyGlobalClearRejectsPreviouslyCapturedTableVersion) {
   config::CacheConfig config;
   config.enabled = true;
@@ -315,6 +643,7 @@ TEST(CacheManagerTest, EmptyGlobalClearRejectsPreviouslyCapturedTableVersion) {
 
   EXPECT_GT(mgr.CaptureDataVersion("posts"), before_clear);
   EXPECT_FALSE(mgr.InsertIfVersion(query, {1, 2, 3}, {"gol", "ola"}, 15.0, before_clear, 3, 2, true));
+  EXPECT_EQ(mgr.GetStatistics().rejection_count, 1U);
 }
 
 /**
@@ -1005,6 +1334,7 @@ TEST(CacheManagerTest, ClearWaitsForAtomicInsertRegistrationBoundary) {
 
     const auto query = CreateQuery("posts", "deterministic_clear_insert_" + std::to_string(repetition));
     auto insert = std::async(std::launch::async, [&]() { return mgr.Insert(query, {1}, {"det"}, 1.0); });
+    auto release_gate_on_exit = mygramdb::utils::ScopeGuard([&] { insert_gate.Release(); });
     ASSERT_TRUE(insert_gate.WaitUntilArrived(std::chrono::seconds(2))) << repetition;
 
     auto clear = std::async(std::launch::async, [&]() { mgr.Clear(); });
@@ -1291,13 +1621,10 @@ TEST(CacheManagerTest, SharedMemoryBudgetIncludesInvalidationAndContainerOverhea
     for (int n = 0; n < 64; ++n) {
       ngrams.push_back("ngram_" + std::to_string(i) + "_" + std::to_string(n));
     }
-    // eviction_batch_size's minimum-batch guarantee (see cache_manager.cpp's
-    // use of QueryCache::EvictBatch) can remove more entries than are
-    // strictly needed, including the one just inserted, when this small
-    // budget holds fewer entries than the batch size -- so an occasional
-    // rejection here is expected, not a failure.
-    if (mgr.Insert(query, {static_cast<DocId>(i)}, ngrams, 1.0, 3, 2, true)) {
+    const std::vector<DocId> result = {static_cast<DocId>(i)};
+    if (mgr.Insert(query, result, ngrams, 1.0, 3, 2, true)) {
       ++successful_inserts;
+      EXPECT_EQ(mgr.Lookup(query), result) << "successful insertion was not retained at iteration " << i;
     }
     const auto stats = mgr.GetStatistics();
     EXPECT_LE(stats.accounted_memory_bytes, stats.max_memory_bytes)
@@ -1318,6 +1645,138 @@ TEST(CacheManagerTest, SharedMemoryBudgetIncludesInvalidationAndContainerOverhea
     EXPECT_LE(rss_growth, config.max_memory_bytes + kAllocatorAndMeasurementTolerance)
         << "cache RSS growth exceeded the shared budget plus allocator tolerance";
   }
+}
+
+TEST(CacheManagerTest, SharedBudgetEvictionPreservesEachFittingLatestInsert) {
+  config::CacheConfig reference_config;
+  reference_config.enabled = true;
+  reference_config.max_memory_bytes = 16 * 1024 * 1024;
+  reference_config.min_query_cost_ms = 0.0;
+  reference_config.eviction_batch_size = 10;
+
+  const auto first_ngrams = CreateBudgetTestNgrams(0);
+  const auto second_ngrams = CreateBudgetTestNgrams(1);
+  const auto first_query = CreateQuery("posts", "small_budget_first");
+  const auto second_query = CreateQuery("posts", "small_budget_second");
+  const std::vector<DocId> first_result = {100, 101};
+  const std::vector<DocId> second_result = {200, 201};
+
+  CacheManager reference(reference_config, CreateTestNgramConfigs(3, 2));
+  ASSERT_TRUE(reference.Insert(first_query, first_result, first_ngrams, 1.0, 3, 2, true));
+  const auto one_entry_stats = reference.GetStatistics();
+  ASSERT_TRUE(reference.Insert(second_query, second_result, second_ngrams, 1.0, 3, 2, true));
+  const auto two_entry_stats = reference.GetStatistics();
+
+  const size_t cache_only_two_entry_bytes = two_entry_stats.accounted_memory_bytes -
+                                            two_entry_stats.invalidation_index_memory_bytes -
+                                            two_entry_stats.invalidation_queue_memory_bytes;
+  const size_t minimum_budget =
+      std::max(static_cast<size_t>(one_entry_stats.accounted_memory_bytes), cache_only_two_entry_bytes);
+  ASSERT_LT(minimum_budget, two_entry_stats.accounted_memory_bytes)
+      << "the fixture must distinguish the shared two-entry footprint from cache-only memory";
+
+  config::CacheConfig small_config = reference_config;
+  small_config.max_memory_bytes = minimum_budget + (two_entry_stats.accounted_memory_bytes - minimum_budget) / 2;
+  ASSERT_GT(small_config.max_memory_bytes, one_entry_stats.accounted_memory_bytes);
+  ASSERT_LT(small_config.max_memory_bytes, two_entry_stats.accounted_memory_bytes);
+
+  CacheManager mgr(small_config, CreateTestNgramConfigs(3, 2));
+  for (int i = 0; i < 10; ++i) {
+    const auto query = CreateQuery("posts", "small_budget_" + std::to_string(i));
+    const auto result = std::vector<DocId>{static_cast<DocId>(i * 10), static_cast<DocId>(i * 10 + 1)};
+    const auto ngrams = CreateBudgetTestNgrams(i);
+    ASSERT_TRUE(mgr.Insert(query, result, ngrams, 1.0, 3, 2, true)) << "entry " << i;
+    EXPECT_EQ(mgr.Lookup(query), result) << "latest fitting insertion was lost at iteration " << i;
+    const auto stats = mgr.GetStatistics();
+    EXPECT_LE(stats.accounted_memory_bytes, stats.max_memory_bytes);
+  }
+  EXPECT_GT(mgr.GetStatistics().evictions, 0U);
+}
+
+TEST(CacheManagerTest, SharedBudgetRejectionRollsBackInvalidationRegistration) {
+  config::CacheConfig reference_config;
+  reference_config.enabled = true;
+  reference_config.max_memory_bytes = 16 * 1024 * 1024;
+  reference_config.min_query_cost_ms = 0.0;
+
+  const auto query = CreateQuery("posts", "shared_budget_too_large");
+  const auto result = std::vector<DocId>{1, 2, 3};
+  const auto ngrams = CreateBudgetTestNgrams(42);
+  CacheManager reference(reference_config, CreateTestNgramConfigs(3, 2));
+  ASSERT_TRUE(reference.Insert(query, result, ngrams, 1.0, 3, 2, true));
+  const auto reference_stats = reference.GetStatistics();
+  const size_t cache_only_bytes = reference_stats.accounted_memory_bytes -
+                                  reference_stats.invalidation_index_memory_bytes -
+                                  reference_stats.invalidation_queue_memory_bytes;
+  ASSERT_GT(reference_stats.invalidation_index_memory_bytes, 0U);
+  ASSERT_LT(cache_only_bytes, reference_stats.accounted_memory_bytes);
+
+  config::CacheConfig constrained_config = reference_config;
+  constrained_config.max_memory_bytes =
+      cache_only_bytes + (reference_stats.accounted_memory_bytes - cache_only_bytes) / 2;
+  ASSERT_GT(constrained_config.max_memory_bytes, cache_only_bytes);
+  ASSERT_LT(constrained_config.max_memory_bytes, reference_stats.accounted_memory_bytes);
+
+  CacheManager mgr(constrained_config, CreateTestNgramConfigs(3, 2));
+  EXPECT_FALSE(mgr.Insert(query, result, ngrams, 1.0, 3, 2, true));
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+  const auto stats = mgr.GetStatistics();
+  EXPECT_EQ(stats.current_entries, 0U);
+  EXPECT_EQ(stats.invalidation_index_memory_bytes, 0U);
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_EQ(stats.rejection_memory_budget, 1U);
+  EXPECT_EQ(stats.invalidations_deferred, 0U);
+  EXPECT_EQ(stats.stale_entry_removals, 0U);
+  EXPECT_LE(stats.accounted_memory_bytes, stats.max_memory_bytes);
+}
+
+TEST(CacheManagerTest, PendingBudgetRollbackDoesNotCountAsDeferredInvalidation) {
+  config::CacheConfig reference_config;
+  reference_config.enabled = true;
+  reference_config.max_memory_bytes = 32 * 1024 * 1024;
+  reference_config.min_query_cost_ms = 0.0;
+  reference_config.compression_enabled = false;
+
+  const auto query = CreateQuery("posts", "pending_budget_rollback");
+  const auto ngrams = CreateBudgetTestNgrams(73);
+  std::vector<DocId> result;
+  result.reserve(1024);
+  for (DocId id = 1; id <= 1024; ++id) {
+    result.push_back(id);
+  }
+
+  CacheManager reference(reference_config, CreateTestNgramConfigs(3, 2));
+  auto reference_pending = reference.BeginInsert(query, ngrams, 3, 2, true);
+  ASSERT_TRUE(reference_pending.has_value());
+  const auto pending_stats = reference.GetStatistics();
+  const size_t pending_accounted_bytes = pending_stats.accounted_memory_bytes;
+  reference_pending.reset();
+
+  ASSERT_TRUE(reference.Insert(query, result, ngrams, 1.0, 3, 2, true));
+  const auto resident_stats = reference.GetStatistics();
+  const size_t cache_only_bytes = resident_stats.accounted_memory_bytes -
+                                  resident_stats.invalidation_index_memory_bytes -
+                                  resident_stats.invalidation_queue_memory_bytes;
+  const size_t minimum_admission_ceiling = std::max(pending_accounted_bytes, cache_only_bytes) + 16;
+  ASSERT_LT(minimum_admission_ceiling, resident_stats.accounted_memory_bytes);
+
+  config::CacheConfig constrained_config = reference_config;
+  constrained_config.max_memory_bytes = minimum_admission_ceiling;
+  CacheManager mgr(constrained_config, CreateTestNgramConfigs(3, 2));
+  auto pending = mgr.BeginInsert(query, ngrams, 3, 2, true);
+  ASSERT_TRUE(pending.has_value());
+  EXPECT_FALSE(mgr.InsertIfPending(std::move(*pending), query, result, 1.0));
+
+  const auto stats = mgr.GetStatistics();
+  EXPECT_EQ(stats.current_entries, 0U);
+  EXPECT_EQ(stats.invalidation_index_memory_bytes, 0U);
+  EXPECT_EQ(stats.invalidation_queue_memory_bytes, 0U);
+  EXPECT_EQ(stats.invalidations_deferred, 0U);
+  EXPECT_EQ(stats.stale_entry_removals, 0U);
+  EXPECT_EQ(stats.rejection_memory_budget, 1U);
+  EXPECT_EQ(mgr.GetTrackedInvalidationEntries(), 0U);
+  EXPECT_FALSE(mgr.Lookup(query).has_value());
+  EXPECT_LE(stats.accounted_memory_bytes, stats.max_memory_bytes);
 }
 
 /**

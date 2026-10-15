@@ -19,6 +19,7 @@
 #include "mysql/binlog_reader_interface.h"
 #include "mysql/connection.h"
 #include "mysql/gtid_waiter.h"
+#include "server/log_field_names.h"
 #include "server/replication_pause_counter.h"
 #include "server/response_formatter.h"
 #include "utils/fd_guard.h"
@@ -55,11 +56,13 @@ const std::string& ChooseSyncRestartGtid(bool stalled_on_undecodable_event, cons
 SyncOperationManager::SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
                                            const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                                            replication_pause::Counter* replication_pause_counter,
-                                           cache::CacheManager* cache_manager)
+                                           cache::CacheManager* cache_manager,
+                                           OperationCoordinator* operation_coordinator)
     : table_contexts_(table_contexts),
       full_config_(full_config),
       binlog_reader_(binlog_reader),
-      replication_pause_counter_(replication_pause_counter) {
+      replication_pause_counter_(replication_pause_counter),
+      operation_coordinator_(operation_coordinator != nullptr ? operation_coordinator : &owned_operation_coordinator_) {
   cache_manager_.store(cache_manager, std::memory_order_release);
 }
 
@@ -103,7 +106,7 @@ SyncOperationManager::~SyncOperationManager() {
   // Join threads WITHOUT holding sync_mutex_
   for (auto& [table_name, thread] : threads_to_join) {
     if (thread.joinable()) {
-      mygram::utils::StructuredLog().Event("sync_thread_joining").Field("table", table_name).Debug();
+      mygram::utils::StructuredLog().Event("sync_thread_joining").Field(log_fields::kFieldTable, table_name).Debug();
       thread.join();
     }
   }
@@ -178,11 +181,15 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
       return MakeUnexpected(MakeError(ErrorCode::kSyncTableNotFound, "Table '" + table_name + "' not found"));
     }
 
-    auto acquired = operation_coordinator_.TryAcquire(LongOperation::kSync, table_name);
+    auto acquired = operation_coordinator_->TryAcquire(LongOperation::kSync, table_name);
     if (!acquired.has_value()) {
+      if (operation_coordinator_->DescribeActive() == "server shutdown") {
+        return MakeUnexpected(MakeError(ErrorCode::kServerShuttingDown,
+                                        "Cannot start SYNC for '" + table_name + "': server is shutting down"));
+      }
       return MakeUnexpected(
           MakeError(ErrorCode::kSyncAlreadyInProgress,
-                    "Cannot start SYNC while " + operation_coordinator_.DescribeActive() + " is in progress"));
+                    "Cannot start SYNC while " + operation_coordinator_->DescribeActive() + " is in progress"));
     }
     operation_token = std::move(*acquired);
 
@@ -245,7 +252,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
         current_config.has_value() ? static_cast<uint32_t>(current_config->mysql.session_timeout_sec) : 0;
     mygram::utils::StructuredLog()
         .Event("sync_starting")
-        .Field("table", table_name)
+        .Field(log_fields::kFieldTable, table_name)
         .Field("session_timeout_sec", static_cast<uint64_t>(session_timeout))
         .Field("hint", "ensure session_timeout_sec is sufficient for snapshot duration")
         .Info();
@@ -264,6 +271,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
     sync_states_[table_name].table_name = table_name;
     sync_states_[table_name].processed_rows = 0;
     sync_states_[table_name].error_message.clear();
+    sync_states_[table_name].end_time.reset();
 
     // Launch async build (store thread instead of detaching)
     // Wrap in try/catch to rollback state if thread creation fails
@@ -280,6 +288,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> SyncOperationManager:
       sync_states_[table_name].is_running = false;
       sync_states_[table_name].status = "FAILED";
       sync_states_[table_name].error_message = std::string("Failed to create sync thread: ") + e.what();
+      sync_states_[table_name].end_time = std::chrono::steady_clock::now();
       return MakeUnexpected(
           MakeError(ErrorCode::kSyncThreadCreationFailed, "Failed to create sync thread: " + std::string(e.what())));
     }
@@ -322,7 +331,8 @@ std::string SyncOperationManager::GetSyncStatus() {
       oss << " rate=" << std::fixed << std::setprecision(0) << rate << " rows/s";
     } else if (state.status == "COMPLETED") {
       uint64_t processed = state.processed_rows.load();
-      double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - state.start_time).count();
+      const auto end_time = state.end_time.value_or(std::chrono::steady_clock::now());
+      double elapsed = std::chrono::duration<double>(end_time - state.start_time).count();
 
       oss << " rows=" << processed << " time=" << std::fixed << std::setprecision(1) << elapsed << "s";
 
@@ -407,7 +417,7 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
         if (iter != active_loaders_.end()) {
           mygram::utils::StructuredLog()
               .Event("sync_stop")
-              .Field("table", tbl)
+              .Field(log_fields::kFieldTable, tbl)
               .Field("source", "user_request")
               .Field("scope", "all")
               .Info();
@@ -450,7 +460,7 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
       if (iter != active_loaders_.end()) {
         mygram::utils::StructuredLog()
             .Event("sync_stop")
-            .Field("table", table_name)
+            .Field(log_fields::kFieldTable, table_name)
             .Field("source", "user_request")
             .Info();
         iter->second->Cancel();
@@ -462,19 +472,18 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
 }
 
 void SyncOperationManager::RequestShutdown() {
-  // Use release-store so the StartSync acquire-load (H-C4) sees this
-  // store and refuses any new SYNC after we have begun shutdown. The
-  // semantics are: once RequestShutdown returns, no new SYNC can be
-  // started and all in-flight syncs have been Cancel()ed.
+  // Close coordinator admission before publishing the local flag. A racing
+  // StartSync either acquired its token before this point and is cancelled
+  // below, or is refused by the coordinator.
+  operation_coordinator_->BlockNewOperationsForShutdown();
   shutdown_requested_.store(true, std::memory_order_release);
-  operation_coordinator_.BlockNewOperationsForShutdown();
 
   // Cancel all active loaders
   std::lock_guard<std::mutex> lock(loaders_mutex_);
   for (auto& [table_name, loader] : active_loaders_) {
     mygram::utils::StructuredLog()
         .Event("sync_cancelling")
-        .Field("table", table_name)
+        .Field(log_fields::kFieldTable, table_name)
         .Field("reason", "shutdown_requested")
         .Info();
     loader->Cancel();
@@ -516,7 +525,7 @@ bool SyncOperationManager::WaitForCompletion(int timeout_sec) {
   }
 
   for (auto& [table_name, thread] : completed_threads) {
-    mygram::utils::StructuredLog().Event("sync_thread_joining").Field("table", table_name).Debug();
+    mygram::utils::StructuredLog().Event("sync_thread_joining").Field(log_fields::kFieldTable, table_name).Debug();
     thread.join();
   }
 
@@ -592,7 +601,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::CheckN
     // window must still see the SYNC-specific conflict here, or it passes
     // this check and only fails later against OperationCoordinator with the
     // generic "is in progress" error instead of kSyncAlreadyInProgress.
-    auto active = operation_coordinator_.GetActive();
+    auto active = operation_coordinator_->GetActive();
     if (!active.has_value() || active->type != LongOperation::kSync) {
       return {};
     }
@@ -618,12 +627,18 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
     sync_states_[table_name].status =
         sync_states_[table_name].cancel_requested.load(std::memory_order_acquire) ? "CANCELLING" : "IN_PROGRESS";
     sync_states_[table_name].start_time = std::chrono::steady_clock::now();
+    sync_states_[table_name].end_time.reset();
   }
 
   // Helper to update state safely
   auto update_state = [this, table_name](auto&& updater) {
     std::lock_guard<std::mutex> lock(sync_mutex_);
-    updater(sync_states_[table_name]);
+    auto& state = sync_states_[table_name];
+    updater(state);
+    if (!state.end_time.has_value() &&
+        (state.status == "COMPLETED" || state.status == "FAILED" || state.status == "CANCELLED")) {
+      state.end_time = std::chrono::steady_clock::now();
+    }
   };
   auto cancellation_requested = [this, table_name]() {
     if (shutdown_requested_.load(std::memory_order_acquire)) {
@@ -700,20 +715,20 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       });
       mygram::utils::StructuredLog()
           .Event("sync_failed")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .Field("error", "Configuration not available")
           .Error();
       return;
     }
 
     // Connect to MySQL
-    mysql::Connection::Config mysql_config{
-        .host = current_config->mysql.host,
-        .port = static_cast<uint16_t>(current_config->mysql.port),
-        .user = current_config->mysql.user,
-        .password = current_config->mysql.password,
-        .database = current_config->mysql.database,
-        .session_timeout_sec = static_cast<uint32_t>(current_config->mysql.session_timeout_sec)};
+    mysql::Connection::Config mysql_config{};
+    mysql_config.host = current_config->mysql.host;
+    mysql_config.port = static_cast<uint16_t>(current_config->mysql.port);
+    mysql_config.user = current_config->mysql.user;
+    mysql_config.password = current_config->mysql.password;
+    mysql_config.database = current_config->mysql.database;
+    mysql_config.session_timeout_sec = static_cast<uint32_t>(current_config->mysql.session_timeout_sec);
 
     auto mysql_conn = std::make_unique<mysql::Connection>(mysql_config);
 
@@ -727,7 +742,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       });
       mygram::utils::StructuredLog()
           .Event("sync_failed")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .FieldError(mygram::utils::MakeError(connect_result.error().code(), error_msg))
           .Error();
       return;
@@ -747,7 +762,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       });
       mygram::utils::StructuredLog()
           .Event("sync_failed")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .Field("error", "Table context not found")
           .Error();
       return;
@@ -805,7 +820,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           });
           mygram::utils::StructuredLog()
               .Event("sync_failed")
-              .Field("table", table_name)
+              .Field(log_fields::kFieldTable, table_name)
               .Field("error", "Replication is already paused by another operation")
               .Error();
           return;
@@ -814,7 +829,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       mygram::utils::StructuredLog()
           .Event("replication_stopping")
           .Field("operation", "sync")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .Field("reason", "stop_before_candidate_snapshot")
           .Info();
       reader->Stop();
@@ -873,7 +888,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
       mygram::utils::StructuredLog()
           .Event("sync_candidate_discarded")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .Field("reason", cancel_reason)
           .Field("partial_rows_discarded", partial_rows)
           .Field("message", "Candidate data discarded; live table preserved")
@@ -888,7 +903,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
       mygram::utils::StructuredLog()
           .Event("sync_cancelled")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .Field("reason", cancel_reason)
           .Field("partial_rows", partial_rows)
           .Info();
@@ -934,7 +949,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           });
           mygram::utils::StructuredLog()
               .Event("sync_catchup_target_failed")
-              .Field("table", table_name)
+              .Field(log_fields::kFieldTable, table_name)
               .FieldError(catchup_target.error())
               .Error();
           return;
@@ -980,7 +995,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       // Log replication configuration for debugging
       mygram::utils::StructuredLog()
           .Event("sync_replication_check")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .Field("replication_enable", current_config->replication.enable)
           .Field("reader_exists", reader != nullptr)
           .Field("gtid_empty", gtid.empty())
@@ -998,7 +1013,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       if (skipped_undecodable_interval) {
         mygram::utils::StructuredLog()
             .Event("sync_skipping_undecodable_interval")
-            .Field("table", table_name)
+            .Field(log_fields::kFieldTable, table_name)
             .Field("stalled_gtid", saved_gtid)
             .Field("restart_gtid", gtid)
             .Field("message",
@@ -1017,7 +1032,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         // Always set GTID and start replication after SYNC
         mygram::utils::StructuredLog()
             .Event("sync_setting_gtid")
-            .Field("table", table_name)
+            .Field(log_fields::kFieldTable, table_name)
             .Field("gtid", restart_gtid)
             .Info();
 
@@ -1026,7 +1041,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         // Log before attempting to start replication
         mygram::utils::StructuredLog()
             .Event("sync_starting_replication")
-            .Field("table", table_name)
+            .Field(log_fields::kFieldTable, table_name)
             .Field("gtid", restart_gtid)
             .Field("reader_running", reader->IsRunning())
             .Info();
@@ -1074,7 +1089,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           });
           mygram::utils::StructuredLog()
               .Event("sync_replication_handoff_failed")
-              .Field("table", table_name)
+              .Field(log_fields::kFieldTable, table_name)
               .Field("target_gtid", catchup_target_gtid)
               .FieldError(*handoff_error)
               .Error();
@@ -1090,7 +1105,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         update_state([](SyncState& state) { state.replication_status = "STARTED"; });
         mygram::utils::StructuredLog()
             .Event("sync_completed")
-            .Field("table", table_name)
+            .Field(log_fields::kFieldTable, table_name)
             .Field("rows", processed)
             .Field("gtid", restart_gtid)
             .Field("catchup_target_gtid", catchup_target_gtid)
@@ -1100,13 +1115,24 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         update_state([](SyncState& state) { state.replication_status = "DISABLED"; });
         mygram::utils::StructuredLog()
             .Event("sync_completed")
-            .Field("table", table_name)
+            .Field(log_fields::kFieldTable, table_name)
             .Field("rows", processed)
             .Field("replication_status", "disabled")
             .Info();
       }
 
-      // The replacement and its replication hand-off are now committed.
+      auto* cache_mgr = cache_manager_.load(std::memory_order_acquire);
+      if (cache_mgr != nullptr) {
+        cache_mgr->ClearTable(table_name);
+        mygram::utils::StructuredLog()
+            .Event("sync_cache_cleared")
+            .Field(log_fields::kFieldTable, table_name)
+            .Field("rows", processed)
+            .Info();
+      }
+
+      // The replacement, cache invalidation and replication hand-off are now
+      // committed. Publish COMPLETED only after stale cached results are gone.
       live_state_swapped = false;
       update_state([&gtid, processed, replication_started](SyncState& state) {
         state.status = "COMPLETED";
@@ -1118,15 +1144,6 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         }
       });
 
-      auto* cache_mgr = cache_manager_.load(std::memory_order_acquire);
-      if (cache_mgr != nullptr) {
-        cache_mgr->ClearTable(table_name);
-        mygram::utils::StructuredLog()
-            .Event("sync_cache_cleared")
-            .Field("table", table_name)
-            .Field("rows", processed)
-            .Info();
-      }
       if (completion_callback_) {
         completion_callback_(table_name);
       }
@@ -1150,7 +1167,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
       mygram::utils::StructuredLog()
           .Event("sync_candidate_discarded")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .Field("reason", "sync_failed")
           .Field("partial_rows_discarded", partial_rows)
           .Field("message", "Partial candidate discarded; live table preserved")
@@ -1163,7 +1180,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       });
       mygram::utils::StructuredLog()
           .Event("sync_failed")
-          .Field("table", table_name)
+          .Field(log_fields::kFieldTable, table_name)
           .FieldError(mygram::utils::MakeError(result.error().code(), error_msg))
           .Error();
 
@@ -1209,7 +1226,11 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
       state.error_message = error_msg;
       state.is_running = false;
     });
-    mygram::utils::StructuredLog().Event("sync_exception").Field("table", table_name).Field("error", error_msg).Error();
+    mygram::utils::StructuredLog()
+        .Event("sync_exception")
+        .Field(log_fields::kFieldTable, table_name)
+        .Field("error", error_msg)
+        .Error();
 
     // Restart replication from the saved GTID position (before SYNC started).
     // The exception prevented SYNC completion, so we restore to the pre-SYNC state.
@@ -1250,7 +1271,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::Restar
   if (reader == nullptr) {
     mygram::utils::StructuredLog()
         .Event("replication_restart_skipped")
-        .Field("table", table_name)
+        .Field(log_fields::kFieldTable, table_name)
         .Field("reason", reason)
         .Field("reader_null", true)
         .Warn();
@@ -1259,7 +1280,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::Restar
 
   mygram::utils::StructuredLog()
       .Event("replication_restart")
-      .Field("table", table_name)
+      .Field(log_fields::kFieldTable, table_name)
       .Field("reason", reason)
       .Field("gtid", gtid)
       .Info();
@@ -1273,7 +1294,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::Restar
   if (start_result) {
     mygram::utils::StructuredLog()
         .Event("replication_restarted")
-        .Field("table", table_name)
+        .Field(log_fields::kFieldTable, table_name)
         .Field("reason", reason)
         .Field("gtid", gtid)
         .Info();
@@ -1281,7 +1302,7 @@ mygram::utils::Expected<void, mygram::utils::Error> SyncOperationManager::Restar
   } else {
     mygram::utils::StructuredLog()
         .Event("replication_restart_failed")
-        .Field("table", table_name)
+        .Field(log_fields::kFieldTable, table_name)
         .Field("reason", reason)
         .Field("gtid", gtid)
         .FieldError(start_result.error())

@@ -171,7 +171,7 @@ TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
     const char* response;
     bool expected;
   };
-  constexpr std::array<TestCase, 14> cases = {{
+  constexpr std::array<TestCase, 13> cases = {{
       {"ERROR 6028 Server is loading, please try again later", true},
       {"ERROR 6029 Replication is not running", true},
       {"ERROR 4000 Server is loading", false},
@@ -183,16 +183,10 @@ TEST_F(CliConstantsTest, WaitReadyRetryableResponses) {
       {"(error) SERVER_TIMEOUT: Server did not respond", true},
       {"OK INFO\r\nstatus: ready\r\nEND", false},
       {"OK RESULTS 1 SERVER_DISCONNECTED SERVER_TIMEOUT NOT_READY", false},
-      // Regression (cross-surface-001): INFO's own readiness field never
-      // arrives as an ERROR frame, so it must be retryable even though
-      // this response has no error code at all.
+      // INFO reports readiness as a field, not an ERROR frame, so it is
+      // retryable even though the response carries no error code.
       {"OK INFO\r\nversion: 1.0\r\nreadiness: not_ready\r\nEND", true},
       {"OK INFO\r\nversion: 1.0\r\nreadiness: ready\r\nEND", false},
-      // Regression (client-cli-009): a typed error path (DUMP SAVE via
-      // client_->Save()) rebuilds the wire form "ERROR <code> <message>"
-      // instead of dropping the code, so this must retry like every other
-      // command's raw ERROR 6028/6029 response.
-      {"ERROR 6028 Server is loading, please try again later", true},
   }};
   for (const auto& test_case : cases) {
     SCOPED_TRACE(test_case.response);
@@ -267,6 +261,59 @@ TEST_F(CliConstantsTest, WaitReadyReconnectsAfterDroppedConnection) {
   EXPECT_EQ(served.load(), 2);
 }
 
+TEST_F(CliConstantsTest, WaitReadyFailsWhenRetriesRunOutWhileNotReady) {
+  int listener = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(listen(listener, 1), 0);
+  socklen_t address_size = sizeof(address);
+  ASSERT_EQ(getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_size), 0);
+
+  constexpr int kAttempts = 2;
+  std::atomic<int> served{0};
+  std::thread server([&] {
+    int connection = accept(listener, nullptr, nullptr);
+    if (connection < 0) {
+      return;
+    }
+#ifdef SO_NOSIGPIPE
+    int nosigpipe = 1;
+    (void)setsockopt(connection, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+      std::array<char, 256> request{};
+      if (recv(connection, request.data(), request.size(), 0) <= 0) {
+        break;
+      }
+      constexpr std::string_view response = "OK INFO\r\nreadiness: not_ready\r\nEND\r\n";
+      (void)send(connection, response.data(), response.size(), kSendFlags);
+      served.fetch_add(1);
+    }
+    close(connection);
+  });
+
+  Config config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.wait_ready = true;
+  config.retry_count = kAttempts - 1;
+  config.retry_interval = 0;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+  StdoutCapture stdout_capture;
+  StderrCapture stderr_capture;
+  EXPECT_EQ(client.RunSingleCommand("INFO"), kExitFailure);
+
+  server.join();
+  close(listener);
+  EXPECT_EQ(served.load(), kAttempts);
+  EXPECT_NE(stderr_capture.GetOutput().find("did not become ready"), std::string::npos);
+}
+
 TEST_F(CliConstantsTest, WaitReadyRetriesNameResolutionFailures) {
   Config config;
   config.host = "invalid.invalid";
@@ -334,21 +381,6 @@ TEST_F(CliStringHelperTest, StripTrailingEndMarker) {
   EXPECT_EQ(StripTrailingEndMarker("no marker"), "no marker");
 }
 
-TEST_F(CliStringHelperTest, QuoteArgIfNeeded) {
-  EXPECT_EQ(QuoteArgIfNeeded("plain"), "plain");
-  EXPECT_EQ(QuoteArgIfNeeded("with space"), "\"with space\"");
-  EXPECT_EQ(QuoteArgIfNeeded("with\"quote"), "\"with\\\"quote\"");
-  EXPECT_EQ(QuoteArgIfNeeded("with\\backslash"), "\"with\\\\backslash\"");
-  EXPECT_EQ(QuoteArgIfNeeded(""), "\"\"");
-  // Control characters get stripped (consistent with client lib's
-  // EscapeQueryString — prevents protocol injection via embedded \r\n).
-  EXPECT_EQ(QuoteArgIfNeeded("a\x01"
-                             "b"),
-            "\"ab\"");
-  EXPECT_EQ(QuoteArgIfNeeded("with\ttab"), "\"withtab\"");
-  EXPECT_EQ(QuoteArgIfNeeded("with\nnewline"), "\"withnewline\"");
-}
-
 TEST_F(CliStringHelperTest, JoinArgsForCommand) {
   EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello"}), "SEARCH articles hello");
   EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello world"}), "SEARCH articles hello world");
@@ -356,6 +388,8 @@ TEST_F(CliStringHelperTest, JoinArgsForCommand) {
             "SEARCH articles (golang OR python) AND tutorial");
   EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "\"hello world\""}), "SEARCH articles \"hello world\"");
   EXPECT_EQ(JoinArgsForCommand({"INFO\r\nSHUTDOWN"}), "INFOSHUTDOWN");
+  // A tab separates words like a space instead of merging them.
+  EXPECT_EQ(JoinArgsForCommand({"SEARCH", "articles", "hello\tworld"}), "SEARCH articles hello world");
   EXPECT_EQ(JoinArgsForCommand({}), "");
   EXPECT_EQ(JoinArgsForCommand({"INFO"}), "INFO");
 }
@@ -368,6 +402,16 @@ TEST_F(CliStringHelperTest, ParsesDumpSaveFilepath) {
   EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE '/tmp/a b.dmp')"), "/tmp/a b.dmp");
   EXPECT_FALSE(ParseDumpSaveFilepath("DUMP STATUS").has_value());
   EXPECT_FALSE(ParseDumpSaveFilepath("DUMP SAVER /tmp/a.dmp").has_value());
+  // Keywords match like the server's dispatch: any case, any whitespace between them.
+  EXPECT_EQ(ParseDumpSaveFilepath("dump  save /tmp/a.dmp"), "/tmp/a.dmp");
+  EXPECT_EQ(ParseDumpSaveFilepath("Dump\xE3\x80\x80Save /tmp/a.dmp"), "/tmp/a.dmp");
+  // A quoted path decodes with the server tokenizer's escape set.
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE "/tmp/a\"b\\c.dmp")"), "/tmp/a\"b\\c.dmp");
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE '/tmp/it\'s.dmp')"), "/tmp/it's.dmp");
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE "/tmp/a\tb\x41.dmp")"), "/tmp/a\tbA.dmp");
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE "/tmp/\xZZ\q.dmp")"), "/tmp/xZZq.dmp");
+  // Outside quotes a backslash is a literal byte.
+  EXPECT_EQ(ParseDumpSaveFilepath(R"(DUMP SAVE C:\dumps\a.dmp)"), R"(C:\dumps\a.dmp)");
 }
 
 TEST_F(CliStringHelperTest, HelpMatchesImplementedRuntimeSyntax) {
@@ -384,6 +428,16 @@ TEST_F(CliStringHelperTest, HelpMatchesImplementedRuntimeSyntax) {
   EXPECT_NE(output.find("FACET <db.table> <column> [text]"), std::string::npos);
   EXPECT_EQ(output.find("SYNC START"), std::string::npos);
   EXPECT_EQ(output.find("FACET <db.table> <column> [WHERE"), std::string::npos);
+}
+
+TEST_F(CliStringHelperTest, HelpAndUsageStateCommandsAreSentVerbatim) {
+  StdoutCapture capture;
+  MygramClient::PrintHelp();
+  PrintUsage("mygram-cli");
+
+  const std::string output = capture.GetOutput();
+  EXPECT_NE(output.find("Commands are sent to the server verbatim"), std::string::npos);
+  EXPECT_NE(output.find("COMMAND is sent to the server verbatim"), std::string::npos);
 }
 
 TEST_F(CliStringHelperTest, HelpListsEverySearchClauseTheServerAccepts) {
@@ -506,10 +560,9 @@ TEST_F(CliPrintResponseTest, SearchResponseWithHighlights) {
 }
 
 /**
- * @brief Regression test for client-cli-010: a primary key containing
- * whitespace is sent quoted/escaped per spec §11.1 (matching QuoteWireToken).
- * Plain whitespace-splitting used to cut "a b" into two ids ("a and b");
- * ParseWireToken now decodes it back to the single key "a b".
+ * @brief A primary key containing whitespace arrives quoted per spec §11.1
+ * (matching QuoteWireToken), and ParseWireToken decodes it to the single key
+ * "a b" rather than splitting it into two ids.
  */
 TEST_F(CliPrintResponseTest, SearchResponseDecodesQuotedPrimaryKeyWithSpace) {
   StdoutCapture capture;
@@ -596,6 +649,14 @@ TEST_F(CliPrintResponseTest, DocResponseUnescapesServerEscapeSequences) {
   EXPECT_EQ(output.find(R"(\x21)"), std::string::npos);
 }
 
+TEST_F(CliPrintResponseTest, DocResponseShowsMalformedQuotedValueAsReceived) {
+  StdoutCapture capture;
+  MygramClient::PrintResponse(R"(OK DOC 42 ok="a b" bad="x\xZZ")");
+  std::string output = capture.GetOutput();
+
+  EXPECT_NE(output.find(R"(ok=a b bad="x\xZZ")"), std::string::npos) << output;
+}
+
 // =============================================================================
 // PrintResponse — INFO / REPLICATION (multi-line, CRLF normalization,
 // trailing-END stripping)
@@ -652,7 +713,6 @@ TEST_F(CliPrintResponseTest, ReplicationStartedShortForm) {
 
 // =============================================================================
 // PrintResponse — CONFIG / FACET / CACHE / SYNC / DUMP / OPTIMIZED / +OK
-// (previously fell through to "Unknown response" passthrough)
 // =============================================================================
 
 // CONFIG SHOW emits "+OK\r\n<body>\r\n\r\n" (handled by the +OK branch); the
@@ -960,13 +1020,10 @@ TEST_F(CliSingleCommandExitStatusTest, DumpSaveWaitsForCompletion) {
 }
 
 /**
- * @brief Regression test for client-cli-009: DUMP SAVE dispatches through
- * client_->Save() (a typed call), not the raw passthrough every other
- * command uses, so a server ERROR 6028 used to reach SendCommand() as an
- * Error object whose numeric code got dropped -- leaving --wait-ready
- * unable to recognize it as retryable. SendCommand() now rebuilds the wire
- * form "ERROR <code> <message>" for any error code below the client-code
- * range, so this retries exactly like every other command's raw response.
+ * @brief DUMP SAVE dispatches through client_->Save() (a typed call) rather
+ * than the raw passthrough. SendCommand() rebuilds the wire form
+ * "ERROR <code> <message>" for any error code below the client-code range, so
+ * --wait-ready retries a server ERROR 6028 here like any other command's.
  */
 TEST_F(CliSingleCommandExitStatusTest, DumpSaveErrorRetriesUnderWaitReady) {
   const int listener = socket(AF_INET, SOCK_STREAM, 0);

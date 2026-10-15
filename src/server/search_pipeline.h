@@ -15,6 +15,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "index/index.h"
@@ -359,9 +360,10 @@ struct FullPipelineOutput {
   // cache_hit is the authoritative non-debug-coupled cache hit signal. Do not
   // derive cache state from debug_info, which is only populated when
   // conn_ctx.debug_mode == true.
-  bool cache_hit = false;                                          ///< True if results came from cache
-  CacheMissReason cache_miss_reason = CacheMissReason::kDisabled;  ///< Why the cache did/did not hit
-  double cache_age_ms = 0.0;                                       ///< Age of the cache entry (only when cache_hit)
+  bool cache_hit = false;                                            ///< True if results came from cache
+  CacheMissReason cache_miss_reason = CacheMissReason::kDisabled;    ///< Why the cache did/did not hit
+  std::optional<std::pair<uint64_t, uint64_t>> canonical_cache_key;  ///< Canonical 128-bit key considered
+  double cache_age_ms = 0.0;                                         ///< Age of the cache entry (only when cache_hit)
   double cache_saved_ms = 0.0;                      ///< Time saved by the cache hit (only when cache_hit)
   bool empty_term_detected = false;                 ///< True if a search term had zero matches (early exit)
   PipelinePath path_taken = PipelinePath::REGULAR;  ///< Which search path was selected

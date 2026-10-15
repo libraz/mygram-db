@@ -227,7 +227,7 @@ def metrics_snapshot(mygramdb: MygramdbClient) -> Generator[dict, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def ensure_replication(mygramdb: MygramdbClient) -> None:
+def ensure_replication(request: pytest.FixtureRequest) -> None:
     """Ensure replication is running before each test.
 
     Some tests (e.g., resilience) stop/start replication and may leave it
@@ -235,6 +235,10 @@ def ensure_replication(mygramdb: MygramdbClient) -> None:
     After MySQL restart, REPLICATION START may fail with stale connections,
     so we fall back to SYNC which creates fresh connections.
     """
+    if request.node.get_closest_marker("dedicated_process") is not None:
+        return
+
+    mygramdb = request.getfixturevalue("mygramdb")
     status = mygramdb.replication_status()
     if "running" in status.lower():
         return

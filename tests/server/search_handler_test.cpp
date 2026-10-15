@@ -16,15 +16,22 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
+#include "cache/cache_key.h"
+#include "cache/cache_manager.h"
 #include "config/config.h"
 #include "index/index.h"
 #include "query/query_parser.h"
 #include "server/search_pipeline.h"
+#include "server/table_catalog.h"
 #include "storage/document_store.h"
 
 namespace mygramdb {
@@ -80,7 +87,121 @@ config::Config MakeConfigWithoutVerifyText() {
   return config;
 }
 
+class SearchHandlerCacheDebugTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    config_ = std::make_unique<config::Config>();
+    config_->cache.enabled = true;
+    config_->cache.max_memory_bytes = 10 * 1024 * 1024;
+    config_->cache.min_query_cost_ms = 0.0;
+
+    table_context_ = std::make_unique<TableContext>();
+    table_context_->name = "test";
+    table_context_->config.name = "test";
+    table_context_->config.ngram_size = 2;
+    table_context_->config.kanji_ngram_size = 0;
+    table_context_->config.cross_boundary_ngrams = false;
+    table_context_->index = std::make_unique<index::Index>(2);
+    table_context_->doc_store = std::make_unique<storage::DocumentStore>();
+    const auto learning = table_context_->doc_store->AddDocument("1", {}, "learning systems");
+    const auto machine = table_context_->doc_store->AddDocument("2", {}, "machine learning");
+    ASSERT_TRUE(learning.has_value());
+    ASSERT_TRUE(machine.has_value());
+    table_context_->index->AddDocument(*learning, "learning systems");
+    table_context_->index->AddDocument(*machine, "machine learning");
+
+    table_contexts_["test"] = table_context_.get();
+    table_catalog_ = std::make_unique<TableCatalog>(table_contexts_);
+    cache::NgramConfigMap ngram_configs;
+    ngram_configs["test"] = cache::NgramConfig{
+        .ngram_size = 2,
+        .kanji_ngram_size = 0,
+        .cross_boundary_ngrams = false,
+    };
+    cache_manager_ = std::make_unique<cache::CacheManager>(config_->cache, std::move(ngram_configs));
+    stats_ = std::make_unique<ServerStats>();
+    handler_context_ = std::make_unique<HandlerContext>(HandlerContext{
+        .table_catalog = table_catalog_.get(),
+        .stats = *stats_,
+        .full_config = config_.get(),
+        .dump_dir = "/tmp",
+        .dump_load_in_progress = dump_load_in_progress_,
+        .dump_save_in_progress = dump_save_in_progress_,
+        .optimization_in_progress = optimization_in_progress_,
+        .replication_paused_for_dump = replication_paused_for_dump_,
+#ifdef USE_MYSQL
+        .sync_manager = nullptr,
+#endif
+        .cache_manager = cache_manager_.get(),
+    });
+    handler_ = std::make_unique<SearchHandler>(*handler_context_);
+  }
+
+  std::string ExpectedCacheKey(const query::Query& query, bool attach_bm25_stats = true) const {
+    const auto params = search_pipeline::BuildPipelineParamsFromContext(
+        *table_context_, config_.get(), cache_manager_.get(), SearchHandler::GetFilterThreshold(), attach_bm25_stats);
+    const auto canonical_query = search_pipeline::BuildCanonicalCacheQuery(query, params);
+    if (!canonical_query.cache_key.has_value()) {
+      return {};
+    }
+    const auto& [high, low] = *canonical_query.cache_key;
+    return cache::CacheKey{high, low}.ToString();
+  }
+
+  std::unique_ptr<config::Config> config_;
+  std::unique_ptr<TableContext> table_context_;
+  std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<TableCatalog> table_catalog_;
+  std::unique_ptr<cache::CacheManager> cache_manager_;
+  std::unique_ptr<ServerStats> stats_;
+  std::atomic<bool> dump_load_in_progress_{false};
+  std::atomic<bool> dump_save_in_progress_{false};
+  std::atomic<bool> optimization_in_progress_{false};
+  std::atomic<bool> replication_paused_for_dump_{false};
+  std::unique_ptr<HandlerContext> handler_context_;
+  std::unique_ptr<SearchHandler> handler_;
+};
+
 }  // namespace
+
+TEST_F(SearchHandlerCacheDebugTest, SearchAndCountExposeCanonicalKeyOnMissAndHitOnlyInDebugMode) {
+  ConnectionContext connection;
+  connection.debug_mode = true;
+
+  query::Query search;
+  search.type = query::QueryType::SEARCH;
+  search.table = "test";
+  search.search_text = "LEARNING";
+  search.limit = 10;
+  const std::string learning_key = ExpectedCacheKey(search);
+  ASSERT_FALSE(learning_key.empty());
+
+  const auto search_miss = handler_->Handle(search, connection);
+  EXPECT_NE(search_miss.find("cache_key: " + learning_key + "\r\n"), std::string::npos);
+  search.search_text = "learning";
+  const auto search_hit = handler_->Handle(search, connection);
+  EXPECT_NE(search_hit.find("cache: hit\r\n"), std::string::npos);
+  EXPECT_NE(search_hit.find("cache_key: " + learning_key + "\r\n"), std::string::npos);
+
+  query::Query count;
+  count.type = query::QueryType::COUNT;
+  count.table = "test";
+  count.search_text = "machine";
+  const std::string machine_key = ExpectedCacheKey(count, /*attach_bm25_stats=*/false);
+  ASSERT_FALSE(machine_key.empty());
+  EXPECT_NE(machine_key, learning_key);
+
+  const auto count_miss = handler_->Handle(count, connection);
+  EXPECT_NE(count_miss.find("cache_key: " + machine_key + "\r\n"), std::string::npos);
+  count.search_text = "MACHINE";
+  const auto count_hit = handler_->Handle(count, connection);
+  EXPECT_NE(count_hit.find("cache: hit\r\n"), std::string::npos);
+  EXPECT_NE(count_hit.find("cache_key: " + machine_key + "\r\n"), std::string::npos);
+
+  connection.debug_mode = false;
+  const auto non_debug = handler_->Handle(count, connection);
+  EXPECT_EQ(non_debug.find("cache_key:"), std::string::npos);
+}
 
 // =============================================================================
 // SEARCH GetTopN optimization

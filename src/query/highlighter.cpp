@@ -205,7 +205,9 @@ std::vector<std::pair<uint32_t, uint32_t>> MergeWindows(std::vector<std::pair<ui
 void ClampWindows(std::vector<std::pair<uint32_t, uint32_t>>& windows,
                   const std::vector<std::pair<uint32_t, uint32_t>>& matches, uint32_t snippet_length,
                   uint32_t total_cp) {
-  for (auto& [win_start, win_end] : windows) {
+  for (auto& window : windows) {
+    auto& win_start = window.first;
+    auto& win_end = window.second;
     if (win_end - win_start <= snippet_length) {
       continue;
     }

@@ -19,13 +19,19 @@
  * during shutdown.
  */
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -171,6 +177,121 @@ TEST_F(TcpServerLifecycleTest, CleanStartStop) {
   EXPECT_FALSE(server_->IsRunning());
 }
 
+TEST_F(TcpServerLifecycleTest, CallbackFailureKeepsDispatchGatedAndAllowsRetry) {
+  config::Config full_config;
+  full_config.cache.enabled = true;
+  server_ =
+      std::make_unique<TcpServer>(config_, table_contexts_, test_dump_dir_.string(), &full_config, mock_reader_.get());
+
+  std::mutex gate_mutex;
+  std::condition_variable gate_cv;
+  bool callback_entered = false;
+  bool release_callback = false;
+  std::atomic<bool> cache_was_available{false};
+  std::optional<mygram::utils::Expected<void, mygram::utils::Error>> start_result;
+  std::thread start_thread([&] {
+    start_result = server_->Start([&](cache::CacheManager* cache_manager) {
+      cache_was_available.store(cache_manager != nullptr, std::memory_order_release);
+      std::unique_lock<std::mutex> lock(gate_mutex);
+      callback_entered = true;
+      gate_cv.notify_all();
+      gate_cv.wait(lock, [&] { return release_callback; });
+      return mygram::utils::Expected<void, mygram::utils::Error>(mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kServerInitMissingDependency, "test callback rejected startup")));
+    });
+  });
+
+  bool reached_callback = false;
+  {
+    std::unique_lock<std::mutex> lock(gate_mutex);
+    reached_callback = gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return callback_entered; });
+  }
+  if (!reached_callback) {
+    {
+      std::lock_guard<std::mutex> lock(gate_mutex);
+      release_callback = true;
+    }
+    gate_cv.notify_all();
+    start_thread.join();
+    FAIL() << "TCP startup did not enter the pre-accept callback";
+    return;
+  }
+
+  const int client_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (client_fd < 0) {
+    {
+      std::lock_guard<std::mutex> lock(gate_mutex);
+      release_callback = true;
+    }
+    gate_cv.notify_all();
+    start_thread.join();
+    FAIL() << "failed to create callback-gate test socket";
+    return;
+  }
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(server_->GetPort());
+  if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1 ||
+      ::connect(client_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    ::close(client_fd);
+    {
+      std::lock_guard<std::mutex> lock(gate_mutex);
+      release_callback = true;
+    }
+    gate_cv.notify_all();
+    start_thread.join();
+    FAIL() << "failed to connect to the already-bound callback-gate listener";
+    return;
+  }
+  const std::string command = "COUNT test queued\r\n";
+  const ssize_t sent = ::send(client_fd, command.data(), command.size(), 0);
+  if (sent != static_cast<ssize_t>(command.size())) {
+    ::close(client_fd);
+    {
+      std::lock_guard<std::mutex> lock(gate_mutex);
+      release_callback = true;
+    }
+    gate_cv.notify_all();
+    start_thread.join();
+    FAIL() << "failed to send queued command to the callback-gate listener";
+    return;
+  }
+
+  // Bind/listen may already be complete, but the accept thread must not exist
+  // until this callback succeeds.
+  EXPECT_EQ(server_->GetTotalRequests(), 0U);
+  EXPECT_TRUE(cache_was_available.load(std::memory_order_acquire));
+
+  {
+    std::lock_guard<std::mutex> lock(gate_mutex);
+    release_callback = true;
+  }
+  gate_cv.notify_all();
+  start_thread.join();
+  ::close(client_fd);
+
+  ASSERT_TRUE(start_result.has_value());
+  EXPECT_FALSE(*start_result);
+  EXPECT_EQ(server_->GetTotalRequests(), 0U)
+      << "a queued client command must not reach RequestDispatcher when startup callback fails";
+
+  // A failed pre-accept callback is transactional: a later start builds fresh
+  // components and opens the listener only after its callback stage completes.
+  auto retry = server_->Start();
+  ASSERT_TRUE(retry) << retry.error().to_string();
+  EXPECT_TRUE(server_->Stop());
+
+  auto exception_result =
+      server_->Start([](cache::CacheManager*) -> mygram::utils::Expected<void, mygram::utils::Error> {
+        throw std::runtime_error("test callback exception");
+      });
+  EXPECT_FALSE(exception_result);
+
+  auto retry_after_exception = server_->Start();
+  ASSERT_TRUE(retry_after_exception) << retry_after_exception.error().to_string();
+  EXPECT_TRUE(server_->Stop());
+}
+
 #ifdef USE_MYSQL
 TEST_F(TcpServerLifecycleTest, MysqlEndpointRuntimeChangesAreRejectedAndSyncUsesStartupConfig) {
   config::Config full_config;
@@ -214,6 +335,33 @@ TEST_F(TcpServerLifecycleTest, IdempotentStop) {
   EXPECT_FALSE(server_->IsRunning());
 }
 
+TEST_F(TcpServerLifecycleTest, RestartAfterSuccessfulStopReopensAdmissionForRealDumpSave) {
+  config::Config full_config;
+  full_config.dump.interval_sec = 0;
+  config::TableConfig table_config;
+  table_config.name = "test";
+  table_config.ngram_size = 1;
+  full_config.tables.push_back(table_config);
+  BuildAndStart(&full_config);
+
+  auto* coordinator = server_->GetOperationCoordinator();
+  ASSERT_NE(coordinator, nullptr);
+  ASSERT_TRUE(server_->Stop());
+  EXPECT_FALSE(coordinator->TryAcquire(LongOperation::kDumpSave).has_value());
+
+  auto restarted = server_->Start();
+  ASSERT_TRUE(restarted) << restarted.error().to_string();
+
+  ConnectionContext connection_context;
+  const std::string response =
+      server_->GetDispatcher()->Dispatch("DUMP SAVE restart_after_stop.dmp", connection_context);
+  EXPECT_EQ(response.rfind("OK DUMP_STARTED ", 0), 0U) << response;
+
+  auto stopped_again = server_->Stop();
+  ASSERT_TRUE(stopped_again) << stopped_again.error().to_string();
+  EXPECT_TRUE(std::filesystem::exists(test_dump_dir_ / "restart_after_stop.dmp"));
+}
+
 #ifdef USE_MYSQL
 TEST_F(TcpServerLifecycleTest, SyncDrainTimeoutReturnsErrorWithoutTearingDownNetwork) {
   BuildAndStart();
@@ -229,6 +377,12 @@ TEST_F(TcpServerLifecycleTest, SyncDrainTimeoutReturnsErrorWithoutTearingDownNet
   EXPECT_EQ(first_stop.error().code(), mygram::utils::ErrorCode::kServerShuttingDown);
   EXPECT_TRUE(server_->IsRunning());
   EXPECT_EQ(wait_calls.load(), 1);
+
+  auto restart_while_stop_incomplete = server_->Start();
+  ASSERT_FALSE(restart_while_stop_incomplete);
+  EXPECT_EQ(restart_while_stop_incomplete.error().code(), mygram::utils::ErrorCode::kNetworkAlreadyRunning);
+  EXPECT_EQ(server_->GetOperationCoordinator()->DescribeActive(), "server shutdown");
+  EXPECT_FALSE(server_->GetOperationCoordinator()->TryAcquire(LongOperation::kDumpSave).has_value());
 
   server_->SetSyncShutdownWaitHookForTest([](int) { return true; });
   auto retry_stop = server_->Stop();
@@ -278,6 +432,87 @@ TEST_F(TcpServerLifecycleTest, StopJoinsActiveDumpWorker) {
   // dump/sync handlers do, and we never invoked one.
   auto log = mock_reader_->CallLog();
   EXPECT_TRUE(log.empty()) << "Mock reader should not have been touched by lifecycle alone";
+}
+
+TEST_F(TcpServerLifecycleTest, StopWaitsForDumpAdmittedBeforeWorkerPublication) {
+  config::Config full_config;
+  full_config.dump.interval_sec = 0;
+  config::TableConfig table_config;
+  table_config.name = "test";
+  table_config.ngram_size = 1;
+  full_config.tables.push_back(table_config);
+  BuildAndStart(&full_config);
+
+  auto* coordinator = server_->GetOperationCoordinator();
+  ASSERT_NE(coordinator, nullptr);
+
+  std::mutex hook_mutex;
+  std::condition_variable hook_cv;
+  bool hook_entered = false;
+  bool release_hook = false;
+  server_->SetAfterDumpSaveFlagAcquiredHookForTest([&] {
+    std::unique_lock<std::mutex> lock(hook_mutex);
+    hook_entered = true;
+    hook_cv.notify_all();
+    hook_cv.wait(lock, [&] { return release_hook; });
+  });
+
+  ConnectionContext connection_context;
+  std::string dump_response;
+  std::atomic<bool> request_finished{false};
+  std::thread request_thread([&] {
+    dump_response = server_->GetDispatcher()->Dispatch("DUMP SAVE stop_race.dmp", connection_context);
+    request_finished.store(true, std::memory_order_release);
+  });
+
+  bool reached_publication_gap = false;
+  {
+    std::unique_lock<std::mutex> lock(hook_mutex);
+    reached_publication_gap = hook_cv.wait_for(lock, std::chrono::seconds(2), [&] { return hook_entered; });
+  }
+  if (!reached_publication_gap) {
+    {
+      std::lock_guard<std::mutex> lock(hook_mutex);
+      release_hook = true;
+    }
+    hook_cv.notify_all();
+    request_thread.join();
+    FAIL() << "DUMP SAVE did not reach the post-admission, pre-worker hook";
+    return;
+  }
+
+  std::atomic<bool> stop_finished{false};
+  bool stop_succeeded = false;
+  std::thread stop_thread([&] {
+    stop_succeeded = server_->Stop().has_value();
+    stop_finished.store(true, std::memory_order_release);
+  });
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (coordinator->DescribeActive() != "server shutdown" && std::chrono::steady_clock::now() < deadline &&
+         !stop_finished.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  const bool shutdown_announced = coordinator->DescribeActive() == "server shutdown";
+  EXPECT_TRUE(shutdown_announced) << "Stop must close coordinator admission before draining workers";
+  EXPECT_FALSE(stop_finished.load(std::memory_order_acquire))
+      << "Stop returned while a previously admitted DUMP SAVE had not published its worker";
+  EXPECT_FALSE(coordinator->TryAcquire(LongOperation::kSync).has_value())
+      << "shutdown must reject new coordinator operations";
+  EXPECT_FALSE(request_finished.load(std::memory_order_acquire))
+      << "the admitted request is still held at the worker-publication boundary";
+
+  {
+    std::lock_guard<std::mutex> lock(hook_mutex);
+    release_hook = true;
+  }
+  hook_cv.notify_all();
+  request_thread.join();
+  stop_thread.join();
+
+  EXPECT_TRUE(stop_succeeded);
+  EXPECT_TRUE(stop_finished.load(std::memory_order_acquire));
+  EXPECT_EQ(dump_response.rfind("OK DUMP_STARTED ", 0), 0U) << dump_response;
 }
 
 }  // namespace mygramdb::server

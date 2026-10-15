@@ -12,6 +12,7 @@
 #include "cache/invalidation_manager.h"
 #include "cache/query_cache.h"
 #include "index/index.h"
+#include "server/log_field_names.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/structured_log.h"
@@ -40,7 +41,7 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     if (stopped_.load()) {
       mygram::utils::StructuredLog()
           .Event("cache_invalidation_queue_enqueue_after_stop")
-          .Field("count", static_cast<uint64_t>(0))
+          .Field(mygramdb::server::log_fields::kFieldCount, static_cast<uint64_t>(0))
           .Warn();
       return;
     }
@@ -74,7 +75,7 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
     if (stopped_.load()) {
       mygram::utils::StructuredLog()
           .Event("cache_invalidation_queue_enqueue_after_stop")
-          .Field("count", static_cast<uint64_t>(affected_entries.size()))
+          .Field(mygramdb::server::log_fields::kFieldCount, static_cast<uint64_t>(affected_entries.size()))
           .Warn();
       return;
     }
@@ -124,27 +125,8 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   }
 
   if (process_immediately) {
-    // Process outside lock to prevent deadlock from nested lock acquisition.
-    //
-    // Single-source unregister: we used to call
-    // invalidation_mgr_->UnregisterCacheEntry(key) here directly *and* rely on
-    // QueryCache::Erase to fire eviction_callback_, which in CacheManager is
-    // wired to call UnregisterCacheEntry as well. The double-unregister was
-    // a no-op for the metadata map (the second find() returned end()) but it
-    // created a race window for the auxiliary reverse indexes
-    // (table_to_cache_keys_, ngram_to_cache_keys_) when a concurrent Insert
-    // re-registered the same key between the two unregisters.
-    //
-    // Fix: use EraseWithoutCallback so the eviction callback stays out of the
-    // picture on this path, and clean up the InvalidationManager metadata
-    // explicitly here. The invariant is:
-    //
-    //   "On the invalidation-queue cleanup path, UnregisterCacheEntry fires
-    //    exactly once per affected key — directly from the queue, never via
-    //    eviction_callback_."
-    //
-    // This also ensures cleanup works in tests that wire an InvalidationQueue
-    // to a QueryCache without CacheManager's eviction callback installed.
+    // Process outside the lock. Each affected identity is unregistered exactly once, here,
+    // never via the eviction callback.
     for (const auto& identity : affected_entries) {
       if (cache_ != nullptr) {
         cache_->EraseWithoutCallback(identity);
@@ -313,24 +295,7 @@ void InvalidationQueue::ProcessBatch() {
     oldest_timestamp_ = std::chrono::steady_clock::time_point::max();
   }
 
-  // Erase entries from cache and clean up their metadata.
-  //
-  // Single-source unregister: UnregisterCacheEntry must fire exactly
-  // once per affected key. Previously this loop called both
-  // invalidation_mgr_->UnregisterCacheEntry(key) AND cache_->Erase(key); when
-  // CacheManager installs an eviction callback that also calls
-  // UnregisterCacheEntry, the second call from the eviction path raced with
-  // any concurrent Insert that re-registered the same key, corrupting the
-  // auxiliary reverse indexes (table_to_cache_keys_ counts could go negative
-  // / desynchronize from cache_metadata_).
-  //
-  // Fix: call EraseWithoutCallback so the eviction callback never runs on
-  // this path, and unregister the metadata explicitly. This keeps the
-  // queue's cleanup self-contained and avoids any double-unregister.
-  //
-  // Invariant: "On the invalidation-queue cleanup path, UnregisterCacheEntry
-  // fires exactly once per affected key — directly from the queue, never via
-  // eviction_callback_."
+  // Each affected identity is unregistered exactly once, here, never via the eviction callback.
   // A cache entry belongs to exactly one table, so PendingKey identities are
   // already unique. Processing the map directly avoids materializing a second
   // unordered_set whose peak memory would duplicate the batch.

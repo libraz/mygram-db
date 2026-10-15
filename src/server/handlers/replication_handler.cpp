@@ -5,8 +5,11 @@
 
 #include "server/handlers/replication_handler.h"
 
+#include <utility>
+
 #include "mysql/binlog_reader_interface.h"
 #include "server/log_field_names.h"
+#include "server/operation_coordinator.h"
 #include "server/operation_names.h"
 #include "server/sync_operation_manager.h"
 #include "utils/structured_log.h"
@@ -28,16 +31,29 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
             "Replication state is owned by the DUMP operation until it completes.",
             mygram::utils::ErrorCode::kServerBusy);
       }
-      if (ctx_.binlog_reader != nullptr) {
-        if (ctx_.binlog_reader->IsRunning()) {
-          mygram::utils::StructuredLog().Event("replication_stopping").Field("source", "user_request").Info();
-          ctx_.binlog_reader->Stop();
-          return ResponseFormatter::FormatReplicationStopResponse();
-        }
-        return ResponseFormatter::FormatError(
-            mygram::utils::MakeError(mygram::utils::ErrorCode::kServerNotReady, "Replication is not running"));
+      if (ctx_.binlog_reader == nullptr) {
+        return ResponseFormatter::FormatError("Replication is not configured",
+                                              mygram::utils::ErrorCode::kNotImplemented);
       }
-      return ResponseFormatter::FormatError("Replication is not configured", mygram::utils::ErrorCode::kNotImplemented);
+
+      OperationCoordinator::Token operation_token;
+      if (ctx_.operation_coordinator != nullptr) {
+        auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kReplicationStop);
+        if (!acquired.has_value()) {
+          return ResponseFormatter::FormatError(
+              "Cannot stop replication while " + ctx_.operation_coordinator->DescribeActive() + " is in progress",
+              mygram::utils::ErrorCode::kServerBusy);
+        }
+        operation_token = std::move(*acquired);
+      }
+
+      if (ctx_.binlog_reader->IsRunning()) {
+        mygram::utils::StructuredLog().Event("replication_stopping").Field("source", "user_request").Info();
+        ctx_.binlog_reader->Stop();
+        return ResponseFormatter::FormatReplicationStopResponse();
+      }
+      return ResponseFormatter::FormatError(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kServerNotReady, "Replication is not running"));
 #else
       return ResponseFormatter::FormatError("MySQL support not compiled", mygram::utils::ErrorCode::kNotImplemented);
 #endif
@@ -77,44 +93,64 @@ std::string ReplicationHandler::Handle(const query::Query& query, ConnectionCont
             mygram::utils::ErrorCode::kServerBusy);
       }
 
-      if (ctx_.binlog_reader != nullptr) {
-        if (!ctx_.binlog_reader->IsRunning()) {
-          // Check if GTID is set (required for replication)
-          std::string current_gtid = ctx_.binlog_reader->GetCurrentGTID();
-          if (current_gtid.empty()) {
-            return ResponseFormatter::FormatError(
-                "Cannot start replication without GTID position. "
-                "Please run SYNC command first to establish initial position.",
-                mygram::utils::ErrorCode::kServerNotReady);
-          }
-
-          mygram::utils::StructuredLog()
-              .Event("replication_start")
-              .Field("source", "user_request")
-              .Field("gtid", current_gtid)
-              .Info();
-
-          // Use Expected<void, Error> rather than the legacy bool + GetLastError()
-          // pair. This matches dump_handler.cpp's restart paths so all
-          // replication-Start sites surface errors via the same FieldError() flow.
-          auto start_result = ctx_.binlog_reader->Start();
-          if (start_result) {
-            return ResponseFormatter::FormatReplicationStartResponse();
-          }
-
-          mygram::utils::StructuredLog()
-              .Event("replication_start_failed")
-              .Field("source", "user_request")
-              .Field(log_fields::kFieldGtid, current_gtid)
-              .FieldError(start_result.error())
-              .Error();
-          return ResponseFormatter::FormatError(mygram::utils::MakeError(
-              start_result.error().code(), "Failed to start replication: " + start_result.error().message()));
-        }
-        return ResponseFormatter::FormatError("Replication is already running",
-                                              mygram::utils::ErrorCode::kAlreadyExists);
+      if (ctx_.binlog_reader == nullptr) {
+        return ResponseFormatter::FormatError("Replication is not configured",
+                                              mygram::utils::ErrorCode::kNotImplemented);
       }
-      return ResponseFormatter::FormatError("Replication is not configured", mygram::utils::ErrorCode::kNotImplemented);
+
+      OperationCoordinator::Token operation_token;
+      if (ctx_.operation_coordinator != nullptr) {
+        auto acquired = ctx_.operation_coordinator->TryAcquire(LongOperation::kReplicationStart);
+        if (!acquired.has_value()) {
+          // Keep the historical 4011 for SYNC conflicts even when SYNC wins
+          // the race after the first pre-check above.
+          if (ctx_.sync_manager != nullptr) {
+            auto check = ctx_.sync_manager->CheckNoSyncInProgress(ops::kStartReplication);
+            if (!check) {
+              return ResponseFormatter::FormatError(check.error());
+            }
+          }
+          return ResponseFormatter::FormatError(
+              "Cannot start replication while " + ctx_.operation_coordinator->DescribeActive() + " is in progress",
+              mygram::utils::ErrorCode::kServerBusy);
+        }
+        operation_token = std::move(*acquired);
+      }
+
+      if (!ctx_.binlog_reader->IsRunning()) {
+        // Check if GTID is set (required for replication)
+        std::string current_gtid = ctx_.binlog_reader->GetCurrentGTID();
+        if (current_gtid.empty()) {
+          return ResponseFormatter::FormatError(
+              "Cannot start replication without GTID position. "
+              "Please run SYNC command first to establish initial position.",
+              mygram::utils::ErrorCode::kServerNotReady);
+        }
+
+        mygram::utils::StructuredLog()
+            .Event("replication_start")
+            .Field("source", "user_request")
+            .Field("gtid", current_gtid)
+            .Info();
+
+        // Use Expected<void, Error> rather than the legacy bool + GetLastError()
+        // pair. This matches dump_handler.cpp's restart paths so all
+        // replication-Start sites surface errors via the same FieldError() flow.
+        auto start_result = ctx_.binlog_reader->Start();
+        if (start_result) {
+          return ResponseFormatter::FormatReplicationStartResponse();
+        }
+
+        mygram::utils::StructuredLog()
+            .Event("replication_start_failed")
+            .Field("source", "user_request")
+            .Field(log_fields::kFieldGtid, current_gtid)
+            .FieldError(start_result.error())
+            .Error();
+        return ResponseFormatter::FormatError(mygram::utils::MakeError(
+            start_result.error().code(), "Failed to start replication: " + start_result.error().message()));
+      }
+      return ResponseFormatter::FormatError("Replication is already running", mygram::utils::ErrorCode::kAlreadyExists);
 #else
       return ResponseFormatter::FormatError("MySQL support not compiled", mygram::utils::ErrorCode::kNotImplemented);
 #endif

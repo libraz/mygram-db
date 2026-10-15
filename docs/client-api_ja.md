@@ -33,6 +33,9 @@ typed clientとHTTPはリテラル検索が既定です。boolean syntaxは常�
 | HTTP | `"mode": "literal"`（既定） | `"mode": "boolean"` | JSON field |
 | C++ | `Search` | `SearchRaw` | `SearchOptions` |
 | C | `mygramclient_search` | `mygramclient_search_raw` | `MygramSearchOptions_C` |
+| `mygram-cli` | 利用者が protocol text 内で引用符を付ける | protocol Boolean 式 | protocol clause |
+
+`mygram-cli` は入力した command 行、および単発実行時に空白で連結した引数を入力どおり server へ送ります。quote は代行しません。引数中の tab は空白に置き換え、その他の制御 byte は取り除きます。`DUMP SAVE` の path は型付きの save 呼び出しを経由します。quote しない path は行の残り全体、quote した path は server と同じ escape 規則で decode します。
 
 C options APIでは `MygramSearchOptions_C` をゼロ初期化し、`struct_size` を
 設定してください。`limit == 0` はserver既定値を使います。ゼロ既定の
@@ -86,6 +89,13 @@ handleを使用中に `mygramclient_destroy()` を呼ばないでください。
 accessは同期され、`mygramclient_get_last_error()` は同じthreadが次にgetterを
 呼ぶまで有効なthread-local snapshotを返します。失敗し得るoperationは、書き込み
 可能なpointer out-parameterを事前に `NULL`、numeric outputを0に初期化します。
+
+`SendCommand` と `mygramclient_send_command` は、送信したcommandに応じて応答を
+区切り、応答を1つだけ読み取ります。応答が途中で切れることはありません。socketに
+残る唯一のbyte列は、distinct-value総数を持たない `OK FACET` headerの応答に続く
+末尾のCRLFで、次の読み取りが先頭の空行として読み飛ばします。これらで送った `DEBUG ON` / `DEBUG OFF` も
+`EnableDebug` / `DisableDebug` と同じく追跡されます。DUMP LOAD、DUMP VERIFY、
+OPTIMIZEの期限を選ぶkeywordは大文字小文字を区別せずに照合します。
 
 V2には将来fieldを末尾追加できます。呼び出し側は構造体をゼロ初期化し、自身が認識するsizeを `struct_size` に設定してください。libraryはそのsizeを越えるfieldを無視し、未知のversionまたは元のV2 prefixより短い構造体を拒否します。
 

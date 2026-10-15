@@ -4,7 +4,7 @@
  *
  * One predicate (NeedsWireQuoting) and one encoder (QuoteWireToken) back
  * every string the client turns into wire-protocol text: search terms,
- * filter values, highlight tags, primary keys, CLI arguments. Quoting
+ * filter values, highlight tags, primary keys, dump file paths. Quoting
  * defeats the server's clause-keyword and OR/AND/NOT recognition (spec/
  * tcp-commands.md §2: "the quoted flag suppresses clause-keyword
  * recognition"), so a bare token that happens to collide with a reserved
@@ -21,14 +21,16 @@
 #include <string>
 #include <string_view>
 
+#include "utils/string_utils.h"
+
 namespace mygramdb::client::detail {
 
 /**
  * @brief Check whether the byte at `pos` starts a Unicode whitespace code point
  *
  * Matches ASCII whitespace plus the non-ASCII code points spec/tcp-commands.md
- * §2 documents the server's tokenizer splitting on outside quotes: U+00A0,
- * U+1680, U+2000-U+200B, U+2028, U+2029, U+202F, U+205F, U+3000.
+ * §2 documents the server's tokenizer splitting on outside quotes: U+0085,
+ * U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000.
  */
 // NOLINTBEGIN(cppcoreguidelines-avoid-magic-numbers,readability-magic-numbers)
 inline bool IsUnicodeWhitespace(std::string_view text, size_t pos) {
@@ -36,10 +38,13 @@ inline bool IsUnicodeWhitespace(std::string_view text, size_t pos) {
     return false;
   }
   const auto byte = static_cast<unsigned char>(text[pos]);
-  if (std::isspace(byte) != 0) {
+  // Keep the ASCII portion explicit so this protocol predicate cannot inherit
+  // a process C locale that classifies high bytes differently.
+  if ((byte >= 0x09 && byte <= 0x0D) || byte == 0x20) {
     return true;
   }
-  if (byte == 0xC2 && pos + 1 < text.size() && static_cast<unsigned char>(text[pos + 1]) == 0xA0) {
+  if (byte == 0xC2 && pos + 1 < text.size() &&
+      (static_cast<unsigned char>(text[pos + 1]) == 0x85 || static_cast<unsigned char>(text[pos + 1]) == 0xA0)) {
     return true;
   }
   if (pos + 2 >= text.size()) {
@@ -51,7 +56,7 @@ inline bool IsUnicodeWhitespace(std::string_view text, size_t pos) {
     return true;
   }
   if (byte == 0xE2 && byte2 == 0x80 &&
-      ((byte3 >= 0x80 && byte3 <= 0x8B) || byte3 == 0xA8 || byte3 == 0xA9 || byte3 == 0xAF)) {
+      ((byte3 >= 0x80 && byte3 <= 0x8A) || byte3 == 0xA8 || byte3 == 0xA9 || byte3 == 0xAF)) {
     return true;
   }
   if (byte == 0xE2 && byte2 == 0x81 && byte3 == 0x9F) {
@@ -66,19 +71,34 @@ inline bool IsUnicodeWhitespace(std::string_view text, size_t pos) {
  *
  * AND, OR, NOT, FILTER, SORT, LIMIT, OFFSET, HIGHLIGHT, FUZZY, FACET and
  * ORDER are recognized case-insensitively by both the top-level command
- * clause scanner (query_parser_commands.cpp: EqualsIgnoreCase/ToUpper) and
- * the boolean sub-expression tokenizer (query_ast.cpp: ToUpper), so a term
+ * clause scanner and boolean sub-expression tokenizer use ASCII
+ * case-insensitive matching, so a term
  * equal to one of them must be quoted regardless of which of those two
  * parsers ends up reading it.
  */
 inline bool IsReservedKeyword(std::string_view token) {
-  std::string upper(token);
-  for (char& ch : upper) {
-    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-  }
-  return upper == "AND" || upper == "OR" || upper == "NOT" || upper == "FILTER" || upper == "SORT" ||
-         upper == "LIMIT" || upper == "OFFSET" || upper == "HIGHLIGHT" || upper == "FUZZY" || upper == "FACET" ||
-         upper == "ORDER";
+  return mygram::utils::EqualsAsciiCaseInsensitive(token, "AND") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "OR") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "NOT") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "FILTER") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "SORT") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "LIMIT") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "OFFSET") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "HIGHLIGHT") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "FUZZY") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "FACET") ||
+         mygram::utils::EqualsAsciiCaseInsensitive(token, "ORDER");
+}
+
+/**
+ * @brief Check whether `ch` opens a quoted region or an escape in the server tokenizer
+ *
+ * `"` and `'` open a quoted region and `\` escapes inside one (spec/
+ * tcp-commands.md §2), so a bare token carrying any of them changes how the
+ * rest of the line is split.
+ */
+inline bool IsWireQuoteOrEscape(char ch) {
+  return ch == '"' || ch == '\'' || ch == '\\';
 }
 
 /**
@@ -98,8 +118,7 @@ inline bool NeedsWireQuoting(std::string_view value) {
   }
   for (size_t i = 0; i < value.size(); ++i) {
     const auto ch = static_cast<unsigned char>(value[i]);
-    if (std::isspace(ch) != 0 || std::iscntrl(ch) != 0 || ch == '"' || ch == '\'' || ch == '\\' || ch == '(' ||
-        ch == ')') {
+    if (std::iscntrl(ch) != 0 || IsWireQuoteOrEscape(value[i]) || ch == '(' || ch == ')') {
       return true;
     }
     if (IsUnicodeWhitespace(value, i)) {

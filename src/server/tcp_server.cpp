@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -79,16 +80,23 @@ TcpServer::TcpServer(ServerConfig config, std::unordered_map<std::string, TableC
 
 TcpServer::~TcpServer() {
   auto stop_result = Stop();
-#ifdef USE_MYSQL
-  if (!stop_result && sync_manager_) {
+  if (!stop_result) {
     mygram::utils::StructuredLog()
-        .Event("tcp_server_destructor_waiting_for_sync")
+        .Event("tcp_server_destructor_waiting_for_operations")
         .FieldError(stop_result.error())
         .Error();
-    sync_manager_->WaitForCompletion();
+
+    // Public Stop() remains bounded so callers can choose to retry. A
+    // destructor cannot leave operations holding raw pointers into members
+    // that are about to be destroyed, so it acts as the final unbounded drain.
+    operation_coordinator_.WaitForIdle();
+#ifdef USE_MYSQL
+    if (sync_manager_) {
+      sync_manager_->WaitForCompletion();
+    }
+#endif
     (void)Stop();
   }
-#endif
 }
 
 void TcpServer::AttachTo(HttpServer& http_server) {
@@ -129,6 +137,26 @@ std::string TcpServer::HandleOptimizeRequest(const std::string& table) {
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
+  return Start(BeforeAcceptCallback{});
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start(BeforeAcceptCallback before_accept) {
+  try {
+    return StartInternal(std::move(before_accept));
+  } catch (const std::exception& e) {
+    mygram::utils::StructuredLog().Event("tcp_server_start_exception").Field("error", e.what()).Error();
+    (void)Stop();
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kInternalError, std::string("TCP server startup failed: ") + e.what()));
+  } catch (...) {
+    mygram::utils::StructuredLog().Event("tcp_server_start_exception").Field("error", "unknown exception").Error();
+    (void)Stop();
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "TCP server startup failed"));
+  }
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> TcpServer::StartInternal(BeforeAcceptCallback before_accept) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -140,7 +168,25 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
     return MakeUnexpected(error);
   }
 
-  shutdown_in_progress_.store(false, std::memory_order_release);
+  if (operation_coordinator_.GetActive().has_value()) {
+    auto error = MakeError(ErrorCode::kServerShuttingDown,
+                           "Cannot start TCP server while a previous long-running operation is still active");
+    mygram::utils::StructuredLog().Event("tcp_server_start_failed").FieldError(error).Error();
+    return MakeUnexpected(std::move(error));
+  }
+
+#ifdef USE_MYSQL
+  // A completed Stop() leaves the old manager shutting down. Destroy it before
+  // reopening the shared coordinator because its destructor closes admission.
+  sync_manager_.reset();
+#endif
+
+  if (!operation_coordinator_.ReopenForStartup(&shutdown_in_progress_)) {
+    auto error = MakeError(ErrorCode::kServerShuttingDown,
+                           "Cannot start TCP server while a previous long-running operation is still active");
+    mygram::utils::StructuredLog().Event("tcp_server_start_failed").FieldError(error).Error();
+    return MakeUnexpected(std::move(error));
+  }
 
   // Create rate limiter (if configured). RequestDispatcher enforces the
   // token bucket per peer IP for every TCP command frame.
@@ -167,7 +213,7 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   // Create SYNC operation manager (if MySQL enabled) - needed before ServerLifecycleManager
   // Note: Must be created before lifecycle manager because SyncHandler needs it
   sync_manager_ = std::make_unique<SyncOperationManager>(table_contexts_, full_config_, binlog_reader_,
-                                                         &replication_pause_counter_);
+                                                         &replication_pause_counter_, nullptr, &operation_coordinator_);
   sync_manager_->SetCompletionCallback(sync_completion_callback_);
 #endif
 
@@ -177,12 +223,14 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   auto lifecycle_manager_result = ServerLifecycleManager::Create(
       config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
       optimization_in_progress_, replication_paused_for_dump_, replication_pause_counter_, binlog_reader_,
-      sync_manager_.get(), rate_limiter_.get(), &shutdown_in_progress_, &dump_progress_);
+      sync_manager_.get(), rate_limiter_.get(), &shutdown_in_progress_, &dump_progress_, &operation_coordinator_,
+      initial_data_ready_checker_);
 #else
   auto lifecycle_manager_result = ServerLifecycleManager::Create(
       config_, table_contexts_, dump_dir_, full_config_, stats_, dump_load_in_progress_, dump_save_in_progress_,
       optimization_in_progress_, replication_paused_for_dump_, replication_pause_counter_, binlog_reader_,
-      rate_limiter_.get(), &shutdown_in_progress_, &dump_progress_);
+      rate_limiter_.get(), &shutdown_in_progress_, &dump_progress_, &operation_coordinator_,
+      initial_data_ready_checker_);
 #endif
   if (!lifecycle_manager_result) {
     return MakeUnexpected(lifecycle_manager_result.error());
@@ -245,6 +293,27 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Start() {
   dispatcher_ = std::move(components.dispatcher);
   acceptor_ = std::move(components.acceptor);
   scheduler_ = std::move(components.scheduler);
+
+  // The embedder wires the initialized cache and starts replication while the
+  // listener is bound but before scheduled work, the reactor, or accept loop
+  // can dispatch a command.
+  if (before_accept) {
+    auto callback_result = before_accept(cache_manager_.get());
+    if (!callback_result) {
+      const auto error = callback_result.error();
+      (void)Stop();
+      return MakeUnexpected(error);
+    }
+  }
+
+  if (scheduler_ != nullptr) {
+    auto scheduler_start = scheduler_->Start();
+    if (!scheduler_start) {
+      const auto error = scheduler_start.error();
+      (void)Stop();
+      return MakeUnexpected(error);
+    }
+  }
 
   // Reactor I/O model: create the IoReactor up front. This is the only I/O
   // path; the legacy blocking one-thread-per-connection model was removed in
@@ -350,7 +419,9 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Stop() {
   using mygram::utils::MakeUnexpected;
   mygram::utils::StructuredLog().Event("tcp_server_stopping").Debug();
 
-  // Step 1: announce shutdown.
+  // Step 1: close long-operation admission and publish shutdown before waiting
+  // for any worker. Operations that already own a coordinator token are
+  // allowed to finish while their dependencies remain alive.
   //
   // Set shutdown_in_progress_ BEFORE joining any worker so long-running
   // workers (DumpSaveWorker, DumpLoadWorker) observe the flag at every
@@ -358,31 +429,42 @@ mygram::utils::Expected<void, mygram::utils::Error> TcpServer::Stop() {
   // this, a worker that captured replication_was_running=true at entry will
   // call binlog_reader_->Start() during shutdown, racing the binlog_reader_
   // destructor that is about to run after Stop() returns.
-  shutdown_in_progress_.store(true, std::memory_order_release);
+  operation_coordinator_.BlockNewOperationsForShutdown(&shutdown_in_progress_);
 
-  // Step 2: stop ingest paths that may touch binlog_reader_.
+#ifdef USE_MYSQL
+  if (sync_manager_) {
+    sync_manager_->RequestShutdown();
+  }
+#endif
+
+  // A token remains active until an operation has stopped using its shared
+  // dependencies. In particular, DUMP SAVE transfers its token to the worker
+  // before publishing the worker thread, closing the gap where JoinWorker()
+  // alone could observe no worker and return too early.
+  if (!operation_coordinator_.WaitForIdle(std::chrono::seconds(kDefaultSyncShutdownTimeoutSec))) {
+    auto error =
+        MakeError(ErrorCode::kServerShuttingDown,
+                  "TCP shutdown timed out waiting for active long-running operations; dependencies remain alive");
+    mygram::utils::StructuredLog().Event("tcp_server_stop_incomplete").FieldError(error).Error();
+    return MakeUnexpected(std::move(error));
+  }
+
+  // Step 2: join operation workers while their dependencies are still alive.
   //
-  // Shutdown order rationale:
-  //   (a) The dump worker may be inside DumpSaveWorker / DumpLoadWorker,
-  //       which call binlog_reader_->Stop() / Start() under
-  //       replication_paused_for_dump_. Joining the worker here — while
-  //       binlog_reader_ is still alive — guarantees those calls complete
-  //       cleanly before binlog_reader_ is torn down.
-  //   (b) sync_manager_ also calls binlog_reader_->Stop() / GetCurrentGTID
-  //       inside BuildSnapshotAsync; RequestShutdown signals cancellation
-  //       and a successful WaitForCompletion joins completed sync threads.
-  //   (c) snapshot_scheduler_ wakes its loop and joins, including any
-  //       in-flight TakeSnapshot that touches binlog_reader_.
+  // The coordinator wait above ensures admitted DUMP and SYNC work has stopped
+  // using shared dependencies. Joining still matters: it observes worker
+  // completion and releases each thread's resources before dependency teardown.
+  // The scheduler is stopped below so its loop cannot start another snapshot;
+  // shutdown admission already makes any attempt to acquire its operation slot
+  // fail.
   //
-  // After Step 2 completes, no caller other than Stop() itself ever calls
-  // into binlog_reader_ again, so its destructor (which fires when this
-  // TcpServer is destroyed, after Stop() returns) is race-free.
+  // After these joins and scheduler Stop(), no owned worker calls into
+  // binlog_reader_ again, so its destructor (which fires when this TcpServer
+  // is destroyed, after Stop() returns) is race-free.
   dump_progress_.JoinWorker();
 
 #ifdef USE_MYSQL
-  // Request SYNC manager to shutdown
   if (sync_manager_) {
-    sync_manager_->RequestShutdown();
     const bool sync_drained = sync_shutdown_wait_hook_for_test_
                                   ? sync_shutdown_wait_hook_for_test_(kDefaultSyncShutdownTimeoutSec)
                                   : sync_manager_->WaitForCompletion(kDefaultSyncShutdownTimeoutSec);

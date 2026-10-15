@@ -7,13 +7,30 @@
 
 #include <gtest/gtest.h>
 
+#include <new>
 #include <thread>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 #include "cache/cache_key.h"
 #include "cache/query_cache.h"
 #include "query/query_parser.h"
 
 namespace mygramdb::cache {
+namespace {
+
+/** Runs the identity sweep and projects the invalidated identities onto their cache keys. */
+template <typename... Args>
+std::unordered_set<CacheKey> InvalidatedKeys(InvalidationManager& mgr, Args&&... args) {
+  std::unordered_set<CacheKey> keys;
+  for (const auto& identity : mgr.InvalidateAffectedEntryIdentities(std::forward<Args>(args)...)) {
+    keys.insert(identity.key);
+  }
+  return keys;
+}
+
+}  // namespace
 
 /**
  * @brief Test basic registration and tracking
@@ -38,12 +55,36 @@ TEST(InvalidationManagerTest, BasicRegistration) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // Invalidate entries containing "hel"
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "help", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "help", 3, 2);
 
   // Only key1 should be invalidated (contains "hel")
   EXPECT_EQ(1, invalidated.size());
   EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
   EXPECT_FALSE(invalidated.find(key2) != invalidated.end());
+}
+
+TEST(InvalidationManagerTest, EmptyTableSkipsInvalidationAndLaterRegistrationIsObserved) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  const auto before_registration = mgr.InvalidateAffectedEntryIdentities("posts", "old text", "hello", 3, 2);
+  EXPECT_TRUE(before_registration.empty());
+
+  const auto posts_key = CacheKeyGenerator::Generate("posts-hello");
+  CacheMetadata posts_metadata;
+  posts_metadata.table = "posts";
+  posts_metadata.ngrams = {"hel", "ell", "llo"};
+  mgr.RegisterCacheEntry(posts_key, posts_metadata);
+
+  const auto comments_key = CacheKeyGenerator::Generate("comments-hello");
+  CacheMetadata comments_metadata = posts_metadata;
+  comments_metadata.table = "comments";
+  mgr.RegisterCacheEntry(comments_key, comments_metadata);
+
+  const auto affected = InvalidatedKeys(mgr, "posts", "", "hello", 3, 2);
+  ASSERT_EQ(affected.size(), 1U);
+  EXPECT_TRUE(affected.find(posts_key) != affected.end());
+  EXPECT_FALSE(affected.find(comments_key) != affected.end());
 }
 
 TEST(InvalidationManagerTest, MemoryEstimateUpdatesIncrementally) {
@@ -64,6 +105,121 @@ TEST(InvalidationManagerTest, MemoryEstimateUpdatesIncrementally) {
 
   mgr.UnregisterCacheEntry(key);
   EXPECT_EQ(mgr.MemoryUsage(), 0U);
+}
+
+TEST(InvalidationManagerTest, RegistrationExceptionRollsBackPartialReverseIndexes) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto key = CacheKeyGenerator::Generate("registration-rollback");
+  const CacheEntryIdentity identity{key, 17};
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"hel", "ell"};
+  metadata.ngram_size = 3;
+  metadata.has_not_terms = true;
+
+  size_t registration_steps = 0;
+  mgr.SetAfterRegistrationStepHookForTest([&] {
+    if (++registration_steps == 2) {
+      throw std::bad_alloc();
+    }
+  });
+  EXPECT_THROW(mgr.RegisterPendingCacheEntry(identity, metadata), std::bad_alloc);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedNgramCount("posts"), 0U);
+  EXPECT_EQ(mgr.MemoryUsage(), 0U);
+
+  // Fail after every resident index, including the compatibility key map and
+  // n-gram-settings count, has been mutated. Rollback must remove them all.
+  registration_steps = 0;
+  mgr.SetAfterRegistrationStepHookForTest([&] {
+    if (++registration_steps == 7) {
+      throw std::bad_alloc();
+    }
+  });
+  EXPECT_THROW(mgr.RegisterCacheEntry(key, metadata), std::bad_alloc);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedNgramCount("posts"), 0U);
+  EXPECT_EQ(mgr.MemoryUsage(), 0U);
+
+  mgr.SetAfterRegistrationStepHookForTest({});
+  mgr.RegisterCacheEntry(key, metadata);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
+  EXPECT_EQ(mgr.GetTrackedNgramCount("posts"), 2U);
+  EXPECT_GT(mgr.MemoryUsage(), 0U);
+}
+
+TEST(InvalidationManagerTest, FailedPendingRegistrationPreservesExistingSettingsReference) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  const auto resident_key = CacheKeyGenerator::Generate("settings-resident");
+  CacheMetadata resident_metadata;
+  resident_metadata.table = "posts";
+  resident_metadata.ngrams = {"ab", "bc"};
+  resident_metadata.ngram_size = 2;
+  resident_metadata.kanji_ngram_size = 1;
+  resident_metadata.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(resident_key, resident_metadata);
+  const size_t resident_memory = mgr.MemoryUsage();
+
+  const auto failed_identity = CacheEntryIdentity{CacheKeyGenerator::Generate("settings-pending"), 29};
+  CacheMetadata pending_metadata;
+  pending_metadata.table = "posts";
+  pending_metadata.ngrams = {"xy", "yz"};
+  pending_metadata.ngram_size = resident_metadata.ngram_size;
+  pending_metadata.kanji_ngram_size = resident_metadata.kanji_ngram_size;
+  pending_metadata.cross_boundary_ngrams = resident_metadata.cross_boundary_ngrams;
+
+  size_t registration_steps = 0;
+  mgr.SetAfterRegistrationStepHookForTest([&] {
+    if (++registration_steps == 1) {
+      throw std::bad_alloc();
+    }
+  });
+  EXPECT_THROW(mgr.RegisterPendingCacheEntry(failed_identity, pending_metadata), std::bad_alloc);
+  EXPECT_EQ(registration_steps, 1U);
+  mgr.SetAfterRegistrationStepHookForTest({});
+
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedNgramCount("posts"), 2U);
+  EXPECT_EQ(mgr.MemoryUsage(), resident_memory);
+
+  // With a new trigram setting, the surviving bigram resident is found only
+  // if its historical-settings reference count was not decremented by the
+  // failed pending registration's rollback.
+  const auto affected = InvalidatedKeys(mgr, "posts", "abc", "abd", 3, 1, true);
+  EXPECT_EQ(affected.size(), 1U);
+  EXPECT_NE(affected.find(resident_key), affected.end());
+}
+
+TEST(InvalidationManagerTest, PromotionAllocationFailureLeavesRegistrationPending) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto key = CacheKeyGenerator::Generate("promotion-rollback");
+  const CacheEntryIdentity identity{key, 23};
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"pro", "rom"};
+  metadata.cache_discriminator = "canonical query";
+  metadata.ngram_size = 3;
+
+  ASSERT_TRUE(mgr.RegisterPendingCacheEntry(identity, metadata));
+  const size_t pending_memory = mgr.MemoryUsage();
+  mgr.SetBeforeResidentIdentityInsertHookForTest([] { throw std::bad_alloc(); });
+  EXPECT_THROW(mgr.PromotePendingCacheEntry(identity, metadata.cache_discriminator), std::bad_alloc);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 1U);
+  EXPECT_EQ(mgr.MemoryUsage(), pending_memory);
+
+  mgr.SetBeforeResidentIdentityInsertHookForTest({});
+  EXPECT_EQ(mgr.PromotePendingCacheEntry(identity, metadata.cache_discriminator),
+            InvalidationManager::PendingRegistrationStatus::kValid);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 0U);
 }
 
 /**
@@ -95,7 +251,7 @@ TEST(InvalidationManagerTest, PreciseInvalidation) {
   mgr.RegisterCacheEntry(key3, meta3);
 
   // INSERT new document with "golang tips"
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang tips", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "golang tips", 3, 2);
 
   // Should invalidate key1 and key3 (both contain "gol", "ola", "lan", "ang")
   // Should NOT invalidate key2 (no overlap with "golang")
@@ -122,7 +278,7 @@ TEST(InvalidationManagerTest, TextSensitiveEntryInvalidatesWhenNgramSetIsUnchang
   ngram_only.invalidate_on_any_text_change = false;
   mgr.RegisterCacheEntry(ngram_only_key, ngram_only);
 
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "aba", "ababa", 2, 0, false);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "aba", "ababa", 2, 0, false);
 
   EXPECT_TRUE(invalidated.find(sensitive_key) != invalidated.end());
   EXPECT_FALSE(invalidated.find(ngram_only_key) != invalidated.end());
@@ -151,7 +307,7 @@ TEST(InvalidationManagerTest, UpdateInvalidation) {
 
   // UPDATE: change "rust programming" to "golang programming"
   // This affects both queries: key1 (old text) and key2 (new text)
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "rust programming", "golang programming", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "rust programming", "golang programming", 3, 2);
 
   // Both should be invalidated
   EXPECT_EQ(2, invalidated.size());
@@ -181,7 +337,7 @@ TEST(InvalidationManagerTest, DeleteInvalidation) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // DELETE document with "docker tutorial"
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "docker tutorial", "", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "docker tutorial", "", 3, 2);
 
   // Only key1 should be invalidated
   EXPECT_EQ(1, invalidated.size());
@@ -211,7 +367,7 @@ TEST(InvalidationManagerTest, TableIsolation) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // INSERT into "posts" table
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "golang", 3, 2);
 
   // Only posts table query should be invalidated
   EXPECT_EQ(1, invalidated.size());
@@ -241,7 +397,7 @@ TEST(InvalidationManagerTest, NoFalsePositives) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // INSERT "golang" - completely different ngrams
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang tutorial", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "golang tutorial", 3, 2);
 
   // Neither should be invalidated
   EXPECT_EQ(0, invalidated.size());
@@ -269,7 +425,7 @@ TEST(InvalidationManagerTest, PartialOverlap) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // INSERT "tes" - only 1 ngram overlap with "test", 1 ngram overlap with "testing"
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "tes", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "tes", 3, 2);
 
   // Both should be invalidated (both contain "tes")
   EXPECT_EQ(2, invalidated.size());
@@ -294,7 +450,7 @@ TEST(InvalidationManagerTest, Unregister) {
   mgr.UnregisterCacheEntry(key1);
 
   // Now invalidation should not affect the unregistered entry
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "golang", 3, 2);
 
   EXPECT_EQ(0, invalidated.size());
 }
@@ -324,7 +480,7 @@ TEST(InvalidationManagerTest, KanjiNgrams) {
 
   // INSERT "本語勉強" (contains "本語")
   // Using kanji_ngram_size=2 for CJK characters
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "本語勉強", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "本語勉強", 3, 2);
 
   // Only key1 should be invalidated (contains "本語")
   EXPECT_EQ(1, invalidated.size());
@@ -351,7 +507,7 @@ TEST(InvalidationManagerTest, MultipleQueriesSameNgrams) {
   mgr.RegisterCacheEntry(key2, meta);
 
   // INSERT new golang post
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang tips", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "golang tips", 3, 2);
 
   // Both queries should be invalidated
   EXPECT_EQ(2, invalidated.size());
@@ -484,10 +640,10 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterCacheEntryCleansUpStaleNgrams) {
   EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "Stale ngram 'aaa' should be removed from reverse index";
 
   // Verify invalidation works correctly with new ngrams
-  auto invalidated_aaa = mgr.InvalidateAffectedEntries("posts", "", "aaa", 3, 2);
+  auto invalidated_aaa = InvalidatedKeys(mgr, "posts", "", "aaa", 3, 2);
   EXPECT_EQ(0, invalidated_aaa.size()) << "Should not invalidate on old ngram 'aaa'";
 
-  auto invalidated_ccc = mgr.InvalidateAffectedEntries("posts", "", "ccc", 3, 2);
+  auto invalidated_ccc = InvalidatedKeys(mgr, "posts", "", "ccc", 3, 2);
   EXPECT_EQ(1, invalidated_ccc.size()) << "Should invalidate on new ngram 'ccc'";
 }
 
@@ -511,6 +667,47 @@ TEST(InvalidationManagerTest, StaleGenerationUnregisterPreservesReregisteredMeta
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
   const auto affected = mgr.InvalidateAffectedEntryIdentities("posts", "", "new", 3, 2);
   EXPECT_TRUE(affected.find(CacheEntryIdentity{key, second.entry_generation}) != affected.end());
+}
+
+TEST(InvalidationManagerTest, PendingGenerationCoexistsWithResidentAndIsInvalidatedByIdentity) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  const auto key = CacheKeyGenerator::Generate("pending_resident_same_key");
+
+  CacheMetadata resident;
+  resident.table = "posts";
+  resident.ngrams = {"gol"};
+  resident.ngram_size = 3;
+  resident.entry_generation = 41;
+  mgr.RegisterCacheEntry(key, resident);
+
+  CacheMetadata pending = resident;
+  pending.entry_generation = 42;
+  pending.cache_discriminator = "canonical query";
+  pending.filters = {{"status", query::FilterOp::EQ, "published"}};
+  const CacheEntryIdentity pending_identity{key, pending.entry_generation};
+  ASSERT_TRUE(mgr.RegisterPendingCacheEntry(pending_identity, pending));
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 1U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 1U);
+
+  const auto affected = mgr.InvalidateAffectedEntryIdentities("posts", "", "gol", 3, 2);
+  EXPECT_EQ(affected.size(), 1U);
+  EXPECT_TRUE(affected.find(CacheEntryIdentity{key, resident.entry_generation}) != affected.end());
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 1U);
+  EXPECT_EQ(mgr.PromotePendingCacheEntry(pending_identity, "canonical query"),
+            InvalidationManager::PendingRegistrationStatus::kInvalidated);
+
+  // A stale identity or key-only cleanup of the old resident cannot remove the
+  // distinct in-flight registration for the same logical key.
+  mgr.UnregisterCacheEntry(CacheEntryIdentity{key, resident.entry_generation});
+  mgr.UnregisterCacheEntry(key);
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 1U);
+
+  mgr.ClearTable("posts");
+  EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
+  EXPECT_EQ(mgr.GetTrackedPendingEntryCount(), 0U);
+  EXPECT_EQ(mgr.MemoryUsage(), 0U);
 }
 
 /**
@@ -541,7 +738,7 @@ TEST(InvalidationManagerTest, Bug17_ReRegisterCompletelyDifferentNgrams) {
   EXPECT_EQ(2, mgr.GetTrackedNgramCount("posts")) << "All old ngrams should be cleaned up";
 
   // Verify old ngrams don't cause invalidation
-  auto invalidated_xxx = mgr.InvalidateAffectedEntries("posts", "", "xxx", 3, 2);
+  auto invalidated_xxx = InvalidatedKeys(mgr, "posts", "", "xxx", 3, 2);
   EXPECT_EQ(0, invalidated_xxx.size()) << "Old ngram 'xxx' should not cause invalidation";
 }
 
@@ -617,7 +814,7 @@ TEST(InvalidationManagerTest, Bug18_PartialUpdateUnchangedNgramsNotInvalidated) 
 
   // UPDATE: "hello world" -> "hello earth"
   // "hello" ngrams unchanged, "world" removed, "earth" added
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello world", "hello earth", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "hello world", "hello earth", 3, 2);
 
   // key1 (hello) should NOT be invalidated - document still matches
   EXPECT_EQ(invalidated.find(key1), invalidated.end()) << "Unchanged ngrams should not cause invalidation";
@@ -648,7 +845,7 @@ TEST(InvalidationManagerTest, Bug18_IdenticalTextNoInvalidation) {
   mgr.RegisterCacheEntry(key, meta);
 
   // UPDATE with identical text (no actual change)
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "hello", "hello", 3, 2);
 
   // No invalidation should occur
   EXPECT_EQ(0, invalidated.size()) << "Identical text should not cause any invalidation";
@@ -676,7 +873,7 @@ TEST(InvalidationManagerTest, Bug18_CompleteTextReplacementInvalidatesAll) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // Complete replacement: "rust" -> "golang" (no overlap)
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "rust", "golang", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "rust", "golang", 3, 2);
 
   // Both should be invalidated (old text removed, new text added)
   EXPECT_EQ(2, invalidated.size());
@@ -708,7 +905,7 @@ TEST(InvalidationManagerTest, MetadataStorageMinimal) {
   EXPECT_EQ(3, mgr.GetTrackedNgramCount("posts"));
 
   // Verify invalidation still works correctly
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 2);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello", 3, 2);
   EXPECT_GE(invalidated.size(), 1);
 }
 
@@ -844,7 +1041,7 @@ TEST(InvalidationManagerTest, HiraganaTextInvalidation) {
   mgr.RegisterCacheEntry(key1, meta1);
 
   // Invalidate with hiragana text - ExtractNgrams should generate same bigrams
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "あいうえお", 2, 1);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "あいうえお", 2, 1);
 
   // Cache entry should be invalidated because N-grams match
   EXPECT_GE(invalidated.size(), 1) << "Hiragana text should invalidate matching cache entries";
@@ -866,7 +1063,7 @@ TEST(InvalidationManagerTest, KatakanaTextInvalidation) {
   std::sort(meta1.ngrams.begin(), meta1.ngrams.end());
   mgr.RegisterCacheEntry(key1, meta1);
 
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "アイウエオ", 2, 1);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "アイウエオ", 2, 1);
 
   EXPECT_GE(invalidated.size(), 1) << "Katakana text should invalidate matching cache entries";
   EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
@@ -893,7 +1090,7 @@ TEST(InvalidationManagerTest, MixedCJKHiraganaInvalidation) {
   mgr.RegisterCacheEntry(key1, meta1);
 
   // Invalidate with the mixed text
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "東京の空", 2, 1);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "東京の空", 2, 1);
 
   // Should invalidate because kanji unigrams match
   EXPECT_GE(invalidated.size(), 1) << "Mixed CJK+Hiragana should invalidate via kanji unigrams";
@@ -955,7 +1152,7 @@ TEST(InvalidationManagerTest, C2_ConfigChangeInvalidatesOldEntries) {
   // With bigrams (old settings): "he", "el", "ll", "lo", "wo", "or", "rl", "ld"
   // The reverse index has bigrams, so trigram-based lookup would miss them.
   // With the fix, historical settings (ngram_size=2) are also checked.
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello world", 3, 1, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello world", 3, 1, true);
 
   // key1 should be invalidated because historical bigram generation finds "he", "el", etc.
   EXPECT_EQ(1, invalidated.size());
@@ -997,7 +1194,7 @@ TEST(InvalidationManagerTest, C2_MultipleHistoricalSettings) {
   // 4-grams for "hello": "hell", "ello"
   // Neither matches bigrams nor trigrams directly. But with historical settings,
   // bigrams and trigrams are also generated and matched.
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 4, 1, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello", 4, 1, true);
 
   EXPECT_EQ(2, invalidated.size());
   EXPECT_TRUE(invalidated.find(key1) != invalidated.end()) << "C2: Bigram entry should be invalidated";
@@ -1025,7 +1222,7 @@ TEST(InvalidationManagerTest, C2_CurrentSettingsNoRegression) {
   mgr.RegisterCacheEntry(key1, meta1);
 
   // Invalidation with same settings
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "golang tips", 3, 2, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "golang tips", 3, 2, true);
 
   EXPECT_EQ(1, invalidated.size());
   EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
@@ -1050,7 +1247,7 @@ TEST(InvalidationManagerTest, C2_LegacyZeroNgramSizeHandled) {
   mgr.RegisterCacheEntry(key1, meta1);
 
   // Invalidation with current settings should work via direct ngram match
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 2, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello", 3, 2, true);
 
   EXPECT_EQ(1, invalidated.size());
   EXPECT_TRUE(invalidated.find(key1) != invalidated.end());
@@ -1087,7 +1284,7 @@ TEST(InvalidationManagerTest, FilterChangeInvalidatesFilteredEntries) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // Filter-only change: same text, filter_columns_changed=true
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2, true, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "hello", "hello", 3, 2, true, true);
 
   // Only the entry with filters should be invalidated
   EXPECT_EQ(1, invalidated.size());
@@ -1118,7 +1315,7 @@ TEST(InvalidationManagerTest, FilterChangeDoesNotInvalidateUnfilteredEntries) {
   mgr.RegisterCacheEntry(key2, meta2);
 
   // Filter-only change with identical text
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "hello", 3, 2, true, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "hello", "hello", 3, 2, true, true);
 
   // No entries should be invalidated (none have filters)
   EXPECT_EQ(0, invalidated.size()) << "Bug 3: Entries without filters should not be invalidated on filter-only change";
@@ -1151,7 +1348,7 @@ TEST(InvalidationManagerTest, TextChangeWithFilterChangeUsesNormalInvalidation) 
   mgr.RegisterCacheEntry(key2, meta2);
 
   // Text changes from "hello" to "world" AND filters changed
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "world", 3, 2, true, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "hello", "world", 3, 2, true, true);
 
   // Both should be invalidated via normal ngram-based invalidation
   EXPECT_EQ(2, invalidated.size());
@@ -1198,7 +1395,7 @@ TEST(InvalidationManagerTest, P1_2_HistoricalSettingsAfterUnregister) {
 
   // Invalidation with new config (ngram_size=3) should still find key2
   // because historical settings (ngram_size=2) are still tracked
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "world", 3, 1, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "world", 3, 1, true);
 
   EXPECT_EQ(1, invalidated.size());
   EXPECT_TRUE(invalidated.find(key2) != invalidated.end())
@@ -1239,7 +1436,7 @@ TEST(InvalidationManagerTest, P1_2_HistoricalSettingsFullyRemoved) {
   // NOT generate historical bigrams (no entries with old settings remain).
   // This verifies the refcount properly drops to 0 and the setting is removed.
   // key2 should still be found via direct trigram match.
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 1, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello", 3, 1, true);
 
   EXPECT_EQ(1, invalidated.size());
   EXPECT_TRUE(invalidated.find(key2) != invalidated.end());
@@ -1277,7 +1474,7 @@ TEST(InvalidationManagerTest, P1_2_ReRegisterWithDifferentSettings) {
 
   // Invalidation with ngram_size=4 should NOT look up historical ngram_size=2
   // (it was replaced by ngram_size=3). Only ngram_size=3 should be historical.
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 4, 1, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello", 4, 1, true);
 
   // key should be found via historical trigram generation
   EXPECT_EQ(1, invalidated.size());
@@ -1323,11 +1520,11 @@ TEST(InvalidationManagerTest, P1_2_ClearTableCleansSettings) {
   EXPECT_EQ(1, mgr.GetTrackedEntryCount());  // Only comments entry remains
 
   // Invalidation on posts should find nothing (no historical settings)
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "", "hello", 3, 1, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "", "hello", 3, 1, true);
   EXPECT_EQ(0, invalidated.size());
 
   // Comments entry should still work
-  auto invalidated2 = mgr.InvalidateAffectedEntries("comments", "", "abc", 3, 1, true);
+  auto invalidated2 = InvalidatedKeys(mgr, "comments", "", "abc", 3, 1, true);
   EXPECT_EQ(1, invalidated2.size());
 }
 
@@ -1365,7 +1562,7 @@ TEST(InvalidationManagerTest, C8_FilterInvalidationNotBypassedWhenTextAlsoChange
 
   // Both text AND filter columns changed: "hello" -> "world" with filter_columns_changed=true
   // changed_ngrams is NOT empty (text changed), so the old bug would skip filter invalidation
-  auto invalidated = mgr.InvalidateAffectedEntries("posts", "hello", "world", 3, 2, true, true);
+  auto invalidated = InvalidatedKeys(mgr, "posts", "hello", "world", 3, 2, true, true);
 
   // The filter-bearing entry should be invalidated even though changed_ngrams is non-empty
   EXPECT_TRUE(invalidated.find(key_filter) != invalidated.end())
@@ -1454,17 +1651,17 @@ TEST(InvalidationManagerTest, ClearTableUpdatesReverseIndex) {
   }
 
   // Sanity: invalidating t1 with "hello" hits all 50 entries.
-  auto pre_clear = mgr.InvalidateAffectedEntries("t1", "", "hello", 3, 2);
+  auto pre_clear = InvalidatedKeys(mgr, "t1", "", "hello", 3, 2);
   EXPECT_EQ(50, pre_clear.size());
 
   mgr.ClearTable("t1");
 
   // After ClearTable, no t1 entries should exist in the reverse index.
-  auto post_clear = mgr.InvalidateAffectedEntries("t1", "", "hello", 3, 2);
+  auto post_clear = InvalidatedKeys(mgr, "t1", "", "hello", 3, 2);
   EXPECT_EQ(0, post_clear.size()) << "ClearTable must remove t1 entries from the reverse index";
 
   // t2 should be unaffected.
-  auto t2_invalidated = mgr.InvalidateAffectedEntries("t2", "", "hello", 3, 2);
+  auto t2_invalidated = InvalidatedKeys(mgr, "t2", "", "hello", 3, 2);
   EXPECT_EQ(50, t2_invalidated.size()) << "ClearTable on t1 must not touch t2";
 }
 
@@ -1473,12 +1670,10 @@ TEST(InvalidationManagerTest, ClearTableUpdatesReverseIndex) {
 // =============================================================================
 
 /**
- * @brief H-M7: UnregisterCacheEntries removes a batch under a single mutex
- *        acquisition. This test asserts the functional equivalence with the
- *        per-key UnregisterCacheEntry path (the lock-batching is observable
- *        only via timing/profiling, not via the public API).
+ * @brief UnregisterCacheEntryIdentities removes a batch under a single mutex
+ *        acquisition and is functionally equivalent to the per-identity path.
  */
-TEST(InvalidationManagerTest, UnregisterCacheEntriesRemovesBatch) {
+TEST(InvalidationManagerTest, UnregisterCacheEntryIdentitiesRemovesBatch) {
   QueryCache cache(1024 * 1024, 0.0);
   InvalidationManager mgr(&cache);
 
@@ -1493,25 +1688,31 @@ TEST(InvalidationManagerTest, UnregisterCacheEntriesRemovesBatch) {
   }
   ASSERT_EQ(mgr.GetTrackedEntryCount(), 20U);
 
-  // Batch unregister of half the keys.
-  std::vector<CacheKey> first_half(keys.begin(), keys.begin() + 10);
-  mgr.UnregisterCacheEntries(first_half);
+  const auto identities_of = [](std::vector<CacheKey>::const_iterator first,
+                                std::vector<CacheKey>::const_iterator last) {
+    std::vector<CacheEntryIdentity> identities;
+    for (; first != last; ++first) {
+      identities.push_back(CacheEntryIdentity{*first, 0});
+    }
+    return identities;
+  };
+
+  // Batch unregister of half the entries.
+  mgr.UnregisterCacheEntryIdentities(identities_of(keys.begin(), keys.begin() + 10));
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 10U);
 
   // Empty batch is a no-op.
-  mgr.UnregisterCacheEntries({});
+  mgr.UnregisterCacheEntryIdentities({});
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 10U);
 
-  // Batch with duplicates is tolerated (idempotent on missing keys after
-  // the first removal).
-  std::vector<CacheKey> second_half_with_dup(keys.begin() + 10, keys.end());
-  second_half_with_dup.push_back(keys[10]);  // duplicate
-  mgr.UnregisterCacheEntries(second_half_with_dup);
+  // Duplicates are tolerated (idempotent on missing identities after the first removal).
+  auto second_half_with_dup = identities_of(keys.begin() + 10, keys.end());
+  second_half_with_dup.push_back(CacheEntryIdentity{keys[10], 0});
+  mgr.UnregisterCacheEntryIdentities(second_half_with_dup);
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
 
-  // Batch including unknown keys is tolerated.
-  auto unknown = CacheKeyGenerator::Generate("never_registered");
-  mgr.UnregisterCacheEntries({unknown});
+  // Unknown identities are tolerated.
+  mgr.UnregisterCacheEntryIdentities({CacheEntryIdentity{CacheKeyGenerator::Generate("never_registered"), 0}});
   EXPECT_EQ(mgr.GetTrackedEntryCount(), 0U);
 }
 
@@ -1565,9 +1766,9 @@ TEST(InvalidationManagerTest, FilterColumnsChangedRestrictedToTargetTable) {
   // filter_columns_changed=true on t1: must invalidate only the 10 t1+filter
   // entries. t1 entries without filters and t2 entries (regardless of
   // filters) must NOT be invalidated.
-  auto invalidated = mgr.InvalidateAffectedEntries("t1", "", "", 3, 2,
-                                                   /*cross_boundary_ngrams=*/true,
-                                                   /*filter_columns_changed=*/true);
+  auto invalidated = InvalidatedKeys(mgr, "t1", "", "", 3, 2,
+                                     /*cross_boundary_ngrams=*/true,
+                                     /*filter_columns_changed=*/true);
   EXPECT_EQ(invalidated.size(), 10U);
   for (const auto& key : t1_filter_keys) {
     EXPECT_TRUE(invalidated.find(key) != invalidated.end()) << "t1 filtered entry must be invalidated";
@@ -1616,9 +1817,9 @@ struct SweepFixture {
 
 /** Runs both non-ngram sweeps at once and returns everything they invalidated. */
 std::unordered_set<CacheKey> SweepFilterAndTextChange(InvalidationManager& mgr, const std::string& table) {
-  return mgr.InvalidateAffectedEntries(table, "aaa", "bbb", 3, 2,
-                                       /*cross_boundary_ngrams=*/true,
-                                       /*filter_columns_changed=*/true);
+  return InvalidatedKeys(mgr, table, "aaa", "bbb", 3, 2,
+                         /*cross_boundary_ngrams=*/true,
+                         /*filter_columns_changed=*/true);
 }
 
 }  // namespace
@@ -1657,7 +1858,9 @@ TEST(InvalidationManagerTest, BatchUnregisterRemovesEntriesFromNonNgramSweepInde
   InvalidationManager mgr(&cache);
   const auto fixture = SweepFixture::Register(mgr, "posts", "batch-unreg");
 
-  mgr.UnregisterCacheEntries({fixture.filtered_key, fixture.text_sensitive_key, fixture.plain_key});
+  mgr.UnregisterCacheEntryIdentities({CacheEntryIdentity{fixture.filtered_key, 0},
+                                      CacheEntryIdentity{fixture.text_sensitive_key, 0},
+                                      CacheEntryIdentity{fixture.plain_key, 0}});
 
   auto after = SweepFilterAndTextChange(mgr, "posts");
   EXPECT_TRUE(after.empty());

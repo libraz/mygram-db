@@ -80,6 +80,23 @@ TEST_F(HttpServerStartupTest, StartOnValidPortSucceeds) {
   EXPECT_FALSE(server.IsRunning());
 }
 
+TEST_F(HttpServerStartupTest, MissingConfigurationUsesTheSharedDependencyError) {
+  const auto cfg = MakeConfig();
+  ASSERT_GT(cfg.port, 0);
+  HttpServer server(cfg, table_contexts_, nullptr);
+  ASSERT_TRUE(server.Start().has_value());
+
+  httplib::Client client("127.0.0.1", cfg.port);
+  const auto response = client.Get("/config");
+  ASSERT_TRUE(response);
+  EXPECT_EQ(response->status, 503) << response->body;
+  const auto body = nlohmann::json::parse(response->body);
+  EXPECT_EQ(body["error"], "Server configuration is not available");
+  EXPECT_EQ(body["error_code"], 6026);
+
+  server.Stop();
+}
+
 /**
  * @brief Verify that starting on a port already in use returns an error (no crash or hang)
  *

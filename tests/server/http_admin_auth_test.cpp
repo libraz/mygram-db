@@ -242,6 +242,69 @@ TEST_F(HttpAdminAuthTest, TheReplicationRouteServesItsStateWithAValidBearerToken
   EXPECT_EQ(server_->GetStats().GetCommandCount(query::QueryType::REPLICATION_STATUS), 1U);
 }
 
+TEST_F(HttpAdminAuthTest, MetricsWithholdReplicationFamiliesUntilCredentialsAreAccepted) {
+  auto client = Client();
+
+  const auto public_response = client.Get("/metrics");
+  ASSERT_TRUE(public_response);
+  ASSERT_EQ(public_response->status, 200) << public_response->body;
+  EXPECT_EQ(public_response->body.find("mygramdb_replication_"), std::string::npos) << public_response->body;
+
+  const httplib::Headers bad_headers{{"Authorization", "Bearer wrong-token"}};
+  const auto rejected_response = client.Get("/metrics", bad_headers);
+  ASSERT_TRUE(rejected_response);
+  ASSERT_EQ(rejected_response->status, 200) << rejected_response->body;
+  EXPECT_EQ(rejected_response->body.find("mygramdb_replication_"), std::string::npos) << rejected_response->body;
+
+  const auto accepted_response = client.Get("/metrics", AdminHeaders());
+  ASSERT_TRUE(accepted_response);
+  ASSERT_EQ(accepted_response->status, 200) << accepted_response->body;
+  EXPECT_NE(accepted_response->body.find("# HELP mygramdb_replication_events_processed"), std::string::npos);
+  EXPECT_NE(accepted_response->body.find("# TYPE mygramdb_replication_events_processed counter"), std::string::npos);
+  EXPECT_NE(accepted_response->body.find("mygramdb_replication_events_processed 4321"), std::string::npos);
+}
+
+TEST_F(HttpAdminAuthTest, EmptyAdminTokenKeepsReplicationMetricsAvailable) {
+  config::Config open_config;
+  open_config.api.admin_token.clear();
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = mygramdb::testing::FindAvailableLoopbackPort();
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+  ASSERT_GT(http_config.port, 0);
+
+  HttpServer open_server(http_config, table_contexts_, &open_config, &binlog_reader_);
+  ASSERT_TRUE(open_server.Start().has_value());
+
+  httplib::Client client("127.0.0.1", http_config.port);
+  const auto response = client.Get("/metrics");
+  ASSERT_TRUE(response);
+  ASSERT_EQ(response->status, 200) << response->body;
+  EXPECT_NE(response->body.find("mygramdb_replication_events_processed 4321"), std::string::npos);
+
+  open_server.Stop();
+}
+
+TEST_F(HttpAdminAuthTest, ReplicationRouteReportsNotConfiguredWhenMysqlReaderIsAbsent) {
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = mygramdb::testing::FindAvailableLoopbackPort();
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+  ASSERT_GT(http_config.port, 0);
+
+  HttpServer server_without_reader(http_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(server_without_reader.Start().has_value());
+
+  httplib::Client client("127.0.0.1", http_config.port);
+  const auto response = client.Get("/replication/status", AdminHeaders());
+  ASSERT_TRUE(response);
+  ASSERT_EQ(response->status, 200) << response->body;
+  EXPECT_EQ(json::parse(response->body), json({{"enabled", false}, {"status", "not_configured"}}));
+
+  server_without_reader.Stop();
+}
+
 TEST_F(HttpAdminAuthTest, OpenRoutesWithholdTheReplicationDetailTheAdminRoutesProtect) {
   auto client = Client();
 

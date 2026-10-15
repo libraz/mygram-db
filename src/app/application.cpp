@@ -230,11 +230,10 @@ mygram::utils::Expected<void, mygram::utils::Error> Application::Initialize() {
   signal_manager_ = std::move(*signal_mgr);
 
   // Initialize server orchestrator
-  ServerOrchestrator::Dependencies deps{
-      .config = config_manager_->GetConfig(),
-      .signal_manager = *signal_manager_,
-      .dump_dir = config_manager_->GetConfig().dump.dir,
-  };
+  // Dependencies contains references, so C++17 requires construction in the
+  // declaration order shown in ServerOrchestrator::Dependencies.
+  const auto& config = config_manager_->GetConfig();
+  ServerOrchestrator::Dependencies deps{config, *signal_manager_, config.dump.dir};
 
   auto orchestrator = ServerOrchestrator::Create(deps);
   if (!orchestrator) {

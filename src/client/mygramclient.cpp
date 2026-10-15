@@ -22,13 +22,13 @@
 #define SO_NOSIGPIPE 0x1022
 #endif
 
-#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <limits>
+#include <locale>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -68,7 +68,6 @@ constexpr std::chrono::milliseconds kDumpStatusPollInterval{100};
 constexpr uint32_t kDefaultClientTimeoutMs = 5000;
 constexpr uint32_t kMaxClientRecvBufferSize = 16U * 1024U * 1024U;
 constexpr uint64_t kDefaultMaxClientResponseBytes = 64ULL * 1024ULL * 1024ULL;
-constexpr std::string_view kHighlightKeyword = "HIGHLIGHT";
 
 // Linux: MSG_NOSIGNAL suppresses SIGPIPE per-call. macOS lacks MSG_NOSIGNAL;
 // SO_NOSIGPIPE is set on the socket instead (see ApplyPostConnectSocketOptions).
@@ -88,57 +87,10 @@ std::string TrimAsciiWhitespace(std::string_view value) {
   return std::string(value);
 }
 
-std::string ToAsciiUpper(std::string_view value) {
-  std::string result(value);
-  std::transform(result.begin(), result.end(), result.begin(),
-                 [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
-  return result;
-}
-
-/**
- * @brief Check whether a command's HIGHLIGHT clause, if any, is real
- *
- * HIGHLIGHT is a case-insensitive clause keyword recognized as a bare,
- * whitespace-delimited token (query_parser_commands.cpp). EscapeQueryString
- * quotes any query/AND/NOT/FILTER value that collides with it, so an
- * unquoted HIGHLIGHT token in the command text can only be the real clause
- * -- matching the same ambiguity the server itself resolves by quoting.
- * Used to tell IsResponseComplete a SEARCH/COUNT reply cannot end at its
- * header line (see ResponseCompletionState::expect_multiline_tail).
- */
-bool CommandRequestsHighlight(std::string_view command) {
-  size_t pos = 0;
-  while (pos < command.size()) {
-    size_t start = command.find_first_not_of(" \t", pos);
-    if (start == std::string_view::npos) {
-      break;
-    }
-    size_t end = command.find_first_of(" \t", start);
-    std::string_view token =
-        command.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
-    if (token.size() == kHighlightKeyword.size() && ToAsciiUpper(token) == kHighlightKeyword) {
-      return true;
-    }
-    if (end == std::string_view::npos) {
-      break;
-    }
-    pos = end;
-  }
-  return false;
-}
-
-/**
- * @brief Check whether a command is SEARCH or COUNT
- *
- * Only these two produce an "OK RESULTS"/"OK COUNT" header that a trailing
- * DEBUG block (AppendDebugBlock, response_formatter.cpp) can follow; every
- * other command's single-line reply is genuinely done at its first \r\n
- * regardless of the connection's debug flag.
- */
-bool IsSearchOrCountCommand(std::string_view command) {
-  const size_t verb_end = command.find_first_of(" \t");
-  const std::string verb = ToAsciiUpper(command.substr(0, verb_end));
-  return verb == "SEARCH" || verb == "COUNT";
+std::ostringstream MakeProtocolCommandStream() {
+  std::ostringstream command;
+  command.imbue(std::locale::classic());
+  return command;
 }
 
 std::string_view FilterOpToWire(FilterOp op) {
@@ -157,14 +109,6 @@ std::string_view FilterOpToWire(FilterOp op) {
       return "<=";
   }
   return "=";
-}
-
-std::string EscapeProtocolToken(const std::string& value) {
-  return detail::QuoteWireToken(value);
-}
-
-std::string QuoteCommandArgumentIfNeeded(const std::string& arg) {
-  return detail::QuoteWireToken(arg);
 }
 
 /**
@@ -403,95 +347,35 @@ std::pair<std::string, std::string> SplitDebugBlock(const std::string& response)
  * @brief Parse key=value pairs from a whitespace-tokenised string
  *
  * Used for response fragments where the server emits "key=value" tokens
- * separated by whitespace (e.g. GET document filter fields).
+ * separated by whitespace (e.g. GET document filter fields). Values are
+ * decoded per spec/tcp-commands.md §11.1 by ParseWireToken, the same decoder
+ * SEARCH primary keys use.
+ *
+ * @return The pairs, or std::nullopt when a quoted value is malformed
  */
-std::vector<std::pair<std::string, std::string>> ParseKeyValuePairs(const std::string& str) {
+std::optional<std::vector<std::pair<std::string, std::string>>> ParseKeyValuePairs(std::string_view str) {
   std::vector<std::pair<std::string, std::string>> pairs;
   size_t pos = 0;
-  auto skip_spaces = [&]() {
+  while (pos < str.size()) {
     while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) != 0) {
       ++pos;
     }
-  };
-  auto hex_value = [](char ch) -> int {
-    if (ch >= '0' && ch <= '9') {
-      return ch - '0';
-    }
-    if (ch >= 'a' && ch <= 'f') {
-      return 10 + (ch - 'a');
-    }
-    if (ch >= 'A' && ch <= 'F') {
-      return 10 + (ch - 'A');
-    }
-    return -1;
-  };
-
-  while (pos < str.size()) {
-    skip_spaces();
     const size_t key_start = pos;
     while (pos < str.size() && str[pos] != '=' && std::isspace(static_cast<unsigned char>(str[pos])) == 0) {
       ++pos;
     }
     if (pos >= str.size() || str[pos] != '=') {
-      while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) == 0) {
-        ++pos;
-      }
       continue;
     }
 
-    std::string key = str.substr(key_start, pos - key_start);
+    std::string key(str.substr(key_start, pos - key_start));
     ++pos;  // skip '='
 
     std::string value;
-    if (pos < str.size() && str[pos] == '"') {
-      ++pos;
-      while (pos < str.size()) {
-        char ch = str[pos++];
-        if (ch == '"') {
-          break;
-        }
-        if (ch == '\\' && pos < str.size()) {
-          char escaped = str[pos++];
-          switch (escaped) {
-            case 'n':
-              value.push_back('\n');
-              break;
-            case 'r':
-              value.push_back('\r');
-              break;
-            case 't':
-              value.push_back('\t');
-              break;
-            case '\\':
-            case '"':
-              value.push_back(escaped);
-              break;
-            case 'x':
-              if (pos + 1 < str.size()) {
-                const int high = hex_value(str[pos]);
-                const int low = hex_value(str[pos + 1]);
-                if (high >= 0 && low >= 0) {
-                  value.push_back(static_cast<char>((high << 4) | low));
-                  pos += 2;
-                  break;
-                }
-              }
-              value.push_back('x');
-              break;
-            default:
-              value.push_back(escaped);
-              break;
-          }
-        } else {
-          value.push_back(ch);
-        }
-      }
-    } else {
-      const size_t value_start = pos;
-      while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) == 0) {
-        ++pos;
-      }
-      value = str.substr(value_start, pos - value_start);
+    // An empty value is always quoted on the wire, so a bare '=' before whitespace is an empty bare token.
+    if (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) == 0 &&
+        !detail::ParseWireToken(str, pos, value)) {
+      return std::nullopt;
     }
 
     if (!key.empty()) {
@@ -519,17 +403,6 @@ std::optional<std::string> ValidateNoControlCharacters(const std::string& value,
 }
 
 /**
- * @brief Escape special characters in query strings
- *
- * Empty strings are emitted as the explicit `""` token to keep the wire
- * form unambiguous: an unquoted empty arg would collapse into surrounding
- * whitespace and produce a malformed command (e.g. `SEARCH table  AND foo`).
- */
-std::string EscapeQueryString(const std::string& str) {
-  return detail::QuoteWireToken(str);
-}
-
-/**
  * @brief Validate an identifier that will be emitted as a bare protocol token
  *
  * Used for unquoted identifiers (table names, primary keys, sort columns, filter keys)
@@ -546,19 +419,21 @@ std::optional<std::string> ValidateIdentifier(const std::string& value, const ch
     oss << "Input for " << field_name << " is empty";
     return oss.str();
   }
-  for (unsigned char character : value) {
+  for (size_t pos = 0; pos < value.size(); ++pos) {
+    const auto character = static_cast<unsigned char>(value[pos]);
     if (std::iscntrl(character) != 0) {
       std::ostringstream oss;
       oss << "Input for " << field_name << " contains control character 0x" << std::uppercase << std::hex
           << std::setw(2) << std::setfill('0') << static_cast<int>(character) << ", which is not allowed";
       return oss.str();
     }
-    if (std::isspace(character) != 0) {
+    // The server splits on Unicode whitespace too (spec/tcp-commands.md §2.1).
+    if (detail::IsUnicodeWhitespace(value, pos)) {
       std::ostringstream oss;
       oss << "Input for " << field_name << " contains whitespace, which is not allowed in identifiers";
       return oss.str();
     }
-    if (character == '"' || character == '\'' || character == '\\') {
+    if (detail::IsWireQuoteOrEscape(value[pos])) {
       std::ostringstream oss;
       oss << "Input for " << field_name << " contains protocol delimiter '" << static_cast<char>(character)
           << "', which is not allowed in identifiers";
@@ -820,7 +695,6 @@ class MygramClient::Impl {
 
       // Apply send/recv timeouts now that we are connected.
       ApplyPostConnectSocketOptions(sock_, config_.timeout_ms);
-      debug_mode_ = false;
 
       return {};
     }
@@ -873,7 +747,6 @@ class MygramClient::Impl {
 
     // Apply send/recv timeouts now that we are connected.
     ApplyPostConnectSocketOptions(sock_, config_.timeout_ms);
-    debug_mode_ = false;
 
     return {};
   }
@@ -901,7 +774,7 @@ class MygramClient::Impl {
     if (!result) {
       return MakeUnexpected(result.error());
     }
-    std::string response = *result;
+    std::string response = std::move(*result);
     auto err = CheckErrorResponse(response);
     if (!err) {
       return MakeUnexpected(err.error());
@@ -929,6 +802,12 @@ class MygramClient::Impl {
 
     if (sock_ < 0) {
       return MakeUnexpected(MakeError(ErrorCode::kClientNotConnected, "Not connected"));
+    }
+
+    // Allocate the configured receive buffer on first use. This keeps unused
+    // clients allocation-free and reuses the same buffer for later commands.
+    if (recv_buffer_.empty()) {
+      recv_buffer_.resize(config_.recv_buffer_size);
     }
 
     const uint32_t command_timeout_ms = TimeoutForCommand(command);
@@ -990,19 +869,7 @@ class MygramClient::Impl {
 
     // Receive response (loop until complete response is received)
     std::string response;
-    std::vector<char> buffer(config_.recv_buffer_size);
-    detail::ResponseCompletionState completion_state;
-    // A SEARCH/COUNT reply's header line reads identically whether or not a
-    // highlight/debug body follows it, so IsResponseComplete needs to be
-    // told up front when this command's reply cannot end at that header.
-    // Other commands' single-line replies are unaffected by the debug flag.
-    const bool is_search_or_count = IsSearchOrCountCommand(command);
-    completion_state.expect_multiline_tail = is_search_or_count && (debug_mode_ || CommandRequestsHighlight(command));
-    // A DEBUG block's own opening ("\r\n\r\n# DEBUG\r\n") is itself a double
-    // CRLF, so a chunk boundary landing right after the header can pass the
-    // generic "ends with \r\n\r\n" check even though the block has barely
-    // started. Only true when a debug block can actually appear.
-    completion_state.expect_debug_marker = is_search_or_count && debug_mode_;
+    detail::ResponseFrameState frame = detail::BeginResponseFrame(command, debug_mode_);
 
     while (true) {
       if (auto ready = wait_until_ready(POLLIN, ErrorCode::kClientReceiveFailed, "receive response"); !ready) {
@@ -1012,7 +879,7 @@ class MygramClient::Impl {
       // response is appended with an explicit length below, so this buffer
       // does not require a spare byte for NUL termination. Reading its full
       // configured size also keeps recv_buffer_size=1 functional.
-      ssize_t received = recv(sock_, buffer.data(), buffer.size(), 0);
+      ssize_t received = recv(sock_, recv_buffer_.data(), recv_buffer_.size(), 0);
       if (received <= 0) {
         if (received == 0) {
           DisconnectSocket();
@@ -1033,17 +900,24 @@ class MygramClient::Impl {
             ErrorCode::kClientInvalidResponse,
             "Response exceeds configured max_response_bytes (" + std::to_string(config_.max_response_bytes) + ")"));
       }
-      response.append(buffer.data(), received_size);
+      response.append(recv_buffer_.data(), received_size);
 
       // Check if the accumulated response is complete
-      if (detail::IsResponseComplete(response, completion_state)) {
+      if (detail::IsResponseComplete(response, frame)) {
         break;
       }
     }
+    response.erase(0, frame.frame_start);
 
     // Remove trailing \r\n (strip all trailing CR/LF characters)
     while (!response.empty() && (response.back() == '\n' || response.back() == '\r')) {
       response.pop_back();
+    }
+
+    // Mirror the server's per-connection DEBUG flag from the reply itself, so
+    // DEBUG ON/OFF sent through any API frames the next SEARCH/COUNT correctly.
+    if (response == proto::kOkDebugOn || response == proto::kOkDebugOff) {
+      debug_mode_ = response == proto::kOkDebugOn;
     }
 
     return response;
@@ -1091,7 +965,17 @@ class MygramClient::Impl {
       // Remaining tokens are reversibly escaped primary keys. Unquoted tokens
       // remain accepted for compatibility with older servers.
       std::string token;
-      while (detail::ParseWireToken(header_line, header_pos, token)) {
+      while (true) {
+        while (header_pos < header_line.size() &&
+               std::isspace(static_cast<unsigned char>(header_line[header_pos])) != 0) {
+          ++header_pos;
+        }
+        if (header_pos >= header_line.size()) {
+          break;
+        }
+        if (!detail::ParseWireToken(header_line, header_pos, token)) {
+          return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed SEARCH primary key"));
+        }
         resp.results.emplace_back(token);
       }
     } else {
@@ -1206,24 +1090,25 @@ class MygramClient::Impl {
     }
 
     // Build command
-    std::ostringstream cmd;
+    auto cmd = MakeProtocolCommandStream();
     cmd << "SEARCH " << table << " ";
     if (options.query_mode == QueryMode::kBoolean) {
       cmd << query;
     } else {
-      cmd << EscapeQueryString(query);
+      cmd << detail::QuoteWireToken(query);
     }
 
     for (const auto& term : options.and_terms) {
-      cmd << " AND " << EscapeQueryString(term);
+      cmd << " AND " << detail::QuoteWireToken(term);
     }
 
     for (const auto& term : options.not_terms) {
-      cmd << " NOT " << EscapeQueryString(term);
+      cmd << " NOT " << detail::QuoteWireToken(term);
     }
 
     for (const auto& filter : options.filters) {
-      cmd << " FILTER " << filter.key << " " << FilterOpToWire(filter.op) << " " << EscapeQueryString(filter.value);
+      cmd << " FILTER " << filter.key << " " << FilterOpToWire(filter.op) << " "
+          << detail::QuoteWireToken(filter.value);
     }
 
     // SORT clause (replaces ORDER BY)
@@ -1242,7 +1127,8 @@ class MygramClient::Impl {
       const auto& highlight = *options.highlight;
       cmd << " HIGHLIGHT";
       if (!highlight.open_tag.empty()) {
-        cmd << " TAG " << EscapeQueryString(highlight.open_tag) << " " << EscapeQueryString(highlight.close_tag);
+        cmd << " TAG " << detail::QuoteWireToken(highlight.open_tag) << " "
+            << detail::QuoteWireToken(highlight.close_tag);
       }
       if (highlight.snippet_length > 0) {
         cmd << " SNIPPET_LEN " << highlight.snippet_length;
@@ -1268,7 +1154,7 @@ class MygramClient::Impl {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
 
-    std::ostringstream cmd;
+    auto cmd = MakeProtocolCommandStream();
     // Send the boolean expression verbatim rather than as a quoted token. The
     // server treats a quoted phrase that embeds AND/OR/NOT keywords as a literal
     // phrase; passing the expression unquoted lets the server tokenize it and
@@ -1291,19 +1177,19 @@ class MygramClient::Impl {
     }
 
     // Build command
-    std::ostringstream cmd;
-    cmd << "COUNT " << table << " " << EscapeQueryString(query);
+    auto cmd = MakeProtocolCommandStream();
+    cmd << "COUNT " << table << " " << detail::QuoteWireToken(query);
 
     for (const auto& term : and_terms) {
-      cmd << " AND " << EscapeQueryString(term);
+      cmd << " AND " << detail::QuoteWireToken(term);
     }
 
     for (const auto& term : not_terms) {
-      cmd << " NOT " << EscapeQueryString(term);
+      cmd << " NOT " << detail::QuoteWireToken(term);
     }
 
     for (const auto& [key, value] : filters) {
-      cmd << " FILTER " << key << " = " << EscapeQueryString(value);
+      cmd << " FILTER " << key << " = " << detail::QuoteWireToken(value);
     }
 
     // Parse response: "OK COUNT <n>" optionally followed by
@@ -1317,6 +1203,7 @@ class MygramClient::Impl {
     auto [main_part, debug_part] = SplitDebugBlock(response);
 
     std::istringstream iss(main_part);
+    iss.imbue(std::locale::classic());
     std::string status;
     std::string count_str;
     uint64_t count = 0;
@@ -1347,22 +1234,22 @@ class MygramClient::Impl {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
 
-    std::ostringstream cmd;
+    auto cmd = MakeProtocolCommandStream();
     cmd << "FACET " << table << " " << column;
     if (!query.empty()) {
-      cmd << " " << EscapeQueryString(query);
+      cmd << " " << detail::QuoteWireToken(query);
     }
 
     for (const auto& term : and_terms) {
-      cmd << " AND " << EscapeQueryString(term);
+      cmd << " AND " << detail::QuoteWireToken(term);
     }
 
     for (const auto& term : not_terms) {
-      cmd << " NOT " << EscapeQueryString(term);
+      cmd << " NOT " << detail::QuoteWireToken(term);
     }
 
     for (const auto& [key, value] : filters) {
-      cmd << " FILTER " << key << " = " << EscapeQueryString(value);
+      cmd << " FILTER " << key << " = " << detail::QuoteWireToken(value);
     }
 
     if (offset > 0) {
@@ -1450,8 +1337,8 @@ class MygramClient::Impl {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "Input for primary key is empty"));
     }
 
-    std::ostringstream cmd;
-    cmd << "GET " << table << " " << EscapeProtocolToken(primary_key);
+    auto cmd = MakeProtocolCommandStream();
+    cmd << "GET " << table << " " << detail::QuoteWireToken(primary_key);
 
     // Parse response: OK DOC <primary_key> [<key=value>...]
     auto result = SendAndExpectPrefix(cmd.str(), proto::kOkDocPrefix);
@@ -1473,8 +1360,11 @@ class MygramClient::Impl {
     Document doc(doc_pk);
 
     // Parse remaining key=value pairs
-    const std::string rest = response.substr(response_pos);
-    doc.fields = ParseKeyValuePairs(rest);
+    auto fields = ParseKeyValuePairs(std::string_view(response).substr(response_pos));
+    if (!fields) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientProtocolError, "Malformed GET field value"));
+    }
+    doc.fields = std::move(*fields);
 
     return doc;
   }
@@ -1529,14 +1419,15 @@ class MygramClient::Impl {
     if (name.empty()) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, "Variable name is empty"));
     }
-    if (auto err = ValidateNoControlCharacters(name, "variable name")) {
+    // The name is sent as a bare token, like every other identifier.
+    if (auto err = ValidateIdentifier(name, "variable name")) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
     if (auto err = ValidateNoControlCharacters(value, "variable value")) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
 
-    auto result = SendAndExpectPrefix("SET " + name + " = " + QuoteCommandArgumentIfNeeded(value), std::string_view{});
+    auto result = SendAndExpectPrefix("SET " + name + " = " + detail::QuoteWireToken(value), std::string_view{});
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -1549,7 +1440,7 @@ class MygramClient::Impl {
     }
     std::string cmd = "SHOW VARIABLES";
     if (!like_pattern.empty()) {
-      cmd += " LIKE " + QuoteCommandArgumentIfNeeded(like_pattern);
+      cmd += " LIKE " + detail::QuoteWireToken(like_pattern);
     }
     return SendAndExpectPrefix(cmd, std::string_view{});
   }
@@ -1628,7 +1519,7 @@ class MygramClient::Impl {
     if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
-    return SendAndExpectPrefix("DUMP INFO " + QuoteCommandArgumentIfNeeded(filepath), proto::kOkDumpInfoPrefix);
+    return SendAndExpectPrefix("DUMP INFO " + detail::QuoteWireToken(filepath), proto::kOkDumpInfoPrefix);
   }
 
   Expected<std::string, Error> DumpStatus() const {
@@ -1639,7 +1530,7 @@ class MygramClient::Impl {
     if (auto err = ValidateNoControlCharacters(filepath, "filepath")) {
       return MakeUnexpected(MakeError(ErrorCode::kClientInvalidArgument, *err));
     }
-    return SendAndExpectPrefix("DUMP VERIFY " + QuoteCommandArgumentIfNeeded(filepath), proto::kOkDumpVerifiedPrefix);
+    return SendAndExpectPrefix("DUMP VERIFY " + detail::QuoteWireToken(filepath), proto::kOkDumpVerifiedPrefix);
   }
 
   Expected<std::string, Error> Save(const std::string& filepath) const {
@@ -1649,7 +1540,7 @@ class MygramClient::Impl {
       }
     }
 
-    std::string cmd = filepath.empty() ? "DUMP SAVE" : "DUMP SAVE " + QuoteCommandArgumentIfNeeded(filepath);
+    std::string cmd = filepath.empty() ? "DUMP SAVE" : "DUMP SAVE " + detail::QuoteWireToken(filepath);
 
     auto result = SendAndExpectPrefix(cmd, std::string_view{});
     if (!result) {
@@ -1670,7 +1561,7 @@ class MygramClient::Impl {
     }
 
     // Parse: OK LOADED <filepath>
-    auto result = SendAndExpectPrefix("DUMP LOAD " + QuoteCommandArgumentIfNeeded(filepath), proto::kOkLoadedPrefix);
+    auto result = SendAndExpectPrefix("DUMP LOAD " + detail::QuoteWireToken(filepath), proto::kOkLoadedPrefix);
     if (!result) {
       return MakeUnexpected(result.error());
     }
@@ -1766,7 +1657,6 @@ class MygramClient::Impl {
     if (!result) {
       return MakeUnexpected(result.error());
     }
-    debug_mode_ = true;
     return {};
   }
 
@@ -1775,23 +1665,24 @@ class MygramClient::Impl {
     if (!result) {
       return MakeUnexpected(result.error());
     }
-    debug_mode_ = false;
     return {};
   }
 
  private:
   [[nodiscard]] uint32_t TimeoutForCommand(std::string_view command) const {
-    const auto is_command = [command](std::string_view name) {
-      return command == name || (command.size() > name.size() && command.compare(0, name.size(), name) == 0 &&
-                                 command[name.size()] == ' ');
+    // Keywords are matched the way the server dispatches them: case-insensitive
+    // and split on any whitespace (spec/tcp-commands.md §2.1, §3).
+    const auto tokens = detail::TokenizeRequest(command);
+    const auto keyword = [&tokens](size_t index, std::string_view name) {
+      return index < tokens.size() && detail::EqualsIgnoreAsciiCase(tokens[index].text, name);
     };
-    if (is_command("OPTIMIZE")) {
+    if (keyword(0, "OPTIMIZE")) {
       return config_.optimize_timeout_ms;
     }
-    if (is_command("DUMP LOAD")) {
+    if (keyword(0, "DUMP") && keyword(1, "LOAD")) {
       return config_.dump_load_timeout_ms;
     }
-    if (is_command("DUMP VERIFY")) {
+    if (keyword(0, "DUMP") && keyword(1, "VERIFY")) {
       return config_.dump_verify_timeout_ms;
     }
     return config_.timeout_ms;
@@ -1802,14 +1693,19 @@ class MygramClient::Impl {
       close(sock_);
       sock_ = -1;
     }
+    // The server's DEBUG flag dies with its connection.
+    debug_mode_ = false;
   }
 
   ClientConfig config_;
+  // Shared by serialized SendCommand calls. Allocate on first use after
+  // connecting so clients that never send a request do not retain this buffer.
+  mutable std::vector<char> recv_buffer_;
   mutable int sock_{-1};
   // Mirrors the server's per-connection DEBUG ON/OFF flag (spec/tcp-commands.md
   // §10.7) so SendCommand knows a SEARCH/COUNT reply will carry a trailing
-  // debug block before any bytes of it have arrived. Reset on every fresh
-  // Connect() since the flag does not survive a new server-side connection.
+  // debug block before any bytes of it have arrived. Guarded by command_mutex_:
+  // set from the DEBUG reply inside SendCommand, cleared in DisconnectSocket.
   mutable bool debug_mode_{false};
   // Serializes the entire connection lifecycle and each request/response.
   // Disconnect() waits for an in-flight command instead of closing a descriptor

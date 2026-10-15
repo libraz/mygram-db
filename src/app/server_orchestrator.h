@@ -290,6 +290,8 @@ class ServerOrchestrator {
   Expected<void, mygram::utils::Error> BuildSnapshots();
   Expected<void, mygram::utils::Error> InitializeBinlogReader();
   Expected<void, mygram::utils::Error> InitializeServers();
+  Expected<void, mygram::utils::Error> StartInternal();
+  void RollbackPartialStartup() noexcept;
   void RegisterRuntimeCallbacks();
   std::unordered_map<std::string, server::TableContext*> BuildTableContextPointerMap();
 

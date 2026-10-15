@@ -56,9 +56,6 @@ constexpr std::string_view kFieldFd = "fd";
 /// Remote client IP address as a string. Replaces `remote_addr`.
 constexpr std::string_view kFieldClientIp = "client_ip";
 
-/// Remote client port number (signed int64).
-constexpr std::string_view kFieldClientPort = "client_port";
-
 // ---------------------------------------------------------------------------
 // Replication / GTID
 // ---------------------------------------------------------------------------
@@ -91,18 +88,9 @@ constexpr std::string_view kFieldOperation = "operation";
 /// Table name.
 constexpr std::string_view kFieldTable = "table";
 
-/// Document identifier (signed int64).
-constexpr std::string_view kFieldDocId = "doc_id";
-
-/// Request identifier (string).
-constexpr std::string_view kFieldRequestId = "request_id";
-
 // ---------------------------------------------------------------------------
-// Timing and counts
+// Counts
 // ---------------------------------------------------------------------------
-
-/// Duration in milliseconds (double or int64).
-constexpr std::string_view kFieldDurationMs = "duration_ms";
 
 /// Generic count field (uint64).
 constexpr std::string_view kFieldCount = "count";

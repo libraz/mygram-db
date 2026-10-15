@@ -6,6 +6,8 @@
 #ifndef MYGRAMDB_APP_SIGNAL_MANAGER_H_
 #define MYGRAMDB_APP_SIGNAL_MANAGER_H_
 
+#include <signal.h>
+
 #include <csignal>
 #include <memory>
 
@@ -61,6 +63,8 @@ struct SignalFlags {
  */
 class SignalManager {
  public:
+  using SigactionFunction = int (*)(int, const struct sigaction*, struct sigaction*);
+
   /**
    * @brief Construct and register signal handlers
    * @return Expected with manager instance or error
@@ -72,6 +76,16 @@ class SignalManager {
    * Original signal handlers are saved and restored in destructor.
    */
   static Expected<std::unique_ptr<SignalManager>, mygram::utils::Error> Create();
+
+  /**
+   * @brief Construct and register signal handlers with an injectable syscall
+   * @param sigaction_function Signal action function used to install handlers
+   * @return Expected with manager instance or error
+   *
+   * The overload is primarily useful for exercising partial-registration
+   * failures. Handler restoration always uses the real POSIX sigaction call.
+   */
+  static Expected<std::unique_ptr<SignalManager>, mygram::utils::Error> Create(SigactionFunction sigaction_function);
 
   /**
    * @brief Destructor restores original signal handlers
@@ -108,7 +122,7 @@ class SignalManager {
   static SignalFlags signal_flags_;
 
  private:
-  SignalManager() = default;  // Private: use Create()
+  explicit SignalManager(SigactionFunction sigaction_function) : sigaction_function_(sigaction_function) {}
 
   /**
    * @brief Register signal handlers
@@ -126,6 +140,12 @@ class SignalManager {
   struct sigaction original_sigterm_ {};
   struct sigaction original_sigusr1_ {};
   struct sigaction original_sigpipe_ {};
+
+  SigactionFunction sigaction_function_;
+  bool sigint_installed_ = false;
+  bool sigterm_installed_ = false;
+  bool sigusr1_installed_ = false;
+  bool sigpipe_installed_ = false;
 };
 
 }  // namespace mygramdb::app

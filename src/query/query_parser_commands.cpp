@@ -18,7 +18,6 @@ using mygram::utils::MakeUnexpected;
 
 using internal::EqualsIgnoreCase;
 using internal::IsClauseKeyword;
-using internal::kMaxLimit;
 
 using mygram::utils::ToUpper;
 
@@ -320,16 +319,16 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseSearch(co
     SetError("Too many NOT terms (max " + std::to_string(kMaxTermCount) + ")");
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
-  if (query.filters.size() > kMaxTermCount) {
-    SetError("Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")");
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  if (auto result = ValidateFilterCount(query.filters.size()); !result) {
+    SetError(result.error().message());
+    return MakeUnexpected(result.error());
   }
 
   // Validate limit
-  if (query.limit > kMaxLimit) {
-    SetError("LIMIT exceeds maximum of " + std::to_string(kMaxLimit));
+  if (auto result = ValidateLimitUpperBound(query.limit); !result) {
+    SetError(result.error().message());
     query.type = QueryType::UNKNOWN;
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+    return MakeUnexpected(result.error());
   }
 
   {
@@ -411,9 +410,9 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseCount(con
     SetError("Too many NOT terms (max " + std::to_string(kMaxTermCount) + ")");
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
-  if (query.filters.size() > kMaxTermCount) {
-    SetError("Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")");
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  if (auto result = ValidateFilterCount(query.filters.size()); !result) {
+    SetError(result.error().message());
+    return MakeUnexpected(result.error());
   }
 
   {
@@ -529,16 +528,16 @@ mygram::utils::Expected<Query, mygram::utils::Error> QueryParser::ParseFacet(con
     SetError("Too many NOT terms (max " + std::to_string(kMaxTermCount) + ")");
     return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
   }
-  if (query.filters.size() > kMaxTermCount) {
-    SetError("Too many FILTER conditions (max " + std::to_string(kMaxTermCount) + ")");
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+  if (auto result = ValidateFilterCount(query.filters.size()); !result) {
+    SetError(result.error().message());
+    return MakeUnexpected(result.error());
   }
 
   // Keep FACET LIMIT bounded the same way as SEARCH and the HTTP API.
-  if (query.limit > kMaxLimit) {
-    SetError("LIMIT exceeds maximum of " + std::to_string(kMaxLimit));
+  if (auto result = ValidateLimitUpperBound(query.limit); !result) {
+    SetError(result.error().message());
     query.type = QueryType::UNKNOWN;
-    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, error_));
+    return MakeUnexpected(result.error());
   }
 
   {

@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -140,9 +141,10 @@ bool ReactorConnection::OnReadable() {
     // Some other path (CloseWithServerBusy, a DrainTask exception handler,
     // ...) already decided to close and may have left a response queued
     // for send. Only report "safe to unregister" once that queue has
-    // actually drained; a future OnWritable finishes the close otherwise.
+    // actually drained when that path chose a graceful terminal drain. Hard
+    // I/O/cap/interest failures remain immediate closes even with residue.
     std::lock_guard<std::mutex> lock(write_mutex_);
-    return !write_queue_.empty();
+    return close_after_write_drain_ && !write_queue_.empty();
   }
 
   {
@@ -193,15 +195,11 @@ bool ReactorConnection::OnReadable() {
             .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
             .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
             .Warn();
-        const bool error_sent = TrySendErrorIfWriteQueueEmpty(wire_message, wire_code);
-        closing_.store(true, std::memory_order_release);
-        if (!error_sent) {
-          // A response is already queued for send; unregistering now would
-          // drop it. Defer to the armed write interest, which drains the
-          // queue and finishes the close once it is empty.
-          return true;
-        }
-        return false;
+        // The helper publishes closing_ while holding write_mutex_, before
+        // checking the queue or sending. An in-flight handler therefore
+        // cannot enqueue a later response ahead of or after this error.
+        const bool close_now = CloseWithError(wire_message, wire_code);
+        return !close_now;
       }
       {
         std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -239,7 +237,7 @@ bool ReactorConnection::OnReadable() {
         interest_update_ok = PublishReadEofLocked();
       }
       if (!interest_update_ok) {
-        closing_.store(true, std::memory_order_release);
+        MarkClosingImmediately();
         return false;
       }
       break;
@@ -257,7 +255,7 @@ bool ReactorConnection::OnReadable() {
         .Field("errno", static_cast<int64_t>(errno))
         .Field("error", std::strerror(errno))
         .Warn();
-    closing_.store(true, std::memory_order_release);
+    MarkClosingImmediately();
     return false;
   }
 
@@ -294,7 +292,7 @@ bool ReactorConnection::OnReadable() {
       std::lock_guard<std::mutex> frame_lock(frame_mutex_);
       std::lock_guard<std::mutex> write_lock(write_mutex_);
       if (pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire) && write_queue_.empty()) {
-        closing_.store(true, std::memory_order_release);
+        MarkClosingImmediatelyLocked();
         should_close = true;
       }
     }
@@ -314,9 +312,16 @@ bool ReactorConnection::OnWritable() {
 
   std::unique_lock<std::mutex> lock(write_mutex_);
 
+  // Hard terminal failures must not send any additional bytes, even if older
+  // responses remain queued. Graceful terminal paths set
+  // close_after_write_drain_ and are the only closes that OnWritable drains.
+  if (closing_.load(std::memory_order_acquire) && !close_after_write_drain_) {
+    return false;
+  }
+
   if (!DrainWriteQueueLocked()) {
     // Fatal send error during drain.
-    closing_.store(true, std::memory_order_release);
+    MarkClosingImmediatelyLocked();
     return false;
   }
 
@@ -343,7 +348,7 @@ bool ReactorConnection::OnWritable() {
           .Field("fd", static_cast<int64_t>(fd_))
           .Field("error", disarm_result.error().to_string())
           .Warn();
-      closing_.store(true, std::memory_order_release);
+      MarkClosingImmediatelyLocked();
       return false;
     }
     write_armed_ = false;
@@ -356,23 +361,26 @@ bool ReactorConnection::OnWritable() {
   // Peer already half-closed and the drain task has no more work in flight:
   // we just flushed the last response, so unregister now. Release
   // write_mutex_ before taking frame_mutex_ to preserve the file-wide lock
-  // order (frame_mutex_ -> write_mutex_).
+  // order (frame_mutex_ -> write_mutex_); reacquire in that order for the
+  // final empty-queue check and close publication.
   lock.unlock();
-  bool should_close = false;
   if (read_eof_.load(std::memory_order_acquire)) {
     std::lock_guard<std::mutex> frame_lock(frame_mutex_);
-    should_close = pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire);
-  }
-  if (should_close) {
-    closing_.store(true, std::memory_order_release);
-    return false;
+    std::lock_guard<std::mutex> write_lock(write_mutex_);
+    if (closing_.load(std::memory_order_acquire)) {
+      return close_after_write_drain_ && !write_queue_.empty();
+    }
+    if (pending_frames_.empty() && !drain_scheduled_.load(std::memory_order_acquire) && write_queue_.empty()) {
+      MarkClosingImmediatelyLocked();
+      return false;
+    }
   }
 
   return true;
 }
 
 bool ReactorConnection::OnError() {
-  closing_.store(true, std::memory_order_release);
+  MarkClosingImmediately();
   return false;
 }
 
@@ -442,29 +450,72 @@ bool ReactorConnection::ShouldSendReadOverflowError() {
   return write_queue_.empty();
 }
 
-bool ReactorConnection::TrySendErrorIfWriteQueueEmpty(std::string_view message, mygram::utils::ErrorCode code,
-                                                      const std::function<void()>& under_lock_hook) {
+void ReactorConnection::MarkClosingImmediately() {
   std::lock_guard<std::mutex> lock(write_mutex_);
+  MarkClosingImmediatelyLocked();
+}
+
+void ReactorConnection::MarkClosingImmediatelyLocked() {
+  close_after_write_drain_ = false;
+  closing_.store(true, std::memory_order_release);
+}
+
+bool ReactorConnection::CloseWithError(std::string_view message, mygram::utils::ErrorCode code,
+                                       const std::function<void()>& under_lock_hook) {
+  std::lock_guard<std::mutex> lock(write_mutex_);
+
+  // A previous terminal path owns the close. Never append a second error;
+  // report whether its accepted write queue still needs the reactor.
+  if (closing_.load(std::memory_order_acquire)) {
+    return !(close_after_write_drain_ && !write_queue_.empty());
+  }
+
+  // Publish terminal state before observing the queue. EnqueueResponse uses
+  // the same mutex, so no later normal response can slip in after this point.
+  closing_.store(true, std::memory_order_release);
   if (!write_queue_.empty()) {
+    close_after_write_drain_ = true;
     return false;
   }
+  close_after_write_drain_ = false;
+
   if (under_lock_hook) {
     under_lock_hook();
   }
-  BestEffortSendError(fd_, message, code);
+
+  // Frame construction can allocate. closing_ is already published, so an
+  // exception cannot let a later handler response through or trigger a
+  // second error from DrainTask's catch path.
+  try {
+    BestEffortSendError(fd_, message, code);
+  } catch (...) {
+    // This is explicitly best effort; the caller will close the connection.
+  }
   return true;
 }
 
 bool ReactorConnection::CloseWithServerBusy() {
-  // Route overload errors through the normal write queue so they cannot
-  // splice into a response being drained by another thread. EnqueueResponse
-  // attempts the small error inline; if it has to arm writable interest, the
-  // queued bytes remain ordered ahead of teardown.
-  (void)EnqueueResponse(ResponseFormatter::FormatError("SERVER_BUSY Server is too busy, please try again later",
-                                                       mygram::utils::ErrorCode::kServerBusy));
+  // Publish closing before constructing the error frame: even allocation
+  // failure must prevent an in-flight handler from enqueueing afterward.
+  std::unique_lock<std::mutex> lock(write_mutex_);
+  if (closing_.load(std::memory_order_acquire)) {
+    return close_after_write_drain_ && !write_queue_.empty();
+  }
   closing_.store(true, std::memory_order_release);
-  std::lock_guard<std::mutex> lock(write_mutex_);
-  return !write_queue_.empty();
+  close_after_write_drain_ = false;
+
+  try {
+    std::string response = ResponseFormatter::FormatError("SERVER_BUSY Server is too busy, please try again later",
+                                                          mygram::utils::ErrorCode::kServerBusy);
+    if (!EnqueueResponseLocked(std::move(response), /*terminal=*/true)) {
+      return false;
+    }
+  } catch (...) {
+    MarkClosingImmediatelyLocked();
+    return false;
+  }
+  close_after_write_drain_ = !write_queue_.empty();
+  return close_after_write_drain_;
 }
 
 bool ReactorConnection::SubmitDrainTaskToPool(std::string_view failure_event) {
@@ -658,7 +709,7 @@ bool ReactorConnection::ScheduleDrainTask() {
   if (thread_pool_ == nullptr || dispatcher_ == nullptr) {
     // Misconfiguration — no way to process the frames.
     drain_scheduled_.store(false, std::memory_order_release);
-    closing_.store(true, std::memory_order_release);
+    MarkClosingImmediately();
     return false;
   }
 
@@ -689,7 +740,7 @@ void ReactorConnection::DrainTask() {
         }
       });
       if (resume_failed) {
-        closing_.store(true, std::memory_order_release);
+        MarkClosingImmediately();
         break;
       }
 
@@ -703,7 +754,9 @@ void ReactorConnection::DrainTask() {
       // EnqueueResponse attempts an inline drain before returning; only on
       // EAGAIN does it hand off to the event loop via ArmWrite.
       if (!EnqueueResponse(std::move(response))) {
-        closing_.store(true, std::memory_order_release);
+        // EnqueueResponse either observed an already-published terminal close
+        // or published an immediate hard failure itself. Do not overwrite a
+        // graceful terminal-drain decision here.
         break;
       }
     }
@@ -713,15 +766,13 @@ void ReactorConnection::DrainTask() {
         .Field("fd", static_cast<int64_t>(fd_))
         .Field("error", error.what())
         .Error();
-    (void)TrySendErrorIfWriteQueueEmpty("internal server error", mygram::utils::ErrorCode::kInternalError);
-    closing_.store(true, std::memory_order_release);
+    (void)CloseWithError("internal server error", mygram::utils::ErrorCode::kInternalError);
   } catch (...) {
     mygram::utils::StructuredLog()
         .Event("reactor_drain_unknown_exception")
         .Field("fd", static_cast<int64_t>(fd_))
         .Error();
-    (void)TrySendErrorIfWriteQueueEmpty("internal server error", mygram::utils::ErrorCode::kInternalError);
-    closing_.store(true, std::memory_order_release);
+    (void)CloseWithError("internal server error", mygram::utils::ErrorCode::kInternalError);
   }
 
   // Netty/Vert.x "clear-then-recheck": before releasing the drain slot,
@@ -762,7 +813,7 @@ void ReactorConnection::DrainTask() {
     // close it because we can no longer guarantee progress on its frames.
     if (thread_pool_ == nullptr || dispatcher_ == nullptr) {
       drain_scheduled_.store(false, std::memory_order_release);
-      closing_.store(true, std::memory_order_release);
+      MarkClosingImmediately();
     } else {
       (void)SubmitDrainTaskToPool("reactor_drain_resubmit_failed");
     }
@@ -775,17 +826,18 @@ void ReactorConnection::DrainTask() {
   // EnqueueResponse's EPOLLOUT fallback, in which case OnWritable will
   // perform the unregister once the queue empties.
   if (read_eof_.load(std::memory_order_acquire) && !closing_.load(std::memory_order_acquire)) {
-    bool write_queue_empty = false;
-    {
-      std::lock_guard<std::mutex> lock(write_mutex_);
-      write_queue_empty = write_queue_.empty();
-    }
-    if (write_queue_empty) {
-      closing_.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    if (write_queue_.empty()) {
+      MarkClosingImmediatelyLocked();
     }
   }
 
-  if (closing_.load(std::memory_order_acquire) && reactor_ != nullptr) {
+  bool should_unregister = false;
+  if (closing_.load(std::memory_order_acquire)) {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    should_unregister = !close_after_write_drain_ || write_queue_.empty();
+  }
+  if (should_unregister && reactor_ != nullptr) {
     // Ask the reactor to unregister us. This is safe from a worker: the
     // IoReactor::Unregister acquires the connections_ write lock, and the
     // event loop will observe the erase on its next Poll iteration. The
@@ -796,6 +848,11 @@ void ReactorConnection::DrainTask() {
 }
 
 bool ReactorConnection::EnqueueResponse(std::string response) {
+  std::unique_lock<std::mutex> lock(write_mutex_);
+  return EnqueueResponseLocked(std::move(response), /*terminal=*/false);
+}
+
+bool ReactorConnection::EnqueueResponseLocked(std::string response, bool terminal) {
   // Payload + CRLF terminator. We hold write_mutex_ across the entire
   // enqueue + optional inline drain + optional ArmWrite sequence so that
   // the event loop's OnWritable cannot race and pop frames out from under
@@ -805,18 +862,23 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
   // Holding `write_mutex_` across `reactor_->ArmWrite` is safe: ArmWrite
   // only acquires the reactor's `mux_lifecycle_` (shared). No IoReactor
   // method ever takes `write_mutex_`, so there is no reverse lock order.
+  if (response.size() > std::numeric_limits<size_t>::max() - kResponseTerminatorLen) {
+    MarkClosingImmediatelyLocked();
+    return false;
+  }
   const size_t payload_bytes = response.size() + kResponseTerminatorLen;
 
-  std::unique_lock<std::mutex> lock(write_mutex_);
-
-  if (closing_.load(std::memory_order_acquire)) {
+  if (terminal) {
+    closing_.store(true, std::memory_order_release);
+    close_after_write_drain_ = false;
+  } else if (closing_.load(std::memory_order_acquire)) {
     return false;
   }
 
   // Slow-reader backpressure: cap the per-connection unsent byte budget.
   // Design doc §7 R3: exceeding the cap means the peer cannot keep up and
   // the server forcibly closes the connection to protect its own memory.
-  if (write_queue_bytes_ + payload_bytes > max_write_queue_bytes_) {
+  if (write_queue_bytes_ > max_write_queue_bytes_ || payload_bytes > max_write_queue_bytes_ - write_queue_bytes_) {
     mygram::utils::StructuredLog()
         .Event("reactor_write_queue_overflow")
         .Field("fd", static_cast<int64_t>(fd_))
@@ -824,10 +886,14 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
         .Field("attempted_bytes", static_cast<uint64_t>(payload_bytes))
         .Field("cap_bytes", static_cast<uint64_t>(max_write_queue_bytes_))
         .Warn();
-    closing_.store(true, std::memory_order_release);
+    MarkClosingImmediatelyLocked();
     return false;
   }
 
+  if (payload_bytes > std::numeric_limits<size_t>::max() - kQueueEntryOverheadBytes) {
+    MarkClosingImmediatelyLocked();
+    return false;
+  }
   const size_t response_budget_bytes = payload_bytes + kQueueEntryOverheadBytes;
   if (memory_budget_ != nullptr && !memory_budget_->TryReserve(response_budget_bytes)) {
     mygram::utils::StructuredLog()
@@ -838,7 +904,7 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
         .Field("used_bytes", static_cast<uint64_t>(memory_budget_->UsedBytes()))
         .Field("cap_bytes", static_cast<uint64_t>(memory_budget_->LimitBytes()))
         .Warn();
-    closing_.store(true, std::memory_order_release);
+    MarkClosingImmediatelyLocked();
     return false;
   }
   auto reservation_guard = mygram::utils::ScopeGuard([this, response_budget_bytes]() {
@@ -860,17 +926,18 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
   // immediately, register EPOLLOUT on EAGAIN).
   if (!write_armed_) {
     if (!DrainWriteQueueLocked()) {
-      closing_.store(true, std::memory_order_release);
+      MarkClosingImmediatelyLocked();
       return false;  // fatal send error
     }
     if (write_queue_.empty()) {
+      close_after_write_drain_ = false;
       return true;  // fully drained inline — no arming required
     }
     // Residue remains → ask the reactor to arm kWritable so the event
     // loop takes over.
     if (reactor_ == nullptr) {
       // Unit-test harness with no reactor and residue we cannot arm on.
-      closing_.store(true, std::memory_order_release);
+      MarkClosingImmediatelyLocked();
       return false;
     }
     auto arm_result = reactor_->ArmWrite(fd_, this);
@@ -880,13 +947,14 @@ bool ReactorConnection::EnqueueResponse(std::string response) {
           .Field("fd", static_cast<int64_t>(fd_))
           .Field("error", arm_result.error().to_string())
           .Warn();
-      closing_.store(true, std::memory_order_release);
+      MarkClosingImmediatelyLocked();
       return false;
     }
     write_armed_ = true;
   }
   // Queue was already armed — event loop's OnWritable will pick up the
   // new entries when it next fires.
+  close_after_write_drain_ = terminal && !write_queue_.empty();
   return true;
 }
 

@@ -15,14 +15,19 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <future>
+#include <locale>
 #include <mutex>
 #include <optional>
+#include <sstream>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -33,12 +38,33 @@
 #include "client/search_expression.h"
 #include "client/wire_quoting.h"
 #include "index/index.h"
+#include "query/query_ast.h"
 #include "server/tcp_server.h"
 #include "storage/document_store.h"
 #include "utils/string_utils.h"
 
 using namespace mygramdb::client;
 using namespace mygramdb;
+
+namespace {
+
+class CommaGroupingNumpunct final : public std::numpunct<char> {
+ protected:
+  char do_decimal_point() const override { return ','; }
+  char do_thousands_sep() const override { return ','; }
+  std::string do_grouping() const override { return "\3"; }
+};
+
+class ScopedGlobalLocale {
+ public:
+  explicit ScopedGlobalLocale(const std::locale& locale) : previous_(std::locale::global(locale)) {}
+  ~ScopedGlobalLocale() { (void)std::locale::global(previous_); }
+
+ private:
+  std::locale previous_;
+};
+
+}  // namespace
 
 TEST(MygramClientErrorProtocolTest, ParsesCodedAndLegacyErrorsTable) {
   struct TestCase {
@@ -96,6 +122,10 @@ class MygramClientTest : public ::testing::Test {
     full_config_.tables.clear();
     full_config_.tables.push_back(table_context_.config);
     full_config_.dump.interval_sec = 0;  // Disable snapshot scheduler in tests
+    // This fixture has no binlog reader; keep its replication configuration
+    // valid for runtime SET validation and make replication status accurately
+    // report the unconfigured state exercised by these tests.
+    full_config_.replication.enable = false;
 
     // Start server on random port
     server::ServerConfig server_config;
@@ -211,15 +241,12 @@ TEST_F(MygramClientTest, SingleByteReceiveBufferReadsCompleteResponse) {
   EXPECT_TRUE(client.Info());
 }
 
-// Regression tests for a client-side frame-completion bug: SEARCH/COUNT with
-// HIGHLIGHT or an active DEBUG flag, and a non-empty SHOW VARIABLES table, all
-// carry more bytes after their first \r\n -- but that first line is
-// byte-for-byte identical to a genuinely single-line reply until the rest
-// arrives. A chunk boundary landing right there (recv_buffer_size==1, or
-// exactly at the header's own length) used to make IsResponseComplete return
-// early, truncating the result and leaving the trailing bytes on the socket
-// to desync the next command (see ResponseCompletionState::expect_multiline_tail
-// and protocol_detection.h's "+-" table-border check).
+// SEARCH/COUNT with HIGHLIGHT or an active DEBUG flag, and a non-empty SHOW
+// VARIABLES table, all carry more bytes after their first \r\n, yet that first
+// line is byte-for-byte identical to a genuinely single-line reply until the
+// rest arrives. A chunk boundary landing right there (recv_buffer_size==1, or
+// exactly at the header's own length) must not end the frame early (see
+// BeginResponseFrame in protocol_detection.h).
 TEST_F(MygramClientTest, SingleByteReceiveBufferSurvivesSearchWithHighlights) {
   const std::string original_text = "Hello world example";
   const std::string normalized = mygram::utils::NormalizeText(original_text, true, "keep", true);
@@ -304,6 +331,190 @@ TEST_F(MygramClientTest, SingleByteReceiveBufferSurvivesNonEmptyShowVariables) {
     EXPECT_NE(result->find("logging.level"), std::string::npos) << "recv_buffer_size=" << recv_buffer_size;
 
     EXPECT_TRUE(client.Info()) << "recv_buffer_size=" << recv_buffer_size;
+  }
+}
+
+TEST_F(MygramClientTest, QuotedHighlightLiteralSearchAndCountReturnPromptly) {
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 2000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  auto search = client.Search("testdb.test", "syntax highlight editor");
+  ASSERT_TRUE(search) << search.error().message();
+  EXPECT_EQ(search->total_count, 0U);
+
+  auto count = client.Count("testdb.test", "syntax highlight editor");
+  ASSERT_TRUE(count) << count.error().message();
+  EXPECT_EQ(count->count, 0U);
+
+  auto raw = client.SendCommand("SEARCH testdb.test 'use highlight here'");
+  ASSERT_TRUE(raw) << raw.error().message();
+  EXPECT_EQ(*raw, "OK RESULTS 0");
+}
+
+TEST_F(MygramClientTest, ErrorReplyUnderHighlightOrDebugCompletesWithServerCode) {
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.timeout_ms = 2000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  auto highlighted = client.SearchWithHighlights("testdb.missing", "hello", 10);
+  ASSERT_FALSE(highlighted);
+  EXPECT_EQ(highlighted.error().code(), mygram::utils::ErrorCode::kTableNotFound) << highlighted.error().message();
+
+  ASSERT_TRUE(client.EnableDebug());
+  auto debug_search = client.Search("testdb.missing", "hello", 10);
+  ASSERT_FALSE(debug_search);
+  EXPECT_EQ(debug_search.error().code(), mygram::utils::ErrorCode::kTableNotFound) << debug_search.error().message();
+  auto debug_count = client.Count("testdb.missing", "hello");
+  ASSERT_FALSE(debug_count);
+  EXPECT_EQ(debug_count.error().code(), mygram::utils::ErrorCode::kTableNotFound) << debug_count.error().message();
+
+  EXPECT_TRUE(client.IsConnected());
+  EXPECT_TRUE(client.Info());
+}
+
+TEST_F(MygramClientTest, RawDebugOnFramesFollowingSearchAtHeaderSizedReads) {
+  AddTestDocuments();
+  const size_t header_length = std::string("OK RESULTS 2 2 1\r\n").size();
+
+  for (const char* debug_on : {"DEBUG ON", "debug  on"}) {
+    ClientConfig config;
+    config.host = "127.0.0.1";
+    config.port = server_->GetPort();
+    config.recv_buffer_size = static_cast<uint32_t>(header_length);
+    MygramClient client(config);
+    ASSERT_TRUE(client.Connect());
+
+    auto toggled = client.SendCommand(debug_on);
+    ASSERT_TRUE(toggled) << toggled.error().message();
+    EXPECT_EQ(*toggled, "OK DEBUG_ON");
+
+    auto result = client.Search("testdb.test", "hello", 100);
+    ASSERT_TRUE(result) << debug_on << ": " << result.error().message();
+    EXPECT_EQ(result->results.size(), 2U) << debug_on;
+    ASSERT_TRUE(result->debug.has_value()) << debug_on;
+    EXPECT_GT(result->debug->terms, 0U) << debug_on;
+
+    auto info = client.Info();
+    ASSERT_TRUE(info) << debug_on << ": " << info.error().message();
+    EXPECT_FALSE(info->version.empty()) << debug_on;
+  }
+}
+
+// Run under ThreadSanitizer: the DEBUG flag must only ever be touched under
+// the command lock, and every SEARCH must be framed with the server's flag.
+TEST_F(MygramClientTest, DebugToggleRacingSearchKeepsFramingConsistent) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  constexpr int kIterations = 50;
+  std::atomic<int> toggle_failures{0};
+  std::atomic<int> search_failures{0};
+  std::string first_search_failure;
+
+  std::thread toggler([this, &toggle_failures]() {
+    for (int i = 0; i < kIterations; ++i) {
+      if (!client_->EnableDebug() || !client_->DisableDebug()) {
+        toggle_failures++;
+      }
+    }
+  });
+  std::thread searcher([this, &search_failures, &first_search_failure]() {
+    for (int i = 0; i < kIterations; ++i) {
+      auto result = client_->Search("testdb.test", "hello", 100);
+      if (!result || result->results.size() != 2U) {
+        if (search_failures++ == 0) {
+          first_search_failure = result ? "unexpected result count" : result.error().message();
+        }
+      }
+    }
+  });
+  toggler.join();
+  searcher.join();
+
+  EXPECT_EQ(toggle_failures.load(), 0);
+  EXPECT_EQ(search_failures.load(), 0) << first_search_failure;
+  EXPECT_TRUE(client_->Info());
+}
+
+TEST_F(MygramClientTest, SingleByteReceiveBufferFacetThenInfo) {
+  AddTestDocuments();
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.recv_buffer_size = 1;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  auto facet = client.Facet("testdb.test", "status");
+  ASSERT_TRUE(facet) << facet.error().message();
+  EXPECT_EQ(facet->facets.size(), 2U);
+
+  auto info = client.Info();
+  ASSERT_TRUE(info) << info.error().message();
+  EXPECT_FALSE(info->version.empty());
+}
+
+TEST_F(MygramClientTest, SingleByteReceiveBufferDebugHighlightSearchThenInfo) {
+  const std::string original_text = "Hello world example";
+  const std::string normalized = mygram::utils::NormalizeText(original_text, true, "keep", true);
+  ASSERT_TRUE(doc_store_->AddDocument("highlight_doc", {}, normalized, original_text));
+  index_->AddDocument(1, normalized);
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = server_->GetPort();
+  config.recv_buffer_size = 1;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+  ASSERT_TRUE(client.EnableDebug());
+
+  auto result = client.SearchWithHighlights("testdb.test", "hello", 10);
+  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_EQ(result->results.size(), 1U);
+  EXPECT_EQ(result->results[0].primary_key, "highlight_doc");
+
+  auto info = client.Info();
+  ASSERT_TRUE(info) << info.error().message();
+  EXPECT_FALSE(info->version.empty());
+}
+
+TEST_F(MygramClientTest, ConfigHelpBodyWithBlankLinesIsReadWholeAtSmallReads) {
+  ASSERT_TRUE(client_->Connect());
+  auto baseline_path = client_->SendCommand("CONFIG HELP mysql.port");
+  ASSERT_TRUE(baseline_path) << baseline_path.error().message();
+  ASSERT_NE(baseline_path->find("Type:"), std::string::npos) << *baseline_path;
+  auto baseline_sections = client_->SendCommand("CONFIG HELP");
+  ASSERT_TRUE(baseline_sections) << baseline_sections.error().message();
+  ASSERT_NE(baseline_sections->find("Use \"CONFIG HELP"), std::string::npos) << *baseline_sections;
+  const size_t header_length = std::string("+OK\r\n").size();
+
+  for (size_t recv_buffer_size : {size_t{1}, header_length}) {
+    ClientConfig config;
+    config.host = "127.0.0.1";
+    config.port = server_->GetPort();
+    config.recv_buffer_size = static_cast<uint32_t>(recv_buffer_size);
+    MygramClient client(config);
+    ASSERT_TRUE(client.Connect()) << "recv_buffer_size=" << recv_buffer_size;
+
+    auto path_help = client.SendCommand("CONFIG HELP mysql.port");
+    ASSERT_TRUE(path_help) << "recv_buffer_size=" << recv_buffer_size << ": " << path_help.error().message();
+    EXPECT_EQ(*path_help, *baseline_path) << "recv_buffer_size=" << recv_buffer_size;
+
+    auto section_help = client.SendCommand("CONFIG HELP");
+    ASSERT_TRUE(section_help) << "recv_buffer_size=" << recv_buffer_size << ": " << section_help.error().message();
+    EXPECT_EQ(*section_help, *baseline_sections) << "recv_buffer_size=" << recv_buffer_size;
+
+    auto info = client.Info();
+    ASSERT_TRUE(info) << "recv_buffer_size=" << recv_buffer_size << ": " << info.error().message();
+    EXPECT_FALSE(info->version.empty()) << "recv_buffer_size=" << recv_buffer_size;
   }
 }
 
@@ -2042,6 +2253,137 @@ TEST_F(MygramClientTest, LongOperationsUseDedicatedTimeouts) {
   ASSERT_TRUE(verify) << verify.error().message();
 }
 
+TEST_F(MygramClientTest, LongOperationTimeoutsIgnoreKeywordCaseAndSpacing) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(addr.sin_port);
+  config.timeout_ms = 30;
+  config.optimize_timeout_ms = 500;
+  config.dump_load_timeout_ms = 500;
+  config.dump_verify_timeout_ms = 500;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::thread responder([listen_fd]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+#ifdef SO_NOSIGPIPE
+      int enabled = 1;
+      (void)setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#endif
+      constexpr std::array<std::string_view, 3> kResponses = {
+          "OK OPTIMIZED terms=0 delta=0\r\n",
+          "OK LOADED /tmp/client-timeout-test.dmp\r\n",
+          "OK DUMP_VERIFIED /tmp/client-timeout-test.dmp\r\n",
+      };
+      for (const auto response : kResponses) {
+        char request[256];
+        if (recv(client_fd, request, sizeof(request), 0) <= 0) {
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+#ifdef MSG_NOSIGNAL
+        constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+        constexpr int kSendFlags = 0;
+#endif
+        if (send(client_fd, response.data(), response.size(), kSendFlags) <= 0) {
+          break;
+        }
+      }
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  const auto optimize = client.SendCommand("optimize");
+  const auto load = client.SendCommand("dump  load /tmp/client-timeout-test.dmp");
+  const auto verify = client.SendCommand("Dump\xE3\x80\x80Verify /tmp/client-timeout-test.dmp");
+  responder.join();
+
+  ASSERT_TRUE(optimize) << optimize.error().message();
+  ASSERT_TRUE(load) << load.error().message();
+  ASSERT_TRUE(verify) << verify.error().message();
+}
+
+TEST_F(MygramClientTest, MalformedQuotedValuesFailGetAndSearchAlike) {
+  const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listen_fd, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(listen_fd, 1), 0);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(addr.sin_port);
+  config.timeout_ms = 2000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::thread responder([listen_fd]() {
+    const int client_fd = accept(listen_fd, nullptr, nullptr);
+    if (client_fd >= 0) {
+#ifdef SO_NOSIGPIPE
+      int enabled = 1;
+      (void)setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#endif
+      constexpr std::array<std::string_view, 4> kResponses = {
+          "OK DOC pk name=\"unterminated\r\n",
+          "OK DOC pk name=\"bad\\xZZ\"\r\n",
+          "OK RESULTS 1 \"unterminated\r\n",
+          "OK RESULTS 1 \"bad\\xZZ\"\r\n",
+      };
+      for (const auto response : kResponses) {
+        char request[256];
+        if (recv(client_fd, request, sizeof(request), 0) <= 0) {
+          break;
+        }
+#ifdef MSG_NOSIGNAL
+        constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+        constexpr int kSendFlags = 0;
+#endif
+        if (send(client_fd, response.data(), response.size(), kSendFlags) <= 0) {
+          break;
+        }
+      }
+      close(client_fd);
+    }
+    close(listen_fd);
+  });
+
+  const auto get_unterminated = client.Get("t", "pk");
+  const auto get_bad_escape = client.Get("t", "pk");
+  const auto search_unterminated = client.Search("t", "q");
+  const auto search_bad_escape = client.Search("t", "q");
+  responder.join();
+
+  ASSERT_FALSE(get_unterminated);
+  EXPECT_EQ(get_unterminated.error().code(), mygram::utils::ErrorCode::kClientProtocolError);
+  ASSERT_FALSE(get_bad_escape);
+  EXPECT_EQ(get_bad_escape.error().code(), mygram::utils::ErrorCode::kClientProtocolError);
+  ASSERT_FALSE(search_unterminated);
+  EXPECT_EQ(search_unterminated.error().code(), mygram::utils::ErrorCode::kClientProtocolError);
+  ASSERT_FALSE(search_bad_escape);
+  EXPECT_EQ(search_bad_escape.error().code(), mygram::utils::ErrorCode::kClientProtocolError);
+}
+
 TEST_F(MygramClientTest, SendCommandRejectsResponseLargerThanConfiguredLimit) {
   const int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
   ASSERT_GE(listen_fd, 0);
@@ -2878,14 +3220,10 @@ TEST_F(MygramClientCApiTest, FreeParseExpression_NullSafety) {
 }
 
 /**
- * @brief Test that control characters in search queries are stripped by EscapeQueryString
+ * @brief Test that control characters in search queries never reach the wire
  *
- * EscapeQueryString now strips bytes < 0x20 to prevent command injection.
- * We test indirectly via Search: a query with embedded \r\n should not cause
- * protocol-level issues (the control chars are stripped before sending).
- *
- * Note: The ValidateNoControlCharacters check runs before EscapeQueryString,
- * so this tests that the validation layer rejects control characters.
+ * The ValidateNoControlCharacters check runs before QuoteWireToken, so this
+ * tests that the validation layer rejects control characters.
  */
 TEST_F(MygramClientTest, EscapeQueryStringStripsControlCharacters) {
   AddTestDocuments();
@@ -3046,6 +3384,64 @@ TEST_F(MygramClientTest, RejectsProtocolDelimitersInBareIdentifiers) {
   EXPECT_EQ(facet_result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
 }
 
+// The client is left unconnected: reaching the send path would report
+// kClientNotConnected, so kClientInvalidArgument proves nothing was sent.
+TEST_F(MygramClientTest, RejectsUnicodeWhitespaceInBareIdentifiersBeforeSending) {
+  constexpr std::string_view kIdeographicSpace = "\xE3\x80\x80";
+  constexpr std::string_view kNoBreakSpace = "\xC2\xA0";
+  constexpr std::string_view kNextLine = "\xC2\x85";
+  for (const auto space : {kIdeographicSpace, kNoBreakSpace, kNextLine}) {
+    const std::string table = "testdb.te" + std::string(space) + "st";
+    const std::string key = "sta" + std::string(space) + "tus";
+
+    const auto search = client_->Search(table, "hello", 10);
+    ASSERT_FALSE(search);
+    EXPECT_EQ(search.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+
+    const auto count = client_->Count("testdb.test", "hello", {}, {}, {{key, "active"}});
+    ASSERT_FALSE(count);
+    EXPECT_EQ(count.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+
+    const auto facet = client_->Facet(table, "status");
+    ASSERT_FALSE(facet);
+    EXPECT_EQ(facet.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+
+    const auto sync = client_->Sync(table);
+    ASSERT_FALSE(sync);
+    EXPECT_EQ(sync.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument);
+  }
+}
+
+TEST_F(MygramClientTest, SearchUnicodeWhitespaceMatchesAsciiWhitespaceOnServer) {
+  AddTestDocuments();
+  ASSERT_TRUE(client_->Connect());
+
+  const auto ascii = client_->Search("testdb.test", "hello world", 10);
+  ASSERT_TRUE(ascii) << ascii.error().message();
+
+  // The client quotes Unicode whitespace inside a literal token; the server's
+  // query parser and AST tokenizer must still interpret it as the same
+  // separator as an ASCII space.
+  const auto ideographic_space = client_->Search("testdb.test",
+                                                 "hello\xE3\x80\x80"
+                                                 "world",
+                                                 10);
+  ASSERT_TRUE(ideographic_space) << ideographic_space.error().message();
+  ASSERT_EQ(ideographic_space->total_count, ascii->total_count);
+  ASSERT_EQ(ideographic_space->results.size(), ascii->results.size());
+  for (size_t i = 0; i < ascii->results.size(); ++i) {
+    EXPECT_EQ(ideographic_space->results[i].primary_key, ascii->results[i].primary_key);
+  }
+}
+
+TEST_F(MygramClientTest, SetVariableRejectsNameThatWouldSplitTheCommand) {
+  for (const std::string name : {"logging.level = 1 x", "logging\"level", "logging\xE3\x80\x80level"}) {
+    const auto result = client_->SetVariable(name, "info");
+    ASSERT_FALSE(result) << name;
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kClientInvalidArgument) << name;
+  }
+}
+
 /**
  * @brief Test that Search emits OFFSET when limit==0 and offset>0
  *
@@ -3068,6 +3464,190 @@ TEST_F(MygramClientTest, SearchWithOffsetOnlyAppliesOffset) {
   auto raw = client_->SendCommand("SEARCH testdb.test w OFFSET 1");
   ASSERT_TRUE(raw) << "Raw SEARCH ... OFFSET 1 failed: " << raw.error().message();
   EXPECT_NE(raw->find("OK RESULTS"), std::string::npos);
+}
+
+TEST(MygramClientLocaleTest, NumericSearchAndFacetCommandsUseClassicLocaleOnWire) {
+  const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(::listen(listener, 1), 0);
+
+  socklen_t address_length = sizeof(address);
+  ASSERT_EQ(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_length), 0);
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.timeout_ms = 2000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::vector<std::string> commands;
+  std::thread server_thread([&] {
+    const int connection = ::accept(listener, nullptr, nullptr);
+    if (connection < 0) {
+      return;
+    }
+
+    constexpr std::array<std::string_view, 4> kResponses = {"OK RESULTS 0\r\n\r\n", "OK RESULTS 0\r\n",
+                                                            "OK FACET 0 0\r\n\r\n\r\n", "OK COUNT 1234\r\n"};
+    while (commands.size() < kResponses.size()) {
+      std::string command;
+      std::array<char, 256> buffer{};
+      while (command.find("\r\n") == std::string::npos) {
+        const ssize_t received = ::recv(connection, buffer.data(), buffer.size(), 0);
+        if (received <= 0) {
+          break;
+        }
+        command.append(buffer.data(), static_cast<size_t>(received));
+      }
+      if (command.empty() || command.find("\r\n") == std::string::npos) {
+        break;
+      }
+      command.resize(command.find("\r\n") + 2);
+      commands.push_back(std::move(command));
+
+      const std::string_view response = kResponses[commands.size() - 1];
+      size_t sent = 0;
+      while (sent < response.size()) {
+        const ssize_t written = ::send(connection, response.data() + sent, response.size() - sent, 0);
+        if (written <= 0) {
+          break;
+        }
+        sent += static_cast<size_t>(written);
+      }
+      if (sent != response.size()) {
+        break;
+      }
+    }
+
+    ::close(connection);
+  });
+
+  {
+    const std::locale hostile_locale(std::locale::classic(), new CommaGroupingNumpunct());
+    const ScopedGlobalLocale restore_locale(hostile_locale);
+    std::ostringstream locale_probe;
+    locale_probe << 1234;
+    EXPECT_EQ(locale_probe.str(), "1,234") << "The test locale must exercise grouping";
+
+    SearchOptions options;
+    options.limit = 1234;
+    options.offset = 5678;
+    options.fuzzy_distance = 2;
+    options.highlight =
+        HighlightOptions{.open_tag = "<b>", .close_tag = "</b>", .snippet_length = 10000, .max_fragments = 100};
+
+    const auto search = client.Search("t", "q", options);
+    EXPECT_TRUE(search) << (search ? std::string{} : search.error().message());
+    const auto raw_search = client.SearchRaw("t", "q", 1234, 5678);
+    EXPECT_TRUE(raw_search) << (raw_search ? std::string{} : raw_search.error().message());
+    const auto facet = client.Facet("t", "c", "", 1234, {}, {}, {}, 5678);
+    EXPECT_TRUE(facet) << (facet ? std::string{} : facet.error().message());
+    const auto count = client.Count("t", "q");
+    EXPECT_TRUE(count) << (count ? std::string{} : count.error().message());
+    if (count) {
+      EXPECT_EQ(count->count, 1234U);
+    }
+  }
+
+  client.Disconnect();
+  server_thread.join();
+  ::close(listener);
+
+  ASSERT_EQ(commands.size(), 4U);
+  EXPECT_EQ(commands[0],
+            "SEARCH t q FUZZY 2 HIGHLIGHT TAG <b> </b> SNIPPET_LEN 10000 MAX_FRAGMENTS 100 LIMIT 5678,1234\r\n");
+  EXPECT_EQ(commands[1], "SEARCH t q LIMIT 5678,1234\r\n");
+  EXPECT_EQ(commands[2], "FACET t c OFFSET 5678 LIMIT 1234\r\n");
+  EXPECT_EQ(commands[3], "COUNT t q\r\n");
+}
+
+TEST(MygramClientLocaleTest, CacheStatisticsParsesDotDecimalUnderCommaLocale) {
+  const char* current_locale = std::setlocale(LC_NUMERIC, nullptr);
+  ASSERT_NE(current_locale, nullptr);
+  struct NumericLocaleGuard {
+    explicit NumericLocaleGuard(const char* locale) : original_locale(locale) {}
+    ~NumericLocaleGuard() { std::setlocale(LC_NUMERIC, original_locale.c_str()); }
+
+    std::string original_locale;
+  } locale_guard(current_locale);
+
+  bool selected_locale = false;
+  for (const char* candidate : {"de_DE.UTF-8", "de_DE.utf8", "de_DE"}) {
+    if (std::setlocale(LC_NUMERIC, candidate) != nullptr) {
+      selected_locale = true;
+      break;
+    }
+  }
+  if (!selected_locale) {
+    GTEST_SKIP() << "No German numeric locale is installed";
+  }
+  ASSERT_STREQ(std::localeconv()->decimal_point, ",");
+
+  const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(::listen(listener, 1), 0);
+
+  socklen_t address_length = sizeof(address);
+  ASSERT_EQ(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_length), 0);
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.timeout_ms = 2000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  std::string command;
+  std::thread server_thread([&] {
+    const int connection = ::accept(listener, nullptr, nullptr);
+    if (connection < 0) {
+      return;
+    }
+    std::array<char, 256> buffer{};
+    while (command.find("\r\n") == std::string::npos) {
+      const ssize_t received = ::recv(connection, buffer.data(), buffer.size(), 0);
+      if (received <= 0) {
+        break;
+      }
+      command.append(buffer.data(), static_cast<size_t>(received));
+    }
+    constexpr std::string_view kResponse =
+        "OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\ntotal_queries: 1234\r\nhit_rate: 0.85\r\nEND\r\n";
+    size_t sent = 0;
+    while (sent < kResponse.size()) {
+      const ssize_t written = ::send(connection, kResponse.data() + sent, kResponse.size() - sent, 0);
+      if (written <= 0) {
+        break;
+      }
+      sent += static_cast<size_t>(written);
+    }
+    ::close(connection);
+  });
+
+  const auto stats = client.GetCacheStatistics();
+  EXPECT_TRUE(stats) << (stats ? std::string{} : stats.error().message());
+  if (stats) {
+    EXPECT_DOUBLE_EQ(stats->hit_rate, 0.85);
+    EXPECT_EQ(stats->total_queries, 1234U);
+  }
+  client.Disconnect();
+  server_thread.join();
+  ::close(listener);
+
+  EXPECT_EQ(command, "CACHE STATS\r\n");
 }
 
 /**
@@ -3427,9 +4007,8 @@ TEST_F(MygramClientTest, ConcurrentSendCommandsSerialize) {
  * @brief Test that searching with an empty query string returns a server
  *        error (not a client-side parse error or a malformed protocol).
  *
- * Regression test for the empty-string quoting fix: EscapeQueryString now
- * emits `""` for an empty arg, so the wire form is `SEARCH table ""` and
- * the server can parse it as an explicit empty token.
+ * QuoteWireToken emits `""` for an empty arg, so the wire form is
+ * `SEARCH table ""` and the server parses it as an explicit empty token.
  */
 TEST_F(MygramClientTest, SearchEmptyQueryReturnsError) {
   AddTestDocuments();
@@ -3518,264 +4097,214 @@ TEST_F(MygramClientTest, CApiReplicationStatus) {
 }
 
 // =============================================================================
-// Unit tests for IsResponseComplete (protocol detection logic)
+// Unit tests for the response-frame detector (protocol_detection.h)
 // =============================================================================
 
+using mygramdb::client::detail::BeginResponseFrame;
 using mygramdb::client::detail::IsResponseComplete;
-using mygramdb::client::detail::ResponseCompletionState;
+using mygramdb::client::detail::TokenizeRequest;
 
-/**
- * @brief Test single-line response detection
- */
-TEST(IsResponseCompleteTest, SingleLineResponseComplete) {
-  EXPECT_TRUE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK COUNT 42\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK DOC pk1 status=active\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK SAVED /path/to/dump\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK LOADED /path/to/dump\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STOPPED\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STARTED\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK DEBUG ON\r\n"));
-  EXPECT_TRUE(IsResponseComplete("ERROR Table not found\r\n"));
+namespace {
+
+/// Feed @p wire to a fresh frame for @p command one byte at a time and return
+/// how many bytes had arrived when the frame first reported complete.
+size_t BytesUntilComplete(std::string_view command, std::string_view wire, bool debug_mode = false) {
+  auto state = BeginResponseFrame(command, debug_mode);
+  std::string received;
+  for (char byte : wire) {
+    received += byte;
+    if (IsResponseComplete(received, state)) {
+      return received.size();
+    }
+  }
+  return std::string::npos;
 }
 
-TEST(IsResponseCompleteTest, SingleLineConfigVerifyErrorComplete) {
-  EXPECT_TRUE(IsResponseComplete("ERROR Configuration validation failed: missing required table name\r\n"));
+/// A wire frame must complete exactly at its last byte under every split:
+/// byte by byte, and as a single read.
+void ExpectExactFrame(std::string_view command, std::string_view wire, bool debug_mode = false) {
+  EXPECT_EQ(BytesUntilComplete(command, wire, debug_mode), wire.size()) << command << " / " << wire;
+  auto state = BeginResponseFrame(command, debug_mode);
+  EXPECT_TRUE(IsResponseComplete(wire, state)) << command << " / " << wire;
 }
 
-/**
- * @brief Test incomplete response (no CRLF at end)
- */
-TEST(IsResponseCompleteTest, IncompleteNoCrlf) {
-  EXPECT_FALSE(IsResponseComplete("OK RESULTS 5 pk1 pk2"));
-  EXPECT_FALSE(IsResponseComplete("OK INFO"));
-  EXPECT_FALSE(IsResponseComplete("OK INFO\r"));
-  EXPECT_FALSE(IsResponseComplete(""));
-  EXPECT_FALSE(IsResponseComplete("X"));
-  EXPECT_FALSE(IsResponseComplete("XY"));
+}  // namespace
+
+TEST(ResponseFrameTest, SingleLineRepliesEndAtFirstCrlf) {
+  ExpectExactFrame("SEARCH t hello", "OK RESULTS 5 pk1 pk2\r\n");
+  ExpectExactFrame("COUNT t hello", "OK COUNT 42\r\n");
+  ExpectExactFrame("GET t pk1", "OK DOC pk1 status=active\r\n");
+  ExpectExactFrame("DUMP LOAD /tmp/x", "OK LOADED /path/to/dump\r\n");
+  ExpectExactFrame("REPLICATION STOP", "OK REPLICATION_STOPPED\r\n");
+  ExpectExactFrame("DEBUG ON", "OK DEBUG_ON\r\n");
+  ExpectExactFrame("SEARCH t hello", "ERROR 4007 Table not found: t\r\n");
 }
 
-TEST(IsResponseCompleteTest, StatefulDetectionFindsCrlfAcrossAppendedChunks) {
-  ResponseCompletionState state;
-  std::string response = "OK COUNT 4\r";
-  EXPECT_FALSE(IsResponseComplete(response, state));
-
-  response += "\n";
-  EXPECT_TRUE(IsResponseComplete(response, state));
+TEST(ResponseFrameTest, IncompleteWithoutCrlf) {
+  auto state = BeginResponseFrame("INFO", false);
+  EXPECT_FALSE(IsResponseComplete("", state));
+  EXPECT_FALSE(IsResponseComplete("OK INFO", state));
+  EXPECT_FALSE(IsResponseComplete("OK INFO\r", state));
 }
 
-TEST(IsResponseCompleteTest, StatefulDetectionReusesFirstCrlfForMultilineCompletion) {
-  ResponseCompletionState state;
-  std::string response = "OK INFO\r\nversion: 1.0\r\n";
-  EXPECT_FALSE(IsResponseComplete(response, state));
-  EXPECT_NE(state.first_crlf, std::string_view::npos);
-
-  response += "END\r\n";
-  EXPECT_TRUE(IsResponseComplete(response, state));
+TEST(ResponseFrameTest, ErrorEndsEveryFramingMode) {
+  constexpr std::string_view kError = "ERROR 4007 Table not found: t\r\n";
+  ExpectExactFrame("SEARCH t hello HIGHLIGHT", kError);
+  ExpectExactFrame("SEARCH t hello HIGHLIGHT", kError, /*debug_mode=*/true);
+  ExpectExactFrame("SEARCH t hello", kError, /*debug_mode=*/true);
+  ExpectExactFrame("COUNT t hello", kError, /*debug_mode=*/true);
+  ExpectExactFrame("FACET t status", kError);
+  ExpectExactFrame("CONFIG HELP nope", "ERROR 8 Configuration path not found: nope\r\n");
+  ExpectExactFrame("INFO", "ERROR 6030 server busy\r\n");
 }
 
-/**
- * @brief Test INFO multi-line response requires END marker
- */
-TEST(IsResponseCompleteTest, InfoRequiresEndMarker) {
-  // Just the first line - NOT complete
-  EXPECT_FALSE(IsResponseComplete("OK INFO\r\n"));
-
-  // Partial response with some content but no END
-  EXPECT_FALSE(IsResponseComplete("OK INFO\r\n\r\n# Server\r\nversion: 1.0\r\n"));
-
-  // Complete response with END marker
-  EXPECT_TRUE(IsResponseComplete("OK INFO\r\n\r\n# Server\r\nversion: 1.0\r\nEND\r\n"));
-
-  // Minimal complete INFO
-  EXPECT_TRUE(IsResponseComplete("OK INFO\r\nEND\r\n"));
+TEST(ResponseFrameTest, QuotedHighlightLiteralDoesNotExpectHighlightRows) {
+  ExpectExactFrame("SEARCH t \"syntax highlight editor\"", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t 'highlight'", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t \"a \\\" HIGHLIGHT\"", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo FILTER tag = \"highlight\"", "OK RESULTS 0\r\n");
+  ExpectExactFrame("COUNT t \"syntax highlight editor\"", "OK COUNT 0\r\n");
+  ExpectExactFrame("COUNT t highlight", "OK COUNT 0\r\n");
 }
 
-/**
- * @brief Test REPLICATION STATUS multi-line response requires END marker
- */
-TEST(IsResponseCompleteTest, ReplicationRequiresEndMarker) {
-  // Just the first line - NOT complete
-  EXPECT_FALSE(IsResponseComplete("OK REPLICATION\r\n"));
-
-  // Partial response
-  EXPECT_FALSE(IsResponseComplete("OK REPLICATION\r\nstatus: running\r\n"));
-
-  // Complete response with END
-  EXPECT_TRUE(IsResponseComplete("OK REPLICATION\r\nstatus: running\r\nEND\r\n"));
-
-  // REPLICATION_STOPPED is a single-line response (different prefix)
-  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STOPPED\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK REPLICATION_STARTED\r\n"));
+TEST(ResponseFrameTest, HighlightRowsEndAtTrailingBlankLine) {
+  ExpectExactFrame("SEARCH t hello HIGHLIGHT", "OK RESULTS 1\r\npk1\thello <em>world</em>\r\n\r\n");
+  ExpectExactFrame("search t hello highlight snippet_len 10", "OK RESULTS 1\r\npk1\tx\r\n\r\n");
+  ExpectExactFrame("SEARCH t hello LIMIT 5 HIGHLIGHT", "OK RESULTS 0\r\n\r\n");
+  // Primary keys on the header line mean the server did not highlight.
+  ExpectExactFrame("SEARCH t hello HIGHLIGHT", "OK RESULTS 2 pk1 pk2\r\n");
 }
 
-TEST(IsResponseCompleteTest, SyncStatusRequiresEndMarker) {
-  EXPECT_FALSE(IsResponseComplete("OK SYNC_STATUS\r\n"));
-  EXPECT_FALSE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\nEND\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\nstatus=IDLE\r\nEND\r\n\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK SYNC_STATUS\r\ntable=users status=RUNNING\r\nEND\r\n"));
+TEST(ResponseFrameTest, HighlightOutsideClausePositionIsAnOperand) {
+  // AND, NOT, FILTER and SORT consume HIGHLIGHT as their operand.
+  ExpectExactFrame("SEARCH t foo AND highlight", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo AND NOT highlight", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo NOT highlight", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo FILTER tag = highlight", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo FILTER tag= highlight", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo FILTER highlight = \"x\"", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo SORT highlight DESC", "OK RESULTS 0\r\n");
+  ExpectExactFrame("SEARCH t foo SORT BY highlight", "OK RESULTS 0\r\n");
+  // Inside a Boolean search text HIGHLIGHT only counts at depth 0.
+  ExpectExactFrame("SEARCH t ( foo OR highlight )", "OK RESULTS 0\r\n");
 }
 
-/**
- * @brief Test CONFIG (+OK prefix) multi-line response requires double CRLF
- */
-TEST(IsResponseCompleteTest, ConfigRequiresDoubleCrlf) {
-  // Just +OK line - NOT complete
-  EXPECT_FALSE(IsResponseComplete("+OK\r\n"));
-
-  // Partial content
-  EXPECT_FALSE(IsResponseComplete("+OK\r\nmysql:\r\n  host: localhost\r\n"));
-
-  // Complete with double CRLF
-  EXPECT_TRUE(IsResponseComplete("+OK\r\nmysql:\r\n  host: localhost\r\n\r\n"));
-
-  // Also works for CONFIG HELP
-  EXPECT_TRUE(IsResponseComplete("+OK\r\nAvailable sections:\r\n  mysql\r\n\r\n"));
+TEST(ResponseFrameTest, HighlightClauseAfterOtherClauses) {
+  ExpectExactFrame("SEARCH t foo AND highlight HIGHLIGHT", "OK RESULTS 0\r\n\r\n");
+  ExpectExactFrame("SEARCH t foo FILTER tag = highlight HIGHLIGHT", "OK RESULTS 0\r\n\r\n");
+  ExpectExactFrame("SEARCH t foo FILTER tag=x highlight", "OK RESULTS 0\r\n\r\n");
+  ExpectExactFrame("SEARCH t foo SORT highlight DESC HIGHLIGHT", "OK RESULTS 0\r\n\r\n");
+  ExpectExactFrame("SEARCH t foo SORT ASC highlight", "OK RESULTS 0\r\n\r\n");
+  ExpectExactFrame("SEARCH t foo FUZZY highlight", "OK RESULTS 0\r\n\r\n");
+  ExpectExactFrame("SEARCH t foo FUZZY 2 LIMIT 5 OFFSET 1 highlight", "OK RESULTS 0\r\n\r\n");
+  ExpectExactFrame("SEARCH t foo OR bar HIGHLIGHT", "OK RESULTS 0\r\n\r\n");
 }
 
-/**
- * @brief Test FACET multi-line response requires double CRLF
- */
-TEST(IsResponseCompleteTest, FacetRequiresDoubleCrlf) {
-  // Just the first line - NOT complete
-  EXPECT_FALSE(IsResponseComplete("OK FACET 3\r\n"));
-
-  // Partial response
-  EXPECT_FALSE(IsResponseComplete("OK FACET 3\r\nval1\t10\r\n"));
-
-  // Complete with double CRLF
-  EXPECT_TRUE(IsResponseComplete("OK FACET 3\r\nval1\t10\r\nval2\t5\r\n\r\n"));
+TEST(ResponseFrameTest, DebugBlockEndsAtItsClosingBlankLine) {
+  ExpectExactFrame("SEARCH t hello", "OK RESULTS 2 2 1\r\n\r\n# DEBUG\r\nquery_time: 1.0ms\r\ncache: miss\r\n\r\n",
+                   /*debug_mode=*/true);
+  ExpectExactFrame("COUNT t hello", "OK COUNT 42\r\n\r\n# DEBUG\r\nquery_time: 2.0ms\r\ncache: miss\r\n\r\n",
+                   /*debug_mode=*/true);
 }
 
-/**
- * @brief Test SEARCH/COUNT with DEBUG block (multi-line via content detection)
- */
-TEST(IsResponseCompleteTest, SearchWithDebugRequiresDoubleCrlf) {
-  // Single-line SEARCH without debug - complete
-  EXPECT_TRUE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n"));
-
-  // SEARCH with DEBUG block - NOT complete (no double CRLF)
-  EXPECT_FALSE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n\r\n# DEBUG\r\nquery_time: 1.0ms\r\n"));
-
-  // SEARCH with DEBUG block - complete (double CRLF at end)
-  EXPECT_TRUE(IsResponseComplete("OK RESULTS 5 pk1 pk2\r\n\r\n# DEBUG\r\nquery_time: 1.0ms\r\ncache: miss\r\n\r\n"));
-
-  // COUNT with DEBUG block
-  EXPECT_TRUE(IsResponseComplete("OK COUNT 42\r\n\r\n# DEBUG\r\nquery_time: 2.0ms\r\n\r\n"));
+TEST(ResponseFrameTest, HighlightWithDebugEndsAtThirdBlankLine) {
+  ExpectExactFrame(
+      "SEARCH t hello HIGHLIGHT",
+      "OK RESULTS 1\r\npk1\tsnip\r\n\r\n# DEBUG\r\nquery_time: 1.0ms\r\nhighlight: on\r\ncache: miss\r\n\r\n\r\n",
+      /*debug_mode=*/true);
+  ExpectExactFrame("SEARCH t hello HIGHLIGHT", "OK RESULTS 0\r\n\r\n# DEBUG\r\ncache: miss\r\n\r\n\r\n",
+                   /*debug_mode=*/true);
 }
 
-TEST(IsResponseCompleteTest, SearchWithHighlightRequiresTrailingBlankLine) {
-  EXPECT_FALSE(IsResponseComplete("OK RESULTS 1\r\npk1\thello <em>world</em>\r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK RESULTS 1\r\npk1\thello <em>world</em>\r\n\r\n"));
+TEST(ResponseFrameTest, FacetEndsAfterBodyBlankLineAndTransportCrlf) {
+  ExpectExactFrame("FACET t status", "OK FACET 2 2\r\nval1\t10\r\nval2\t5\r\n\r\n\r\n");
+  ExpectExactFrame("FACET t status", "OK FACET 0 0\r\n\r\n\r\n");
+  ExpectExactFrame("FACET t status", "OK FACET 1 1\r\n#x\t3\r\n# query_time_ms: 1.0\r\n\r\n\r\n", /*debug_mode=*/true);
 }
 
-/**
- * @brief Regression test: a chunk boundary landing right after the SEARCH
- * header's own \r\n must not be mistaken for the end of a HIGHLIGHT reply.
- *
- * expect_multiline_tail is what SendCommand sets from the outgoing command
- * text (see CommandRequestsHighlight, mygramclient.cpp) -- without it, the
- * header alone ("OK RESULTS 1\r\n") satisfies the plain single-line check.
- */
-TEST(IsResponseCompleteTest, HighlightHeaderChunkBoundaryWaitsForRow) {
-  ResponseCompletionState state;
-  state.expect_multiline_tail = true;
-
-  std::string response = "OK RESULTS 1\r\n";
-  EXPECT_FALSE(IsResponseComplete(response, state)) << "header alone is not a complete HIGHLIGHT reply";
-
-  response += "pk1\thello <em>world</em>\r\n";
-  EXPECT_FALSE(IsResponseComplete(response, state)) << "missing the trailing blank line every HIGHLIGHT reply ends in";
-
-  response += "\r\n";
-  EXPECT_TRUE(IsResponseComplete(response, state));
+// A header without the distinct-value total ends at the first blank line; a
+// CRLF after it is skipped by the next frame as leftover.
+TEST(ResponseFrameTest, LegacyFacetHeaderEndsAtFirstBlankLine) {
+  ExpectExactFrame("FACET t status", "OK FACET 1\r\nlegacy\t7\r\n\r\n");
+  ExpectExactFrame("FACET t status", "OK FACET 0\r\n\r\n");
 }
 
-/**
- * @brief Regression test: a DEBUG block's own opening ("\r\n\r\n# DEBUG\r\n")
- * is itself a double CRLF and must not be mistaken for the block's end.
- *
- * expect_debug_marker is what SendCommand sets when DEBUG ON is active for
- * this connection (see debug_mode_, mygramclient.cpp). Without the marker
- * gate, a chunk boundary landing right after the opening double CRLF -- or
- * after the debug block's own header line, before any DEBUG content -- would
- * satisfy the plain "ends with \r\n\r\n" check.
- */
-TEST(IsResponseCompleteTest, DebugBlockOpeningChunkBoundaryWaitsForMarkerAndClose) {
-  ResponseCompletionState state;
-  state.expect_multiline_tail = true;
-  state.expect_debug_marker = true;
+TEST(ResponseFrameTest, LeadingBlankLineFromPreviousReplyIsSkipped) {
+  ExpectExactFrame("COUNT t hello", "\r\nOK COUNT 3\r\n");
+  ExpectExactFrame("INFO", "\r\nOK INFO\r\n\r\n# Server\r\nversion: 1.0\r\nEND\r\n");
 
-  std::string response = "OK RESULTS 2 2 1\r\n\r\n";
-  EXPECT_FALSE(IsResponseComplete(response, state)) << "the block's own opening double CRLF is not its end";
-
-  response += "# DEBUG\r\nquery_time: 1.0ms\r\ncache: miss\r\n";
-  EXPECT_FALSE(IsResponseComplete(response, state)) << "debug fields without the closing blank line are incomplete";
-
-  response += "\r\n";
-  EXPECT_TRUE(IsResponseComplete(response, state));
+  auto state = BeginResponseFrame("COUNT t hello", false);
+  ASSERT_TRUE(IsResponseComplete("\r\nOK COUNT 3\r\n", state));
+  EXPECT_EQ(state.frame_start, 2U);
 }
 
-/**
- * @brief Test CACHE_STATS multi-line response requires END marker
- */
-TEST(IsResponseCompleteTest, CacheStatsRequiresEndMarker) {
-  // Just the first line - NOT complete
-  EXPECT_FALSE(IsResponseComplete("OK CACHE_STATS\r\n"));
-
-  // Partial response with content but no END
-  EXPECT_FALSE(IsResponseComplete("OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\n"));
-
-  // Complete response with END marker
-  EXPECT_TRUE(IsResponseComplete("OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\nEND\r\n"));
-
-  // Minimal complete CACHE_STATS
-  EXPECT_TRUE(IsResponseComplete("OK CACHE_STATS\r\nEND\r\n"));
+TEST(ResponseFrameTest, EndMarkerMustBeAWholeLine) {
+  ExpectExactFrame("INFO",
+                   "OK INFO\r\n\r\n# Server\r\nversion: 1.0\r\n\r\n# Clients\r\nconnected_clients: 1\r\nEND\r\n");
+  ExpectExactFrame("REPLICATION STATUS", "OK REPLICATION\r\nstatus: running\r\nlast_error: xEND\r\nEND\r\n");
+  ExpectExactFrame("CACHE STATS", "OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\nEND\r\n");
+  ExpectExactFrame("DUMP INFO /tmp/snap.bin", "OK DUMP_INFO /tmp/snap.bin\r\nversion: 2\r\nEND\r\n");
+  ExpectExactFrame("DUMP STATUS", "OK DUMP_STATUS\r\nstatus: IDLE\r\nEND\r\n");
 }
 
-/**
- * @brief Test DUMP_INFO multi-line response requires END marker
- *
- * DUMP_INFO is unique because the first line carries a filepath suffix:
- * "OK DUMP_INFO /path/to/dump\r\n", so detection uses prefix matching.
- */
-TEST(IsResponseCompleteTest, DumpInfoRequiresEndMarker) {
-  // Just the first line - NOT complete
-  EXPECT_FALSE(IsResponseComplete("OK DUMP_INFO /tmp/snap.bin\r\n"));
-
-  // Partial response with content but no END
-  EXPECT_FALSE(IsResponseComplete("OK DUMP_INFO /tmp/snap.bin\r\nversion: 2\r\nfile_size: 1024\r\n"));
-
-  // Complete response with END marker
-  EXPECT_TRUE(IsResponseComplete("OK DUMP_INFO /tmp/snap.bin\r\nversion: 2\r\nEND\r\n"));
-
-  // Empty filepath edge case still requires END
-  EXPECT_FALSE(IsResponseComplete("OK DUMP_INFO \r\n"));
-  EXPECT_TRUE(IsResponseComplete("OK DUMP_INFO \r\nEND\r\n"));
+TEST(ResponseFrameTest, SyncStatusIncludesBlankLineAfterEnd) {
+  ExpectExactFrame("SYNC STATUS",
+                   "OK SYNC_STATUS\r\nstatus=IDLE message=\"No sync operation performed\"\r\nEND\r\n\r\n");
+  ExpectExactFrame("SYNC STATUS", "OK SYNC_STATUS\r\ntable=users status=IN_PROGRESS\r\nEND\r\n\r\n");
 }
 
-/**
- * @brief Test DUMP_STATUS multi-line response requires END marker
- */
-TEST(IsResponseCompleteTest, DumpStatusRequiresEndMarker) {
-  // Just the first line - NOT complete
-  EXPECT_FALSE(IsResponseComplete("OK DUMP_STATUS\r\n"));
+TEST(ResponseFrameTest, ConfigHelpBodyKeepsItsInternalBlankLine) {
+  ExpectExactFrame("CONFIG HELP mysql.port",
+                   "+OK\r\nmysql.port\r\n\r\nType: integer\r\nDefault: 3306\r\nDescription: MySQL port\r\n\r\n");
+  ExpectExactFrame("config  help",
+                   "+OK\r\nAvailable configuration sections:\r\n  mysql - MySQL\r\n\r\n"
+                   "Use \"CONFIG HELP <section>\" for detailed information.\r\n\r\n");
+}
 
-  // Partial response with content but no END
-  EXPECT_FALSE(IsResponseComplete("OK DUMP_STATUS\r\nstatus: IDLE\r\nsave_in_progress: false\r\n"));
+TEST(ResponseFrameTest, PlusOkBodiesEndAtFirstBlankLine) {
+  ExpectExactFrame("CONFIG", "+OK\r\nmysql:\r\n  host: localhost\r\n\r\n");
+  ExpectExactFrame("CONFIG SHOW tables", "+OK\r\n\r\n\r\n");
+  ExpectExactFrame("CONFIG VERIFY a.yaml",
+                   "+OK\r\nConfiguration is valid\r\n  Tables: 1 (t)\r\n  MySQL: h:3306\r\n\r\n");
+  ExpectExactFrame("SET a = b", "+OK Variable 'a' set to 'b'\r\n\r\n");
+  ExpectExactFrame("SHOW VARIABLES LIKE 'x%'", "+OK 0 rows\r\n\r\n");
+  ExpectExactFrame("SHOW VARIABLES",
+                   "+------+\r\n| Variable_name | Value | Mutable |\r\n+------+\r\n| a | b | YES |\r\n+------+\r\n"
+                   "1 row in set\r\n\r\n");
+}
 
-  // Complete response with END marker
-  EXPECT_TRUE(IsResponseComplete("OK DUMP_STATUS\r\nstatus: IDLE\r\nEND\r\n"));
+TEST(ResponseFrameTest, TokenizeRequestFollowsServerSplittingRules) {
+  const auto tokens = TokenizeRequest("dump\xE3\x80\x80load  'a b'\"c\"d\xC2\xA0\"e\\\" f\"");
+  ASSERT_EQ(tokens.size(), 6U);
+  EXPECT_EQ(tokens[0].text, "dump");
+  EXPECT_EQ(tokens[1].text, "load");
+  EXPECT_EQ(tokens[2].text, "a b");
+  EXPECT_TRUE(tokens[2].quoted);
+  EXPECT_EQ(tokens[3].text, "c");
+  EXPECT_TRUE(tokens[3].quoted);
+  EXPECT_EQ(tokens[4].text, "d");
+  EXPECT_FALSE(tokens[4].quoted);
+  EXPECT_EQ(tokens[5].text, "e\\\" f");
+  EXPECT_TRUE(tokens[5].quoted);
+}
 
-  // Minimal complete DUMP_STATUS
-  EXPECT_TRUE(IsResponseComplete("OK DUMP_STATUS\r\nEND\r\n"));
+TEST(SearchExpressionAstRoundTripTest, NegatedNestedGroupKeepsItsScope) {
+  auto converted = ConvertSearchExpression("(a -(b c))");
+  ASSERT_TRUE(converted) << converted.error().message();
+
+  query::QueryASTParser parser;
+  auto actual = parser.Parse(*converted);
+  ASSERT_NE(actual, nullptr) << *converted << ": " << parser.GetError();
+  auto expected = parser.Parse("a AND NOT (b AND c)");
+  ASSERT_NE(expected, nullptr) << parser.GetError();
+  EXPECT_EQ(actual->ToString(), expected->ToString()) << *converted;
 }
 
 // =============================================================================
 // Unit tests for NeedsWireQuoting / QuoteWireToken (shared quoting decision)
 // =============================================================================
 
+using mygramdb::client::detail::IsUnicodeWhitespace;
 using mygramdb::client::detail::NeedsWireQuoting;
 using mygramdb::client::detail::QuoteWireToken;
 
@@ -3809,18 +4338,55 @@ TEST(WireQuotingTest, AsciiSpecialCharactersAreQuoted) {
 }
 
 /**
- * @brief Regression test for M-4: EscapeQueryString/QuoteCommandArgumentIfNeeded
- * used to check only ASCII whitespace, missing every Unicode whitespace code
+ * @brief The client's argument quoting treats every Unicode whitespace code
  * point the server tokenizer splits on outside quotes (spec/tcp-commands.md
- * §2). NeedsWireQuoting now backs both, via IsUnicodeWhitespace.
+ * §2) as needing quotes; NeedsWireQuoting backs both via IsUnicodeWhitespace.
  */
 TEST(WireQuotingTest, UnicodeWhitespaceIsQuoted) {
-  // U+3000 (ideographic space): "東京" + U+3000 + "タワー"
-  EXPECT_TRUE(NeedsWireQuoting("東京\xE3\x80\x80タワー"));
-  // U+00A0 (no-break space)
-  EXPECT_TRUE(NeedsWireQuoting("tokyo\xC2\xA0tower"));
-  // U+2028 (line separator)
-  EXPECT_TRUE(NeedsWireQuoting("tokyo\xE2\x80\xA8tower"));
+  const std::vector<std::string_view> whitespace = {
+      " ",
+      "\t",
+      "\n",
+      "\v",
+      "\f",
+      "\r",            // ASCII White_Space
+      "\xC2\x85",      // U+0085 NEXT LINE
+      "\xC2\xA0",      // U+00A0 NO-BREAK SPACE
+      "\xE1\x9A\x80",  // U+1680 OGHAM SPACE MARK
+      "\xE2\x80\x80",
+      "\xE2\x80\x81",
+      "\xE2\x80\x82",
+      "\xE2\x80\x83",
+      "\xE2\x80\x84",
+      "\xE2\x80\x85",
+      "\xE2\x80\x86",
+      "\xE2\x80\x87",
+      "\xE2\x80\x88",
+      "\xE2\x80\x89",
+      "\xE2\x80\x8A",  // U+2000-U+200A
+      "\xE2\x80\xA8",  // U+2028 LINE SEPARATOR
+      "\xE2\x80\xA9",  // U+2029 PARAGRAPH SEPARATOR
+      "\xE2\x80\xAF",  // U+202F NARROW NO-BREAK SPACE
+      "\xE2\x81\x9F",  // U+205F MEDIUM MATHEMATICAL SPACE
+      "\xE3\x80\x80",  // U+3000 IDEOGRAPHIC SPACE
+  };
+
+  for (size_t i = 0; i < whitespace.size(); ++i) {
+    SCOPED_TRACE(i);
+    EXPECT_TRUE(IsUnicodeWhitespace(whitespace[i], 0));
+    std::string value = "tokyo";
+    value.append(whitespace[i]);
+    value += "tower";
+    EXPECT_TRUE(NeedsWireQuoting(value));
+  }
+
+  // U+200B ZERO WIDTH SPACE is not Unicode White_Space and does not split the
+  // server's request tokens.
+  constexpr std::string_view kZeroWidthSpace = "\xE2\x80\x8B";
+  EXPECT_FALSE(IsUnicodeWhitespace(kZeroWidthSpace, 0));
+  EXPECT_FALSE(
+      NeedsWireQuoting("tokyo\xE2\x80\x8B"
+                       "tower"));
 }
 
 TEST(WireQuotingTest, QuoteWireTokenEscapesEmbeddedQuoteAndBackslash) {
@@ -3831,7 +4397,7 @@ TEST(WireQuotingTest, QuoteWireTokenEscapesEmbeddedQuoteAndBackslash) {
 TEST(WireQuotingTest, QuoteWireTokenEscapesControlCharactersReversibly) {
   // \r, \n, \t get the short mnemonic; other control bytes get \xHH -- never
   // silently dropped, so a primary key round-trips through GET byte-for-byte
-  // (see EscapeProtocolToken's use for GET).
+  // (see QuoteWireToken's use for GET).
   EXPECT_EQ(QuoteWireToken("a\r\n\tb"), R"("a\r\n\tb")");
   EXPECT_EQ(QuoteWireToken(std::string("a\x01"
                                        "b",

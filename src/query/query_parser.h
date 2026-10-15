@@ -251,8 +251,11 @@ struct Query {
  * - COUNT <table> <text> [AND <term>] [NOT <term>] [FILTER <col> <op> <value>]
  * - GET <table> <primary_key>
  * - INFO
- * - SAVE [filename]
- * - LOAD [filename]
+ * - DUMP SAVE [filepath]
+ * - DUMP LOAD <filepath>
+ * - DUMP VERIFY <filepath>
+ * - DUMP INFO <filepath>
+ * - DUMP STATUS
  * - REPLICATION STATUS
  * - REPLICATION STOP
  * - REPLICATION START
@@ -333,6 +336,16 @@ class QueryParser {
    */
   [[nodiscard]] static mygram::utils::Expected<void, mygram::utils::Error> ValidateFilterCondition(
       const FilterCondition& filter);
+
+  /**
+   * @brief Validate the number of FILTER conditions against the shared cap.
+   */
+  [[nodiscard]] static mygram::utils::Expected<void, mygram::utils::Error> ValidateFilterCount(size_t count);
+
+  /**
+   * @brief Validate a LIMIT value against the shared upper bound.
+   */
+  [[nodiscard]] static mygram::utils::Expected<void, mygram::utils::Error> ValidateLimitUpperBound(uint64_t limit);
 
   /**
    * @brief Quote a literal search term for embedding in a command string.

@@ -116,9 +116,6 @@ bool RateLimiter::AllowRequest(const std::string& client_ip) {
 
   std::lock_guard<std::mutex> lock(mutex_);
 
-  // Update statistics
-  total_requests_.fetch_add(1, std::memory_order_relaxed);
-
   // Cleanup is offloaded to a background thread to avoid O(n) latency spikes
   // on the request hot path. The previous implementation swept inside
   // AllowRequest under mutex_, blocking all rate-limit checks during the
@@ -209,16 +206,8 @@ RateLimiter::Stats RateLimiter::GetStats() const {
   // counter loads happen outside the lock so /info, /metrics, and similar
   // observability endpoints do not contend with the AllowRequest hot path.
   //
-  // Consistency note: AllowRequest unconditionally increments
-  // total_requests_ AND exactly one of {allowed_requests_, blocked_requests_}
-  // under `mutex_`, so the invariant `total == allowed + blocked` holds
-  // post-write. To preserve that invariant on the lock-free GetStats path,
-  // we read allowed/blocked first and derive total as their sum rather than
-  // loading total directly. Reading the three counters independently across
-  // a concurrent fetch_add can otherwise expose a momentary `total > allowed
-  // + blocked` skew in a way the strict equality check in tests treats as a
-  // bug. ResetStats still holds `mutex_` to keep its three zeros mutually
-  // atomic w.r.t. AllowRequest.
+  // Derive total from the same allowed/blocked snapshots returned to callers,
+  // so the reported total always equals their sum.
   size_t tracked = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -226,27 +215,20 @@ RateLimiter::Stats RateLimiter::GetStats() const {
   }
   const uint64_t allowed = allowed_requests_.load(std::memory_order_relaxed);
   const uint64_t blocked = blocked_requests_.load(std::memory_order_relaxed);
-  return Stats{.total_requests = allowed + blocked,
-               .allowed_requests = allowed,
-               .blocked_requests = blocked,
-               .tracked_clients = tracked,
-               .evicted_clients = evicted_clients_.load(std::memory_order_relaxed)};
+  Stats stats{};
+  stats.total_requests = allowed + blocked;
+  stats.allowed_requests = allowed;
+  stats.blocked_requests = blocked;
+  stats.tracked_clients = tracked;
+  stats.evicted_clients = evicted_clients_.load(std::memory_order_relaxed);
+  return stats;
 }
 
 void RateLimiter::ResetStats() {
-  // Holds `mutex_` to keep the {allowed, blocked, total} reset atomic with
-  // respect to AllowRequest, which performs its three counter mutations
-  // under the same lock. Without this, a ResetStats can interleave between
-  // an AllowRequest's `total_requests_++` and the matching
-  // `allowed_requests_++` / `blocked_requests_++`, leaving the post-reset
-  // counters in the inconsistent state `total > allowed + blocked` --
-  // exactly what `ResetStatsConcurrentConsistency` regresses against.
-  // GetStats() reads atomics outside this lock; that is safe because each
-  // load is independent and there are no inter-counter invariants the
-  // observability path needs (callers that care about consistency derive it
-  // from a single atomic).
+  // Keep enabled AllowRequest counter updates on one side of the reset. The
+  // disabled fast path updates only allowed_requests_ atomically and does not
+  // take mutex_. GetStats derives total_requests from the two counter values.
   std::lock_guard<std::mutex> lock(mutex_);
-  total_requests_.store(0, std::memory_order_relaxed);
   allowed_requests_.store(0, std::memory_order_relaxed);
   blocked_requests_.store(0, std::memory_order_relaxed);
 }

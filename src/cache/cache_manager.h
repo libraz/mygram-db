@@ -44,6 +44,35 @@ struct CacheLookupResult {
 class CacheManager {
  public:
   /**
+   * @brief Registration for one query whose execution is in progress.
+   *
+   * Destruction cancels the pending invalidation registration. The token
+   * retains the invalidation manager, but never a raw CacheManager pointer, so
+   * it remains safe to discard after the manager has been destroyed.
+   */
+  class PendingInsert {
+   public:
+    PendingInsert() = default;
+    ~PendingInsert();
+    PendingInsert(const PendingInsert&) = delete;
+    PendingInsert& operator=(const PendingInsert&) = delete;
+    PendingInsert(PendingInsert&& other) noexcept;
+    PendingInsert& operator=(PendingInsert&& other) noexcept;
+
+    [[nodiscard]] explicit operator bool() const { return active_; }
+
+   private:
+    friend class CacheManager;
+    PendingInsert(CacheEntryIdentity identity, std::shared_ptr<InvalidationManager> invalidation_manager);
+    void Cancel() noexcept;
+    void Consume() noexcept;
+
+    CacheEntryIdentity identity_;
+    std::shared_ptr<InvalidationManager> invalidation_manager_;
+    bool active_ = false;
+  };
+
+  /**
    * @brief Constructor
    * @param cache_config Cache configuration
    * @param ngram_configs Per-table N-gram configuration for cache invalidation
@@ -108,14 +137,37 @@ class CacheManager {
               bool invalidate_on_any_text_change = false);
 
   /**
-   * @brief Capture the current data-change generation for guarded cache inserts
+   * Register invalidation metadata before running a query. An empty result
+   * means this query should execute without cache admission (including when
+   * the pending metadata itself cannot fit the shared budget).
    */
-  [[nodiscard]] uint64_t CaptureDataVersion() const { return data_version_.load(std::memory_order_acquire); }
+  [[nodiscard]] std::optional<PendingInsert> BeginInsert(const query::Query& query,
+                                                         const std::vector<std::string>& ngrams, int ngram_size = 0,
+                                                         int kanji_ngram_size = 0, bool cross_boundary_ngrams = true,
+                                                         bool invalidate_on_any_text_change = false);
+
+  /**
+   * Insert a completed result only while its exact pending registration
+   * remains valid. Consumes the token on every path.
+   */
+  bool InsertIfPending(PendingInsert&& pending, const query::Query& query, const std::vector<DocId>& result,
+                       double query_cost_ms);
+
+  /**
+   * @brief Capture the table's data-change generation for guarded cache inserts
+   */
   [[nodiscard]] uint64_t CaptureDataVersion(const std::string& table_name) const;
 
-  /** Test seam invoked while Insert owns the cross-component transaction lock. */
+  /** Test seam invoked while Insert/InsertIfPending owns the cross-component transaction lock. */
   void SetAfterQueryCacheInsertHookForTest(std::function<void()> hook) {
     after_query_cache_insert_hook_for_test_ = std::move(hook);
+  }
+
+  /** Test seam forwarded to InvalidationManager's resident-promotion boundary. */
+  void SetBeforeResidentIdentityInsertHookForTest(std::function<void()> hook) {
+    if (invalidation_mgr_) {
+      invalidation_mgr_->SetBeforeResidentIdentityInsertHookForTest(std::move(hook));
+    }
   }
 
   /**
@@ -170,13 +222,10 @@ class CacheManager {
    * @brief Stop the cache and clear it to avoid stale entries.
    *
    * Stops the cache by draining the invalidation queue, clearing all
-   * entries, and stopping the background workers. Re-enabling produces a
+   * entries, and stopping the invalidation worker. Re-enabling produces a
    * cold cache. This is the safe default: any data-modification events
    * delivered while the cache is disabled would otherwise be silently
    * dropped, leaving stale entries visible after re-enable.
-   *
-   * If you need to preserve entries across a temporary disable, a future
-   * Pause() API (TODO) would be required; this method intentionally clears.
    */
   void Disable();
 
@@ -220,6 +269,8 @@ class CacheManager {
    * @return Resolved CacheKey, or nullopt if the query is not cacheable
    */
   [[nodiscard]] std::optional<ResolvedCacheKey> ResolveCacheKey(const query::Query& query) const;
+  [[nodiscard]] std::optional<ResolvedCacheKey> ResolveCanonicalCacheKey(const query::Query& query) const;
+  [[nodiscard]] bool AdmitInsertedEntryLocked(const CacheEntryIdentity& identity);
 
   std::atomic<bool> enabled_;
   size_t max_memory_bytes_;
@@ -231,7 +282,7 @@ class CacheManager {
   bool table_invalidation_strategy_ = false;
 
   /// Serializes the *combined* (QueryCache + InvalidationManager) mutating
-  /// operations Insert/Clear/ClearTable. Each component already owns an
+  /// operations BeginInsert/Insert/Clear/ClearTable/Invalidate. Each component already owns an
   /// internal lock that protects its own data structures; this mutex closes
   /// the gap *between* the two component-local critical sections.
   ///
@@ -239,8 +290,9 @@ class CacheManager {
   /// invalidation_mgr_->Clear() as two independent locked sections, and a
   /// concurrent Insert() can squeeze in between them and register a key in
   /// InvalidationManager that points to a now-empty QueryCache (phantom
-  /// metadata). Holding serialize_mutex_ around the whole Insert / Clear /
-  /// ClearTable body guarantees consistency between the two components.
+  /// metadata). Holding serialize_mutex_ around pending registration, insert
+  /// promotion, Clear / ClearTable, and Invalidate's synchronous mark keeps the
+  /// registration and payload transitions consistent across both components.
   ///
   /// Lookup is intentionally *not* serialized here: it only touches QueryCache
   /// (which has its own shared_mutex) and never mutates InvalidationManager,
@@ -249,7 +301,7 @@ class CacheManager {
   mutable std::mutex serialize_mutex_;
 
   std::unique_ptr<QueryCache> query_cache_;
-  std::unique_ptr<InvalidationManager> invalidation_mgr_;
+  std::shared_ptr<InvalidationManager> invalidation_mgr_;
   std::unique_ptr<InvalidationQueue> invalidation_queue_;
   std::function<void()> after_query_cache_insert_hook_for_test_;
 };

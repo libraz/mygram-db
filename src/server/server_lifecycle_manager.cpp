@@ -6,7 +6,10 @@
 #include "server/server_lifecycle_manager.h"
 
 #include <array>
+#include <chrono>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 #include "cache/cache_manager.h"
 #include "config/runtime_variable_manager.h"
@@ -24,9 +27,89 @@
 #include "server/handlers/sync_handler.h"
 #include "server/sync_operation_manager.h"
 #endif
+#include "utils/atomic_file_writer.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::server {
+
+namespace {
+
+constexpr auto kOrphanDumpTempMaxAge = std::chrono::hours(1);
+
+void SweepOrphanTempFiles(const std::filesystem::path& directory) {
+  std::error_code error;
+  const auto directory_status = std::filesystem::symlink_status(directory, error);
+  if (error || !std::filesystem::is_directory(directory_status) || std::filesystem::is_symlink(directory_status)) {
+    return;
+  }
+
+  std::filesystem::directory_iterator entry(directory, std::filesystem::directory_options::skip_permission_denied,
+                                            error);
+  if (error) {
+    mygram::utils::StructuredLog()
+        .Event("dump_temp_sweep_error")
+        .Field("directory", directory.string())
+        .Field("error", error.message())
+        .Warn();
+    return;
+  }
+
+  std::vector<std::string> marker_basenames;
+  for (const std::filesystem::directory_iterator end; entry != end; entry.increment(error)) {
+    if (error) {
+      mygram::utils::StructuredLog()
+          .Event("dump_temp_sweep_error")
+          .Field("directory", directory.string())
+          .Field("error", error.message())
+          .Warn();
+      break;
+    }
+
+    const auto entry_status = entry->symlink_status(error);
+    if (error) {
+      error.clear();
+      continue;
+    }
+    if (std::filesystem::is_symlink(entry_status)) {
+      continue;
+    }
+    if (std::filesystem::is_directory(entry_status)) {
+      SweepOrphanTempFiles(entry->path());
+      continue;
+    }
+    if (!std::filesystem::is_regular_file(entry_status)) {
+      continue;
+    }
+
+    const std::string marker_basename = entry->path().filename().string();
+    if (marker_basename.compare(0, mygram::utils::kDumpTempOwnerMarkerPrefix.size(),
+                                mygram::utils::kDumpTempOwnerMarkerPrefix) != 0) {
+      continue;
+    }
+    marker_basenames.push_back(marker_basename);
+  }
+
+  // The helper removes the marker it processes. Collect names before calling
+  // it so directory iteration does not depend on deletion behavior.
+  for (const auto& marker_basename : marker_basenames) {
+    auto removed = mygram::utils::RemoveOrphanDumpTempFile(
+        directory, marker_basename, std::chrono::duration_cast<std::chrono::seconds>(kOrphanDumpTempMaxAge));
+    if (!removed) {
+      mygram::utils::StructuredLog()
+          .Event("dump_temp_sweep_error")
+          .Field("filepath", (directory / marker_basename).string())
+          .FieldError(removed.error())
+          .Warn();
+    } else if (*removed) {
+      mygram::utils::StructuredLog()
+          .Event("dump_orphan_temp_removed")
+          .Field("filepath", (directory / marker_basename).string())
+          .Info();
+    }
+  }
+}
+
+}  // namespace
 
 mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::Error> ServerLifecycleManager::Create(
     const ServerConfig& config, std::unordered_map<std::string, TableContext*>& table_contexts,
@@ -39,7 +122,8 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
     SyncOperationManager* sync_manager
 #endif
     ,
-    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress) {
+    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress,
+    OperationCoordinator* operation_coordinator, std::function<bool()> initial_data_ready_checker) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -64,7 +148,7 @@ mygram::utils::Expected<std::unique_ptr<ServerLifecycleManager>, mygram::utils::
       sync_manager
 #endif
       ,
-      rate_limiter, shutdown_requested, dump_progress));
+      rate_limiter, shutdown_requested, dump_progress, operation_coordinator, std::move(initial_data_ready_checker)));
   return manager;
 }
 
@@ -79,7 +163,8 @@ ServerLifecycleManager::ServerLifecycleManager(
     SyncOperationManager* sync_manager
 #endif
     ,
-    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress)
+    RateLimiter* rate_limiter, std::atomic<bool>* shutdown_requested, DumpProgress* dump_progress,
+    OperationCoordinator* operation_coordinator, std::function<bool()> initial_data_ready_checker)
     : config_(config),
       table_contexts_(table_contexts),
       dump_dir_(dump_dir),
@@ -98,7 +183,9 @@ ServerLifecycleManager::ServerLifecycleManager(
       ,
       rate_limiter_(rate_limiter),
       shutdown_requested_(shutdown_requested),
-      dump_progress_(dump_progress) {
+      dump_progress_(dump_progress),
+      operation_coordinator_(operation_coordinator),
+      initial_data_ready_checker_(std::move(initial_data_ready_checker)) {
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::Initialize() {
@@ -107,6 +194,11 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
   using mygram::utils::MakeUnexpected;
 
   InitializedComponents components;
+
+  // Orphan cleanup belongs to server initialization, not periodic snapshot
+  // retention, so it also runs when automatic snapshots are disabled or when
+  // no full application config was supplied.
+  SweepOrphanTempFiles(dump_dir_);
 
   // Step 1: Initialize ThreadPool (no dependencies)
   {
@@ -276,11 +368,11 @@ ServerLifecycleManager::InitCacheManager() {
   // Build NgramConfigMap from table_contexts for cache invalidation
   cache::NgramConfigMap ngram_configs;
   for (const auto& [name, ctx] : table_contexts_) {
-    ngram_configs[name] = cache::NgramConfig{
-        .ngram_size = ctx->config.ngram_size,
-        .kanji_ngram_size = ctx->config.kanji_ngram_size,
-        .cross_boundary_ngrams = ctx->config.cross_boundary_ngrams,
-    };
+    cache::NgramConfig ngram_config{};
+    ngram_config.ngram_size = ctx->config.ngram_size;
+    ngram_config.kanji_ngram_size = ctx->config.kanji_ngram_size;
+    ngram_config.cross_boundary_ngrams = ctx->config.cross_boundary_ngrams;
+    ngram_configs[name] = ngram_config;
   }
   auto cache_manager = std::make_unique<cache::CacheManager>(full_config_->cache, std::move(ngram_configs));
   return cache_manager;
@@ -289,27 +381,30 @@ ServerLifecycleManager::InitCacheManager() {
 mygram::utils::Expected<std::unique_ptr<HandlerContext>, mygram::utils::Error>
 ServerLifecycleManager::InitHandlerContext(TableCatalog* table_catalog, cache::CacheManager* cache_manager,
                                            config::RuntimeVariableManager* variable_manager) {
-  auto handler_context = std::make_unique<HandlerContext>(HandlerContext{
-      .table_catalog = table_catalog,
-      .stats = stats_,
-      .full_config = full_config_,
-      .dump_dir = dump_dir_,
-      .dump_load_in_progress = dump_load_in_progress_,
-      .dump_save_in_progress = dump_save_in_progress_,
-      .optimization_in_progress = optimization_in_progress_,
-      .replication_paused_for_dump = replication_paused_for_dump_,
-      .replication_pause_counter = &replication_pause_counter_,
-      .binlog_reader = binlog_reader_,
+  // HandlerContext has reference members. Initialize its required references
+  // in declaration order, then set the optional dependencies by name.
+  HandlerContext context{
+      table_catalog,
+      stats_,
+      full_config_,
+      dump_dir_,
+      dump_load_in_progress_,
+      dump_save_in_progress_,
+      optimization_in_progress_,
+      replication_paused_for_dump_,
+      &replication_pause_counter_,
+      binlog_reader_,
 #ifdef USE_MYSQL
-      .sync_manager = sync_manager_,
+      sync_manager_,
 #endif
-      .cache_manager = cache_manager,
-      .variable_manager = variable_manager,
-      .rate_limiter = rate_limiter_,
-      .dump_progress = dump_progress_,
-      .operation_coordinator = sync_manager_ != nullptr ? &sync_manager_->GetOperationCoordinator() : nullptr,
-  });
-  return handler_context;
+  };
+  context.cache_manager = cache_manager;
+  context.variable_manager = variable_manager;
+  context.rate_limiter = rate_limiter_;
+  context.dump_progress = dump_progress_;
+  context.operation_coordinator = operation_coordinator_;
+  context.admin_token = config_.admin_token;
+  return std::make_unique<HandlerContext>(std::move(context));
 }
 
 mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifecycleManager::InitHandlers(
@@ -476,16 +571,15 @@ mygram::utils::Expected<std::unique_ptr<SnapshotScheduler>, mygram::utils::Error
     return MakeUnexpected(MakeError(ErrorCode::kInternalError, "TableCatalog must not be null for SnapshotScheduler"));
   }
 
+  SyncOperationManager* sync_manager = nullptr;
+#ifdef USE_MYSQL
+  sync_manager = sync_manager_;
+#endif
   auto scheduler = std::make_unique<SnapshotScheduler>(
       full_config_->dump, table_catalog, full_config_, dump_dir_, binlog_reader_, dump_save_in_progress_,
-      replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_, sync_manager_,
-      std::function<bool()>{}, &optimization_in_progress_, shutdown_requested_, dump_progress_, &stats_);
-
-  // Start the scheduler
-  auto start_result = scheduler->Start();
-  if (!start_result) {
-    return MakeUnexpected(start_result.error());
-  }
+      replication_paused_for_dump_, &replication_pause_counter_, &dump_load_in_progress_, sync_manager,
+      std::function<bool()>{}, &optimization_in_progress_, shutdown_requested_, dump_progress_, &stats_,
+      operation_coordinator_, initial_data_ready_checker_);
 
   return scheduler;
 }

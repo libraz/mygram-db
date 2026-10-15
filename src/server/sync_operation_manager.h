@@ -19,6 +19,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "config/config.h"
@@ -48,9 +49,11 @@ namespace mygramdb::server {
  *
  * Thread Safety Requirements:
  * - Atomic members (is_running, total_rows, processed_rows) are thread-safe
- * - Non-atomic members (table_name, status, error_message, gtid, replication_status)
+ * - Non-atomic members (table_name, status, error_message, gtid, replication_status,
+ *   start_time, end_time)
  *   MUST be accessed only while holding sync_mutex_ in SyncOperationManager
- * - The start_time member is set once during initialization and read-only thereafter
+ * - start_time is set when the worker starts; end_time is set on the first
+ *   terminal-state publication and remains fixed until the next SYNC.
  *
  * Typical Access Pattern:
  * 1. Create SyncState under sync_mutex_ protection
@@ -63,7 +66,8 @@ struct SyncState {
   std::string table_name;               // Protected by sync_mutex_
   std::atomic<uint64_t> total_rows{0};  // Atomic to prevent data races during concurrent access
   std::atomic<uint64_t> processed_rows{0};
-  std::chrono::steady_clock::time_point start_time;  // Set once, read-only after init
+  std::chrono::steady_clock::time_point start_time;
+  std::optional<std::chrono::steady_clock::time_point> end_time;
   std::string status;  // Protected by sync_mutex_ - "IDLE", "STARTING", "IN_PROGRESS", "CANCELLING", terminal states
   std::string error_message;       // Protected by sync_mutex_
   std::string gtid;                // Protected by sync_mutex_
@@ -133,7 +137,8 @@ class SyncOperationManager {
   SyncOperationManager(const std::unordered_map<std::string, TableContext*>& table_contexts,
                        const config::Config* full_config, mysql::IBinlogReader* binlog_reader,
                        replication_pause::Counter* replication_pause_counter = nullptr,
-                       cache::CacheManager* cache_manager = nullptr);
+                       cache::CacheManager* cache_manager = nullptr,
+                       OperationCoordinator* operation_coordinator = nullptr);
 
   ~SyncOperationManager();
 
@@ -250,8 +255,8 @@ class SyncOperationManager {
    */
   void SetCompletionCallback(CompletionCallback callback);
 
-  OperationCoordinator& GetOperationCoordinator() { return operation_coordinator_; }
-  const OperationCoordinator& GetOperationCoordinator() const { return operation_coordinator_; }
+  OperationCoordinator& GetOperationCoordinator() { return *operation_coordinator_; }
+  const OperationCoordinator& GetOperationCoordinator() const { return *operation_coordinator_; }
 
 #ifdef MYGRAMDB_SYNC_TEST_HOOKS
   auto RegisterNullLoaderScopedForTest(const std::string& table_name) {
@@ -296,6 +301,19 @@ class SyncOperationManager {
     MarkSyncingTableForTest(table_name);
   }
 
+  void SetTerminalSyncStateForTest(const std::string& table_name, std::string status,
+                                   std::chrono::steady_clock::time_point start_time,
+                                   std::chrono::steady_clock::time_point end_time, uint64_t processed_rows = 0) {
+    std::lock_guard<std::mutex> lock(sync_mutex_);
+    auto& state = sync_states_[table_name];
+    state.table_name = table_name;
+    state.status = std::move(status);
+    state.start_time = start_time;
+    state.end_time = end_time;
+    state.processed_rows = processed_rows;
+    state.is_running = false;
+  }
+
   mygram::utils::Expected<void, mygram::utils::Error> RestartReplicationFromGtidForTest(mysql::IBinlogReader* reader,
                                                                                         const std::string& gtid,
                                                                                         const std::string& table_name,
@@ -312,7 +330,8 @@ class SyncOperationManager {
   mysql::IBinlogReader* binlog_reader_;
   replication_pause::Counter* replication_pause_counter_;
   std::atomic<cache::CacheManager*> cache_manager_{nullptr};
-  OperationCoordinator operation_coordinator_;
+  OperationCoordinator owned_operation_coordinator_;
+  OperationCoordinator* operation_coordinator_;
 
   // State tracking
   //

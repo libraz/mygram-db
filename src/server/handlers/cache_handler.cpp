@@ -9,11 +9,38 @@
 #include <sstream>
 
 #include "cache/cache_manager.h"
+#include "config/runtime_variable_manager.h"
 #include "server/protocol_constants.h"
 #include "server/response_formatter.h"
 #include "server/table_catalog.h"
 
 namespace mygramdb::server {
+
+namespace {
+
+std::string HandleCacheToggle(HandlerContext& ctx, bool enabled) {
+  if (ctx.cache_manager == nullptr) {
+    return ResponseFormatter::FormatError("Cache not configured", mygram::utils::ErrorCode::kCacheDisabled);
+  }
+
+  if (ctx.variable_manager != nullptr) {
+    auto result = ctx.variable_manager->SetVariable("cache.enabled", enabled ? "true" : "false");
+    if (!result) {
+      return ResponseFormatter::FormatError(result.error());
+    }
+  } else if (enabled) {
+    if (!ctx.cache_manager->Enable()) {
+      return ResponseFormatter::FormatError("Cache cannot be enabled: the invalidation worker could not be started.",
+                                            mygram::utils::ErrorCode::kCacheDisabled);
+    }
+  } else {
+    ctx.cache_manager->Disable();
+  }
+
+  return ResponseFormatter::FormatStatus(enabled ? "CACHE_ENABLED" : "CACHE_DISABLED");
+}
+
+}  // namespace
 
 std::string CacheHandler::Handle(const query::Query& query, ConnectionContext& conn_ctx) {
   (void)conn_ctx;  // Mark as intentionally unused
@@ -123,28 +150,11 @@ std::string CacheHandler::HandleStats() {
 }
 
 std::string CacheHandler::HandleEnable() {
-  // Check if cache manager exists
-  if (ctx_.cache_manager == nullptr) {
-    return ResponseFormatter::FormatError("Cache not configured", mygram::utils::ErrorCode::kCacheDisabled);
-  }
-
-  // Attempt to enable cache
-  if (!ctx_.cache_manager->Enable()) {
-    return ResponseFormatter::FormatError("Cache cannot be enabled: the invalidation worker could not be started.",
-                                          mygram::utils::ErrorCode::kCacheDisabled);
-  }
-
-  return ResponseFormatter::FormatStatus("CACHE_ENABLED");
+  return HandleCacheToggle(ctx_, true);
 }
 
 std::string CacheHandler::HandleDisable() {
-  // Check if cache manager exists
-  if (ctx_.cache_manager == nullptr) {
-    return ResponseFormatter::FormatError("Cache not configured", mygram::utils::ErrorCode::kCacheDisabled);
-  }
-
-  ctx_.cache_manager->Disable();
-  return ResponseFormatter::FormatStatus("CACHE_DISABLED");
+  return HandleCacheToggle(ctx_, false);
 }
 
 }  // namespace mygramdb::server

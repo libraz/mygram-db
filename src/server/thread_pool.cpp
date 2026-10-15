@@ -17,7 +17,9 @@ namespace mygramdb::server {
 
 constexpr unsigned int kFallbackCpuCount = 4;  ///< Fallback when runtime can't detect core count
 
-ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(queue_size) {
+ThreadPool::ThreadPool(size_t num_threads, size_t queue_size, WorkerThreadFactory worker_thread_factory,
+                       TaskDequeuedHook task_dequeued_hook)
+    : max_queue_size_(queue_size), task_dequeued_hook_(std::move(task_dequeued_hook)) {
   // Auto-size the pool when not specified.
   //
   // Under the reactor I/O model, persistent client connections do NOT pin
@@ -45,10 +47,29 @@ ThreadPool::ThreadPool(size_t num_threads, size_t queue_size) : max_queue_size_(
       .Field("queue_size", queue_size == 0 ? "unbounded" : std::to_string(queue_size))
       .Debug();
 
-  // Start worker threads
+  if (!worker_thread_factory) {
+    worker_thread_factory = [](std::function<void()> worker) { return std::thread(std::move(worker)); };
+  }
+
+  // Start worker threads. If creation fails partway through, stop and join
+  // the workers that already started before propagating the original failure.
   workers_.reserve(num_threads);
-  for (size_t i = 0; i < num_threads; ++i) {
-    workers_.emplace_back(&ThreadPool::WorkerThread, this);
+  try {
+    for (size_t i = 0; i < num_threads; ++i) {
+      workers_.emplace_back(worker_thread_factory([this] { WorkerThread(); }));
+    }
+  } catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      shutdown_ = true;
+    }
+    condition_.notify_all();
+    for (auto& worker : workers_) {
+      if (worker.joinable()) {
+        worker.join();
+      }
+    }
+    throw;
   }
 }
 
@@ -214,6 +235,7 @@ void ThreadPool::Shutdown(bool graceful, uint32_t timeout_ms) {
 void ThreadPool::WorkerThread() {
   while (true) {
     Task task;
+    size_t active_workers_after_dequeue = 0;
 
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -230,6 +252,7 @@ void ThreadPool::WorkerThread() {
       // guarantee a task is available here.
       task = std::move(tasks_.front());
       tasks_.pop();
+      active_workers_after_dequeue = active_workers_.fetch_add(1, std::memory_order_relaxed) + 1;
     }
 
     // Execute task (outside lock)
@@ -238,9 +261,8 @@ void ThreadPool::WorkerThread() {
     // After the decrement, also notify any Shutdown() waiter so it can wake
     // promptly when the pool fully drains, instead of relying on a polling
     // sleep.
-    active_workers_++;
     mygram::utils::ScopeGuard worker_guard([this]() {
-      active_workers_--;
+      active_workers_.fetch_sub(1, std::memory_order_relaxed);
       // Cheap check: only signal when we're plausibly idle. The waiter
       // re-checks the predicate under idle_cv_mutex_, so spurious wakeups
       // are safe; we just want to avoid the syscall on every task.
@@ -250,6 +272,9 @@ void ThreadPool::WorkerThread() {
     });
 
     try {
+      if (task_dequeued_hook_) {
+        task_dequeued_hook_(active_workers_after_dequeue);
+      }
       task();
     } catch (const std::exception& e) {
       mygram::utils::StructuredLog().Event("worker_thread_exception").Field("error", e.what()).Error();

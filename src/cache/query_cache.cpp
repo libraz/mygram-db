@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iterator>
 
 #include "utils/constants.h"
 #include "utils/structured_log.h"
@@ -65,9 +66,7 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryCache::StartBackgroundW
   constexpr auto kRefreshInterval = std::chrono::milliseconds(100);
   auto result = lru_refresh_worker_.Start([this] { RefreshLRU(); }, kRefreshInterval);
   if (!result) {
-    // Report a cache worker failure under the cache code, the way the
-    // invalidation queue does, rather than the generic code the shared worker
-    // uses for a thread the runtime refused to create.
+    // Report under the cache code, as the invalidation queue does.
     return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
         mygram::utils::ErrorCode::kCacheWorkerStartFailed,
         std::string("Failed to start cache LRU maintenance worker: ") + result.error().message()));
@@ -115,9 +114,7 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
   // duration of any iterator dereference of `iter` below. Insert()/Erase() and
   // Clear() take a unique_lock, which the std::shared_mutex contract
   // serializes after all readers; cache_map_ rehash therefore cannot occur
-  // while we hold `iter`. The QueryCache constructor additionally caps the
-  // load factor at 0.5 and pre-reserves buckets, so steady-state inserts
-  // rarely rehash even in isolation.
+  // while we hold `iter`.
   //
   // If you change this function to release `lock` before using `iter`, you
   // reintroduce the iterator-validity use-after-free — copy the values you need out of
@@ -333,9 +330,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     return false;
   }
 
-  // Collect keys evicted to make room; eviction_callback_ must fire after we
-  // release mutex_ to avoid lock-order inversion with InvalidationManager
-  //.
+  // Entries evicted to make room fire their callbacks after mutex_ is released.
   std::vector<CacheEntryIdentity> evicted_entries;
 
   {
@@ -384,38 +379,8 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     stats_.current_memory_bytes = total_memory_bytes_;
   }
 
-  // Fire eviction callbacks AFTER releasing mutex_ to avoid lock-order inversion:
-  // eviction_callback_ acquires InvalidationManager::mutex_, while
-  // InvalidateAffectedEntries acquires the locks in the opposite order.
-  // Calling the callback under our unique_lock would establish the inverse
-  // ordering and risk deadlock.
+  // Callbacks take InvalidationManager::mutex_, so they fire after mutex_ is released.
   FireEvictionCallbacks(evicted_entries);
-
-  return true;
-}
-
-bool QueryCache::MarkInvalidated(const CacheKey& key) {
-  // Uses shared_lock intentionally for performance: invalidation can be high-frequency
-  // and only updates atomic fields (invalidated flag + atomic counter).
-  //
-  // Thread-safety rationale:
-  // - find() is a read on cache_map_, which is safe under shared_lock.
-  // - invalidated.store() modifies an atomic member of the value, not the map structure.
-  // - stats_.invalidations_immediate is also atomic.
-  // - Iterator stability: emplace (used by Insert) does not invalidate existing iterators
-  //   in std::unordered_map, so a concurrent Insert under unique_lock is safe.
-  // - Erase requires unique_lock, which blocks until all shared_locks are released,
-  //   so no iterator can be invalidated while this shared_lock is held.
-  std::shared_lock lock(mutex_);
-
-  auto iter = cache_map_.find(key);
-  if (iter == cache_map_.end()) {
-    return false;
-  }
-
-  // Atomic flag set (no lock upgrade needed)
-  iter->second.first.invalidated.store(true);
-  stats_.invalidations_immediate++;
 
   return true;
 }
@@ -432,131 +397,72 @@ bool QueryCache::MarkInvalidated(const CacheEntryIdentity& identity) {
 }
 
 bool QueryCache::Erase(const CacheKey& key) {
-  std::optional<CacheEntryIdentity> removed_identity;
-  {
-    std::unique_lock lock(mutex_);
-
-    auto iter = cache_map_.find(key);
-    if (iter == cache_map_.end()) {
-      return false;
-    }
-
-    // defer eviction callback until after we release mutex_. The
-    // callback typically takes InvalidationManager::mutex_, and the reverse
-    // order is taken by InvalidateAffectedEntries -> MarkInvalidated; firing
-    // the callback while holding our unique_lock would risk deadlock.
-    if (identity_eviction_callback_ || eviction_callback_) {
-      removed_identity = CacheEntryIdentity{key, iter->second.first.metadata.entry_generation};
-    }
-
-    // Remove from LRU list
-    lru_list_.erase(iter->second.second);
-
-    // Update memory tracking. Mirror Insert() by including the map node
-    // overhead in the per-entry decrement so total_memory_bytes_
-    // stays in sync.
-    const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
-    total_memory_bytes_ -= entry_memory;
-    stats_.current_entries--;
-    stats_.current_memory_bytes = total_memory_bytes_;
-    stats_.stale_entry_removals++;
-    RemoveTableIndexEntryLocked(key, iter->second.first.metadata.table);
-
-    // Remove from cache map
-    cache_map_.erase(iter);
+  std::optional<CacheEntryIdentity> callback_identity;
+  if (!EraseInternal(key, nullptr, EraseReason::kStaleEntry, callback_identity)) {
+    return false;
   }
-
-  // callers that want to suppress this callback (the InvalidationQueue
-  // cleanup path performs its own UnregisterCacheEntry and must not
-  // double-unregister) should use EraseWithoutCallback() instead.
-  if (removed_identity.has_value()) {
-    FireEvictionCallbacks({*removed_identity});
+  if (callback_identity.has_value()) {
+    FireEvictionCallbacks({*callback_identity});
   }
-
   return true;
 }
 
 bool QueryCache::Erase(const CacheEntryIdentity& identity) {
-  bool fire_callback = false;
-  {
-    std::unique_lock lock(mutex_);
-    auto iter = cache_map_.find(identity.key);
-    if (iter == cache_map_.end() || iter->second.first.metadata.entry_generation != identity.generation) {
-      return false;
-    }
-    fire_callback = static_cast<bool>(identity_eviction_callback_) || static_cast<bool>(eviction_callback_);
-    lru_list_.erase(iter->second.second);
-    const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
-    total_memory_bytes_ -= entry_memory;
-    stats_.current_entries--;
-    stats_.current_memory_bytes = total_memory_bytes_;
-    stats_.stale_entry_removals++;
-    RemoveTableIndexEntryLocked(identity.key, iter->second.first.metadata.table);
-    cache_map_.erase(iter);
-  }
-  if (fire_callback) {
-    FireEvictionCallbacks({identity});
-  }
-  return true;
-}
-
-bool QueryCache::EraseWithoutCallback(const CacheKey& key) {
-  std::unique_lock lock(mutex_);
-
-  auto iter = cache_map_.find(key);
-  if (iter == cache_map_.end()) {
+  std::optional<CacheEntryIdentity> callback_identity;
+  if (!EraseInternal(identity.key, &identity, EraseReason::kStaleEntry, callback_identity)) {
     return false;
   }
-
-  // deliberately does NOT invoke eviction_callback_. The
-  // InvalidationQueue cleanup path performs its own InvalidationManager
-  // unregister and must not double-unregister via the callback, which would
-  // otherwise race with concurrent Insert and corrupt the reverse indexes
-  // (table_to_cache_keys_, ngram_to_cache_keys_).
-
-  // Remove from LRU list
-  lru_list_.erase(iter->second.second);
-
-  // Update memory tracking. Symmetric with Insert(): include kHashMapNodeOverhead
-  // so total_memory_bytes_ stays in sync.
-  const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
-  total_memory_bytes_ -= entry_memory;
-  stats_.current_entries--;
-  stats_.current_memory_bytes = total_memory_bytes_;
-  stats_.invalidations_deferred++;
-  RemoveTableIndexEntryLocked(key, iter->second.first.metadata.table);
-
-  // Remove from cache map
-  cache_map_.erase(iter);
-
+  if (callback_identity.has_value()) {
+    FireEvictionCallbacks({*callback_identity});
+  }
   return true;
 }
 
 bool QueryCache::EraseWithoutCallback(const CacheEntryIdentity& identity) {
+  std::optional<CacheEntryIdentity> ignored_callback_identity;
+  return EraseInternal(identity.key, &identity, EraseReason::kDeferredInvalidation, ignored_callback_identity);
+}
+
+bool QueryCache::EraseForAdmissionRollback(const CacheEntryIdentity& identity) {
+  std::optional<CacheEntryIdentity> ignored_callback_identity;
+  return EraseInternal(identity.key, &identity, EraseReason::kAdmissionRollback, ignored_callback_identity);
+}
+
+bool QueryCache::EraseInternal(const CacheKey& key, const CacheEntryIdentity* identity, EraseReason reason,
+                               std::optional<CacheEntryIdentity>& callback_identity) {
+  callback_identity.reset();
   std::unique_lock lock(mutex_);
-  auto iter = cache_map_.find(identity.key);
-  if (iter == cache_map_.end() || iter->second.first.metadata.entry_generation != identity.generation) {
+  auto iter = cache_map_.find(key);
+  if (iter == cache_map_.end() ||
+      (identity != nullptr && iter->second.first.metadata.entry_generation != identity->generation)) {
     return false;
   }
+
+  if (reason == EraseReason::kStaleEntry && identity_eviction_callback_) {
+    callback_identity = CacheEntryIdentity{key, iter->second.first.metadata.entry_generation};
+  }
+
+  // Deliver captured callbacks after releasing mutex_: they typically acquire
+  // InvalidationManager::mutex_, the reverse of the lock order used while
+  // marking cache entries invalid.
   lru_list_.erase(iter->second.second);
   const size_t entry_memory = iter->second.first.MemoryUsage() + kHashMapNodeOverhead;
   total_memory_bytes_ -= entry_memory;
   stats_.current_entries--;
   stats_.current_memory_bytes = total_memory_bytes_;
-  stats_.invalidations_deferred++;
-  RemoveTableIndexEntryLocked(identity.key, iter->second.first.metadata.table);
+  if (reason == EraseReason::kStaleEntry) {
+    stats_.stale_entry_removals++;
+  } else if (reason == EraseReason::kDeferredInvalidation) {
+    stats_.invalidations_deferred++;
+  }
+  RemoveTableIndexEntryLocked(key, iter->second.first.metadata.table);
   cache_map_.erase(iter);
   return true;
 }
 
 void QueryCache::Clear() {
-  // collect keys under the lock and fire eviction callbacks AFTER
-  // releasing the lock. This:
-  //   (1) avoids QueryCache::mutex_ -> InvalidationManager::mutex_ acquisition
-  //       order while InvalidateAffectedEntries takes them in reverse, and
-  //   (2) lets the BatchEvictionCallback path acquire InvalidationManager::mutex_
-  //       exactly once instead of N times when an external observer is wired up
-  //       (e.g. CacheManager -> InvalidationManager).
+  // Identities are collected under the lock; callbacks fire after it is released and
+  // the batch callback takes InvalidationManager::mutex_ once.
   std::vector<CacheEntryIdentity> evicted_entries;
   {
     std::unique_lock lock(mutex_);
@@ -564,8 +470,7 @@ void QueryCache::Clear() {
     // Capture keys before swap. Callback delivery preserves insertion order
     // observed at swap time; ordering is informational because the per-key
     // unregister is independent.
-    if (eviction_callback_ || batch_eviction_callback_ || identity_eviction_callback_ ||
-        batch_identity_eviction_callback_) {
+    if (identity_eviction_callback_ || batch_identity_eviction_callback_) {
       evicted_entries.reserve(cache_map_.size());
       for (const auto& [key, entry_pair] : cache_map_) {
         evicted_entries.push_back(CacheEntryIdentity{key, entry_pair.first.metadata.entry_generation});
@@ -603,8 +508,8 @@ void QueryCache::ClearTable(const std::string& table) {
       }
     }
 
-    // Erase entries; RemoveEntryLocked appends each removed key to evicted_keys
-    // so the eviction callback can fire after we release the lock.
+    // Erase entries; RemoveEntryLocked appends each removed key to evicted_entries
+    // so the eviction callbacks can fire after we release the lock.
     for (const auto& key : to_erase) {
       auto iter = cache_map_.find(key);
       if (iter != cache_map_.end()) {
@@ -681,21 +586,34 @@ size_t QueryCache::MemoryUsage() const {
   return total;
 }
 
-size_t QueryCache::EvictBatch() {
+size_t QueryCache::EvictBatch(std::optional<CacheEntryIdentity> protected_identity) {
   std::vector<CacheEntryIdentity> evicted_entries;
   {
     std::unique_lock lock(mutex_);
     size_t removed_count = 0;
-    while (removed_count < eviction_batch_size_ && !lru_list_.empty()) {
-      const CacheKey key = lru_list_.back();
+    auto reverse_it = lru_list_.rbegin();
+    while (removed_count < eviction_batch_size_ && reverse_it != lru_list_.rend()) {
+      const CacheKey key = *reverse_it;
       auto iter = cache_map_.find(key);
       if (iter == cache_map_.end()) {
-        lru_list_.pop_back();
+        reverse_it = std::make_reverse_iterator(lru_list_.erase(std::prev(reverse_it.base())));
         stats_.stale_lru_entries.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+
+      if (protected_identity.has_value() && key == protected_identity->key &&
+          iter->second.first.metadata.entry_generation == protected_identity->generation) {
+        ++reverse_it;
+        continue;
+      }
+
+      // A reverse iterator stores its base iterator, so std::next(reverse_it)
+      // would still refer to the node RemoveEntryLocked erases. Save the
+      // forward successor instead, which remains valid across that erase.
+      const auto next_base = reverse_it.base();
       RemoveEntryLocked(iter, RemovalReason::kLRUEviction, &evicted_entries);
       ++removed_count;
+      reverse_it = std::make_reverse_iterator(next_base);
     }
     stats_.current_memory_bytes = total_memory_bytes_;
   }
@@ -748,12 +666,8 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
                                    std::vector<CacheEntryIdentity>* evicted_entries) {
   const CacheKey& key = iter->first;
 
-  // do NOT invoke eviction_callback_ here. The callback typically takes
-  // InvalidationManager::mutex_ and we hold QueryCache::mutex_ — calling it
-  // inline establishes the inverse of the (IM.mutex_ -> QueryCache.mutex_)
-  // ordering used by InvalidationManager::InvalidateAffectedEntries and risks
-  // deadlock. Callers append `key` to @p evicted_keys and call
-  // FireEvictionCallbacks() AFTER releasing mutex_.
+  // Callbacks are not invoked here: the caller passes evicted_entries and calls
+  // FireEvictionCallbacks() after releasing mutex_.
   if (evicted_entries != nullptr) {
     evicted_entries->push_back(CacheEntryIdentity{key, iter->second.first.metadata.entry_generation});
   }
@@ -963,9 +877,7 @@ void QueryCache::FireEvictionCallbacks(const std::vector<CacheEntryIdentity>& en
     return;
   }
 
-  // Prefer the batch callback when wired up: it lets observers acquire
-  // their own mutex once instead of N times. Falls back to the per-key callback
-  // for backward compatibility with callers that only set EvictionCallback.
+  // Prefer the batch callback: observers acquire their own mutex once instead of N times.
   if (batch_identity_eviction_callback_) {
     batch_identity_eviction_callback_(entries);
     return;
@@ -976,23 +888,6 @@ void QueryCache::FireEvictionCallbacks(const std::vector<CacheEntryIdentity>& en
       identity_eviction_callback_(identity);
     }
     return;
-  }
-
-  std::vector<CacheKey> keys;
-  keys.reserve(entries.size());
-  for (const auto& identity : entries) {
-    keys.push_back(identity.key);
-  }
-
-  if (batch_eviction_callback_) {
-    batch_eviction_callback_(keys);
-    return;
-  }
-
-  if (eviction_callback_) {
-    for (const auto& key : keys) {
-      eviction_callback_(key);
-    }
   }
 }
 

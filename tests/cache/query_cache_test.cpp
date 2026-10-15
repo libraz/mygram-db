@@ -63,14 +63,14 @@ TEST(QueryCacheTest, EmptyResultRoundTripsWithoutCompression) {
 
 TEST(QueryCacheTest, BackgroundWorkerCanBeStartedAfterCallbacksAreInstalled) {
   QueryCache cache(1024 * 1024, 0.0, 0, true, 1, false);
-  EXPECT_FALSE(cache.IsBackgroundWorkerRunningForTesting());
+  EXPECT_FALSE(cache.IsBackgroundWorkerRunning());
 
   std::atomic<size_t> callback_count{0};
-  cache.SetEvictionCallback([&callback_count](const CacheKey&) { callback_count.fetch_add(1); });
+  cache.SetIdentityEvictionCallback([&callback_count](const CacheEntryIdentity&) { callback_count.fetch_add(1); });
   auto start_result = cache.StartBackgroundWorker();
 
   ASSERT_TRUE(start_result) << start_result.error().to_string();
-  EXPECT_TRUE(cache.IsBackgroundWorkerRunningForTesting());
+  EXPECT_TRUE(cache.IsBackgroundWorkerRunning());
   EXPECT_EQ(callback_count.load(), 0U);
 }
 
@@ -104,7 +104,7 @@ TEST(QueryCacheTest, RefreshPurgesInvalidatedEntrySoSameKeyCanBeRecached) {
   metadata.table = "posts";
   metadata.ngrams = {"inv"};
   ASSERT_TRUE(cache.Insert(key, {1, 2, 3}, metadata, 1.0));
-  ASSERT_TRUE(cache.MarkInvalidated(key));
+  ASSERT_TRUE(cache.MarkInvalidated(CacheEntryIdentity{key, 0}));
   EXPECT_FALSE(cache.Lookup(key).has_value());
 
   for (int attempt = 0; attempt < 20 && cache.GetStatistics().current_entries != 0; ++attempt) {
@@ -249,6 +249,68 @@ TEST(QueryCacheTest, CapacityEvictionHonorsConfiguredBatchSize) {
   EXPECT_TRUE(cache.Lookup(key4).has_value());
 }
 
+TEST(QueryCacheTest, ProtectedBatchEvictionWalksPastMiddleEntryForWholeBatch) {
+  constexpr size_t kEvictionBatchSize = 3;
+  QueryCache cache(1024 * 1024, 0.0, /*ttl_seconds=*/0, /*compression_enabled=*/false, kEvictionBatchSize,
+                   /*start_background_worker=*/false);
+  const auto oldest = CacheKeyGenerator::Generate("protected-middle-oldest");
+  const auto protected_key = CacheKeyGenerator::Generate("protected-middle");
+  const auto after_protected = CacheKeyGenerator::Generate("protected-middle-after");
+  const auto newest = CacheKeyGenerator::Generate("protected-middle-newest");
+
+  const auto insert = [&cache](const CacheKey& key, uint64_t generation, DocId doc_id) {
+    CacheMetadata metadata;
+    metadata.key = key;
+    metadata.entry_generation = generation;
+    metadata.table = "posts";
+    return cache.Insert(key, {doc_id}, metadata, 1.0);
+  };
+  ASSERT_TRUE(insert(oldest, 1, 1));
+  ASSERT_TRUE(insert(protected_key, 2, 2));
+  ASSERT_TRUE(insert(after_protected, 3, 3));
+  ASSERT_TRUE(insert(newest, 4, 4));
+
+  EXPECT_EQ(cache.EvictBatch(CacheEntryIdentity{protected_key, 2}), 3U);
+  EXPECT_FALSE(cache.Lookup(oldest).has_value());
+  ASSERT_TRUE(cache.Lookup(protected_key).has_value());
+  EXPECT_FALSE(cache.Lookup(after_protected).has_value());
+  EXPECT_FALSE(cache.Lookup(newest).has_value());
+}
+
+TEST(QueryCacheTest, ProtectedBatchEvictionStopsAtTailEntryAndChecksGeneration) {
+  QueryCache cache(1024 * 1024, 0.0, /*ttl_seconds=*/0, /*compression_enabled=*/false,
+                   /*eviction_batch_size=*/8, /*start_background_worker=*/false);
+  const auto oldest = CacheKeyGenerator::Generate("protected-tail-oldest");
+  const auto middle = CacheKeyGenerator::Generate("protected-tail-middle");
+  const auto newest = CacheKeyGenerator::Generate("protected-tail-newest");
+  const auto insert = [&cache](const CacheKey& key, uint64_t generation, DocId doc_id) {
+    CacheMetadata metadata;
+    metadata.key = key;
+    metadata.entry_generation = generation;
+    metadata.table = "posts";
+    return cache.Insert(key, {doc_id}, metadata, 1.0);
+  };
+  ASSERT_TRUE(insert(oldest, 10, 10));
+  ASSERT_TRUE(insert(middle, 11, 11));
+  ASSERT_TRUE(insert(newest, 12, 12));
+
+  EXPECT_EQ(cache.EvictBatch(CacheEntryIdentity{oldest, 10}), 2U);
+  ASSERT_TRUE(cache.Lookup(oldest).has_value());
+  EXPECT_FALSE(cache.Lookup(middle).has_value());
+  EXPECT_FALSE(cache.Lookup(newest).has_value());
+
+  QueryCache mismatch_cache(1024 * 1024, 0.0, /*ttl_seconds=*/0, /*compression_enabled=*/false,
+                            /*eviction_batch_size=*/8, /*start_background_worker=*/false);
+  const auto reused_key = CacheKeyGenerator::Generate("protected-generation-mismatch");
+  CacheMetadata reused_metadata;
+  reused_metadata.key = reused_key;
+  reused_metadata.entry_generation = 20;
+  reused_metadata.table = "posts";
+  ASSERT_TRUE(mismatch_cache.Insert(reused_key, {20}, reused_metadata, 1.0));
+  EXPECT_EQ(mismatch_cache.EvictBatch(CacheEntryIdentity{reused_key, 19}), 1U);
+  EXPECT_FALSE(mismatch_cache.Lookup(reused_key).has_value());
+}
+
 /**
  * @brief Test invalidation flag
  */
@@ -265,7 +327,7 @@ TEST(QueryCacheTest, Invalidation) {
   cache.Insert(key, result, meta, 15.0);
 
   // Mark as invalidated
-  EXPECT_TRUE(cache.MarkInvalidated(key));
+  EXPECT_TRUE(cache.MarkInvalidated(CacheEntryIdentity{key, 0}));
 
   // Lookup should return nullopt for invalidated entry
   auto cached = cache.Lookup(key);
@@ -335,7 +397,8 @@ TEST(QueryCacheTest, ClearInvokesEvictionCallbackForEveryEntry) {
   QueryCache cache(1024 * 1024, 0.0);
 
   std::atomic<int> callback_count{0};
-  cache.SetEvictionCallback([&callback_count](const CacheKey& /*key*/) { callback_count.fetch_add(1); });
+  cache.SetIdentityEvictionCallback(
+      [&callback_count](const CacheEntryIdentity& /*identity*/) { callback_count.fetch_add(1); });
 
   CacheMetadata meta;
   meta.table = "t";
@@ -419,7 +482,7 @@ TEST(QueryCacheTest, ConcurrentAccess) {
 
         // Sometimes invalidate
         if (i % 10 == 0) {
-          cache.MarkInvalidated(key);
+          cache.MarkInvalidated(CacheEntryIdentity{key, 0});
         }
       }
     });
@@ -481,7 +544,7 @@ TEST(QueryCacheTest, InvalidatedNoHit) {
   meta.ngrams = {"tes", "est"};
 
   cache.Insert(key, result, meta, 15.0);
-  cache.MarkInvalidated(key);
+  cache.MarkInvalidated(CacheEntryIdentity{key, 0});
 
   // Lookup invalidated entry
   [[maybe_unused]] auto lookup_result = cache.Lookup(key);
@@ -1205,7 +1268,8 @@ TEST(QueryCacheTest, Bug19_ClearTableCallsEvictionCallback) {
 
   // Track evicted keys
   std::vector<CacheKey> evicted_keys;
-  cache.SetEvictionCallback([&evicted_keys](const CacheKey& key) { evicted_keys.push_back(key); });
+  cache.SetIdentityEvictionCallback(
+      [&evicted_keys](const CacheEntryIdentity& identity) { evicted_keys.push_back(identity.key); });
 
   CacheMetadata meta;
   meta.table = "posts";
@@ -1255,7 +1319,8 @@ TEST(QueryCacheTest, Bug19_ClearTableOnlyAffectsSpecifiedTable) {
   QueryCache cache(1024 * 1024, 10.0);
 
   std::vector<CacheKey> evicted_keys;
-  cache.SetEvictionCallback([&evicted_keys](const CacheKey& key) { evicted_keys.push_back(key); });
+  cache.SetIdentityEvictionCallback(
+      [&evicted_keys](const CacheEntryIdentity& identity) { evicted_keys.push_back(identity.key); });
 
   // Insert entries for two different tables
   CacheMetadata meta_posts;
@@ -1295,7 +1360,7 @@ TEST(QueryCacheTest, Bug19_ClearTableNoMatchingEntries) {
   QueryCache cache(1024 * 1024, 10.0);
 
   int callback_count = 0;
-  cache.SetEvictionCallback([&callback_count](const CacheKey& /*key*/) { callback_count++; });
+  cache.SetIdentityEvictionCallback([&callback_count](const CacheEntryIdentity& /*identity*/) { callback_count++; });
 
   // Insert entries for one table
   CacheMetadata meta;
@@ -1339,9 +1404,9 @@ TEST(QueryCacheTest, Bug33_EvictionCallbackReceivesCorrectKeys) {
   std::vector<CacheKey> evicted_keys;
 
   // Simple callback that just records the key
-  cache.SetEvictionCallback([&evicted_keys](const CacheKey& key) {
+  cache.SetIdentityEvictionCallback([&evicted_keys](const CacheEntryIdentity& identity) {
     // Don't call cache methods here - it would deadlock
-    evicted_keys.push_back(key);
+    evicted_keys.push_back(identity.key);
   });
 
   CacheMetadata meta1;
@@ -1384,7 +1449,8 @@ TEST(QueryCacheTest, Bug33_ClearTableCallbackReceivesAllKeys) {
 
   std::vector<CacheKey> cleared_keys;
 
-  cache.SetEvictionCallback([&cleared_keys](const CacheKey& key) { cleared_keys.push_back(key); });
+  cache.SetIdentityEvictionCallback(
+      [&cleared_keys](const CacheEntryIdentity& identity) { cleared_keys.push_back(identity.key); });
 
   CacheMetadata meta;
   meta.table = "posts";
@@ -2558,7 +2624,7 @@ TEST_F(QueryCacheNoCompressionTest, MarkInvalidatedWorksWithoutCompression) {
   std::vector<DocId> result = {10, 20, 30};
   ASSERT_TRUE(cache_.Insert(key, result, MakeMeta(), 5.0));
 
-  EXPECT_TRUE(cache_.MarkInvalidated(key));
+  EXPECT_TRUE(cache_.MarkInvalidated(CacheEntryIdentity{key, 0}));
   EXPECT_FALSE(cache_.Lookup(key).has_value());
 }
 
@@ -2658,19 +2724,15 @@ TEST(QueryCacheTest, IncrementalBucketGrowthPreservesStableInsertSequence) {
 }
 
 /**
- * @brief CR-5: Erase without callback does not fire eviction_callback_.
- *
- * Regression test for the EraseWithoutCallback API the InvalidationQueue
- * uses to avoid double-unregister. If a future change accidentally fires
- * eviction_callback_ on this path, this test fails.
+ * @brief EraseWithoutCallback does not fire the eviction callback, while Erase does.
  */
 TEST(QueryCacheTest, EraseWithoutCallbackSuppressesEvictionCallback) {
   QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
 
   std::atomic<int> callback_fires{0};
-  cache.SetEvictionCallback([&](const CacheKey& /*key*/) { callback_fires.fetch_add(1, std::memory_order_relaxed); });
+  cache.SetIdentityEvictionCallback(
+      [&](const CacheEntryIdentity& /*identity*/) { callback_fires.fetch_add(1, std::memory_order_relaxed); });
 
-  // Insert two entries.
   auto key_a = CacheKeyGenerator::Generate("erase_with_cb_a");
   auto key_b = CacheKeyGenerator::Generate("erase_no_cb_b");
   CacheMetadata meta;
@@ -2679,18 +2741,45 @@ TEST(QueryCacheTest, EraseWithoutCallbackSuppressesEvictionCallback) {
   ASSERT_TRUE(cache.Insert(key_a, {1}, meta, 1.0));
   ASSERT_TRUE(cache.Insert(key_b, {2}, meta, 1.0));
 
-  // Erase fires the callback (CR-6 invariant: Erase fires the callback so
-  // single-source unregister works for callers other than the queue).
-  EXPECT_TRUE(cache.Erase(key_a));
+  EXPECT_TRUE(cache.Erase(CacheEntryIdentity{key_a, 0}));
   EXPECT_EQ(callback_fires.load(), 1);
 
-  // EraseWithoutCallback does NOT fire the callback.
-  EXPECT_TRUE(cache.EraseWithoutCallback(key_b));
-  EXPECT_EQ(callback_fires.load(), 1);  // unchanged
+  EXPECT_TRUE(cache.EraseWithoutCallback(CacheEntryIdentity{key_b, 0}));
+  EXPECT_EQ(callback_fires.load(), 1);
 
-  // Both keys are gone.
   EXPECT_FALSE(cache.Lookup(key_a).has_value());
   EXPECT_FALSE(cache.Lookup(key_b).has_value());
+}
+
+TEST(QueryCacheTest, AdmissionRollbackSuppressesCallbacksAndRemovalCounters) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
+  std::atomic<int> callback_fires{0};
+  cache.SetIdentityEvictionCallback(
+      [&](const CacheEntryIdentity&) { callback_fires.fetch_add(1, std::memory_order_relaxed); });
+
+  const auto key = CacheKeyGenerator::Generate("admission_rollback");
+  CacheMetadata first;
+  first.table = "posts";
+  first.entry_generation = 11;
+  ASSERT_TRUE(cache.Insert(key, {1}, first, 1.0));
+  const CacheEntryIdentity rejected{key, first.entry_generation};
+  const auto before = cache.GetStatistics();
+
+  EXPECT_TRUE(cache.EraseForAdmissionRollback(rejected));
+  EXPECT_EQ(callback_fires.load(std::memory_order_relaxed), 0);
+  const auto after = cache.GetStatistics();
+  EXPECT_EQ(after.current_entries, 0U);
+  EXPECT_EQ(after.invalidations_deferred, before.invalidations_deferred);
+  EXPECT_EQ(after.stale_entry_removals, before.stale_entry_removals);
+  EXPECT_FALSE(cache.Lookup(key).has_value());
+
+  CacheMetadata replacement = first;
+  replacement.entry_generation = 12;
+  ASSERT_TRUE(cache.Insert(key, {2}, replacement, 1.0));
+  EXPECT_FALSE(cache.EraseForAdmissionRollback(rejected));
+  const auto replacement_result = cache.Lookup(key);
+  ASSERT_TRUE(replacement_result.has_value());
+  EXPECT_EQ(*replacement_result, std::vector<DocId>({2}));
 }
 
 TEST(QueryCacheTest, StaleEntryIdentityCannotInvalidateOrEraseReinsertedValue) {
@@ -2737,7 +2826,7 @@ TEST(QueryCacheTest, EvictionCallbackFiresWithoutHoldingCacheLock) {
   // Callback re-enters QueryCache via Lookup (a shared_lock acquisition). If
   // the callback fired while we still held the unique_lock, this Lookup would
   // block forever.
-  cache.SetEvictionCallback([&](const CacheKey& /*key*/) {
+  cache.SetIdentityEvictionCallback([&](const CacheEntryIdentity& /*identity*/) {
     auto unrelated_key = CacheKeyGenerator::Generate("reentrant_probe");
     (void)cache.Lookup(unrelated_key);  // must not deadlock
     reentrant_lookups.fetch_add(1, std::memory_order_relaxed);
@@ -2784,14 +2873,15 @@ TEST(QueryCacheTest, BatchEvictionCallbackInvokedOncePerBulkOp) {
 
   std::atomic<int> batch_calls{0};
   std::atomic<int> total_keys{0};
-  cache.SetBatchEvictionCallback([&](const std::vector<CacheKey>& keys) {
+  cache.SetBatchIdentityEvictionCallback([&](const std::vector<CacheEntryIdentity>& entries) {
     batch_calls.fetch_add(1, std::memory_order_relaxed);
-    total_keys.fetch_add(static_cast<int>(keys.size()), std::memory_order_relaxed);
+    total_keys.fetch_add(static_cast<int>(entries.size()), std::memory_order_relaxed);
   });
 
   // Per-key callback must NOT fire when the batch callback is set.
   std::atomic<int> per_key_calls{0};
-  cache.SetEvictionCallback([&](const CacheKey& /*key*/) { per_key_calls.fetch_add(1, std::memory_order_relaxed); });
+  cache.SetIdentityEvictionCallback(
+      [&](const CacheEntryIdentity& /*identity*/) { per_key_calls.fetch_add(1, std::memory_order_relaxed); });
 
   CacheMetadata meta;
   meta.table = "posts";
@@ -2815,7 +2905,8 @@ TEST(QueryCacheTest, MemoryPressureHonorsConfiguredEvictionBatchSize) {
   QueryCache cache(16 * 1024, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0,
                    /*compression_enabled=*/false, kEvictionBatchSize);
   std::vector<size_t> callback_sizes;
-  cache.SetBatchEvictionCallback([&](const std::vector<CacheKey>& keys) { callback_sizes.push_back(keys.size()); });
+  cache.SetBatchIdentityEvictionCallback(
+      [&](const std::vector<CacheEntryIdentity>& entries) { callback_sizes.push_back(entries.size()); });
 
   CacheMetadata metadata;
   metadata.table = "posts";
@@ -2839,7 +2930,8 @@ TEST(QueryCacheTest, MemoryPressureHonorsConfiguredEvictionBatchSize) {
 TEST(QueryCacheTest, BulkPathFallsBackToPerKeyCallbackWhenBatchUnset) {
   QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
   std::atomic<int> per_key_calls{0};
-  cache.SetEvictionCallback([&](const CacheKey& /*key*/) { per_key_calls.fetch_add(1, std::memory_order_relaxed); });
+  cache.SetIdentityEvictionCallback(
+      [&](const CacheEntryIdentity& /*identity*/) { per_key_calls.fetch_add(1, std::memory_order_relaxed); });
 
   CacheMetadata meta;
   meta.table = "posts";
@@ -2903,10 +2995,10 @@ TEST(QueryCacheTest, EvictionCallbackCanCallGetMetadataWithoutDeadlock) {
   QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/0.0);
 
   std::atomic<int> callback_invocations{0};
-  cache.SetEvictionCallback([&](const CacheKey& key) {
+  cache.SetIdentityEvictionCallback([&](const CacheEntryIdentity& identity) {
     // GetMetadata takes shared_lock on mutex_. If the eviction callback fires
     // under unique_lock, this acquisition deadlocks the worker thread.
-    auto entry_meta = cache.GetMetadata(key);
+    auto entry_meta = cache.GetMetadata(identity.key);
     // Whether entry_meta is empty or populated is implementation-detail (the
     // entry is removed before/after the callback). What matters is that the
     // call returns at all.
@@ -2979,7 +3071,7 @@ TEST(QueryCacheTest, PeriodicRefreshScansBoundedSliceAndResumes) {
   QueryCache cache(/*max_memory_bytes=*/512UL * 1024 * 1024, /*min_query_cost_ms=*/0.0, /*ttl_seconds=*/0,
                    /*compression_enabled=*/false, /*eviction_batch_size=*/1,
                    /*start_background_worker=*/false);
-  ASSERT_FALSE(cache.IsBackgroundWorkerRunningForTesting());
+  ASSERT_FALSE(cache.IsBackgroundWorkerRunning());
 
   CacheMetadata meta;
   meta.table = "posts";
@@ -2996,7 +3088,7 @@ TEST(QueryCacheTest, PeriodicRefreshScansBoundedSliceAndResumes) {
   ASSERT_EQ(cache.GetStatistics().current_entries, kEntryCount + 1);
 
   // Only the periodic pass removes entries that are merely flagged.
-  ASSERT_TRUE(cache.MarkInvalidated(probe_key));
+  ASSERT_TRUE(cache.MarkInvalidated(CacheEntryIdentity{probe_key, 0}));
 
   cache.RefreshLRUForTesting();
   EXPECT_EQ(cache.GetStatistics().current_entries, kEntryCount + 1)
@@ -3034,7 +3126,7 @@ TEST(QueryCacheTest, PeriodicRefreshCoversSmallCacheInOnePass) {
 
   // Flag every entry, including the one at the very tail.
   for (const auto& key : keys) {
-    ASSERT_TRUE(cache.MarkInvalidated(key));
+    ASSERT_TRUE(cache.MarkInvalidated(CacheEntryIdentity{key, 0}));
   }
 
   cache.RefreshLRUForTesting();
@@ -3090,7 +3182,7 @@ TEST(QueryCacheTest, PeriodicRefreshResumePointIsResetByClear) {
   // Same keys, same order: every node returns to its original position.
   fill();
   for (const auto& key : keys) {
-    ASSERT_TRUE(cache.MarkInvalidated(key));
+    ASSERT_TRUE(cache.MarkInvalidated(CacheEntryIdentity{key, 0}));
   }
 
   cache.RefreshLRUForTesting();

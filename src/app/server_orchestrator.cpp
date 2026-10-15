@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <exception>
 #include <filesystem>
 #include <functional>
 #include <thread>
@@ -227,6 +228,20 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() {
+  try {
+    return StartInternal();
+  } catch (const std::exception& e) {
+    RollbackPartialStartup();
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError,
+                                                                  std::string("Server startup failed: ") + e.what()));
+  } catch (...) {
+    RollbackPartialStartup();
+    return mygram::utils::MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "Server startup failed"));
+  }
+}
+
+mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::StartInternal() {
   if (!initialized_) {
     return mygram::utils::MakeUnexpected(
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "Cannot start: not initialized"));
@@ -237,62 +252,49 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
         mygram::utils::MakeError(mygram::utils::ErrorCode::kInternalError, "Already started"));
   }
 
+  auto tcp_start = tcp_server_->Start([this](cache::CacheManager* cache_manager) -> Expected<void, Error> {
 #ifdef USE_MYSQL
-  bool binlog_started = false;
-
-  // Start BinlogReader when replication is configured. An empty GTID is a
-  // valid start position for a fresh MySQL instance; gating on non-empty GTID
-  // leaves replication permanently stopped and readiness stuck at 503.
-  if (ShouldStartBinlogReaderOnServerStart(binlog_reader_.get(), snapshot_gtid_)) {
-    auto start_result = StartBinlogReaderForStartup(*binlog_reader_, restored_from_dump_);
-    if (!start_result) {
-      return mygram::utils::MakeUnexpected(start_result.error());
+    if (binlog_reader_) {
+      binlog_reader_->SetCacheManager(cache_manager);
     }
-    binlog_started = *start_result;
-  }
-  if (binlog_started) {
-    mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
-
-    auto catchup_result = mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_,
-                                                        kSnapshotCatchupTimeout, std::chrono::milliseconds(10),
-                                                        []() { return SignalManager::IsShutdownRequested(); });
-    if (!catchup_result) {
-      binlog_reader_->Stop();
-      mygram::utils::StructuredLog()
-          .Event("startup_replication_catchup_failed")
-          .Field("target_gtid", snapshot_catchup_target_gtid_)
-          .FieldError(catchup_result.error())
-          .Error();
-      return mygram::utils::MakeUnexpected(catchup_result.error());
-    }
-  }
+#else
+    (void)cache_manager;
 #endif
+    RegisterRuntimeCallbacks();
 
-  // Start TCP server
-  auto tcp_start = tcp_server_->Start();
+#ifdef USE_MYSQL
+    // Start only after the query cache and runtime callbacks are wired. This
+    // closes the window where row events could be applied before invalidation
+    // reached the cache, while TCP dispatch is still gated.
+    if (ShouldStartBinlogReaderOnServerStart(binlog_reader_.get(), snapshot_gtid_)) {
+      auto start_result = StartBinlogReaderForStartup(*binlog_reader_, restored_from_dump_);
+      if (!start_result) {
+        return mygram::utils::MakeUnexpected(start_result.error());
+      }
+      if (*start_result) {
+        mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
+
+        auto catchup_result = mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_,
+                                                            kSnapshotCatchupTimeout, std::chrono::milliseconds(10),
+                                                            []() { return SignalManager::IsShutdownRequested(); });
+        if (!catchup_result) {
+          binlog_reader_->Stop();
+          mygram::utils::StructuredLog()
+              .Event("startup_replication_catchup_failed")
+              .Field("target_gtid", snapshot_catchup_target_gtid_)
+              .FieldError(catchup_result.error())
+              .Error();
+          return mygram::utils::MakeUnexpected(catchup_result.error());
+        }
+      }
+    }
+#endif
+    return {};
+  });
   if (!tcp_start) {
-#ifdef USE_MYSQL
-    if (binlog_started && binlog_reader_ && binlog_reader_->IsRunning()) {
-      binlog_reader_->Stop();
-    }
-#endif
+    RollbackPartialStartup();
     return mygram::utils::MakeUnexpected(tcp_start.error());
   }
-
-#ifdef USE_MYSQL
-  // Hand the query cache to the replication path at the first moment it exists:
-  // the TCP server creates it while starting, which is after the binlog reader
-  // was constructed and started. Until this runs, every row event skips
-  // invalidation, so a cached result would keep being served after the row
-  // behind it changed. Doing it immediately after the listener starts keeps the
-  // gap to the span of this statement, during which no query can have been
-  // cached yet.
-  if (binlog_reader_) {
-    binlog_reader_->SetCacheManager(tcp_server_->GetCacheManager());
-  }
-#endif
-
-  RegisterRuntimeCallbacks();
 
   // Start HTTP server (if enabled)
   if (http_server_) {
@@ -307,12 +309,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
       // Cleanup in reverse start order. Start() must be transactional: callers
       // either get a fully-running orchestrator or no background workers left
       // behind after a partial startup failure.
-      (void)tcp_server_->Stop();
-#ifdef USE_MYSQL
-      if (binlog_started && binlog_reader_ && binlog_reader_->IsRunning()) {
-        binlog_reader_->Stop();
-      }
-#endif
+      RollbackPartialStartup();
       return mygram::utils::MakeUnexpected(http_start.error());
     }
     mygram::utils::StructuredLog()
@@ -329,6 +326,26 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Start() 
       .Field("tcp_port", static_cast<uint64_t>(deps_.config.api.tcp.port))
       .Info();
   return {};
+}
+
+void ServerOrchestrator::RollbackPartialStartup() noexcept {
+  ServerShutdownActions actions;
+  if (http_server_ && http_server_->IsRunning()) {
+    actions.stop_http_server = [this]() { http_server_->Stop(); };
+  }
+  if (tcp_server_) {
+    actions.stop_tcp_server = [this]() { return tcp_server_->Stop(); };
+  }
+#ifdef USE_MYSQL
+  if (binlog_reader_ && binlog_reader_->IsRunning()) {
+    actions.stop_binlog_reader = [this]() { binlog_reader_->Stop(); };
+  }
+  if (mysql_connection_) {
+    actions.close_mysql_connection = [this]() { mysql_connection_->Close(); };
+  }
+#endif
+  (void)StopServerComponentsBestEffort(actions);
+  started_ = false;
 }
 
 Expected<void, mygram::utils::Error> ServerOrchestrator::Stop() {

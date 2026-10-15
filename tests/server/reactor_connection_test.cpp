@@ -24,7 +24,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -32,6 +34,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 // Dispatcher harness dependencies (same pattern as request_dispatcher_test.cpp)
@@ -79,6 +82,102 @@ static bool WaitReadable(int fd, int timeout_ms = 2000) {
   pfd.events = POLLIN | POLLHUP;
   return ::poll(&pfd, 1, timeout_ms) > 0;
 }
+
+static std::string ReceiveAvailable(int fd) {
+  std::string received;
+  char buffer[4096];
+  while (true) {
+    const ssize_t n = ::recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+    if (n > 0) {
+      received.append(buffer, static_cast<size_t>(n));
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    break;
+  }
+  return received;
+}
+
+struct ReadOverflowResult {
+  bool detected = false;
+  bool keep_registered = false;
+};
+
+/// Feed a real oversized, unterminated frame through OnReadable. The peer is
+/// made nonblocking so the test can alternate socket writes with event-loop
+/// reads instead of relying on the socketpair's send-buffer size.
+static ReadOverflowResult DriveReadOverflow(ReactorConnection& conn, int peer_fd) {
+  const int flags = ::fcntl(peer_fd, F_GETFL, 0);
+  if (flags < 0 || ::fcntl(peer_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    return {};
+  }
+
+  const std::string tail(ReactorConnection::kMaxReadBufferBytes + 1, 'x');
+  size_t written = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (written < tail.size()) {
+      const ssize_t n = ::write(peer_fd, tail.data() + written, tail.size() - written);
+      if (n > 0) {
+        written += static_cast<size_t>(n);
+      } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        return {};
+      }
+    }
+
+    const bool keep_registered = conn.OnReadable();
+    if (conn.IsClosing()) {
+      return {.detected = true, .keep_registered = keep_registered};
+    }
+    std::this_thread::yield();
+  }
+  return {};
+}
+
+static bool WaitForDrainTaskToFinish(const ReactorConnection& conn) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (!conn.HasInFlightRequest()) {
+      return true;
+    }
+    std::this_thread::yield();
+  }
+  return !conn.HasInFlightRequest();
+}
+
+class PromiseReleaseGuard {
+ public:
+  explicit PromiseReleaseGuard(std::promise<void>& promise) : promise_(promise) {}
+  ~PromiseReleaseGuard() {
+    Release();
+    if (completion_future_.valid()) {
+      completion_future_.wait();
+    }
+    if (drain_conn_ != nullptr) {
+      while (drain_conn_->HasInFlightRequest()) {
+        std::this_thread::yield();
+      }
+    }
+  }
+
+  void Release() {
+    if (!released_) {
+      promise_.set_value();
+      released_ = true;
+    }
+  }
+
+  void WaitForDrain(const ReactorConnection& conn) { drain_conn_ = &conn; }
+  void WaitFor(std::shared_future<void> completion) { completion_future_ = std::move(completion); }
+
+ private:
+  std::promise<void>& promise_;
+  bool released_ = false;
+  const ReactorConnection* drain_conn_ = nullptr;
+  std::shared_future<void> completion_future_;
+};
 
 // ---------------------------------------------------------------------------
 // Helper: build a minimal RequestDispatcher (no table registered).
@@ -129,6 +228,34 @@ class ThrowingCommandHandler final : public CommandHandler {
   }
 };
 
+enum class GatedHandlerBehavior { kReturn, kThrowStd, kThrowNonStd };
+
+class GatedCommandHandler final : public CommandHandler {
+ public:
+  GatedCommandHandler(HandlerContext& context, GatedHandlerBehavior behavior, std::promise<void>& entered,
+                      std::shared_future<void> release)
+      : CommandHandler(context), behavior_(behavior), entered_(entered), release_(std::move(release)) {}
+
+  std::string Handle(const mygramdb::query::Query& /*query*/, ConnectionContext& /*conn_ctx*/) override {
+    entered_.set_value();
+    release_.wait();
+    switch (behavior_) {
+      case GatedHandlerBehavior::kReturn:
+        return "OK gated response";
+      case GatedHandlerBehavior::kThrowStd:
+        throw std::runtime_error("injected gated std exception");
+      case GatedHandlerBehavior::kThrowNonStd:
+        throw 42;
+    }
+    return {};
+  }
+
+ private:
+  GatedHandlerBehavior behavior_;
+  std::promise<void>& entered_;
+  std::shared_future<void> release_;
+};
+
 // ---------------------------------------------------------------------------
 // Fixture A: real dispatcher + real pool — used for frame-parsing & drain tests
 // ---------------------------------------------------------------------------
@@ -156,6 +283,35 @@ class ReactorConnectionTest : public ::testing::Test {
       peer_fd_ = -1;
     }
     pool_.reset();  // drain before destroying dispatcher
+  }
+
+  void ExpectReadOverflowDuringGatedHandler(GatedHandlerBehavior behavior) {
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto release_future = release.get_future().share();
+    GatedCommandHandler gated_handler(*harness_.hctx, behavior, entered, std::move(release_future));
+    PromiseReleaseGuard release_guard(release);
+    release_guard.WaitForDrain(*conn_);
+    harness_.dispatcher->RegisterHandler(mygramdb::query::QueryType::INFO, &gated_handler);
+
+    WriteAll(peer_fd_, "INFO\r\n");
+    ASSERT_TRUE(conn_->OnReadable());
+    ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready)
+        << "handler did not reach its gate";
+
+    const ReadOverflowResult overflow = DriveReadOverflow(*conn_, peer_fd_);
+    ASSERT_TRUE(overflow.detected) << "OnReadable did not publish terminal overflow";
+    EXPECT_FALSE(overflow.keep_registered)
+        << "an empty write queue should let the event loop unregister after sending the error";
+    EXPECT_TRUE(conn_->IsClosing());
+    ASSERT_TRUE(WaitReadable(peer_fd_));
+    EXPECT_EQ(ReceiveAvailable(peer_fd_), "ERROR 6007 request too large\r\n");
+
+    release_guard.Release();
+    ASSERT_TRUE(WaitForDrainTaskToFinish(*conn_)) << "gated drain task did not finish";
+    EXPECT_TRUE(ReceiveAvailable(peer_fd_).empty())
+        << "the in-flight handler must not append a response or a second error after terminal close";
   }
 
   int peer_fd_ = -1;
@@ -581,40 +737,54 @@ TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowDoesNotInlineErrorAheadOfP
       << "read overflow must not send ERROR ahead of already queued response";
 }
 
-TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowErrorHoldsWriteMutexAcrossSend) {
+TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowPublishesClosingBeforeConcurrentEnqueue) {
   std::promise<void> entered;
   auto entered_future = entered.get_future();
   std::promise<void> release;
   auto release_future = release.get_future().share();
+  std::promise<void> enqueue_attempted;
+  auto enqueue_attempted_future = enqueue_attempted.get_future();
+  std::future<bool> error_sender;
+  std::future<bool> response_sender;
+  PromiseReleaseGuard release_guard(release);
 
-  auto error_sender = std::async(std::launch::async, [this, &entered, release_future]() {
+  error_sender = std::async(std::launch::async, [this, &entered, release_future]() {
     return conn_->SendReadOverflowErrorForTest("request too large", mygram::utils::ErrorCode::kNetworkInvalidRequest,
                                                [&entered, release_future]() {
                                                  entered.set_value();
                                                  release_future.wait();
                                                });
   });
-  ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
-
-  auto response_sender = std::async(std::launch::async, [this]() { return conn_->EnqueueResponse("OK response"); });
-  EXPECT_EQ(response_sender.wait_for(std::chrono::milliseconds(25)), std::future_status::timeout)
-      << "normal response write must wait until the locked error send completes";
-
-  release.set_value();
-  EXPECT_TRUE(error_sender.get());
-  EXPECT_TRUE(response_sender.get());
-
-  const std::string expected = "ERROR 6007 request too large\r\nOK response\r\n";
-  std::string received;
-  while (received.size() < expected.size() && WaitReadable(peer_fd_, 1000)) {
-    char response[128]{};
-    const ssize_t n = ::recv(peer_fd_, response, sizeof(response), 0);
-    if (n <= 0) {
-      break;
-    }
-    received.append(response, static_cast<size_t>(n));
+  EXPECT_EQ(entered_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  if (entered_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+    EXPECT_TRUE(conn_->IsClosing()) << "terminal state must be visible before the error send proceeds";
   }
-  EXPECT_EQ(received, expected);
+
+  response_sender = std::async(std::launch::async, [this, &enqueue_attempted]() {
+    enqueue_attempted.set_value();
+    return conn_->EnqueueResponse("OK response");
+  });
+  EXPECT_EQ(enqueue_attempted_future.wait_for(std::chrono::seconds(1)), std::future_status::ready)
+      << "concurrent response sender did not reach the enqueue call";
+
+  release_guard.Release();
+  EXPECT_TRUE(error_sender.get());
+  EXPECT_FALSE(response_sender.get()) << "a response after terminal close must be rejected";
+
+  ASSERT_TRUE(WaitReadable(peer_fd_));
+  EXPECT_EQ(ReceiveAvailable(peer_fd_), "ERROR 6007 request too large\r\n");
+}
+
+TEST_F(ReactorConnectionTest, ReadOverflowSuppressesLaterGatedHandlerResponse) {
+  ExpectReadOverflowDuringGatedHandler(GatedHandlerBehavior::kReturn);
+}
+
+TEST_F(ReactorConnectionTest, ReadOverflowSuppressesLaterGatedStandardExceptionError) {
+  ExpectReadOverflowDuringGatedHandler(GatedHandlerBehavior::kThrowStd);
+}
+
+TEST_F(ReactorConnectionTest, ReadOverflowSuppressesLaterGatedUnknownExceptionError) {
+  ExpectReadOverflowDuringGatedHandler(GatedHandlerBehavior::kThrowNonStd);
 }
 
 TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClosing) {
@@ -630,13 +800,14 @@ TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClos
   SetNonBlocking(rc_fd_);
 
   pool_ = std::make_unique<ThreadPool>(1, 1);
-  std::promise<void> worker_started;
-  auto worker_started_future = worker_started.get_future();
-  std::promise<void> release_worker;
-  auto release_worker_future = release_worker.get_future().share();
+  auto worker_started = std::make_shared<std::promise<void>>();
+  auto worker_started_future = worker_started->get_future();
+  auto release_worker = std::make_shared<std::promise<void>>();
+  auto release_worker_future = release_worker->get_future().share();
+  PromiseReleaseGuard release_guard(*release_worker);
 
-  ASSERT_TRUE(pool_->Submit([&worker_started, release_worker_future]() {
-    worker_started.set_value();
+  ASSERT_TRUE(pool_->Submit([worker_started, release_worker_future]() {
+    worker_started->set_value();
     release_worker_future.wait();
   }));
   ASSERT_EQ(worker_started_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
@@ -661,7 +832,7 @@ TEST_F(ReactorConnectionTest, ThreadPoolQueueExhaustionSendsServerBusyBeforeClos
   EXPECT_EQ(received, expected);
   EXPECT_EQ(stats.GetRequestsDeniedPoolFullTcp(), 1U);
 
-  release_worker.set_value();
+  release_guard.Release();
 }
 
 // Same pool-exhaustion trigger as above, but with a response already queued
@@ -692,13 +863,14 @@ TEST_F(ReactorConnectionTest, ThreadPoolExhaustionWithArmedWriteQueueDoesNotDisc
   ASSERT_TRUE(reactor.Start());
 
   pool_ = std::make_unique<ThreadPool>(1, 1);
-  std::promise<void> worker_started;
-  auto worker_started_future = worker_started.get_future();
-  std::promise<void> release_worker;
-  auto release_worker_future = release_worker.get_future().share();
+  auto worker_started = std::make_shared<std::promise<void>>();
+  auto worker_started_future = worker_started->get_future();
+  auto release_worker = std::make_shared<std::promise<void>>();
+  auto release_worker_future = release_worker->get_future().share();
+  PromiseReleaseGuard release_guard(*release_worker);
 
-  ASSERT_TRUE(pool_->Submit([&worker_started, release_worker_future]() {
-    worker_started.set_value();
+  ASSERT_TRUE(pool_->Submit([worker_started, release_worker_future]() {
+    worker_started->set_value();
     release_worker_future.wait();
   }));
   ASSERT_EQ(worker_started_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
@@ -731,7 +903,7 @@ TEST_F(ReactorConnectionTest, ThreadPoolExhaustionWithArmedWriteQueueDoesNotDisc
   }
   EXPECT_EQ(reactor.ConnectionCount(), 1U) << "connection must stay registered until the queue drains";
 
-  release_worker.set_value();
+  release_guard.Release();
 
   // Drive the drain exactly as a real writable event would: read whatever
   // the peer has received so far, then give the connection another chance to
@@ -768,6 +940,88 @@ TEST_F(ReactorConnectionTest, ThreadPoolExhaustionWithArmedWriteQueueDoesNotDisc
   conn_.reset();
 }
 
+TEST_F(ReactorConnectionTest, ReadOverflowKeepsQueuedResponseRegisteredUntilDrainFinishes) {
+  conn_.reset();
+  ::close(peer_fd_);
+  peer_fd_ = -1;
+  pool_.reset();
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  peer_fd_ = fds[0];
+  rc_fd_ = fds[1];
+  SetNonBlocking(rc_fd_);
+  int send_buffer_bytes = 64 * 1024;
+  ASSERT_EQ(::setsockopt(rc_fd_, SOL_SOCKET, SO_SNDBUF, &send_buffer_bytes, sizeof(send_buffer_bytes)), 0);
+
+  IoReactor reactor(ReactorConfig{});
+  reactor.SetMultiplexerFactoryForTest([]() { return std::make_unique<reactor::MockEventMultiplexer>(); });
+  ASSERT_TRUE(reactor.Start());
+
+  pool_ = std::make_unique<ThreadPool>(1, 0);
+  auto worker_started = std::make_shared<std::promise<void>>();
+  auto worker_started_future = worker_started->get_future();
+  auto release_worker = std::make_shared<std::promise<void>>();
+  auto release_worker_future = release_worker->get_future().share();
+  PromiseReleaseGuard release_guard(*release_worker);
+
+  ASSERT_TRUE(pool_->Submit([worker_started, release_worker_future]() {
+    worker_started->set_value();
+    release_worker_future.wait();
+  }));
+  ASSERT_EQ(worker_started_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+
+  conn_ = ReactorConnection::Create(rc_fd_, &reactor, harness_.dispatcher.get(), pool_.get());
+  ASSERT_TRUE(reactor.Register(conn_));
+
+  const std::string filler(1024 * 1024, 'F');
+  ASSERT_TRUE(conn_->EnqueueResponse(filler));
+  ASSERT_TRUE(conn_->WriteArmedForTest());
+  ASSERT_GT(conn_->WriteQueueDepthForTest(), 0U);
+
+  WriteAll(peer_fd_, "INFO\r\n");
+  const bool drain_submitted = conn_->OnReadable();
+
+  auto drain_finished = std::make_shared<std::promise<void>>();
+  auto drain_finished_future = drain_finished->get_future().share();
+  release_guard.WaitFor(drain_finished_future);
+  ASSERT_TRUE(pool_->Submit([drain_finished]() { drain_finished->set_value(); }))
+      << "single-worker sentinel must run after the queued DrainTask";
+  ASSERT_TRUE(drain_submitted) << "the queued drain task should retain its single worker slot";
+
+  const ReadOverflowResult overflow = DriveReadOverflow(*conn_, peer_fd_);
+  ASSERT_TRUE(overflow.detected) << "OnReadable did not publish terminal overflow";
+  EXPECT_TRUE(overflow.keep_registered) << "the accepted response remains queued and must drain before close";
+  EXPECT_TRUE(conn_->IsClosing());
+  EXPECT_GT(conn_->WriteQueueDepthForTest(), 0U);
+  EXPECT_EQ(reactor.ConnectionCount(), 1U);
+
+  // The worker is released only after overflow publication. FIFO execution in
+  // this one-worker pool makes the sentinel prove DrainTask's tail has run.
+  release_guard.Release();
+  ASSERT_EQ(drain_finished_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_EQ(reactor.ConnectionCount(), 1U)
+      << "DrainTask must leave a graceful terminal queue registered for OnWritable";
+  EXPECT_GT(conn_->WriteQueueDepthForTest(), 0U);
+
+  bool fully_drained = false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  std::string received;
+  while (!fully_drained && std::chrono::steady_clock::now() < deadline) {
+    received += ReceiveAvailable(peer_fd_);
+    fully_drained = !conn_->OnWritable();
+    std::this_thread::yield();
+  }
+  received += ReceiveAvailable(peer_fd_);
+  EXPECT_TRUE(fully_drained) << "OnWritable never finished the accepted write queue";
+  EXPECT_EQ(conn_->WriteQueueDepthForTest(), 0U);
+  EXPECT_EQ(received, filler + "\r\n")
+      << "overflow must not splice an ERROR ahead of or after an already accepted response";
+
+  reactor.Unregister(rc_fd_, conn_.get());
+  EXPECT_EQ(reactor.ConnectionCount(), 0U);
+}
+
 TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {
   conn_.reset();
   if (peer_fd_ >= 0) {
@@ -785,6 +1039,43 @@ TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {
 
   EXPECT_FALSE(conn_->EnqueueResponse("hello"));
   EXPECT_TRUE(conn_->IsClosing());
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, WriteQueueCapFailureDoesNotDrainAfterImmediateClose) {
+  conn_.reset();
+  ::close(peer_fd_);
+  peer_fd_ = -1;
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  peer_fd_ = fds[0];
+  rc_fd_ = fds[1];
+  SetNonBlocking(rc_fd_);
+  int send_buffer_bytes = 4096;
+  ASSERT_EQ(::setsockopt(rc_fd_, SOL_SOCKET, SO_SNDBUF, &send_buffer_bytes, sizeof(send_buffer_bytes)), 0);
+
+  IoReactor reactor(ReactorConfig{});
+  reactor.SetMultiplexerFactoryForTest([]() { return std::make_unique<reactor::MockEventMultiplexer>(); });
+  ASSERT_TRUE(reactor.Start());
+
+  constexpr size_t kMaxWriteQueueBytes = 128 * 1024;
+  conn_ = ReactorConnection::Create(rc_fd_, &reactor, nullptr, nullptr, nullptr, kMaxWriteQueueBytes);
+  ASSERT_TRUE(reactor.Register(conn_));
+
+  ASSERT_TRUE(conn_->EnqueueResponse(std::string(kMaxWriteQueueBytes - 2, 'Q')));
+  ASSERT_TRUE(conn_->WriteArmedForTest());
+  ASSERT_GT(conn_->WriteQueueDepthForTest(), 0U);
+
+  EXPECT_FALSE(conn_->EnqueueResponse(std::string(kMaxWriteQueueBytes, 'X')));
+  ASSERT_TRUE(conn_->IsClosing());
+  ASSERT_GT(conn_->WriteQueueDepthForTest(), 0U);
+
+  const std::string already_sent = ReceiveAvailable(peer_fd_);
+  ASSERT_FALSE(already_sent.empty()) << "the initial enqueue must have made partial send progress";
+  EXPECT_FALSE(conn_->OnWritable()) << "an immediate close must bypass the residual write queue";
+  EXPECT_TRUE(ReceiveAvailable(peer_fd_).empty()) << "OnWritable must not send queued bytes after hard close";
+
+  reactor.Unregister(rc_fd_, conn_.get());
 }
 
 TEST(ReactorConnectionBudgetTest, SharedPendingFrameBudgetRejectsAggregateAcrossConnections) {

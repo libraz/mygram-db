@@ -10,6 +10,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +24,7 @@
 #include "cache/cache_types.h"
 #include "index/index.h"
 #include "query/query_parser.h"
+#include "server/operation_coordinator.h"
 #include "server/response_formatter.h"
 #include "server/table_catalog.h"
 #include "storage/document_store.h"
@@ -946,6 +949,37 @@ TEST_F(DumpHandlerTest, PathTraversalPreventionVerify) {
   response = handler_->Handle(query, conn_ctx_);
   // May succeed if interpreted as literal filename, but should not traverse
   // The important thing is it doesn't access /etc/passwd
+}
+
+TEST_F(DumpHandlerTest, RejectsControlCharactersInAllFilesystemCommandsBeforeAccess) {
+  constexpr std::array<char, 5> control_bytes = {'\0', '\r', '\n', '\t', '\x7f'};
+  constexpr std::array<query::QueryType, 4> filesystem_commands = {
+      query::QueryType::DUMP_SAVE,
+      query::QueryType::DUMP_LOAD,
+      query::QueryType::DUMP_VERIFY,
+      query::QueryType::DUMP_INFO,
+  };
+
+  for (size_t byte_index = 0; byte_index < control_bytes.size(); ++byte_index) {
+    const std::string prefix = "control_path_" + std::to_string(byte_index);
+    std::string filepath = prefix;
+    filepath.push_back(control_bytes[byte_index]);
+    filepath += "_suffix.dmp";
+    const auto filesystem_visible_path = test_dump_dir_ / prefix;
+
+    for (const auto command : filesystem_commands) {
+      query::Query query;
+      query.type = command;
+      query.filepath = filepath;
+
+      const std::string response = handler_->Handle(query, conn_ctx_);
+      EXPECT_EQ(response.rfind("ERROR", 0), 0U) << "Command type " << static_cast<int>(command);
+      EXPECT_NE(response.find("control characters"), std::string::npos)
+          << "The request must be rejected by path validation before touching the filesystem";
+      EXPECT_FALSE(std::filesystem::exists(filesystem_visible_path))
+          << "A rejected path must not create a filesystem entry, including the prefix visible before NUL";
+    }
+  }
 }
 
 /**
@@ -2578,6 +2612,29 @@ class MockBinlogReaderForDumpTest : public mysql::IBinlogReader {
   std::string gtid_ = "uuid:100";
   mutable std::vector<std::string> call_log_;
 };
+
+TEST_F(DumpHandlerTest, DumpSaveRejectedByShutdownBeforeReadingReplicationState) {
+  MockBinlogReaderForDumpTest reader;
+  OperationCoordinator coordinator;
+  std::atomic<bool> shutdown_requested{false};
+  coordinator.BlockNewOperationsForShutdown(&shutdown_requested);
+  handler_ctx_->binlog_reader = &reader;
+  handler_ctx_->operation_coordinator = &coordinator;
+
+  query::Query query;
+  query.type = query::QueryType::DUMP_SAVE;
+  query.filepath = "shutdown_rejected.dmp";
+
+  const std::string response = handler_->Handle(query, conn_ctx_);
+
+  EXPECT_EQ(response.rfind("ERROR", 0), 0U) << response;
+  EXPECT_TRUE(shutdown_requested.load(std::memory_order_acquire));
+  EXPECT_TRUE(reader.GetCallLog().empty()) << "a rejected request must not touch the binlog reader";
+  EXPECT_FALSE(std::filesystem::exists(test_dump_dir_ / query.filepath));
+
+  handler_ctx_->binlog_reader = nullptr;
+  handler_ctx_->operation_coordinator = nullptr;
+}
 
 /**
  * @brief Verify DumpSaveWorker stops replication before capturing GTID

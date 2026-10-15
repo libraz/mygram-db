@@ -524,13 +524,9 @@ class HttpServer {
    * intended HTTP code, and `message` is the user-facing reason.
    */
   struct TableContextLookup {
-    TableContext* table_ctx = nullptr;  ///< Non-null on success.
-    std::string table_key;              ///< Canonical table key on success.
-    int status = 0;                     ///< HTTP status (0 means uninitialized).
-    std::string message;                ///< Error message for failures.
-    /// Machine-readable cause, carried so callers report the same code the TCP
-    /// surface uses for the identical condition.
-    mygram::utils::ErrorCode code = mygram::utils::ErrorCode::kSuccess;
+    TableContext* table_ctx = nullptr;          ///< Non-null on success.
+    std::string table_key;                      ///< Canonical table key on success.
+    std::optional<mygram::utils::Error> error;  ///< Failure rendered through the shared HTTP status mapper.
   };
 
   /**
@@ -698,15 +694,8 @@ class HttpServer {
    */
   static void SendJson(httplib::Response& res, int status_code, const nlohmann::json& body);
 
-  /**
-   * @brief Send error response
-   *
-   * The code is mandatory: a default turned every call site that did not think
-   * about it into `kUnknown`, so the HTTP surface reported one opaque code
-   * where the TCP surface named the cause.
-   */
-  static void SendError(httplib::Response& res, int status_code, const std::string& message,
-                        mygram::utils::ErrorCode code);
+  /** Map an Error to its HTTP status and render it. */
+  static void SendError(httplib::Response& res, const mygram::utils::Error& error);
 
   /**
    * @brief Send an error response built from an `Error` object.

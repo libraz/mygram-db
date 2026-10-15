@@ -6,13 +6,24 @@
 #include "server/server_lifecycle_manager.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+#include <array>
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <utility>
 
 #include "config/config.h"
 #include "index/index.h"
 #include "storage/document_store.h"
+#include "utils/atomic_file_writer.h"
 
 #ifdef USE_MYSQL
 #include "server/sync_operation_manager.h"
@@ -20,6 +31,90 @@
 
 using namespace mygramdb::server;
 using namespace mygramdb;
+
+namespace {
+
+using TrackedDumpTempPaths = std::pair<std::filesystem::path, std::filesystem::path>;
+
+std::optional<TrackedDumpTempPaths> CreateAgedDeadTrackedTemp(const std::filesystem::path& directory,
+                                                              const std::string& final_name) {
+  std::filesystem::create_directories(directory);
+  int path_pipe[2] = {-1, -1};
+  if (::pipe(path_pipe) != 0) {
+    ADD_FAILURE() << "failed to create temp-path pipe";
+    return std::nullopt;
+  }
+
+  const pid_t child_pid = ::fork();
+  if (child_pid < 0) {
+    ::close(path_pipe[0]);
+    ::close(path_pipe[1]);
+    ADD_FAILURE() << "failed to fork dump-temp owner process";
+    return std::nullopt;
+  }
+  if (child_pid == 0) {
+    ::close(path_pipe[0]);
+    mygramdb::utils::AtomicFileWriter writer((directory / final_name).string(), true);
+    const int fd = ::open(writer.GetTempPath().c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0) {
+      _exit(2);
+    }
+    const auto tracked = writer.TrackDumpTempFile(fd);
+    ::close(fd);
+    if (!tracked) {
+      _exit(3);
+    }
+    const std::string temp_path = writer.GetTempPath();
+    if (::write(path_pipe[1], temp_path.c_str(), temp_path.size() + 1) != static_cast<ssize_t>(temp_path.size() + 1)) {
+      _exit(4);
+    }
+    ::close(path_pipe[1]);
+    _exit(0);  // Leave the marker and temp file as a real dead-owner pair.
+  }
+
+  ::close(path_pipe[1]);
+  std::array<char, 4096> temp_path_buffer{};
+  size_t bytes_read = 0;
+  while (bytes_read < temp_path_buffer.size() && std::memchr(temp_path_buffer.data(), '\0', bytes_read) == nullptr) {
+    const ssize_t count =
+        ::read(path_pipe[0], temp_path_buffer.data() + bytes_read, temp_path_buffer.size() - bytes_read);
+    if (count <= 0) {
+      break;
+    }
+    bytes_read += static_cast<size_t>(count);
+  }
+  ::close(path_pipe[0]);
+
+  int child_status = 0;
+  if (::waitpid(child_pid, &child_status, 0) != child_pid || !WIFEXITED(child_status) ||
+      WEXITSTATUS(child_status) != 0 || bytes_read == 0 ||
+      std::memchr(temp_path_buffer.data(), '\0', bytes_read) == nullptr) {
+    ADD_FAILURE() << "dump-temp owner process did not leave a tracked temp file";
+    return std::nullopt;
+  }
+
+  const std::filesystem::path temp_path(temp_path_buffer.data());
+  std::filesystem::path marker_path;
+  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    const auto basename = entry.path().filename().string();
+    if (basename.compare(0, mygramdb::utils::kDumpTempOwnerMarkerPrefix.size(),
+                         mygramdb::utils::kDumpTempOwnerMarkerPrefix) == 0) {
+      marker_path = entry.path();
+      break;
+    }
+  }
+  if (marker_path.empty()) {
+    ADD_FAILURE() << "TrackDumpTempFile did not create an owner marker";
+    return std::nullopt;
+  }
+
+  const auto old_time = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+  std::filesystem::last_write_time(temp_path, old_time);
+  std::filesystem::last_write_time(marker_path, old_time);
+  return TrackedDumpTempPaths{temp_path, marker_path};
+}
+
+}  // namespace
 
 /**
  * @brief Test fixture for ServerLifecycleManager tests
@@ -47,7 +142,13 @@ class ServerLifecycleManagerTest : public ::testing::Test {
     full_config_.cache.enabled = false;
     full_config_.dump.interval_sec = 0;  // Disable scheduler
 
-    dump_dir_ = "/tmp/test_dump";
+    const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+    const auto dump_path =
+        std::filesystem::temp_directory_path() /
+        ("server_lifecycle_manager_" + std::string(test_info->name()) + "_" + std::to_string(getpid()));
+    std::filesystem::remove_all(dump_path);
+    std::filesystem::create_directories(dump_path);
+    dump_dir_ = dump_path.string();
 
 #ifdef USE_MYSQL
     // Create SyncOperationManager (required for SyncHandler)
@@ -56,14 +157,18 @@ class ServerLifecycleManagerTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    // Cleanup handled by unique_ptr destructors
+    // Cleanup handled by unique_ptr destructors; keep this fixture's dump
+    // directory private so parallel lifecycle cases cannot sweep each other's
+    // files.
+    std::filesystem::remove_all(dump_dir_);
   }
 
   // Helper: Create lifecycle manager with current config
-  std::unique_ptr<ServerLifecycleManager> CreateManager() {
+  std::unique_ptr<ServerLifecycleManager> CreateManager(bool null_full_config = false) {
+    const config::Config* full_config = null_full_config ? nullptr : &full_config_;
     auto result = ServerLifecycleManager::Create(
-        server_config_, table_contexts_, dump_dir_, &full_config_, stats_, dump_load_in_progress_,
-        dump_save_in_progress_, optimization_in_progress_, replication_paused_for_dump_, replication_pause_counter_,
+        server_config_, table_contexts_, dump_dir_, full_config, stats_, dump_load_in_progress_, dump_save_in_progress_,
+        optimization_in_progress_, replication_paused_for_dump_, replication_pause_counter_,
         nullptr  // binlog_reader
 #ifdef USE_MYSQL
         ,
@@ -296,24 +401,23 @@ TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithCacheEnabled) {
  *
  * Regression test for the contract enforced by InitScheduler():
  *   - When dump.interval_sec > 0 and TableCatalog is non-null, the scheduler
- *     is constructed AND started. SnapshotScheduler's constructor no longer
+ *     is constructed but not started. TcpServer starts it only after the
+ *     pre-accept wiring callback. SnapshotScheduler's constructor no longer
  *     silently accepts a null catalog (the precondition was hoisted up to
  *     ServerLifecycleManager::InitScheduler).
  */
 TEST_F(ServerLifecycleManagerTest, Initialize_Success_WithSchedulerEnabled) {
   full_config_.dump.interval_sec = 60;
-  full_config_.dump.dir = "/tmp/test_dump";
+  full_config_.dump.dir = dump_dir_;
 
   auto manager = CreateManager();
   auto result = manager->Initialize();
 
   ASSERT_TRUE(result) << "Initialize failed: " << result.error().to_string();
   ASSERT_NE(result->scheduler, nullptr);
-  // InitScheduler must Start() the scheduler after construction.
-  EXPECT_TRUE(result->scheduler->IsRunning());
+  EXPECT_FALSE(result->scheduler->IsRunning());
 
-  // Cleanup: Stop scheduler before destroying
-  result->scheduler->Stop();
+  // Cleanup: the lifecycle manager owns only a constructed scheduler here.
   result->acceptor->Stop();
 }
 
@@ -337,6 +441,44 @@ TEST_F(ServerLifecycleManagerTest, Initialize_SchedulerDisabledWhenIntervalZero)
   EXPECT_EQ(result->scheduler, nullptr);
 
   // Cleanup
+  result->acceptor->Stop();
+}
+
+TEST_F(ServerLifecycleManagerTest, LifecycleSweepsDeadMarkedTempWithSchedulerDisabledAndPreservesManualTmp) {
+  full_config_.dump.interval_sec = 0;
+  const auto nested_dir = std::filesystem::path(dump_dir_) / "nested";
+  const auto stale_temp = CreateAgedDeadTrackedTemp(nested_dir, "unfinished.dmp");
+  ASSERT_TRUE(stale_temp.has_value());
+  const auto& [temp_path, marker_path] = *stale_temp;
+
+  const auto completed_manual_tmp = std::filesystem::path(dump_dir_) / "finished-manual-dump.tmp";
+  {
+    std::ofstream file(completed_manual_tmp);
+    file << "completed manual dump";
+  }
+
+  {
+    auto manager = CreateManager();
+    auto result = manager->Initialize();
+    ASSERT_TRUE(result) << result.error().to_string();
+    EXPECT_EQ(result->scheduler, nullptr);
+    EXPECT_FALSE(std::filesystem::exists(temp_path));
+    EXPECT_FALSE(std::filesystem::exists(marker_path));
+    result->acceptor->Stop();
+  }
+  EXPECT_TRUE(std::filesystem::exists(completed_manual_tmp));
+}
+
+TEST_F(ServerLifecycleManagerTest, LifecycleSweepRunsWithoutFullConfig) {
+  const auto stale_temp = CreateAgedDeadTrackedTemp(std::filesystem::path(dump_dir_) / "nested", "unfinished.dmp");
+  ASSERT_TRUE(stale_temp.has_value());
+
+  auto manager = CreateManager(/*null_full_config=*/true);
+  auto result = manager->Initialize();
+  ASSERT_TRUE(result) << result.error().to_string();
+  EXPECT_EQ(result->scheduler, nullptr);
+  EXPECT_FALSE(std::filesystem::exists(stale_temp->first));
+  EXPECT_FALSE(std::filesystem::exists(stale_temp->second));
   result->acceptor->Stop();
 }
 
