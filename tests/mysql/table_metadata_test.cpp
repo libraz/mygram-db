@@ -252,22 +252,6 @@ TEST(TableMetadataTest, RebuildsConstantTimeColumnOrdinalLookup) {
   EXPECT_FALSE(metadata.FindColumnOrdinal("missing").has_value());
 }
 
-TEST(TableMetadataTest, ParsesEnumAndSetDeclarationLabels) {
-  EXPECT_EQ(ParseEnumSetColumnValues("enum('draft','published','can''t')"),
-            (std::vector<std::string>{"draft", "published", "can't"}));
-  EXPECT_EQ(ParseEnumSetColumnValues("set('red','green','blue')"), (std::vector<std::string>{"red", "green", "blue"}));
-  EXPECT_TRUE(ParseEnumSetColumnValues("varchar(20)").empty());
-  EXPECT_TRUE(ParseEnumSetColumnValues("enum('unterminated)").empty());
-}
-
-TEST(TableMetadataTest, DecodesServerEscapesInEnumAndSetLabels) {
-  // SHOW COLUMNS renders NUL, LF, CR and backslash in a label as \0, \n, \r and \\.
-  EXPECT_EQ(ParseEnumSetColumnValues(R"(enum('a\nb','c\rd','e\0f','g\\h','i\Zj'))"),
-            (std::vector<std::string>{"a\nb", "c\rd", std::string("e\0f", 3), "g\\h", "i\032j"}));
-  // An escaped backslash followed by a letter is a backslash and that letter, not a control character.
-  EXPECT_EQ(ParseEnumSetColumnValues(R"(set('x\\n','y'))"), (std::vector<std::string>{"x\\n", "y"}));
-}
-
 // ===========================================================================
 // Large table ID tests
 // ===========================================================================

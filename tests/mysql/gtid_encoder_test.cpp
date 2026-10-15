@@ -708,20 +708,19 @@ TEST_F(GtidEncoderTest, NonOverlappingIntervalsArePreserved) {
 // Overflow protection tests (P3)
 // ===========================================================================
 
-TEST_F(GtidEncoderTest, AllowsTransactionIdAboveSignedInt64Max) {
-  std::string gtid = "00000000-0000-0000-0000-000000000001:9223372036854775808";
+TEST_F(GtidEncoderTest, AllowsLargestTransactionIdTheServerAccepts) {
+  std::string gtid = "00000000-0000-0000-0000-000000000001:9223372036854775806";
   auto result = GtidEncoder::Encode(gtid);
   ASSERT_TRUE(result.has_value()) << result.error().message();
-  EXPECT_EQ(ReadUInt64LE(*result, 32), 9223372036854775808ULL);
-  EXPECT_EQ(ReadUInt64LE(*result, 40), 9223372036854775809ULL);
+  EXPECT_EQ(ReadUInt64LE(*result, 32), 9223372036854775806ULL);
+  EXPECT_EQ(ReadUInt64LE(*result, 40), 9223372036854775807ULL);
 }
 
-TEST_F(GtidEncoderTest, AllowsRangeEndAboveSignedInt64Max) {
-  std::string gtid = "00000000-0000-0000-0000-000000000001:1-9223372036854775808";
-  auto result = GtidEncoder::Encode(gtid);
-  ASSERT_TRUE(result.has_value()) << result.error().message();
-  EXPECT_EQ(ReadUInt64LE(*result, 32), 1ULL);
-  EXPECT_EQ(ReadUInt64LE(*result, 40), 9223372036854775809ULL);
+TEST_F(GtidEncoderTest, RejectsTransactionIdAtOrAboveSignedInt64Max) {
+  for (const char* gno : {"9223372036854775807", "9223372036854775808"}) {
+    EXPECT_FALSE(GtidEncoder::Encode(std::string("00000000-0000-0000-0000-000000000001:") + gno).has_value()) << gno;
+    EXPECT_FALSE(GtidEncoder::Encode(std::string("00000000-0000-0000-0000-000000000001:1-") + gno).has_value()) << gno;
+  }
 }
 
 TEST_F(GtidEncoderTest, OverflowCheckForUint64MaxValue) {

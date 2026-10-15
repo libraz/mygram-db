@@ -696,7 +696,7 @@ TEST(BinlogReaderMultiTableTest, MultiTableModeConfiguration) {
 
   // Verify configuration
   EXPECT_FALSE(reader.IsRunning());
-  EXPECT_EQ(reader.GetCurrentGTID(), "server-uuid:100");
+  EXPECT_EQ(reader.GetCurrentGTID(), "server-uuid:1-100");
   EXPECT_EQ(reader.GetProcessedEvents(), 0);
   EXPECT_EQ(reader.GetQueueSize(), 0);
 }

@@ -84,7 +84,7 @@ TEST(DDLMultiTableStatementTest, DropListMatchesQuotedAndQualifiedNames) {
 
   ExpectDDLMatch("DROP TABLE `users`, `articles`", DDLType::kDrop, unqualified);
   ExpectDDLMatch("drop table users, articles", DDLType::kDrop, unqualified);
-  ExpectDDLMatch("DrOp TaBlE users, ArTiClEs", DDLType::kDrop, unqualified);
+  ExpectDDLMatch("DrOp TaBlE users, articles", DDLType::kDrop, unqualified);
   ExpectDDLMatch("DROP TABLE IF EXISTS users, articles", DDLType::kDrop, unqualified);
   ExpectDDLMatch("DROP TABLE users, articles RESTRICT", DDLType::kDrop, unqualified);
   ExpectDDLMatch("DROP TABLE users, articles CASCADE", DDLType::kDrop, unqualified);
@@ -97,7 +97,7 @@ TEST(DDLMultiTableStatementTest, DropListMatchesQuotedAndQualifiedNames) {
   ExpectDDLMatch("DROP TABLE `app`.`a`, `app`.`articles`", DDLType::kDrop, qualified, "app");
   ExpectDDLMatch("DROP TABLE app.a, app.articles, app.b", DDLType::kDrop, qualified, "app");
   ExpectDDLMatch("DROP TABLE other.a, articles", DDLType::kDrop, qualified, "app");
-  ExpectDDLMatch("DROP TEMPORARY TABLE users, articles", DDLType::kDrop, unqualified);
+  ExpectNoDDLMatch("DROP TEMPORARY TABLE users, articles", unqualified);
 }
 
 TEST(DDLMultiTableStatementTest, DropListIgnoresTablesOutsideTheConfiguration) {

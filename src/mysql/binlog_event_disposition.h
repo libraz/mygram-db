@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -156,6 +157,34 @@ inline BinlogEventDisposition ClassifyBinlogEventDisposition(MySQLBinlogEventTyp
   // this build decodes. Nothing about its payload is known, so it cannot be
   // skipped safely.
   return BinlogEventDisposition::kFailClosed;
+}
+
+/// Offset of the uint16 header flags in a binlog event header.
+inline constexpr size_t kBinlogEventFlagsOffset = 17;
+
+/// Header flag by which the source declares that a replica may skip an event it does not understand.
+inline constexpr uint16_t kLogEventIgnorableFlag = 0x80;
+
+/**
+ * @brief Whether a frame is a type this build does not recognize that the source marked ignorable.
+ *
+ * Both servers skip such an event and keep the position moving, so skipping it
+ * cannot lose a row. An unmarked unrecognized type still fails closed.
+ *
+ * @param event_data Complete event frame, header included
+ * @param event_length Frame length in bytes
+ */
+inline bool IsIgnorableUnrecognizedEvent(const unsigned char* event_data, size_t event_length) {
+  if (event_data == nullptr || event_length < kBinlogEventFlagsOffset + sizeof(uint16_t)) {
+    return false;
+  }
+  const auto type = static_cast<MySQLBinlogEventType>(event_data[4]);
+  if (std::string_view(GetEventTypeName(type)) != "UNKNOWN") {
+    return false;
+  }
+  const uint16_t flags = static_cast<uint16_t>(event_data[kBinlogEventFlagsOffset] |
+                                               (static_cast<uint16_t>(event_data[kBinlogEventFlagsOffset + 1]) << 8U));
+  return (flags & kLogEventIgnorableFlag) != 0;
 }
 
 /**

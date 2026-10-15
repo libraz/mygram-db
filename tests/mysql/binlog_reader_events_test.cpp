@@ -217,10 +217,10 @@ TEST_F(BinlogReaderFixture, SkipsEventsMissingRequiredFilters) {
  */
 TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
   reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:10");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:10");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-10");
   EXPECT_GT(reader_->GetLastAppliedUnixTime(), 0);
   reader_->UpdateCurrentGTID("ffffffff-0000-0000-0000-000000000001:11");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:10-11");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-11");
   EXPECT_GT(reader_->GetLastAppliedUnixTime(), 0);
 }
 

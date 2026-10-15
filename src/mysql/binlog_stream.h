@@ -39,7 +39,7 @@ struct BinlogFetchResult {
     kNoData,          ///< No data (heartbeat, keepalive, or EOF)
     kConnectionLost,  ///< Read timeout / CR_SERVER_LOST (2013)
     kServerGoneAway,  ///< Server ended the connection (CR_SERVER_GONE_ERROR 2006, shutdown, kill, network error)
-    kBinlogPurged,    ///< GTID position purged from binlog (1236)
+    kBinlogPurged,    ///< Required GTIDs purged from the source's binlog (1236 with the purged-GTIDs message)
     kError,           ///< Other non-recoverable error
   };
 
@@ -55,12 +55,21 @@ struct BinlogFetchResult {
 };
 
 /**
- * @brief Map a failed fetch's error number to the reader's recovery.
+ * @brief Whether a server error says the requested GTID position was purged.
+ *
+ * The source reports every fatal dump error as 1236 (replica ahead of the
+ * source, oversized packet, corrupt binlog, purged position), so the number
+ * alone does not identify a purged position; the server message does.
+ */
+bool IsPurgedPositionError(unsigned int err_no, std::string_view server_message);
+
+/**
+ * @brief Map a failed fetch's error number and message to the reader's recovery.
  *
  * Anything that ends the transport reconnects; only a purged position and
  * protocol or other errors that a reconnect would hit again stop replication.
  */
-BinlogFetchResult::Status ClassifyFetchError(unsigned int err_no);
+BinlogFetchResult::Status ClassifyFetchError(unsigned int err_no, std::string_view server_message);
 
 /**
  * @brief Shared MYSQL_RPL fetch implementation used by MySQL and MariaDB streams.

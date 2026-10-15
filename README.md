@@ -25,6 +25,7 @@ traffic to MygramDB.
 ## What it includes
 
 - GTID-based MySQL 8.4+/9.x and MariaDB 10.11+/11.x/12.x replication
+- Source server settings: `binlog_format=ROW`, `binlog_row_image=FULL`, `binlog_row_metadata=FULL`, `binlog_checksum=CRC32`, and `log_replica_updates` (MariaDB: `log_slave_updates`) ON when the source is itself a replica
 - TCP protocol, HTTP API, and C/C++ client libraries
 - Multi-table indexing, runtime configuration, DUMP save/load, and automatic reconnection to the configured MySQL endpoint
 - ICU normalization for CJK and other multilingual text

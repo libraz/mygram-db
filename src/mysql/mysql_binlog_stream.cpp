@@ -62,7 +62,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::Open(Conn
 
   // Initialize MYSQL_RPL structure for binlog reading
   std::memset(&rpl_, 0, sizeof(rpl_));
-  rpl_.file_name_length = 0;  // 0 means start from current position
+  rpl_.file_name_length = 0;  // GTID mode: the source positions itself from the GTID set
   rpl_.file_name = nullptr;
   rpl_.start_position = 4;      // Skip magic number at start of binlog
   rpl_.server_id = server_id;   // Use configured server ID for replica
@@ -89,7 +89,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::Open(Conn
         .Field("encoded_bytes", static_cast<uint64_t>(gtid_encoded_data_.size()))
         .Debug();
   } else {
-    // Empty GTID set: receive all events from current binlog position
+    // Empty GTID set: the source starts at its oldest binlog, or fails with 1236 if any GTID was purged
     rpl_.gtid_set_encoded_size = 0;
     rpl_.gtid_set_arg = nullptr;
     rpl_.fix_gtid_set = nullptr;
@@ -101,7 +101,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::Open(Conn
     unsigned int err_no = mysql_errno(conn.GetHandle());
     std::string error_msg = "Failed to open binlog stream: " + std::string(mysql_error(conn.GetHandle()));
 
-    if (err_no == kMySQLErrBinlogPurged) {
+    if (IsPurgedPositionError(err_no, mysql_error(conn.GetHandle()))) {
       return MakeUnexpected(MakeError(ErrorCode::kMySQLBinlogError,
                                       "Binlog position no longer available on server. "
                                       "GTID position has been purged. "

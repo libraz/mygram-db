@@ -97,10 +97,10 @@ Expected<MysqlGtidInterval, Error> ParseMysqlGtidInterval(std::string_view inter
     return MakeUnexpected(
         MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid interval number format: " + std::string(interval_text)));
   }
-  // The binlog dump protocol stores an exclusive end, so the last transaction
-  // number has to leave room for one more.
-  if (*end == std::numeric_limits<uint64_t>::max()) {
-    return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: cannot add 1 to UINT64_MAX"));
+  // The server decodes interval bounds as signed 64-bit and rejects a GNO at or
+  // above INT64_MAX, since the exclusive end of the dump encoding must fit.
+  if (*end >= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    return MakeUnexpected(MakeError(ErrorCode::kOutOfRange, "Transaction ID overflow: GNO must be below INT64_MAX"));
   }
   if (*start == 0 || *end < *start) {
     return MakeUnexpected(

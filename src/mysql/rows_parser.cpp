@@ -417,7 +417,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
     // Advance pointer by field size (if not NULL)
     if (!is_null) {
       const uint64_t field_size =
-          binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata);
+          binlog_util::calc_field_size(static_cast<uint8_t>(col_meta.type), ptr, col_meta.metadata, end);
       if (field_size == 0) {
         mygram::utils::StructuredLog()
             .Event("mysql_binlog_warning")

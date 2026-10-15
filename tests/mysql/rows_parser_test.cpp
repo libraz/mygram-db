@@ -1168,6 +1168,48 @@ TEST_F(DateTimeParsingTest, OldTimeRejectsOutOfRangeComponents) {
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
 }
 
+// MariaDB Field_time0 reads the 3 bytes with sint3korr: a negative time is a negative HHMMSS number.
+TEST_F(DateTimeParsingTest, OldTimeReadsTheThreeBytesAsSigned) {
+  const auto decode = [](std::vector<unsigned char> bytes) {
+    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIME), bytes.data(), 0, /*is_null=*/false,
+                                      bytes.data() + bytes.size(), /*is_unsigned=*/false);
+  };
+
+  auto negative = decode({0xC0, 0x1D, 0xFE});  // -123456
+  ASSERT_TRUE(negative.has_value());
+  EXPECT_EQ("-12:34:56", *negative);
+
+  auto lowest = decode({0x59, 0x0A, 0x80});  // -8385959
+  ASSERT_TRUE(lowest.has_value());
+  EXPECT_EQ("-838:59:59", *lowest);
+
+  auto positive = decode({0x40, 0xE2, 0x01});  // 123456
+  ASSERT_TRUE(positive.has_value());
+  EXPECT_EQ("12:34:56", *positive);
+
+  auto bad_minutes = decode({0xD0, 0x13, 0xFE});  // -126000: 12:60:00
+  ASSERT_FALSE(bad_minutes.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, bad_minutes.error().code());
+}
+
+TEST_F(DateTimeParsingTest, Datetime2RejectsAFractionOfOneMillionMicrosecondsOrMore) {
+  auto datetime_bytes = EncodeDatetime2(2000, 1, 1, 0, 0, 0);
+  datetime_bytes.push_back(100);  // precision 2: 100 hundredths of a second
+
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME2), datetime_bytes.data(), 2,
+                                           /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                           /*is_unsigned=*/false);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
+
+  datetime_bytes.back() = 99;
+  auto accepted = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME2), datetime_bytes.data(), 2,
+                                             /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                             /*is_unsigned=*/false);
+  ASSERT_TRUE(accepted.has_value());
+  EXPECT_EQ("2000-01-01 00:00:00.990000", *accepted);
+}
+
 /**
  * @test TIMESTAMP2 parsing - basic
  */
@@ -2929,7 +2971,7 @@ TEST_F(RowsParserTest, DecimalRejectsOutOfRangeMetadata) {
                                                         static_cast<uint16_t>(66U << 8U), false, data + sizeof(data));
   auto excessive_scale =
       internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data,
-                                 static_cast<uint16_t>((40U << 8U) | 31U), false, data + sizeof(data));
+                                 static_cast<uint16_t>((40U << 8U) | 39U), false, data + sizeof(data));
 
   ASSERT_FALSE(zero_precision.has_value());
   ASSERT_FALSE(excessive_precision.has_value());
@@ -3941,6 +3983,71 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
   EXPECT_NE(result.error().message().find("binlog_row_image=FULL"), std::string::npos);
+}
+
+TEST(BitFieldDecodeTest, RejectsMoreThanEightBytes) {
+  const std::vector<unsigned char> data(16, 0xFF);
+  const auto decode = [&data](uint16_t metadata) {
+    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::BIT), data.data(), metadata, /*is_null=*/false,
+                                      data.data() + data.size(), /*is_unsigned=*/false);
+  };
+
+  auto widest = decode(8 << 8);  // BIT(64)
+  ASSERT_TRUE(widest.has_value());
+  EXPECT_EQ("18446744073709551615", *widest);
+
+  for (const uint16_t metadata : {static_cast<uint16_t>(9 << 8), static_cast<uint16_t>((8 << 8) | 1)}) {
+    auto rejected = decode(metadata);
+    ASSERT_FALSE(rejected.has_value()) << metadata;
+    EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, rejected.error().code()) << metadata;
+    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::BIT), data.data(), metadata,
+                                               data.data() + data.size()))
+        << metadata;
+  }
+}
+
+TEST(FieldSizeBoundsTest, LengthPrefixPastTheEndIsReportedAsTruncated) {
+  const std::vector<unsigned char> data = {0x05, 0x00};
+  const unsigned char* end = data.data() + data.size();
+
+  // A VARCHAR(1000) prefix is two bytes; with one byte left it cannot be read.
+  EXPECT_EQ(binlog_util::kFieldSizeTruncated,
+            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::VARCHAR), end - 1, 1000, end));
+  EXPECT_EQ(binlog_util::kFieldSizeTruncated,
+            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::BLOB), end, 2, end));
+  EXPECT_EQ(binlog_util::kFieldSizeTruncated,
+            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::LONG_BLOB), data.data(), 4, end));
+  EXPECT_EQ(7U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::BLOB), data.data(), 2, end));
+  EXPECT_EQ(6U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::VARCHAR), data.data(), 100, end));
+}
+
+TEST(FieldSizeBoundsTest, JsonLengthWidthOutsideOneToFourIsRejectedBySizerAndDecoder) {
+  const std::vector<unsigned char> data(8, 0);
+  const unsigned char* end = data.data() + data.size();
+  for (const uint16_t metadata : {0, 5, 255, 257}) {
+    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::JSON), data.data(), metadata, end))
+        << metadata;
+    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::JSON), data.data(), metadata,
+                                              /*is_null=*/false, end, /*is_unsigned=*/false);
+    ASSERT_FALSE(decoded.has_value()) << metadata;
+    EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, decoded.error().code()) << metadata;
+  }
+}
+
+TEST(FieldSizeBoundsTest, NewDecimalAcceptsAScaleUpToThirtyEight) {
+  // MariaDB DECIMAL(50,35): 15 integer digits (4+3 bytes), 35 fractional digits (3*4+4 bytes)
+  const auto metadata = static_cast<uint16_t>((50 << 8) | 35);
+  std::vector<unsigned char> data(32, 0);
+  data[0] = 0x80;  // positive zero
+  EXPECT_EQ(23U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data.data(), metadata,
+                                              data.data() + data.size()));
+  EXPECT_EQ(23U, *binlog_util::decimal_binary_size(50, 35));
+  EXPECT_TRUE(binlog_util::decimal_binary_size(65, 38).has_value());
+  EXPECT_FALSE(binlog_util::decimal_binary_size(65, 39).has_value());
+
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data.data(), metadata,
+                                            /*is_null=*/false, data.data() + data.size(), /*is_unsigned=*/false);
+  ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
 }
 
 #endif  // USE_MYSQL

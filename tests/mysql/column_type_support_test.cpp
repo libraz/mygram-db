@@ -70,8 +70,8 @@ config::TableConfig MakeConfig() {
 
 std::vector<DDLColumnMetadata> MakeColumns() {
   return {
-      {"id", "bigint unsigned", "", false, "PRI"},
-      {"content", "longtext", "utf8mb4_0900_ai_ci", true, ""},
+      {"id", "bigint unsigned", "", false, "PRI", "", ""},
+      {"content", "longtext", "utf8mb4_0900_ai_ci", true, "", "", ""},
   };
 }
 
@@ -138,7 +138,8 @@ TEST(ColumnTypeSupportTest, TheFieldSizerCoversExactlyTheDecodableTypes) {
     const auto code = static_cast<uint8_t>(candidate);
     bool sized_somewhere = false;
     for (const uint16_t metadata : kSampleMetadata) {
-      sized_somewhere = sized_somewhere || binlog_util::calc_field_size(code, buffer.data(), metadata) != 0;
+      sized_somewhere = sized_somewhere ||
+                        binlog_util::calc_field_size(code, buffer.data(), metadata, buffer.data() + buffer.size()) != 0;
     }
     const bool decodable =
         DescribeColumnType(static_cast<ColumnType>(code)).binlog_decoding == BinlogDecoding::kDecoded;
@@ -293,6 +294,56 @@ TEST(ColumnTypeSupportTest, TypesThatAgreeRemainConfigurable) {
     auto result = ValidateTextColumnType(column_type, collation);
     EXPECT_TRUE(result) << column_type << ": " << (result ? "" : result.error().message());
   }
+}
+
+/**
+ * @brief YEAR(2) is refused: the snapshot reads "99" and the binlog decodes 1999.
+ */
+TEST(ColumnTypeSupportTest, TwoDigitYearIsRefusedButYearIsNot) {
+  auto refused = ValidateTextColumnType("year(2)", "");
+  ASSERT_FALSE(refused);
+  EXPECT_EQ(refused.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);
+  EXPECT_NE(refused.error().message().find("two-digit year"), std::string::npos) << refused.error().message();
+
+  EXPECT_TRUE(ValidateTextColumnType("year", ""));
+  EXPECT_TRUE(ValidateTextColumnType("year(4)", ""));
+}
+
+// ===========================================================================
+// Widths the binlog cannot recover
+// ===========================================================================
+
+/**
+ * @brief Old-format MariaDB temporals with fractional seconds cannot be sized from a TABLE_MAP.
+ */
+TEST(ColumnTypeSupportTest, OldFormatFractionalTemporalsAreUnsizable) {
+  for (const auto* column_type : {"time(3) /* mariadb-5.3 */", "datetime(6) /* mariadb-5.3 */",
+                                  "timestamp(1) /* mariadb-5.3 */", "DATETIME(2) /* MARIADB-5.3 */"}) {
+    EXPECT_FALSE(UnsizableColumnTypeReason(column_type).empty()) << column_type;
+  }
+}
+
+TEST(ColumnTypeSupportTest, CurrentFormatAndWholeSecondTemporalsAreSizable) {
+  for (const auto* column_type :
+       {"time(3)", "datetime(6)", "timestamp(1)", "time", "datetime", "time(0) /* mariadb-5.3 */",
+        "datetime /* mariadb-5.3 */", "timestamp /* mariadb-5.3 */", "varchar(32)", "date", "bigint unsigned"}) {
+    EXPECT_TRUE(UnsizableColumnTypeReason(column_type).empty()) << column_type;
+  }
+}
+
+/**
+ * @brief Skipped columns are sized too, so an unconfigured old-format column fails the table.
+ */
+TEST(ColumnTypeSupportTest, UnconfiguredOldFormatTemporalRefusesTheTable) {
+  auto columns = MakeColumns();
+  columns.push_back({"created_at", "datetime(3) /* mariadb-5.3 */", "", true, ""});
+  auto result = DDLSchemaValidator::ValidateMetadata(MakeConfig(), columns, true);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);
+  EXPECT_EQ(result.error().context(), "testdb.articles.created_at");
+
+  columns.back().column_type = "datetime /* mariadb-5.3 */";
+  EXPECT_TRUE(DDLSchemaValidator::ValidateMetadata(MakeConfig(), columns, true));
 }
 
 }  // namespace

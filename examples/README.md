@@ -156,14 +156,18 @@ SHOW VARIABLES LIKE 'gtid_mode';
 -- Should show: gtid_mode = ON
 ```
 
-2. **Binary log format set to ROW, with full row images:**
+2. **Binary log format set to ROW, with full row images and full row metadata:**
 
 ```sql
 SHOW VARIABLES LIKE 'binlog_format';
 -- Should show: binlog_format = ROW
 SHOW VARIABLES LIKE 'binlog_row_image';
 -- Should show: binlog_row_image = FULL
+SHOW VARIABLES LIKE 'binlog_row_metadata';
+-- Should show: binlog_row_metadata = FULL
 ```
+
+If the source server is itself a replica, `log_replica_updates` (MariaDB: `log_slave_updates`) must also be ON; otherwise replicated writes never reach its binary log.
 
 3. **Replication user created, with SELECT on the source database:**
 

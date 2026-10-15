@@ -406,12 +406,9 @@ TEST_F(BinlogReaderFixture, ConcurrentStartCallsThreadSafe) {
 }
 
 /**
- * @brief Test that FetchColumnNames is skipped for non-monitored tables
- *
- * Regression test for: FetchColumnNames was called for all TABLE_MAP_EVENTs regardless
- * of whether the table was monitored, causing permission errors and unnecessary queries.
+ * @brief Test that only configured tables are registered with the reader in multi-table mode
  */
-TEST_F(BinlogReaderFixture, SkipsColumnFetchForNonMonitoredTablesMultiTableMode) {
+TEST_F(BinlogReaderFixture, OnlyConfiguredTablesAreRegisteredInMultiTableMode) {
   // Set up multi-table mode with only "articles" registered
   server::TableContext articles_ctx;
   articles_ctx.name = "articles";
@@ -460,24 +457,6 @@ TEST_F(BinlogReaderFixture, LegacyConstructorSkipsNonMonitoredTables) {
   other_event.table_name = "ignore_threads";
   EXPECT_TRUE(reader_->ProcessEvent(other_event)) << "Event for non-monitored table should be skipped gracefully";
   EXPECT_FALSE(doc_store_.GetDocId("2").has_value()) << "Non-monitored table event should not be indexed";
-}
-
-/**
- * @brief Test that column names cache is only populated for monitored tables
- *
- * This verifies the optimization: we don't waste resources caching column names
- * for tables we'll never process.
- */
-TEST_F(BinlogReaderFixture, ColumnNamesCacheOnlyForMonitoredTables) {
-  // The column cache should only contain entries for monitored tables
-  // Since we can't call FetchColumnNames without a real MySQL connection,
-  // we verify the cache starts empty and stays empty for non-monitored tables
-
-  EXPECT_EQ(reader_->schema_cache_.FindColumns("", table_config_.name), nullptr)
-      << "Column names cache should start empty";
-
-  // Simulate the behavior: in the actual code, FetchColumnNames is only called
-  // for monitored tables, so the cache will only contain monitored table entries
 }
 
 #endif  // USE_MYSQL

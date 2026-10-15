@@ -120,24 +120,24 @@ TEST_F(JsonDecodeTest, JsonMetadata4ByteLength) {
   EXPECT_EQ(*result, "true");
 }
 
-TEST_F(JsonDecodeTest, JsonDefaultMetadata0Uses4Bytes) {
+TEST_F(JsonDecodeTest, JsonMetadata0IsRejected) {
   constexpr uint16_t metadata = 0;
   auto data = LengthPrefixed(4, kTrue);
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
-  ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
-  EXPECT_EQ(*result, "true");
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
 }
 
-TEST_F(JsonDecodeTest, JsonEmptyPayloadIsRejected) {
+TEST_F(JsonDecodeTest, JsonEmptyPayloadIsTheJsonNullLiteral) {
   constexpr uint16_t metadata = 1;
   std::vector<unsigned char> data = {0};
   const unsigned char* end = data.data() + data.size();
 
   auto result = DecodeFieldValue(245, data.data(), metadata, false, end, false);
-  ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLFieldTruncated);
+  ASSERT_TRUE(result.has_value()) << "Error: " << result.error().message();
+  EXPECT_EQ(*result, "null");
 }
 
 TEST_F(JsonDecodeTest, DecodesSmallObject) {

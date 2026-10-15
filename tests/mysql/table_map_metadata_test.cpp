@@ -51,9 +51,11 @@ struct WireColumn {
  *
  * @param columns          Column type codes and metadata bytes, in order
  * @param metadata_len_adj Added to the metadata block length the event declares
+ * @param optional_metadata Raw TLV bytes placed after the NULL bitmap
  * @return Complete event bytes, header through checksum
  */
-std::vector<uint8_t> BuildTableMap(const std::vector<WireColumn>& columns, int metadata_len_adj = 0) {
+std::vector<uint8_t> BuildTableMap(const std::vector<WireColumn>& columns, int metadata_len_adj = 0,
+                                   const std::vector<uint8_t>& optional_metadata = {}) {
   auto buf = BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::TABLE_MAP_EVENT);
 
   BinlogEventBuilder::AppendTableId(buf, kTableId);
@@ -84,6 +86,7 @@ std::vector<uint8_t> BuildTableMap(const std::vector<WireColumn>& columns, int m
   }
 
   buf.insert(buf.end(), (columns.size() + 7) / 8, 0x00);  // NULL bitmap: nothing nullable
+  buf.insert(buf.end(), optional_metadata.begin(), optional_metadata.end());
 
   BinlogEventBuilder::AppendLittleEndian32(buf, 0);  // checksum placeholder
   BinlogEventBuilder::FixEventSizeWithChecksum(buf);
@@ -98,6 +101,234 @@ uint8_t Code(ColumnType type) {
 std::vector<uint8_t> CharMetadata(uint16_t field_length) {
   return {static_cast<uint8_t>(Code(ColumnType::STRING) ^ ((field_length & 0x300) >> 4)),
           static_cast<uint8_t>(field_length & 0xFF)};
+}
+
+/// One optional-metadata TLV: type byte, packed length, value.
+std::vector<uint8_t> Tlv(uint8_t type, const std::vector<uint8_t>& value) {
+  std::vector<uint8_t> out = {type};
+  BinlogEventBuilder::AppendPackedInt(out, value.size());
+  out.insert(out.end(), value.begin(), value.end());
+  return out;
+}
+
+/// Length-prefixed strings back to back, as COLUMN_NAME stores them.
+std::vector<uint8_t> LengthPrefixed(const std::vector<std::string>& strings) {
+  std::vector<uint8_t> out;
+  for (const auto& text : strings) {
+    BinlogEventBuilder::AppendPackedInt(out, text.size());
+    out.insert(out.end(), text.begin(), text.end());
+  }
+  return out;
+}
+
+/// One ENUM_STR_VALUE / SET_STR_VALUE group: label count, then the labels.
+std::vector<uint8_t> LabelGroup(const std::vector<std::string>& labels) {
+  std::vector<uint8_t> out;
+  BinlogEventBuilder::AppendPackedInt(out, labels.size());
+  const auto body = LengthPrefixed(labels);
+  out.insert(out.end(), body.begin(), body.end());
+  return out;
+}
+
+std::vector<uint8_t> Concat(const std::vector<std::vector<uint8_t>>& parts) {
+  std::vector<uint8_t> out;
+  for (const auto& part : parts) {
+    out.insert(out.end(), part.begin(), part.end());
+  }
+  return out;
+}
+
+constexpr uint8_t kSignedness = 1;
+constexpr uint8_t kDefaultCharset = 2;
+constexpr uint8_t kColumnName = 4;
+constexpr uint8_t kSetStrValue = 5;
+constexpr uint8_t kEnumStrValue = 6;
+constexpr uint8_t kSimplePrimaryKey = 8;
+
+/// id INT, title VARCHAR, flag TINY, status ENUM, tags SET, price DECIMAL(10,2), ratio DOUBLE
+std::vector<WireColumn> OptionalMetadataColumns() {
+  return {{Code(ColumnType::LONG), {}},
+          {Code(ColumnType::VARCHAR), {0x28, 0x00}},
+          {Code(ColumnType::TINY), {}},
+          {Code(ColumnType::STRING), {kRealTypeEnum, 0x01}},
+          {Code(ColumnType::STRING), {kRealTypeSet, 0x01}},
+          {Code(ColumnType::NEWDECIMAL), {10, 2}},
+          {Code(ColumnType::DOUBLE), {0x08}}};
+}
+
+std::vector<uint8_t> FullOptionalMetadata() {
+  return Concat({
+      Tlv(kSignedness, {0xA0}),  // id unsigned, flag signed, price unsigned, ratio signed
+      Tlv(kDefaultCharset, {45, 1, 8}),
+      Tlv(kColumnName, LengthPrefixed({"id", "title", "flag", "status", "tags", "price", "ratio"})),
+      Tlv(kSetStrValue, LabelGroup({"a", "b", "c"})),
+      Tlv(kEnumStrValue, LabelGroup({"draft", "published"})),
+      Tlv(kSimplePrimaryKey, {0}),
+  });
+}
+
+TEST(TableMapMetadataTest, FullOptionalMetadataSuppliesNamesSignednessAndLabels) {
+  auto event = BuildTableMap(OptionalMetadataColumns(), 0, FullOptionalMetadata());
+
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+  ASSERT_TRUE(metadata.has_value());
+  EXPECT_TRUE(metadata->has_column_names);
+  EXPECT_TRUE(metadata->signedness_known);
+  EXPECT_TRUE(metadata->enum_set_labels_known);
+  EXPECT_TRUE(metadata->HasFullRowMetadata());
+
+  const std::vector<std::string> names = {"id", "title", "flag", "status", "tags", "price", "ratio"};
+  ASSERT_EQ(names.size(), metadata->columns.size());
+  for (size_t i = 0; i < names.size(); ++i) {
+    EXPECT_EQ(names[i], metadata->columns[i].name) << i;
+  }
+  EXPECT_EQ(3U, *metadata->FindColumnOrdinal("status"));
+
+  // The signedness bitmap covers numeric columns only, in column order.
+  EXPECT_TRUE(metadata->columns[0].is_unsigned);
+  EXPECT_FALSE(metadata->columns[1].is_unsigned);
+  EXPECT_FALSE(metadata->columns[2].is_unsigned);
+  EXPECT_TRUE(metadata->columns[5].is_unsigned);
+  EXPECT_FALSE(metadata->columns[6].is_unsigned);
+
+  EXPECT_EQ((std::vector<std::string>{"draft", "published"}), metadata->columns[3].enum_set_values);
+  EXPECT_EQ((std::vector<std::string>{"a", "b", "c"}), metadata->columns[4].enum_set_values);
+  EXPECT_TRUE(metadata->columns[0].enum_set_values.empty());
+}
+
+TEST(TableMapMetadataTest, RowDecodesWithTheLabelsAndSignednessFromTheTableMap) {
+  auto event = BuildTableMap(OptionalMetadataColumns(), 0, FullOptionalMetadata());
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+  ASSERT_TRUE(metadata.has_value());
+
+  std::vector<uint8_t> row;
+  row.insert(row.end(), {0x00});                              // NULL bitmap: 7 columns, none null
+  BinlogEventBuilder::AppendLittleEndian32(row, 0xFFFFFFFF);  // id: unsigned
+  row.push_back(0x02);                                        // title: 1-byte length prefix
+  row.insert(row.end(), {'h', 'i'});
+  row.push_back(0xFF);                                    // flag: signed TINY
+  row.push_back(0x02);                                    // status: published
+  row.push_back(0x05);                                    // tags: a,c
+  row.insert(row.end(), {0x80, 0x00, 0x04, 0xD2, 0x38});  // price: 1234.56
+  row.insert(row.end(), {0, 0, 0, 0, 0, 0, 0xF0, 0x3F});  // ratio: 1.0
+  auto rows = BinlogEventBuilder::BuildWriteRowsV2(kTableId, 0, 2, {}, 7, {0x7F}, row);
+
+  auto result = ParseWriteRowsEvent(rows.data(), rows.size(), &*metadata, "id", "",
+                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, nullptr);
+
+  ASSERT_TRUE(result.has_value()) << result.error().message();
+  ASSERT_EQ(1U, result->size());
+  const auto& decoded = result->front();
+  EXPECT_EQ("4294967295", decoded.primary_key);
+  EXPECT_EQ("hi", decoded.GetColumnValue("title"));
+  EXPECT_EQ("-1", decoded.GetColumnValue("flag"));
+  EXPECT_EQ("published", decoded.GetColumnValue("status"));
+  EXPECT_EQ("a,c", decoded.GetColumnValue("tags"));
+  EXPECT_EQ("1234.56", decoded.GetColumnValue("price"));
+}
+
+TEST(TableMapMetadataTest, TableMapWithoutOptionalMetadataKeepsPlaceholderNames) {
+  auto event = BuildTableMap(OptionalMetadataColumns());
+
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+  ASSERT_TRUE(metadata.has_value());
+  EXPECT_FALSE(metadata->has_column_names);
+  EXPECT_FALSE(metadata->signedness_known);
+  EXPECT_FALSE(metadata->enum_set_labels_known);
+  EXPECT_FALSE(metadata->HasFullRowMetadata());
+  EXPECT_EQ("col_0", metadata->columns[0].name);
+  EXPECT_EQ("col_6", metadata->columns[6].name);
+
+  // Nothing numeric and nothing ENUM/SET: there is nothing for the block to supply.
+  auto text_only = BuildTableMap({{Code(ColumnType::VARCHAR), {0x28, 0x00}}, {Code(ColumnType::BLOB), {0x02}}});
+  auto text_metadata = BinlogEventParser::ParseTableMapEvent(text_only.data(), text_only.size());
+  ASSERT_TRUE(text_metadata.has_value());
+  EXPECT_TRUE(text_metadata->signedness_known);
+  EXPECT_TRUE(text_metadata->enum_set_labels_known);
+  EXPECT_FALSE(text_metadata->has_column_names);
+}
+
+TEST(TableMapMetadataTest, MinimalOptionalMetadataLeavesNamesAndLabelsUnknown) {
+  // binlog_row_metadata=MINIMAL logs signedness and charsets but not names or labels.
+  auto event =
+      BuildTableMap(OptionalMetadataColumns(), 0, Concat({Tlv(kSignedness, {0xA0}), Tlv(kDefaultCharset, {45, 1, 8})}));
+
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+  ASSERT_TRUE(metadata.has_value());
+  EXPECT_TRUE(metadata->signedness_known);
+  EXPECT_TRUE(metadata->columns[0].is_unsigned);
+  EXPECT_FALSE(metadata->has_column_names);
+  EXPECT_FALSE(metadata->enum_set_labels_known);
+  EXPECT_FALSE(metadata->HasFullRowMetadata());
+}
+
+TEST(TableMapMetadataTest, UnknownOptionalMetadataTypesAreSkippedByLength) {
+  auto event = BuildTableMap(OptionalMetadataColumns(), 0,
+                             Concat({Tlv(99, {1, 2, 3, 4, 5}), FullOptionalMetadata(), Tlv(200, {})}));
+
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+  ASSERT_TRUE(metadata.has_value());
+  EXPECT_TRUE(metadata->HasFullRowMetadata());
+  EXPECT_EQ("ratio", metadata->columns[6].name);
+}
+
+TEST(TableMapMetadataTest, MalformedOptionalMetadataFailsTheEvent) {
+  const auto names = LengthPrefixed({"id", "title", "flag", "status", "tags", "price", "ratio"});
+  const std::vector<std::pair<const char*, std::vector<uint8_t>>> cases = {
+      {"type byte without a length", {kColumnName}},
+      {"length past the end", {kColumnName, 50, 'a'}},
+      {"NULL length marker", {kColumnName, 251}},
+      {"signedness shorter than the numeric columns need", Tlv(kSignedness, {})},
+      {"signedness longer than the numeric columns need", Tlv(kSignedness, {0xA0, 0x00})},
+      {"one name too few", Tlv(kColumnName, LengthPrefixed({"id", "title", "flag", "status", "tags", "price"}))},
+      {"one name too many", Tlv(kColumnName, Concat({names, LengthPrefixed({"extra"})}))},
+      {"name cut short", Tlv(kColumnName, {2, 'i'})},
+      {"two SET groups for one SET column", Tlv(kSetStrValue, Concat({LabelGroup({"a"}), LabelGroup({"b"})}))},
+      {"no ENUM group for the ENUM column", Tlv(kEnumStrValue, {})},
+      {"label count past the end", Tlv(kEnumStrValue, {5, 1, 'x'})},
+      {"label cut short", Tlv(kEnumStrValue, {1, 4, 'a', 'b'})},
+  };
+  for (const auto& [description, optional_metadata] : cases) {
+    SCOPED_TRACE(description);
+    auto event = BuildTableMap(OptionalMetadataColumns(), 0, optional_metadata);
+
+    auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+    ASSERT_FALSE(metadata.has_value());
+    // The frame is intact, so a reconnect would only replay the same bytes.
+    EXPECT_EQ(metadata.error().code(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
+
+    // A table whose rows are not decoded never has the block read.
+    auto skipped = BinlogEventParser::ParseTableMapEvent(event.data(), event.size(),
+                                                         [](const mygramdb::mysql::TableMetadata&) { return false; });
+    ASSERT_TRUE(skipped.has_value()) << skipped.error().message();
+    EXPECT_FALSE(skipped->HasFullRowMetadata());
+  }
+}
+
+TEST(TableMapMetadataTest, SignednessBitmapCountsOnlyNumericColumnTypes) {
+  // YEAR, FLOAT, DOUBLE, DECIMAL and the integer types carry a bit; BIT, TIME2, JSON and text do not.
+  auto event = BuildTableMap({{Code(ColumnType::BIT), {0x00, 0x01}},
+                              {Code(ColumnType::YEAR), {}},
+                              {Code(ColumnType::TIME2), {0x00}},
+                              {Code(ColumnType::FLOAT), {0x04}},
+                              {Code(ColumnType::JSON), {0x04}},
+                              {Code(ColumnType::INT24), {}},
+                              {Code(ColumnType::LONGLONG), {}}},
+                             0, Tlv(kSignedness, {0x50}));  // YEAR 0, FLOAT 1, INT24 0, LONGLONG 1
+
+  auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
+
+  ASSERT_TRUE(metadata.has_value());
+  EXPECT_FALSE(metadata->columns[0].is_unsigned);
+  EXPECT_FALSE(metadata->columns[1].is_unsigned);
+  EXPECT_TRUE(metadata->columns[3].is_unsigned);
+  EXPECT_FALSE(metadata->columns[5].is_unsigned);
+  EXPECT_TRUE(metadata->columns[6].is_unsigned);
 }
 
 TEST(TableMapMetadataTest, EveryMetadataCarryingTypeReadsItsOwnBytes) {
@@ -244,7 +475,8 @@ TEST(TableMapMetadataTest, LengthPrefixNearUint32MaxDoesNotWrapPastTheBoundsChec
   for (const auto type : {ColumnType::LONG_BLOB, ColumnType::JSON, ColumnType::GEOMETRY}) {
     SCOPED_TRACE(static_cast<int>(type));
     const std::vector<uint8_t> field = {0xFE, 0xFF, 0xFF, 0xFF, 'x', 'y'};
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(Code(type), field.data(), 4), 4ULL + 0xFFFFFFFEULL);
+    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(Code(type), field.data(), 4, field.data() + field.size()),
+              4ULL + 0xFFFFFFFEULL);
 
     auto table_map = BuildTableMap({{Code(ColumnType::LONG), {}}, {Code(type), {0x04}}});
     auto metadata = BinlogEventParser::ParseTableMapEvent(table_map.data(), table_map.size());

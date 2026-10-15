@@ -200,6 +200,20 @@ constexpr ColumnTypeSupport DescribeColumnType(ColumnType type) {
  */
 [[nodiscard]] std::string UnusableColumnTypeReason(std::string_view column_type);
 
+/**
+ * @brief Operator-facing reason a table cannot be monitored because of one column's type.
+ *
+ * A TABLE_MAP event gives the decoder the width of every column of a row,
+ * including columns nobody configured, so a type whose width the event does not
+ * describe breaks the whole table. Applies to every column, configured or not.
+ * Today that is MariaDB's old-format TIME(n)/DATETIME(n)/TIMESTAMP(n) with n > 0,
+ * which SHOW COLUMNS marks with a mariadb-5.3 version comment.
+ *
+ * @param column_type Declared type as MySQL reported it
+ * @return A sentence naming the type, or an empty string when the width is recoverable
+ */
+[[nodiscard]] std::string UnsizableColumnTypeReason(std::string_view column_type);
+
 }  // namespace mygramdb::mysql
 
 #endif  // USE_MYSQL

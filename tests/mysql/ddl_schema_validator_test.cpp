@@ -25,10 +25,10 @@ config::TableConfig MakeConfig() {
 
 std::vector<DDLColumnMetadata> MakeColumns() {
   return {
-      {"id", "bigint unsigned", "", false, "PRI"},
-      {"content", "longtext", "utf8mb4_0900_ai_ci", true, ""},
-      {"status", "int", "", false, "MUL"},
-      {"category", "varchar(64)", "utf8mb4_0900_ai_ci", true, ""},
+      {"id", "bigint unsigned", "", false, "PRI", "", ""},
+      {"content", "longtext", "utf8mb4_0900_ai_ci", true, "", "", ""},
+      {"status", "int", "", false, "MUL", "", ""},
+      {"category", "varchar(64)", "utf8mb4_0900_ai_ci", true, "", "", ""},
   };
 }
 
@@ -113,6 +113,53 @@ TEST(DDLSchemaValidatorTest, ConfiguredColumnTypeChangeChangesFingerprint) {
   auto comparison = DDLSchemaValidator::Compare(*before, *after, config);
   ASSERT_FALSE(comparison);
   EXPECT_NE(comparison.error().message().find("'id' changed"), std::string::npos);
+}
+
+TEST(DDLSchemaValidatorTest, GeneratedColumnChangeChangesFingerprint) {
+  const auto config = MakeConfig();
+  auto before = DDLSchemaValidator::ValidateMetadata(config, MakeColumns(), true);
+  ASSERT_TRUE(before);
+
+  // MODIFY ... AS (expr) STORED rewrites values without a row event.
+  auto stored = MakeColumns();
+  stored[3].generation_kind = "STORED";
+  stored[3].generation_expression = "lower(`content`)";
+  auto after_stored = DDLSchemaValidator::ValidateMetadata(config, stored, true);
+  ASSERT_TRUE(after_stored);
+  auto comparison = DDLSchemaValidator::Compare(*before, *after_stored, config);
+  ASSERT_FALSE(comparison);
+  EXPECT_NE(comparison.error().message().find("'category' changed"), std::string::npos);
+
+  auto other_expression = stored;
+  other_expression[3].generation_expression = "upper(`content`)";
+  auto after_other = DDLSchemaValidator::ValidateMetadata(config, other_expression, true);
+  ASSERT_TRUE(after_other);
+  EXPECT_FALSE(DDLSchemaValidator::Compare(*after_stored, *after_other, config));
+
+  auto virtual_kind = stored;
+  virtual_kind[3].generation_kind = "VIRTUAL";
+  auto after_virtual = DDLSchemaValidator::ValidateMetadata(config, virtual_kind, true);
+  ASSERT_TRUE(after_virtual);
+  EXPECT_FALSE(DDLSchemaValidator::Compare(*after_stored, *after_virtual, config));
+
+  EXPECT_TRUE(DDLSchemaValidator::Compare(*after_stored, *after_stored, config));
+}
+
+TEST(DDLSchemaValidatorTest, GenerationKindIsReadFromExtra) {
+  EXPECT_EQ(DDLSchemaValidator::GenerationKindFromExtra("STORED GENERATED"), "STORED");
+  EXPECT_EQ(DDLSchemaValidator::GenerationKindFromExtra("VIRTUAL GENERATED"), "VIRTUAL");
+  EXPECT_EQ(DDLSchemaValidator::GenerationKindFromExtra("auto_increment"), "");
+  EXPECT_EQ(DDLSchemaValidator::GenerationKindFromExtra("DEFAULT_GENERATED"), "");
+  EXPECT_EQ(DDLSchemaValidator::GenerationKindFromExtra(""), "");
+}
+
+TEST(DDLSchemaValidatorTest, OnlyCascadingReferentialRulesRewriteChildRows) {
+  for (const char* rule : {"CASCADE", "SET NULL", "SET DEFAULT", "cascade"}) {
+    EXPECT_TRUE(DDLSchemaValidator::IsRowRewritingReferentialRule(rule)) << rule;
+  }
+  for (const char* rule : {"NO ACTION", "RESTRICT", "restrict", ""}) {
+    EXPECT_FALSE(DDLSchemaValidator::IsRowRewritingReferentialRule(rule)) << rule;
+  }
 }
 
 TEST(DDLSchemaValidatorTest, BooleanRequiresSignedTinyintOne) {
@@ -244,6 +291,72 @@ TEST(DDLSchemaValidatorIntegrationTest, RejectsCp932ConfiguredColumnReportedByMy
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);
   EXPECT_NE(result.error().message().find("unsupported collation 'cp932_"), std::string::npos);
+}
+
+TEST(DDLSchemaValidatorIntegrationTest, RejectsChildTableWithCascadingForeignKey) {
+  if (!mygramdb::mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+  Connection connection(MakeIntegrationConnectionConfig());
+  ASSERT_TRUE(connection.Connect("ddl-foreign-key-cascade-test"));
+  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS fk_cascade_child"));
+  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS fk_cascade_parent"));
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE fk_cascade_parent (id BIGINT PRIMARY KEY) ENGINE=InnoDB"));
+  ASSERT_TRUE(connection.ExecuteUpdate(
+      "CREATE TABLE fk_cascade_child (id BIGINT PRIMARY KEY, parent_id BIGINT NOT NULL, content TEXT, "
+      "CONSTRAINT fk_cascade_parent_ref FOREIGN KEY (parent_id) REFERENCES fk_cascade_parent (id) "
+      "ON DELETE CASCADE) ENGINE=InnoDB"));
+
+  config::TableConfig table_config;
+  table_config.database = MakeIntegrationConnectionConfig().database;
+  table_config.name = "fk_cascade_child";
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  auto cascading = DDLSchemaValidator::Capture(connection, table_config);
+
+  ASSERT_TRUE(connection.ExecuteUpdate("ALTER TABLE fk_cascade_child DROP FOREIGN KEY fk_cascade_parent_ref"));
+  ASSERT_TRUE(connection.ExecuteUpdate(
+      "ALTER TABLE fk_cascade_child ADD CONSTRAINT fk_cascade_parent_ref FOREIGN KEY (parent_id) "
+      "REFERENCES fk_cascade_parent (id) ON DELETE RESTRICT ON UPDATE NO ACTION"));
+  auto restricted = DDLSchemaValidator::Capture(connection, table_config);
+  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE fk_cascade_child"));
+  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE fk_cascade_parent"));
+
+  // MySQL 9.x with innodb_native_foreign_keys=OFF writes child row events and accepts the cascade.
+  if (!cascading) {
+    EXPECT_EQ(cascading.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);
+    EXPECT_NE(cascading.error().message().find("fk_cascade_parent_ref"), std::string::npos);
+  }
+  EXPECT_TRUE(restricted) << restricted.error().message();
+}
+
+TEST(DDLSchemaValidatorIntegrationTest, DetectsStoredGeneratedColumnChange) {
+  if (!mygramdb::mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+  Connection connection(MakeIntegrationConnectionConfig());
+  ASSERT_TRUE(connection.Connect("ddl-generated-column-test"));
+  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS ddl_generated_column"));
+  ASSERT_TRUE(
+      connection.ExecuteUpdate("CREATE TABLE ddl_generated_column (id BIGINT PRIMARY KEY, content TEXT, "
+                               "slug VARCHAR(64) AS (LEFT(content, 8)) STORED) ENGINE=InnoDB"));
+
+  config::TableConfig table_config;
+  table_config.database = MakeIntegrationConnectionConfig().database;
+  table_config.name = "ddl_generated_column";
+  table_config.primary_key = "id";
+  table_config.text_source.column = "slug";
+  auto before = DDLSchemaValidator::Capture(connection, table_config);
+  ASSERT_TRUE(connection.ExecuteUpdate(
+      "ALTER TABLE ddl_generated_column MODIFY slug VARCHAR(64) AS (LEFT(content, 4)) STORED"));
+  auto after = DDLSchemaValidator::Capture(connection, table_config);
+  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE ddl_generated_column"));
+
+  ASSERT_TRUE(before) << before.error().message();
+  ASSERT_TRUE(after) << after.error().message();
+  auto comparison = DDLSchemaValidator::Compare(*before, *after, table_config);
+  ASSERT_FALSE(comparison);
+  EXPECT_NE(comparison.error().message().find("'slug' changed"), std::string::npos);
 }
 
 }  // namespace

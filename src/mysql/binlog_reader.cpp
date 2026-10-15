@@ -38,7 +38,7 @@ BinlogReader::BinlogReader(Connection& connection, index::Index& index, storage:
     : connection_(connection),
       mysql_config_(std::move(mysql_config)),
       config_(config),
-      current_gtid_(config.start_gtid) {
+      current_gtid_(ConvertSingleGtidToRange(config.start_gtid)) {
   legacy_table_context_.name = table_config.name;
   legacy_table_context_.config = std::move(table_config);
   legacy_index_ = &index;
@@ -55,7 +55,7 @@ BinlogReader::BinlogReader(Connection& connection,
       table_contexts_(std::move(table_contexts)),
       mysql_config_(std::move(mysql_config)),
       config_(config),
-      current_gtid_(config.start_gtid) {
+      current_gtid_(ConvertSingleGtidToRange(config.start_gtid)) {
   server_stats_.store(stats, std::memory_order_relaxed);
 }
 
@@ -471,7 +471,7 @@ std::string BinlogReader::GetCurrentGTID() const {
 void BinlogReader::SetCurrentGTID(const std::string& gtid) {
   {
     std::scoped_lock lock(gtid_mutex_);
-    current_gtid_ = gtid;
+    current_gtid_ = ConvertSingleGtidToRange(gtid);
     position_state_.ResetApplied();
   }
   // SetCurrentGTID is used after SYNC/DUMP LOAD has replaced the indexed

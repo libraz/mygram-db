@@ -6,13 +6,19 @@ Verifies that the MySQL server is configured correctly for binlog replication.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from lib.mysql_client import MysqlClient
 
 pytestmark = [pytest.mark.mysql, pytest.mark.usefixtures("mygramdb")]
+
+PROJECT_ROOT = Path(__file__).parents[3]
+E2E_ROOT = PROJECT_ROOT / "e2e"
 
 
 class TestServerValidation:
@@ -40,6 +46,33 @@ class TestServerValidation:
         result = mysql.execute("SHOW VARIABLES LIKE 'binlog_row_image'")
         assert len(result) == 1
         assert result[0]["Value"].upper() == "FULL"
+
+    def test_binlog_row_metadata_full(self, mysql: MysqlClient) -> None:
+        """binlog_row_metadata must be FULL so TABLE_MAP events carry column names."""
+        result = mysql.execute("SHOW VARIABLES LIKE 'binlog_row_metadata'")
+        assert len(result) == 1
+        assert result[0]["Value"].upper() == "FULL"
+
+    def test_startup_rejects_binlog_row_metadata_minimal(self, mysql: MysqlClient) -> None:
+        """A source without full row metadata must stop startup before any snapshot."""
+        config_path = Path(os.environ.get("MYGRAMDB_CONFIG", E2E_ROOT / "docker" / "mygramdb-test.yaml"))
+        binary = Path(os.environ.get("MYGRAMDB_BINARY", PROJECT_ROOT / "build" / "bin" / "mygramdb"))
+
+        try:
+            mysql.execute("SET GLOBAL binlog_row_metadata = MINIMAL")
+            result = subprocess.run(
+                [str(binary), "-c", str(config_path)],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            output = result.stdout + result.stderr
+            assert result.returncode != 0, output
+            assert "binlog_row_metadata" in output and "FULL" in output, output
+        finally:
+            mysql.execute("SET GLOBAL binlog_row_metadata = FULL")
 
     def test_server_uuid_valid(self, mysql: MysqlClient, db_flavor: str) -> None:
         """Server UUID (MySQL) or server_id (MariaDB) must be valid."""

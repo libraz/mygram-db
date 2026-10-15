@@ -23,6 +23,7 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mysql/binlog_checksum.h"
 #include "mysql/binlog_event_types.h"
 #include "mysql/binlog_reader_interface.h"
 #include "mysql/binlog_stream.h"
@@ -204,16 +205,19 @@ struct BinlogEvent {
    * @param table Configured table the DDL is emitted for
    * @param query DDL query text, logged in the table's database
    * @param gtid_val GTID for this event
+   * @param lex_options sql_mode bits the query was logged under that change its quoting
+   * @param names_case_insensitive Whether the source runs with lower_case_table_names != 0
    * @return BinlogEvent whose ddl_type is what replication assigns @p table
    */
   static BinlogEvent CreateDDL(const config::TableConfig& table, const std::string& query = "",
-                               const std::string& gtid_val = "") {
+                               const std::string& gtid_val = "", QueryLexOptions lex_options = {},
+                               bool names_case_insensitive = false) {
     BinlogEvent event;
     event.type = BinlogEventType::DDL;
     event.table_name = table.name;
     event.text = query;
     event.gtid = gtid_val;
-    event.ddl_type = ClassifyDDL(query, table);
+    event.ddl_type = ClassifyDDL(query, table, lex_options, names_case_insensitive);
     return event;
   }
 
@@ -221,9 +225,12 @@ struct BinlogEvent {
    * @brief DDL type replication assigns a configured table for a query
    * @param query DDL query string, logged in the table's database
    * @param table Configured table
+   * @param lex_options sql_mode bits the query was logged under that change its quoting
+   * @param names_case_insensitive Whether the source runs with lower_case_table_names != 0
    * @return The type FindConfiguredTableDDL reports, or kUnknown when no statement names @p table
    */
-  static DDLType ClassifyDDL(const std::string& query, const config::TableConfig& table);
+  static DDLType ClassifyDDL(const std::string& query, const config::TableConfig& table,
+                             QueryLexOptions lex_options = {}, bool names_case_insensitive = false);
 };
 
 /**
@@ -243,6 +250,9 @@ class BinlogReader final : public IBinlogReader {
     size_t queue_size = 10000;      // Maximum queue size
     int reconnect_delay_ms = 1000;  // Reconnect delay in milliseconds
     uint32_t server_id = 0;         // MySQL server ID for replication (must be unique)
+    // The source runs with lower_case_table_names != 0: it folds names to lowercase in TABLE_MAP
+    // events, so database and table names match ASCII case-insensitively instead of byte-exactly.
+    bool table_names_case_insensitive = false;
   };
   // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
 
@@ -410,10 +420,10 @@ class BinlogReader final : public IBinlogReader {
   Connection& connection_;  // Reference to main connection (used for startup validation only, externally owned)
   std::unique_ptr<Connection> binlog_connection_;    // Dedicated connection for binlog reading (internally owned)
   std::unique_ptr<Connection> metadata_connection_;  // Dedicated connection for metadata queries (internally owned)
-  // Both the reader thread (TABLE_MAP column lookup) and worker thread
-  // (post-DDL schema validation) use metadata_connection_. A MYSQL handle may
-  // not execute or consume two result sets concurrently, so keep each complete
-  // query/result lifetime under this lock.
+  // The reader thread (reconnect) and worker thread (post-DDL schema
+  // validation) use metadata_connection_. A MYSQL handle may not execute or
+  // consume two result sets concurrently, so keep each complete query/result
+  // lifetime under this lock.
   mutable std::mutex metadata_connection_mutex_;
 
   // Table contexts keyed by table name. The deprecated single-table
@@ -482,9 +492,9 @@ class BinlogReader final : public IBinlogReader {
   std::string last_server_uuid_;
   mutable std::mutex uuid_mutex_;
 
-  // TABLE_MAP metadata, replay-suppressed table ids and SHOW COLUMNS results;
-  // reader thread only.
+  // TABLE_MAP metadata and replay-suppressed table ids; reader thread only.
   TableSchemaCache schema_cache_;
+  BinlogChecksumTracker checksum_tracker_;  // reader thread only
   std::unordered_map<std::string, ConfiguredTableSchema> configured_schema_baselines_;
 
   // Binlog stream protocol handler (MySQL or MariaDB)
@@ -518,12 +528,17 @@ class BinlogReader final : public IBinlogReader {
                                      std::string_view event_type_name = {});
 
   /**
-   * @brief Convert a single GTID "uuid:N" to range "uuid:1-N"
+   * @brief Widen a bare single GTID "uuid:N" to range "uuid:1-N"
    *
    * COM_BINLOG_DUMP_GTID semantics: "send events NOT in this set".
-   * A single GTID "uuid:101" means interval [101,102), so the server
+   * A single GTID "uuid:101" means interval [101,102), so the source
    * sends transactions 1-100 and 102+, causing duplicate delivery.
-   * Converting to "uuid:1-101" excludes all transactions 1 through 101.
+   * Widening to "uuid:1-101" excludes all transactions 1 through 101.
+   *
+   * A start position enters the reader through this function exactly once
+   * (constructor and SetCurrentGTID), so later merges such as "uuid:1-101"
+   * plus 102 never produce a bare "uuid:N-M" interval the source would read
+   * as having a hole below N.
    *
    * A comma-separated set is split and each entry converted independently, so a
    * multi-UUID position keeps the same exclusion semantics as a single one.
@@ -544,6 +559,17 @@ class BinlogReader final : public IBinlogReader {
    * @brief Worker thread function
    */
   void WorkerThreadFunc();
+
+  /** Drop every queued event; the caller holds queue_mutex_. */
+  void ClearQueueLocked();
+
+  /**
+   * @brief Discard what the previous stream queued and return the position the next one opens from.
+   *
+   * Called before every stream open, so a reopen resumes exactly from the
+   * applied position whatever ended the previous stream.
+   */
+  std::string TakeResumePosition();
 
   /** Mark one background thread exited without underflowing test-only direct calls. */
   void MarkThreadExited();
@@ -603,11 +629,17 @@ class BinlogReader final : public IBinlogReader {
   void RejectUnsafeStatementEvent(const std::string& statement);
 
   /**
-   * @brief Verify a fetched frame's CRC32 before anything reads it.
+   * @brief Verify a fetched frame under its file's checksum algorithm before anything reads it.
+   *
+   * On success the arguments are replaced by the frame in the layout the
+   * parsers read, which carries a 4-byte checksum trailer even when the source
+   * wrote the file without checksums.
+   *
    * @return false, with the error published, when the frame is shorter than a
-   *         header plus checksum or its checksum does not match
+   *         header plus checksum, its CRC32 does not match or its format
+   *         description declares an unknown algorithm
    */
-  bool VerifyFetchedFrame(const unsigned char* event_buffer, size_t event_length);
+  bool VerifyFetchedFrame(const unsigned char*& event_buffer, size_t& event_length);
 
   /// What the reader loop does after offering an event to HandleTableMapEvent.
   enum class TableMapAction : uint8_t {
@@ -626,9 +658,8 @@ class BinlogReader final : public IBinlogReader {
   /**
    * @brief Apply what the reader thread owes a configured-table DDL before queueing it.
    *
-   * Drops the table's cached column definitions so the next TABLE_MAP refetches
-   * them, and stops on DDL that changes rows without row events unless the
-   * table's SYNC snapshot already covers it.
+   * Stops on DDL that changes rows without row events unless the table's SYNC
+   * snapshot already covers it.
    *
    * @return false when replication was stopped
    */
@@ -683,13 +714,6 @@ class BinlogReader final : public IBinlogReader {
 
   /** Validate a monitored DDL before mutating state or advancing its GTID. */
   DDLSchemaCheck ValidateSchemaAfterDDL(const BinlogEvent& event);
-
-  /**
-   * @brief Fetch column names from INFORMATION_SCHEMA and update TableMetadata
-   * @param metadata Table metadata to update with actual column names
-   * @return true if successful, false otherwise
-   */
-  bool FetchColumnNames(TableMetadata& metadata, ProcessingFailureKind* failure_kind = nullptr);
 
   /** A reconnect already owns an open transport for the next outer-loop iteration. */
   [[nodiscard]] static bool ShouldCloseStreamAfterReadLoop(bool connection_was_reestablished) {

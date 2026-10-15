@@ -303,6 +303,10 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       unsigned int full_bytes = (metadata >> 8) & 0xFF;
       unsigned int extra_bits = metadata & 0xFF;
       unsigned int total_bytes = full_bytes + (extra_bits > 0 ? 1 : 0);
+      // A BIT column holds at most 64 bits; more would shift the high bytes out of the value.
+      if (total_bytes > 8) {
+        return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid BIT metadata"));
+      }
       if (data + total_bytes > end) {
         return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
       }
@@ -462,9 +466,8 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
     case 245: {  // MYSQL_TYPE_JSON
       uint32_t json_len = 0;
       const unsigned char* json_data = nullptr;
-      // JSON typically uses 4 bytes for length, but check metadata
-      uint8_t len_bytes = (metadata > 0) ? metadata : 4;
-      switch (len_bytes) {
+      // The metadata is the width of the length prefix, 1 to 4 bytes.
+      switch (metadata) {
         case 1:
           if (data + 1 > end) {
             return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Field data truncated"));
@@ -495,7 +498,7 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
           break;
         default:
           return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata,
-                                          "Unsupported JSON metadata length: " + std::to_string(len_bytes)));
+                                          "Unsupported JSON metadata length: " + std::to_string(metadata)));
       }
       if (json_len > kMaxFieldLength || json_data + json_len > end) {
         mygram::utils::StructuredLog()
@@ -677,6 +680,9 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
         // The fractional part can be negative for dates before epoch
 
         uint32_t usec = FractionalToMicroseconds(frac, metadata);
+        if (usec >= 1000000) {
+          return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid DATETIME2 fractional seconds"));
+        }
 
         oss << '.' << std::setw(6) << usec;
       }
@@ -688,17 +694,26 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
       if (auto available = RequireBytes(data, end, 3); !available) {
         return MakeUnexpected(available.error());
       }
-      // Old TIME format: 3 bytes, stored as HHMMSS
-      uint32_t val = binlog_util::uint3korr(data);
-      unsigned int second = val % 100;
-      unsigned int minute = (val / 100) % 100;
-      unsigned int hour = val / 10000;
+      // Old TIME format: 3-byte signed integer holding HHMMSS as decimal digits
+      // (MariaDB Field_time0 reads it with sint3korr; the sign is the time's sign).
+      int32_t signed_value = static_cast<int32_t>(binlog_util::uint3korr(data));
+      if ((signed_value & 0x800000) != 0) {
+        signed_value |= static_cast<int32_t>(0xFF000000);
+      }
+      const bool negative = signed_value < 0;
+      const auto magnitude = static_cast<uint32_t>(negative ? -static_cast<int64_t>(signed_value) : signed_value);
+      unsigned int second = magnitude % 100;
+      unsigned int minute = (magnitude / 100) % 100;
+      unsigned int hour = magnitude / 10000;
 
       if (!IsValidTimeComponents(hour, minute, second)) {
         return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "Invalid TIME component value"));
       }
 
       std::ostringstream oss;
+      if (negative) {
+        oss << '-';
+      }
       oss << std::setfill('0') << std::setw(2) << hour << ':' << std::setw(2) << minute << ':' << std::setw(2)
           << second;
       return oss.str();

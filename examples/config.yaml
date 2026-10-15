@@ -19,6 +19,7 @@ mysql:
   use_gtid: true                    # Required: GTID replication is the only supported mode
   binlog_format: "ROW"              # Binary log format (default: ROW, required for replication)
   binlog_row_image: "FULL"          # Row image format (default: FULL, required for replication)
+                                    # The server must also run binlog_row_metadata=FULL (checked at startup)
                                     # MariaDB also requires log_bin_compress=OFF; startup fails closed otherwise
   connect_timeout_ms: 3000          # Connection timeout in milliseconds (default: 3000)
   session_timeout_sec: 3600         # Session timeout in seconds (default: 3600 = 1 hour)

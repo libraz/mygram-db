@@ -856,7 +856,6 @@ TEST(BinlogParsingTest, QueryEventDetectsCreateTableDestinationForConfiguredTabl
       "CREATE TABLE app.articles (id BIGINT PRIMARY KEY)",
       "CREATE TABLE IF NOT EXISTS `app`.`articles` LIKE staging.rebuilt",
       "CREATE TABLE app.articles AS SELECT * FROM staging.rebuilt",
-      "CREATE TEMPORARY TABLE app.articles SELECT * FROM staging.rebuilt",
   };
   for (const auto& query : target_queries) {
     auto event = BuildQueryEvent("staging", query);
@@ -875,6 +874,12 @@ TEST(BinlogParsingTest, QueryEventDetectsCreateTableDestinationForConfiguredTabl
   ASSERT_EQ(replace_events.size(), 1U);
   EXPECT_EQ(replace_events[0].ddl_type, DDLType::kRowsReplaced);
 
+  // A temporary table is session-local and never replaces the base table.
+  auto temporary = BuildQueryEvent("staging", "CREATE TEMPORARY TABLE app.articles SELECT * FROM staging.rebuilt");
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(temporary.data(), temporary.size(), "uuid:6", metadata_cache,
+                                                  table_contexts, nullptr, true)
+                  .empty());
+
   auto other_database = BuildQueryEvent("staging", "CREATE TABLE analytics.articles LIKE staging.rebuilt");
   EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(other_database.data(), other_database.size(), "uuid:7",
                                                   metadata_cache, table_contexts, nullptr, true)
@@ -884,8 +889,9 @@ TEST(BinlogParsingTest, QueryEventDetectsCreateTableDestinationForConfiguredTabl
 /**
  * @brief DROP DATABASE|SCHEMA reaches every configured table of that schema.
  *
- * The schema name is compared case-insensitively, a multi-statement event is
- * split before matching, and an unrelated schema produces nothing.
+ * The schema name is compared case-insensitively when the source folds case
+ * and byte-exactly otherwise, a multi-statement event is split before
+ * matching, and an unrelated schema produces nothing.
  */
 TEST(BinlogParsingTest, QueryEventDropDatabaseEmitsDdlForConfiguredTables) {
   server::TableContext ctx;
@@ -901,11 +907,16 @@ TEST(BinlogParsingTest, QueryEventDropDatabaseEmitsDdlForConfiguredTables) {
                             "drop schema if exists `SHOP`", "/* cleanup */ DROP SCHEMA shop"}) {
     auto event = BuildQueryEvent("", query);
     auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:8", metadata_cache,
-                                                      table_contexts, nullptr, true);
+                                                      table_contexts, nullptr, true, "+00:00", true);
     ASSERT_EQ(events.size(), 1U) << query;
     EXPECT_EQ(events[0].ddl_type, DDLType::kDropDatabase) << query;
     EXPECT_EQ(events[0].table_name, "shop.articles") << query;
   }
+
+  auto mixed_case = BuildQueryEvent("", "DROP DATABASE Shop");
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(mixed_case.data(), mixed_case.size(), "uuid:8", metadata_cache,
+                                                  table_contexts, nullptr, true)
+                  .empty());
 
   for (const char* query : {"DROP DATABASE unrelated", "CREATE DATABASE shop", "DROP DATABASE shop_archive"}) {
     auto event = BuildQueryEvent("", query);
@@ -1041,9 +1052,10 @@ TEST(BinlogParsingTest, IsTableAffectingDDL_EdgeCases) {
   // Test with comments (simplified - real parser may need to handle comments)
   EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("/* comment */ DROP TABLE articles", "articles"));
 
-  // Test table name case sensitivity (table names are converted to uppercase for matching)
-  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE ARTICLES", "articles"));
-  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE Articles", "articles"));
+  // Table names match byte-exactly unless the source folds case (lower_case_table_names != 0)
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE ARTICLES", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE ARTICLES", "articles", {}, true));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE Articles", "articles", {}, true));
 }
 
 /**
@@ -1434,6 +1446,58 @@ TEST(BinlogParsingTest, ExtractTaggedGTID_TruncatedBuffer) {
   EXPECT_FALSE(result.has_value());
 }
 
+TEST(BinlogParsingTest, ExtractTaggedGTID_MultiByteGnoAndHighUuidBytes) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+
+  std::array<uint8_t, 16> uuid;
+  uuid.fill(0xFF);
+
+  auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 123456789012LL, "t");
+  auto result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "ffffffff-ffff-ffff-ffff-ffffffffffff:t:123456789012");
+
+  // Longest tag allowed.
+  const std::string longest(32, 'x');
+  event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 1, longest);
+  result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, "ffffffff-ffff-ffff-ffff-ffffffffffff:" + longest + ":1");
+}
+
+TEST(BinlogParsingTest, ExtractTaggedGTID_RejectsAMessageThatDoesNotFit) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+
+  std::array<uint8_t, 16> uuid;
+  uuid.fill(0x11);
+
+  const auto tag_too_long = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 5, std::string(33, 'x'));
+  EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(tag_too_long.data(), tag_too_long.size()).has_value());
+
+  for (const int64_t gno : {int64_t{0}, int64_t{-5}}) {
+    const auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, gno, "t");
+    EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(event.data(), event.size()).has_value()) << gno;
+  }
+
+  // The first body byte is the serialization format version (1, encoded as 0x02).
+  auto wrong_version = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 5, "t");
+  wrong_version[19] = 0x04;
+  EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(wrong_version.data(), wrong_version.size()).has_value());
+
+  // No cut of a valid event may read as a different GTID.
+  const auto full = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 987654, "tag");
+  const auto expected = BinlogEventParser::ExtractTaggedGTID(full.data(), full.size());
+  ASSERT_TRUE(expected.has_value());
+  EXPECT_EQ(*expected, "11111111-1111-1111-1111-111111111111:tag:987654");
+  for (size_t cut = 0; cut < full.size(); ++cut) {
+    const auto partial = BinlogEventParser::ExtractTaggedGTID(full.data(), cut);
+    if (partial.has_value()) {
+      EXPECT_EQ(*partial, *expected) << cut;
+    }
+  }
+  EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(full.data(), 19 + 26).has_value());
+}
+
 // ============================================================================
 // Tests moved from binlog_event_parser_bug_fixes_test.cpp
 // ============================================================================
@@ -1549,6 +1613,46 @@ TEST(BinlogParsingTest, ParseBinlogEventConcatTextSourceUsesOrdinalColumnValues)
   EXPECT_EQ(events[0].primary_key, "7");
   EXPECT_EQ(events[0].text, "Hello World This is the body text news tech");
   EXPECT_EQ(events[0].gtid, "uuid:9");
+}
+
+TEST(BinlogParsingTest, RowEventTableNamesMatchByteExactlyUnlessTheSourceFoldsCase) {
+  constexpr uint64_t kTableId = 43;
+  TableMetadata metadata = CreateConcatTableMetadata(kTableId);
+  metadata.database_name = "appdb";  // folded by the source
+  TableMetadataCache cache;
+  cache.Add(kTableId, metadata);
+
+  server::TableContext ctx;
+  ctx.name = "articles";
+  ctx.config.name = "articles";
+  ctx.config.database = "AppDb";
+  ctx.config.primary_key = "id";
+  ctx.config.text_source.concat = {"title", "body", "tags"};
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("AppDb.articles", &ctx);
+
+  auto row_data = BuildConcatRowData(7, "Hello World", "This is the body text", "news tech");
+  auto event = test::BinlogEventBuilder::BuildWriteRowsV2(kTableId, 0x0000, 2, {}, 4, {0x0F}, row_data);
+
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:9", cache, table_contexts, nullptr,
+                                                  true, "+00:00", false)
+                  .empty());
+  const auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:9", cache, table_contexts,
+                                                          nullptr, true, "+00:00", true);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0].table_name, "AppDb.articles");
+  EXPECT_EQ(events[0].primary_key, "7");
+
+  // Single-table mode checks the database only.
+  table_contexts.clear();
+  config::TableConfig single = ctx.config;
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:9", cache, table_contexts, &single,
+                                                  false, "+00:00", false)
+                  .empty());
+  EXPECT_EQ(BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:9", cache, table_contexts, &single,
+                                                false, "+00:00", true)
+                .size(),
+            1U);
 }
 
 TEST(BinlogParsingTest, QueryDdlEventCarriesCurrentGtid) {
@@ -1699,6 +1803,239 @@ TEST(BinlogParsingTest, StoredProgramDefinitionIsSafeDespiteItsBody) {
     EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery(query)) << query;
   }
   EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery("CREATE TABLE t (id INT); DELETE FROM articles"));
+}
+
+TEST(BinlogParsingTest, StoredProgramBodyNeverReachesTheConfiguredTableClassifier) {
+  config::TableConfig config;
+  config.name = "articles";
+  TableMetadataCache cache;
+  const std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  for (const char* query : {
+           "CREATE PROCEDURE p() BEGIN SELECT 1; TRUNCATE TABLE articles; END",
+           "CREATE TRIGGER t AFTER INSERT ON a FOR EACH ROW BEGIN UPDATE articles SET n = 1; DROP TABLE articles; END",
+       }) {
+    const auto event = BuildQueryEvent("app", query);
+    EXPECT_TRUE(
+        BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:1", cache, table_contexts, &config, false)
+            .empty())
+        << query;
+    EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery(query)) << query;
+  }
+}
+
+TEST(BinlogParsingTest, CreateTableStartTransactionIsATransactionBoundary) {
+  using Boundary = BinlogEventParser::QueryTransactionBoundary;
+
+  const std::string ctas = "CREATE TABLE `articles_copy` (\n  `id` int NOT NULL\n) START TRANSACTION ENGINE=InnoDB";
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary(ctas), Boundary::kBegin);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary(R"(CREATE TABLE "t" ("id" int) START TRANSACTION)",
+                                                                mygramdb::mysql::QueryLexOptions{true, false}),
+            Boundary::kBegin);
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery(ctas));
+
+  // MariaDB logs the original statement; its GTID flags open the group instead.
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("CREATE TABLE t AS SELECT * FROM s"), Boundary::kNone);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("CREATE TABLE `t` (`id` int) ENGINE=InnoDB"),
+            Boundary::kNone);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("CREATE TABLE t (id int); START TRANSACTION"),
+            Boundary::kNone);
+}
+
+namespace {
+
+void AppendLittleEndianMode(std::vector<uint8_t>& status_vars, uint64_t sql_mode) {
+  status_vars.push_back(1);  // Q_SQL_MODE_CODE
+  mygramdb::mysql::test::BinlogEventBuilder::AppendLittleEndian64(status_vars, sql_mode);
+}
+
+}  // namespace
+
+TEST(BinlogParsingTest, ExtractQueryStringReadsAnsiQuotesFromTheSqlModeStatusVariable) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  constexpr uint64_t kAnsiQuotes = 0x4;
+  constexpr uint64_t kOtherModes = 0x20000 | 0x400;
+
+  const auto extract = [](const std::vector<uint8_t>& status_vars) {
+    const auto event = BinlogEventBuilder::BuildQueryEventWithStatusVars("app", "TRUNCATE TABLE t", status_vars);
+    return BinlogEventParser::ExtractQueryString(event.data(), event.size());
+  };
+
+  auto plain = extract({});
+  ASSERT_TRUE(plain.has_value());
+  EXPECT_EQ(plain->database, "app");
+  EXPECT_EQ(plain->query, "TRUNCATE TABLE t");
+  EXPECT_FALSE(plain->lex_options.ansi_quotes);
+  EXPECT_FALSE(plain->lex_options.no_backslash_escapes);
+
+  // Q_FLAGS2_CODE precedes Q_SQL_MODE_CODE in a real event.
+  std::vector<uint8_t> status_vars = {0, 0, 0, 0, 0};
+  AppendLittleEndianMode(status_vars, kAnsiQuotes | kOtherModes);
+  status_vars.insert(status_vars.end(), {4, 33, 0, 33, 0, 33, 0});  // Q_CHARSET_CODE after it
+  auto ansi = extract(status_vars);
+  ASSERT_TRUE(ansi.has_value());
+  EXPECT_TRUE(ansi->lex_options.ansi_quotes);
+  EXPECT_EQ(ansi->query, "TRUNCATE TABLE t");
+
+  status_vars = {0, 0, 0, 0, 0};
+  AppendLittleEndianMode(status_vars, kOtherModes);
+  EXPECT_FALSE(extract(status_vars)->lex_options.ansi_quotes);
+
+  // Variables that precede the mode are skipped by their own lengths.
+  status_vars = {2, 3, 's', 't', 'd', 0};                                   // Q_CATALOG_CODE: length, name, NUL
+  status_vars.insert(status_vars.end(), {6, 3, 's', 't', 'd'});             // Q_CATALOG_NZ_CODE
+  status_vars.insert(status_vars.end(), {11, 1, 'u', 2, 'h', 'h'});         // Q_INVOKER
+  status_vars.insert(status_vars.end(), {12, 2, 'a', 0, 'b', 0});           // Q_UPDATED_DB_NAMES
+  status_vars.insert(status_vars.end(), {12, 200});                         // over the cap: no names follow
+  status_vars.insert(status_vars.end(), {130, 4, 1, 0, 0, 0, 0, 0, 0, 0});  // MariaDB Q_GTID_FLAGS3 + seq
+  AppendLittleEndianMode(status_vars, kAnsiQuotes);
+  EXPECT_TRUE(extract(status_vars)->lex_options.ansi_quotes);
+
+  // An unknown code ends the walk, as it does in the server; so does a cut-off variable.
+  // The mode is then unknown, which is not the same as off.
+  status_vars = {0xFE, 0, 0};
+  AppendLittleEndianMode(status_vars, kAnsiQuotes);
+  EXPECT_FALSE(extract(status_vars)->sql_mode_known);
+  status_vars = {1, 0x04, 0, 0, 0};
+  EXPECT_FALSE(extract(status_vars)->sql_mode_known);
+  status_vars = {14, 0, 0, 0, 0, 0, 0, 0, 0};  // Q_COMMIT_TS is not decoded by the server either
+  AppendLittleEndianMode(status_vars, kAnsiQuotes);
+  EXPECT_FALSE(extract(status_vars)->sql_mode_known);
+  EXPECT_TRUE(plain->sql_mode_known);
+}
+
+/**
+ * @brief A statement whose mode is unknown is judged under every quoting mode.
+ */
+TEST(BinlogParsingTest, UnknownSqlModeIsJudgedUnderEveryQuotingMode) {
+  using mygramdb::mysql::QueryEventData;
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  config::TableConfig config;
+  config.name = "articles";
+  TableMetadataCache cache;
+  const std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  // Read with ANSI_QUOTES the span is an identifier, so the DROP is real; read without it,
+  // the backslash hides it inside a string.
+  const std::string query = R"(DROP TABLE "a\", articles)";
+  const std::vector<uint8_t> unknown_vars = {0xFE, 0, 0};
+  const auto unknown_event = BinlogEventBuilder::BuildQueryEventWithStatusVars("app", query, unknown_vars);
+  const auto events = BinlogEventParser::ParseBinlogEvent(unknown_event.data(), unknown_event.size(), "uuid:1", cache,
+                                                          table_contexts, &config, false);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0].ddl_type, DDLType::kDrop);
+
+  // Without NO_BACKSLASH_ESCAPES the quote is escaped and DELETE hides in a string; with it, DELETE runs.
+  QueryEventData data;
+  data.query = R"(SET @a = '\'; DELETE FROM articles; SET @b = ')";
+  data.sql_mode_known = true;
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery(data));
+  data.sql_mode_known = false;
+  EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery(data));
+  data.query = "XA START 'x'";
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary(data),
+            BinlogEventParser::QueryTransactionBoundary::kUnsupportedXa);
+}
+
+TEST(BinlogParsingTest, ExtractQueryStringReadsNoBackslashEscapesFromTheSqlModeStatusVariable) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  constexpr uint64_t kNoBackslashEscapes = 1ULL << 20;
+  constexpr uint64_t kAnsiQuotes = 0x4;
+
+  const auto extract = [](uint64_t mode) {
+    std::vector<uint8_t> status_vars;
+    AppendLittleEndianMode(status_vars, mode);
+    const auto event = BinlogEventBuilder::BuildQueryEventWithStatusVars("app", "TRUNCATE TABLE t", status_vars);
+    return BinlogEventParser::ExtractQueryString(event.data(), event.size());
+  };
+
+  auto literal = extract(kNoBackslashEscapes | 0x20000);
+  ASSERT_TRUE(literal.has_value());
+  EXPECT_TRUE(literal->lex_options.no_backslash_escapes);
+  EXPECT_FALSE(literal->lex_options.ansi_quotes);
+
+  auto both = extract(kNoBackslashEscapes | kAnsiQuotes);
+  ASSERT_TRUE(both.has_value());
+  EXPECT_TRUE(both->lex_options.no_backslash_escapes);
+  EXPECT_TRUE(both->lex_options.ansi_quotes);
+
+  auto neither = extract(0x20000);
+  ASSERT_TRUE(neither.has_value());
+  EXPECT_FALSE(neither->lex_options.no_backslash_escapes);
+}
+
+TEST(BinlogParsingTest, NoBackslashEscapesFromTheEventChangesWhereItsDdlStarts) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  config::TableConfig config;
+  config.name = "articles";
+  TableMetadataCache cache;
+  const std::unordered_map<std::string, server::TableContext*> table_contexts;
+  const std::string query = R"(SET @path = 'C:\'; DROP TABLE articles)";
+
+  std::vector<uint8_t> status_vars;
+  AppendLittleEndianMode(status_vars, 1ULL << 20);
+  const auto literal_event = BinlogEventBuilder::BuildQueryEventWithStatusVars("app", query, status_vars);
+  const auto literal_events = BinlogEventParser::ParseBinlogEvent(literal_event.data(), literal_event.size(), "uuid:1",
+                                                                  cache, table_contexts, &config, false);
+  ASSERT_EQ(literal_events.size(), 1U);
+  EXPECT_EQ(literal_events[0].ddl_type, DDLType::kDrop);
+
+  const auto default_event = BuildQueryEvent("app", query);
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(default_event.data(), default_event.size(), "uuid:1", cache,
+                                                  table_contexts, &config, false)
+                  .empty());
+}
+
+TEST(BinlogParsingTest, DdlTableNamesMatchByteExactlyUnlessTheSourceFoldsCase) {
+  server::TableContext ctx;
+  ctx.name = "Articles";
+  ctx.config.name = "Articles";
+  ctx.config.database = "AppDb";
+  std::unordered_map<std::string, server::TableContext*> table_contexts;
+  table_contexts.emplace("AppDb.Articles", &ctx);
+  TableMetadataCache cache;
+
+  const auto folded = BuildQueryEvent("appdb", "TRUNCATE TABLE articles");
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(folded.data(), folded.size(), "uuid:1", cache, table_contexts,
+                                                  nullptr, true, "+00:00", false)
+                  .empty());
+  const auto matched = BinlogEventParser::ParseBinlogEvent(folded.data(), folded.size(), "uuid:1", cache,
+                                                           table_contexts, nullptr, true, "+00:00", true);
+  ASSERT_EQ(matched.size(), 1U);
+  EXPECT_EQ(matched[0].table_name, "AppDb.Articles");
+  EXPECT_EQ(matched[0].ddl_type, DDLType::kTruncate);
+
+  const auto exact = BuildQueryEvent("AppDb", "TRUNCATE TABLE Articles");
+  EXPECT_EQ(BinlogEventParser::ParseBinlogEvent(exact.data(), exact.size(), "uuid:1", cache, table_contexts, nullptr,
+                                                true, "+00:00", false)
+                .size(),
+            1U);
+
+  EXPECT_FALSE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE ARTICLES", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("DROP TABLE ARTICLES", "articles", {}, true));
+}
+
+TEST(BinlogParsingTest, AnsiQuotesFromTheEventChangesHowItsDdlIsRead) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+
+  config::TableConfig config;
+  config.name = "articles";
+  TableMetadataCache cache;
+  const std::unordered_map<std::string, server::TableContext*> table_contexts;
+  const std::string query = R"(DROP TABLE "a\", articles)";
+
+  std::vector<uint8_t> status_vars;
+  AppendLittleEndianMode(status_vars, 0x4);
+  const auto ansi_event = BinlogEventBuilder::BuildQueryEventWithStatusVars("app", query, status_vars);
+  const auto ansi_events = BinlogEventParser::ParseBinlogEvent(ansi_event.data(), ansi_event.size(), "uuid:1", cache,
+                                                               table_contexts, &config, false);
+  ASSERT_EQ(ansi_events.size(), 1U);
+  EXPECT_EQ(ansi_events[0].ddl_type, DDLType::kDrop);
+
+  const auto default_event = BuildQueryEvent("app", query);
+  EXPECT_TRUE(BinlogEventParser::ParseBinlogEvent(default_event.data(), default_event.size(), "uuid:1", cache,
+                                                  table_contexts, &config, false)
+                  .empty());
 }
 
 TEST(BinlogParsingTest, IgnoredDdlPrefixCoversOnlyTheStatementItLeads) {
@@ -2025,8 +2362,8 @@ TEST(BinlogParsingTest, RenameTableMultiplePairsTargetInDestination) {
       "RENAME TABLE `users` TO `users_old`, `articles` TO `articles_new`", "articles"));
 
   // Case insensitive multi-pair
-  EXPECT_TRUE(
-      BinlogEventParser::IsTableAffectingDDL("rename table users to users_old, ARTICLES to articles_new", "articles"));
+  EXPECT_TRUE(BinlogEventParser::IsTableAffectingDDL("rename table users to users_old, ARTICLES to articles_new",
+                                                     "articles", {}, true));
 }
 
 #if defined(__unix__) || defined(__APPLE__)

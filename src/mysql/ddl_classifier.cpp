@@ -9,6 +9,7 @@
 
 #include <cctype>
 
+#include "mysql/table_name_match.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
@@ -36,14 +37,14 @@ bool StartsDashComment(std::string_view query, size_t pos) {
 /**
  * @brief Read a quoted span starting at @p pos
  *
- * Backticks escape themselves by doubling; string literals also honour
- * backslash escapes. An unterminated span runs to the end of the input.
+ * A quote is escaped by doubling it; a backslash escapes the next byte only
+ * when @p backslash_escapes is set. An unterminated span runs to the end of the input.
  */
-size_t ReadQuoted(std::string_view query, size_t pos, std::string& content) {
+size_t ReadQuoted(std::string_view query, size_t pos, std::string& content, bool backslash_escapes) {
   const char quote = query[pos++];
   while (pos < query.size()) {
     const char chr = query[pos];
-    if (quote != '`' && chr == '\\' && pos + 1 < query.size()) {
+    if (backslash_escapes && chr == '\\' && pos + 1 < query.size()) {
       content.push_back(query[pos + 1]);
       pos += 2;
       continue;
@@ -60,6 +61,70 @@ size_t ReadQuoted(std::string_view query, size_t pos, std::string& content) {
     ++pos;
   }
   return pos;
+}
+
+/**
+ * @brief Whether the tokens so far open a stored-program definition whose body follows
+ *
+ * `CREATE [OR REPLACE] [DEFINER = user[@host]] [AGGREGATE] PROCEDURE|FUNCTION|TRIGGER|EVENT|PACKAGE [BODY]`
+ * and `ALTER [DEFINER = user[@host]] EVENT`. The server logs such a statement as
+ * one event with the whole body, whose own `;` separators are not statement ends.
+ * A loadable function (`... FUNCTION f RETURNS t SONAME 'lib'`) has no body.
+ */
+bool OpensStoredProgramBody(const std::vector<SqlToken>& tokens) {
+  size_t pos = 0;
+  const auto is_word = [&tokens, &pos](std::string_view word) {
+    return pos < tokens.size() && tokens[pos].kind == SqlToken::Kind::kWord &&
+           mygram::utils::EqualsAsciiCaseInsensitive(tokens[pos].text, word);
+  };
+  const auto is_punct = [&tokens, &pos](char punct) {
+    return pos < tokens.size() && tokens[pos].kind == SqlToken::Kind::kPunct && tokens[pos].text[0] == punct;
+  };
+
+  const bool create = is_word("CREATE");
+  if (!create && !is_word("ALTER")) {
+    return false;
+  }
+  ++pos;
+  if (create && is_word("OR")) {
+    ++pos;
+    if (!is_word("REPLACE")) {
+      return false;
+    }
+    ++pos;
+  }
+  if (is_word("DEFINER")) {
+    ++pos;
+    if (!is_punct('=')) {
+      return false;
+    }
+    pos += 2;  // '=' and the user, or CURRENT_USER
+    if (is_punct('(')) {
+      pos += 2;  // CURRENT_USER()
+    }
+    if (is_punct('@')) {
+      pos += 2;  // host
+    }
+  }
+  if (!create) {
+    return is_word("EVENT");
+  }
+  if (is_word("AGGREGATE")) {
+    ++pos;
+  }
+  if (is_word("FUNCTION")) {
+    // A stored function names its parameter list; a loadable one goes straight to RETURNS.
+    ++pos;
+    if (is_word("IF")) {
+      pos += 3;  // IF NOT EXISTS
+    }
+    pos += 1;  // name
+    if (is_punct('.')) {
+      pos += 2;
+    }
+    return is_punct('(');
+  }
+  return is_word("PROCEDURE") || is_word("TRIGGER") || is_word("EVENT") || is_word("PACKAGE");
 }
 
 /**
@@ -116,6 +181,22 @@ class StatementCursor {
   }
 
   void Skip(size_t count) { pos_ += count; }
+
+  /// Whether `START TRANSACTION` appears outside any parentheses in the rest of the statement.
+  [[nodiscard]] bool HasTopLevelStartTransaction() const {
+    int depth = 0;
+    for (size_t index = pos_; index < tokens_.size(); ++index) {
+      const SqlToken& token = tokens_[index];
+      if (token.kind == SqlToken::Kind::kPunct && token.text[0] == '(') {
+        ++depth;
+      } else if (token.kind == SqlToken::Kind::kPunct && token.text[0] == ')') {
+        --depth;
+      } else if (depth == 0 && IsKeyword(index - pos_, "START") && IsKeyword(index - pos_ + 1, "TRANSACTION")) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   /// A double-quoted span is read as a name: the server only logs one there under ANSI_QUOTES.
   std::optional<std::string> ReadIdentifier() {
@@ -317,7 +398,10 @@ DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
       }
       return Finish(std::move(statement), DDLType::kDropDatabase, std::move(names), cursor.AtEnd());
     }
-    cursor.Accept("TEMPORARY");
+    // A temporary table is session-local: it never touches the base table of the same name.
+    if (cursor.Accept("TEMPORARY")) {
+      return statement;
+    }
     if (cursor.Accept("TABLE") || cursor.Accept("TABLES")) {
       cursor.AcceptIfExists();
       std::vector<DdlTableName> names;
@@ -339,13 +423,18 @@ DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
       }
       replace = true;
     }
-    cursor.Accept("TEMPORARY");
+    if (cursor.Accept("TEMPORARY")) {
+      return statement;
+    }
     if (!cursor.Accept("TABLE")) {
       return statement;
     }
     cursor.AcceptIfNotExists();
+    auto names = ReadOneName(cursor);
+    // CREATE TABLE ... SELECT is logged as `CREATE TABLE ... START TRANSACTION` and completes with the rows' XID.
+    statement.starts_transaction = cursor.HasTopLevelStartTransaction();
     // CREATE OR REPLACE swaps out an existing table's rows without row events.
-    return Finish(std::move(statement), replace ? DDLType::kRowsReplaced : DDLType::kCreate, ReadOneName(cursor), true);
+    return Finish(std::move(statement), replace ? DDLType::kRowsReplaced : DDLType::kCreate, std::move(names), true);
   }
 
   if (cursor.Accept("ALTER")) {
@@ -367,7 +456,7 @@ DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
   return statement;
 }
 
-std::vector<std::vector<SqlToken>> LexQueryStatements(std::string_view query) {
+std::vector<std::vector<SqlToken>> LexQueryStatements(std::string_view query, QueryLexOptions lex_options) {
   std::vector<std::vector<SqlToken>> statements;
   std::vector<SqlToken> current;
   bool in_executable_comment = false;
@@ -388,9 +477,10 @@ std::vector<std::vector<SqlToken>> LexQueryStatements(std::string_view query) {
     }
     if (chr == '\'' || chr == '"' || chr == '`') {
       SqlToken token;
-      token.kind = chr == '`' ? SqlToken::Kind::kQuotedIdentifier : SqlToken::Kind::kString;
-      token.double_quoted = chr == '"';
-      pos = ReadQuoted(query, pos, token.text);
+      const bool is_identifier = chr == '`' || (chr == '"' && lex_options.ansi_quotes);
+      token.kind = is_identifier ? SqlToken::Kind::kQuotedIdentifier : SqlToken::Kind::kString;
+      token.double_quoted = chr == '"' && !lex_options.ansi_quotes;
+      pos = ReadQuoted(query, pos, token.text, !is_identifier && !lex_options.no_backslash_escapes);
       current.push_back(std::move(token));
       continue;
     }
@@ -427,7 +517,13 @@ std::vector<std::vector<SqlToken>> LexQueryStatements(std::string_view query) {
       continue;
     }
     if (chr == ';') {
-      end_statement();
+      // The source logs a stored-program definition as one event, so the rest of
+      // the event is its body whatever `;` and END it contains.
+      if (OpensStoredProgramBody(current)) {
+        current.push_back(SqlToken{SqlToken::Kind::kPunct, ";"});
+      } else {
+        end_statement();
+      }
       ++pos;
       continue;
     }
@@ -446,9 +542,9 @@ std::vector<std::vector<SqlToken>> LexQueryStatements(std::string_view query) {
   return statements;
 }
 
-std::vector<DdlStatement> ClassifyQueryEvent(std::string_view query) {
+std::vector<DdlStatement> ClassifyQueryEvent(std::string_view query, QueryLexOptions lex_options) {
   std::vector<DdlStatement> statements;
-  for (const auto& tokens : LexQueryStatements(query)) {
+  for (const auto& tokens : LexQueryStatements(query, lex_options)) {
     statements.push_back(ClassifyStatement(tokens));
   }
   return statements;
@@ -480,20 +576,20 @@ bool StartsWithStatementPrefix(const std::vector<SqlToken>& statement, const std
 }
 
 bool NamesConfiguredTable(const DdlStatement& statement, std::string_view event_database,
-                          const config::TableConfig& table_config) {
+                          const config::TableConfig& table_config, bool names_case_insensitive) {
   for (const auto& name : statement.names) {
     if (statement.type == DDLType::kDropDatabase) {
       if (!table_config.database.empty() &&
-          mygram::utils::EqualsAsciiCaseInsensitive(name.database, table_config.database)) {
+          TableNamesEqual(name.database, table_config.database, names_case_insensitive)) {
         return true;
       }
       continue;
     }
-    if (!mygram::utils::EqualsAsciiCaseInsensitive(name.table, table_config.name)) {
+    if (!TableNamesEqual(name.table, table_config.name, names_case_insensitive)) {
       continue;
     }
     const std::string_view database = name.database.empty() ? event_database : std::string_view(name.database);
-    if (table_config.database.empty() || mygram::utils::EqualsAsciiCaseInsensitive(database, table_config.database)) {
+    if (table_config.database.empty() || TableNamesEqual(database, table_config.database, names_case_insensitive)) {
       return true;
     }
   }
@@ -501,10 +597,11 @@ bool NamesConfiguredTable(const DdlStatement& statement, std::string_view event_
 }
 
 std::optional<DDLType> FindConfiguredTableDDL(const std::vector<DdlStatement>& statements,
-                                              std::string_view event_database,
-                                              const config::TableConfig& table_config) {
+                                              std::string_view event_database, const config::TableConfig& table_config,
+                                              bool names_case_insensitive) {
   for (const auto& statement : statements) {
-    if (statement.type != DDLType::kUnknown && NamesConfiguredTable(statement, event_database, table_config)) {
+    if (statement.type != DDLType::kUnknown &&
+        NamesConfiguredTable(statement, event_database, table_config, names_case_insensitive)) {
       return statement.type;
     }
   }

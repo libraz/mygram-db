@@ -2,8 +2,8 @@
  * @file binlog_reader_utils.cpp
  * @brief BinlogReader utility functions
  *
- * Contains ProcessEvent, FetchColumnNames, ValidateConnection,
- * ConvertSingleGtidToRange, FixGtidSetCallback, and UpdateCurrentGTID,
+ * Contains ProcessEvent, ValidateConnection,
+ * ConvertSingleGtidToRange, and UpdateCurrentGTID,
  * extracted from binlog_reader.cpp for translation unit splitting.
  */
 
@@ -28,8 +28,6 @@
 #include "mysql/mariadb_gtid.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/numeric_parse.h"
-#include "utils/sql_utils.h"
-#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -149,8 +147,7 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
   }
 
   // Capture performs a query and consumes its MYSQL_RES. Keep that entire
-  // lifetime serialized with FetchColumnNames(), which runs on the reader
-  // thread and shares this connection.
+  // lifetime under the lock that serializes this shared connection.
   auto current = DDLSchemaValidator::Capture(*metadata_connection_, table_iter->second->config);
   if (!current) {
     const ErrorCode code = current.error().code();
@@ -166,156 +163,6 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
     return incompatible(comparison.error().message());
   }
   return DDLSchemaCheck::kCompatible;
-}
-
-bool BinlogReader::FetchColumnNames(TableMetadata& metadata, ProcessingFailureKind* failure_kind) {
-  if (failure_kind != nullptr) {
-    *failure_kind = ProcessingFailureKind::kDeterministic;
-  }
-  std::string cache_key = metadata.database_name + "." + metadata.table_name;
-
-  // Check cache first
-  {
-    const auto* cached = schema_cache_.FindColumns(metadata.database_name, metadata.table_name);
-    if (cached != nullptr) {
-      // Cache hit: update column definitions from cache
-      const auto& column_definitions = *cached;
-      if (column_definitions.size() == metadata.columns.size()) {
-        for (size_t i = 0; i < metadata.columns.size(); i++) {
-          metadata.columns[i].name = column_definitions[i].name;
-          metadata.columns[i].is_unsigned = column_definitions[i].is_unsigned;
-          metadata.columns[i].enum_set_values = column_definitions[i].enum_set_values;
-        }
-        metadata.RebuildColumnOrdinals();
-        mygram::utils::StructuredLog()
-            .Event("binlog_debug")
-            .Field("action", "column_names_cache_hit")
-            .Field("database", metadata.database_name)
-            .Field("table", metadata.table_name)
-            .Debug();
-        return true;
-      }
-      // Cache mismatch (column count changed?), fall through to query
-      mygram::utils::StructuredLog()
-          .Event("binlog_warning")
-          .Field("type", "column_cache_mismatch")
-          .Field("database", metadata.database_name)
-          .Field("table", metadata.table_name)
-          .Field("cached_count", static_cast<int64_t>(column_definitions.size()))
-          .Field("current_count", static_cast<int64_t>(metadata.columns.size()))
-          .Message("Cached column definitions have mismatched count")
-          .Warn();
-      schema_cache_.InvalidateColumns(metadata.database_name, metadata.table_name);
-    }
-  }
-
-  // Cache miss or stale: use SHOW COLUMNS (faster than INFORMATION_SCHEMA)
-  auto quoted_table = mygramdb::utils::QuoteQualifiedSQLIdentifier(metadata.database_name, metadata.table_name);
-  if (!quoted_table) {
-    SetLastError(quoted_table.error());
-    mygram::utils::StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "invalid_metadata_identifier")
-        .Field("database", metadata.database_name)
-        .Field("table", metadata.table_name)
-        .Field("error", quoted_table.error().message())
-        .Error();
-    return false;
-  }
-  std::string query = "SHOW COLUMNS FROM " + *quoted_table;
-
-  // Use dedicated metadata connection to avoid thread safety issues (#1)
-  // The main connection_ must not be used from the reader thread.
-  std::lock_guard<std::mutex> metadata_lock(metadata_connection_mutex_);
-  if (!metadata_connection_) {
-    const auto error = mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLDisconnected,
-                                                "Metadata connection is not initialized", cache_key);
-    SetLastError(error);
-    if (failure_kind != nullptr) {
-      *failure_kind = ClassifyProcessingFailure(error.code());
-    }
-    mygram::utils::StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "metadata_connection_null")
-        .Field("database", metadata.database_name)
-        .Field("table", metadata.table_name)
-        .Error();
-    return false;
-  }
-
-  auto result_exp = metadata_connection_->Execute(query);
-  if (!result_exp) {
-    SetLastError(result_exp.error());
-    if (failure_kind != nullptr) {
-      *failure_kind = ClassifyProcessingFailure(result_exp.error().code());
-    }
-    mygram::utils::StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "column_query_failed")
-        .Field("database", metadata.database_name)
-        .Field("table", metadata.table_name)
-        .FieldError(result_exp.error())
-        .Error();
-    return false;
-  }
-
-  auto is_unsigned_type = [](const char* column_type) {
-    if (column_type == nullptr) {
-      return false;
-    }
-    const std::string type = mygram::utils::ToLower(column_type);
-    return type.find("unsigned") != std::string::npos;
-  };
-
-  std::vector<TableSchemaCache::ColumnDefinition> column_definitions;
-  column_definitions.reserve(metadata.columns.size());
-
-  MYSQL_ROW row = nullptr;
-  while ((row = mysql_fetch_row(result_exp->get())) != nullptr) {
-    TableSchemaCache::ColumnDefinition column_definition;
-    column_definition.name = row[0] == nullptr ? std::string{} : std::string(row[0]);
-    column_definition.is_unsigned = is_unsigned_type(row[1]);
-    column_definition.enum_set_values =
-        row[1] == nullptr ? std::vector<std::string>{} : ParseEnumSetColumnValues(row[1]);
-    column_definitions.push_back(std::move(column_definition));
-  }
-
-  // result automatically freed by MySQLResult destructor
-
-  if (column_definitions.size() != metadata.columns.size()) {
-    SetLastError(mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLInvalidMetadata,
-                                          "SHOW COLUMNS count does not match TABLE_MAP metadata for " + cache_key,
-                                          cache_key));
-    mygram::utils::StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "column_count_mismatch")
-        .Field("database", metadata.database_name)
-        .Field("table", metadata.table_name)
-        .Field("show_columns_count", static_cast<int64_t>(column_definitions.size()))
-        .Field("binlog_count", static_cast<int64_t>(metadata.columns.size()))
-        .Error();
-    return false;
-  }
-
-  // Update metadata with actual column names
-  for (size_t i = 0; i < metadata.columns.size(); i++) {
-    metadata.columns[i].name = column_definitions[i].name;
-    metadata.columns[i].is_unsigned = column_definitions[i].is_unsigned;
-    metadata.columns[i].enum_set_values = column_definitions[i].enum_set_values;
-  }
-  metadata.RebuildColumnOrdinals();
-
-  schema_cache_.StoreColumns(metadata.database_name, metadata.table_name, std::move(column_definitions));
-
-  mygram::utils::StructuredLog()
-      .Event("binlog_debug")
-      .Field("action", "fetched_column_names")
-      .Field("column_count", static_cast<uint64_t>(metadata.columns.size()))
-      .Field("database", metadata.database_name)
-      .Field("table", metadata.table_name)
-      .Debug();
-
-  return true;
 }
 
 std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
@@ -509,12 +356,11 @@ bool BinlogReader::ValidateConnection() {
   }
 
   // Pass current GTID position for purge check
-  // Always use range format for validation so GTID_SUBSET checks the full history
   std::optional<std::string> current_gtid_for_validation;
   {
     std::lock_guard<std::mutex> lock(gtid_mutex_);
     if (!current_gtid_.empty()) {
-      current_gtid_for_validation = ConvertSingleGtidToRange(current_gtid_);
+      current_gtid_for_validation = current_gtid_;
     }
   }
 

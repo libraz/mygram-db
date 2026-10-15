@@ -107,16 +107,35 @@ TEST(MariaDBGtidPositionTest, AcceptsExactlyTheDocumentedCharacterSet) {
 TEST(BinlogFetchErrorTest, TransportEndingErrorsReconnectAndOthersStop) {
   using Status = BinlogFetchResult::Status;
 
-  EXPECT_EQ(ClassifyFetchError(2013), Status::kConnectionLost);
+  EXPECT_EQ(ClassifyFetchError(2013, ""), Status::kConnectionLost);
   // Source restart, kill and network errors all leave the position intact.
   for (const unsigned int err_no : {2006U, 2055U, 1053U, 1152U, 1158U, 1159U, 1160U, 1161U, 1927U, 4031U}) {
-    EXPECT_EQ(ClassifyFetchError(err_no), Status::kServerGoneAway) << err_no;
+    EXPECT_EQ(ClassifyFetchError(err_no, ""), Status::kServerGoneAway) << err_no;
   }
 
-  EXPECT_EQ(ClassifyFetchError(1236), Status::kBinlogPurged);
+  // 1236 is purged only when the server says so; every other fatal dump error stops without claiming it.
+  EXPECT_EQ(ClassifyFetchError(1236,
+                               "Got fatal error 1236 from source when reading data from binary log: 'The replica "
+                               "is connecting using CHANGE REPLICATION SOURCE TO SOURCE_AUTO_POSITION = 1, but "
+                               "the source has purged binary logs containing GTIDs that the replica requires.'"),
+            Status::kBinlogPurged);
+  EXPECT_EQ(ClassifyFetchError(1236,
+                               "Got fatal error 1236 from master when reading data from binary log: 'Could not "
+                               "find GTID state requested by slave in any binlog files. Probably the slave state "
+                               "is too old and required binlog files have been purged.'"),
+            Status::kBinlogPurged);
+  for (const char* message : {"Got fatal error 1236 from source when reading data from binary log: 'Cannot replicate "
+                              "because the replica has more GTIDs than the source'",
+                              "Got fatal error 1236 from source when reading data from binary log: 'log event entry "
+                              "exceeded max_allowed_packet; Increase max_allowed_packet on source'",
+                              "Got fatal error 1236 from source when reading data from binary log: 'binlog truncated "
+                              "in the middle of event'"}) {
+    EXPECT_EQ(ClassifyFetchError(1236, message), Status::kError) << message;
+  }
+  EXPECT_FALSE(IsPurgedPositionError(1064, "purged binary logs containing GTIDs"));
   // A malformed packet, a parse error or an access denial does not heal on reconnect.
   for (const unsigned int err_no : {2027U, 1064U, 1045U}) {
-    EXPECT_EQ(ClassifyFetchError(err_no), Status::kError) << err_no;
+    EXPECT_EQ(ClassifyFetchError(err_no, ""), Status::kError) << err_no;
   }
 }
 

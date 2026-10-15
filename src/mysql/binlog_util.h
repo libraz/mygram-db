@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -145,7 +146,7 @@ inline constexpr int kDecimalDigitsToBytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
  */
 inline std::optional<uint32_t> decimal_binary_size(uint8_t precision, uint8_t scale) {
   constexpr uint8_t kMaxDecimalPrecision = 65;
-  constexpr uint8_t kMaxDecimalScale = 30;
+  constexpr uint8_t kMaxDecimalScale = 38;  // MariaDB DECIMAL_MAX_SCALE; MySQL stops at 30
   if (precision == 0 || precision > kMaxDecimalPrecision || scale > precision || scale > kMaxDecimalScale) {
     return std::nullopt;
   }
@@ -304,22 +305,59 @@ inline mygram::utils::Expected<std::string, mygram::utils::Error> decode_decimal
   return result;
 }
 
+/// Returned by calc_field_size when a field's length prefix runs past the buffer; it exceeds any remaining length.
+inline constexpr uint64_t kFieldSizeTruncated = std::numeric_limits<uint64_t>::max();
+
+/**
+ * @brief Size of a field made of a little-endian length prefix followed by that many bytes
+ *
+ * The size is returned in 64 bits so that a declared 4-byte length near
+ * UINT32_MAX plus its prefix cannot wrap into a small value that passes the
+ * caller's bounds check.
+ *
+ * @return Prefix plus payload bytes, or kFieldSizeTruncated when the prefix does not fit before @p end
+ */
+inline uint64_t length_prefixed_field_size(const unsigned char* data, const unsigned char* end,
+                                           unsigned int prefix_bytes) {
+  if (data == nullptr || end == nullptr || data > end || static_cast<size_t>(end - data) < prefix_bytes) {
+    return kFieldSizeTruncated;
+  }
+  uint32_t length = 0;
+  switch (prefix_bytes) {
+    case 1:
+      length = *data;
+      break;
+    case 2:
+      length = uint2korr(data);
+      break;
+    case 3:
+      length = uint3korr(data);
+      break;
+    default:
+      length = uint4korr(data);
+      break;
+  }
+  return uint64_t{prefix_bytes} + length;
+}
+
 /**
  * @brief Calculate field size in bytes for a given MySQL column type
  *
  * Based on calc_field_size() from MySQL source:
  * libs/mysql/binlog/event/binary_log_funcs.cpp
  *
- * The size is returned in 64 bits so that a declared 4-byte length near
- * UINT32_MAX plus its prefix cannot wrap into a small value that passes the
- * caller's bounds check.
+ * Only the length prefix of a variable-length field is read, and only when it
+ * lies before @p end.
  *
  * @param col_type MySQL column type
  * @param master_data Pointer to the field data
  * @param metadata Type-specific metadata
- * @return Size of the field in bytes, or 0 for an unsupported type or invalid metadata
+ * @param end Pointer one past the last readable byte of the row image
+ * @return Size of the field in bytes, 0 for an unsupported type or invalid
+ *         metadata, or kFieldSizeTruncated when the length prefix is cut off
  */
-inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_data, uint16_t metadata) {
+inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_data, uint16_t metadata,
+                                const unsigned char* end) {
   switch (col_type) {
     // Fixed-size integer types
     case 1:  // MYSQL_TYPE_TINY
@@ -342,13 +380,7 @@ inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     // VARCHAR
     case 15:     // MYSQL_TYPE_VARCHAR
     case 141: {  // MariaDB MYSQL_TYPE_VARCHAR_COMPRESSED (same framing as VARCHAR)
-      uint32_t length = metadata > 255 ? 2 : 1;
-      if (length == 1) {
-        length += static_cast<uint32_t>(*master_data);
-      } else {
-        length += uint2korr(master_data);
-      }
-      return length;
+      return length_prefixed_field_size(master_data, end, metadata > 255 ? 2 : 1);
     }
 
     // BLOB/TEXT types
@@ -359,7 +391,6 @@ inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_da
     case 251:    // MYSQL_TYPE_LONG_BLOB
     case 252: {  // MYSQL_TYPE_BLOB (includes TEXT)
       // metadata indicates the number of length bytes (1, 2, 3, or 4)
-      uint32_t blob_len = 0;
       uint16_t blob_len_bytes = metadata;
       if (blob_len_bytes == 0) {
         if (col_type == 249) {
@@ -370,24 +401,10 @@ inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_da
           blob_len_bytes = 4;
         }
       }
-      switch (blob_len_bytes) {
-        case 1:
-          blob_len = *master_data;
-          break;
-        case 2:
-          blob_len = uint2korr(master_data);
-          break;
-        case 3:
-          blob_len = uint3korr(master_data);
-          break;
-        case 4:
-          blob_len = uint4korr(master_data);
-          break;
-        default:
-          // Invalid metadata - return 0 to indicate error
-          return 0;
+      if (blob_len_bytes < 1 || blob_len_bytes > 4) {
+        return 0;
       }
-      return uint64_t{blob_len_bytes} + blob_len;  // length bytes + actual data
+      return length_prefixed_field_size(master_data, end, blob_len_bytes);
     }
 
     // STRING (CHAR)
@@ -399,13 +416,7 @@ inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_da
       } else {
         // Fixed-length or variable-length string
         uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);
-        uint32_t length = max_len > 255 ? 2 : 1;
-        if (length == 1) {
-          length += *master_data;
-        } else {
-          length += uint2korr(master_data);
-        }
-        return length;
+        return length_prefixed_field_size(master_data, end, max_len > 255 ? 2 : 1);
       }
     }
 
@@ -452,61 +463,29 @@ inline uint64_t calc_field_size(uint8_t col_type, const unsigned char* master_da
 
     // JSON type
     case 245: {  // MYSQL_TYPE_JSON
-      // JSON is stored like BLOB with metadata indicating length bytes
-      uint32_t json_len = 0;
-      switch (metadata) {
-        case 1:
-          json_len = *master_data;
-          break;
-        case 2:
-          json_len = uint2korr(master_data);
-          break;
-        case 3:
-          json_len = uint3korr(master_data);
-          break;
-        case 4:
-          json_len = uint4korr(master_data);
-          break;
-        default:
-          // JSON typically uses 4 bytes for length
-          json_len = uint4korr(master_data);
-          metadata = 4;
-          break;
+      // JSON is stored like BLOB; metadata is the number of length bytes
+      if (metadata < 1 || metadata > 4) {
+        return 0;
       }
-      return uint64_t{metadata} + json_len;
+      return length_prefixed_field_size(master_data, end, metadata);
     }
 
     // BIT type
     case 16: {  // MYSQL_TYPE_BIT
-      // metadata: (bytes << 8) | bits
+      // metadata: (bytes << 8) | bits; a column holds at most 64 bits
       unsigned int bytes = (metadata >> 8) & 0xFF;
       unsigned int bits = metadata & 0xFF;
-      return bytes + (bits > 0 ? 1 : 0);
+      const unsigned int total_bytes = bytes + (bits > 0 ? 1 : 0);
+      return total_bytes > 8 ? 0 : total_bytes;
     }
 
     // GEOMETRY type
     case 255: {  // MYSQL_TYPE_GEOMETRY
       // GEOMETRY is stored like BLOB: length prefix (1-4 bytes based on metadata) + WKB data
-      // metadata indicates the number of bytes used for length prefix
-      uint32_t geo_len = 0;
-      switch (metadata) {
-        case 1:
-          geo_len = *master_data;
-          break;
-        case 2:
-          geo_len = uint2korr(master_data);
-          break;
-        case 3:
-          geo_len = uint3korr(master_data);
-          break;
-        case 4:
-          geo_len = uint4korr(master_data);
-          break;
-        default:
-          // Invalid metadata - return 0 to indicate error
-          return 0;
+      if (metadata < 1 || metadata > 4) {
+        return 0;
       }
-      return uint64_t{metadata} + geo_len;  // length bytes + WKB data
+      return length_prefixed_field_size(master_data, end, metadata);
     }
 
     // For unsupported types, return 0 (will need to be handled specially)

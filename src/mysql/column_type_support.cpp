@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <unordered_map>
 
+#include "utils/numeric_parse.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
@@ -86,6 +87,16 @@ const std::unordered_map<std::string, ColumnType>& DeclaredTypeCodes() {
   return codes;
 }
 
+/// The digits of a declared type's `(n)` suffix, e.g. 3 for `datetime(3) /* ... */`.
+std::optional<int> DeclaredTypeArgument(std::string_view column_type) {
+  const size_t open = column_type.find('(');
+  const size_t close = column_type.find(')', open);
+  if (open == std::string_view::npos || close == std::string_view::npos) {
+    return std::nullopt;
+  }
+  return mygram::utils::ParseNumeric<int>(column_type.substr(open + 1, close - open - 1));
+}
+
 }  // namespace
 
 std::optional<ColumnType> ColumnTypeFromDeclaredType(std::string_view column_type) {
@@ -98,6 +109,11 @@ std::optional<ColumnType> ColumnTypeFromDeclaredType(std::string_view column_typ
 }
 
 std::string UnusableColumnTypeReason(std::string_view column_type) {
+  if (DeclaredBaseType(column_type) == "year" && DeclaredTypeArgument(column_type) == 2) {
+    return "type '" + std::string(column_type) +
+           "' is read back as a two-digit year by the initial snapshot and decoded as a four-digit year by the binlog "
+           "row image, so the same row would be indexed as two documents";
+  }
   const auto code = ColumnTypeFromDeclaredType(column_type);
   if (!code.has_value()) {
     return "type '" + std::string(column_type) + "' is not a type this build decodes from a binlog row image";
@@ -113,6 +129,25 @@ std::string UnusableColumnTypeReason(std::string_view column_type) {
       return "type '" + std::string(column_type) + "' cannot be decoded from a binlog row image";
   }
   return "type '" + std::string(column_type) + "' cannot be decoded from a binlog row image";
+}
+
+std::string UnsizableColumnTypeReason(std::string_view column_type) {
+  constexpr std::string_view kOldFormatMarker = "/* mariadb-5.3 */";
+  const std::string base = DeclaredBaseType(column_type);
+  if (base != "time" && base != "datetime" && base != "timestamp") {
+    return {};
+  }
+  if (mygram::utils::ToLower(std::string(column_type)).find(kOldFormatMarker) == std::string::npos) {
+    return {};
+  }
+  const auto precision = DeclaredTypeArgument(column_type);
+  if (!precision.has_value() || *precision <= 0) {
+    return {};
+  }
+  return "type '" + std::string(column_type) +
+         "' is an old-format MariaDB temporal with fractional seconds, whose width the binlog TABLE_MAP event does not "
+         "describe, so rows of the table cannot be sized. Rebuild the column in the current format with "
+         "ALTER TABLE ... MODIFY";
 }
 
 }  // namespace mygramdb::mysql

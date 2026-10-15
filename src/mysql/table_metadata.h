@@ -62,20 +62,12 @@ enum class ColumnType : uint8_t {
  */
 struct ColumnMetadata {
   ColumnType type = ColumnType::LONG;
-  std::string name;       // May not be available from binlog
+  std::string name;       // "col_<index>" unless the TABLE_MAP carried COLUMN_NAME
   uint16_t metadata = 0;  // Type-specific metadata
   bool is_nullable = false;
   bool is_unsigned = false;
   std::vector<std::string> enum_set_values;  // ENUM labels or SET members in declaration order
 };
-
-/**
- * @brief Parse ENUM/SET member labels from a SHOW COLUMNS type definition.
- *
- * @param column_type MySQL type string such as enum('draft','published')
- * @return Labels in declaration order, or an empty vector for non-ENUM/SET or malformed input
- */
-[[nodiscard]] std::vector<std::string> ParseEnumSetColumnValues(const std::string& column_type);
 
 /**
  * @brief Table metadata extracted from TABLE_MAP event
@@ -87,9 +79,19 @@ struct TableMetadata {
   std::vector<ColumnMetadata> columns;
   std::unordered_map<std::string, size_t> column_ordinals;
 
+  // What the TABLE_MAP optional metadata block supplied (binlog_row_metadata=FULL carries all three).
+  bool has_column_names = false;       ///< COLUMN_NAME gave every column its real name
+  bool signedness_known = false;       ///< Every numeric column has its UNSIGNED flag from SIGNEDNESS
+  bool enum_set_labels_known = false;  ///< Every ENUM and SET column has its labels
+
   // Bitmap indicating which columns are used
   std::vector<uint8_t> columns_before_image;  // For UPDATE: old values
   std::vector<uint8_t> columns_after_image;   // For INSERT/UPDATE: new values
+
+  /// Whether names, signedness and ENUM/SET labels all came from the binlog rather than a schema query.
+  [[nodiscard]] bool HasFullRowMetadata() const {
+    return has_column_names && signedness_known && enum_set_labels_known;
+  }
 
   void RebuildColumnOrdinals();
   [[nodiscard]] std::optional<size_t> FindColumnOrdinal(std::string_view name) const;

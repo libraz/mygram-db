@@ -16,6 +16,7 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <sstream>
 #include <string_view>
 
@@ -26,6 +27,7 @@
 #include "mysql/ddl_classifier.h"
 #include "mysql/mariadb_event_parser.h"
 #include "mysql/rows_parser.h"
+#include "mysql/table_name_match.h"
 #include "mysql/text_materializer.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
@@ -45,9 +47,35 @@ namespace {
 /// Minimum length for a standard GTID_LOG_EVENT
 constexpr size_t kGTIDEventMinLength = mygram::constants::kBinlogEventHeaderLen + 1 + 16 + 8;
 
-/// Minimum length for a GTID_TAGGED_LOG_EVENT (MySQL 8.4+)
+/// Minimum length for a GTID_TAGGED_LOG_EVENT (MySQL 8.4+): the three framing integers, then the id and a
+/// one-byte value for flags, GNO and tag, and the id plus 16 UUID bytes
 constexpr size_t kTaggedGTIDEventMinLength =
-    mygram::constants::kBinlogEventHeaderLen + 1 + (2 + 8) + (2 + 16 + 1) + (2 + 8);
+    mygram::constants::kBinlogEventHeaderLen + 3 + (1 + 1) + (1 + 16) + (1 + 1) + (1 + 1);
+
+/// Serialization format version GTID_TAGGED_LOG_EVENT is written with
+constexpr uint64_t kTaggedGtidFormatVersion = 1;
+
+/// Longest tag a GTID can carry
+constexpr uint64_t kTaggedGtidMaxTagLength = 32;
+
+/// sql_mode bits in the QUERY_EVENT status variable; both servers use the same positions.
+/// MySQL sql/system_variables.h, MariaDB sql/sql_class.h.
+constexpr uint64_t kSqlModeAnsiQuotes = 1ULL << 2;
+constexpr uint64_t kSqlModeNoBackslashEscapes = 1ULL << 20;
+
+/// Most database names a MySQL Q_UPDATED_DB_NAMES status variable lists; a larger count carries none
+constexpr uint8_t kMaxUpdatedDbNames = 16;
+
+/// Optional-metadata TLV types of a TABLE_MAP event that the parser reads
+/// (Table_map_event::Optional_metadata_field_type).
+constexpr uint8_t kMetadataSignedness = 1;
+constexpr uint8_t kMetadataColumnName = 4;
+constexpr uint8_t kMetadataSetStrValue = 5;
+constexpr uint8_t kMetadataEnumStrValue = 6;
+
+/// ENUM and SET columns arrive as STRING with these real types in the high metadata byte
+constexpr uint8_t kRealTypeEnum = 0xF7;
+constexpr uint8_t kRealTypeSet = 0xF8;
 
 /// Size of the fixed-length fields in a QUERY_EVENT (thread_id + exec_time +
 /// db_len + error_code + status_vars_len = 4+4+1+2+2 = 13 bytes)
@@ -95,11 +123,6 @@ struct RowsEventContext {
   RetainedColumns retained_columns;
 };
 
-struct QueryEventData {
-  std::string database;
-  std::string query;
-};
-
 /**
  * @brief Extract table_id from binlog event post-header
  * @param buffer Event buffer (must point to beginning of event)
@@ -127,12 +150,14 @@ inline uint64_t ExtractTableId(const unsigned char* buffer) {
  * @param table_config Single table config (single-table mode)
  * @param multi_table_mode Whether multi-table mode is enabled
  * @param event_type_name Name of event type for logging (e.g., "write", "update", "delete")
+ * @param names_case_insensitive Whether names match ASCII case-insensitively (lower_case_table_names != 0)
  * @return Optional context, nullopt if table not found or not monitored
  */
 std::optional<RowsEventContext> InitRowsEventContext(
     const unsigned char* buffer, unsigned long length, const TableMetadataCache& table_metadata_cache,
     const std::unordered_map<std::string, server::TableContext*>& table_contexts,
-    const config::TableConfig* table_config, bool multi_table_mode, const std::string& event_type_name) {
+    const config::TableConfig* table_config, bool multi_table_mode, const std::string& event_type_name,
+    bool names_case_insensitive) {
   RowsEventContext ctx;
 
   constexpr auto kRowsEventTableIdEnd = mygram::constants::kBinlogEventHeaderLen + 6;
@@ -166,11 +191,8 @@ std::optional<RowsEventContext> InitRowsEventContext(
     // (e.g. "testdb.articles"). Look up by the qualified key derived from the
     // binlog event's database and table names, falling back to the bare table
     // name for configurations whose effective database is empty.
-    auto table_iter =
-        table_contexts.find(config::QualifiedTableName(ctx.table_meta->database_name, ctx.table_meta->table_name));
-    if (table_iter == table_contexts.end()) {
-      table_iter = table_contexts.find(ctx.table_meta->table_name);
-    }
+    const auto table_iter = FindTableContextEntry(table_contexts, ctx.table_meta->database_name,
+                                                  ctx.table_meta->table_name, names_case_insensitive);
     if (table_iter == table_contexts.end()) {
       mygram::utils::StructuredLog()
           .Event("binlog_debug")
@@ -190,7 +212,8 @@ std::optional<RowsEventContext> InitRowsEventContext(
     return std::nullopt;
   }
 
-  if (!ctx.current_config->database.empty() && ctx.table_meta->database_name != ctx.current_config->database) {
+  if (!ctx.current_config->database.empty() &&
+      !TableNamesEqual(ctx.table_meta->database_name, ctx.current_config->database, names_case_insensitive)) {
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "database_not_monitored_" + event_type_name)
@@ -311,62 +334,355 @@ std::optional<TableMapMetadataLayout> TableMapMetadataLayoutFor(ColumnType type)
 }
 
 /**
- * @brief Whether a lexed statement defines or alters a stored program
+ * @brief Whether a column type carries a bit in the TABLE_MAP SIGNEDNESS field
  *
- * Matches `CREATE [OR REPLACE] [DEFINER = user[@host]] [AGGREGATE]` or
- * `ALTER [DEFINER = user[@host]]` followed by PROCEDURE, FUNCTION, TRIGGER,
- * EVENT or PACKAGE. Such a statement stores a body without running it.
+ * Mirrors has_signedess_information_type in the server: the integer types, YEAR,
+ * the floating-point types and DECIMAL. MariaDB marks the same set.
  */
-bool DefinesStoredProgram(const std::vector<SqlToken>& tokens) {
-  size_t pos = 0;
-  const auto is_word = [&tokens, &pos](std::string_view word) {
-    return pos < tokens.size() && tokens[pos].kind == SqlToken::Kind::kWord &&
-           mygram::utils::EqualsAsciiCaseInsensitive(tokens[pos].text, word);
-  };
-  const auto is_punct = [&tokens, &pos](char punct) {
-    return pos < tokens.size() && tokens[pos].kind == SqlToken::Kind::kPunct && tokens[pos].text[0] == punct;
-  };
+bool HasSignednessBit(ColumnType type) {
+  switch (type) {
+    case ColumnType::TINY:
+    case ColumnType::SHORT:
+    case ColumnType::INT24:
+    case ColumnType::LONG:
+    case ColumnType::LONGLONG:
+    case ColumnType::YEAR:
+    case ColumnType::FLOAT:
+    case ColumnType::DOUBLE:
+    case ColumnType::NEWDECIMAL:
+      return true;
+    default:
+      return false;
+  }
+}
 
-  const bool create = is_word("CREATE");
-  if (!create && !is_word("ALTER")) {
+enum class EnumSetKind : uint8_t { kNone, kEnum, kSet };
+
+EnumSetKind EnumSetKindOf(const ColumnMetadata& column) {
+  if (column.type == ColumnType::ENUM) {
+    return EnumSetKind::kEnum;
+  }
+  if (column.type == ColumnType::SET) {
+    return EnumSetKind::kSet;
+  }
+  if (column.type == ColumnType::STRING) {
+    const auto real_type = static_cast<uint8_t>(column.metadata >> 8);
+    if (real_type == kRealTypeEnum) {
+      return EnumSetKind::kEnum;
+    }
+    if (real_type == kRealTypeSet) {
+      return EnumSetKind::kSet;
+    }
+  }
+  return EnumSetKind::kNone;
+}
+
+/// Reads a packed length from an optional-metadata block; false when truncated or the NULL marker.
+bool ReadMetadataLength(const unsigned char*& pos, const unsigned char* end, uint64_t& value) {
+  constexpr unsigned char kNullMarker = 251;
+  if (pos >= end || *pos == kNullMarker) {
     return false;
   }
-  ++pos;
-  if (create && is_word("OR")) {
-    ++pos;
-    if (!is_word("REPLACE")) {
+  return binlog_util::read_packed_integer(&pos, end, &value);
+}
+
+/// Reads one length-prefixed string; false when the length or the bytes run past @p end.
+bool ReadMetadataString(const unsigned char*& pos, const unsigned char* end, std::string& value) {
+  uint64_t length = 0;
+  if (!ReadMetadataLength(pos, end, length) || length > static_cast<uint64_t>(end - pos)) {
+    return false;
+  }
+  value.assign(reinterpret_cast<const char*>(pos), static_cast<size_t>(length));
+  pos += length;
+  return true;
+}
+
+/// SIGNEDNESS: one bit per numeric column, most significant bit first.
+bool ParseSignedness(const unsigned char* pos, const unsigned char* end, TableMetadata& metadata) {
+  const auto numeric_columns =
+      static_cast<size_t>(std::count_if(metadata.columns.begin(), metadata.columns.end(),
+                                        [](const ColumnMetadata& column) { return HasSignednessBit(column.type); }));
+  if (static_cast<size_t>(end - pos) != binlog_util::bitmap_bytes(numeric_columns)) {
+    return false;
+  }
+  size_t bit = 0;
+  for (auto& column : metadata.columns) {
+    if (HasSignednessBit(column.type)) {
+      column.is_unsigned = ((pos[bit / 8] >> (7 - bit % 8)) & 1) != 0;
+      ++bit;
+    }
+  }
+  return true;
+}
+
+/// COLUMN_NAME: one length-prefixed name per column.
+bool ParseColumnNames(const unsigned char* pos, const unsigned char* end, TableMetadata& metadata) {
+  std::vector<std::string> names;
+  while (pos < end) {
+    if (!ReadMetadataString(pos, end, names.emplace_back())) {
       return false;
     }
-    ++pos;
   }
-  if (is_word("DEFINER")) {
-    ++pos;
-    if (!is_punct('=')) {
+  if (names.size() != metadata.columns.size()) {
+    return false;
+  }
+  for (size_t index = 0; index < names.size(); ++index) {
+    metadata.columns[index].name = std::move(names[index]);
+  }
+  return true;
+}
+
+/// ENUM_STR_VALUE / SET_STR_VALUE: per column of the kind, a label count and that many length-prefixed labels.
+bool ParseEnumSetLabels(const unsigned char* pos, const unsigned char* end, EnumSetKind kind, TableMetadata& metadata) {
+  std::vector<std::vector<std::string>> groups;
+  while (pos < end) {
+    uint64_t count = 0;
+    // Every label costs at least its length byte.
+    if (!ReadMetadataLength(pos, end, count) || count > static_cast<uint64_t>(end - pos)) {
       return false;
     }
-    pos += 2;  // user, or CURRENT_USER
-    if (is_punct('(')) {
-      pos += 2;  // CURRENT_USER()
-    }
-    if (is_punct('@')) {
-      pos += 2;  // host
+    auto& labels = groups.emplace_back();
+    labels.reserve(static_cast<size_t>(count));
+    for (uint64_t index = 0; index < count; ++index) {
+      if (!ReadMetadataString(pos, end, labels.emplace_back())) {
+        return false;
+      }
     }
   }
-  if (create && is_word("AGGREGATE")) {
-    ++pos;
+  size_t next_group = 0;
+  for (auto& column : metadata.columns) {
+    if (EnumSetKindOf(column) != kind) {
+      continue;
+    }
+    if (next_group >= groups.size()) {
+      return false;
+    }
+    column.enum_set_values = std::move(groups[next_group++]);
   }
-  return is_word("PROCEDURE") || is_word("FUNCTION") || is_word("TRIGGER") || is_word("EVENT") || is_word("PACKAGE");
+  return next_group == groups.size();
+}
+
+/**
+ * @brief Read the optional-metadata TLV block that follows the TABLE_MAP NULL bitmap
+ *
+ * Fills names, signedness and ENUM/SET labels, and records what the block
+ * supplied. Unknown TLV types are skipped by their length.
+ *
+ * @return false when a TLV is truncated or its content does not fit the table
+ */
+bool ParseTableMapOptionalMetadata(const unsigned char* pos, const unsigned char* end, TableMetadata& metadata) {
+  bool saw_signedness = false;
+  bool saw_enum_labels = false;
+  bool saw_set_labels = false;
+  while (pos < end) {
+    const uint8_t type = *pos++;
+    uint64_t length = 0;
+    if (!ReadMetadataLength(pos, end, length) || length > static_cast<uint64_t>(end - pos)) {
+      return false;
+    }
+    const unsigned char* value_end = pos + length;
+    switch (type) {
+      case kMetadataSignedness:
+        if (!ParseSignedness(pos, value_end, metadata)) {
+          return false;
+        }
+        saw_signedness = true;
+        break;
+      case kMetadataColumnName:
+        if (!ParseColumnNames(pos, value_end, metadata)) {
+          return false;
+        }
+        metadata.has_column_names = true;
+        break;
+      case kMetadataEnumStrValue:
+        if (!ParseEnumSetLabels(pos, value_end, EnumSetKind::kEnum, metadata)) {
+          return false;
+        }
+        saw_enum_labels = true;
+        break;
+      case kMetadataSetStrValue:
+        if (!ParseEnumSetLabels(pos, value_end, EnumSetKind::kSet, metadata)) {
+          return false;
+        }
+        saw_set_labels = true;
+        break;
+      default:
+        break;
+    }
+    pos = value_end;
+  }
+
+  const auto has_column = [&metadata](auto predicate) {
+    return std::any_of(metadata.columns.begin(), metadata.columns.end(), predicate);
+  };
+  metadata.signedness_known =
+      saw_signedness || !has_column([](const ColumnMetadata& column) { return HasSignednessBit(column.type); });
+  metadata.enum_set_labels_known =
+      (saw_enum_labels ||
+       !has_column([](const ColumnMetadata& column) { return EnumSetKindOf(column) == EnumSetKind::kEnum; })) &&
+      (saw_set_labels ||
+       !has_column([](const ColumnMetadata& column) { return EnumSetKindOf(column) == EnumSetKind::kSet; }));
+  return true;
+}
+
+/**
+ * @brief Read one variable-length integer of the serialization framework
+ *
+ * The first byte's trailing one bits give the extra byte count; its remaining
+ * high bits are the low bits of the value, and the extra bytes (little-endian)
+ * supply the rest (libs/mysql/serialization/variable_length_integers.h).
+ *
+ * @return false when the integer runs past @p end
+ */
+bool ReadSerializedVarlen(const unsigned char*& pos, const unsigned char* end, uint64_t& value) {
+  if (pos >= end) {
+    return false;
+  }
+  const unsigned first = *pos;
+  size_t extra_bytes = 0;
+  while (extra_bytes < 8 && ((first >> extra_bytes) & 1U) != 0) {
+    ++extra_bytes;
+  }
+  const size_t total_bytes = extra_bytes + 1;
+  if (total_bytes > static_cast<size_t>(end - pos)) {
+    return false;
+  }
+  value = total_bytes >= 9 ? 0 : (first >> total_bytes);
+  if (extra_bytes > 0) {
+    uint64_t high = 0;
+    for (size_t index = 0; index < extra_bytes; ++index) {
+      high |= static_cast<uint64_t>(pos[1 + index]) << (index * 8);
+    }
+    const size_t shift = 8 - total_bytes + ((total_bytes + 7) >> 4);
+    value |= high << shift;
+  }
+  pos += total_bytes;
+  return true;
+}
+
+/**
+ * @brief The quoting-relevant sql_mode bits the QUERY_EVENT status variables carry
+ *
+ * Walks the variables in write order with the per-code lengths of both servers
+ * (MySQL statement_events.cpp Query_event, MariaDB log_event.cc Query_log_event)
+ * until Q_SQL_MODE_CODE. Like the servers, it stops at an unknown code; a mode
+ * it cannot reach is reported as unknown, not as off. A walk that ends with no
+ * mode variable at all reads as the default mode.
+ */
+std::optional<QueryLexOptions> StatusVarsLexOptions(const unsigned char* pos, const unsigned char* end) {
+  constexpr uint8_t kSqlModeCode = 1;
+  constexpr uint8_t kGtidFlags3CommitAlterE1 = 4;
+  constexpr uint8_t kGtidFlags3RollbackAlterE1 = 8;
+
+  while (pos < end) {
+    const uint8_t code = *pos++;
+    const auto available = static_cast<size_t>(end - pos);
+    size_t skip = 0;
+    switch (code) {
+      case kSqlModeCode: {
+        if (available < 8) {
+          return std::nullopt;
+        }
+        const uint64_t sql_mode = binlog_util::uint8korr(pos);
+        return QueryLexOptions{(sql_mode & kSqlModeAnsiQuotes) != 0, (sql_mode & kSqlModeNoBackslashEscapes) != 0};
+      }
+      case 0:   // Q_FLAGS2_CODE
+      case 3:   // Q_AUTO_INCREMENT
+      case 10:  // Q_MASTER_DATA_WRITTEN_CODE
+        skip = 4;
+        break;
+      case 2:  // Q_CATALOG_CODE: length, name, NUL
+        if (available < 1) {
+          return std::nullopt;
+        }
+        skip = 1 + static_cast<size_t>(pos[0]) + 1;
+        break;
+      case 4:  // Q_CHARSET_CODE
+        skip = 6;
+        break;
+      case 5:  // Q_TIME_ZONE_CODE
+      case 6:  // Q_CATALOG_NZ_CODE
+        if (available < 1) {
+          return std::nullopt;
+        }
+        skip = 1 + static_cast<size_t>(pos[0]);
+        break;
+      case 7:   // Q_LC_TIME_NAMES_CODE
+      case 8:   // Q_CHARSET_DATABASE_CODE
+      case 18:  // Q_DEFAULT_COLLATION_FOR_UTF8MB4
+        skip = 2;
+        break;
+      case 9:    // Q_TABLE_MAP_FOR_UPDATE_CODE
+      case 17:   // Q_DDL_LOGGED_WITH_XID
+      case 129:  // MariaDB Q_XID
+        skip = 8;
+        break;
+      case 11:  // Q_INVOKER: user, host, each length-prefixed
+        if (available < 1 || available < 2 + static_cast<size_t>(pos[0])) {
+          return std::nullopt;
+        }
+        skip = 2 + static_cast<size_t>(pos[0]) + static_cast<size_t>(pos[1 + pos[0]]);
+        break;
+      case 12: {  // MySQL Q_UPDATED_DB_NAMES: count, then NUL-terminated names unless the count is over the cap
+        if (available < 1 || pos[0] == 0) {
+          return std::nullopt;
+        }
+        const uint8_t count = pos[0];
+        skip = 1;
+        if (count <= kMaxUpdatedDbNames) {
+          const unsigned char* name = pos + 1;
+          for (uint8_t index = 0; index < count; ++index) {
+            const void* terminator = name < end ? memchr(name, 0, static_cast<size_t>(end - name)) : nullptr;
+            if (terminator == nullptr) {
+              return std::nullopt;
+            }
+            name = static_cast<const unsigned char*>(terminator) + 1;
+          }
+          skip = static_cast<size_t>(name - pos);
+        }
+        break;
+      }
+      case 13:   // Q_MICROSECONDS
+      case 128:  // MariaDB Q_HRNOW
+        skip = 3;
+        break;
+      case 16:  // Q_EXPLICIT_DEFAULTS_FOR_TIMESTAMP
+      case 19:  // Q_SQL_REQUIRE_PRIMARY_KEY
+      case 20:  // Q_DEFAULT_TABLE_ENCRYPTION
+        skip = 1;
+        break;
+      case 130:  // MariaDB Q_GTID_FLAGS3: flags, then a sequence number for commit/rollback alter
+        if (available < 1) {
+          return std::nullopt;
+        }
+        skip = 1 + (((pos[0] & (kGtidFlags3CommitAlterE1 | kGtidFlags3RollbackAlterE1)) != 0) ? 8 : 0);
+        break;
+      case 131:  // MariaDB Q_CHARACTER_SET_COLLATIONS: count, then count 4-byte entries
+        if (available < 1) {
+          return std::nullopt;
+        }
+        skip = 1 + static_cast<size_t>(pos[0]) * 4;
+        break;
+      default:
+        return std::nullopt;
+    }
+    if (skip > available) {
+      return std::nullopt;
+    }
+    pos += skip;
+  }
+  // No mode variable at all: the statement ran under the default mode.
+  return QueryLexOptions{};
 }
 
 }  // namespace
-
-std::optional<QueryEventData> ExtractQueryEventData(const unsigned char* buffer, unsigned long length);
 
 std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
     const unsigned char* buffer, unsigned long length, const std::string& current_gtid,
     const TableMetadataCache& table_metadata_cache,
     const std::unordered_map<std::string, server::TableContext*>& table_contexts,
-    const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone) {
+    const config::TableConfig* table_config, bool multi_table_mode, const std::string& datetime_timezone,
+    bool table_names_case_insensitive) {
   if ((buffer == nullptr) || length < mygram::constants::kBinlogEventHeaderLen) {
     // Minimum event size is header length bytes (binlog header)
     return {};
@@ -407,7 +723,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
       // Initialize context with common data
       auto ctx_opt = InitRowsEventContext(buffer, length, table_metadata_cache, table_contexts, table_config,
-                                          multi_table_mode, "write");
+                                          multi_table_mode, "write", table_names_case_insensitive);
       if (!ctx_opt) {
         return {};
       }
@@ -464,7 +780,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
       // Initialize context with common data
       auto ctx_opt = InitRowsEventContext(buffer, length, table_metadata_cache, table_contexts, table_config,
-                                          multi_table_mode, "update");
+                                          multi_table_mode, "update", table_names_case_insensitive);
       if (!ctx_opt) {
         return {};
       }
@@ -532,7 +848,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
       // Initialize context with common data
       auto ctx_opt = InitRowsEventContext(buffer, length, table_metadata_cache, table_contexts, table_config,
-                                          multi_table_mode, "delete");
+                                          multi_table_mode, "delete", table_names_case_insensitive);
       if (!ctx_opt) {
         return {};
       }
@@ -583,7 +899,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
 
     case MySQLBinlogEventType::QUERY_EVENT: {
       // DDL statements (CREATE, ALTER, DROP, TRUNCATE, etc.)
-      auto query_data_opt = ExtractQueryEventData(buffer, length);
+      auto query_data_opt = ExtractQueryString(buffer, length);
       if (!query_data_opt) {
         return {};
       }
@@ -604,14 +920,30 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
       }
 
       // Check if this affects any of our target tables
-      const std::vector<DdlStatement> statements = ClassifyQueryEvent(query_data.query);
+      // The DDL a configured table sees is the first one found under any mode the
+      // statement may have been logged with.
+      const std::vector<QueryLexOptions> modes = LexModes(query_data);
+      std::vector<std::vector<DdlStatement>> statements_by_mode;
+      statements_by_mode.reserve(modes.size());
+      for (const QueryLexOptions& mode : modes) {
+        statements_by_mode.push_back(ClassifyQueryEvent(query_data.query, mode));
+      }
+      const auto find_ddl = [&](const config::TableConfig& config) {
+        for (const auto& statements : statements_by_mode) {
+          if (auto match =
+                  FindConfiguredTableDDL(statements, query_data.database, config, table_names_case_insensitive)) {
+            return match;
+          }
+        }
+        return std::optional<DDLType>{};
+      };
       if (multi_table_mode) {
         // Multi-table mode: check all registered tables
         std::vector<BinlogEvent> events;
         for (const auto& [table_name, ctx] : table_contexts) {
           std::optional<DDLType> ddl_match;
           if (ctx != nullptr) {
-            ddl_match = FindConfiguredTableDDL(statements, query_data.database, ctx->config);
+            ddl_match = find_ddl(ctx->config);
           }
           if (ddl_match) {
             BinlogEvent event;
@@ -630,7 +962,7 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
         // Single-table mode: check only our configured table
         std::optional<DDLType> ddl_match;
         if (table_config != nullptr) {
-          ddl_match = FindConfiguredTableDDL(statements, query_data.database, *table_config);
+          ddl_match = find_ddl(*table_config);
         }
         if (ddl_match) {
           BinlogEvent event;
@@ -754,101 +1086,67 @@ std::optional<std::string> BinlogEventParser::ExtractGTID(const unsigned char* b
 
 std::optional<std::string> BinlogEventParser::ExtractTaggedGTID(const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < kTaggedGTIDEventMinLength) {
-    // Minimum: header + commit flag + commit-ticket field + TSID field with
-    // an empty tag + GNO field.
     return {};
   }
 
-  // GTID_TAGGED_LOG_EVENT uses the MySQL 8.4 serialization framework.
-  // After the 19-byte common header and 1-byte commit_flag, fields are encoded as:
-  //   field_id(1B) + type_id(1B) + data
-  //
-  // type_id=1 (FIELD_TYPE_UINT): fixed 8-byte little-endian uint64
-  // type_id=2 (FIELD_TYPE_VARIABLE_LENGTH): variable-length payload
-  //
-  // Known fields:
-  //   Field 0 (COMMIT_GROUP_TICKET): type=1, uint64
-  //   Field 1 (TSID): type=2, UUID(16B) + tag_len(1B) + tag_bytes
-  //   Field 2 (SPEC): type=1, GNO as uint64
-  //   Field 3 (COMMIT_TIMESTAMP): type=2, original(7B) + immediate(7B)
+  // The body is a serialization-framework message with no commit_flag byte:
+  //   format version, message size, last non-ignorable field id   (varlen ints)
+  //   field 0 gtid_flags, 1 UUID bytes (16 varlen ints), 2 GNO (signed varlen), 3 tag (varlen length + bytes), ...
+  // and every field is preceded by its id as a varlen int. Only the fields up to the tag are read.
+  const unsigned char* pos = buffer + mygram::constants::kBinlogEventHeaderLen;
+  const unsigned char* const buf_end = buffer + length;
 
-  const unsigned char* pos = buffer + mygram::constants::kBinlogEventHeaderLen;  // Skip common header
-  const unsigned char* buf_end = buffer + length;
-
-  if (pos >= buf_end) {
+  uint64_t value = 0;
+  if (!ReadSerializedVarlen(pos, buf_end, value) || value != kTaggedGtidFormatVersion) {
     return {};
   }
-  pos++;  // Skip commit_flag
+  uint64_t message_size = 0;
+  uint64_t last_non_ignorable_field = 0;
+  if (!ReadSerializedVarlen(pos, buf_end, message_size) ||
+      !ReadSerializedVarlen(pos, buf_end, last_non_ignorable_field)) {
+    return {};
+  }
 
-  // Parse serialization framework fields
-  const unsigned char* uuid_ptr = nullptr;
-  uint64_t gno = 0;
-  std::string tag;
-  bool found_uuid = false;
-  bool found_gno = false;
+  const auto read_field_id = [&pos, buf_end](uint64_t expected) {
+    uint64_t field_id = 0;
+    return ReadSerializedVarlen(pos, buf_end, field_id) && field_id == expected;
+  };
 
-  while (pos + 2 <= buf_end) {
-    uint8_t field_id = *pos++;
-    uint8_t type_id = *pos++;
+  uint64_t gtid_flags = 0;
+  if (!read_field_id(0) || !ReadSerializedVarlen(pos, buf_end, gtid_flags)) {
+    return {};
+  }
 
-    if (type_id == 1) {
-      // Fixed-size uint64 field (8 bytes)
-      if (pos + 8 > buf_end) {
-        break;
-      }
-      if (field_id == 2) {
-        // SPEC field: GNO
-        gno = 0;
-        for (int i = 0; i < 8; i++) {
-          gno |= static_cast<uint64_t>(pos[i]) << (i * 8);
-        }
-        found_gno = true;
-      }
-      pos += 8;
-    } else if (type_id == 2) {
-      // Variable-length field
-      if (field_id == 1) {
-        // TSID field: UUID(16B) + tag_len(1B) + tag
-        if (pos + 17 > buf_end) {
-          break;
-        }
-        uuid_ptr = pos;
-        found_uuid = true;
-        pos += 16;  // Skip UUID
-        uint8_t tag_len = *pos++;
-        if (tag_len > 0) {
-          if (pos + tag_len > buf_end) {
-            break;
-          }
-          tag = std::string(reinterpret_cast<const char*>(pos), tag_len);
-          pos += tag_len;
-        }
-      } else if (field_id == 3) {
-        // COMMIT_TIMESTAMP: original(7B) + immediate(7B) = 14B
-        if (pos + 14 > buf_end) {
-          break;
-        }
-        pos += 14;
-      } else {
-        // Unknown variable-length field - cannot determine size, stop parsing
-        break;
-      }
-    } else {
-      // Unknown type - stop parsing
-      break;
+  std::array<unsigned char, 16> uuid{};
+  if (!read_field_id(1)) {
+    return {};
+  }
+  for (auto& byte : uuid) {
+    if (!ReadSerializedVarlen(pos, buf_end, value) || value > 0xFF) {
+      return {};
     }
-
-    if (found_uuid && found_gno) {
-      break;
-    }
+    byte = static_cast<unsigned char>(value);
   }
 
-  if (!found_uuid || !found_gno || uuid_ptr == nullptr) {
+  // GNO is a signed varlen integer: the low bit is the sign, the rest the (possibly complemented) magnitude.
+  uint64_t encoded_gno = 0;
+  if (!read_field_id(2) || !ReadSerializedVarlen(pos, buf_end, encoded_gno)) {
     return {};
   }
+  const auto gno = static_cast<int64_t>((encoded_gno >> 1) ^ (~(encoded_gno & 1) + 1));
+  if (gno < 1) {
+    return {};
+  }
+
+  uint64_t tag_length = 0;
+  if (!read_field_id(3) || !ReadSerializedVarlen(pos, buf_end, tag_length) || tag_length > kTaggedGtidMaxTagLength ||
+      tag_length > static_cast<uint64_t>(buf_end - pos)) {
+    return {};
+  }
+  const std::string tag(reinterpret_cast<const char*>(pos), static_cast<size_t>(tag_length));
 
   // Format as "UUID:TAG:GNO" or "UUID:GNO"
-  std::string gtid = FormatUUID(uuid_ptr);
+  std::string gtid = FormatUUID(uuid.data());
   if (!tag.empty()) {
     gtid += ":" + tag;
   }
@@ -857,7 +1155,8 @@ std::optional<std::string> BinlogEventParser::ExtractTaggedGTID(const unsigned c
 }
 
 mygram::utils::Expected<TableMetadata, mygram::utils::Error> BinlogEventParser::ParseTableMapEvent(
-    const unsigned char* buffer, unsigned long length) {
+    const unsigned char* buffer, unsigned long length,
+    const std::function<bool(const TableMetadata&)>& wants_row_metadata) {
   // A frame that does not add up is not proof the event is undecodable: a
   // replay can deliver it intact, so it keeps the generic binlog code.
   const auto malformed = []() {
@@ -1080,8 +1379,7 @@ mygram::utils::Expected<TableMetadata, mygram::utils::Error> BinlogEventParser::
     col.metadata = 0;
     col.is_nullable = false;
     col.is_unsigned = false;
-    // Column name is not available in TABLE_MAP event
-    // Use column index as temporary name
+    // Replaced by the real name when the optional metadata carries COLUMN_NAME
     col.name = "col_" + std::to_string(i);
     metadata.columns.push_back(col);
   }
@@ -1208,6 +1506,24 @@ mygram::utils::Expected<TableMetadata, mygram::utils::Error> BinlogEventParser::
     }
   }
 
+  // Whatever follows the NULL bitmap is the optional-metadata block. A table
+  // nobody decodes rows for does not need it read.
+  if (!wants_row_metadata || wants_row_metadata(metadata)) {
+    if (!ParseTableMapOptionalMetadata(ptr, event_end, metadata)) {
+      mygram::utils::StructuredLog()
+          .Event("binlog_parse_error")
+          .Field("function", "ParseTableMapEvent")
+          .Field("reason", "malformed_optional_metadata")
+          .Field("remaining", static_cast<uint64_t>(event_end - ptr))
+          .Error();
+      // The frame passed its checksum, so every replay delivers the same bytes.
+      return mygram::utils::MakeUnexpected(
+          mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
+                                   "TABLE_MAP_EVENT for " + metadata.database_name + "." + metadata.table_name +
+                                       " carries optional row metadata that does not parse"));
+    }
+  }
+
   mygram::utils::StructuredLog()
       .Event("binlog_debug")
       .Field("action", "table_map_complete")
@@ -1221,7 +1537,7 @@ mygram::utils::Expected<TableMetadata, mygram::utils::Error> BinlogEventParser::
   return metadata;
 }
 
-std::optional<QueryEventData> ExtractQueryEventData(const unsigned char* buffer, unsigned long length) {
+std::optional<QueryEventData> BinlogEventParser::ExtractQueryString(const unsigned char* buffer, unsigned long length) {
   if ((buffer == nullptr) || length < mygram::constants::kBinlogEventHeaderLen) {
     // Minimum: header bytes
     return {};
@@ -1273,10 +1589,11 @@ std::optional<QueryEventData> ExtractQueryEventData(const unsigned char* buffer,
   pos += 2;
   remaining -= 2;
 
-  // Skip status_vars
+  // Status variables carry the sql_mode the statement was logged under
   if (remaining < status_vars_len) {
     return {};
   }
+  const std::optional<QueryLexOptions> lex_options = StatusVarsLexOptions(pos, pos + status_vars_len);
   pos += status_vars_len;
   remaining -= status_vars_len;
 
@@ -1294,19 +1611,12 @@ std::optional<QueryEventData> ExtractQueryEventData(const unsigned char* buffer,
   }
 
   std::string query(reinterpret_cast<const char*>(pos), remaining);
-  return QueryEventData{std::move(database), std::move(query)};
-}
-
-std::optional<std::string> BinlogEventParser::ExtractQueryString(const unsigned char* buffer, unsigned long length) {
-  auto data = ExtractQueryEventData(buffer, length);
-  if (!data) {
-    return std::nullopt;
-  }
-  return data->query;
+  return QueryEventData{std::move(database), std::move(query), lex_options.value_or(QueryLexOptions{}),
+                        lex_options.has_value()};
 }
 
 BinlogEventParser::QueryTransactionBoundary BinlogEventParser::ClassifyQueryTransactionBoundary(
-    std::string_view query) {
+    std::string_view query, QueryLexOptions lex_options) {
   std::string normalized = mygram::utils::ToUpper(mygram::utils::TrimAsciiWhitespaceView(query));
   while (!normalized.empty() &&
          (normalized.back() == ';' || std::isspace(static_cast<unsigned char>(normalized.back())) != 0)) {
@@ -1326,6 +1636,13 @@ BinlogEventParser::QueryTransactionBoundary BinlogEventParser::ClassifyQueryTran
   }
   if (first == "BEGIN" || (first == "START" && second == "TRANSACTION")) {
     return QueryTransactionBoundary::kBegin;
+  }
+  if (first == "CREATE") {
+    // CREATE TABLE ... SELECT is logged as CREATE TABLE ... START TRANSACTION, then the rows and an XID.
+    const auto statements = ClassifyQueryEvent(query, lex_options);
+    if (!statements.empty() && statements.front().starts_transaction) {
+      return QueryTransactionBoundary::kBegin;
+    }
   }
   if (first == "COMMIT" || (first == "ROLLBACK" && second != "TO")) {
     return QueryTransactionBoundary::kEnd;
@@ -1366,21 +1683,59 @@ bool BinlogEventParser::IsRowsStatementEnd(const unsigned char* buffer, unsigned
   return (flags & kStatementEndFlag) != 0U;
 }
 
-bool BinlogEventParser::IsSafeIgnoredQuery(std::string_view query, const std::vector<std::string>& ignored_prefixes) {
+std::vector<QueryLexOptions> BinlogEventParser::LexModes(const QueryEventData& query) {
+  if (query.sql_mode_known) {
+    return {query.lex_options};
+  }
+  return {QueryLexOptions{false, false}, QueryLexOptions{true, false}, QueryLexOptions{false, true},
+          QueryLexOptions{true, true}};
+}
+
+BinlogEventParser::QueryTransactionBoundary BinlogEventParser::ClassifyQueryTransactionBoundary(
+    const QueryEventData& query) {
+  QueryTransactionBoundary result = QueryTransactionBoundary::kNone;
+  for (const QueryLexOptions& mode : LexModes(query)) {
+    const auto boundary = ClassifyQueryTransactionBoundary(query.query, mode);
+    // kUnsupportedXa > kBegin > kEnd > kNone
+    const auto rank = [](QueryTransactionBoundary value) {
+      switch (value) {
+        case QueryTransactionBoundary::kUnsupportedXa:
+          return 3;
+        case QueryTransactionBoundary::kBegin:
+          return 2;
+        case QueryTransactionBoundary::kEnd:
+          return 1;
+        case QueryTransactionBoundary::kNone:
+          return 0;
+      }
+      return 0;
+    };
+    if (rank(boundary) > rank(result)) {
+      result = boundary;
+    }
+  }
+  return result;
+}
+
+bool BinlogEventParser::IsSafeIgnoredQuery(const QueryEventData& query,
+                                           const std::vector<std::string>& ignored_prefixes) {
+  const auto modes = LexModes(query);
+  return std::all_of(modes.begin(), modes.end(), [&](const QueryLexOptions& mode) {
+    return IsSafeIgnoredQuery(query.query, ignored_prefixes, mode);
+  });
+}
+
+bool BinlogEventParser::IsSafeIgnoredQuery(std::string_view query, const std::vector<std::string>& ignored_prefixes,
+                                           QueryLexOptions lex_options) {
   std::vector<std::vector<SqlToken>> prefixes;
   for (const auto& prefix : ignored_prefixes) {
-    auto lexed = LexQueryStatements(prefix);
+    auto lexed = LexQueryStatements(prefix, lex_options);
     if (lexed.size() == 1) {
       prefixes.push_back(std::move(lexed.front()));
     }
   }
 
-  const auto statements = LexQueryStatements(query);
-  // A stored-program definition is logged alone with its body, whose ';' the lexer splits on.
-  if (!statements.empty() && DefinesStoredProgram(statements.front())) {
-    return true;
-  }
-  for (const auto& tokens : statements) {
+  for (const auto& tokens : LexQueryStatements(query, lex_options)) {
     if (std::any_of(prefixes.begin(), prefixes.end(),
                     [&tokens](const auto& prefix) { return StartsWithStatementPrefix(tokens, prefix); })) {
       continue;
@@ -1417,14 +1772,18 @@ bool BinlogEventParser::IsSafeIgnoredQuery(std::string_view query, const std::ve
   return true;
 }
 
-DDLType BinlogEvent::ClassifyDDL(const std::string& query, const config::TableConfig& table) {
-  return FindConfiguredTableDDL(ClassifyQueryEvent(query), table.database, table).value_or(DDLType::kUnknown);
+DDLType BinlogEvent::ClassifyDDL(const std::string& query, const config::TableConfig& table,
+                                 QueryLexOptions lex_options, bool names_case_insensitive) {
+  return FindConfiguredTableDDL(ClassifyQueryEvent(query, lex_options), table.database, table, names_case_insensitive)
+      .value_or(DDLType::kUnknown);
 }
 
-bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std::string& table_name) {
+bool BinlogEventParser::IsTableAffectingDDL(const std::string& query, const std::string& table_name,
+                                            QueryLexOptions lex_options, bool names_case_insensitive) {
   config::TableConfig table_config;
   table_config.name = table_name;
-  return FindConfiguredTableDDL(ClassifyQueryEvent(query), "", table_config).has_value();
+  return FindConfiguredTableDDL(ClassifyQueryEvent(query, lex_options), "", table_config, names_case_insensitive)
+      .has_value();
 }
 
 }  // namespace mygramdb::mysql

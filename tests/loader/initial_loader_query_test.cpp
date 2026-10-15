@@ -935,7 +935,7 @@ TEST(InitialLoaderIntegrationTest, SharedSnapshotKeepsMultipleTableLoadsAtSameGt
   cleanup();
 }
 
-TEST(InitialLoaderIntegrationTest, CommitBetweenGtidCaptureAndSnapshotCannotBeSkipped) {
+TEST(InitialLoaderIntegrationTest, CommitJustBeforeSnapshotStartIsNotLost) {
   if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
     GTEST_SKIP() << "MySQL integration tests are disabled. Set ENABLE_MYSQL_INTEGRATION_TESTS=1 to enable.";
   }
@@ -976,12 +976,19 @@ TEST(InitialLoaderIntegrationTest, CommitBetweenGtidCaptureAndSnapshotCannotBeSk
   index::Index index(1);
   storage::DocumentStore store;
   InitialLoader loader(loader_connection, index, store, table_config);
-  loader.SetAfterGtidCaptureHookForTest(
+  loader.SetBeforeSnapshotHookForTest(
       [&]() { EXPECT_TRUE(writer_connection.ExecuteUpdate("INSERT INTO " + table + " VALUES ('2', 'racing beta')")); });
 
   auto load_result = loader.Load();
   ASSERT_TRUE(load_result) << load_result.error().message();
-  EXPECT_EQ(loader.GetStartGTID(), before_gtid);
+  if (loader_connection.GetFlavor() == mysql::ServerFlavor::kMariaDB) {
+    // MariaDB reports the exact position of the snapshot, which already holds the raced row.
+    auto after_result = writer_connection.GetExecutedGTID();
+    ASSERT_TRUE(after_result) << after_result.error().message();
+    EXPECT_EQ(loader.GetStartGTID(), *after_result);
+  } else {
+    EXPECT_EQ(loader.GetStartGTID(), before_gtid);
+  }
   EXPECT_EQ(store.Size(), 2U);
   EXPECT_TRUE(store.GetDocId("1").has_value());
   EXPECT_TRUE(store.GetDocId("2").has_value());

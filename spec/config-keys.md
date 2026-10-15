@@ -45,6 +45,48 @@ Runtime mutation is available through the variable surface. The mutable set is a
 
 `mysql.binlog_format` and `mysql.binlog_row_image` are assertions about the server, not settings sent to it. The parser rejects any value other than `ROW`/`FULL`, and the actual enforcement queries the live server (`src/mysql/connection_validator.cpp`). The configured values themselves are never used to drive behavior.
 
+### Server requirements
+
+The source server is probed at startup, before any snapshot is built, and again on every reconnect (`src/mysql/connection_validator.cpp`, `src/app/server_orchestrator.cpp`). A failed probe stops replication with the code shown. The version ranges are those named in `README.md`.
+
+| Requirement | Applies to | Code |
+|---|---|---|
+| `gtid_mode=ON` (MariaDB: always on) | MySQL | `2006` |
+| `binlog_format=ROW` | both | `2008` |
+| `binlog_row_image=FULL` | both | `2008` |
+| `binlog_row_metadata=FULL`, so TABLE_MAP events carry column names | both | `2008` |
+| `binlog_checksum=CRC32`, so every event written from now on is integrity-checked | both | `2008` |
+| no binlog compression: `binlog_transaction_compression` OFF (MySQL), `log_bin_compress` OFF (MariaDB) | both | `2008` |
+| `binlog_row_value_options` without `PARTIAL_JSON` | MySQL | `2008` |
+| `binlog_storage_engine` unset (the engine-integrated binary log has no per-event checksum) | MariaDB | `2008` |
+| no tagged GTID (`uuid:tag:n`) anywhere in `gtid_executed`, including after untagged intervals | MySQL | `2005` |
+| `log_replica_updates=ON` (MySQL) / `log_slave_updates=ON` (MariaDB) when the server is itself a replica | both | `2008` |
+
+Whether the server is a replica is decided by `SHOW REPLICA STATUS` returning rows (MySQL) or by a non-empty `@@GLOBAL.gtid_slave_pos` (MariaDB: the SQL thread records every replicated GTID group there, in GTID and in file/position mode, and reading it needs no privilege). On MySQL the statement needs `REPLICATION CLIENT`; when it is refused, validation fails with the server's privilege error rather than assuming the server is not a replica. A MariaDB server that was once a replica keeps a non-empty `gtid_slave_pos`, so it is held to the same requirement. The required account grants are `REPLICATION SLAVE`, `REPLICATION CLIENT` and `SELECT` on the monitored schema.
+
+The snapshot and metadata session is pinned to `time_zone='+00:00'` and an empty `sql_mode` (so `PAD_CHAR_TO_FULL_LENGTH` cannot pad `CHAR` values the binlog row image does not pad), and the initial snapshot runs under `REPEATABLE READ`. On MariaDB the snapshot position is the exact binlog position of the snapshot (`Binlog_snapshot_file`/`Binlog_snapshot_position` converted with `BINLOG_GTID_POS`); on MySQL it is the `gtid_executed` value read just before the snapshot opens.
+
+### Stream handling
+
+Properties of how the reader consumes the binlog that an operator can observe (`src/mysql/binlog_reader_threads.cpp`, `src/mysql/binlog_checksum.h`, `src/mysql/binlog_stream.cpp`).
+
+- **Checksum per file.** The source sends each binlog file with that file's own checksum algorithm, declared in its `FORMAT_DESCRIPTION_EVENT`. The reader verifies CRC32 frames and accepts frames of a file written with `binlog_checksum=NONE`, so a file written before the setting was changed still streams. A CRC32 mismatch, or an unknown algorithm byte, fails the frame and reconnects from the applied position.
+- **Column metadata from TABLE_MAP.** Column names, signedness and ENUM/SET labels are read from the optional metadata of each `TABLE_MAP_EVENT`; no schema query is made. A `TABLE_MAP_EVENT` of a monitored table written without full row metadata (`binlog_row_metadata` was not `FULL`) stops replication with `2017`, because the event stays in the binlog as written; the message names `binlog_row_metadata=FULL`. Optional metadata that does not parse also stops a monitored table with `2017`; for a table that is not replicated, or whose rows its SYNC snapshot covers, the block is not read.
+- **Name matching.** The reader reads `lower_case_table_names` from the source. With `0`, database and table names from the binlog match the configured names byte-exactly; with any other value they match ASCII case-insensitively. Row events and DDL statements follow the same rule.
+- **Statement lexing.** A `QUERY_EVENT` is lexed under the `sql_mode` it was logged with: `ANSI_QUOTES` makes a double-quoted span an identifier, `NO_BACKSLASH_ESCAPES` makes a backslash in a string literal an ordinary character. When the status variables cannot be walked to the mode, the statement is judged under every combination and the strictest result applies. The source logs a stored-program definition (`CREATE`/`ALTER` of a `PROCEDURE`, `FUNCTION`, `TRIGGER`, `EVENT` or `PACKAGE`) as a single event, so from the definition's header the whole rest of the event is that definition: nothing in or after its body is classified (documented limit), and the event is one statement that is safe to ignore. Statements before the definition in the same event classify normally.
+- **Unknown event types.** An event type this build does not recognize is skipped when its header carries `LOG_EVENT_IGNORABLE_F` (`0x80`), as the source's own replicas do; without the flag it stops replication with `2017`.
+- **Dump errors.** The source reports every fatal dump error as MySQL error `1236`. Only a message saying that the GTIDs the replica requires were purged is reported as an unavailable position, which tells the operator to run `SYNC`; every other `1236` (replica ahead of the source, oversized packet, corrupt or truncated binlog) stops replication with `2008` carrying the server's message.
+
+### Table requirements
+
+Checked for each monitored table at startup and again after every DDL on it (`src/mysql/ddl_schema_validator.cpp`, `src/mysql/connection.cpp`). Failure is `2012` unless noted.
+
+- The primary-key column is a single-column `PRIMARY KEY`, or a single-column `UNIQUE` key declared `NOT NULL` (a nullable `UNIQUE` column fails with `2012`; a column that is not unique fails with `2011`).
+- The table is not the child of a foreign key with `ON UPDATE` or `ON DELETE` `CASCADE`, `SET NULL` or `SET DEFAULT`, because InnoDB applies those changes without writing row events. MySQL 9.x with `innodb_native_foreign_keys=OFF` is exempt: the server layer writes a row event for every child row.
+- No column, configured or not, is an old-format MariaDB `TIME(n)`, `DATETIME(n)` or `TIMESTAMP(n)` with `n > 0` (`SHOW COLUMNS` shows `/* mariadb-5.3 */`); the width of such a column is not described by TABLE_MAP, so no row of the table can be decoded. The same types with `n = 0` are accepted.
+- No configured column is declared `year(2)`.
+- A change to a configured column's type, nullability, collation, generation kind (`STORED`/`VIRTUAL`) or generation expression after DDL is a schema change, including `MODIFY ... AS (expr) STORED`.
+
 ## `tables[]`
 
 Each element requires `name` and `text_source`. Table identity is `(database, name)`; a duplicate identity is a hard failure (`src/config/config.cpp`).
@@ -108,12 +150,14 @@ This value is applied only to tables that do not carry their own `ngram_size` (`
 | `replication.enable` | boolean | — | `true` | startup-only | `src/config/config-schema.json` |
 | `replication.auto_initial_snapshot` | boolean | — | `false` | startup-only | `src/config/config-schema.json`, cross-check `src/config/config.cpp` |
 | `replication.server_id` | integer | 0–4294967295; must be non-zero when replication is enabled (including when the block is omitted) and operationally unique among replication clients | `0` (valid only when disabled) | startup-only | `src/config/config-schema.json`, final-state validation in `src/config/config_validator.cpp` |
-| `replication.start_from` | string | `snapshot`, `latest`, or `gtid=<position>`, where the position is a MySQL GTID set (`UUID:txn[-txn]`, comma-separated per source) or a MariaDB GTID list (`domain-server-seq`, comma-separated per domain); a value neither grammar accepts is rejected | `snapshot` | startup-only | `src/config/config.cpp`, `src/utils/gtid_grammar.cpp` |
+| `replication.start_from` | string | `snapshot`, `latest`, or `gtid=<position>`, where the position is a MySQL GTID set (`UUID:txn[-txn]`, comma-separated per source; a transaction number must be below 2^63−1) or a MariaDB GTID list (`domain-server-seq`, comma-separated per domain); a value neither grammar accepts is rejected | `snapshot` | startup-only | `src/config/config.cpp`, `src/utils/gtid_grammar.cpp` |
 | `replication.queue_size` | integer | 100–1000000 | `10000` | startup-only | `src/config/config-schema.json` |
 | `replication.reconnect_backoff_min_ms` | integer | 100–60000 | `500` | startup-only · unread | `src/config/config-schema.json` |
 | `replication.reconnect_backoff_max_ms` | integer | 1000–600000 | `10000` | startup-only · unread | `src/config/config-schema.json` |
 
 `auto_initial_snapshot: true` requires `start_from: snapshot`; any other start position is a hard failure (`src/config/config.cpp`).
+
+A bare `UUID:N` entry in a MySQL start position means "through N": the reader widens it to `UUID:1-N` once, when the position enters the reader (`src/mysql/binlog_reader.cpp`), for each source separately. An entry that is already a range, carries several intervals or a tag is taken as written. Every later reconnect resumes from the applied position, which stays a single range from that start.
 
 ## `memory`
 

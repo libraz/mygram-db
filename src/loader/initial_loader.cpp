@@ -164,29 +164,12 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
 
   start_gtid_.clear();
   if (manage_transaction) {
-    // Capture a conservative replication position BEFORE opening the snapshot.
-    // @@GLOBAL.gtid_executed / gtid_current_pos are server-global status
-    // variables, not MVCC data: reading them after START TRANSACTION can include
-    // commits that are absent from the snapshot and would then be skipped by
-    // replication. A pre-snapshot position intentionally permits at-least-once
-    // replay for commits in the small interval before START; row application is
-    // idempotent and converges to the snapshot/current binlog state.
-    auto gtid_result = connection_.CaptureSnapshotLowerBoundGTID();
-    if (!gtid_result) {
-      return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed,
-                                      "Failed to capture pre-snapshot GTID: " + gtid_result.error().message()));
-    }
-    start_gtid_ = *gtid_result;
-    if (after_gtid_capture_hook_for_test_) {
-      after_gtid_capture_hook_for_test_();
-    }
-
-    // Start the consistent snapshot only after the safe lower-bound GTID has
-    // been captured.
+    // The connection owns the flavor-specific order of position capture and
+    // snapshot start; see Connection::StartConsistentSnapshot.
     mygram::utils::StructuredLog().Event("consistent_snapshot_starting").Info();
-    auto start_txn_result = connection_.ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
-    if (!start_txn_result) {
-      std::string error_msg = "Failed to start consistent snapshot: " + start_txn_result.error().message();
+    auto snapshot_gtid = connection_.StartConsistentSnapshot(before_snapshot_hook_for_test_);
+    if (!snapshot_gtid) {
+      std::string error_msg = "Failed to start consistent snapshot: " + snapshot_gtid.error().message();
       mygram::utils::StructuredLog()
           .Event("loader_error")
           .Field("operation", "initial_load")
@@ -195,6 +178,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
           .Error();
       return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
     }
+    start_gtid_ = *snapshot_gtid;
   } else if (existing_snapshot_gtid != nullptr) {
     start_gtid_ = *existing_snapshot_gtid;
   }

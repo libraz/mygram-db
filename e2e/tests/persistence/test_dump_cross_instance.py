@@ -53,6 +53,7 @@ def _database_container_command(name: str, port: int, server_id: int) -> list[st
             "--log-bin=mariadb-bin",
             "--binlog-format=ROW",
             "--binlog-row-image=FULL",
+            "--binlog-row-metadata=FULL",
             "--character-set-server=utf8mb4",
             "--collation-server=utf8mb4_unicode_ci",
         ]
@@ -75,6 +76,7 @@ def _database_container_command(name: str, port: int, server_id: int) -> list[st
             "--gtid-mode=ON",
             "--enforce-gtid-consistency=ON",
             "--binlog-row-image=FULL",
+            "--binlog-row-metadata=FULL",
             "--character-set-server=utf8mb4",
             "--collation-server=utf8mb4_unicode_ci",
         ]

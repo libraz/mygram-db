@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "mysql/server_flavor.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -56,7 +57,30 @@ class ConnectionValidator {
   static bool IsValidIdentifier(std::string_view identifier);
   static bool IsSupportedBinlogFormatValue(std::string_view value);
   static bool IsSupportedBinlogChecksumValue(std::string_view value);
+  static bool IsSupportedBinlogRowMetadataValue(std::string_view value);
+
+  /// True when a MariaDB gtid_slave_pos value shows replicated transactions were applied.
+  static bool HasAppliedReplicatedGtids(std::string_view gtid_slave_pos);
+
+  /// True when a MariaDB binlog_storage_engine value names an engine.
+  static bool IsBinlogStorageEngineEnabled(std::string_view value);
+
+  /**
+   * @brief True when any GTID entry carries a tag, in any position of the entry
+   *
+   * A set the GTID grammar rejects counts as tagged: it cannot be shown to be untagged.
+   */
   static bool ContainsTaggedGtid(std::string_view gtid_set);
+
+  /**
+   * @brief Decide whether a replica keeps replicated writes in its own binary log
+   *
+   * @param is_replica Whether the replica status statement returned rows
+   * @param value Value of log_replica_updates (MySQL) / log_slave_updates (MariaDB); nullopt if undefined
+   * @return kMySQLBinlogError when a replica does not log replicated writes
+   */
+  static mygram::utils::Expected<void, mygram::utils::Error> EvaluateLogReplicaUpdates(
+      ServerFlavor flavor, bool is_replica, const std::optional<std::string>& value);
 
   /**
    * @brief Validate MySQL server connection
@@ -152,9 +176,10 @@ class ConnectionValidator {
   /**
    * @brief Check if binlog_checksum is set to CRC32
    *
-   * MygramDB currently parses binlog events with a trailing 4-byte CRC32
-   * checksum. binlog_checksum=NONE would make the reader treat payload bytes as
-   * checksum bytes and silently lose row changes.
+   * The reader follows the algorithm each binlog file declares, so files
+   * written earlier with NONE still stream. The requirement keeps every event
+   * written from now on under integrity verification: with NONE a corrupted
+   * event would be applied unnoticed.
    *
    * @return Expected<void, Error> - success or error with kMySQLBinlogError
    */
@@ -167,6 +192,33 @@ class ConnectionValidator {
    * which is not yet supported.
    */
   static mygram::utils::Expected<void, mygram::utils::Error> CheckPartialJsonMode(Connection& conn);
+
+  /**
+   * @brief Check that binlog_row_metadata is FULL
+   *
+   * TABLE_MAP events carry column names only under FULL; the reader takes names
+   * from them rather than from a schema query that can race with DDL.
+   *
+   * @return Expected<void, Error> - success or error with kMySQLBinlogError
+   */
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckBinlogRowMetadata(Connection& conn);
+
+  /**
+   * @brief Reject MariaDB's engine-integrated binary log (binlog_storage_engine)
+   *
+   * That log has no per-event checksum and BINLOG_GTID_POS cannot probe its
+   * purge boundary. Not applicable to MySQL.
+   */
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckBinlogStorageEngine(Connection& conn);
+
+  /**
+   * @brief Require log_replica_updates / log_slave_updates when the server is a replica
+   *
+   * Without it, writes applied by the replication threads never reach this
+   * server's binary log and the index silently stops changing. A failed replica
+   * status query (missing privilege) fails validation.
+   */
+  static mygram::utils::Expected<void, mygram::utils::Error> CheckLogReplicaUpdates(Connection& conn);
 
   /**
    * @brief Check for tagged GTID usage

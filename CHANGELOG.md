@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The source must run `binlog_row_metadata=FULL`** — column names, signedness and `ENUM`/`SET` labels are read from each `TABLE_MAP` event instead of a `SHOW COLUMNS` query, which could disagree with the binlog after DDL and miscounted MariaDB tables with hidden columns. Startup fails with `2008` when the source runs another value, before any snapshot is built. A `TABLE_MAP` of a monitored table that was written without the metadata stops replication with `2017`; run `SYNC` for every replicated table after fixing the setting.
+- **More configurations are refused at startup** — a table that is the child of a foreign key with `ON UPDATE`/`ON DELETE` `CASCADE`, `SET NULL` or `SET DEFAULT`, a source that is itself a replica without `log_replica_updates`/`log_slave_updates`, MariaDB with `binlog_storage_engine`, old-format MariaDB `TIME(n)`/`DATETIME(n)`/`TIMESTAMP(n)` columns with `n > 0`, a configured `year(2)` column, and a primary key on a nullable `UNIQUE` column.
+- **Table and database names match byte-exactly when the source runs `lower_case_table_names=0`** — DDL statements used to match case-insensitively regardless of the setting. With any other value, row events and DDL both match case-insensitively.
+- **A `1236` dump error that is not a purged position stops replication with `2008`** carrying the server's message; only a message saying the required GTIDs were purged is reported as an unavailable position (run `SYNC`). A replica ahead of the source, an oversized packet or a corrupt binlog no longer send the operator to `SYNC`.
+- **`replication.start_from: gtid=UUID:N` means "through N"** — the position is widened to `UUID:1-N` once when it enters the reader, so reconnects after the first applied transaction no longer ask the source for earlier transactions again.
+
+### Fixed
+
+- **Each binlog file is read with its own checksum algorithm**, so files written with `binlog_checksum=NONE` stream instead of failing every frame.
+- **A reconnect no longer replays events still queued from the old stream.**
+- **Unknown event types flagged ignorable by the source are skipped**; transaction numbers at or above 2^63−1 are refused, as the source refuses them.
+- **Statements are read under the `sql_mode` they were logged with** — `ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES` change where a statement ends, and a stored-program definition is read as the whole event from its header on, so a `TRUNCATE` inside its body is never taken for one executed against a configured table.
+
 ## [1.10.2] - 2026-09-28
 
 Every change is corrective. Several change whether a configuration starts or

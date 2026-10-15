@@ -585,6 +585,24 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   }
 
   mygram::utils::StructuredLog().Event("server_debug").Field("action", "mysql_connected").Debug();
+
+  // A source that cannot be replicated from must fail before any snapshot is
+  // paid for. The reader repeats this check on every (re)connect.
+  if (deps_.config.replication.enable) {
+    std::vector<mysql::ConnectionValidator::RequiredTable> required_tables;
+    required_tables.reserve(deps_.config.tables.size());
+    for (const auto& table_config : deps_.config.tables) {
+      required_tables.push_back({table_config.database, table_config.name});
+    }
+    const auto validation = mysql::ConnectionValidator::ValidateServer(*mysql_connection_, required_tables);
+    if (!validation.valid) {
+      const std::string message = "Connection validation failed: " + validation.error_message;
+      return mygram::utils::MakeUnexpected(
+          validation.error_code.has_value()
+              ? mygram::utils::MakeError(*validation.error_code, message)
+              : mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError, message));
+    }
+  }
 #endif
   return {};
 }
@@ -704,27 +722,20 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
   const bool use_shared_snapshot = deps_.config.replication.enable && deps_.config.tables.size() > 1;
   std::string shared_snapshot_gtid;
   if (use_shared_snapshot) {
-    // Capture a lower-bound GTID before opening the snapshot. Global GTID
-    // variables are not MVCC snapshot data; reading one after START can include
-    // a concurrent commit that the snapshot cannot see, causing permanent loss.
-    auto gtid_result = mysql_connection_->CaptureSnapshotLowerBoundGTID();
-    if (!gtid_result) {
-      return mygram::utils::MakeUnexpected(
-          mygram::utils::MakeError(mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
-                                   "Failed to capture pre-snapshot GTID: " + gtid_result.error().message()));
+    // The connection owns the flavor-specific order of position capture and
+    // snapshot start; see Connection::StartConsistentSnapshot.
+    auto snapshot_gtid_result = mysql_connection_->StartConsistentSnapshot();
+    if (!snapshot_gtid_result) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
+          "Failed to start shared consistent snapshot: " + snapshot_gtid_result.error().message()));
     }
-    shared_snapshot_gtid = *gtid_result;
+    shared_snapshot_gtid = *snapshot_gtid_result;
     if (shared_snapshot_gtid.empty()) {
+      static_cast<void>(mysql_connection_->ExecuteUpdate("ROLLBACK"));
       return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
           mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
           "GTID is empty - cannot start multi-table replication from undefined snapshot position"));
-    }
-
-    auto start_txn_result = mysql_connection_->ExecuteUpdate("START TRANSACTION WITH CONSISTENT SNAPSHOT");
-    if (!start_txn_result) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kStorageSnapshotBuildFailed,
-          "Failed to start shared consistent snapshot: " + start_txn_result.error().message()));
     }
 
     snapshot_gtid_ = shared_snapshot_gtid;
@@ -854,7 +865,8 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
     }
   }
 
-  // The snapshot GTID above is a safe lower bound for starting replication.
+  // The snapshot GTID above is a safe starting point for replication: a lower
+  // bound on MySQL, the exact snapshot position on MariaDB.
   // Capture a separate post-snapshot target and withhold readiness until the
   // reader has actually applied through it.
   if (deps_.config.replication.enable && !table_contexts_.empty()) {
@@ -934,11 +946,19 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
   // Prepare table_contexts map for BinlogReader
   auto table_contexts_ptrs = BuildTableContextPointerMap();
 
+  // TABLE_MAP carries lowercase names whenever the server folds case, so the
+  // reader must match table names case-insensitively in that case.
+  auto lower_case_table_names = mysql_connection_->GetLowerCaseTableNames();
+  if (!lower_case_table_names) {
+    return mygram::utils::MakeUnexpected(lower_case_table_names.error());
+  }
+
   // Create binlog reader
   mysql::BinlogReader::Config binlog_config;
   binlog_config.start_gtid = start_gtid;
   binlog_config.queue_size = deps_.config.replication.queue_size;
   binlog_config.server_id = deps_.config.replication.server_id;
+  binlog_config.table_names_case_insensitive = *lower_case_table_names != 0;
 
   binlog_reader_ =
       std::make_unique<mysql::BinlogReader>(*mysql_connection_, table_contexts_ptrs, deps_.config.mysql, binlog_config);

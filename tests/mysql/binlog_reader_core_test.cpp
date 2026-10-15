@@ -145,7 +145,7 @@ TEST_F(BinlogReaderFixture, UnsupportedRuntimeEventsStopBeforeGtidAdvance) {
     reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
     ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(decoded_type));
     EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-17");
     EXPECT_FALSE(reader_->GetLastError().empty());
     // The code is what SYNC reads to decide it must restart past the event
     // rather than replay it; a generic binlog error would be replayed forever.
@@ -202,7 +202,8 @@ namespace {
 
 /// TABLE_MAP_EVENT whose columns carry no metadata bytes (LONG and unknown codes).
 std::vector<uint8_t> BuildBareTableMap(uint64_t table_id, const std::string& database, const std::string& table,
-                                       const std::vector<uint8_t>& column_types) {
+                                       const std::vector<uint8_t>& column_types,
+                                       const std::vector<uint8_t>& optional_metadata = {}) {
   using test::BinlogEventBuilder;
   auto buf = BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::TABLE_MAP_EVENT);
   BinlogEventBuilder::AppendTableId(buf, table_id);
@@ -217,9 +218,17 @@ std::vector<uint8_t> BuildBareTableMap(uint64_t table_id, const std::string& dat
   buf.insert(buf.end(), column_types.begin(), column_types.end());
   BinlogEventBuilder::AppendPackedInt(buf, 0);                 // metadata block
   buf.insert(buf.end(), (column_types.size() + 7) / 8, 0x00);  // NULL bitmap
-  BinlogEventBuilder::AppendLittleEndian32(buf, 0);            // checksum placeholder
+  buf.insert(buf.end(), optional_metadata.begin(), optional_metadata.end());
+  BinlogEventBuilder::AppendLittleEndian32(buf, 0);  // checksum placeholder
   BinlogEventBuilder::FixEventSizeWithChecksum(buf);
   return buf;
+}
+
+/// SIGNEDNESS and COLUMN_NAME blocks for a single signed INT column named "id".
+std::vector<uint8_t> SingleIntColumnRowMetadata() {
+  constexpr uint8_t kSignedness = 1;
+  constexpr uint8_t kColumnName = 4;
+  return {kSignedness, 1, 0x00, kColumnName, 3, 2, 'i', 'd'};
 }
 
 std::vector<unsigned char> BuildRowsEventHeader(uint64_t table_id) {
@@ -234,13 +243,12 @@ std::vector<unsigned char> BuildRowsEventHeader(uint64_t table_id) {
 }  // namespace
 
 /**
- * @brief A DDL that can redefine the configured table drops its cached columns on the reader thread.
+ * @brief A DDL that redefines the configured table does not stop replication by itself.
  *
- * The next TABLE_MAP of the table follows the DDL in the stream, so it must
- * fetch the new column names, signedness and ENUM labels instead of copying the
- * previous definition over a same-sized TABLE_MAP. No other table is touched.
+ * The next TABLE_MAP of the table carries the new column names, signedness and
+ * ENUM labels, so nothing is cached on the reader thread to invalidate.
  */
-TEST_F(BinlogReaderFixture, ConfiguredTableDdlDropsOnlyThatTablesCachedColumns) {
+TEST_F(BinlogReaderFixture, ConfiguredTableRedefinitionDdlDoesNotStopReplication) {
   const std::vector<std::string> redefinitions = {
       "CREATE TABLE articles (id BIGINT UNSIGNED PRIMARY KEY, state ENUM('a','b'))",
       "DROP TABLE articles",
@@ -249,17 +257,9 @@ TEST_F(BinlogReaderFixture, ConfiguredTableDdlDropsOnlyThatTablesCachedColumns) 
   };
   for (const auto& query : redefinitions) {
     SCOPED_TRACE(query);
-    reader_->schema_cache_.StoreColumns("app", "articles", {{"id", false, {}}});
-    reader_->schema_cache_.StoreColumns("app", "articles_archive", {{"id", false, {}}});
-    reader_->schema_cache_.StoreColumns("app", "other", {{"id", false, {}}});
-
     const auto event = BinlogEvent::CreateDDL(table_config_, query, "ffffffff-0000-0000-0000-000000000001:5");
     ASSERT_NE(event.ddl_type, DDLType::kUnknown);
     EXPECT_TRUE(reader_->ObserveConfiguredTableDdl(event));
-
-    EXPECT_EQ(reader_->schema_cache_.FindColumns("app", "articles"), nullptr);
-    EXPECT_NE(reader_->schema_cache_.FindColumns("app", "articles_archive"), nullptr);
-    EXPECT_NE(reader_->schema_cache_.FindColumns("app", "other"), nullptr);
     EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire));
   }
 }
@@ -286,7 +286,7 @@ TEST_F(BinlogReaderFixture, RowsReplacingDdlStopsWithTheUndecodableCode) {
     EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
     EXPECT_NE(reader_->GetLastError().find("SYNC for every replicated table"), std::string::npos);
     EXPECT_FALSE(reader_->HasSchemaIncompatibleError());
-    EXPECT_EQ(reader_->GetCurrentGTID(), "3e11fa47-71ca-11e1-9e33-c80aa9429562:17");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-17");
     EXPECT_EQ(reader_->GetQueueSize(), 0U);
   }
   reader_->should_stop_.store(false, std::memory_order_release);
@@ -329,22 +329,157 @@ TEST_F(BinlogReaderFixture, ReusedTableIdForUnmonitoredTableDropsTheReplicatedMa
 }
 
 /**
- * @brief Every stream (re)open forgets table ids and column definitions.
+ * @brief A monitored TABLE_MAP without full row metadata stops replication naming the setting.
+ *
+ * The event stays in the binlog as written, so a reconnect would hit the same
+ * map: the stop carries the undecodable code and does not retry.
  */
-TEST_F(BinlogReaderFixture, SchemaCacheResetForgetsEveryTableIdAndColumnList) {
+TEST_F(BinlogReaderFixture, MonitoredTableMapWithoutRowMetadataStopsNamingTheSetting) {
+  BinlogReader::ProcessingFailureKind failure_kind = BinlogReader::ProcessingFailureKind::kNone;
+  const auto bare = BuildBareTableMap(61, "app", table_config_.name, {0x03});
+
+  EXPECT_EQ(reader_->HandleTableMapEvent(bare.data(), bare.size(), &failure_kind), BinlogReader::TableMapAction::kStop);
+  EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
+  EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
+  EXPECT_NE(reader_->GetLastError().find("binlog_row_metadata=FULL"), std::string::npos) << reader_->GetLastError();
+  EXPECT_EQ(reader_->schema_cache_.table_maps().Get(61), nullptr);
+
+  // A table that is not replicated needs no metadata.
+  reader_->should_stop_.store(false, std::memory_order_release);
+  const auto unmonitored = BuildBareTableMap(62, "app", "audit_log", {0x03});
+  EXPECT_EQ(reader_->HandleTableMapEvent(unmonitored.data(), unmonitored.size(), &failure_kind),
+            BinlogReader::TableMapAction::kContinue);
+  EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire));
+}
+
+/**
+ * @brief Optional row metadata that does not parse stops a monitored table and is ignored for the rest.
+ *
+ * The frame has passed its checksum, so reconnecting would deliver the same
+ * bytes again: a monitored table stops with the undecodable code instead.
+ */
+TEST_F(BinlogReaderFixture, UnparsableRowMetadataStopsOnlyAMonitoredTable) {
+  BinlogReader::ProcessingFailureKind failure_kind = BinlogReader::ProcessingFailureKind::kNone;
+  const std::vector<uint8_t> broken = {4};  // COLUMN_NAME type byte without a length
+
+  const auto unmonitored = BuildBareTableMap(65, "app", "audit_log", {0x03}, broken);
+  EXPECT_EQ(reader_->HandleTableMapEvent(unmonitored.data(), unmonitored.size(), &failure_kind),
+            BinlogReader::TableMapAction::kContinue);
+  EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire));
+
+  const auto monitored = BuildBareTableMap(66, "app", table_config_.name, {0x03}, broken);
+  EXPECT_EQ(reader_->HandleTableMapEvent(monitored.data(), monitored.size(), &failure_kind),
+            BinlogReader::TableMapAction::kStop);
+  EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
+  EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent);
+}
+
+/**
+ * @brief Column names and signedness come from the TABLE_MAP itself.
+ */
+TEST_F(BinlogReaderFixture, MonitoredTableMapWithFullRowMetadataIsRecordedFromTheEvent) {
+  BinlogReader::ProcessingFailureKind failure_kind = BinlogReader::ProcessingFailureKind::kNone;
+  const auto full = BuildBareTableMap(63, "app", table_config_.name, {0x03}, SingleIntColumnRowMetadata());
+
+  EXPECT_EQ(reader_->HandleTableMapEvent(full.data(), full.size(), &failure_kind),
+            BinlogReader::TableMapAction::kContinue);
+  const TableMetadata* recorded = reader_->schema_cache_.table_maps().Get(63);
+  ASSERT_NE(recorded, nullptr);
+  EXPECT_EQ(recorded->columns[0].name, "id");
+  EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire));
+}
+
+/**
+ * @brief TABLE_MAP names are folded by the source, so the match follows lower_case_table_names.
+ */
+TEST_F(BinlogReaderFixture, TableMapNamesMatchCaseInsensitivelyOnlyWhenTheSourceFoldsCase) {
+  BinlogReader::ProcessingFailureKind failure_kind = BinlogReader::ProcessingFailureKind::kNone;
+  const auto folded = BuildBareTableMap(64, "app", "ARTICLES", {0x03}, SingleIntColumnRowMetadata());
+
+  EXPECT_EQ(reader_->HandleTableMapEvent(folded.data(), folded.size(), &failure_kind),
+            BinlogReader::TableMapAction::kContinue);
+  EXPECT_EQ(reader_->schema_cache_.table_maps().Get(64), nullptr);
+
+  reader_config_.table_names_case_insensitive = true;
+  ResetReader();
+  EXPECT_EQ(reader_->HandleTableMapEvent(folded.data(), folded.size(), &failure_kind),
+            BinlogReader::TableMapAction::kContinue);
+  EXPECT_NE(reader_->schema_cache_.table_maps().Get(64), nullptr);
+
+  // A missing row map is only a parse failure for a table the reader recognizes.
+  const auto rows = BuildRowsEventHeader(64);
+  EXPECT_TRUE(
+      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, rows.data(), rows.size()));
+}
+
+/**
+ * @brief A bare start position is widened once, so what the reader applies after it stays one range.
+ *
+ * Applying 101 on top of a literal "uuid:100" would give "uuid:100-101"; a
+ * reconnect from that asks the source for 1..99 again.
+ */
+TEST_F(BinlogReaderFixture, StartPositionIsWidenedOnceSoTheReopenPositionCoversEverythingApplied) {
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:100");
+  EXPECT_EQ(reader_->TakeResumePosition(), "ffffffff-0000-0000-0000-000000000001:1-100");
+
+  BinlogEvent event = MakeEvent(BinlogEventType::INSERT, "101", 1, "text");
+  ASSERT_TRUE(reader_->ProcessQueuedEvent(event));
+  BinlogEvent commit;
+  commit.type = BinlogEventType::COMMIT;
+  commit.gtid = event.gtid;
+  ASSERT_TRUE(reader_->ProcessQueuedEvent(commit));
+
+  EXPECT_EQ(reader_->TakeResumePosition(), "ffffffff-0000-0000-0000-000000000001:1-101");
+
+  // The same holds for a start position given to the constructor, per source.
+  reader_config_.start_gtid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-7";
+  ResetReader();
+  EXPECT_EQ(reader_->TakeResumePosition(),
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-7");
+}
+
+/**
+ * @brief A reopen starts from the applied position with nothing left over from the previous stream.
+ *
+ * Events still queued would be delivered a second time by the new stream, and a
+ * pending partial transaction would trip the commit check of the replay.
+ */
+TEST_F(BinlogReaderFixture, ReopenDiscardsWhatThePreviousStreamQueued) {
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
+  BinlogEvent applied = MakeEvent(BinlogEventType::INSERT, "51", 1, "text");
+  ASSERT_TRUE(reader_->ProcessQueuedEvent(applied));  // leaves 51 pending its COMMIT
+  reader_->PushEvent(std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "52", 1, "text")));
+  reader_->PushEvent(std::make_unique<BinlogEvent>(MakeEvent(BinlogEventType::INSERT, "53", 1, "text")));
+  ASSERT_EQ(reader_->GetQueueSize(), 2U);
+
+  EXPECT_EQ(reader_->TakeResumePosition(), "ffffffff-0000-0000-0000-000000000001:1-50");
+
+  EXPECT_EQ(reader_->GetQueueSize(), 0U);
+  // The replay of transaction 52 commits cleanly: nothing of 51 is pending.
+  BinlogEvent replay = MakeEvent(BinlogEventType::INSERT, "52", 1, "text");
+  ASSERT_TRUE(reader_->ProcessQueuedEvent(replay));
+  BinlogEvent commit;
+  commit.type = BinlogEventType::COMMIT;
+  commit.gtid = replay.gtid;
+  EXPECT_TRUE(reader_->ProcessQueuedEvent(commit));
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50:52");
+}
+
+/**
+ * @brief Every stream (re)open forgets table ids.
+ */
+TEST_F(BinlogReaderFixture, SchemaCacheResetForgetsEveryTableId) {
   TableMetadata monitored;
   monitored.table_id = 7;
   monitored.database_name = "app";
   monitored.table_name = table_config_.name;
   reader_->schema_cache_.RecordTableMap(monitored);
   reader_->schema_cache_.RecordSuppressedTableMap(8);
-  reader_->schema_cache_.StoreColumns("app", table_config_.name, {{"id", false, {}}});
 
   reader_->schema_cache_.Reset();
 
   EXPECT_EQ(reader_->schema_cache_.table_maps().Size(), 0U);
   EXPECT_FALSE(reader_->schema_cache_.IsSuppressed(8));
-  EXPECT_EQ(reader_->schema_cache_.FindColumns("app", table_config_.name), nullptr);
 }
 
 /**
@@ -601,7 +736,7 @@ TEST(BinlogReaderTest, InitialState) {
   BinlogReader reader(conn, idx, doc_store, table_config, mysql_config, reader_config);
 
   EXPECT_FALSE(reader.IsRunning());
-  EXPECT_EQ(reader.GetCurrentGTID(), "3E11FA47-71CA-11E1-9E33-C80AA9429562:100");
+  EXPECT_EQ(reader.GetCurrentGTID(), "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-100");
   EXPECT_EQ(reader.GetQueueSize(), 0);
   EXPECT_EQ(reader.GetProcessedEvents(), 0);
 }
@@ -842,7 +977,7 @@ TEST_F(BinlogReaderFixture, MySqlCurrentGtidPromotesSingleGtidToSet) {
   reader_->UpdateCurrentGTID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:7");
 
   EXPECT_EQ(reader_->GetCurrentGTID(),
-            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:7");
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-100,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:7");
 }
 
 TEST_F(BinlogReaderFixture, MySqlCurrentGtidMergesTaggedGtidWithoutDroppingUuids) {
@@ -925,7 +1060,7 @@ TEST_F(BinlogReaderFixture, GtidNotUpdatedOnProcessEventFailure) {
 
   // Set initial GTID
   reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:100");
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:100");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-100");
 
   // Create an event with GTID "ffffffff-0000-0000-0000-000000000001:101"
   auto event = MakeEvent(BinlogEventType::INSERT, "101", 1, "test text");
@@ -936,7 +1071,7 @@ TEST_F(BinlogReaderFixture, GtidNotUpdatedOnProcessEventFailure) {
 
   // If ProcessEvent failed, GTID should remain at original value
   if (!result) {
-    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:100")
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-100")
         << "GTID was updated despite ProcessEvent failure";
   }
 }
@@ -972,17 +1107,17 @@ TEST_F(BinlogReaderFixture, WorkerThreadGtidUpdateOnlyOnSuccess) {
   bool success = reader_->ProcessQueuedEvent(*popped_event);
 
   if (success) {
-    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50");
     EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed + 1);
 
     BinlogEvent commit_event;
     commit_event.type = BinlogEventType::COMMIT;
     commit_event.gtid = popped_event->gtid;
     EXPECT_TRUE(reader_->ProcessQueuedEvent(commit_event));
-    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-51");
   } else {
     // Should NOT update GTID
-    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50")
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50")
         << "GTID should not be updated on ProcessEvent failure";
     EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed)
         << "processed_events should not be incremented on failure";
@@ -998,13 +1133,13 @@ TEST_F(BinlogReaderFixture, DmlGtidAdvancesOnlyAtCommitBoundary) {
 
   ASSERT_TRUE(reader_->ProcessQueuedEvent(event));
   EXPECT_EQ(reader_->GetProcessedEvents(), initial_processed + 1);
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50");
 
   BinlogEvent commit_event;
   commit_event.type = BinlogEventType::COMMIT;
   commit_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
   ASSERT_TRUE(reader_->ProcessQueuedEvent(commit_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-51");
 }
 
 TEST_F(BinlogReaderFixture, MismatchedCommitDoesNotDiscardPendingAppliedPosition) {
@@ -1017,13 +1152,13 @@ TEST_F(BinlogReaderFixture, MismatchedCommitDoesNotDiscardPendingAppliedPosition
   mismatched_commit.type = BinlogEventType::COMMIT;
   mismatched_commit.gtid = "ffffffff-0000-0000-0000-000000000001:52";
   EXPECT_FALSE(reader_->ProcessQueuedEvent(mismatched_commit));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50");
 
   BinlogEvent matching_commit;
   matching_commit.type = BinlogEventType::COMMIT;
   matching_commit.gtid = "ffffffff-0000-0000-0000-000000000001:51";
   EXPECT_TRUE(reader_->ProcessQueuedEvent(matching_commit));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-51");
 }
 
 TEST_F(BinlogReaderFixture, PendingCommitPositionIsSerializedWithExplicitPositionReset) {
@@ -1052,7 +1187,7 @@ TEST_F(BinlogReaderFixture, PendingCommitPositionIsSerializedWithExplicitPositio
   BinlogEvent commit;
   commit.type = BinlogEventType::COMMIT;
   ASSERT_TRUE(reader_->ProcessQueuedEvent(commit));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:2000")
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-2000")
       << "SetCurrentGTID must atomically clear any worker-owned pending transaction";
 }
 
@@ -1063,7 +1198,7 @@ TEST_F(BinlogReaderFixture, DdlGtidAdvancesImmediatelyAfterSuccess) {
   ddl_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
 
   ASSERT_TRUE(reader_->ProcessQueuedEvent(ddl_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50-51");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-51");
 }
 
 TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecovery) {
@@ -1072,7 +1207,7 @@ TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecove
   ddl_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
 
   EXPECT_FALSE(reader_->ProcessQueuedEvent(ddl_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50");
   EXPECT_TRUE(reader_->HasSchemaIncompatibleError());
   EXPECT_NE(reader_->GetLastError().find("SCHEMA_INCOMPATIBLE"), std::string::npos);
 
@@ -1094,7 +1229,7 @@ TEST_F(BinlogReaderFixture, DroppedDatabaseStopsLikeADroppedTable) {
   ddl_event.gtid = "ffffffff-0000-0000-0000-000000000001:51";
 
   EXPECT_FALSE(reader_->ProcessQueuedEvent(ddl_event));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50");
   EXPECT_TRUE(reader_->HasSchemaIncompatibleError());
   EXPECT_NE(reader_->GetLastError().find("database was dropped"), std::string::npos) << reader_->GetLastError();
 }
@@ -1130,7 +1265,7 @@ TEST_F(BinlogReaderFixture, AlterTableRenameHaltsWithTheRenameDiagnosticInBothDi
     EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLInvalidSchema) << query;
     EXPECT_NE(reader_->GetLastError().find("configured table was renamed"), std::string::npos)
         << query << ": " << reader_->GetLastError();
-    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:50") << query;
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50") << query;
   }
 }
 
@@ -1537,7 +1672,7 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRejectsConcurrentCommitBeforeWorker
   producer.join();
 
   EXPECT_EQ(reader_->GetQueueSize(), 0U) << "COMMIT must be rejected after failure publication";
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1");
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-1");
   EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kStorageWriteError);
   EXPECT_NE(reader_->GetLastError().find("normalized_text length 16777233"), std::string::npos)
       << reader_->GetLastError();
@@ -1551,7 +1686,7 @@ TEST_F(BinlogReaderFixture, ProcessingFailureRejectsConcurrentCommitBeforeWorker
 
   EXPECT_TRUE(doc_store_.GetDocId("2").has_value()) << "the transaction was partially applied before failure";
   EXPECT_FALSE(doc_store_.GetDocId("3").has_value()) << "the oversized afterimage must not be inserted";
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1")
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-1")
       << "rejected COMMIT must not advance the failed transaction GTID";
 }
 

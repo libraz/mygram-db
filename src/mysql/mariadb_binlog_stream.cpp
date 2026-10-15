@@ -51,9 +51,8 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::SetupSe
   using mygram::utils::MakeUnexpected;
 
   // MariaDB uses @master_binlog_checksum (not @source_binlog_checksum).
-  // Request CRC32 explicitly: the reader always validates and strips a
-  // four-byte checksum trailer, so mirroring a dynamically changed NONE
-  // setting would make every subsequent event look corrupt.
+  // Request CRC32 explicitly: until the first format description arrives the
+  // source sends its artificial events with the algorithm the replica asked for.
   if (mysql_query(conn.GetHandle(), "SET @master_binlog_checksum = 'CRC32'") != 0) {
     return MakeUnexpected(
         MakeError(ErrorCode::kMariaDBProtocolError,
@@ -155,7 +154,7 @@ mygram::utils::Expected<void, mygram::utils::Error> MariaDBBinlogStream::Open(Co
     unsigned int err_no = mysql_errno(conn.GetHandle());
     std::string error_msg = "Failed to open MariaDB binlog stream: " + std::string(mysql_error(conn.GetHandle()));
 
-    if (err_no == kMySQLErrBinlogPurged) {
+    if (IsPurgedPositionError(err_no, mysql_error(conn.GetHandle()))) {
       return MakeUnexpected(MakeError(ErrorCode::kMariaDBProtocolError,
                                       "Binlog position no longer available on MariaDB server. "
                                       "GTID position has been purged. "

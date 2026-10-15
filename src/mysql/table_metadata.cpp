@@ -9,8 +9,6 @@
 
 #include <algorithm>
 
-#include "utils/string_utils.h"
-
 namespace mygramdb::mysql {
 
 void TableMetadata::RebuildColumnOrdinals() {
@@ -35,83 +33,6 @@ std::optional<size_t> TableMetadata::FindColumnOrdinal(std::string_view name) co
     }
   }
   return std::nullopt;
-}
-
-std::vector<std::string> ParseEnumSetColumnValues(const std::string& column_type) {
-  size_t prefix_length = 0;
-  if (column_type.size() >= 5 &&
-      mygram::utils::EqualsAsciiCaseInsensitive(std::string_view(column_type).substr(0, 5), "enum(")) {
-    prefix_length = 5;
-  }
-  if (prefix_length == 0 && column_type.size() >= 4 &&
-      mygram::utils::EqualsAsciiCaseInsensitive(std::string_view(column_type).substr(0, 4), "set(")) {
-    prefix_length = 4;
-  }
-  if (prefix_length == 0 || column_type.back() != ')') {
-    return {};
-  }
-
-  std::vector<std::string> values;
-  size_t pos = prefix_length;
-  const size_t end = column_type.size() - 1;
-  while (pos < end) {
-    if (column_type[pos] != '\'') {
-      return {};
-    }
-    ++pos;
-    std::string value;
-    bool closed = false;
-    while (pos < end) {
-      const char chr = column_type[pos++];
-      if (chr == '\\') {
-        if (pos >= end) {
-          return {};
-        }
-        // The server escapes NUL, LF and CR in a declared label (and \Z for
-        // Ctrl-Z in some versions); any other escaped byte stands for itself.
-        const char escaped = column_type[pos++];
-        switch (escaped) {
-          case '0':
-            value.push_back('\0');
-            break;
-          case 'n':
-            value.push_back('\n');
-            break;
-          case 'r':
-            value.push_back('\r');
-            break;
-          case 'Z':
-            value.push_back('\032');
-            break;
-          default:
-            value.push_back(escaped);
-            break;
-        }
-      } else if (chr == '\'') {
-        if (pos < end && column_type[pos] == '\'') {
-          value.push_back('\'');
-          ++pos;
-        } else {
-          closed = true;
-          break;
-        }
-      } else {
-        value.push_back(chr);
-      }
-    }
-    if (!closed) {
-      return {};
-    }
-    values.push_back(std::move(value));
-    if (pos == end) {
-      break;
-    }
-    if (column_type[pos] != ',') {
-      return {};
-    }
-    ++pos;
-  }
-  return values;
 }
 
 TableMetadataCache::AddResult TableMetadataCache::AddOrUpdate(uint64_t table_id, const TableMetadata& metadata) {

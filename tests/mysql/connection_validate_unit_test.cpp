@@ -9,6 +9,9 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "mysql/connection.h"
 #include "mysql_test_helpers.h"
@@ -77,10 +80,10 @@ TEST(ConnectionValidateIntegrationTest, ValidatesRealKeyMetadataAndEncodesInputs
   const std::string quoted_table = "`" + table + "`";
   auto cleanup = utils::ScopeGuard([&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table); });
 
-  ASSERT_TRUE(
-      connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
-                               " (id BIGINT PRIMARY KEY, email VARCHAR(255) UNIQUE, part_a INT, part_b INT, plain INT,"
-                               " UNIQUE KEY pair_key (part_a, part_b)) ENGINE=InnoDB"));
+  ASSERT_TRUE(connection.ExecuteUpdate(
+      "CREATE TABLE " + quoted_table +
+      " (id BIGINT PRIMARY KEY, email VARCHAR(255) NOT NULL UNIQUE, part_a INT, part_b INT, plain INT,"
+      " UNIQUE KEY pair_key (part_a, part_b)) ENGINE=InnoDB"));
 
   EXPECT_TRUE(connection.ValidateUniqueColumn(config.database, table, "id"));
   EXPECT_TRUE(connection.ValidateUniqueColumn(config.database, table, "email"));
@@ -117,9 +120,10 @@ TEST(ConnectionValidateIntegrationTest, CompositePrimaryKeyColumnIsRejected) {
   const std::string quoted_table = "`" + table + "`";
   auto cleanup = utils::ScopeGuard([&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table); });
 
-  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
-                                       " (tenant INT, id BIGINT, email VARCHAR(255) UNIQUE, PRIMARY KEY (tenant, id))"
-                                       " ENGINE=InnoDB"));
+  ASSERT_TRUE(
+      connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
+                               " (tenant INT, id BIGINT, email VARCHAR(255) NOT NULL UNIQUE, PRIMARY KEY (tenant, id))"
+                               " ENGINE=InnoDB"));
 
   // Rows sharing one part of a composite key would collapse into one document.
   for (const std::string& column : {"tenant", "id"}) {
@@ -128,6 +132,102 @@ TEST(ConnectionValidateIntegrationTest, CompositePrimaryKeyColumnIsRejected) {
     EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLDuplicateColumn) << column;
   }
   EXPECT_TRUE(connection.ValidateUniqueColumn(config.database, table, "email"));
+}
+
+TEST(ConnectionValidateIntegrationTest, NullableUniqueColumnIsRejected) {
+  if (!testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+
+  const auto config = testing::GetMySQLTestConfig();
+  Connection connection(config);
+  auto connect = connection.Connect("validate-nullable-unique-integration-test");
+  ASSERT_TRUE(connect) << connect.error().message();
+
+  const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
+  const std::string table = "validate_nullable_unique_" + suffix;
+  const std::string quoted_table = "`" + table + "`";
+  auto cleanup = utils::ScopeGuard([&]() { (void)connection.ExecuteUpdate("DROP TABLE IF EXISTS " + quoted_table); });
+
+  ASSERT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + quoted_table +
+                                       " (id BIGINT PRIMARY KEY, nullable_key VARCHAR(64) UNIQUE,"
+                                       " required_key VARCHAR(64) NOT NULL UNIQUE) ENGINE=InnoDB"));
+
+  auto nullable = connection.ValidateUniqueColumn(config.database, table, "nullable_key");
+  ASSERT_FALSE(nullable);
+  EXPECT_EQ(nullable.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);
+  EXPECT_THAT(nullable.error().message(), ::testing::HasSubstr("allows NULL"));
+  EXPECT_TRUE(connection.ValidateUniqueColumn(config.database, table, "required_key"));
+}
+
+TEST(ConnectionValidateIntegrationTest, SessionPinsSqlModeAndIsolation) {
+  if (!testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+
+  Connection connection(testing::GetMySQLTestConfig());
+  auto connect = connection.Connect("validate-session-pin-integration-test");
+  ASSERT_TRUE(connect) << connect.error().message();
+
+  auto mode = connection.Execute("SELECT @@SESSION.sql_mode");
+  ASSERT_TRUE(mode) << mode.error().message();
+  MYSQL_ROW row = mysql_fetch_row(mode->get());
+  ASSERT_NE(row, nullptr);
+  EXPECT_STREQ(row[0], "");
+
+  auto snapshot = connection.StartConsistentSnapshot();
+  ASSERT_TRUE(snapshot) << snapshot.error().message();
+  // The variable is tx_isolation before MySQL 5.7.20 / MariaDB 11.1.
+  auto isolation =
+      connection.Execute("SHOW SESSION VARIABLES WHERE Variable_name IN ('transaction_isolation', 'tx_isolation')");
+  ASSERT_TRUE(isolation) << isolation.error().message();
+  row = mysql_fetch_row(isolation->get());
+  ASSERT_NE(row, nullptr);
+  EXPECT_STREQ(row[1], "REPEATABLE-READ");
+  EXPECT_TRUE(connection.ExecuteUpdate("ROLLBACK"));
+}
+
+TEST(ConnectionValidateIntegrationTest, LowerCaseTableNamesIsReadAsAnInteger) {
+  if (!testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+
+  Connection connection(testing::GetMySQLTestConfig());
+  auto connect = connection.Connect("validate-lctn-integration-test");
+  ASSERT_TRUE(connect) << connect.error().message();
+
+  auto value = connection.GetLowerCaseTableNames();
+  ASSERT_TRUE(value) << value.error().message();
+  EXPECT_GE(*value, 0);
+  EXPECT_LE(*value, 2);
+}
+
+TEST(ConnectionValidateUnitTest, SnapshotStatusNeedsFileAndPosition) {
+  using internal::ParseBinlogSnapshotStatus;
+  using Rows = std::vector<std::pair<std::string, std::string>>;
+
+  auto parsed = ParseBinlogSnapshotStatus(
+      Rows{{"Binlog_snapshot_file", "mariadb-bin.000003"}, {"Binlog_snapshot_position", "4096"}});
+  ASSERT_TRUE(parsed) << parsed.error().message();
+  EXPECT_EQ(parsed->file, "mariadb-bin.000003");
+  EXPECT_EQ(parsed->offset, 4096U);
+
+  // Variable names are matched case-insensitively and in any order.
+  auto reordered =
+      ParseBinlogSnapshotStatus(Rows{{"binlog_snapshot_position", "512"}, {"BINLOG_SNAPSHOT_FILE", "b.000001"}});
+  ASSERT_TRUE(reordered) << reordered.error().message();
+  EXPECT_EQ(reordered->offset, 512U);
+  EXPECT_EQ(reordered->file, "b.000001");
+
+  // Anything missing, empty or malformed fails closed (binary log disabled, old server, proxy).
+  for (const Rows& rows : {Rows{}, Rows{{"Binlog_snapshot_file", "b.000001"}}, Rows{{"Binlog_snapshot_position", "4"}},
+                           Rows{{"Binlog_snapshot_file", ""}, {"Binlog_snapshot_position", "4"}},
+                           Rows{{"Binlog_snapshot_file", "b.000001"}, {"Binlog_snapshot_position", "abc"}},
+                           Rows{{"Binlog_snapshot_file", "b.000001"}, {"Binlog_snapshot_position", ""}}}) {
+    auto failed = ParseBinlogSnapshotStatus(rows);
+    ASSERT_FALSE(failed);
+    EXPECT_EQ(failed.error().code(), mygram::utils::ErrorCode::kMySQLBinlogError);
+  }
 }
 
 /**

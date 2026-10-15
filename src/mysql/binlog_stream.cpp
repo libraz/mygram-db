@@ -8,16 +8,29 @@
 #ifdef USE_MYSQL
 
 #include "mysql/binlog_reader_internal.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::mysql {
 
-BinlogFetchResult::Status ClassifyFetchError(unsigned int err_no) {
+bool IsPurgedPositionError(unsigned int err_no, std::string_view server_message) {
+  if (err_no != kMySQLErrBinlogPurged) {
+    return false;
+  }
+  // 1236 is the source's catch-all for fatal dump errors, so the text decides.
+  const std::string message = mygram::utils::ToLower(std::string(server_message));
+  return message.find("purged binary logs containing gtids") != std::string::npos ||
+         message.find("purged required binary logs") != std::string::npos ||
+         message.find("binlog files have been purged") != std::string::npos;
+}
+
+BinlogFetchResult::Status ClassifyFetchError(unsigned int err_no, std::string_view server_message) {
+  if (IsPurgedPositionError(err_no, server_message)) {
+    return BinlogFetchResult::Status::kBinlogPurged;
+  }
   switch (err_no) {
     case kMySQLErrServerLost:
       return BinlogFetchResult::Status::kConnectionLost;
-    case kMySQLErrBinlogPurged:
-      return BinlogFetchResult::Status::kBinlogPurged;
     case kMySQLErrGoneAway:
     case kMySQLErrServerLostExtended:
     case kMySQLErrServerShutdown:
@@ -48,7 +61,7 @@ BinlogFetchResult FetchBinlogEvent(Connection& conn, MYSQL_RPL& rpl, std::string
     result.error_message =
         std::string(error_prefix) + ": " + std::string(err_str) + " (errno: " + std::to_string(err_no) + ")";
 
-    result.status = ClassifyFetchError(err_no);
+    result.status = ClassifyFetchError(err_no, err_str);
     return result;
   }
 

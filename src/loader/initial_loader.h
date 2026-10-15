@@ -82,9 +82,10 @@ class InitialLoader {
   /**
    * @brief Load initial data from MySQL with consistent GTID
    *
-   * Captures a conservative GTID lower bound, then uses
-   * START TRANSACTION WITH CONSISTENT SNAPSHOT for data consistency.
-   * Commits between those steps may be replayed, but are never skipped.
+   * Opens a consistent snapshot through Connection::StartConsistentSnapshot.
+   * On MySQL the GTID is a lower bound read before the snapshot, so commits in
+   * between may be replayed but are never skipped; on MariaDB it is the exact
+   * position of the snapshot.
    *
    * @param progress_callback Optional progress callback
    * @return Expected<void, Error> on success or error
@@ -95,8 +96,8 @@ class InitialLoader {
   /**
    * @brief Load initial data using an already-open consistent snapshot.
    *
-   * The caller must have captured snapshot_gtid before executing
-   * START TRANSACTION WITH CONSISTENT SNAPSHOT on the shared connection.
+   * The caller must have obtained snapshot_gtid from
+   * Connection::StartConsistentSnapshot on the shared connection.
    * This method does not COMMIT on success; the caller owns the transaction.
    */
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadFromExistingSnapshot(
@@ -105,9 +106,10 @@ class InitialLoader {
   /**
    * @brief Get GTID captured at load time
    *
-   * This GTID is a safe lower bound captured before the snapshot.
-   * Binlog replication should start from this GTID; commits that raced with
-   * snapshot creation can be replayed but cannot be skipped.
+   * Binlog replication should start from this GTID. On MySQL it is a lower
+   * bound captured before the snapshot, so commits that raced with snapshot
+   * creation can be replayed but cannot be skipped; on MariaDB it is the exact
+   * snapshot position.
    *
    * @return GTID string or empty if not available
    */
@@ -129,10 +131,8 @@ class InitialLoader {
    */
   bool IsCancelled() const { return cancelled_; }
 
-  /** Test seam between conservative GTID capture and snapshot creation. */
-  void SetAfterGtidCaptureHookForTest(std::function<void()> hook) {
-    after_gtid_capture_hook_for_test_ = std::move(hook);
-  }
+  /** Test seam called immediately before the consistent snapshot starts. */
+  void SetBeforeSnapshotHookForTest(std::function<void()> hook) { before_snapshot_hook_for_test_ = std::move(hook); }
 
  private:
   friend struct internal::InitialLoaderTestAccess;
@@ -149,7 +149,7 @@ class InitialLoader {
   std::atomic<uint64_t> processed_rows_{0};
   std::atomic<bool> cancelled_{false};
   std::string start_gtid_;  // GTID captured at load time
-  std::function<void()> after_gtid_capture_hook_for_test_;
+  std::function<void()> before_snapshot_hook_for_test_;
 
   [[nodiscard]] mygram::utils::Expected<void, mygram::utils::Error> LoadInternal(
       const ProgressCallback& progress_callback, bool manage_transaction, const std::string* existing_snapshot_gtid);

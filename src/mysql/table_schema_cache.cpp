@@ -1,6 +1,6 @@
 /**
  * @file table_schema_cache.cpp
- * @brief Reader-thread owner of TABLE_MAP metadata and SHOW COLUMNS definitions
+ * @brief Reader-thread owner of TABLE_MAP metadata
  */
 
 #include "mysql/table_schema_cache.h"
@@ -12,7 +12,6 @@ namespace mygramdb::mysql {
 void TableSchemaCache::Reset() {
   table_maps_.Clear();
   suppressed_table_ids_.clear();
-  columns_.clear();
 }
 
 TableMetadataCache::AddResult TableSchemaCache::RecordTableMap(const TableMetadata& metadata) {
@@ -34,28 +33,6 @@ void TableSchemaCache::RecordUnmonitoredTableMap(uint64_t table_id) {
 
 bool TableSchemaCache::IsSuppressed(uint64_t table_id) const {
   return suppressed_table_ids_.find(table_id) != suppressed_table_ids_.end();
-}
-
-const std::vector<TableSchemaCache::ColumnDefinition>* TableSchemaCache::FindColumns(const std::string& database,
-                                                                                     const std::string& table) const {
-  auto iter = columns_.find({database, table});
-  return iter == columns_.end() ? nullptr : &iter->second;
-}
-
-void TableSchemaCache::StoreColumns(const std::string& database, const std::string& table,
-                                    std::vector<ColumnDefinition> columns) {
-  columns_[{database, table}] = std::move(columns);
-}
-
-void TableSchemaCache::InvalidateColumns(std::string_view database, std::string_view table) {
-  for (auto iter = columns_.begin(); iter != columns_.end();) {
-    const auto& [cached_database, cached_table] = iter->first;
-    if (cached_table == table && (database.empty() || cached_database == database)) {
-      iter = columns_.erase(iter);
-    } else {
-      ++iter;
-    }
-  }
 }
 
 }  // namespace mygramdb::mysql

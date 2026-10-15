@@ -9,8 +9,10 @@
 
 #include <mysql.h>
 
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "mysql/column_type_support.h"
 #include "mysql/connection.h"
@@ -163,7 +165,103 @@ std::string Field(MYSQL_ROW row, unsigned long* lengths, size_t index) {
 
 bool SameColumn(const DDLColumnMetadata& lhs, const DDLColumnMetadata& rhs) {
   return lhs.name == rhs.name && lhs.column_type == rhs.column_type && lhs.collation == rhs.collation &&
-         lhs.nullable == rhs.nullable;
+         lhs.nullable == rhs.nullable && lhs.generation_kind == rhs.generation_kind &&
+         lhs.generation_expression == rhs.generation_expression;
+}
+
+/// Fill generation_kind/generation_expression from information_schema.COLUMNS. SHOW COLUMNS
+/// reports neither, yet MODIFY ... AS (expr) STORED rewrites values without any row event.
+Expected<void, Error> CaptureGeneratedColumns(Connection& connection, const config::TableConfig& table_config,
+                                              std::vector<DDLColumnMetadata>& columns) {
+  const std::string query =
+      "SELECT COLUMN_NAME, GENERATION_EXPRESSION, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = " +
+      mygramdb::utils::EncodeMySQLStringLiteral(table_config.database) +
+      " AND TABLE_NAME = " + mygramdb::utils::EncodeMySQLStringLiteral(table_config.name);
+  auto result = connection.Execute(query);
+  if (!result) {
+    return MakeUnexpected(result.error());
+  }
+
+  std::unordered_map<std::string, std::pair<std::string, std::string>> generated;
+  MYSQL_ROW row = nullptr;
+  while ((row = mysql_fetch_row(result->get())) != nullptr) {
+    unsigned long* lengths = mysql_fetch_lengths(result->get());
+    if (lengths == nullptr) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLQueryFailed,
+                    "Failed to read schema field lengths for '" + config::QualifiedTableName(table_config) + "'"));
+    }
+    generated.emplace(
+        Field(row, lengths, 0),
+        std::make_pair(DDLSchemaValidator::GenerationKindFromExtra(Field(row, lengths, 2)), Field(row, lengths, 1)));
+  }
+
+  for (auto& column : columns) {
+    auto it = generated.find(column.name);
+    if (it == generated.end()) {
+      // The column vanished between the two statements: a DDL is in flight.
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Column '" + column.name + "' of '" +
+                                                                        config::QualifiedTableName(table_config) +
+                                                                        "' changed while its schema was being read"));
+    }
+    column.generation_kind = it->second.first;
+    column.generation_expression = it->second.second;
+  }
+  return {};
+}
+
+/// Reject a child-side foreign key whose cascade InnoDB applies without a row event.
+Expected<void, Error> ValidateNoCascadingForeignKeys(Connection& connection, const config::TableConfig& table_config) {
+  const std::string table_name = config::QualifiedTableName(table_config);
+  const std::string query =
+      "SELECT CONSTRAINT_NAME, UPDATE_RULE, DELETE_RULE FROM information_schema.REFERENTIAL_CONSTRAINTS "
+      "WHERE CONSTRAINT_SCHEMA = " +
+      mygramdb::utils::EncodeMySQLStringLiteral(table_config.database) +
+      " AND TABLE_NAME = " + mygramdb::utils::EncodeMySQLStringLiteral(table_config.name);
+  auto result = connection.Execute(query);
+  if (!result) {
+    return MakeUnexpected(result.error());
+  }
+
+  std::string cascading;
+  MYSQL_ROW row = nullptr;
+  while ((row = mysql_fetch_row(result->get())) != nullptr) {
+    unsigned long* lengths = mysql_fetch_lengths(result->get());
+    if (lengths == nullptr) {
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLQueryFailed, "Failed to read foreign key field lengths for '" + table_name + "'"));
+    }
+    const std::string update_rule = Field(row, lengths, 1);
+    const std::string delete_rule = Field(row, lengths, 2);
+    if (DDLSchemaValidator::IsRowRewritingReferentialRule(update_rule) ||
+        DDLSchemaValidator::IsRowRewritingReferentialRule(delete_rule)) {
+      cascading += (cascading.empty() ? "" : ", ") + Field(row, lengths, 0) + " (ON UPDATE " + update_rule +
+                   ", ON DELETE " + delete_rule + ")";
+    }
+  }
+  if (cascading.empty()) {
+    return {};
+  }
+
+  // With SQL-layer foreign keys (MySQL 9.x, innodb_native_foreign_keys=OFF) the
+  // server writes a row event for every child row a cascade touches.
+  auto native = connection.Execute("SHOW GLOBAL VARIABLES LIKE 'innodb_native_foreign_keys'");
+  if (!native) {
+    return MakeUnexpected(native.error());
+  }
+  MYSQL_ROW native_row = mysql_fetch_row(native->get());
+  if (native_row != nullptr && native_row[1] != nullptr &&
+      (mygram::utils::EqualsAsciiCaseInsensitive(native_row[1], "OFF") || std::string_view(native_row[1]) == "0")) {
+    return {};
+  }
+
+  return MakeUnexpected(
+      MakeError(ErrorCode::kMySQLInvalidSchema,
+                "Table '" + table_name + "' is the child of foreign keys that cascade: " + cascading +
+                    ". InnoDB applies these changes without writing row events, so the index would silently diverge. "
+                    "Use ON UPDATE/ON DELETE NO ACTION or RESTRICT on a monitored table, or run MySQL 9.x with "
+                    "innodb_native_foreign_keys=OFF",
+                table_name));
 }
 
 }  // namespace
@@ -193,12 +291,18 @@ Expected<ConfiguredTableSchema, Error> DDLSchemaValidator::Capture(Connection& c
                     "Failed to read schema field lengths for '" + config::QualifiedTableName(table_config) + "'"));
     }
     columns.push_back({Field(row, lengths, 0), Field(row, lengths, 1), Field(row, lengths, 2),
-                       Field(row, lengths, 3) == "YES", Field(row, lengths, 4)});
+                       Field(row, lengths, 3) == "YES", Field(row, lengths, 4), "", ""});
+  }
+  if (auto generated = CaptureGeneratedColumns(connection, table_config, columns); !generated) {
+    return MakeUnexpected(generated.error());
   }
 
   auto unique = connection.ValidateUniqueColumn(table_config.database, table_config.name, table_config.primary_key);
   if (!unique) {
     return MakeUnexpected(unique.error());
+  }
+  if (auto foreign_keys = ValidateNoCascadingForeignKeys(connection, table_config); !foreign_keys) {
+    return MakeUnexpected(foreign_keys.error());
   }
   return ValidateMetadata(table_config, columns, true);
 }
@@ -220,6 +324,16 @@ Expected<ConfiguredTableSchema, Error> DDLSchemaValidator::ValidateMetadata(
       return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
                                       "Duplicate column metadata for '" + column.name + "' in '" + table_name + "'",
                                       table_name));
+    }
+  }
+
+  // Every column is sized from the row event, configured or not.
+  for (const auto& column : columns) {
+    const std::string unsizable = UnsizableColumnTypeReason(column.column_type);
+    if (!unsizable.empty()) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
+                                      "Column '" + column.name + "' in '" + table_name + "' uses " + unsizable,
+                                      table_name + "." + column.name));
     }
   }
 
@@ -266,6 +380,22 @@ Expected<ConfiguredTableSchema, Error> DDLSchemaValidator::ValidateMetadata(
     }
   }
   return schema;
+}
+
+bool DDLSchemaValidator::IsRowRewritingReferentialRule(const std::string& rule) {
+  return !rule.empty() && !mygram::utils::EqualsAsciiCaseInsensitive(rule, "NO ACTION") &&
+         !mygram::utils::EqualsAsciiCaseInsensitive(rule, "RESTRICT");
+}
+
+std::string DDLSchemaValidator::GenerationKindFromExtra(const std::string& extra) {
+  const std::string lower = Lower(extra);
+  if (lower.find("stored generated") != std::string::npos) {
+    return "STORED";
+  }
+  if (lower.find("virtual generated") != std::string::npos) {
+    return "VIRTUAL";
+  }
+  return {};
 }
 
 Expected<void, Error> DDLSchemaValidator::Compare(const ConfiguredTableSchema& expected,

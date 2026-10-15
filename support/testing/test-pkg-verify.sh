@@ -354,6 +354,7 @@ else
         --enforce-gtid-consistency=ON \
         --binlog-format=ROW \
         --binlog-row-image=FULL \
+        --binlog-row-metadata=FULL \
         --character-set-server=utf8mb4 \
         --collation-server=utf8mb4_unicode_ci \
         --mysql-native-password=ON \

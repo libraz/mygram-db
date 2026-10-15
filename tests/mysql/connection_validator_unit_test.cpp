@@ -178,16 +178,74 @@ TEST(ConnectionValidatorUnitTest, MariaDBCompressedEventsAreExplicitlyFailClosed
 }
 
 TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsOnlyTaggedEntries) {
+  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid(""));
   EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1"));
   EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-3:5-7"));
   EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid(
       "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:2-4"));
 
   EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:my-tag:100"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10::100"));
   EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid(
       "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:tag:2"));
+}
+
+TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsATagAfterUntaggedIntervals) {
+  // MySQL 8.4 prints the untagged intervals first, then each tag with its own.
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-100:tag:1-5"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-3:5-7:tag:9"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:tag_a:1-5:other:7"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-9:TAG:1"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid(
+      "01020304-0506-0708-090a-0b0c0d0e0f10:1-9,11111111-2222-3333-4444-555555555555:5:tag:1-2"));
+}
+
+TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidTreatsUnparseableSetAsTagged) {
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:my-tag:100"));
+  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("not-a-gtid"));
+}
+
+TEST(ConnectionValidatorUnitTest, BinlogRowMetadataMustBeFull) {
+  EXPECT_TRUE(ConnectionValidator::IsSupportedBinlogRowMetadataValue("FULL"));
+  EXPECT_TRUE(ConnectionValidator::IsSupportedBinlogRowMetadataValue("full"));
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogRowMetadataValue("MINIMAL"));
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogRowMetadataValue("NO_LOG"));
+  EXPECT_FALSE(ConnectionValidator::IsSupportedBinlogRowMetadataValue(""));
+}
+
+TEST(ConnectionValidatorUnitTest, BinlogStorageEngineIsEnabledOnlyWhenItNamesAnEngine) {
+  EXPECT_FALSE(ConnectionValidator::IsBinlogStorageEngineEnabled(""));
+  EXPECT_FALSE(ConnectionValidator::IsBinlogStorageEngineEnabled("  "));
+  EXPECT_TRUE(ConnectionValidator::IsBinlogStorageEngineEnabled("innodb"));
+}
+
+TEST(ConnectionValidatorUnitTest, MariaDBReplicaRoleComesFromGtidSlavePos) {
+  EXPECT_FALSE(ConnectionValidator::HasAppliedReplicatedGtids(""));
+  EXPECT_FALSE(ConnectionValidator::HasAppliedReplicatedGtids("  "));
+  EXPECT_TRUE(ConnectionValidator::HasAppliedReplicatedGtids("0-1-100"));
+  EXPECT_TRUE(ConnectionValidator::HasAppliedReplicatedGtids("0-1-100,1-2-5"));
+}
+
+TEST(ConnectionValidatorUnitTest, ReplicaMustLogReplicatedWrites) {
+  using mygram::utils::ErrorCode;
+
+  // A server that is not a replica needs no setting.
+  EXPECT_TRUE(ConnectionValidator::EvaluateLogReplicaUpdates(ServerFlavor::kMySQL, false, std::nullopt).has_value());
+  EXPECT_TRUE(ConnectionValidator::EvaluateLogReplicaUpdates(ServerFlavor::kMariaDB, false, "OFF").has_value());
+
+  EXPECT_TRUE(ConnectionValidator::EvaluateLogReplicaUpdates(ServerFlavor::kMySQL, true, "ON").has_value());
+  EXPECT_TRUE(ConnectionValidator::EvaluateLogReplicaUpdates(ServerFlavor::kMariaDB, true, "ON").has_value());
+
+  auto mysql_off = ConnectionValidator::EvaluateLogReplicaUpdates(ServerFlavor::kMySQL, true, "OFF");
+  ASSERT_FALSE(mysql_off.has_value());
+  EXPECT_EQ(mysql_off.error().code(), ErrorCode::kMySQLBinlogError);
+  EXPECT_NE(mysql_off.error().message().find("log_replica_updates=OFF"), std::string::npos);
+
+  auto mariadb_off = ConnectionValidator::EvaluateLogReplicaUpdates(ServerFlavor::kMariaDB, true, "OFF");
+  ASSERT_FALSE(mariadb_off.has_value());
+  EXPECT_NE(mariadb_off.error().message().find("log_slave_updates=OFF"), std::string::npos);
+
+  // A replica whose setting cannot be read fails closed.
+  EXPECT_FALSE(ConnectionValidator::EvaluateLogReplicaUpdates(ServerFlavor::kMySQL, true, std::nullopt).has_value());
 }
 
 /**

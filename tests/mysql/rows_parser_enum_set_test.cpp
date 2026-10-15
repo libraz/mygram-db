@@ -245,7 +245,7 @@ TEST_F(EnumSetDecodeTest, StringEncodedEnumReadsConfiguredPackLength) {
   auto result = DecodeFieldValue(254, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "769");
-  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata), 2U);
+  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata, end), 2U);
 }
 
 TEST_F(EnumSetDecodeTest, StringEncodedSetReadsEightBytePackLength) {
@@ -257,7 +257,7 @@ TEST_F(EnumSetDecodeTest, StringEncodedSetReadsEightBytePackLength) {
   auto result = DecodeFieldValue(254, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, std::to_string(expected));
-  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata), 8U);
+  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata, end), 8U);
 }
 
 TEST_F(EnumSetDecodeTest, StringEncodedEnumReportsTruncatedPackLength) {
@@ -300,7 +300,7 @@ TEST_F(EnumSetDecodeTest, TinyMediumAndLongBlobTypesFallbackToBlobDecoder) {
     auto result = DecodeFieldValue(249, data, 0, false, end, false);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, "abc");
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(249, data, 0), 4U);
+    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(249, data, 0, end), 4U);
   }
   {
     unsigned char data[] = {3, 0, 0, 'd', 'e', 'f'};
@@ -308,7 +308,7 @@ TEST_F(EnumSetDecodeTest, TinyMediumAndLongBlobTypesFallbackToBlobDecoder) {
     auto result = DecodeFieldValue(250, data, 0, false, end, false);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, "def");
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(250, data, 0), 6U);
+    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(250, data, 0, end), 6U);
   }
   {
     unsigned char data[] = {3, 0, 0, 0, 'g', 'h', 'i'};
@@ -316,7 +316,7 @@ TEST_F(EnumSetDecodeTest, TinyMediumAndLongBlobTypesFallbackToBlobDecoder) {
     auto result = DecodeFieldValue(251, data, 0, false, end, false);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, "ghi");
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(251, data, 0), 7U);
+    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(251, data, 0, end), 7U);
   }
 }
 

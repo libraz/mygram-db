@@ -23,6 +23,7 @@
 ## 含まれるもの
 
 - GTID ベースの MySQL 8.4+/9.x、MariaDB 10.11+/11.x/12.x レプリケーション
+- ソースサーバーの設定: `binlog_format=ROW`、`binlog_row_image=FULL`、`binlog_row_metadata=FULL`、`binlog_checksum=CRC32`。ソース自身がレプリカの場合は `log_replica_updates`（MariaDB は `log_slave_updates`）も ON
 - TCP プロトコル、HTTP API、C/C++ クライアントライブラリ
 - 複数テーブルの index、runtime configuration、DUMP save/load、設定済み MySQL 接続先への自動再接続
 - CJK を含む多言語テキストの ICU 正規化

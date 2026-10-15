@@ -171,8 +171,12 @@ class Decoder {
   explicit Decoder(size_t max_output_bytes) : max_output_bytes_(max_output_bytes) {}
 
   Expected<std::string, Error> Decode(const unsigned char* data, size_t size) {
-    if (data == nullptr || size == 0) {
-      return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Binary JSON value is empty"));
+    // An empty document is stored by IGNORE and non-strict inserts of NULL; the server reads it as JSON null.
+    if (size == 0) {
+      return std::string("null");
+    }
+    if (data == nullptr) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLFieldTruncated, "Binary JSON value is missing"));
     }
     std::string output;
     auto result = DecodeValue(data[0], data + 1, size - 1, 0, output);

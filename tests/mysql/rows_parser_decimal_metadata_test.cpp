@@ -174,6 +174,42 @@ TEST(RowsParserDecimalMetadataTest, WellFormedDecimalStillParses) {
   EXPECT_EQ("1234.56", result->front().GetColumnValue("col_1"));
 }
 
+TEST(RowsParserDecimalMetadataTest, MariaDbScaleAboveThirtyKeepsTheRowStreamAligned) {
+  // MariaDB allows DECIMAL(50,35): 15 integer digits take 7 bytes, 35 fractional digits take 16.
+  auto table_map = BuildDecimalTableMap(/*precision=*/50, /*scale=*/35);
+  auto metadata = BinlogEventParser::ParseTableMapEvent(table_map.data(), table_map.size());
+  ASSERT_TRUE(metadata.has_value());
+
+  std::vector<uint8_t> decimal_body(23, 0x00);
+  decimal_body[0] = 0x80;  // positive zero
+  auto event = BuildDecimalWriteRows(/*key=*/7, decimal_body);
+
+  for (const bool decode_decimal : {false, true}) {
+    RetainedColumns retained;
+    retained.by_ordinal = {true, decode_decimal};
+    auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
+                                      MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+
+    ASSERT_TRUE(result.has_value()) << result.error().message();
+    ASSERT_EQ(1U, result->size());
+    EXPECT_EQ("7", result->front().primary_key);
+  }
+}
+
+TEST(RowsParserDecimalMetadataTest, ScaleAboveThirtyEightIsStillRejected) {
+  auto table_map = BuildDecimalTableMap(/*precision=*/60, /*scale=*/39);
+  auto metadata = BinlogEventParser::ParseTableMapEvent(table_map.data(), table_map.size());
+  ASSERT_TRUE(metadata.has_value());
+
+  auto event = BuildDecimalWriteRows(/*key=*/7, std::vector<uint8_t>(30, 0x80));
+
+  auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
+                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, nullptr);
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(ErrorCode::kMySQLInvalidMetadata, result.error().code());
+}
+
 }  // namespace
 
 #endif  // USE_MYSQL

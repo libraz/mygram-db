@@ -27,6 +27,7 @@
 #include "utils/gtid_grammar.h"
 #include "utils/numeric_parse.h"
 #include "utils/sql_utils.h"
+#include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic) - UUID binary parsing
@@ -83,6 +84,31 @@ mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_er
     default:
       return mygram::utils::ErrorCode::kMySQLQueryFailed;
   }
+}
+
+mygram::utils::Expected<internal::BinlogSnapshotPosition, mygram::utils::Error> internal::ParseBinlogSnapshotStatus(
+    const std::vector<std::pair<std::string, std::string>>& status_rows) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  BinlogSnapshotPosition position;
+  std::optional<uint64_t> offset;
+  for (const auto& [name, value] : status_rows) {
+    if (mygram::utils::EqualsAsciiCaseInsensitive(name, "Binlog_snapshot_file")) {
+      position.file = value;
+    } else if (mygram::utils::EqualsAsciiCaseInsensitive(name, "Binlog_snapshot_position")) {
+      offset = mygram::utils::ParseNumeric<uint64_t>(value);
+    }
+  }
+  if (position.file.empty() || !offset.has_value()) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLBinlogError,
+                  "Binlog_snapshot_file/Binlog_snapshot_position are unavailable; cannot determine "
+                  "the replication position of the consistent snapshot (is the binary log enabled?)"));
+  }
+  position.offset = *offset;
+  return position;
 }
 
 // GTID implementation
@@ -294,6 +320,19 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     Close();
     return MakeUnexpected(
         MakeError(ErrorCode::kMySQLConnectionFailed, "Failed to set MySQL session time_zone to UTC: " + error));
+  }
+
+  // PAD_CHAR_TO_FULL_LENGTH makes the snapshot return CHAR values padded to the
+  // declared width while the binlog row image strips the padding, so a CHAR key
+  // would diverge between the two paths. An empty mode also keeps ANSI_QUOTES,
+  // NO_BACKSLASH_ESCAPES and the other parsing modes off; every query issued
+  // here quotes identifiers with backticks and encodes literals as hex.
+  if (mysql_query(mysql_, "SET SESSION sql_mode = ''") != 0) {
+    const std::string error = GetMySQLErrorMessage();
+    mygram::utils::StructuredLog().Event("mysql_session_sql_mode_error").Field("error", error).Error();
+    Close();
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLConnectionFailed, "Failed to set MySQL session sql_mode: " + error));
   }
 
   // Set session timeout to prevent disconnection during long-running operations
@@ -574,6 +613,81 @@ mygram::utils::Expected<std::string, mygram::utils::Error> Connection::CaptureSn
   return result;
 }
 
+mygram::utils::Expected<std::string, mygram::utils::Error> Connection::CaptureMariaDBSnapshotGTID() {
+  using mygram::utils::MakeUnexpected;
+
+  auto status = Execute("SHOW STATUS LIKE 'binlog_snapshot_%'");
+  if (!status) {
+    return MakeUnexpected(status.error());
+  }
+  std::vector<std::pair<std::string, std::string>> status_rows;
+  while (MYSQL_ROW row = mysql_fetch_row(status->get())) {
+    if (row[0] != nullptr && row[1] != nullptr) {
+      status_rows.emplace_back(row[0], row[1]);
+    }
+  }
+  auto position = internal::ParseBinlogSnapshotStatus(status_rows);
+  if (!position) {
+    return MakeUnexpected(position.error());
+  }
+
+  auto gtid_result = Execute("SELECT BINLOG_GTID_POS(" + mygram::utils::EncodeMySQLStringLiteral(position->file) +
+                             ", " + std::to_string(position->offset) + ")");
+  if (!gtid_result) {
+    return MakeUnexpected(gtid_result.error());
+  }
+  MYSQL_ROW gtid_row = mysql_fetch_row(gtid_result->get());
+  if (gtid_row == nullptr || gtid_row[0] == nullptr) {
+    return MakeUnexpected(
+        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
+                                 "BINLOG_GTID_POS returned no position for the snapshot binlog position " +
+                                     position->file + ":" + std::to_string(position->offset)));
+  }
+  std::string gtid(gtid_row[0]);
+  gtid.erase(std::remove_if(gtid.begin(), gtid.end(), [](unsigned char chr) { return std::isspace(chr); }), gtid.end());
+  return gtid;
+}
+
+mygram::utils::Expected<std::string, mygram::utils::Error> Connection::StartConsistentSnapshot(
+    const std::function<void()>& before_snapshot_hook) {
+  using mygram::utils::MakeUnexpected;
+
+  // The same level mysqldump pins: a global READ UNCOMMITTED reads uncommitted
+  // rows and SERIALIZABLE takes shared locks on every row it scans.
+  if (auto isolation = ExecuteUpdate("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"); !isolation) {
+    return MakeUnexpected(isolation.error());
+  }
+
+  constexpr const char* kStartSnapshot = "START TRANSACTION WITH CONSISTENT SNAPSHOT";
+
+  if (flavor_ == ServerFlavor::kMariaDB) {
+    if (before_snapshot_hook) {
+      before_snapshot_hook();
+    }
+    if (auto started = ExecuteUpdate(kStartSnapshot); !started) {
+      return MakeUnexpected(started.error());
+    }
+    auto gtid = CaptureMariaDBSnapshotGTID();
+    if (!gtid) {
+      static_cast<void>(ExecuteUpdate("ROLLBACK"));
+      return MakeUnexpected(gtid.error());
+    }
+    return gtid;
+  }
+
+  auto lower_bound = CaptureSnapshotLowerBoundGTID();
+  if (!lower_bound) {
+    return MakeUnexpected(lower_bound.error());
+  }
+  if (before_snapshot_hook) {
+    before_snapshot_hook();
+  }
+  if (auto started = ExecuteUpdate(kStartSnapshot); !started) {
+    return MakeUnexpected(started.error());
+  }
+  return lower_bound;
+}
+
 mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetPurgedGTID() {
   using mygram::utils::MakeUnexpected;
 
@@ -633,6 +747,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetServer
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
+  // MariaDB defines no server_uuid; server_id is the strongest identity it exposes.
   const char* query = (flavor_ == ServerFlavor::kMariaDB) ? "SELECT @@GLOBAL.server_id" : "SELECT @@GLOBAL.server_uuid";
   auto result = Execute(query);
   if (!result) {
@@ -652,6 +767,28 @@ mygram::utils::Expected<std::string, mygram::utils::Error> Connection::GetServer
 
   mygram::utils::StructuredLog().Event("mysql_debug").Field("action", "get_server_uuid").Field("uuid", uuid).Debug();
   return uuid;
+}
+
+mygram::utils::Expected<int, mygram::utils::Error> Connection::GetLowerCaseTableNames() {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  auto result = Execute("SELECT @@GLOBAL.lower_case_table_names");
+  if (!result) {
+    return MakeUnexpected(result.error());
+  }
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if ((row == nullptr) || (row[0] == nullptr)) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to fetch @@GLOBAL.lower_case_table_names"));
+  }
+  const auto value = mygram::utils::ParseNumeric<int>(row[0]);
+  constexpr int kMaxLowerCaseTableNames = 2;
+  if (!value.has_value() || *value < 0 || *value > kMaxLowerCaseTableNames) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLQueryFailed, std::string("Unexpected lower_case_table_names value: ") + row[0]));
+  }
+  return *value;
 }
 
 mygram::utils::Expected<bool, mygram::utils::Error> Connection::IsGTIDModeEnabled() {
@@ -887,6 +1024,30 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::ValidateUniqueCo
                                     "Column '" + column + "' in table '" + database + "." + table +
                                         "' must be a single-column PRIMARY KEY or UNIQUE KEY. "
                                         "Composite keys are not supported.",
+                                    database + "." + table + "." + column));
+  }
+
+  // A UNIQUE key admits NULL unless the column forbids it, and a NULL key value
+  // cannot identify a row in either ingest path.
+  const std::string nullable_query =
+      "SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = " + database_literal +
+      " AND TABLE_NAME = " + table_literal + " AND COLUMN_NAME = " + column_literal;
+  auto nullable_exp = Execute(nullable_query);
+  if (!nullable_exp) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed,
+                                    "Failed to query column nullability: " + nullable_exp.error().message(),
+                                    database + "." + table + "." + column));
+  }
+  MYSQL_ROW nullable_row = mysql_fetch_row(nullable_exp->get());
+  if ((nullable_row == nullptr) || (nullable_row[0] == nullptr)) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLQueryFailed, "Failed to fetch column nullability",
+                                    database + "." + table + "." + column));
+  }
+  if (mygram::utils::EqualsAsciiCaseInsensitive(nullable_row[0], "YES")) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidSchema,
+                                    "Column '" + column + "' in table '" + database + "." + table +
+                                        "' is a UNIQUE KEY that allows NULL. Declare it NOT NULL: a NULL key value "
+                                        "cannot identify a row.",
                                     database + "." + table + "." + column));
   }
 

@@ -84,6 +84,35 @@ class BinlogEventBuilder {
   }
 
   /**
+   * @brief Append an unsigned variable-length integer of the serialization framework.
+   *
+   * The byte count is 1 + ceil((bits-1)/7) for 1..63 significant bits and 9 for 64.
+   * The first byte holds (byte_count - 1) trailing one bits and the value's low bits
+   * above them; the remaining bytes carry the rest little-endian.
+   */
+  static inline void AppendSerializedVarlen(std::vector<uint8_t>& buf, uint64_t value) {
+    int bits = 0;
+    for (uint64_t rest = value; rest != 0; rest >>= 1) {
+      ++bits;
+    }
+    const int byte_count = ((bits * 575) >> 12) + 1;
+    buf.push_back(static_cast<uint8_t>(((1 << (byte_count - 1)) - 1) | static_cast<uint8_t>(value << byte_count)));
+    if (byte_count == 1) {
+      return;
+    }
+    uint64_t rest = value >> (8 - byte_count + ((byte_count + 7) >> 4));
+    for (int i = 0; i < byte_count - 1; ++i) {
+      buf.push_back(static_cast<uint8_t>((rest >> (i * 8)) & 0xFF));
+    }
+  }
+
+  /** @brief Append a signed variable-length integer: the sign in the low bit, a negative's complement above it. */
+  static inline void AppendSerializedVarlenSigned(std::vector<uint8_t>& buf, int64_t value) {
+    const uint64_t sign_mask = value < 0 ? ~uint64_t{0} : 0;
+    AppendSerializedVarlen(buf, ((static_cast<uint64_t>(value) ^ sign_mask) << 1) | (sign_mask & 1));
+  }
+
+  /**
    * @brief Append a bitmap as raw bytes (least-significant bit first).
    * @param bits Bitmask value
    * @param count Number of bits in the bitmap
@@ -189,6 +218,29 @@ class BinlogEventBuilder {
     buf.push_back(static_cast<uint8_t>(database.size()));
     AppendLittleEndian16(buf, 0);  // error_code
     AppendLittleEndian16(buf, 0);  // status_vars_len
+    buf.insert(buf.end(), database.begin(), database.end());
+    buf.push_back(0x00);
+    buf.insert(buf.end(), query.begin(), query.end());
+    AppendLittleEndian32(buf, 0);
+    FixEventSizeWithChecksum(buf);
+    return buf;
+  }
+
+  /**
+   * @brief Build a QUERY_EVENT carrying the given status variable bytes.
+   *
+   * @param status_vars Encoded status variables, each starting with its code byte
+   */
+  static inline std::vector<uint8_t> BuildQueryEventWithStatusVars(const std::string& database,
+                                                                   const std::string& query,
+                                                                   const std::vector<uint8_t>& status_vars) {
+    auto buf = BuildHeader(MySQLBinlogEventType::QUERY_EVENT);
+    AppendLittleEndian32(buf, 1);  // thread_id
+    AppendLittleEndian32(buf, 0);  // query_exec_time
+    buf.push_back(static_cast<uint8_t>(database.size()));
+    AppendLittleEndian16(buf, 0);  // error_code
+    AppendLittleEndian16(buf, static_cast<uint16_t>(status_vars.size()));
+    buf.insert(buf.end(), status_vars.begin(), status_vars.end());
     buf.insert(buf.end(), database.begin(), database.end());
     buf.push_back(0x00);
     buf.insert(buf.end(), query.begin(), query.end());
@@ -346,54 +398,39 @@ class BinlogEventBuilder {
   /**
    * @brief Build a GTID_TAGGED_LOG_EVENT (type 42, MySQL 8.4+).
    *
-   * Uses the MySQL 8.4 serialization framework format with field_id + type_id
-   * pairs. Fields:
-   * - Field 1 (COMMIT_GROUP_TICKET): 8 bytes
-   * - Field 2 (TSID): UUID(16B) + tag_len(1B) + tag_bytes
-   * - Field 3 (SPEC): GNO(8B)
-   * - Field 4 (COMMIT_TIMESTAMP): original(7B) + immediate(7B)
+   * The body is a serialization-framework message with no commit_flag byte:
+   * format version, message size and last non-ignorable field id, then fields
+   * each preceded by its id: 0 gtid_flags, 1 UUID (16 varlen bytes), 2 GNO (signed
+   * varlen), 3 tag (varlen length + bytes), 4 last_committed, 5 sequence_number,
+   * 6 immediate_commit_timestamp, 8 transaction_length, 9 immediate_server_version.
    */
-  static inline std::vector<uint8_t> BuildGtidTaggedEvent(const std::array<uint8_t, 16>& uuid, uint64_t gno,
-                                                          const std::string& tag, uint8_t commit_flag = 1) {
+  static inline std::vector<uint8_t> BuildGtidTaggedEvent(const std::array<uint8_t, 16>& uuid, int64_t gno,
+                                                          const std::string& tag, uint8_t gtid_flags = 1) {
     auto buf = BuildHeader(MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT);
 
-    // commit_flag byte (present before serialized fields)
-    buf.push_back(commit_flag);
-
-    // Field 1: COMMIT_GROUP_TICKET (field_id=0, type_id=1 for uint64)
-    // Value: 0 (no ticket)
-    buf.push_back(0);  // field_id
-    buf.push_back(1);  // type_id: uint64
-    AppendLittleEndian64(buf, 0);
-
-    // Field 2: TSID (field_id=1, type_id=2 for variable-length)
-    // Contains UUID (16B) + tag_length (1B) + tag bytes
-    buf.push_back(1);  // field_id
-    buf.push_back(2);  // type_id: variable-length
-    buf.insert(buf.end(), uuid.begin(), uuid.end());
-    buf.push_back(static_cast<uint8_t>(tag.size()));
-    if (!tag.empty()) {
-      buf.insert(buf.end(), tag.begin(), tag.end());
+    std::vector<uint8_t> fields;
+    AppendSerializedVarlen(fields, 0);  // field id: gtid_flags
+    AppendSerializedVarlen(fields, gtid_flags);
+    AppendSerializedVarlen(fields, 1);  // field id: UUID
+    for (const uint8_t byte : uuid) {
+      AppendSerializedVarlen(fields, byte);
     }
+    AppendSerializedVarlen(fields, 2);  // field id: GNO
+    AppendSerializedVarlenSigned(fields, gno);
+    AppendSerializedVarlen(fields, 3);  // field id: tag
+    AppendSerializedVarlen(fields, tag.size());
+    fields.insert(fields.end(), tag.begin(), tag.end());
+    AppendSerializedVarlen(fields, 4);  // field id: last_committed
+    AppendSerializedVarlenSigned(fields, 0);
+    AppendSerializedVarlen(fields, 5);  // field id: sequence_number
+    AppendSerializedVarlenSigned(fields, 1);
+    AppendSerializedVarlen(fields, 6);  // field id: immediate_commit_timestamp
+    AppendSerializedVarlen(fields, 1700000000000000ULL);
 
-    // Field 3: SPEC (field_id=2, type_id=1 for uint64)
-    // Contains GNO
-    buf.push_back(2);  // field_id
-    buf.push_back(1);  // type_id: uint64
-    AppendLittleEndian64(buf, gno);
-
-    // Field 4: COMMIT_TIMESTAMP (field_id=3, type_id=2 for variable-length)
-    // Contains original_commit_timestamp (7B) + immediate_commit_timestamp (7B)
-    buf.push_back(3);  // field_id
-    buf.push_back(2);  // type_id: variable-length
-    // original_commit_timestamp: 7 bytes (0 = unknown)
-    for (int i = 0; i < 7; ++i) {
-      buf.push_back(0);
-    }
-    // immediate_commit_timestamp: 7 bytes (0 = unknown)
-    for (int i = 0; i < 7; ++i) {
-      buf.push_back(0);
-    }
+    AppendSerializedVarlen(buf, 1);  // serialization format version
+    AppendSerializedVarlen(buf, fields.size());
+    AppendSerializedVarlen(buf, 7);  // last non-ignorable field id
+    buf.insert(buf.end(), fields.begin(), fields.end());
 
     // CRC32 checksum placeholder (4 zero bytes)
     AppendLittleEndian32(buf, 0);
@@ -401,6 +438,7 @@ class BinlogEventBuilder {
     FixEventSizeWithChecksum(buf);
     return buf;
   }
+
   // =========================================================================
   // MariaDB-specific event builders
   // =========================================================================

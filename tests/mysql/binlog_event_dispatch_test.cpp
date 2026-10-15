@@ -11,6 +11,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "binlog_event_builder.h"
 #include "binlog_test_fixtures.h"
@@ -18,6 +19,7 @@
 #ifdef USE_MYSQL
 
 #include "mysql/binlog_event_disposition.h"
+#include "utils/constants.h"
 #include "utils/crc32.h"
 
 using namespace binlog_test;
@@ -117,6 +119,31 @@ TEST(BinlogEventDispositionTest, WireBytesOutsideTheEnumerationFailClosed) {
 }
 
 /**
+ * @brief Only an unrecognized type carrying the source's ignorable flag is skippable.
+ */
+TEST(BinlogEventDispositionTest, UnrecognizedTypeIsSkippedOnlyWhenFlaggedIgnorable) {
+  const auto frame = [](uint8_t type_byte, uint16_t flags) {
+    std::vector<unsigned char> bytes(mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize,
+                                     0);
+    bytes[4] = type_byte;
+    bytes[17] = static_cast<unsigned char>(flags & 0xFFU);
+    bytes[18] = static_cast<unsigned char>(flags >> 8U);
+    return bytes;
+  };
+
+  auto flagged = frame(200, 0x0080);
+  EXPECT_TRUE(IsIgnorableUnrecognizedEvent(flagged.data(), flagged.size()));
+  auto flagged_among_others = frame(200, 0x0081);
+  EXPECT_TRUE(IsIgnorableUnrecognizedEvent(flagged_among_others.data(), flagged_among_others.size()));
+  auto unflagged = frame(200, 0x0001);
+  EXPECT_FALSE(IsIgnorableUnrecognizedEvent(unflagged.data(), unflagged.size()));
+  // A recognized type is never reclassified by the flag.
+  auto known_fail_closed = frame(static_cast<uint8_t>(MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT), 0x0080);
+  EXPECT_FALSE(IsIgnorableUnrecognizedEvent(known_fail_closed.data(), known_fail_closed.size()));
+  EXPECT_FALSE(IsIgnorableUnrecognizedEvent(flagged.data(), 10));
+}
+
+/**
  * @brief A stop on an unrecognized byte names the byte, so two different ones never read the same.
  */
 TEST_F(BinlogReaderFixture, UnknownEventTypeStopReportsTheTypeByte) {
@@ -152,7 +179,7 @@ TEST_F(BinlogReaderFixture, EveryFailClosedEventTypeStopsWithTheUndecodableCode)
     ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(type));
 
     EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17");
+    EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-17");
     EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
     EXPECT_EQ(reader_->GetReplicationState(), ReplicationState::kFailed);
     const std::string last_error = reader_->GetLastError();
@@ -179,7 +206,7 @@ TEST_F(BinlogReaderFixture, AnonymousGtidEventStopsWithoutAdvancingAnyPosition) 
   ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(MySQLBinlogEventType::ANONYMOUS_GTID_LOG_EVENT));
 
   EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17")
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-17")
       << "an anonymous transaction has no position to record";
   EXPECT_EQ(reader_->GetLastAppliedUnixTime(), applied_time_before)
       << "the lag gauge must not report progress for a transaction that was not applied";
@@ -207,7 +234,7 @@ TEST_F(BinlogReaderFixture, IncidentEventStopsAndNamesTheOnlyRecovery) {
   ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(MySQLBinlogEventType::INCIDENT_EVENT));
 
   EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:17")
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-17")
       << "the position must not advance past the declared gap";
   EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
   EXPECT_EQ(reader_->GetReplicationState(), ReplicationState::kFailed);
@@ -324,8 +351,13 @@ TEST_F(BinlogReaderFixture, FramesShorterThanHeaderPlusChecksumFailVerification)
   const std::vector<unsigned char> twenty_bytes(20, 0x00);
   const uint64_t errors_before = reader_->crc_errors_.load();
 
-  EXPECT_FALSE(reader_->VerifyFetchedFrame(ok_byte_only.data(), 0));
-  EXPECT_FALSE(reader_->VerifyFetchedFrame(twenty_bytes.data(), twenty_bytes.size()));
+  const auto verify = [this](const std::vector<unsigned char>& frame, size_t length) {
+    const unsigned char* data = frame.data();
+    size_t frame_length = length;
+    return reader_->VerifyFetchedFrame(data, frame_length);
+  };
+  EXPECT_FALSE(verify(ok_byte_only, 0));
+  EXPECT_FALSE(verify(twenty_bytes, twenty_bytes.size()));
   EXPECT_EQ(reader_->crc_errors_.load(), errors_before + 2);
   EXPECT_NE(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent)
       << "a replay can deliver the frame intact, so it must not claim the event is undecodable";
@@ -335,7 +367,7 @@ TEST_F(BinlogReaderFixture, FramesShorterThanHeaderPlusChecksumFailVerification)
   for (size_t i = 0; i < 4; ++i) {
     intact[intact.size() - 4 + i] = static_cast<uint8_t>((crc >> (8 * i)) & 0xFFU);
   }
-  EXPECT_TRUE(reader_->VerifyFetchedFrame(intact.data(), intact.size()));
+  EXPECT_TRUE(verify(std::vector<unsigned char>(intact.begin(), intact.end()), intact.size()));
   EXPECT_EQ(reader_->crc_errors_.load(), errors_before + 2);
 }
 

@@ -13,6 +13,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "mysql/server_flavor.h"
 #include "utils/error.h"
@@ -29,6 +31,19 @@ mygram::utils::ErrorCode ClassifyQueryErrorCode(unsigned int native_error);
 /// Classify a native MySQL connect error into the stable application error
 /// domain, separating refused credentials from an unreachable server.
 mygram::utils::ErrorCode ClassifyConnectErrorCode(unsigned int native_error);
+
+/// Binlog file and offset a consistent snapshot was opened at (MariaDB).
+struct BinlogSnapshotPosition {
+  std::string file;
+  uint64_t offset = 0;
+};
+
+/// Pick Binlog_snapshot_file and Binlog_snapshot_position out of the
+/// (Variable_name, Value) rows of `SHOW STATUS LIKE 'binlog_snapshot_%'`. An
+/// absent, empty or non-numeric member is an error: the position cannot be
+/// reconstructed from the rest.
+mygram::utils::Expected<BinlogSnapshotPosition, mygram::utils::Error> ParseBinlogSnapshotStatus(
+    const std::vector<std::pair<std::string, std::string>>& status_rows);
 
 }  // namespace internal
 
@@ -202,10 +217,26 @@ class Connection {
   mygram::utils::Expected<std::string, mygram::utils::Error> GetExecutedGTID();
 
   /**
-   * Capture and canonicalize the conservative replication lower bound that
-   * must be read before START TRANSACTION WITH CONSISTENT SNAPSHOT.
+   * @brief Open a consistent snapshot and return the replication position to resume from
+   *
+   * Sets REPEATABLE READ for the session first, so a global READ UNCOMMITTED or
+   * SERIALIZABLE cannot change what the snapshot reads or locks. The position is
+   * flavor-specific:
+   * - MySQL: the gtid_executed lower bound read BEFORE the snapshot. A commit is
+   *   applied in the engine before it joins gtid_executed, so the bound never
+   *   claims a transaction the snapshot cannot see; commits in the gap replay.
+   * - MariaDB: a transaction joins gtid_binlog_pos before InnoDB can see it, so a
+   *   pre-snapshot read could claim a commit the snapshot misses. The snapshot is
+   *   opened first and its exact position is read on the same session
+   *   (Binlog_snapshot_file/position, converted by BINLOG_GTID_POS).
+   *
+   * On failure after the snapshot began, the transaction is rolled back.
+   *
+   * @param before_snapshot_hook Test seam, called immediately before the snapshot starts
+   * @return Canonical position text, empty when the server has no GTID yet, or Error
    */
-  mygram::utils::Expected<std::string, mygram::utils::Error> CaptureSnapshotLowerBoundGTID();
+  mygram::utils::Expected<std::string, mygram::utils::Error> StartConsistentSnapshot(
+      const std::function<void()>& before_snapshot_hook = {});
 
   /**
    * @brief Get purged GTID set (GTIDs no longer in binlog)
@@ -226,6 +257,12 @@ class Connection {
    * @return Server UUID string, or Error on query failure / malformed result
    */
   mygram::utils::Expected<std::string, mygram::utils::Error> GetServerUUID();
+
+  /**
+   * @brief Read @@GLOBAL.lower_case_table_names
+   * @return 0 (case-sensitive), 1 or 2 (case-insensitive), or Error on query failure / out-of-range value
+   */
+  mygram::utils::Expected<int, mygram::utils::Error> GetLowerCaseTableNames();
 
   /**
    * @brief Check if GTID mode is enabled on the server
@@ -249,7 +286,7 @@ class Connection {
    *
    * Checks if the specified column is either:
    * - A PRIMARY KEY column
-   * - A UNIQUE KEY column
+   * - A UNIQUE KEY column that is declared NOT NULL
    *
    * @param database Database name
    * @param table Table name
@@ -278,6 +315,18 @@ class Connection {
   MYSQL* mysql_ = nullptr;
   ServerFlavor flavor_ = ServerFlavor::kMySQL;
   std::string server_version_;
+
+  /**
+   * Capture and canonicalize the conservative replication lower bound that
+   * must be read before START TRANSACTION WITH CONSISTENT SNAPSHOT. MySQL only.
+   */
+  mygram::utils::Expected<std::string, mygram::utils::Error> CaptureSnapshotLowerBoundGTID();
+
+  /**
+   * Read the exact GTID position of the consistent snapshot open on this
+   * session. MariaDB only.
+   */
+  mygram::utils::Expected<std::string, mygram::utils::Error> CaptureMariaDBSnapshotGTID();
 
   /**
    * @brief Get current MySQL client error message

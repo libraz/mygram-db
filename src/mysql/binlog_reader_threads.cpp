@@ -28,6 +28,7 @@
 #include "mysql/gtid_encoder.h"
 #include "mysql/mariadb_event_parser.h"
 #include "mysql/mariadb_gtid.h"
+#include "mysql/table_name_match.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
 #include "utils/crc32.h"
@@ -69,13 +70,12 @@ bool IsRowsEventType(MySQLBinlogEventType event_type) {
 
 mygram::utils::Expected<bool, mygram::utils::Error> BinlogReader::ShouldSuppressTableReplay(
     const std::string& table_name, const std::string& event_gtid) const {
-  auto table_iter = table_contexts_.find(table_name);
-  if (table_iter == table_contexts_.end()) {
-    const auto separator = table_name.rfind('.');
-    if (separator != std::string::npos) {
-      table_iter = table_contexts_.find(table_name.substr(separator + 1));
-    }
-  }
+  const auto separator = table_name.rfind('.');
+  const auto table_iter =
+      separator == std::string::npos
+          ? FindTableContextEntry(table_contexts_, "", table_name, config_.table_names_case_insensitive)
+          : FindTableContextEntry(table_contexts_, table_name.substr(0, separator), table_name.substr(separator + 1),
+                                  config_.table_names_case_insensitive);
   if (table_iter == table_contexts_.end() || table_iter->second == nullptr || event_gtid.empty()) {
     return false;
   }
@@ -319,21 +319,23 @@ void BinlogReader::RejectUnsafeStatementEvent(const std::string& statement) {
       "unsafe_query_event", "QUERY_EVENT");
 }
 
-bool BinlogReader::VerifyFetchedFrame(const unsigned char* event_buffer, size_t event_length) {
+bool BinlogReader::VerifyFetchedFrame(const unsigned char*& event_buffer, size_t& event_length) {
   // A frame too short to hold a header and its checksum is malformed, so it
   // fails here like a mismatch instead of reaching dispatch unverified.
-  auto checksum_result = VerifyBinlogEventChecksum(event_buffer, event_length);
-  if (checksum_result) {
+  auto framed = checksum_tracker_.Admit(event_buffer, event_length);
+  if (framed) {
+    event_buffer = framed->data;
+    event_length = framed->length;
     return true;
   }
   crc_errors_++;
-  SetLastError(checksum_result.error());
+  SetLastError(framed.error());
   mygram::utils::StructuredLog()
       .Event("binlog_error")
       .Field("type", "crc32_checksum_mismatch")
       .Field("event_length", static_cast<uint64_t>(event_length))
       .Field("gtid", position_state_.received_gtid())
-      .FieldError(checksum_result.error())
+      .FieldError(framed.error())
       .Error();
   return false;
 }
@@ -342,12 +344,23 @@ BinlogReader::TableMapAction BinlogReader::HandleTableMapEvent(const unsigned ch
                                                                unsigned long event_length,
                                                                ProcessingFailureKind* failure_kind) {
   *failure_kind = ProcessingFailureKind::kDeterministic;
-  auto metadata_opt = BinlogEventParser::ParseTableMapEvent(event_buffer, event_length);
+  // Row metadata is only read for a table whose rows will be decoded: monitored
+  // and not covered by its SYNC snapshot.
+  const auto decodes_rows = [this](const TableMetadata& table) {
+    if (FindTableContextEntry(table_contexts_, table.database_name, table.table_name,
+                              config_.table_names_case_insensitive) == table_contexts_.end()) {
+      return false;
+    }
+    const auto suppressed = ShouldSuppressTableReplay(config::QualifiedTableName(table.database_name, table.table_name),
+                                                      position_state_.received_gtid());
+    return !suppressed || !*suppressed;
+  };
+  auto metadata_opt = BinlogEventParser::ParseTableMapEvent(event_buffer, event_length, decodes_rows);
   if (!metadata_opt) {
     if (metadata_opt.error().code() == mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent) {
       FailClosedOnUnreplayableEvent(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
-                                    metadata_opt.error().message() + kUnreplayableEventRecovery, "unsizable_table_map",
-                                    "TABLE_MAP_EVENT");
+                                    metadata_opt.error().message() + kUnreplayableEventRecovery,
+                                    "undecodable_table_map", "TABLE_MAP_EVENT");
       return TableMapAction::kStop;
     }
     // Reconnecting replays this event, so it keeps the generic binlog code
@@ -372,9 +385,8 @@ BinlogReader::TableMapAction BinlogReader::HandleTableMapEvent(const unsigned ch
   // (e.g. "testdb.articles"). Match on the qualified key first and
   // fall back to the bare table name for empty-database configs.
   const bool is_monitored_table =
-      table_contexts_.find(config::QualifiedTableName(metadata_opt->database_name, metadata_opt->table_name)) !=
-          table_contexts_.end() ||
-      table_contexts_.find(metadata_opt->table_name) != table_contexts_.end();
+      FindTableContextEntry(table_contexts_, metadata_opt->database_name, metadata_opt->table_name,
+                            config_.table_names_case_insensitive) != table_contexts_.end();
 
   const std::string qualified_table = config::QualifiedTableName(metadata_opt->database_name, metadata_opt->table_name);
   auto suppress_replay = ShouldSuppressTableReplay(qualified_table, position_state_.received_gtid());
@@ -406,32 +418,29 @@ BinlogReader::TableMapAction BinlogReader::HandleTableMapEvent(const unsigned ch
     return TableMapAction::kContinue;
   }
 
-  if (!FetchColumnNames(metadata_opt.value(), failure_kind)) {
-    mygram::utils::StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "column_fetch_failed")
-        .Field("database", metadata_opt->database_name)
-        .Field("table", metadata_opt->table_name)
-        .Field("gtid", GetCurrentGTID())
-        .Error();
-    return TableMapAction::kReconnect;
+  // Names, signedness and ENUM/SET labels come from the TABLE_MAP itself. The
+  // event stays in the binlog as written, so fixing the setting cannot make a
+  // replay decode it.
+  if (!metadata_opt->HasFullRowMetadata()) {
+    FailClosedOnUnreplayableEvent(
+        mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
+        "TABLE_MAP_EVENT for " + qualified_table +
+            " carries no full row metadata: binlog_row_metadata was not FULL when the event was written, so column "
+            "names, signedness and ENUM/SET labels cannot be decoded. Set binlog_row_metadata=FULL" +
+            kUnreplayableEventRecovery,
+        "table_map_without_row_metadata", "TABLE_MAP_EVENT");
+    return TableMapAction::kStop;
   }
 
   auto add_result = schema_cache_.RecordTableMap(metadata_opt.value());
-
   if (add_result == TableMetadataCache::AddResult::kSchemaChanged) {
-    schema_cache_.InvalidateColumns(metadata_opt->database_name, metadata_opt->table_name);
-    if (!FetchColumnNames(metadata_opt.value(), failure_kind)) {
-      return TableMapAction::kReconnect;
-    }
-    schema_cache_.RecordTableMap(metadata_opt.value());
     mygram::utils::StructuredLog()
         .Event("binlog_schema_change")
         .Field("database", metadata_opt->database_name)
         .Field("table", metadata_opt->table_name)
         .Field("table_id", metadata_opt->table_id)
         .Field("gtid", GetCurrentGTID())
-        .Message("Schema change detected, column name cache invalidated")
+        .Message("Schema change detected")
         .Warn();
   }
 
@@ -446,14 +455,6 @@ BinlogReader::TableMapAction BinlogReader::HandleTableMapEvent(const unsigned ch
 }
 
 bool BinlogReader::ObserveConfiguredTableDdl(const BinlogEvent& event) {
-  auto table_iter = table_contexts_.find(event.table_name);
-  if (table_iter != table_contexts_.end() && table_iter->second != nullptr) {
-    // The next TABLE_MAP of this table follows the DDL in the stream, so its
-    // columns are fetched after the redefinition rather than from the cache.
-    const config::TableConfig& table_config = table_iter->second->config;
-    schema_cache_.InvalidateColumns(table_config.database, table_config.name);
-  }
-
   switch (event.ddl_type) {
     case DDLType::kRowsReplaced: {
       auto suppress_replay = ShouldSuppressTableReplay(event.table_name, event.gtid);
@@ -488,6 +489,26 @@ bool BinlogReader::ObserveConfiguredTableDdl(const BinlogEvent& event) {
       return true;
   }
   return true;
+}
+
+void BinlogReader::ClearQueueLocked() {
+  while (!event_queue_.empty()) {
+    event_queue_.pop();
+  }
+}
+
+std::string BinlogReader::TakeResumePosition() {
+  // Events queued from the previous stream would be delivered a second time by
+  // the reopened one, so a reopen starts from an empty queue and no pending
+  // transaction.
+  {
+    std::scoped_lock lock(queue_mutex_);
+    ClearQueueLocked();
+  }
+  queue_full_cv_.notify_all();
+  std::scoped_lock lock(gtid_mutex_);
+  position_state_.ResetApplied();
+  return current_gtid_;
 }
 
 void BinlogReader::MarkThreadExited() {
@@ -639,14 +660,10 @@ void BinlogReader::ReaderThreadFunc() {
         continue;
       }
 
-      // Use current_gtid_ (last applied by the worker thread) as the
-      // authoritative source for reconnection. The server's executed set may
-      // include events not yet delivered to MygramDB and would skip data.
-      std::string current_gtid;
-      {
-        std::scoped_lock lock(gtid_mutex_);
-        current_gtid = ConvertSingleGtidToRange(current_gtid_);
-      }
+      // current_gtid_ (last applied by the worker thread) is the authoritative
+      // resume position: the server's executed set may include events not yet
+      // delivered to MygramDB and would skip data.
+      const std::string current_gtid = TakeResumePosition();
 
       // Open binlog stream via protocol-specific implementation
       auto open_result = binlog_stream_->Open(*binlog_connection_, current_gtid, config_.server_id);
@@ -690,6 +707,7 @@ void BinlogReader::ReaderThreadFunc() {
       // a table id: the server may assign it to another table on this stream.
       position_state_.ResetReceived();
       schema_cache_.Reset();
+      checksum_tracker_.Reset();
 
       // Reset no-data counter on successful stream open (reconnection)
       no_data_log_count_.store(0);
@@ -852,7 +870,7 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         const unsigned char* event_buffer = fetch.event_data;
-        const size_t event_length = fetch.event_length;
+        size_t event_length = fetch.event_length;
 
         event_count++;
         mygram::utils::StructuredLog()
@@ -921,6 +939,17 @@ void BinlogReader::ReaderThreadFunc() {
             continue;
           }
 
+          // A type this build does not know, flagged ignorable by the source, is
+          // skipped like the source's own replicas do.
+          if (IsIgnorableUnrecognizedEvent(event_buffer, event_length)) {
+            mygram::utils::StructuredLog()
+                .Event("binlog_debug")
+                .Field("action", "skipped_ignorable_unrecognized_event")
+                .Field("event_type", static_cast<int64_t>(event_type))
+                .Debug();
+            continue;
+          }
+
           // Reject unsupported wire formats before replay suppression. A SYNC
           // watermark may justify skipping a decoded row, but it must never turn
           // an event format we cannot decode into an accepted transaction.
@@ -950,7 +979,7 @@ void BinlogReader::ReaderThreadFunc() {
         auto query_boundary = BinlogEventParser::QueryTransactionBoundary::kNone;
         const bool query_was_inside_transaction = position_state_.reader_transaction_open();
         bool query_parsed = false;
-        std::string query_text;
+        QueryEventData query_data;
         if (event_type == MySQLBinlogEventType::QUERY_EVENT) {
           auto query = BinlogEventParser::ExtractQueryString(event_buffer, event_length);
           if (!query.has_value()) {
@@ -969,13 +998,13 @@ void BinlogReader::ReaderThreadFunc() {
             break;
           }
           query_parsed = true;
-          query_text = std::move(*query);
-          query_boundary = BinlogEventParser::ClassifyQueryTransactionBoundary(query_text);
+          query_data = std::move(*query);
+          query_boundary = BinlogEventParser::ClassifyQueryTransactionBoundary(query_data);
           if (query_boundary == BinlogEventParser::QueryTransactionBoundary::kUnsupportedXa) {
             // Real XA traffic stops here, at XA START, rather than at the
             // XA_PREPARE_LOG_EVENT, so this exit is the one SYNC has to
             // recognize as un-replayable.
-            RejectUnsupportedXaTransaction("QUERY_EVENT", query_text);
+            RejectUnsupportedXaTransaction("QUERY_EVENT", query_data.query);
             break;
           }
           if (query_boundary == BinlogEventParser::QueryTransactionBoundary::kBegin) {
@@ -984,9 +1013,9 @@ void BinlogReader::ReaderThreadFunc() {
         }
 
         // Parse the binlog event using BinlogEventParser
-        auto events = BinlogEventParser::ParseBinlogEvent(event_buffer, event_length, position_state_.received_gtid(),
-                                                          schema_cache_.table_maps(), table_contexts_, nullptr, true,
-                                                          mysql_config_.datetime_timezone);
+        auto events = BinlogEventParser::ParseBinlogEvent(
+            event_buffer, event_length, position_state_.received_gtid(), schema_cache_.table_maps(), table_contexts_,
+            nullptr, true, mysql_config_.datetime_timezone, config_.table_names_case_insensitive);
 
         if (!events.empty()) {
           mygram::utils::StructuredLog()
@@ -1057,7 +1086,7 @@ void BinlogReader::ReaderThreadFunc() {
           // Never do this for BEGIN or for statements inside an explicit
           // transaction; those advance only at COMMIT/XID.
           const bool safe_ignored_query =
-              query_parsed && BinlogEventParser::IsSafeIgnoredQuery(query_text, mysql_config_.ignored_ddl_prefixes);
+              query_parsed && BinlogEventParser::IsSafeIgnoredQuery(query_data, mysql_config_.ignored_ddl_prefixes);
           const bool standalone_query_completed =
               event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
               !position_state_.received_gtid().empty() &&
@@ -1071,7 +1100,7 @@ void BinlogReader::ReaderThreadFunc() {
             PushEvent(std::move(progress));
           } else if (event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
                      query_boundary == BinlogEventParser::QueryTransactionBoundary::kNone && !safe_ignored_query) {
-            RejectUnsafeStatementEvent(query_text);
+            RejectUnsafeStatementEvent(query_data.query);
             break;
           }
           if (event_type == MySQLBinlogEventType::QUERY_EVENT &&
@@ -1207,9 +1236,7 @@ void BinlogReader::WorkerThreadFunc() {
             schema_incompatible_.load(std::memory_order_acquire) || should_stop_.load(std::memory_order_acquire);
         {
           std::scoped_lock lock(queue_mutex_);
-          while (!event_queue_.empty()) {
-            event_queue_.pop();
-          }
+          ClearQueueLocked();
           if (stop_without_retry) {
             should_stop_.store(true, std::memory_order_release);
           } else {
@@ -1365,15 +1392,14 @@ bool BinlogReader::IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_t
   // Table contexts are keyed by the database-qualified identity
   // (e.g. "testdb.articles"). Match on the qualified key first and fall back to
   // the bare table name for empty-database configs.
-  auto table_iter = table_contexts_.find(config::QualifiedTableName(metadata->database_name, metadata->table_name));
-  if (table_iter == table_contexts_.end()) {
-    table_iter = table_contexts_.find(metadata->table_name);
-  }
+  const auto table_iter = FindTableContextEntry(table_contexts_, metadata->database_name, metadata->table_name,
+                                                config_.table_names_case_insensitive);
   if (table_iter == table_contexts_.end() || table_iter->second == nullptr) {
     return false;
   }
   const config::TableConfig& table_config = table_iter->second->config;
-  return table_config.database.empty() || metadata->database_name == table_config.database;
+  return table_config.database.empty() ||
+         TableNamesEqual(metadata->database_name, table_config.database, config_.table_names_case_insensitive);
 }
 
 void BinlogReader::PushEvent(std::unique_ptr<BinlogEvent> event) {
