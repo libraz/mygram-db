@@ -10,21 +10,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-17
+
+Replication reads column metadata from each binlog `TABLE_MAP` event, so the
+source must run `binlog_row_metadata=FULL`, and source setups that cannot
+replicate correctly are refused at startup. The client shared library moves to
+soname 2. Under the early-stage SemVer policy these breaking changes ship in a
+minor release; the release notes list the actions required before upgrading.
+
 ### Changed
 
-- **The client shared library is now soname `libmygramclient.so.2`** — `SearchExpression` gained `required_is_group`/`excluded_is_group` and lost `optional_terms`, and `MygramParsedExpression_C` lost `optional_terms`/`optional_count`. C and C++ consumers must rebuild against the new headers.
-- **The source must run `binlog_row_metadata=FULL`** — column names, signedness and `ENUM`/`SET` labels are read from each `TABLE_MAP` event instead of a `SHOW COLUMNS` query, which could disagree with the binlog after DDL and miscounted MariaDB tables with hidden columns. Startup fails with `2008` when the source runs another value, before any snapshot is built. A `TABLE_MAP` of a monitored table that was written without the metadata stops replication with `2017`; run `SYNC` for every replicated table after fixing the setting.
-- **More configurations are refused at startup** — a table that is the child of a foreign key with `ON UPDATE`/`ON DELETE` `CASCADE`, `SET NULL` or `SET DEFAULT`, a source that is itself a replica without `log_replica_updates`/`log_slave_updates`, MariaDB with `binlog_storage_engine`, old-format MariaDB `TIME(n)`/`DATETIME(n)`/`TIMESTAMP(n)` columns with `n > 0`, a configured `year(2)` column, and a primary key on a nullable `UNIQUE` column.
+- **The source must run `binlog_row_metadata=FULL`** — column names, signedness and `ENUM`/`SET` labels are read from each `TABLE_MAP` event instead of a `SHOW COLUMNS` query, which could disagree with the binlog after DDL and miscounted MariaDB tables with hidden columns. Startup fails with `2008` when the source runs another value, before any snapshot is built. A `TABLE_MAP` of a monitored table written without the metadata stops replication with `2017`; run `SYNC` for every replicated table if older binlogs remain in the replay window.
+- **More sources and tables are refused at startup** — a table that is the child of a foreign key with `ON UPDATE`/`ON DELETE` `CASCADE`, `SET NULL` or `SET DEFAULT`, a source that is itself a replica without `log_replica_updates`/`log_slave_updates`, MariaDB with `binlog_storage_engine`, old-format MariaDB `TIME(n)`/`DATETIME(n)`/`TIMESTAMP(n)` columns with `n > 0`, a configured `year(2)` column, a primary key on a nullable `UNIQUE` column, and a primary key that is part of a composite key.
+- **More configurations are refused at load** — no `replication` block with `server_id` 0, a `start_from: gtid=` value neither GTID grammar accepts (MariaDB `domain-server-seq` lists are now accepted), an IPv4-mapped `network.allow_cidrs` entry with a prefix below 96, and `memory.hard_limit_mb`/`soft_target_mb` above 2147483647.
 - **Table and database names match byte-exactly when the source runs `lower_case_table_names=0`** — DDL statements used to match case-insensitively regardless of the setting. With any other value, row events and DDL both match case-insensitively.
-- **A `1236` dump error that is not a purged position stops replication with `2008`** carrying the server's message; only a message saying the required GTIDs were purged is reported as an unavailable position (run `SYNC`). A replica ahead of the source, an oversized packet or a corrupt binlog no longer send the operator to `SYNC`.
-- **`replication.start_from: gtid=UUID:N` means "through N"** — the position is widened to `UUID:1-N` once when it enters the reader, so reconnects after the first applied transaction no longer ask the source for earlier transactions again.
+- **The client shared library is now soname `libmygramclient.so.2`** — `SearchExpression` gained `required_is_group`/`excluded_is_group` and lost `optional_terms`, and `MygramParsedExpression_C` lost `optional_terms`/`optional_count`. C and C++ consumers must rebuild against the new headers.
+- **`mygram-cli DUMP SAVE` reads the path as the server does** — the last non-empty token is the path; a line with a `-` flag is sent unchanged and the server rejects it.
+- **Runtime `SET` is validated against the configuration schema** — a value the loader would refuse returns `1004`, and a multi-assignment `SET` applies all or nothing.
+- **Document-field limits apply at ingestion** — a row over the dump limits (primary key 1 MiB, 1,000 filters, filter value 64 KiB, text 16 MiB) fails the initial load or `SYNC`, and replication does not advance past it.
+- **Replication data is withheld before `AUTH`** — with `api.admin_token` set, the `INFO` `# Replication` section and the `mygramdb_replication_` metrics on `/metrics` require credentials.
+- **HTTP statuses follow the error code** — a bare table name under multi-database configuration returns 404/`4007`, `GET /replication/status` without replication returns 200 with `enabled: false`, `GET /config` without a configuration returns 503/`6026`, and over-limit `limit`, filter count and facet column return `3000` as on TCP.
+- **A `1236` dump error that is not a purged position stops replication with `2008`** carrying the server's message; only a message saying the required GTIDs were purged is reported as an unavailable position (run `SYNC`).
+- **A `TABLE_MAP` whose column type cannot be sized stops replication with `2017`** instead of reconnecting onto the same event.
+- **`replication.start_from: gtid=UUID:N` means "through N"** — the position is widened to `UUID:1-N` once when it enters the reader, so reconnects no longer ask the source for earlier transactions again. Transaction numbers at or above 2^63−1 are refused, as the source refuses them.
 
 ### Fixed
 
-- **Each binlog file is read with its own checksum algorithm**, so files written with `binlog_checksum=NONE` stream instead of failing every frame.
-- **A reconnect no longer replays events still queued from the old stream.**
-- **Unknown event types flagged ignorable by the source are skipped**; transaction numbers at or above 2^63−1 are refused, as the source refuses them.
-- **Statements are read under the `sql_mode` they were logged with** — `ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES` change where a statement ends, and a stored-program definition is read as the whole event from its header on, so a `TRUNCATE` inside its body is never taken for one executed against a configured table.
+- **Destructive DDL is detected** — `TRUNCATE`, multi-table `DROP`/`RENAME`, `DROP DATABASE`, partition and tablespace changes, `CREATE OR REPLACE TABLE`, statements with `#` or executable comments, and unquoted non-ASCII or `$` names on a configured table stop replication instead of leaving removed rows searchable.
+- **Rows after `ALTER TABLE`, a drop-and-recreate or a `RENAME` swap decode against the definition they were written with**, including after a source restart or failover.
+- **Statements are read under the `sql_mode` they were logged with**, and a stored-program definition is read as the whole rest of its event, so a `TRUNCATE` inside its body is never taken for one run against a configured table.
+- **Each binlog file is read with its own checksum algorithm**, transient fetch errors and truncated frames reconnect, events queued from the old stream are dropped on reconnect, and ignorable unknown event types are skipped.
+- **Positions** — MariaDB `REPLICATION START` refuses a purged position up front, a malformed GTID never reaches `SET GTID_NEXT`, a row event with a `NULL` primary key fails closed, and the MariaDB snapshot position is the snapshot's own binlog position.
+- **The initial load and replication admit the same rows** for `required_filters` values that fail conversion and for MariaDB `TIME(n)`; temporal required filters no longer force a full table scan.
+- **Query cache** — different queries no longer share an entry, a query still executing cannot overwrite newer data, nothing stale is served after a cold start, and an insert no longer evicts the entry it admitted.
+- **Search** — a too-short `NOT` term without normalized text returns `4000`, boolean and numeric `!=` filters agree across search paths, U+0085 separates terms and U+200B does not, lowercasing ignores the host locale, `FACET` ties sort stably for `OFFSET` paging, and `DEBUG ON` prints `cache_key`.
+- **TCP** — `SHOW VARIABLES LIKE` is case-insensitive and reports the live `cache.enabled`, a failed multi-assignment `SET` changes nothing, `SYNC STATUS` stops counting after completion, `REPLICATION START`/`STOP` cannot race `DUMP SAVE`, and shutdown refuses new `SYNC` and `OPTIMIZE`.
+- **HTTP** — `DOUBLE` filter values match like TCP `FILTER` instead of being rounded to six decimals.
+- **Dumps** — `DUMP SAVE` refuses sections and payloads the loader would reject, malformed files (CRC flag cleared, wrong section count, trailing data, DocID 0) fail to load without touching the live store, an exhausted DocID counter reloads, the index is written atomically, scheduled snapshots wait for the initial load, orphaned temp files are cleaned at startup whatever `dump.interval_sec` is, and dump paths with control bytes are refused.
+- **Clients and CLI** — replies are framed per command (`FACET`, `CONFIG HELP`, highlighted and `DEBUG` searches), names with whitespace are rejected client-side, web-syntax groups, phrases and `OR`-prefixed terms keep their meaning, numbers ignore the host locale, and `mygram-cli --wait-ready` exits non-zero when the server never becomes ready.
+
+### Testing
+
+- The e2e matrix covers MySQL 8.4 and 9.7 and MariaDB 10.11, 11.8 and 12.3.
+
+**Detailed Release Notes**: [docs/releases/v1.11.0.md](docs/releases/v1.11.0.md)
 
 ## [1.10.2] - 2026-09-28
 
@@ -986,7 +1015,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.10.2...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.11.0...HEAD
+[1.11.0]: https://github.com/libraz/mygram-db/compare/v1.10.2...v1.11.0
 [1.10.2]: https://github.com/libraz/mygram-db/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/libraz/mygram-db/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/libraz/mygram-db/compare/v1.9.0...v1.10.0
