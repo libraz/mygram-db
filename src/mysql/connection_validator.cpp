@@ -28,7 +28,8 @@ namespace {
 /// Read one server variable; nullopt when the server does not define it.
 mygram::utils::Expected<std::optional<std::string>, mygram::utils::Error> ReadServerVariable(Connection& conn,
                                                                                              std::string_view name) {
-  auto result = conn.Execute("SHOW VARIABLES LIKE " + mygramdb::utils::EncodeMySQLStringLiteral(name));
+  // LIKE takes only a plain quoted literal; WHERE takes the encoded expression and has no wildcards.
+  auto result = conn.Execute("SHOW VARIABLES WHERE Variable_name = " + mygramdb::utils::EncodeMySQLStringLiteral(name));
   if (!result) {
     return mygram::utils::MakeUnexpected(result.error());
   }
