@@ -1740,6 +1740,8 @@ TEST(CacheManagerTest, PendingBudgetRollbackDoesNotCountAsDeferredInvalidation) 
   config::CacheConfig constrained_config = reference_config;
   constrained_config.max_memory_bytes = minimum_admission_ceiling;
   CacheManager mgr(constrained_config, CreateTestNgramConfigs(3, 2));
+  // An empty queue's bucket array is not zero bytes on every standard library.
+  const size_t idle_queue_bytes = mgr.GetStatistics().invalidation_queue_memory_bytes;
   auto pending = mgr.BeginInsert(query, ngrams, 3, 2, true);
   ASSERT_TRUE(pending.has_value());
   EXPECT_FALSE(mgr.InsertIfPending(std::move(*pending), query, result, 1.0));
@@ -1747,7 +1749,7 @@ TEST(CacheManagerTest, PendingBudgetRollbackDoesNotCountAsDeferredInvalidation) 
   const auto stats = mgr.GetStatistics();
   EXPECT_EQ(stats.current_entries, 0U);
   EXPECT_EQ(stats.invalidation_index_memory_bytes, 0U);
-  EXPECT_EQ(stats.invalidation_queue_memory_bytes, 0U);
+  EXPECT_EQ(stats.invalidation_queue_memory_bytes, idle_queue_bytes);
   EXPECT_EQ(stats.invalidations_deferred, 0U);
   EXPECT_EQ(stats.stale_entry_removals, 0U);
   EXPECT_EQ(stats.rejection_memory_budget, 1U);

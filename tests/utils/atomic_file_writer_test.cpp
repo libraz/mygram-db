@@ -642,8 +642,11 @@ TEST_F(AtomicFileWriterTest, TempSymlinkAndInodeReplacementAreNeverDeleted) {
     const auto temp_path = test_dir_ / abandoned->temp_basename;
     const auto markers = FindOwnerMarkers();
     ASSERT_EQ(markers.size(), 1U);
-    ASSERT_TRUE(std::filesystem::remove(temp_path));
-    WriteToFile(temp_path.string(), "completed replacement payload");
+    // Ownership is (device, inode); create the replacement while the original
+    // still holds its inode so the two can never share one.
+    const auto replacement_path = test_dir_ / "replacement_payload.dat";
+    WriteToFile(replacement_path.string(), "completed replacement payload");
+    std::filesystem::rename(replacement_path, temp_path);
     ASSERT_TRUE(MakeOld(temp_path));
     ASSERT_TRUE(MakeOld(markers.front()));
 
