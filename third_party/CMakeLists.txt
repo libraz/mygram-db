@@ -105,7 +105,7 @@ endif()
 FetchContent_Declare(
   roaring
   GIT_REPOSITORY https://github.com/RoaringBitmap/CRoaring.git
-  GIT_TAG v5.2.2
+  GIT_TAG v5.3.0
 )
 set(ENABLE_ROARING_TESTS OFF CACHE BOOL "" FORCE)
 set(ROARING_BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -137,7 +137,7 @@ endif()
 FetchContent_Declare(
   json-schema-validator
   GIT_REPOSITORY https://github.com/pboettch/json-schema-validator.git
-  GIT_TAG 2.4.0
+  GIT_TAG 2.4.1
 )
 set(JSON_VALIDATOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(JSON_VALIDATOR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -153,7 +153,7 @@ endif()
 FetchContent_Declare(
   httplib
   GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-  GIT_TAG v0.58.0
+  GIT_TAG v0.62.0
 )
 set(HTTPLIB_REQUIRE_OPENSSL OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_REQUIRE_ZLIB OFF CACHE BOOL "" FORCE)
