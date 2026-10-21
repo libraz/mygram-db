@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <new>
 #include <thread>
 #include <unordered_set>
@@ -1929,6 +1930,68 @@ TEST(InvalidationManagerTest, ReRegisterWithClearedFlagsLeavesNonNgramSweepIndex
 
   auto after = SweepFilterAndTextChange(mgr, "posts");
   EXPECT_TRUE(after.empty()) << "re-registration must drop stale sweep-index memberships";
+}
+
+// Changed n-grams supplied ahead of the call are used as-is, so a caller can
+// extract them before entering its own critical section.
+TEST(InvalidationManagerTest, PrecomputedChangedNgramsAreUsedWithoutReextraction) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  const auto key = CacheKeyGenerator::Generate("precomputed");
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"zzz"};
+  metadata.ngram_size = 3;
+  metadata.kanji_ngram_size = 2;
+  metadata.cross_boundary_ngrams = true;
+  mgr.RegisterCacheEntry(key, metadata);
+
+  // Identical texts change no n-gram, so only the supplied set can match.
+  const ChangedNgrams precomputed{{NgramSetting{3, 2, true}, {"zzz"}}};
+  const auto invalidated = InvalidatedKeys(mgr, "posts", "same text", "same text", 3, 2, true, false, &precomputed);
+  EXPECT_EQ(invalidated, (std::unordered_set<CacheKey>{key}));
+}
+
+// A setting registered after the precompute is still extracted, so an entry
+// using it is not missed.
+TEST(InvalidationManagerTest, SettingMissingFromPrecomputedNgramsIsExtracted) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+
+  const auto key = CacheKeyGenerator::Generate("late-setting");
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"ab"};
+  metadata.ngram_size = 2;
+  metadata.kanji_ngram_size = 1;
+  metadata.cross_boundary_ngrams = false;
+  mgr.RegisterCacheEntry(key, metadata);
+
+  const ChangedNgrams precomputed{{NgramSetting{3, 2, true}, {}}};
+  const auto invalidated = InvalidatedKeys(mgr, "posts", "", "ab", 3, 2, true, false, &precomputed);
+  EXPECT_EQ(invalidated, (std::unordered_set<CacheKey>{key}));
+}
+
+TEST(InvalidationManagerTest, PrecomputeCoversCurrentAndRegisteredSettings) {
+  QueryCache cache(1024 * 1024, 0.0);
+  InvalidationManager mgr(&cache);
+  EXPECT_TRUE(mgr.PrecomputeChangedNgrams("posts", "", "abc", 3, 2, true).empty());
+
+  CacheMetadata metadata;
+  metadata.table = "posts";
+  metadata.ngrams = {"ab"};
+  metadata.ngram_size = 2;
+  metadata.kanji_ngram_size = 1;
+  metadata.cross_boundary_ngrams = false;
+  mgr.RegisterCacheEntry(CacheKeyGenerator::Generate("registered"), metadata);
+
+  const auto changed = mgr.PrecomputeChangedNgrams("posts", "", "abc", 3, 2, true);
+  ASSERT_EQ(changed.size(), 2U);
+  const auto& current = changed.at(NgramSetting{3, 2, true});
+  const auto& registered = changed.at(NgramSetting{2, 1, false});
+  EXPECT_NE(std::find(current.begin(), current.end(), "abc"), current.end());
+  EXPECT_NE(std::find(registered.begin(), registered.end(), "ab"), registered.end());
 }
 
 }  // namespace mygramdb::cache

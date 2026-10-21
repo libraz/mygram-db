@@ -17,13 +17,28 @@
 
 #pragma once
 
-#include <cctype>
 #include <string>
 #include <string_view>
 
 #include "utils/string_utils.h"
 
 namespace mygramdb::client::detail {
+
+/**
+ * @brief ASCII whitespace test (0x09-0x0D, 0x20), independent of the process locale
+ */
+inline bool IsAsciiSpace(unsigned char byte) {
+  return (byte >= 0x09 && byte <= 0x0D) || byte == 0x20;  // NOLINT(readability-magic-numbers)
+}
+
+/**
+ * @brief ASCII control test (0x00-0x1F, 0x7F), independent of the process locale
+ *
+ * Bytes >= 0x80 are never control bytes, so UTF-8 sequences pass through.
+ */
+inline bool IsAsciiControl(unsigned char byte) {
+  return byte < 0x20 || byte == 0x7F;  // NOLINT(readability-magic-numbers)
+}
 
 /**
  * @brief Check whether the byte at `pos` starts a Unicode whitespace code point
@@ -40,7 +55,7 @@ inline bool IsUnicodeWhitespace(std::string_view text, size_t pos) {
   const auto byte = static_cast<unsigned char>(text[pos]);
   // Keep the ASCII portion explicit so this protocol predicate cannot inherit
   // a process C locale that classifies high bytes differently.
-  if ((byte >= 0x09 && byte <= 0x0D) || byte == 0x20) {
+  if (IsAsciiSpace(byte)) {
     return true;
   }
   if (byte == 0xC2 && pos + 1 < text.size() &&
@@ -118,7 +133,7 @@ inline bool NeedsWireQuoting(std::string_view value) {
   }
   for (size_t i = 0; i < value.size(); ++i) {
     const auto ch = static_cast<unsigned char>(value[i]);
-    if (std::iscntrl(ch) != 0 || IsWireQuoteOrEscape(value[i]) || ch == '(' || ch == ')') {
+    if (IsAsciiControl(ch) || IsWireQuoteOrEscape(value[i]) || ch == '(' || ch == ')') {
       return true;
     }
     if (IsUnicodeWhitespace(value, i)) {
@@ -164,7 +179,7 @@ inline std::string QuoteWireToken(std::string_view value) {
         escaped += "\\t";
         break;
       default:
-        if (std::iscntrl(ch) != 0) {
+        if (IsAsciiControl(ch)) {
           escaped += "\\x";
           escaped += kHexDigits[ch >> 4];
           escaped += kHexDigits[ch & 0x0F];
@@ -208,7 +223,7 @@ inline int HexDigitValue(char ch) {
  *         or a truncated `\x` escape, or when nothing is left to read.
  */
 inline bool ParseWireToken(std::string_view input, size_t& pos, std::string& value) {
-  while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos])) != 0) {
+  while (pos < input.size() && IsAsciiSpace(static_cast<unsigned char>(input[pos]))) {
     ++pos;
   }
   if (pos >= input.size()) {
@@ -218,7 +233,7 @@ inline bool ParseWireToken(std::string_view input, size_t& pos, std::string& val
   value.clear();
   if (input[pos] != '"') {
     const size_t start = pos;
-    while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos])) == 0) {
+    while (pos < input.size() && !IsAsciiSpace(static_cast<unsigned char>(input[pos]))) {
       ++pos;
     }
     value.assign(input.substr(start, pos - start));

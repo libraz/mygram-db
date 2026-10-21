@@ -1729,6 +1729,48 @@ TEST(BinlogParsingTest, QueryTransactionBoundariesDistinguishStandaloneAndExplic
   EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("CREATE TABLE ignored (id INT)"), Boundary::kNone);
 }
 
+TEST(BinlogParsingTest, QueryTransactionBoundaryIgnoresCommentsAndOptionalWords) {
+  using Boundary = BinlogEventParser::QueryTransactionBoundary;
+
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("ROLLBACK WORK TO SAVEPOINT s"), Boundary::kNone);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("rollback work to s"), Boundary::kNone);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("/* app */ ROLLBACK TO SAVEPOINT s"), Boundary::kNone);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("/* c */ XA END 'x'"), Boundary::kUnsupportedXa);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("# c\nXA PREPARE 'x'"), Boundary::kUnsupportedXa);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("/* c */ BEGIN"), Boundary::kBegin);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("/* c */ COMMIT"), Boundary::kEnd);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("COMMIT;"), Boundary::kEnd);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("COMMIT AND NO CHAIN"), Boundary::kEnd);
+  EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary("ROLLBACK WORK"), Boundary::kEnd);
+}
+
+TEST(BinlogParsingTest, IndexDdlOnConfiguredTableIsEmittedForRevalidation) {
+  config::TableConfig config;
+  config.name = "articles";
+  for (const char* query : {"DROP INDEX uq_pk ON articles", "CREATE UNIQUE INDEX uq ON articles (id)"}) {
+    auto event = BuildQueryEvent("app", query);
+    TableMetadataCache cache;
+    const std::unordered_map<std::string, server::TableContext*> table_contexts;
+    auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:14", cache, table_contexts,
+                                                      &config, false);
+    ASSERT_EQ(events.size(), 1) << query;
+    EXPECT_EQ(events[0].type, BinlogEventType::DDL) << query;
+    EXPECT_EQ(events[0].ddl_type, DDLType::kAlter) << query;
+  }
+}
+
+TEST(BinlogParsingTest, CommentedQueryCommitProducesCommitMarker) {
+  for (const char* query : {"/* app */ COMMIT", "COMMIT;", "commit work"}) {
+    auto event = BuildQueryEvent("testdb", query);
+    TableMetadataCache cache;
+    std::unordered_map<std::string, server::TableContext*> table_contexts;
+    auto events = BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:13", cache, table_contexts,
+                                                      nullptr, true);
+    ASSERT_EQ(events.size(), 1) << query;
+    EXPECT_EQ(events[0].type, BinlogEventType::COMMIT) << query;
+  }
+}
+
 TEST(BinlogParsingTest, IgnoredStandaloneQueryProgressIsFailClosed) {
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("GRANT SELECT ON db.* TO 'reader'@'%'"));
   EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("CREATE DATABASE IF NOT EXISTS testdb"));
@@ -1935,6 +1977,26 @@ TEST(BinlogParsingTest, UnknownSqlModeIsJudgedUnderEveryQuotingMode) {
   data.query = "XA START 'x'";
   EXPECT_EQ(BinlogEventParser::ClassifyQueryTransactionBoundary(data),
             BinlogEventParser::QueryTransactionBoundary::kUnsupportedXa);
+}
+
+/**
+ * @brief Under an unknown sql_mode, the most destructive reading of the event wins.
+ */
+TEST(BinlogParsingTest, UnknownSqlModeTakesTheMostDestructiveDdlAcrossModes) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  config::TableConfig config;
+  config.name = "articles";
+  TableMetadataCache cache;
+  const std::unordered_map<std::string, server::TableContext*> table_contexts;
+
+  // With backslash escapes the DROP sits inside the comment string; with NO_BACKSLASH_ESCAPES it runs.
+  const std::string query = R"(ALTER TABLE articles COMMENT '\'; DROP TABLE articles; SELECT ')";
+  const std::vector<uint8_t> unknown_vars = {0xFE, 0, 0};
+  const auto event = BinlogEventBuilder::BuildQueryEventWithStatusVars("app", query, unknown_vars);
+  const auto events =
+      BinlogEventParser::ParseBinlogEvent(event.data(), event.size(), "uuid:1", cache, table_contexts, &config, false);
+  ASSERT_EQ(events.size(), 1U);
+  EXPECT_EQ(events[0].ddl_type, DDLType::kDrop);
 }
 
 TEST(BinlogParsingTest, ExtractQueryStringReadsNoBackslashEscapesFromTheSqlModeStatusVariable) {

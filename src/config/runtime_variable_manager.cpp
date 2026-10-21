@@ -5,8 +5,6 @@
 
 #include "config/runtime_variable_manager.h"
 
-#include <spdlog/spdlog.h>
-
 #include <map>
 #include <set>
 #include <shared_mutex>
@@ -15,6 +13,7 @@
 #include "cache/cache_manager.h"
 #include "config/config_help.h"
 #include "config/config_internal.h"
+#include "utils/log_manager.h"
 #include "utils/memory_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -117,7 +116,7 @@ Expected<void, VariableSetError> RuntimeVariableManager::SetVariables(
       return fail(variable_name, MakeError(ErrorCode::kConfigUnknownVariable, "Unknown variable: " + variable_name));
     }
 
-    auto parsed_value = internal::ValidateConfigValue(variable_name, raw_value);
+    auto parsed_value = internal::ValidateConfigValue(variable_name, raw_value, base_config_.custom_schema);
     if (!parsed_value) {
       return fail(variable_name, parsed_value.error());
     }
@@ -192,15 +191,8 @@ Expected<void, VariableSetError> RuntimeVariableManager::SetVariables(
   runtime_values_.swap(staged_runtime_values);
 
   if (final_values.find("logging.level") != final_values.end()) {
-    const auto& level = final_values.at("logging.level");
-    if (level == "debug") {
-      spdlog::set_level(spdlog::level::debug);
-    } else if (level == "info") {
-      spdlog::set_level(spdlog::level::info);
-    } else if (level == "warn") {
-      spdlog::set_level(spdlog::level::warn);
-    } else if (level == "error") {
-      spdlog::set_level(spdlog::level::err);
+    if (auto level = mygram::utils::LogManager::ParseLevel(final_values.at("logging.level")); level.has_value()) {
+      mygram::utils::LogManager::Instance().SetLevel(*level);
     }
   }
   if (final_values.find("logging.format") != final_values.end()) {

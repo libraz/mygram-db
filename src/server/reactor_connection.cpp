@@ -132,11 +132,6 @@ int ReactorConnection::ReleaseFd() noexcept {
 }
 
 bool ReactorConnection::OnReadable() {
-  // Refresh idle-timer baseline. Any inbound event counts as activity for
-  // the reaper, even if recv() ultimately returns 0 (peer half-close): the
-  // peer just spoke to us, so we are not idle.
-  last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
-
   if (closing_.load(std::memory_order_acquire)) {
     // Some other path (CloseWithServerBusy, a DrainTask exception handler,
     // ...) already decided to close and may have left a response queued
@@ -164,42 +159,12 @@ bool ReactorConnection::OnReadable() {
   while (true) {
     ssize_t n = ::recv(fd_, chunk.data(), chunk.size(), 0);
     if (n > 0) {
+      // Only bytes actually received refresh the idle-timer baseline.
+      last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
       received_bytes += static_cast<size_t>(n);
       const ReadAppendStatus append_status = AppendReadBytes(chunk.data(), static_cast<size_t>(n), enqueued);
       if (append_status != ReadAppendStatus::kOk) {
-        size_t read_buffer_size = 0;
-        {
-          std::lock_guard<std::mutex> lock(frame_mutex_);
-          read_buffer_size = read_buf_.size();
-        }
-        // Each rejection keeps its own event name and wire error: an operator
-        // reading the log, and a client branching on the numeric code, must
-        // both be able to tell a payload problem from a multiplexer fault.
-        const char* overflow_event = "reactor_read_buf_overflow";
-        std::string_view wire_message = "request too large";
-        mygram::utils::ErrorCode wire_code = mygram::utils::ErrorCode::kNetworkInvalidRequest;
-        if (append_status == ReadAppendStatus::kFrameQueueOverflow) {
-          overflow_event = "reactor_pending_frames_overflow";
-          wire_message = "server busy";
-          wire_code = mygram::utils::ErrorCode::kServerBusy;
-        } else if (append_status == ReadAppendStatus::kInterestUpdateFailed) {
-          overflow_event = "reactor_read_interest_update_failed";
-          wire_message = "event multiplexer modify failed";
-          wire_code = mygram::utils::ErrorCode::kNetworkReactorModifyFailed;
-        }
-        mygram::utils::StructuredLog()
-            .Event(overflow_event)
-            .Field("fd", static_cast<int64_t>(fd_))
-            .Field("buf_bytes", static_cast<uint64_t>(read_buffer_size))
-            .Field("cap_bytes", static_cast<uint64_t>(kMaxReadBufferBytes))
-            .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
-            .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
-            .Warn();
-        // The helper publishes closing_ while holding write_mutex_, before
-        // checking the queue or sending. An in-flight handler therefore
-        // cannot enqueue a later response ahead of or after this error.
-        const bool close_now = CloseWithError(wire_message, wire_code);
-        return !close_now;
+        return !CloseWithReadRejection(append_status);
       }
       {
         std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -237,8 +202,7 @@ bool ReactorConnection::OnReadable() {
         interest_update_ok = PublishReadEofLocked();
       }
       if (!interest_update_ok) {
-        MarkClosingImmediately();
-        return false;
+        return !CloseWithReadRejection(ReadAppendStatus::kInterestUpdateFailed);
       }
       break;
     }
@@ -303,11 +267,6 @@ bool ReactorConnection::OnReadable() {
 }
 
 bool ReactorConnection::OnWritable() {
-  // Outbound progress also resets the idle-timer: a slow client
-  // that is steadily draining its socket is not "idle" even if it never
-  // sends another request.
-  last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
-
   std::unique_lock<std::mutex> lock(write_mutex_);
 
   // Hard terminal failures must not send any additional bytes, even if older
@@ -391,7 +350,7 @@ ReactorConnection::ReadAppendStatus ReactorConnection::AppendReadBytes(const cha
     return ReadAppendStatus::kReadBufferOverflow;
   }
   if (memory_budget_ != nullptr && !memory_budget_->TryReserve(len)) {
-    frame_queue_overflow_ = true;
+    RejectFramesLocked(ReadAppendStatus::kFrameQueueOverflow);
     mygram::utils::StructuredLog()
         .Event("reactor_global_buffer_budget_exhausted")
         .Field("fd", static_cast<int64_t>(fd_))
@@ -430,8 +389,8 @@ ReactorConnection::ReadAppendStatus ReactorConnection::AppendReadBytes(const cha
   if (!interest_update_ok) {
     return ReadAppendStatus::kInterestUpdateFailed;
   }
-  if (frame_queue_overflow_) {
-    return ReadAppendStatus::kFrameQueueOverflow;
+  if (frame_reject_status_ != ReadAppendStatus::kOk) {
+    return frame_reject_status_;
   }
 
   // Hard cap on the unframed tail only. Completed CRLF-delimited frames are
@@ -458,6 +417,67 @@ void ReactorConnection::MarkClosingImmediatelyLocked() {
   closing_.store(true, std::memory_order_release);
 }
 
+void ReactorConnection::RejectFramesLocked(ReadAppendStatus status) {
+  // The first rejection owns the reason reported to the peer.
+  if (frame_reject_status_ == ReadAppendStatus::kOk) {
+    frame_reject_status_ = status;
+  }
+}
+
+bool ReactorConnection::DisarmReadsForDeferredCloseLocked() {
+  // Level-triggered readiness on unread inbound bytes would otherwise keep
+  // dispatching OnReadable for a connection that will never recv() again.
+  if (reactor_ == nullptr) {
+    return true;
+  }
+  auto result = reactor_->SetReadEnabled(fd_, this, false);
+  if (result) {
+    return true;
+  }
+  mygram::utils::StructuredLog()
+      .Event("reactor_read_interest_update_failed")
+      .Field("fd", static_cast<int64_t>(fd_))
+      .Field("error", result.error().to_string())
+      .Warn();
+  MarkClosingImmediatelyLocked();
+  return false;
+}
+
+bool ReactorConnection::CloseWithReadRejection(ReadAppendStatus status) {
+  size_t read_buffer_size = 0;
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    read_buffer_size = read_buf_.size();
+  }
+  // Each rejection keeps its own event name and wire error: an operator
+  // reading the log, and a client branching on the numeric code, must
+  // both be able to tell a payload problem from a multiplexer fault.
+  const char* overflow_event = "reactor_read_buf_overflow";
+  std::string_view wire_message = "request too large";
+  mygram::utils::ErrorCode wire_code = mygram::utils::ErrorCode::kNetworkInvalidRequest;
+  if (status == ReadAppendStatus::kFrameQueueOverflow) {
+    overflow_event = "reactor_pending_frames_overflow";
+    wire_message = "server busy";
+    wire_code = mygram::utils::ErrorCode::kServerBusy;
+  } else if (status == ReadAppendStatus::kInterestUpdateFailed) {
+    overflow_event = "reactor_read_interest_update_failed";
+    wire_message = "event multiplexer modify failed";
+    wire_code = mygram::utils::ErrorCode::kNetworkReactorModifyFailed;
+  }
+  mygram::utils::StructuredLog()
+      .Event(overflow_event)
+      .Field("fd", static_cast<int64_t>(fd_))
+      .Field("buf_bytes", static_cast<uint64_t>(read_buffer_size))
+      .Field("cap_bytes", static_cast<uint64_t>(kMaxReadBufferBytes))
+      .Field("pending_frames", static_cast<uint64_t>(PendingFrameCountForTest()))
+      .Field("pending_frame_bytes", static_cast<uint64_t>(PendingFrameBytesForTest()))
+      .Warn();
+  // CloseWithError publishes closing_ while holding write_mutex_, before
+  // checking the queue or sending. An in-flight handler therefore cannot
+  // enqueue a later response ahead of or after this error.
+  return CloseWithError(wire_message, wire_code);
+}
+
 bool ReactorConnection::CloseWithError(std::string_view message, mygram::utils::ErrorCode code,
                                        const std::function<void()>& under_lock_hook) {
   std::lock_guard<std::mutex> lock(write_mutex_);
@@ -473,7 +493,7 @@ bool ReactorConnection::CloseWithError(std::string_view message, mygram::utils::
   closing_.store(true, std::memory_order_release);
   if (!write_queue_.empty()) {
     close_after_write_drain_ = true;
-    return false;
+    return !DisarmReadsForDeferredCloseLocked();
   }
   close_after_write_drain_ = false;
 
@@ -513,6 +533,9 @@ bool ReactorConnection::CloseWithServerBusy() {
     return false;
   }
   close_after_write_drain_ = !write_queue_.empty();
+  if (close_after_write_drain_ && !DisarmReadsForDeferredCloseLocked()) {
+    return false;
+  }
   return close_after_write_drain_;
 }
 
@@ -558,17 +581,25 @@ bool ReactorConnection::MaybeResumeReadsLocked() {
   // read_buf_. While reads are disarmed, this drain worker owns the buffer;
   // refill the pending queue before deciding whether kernel reads may resume.
   (void)ExtractFramesLocked();
-  if (frame_queue_overflow_) {
+  if (frame_reject_status_ != ReadAppendStatus::kOk) {
     return false;
   }
   if (pending_frames_.size() >= pending_frames_high_watermark_ ||
       pending_frame_bytes_ >= pending_frame_bytes_high_watermark_) {
     return true;
   }
-  if (reactor_ != nullptr) {
-    auto result = reactor_->SetReadEnabled(fd_, this, true);
-    if (!result) {
-      return false;
+  {
+    // A terminal close disarms reads under write_mutex_; never re-arm after it.
+    std::lock_guard<std::mutex> write_lock(write_mutex_);
+    if (closing_.load(std::memory_order_acquire)) {
+      return true;
+    }
+    if (reactor_ != nullptr) {
+      auto result = reactor_->SetReadEnabled(fd_, this, true);
+      if (!result) {
+        RejectFramesLocked(ReadAppendStatus::kInterestUpdateFailed);
+        return false;
+      }
     }
   }
   read_paused_ = false;
@@ -615,14 +646,18 @@ size_t ReactorConnection::ExtractFramesLocked() {
     }
     // Frame is [consumed, found_off); delimiter is [found_off, found_off+2).
     const size_t frame_len = found_off - consumed;
-    if (frame_len > kMaxReadBufferBytes || pending_frames_.size() >= max_pending_frames_ ||
+    if (frame_len > kMaxReadBufferBytes) {
+      RejectFramesLocked(ReadAppendStatus::kReadBufferOverflow);
+      break;
+    }
+    if (pending_frames_.size() >= max_pending_frames_ ||
         frame_len > max_pending_frame_bytes_ - std::min(pending_frame_bytes_, max_pending_frame_bytes_)) {
-      frame_queue_overflow_ = true;
+      RejectFramesLocked(ReadAppendStatus::kFrameQueueOverflow);
       break;
     }
     const size_t frame_budget_bytes = frame_len + kQueueEntryOverheadBytes;
     if (memory_budget_ != nullptr && !memory_budget_->TryReserve(frame_budget_bytes)) {
-      frame_queue_overflow_ = true;
+      RejectFramesLocked(ReadAppendStatus::kFrameQueueOverflow);
       mygram::utils::StructuredLog()
           .Event("reactor_global_buffer_budget_exhausted")
           .Field("fd", static_cast<int64_t>(fd_))
@@ -719,7 +754,7 @@ void ReactorConnection::DrainTask() {
     while (!closing_.load(std::memory_order_acquire)) {
       std::string frame;
       size_t frame_budget_bytes = 0;
-      bool resume_failed = false;
+      ReadAppendStatus resume_status = ReadAppendStatus::kOk;
       {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         if (pending_frames_.empty()) {
@@ -730,15 +765,17 @@ void ReactorConnection::DrainTask() {
         pending_frame_overhead_bytes_ -= kQueueEntryOverheadBytes;
         frame = std::move(pending_frames_.front());
         pending_frames_.pop_front();
-        resume_failed = !MaybeResumeReadsLocked();
+        if (!MaybeResumeReadsLocked()) {
+          resume_status = frame_reject_status_;
+        }
       }
       auto frame_budget_guard = mygram::utils::ScopeGuard([this, frame_budget_bytes]() {
         if (memory_budget_ != nullptr) {
           memory_budget_->Release(frame_budget_bytes + kQueueEntryOverheadBytes);
         }
       });
-      if (resume_failed) {
-        MarkClosingImmediately();
+      if (resume_status != ReadAppendStatus::kOk) {
+        (void)CloseWithReadRejection(resume_status);
         break;
       }
 
@@ -955,6 +992,8 @@ bool ReactorConnection::DrainWriteQueueLocked() {
 
     ssize_t n = ::send(fd_, data, remaining, kSendFlags);
     if (n > 0) {
+      // Outbound progress resets the idle timer on whichever thread sends.
+      last_active_.store(std::chrono::steady_clock::now(), std::memory_order_relaxed);
       front_offset_ += static_cast<size_t>(n);
       // Defensive underflow guard: a bug elsewhere that drives
       // write_queue_bytes_ below the actually-queued byte count would wrap

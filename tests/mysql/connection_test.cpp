@@ -175,6 +175,22 @@ TEST(MySQLConnectionTest, QueryErrorClassificationPreservesRetryableTransportFai
   EXPECT_EQ(internal::ClassifyQueryErrorCode(2055), ErrorCode::kMySQLDisconnected);  // CR_SERVER_LOST_EXTENDED
 }
 
+TEST(MySQLConnectionTest, QueryErrorClassificationTreatsEveryTransientServerErrorAsRetryable) {
+  using mygram::utils::ErrorCode;
+
+  // Shutdown, network errors, a killed connection and an interaction timeout end the connection.
+  for (const unsigned int native_error : {1053U, 1152U, 1158U, 1159U, 1160U, 1161U, 1927U, 4031U}) {
+    EXPECT_TRUE(internal::IsConnectionEndingError(native_error)) << native_error;
+    EXPECT_EQ(internal::ClassifyQueryErrorCode(native_error), ErrorCode::kMySQLDisconnected) << native_error;
+  }
+  // An interrupted or deadlocked statement leaves the connection usable and can be run again.
+  for (const unsigned int native_error : {1213U, 1317U}) {
+    EXPECT_FALSE(internal::IsConnectionEndingError(native_error)) << native_error;
+    EXPECT_EQ(internal::ClassifyQueryErrorCode(native_error), ErrorCode::kMySQLTimeout) << native_error;
+  }
+  EXPECT_FALSE(internal::IsConnectionEndingError(1146));
+}
+
 TEST(MySQLConnectionTest, QueryErrorClassificationKeepsSemanticFailuresTerminal) {
   using mygram::utils::ErrorCode;
 

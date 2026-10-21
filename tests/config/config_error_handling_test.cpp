@@ -174,6 +174,73 @@ TEST(ConfigErrorHandlingTest, LoadConfigAcceptsBigintUnsignedFilterTypes) {
   std::filesystem::remove(config_path);
 }
 
+/**
+ * @brief A missing or empty YAML file reports the same error as the JSON equivalent
+ */
+TEST(ConfigErrorHandlingTest, MissingAndEmptyYamlMatchJsonErrors) {
+  const auto dir = std::filesystem::temp_directory_path() / "mygramdb_missing_empty_config_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+
+  const auto missing_yaml = LoadConfig((dir / "missing.yaml").string());
+  const auto missing_json = LoadConfig((dir / "missing.json").string());
+  ASSERT_FALSE(missing_yaml);
+  ASSERT_FALSE(missing_json);
+  EXPECT_EQ(missing_yaml.error().code(), mygram::utils::ErrorCode::kConfigFileNotFound);
+  EXPECT_EQ(missing_yaml.error().code(), missing_json.error().code());
+  EXPECT_NE(missing_yaml.error().message().find("Failed to open configuration file"), std::string::npos)
+      << missing_yaml.error().message();
+
+  std::ofstream(dir / "empty.yaml").close();
+  std::ofstream(dir / "empty.json").close();
+  const auto empty_yaml = LoadConfig((dir / "empty.yaml").string());
+  const auto empty_json = LoadConfig((dir / "empty.json").string());
+  ASSERT_FALSE(empty_yaml);
+  ASSERT_FALSE(empty_json);
+  EXPECT_EQ(empty_yaml.error().code(), empty_json.error().code());
+  EXPECT_NE(empty_yaml.error().message().find("Configuration file is empty"), std::string::npos)
+      << empty_yaml.error().message();
+
+  std::filesystem::remove_all(dir);
+}
+
+/**
+ * @brief Validation against loaded --schema text refuses what the loader refuses
+ */
+TEST(ConfigErrorHandlingTest, LoadConfigForValidationWithSchemaTextAppliesCustomSchema) {
+  const auto dir = std::filesystem::temp_directory_path() / "mygramdb_validation_schema_text_test";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  const auto schema_path = dir / "schema.json";
+  const std::string schema = R"({"properties":{"api":{"properties":{"max_query_length":{"maximum":256}}}}})";
+  std::ofstream(schema_path) << schema;
+  const auto write_config = [&dir](const std::string& name, int max_query_length) {
+    const auto path = dir / name;
+    std::ofstream(path) << "mysql:\n  user: \"test\"\n  database: \"test\"\n"
+                        << "tables:\n  - name: \"docs\"\n    text_source:\n      column: \"body\"\n"
+                        << "replication:\n  enable: false\n"
+                        << "api:\n  max_query_length: " << max_query_length << "\n";
+    return path.string();
+  };
+  const std::string within = write_config("within.yaml", 200);
+  const std::string beyond = write_config("beyond.yaml", 4096);
+
+  auto loaded = LoadConfig(within, schema_path.string());
+  ASSERT_TRUE(loaded) << loaded.error().to_string();
+  EXPECT_EQ(loaded->custom_schema, schema);
+
+  EXPECT_TRUE(LoadConfigForValidationWithSchemaText(within, loaded->custom_schema));
+  auto refused = LoadConfigForValidationWithSchemaText(beyond, loaded->custom_schema);
+  ASSERT_FALSE(refused);
+  auto refused_by_path = LoadConfigForValidation(beyond, schema_path.string());
+  ASSERT_FALSE(refused_by_path);
+  EXPECT_EQ(refused.error().code(), refused_by_path.error().code());
+  EXPECT_TRUE(LoadConfigForValidationWithSchemaText(beyond, ""))
+      << "an empty schema text applies the built-in schema only";
+
+  std::filesystem::remove_all(dir);
+}
+
 TEST(ConfigErrorHandlingTest, RequiredFilterMissingTypeListsSchemaTypes) {
   json config_json = {
       {"mysql", {{"host", "127.0.0.1"}, {"user", "test"}, {"password", "test"}, {"database", "test"}}},

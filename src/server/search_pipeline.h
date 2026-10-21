@@ -77,6 +77,7 @@ enum class CacheMissReason : std::uint8_t {
   kHit,                 ///< Cache returned a fresh entry (cache_hit == true)
   kNotFound,            ///< Cache lookup found no entry for this query
   kStale,               ///< Cache entry existed but failed the staleness check
+  kInvalidated,         ///< Cache entry was already invalidated by a data change
   kDisabled,            ///< Cache manager was nullptr or disabled
   kCostBelowThreshold,  ///< Reserved: query cost did not meet the cache threshold
 };
@@ -222,7 +223,8 @@ struct CacheLookupResult {
 /// @param cache_manager Cache manager (may be nullptr; returns nullopt if null or disabled)
 /// @param doc_store Document store for staleness check
 /// @param[out] miss_reason Optional out-parameter; set to the reason on miss
-///                         (kHit on success, kDisabled / kNotFound / kStale on miss).
+///                         (kHit on success, kDisabled / kNotFound / kStale / kInvalidated
+///                         on miss; a TTL-expired entry reports kNotFound).
 ///                         May be nullptr to ignore.
 /// @return CacheLookupResult if cache hit (non-stale), std::nullopt if miss/stale/disabled
 std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache::CacheManager* cache_manager,

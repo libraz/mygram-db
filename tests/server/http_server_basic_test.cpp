@@ -8,11 +8,13 @@
 #include <httplib.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
 #include <nlohmann/json.hpp>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -461,6 +463,50 @@ TEST_F(HttpServerTest, RejectsRequestsOutsideAllowedCidrs) {
   auto detail_res = client.Get("/health/detail");
   ASSERT_TRUE(detail_res);
   EXPECT_EQ(detail_res->status, 403);
+
+  restricted_server->Stop();
+}
+
+TEST_F(HttpServerTest, DeniedPeerIsRefusedBeforeItsBodyIsRead) {
+  uint16_t port = testing::FindAvailableLoopbackPort();
+  ASSERT_GT(port, 0);
+
+  HttpServerConfig restricted_config;
+  restricted_config.bind = "127.0.0.1";
+  restricted_config.port = port;
+  restricted_config.allow_cidrs = {"10.0.0.0/8"};
+  restricted_config.read_timeout_sec = 30;
+
+  auto restricted_server = std::make_unique<HttpServer>(restricted_config, table_contexts_, config_.get(), nullptr);
+  ASSERT_TRUE(restricted_server->Start());
+
+  const int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(sock, 0);
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(port);
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ASSERT_EQ(::connect(sock, reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+
+  timeval receive_timeout{};
+  receive_timeout.tv_sec = 3;
+  ASSERT_EQ(::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &receive_timeout, sizeof(receive_timeout)), 0);
+
+  // Headers announce a body that is never sent; the refusal must not wait for it.
+  const std::string request =
+      "POST /tables/test/search HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+      "Content-Length: 1000000\r\n\r\n";
+  ASSERT_EQ(::send(sock, request.data(), request.size(), 0), static_cast<ssize_t>(request.size()));
+
+  std::string response;
+  char buffer[512];
+  const ssize_t received = ::recv(sock, buffer, sizeof(buffer), 0);
+  if (received > 0) {
+    response.assign(buffer, static_cast<size_t>(received));
+  }
+  ::close(sock);
+
+  EXPECT_EQ(response.rfind("HTTP/1.1 403", 0), 0U) << response;
 
   restricted_server->Stop();
 }

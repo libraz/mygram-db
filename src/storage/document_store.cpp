@@ -707,6 +707,9 @@ size_t DocumentStore::MemoryUsage() const {
   std::shared_lock lock(mutex_);
   size_t total = 0;
 
+  // Strings add capacity() even when stored inline, and filter values add their size per entry: the
+  // figure feeds the restore budget and must not fall below resident memory (restore_materialization_test).
+
   // Include slot overhead for flat hash maps (each slot has 1 byte control metadata)
   // plus the slot data itself (key + value + padding)
   constexpr size_t kControlByteSize = 1;
@@ -714,14 +717,12 @@ size_t DocumentStore::MemoryUsage() const {
   total += pk_to_doc_id_.capacity() * (sizeof(std::pair<std::string, DocId>) + kControlByteSize);
   total += doc_filters_.capacity() * (sizeof(std::pair<DocId, DocumentFilterValues>) + kControlByteSize);
 
-  // doc_id_to_pk_ - heap allocation for strings only
-  // (slot overhead including sizeof(DocId) + sizeof(std::string) is already counted above)
+  // doc_id_to_pk_ - string capacity on top of the slot counted above
   for (const auto& [doc_id, primary_key_str] : doc_id_to_pk_) {
     total += primary_key_str.capacity();
   }
 
-  // pk_to_doc_id_ - heap allocation for strings only
-  // (slot overhead including sizeof(std::string) + sizeof(DocId) is already counted above)
+  // pk_to_doc_id_ - string capacity on top of the slot counted above
   for (const auto& [primary_key_str, doc_id] : pk_to_doc_id_) {
     total += primary_key_str.capacity();
   }
@@ -756,8 +757,6 @@ size_t DocumentStore::MemoryUsage() const {
   // doc_texts_ (normalized text for n-gram verification)
   total += doc_texts_.capacity() * (sizeof(std::pair<DocId, std::string>) + kControlByteSize);
   for (const auto& [doc_id, text] : doc_texts_) {
-    // Only count heap allocation; slot overhead (sizeof(DocId) + sizeof(std::string))
-    // is already counted above via capacity()
     total += text.capacity();
   }
   total += original_texts_.capacity() * (sizeof(std::pair<DocId, std::string>) + kControlByteSize);

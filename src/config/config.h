@@ -539,6 +539,10 @@ struct Config {
   // Loader metadata only: it is not a schema/configuration key and is omitted
   // from CONFIG SHOW and dump serialization.
   std::string source_path;
+  // Text of the operator --schema document the loader validated against, empty
+  // when only the built-in schema applies. Loader metadata like source_path;
+  // runtime SET validates against it as well.
+  std::string custom_schema;
   MysqlConfig mysql;
   std::vector<TableConfig> tables;
   BuildConfig build;
@@ -573,6 +577,15 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::stri
  */
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigForValidation(const std::string& path,
                                                                               const std::string& schema_path = "");
+
+/**
+ * @brief LoadConfigForValidation() against an already-loaded operator schema document
+ *
+ * @param path Path to configuration file (YAML or JSON)
+ * @param custom_schema Text of the --schema document (Config::custom_schema); empty = built-in schema only
+ */
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigForValidationWithSchemaText(
+    const std::string& path, const std::string& custom_schema);
 
 /**
  * @brief Load configuration from YAML file (legacy compatibility)

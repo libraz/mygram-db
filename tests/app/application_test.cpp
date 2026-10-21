@@ -395,6 +395,71 @@ TEST(ServerOrchestratorReplicationTest, ReaderStartFailureAfterDumpRestoreKeepsT
   EXPECT_TRUE(*started);
 }
 
+TEST(ServerOrchestratorReplicationTest, CatchupFailureAfterDumpRestoreKeepsTheServerRunningNotReady) {
+  class RunningReader final : public mygramdb::mysql::IBinlogReader {
+   public:
+    mygram::utils::Expected<void, mygram::utils::Error> Start() override {
+      running_ = true;
+      return {};
+    }
+    void Stop() override { running_ = false; }
+    bool IsRunning() const override { return running_; }
+    std::string GetCurrentGTID() const override { return {}; }
+    void SetCurrentGTID(const std::string&) override {}
+    std::string GetLastError() const override { return {}; }
+    uint64_t GetProcessedEvents() const override { return 0; }
+    size_t GetQueueSize() const override { return 0; }
+
+   private:
+    bool running_ = false;
+  };
+  const mygram::utils::Expected<void, mygram::utils::Error> stalled = mygram::utils::MakeUnexpected(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kTimeout, "no replication progress"));
+
+  RunningReader after_restore_reader;
+  ASSERT_TRUE(after_restore_reader.Start());
+  auto after_restore =
+      mygramdb::app::FinishStartupCatchup(after_restore_reader, /*restored_from_dump=*/true, "uuid:1-10", stalled);
+  ASSERT_TRUE(after_restore.has_value()) << "restored data is served with replication stopped";
+  EXPECT_FALSE(*after_restore);
+  EXPECT_FALSE(after_restore_reader.IsRunning()) << "a stopped reader keeps readiness at not ready";
+
+  RunningReader after_snapshot_reader;
+  ASSERT_TRUE(after_snapshot_reader.Start());
+  auto after_snapshot =
+      mygramdb::app::FinishStartupCatchup(after_snapshot_reader, /*restored_from_dump=*/false, "uuid:1-10", stalled);
+  ASSERT_FALSE(after_snapshot.has_value()) << "a MySQL snapshot that cannot catch up still aborts startup";
+  EXPECT_EQ(after_snapshot.error().code(), mygram::utils::ErrorCode::kTimeout);
+  EXPECT_FALSE(after_snapshot_reader.IsRunning());
+
+  // A catch-up target that could not be captured after the restore follows the same policy.
+  const mygram::utils::Expected<void, mygram::utils::Error> target_unavailable = mygram::utils::MakeUnexpected(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLQueryFailed, "latest GTID query failed"));
+  RunningReader target_after_restore_reader;
+  ASSERT_TRUE(target_after_restore_reader.Start());
+  auto target_after_restore = mygramdb::app::FinishStartupCatchup(target_after_restore_reader,
+                                                                  /*restored_from_dump=*/true, "", target_unavailable);
+  ASSERT_TRUE(target_after_restore.has_value()) << "restored data is served with replication stopped";
+  EXPECT_FALSE(*target_after_restore);
+  EXPECT_FALSE(target_after_restore_reader.IsRunning());
+
+  RunningReader target_after_snapshot_reader;
+  ASSERT_TRUE(target_after_snapshot_reader.Start());
+  auto target_after_snapshot =
+      mygramdb::app::FinishStartupCatchup(target_after_snapshot_reader,
+                                          /*restored_from_dump=*/false, "", target_unavailable);
+  ASSERT_FALSE(target_after_snapshot.has_value());
+  EXPECT_EQ(target_after_snapshot.error().code(), mygram::utils::ErrorCode::kMySQLQueryFailed);
+
+  RunningReader caught_up_reader;
+  ASSERT_TRUE(caught_up_reader.Start());
+  auto caught_up = mygramdb::app::FinishStartupCatchup(caught_up_reader, /*restored_from_dump=*/true, "uuid:1-10",
+                                                       mygram::utils::Expected<void, mygram::utils::Error>{});
+  ASSERT_TRUE(caught_up.has_value());
+  EXPECT_TRUE(*caught_up);
+  EXPECT_TRUE(caught_up_reader.IsRunning());
+}
+
 TEST(ServerOrchestratorReplicationTest, CollectRequiredTablesUsesConfiguredDatabaseAndNames) {
   std::unordered_map<std::string, std::unique_ptr<mygramdb::server::TableContext>> tables;
 

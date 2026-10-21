@@ -6,7 +6,6 @@
 #include "server/server_lifecycle_manager.h"
 
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <gtest/gtest.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -55,15 +54,11 @@ std::optional<TrackedDumpTempPaths> CreateAgedDeadTrackedTemp(const std::filesys
   if (child_pid == 0) {
     ::close(path_pipe[0]);
     mygramdb::utils::AtomicFileWriter writer((directory / final_name).string(), true);
-    const int fd = ::open(writer.GetTempPath().c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
-    if (fd < 0) {
-      _exit(2);
-    }
-    const auto tracked = writer.TrackDumpTempFile(fd);
-    ::close(fd);
-    if (!tracked) {
+    const auto created = writer.CreateDumpTempFile();
+    if (!created) {
       _exit(3);
     }
+    ::close(*created);
     const std::string temp_path = writer.GetTempPath();
     if (::write(path_pipe[1], temp_path.c_str(), temp_path.size() + 1) != static_cast<ssize_t>(temp_path.size() + 1)) {
       _exit(4);
@@ -104,7 +99,7 @@ std::optional<TrackedDumpTempPaths> CreateAgedDeadTrackedTemp(const std::filesys
     }
   }
   if (marker_path.empty()) {
-    ADD_FAILURE() << "TrackDumpTempFile did not create an owner marker";
+    ADD_FAILURE() << "CreateDumpTempFile did not create an owner marker";
     return std::nullopt;
   }
 

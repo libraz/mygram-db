@@ -60,6 +60,7 @@ struct CIDR {
   uint32_t netmask = 0;   // Network mask in host byte order
   int prefix_length = 0;  // Prefix length (0-32 for IPv4, 0-128 for IPv6)
   int family = AF_INET;
+  bool ipv4_mapped = false;  // Written as an IPv4-mapped IPv6 prefix (::ffff:a.b.c.d/n)
   std::array<uint8_t, 16> network_bytes{};
 
   /**
@@ -74,7 +75,9 @@ struct CIDR {
    *
    * IPv4-mapped IPv6 peers (for example ::ffff:127.0.0.1) also match an
    * equivalent IPv4 CIDR. This is important for dual-stack listeners, whose
-   * kernel may report IPv4 peers using mapped IPv6 addresses.
+   * kernel may report IPv4 peers using mapped IPv6 addresses. A universal
+   * entry (0.0.0.0/0 or ::/0) matches every IPv4 and IPv6 address; a mapped
+   * ::ffff:0.0.0.0/96 entry matches IPv4 peers only.
    */
   [[nodiscard]] bool Contains(const std::string& ip_str) const;
 

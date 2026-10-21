@@ -520,34 +520,6 @@ bool QueryParser::IsSafeColumnName(std::string_view column) {
   return true;
 }
 
-bool QueryParser::IsSafeTableName(std::string_view table) {
-  if (table.empty() || table.size() > kMaxTableNameLength) {
-    return false;
-  }
-  const auto* bytes = reinterpret_cast<const unsigned char*>(table.data());
-  for (size_t i = 0; i < table.size();) {
-    const auto u = bytes[i];
-    const bool ascii_safe =
-        (u >= 'a' && u <= 'z') || (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9') || u == '_' || u == '-' || u == '.';
-    if (ascii_safe) {
-      ++i;
-      continue;
-    }
-    if (u < 0x80) {
-      return false;
-    }
-    // Only well-formed multi-byte sequences may pass; TryParseUtf8Char rejects
-    // overlong forms, surrogates and out-of-range code points.
-    uint32_t code_point = 0;
-    const int consumed = mygram::utils::TryParseUtf8Char(bytes + i, table.size() - i, &code_point);
-    if (consumed <= 1) {
-      return false;
-    }
-    i += static_cast<size_t>(consumed);
-  }
-  return true;
-}
-
 bool QueryParser::IsDatabaseQualifiedTableName(std::string_view table) {
   const auto separator = table.find('.');
   return separator != std::string_view::npos && separator != 0 && separator + 1 < table.size();

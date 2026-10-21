@@ -92,9 +92,18 @@ class InvalidationQueue {
    * @param table_name Table that was modified
    * @param old_text Previous text content
    * @param new_text New text content
+   * @param precomputed Changed n-grams from PrecomputeChangedNgrams for the same event, if any
    */
   void Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
-               bool filter_columns_changed = false);
+               bool filter_columns_changed = false, const ChangedNgrams* precomputed = nullptr);
+
+  /**
+   * @brief Extract an event's changed n-grams for Enqueue with the table's settings
+   *
+   * Lets a caller run the extraction before entering its own critical section.
+   */
+  [[nodiscard]] ChangedNgrams PrecomputeChangedNgrams(const std::string& table_name, const std::string& old_text,
+                                                      const std::string& new_text) const;
 
   /**
    * @brief Start background worker thread for batch processing
@@ -147,6 +156,9 @@ class InvalidationQueue {
   QueryCache* cache_;                      ///< Pointer to query cache
   InvalidationManager* invalidation_mgr_;  ///< Pointer to invalidation manager
   NgramConfigMap ngram_configs_;           ///< Per-table N-gram settings for invalidation
+
+  /// N-gram setting @p table_name is indexed with, or the index defaults.
+  [[nodiscard]] NgramSetting NgramSettingFor(const std::string& table_name) const;
 
   /** Typed (table, CacheKey) composite key for the pending-invalidation map. */
   struct PendingKey {

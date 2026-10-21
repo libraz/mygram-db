@@ -10,12 +10,16 @@
 #include <spdlog/spdlog.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "config/config.h"
+#include "config/runtime_variable_manager.h"
 #include "utils/structured_log.h"
 
 using namespace mygramdb::app;
@@ -594,6 +598,108 @@ TEST_F(ConfigurationManagerTestFixture, ReopenLogFilePreservesLevel) {
   EXPECT_EQ(spdlog::get_level(), spdlog::level::debug) << "Log level should be preserved after reopen";
 
   // Cleanup
+  std::filesystem::remove(config_path);
+  std::filesystem::remove_all(log_dir);
+}
+
+/**
+ * @brief Reopening under concurrent logging keeps the default logger and loses no message
+ */
+TEST_F(ConfigurationManagerTestFixture, ReopenLogFileUnderConcurrentLoggingKeepsLoggerAndMessages) {
+  const std::string log_dir = "/tmp/test_log_concurrent_reopen_" + std::to_string(getpid());
+  const std::string log_file = log_dir + "/app.log";
+  std::filesystem::remove_all(log_dir);
+  std::filesystem::create_directories(log_dir);
+  const std::string config_path = CreateTempConfig("info", "text", log_file);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result) << config_mgr_result.error().to_string();
+  auto config_mgr = std::move(*config_mgr_result);
+  ASSERT_TRUE(config_mgr->ApplyLoggingConfig().has_value());
+  spdlog::logger* const installed_logger = spdlog::default_logger_raw();
+
+  constexpr int kThreads = 4;
+  constexpr int kMessagesPerThread = 500;
+  std::atomic<bool> logging_done{false};
+  std::vector<std::thread> loggers;
+  for (int t = 0; t < kThreads; ++t) {
+    loggers.emplace_back([t]() {
+      for (int i = 0; i < kMessagesPerThread; ++i) {
+        spdlog::info("concurrent_reopen_marker {} {}", t, i);
+      }
+    });
+  }
+  std::thread reopener([&]() {
+    while (!logging_done.load()) {
+      auto reopen_result = config_mgr->ReopenLogFile();
+      EXPECT_TRUE(reopen_result) << reopen_result.error().to_string();
+      EXPECT_EQ(spdlog::default_logger_raw(), installed_logger) << "reopen must not replace the default logger";
+    }
+  });
+  for (auto& logger_thread : loggers) {
+    logger_thread.join();
+  }
+  logging_done.store(true);
+  reopener.join();
+  spdlog::default_logger()->flush();
+
+  const std::string contents = ReadFile(log_file);
+  size_t markers = 0;
+  for (size_t pos = contents.find("concurrent_reopen_marker"); pos != std::string::npos;
+       pos = contents.find("concurrent_reopen_marker", pos + 1)) {
+    ++markers;
+  }
+  EXPECT_EQ(markers, static_cast<size_t>(kThreads * kMessagesPerThread));
+
+  std::filesystem::remove(config_path);
+  std::filesystem::remove_all(log_dir);
+}
+
+/**
+ * @brief A concurrent reopen never reverts a level set through SET logging.level
+ */
+TEST_F(ConfigurationManagerTestFixture, ReopenLogFileDoesNotRevertConcurrentSetLevel) {
+  const std::string log_dir = "/tmp/test_log_reopen_set_level_" + std::to_string(getpid());
+  const std::string log_file = log_dir + "/app.log";
+  std::filesystem::remove_all(log_dir);
+  std::filesystem::create_directories(log_dir);
+  const std::string config_path = CreateTempConfig("info", "text", log_file);
+
+  auto config_mgr_result = ConfigurationManager::Create(config_path, "");
+  ASSERT_TRUE(config_mgr_result) << config_mgr_result.error().to_string();
+  auto config_mgr = std::move(*config_mgr_result);
+  ASSERT_TRUE(config_mgr->ApplyLoggingConfig().has_value());
+  auto variables_result = RuntimeVariableManager::Create(config_mgr->GetConfig());
+  ASSERT_TRUE(variables_result) << variables_result.error().to_string();
+  auto variables = std::move(*variables_result);
+
+  std::atomic<bool> setting_done{false};
+  std::thread reopener([&]() {
+    while (!setting_done.load()) {
+      (void)config_mgr->ReopenLogFile();
+    }
+  });
+  int mismatches = 0;
+  for (int i = 0; i < 500; ++i) {
+    const std::string level = (i % 2 == 0) ? "warn" : "debug";
+    if (!variables->SetVariable("logging.level", level).has_value()) {
+      ADD_FAILURE() << "SET logging.level = " << level << " failed";
+      break;
+    }
+    std::this_thread::yield();
+    if (spdlog::get_level() != (i % 2 == 0 ? spdlog::level::warn : spdlog::level::debug)) {
+      ++mismatches;
+    }
+  }
+  setting_done.store(true);
+  reopener.join();
+
+  EXPECT_EQ(mismatches, 0) << "a reopen reverted the level set through SET logging.level";
+  auto shown = variables->GetVariable("logging.level");
+  ASSERT_TRUE(shown);
+  EXPECT_EQ(*shown, "debug");
+  EXPECT_EQ(spdlog::get_level(), spdlog::level::debug);
+
   std::filesystem::remove(config_path);
   std::filesystem::remove_all(log_dir);
 }

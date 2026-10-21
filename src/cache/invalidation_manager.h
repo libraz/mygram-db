@@ -19,6 +19,7 @@
 
 #include "cache/cache_entry.h"
 #include "cache/cache_key.h"
+#include "cache/cache_types.h"
 
 namespace mygramdb::cache {
 
@@ -127,11 +128,27 @@ class InvalidationManager {
    * @param new_text New text content (empty if DELETE)
    * @param ngram_size N-gram size (for ASCII/alphanumeric)
    * @param kanji_ngram_size N-gram size (for CJK characters)
+   * @param precomputed Changed n-grams from PrecomputeChangedNgrams; settings it
+   *        lacks are extracted here
    * @return Set of resident entry identities that were marked invalidated
    */
   std::unordered_set<CacheEntryIdentity> InvalidateAffectedEntryIdentities(
       const std::string& table_name, const std::string& old_text, const std::string& new_text, int ngram_size,
-      int kanji_ngram_size, bool cross_boundary_ngrams = true, bool filter_columns_changed = false);
+      int kanji_ngram_size, bool cross_boundary_ngrams = true, bool filter_columns_changed = false,
+      const ChangedNgrams* precomputed = nullptr);
+
+  /**
+   * @brief Extract a text event's changed n-grams ahead of InvalidateAffectedEntryIdentities
+   *
+   * Covers the given setting and every setting the table's entries use now, so
+   * the extraction can run outside a caller's critical section. A setting
+   * registered afterwards is extracted by InvalidateAffectedEntryIdentities.
+   *
+   * @return Changed n-grams per setting; empty when the table has no entries
+   */
+  [[nodiscard]] ChangedNgrams PrecomputeChangedNgrams(const std::string& table_name, const std::string& old_text,
+                                                      const std::string& new_text, int ngram_size, int kanji_ngram_size,
+                                                      bool cross_boundary_ngrams) const;
 
   /**
    * @brief Unregister cache entry from invalidation tracking
@@ -256,6 +273,10 @@ class InvalidationManager {
    */
   static std::vector<std::string> ExtractNgrams(const std::string& text, int ngram_size, int kanji_ngram_size,
                                                 bool cross_boundary_ngrams = true);
+
+  /// Sorted symmetric difference of the n-grams of @p old_text and @p new_text under @p setting.
+  static std::vector<std::string> ChangedNgramsFor(const std::string& old_text, const std::string& new_text,
+                                                   const NgramSetting& setting);
 };
 
 }  // namespace mygramdb::cache

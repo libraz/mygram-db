@@ -5,38 +5,21 @@
 
 #include "app/configuration_manager.h"
 
-#include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <mutex>
 
 #include "query/synonym_dictionary.h"
 #include "server/log_field_names.h"
+#include "utils/log_manager.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
 
 namespace mygramdb::app {
 
 namespace {
-
-constexpr size_t kMaxLogFileBytes = 100U * 1024U * 1024U;
-constexpr size_t kMaxRotatedLogFiles = 5;
-
-std::mutex& LoggerReconfigurationMutex() {
-  static std::mutex mutex;
-  return mutex;
-}
-
-std::shared_ptr<spdlog::logger> CreateFileLogger(const std::string& path) {
-  // rotate_on_open=false preserves the existing audit trail across startup
-  // and SIGHUP reopen while bounding the total log volume.
-  auto sink =
-      std::make_shared<spdlog::sinks::rotating_file_sink_mt>(path, kMaxLogFileBytes, kMaxRotatedLogFiles, false);
-  return std::make_shared<spdlog::logger>("mygramdb", std::move(sink));
-}
 
 std::string AbsolutePathString(const std::string& path) {
   if (path.empty()) {
@@ -145,7 +128,7 @@ int ConfigurationManager::PrintConfigTest() const {
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyLoggingConfig() const {
-  std::lock_guard<std::mutex> reconfigure_lock(LoggerReconfigurationMutex());
+  auto& log_manager = mygram::utils::LogManager::Instance();
 
   // Configure log output (file or stdout) BEFORE setting level
   if (!config_.logging.file.empty()) {
@@ -156,29 +139,19 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::ApplyL
       if (!log_dir.empty() && !std::filesystem::exists(log_dir)) {
         std::filesystem::create_directories(log_dir);
       }
-
-      // Create a fresh logger and publish it as the default without dropping
-      // the previous logger out from under concurrent log calls.
-      auto file_logger = CreateFileLogger(config_.logging.file);
-      spdlog::set_default_logger(file_logger);
-    } catch (const spdlog::spdlog_ex& ex) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kIOError, "Log file initialization failed: " + std::string(ex.what())));
     } catch (const std::exception& ex) {
       return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
           mygram::utils::ErrorCode::kIOError, "Failed to create log directory: " + std::string(ex.what())));
     }
+
+    if (auto opened = log_manager.OpenFile(config_.logging.file); !opened) {
+      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+          mygram::utils::ErrorCode::kIOError, "Log file initialization failed: " + opened.error().message()));
+    }
   }
 
-  // Apply logging level (must be AFTER setting default logger)
-  if (config_.logging.level == "debug") {
-    spdlog::set_level(spdlog::level::debug);
-  } else if (config_.logging.level == "info") {
-    spdlog::set_level(spdlog::level::info);
-  } else if (config_.logging.level == "warn") {
-    spdlog::set_level(spdlog::level::warn);
-  } else if (config_.logging.level == "error") {
-    spdlog::set_level(spdlog::level::err);
+  if (auto level = mygram::utils::LogManager::ParseLevel(config_.logging.level); level.has_value()) {
+    log_manager.SetLevel(*level);
   } else {
     spdlog::warn("Unknown log level '{}', keeping current level", config_.logging.level);
   }
@@ -222,25 +195,13 @@ mygram::utils::Expected<void, mygram::utils::Error> ConfigurationManager::Reopen
     return {};
   }
 
-  std::lock_guard<std::mutex> reconfigure_lock(LoggerReconfigurationMutex());
-
-  try {
-    // Get current log level before swapping logger
-    auto current_level = spdlog::get_level();
-
-    // Create a new file logger and swap it into the default logger slot.
-    // The old default logger remains alive until existing shared owners finish.
-    auto file_logger = CreateFileLogger(config_.logging.file);
-    spdlog::set_default_logger(file_logger);
-
-    // Restore log level
-    spdlog::set_level(current_level);
-
-    mygram::utils::StructuredLog().Event("log_file_reopened").Info();
-  } catch (const spdlog::spdlog_ex& ex) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(mygram::utils::ErrorCode::kIOError,
-                                                                  "Log file reopen failed: " + std::string(ex.what())));
+  // The default logger and its level stay untouched; only the file underneath is replaced.
+  if (auto reopened = mygram::utils::LogManager::Instance().OpenFile(config_.logging.file); !reopened) {
+    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+        mygram::utils::ErrorCode::kIOError, "Log file reopen failed: " + reopened.error().message()));
   }
+
+  mygram::utils::StructuredLog().Event("log_file_reopened").Info();
 
   return {};
 }

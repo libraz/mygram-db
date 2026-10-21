@@ -210,6 +210,7 @@ class ConnectionAcceptor {
   std::mutex stop_mutex_;
   std::condition_variable stop_cv_;
   DenialLogLimiter acl_denial_log_limiter_;
+  DenialLogLimiter connection_limit_log_limiter_;
 };
 
 }  // namespace mygramdb::server

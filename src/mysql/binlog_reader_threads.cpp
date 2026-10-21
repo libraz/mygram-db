@@ -497,6 +497,12 @@ void BinlogReader::ClearQueueLocked() {
   }
 }
 
+void BinlogReader::WakeQueueWaiters() {
+  { std::scoped_lock lock(queue_mutex_); }
+  queue_cv_.notify_all();
+  queue_full_cv_.notify_all();
+}
+
 std::string BinlogReader::TakeResumePosition() {
   // Events queued from the previous stream would be delivered a second time by
   // the reopened one, so a reopen starts from an empty queue and no pending
@@ -1198,8 +1204,7 @@ void BinlogReader::ReaderThreadFunc() {
   // queue_cv_. Without this notification the worker would hang indefinitely
   // when the reader exits due to a fatal error (should_stop_ = true) because
   // no more events will ever be pushed and the predicate would never flip.
-  queue_cv_.notify_all();
-  queue_full_cv_.notify_all();
+  WakeQueueWaiters();
 
   MarkThreadExited();
   mygram::utils::StructuredLog().Event("binlog_reader_thread_stopped").Info();
@@ -1280,8 +1285,7 @@ void BinlogReader::WorkerThreadFunc() {
     should_stop_.store(true, std::memory_order_release);
   }
 
-  queue_cv_.notify_all();
-  queue_full_cv_.notify_all();
+  WakeQueueWaiters();
   MarkThreadExited();
   mygram::utils::StructuredLog().Event("binlog_worker_thread_stopped").Info();
 }

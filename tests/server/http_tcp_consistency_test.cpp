@@ -20,6 +20,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <deque>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -1228,6 +1229,109 @@ TEST_F(HttpTcpAlternatePrimaryKeyTest, PrimaryKeyShorthandMatchesTheTcpForm) {
   EXPECT_EQ(HttpSearchPrimaryKeys(http_response->body), tcp_primary_keys) << http_response->body;
 }
 
+// Table names the config accepts but the command grammar would split on:
+// whitespace, `$` and an ideographic space. Both surfaces must resolve each to
+// the same table and search the text the client sent.
+class HttpTcpAwkwardTableNamesTest : public ::testing::Test {
+ protected:
+  struct TableSpec {
+    std::string key;
+    std::string url_name;
+    std::string primary_key;
+    std::string text;
+  };
+
+  void SetUp() override {
+    mygramdb::test::SkipIfSocketCreationBlocked();
+
+    specs_ = {
+        {"app.my table", "app.my%20table", "spaced_1", "alpha beta"},
+        {"app.price$", "app.price%24", "dollar_1", "alpha gamma"},
+        {"app.wide\xE3\x80\x80name", "app.wide%E3%80%80name", "wide_1", "alpha delta"},
+    };
+    config_ = std::make_unique<config::Config>();
+    config_->api.default_limit = 10;
+    contexts_.resize(specs_.size());
+    for (size_t i = 0; i < specs_.size(); ++i) {
+      auto index = std::make_unique<index::Index>(2);
+      auto doc_store = std::make_unique<storage::DocumentStore>();
+      storage::FilterMap filters;
+      filters["kind"] = std::string("note");
+      auto doc_id = doc_store->AddDocument(specs_[i].primary_key, filters, specs_[i].text);
+      ASSERT_TRUE(doc_id.has_value());
+      index->AddDocument(*doc_id, index->NormalizeText(specs_[i].text));
+
+      contexts_[i].name = specs_[i].key.substr(specs_[i].key.find('.') + 1);
+      contexts_[i].config.name = contexts_[i].name;
+      contexts_[i].config.database = "app";
+      contexts_[i].config.ngram_size = 2;
+      contexts_[i].config.primary_key = "id";
+      contexts_[i].index = std::move(index);
+      contexts_[i].doc_store = std::move(doc_store);
+      table_contexts_[specs_[i].key] = &contexts_[i];
+      config_->tables.push_back(contexts_[i].config);
+    }
+
+    ASSERT_TRUE(StartSurfacePair(table_contexts_, *config_, tcp_server_, http_server_, tcp_port_, http_port_));
+  }
+
+  void TearDown() override { StopSurfacePair(tcp_server_.get(), http_server_.get()); }
+
+  std::vector<TableSpec> specs_;
+  std::deque<TableContext> contexts_;
+  std::unordered_map<std::string, TableContext*> table_contexts_;
+  std::unique_ptr<config::Config> config_;
+  std::unique_ptr<TcpServer> tcp_server_;
+  std::unique_ptr<HttpServer> http_server_;
+  uint16_t tcp_port_ = 0;
+  uint16_t http_port_ = 0;
+};
+
+TEST_F(HttpTcpAwkwardTableNamesTest, SearchAndCountResolveTheSameTableOnBothSurfaces) {
+  httplib::Client client("127.0.0.1", http_port_);
+  for (const auto& spec : specs_) {
+    SCOPED_TRACE(spec.key);
+
+    const auto tcp_response = SendTcpRequest(tcp_port_, "SEARCH " + QuoteLiteral(spec.key) + " alpha");
+    const auto tcp_keys = ParseTcpSearchPrimaryKeys(tcp_response);
+    ASSERT_EQ(tcp_keys, (std::vector<std::string>{spec.primary_key})) << tcp_response;
+
+    auto search = client.Post("/tables/" + spec.url_name + "/search", R"({"q":"alpha"})", "application/json");
+    ASSERT_TRUE(search);
+    ASSERT_EQ(search->status, 200) << search->body;
+    EXPECT_EQ(HttpSearchPrimaryKeys(search->body), tcp_keys) << search->body;
+
+    auto count =
+        client.Post("/tables/" + spec.url_name + "/count", R"({"q":"alpha","mode":"boolean"})", "application/json");
+    ASSERT_TRUE(count);
+    ASSERT_EQ(count->status, 200) << count->body;
+    EXPECT_EQ(json::parse(count->body)["count"].get<size_t>(),
+              ParseTcpCount(SendTcpRequest(tcp_port_, "COUNT " + QuoteLiteral(spec.key) + " alpha"), "COUNT"))
+        << count->body;
+
+    auto facet =
+        client.Post("/tables/" + spec.url_name + "/facet", R"({"q":"alpha","column":"kind"})", "application/json");
+    ASSERT_TRUE(facet);
+    ASSERT_EQ(facet->status, 200) << facet->body;
+    EXPECT_EQ(json::parse(facet->body)["facets"].size(), 1U) << facet->body;
+  }
+}
+
+TEST_F(HttpTcpAwkwardTableNamesTest, TextIsSearchedInTheNamedTableOnly) {
+  httplib::Client client("127.0.0.1", http_port_);
+  const auto& wide = specs_[2];
+
+  auto hit = client.Post("/tables/" + wide.url_name + "/search", R"({"q":"delta"})", "application/json");
+  ASSERT_TRUE(hit);
+  ASSERT_EQ(hit->status, 200) << hit->body;
+  EXPECT_EQ(HttpSearchPrimaryKeys(hit->body), (std::vector<std::string>{wide.primary_key})) << hit->body;
+
+  auto miss = client.Post("/tables/" + specs_[0].url_name + "/search", R"({"q":"delta"})", "application/json");
+  ASSERT_TRUE(miss);
+  ASSERT_EQ(miss->status, 200) << miss->body;
+  EXPECT_EQ(json::parse(miss->body)["count"].get<size_t>(), 0U) << miss->body;
+}
+
 // api.max_query_length is documented in characters, so the same query must be
 // accepted or rejected identically whatever encoding it uses, on both surfaces.
 class HttpTcpQueryLengthTest : public ::testing::Test {
@@ -1412,9 +1516,9 @@ TEST_F(HttpTcpConsistencyTest, HttpOptimizeChecksTheTokenBeforeTheContentType) {
       << wrong_type->body;
 }
 
-// Row 5: HTTP applies a table-name whitelist that TCP does not have. Neither
-// surface finds the table; they disagree on which fault it is.
-TEST_F(HttpTcpConsistencyTest, HttpAppliesATableNameWhitelistTcpDoesNotHave) {
+// Row 5: neither surface imposes a character set on the table name, so a name
+// that is not configured is the same fault on both.
+TEST_F(HttpTcpConsistencyTest, UnknownTableWithAnyCharactersIsTheSameFaultOnBothSurfaces) {
   httplib::Client client("127.0.0.1", http_port_);
 
   const auto tcp_response = SendTcpRequest(tcp_port_, R"(SEARCH "app.art icles" machine)");
@@ -1423,9 +1527,8 @@ TEST_F(HttpTcpConsistencyTest, HttpAppliesATableNameWhitelistTcpDoesNotHave) {
 
   auto http_response = client.Post("/tables/app.art%20icles/search", R"({"q":"machine"})", "application/json");
   ASSERT_TRUE(http_response);
-  EXPECT_EQ(http_response->status, 400) << http_response->body;
-  EXPECT_EQ(json::parse(http_response->body)["error_code"],
-            static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidToken))
+  EXPECT_EQ(http_response->status, 404) << http_response->body;
+  EXPECT_EQ(json::parse(http_response->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kTableNotFound))
       << http_response->body;
 }
 
@@ -1500,13 +1603,60 @@ TEST_F(HttpTcpConsistencyTest, NonStringFilterValuesAreCoercedToTheTcpSpelling) 
       << integer_response->body;
 }
 
-// Row 12: `mode:"boolean"` assigns the expression straight through, so the
-// checks the TCP parser applies to a search expression do not run.
-TEST_F(HttpTcpConsistencyTest, BooleanExpressionValidationRunsOnlyOnTcp) {
+// TCP INFO and HTTP /info report from one memory and index snapshot, so inside
+// its interval a change between the two reads is invisible to both.
+TEST_F(HttpTcpConsistencyTest, InfoFiguresComeFromOneSharedSnapshot) {
+  const uint16_t shared_port = testing::FindAvailableLoopbackPort();
+  ASSERT_GT(shared_port, 0);
+  HttpServerConfig http_cfg;
+  http_cfg.bind = "127.0.0.1";
+  http_cfg.port = shared_port;
+  http_cfg.allow_cidrs = {"127.0.0.1/32"};
+  HttpServer sharing_server(http_cfg, table_contexts_, config_.get(), nullptr, nullptr, nullptr,
+                            tcp_server_->GetMutableStats());
+  ASSERT_TRUE(sharing_server.Start());
+
+  client::ClientConfig client_config;
+  client_config.host = "127.0.0.1";
+  client_config.port = tcp_port_;
+  client::MygramClient tcp_client(client_config);
+  ASSERT_TRUE(tcp_client.Connect());
+  const auto info_response = tcp_client.SendCommand("INFO");
+  ASSERT_TRUE(info_response);
+  const std::string tcp_info = *info_response;
+  ASSERT_NE(tcp_info.find("OK INFO"), std::string::npos) << tcp_info;
+  const auto field = [&](const std::string& name) {
+    const auto pos = tcp_info.find(name + ": ");
+    EXPECT_NE(pos, std::string::npos) << name << " missing from " << tcp_info;
+    return std::stoull(tcp_info.substr(pos + name.size() + 2));
+  };
+  const auto tcp_documents = field("total_documents");
+  const auto tcp_memory = field("used_memory_bytes");
+
+  // Grow the table after the snapshot was taken.
+  auto extra = table_ctx_.doc_store->AddDocument("doc_extra", {}, "late arrival");
+  ASSERT_TRUE(extra.has_value());
+  table_ctx_.index->AddDocument(*extra, table_ctx_.index->NormalizeText("late arrival"));
+
+  httplib::Client client("127.0.0.1", shared_port);
+  auto http_info = client.Get("/info");
+  ASSERT_TRUE(http_info);
+  ASSERT_EQ(http_info->status, 200) << http_info->body;
+  const json body = json::parse(http_info->body);
+  EXPECT_EQ(body["index"]["total_documents"].get<uint64_t>(), tcp_documents) << http_info->body;
+  EXPECT_EQ(body["memory"]["used_memory_bytes"].get<uint64_t>(), tcp_memory) << http_info->body;
+
+  sharing_server.Stop();
+}
+
+// Row 12: `mode:"boolean"` goes through the TCP parser, so the checks it applies
+// to a search expression run on HTTP too and report the same code.
+TEST_F(HttpTcpConsistencyTest, BooleanExpressionValidationMatchesAcrossSurfaces) {
   const std::string unclosed = "machine AND (learning";
 
   const auto tcp_response = SendTcpRequest(tcp_port_, "SEARCH app.articles " + unclosed);
-  EXPECT_NE(ParseTcpErrorCode(tcp_response), -1) << "the TCP parser accepted an unclosed parenthesis: " << tcp_response;
+  const int tcp_code = ParseTcpErrorCode(tcp_response);
+  EXPECT_NE(tcp_code, -1) << "the TCP parser accepted an unclosed parenthesis: " << tcp_response;
 
   httplib::Client client("127.0.0.1", http_port_);
   json request;
@@ -1514,12 +1664,73 @@ TEST_F(HttpTcpConsistencyTest, BooleanExpressionValidationRunsOnlyOnTcp) {
   request["mode"] = "boolean";
   auto http_response = client.Post("/tables/app.articles/search", request.dump(), "application/json");
   ASSERT_TRUE(http_response);
-  // The expression reaches the pipeline, which reports its own AST failure
-  // rather than the parser's clause-level one.
   EXPECT_EQ(http_response->status, 400) << http_response->body;
-  EXPECT_EQ(json::parse(http_response->body)["error_code"],
-            static_cast<int>(mygram::utils::ErrorCode::kQueryExpressionParseError))
-      << http_response->body;
+  EXPECT_EQ(json::parse(http_response->body)["error_code"], tcp_code) << http_response->body;
+}
+
+// A boolean expression carries no clauses of its own: the request fields own
+// filters, sort and pagination, so a clause keyword inside `q` is refused
+// rather than silently reinterpreted.
+TEST_F(HttpTcpConsistencyTest, BooleanExpressionCannotSmuggleClauses) {
+  httplib::Client client("127.0.0.1", http_port_);
+  for (const char* expression : {"machine LIMIT 1", "machine FILTER category = ai", "machine SORT id DESC"}) {
+    SCOPED_TRACE(expression);
+    json request;
+    request["q"] = expression;
+    request["mode"] = "boolean";
+    auto response = client.Post("/tables/app.articles/search", request.dump(), "application/json");
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->status, 400) << response->body;
+    EXPECT_EQ(json::parse(response->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError))
+        << response->body;
+  }
+}
+
+// Without an operator the expression is still normalized by the TCP parser:
+// quoted phrases keep their quotes as phrase markers and whitespace runs
+// collapse, on search, count and facet alike.
+TEST_F(HttpTcpConsistencyTest, BooleanModeWithoutOperatorNormalizesLikeTcp) {
+  httplib::Client client("127.0.0.1", http_port_);
+  const std::vector<std::string> expressions = {R"("machine learning")", "machine    learning", "  machine learning",
+                                                R"("machine  learning")"};
+  for (const auto& expression : expressions) {
+    SCOPED_TRACE(expression);
+
+    auto tcp_keys = ParseTcpSearchPrimaryKeys(SendTcpRequest(tcp_port_, "SEARCH app.articles " + expression));
+    SortPrimaryKeys(tcp_keys);
+    const size_t tcp_count = ParseTcpCount(SendTcpRequest(tcp_port_, "COUNT app.articles " + expression), "COUNT");
+    const auto tcp_facet_response =
+        SendTcpRequest(tcp_port_, "FACET app.articles category " + expression, /*multiline_response=*/true);
+    const auto tcp_facet = ParseTcpFacetValues(tcp_facet_response);
+
+    json request;
+    request["q"] = expression;
+    request["mode"] = "boolean";
+    request["limit"] = 100;
+    auto search = client.Post("/tables/app.articles/search", request.dump(), "application/json");
+    ASSERT_TRUE(search);
+    ASSERT_EQ(search->status, 200) << search->body;
+    auto http_keys = HttpSearchPrimaryKeys(search->body);
+    SortPrimaryKeys(http_keys);
+    EXPECT_EQ(http_keys, tcp_keys) << search->body;
+
+    json count_request = {{"q", expression}, {"mode", "boolean"}};
+    auto count = client.Post("/tables/app.articles/count", count_request.dump(), "application/json");
+    ASSERT_TRUE(count);
+    ASSERT_EQ(count->status, 200) << count->body;
+    EXPECT_EQ(json::parse(count->body)["count"].get<size_t>(), tcp_count) << count->body;
+
+    json facet_request = {{"q", expression}, {"mode", "boolean"}, {"column", "category"}};
+    auto facet = client.Post("/tables/app.articles/facet", facet_request.dump(), "application/json");
+    ASSERT_TRUE(facet);
+    ASSERT_EQ(facet->status, 200) << facet->body;
+    std::vector<std::pair<std::string, uint64_t>> http_facet;
+    const json facet_body = json::parse(facet->body);
+    for (const auto& entry : facet_body["facets"]) {
+      http_facet.emplace_back(entry["value"].get<std::string>(), entry["count"].get<uint64_t>());
+    }
+    EXPECT_EQ(http_facet, tcp_facet) << facet->body;
+  }
 }
 
 // Row 14: COUNT rejects the clauses it cannot honour on both surfaces, and both

@@ -14,6 +14,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -126,6 +127,40 @@ TEST_F(FilterIndexTest, ClearRemovesAll) {
 TEST_F(FilterIndexTest, MemoryUsageNonZero) {
   Add(1, {{"category", FilterValue{std::string("tech")}}});
   EXPECT_GT(index_.MemoryUsage(), 0);
+}
+
+/**
+ * @test A string's characters are counted once, through its capacity
+ *
+ * Column names and serialized values within small-string storage share one
+ * capacity, so two indexes differing only in their lengths report the same
+ * memory; adding size() on top would make them differ.
+ */
+TEST(FilterIndexMemoryTest, StringCharactersAreCountedOnceThroughCapacity) {
+  FilterIndex short_names;
+  FilterIndex longer_names;
+  for (DocId doc_id = 1; doc_id <= 32; ++doc_id) {
+    const auto value = static_cast<int8_t>(doc_id % 4);
+    ASSERT_TRUE(short_names.AddDocument(doc_id, {{"c", FilterValue{value}}}));
+    ASSERT_TRUE(longer_names.AddDocument(doc_id, {{"category12", FilterValue{static_cast<int64_t>(value)}}}));
+  }
+  EXPECT_EQ(short_names.MemoryUsage(), longer_names.MemoryUsage());
+}
+
+/**
+ * @test Every distinct value's map slot is counted alongside its bitmap
+ */
+TEST(FilterIndexMemoryTest, ValueSlotsAreCounted) {
+  constexpr DocId kNumDocs = 100;
+  FilterIndex index;
+  size_t bitmap_bytes = 0;
+  for (DocId doc_id = 1; doc_id <= kNumDocs; ++doc_id) {
+    ASSERT_TRUE(index.AddDocument(doc_id, {{"id", FilterValue{static_cast<int64_t>(doc_id)}}}));
+    const auto bitmap = mygram::utils::MakeRoaringFromVector({doc_id});
+    bitmap_bytes += roaring_bitmap_portable_size_in_bytes(bitmap.get());
+  }
+  constexpr size_t kValueSlotBytes = sizeof(std::pair<const std::string, mygram::utils::RoaringBitmapPtr>) + 1;
+  EXPECT_GE(index.MemoryUsage(), kNumDocs * kValueSlotBytes + bitmap_bytes);
 }
 
 TEST_F(FilterIndexTest, MultipleColumns) {

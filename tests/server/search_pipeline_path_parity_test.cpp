@@ -1,16 +1,17 @@
 /**
  * @file search_pipeline_path_parity_test.cpp
- * @brief The four search execution paths must agree where they are equivalent
+ * @brief The search execution paths must agree where they are equivalent
  *
  * ExecuteFullPipeline dispatches to one of four executors — the boolean AST
- * evaluator, the fuzzy threshold search, the synonym-aware search, and the
- * plain n-gram intersection — and each carries its own copy of the
+ * evaluator (with or without FUZZY), the fuzzy threshold search, the
+ * synonym-aware search, and the plain n-gram intersection — and each carries
+ * its own copy of the
  * post-processing that follows the candidate set: the NOT filter, the column
  * filters, the verify_text post-filter and the hybrid-fragment exact-text
  * guard. A rule applied on one executor and not another is invisible to tests
  * that exercise each path on its own.
  *
- * Every case here derives all four requests from one input and compares the
+ * Every case here derives all requests from one input and compares the
  * returned document sets, not their sizes.
  *
  * The reductions used, verified against ExecuteFullPipeline's dispatch:
@@ -18,6 +19,7 @@
  *  - Fuzzy with max_distance 0. The threshold ExecuteWithFuzzy computes is
  *    |ngrams| - 0, which is the full n-gram AND the plain path performs.
  *    PostFilterByFuzzyText at distance 0 accepts only an exact substring.
+ *    The boolean evaluator under FUZZY 0 reduces the same way.
  *  - A synonym dictionary that expands nothing. SynonymDictionary::Expand
  *    returns the input term alone, so every group is a single variant and the
  *    OR-within-group union degenerates to the plain term search.
@@ -26,15 +28,14 @@
  *    primaries, so neither `T` nor `(T)` selects it. Repeating the term is the
  *    smallest expression that does, and its union with itself is the term.
  *
- * Terms are chosen long enough to generate n-grams. A term shorter than the
- * n-gram size takes the plain path's substring fallback but makes the fuzzy
- * path report an empty term, so the paths are genuinely not equivalent there
- * and that case is not claimed as one.
+ * Terms in the shared cases are long enough to generate n-grams; terms
+ * shorter than the n-gram size are compared in their own section.
  */
 
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -55,7 +56,7 @@ namespace mygramdb::server::search_pipeline {
 namespace {
 
 /// Which executor ExecuteFullPipeline is being steered into.
-enum class Path { kRegular, kFuzzyZero, kSynonymEmpty, kBoolean };
+enum class Path { kRegular, kFuzzyZero, kSynonymEmpty, kBoolean, kBooleanFuzzyZero };
 
 const char* PathName(Path path) {
   switch (path) {
@@ -67,6 +68,8 @@ const char* PathName(Path path) {
       return "synonym(empty dictionary)";
     case Path::kBoolean:
       return "boolean AST";
+    case Path::kBooleanFuzzyZero:
+      return "boolean AST fuzzy(distance 0)";
   }
   return "unknown";
 }
@@ -158,12 +161,12 @@ class SearchPathParityTest : public ::testing::Test {
     query.type = query::QueryType::SEARCH;
     query.table = "test";
     query.limit = 100;
-    if (path == Path::kBoolean) {
+    if (path == Path::kBoolean || path == Path::kBooleanFuzzyZero) {
       query.search_text = term + " OR " + term;
     } else {
       query.search_text = term;
     }
-    if (path == Path::kFuzzyZero) {
+    if (path == Path::kFuzzyZero || path == Path::kBooleanFuzzyZero) {
       query.fuzzy_max_distance = 0;
     }
     return query;
@@ -196,12 +199,12 @@ class SearchPathParityTest : public ::testing::Test {
     return primary_keys;
   }
 
-  /// Compare all four paths against the plain path for one input.
+  /// Compare every path against the plain path for one input.
   void ExpectAllPathsAgree(const std::string& term, const std::function<void(query::Query&)>& decorate = {},
                            const query::SynonymDictionary* synonym_dict = nullptr) {
     SCOPED_TRACE("term: " + term);
     const auto regular = RunPath(Path::kRegular, term, decorate);
-    for (const Path path : {Path::kFuzzyZero, Path::kSynonymEmpty, Path::kBoolean}) {
+    for (const Path path : {Path::kFuzzyZero, Path::kSynonymEmpty, Path::kBoolean, Path::kBooleanFuzzyZero}) {
       SCOPED_TRACE(PathName(path));
       EXPECT_EQ(RunPath(path, term, decorate, synonym_dict), regular);
     }
@@ -248,6 +251,11 @@ TEST_F(SearchPathParityTest, EachRequestShapeSelectsTheIntendedExecutor) {
   // it declines to claim the single-term n-gram AND reproduces its semantics.
   EXPECT_TRUE(regular->semantics_reproducible_by_single_term_ngram_and);
   EXPECT_FALSE(boolean->semantics_reproducible_by_single_term_ngram_and);
+
+  auto boolean_fuzzy =
+      ExecuteFullPipeline(MakeQuery(Path::kBooleanFuzzyZero, "report"), MakeParams(Path::kBooleanFuzzyZero));
+  ASSERT_TRUE(boolean_fuzzy.has_value()) << boolean_fuzzy.error().message();
+  EXPECT_EQ(boolean_fuzzy->path_taken, PipelinePath::FUZZY);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +423,77 @@ TEST_F(SearchPathParityTest, TermTooShortForNgramsAgreesAcrossPaths) {
   EXPECT_FALSE(regular->empty_term_detected);
   EXPECT_FALSE(fuzzy->empty_term_detected);
   EXPECT_EQ(fuzzy->results, regular->results);
+}
+
+// The boolean evaluator answers a short term from the stored text under FUZZY
+// too, both as an operand and as an AND clause.
+TEST_F(SearchPathParityTest, BooleanFuzzyKeepsTermsTooShortForNgrams) {
+  const std::string short_term = "ab";  // Shorter than kNgramSize.
+  auto fuzzy_one = [](query::Query& query) { query.fuzzy_max_distance = 1; };
+
+  const auto boolean_plain = RunPath(Path::kBoolean, short_term);
+  ASSERT_EQ(boolean_plain, (std::vector<std::string>{"doc_hybrid_match"}));
+  EXPECT_EQ(RunPath(Path::kBoolean, short_term, fuzzy_one), boolean_plain);
+  EXPECT_EQ(RunPath(Path::kBoolean, short_term, fuzzy_one), RunPath(Path::kRegular, short_term, fuzzy_one));
+
+  auto and_short = [](query::Query& query) { query.and_terms = {"ab"}; };
+  auto and_short_fuzzy = [&](query::Query& query) {
+    and_short(query);
+    fuzzy_one(query);
+  };
+  const auto boolean_and_plain = RunPath(Path::kBoolean, "report", and_short);
+  ASSERT_EQ(boolean_and_plain, (std::vector<std::string>{"doc_hybrid_match"}));
+  const auto boolean_and_fuzzy = RunPath(Path::kBoolean, "report", and_short_fuzzy);
+  EXPECT_TRUE(std::includes(boolean_and_fuzzy.begin(), boolean_and_fuzzy.end(), boolean_and_plain.begin(),
+                            boolean_and_plain.end()));
+  EXPECT_EQ(boolean_and_fuzzy, RunPath(Path::kRegular, "report", and_short_fuzzy));
+}
+
+// ---------------------------------------------------------------------------
+// FUZZY with a real edit distance
+// ---------------------------------------------------------------------------
+
+// The hybrid-fragment guard applies the FUZZY matcher on the boolean path as it
+// does on the flat one, so a genuine fuzzy match of a mixed CJK/ASCII term
+// survives either way.
+TEST_F(SearchPathParityTest, BooleanFuzzyKeepsFuzzyMatchesOfAHybridTerm) {
+  // One edit away from the term.
+  AddDocument("doc_hybrid_fuzzy", std::string(kCatDog) + "ax report", {{"category", "tech"}});
+  const std::string hybrid_term = std::string(kCatDog) + "ab";
+  auto fuzzy_one = [](query::Query& query) { query.fuzzy_max_distance = 1; };
+
+  const auto flat = RunPath(Path::kRegular, hybrid_term, fuzzy_one);
+  EXPECT_EQ(flat, (std::vector<std::string>{"doc_hybrid_fuzzy", "doc_hybrid_match"}));
+  EXPECT_EQ(RunPath(Path::kBoolean, hybrid_term, fuzzy_one), flat);
+
+  config_.memory.verify_text = "all";
+  EXPECT_EQ(RunPath(Path::kBoolean, hybrid_term, fuzzy_one), RunPath(Path::kRegular, hybrid_term, fuzzy_one));
+}
+
+// FUZZY takes precedence over synonyms for NOT terms on the boolean path as on
+// the flat one: the exclusion removes the term itself, not its synonyms.
+TEST_F(SearchPathParityTest, FuzzyNotTermIsNotSynonymExpandedOnEitherPath) {
+  const auto path = dir_ / "not_synonyms.tsv";
+  std::ofstream output(path);
+  output << "draft\tpublished\n";
+  output.close();
+  query::SynonymDictionary synonyms;
+  auto normalizer = [this](std::string_view text) { return index_->NormalizeText(text); };
+  ASSERT_TRUE(synonyms.LoadFromFile(path.string(), normalizer).has_value());
+
+  auto run = [&](Path query_path) {
+    query::Query query = MakeQuery(query_path, "report");
+    query.not_terms = {"draft"};
+    auto params = MakeParams(query_path);
+    params.synonym_dict = &synonyms;
+    auto result = ExecuteFullPipeline(query, params);
+    EXPECT_TRUE(result.has_value()) << (result.has_value() ? std::string{} : result.error().message());
+    return result.has_value() ? result->results : std::vector<storage::DocId>{};
+  };
+
+  const auto flat = run(Path::kFuzzyZero);
+  EXPECT_EQ(flat.size(), 3U);  // doc_alpha, doc_hybrid_match, doc_hybrid_ngram_only
+  EXPECT_EQ(run(Path::kBooleanFuzzyZero), flat);
 }
 
 }  // namespace mygramdb::server::search_pipeline

@@ -33,6 +33,7 @@ using mygramdb::mysql::LexQueryStatements;
 using mygramdb::mysql::QueryLexOptions;
 using mygramdb::mysql::SqlToken;
 using mygramdb::mysql::TableMetadataCache;
+using mygramdb::mysql::TransactionControl;
 
 TableConfig MakeTableConfig(const std::string& name, const std::string& database = "") {
   TableConfig config;
@@ -396,7 +397,8 @@ TEST(DdlClassifierTest, TableNamesMatchByteExactlyUnlessTheSourceFoldsCase) {
 TEST(DdlClassifierTest, CreateTableStartTransactionOpensATransaction) {
   const auto opens = [](const std::string& query, bool ansi_quotes = false) {
     const auto statements = ClassifyQueryEvent(query, QueryLexOptions{ansi_quotes, false});
-    return !statements.empty() && statements.front().starts_transaction;
+    return !statements.empty() && statements.front().type == DDLType::kCreate &&
+           statements.front().transaction == TransactionControl::kBegin;
   };
 
   EXPECT_TRUE(opens("CREATE TABLE `articles` (\n  `id` int NOT NULL\n) START TRANSACTION ENGINE=InnoDB"));
@@ -412,6 +414,75 @@ TEST(DdlClassifierTest, CreateTableStartTransactionOpensATransaction) {
   // It is still the CREATE of the named table.
   ExpectDDL("CREATE TABLE `articles` (`id` int) START TRANSACTION ENGINE=InnoDB", DDLType::kCreate,
             MakeTableConfig("articles"));
+}
+
+TEST(DdlClassifierTest, TransactionControlIsReadFromLexedTokens) {
+  const auto control = [](const std::string& query) {
+    const auto statements = ClassifyQueryEvent(query);
+    return statements.empty() ? TransactionControl::kNone : statements.front().transaction;
+  };
+
+  EXPECT_EQ(control("/* app */ BEGIN"), TransactionControl::kBegin);
+  EXPECT_EQ(control("START TRANSACTION"), TransactionControl::kBegin);
+  EXPECT_EQ(control("/* app */ COMMIT"), TransactionControl::kEnd);
+  EXPECT_EQ(control("COMMIT;"), TransactionControl::kEnd);
+  EXPECT_EQ(control("commit work and no chain"), TransactionControl::kEnd);
+  EXPECT_EQ(control("ROLLBACK WORK"), TransactionControl::kEnd);
+  EXPECT_EQ(control("-- app\nXA END 'x'"), TransactionControl::kXa);
+
+  EXPECT_EQ(control("ROLLBACK WORK TO SAVEPOINT s"), TransactionControl::kNone);
+  EXPECT_EQ(control("ROLLBACK WORK TO s"), TransactionControl::kNone);
+  EXPECT_EQ(control("/* app */ rollback to savepoint s"), TransactionControl::kNone);
+  EXPECT_EQ(control("SELECT 'COMMIT'"), TransactionControl::kNone);
+}
+
+TEST(DdlClassifierTest, IndexDdlOnConfiguredTableIsRevalidatedLikeAlter) {
+  const TableConfig config = MakeTableConfig("articles");
+  const TableConfig qualified = MakeTableConfig("articles", "app");
+
+  ExpectDDL("DROP INDEX uq_pk ON articles", DDLType::kAlter, config);
+  ExpectDDL("DROP INDEX `PRIMARY` ON `app`.`articles`", DDLType::kAlter, qualified);
+  ExpectDDL("DROP INDEX uq_pk ON articles", DDLType::kAlter, qualified, "app");
+  ExpectDDL("DROP ONLINE INDEX IF EXISTS uq_pk ON articles NOWAIT ALGORITHM=INPLACE", DDLType::kAlter, config);
+  ExpectDDL("CREATE INDEX lookup ON articles (status)", DDLType::kAlter, config);
+  ExpectDDL("/* app */ CREATE UNIQUE INDEX uq ON app.articles (id)", DDLType::kAlter, qualified);
+  ExpectDDL("CREATE FULLTEXT INDEX ft ON articles (body)", DDLType::kAlter, config);
+  ExpectDDL("CREATE SPATIAL INDEX sp ON articles (location)", DDLType::kAlter, config);
+  ExpectDDL("CREATE OR REPLACE UNIQUE INDEX IF NOT EXISTS uq USING BTREE ON articles (id)", DDLType::kAlter, config);
+
+  const auto ansi = ClassifyQueryEvent(R"(DROP INDEX "uq_pk" ON "articles")", QueryLexOptions{true, false});
+  EXPECT_EQ(FindConfiguredTableDDL(ansi, "", config), DDLType::kAlter);
+
+  ExpectNoDDL("CREATE INDEX lookup ON unrelated (status)", config);
+  ExpectNoDDL("DROP INDEX uq_pk ON articles", qualified, "other");
+  EXPECT_TRUE(BinlogEventParser::IsSafeIgnoredQuery("DROP INDEX uq_pk ON unrelated"));
+
+  // An index statement whose table cannot be read may name the configured table.
+  for (const char* query : {"DROP INDEX uq_pk", "DROP INDEX uq_pk ON", "CREATE UNIQUE INDEX uq ON"}) {
+    const auto statements = ClassifyQueryEvent(query);
+    ASSERT_EQ(statements.size(), 1U) << query;
+    EXPECT_TRUE(statements[0].malformed) << query;
+    EXPECT_FALSE(BinlogEventParser::IsSafeIgnoredQuery(query)) << query;
+  }
+}
+
+TEST(DdlClassifierTest, MostDestructiveStatementOnConfiguredTableWinsRegardlessOfOrder) {
+  const TableConfig config = MakeTableConfig("articles");
+
+  ExpectDDL("ALTER TABLE articles COMMENT 'x'; DROP TABLE articles", DDLType::kDrop, config);
+  ExpectDDL("DROP TABLE articles; ALTER TABLE articles COMMENT 'x'", DDLType::kDrop, config);
+  ExpectDDL("CREATE TABLE articles (id INT); RENAME TABLE articles TO old", DDLType::kRename, config);
+  ExpectDDL("TRUNCATE TABLE articles; DROP DATABASE shop; DROP TABLE articles", DDLType::kDrop, config);
+  ExpectDDL("TRUNCATE TABLE articles; ALTER TABLE articles TRUNCATE PARTITION p0", DDLType::kRowsReplaced, config);
+  ExpectDDL("TRUNCATE TABLE articles; TRUNCATE TABLE articles", DDLType::kTruncate, config);
+  ExpectDDL("CREATE TABLE articles (id INT); ALTER TABLE articles ADD COLUMN c INT", DDLType::kCreate, config);
+
+  // TRUNCATE skips schema validation, so together with a schema change neither type is safe.
+  ExpectDDL("ALTER TABLE articles COMMENT 'x'; TRUNCATE TABLE articles", DDLType::kUnknown, config);
+  ExpectDDL("TRUNCATE TABLE articles; DROP INDEX uq_pk ON articles", DDLType::kUnknown, config);
+
+  // Statements on other tables do not raise the configured table's type.
+  ExpectDDL("ALTER TABLE articles COMMENT 'x'; DROP TABLE users", DDLType::kAlter, config);
 }
 
 }  // namespace

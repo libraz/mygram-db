@@ -14,6 +14,8 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <shared_mutex>
+#include <string>
 #include <thread>
 
 #include "cache/cache_manager.h"
@@ -1757,7 +1759,7 @@ TEST_F(HttpServerTest, SearchRejectsNullByteInQuery) {
 
   httplib::Client client("127.0.0.1", port_);
 
-  // Build JSON manually since json library may not handle embedded nulls
+  // dump() escapes the NUL as \u0000, which the server's parser decodes back to a NUL byte.
   std::string query_text = "test";
   query_text += '\0';
   query_text += "injection";
@@ -1769,10 +1771,50 @@ TEST_F(HttpServerTest, SearchRejectsNullByteInQuery) {
   auto res = client.Post("/tables/test/search", request_body.dump(), "application/json");
 
   ASSERT_TRUE(res);
-  // Note: The null byte may be truncated by JSON serialization.
-  // If not truncated, expect 400; if truncated, expect 200 (normal query).
-  // We accept either outcome since JSON itself may strip nulls.
-  EXPECT_TRUE(res->status == 200 || res->status == 400);
+  EXPECT_EQ(res->status, 400) << res->body;
+  EXPECT_EQ(json::parse(res->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQueryInvalidToken))
+      << res->body;
+}
+
+TEST_F(HttpServerTest, DeeplyNestedBodyWithinByteCapIsRejectedAsSyntaxError) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+
+  constexpr size_t kLevels = 100000;
+  const std::string nested = std::string(kLevels, '[') + std::string(kLevels, ']');
+  const std::string body = R"({"q":"machine","filters":{"a":)" + nested + "}}";
+
+  for (const auto* path : {"/tables/test/search", "/tables/test/count", "/tables/test/facet", "/optimize"}) {
+    auto res = client.Post(path, body, "application/json");
+    ASSERT_TRUE(res) << path;
+    EXPECT_EQ(res->status, 400) << path << " " << res->body;
+    EXPECT_EQ(json::parse(res->body)["error_code"], static_cast<int>(mygram::utils::ErrorCode::kQuerySyntaxError))
+        << path << " " << res->body;
+  }
+
+  // A body nested only as deep as the schemas need is still served.
+  json shallow;
+  shallow["q"] = "machine";
+  shallow["filters"] = {{"status", {{"op", "EQ"}, {"value", 1}}}};
+  auto ok = client.Post("/tables/test/search", shallow.dump(), "application/json");
+  ASSERT_TRUE(ok);
+  EXPECT_EQ(ok->status, 200) << ok->body;
+}
+
+TEST_F(HttpServerTest, MalformedBodyIsRejectedWithoutWaitingForTheGenerationLock) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client("127.0.0.1", port_);
+  client.set_read_timeout(2);
+
+  // An exclusive holder (index swap, dump load) must not stall a request whose body never parses.
+  std::unique_lock<std::shared_mutex> exclusive(*table_context_.generation_mutex);
+  auto res = client.Post("/tables/test/search", "{not json", "application/json");
+  exclusive.unlock();
+
+  ASSERT_TRUE(res);
+  EXPECT_EQ(res->status, 400) << res->body;
 }
 
 /**
@@ -2027,11 +2069,11 @@ TEST_F(HttpServerTest, SearchRejectsInvalidQueryMode) {
 }
 
 /**
- * @brief A table name containing whitespace is rejected (URL-encoded form).
+ * @brief A table name containing whitespace is looked up verbatim (URL-encoded form).
  *
  * This covers the case where the raw URL would be `/articles%20foo/search`.
- * The matched table name `articles foo` must not be embedded in the parser
- * command since the embedded space would inject a stray token.
+ * The name is quoted into the parser command, so the embedded space cannot
+ * inject a stray token; an unconfigured name is simply an unknown table.
  */
 TEST_F(HttpServerTest, SearchRejectsTableNameWithWhitespace) {
   ASSERT_TRUE(http_server_->Start());
@@ -2044,15 +2086,15 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithWhitespace) {
   // %20 -> space. The httplib router decodes percent-escapes before matching.
   auto res = client.Post("/tables/test%20foo/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
+  EXPECT_EQ(res->status, 404);
 
   auto body = json::parse(res->body);
   ASSERT_TRUE(body.contains("error"));
-  EXPECT_NE(body["error"].get<std::string>().find("Invalid table name"), std::string::npos);
+  EXPECT_NE(body["error"].get<std::string>().find("Table not found"), std::string::npos);
 }
 
 /**
- * @brief Table names with semicolons or other punctuation are rejected.
+ * @brief Table names with semicolons or other punctuation are unknown tables.
  */
 TEST_F(HttpServerTest, SearchRejectsTableNameWithSemicolon) {
   ASSERT_TRUE(http_server_->Start());
@@ -2064,7 +2106,7 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithSemicolon) {
 
   auto res = client.Post("/tables/test%3Bdrop/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
+  EXPECT_EQ(res->status, 404);
 }
 
 TEST_F(HttpServerTest, SearchRejectsTableNameWithInvalidUtf8) {
@@ -2078,11 +2120,11 @@ TEST_F(HttpServerTest, SearchRejectsTableNameWithInvalidUtf8) {
   // %E3%81 is a truncated three-byte UTF-8 sequence.
   auto res = client.Post("/tables/test%E3%81/search", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
+  EXPECT_EQ(res->status, 404);
 
   auto body = json::parse(res->body);
   ASSERT_TRUE(body.contains("error"));
-  EXPECT_NE(body["error"].get<std::string>().find("Invalid table name"), std::string::npos);
+  EXPECT_NE(body["error"].get<std::string>().find("Table not found"), std::string::npos);
 }
 
 /**
@@ -2102,7 +2144,7 @@ TEST_F(HttpServerTest, CountTreatsFilterKeywordInQAsLiteralText) {
 }
 
 /**
- * @brief COUNT also rejects unsafe table names.
+ * @brief COUNT also reports an unconfigured whitespace table name as not found.
  */
 TEST_F(HttpServerTest, CountRejectsTableNameWithWhitespace) {
   ASSERT_TRUE(http_server_->Start());
@@ -2114,7 +2156,7 @@ TEST_F(HttpServerTest, CountRejectsTableNameWithWhitespace) {
 
   auto res = client.Post("/tables/test%20foo/count", request_body.dump(), "application/json");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400);
+  EXPECT_EQ(res->status, 404);
 }
 
 /**

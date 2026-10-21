@@ -21,6 +21,7 @@
 #include "config/runtime_variable_manager.h"
 #include "loader/initial_loader.h"
 #include "mysql/connection_validator.h"
+#include "mysql/ddl_schema_validator.h"
 #include "mysql/gtid_waiter.h"
 #include "query/synonym_dictionary.h"
 #include "server/dump_config_validator.h"
@@ -78,6 +79,13 @@ ServerOrchestrator::~ServerOrchestrator() {
   if (started_) {
     (void)Stop();
   }
+  // ~TcpServer drains operations that still reach the HTTP server and the
+  // readiness tracker, even after a timed-out Stop(), so it runs before both.
+  if (http_server_) {
+    http_server_->Stop();
+  }
+  tcp_server_.reset();
+  http_server_.reset();
 }
 
 Expected<void, mygram::utils::Error> StopServerComponentsBestEffort(const ServerShutdownActions& actions) {
@@ -123,6 +131,23 @@ Expected<bool, mygram::utils::Error> StartBinlogReaderForStartup(mysql::IBinlogR
       .Field("action", "serving_restored_data_with_replication_stopped")
       .FieldError(start_result.error())
       .Error();
+  return false;
+}
+
+Expected<bool, mygram::utils::Error> FinishStartupCatchup(mysql::IBinlogReader& binlog_reader, bool restored_from_dump,
+                                                          std::string_view target_gtid,
+                                                          const Expected<void, mygram::utils::Error>& catchup_result) {
+  if (catchup_result) {
+    return true;
+  }
+  binlog_reader.Stop();
+  auto log = mygram::utils::StructuredLog();
+  log.Event("startup_replication_catchup_failed").Field("target_gtid", target_gtid).FieldError(catchup_result.error());
+  if (!restored_from_dump) {
+    log.Error();
+    return mygram::utils::MakeUnexpected(catchup_result.error());
+  }
+  log.Field("after", "startup_dump_restore").Field("action", "serving_restored_data_with_replication_stopped").Error();
   return false;
 }
 
@@ -274,17 +299,18 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::StartInt
       if (*start_result) {
         mygram::utils::StructuredLog().Event("binlog_replication_started").Field("gtid", snapshot_gtid_).Info();
 
-        auto catchup_result = mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_,
-                                                            kSnapshotCatchupTimeout, std::chrono::milliseconds(10),
-                                                            []() { return SignalManager::IsShutdownRequested(); });
-        if (!catchup_result) {
-          binlog_reader_->Stop();
-          mygram::utils::StructuredLog()
-              .Event("startup_replication_catchup_failed")
-              .Field("target_gtid", snapshot_catchup_target_gtid_)
-              .FieldError(catchup_result.error())
-              .Error();
-          return mygram::utils::MakeUnexpected(catchup_result.error());
+        Expected<void, Error> catchup_result;
+        if (snapshot_catchup_target_error_.has_value()) {
+          catchup_result = mygram::utils::MakeUnexpected(*snapshot_catchup_target_error_);
+        } else {
+          catchup_result = mysql::WaitForAppliedPosition(*binlog_reader_, snapshot_catchup_target_gtid_,
+                                                         kSnapshotCatchupTimeout, std::chrono::milliseconds(10),
+                                                         []() { return SignalManager::IsShutdownRequested(); });
+        }
+        auto caught_up =
+            FinishStartupCatchup(*binlog_reader_, restored_from_dump_, snapshot_catchup_target_gtid_, catchup_result);
+        if (!caught_up) {
+          return mygram::utils::MakeUnexpected(caught_up.error());
         }
       }
     }
@@ -602,6 +628,16 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::Initiali
               ? mygram::utils::MakeError(*validation.error_code, message)
               : mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError, message));
     }
+
+    // Table requirements are refused with their own codes before any table is scanned.
+    for (const auto& table_config : deps_.config.tables) {
+      auto schema = mysql::DDLSchemaValidator::Capture(*mysql_connection_, table_config);
+      if (!schema) {
+        return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
+            schema.error().code(), "Table '" + config::QualifiedTableName(table_config) +
+                                       "' does not meet the table requirements: " + schema.error().message()));
+      }
+    }
   }
 #endif
   return {};
@@ -680,10 +716,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ServerOrchestrator::BuildSna
 
         if (deps_.config.replication.enable && !table_contexts_.empty()) {
           auto catchup_target = mysql_connection_->GetLatestGTID();
-          if (!catchup_target) {
-            return mygram::utils::MakeUnexpected(catchup_target.error());
+          if (catchup_target) {
+            snapshot_catchup_target_gtid_ = *catchup_target;
+          } else {
+            // Decided by FinishStartupCatchup once the reader exists, like a failed catch-up wait.
+            snapshot_catchup_target_error_ = catchup_target.error();
           }
-          snapshot_catchup_target_gtid_ = *catchup_target;
         }
         mygram::utils::StructuredLog()
             .Event("startup_dump_load_completed")

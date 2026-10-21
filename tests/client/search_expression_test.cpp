@@ -7,6 +7,13 @@
 
 #include <gtest/gtest.h>
 
+#include <clocale>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "client/wire_quoting.h"
+
 using namespace mygramdb::client;
 
 /**
@@ -513,6 +520,29 @@ TEST(SearchExpressionTest, SimplifyMixed) {
   EXPECT_EQ(simplified.error().code(), mygramdb::utils::ErrorCode::kClientExpressionParseError);
 }
 
+TEST(SearchExpressionTest, BareOrExpressionMatchesItsParenthesizedForm) {
+  const std::vector<std::pair<std::string, std::string>> golden = {
+      {"a OR b c", "(a OR b c)"}, {"(a OR b c)", "((a OR b c))"},     {"a OR b c OR d", "(a OR b c OR d)"},
+      {"x a OR b", "(x a OR b)"}, {"a OR (b c) d", "(a OR (b c) d)"},
+  };
+
+  for (const auto& [expression, expected] : golden) {
+    auto converted = ConvertSearchExpression(expression);
+    ASSERT_TRUE(converted) << expression << ": " << converted.error().message();
+    EXPECT_EQ(*converted, expected) << expression;
+  }
+
+  // The wrapped form carries the same single group the bare form does.
+  for (const std::string expression : {"a OR b c", "a OR b c OR d", "x a OR b"}) {
+    auto bare = ParseSearchExpression(expression);
+    auto wrapped = ParseSearchExpression("(" + expression + ")");
+    ASSERT_TRUE(bare) << expression;
+    ASSERT_TRUE(wrapped) << expression;
+    EXPECT_TRUE(bare->required_terms.empty()) << expression;
+    EXPECT_EQ(wrapped->raw_expression, "(" + bare->raw_expression + ")") << expression;
+  }
+}
+
 TEST(SearchExpressionTest, MalformedOrChainsAreRejected) {
   const std::vector<std::string> expressions = {
       "a OR -b",
@@ -648,4 +678,79 @@ TEST(SearchExpressionTest, OrIsAnOperatorOnlyAsAWholeToken) {
   converted = ConvertSearchExpression("python\xE3\x80\x80OR\xE3\x80\x80ruby");
   ASSERT_TRUE(converted) << converted.error().message();
   EXPECT_EQ(*converted, "(python OR ruby)");
+}
+
+namespace {
+
+/// Switches LC_ALL to a UTF-8 locale for the scope; `active()` is false when none is installed.
+class ScopedUtf8CLocale {
+ public:
+  ScopedUtf8CLocale() {
+    const char* previous = std::setlocale(LC_ALL, nullptr);
+    previous_ = previous != nullptr ? previous : "C";
+    for (const char* name : {"en_US.UTF-8", "C.UTF-8", "ja_JP.UTF-8"}) {
+      if (std::setlocale(LC_ALL, name) != nullptr) {
+        active_ = true;
+        return;
+      }
+    }
+  }
+  ~ScopedUtf8CLocale() { std::setlocale(LC_ALL, previous_.c_str()); }
+  ScopedUtf8CLocale(const ScopedUtf8CLocale&) = delete;
+  ScopedUtf8CLocale& operator=(const ScopedUtf8CLocale&) = delete;
+
+  [[nodiscard]] bool active() const { return active_; }
+
+ private:
+  std::string previous_;
+  bool active_ = false;
+};
+
+}  // namespace
+
+TEST(SearchExpressionLocaleTest, MultibyteTermsAreNotSplitUnderUtf8Locale) {
+  const ScopedUtf8CLocale locale;
+  if (!locale.active()) {
+    GTEST_SKIP() << "no UTF-8 locale (en_US.UTF-8, C.UTF-8, ja_JP.UTF-8) is installed";
+  }
+
+  // U+00E0 ends in byte 0xA0, U+00C5 in 0x85: both are NBSP/NEL lead-ins only as a full C2 sequence.
+  auto parsed = ParseSearchExpression("caf\xC3\xA0 \xC3\x85ngstr\xC3\xB6m");
+  ASSERT_TRUE(parsed) << parsed.error().message();
+  ASSERT_EQ(parsed->required_terms.size(), 2U);
+  EXPECT_EQ(parsed->required_terms[0], "caf\xC3\xA0");
+  EXPECT_EQ(parsed->required_terms[1], "\xC3\x85ngstr\xC3\xB6m");
+
+  auto converted = ConvertSearchExpression("OR\xC3\xA0 x\xC3\xA0");
+  ASSERT_TRUE(converted) << converted.error().message();
+  EXPECT_EQ(*converted, "OR\xC3\xA0 AND x\xC3\xA0");
+}
+
+TEST(WireQuotingLocaleTest, ByteClassificationIgnoresProcessLocale) {
+  const ScopedUtf8CLocale locale;
+  if (!locale.active()) {
+    GTEST_SKIP() << "no UTF-8 locale (en_US.UTF-8, C.UTF-8, ja_JP.UTF-8) is installed";
+  }
+  namespace detail = mygramdb::client::detail;
+
+  for (unsigned int byte = 0x80; byte <= 0xFF; ++byte) {
+    EXPECT_FALSE(detail::IsAsciiSpace(static_cast<unsigned char>(byte))) << byte;
+    EXPECT_FALSE(detail::IsAsciiControl(static_cast<unsigned char>(byte))) << byte;
+  }
+  EXPECT_TRUE(detail::IsAsciiControl(0x00));
+  EXPECT_TRUE(detail::IsAsciiControl(0x1F));
+  EXPECT_TRUE(detail::IsAsciiControl(0x7F));
+  EXPECT_FALSE(detail::IsAsciiControl(' '));
+
+  EXPECT_FALSE(detail::NeedsWireQuoting("caf\xC3\xA0"));
+  EXPECT_FALSE(detail::NeedsWireQuoting("\xC3\x85ngstr\xC3\xB6m"));
+  EXPECT_EQ(detail::QuoteWireToken("\xC3\x85"), "\xC3\x85");
+
+  const std::string input = "caf\xC3\xA0 next";
+  size_t pos = 0;
+  std::string value;
+  ASSERT_TRUE(detail::ParseWireToken(input, pos, value));
+  EXPECT_EQ(value, "caf\xC3\xA0");
+  ASSERT_TRUE(detail::ParseWireToken(input, pos, value));
+  EXPECT_EQ(value, "next");
 }

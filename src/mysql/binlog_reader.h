@@ -496,6 +496,8 @@ class BinlogReader final : public IBinlogReader {
   TableSchemaCache schema_cache_;
   BinlogChecksumTracker checksum_tracker_;  // reader thread only
   std::unordered_map<std::string, ConfiguredTableSchema> configured_schema_baselines_;
+  // Source's executed GTID set read right after the baselines; a DDL it covers is already in them.
+  std::string schema_baseline_gtid_;
 
   // Binlog stream protocol handler (MySQL or MariaDB)
   std::unique_ptr<IBinlogStream> binlog_stream_;
@@ -562,6 +564,15 @@ class BinlogReader final : public IBinlogReader {
 
   /** Drop every queued event; the caller holds queue_mutex_. */
   void ClearQueueLocked();
+
+  /**
+   * @brief Wake every queue waiter after should_stop_ was set
+   *
+   * Passing through queue_mutex_ first means a waiter is either before its
+   * predicate check, and sees the flag, or already blocked, and gets the notify.
+   * The caller must not hold queue_mutex_.
+   */
+  void WakeQueueWaiters();
 
   /**
    * @brief Discard what the previous stream queued and return the position the next one opens from.

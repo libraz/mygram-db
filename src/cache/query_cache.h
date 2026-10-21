@@ -199,6 +199,18 @@ class QueryCache {
   /** Callback invoked once per bulk removal (Clear, ClearTable, EvictForSpace, RefreshLRU). */
   using BatchIdentityEvictionCallback = std::function<void(const std::vector<CacheEntryIdentity>&)>;
 
+  /** Outcome of one lookup; every lookup records exactly one in the statistics. */
+  enum class LookupOutcome : std::uint8_t {
+    kHit,
+    kNotFound,     ///< No entry, a discriminator mismatch, or an undecodable payload
+    kInvalidated,  ///< Entry already marked invalidated by a data change
+    kTTLExpired,   ///< Entry older than the configured TTL
+    kStale,        ///< Payload rejected by the caller's staleness check; counted as invalidated
+  };
+
+  /** Check run on a decoded payload before it counts as a hit; true rejects it as stale. */
+  using StalenessCheck = std::function<bool(const std::vector<DocId>&)>;
+
   /**
    * @brief Constructor
    * @param max_memory_bytes Maximum memory usage in bytes
@@ -251,6 +263,7 @@ class QueryCache {
     std::chrono::steady_clock::time_point created_at;  ///< When cache entry was created
     uint64_t entry_generation = 0;
     uint64_t data_version = 0;
+    LookupOutcome outcome = LookupOutcome::kNotFound;  ///< Set on every lookup
   };
 
   /**
@@ -264,13 +277,16 @@ class QueryCache {
   /**
    * @brief Lookup cache entry with metadata
    * @param key Cache key
-   * @param[out] metadata Output parameter for cache metadata
+   * @param[out] metadata Output parameter for cache metadata and the lookup outcome
+   * @param is_stale Optional check that turns a decoded payload into a stale miss
+   *        before the hit is counted; the caller owns erasing the stale entry
    * @return Decompressed result if found and not invalidated, nullopt otherwise
    */
   [[nodiscard]] std::optional<std::vector<DocId>> LookupWithMetadata(const CacheKey& key, LookupMetadata& metadata);
   [[nodiscard]] std::optional<std::vector<DocId>> LookupWithMetadata(const CacheKey& key,
                                                                      std::string_view discriminator,
-                                                                     LookupMetadata& metadata);
+                                                                     LookupMetadata& metadata,
+                                                                     const StalenessCheck& is_stale = {});
 
   /**
    * @brief Insert cache entry
@@ -282,6 +298,30 @@ class QueryCache {
    */
   bool Insert(const CacheKey& key, const std::vector<DocId>& result, const CacheMetadata& metadata,
               double query_cost_ms);
+
+  /** Result payload encoded for InsertPrepared. */
+  struct PreparedPayload {
+    std::shared_ptr<const std::vector<uint8_t>> encoded;  ///< Compressed (or raw) DocId bytes
+    size_t original_count = 0;                            ///< Number of DocIds encoded
+  };
+
+  /**
+   * @brief Encode a result for InsertPrepared without holding any cache lock
+   *
+   * Applies the cost threshold and reports a compression failure, each counted
+   * as Insert counts it. Residency and size are checked by InsertPrepared, so
+   * a caller's own admission checks still run before them.
+   * @return The encoded payload, or nullopt when the insert is rejected
+   */
+  std::optional<PreparedPayload> PreparePayload(const CacheKey& key, const std::vector<DocId>& result,
+                                                double query_cost_ms);
+
+  /**
+   * @brief Insert a payload produced by PreparePayload
+   * @return true if inserted, false if rejected (oversize, duplicate or eviction failure)
+   */
+  bool InsertPrepared(const CacheKey& key, PreparedPayload payload, const CacheMetadata& metadata,
+                      double query_cost_ms);
 
   /**
    * @brief Mark cache entry as invalidated (Step 1: immediate)
@@ -609,11 +649,20 @@ class QueryCache {
   /**
    * @brief Internal lookup implementation shared by Lookup and LookupWithMetadata
    * @param key Cache key
-   * @param metadata If non-null, populated with cache entry metadata on hit
+   * @param metadata If non-null, populated with cache entry metadata and the outcome
+   * @param is_stale If non-null and set, rejects a decoded payload as stale
    * @return Decompressed result if found and not invalidated, nullopt otherwise
    */
   std::optional<std::vector<DocId>> LookupInternal(const CacheKey& key, std::optional<std::string_view> discriminator,
-                                                   LookupMetadata* metadata);
+                                                   LookupMetadata* metadata, const StalenessCheck* is_stale);
+
+  /// @name Lookup accounting
+  /// The only writers of the hit, miss and TTL-expiration counters.
+  /// @{
+  void RecordHit(double elapsed_ms, double query_cost_ms);
+  void RecordMiss(LookupOutcome reason, double elapsed_ms);
+  void RecordExpiration();
+  /// @}
 };
 
 // ---------------------------------------------------------------------------

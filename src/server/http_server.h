@@ -128,11 +128,17 @@ class ThreadPool;
 /**
  * @brief HTTP server for JSON API
  *
- * Provides RESTful JSON API:
- * - POST /{table}/search - Full-text search
- * - GET /{table}/:primary_key - Get document by primary key
+ * Provides RESTful JSON API (the route table is `Routes()`; `spec/http-routes.md` is the authority):
+ * - POST /tables/{identity}/search - Full-text search
+ * - POST /tables/{identity}/count - Match count
+ * - POST /tables/{identity}/facet - Facet counts
+ * - GET /tables/{identity}/{primary_key} - Get document by primary key
  * - GET /info - Server information
- * - GET /health - Health check
+ * - GET /config - Configuration summary
+ * - GET /metrics - Prometheus metrics
+ * - GET /replication/status - Replication status
+ * - GET /health, /health/live, /health/ready, /health/detail - Health probes
+ * - POST /optimize - Run index optimization
  */
 class HttpServer {
  public:
@@ -420,7 +426,6 @@ class HttpServer {
 
   // Statistics
   ServerStats stats_;
-  StatisticsSnapshotCache statistics_snapshot_cache_;
   std::atomic<size_t> active_connections_{0};
 
   std::unique_ptr<httplib::Server> server_;
@@ -482,6 +487,14 @@ class HttpServer {
    */
   void SetupAccessControl();
 
+  /**
+   * @brief Count and log one request refused by `network.allow_cidrs`.
+   *
+   * Shared by the accepted-socket gate and the pre-routing handler so both
+   * refusal points are observable the same way.
+   */
+  void RecordAclDenial(const std::string& client_ip);
+
   /** True when `api.admin_token` is set and therefore has to be presented. */
   bool AdminTokenConfigured() const;
 
@@ -534,11 +547,9 @@ class HttpServer {
    *
    * The single place HandleSearch, HandleCount and HandleGet resolve a table,
    * so under one configuration all three answer a given name the same way. The
-   * answer is configuration-dependent: step 2 rejects a bare name that step 3
-   * would otherwise resolve. In order:
-   *   1. `QueryParser::IsSafeTableName` — reject names that would break the
-   *      parser grammar (uniform across all endpoints).
-   *   2. `config::RequiresQualifiedTableReferences` — reject a bare name when
+   * answer is configuration-dependent: step 1 rejects a bare name that step 2
+   * would otherwise resolve. No character set is imposed on the name, as on TCP. In order:
+   *   1. `config::RequiresQualifiedTableReferences` — reject a bare name when
    *      the configuration spans two or more databases.
    *   3. `ResolveTableKey` — resolve a possibly bare identity to its canonical
    *      qualified key.

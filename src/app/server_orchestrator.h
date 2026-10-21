@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -87,6 +88,23 @@ class InitialDataReadinessTracker {
  */
 [[nodiscard]] Expected<bool, mygram::utils::Error> StartBinlogReaderForStartup(mysql::IBinlogReader& binlog_reader,
                                                                                bool restored_from_dump);
+
+/**
+ * @brief Apply the startup failure policy to the post-start replication catch-up.
+ *
+ * A failed catch-up stops the reader. Like a reader that cannot start, it is
+ * fatal except after a startup dump restore, where the server keeps serving
+ * the restored tables as not ready with replication stopped.
+ *
+ * @param binlog_reader Started reader
+ * @param restored_from_dump Whether the tables were restored from a dump at startup
+ * @param target_gtid Position the reader had to apply
+ * @param catchup_result Outcome of waiting for @p target_gtid, or the failure to capture it
+ * @return true if caught up, false if catch-up failed but startup continues, or the catch-up error
+ */
+[[nodiscard]] Expected<bool, mygram::utils::Error> FinishStartupCatchup(
+    mysql::IBinlogReader& binlog_reader, bool restored_from_dump, std::string_view target_gtid,
+    const Expected<void, mygram::utils::Error>& catchup_result);
 
 /**
  * @brief Collect configured table identities for MySQL reconnection validation.
@@ -304,6 +322,7 @@ class ServerOrchestrator {
   std::unique_ptr<mysql::Connection> mysql_connection_;
   std::unique_ptr<mysql::BinlogReader> binlog_reader_;
 #endif
+  // ~ServerOrchestrator resets tcp_server_ before http_server_ and initial_data_readiness_.
   std::unique_ptr<server::TcpServer> tcp_server_;
   std::unique_ptr<server::HttpServer> http_server_;
   InitialDataReadinessTracker initial_data_readiness_;
@@ -312,6 +331,8 @@ class ServerOrchestrator {
   std::string snapshot_gtid_;                 ///< Captured during snapshot build
   std::string snapshot_catchup_target_gtid_;  ///< Position captured after the snapshot transaction completed
   bool restored_from_dump_ = false;           ///< Tables came from the startup dump, not a MySQL snapshot
+  /// Why the catch-up target could not be captured after a startup dump restore.
+  std::optional<mygram::utils::Error> snapshot_catchup_target_error_;
   std::atomic<bool> initialized_{false};
   std::atomic<bool> started_{false};
 };

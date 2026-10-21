@@ -1025,6 +1025,26 @@ TEST_F(DumpHandlerTest, DumpSaveBlockedDuringOptimize) {
       << "Response: " << save_response;
 }
 
+TEST_F(DumpHandlerTest, DumpSaveRefusedWhileInitialDataIsNotReady) {
+  bool initial_data_ready = false;
+  handler_ctx_->initial_data_ready_checker = [&initial_data_ready]() { return initial_data_ready; };
+
+  query::Query save_query;
+  save_query.type = query::QueryType::DUMP_SAVE;
+  save_query.filepath = test_filepath_;
+  std::string refused = handler_->Handle(save_query, conn_ctx_);
+
+  EXPECT_EQ(refused.rfind("ERROR 6029 ", 0), 0U) << "Response: " << refused;
+  EXPECT_FALSE(dump_save_in_progress_.load());
+  EXPECT_FALSE(replication_paused_for_dump_.load());
+  EXPECT_TRUE(std::filesystem::is_empty(test_dump_dir_));
+
+  initial_data_ready = true;
+  std::string saved = handler_->Handle(save_query, conn_ctx_);
+  EXPECT_EQ(saved.rfind("OK SAVED", 0), 0U) << "Response: " << saved;
+  EXPECT_TRUE(std::filesystem::exists(test_dump_dir_ / test_filepath_));
+}
+
 // ============================================================================
 // Concurrent Dump Operation Tests
 // ============================================================================

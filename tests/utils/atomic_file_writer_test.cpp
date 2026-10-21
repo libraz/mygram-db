@@ -97,10 +97,11 @@ std::optional<AbandonedDumpTemp> CreateAbandonedDumpTemp(const std::string& fina
   if (child_pid == 0) {
     close(communication_pipe[0]);
     AtomicFileWriter writer(final_path, true);
-    const int temp_fd = open(writer.GetTempPath().c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    if (temp_fd < 0 || !writer.TrackDumpTempFile(temp_fd)) {
+    auto created = writer.CreateDumpTempFile();
+    if (!created) {
       _exit(10);
     }
+    const int temp_fd = *created;
     const std::string temp_basename = std::filesystem::path(writer.GetTempPath()).filename().string();
     const uint32_t basename_size = static_cast<uint32_t>(temp_basename.size());
     if (!WriteAllForTest(communication_pipe[1], &basename_size, sizeof(basename_size)) ||
@@ -139,6 +140,34 @@ bool MakeOld(const std::filesystem::path& path) {
   const auto old_time = std::time(nullptr) - 3600;
   const struct timespec times[2] = {{old_time, 0}, {old_time, 0}};
   return utimensat(AT_FDCWD, path.c_str(), times, 0) == 0;
+}
+
+std::optional<pid_t> ReapedChildPid() {
+  const pid_t child_pid = fork();
+  if (child_pid < 0) {
+    return std::nullopt;
+  }
+  if (child_pid == 0) {
+    _exit(0);
+  }
+  int child_status = 0;
+  if (waitpid(child_pid, &child_status, 0) != child_pid) {
+    return std::nullopt;
+  }
+  return child_pid;
+}
+
+bool WriteOwnerMarker(const std::filesystem::path& marker_path, const std::string& contents) {
+  const int fd = open(marker_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+  if (fd < 0) {
+    return false;
+  }
+  const bool written = fchmod(fd, S_IRUSR | S_IWUSR) == 0 && WriteAllForTest(fd, contents.data(), contents.size());
+  return close(fd) == 0 && written;
+}
+
+std::string OwnerMarkerBasename(pid_t owner_pid) {
+  return std::string(kDumpTempOwnerMarkerPrefix) + std::to_string(static_cast<uint64_t>(owner_pid)) + ".42";
 }
 
 }  // namespace
@@ -403,10 +432,9 @@ TEST_F(AtomicFileWriterTest, TrackedDumpCommitAndRollbackRemoveOwnerMarker) {
   const std::string committed_path = TestPath("tracked_commit.dat");
   {
     AtomicFileWriter writer(committed_path, true);
-    const int fd = open(writer.GetTempPath().c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    ASSERT_GE(fd, 0);
-    auto tracked = writer.TrackDumpTempFile(fd);
-    ASSERT_TRUE(tracked.has_value()) << tracked.error().message();
+    auto created = writer.CreateDumpTempFile();
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    const int fd = *created;
     const auto owner_markers = FindOwnerMarkers();
     ASSERT_EQ(owner_markers.size(), 1U);
     struct stat marker_stat {};
@@ -424,10 +452,9 @@ TEST_F(AtomicFileWriterTest, TrackedDumpCommitAndRollbackRemoveOwnerMarker) {
   const std::string rolled_back_path = TestPath("tracked_rollback.dat");
   {
     AtomicFileWriter writer(rolled_back_path, true);
-    const int fd = open(writer.GetTempPath().c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    ASSERT_GE(fd, 0);
-    auto tracked = writer.TrackDumpTempFile(fd);
-    ASSERT_TRUE(tracked.has_value()) << tracked.error().message();
+    auto created = writer.CreateDumpTempFile();
+    ASSERT_TRUE(created.has_value()) << created.error().message();
+    const int fd = *created;
     ASSERT_TRUE(WriteAllForTest(fd, "discard", 7));
     ASSERT_EQ(close(fd), 0);
     writer.Rollback();
@@ -435,6 +462,46 @@ TEST_F(AtomicFileWriterTest, TrackedDumpCommitAndRollbackRemoveOwnerMarker) {
   }
   EXPECT_FALSE(std::filesystem::exists(rolled_back_path));
   EXPECT_TRUE(FindOwnerMarkers().empty());
+}
+
+TEST_F(AtomicFileWriterTest, CreatedDumpTempIsNamedByCompleteOwnerMarker) {
+  AtomicFileWriter writer(TestPath("created_dump.dat"), true);
+  auto created = writer.CreateDumpTempFile();
+  ASSERT_TRUE(created.has_value()) << created.error().message();
+  const int fd = *created;
+  struct stat temp_stat {};
+  ASSERT_EQ(fstat(fd, &temp_stat), 0);
+  EXPECT_EQ(temp_stat.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO), S_IRUSR | S_IWUSR);
+  ASSERT_EQ(close(fd), 0);
+
+  const auto markers = FindOwnerMarkers();
+  ASSERT_EQ(markers.size(), 1U);
+  EXPECT_EQ(ReadFile(markers.front().string()),
+            MakeOwnerMarkerContents(getpid(), std::filesystem::path(writer.GetTempPath()).filename().string(),
+                                    static_cast<uint64_t>(temp_stat.st_dev), static_cast<uint64_t>(temp_stat.st_ino)));
+  EXPECT_FALSE(writer.CreateDumpTempFile().has_value());
+}
+
+TEST_F(AtomicFileWriterTest, CommitRenameFailurePreservesExistingTargetAndRemovesTemp) {
+  const std::string final_path = TestPath("occupied_target");
+  std::filesystem::create_directories(final_path);
+  const std::string existing_file = final_path + "/existing.dat";
+  WriteToFile(existing_file, "existing snapshot");
+
+  AtomicFileWriter writer(final_path, true);
+  auto created = writer.CreateDumpTempFile();
+  ASSERT_TRUE(created.has_value()) << created.error().message();
+  ASSERT_TRUE(WriteAllForTest(*created, "replacement", 11));
+  ASSERT_EQ(close(*created), 0);
+
+  auto result = writer.Commit();
+
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), ErrorCode::kStorageWriteError);
+  EXPECT_FALSE(std::filesystem::exists(writer.GetTempPath()));
+  EXPECT_TRUE(FindOwnerMarkers().empty());
+  EXPECT_TRUE(std::filesystem::is_directory(final_path));
+  EXPECT_EQ(ReadFile(existing_file), "existing snapshot");
 }
 
 TEST_F(AtomicFileWriterTest, GenericWriterDoesNotCreateDumpOwnerMarker) {
@@ -513,10 +580,9 @@ TEST_F(AtomicFileWriterTest, MissingTempRemovesOnlyItsOldDeadOwnerMarker) {
 TEST_F(AtomicFileWriterTest, LiveOwnerAndUnsafeMarkersAreRetained) {
   const std::string final_path = TestPath("live_dump.dat");
   AtomicFileWriter writer(final_path, true);
-  const int fd = open(writer.GetTempPath().c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-  ASSERT_GE(fd, 0);
-  auto tracked = writer.TrackDumpTempFile(fd);
-  ASSERT_TRUE(tracked.has_value()) << tracked.error().message();
+  auto created = writer.CreateDumpTempFile();
+  ASSERT_TRUE(created.has_value()) << created.error().message();
+  const int fd = *created;
   ASSERT_TRUE(WriteAllForTest(fd, "partial", 7));
   ASSERT_EQ(close(fd), 0);
   const auto markers = FindOwnerMarkers();
@@ -531,6 +597,77 @@ TEST_F(AtomicFileWriterTest, LiveOwnerAndUnsafeMarkersAreRetained) {
   EXPECT_TRUE(std::filesystem::exists(markers.front()));
   writer.Rollback();
   EXPECT_FALSE(std::filesystem::exists(writer.GetTempPath()));
+  EXPECT_TRUE(FindOwnerMarkers().empty());
+}
+
+TEST_F(AtomicFileWriterTest, SweepReclaimsTempLeftByEarlierProcessWithThisPid) {
+  const std::string temp_basename = "pid_reuse_dump.dat.tmp." + std::to_string(getpid()) + ".7";
+  const auto temp_path = test_dir_ / temp_basename;
+  WriteToFile(temp_path.string(), "incomplete dump");
+  struct stat temp_stat {};
+  ASSERT_EQ(stat(temp_path.c_str(), &temp_stat), 0);
+  const auto marker_path = test_dir_ / OwnerMarkerBasename(getpid());
+  ASSERT_TRUE(WriteOwnerMarker(marker_path,
+                               MakeOwnerMarkerContents(getpid(), temp_basename, static_cast<uint64_t>(temp_stat.st_dev),
+                                                       static_cast<uint64_t>(temp_stat.st_ino))));
+  ASSERT_TRUE(MakeOld(temp_path));
+  ASSERT_TRUE(MakeOld(marker_path));
+
+  SweepOrphanDumpTempFiles(test_dir_, std::chrono::minutes(30));
+
+  EXPECT_FALSE(std::filesystem::exists(temp_path));
+  EXPECT_FALSE(std::filesystem::exists(marker_path));
+}
+
+TEST_F(AtomicFileWriterTest, SweepReclaimsTempWhoseMarkerPredatesIt) {
+  const auto dead_pid = ReapedChildPid();
+  ASSERT_TRUE(dead_pid.has_value());
+  const auto nested_dir = test_dir_ / "nested";
+  std::filesystem::create_directories(nested_dir);
+
+  const std::string temp_basename = "pending_dump.dat.tmp." + std::to_string(*dead_pid) + ".9";
+  const auto temp_path = nested_dir / temp_basename;
+  WriteToFile(temp_path.string(), "");
+  const auto marker_path = nested_dir / OwnerMarkerBasename(*dead_pid);
+  ASSERT_TRUE(WriteOwnerMarker(marker_path, MakeOwnerMarkerContents(*dead_pid, temp_basename, 0, 0)));
+
+  const std::string missing_temp_basename = "never_created.dat.tmp." + std::to_string(*dead_pid) + ".10";
+  const auto missing_marker_path =
+      nested_dir / (std::string(kDumpTempOwnerMarkerPrefix) + std::to_string(*dead_pid) + ".43");
+  ASSERT_TRUE(WriteOwnerMarker(missing_marker_path, MakeOwnerMarkerContents(*dead_pid, missing_temp_basename, 0, 0)));
+
+  const auto unmarked_unique = nested_dir / ("backup.dmp.tmp." + std::to_string(*dead_pid) + ".11");
+  const auto unmarked_plain = nested_dir / "finished-manual-dump.tmp";
+  WriteToFile(unmarked_unique.string(), "keep unmarked temp");
+  WriteToFile(unmarked_plain.string(), "keep completed dump");
+  for (const auto& path : {temp_path, marker_path, missing_marker_path, unmarked_unique, unmarked_plain}) {
+    ASSERT_TRUE(MakeOld(path));
+  }
+
+  SweepOrphanDumpTempFiles(test_dir_, std::chrono::minutes(30));
+
+  EXPECT_FALSE(std::filesystem::exists(temp_path));
+  EXPECT_FALSE(std::filesystem::exists(marker_path));
+  EXPECT_FALSE(std::filesystem::exists(missing_marker_path));
+  EXPECT_TRUE(std::filesystem::exists(unmarked_unique));
+  EXPECT_TRUE(std::filesystem::exists(unmarked_plain));
+}
+
+TEST_F(AtomicFileWriterTest, SweepRetainsTempHeldByLiveWriterInThisProcess) {
+  AtomicFileWriter writer(TestPath("live_sweep_dump.dat"), true);
+  auto created = writer.CreateDumpTempFile();
+  ASSERT_TRUE(created.has_value()) << created.error().message();
+  ASSERT_EQ(close(*created), 0);
+  const auto markers = FindOwnerMarkers();
+  ASSERT_EQ(markers.size(), 1U);
+  ASSERT_TRUE(MakeOld(writer.GetTempPath()));
+  ASSERT_TRUE(MakeOld(markers.front()));
+
+  SweepOrphanDumpTempFiles(test_dir_, std::chrono::minutes(30));
+
+  EXPECT_TRUE(std::filesystem::exists(writer.GetTempPath()));
+  EXPECT_TRUE(std::filesystem::exists(markers.front()));
+  writer.Rollback();
   EXPECT_TRUE(FindOwnerMarkers().empty());
 }
 

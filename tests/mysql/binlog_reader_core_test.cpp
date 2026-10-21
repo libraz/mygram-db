@@ -10,6 +10,7 @@
 
 #ifdef USE_MYSQL
 
+#include <future>
 #include <stdexcept>
 #include <string_view>
 
@@ -103,6 +104,29 @@ TEST_F(BinlogReaderFixture, ReconnectBackoffCanBeCancelledByShutdown) {
   waiter.join();
 
   EXPECT_FALSE(completed_full_delay.load(std::memory_order_acquire));
+  reader_->should_stop_.store(false, std::memory_order_release);
+}
+
+TEST_F(BinlogReaderFixture, StopFlagAlwaysWakesAWorkerWaitingInPopEvent) {
+  constexpr int kRounds = 500;
+  for (int round = 0; round < kRounds; ++round) {
+    reader_->should_stop_.store(false, std::memory_order_release);
+    std::promise<void> returned;
+    auto returned_future = returned.get_future();
+    std::thread worker([&] {
+      EXPECT_EQ(reader_->PopEvent(), nullptr);
+      returned.set_value();
+    });
+    reader_->should_stop_.store(true, std::memory_order_release);
+    reader_->WakeQueueWaiters();
+    const bool woke = returned_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    if (!woke) {
+      // Release the stranded worker so the failure is reported instead of hanging the suite.
+      reader_->WakeQueueWaiters();
+    }
+    worker.join();
+    ASSERT_TRUE(woke) << "worker stayed blocked in PopEvent in round " << round;
+  }
   reader_->should_stop_.store(false, std::memory_order_release);
 }
 
@@ -1220,6 +1244,34 @@ TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecove
   EXPECT_TRUE(reader_->GetLastError().empty());
 }
 
+TEST_F(BinlogReaderFixture, ReplayedAlterAlreadyInTheStartupSchemaBaselineFailsClosed) {
+  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
+  reader_->configured_schema_baselines_.emplace(table_config_.name, ConfiguredTableSchema{});
+  reader_->schema_baseline_gtid_ = "ffffffff-0000-0000-0000-000000000001:1-60";
+
+  BinlogEvent replayed =
+      BinlogEvent::CreateDDL(table_config_, "ALTER TABLE articles MODIFY status INT AS (category = 'x') STORED");
+  ASSERT_EQ(replayed.ddl_type, DDLType::kAlter);
+  replayed.gtid = "ffffffff-0000-0000-0000-000000000001:51";
+
+  EXPECT_FALSE(reader_->ProcessQueuedEvent(replayed));
+  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50");
+  EXPECT_TRUE(reader_->HasSchemaIncompatibleError());
+  EXPECT_NE(reader_->GetLastError().find("startup schema fingerprint"), std::string::npos) << reader_->GetLastError();
+}
+
+TEST_F(BinlogReaderFixture, AlterAfterTheStartupSchemaBaselineIsComparedAgainstIt) {
+  reader_->configured_schema_baselines_.emplace(table_config_.name, ConfiguredTableSchema{});
+  reader_->schema_baseline_gtid_ = "ffffffff-0000-0000-0000-000000000001:1-60";
+
+  BinlogEvent later = BinlogEvent::CreateDDL(table_config_, "ALTER TABLE articles ADD COLUMN note INT");
+  later.gtid = "ffffffff-0000-0000-0000-000000000001:61";
+
+  // The comparison itself needs the metadata connection, which this fixture has not opened.
+  EXPECT_EQ(reader_->ValidateSchemaAfterDDL(later), BinlogReader::DDLSchemaCheck::kRetryableFailure);
+  EXPECT_FALSE(reader_->HasSchemaIncompatibleError());
+}
+
 TEST_F(BinlogReaderFixture, DroppedDatabaseStopsLikeADroppedTable) {
   reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
   config::TableConfig in_app = table_config_;
@@ -1278,6 +1330,15 @@ TEST_F(BinlogReaderFixture, PermanentSchemaReadFailureIsNotRetried) {
   EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ErrorCode::kMySQLQueryFailed));
   EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ErrorCode::kMySQLTableNotFound));
   EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ErrorCode::kPermissionDenied));
+}
+
+TEST_F(BinlogReaderFixture, TransientServerQueryErrorsAreRetriedNotLatchedIncompatible) {
+  using mygramdb::mysql::internal::ClassifyQueryErrorCode;
+
+  for (const unsigned int native_error : {1053U, 1152U, 1158U, 1159U, 1160U, 1161U, 1927U, 4031U, 1317U, 1213U}) {
+    EXPECT_TRUE(reader_->IsRetryableSchemaValidationError(ClassifyQueryErrorCode(native_error))) << native_error;
+  }
+  EXPECT_FALSE(reader_->IsRetryableSchemaValidationError(ClassifyQueryErrorCode(1146)));
 }
 
 TEST_F(BinlogReaderFixture, ProcessingFailureClassificationPreservesTransportFailures) {

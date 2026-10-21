@@ -21,8 +21,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <new>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -123,6 +126,25 @@ void operator delete[](void* ptr, std::align_val_t, const std::nothrow_t&) noexc
 }
 
 namespace mygramdb::storage {
+
+struct FilterIndexTestAccess {
+  /// Every live map entry, valued by its reference count or bitmap bytes; map capacity is not part of it.
+  static std::map<std::string, size_t> Entries(const FilterIndex& index) {
+    std::shared_lock lock(index.mutex_);
+    std::map<std::string, size_t> entries;
+    for (const auto& [column, values] : index.eq_bitmaps_) {
+      entries.emplace("column:" + column, values.size());
+      for (const auto& [value, bitmap] : values) {
+        entries.emplace("value:" + column + "=" + value, roaring_bitmap_portable_size_in_bytes(bitmap.get()));
+      }
+    }
+    for (const auto& [column, count] : index.column_ref_counts_) {
+      entries.emplace("refs:" + column, count);
+    }
+    return entries;
+  }
+};
+
 namespace {
 
 /// Roaring allocations still allowed before the failures begin.
@@ -279,7 +301,7 @@ TEST_F(FilterIndexAllocationFailureTest, AddDocumentRollsBackTheColumnsItAlready
   EXPECT_FALSE(index.HasColumn("created_at")) << "a column the document was rolled out of is still counted";
   EXPECT_FALSE(index.HasColumn("deleted_at"));
   EXPECT_FALSE(index.HasColumn("region"));
-  EXPECT_EQ(index.MemoryUsage(), 0U);
+  EXPECT_TRUE(FilterIndexTestAccess::Entries(index).empty()) << "the rolled-back document left entries behind";
 }
 
 /**
@@ -327,7 +349,7 @@ TEST_F(FilterIndexAllocationFailureTest, UpdateIsAllOldOrAllNewAcrossAllocationF
   for (int64_t allowance = 0; allowance <= 8; ++allowance) {
     FilterIndex index;
     ASSERT_TRUE(index.AddDocument(1, old_filters));
-    const size_t old_memory_usage = index.MemoryUsage();
+    const auto old_entries = FilterIndexTestAccess::Entries(index);
 
     Expected<void, Error> updated;
     {
@@ -351,7 +373,7 @@ TEST_F(FilterIndexAllocationFailureTest, UpdateIsAllOldOrAllNewAcrossAllocationF
       EXPECT_FALSE(Indexed(index, "c", new_c));
       EXPECT_TRUE(index.HasColumn("removed_null"));
       EXPECT_FALSE(index.HasColumn("added_null"));
-      EXPECT_EQ(index.MemoryUsage(), old_memory_usage);
+      EXPECT_EQ(FilterIndexTestAccess::Entries(index), old_entries);
     }
     EXPECT_EQ(Selected(index, "stable", stable), (std::vector<DocId>{1}));
     EXPECT_EQ(index.GetColumnValueCounts("a").size(), 1U);

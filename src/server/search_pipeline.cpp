@@ -538,17 +538,24 @@ auto MakeAllTermsPresentMatcher(std::vector<std::string> normalized_terms) {
   };
 }
 
-/// Predicate accepting a text where every normalized term is present either
-/// exactly or within max_distance edits (ContainsFuzzyMatch). The FUZZY
-/// path's hybrid-fragment guard must use this instead of
-/// MakeAllTermsPresentMatcher: an exact-only matcher would reject a
+/// The one FUZZY text matcher: a normalized term is present exactly or within
+/// max_distance edits. Every FUZZY verification, flat or boolean, decides
+/// through here.
+bool FuzzyTermPresent(const std::string& text, const std::string& normalized_term, uint32_t max_distance) {
+  // Exact substring match first; it is cheaper than edit distance.
+  return text.find(normalized_term) != std::string::npos ||
+         mygram::utils::ContainsFuzzyMatch(text, normalized_term, max_distance);
+}
+
+/// Predicate accepting a text where every normalized term is present per
+/// FuzzyTermPresent. The FUZZY path's hybrid-fragment guard must use this
+/// instead of MakeAllTermsPresentMatcher: an exact-only matcher would reject a
 /// candidate that only n-gram-intersected because it is a genuine fuzzy
 /// match, contradicting FUZZY's own matching semantics.
 auto MakeAllTermsFuzzyPresentMatcher(std::vector<std::string> normalized_terms, uint32_t max_distance) {
   return [terms = std::move(normalized_terms), max_distance](const std::string& text) {
-    return std::all_of(terms.begin(), terms.end(), [&](const std::string& term) {
-      return text.find(term) != std::string::npos || mygram::utils::ContainsFuzzyMatch(text, term, max_distance);
-    });
+    return std::all_of(terms.begin(), terms.end(),
+                       [&](const std::string& term) { return FuzzyTermPresent(text, term, max_distance); });
   };
 }
 
@@ -643,6 +650,38 @@ std::vector<storage::DocId> SearchTermDocuments(const SearchTermInfo& term_info,
                : std::vector<storage::DocId>{};
   }
   return current_index->SearchAnd(term_info.ngrams);
+}
+
+/// Candidates for one term under FUZZY, shared by the flat and boolean paths.
+///
+/// A term too short for n-grams takes the same substring scan the non-fuzzy
+/// path uses, so FUZZY stays a superset of the plain result. Otherwise the
+/// term needs max(1, |ngrams| - max_distance * n) of its n-grams, where n is
+/// kanji_ngram_size for a CJK-dominant term and ngram_size otherwise.
+std::vector<storage::DocId> FuzzyTermDocuments(const SearchTermInfo& term_info, uint32_t max_distance,
+                                               index::Index* current_index, storage::DocumentStore* current_doc_store,
+                                               int ngram_size, int kanji_ngram_size) {
+  if (term_info.ngrams.empty()) {
+    return SearchTermDocuments(term_info, current_index, current_doc_store);
+  }
+  int effective_ngram_size = ngram_size > 0 ? ngram_size : 2;
+  if (kanji_ngram_size > 0) {
+    // CJK characters are up to 3 bytes in UTF-8.
+    const size_t short_count = static_cast<size_t>(std::count_if(
+        term_info.ngrams.begin(), term_info.ngrams.end(), [](const std::string& ngram) { return ngram.size() <= 3; }));
+    if (short_count > term_info.ngrams.size() / 2) {
+      effective_ngram_size = kanji_ngram_size;
+    }
+  }
+  const size_t drop = static_cast<size_t>(max_distance) * static_cast<size_t>(effective_ngram_size);
+  const size_t threshold = term_info.ngrams.size() > drop ? term_info.ngrams.size() - drop : 1;
+  return current_index->SearchByThreshold(term_info.ngrams, threshold);
+}
+
+/// Synonym dictionary terms are expanded with, positive and NOT alike. FUZZY
+/// takes precedence over synonyms on every path.
+const query::SynonymDictionary* TermExpansionSynonyms(const query::SynonymDictionary* synonym_dict, bool fuzzy) {
+  return fuzzy ? nullptr : synonym_dict;
 }
 
 SynonymTermGroup ExpandNormalizedTermWithSynonyms(std::string_view normalized,
@@ -1677,24 +1716,31 @@ std::optional<CacheLookupResult> TryCacheLookup(const query::Query& query, cache
     return std::nullopt;
   }
 
-  auto cached_lookup = cache_manager->LookupWithMetadata(query);
+  // The staleness check runs inside the lookup so a stale payload is counted
+  // as a miss rather than as a hit, and the cache erases it.
+  using LookupOutcome = cache::QueryCache::LookupOutcome;
+  LookupOutcome outcome = LookupOutcome::kNotFound;
+  auto cached_lookup = cache_manager->LookupWithMetadata(
+      query, [doc_store](const std::vector<storage::DocId>& results) { return IsCacheStale(results, doc_store); },
+      &outcome);
   if (!cached_lookup.has_value()) {
-    set_reason(CacheMissReason::kNotFound);
+    switch (outcome) {
+      case LookupOutcome::kStale:
+        set_reason(CacheMissReason::kStale);
+        break;
+      case LookupOutcome::kInvalidated:
+        set_reason(CacheMissReason::kInvalidated);
+        break;
+      case LookupOutcome::kHit:
+      case LookupOutcome::kNotFound:
+      case LookupOutcome::kTTLExpired:
+        set_reason(CacheMissReason::kNotFound);
+        break;
+    }
     return std::nullopt;
   }
 
-  // Check staleness against a const-ref to avoid copying the results vector.
-  // cached_lookup owns the data until this function returns.
   const auto& cached_entry = cached_lookup.value();
-  if (IsCacheStale(cached_entry.results, doc_store)) {
-    // A stale payload is not a reusable cache miss: keeping it resident makes
-    // the subsequent Insert reject the same key as a duplicate and repeats
-    // decompression/staleness sampling forever.
-    cache_manager->Erase(query, cached_entry.entry_generation);
-    set_reason(CacheMissReason::kStale);
-    return std::nullopt;
-  }
-
   CacheLookupResult result;
   result.results = std::move(cached_lookup->results);
   auto now = std::chrono::steady_clock::now();
@@ -1822,6 +1868,8 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
                                            const query::SynonymDictionary* synonym_dict = nullptr,
                                            const TermInfoLookup* precomputed_term_infos = nullptr) {
   SearchPipelineResult result;
+  const query::SynonymDictionary* expansion_synonyms =
+      TermExpansionSynonyms(synonym_dict, fuzzy_max_distance.has_value());
   auto find_precomputed = [&](const std::string& term) -> const SearchTermInfo* {
     if (precomputed_term_infos == nullptr) {
       return nullptr;
@@ -1836,20 +1884,9 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
       generated_infos = GenerateTermInfos({term}, current_index, ngram_size, kanji_ngram_size, cross_boundary);
       info = generated_infos.empty() ? nullptr : &generated_infos.front();
     }
-    if (info == nullptr || info->ngrams.empty()) {
-      return std::vector<storage::DocId>{};
-    }
-    int effective_ngram_size = ngram_size > 0 ? ngram_size : 2;
-    if (kanji_ngram_size > 0) {
-      const size_t short_count = static_cast<size_t>(std::count_if(
-          info->ngrams.begin(), info->ngrams.end(), [](const std::string& ngram) { return ngram.size() <= 3; }));
-      if (short_count > info->ngrams.size() / 2) {
-        effective_ngram_size = kanji_ngram_size;
-      }
-    }
-    const size_t drop = static_cast<size_t>(*fuzzy_max_distance) * static_cast<size_t>(effective_ngram_size);
-    const size_t threshold = info->ngrams.size() > drop ? info->ngrams.size() - drop : 1;
-    return current_index->SearchByThreshold(info->ngrams, threshold);
+    return info != nullptr ? FuzzyTermDocuments(*info, *fuzzy_max_distance, current_index, current_doc_store,
+                                                ngram_size, kanji_ngram_size)
+                           : std::vector<storage::DocId>{};
   };
   auto regular_term_search = [&](const std::string& term) {
     std::vector<SearchTermInfo> generated_infos;
@@ -1864,8 +1901,8 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
   auto synonym_term_search = [&](const std::string& term) {
     const SearchTermInfo* info = find_precomputed(term);
     const std::string normalized = info != nullptr ? info->normalized_term : current_index->NormalizeText(term);
-    auto group = ExpandNormalizedTermWithSynonyms(normalized, synonym_dict, current_index, ngram_size, kanji_ngram_size,
-                                                  cross_boundary);
+    auto group = ExpandNormalizedTermWithSynonyms(normalized, expansion_synonyms, current_index, ngram_size,
+                                                  kanji_ngram_size, cross_boundary);
     std::vector<storage::DocId> matches;
     for (const auto& variant : group.variants) {
       matches =
@@ -1886,8 +1923,8 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
     std::string normalized = info != nullptr ? info->normalized_term : current_index->NormalizeText(term);
     if (normalized.empty()) {
       term_variants.emplace(term, std::vector<std::string>{});
-    } else if (synonym_dict != nullptr && !fuzzy_max_distance.has_value()) {
-      term_variants.emplace(term, synonym_dict->Expand(normalized));
+    } else if (expansion_synonyms != nullptr) {
+      term_variants.emplace(term, expansion_synonyms->Expand(normalized));
     } else {
       term_variants.emplace(term, std::vector<std::string>{std::move(normalized)});
     }
@@ -1914,8 +1951,8 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
       return false;
     }
     return std::any_of(variants->second.begin(), variants->second.end(), [&](const std::string& variant) {
-      return text.find(variant) != std::string::npos ||
-             (allow_fuzzy && mygram::utils::ContainsFuzzyMatch(text, variant, *fuzzy_max_distance));
+      return allow_fuzzy ? FuzzyTermPresent(text, variant, *fuzzy_max_distance)
+                         : text.find(variant) != std::string::npos;
     });
   };
   auto matches_ast = [&](const query::QueryNode& node, const std::string& text, bool allow_fuzzy) {
@@ -1951,7 +1988,7 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
   if (fuzzy_max_distance.has_value()) {
     result.results =
         MaterializeAstDocumentSet(EvaluateBooleanAstExpanded(ast, fuzzy_term_search, corpus, verify_exclusion), corpus);
-  } else if (synonym_dict != nullptr) {
+  } else if (expansion_synonyms != nullptr) {
     result.results = MaterializeAstDocumentSet(
         EvaluateBooleanAstExpanded(ast, synonym_term_search, corpus, verify_exclusion), corpus);
   } else {
@@ -1964,7 +2001,7 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
     std::vector<storage::DocId> and_results;
     if (fuzzy_max_distance.has_value()) {
       and_results = fuzzy_term_search(and_term);
-    } else if (synonym_dict != nullptr) {
+    } else if (expansion_synonyms != nullptr) {
       and_results = synonym_term_search(and_term);
     } else {
       and_results = regular_term_search(and_term);
@@ -1985,12 +2022,12 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
   result.after_intersection = result.results.size();
 
   ApplyNotAndFilters(result, query, current_index, current_doc_store, ngram_size, kanji_ngram_size, cross_boundary,
-                     synonym_dict, precomputed_term_infos,
+                     expansion_synonyms, precomputed_term_infos,
                      ShouldVerifyExclusions(full_config, verify_terms_for_mode, query.not_terms));
 
   if (!result.results.empty() && full_config != nullptr &&
       ShouldApplyVerifyText(full_config->memory.verify_text, verify_terms_for_mode)) {
-    if (fuzzy_max_distance.has_value() || synonym_dict != nullptr) {
+    if (fuzzy_max_distance.has_value() || expansion_synonyms != nullptr) {
       prepare_all_terms();
       result.results = RetainCandidatesMatchingText(result.results, current_doc_store, [&](const std::string& text) {
         return matches_query_shape(text, fuzzy_max_distance.has_value());
@@ -2021,7 +2058,7 @@ SearchPipelineResult ExecuteWithBooleanAst(const query::Query& query, const quer
       std::move(result.results), verify_terms_for_mode, current_index, current_doc_store, ngram_size, kanji_ngram_size,
       cross_boundary, [&]() {
         prepare_all_terms();
-        return [&](const std::string& text) { return matches_query_shape(text, /*allow_fuzzy=*/false); };
+        return [&](const std::string& text) { return matches_query_shape(text, fuzzy_max_distance.has_value()); };
       });
   return result;
 }
@@ -2123,50 +2160,18 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
 
   bool first_term = true;
   for (const auto& ti : term_infos) {
-    if (ti.ngrams.empty()) {
-      if (ti.normalized_term.empty()) {
-        // Genuinely empty term: no candidates can match it.
-        result.results.clear();
-        result.empty_term_detected = true;
-        first_term = false;
-        break;
-      }
-      // Term too short for n-gram generation. SubstringFallbackError (called
-      // before this path runs) already guarantees text storage is enabled,
-      // so fall back to the same substring search SearchTermDocuments uses
-      // for the non-fuzzy path -- otherwise FUZZY would treat a term the
-      // plain path can still match via substring scan as entirely
-      // unmatchable, breaking the superset guarantee over the non-fuzzy
-      // result set.
-      auto term_results = SearchTermDocuments(ti, current_index, current_doc_store);
-      if (first_term) {
-        result.total_candidates = term_results.size();
-      }
-      IntersectSorted(result.results, std::move(term_results), first_term);
-      continue;
+    if (ti.ngrams.empty() && ti.normalized_term.empty()) {
+      // Genuinely empty term: no candidates can match it.
+      result.results.clear();
+      result.empty_term_detected = true;
+      first_term = false;
+      break;
     }
 
-    // Compute effective n-gram size per-term: use kanji_ngram_size for CJK-dominant terms
-    int effective_ngram_size_for_term = ngram_size > 0 ? ngram_size : 2;
-    if (kanji_ngram_size > 0) {
-      // If most ngrams are short (CJK unigram), use kanji_ngram_size
-      size_t short_count = 0;
-      for (const auto& ng : ti.ngrams) {
-        if (ng.size() <= 3) {
-          ++short_count;  // CJK chars are up to 3 bytes in UTF-8
-        }
-      }
-      if (short_count > ti.ngrams.size() / 2) {
-        effective_ngram_size_for_term = kanji_ngram_size;
-      }
-    }
-
-    // Compute threshold: max(1, |ngrams| - max_distance * ngram_size)
-    size_t ngram_count = ti.ngrams.size();
-    size_t drop = static_cast<size_t>(max_distance) * static_cast<size_t>(effective_ngram_size_for_term);
-    size_t threshold = (ngram_count > drop) ? (ngram_count - drop) : 1;
-
-    auto term_results = current_index->SearchByThreshold(ti.ngrams, threshold);
+    // SubstringFallbackError, run before this path, guarantees the text
+    // storage a term too short for n-grams is scanned in.
+    auto term_results =
+        FuzzyTermDocuments(ti, max_distance, current_index, current_doc_store, ngram_size, kanji_ngram_size);
 
     // AND across terms
     if (first_term) {
@@ -2206,12 +2211,8 @@ SearchPipelineResult ExecuteWithFuzzy(const query::Query& query, const std::vect
 std::vector<storage::DocId> PostFilterByFuzzyText(const std::vector<storage::DocId>& candidates,
                                                   const std::vector<std::string>& normalized_terms,
                                                   uint32_t max_distance, storage::DocumentStore* doc_store) {
-  return RetainCandidatesMatchingText(candidates, doc_store, [&](const std::string& text) {
-    return std::all_of(normalized_terms.begin(), normalized_terms.end(), [&](const std::string& term) {
-      // Exact substring match first; it is cheaper than edit distance.
-      return text.find(term) != std::string::npos || mygram::utils::ContainsFuzzyMatch(text, term, max_distance);
-    });
-  });
+  return RetainCandidatesMatchingText(candidates, doc_store,
+                                      MakeAllTermsFuzzyPresentMatcher(normalized_terms, max_distance));
 }
 
 namespace {
@@ -2330,7 +2331,8 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
                                      params.full_config != nullptr && params.full_config->bm25.enable;
   const bool boolean_path = boolean_ast != nullptr && has_boolean_syntax;
   const bool fuzzy_path = query.fuzzy_max_distance.has_value();
-  const bool synonym_path = !fuzzy_path && params.synonym_dict != nullptr;
+  const query::SynonymDictionary* expansion_synonyms = TermExpansionSynonyms(params.synonym_dict, fuzzy_path);
+  const bool synonym_path = expansion_synonyms != nullptr;
 
   std::vector<std::string> all_boolean_terms;
   std::vector<std::string> verify_terms_for_mode;
@@ -2352,8 +2354,8 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
   // miss must register these n-grams before estimates, document frequencies,
   // or result materialization can race an invalidating mutation.
   if (boolean_path) {
-    output.path_taken = fuzzy_path ? PipelinePath::FUZZY
-                                   : (params.synonym_dict != nullptr ? PipelinePath::SYNONYM : PipelinePath::REGULAR);
+    output.path_taken =
+        fuzzy_path ? PipelinePath::FUZZY : (synonym_path ? PipelinePath::SYNONYM : PipelinePath::REGULAR);
     CollectAstTerms(*boolean_ast, all_boolean_terms);
     output.all_search_terms.clear();
     CollectAstScoringTerms(*boolean_ast, output.all_search_terms);
@@ -2370,15 +2372,13 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
       cache_registration_infos.push_back(term_info);
     }
     boolean_not_fallback_infos = SelectTermInfos(query.not_terms, term_info_lookup);
-    if (params.synonym_dict != nullptr) {
-      not_synonym_groups = GenerateTermsWithSynonymsNgrams(query.not_terms, params.synonym_dict, params.current_index,
+    if (synonym_path) {
+      not_synonym_groups = GenerateTermsWithSynonymsNgrams(query.not_terms, expansion_synonyms, params.current_index,
                                                            params.ngram_size, params.kanji_ngram_size, cross_boundary);
       for (const auto& group : not_synonym_groups) {
         cache_registration_infos.insert(cache_registration_infos.end(), group.variants.begin(), group.variants.end());
       }
-    }
-    if (params.synonym_dict != nullptr && !fuzzy_path) {
-      synonym_groups = GenerateTermsWithSynonymsNgrams(verify_terms_for_mode, params.synonym_dict, params.current_index,
+      synonym_groups = GenerateTermsWithSynonymsNgrams(verify_terms_for_mode, expansion_synonyms, params.current_index,
                                                        params.ngram_size, params.kanji_ngram_size, cross_boundary);
       for (const auto& group : synonym_groups) {
         cache_registration_infos.insert(cache_registration_infos.end(), group.variants.begin(), group.variants.end());
@@ -2393,9 +2393,9 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
     cache_registration_infos.insert(cache_registration_infos.end(), not_term_infos.begin(), not_term_infos.end());
     if (synonym_path) {
       synonym_groups =
-          GenerateTermsWithSynonymsNgrams(output.all_search_terms, params.synonym_dict, params.current_index,
+          GenerateTermsWithSynonymsNgrams(output.all_search_terms, expansion_synonyms, params.current_index,
                                           params.ngram_size, params.kanji_ngram_size, cross_boundary);
-      not_synonym_groups = GenerateTermsWithSynonymsNgrams(query.not_terms, params.synonym_dict, params.current_index,
+      not_synonym_groups = GenerateTermsWithSynonymsNgrams(query.not_terms, expansion_synonyms, params.current_index,
                                                            params.ngram_size, params.kanji_ngram_size, cross_boundary);
       for (const auto& group : synonym_groups) {
         cache_registration_infos.insert(cache_registration_infos.end(), group.variants.begin(), group.variants.end());
@@ -2422,12 +2422,10 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
   } else if (auto error = SubstringFallbackError(output.term_infos, params.current_doc_store)) {
     return mygram::utils::MakeUnexpected(std::move(*error));
   }
-  const query::SynonymDictionary* not_term_synonym_dict = boolean_path || synonym_path ? params.synonym_dict : nullptr;
   if (auto error = NotTermsFallbackError(
-          query.not_terms, not_term_synonym_dict, params.current_index, params.current_doc_store, params.ngram_size,
-          params.kanji_ngram_size, cross_boundary, not_term_synonym_dict != nullptr ? &not_synonym_groups : nullptr,
-          not_term_synonym_dict == nullptr ? (boolean_path ? &boolean_not_fallback_infos : &not_term_infos)
-                                           : nullptr)) {
+          query.not_terms, expansion_synonyms, params.current_index, params.current_doc_store, params.ngram_size,
+          params.kanji_ngram_size, cross_boundary, synonym_path ? &not_synonym_groups : nullptr,
+          synonym_path ? nullptr : (boolean_path ? &boolean_not_fallback_infos : &not_term_infos))) {
     return mygram::utils::MakeUnexpected(std::move(*error));
   }
 
@@ -2490,9 +2488,9 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
     auto pipeline_result =
         ExecuteWithBooleanAst(query, *boolean_ast, params.current_index, params.current_doc_store, params.full_config,
                               verify_terms_for_mode, params.ngram_size, params.kanji_ngram_size, cross_boundary,
-                              query.fuzzy_max_distance, params.synonym_dict, &term_info_lookup);
+                              query.fuzzy_max_distance, expansion_synonyms, &term_info_lookup);
 
-    if (!query.fuzzy_max_distance.has_value() && params.synonym_dict == nullptr && pipeline_result.results.empty() &&
+    if (!fuzzy_path && !synonym_path && pipeline_result.results.empty() &&
         // The boolean path always inserts with invalidation on any text change.
         ContainsEmptyPostingTerm(output.term_infos, /*invalidate_on_any_text_change=*/true)) {
       pipeline_result.empty_term_detected = true;
@@ -2564,10 +2562,10 @@ mygram::utils::Expected<FullPipelineOutput, mygram::utils::Error> ExecuteFullPip
   }
 
   // Synonym-aware search path
-  if (params.synonym_dict != nullptr) {
+  if (synonym_path) {
     auto pipeline_result = ExecuteWithSynonyms(query, synonym_groups, params.current_index, params.current_doc_store,
                                                params.full_config, params.ngram_size, params.kanji_ngram_size,
-                                               cross_boundary, params.filter_threshold, params.synonym_dict);
+                                               cross_boundary, params.filter_threshold, expansion_synonyms);
 
     output.empty_term_detected = pipeline_result.empty_term_detected;
     output.total_candidates = pipeline_result.total_candidates;

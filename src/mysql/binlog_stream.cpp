@@ -28,23 +28,13 @@ BinlogFetchResult::Status ClassifyFetchError(unsigned int err_no, std::string_vi
   if (IsPurgedPositionError(err_no, server_message)) {
     return BinlogFetchResult::Status::kBinlogPurged;
   }
-  switch (err_no) {
-    case kMySQLErrServerLost:
-      return BinlogFetchResult::Status::kConnectionLost;
-    case kMySQLErrGoneAway:
-    case kMySQLErrServerLostExtended:
-    case kMySQLErrServerShutdown:
-    case kMySQLErrAbortingConnection:
-    case kMySQLErrNetReadError:
-    case kMySQLErrNetReadInterrupted:
-    case kMySQLErrNetErrorOnWrite:
-    case kMySQLErrNetWriteInterrupted:
-    case kMariaDBErrConnectionKilled:
-    case kMySQLErrClientInteractionTimeout:
-      return BinlogFetchResult::Status::kServerGoneAway;
-    default:
-      return BinlogFetchResult::Status::kError;
+  if (err_no == kMySQLErrServerLost) {
+    return BinlogFetchResult::Status::kConnectionLost;
   }
+  if (internal::IsConnectionEndingError(err_no)) {
+    return BinlogFetchResult::Status::kServerGoneAway;
+  }
+  return BinlogFetchResult::Status::kError;
 }
 
 BinlogFetchResult FetchBinlogEvent(Connection& conn, MYSQL_RPL& rpl, std::string_view log_action,

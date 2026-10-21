@@ -2397,6 +2397,24 @@ TEST(DumpFormatV2Test, SaveRejectsEncodedTableAboveSectionCeilingWithoutReplacin
   EXPECT_EQ(std::string(bytes.begin(), bytes.end()), previous_contents);
 }
 
+TEST(DumpFormatV2Test, SaveRejectsConfigSectionAboveRestoreBudgetWithinSectionCeiling) {
+  const auto filepath = TempFilePath("save_config_budget");
+  ScopedCleanup cleanup(filepath);
+  const std::string previous_contents = "previous-good-dump";
+  WriteFileBytes(filepath, std::vector<char>(previous_contents.begin(), previous_contents.end()));
+
+  std::unordered_map<std::string, std::pair<Index*, DocumentStore*>> contexts;
+  const RestoreLimits limits{/*memory_budget_bytes=*/16, /*max_section_bytes=*/1024 * 1024};
+  auto result = WriteDump(filepath, "GTID:config-budget", MakeTestConfig(), contexts, nullptr, nullptr, {}, limits);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kStorageDumpWriteError);
+  EXPECT_NE(result.error().message().find("Config section"), std::string::npos) << result.error().message();
+  EXPECT_NE(result.error().message().find("dump.restore_memory_budget_mb"), std::string::npos)
+      << result.error().message();
+  const auto bytes = ReadFileBytes(filepath);
+  EXPECT_EQ(std::string(bytes.begin(), bytes.end()), previous_contents);
+}
+
 TEST(DumpFormatV2Test, DumpSavedWithinLimitsRestoresWithTheSameLimits) {
   const auto filepath = TempFilePath("save_restore_same_limits");
   ScopedCleanup cleanup(filepath);

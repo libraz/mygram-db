@@ -387,14 +387,21 @@ std::string SyncOperationManager::StopSync(const std::string& table_name) {
     // and cancels as soon as the loader is available.
     {
       std::lock_guard<std::mutex> lock(sync_mutex_);
+      std::vector<std::string> cancellable;
       for (const auto& tbl : tables_to_stop) {
         auto state_iter = sync_states_.find(tbl);
         if (state_iter != sync_states_.end() && state_iter->second.is_running) {
           state_iter->second.cancel_requested.store(true, std::memory_order_release);
           state_iter->second.status = "CANCELLING";
           state_iter->second.error_message = "Cancellation requested by user";
+          cancellable.push_back(tbl);
         }
       }
+      tables_to_stop = std::move(cancellable);
+    }
+    // Only a SYNC that has not published its terminal state can still honour the request.
+    if (tables_to_stop.empty()) {
+      return ResponseFormatter::FormatError("No active SYNC operations to stop", mygram::utils::ErrorCode::kNotFound);
     }
 
     // Cancel all loaders that are already registered. Cancel() is idempotent.
@@ -657,6 +664,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
   std::unique_ptr<storage::DocumentStore> candidate_doc_store;
   bool live_state_swapped = false;
   bool replay_watermark_published = false;
+  bool reader_repositioned = false;
   uint64_t previous_bm25_total_length = 0;
   uint64_t previous_bm25_doc_count = 0;
 
@@ -1009,8 +1017,69 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
                    "to pick up what the skipped interval wrote")
             .Warn();
       }
+      const bool replication_handed_off = current_config->replication.enable && reader != nullptr;
+      // Swap the previous live state back and leave the reader at the position
+      // that state was applied up to. Returns why replication could not restart, if it could not.
+      const auto roll_back_swap = [&](const std::string& restart_reason) -> std::optional<std::string> {
+        if (replication_handed_off) {
+          reader->Stop();
+        }
+        {
+          std::unique_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
+          ctx->index->ReplaceWithLoaded(*candidate_index);
+          ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
+          ctx->bm25_stats.SetCorpusStats(previous_bm25_total_length, previous_bm25_doc_count);
+          std::lock_guard<std::mutex> replay_lock(ctx->replay_watermark->mutex);
+          ctx->replay_watermark->snapshot_gtid.clear();
+        }
+        replay_watermark_published = false;
+        live_state_swapped = false;
+        // Searches during the hand-off may have cached results computed from the discarded snapshot.
+        auto* rollback_cache = cache_manager_.load(std::memory_order_acquire);
+        if (rollback_cache != nullptr) {
+          rollback_cache->ClearTable(table_name);
+        }
+        if (!replication_handed_off) {
+          return std::nullopt;
+        }
+        if (!replication_was_running) {
+          reader->SetCurrentGTID(saved_gtid);
+          return std::nullopt;
+        }
+        auto rollback_restart = RestartReplicationFromGtid(reader, saved_gtid, table_name, restart_reason);
+        if (!rollback_restart) {
+          return rollback_restart.error().message();
+        }
+        return std::nullopt;
+      };
+      const auto publish_cancelled_after_rollback = [&](const std::optional<std::string>& restart_error) {
+        std::string cancel_msg = "Cancelled by user (SYNC STOP)";
+        if (restart_error.has_value()) {
+          cancel_msg += "; rollback replication restart failed: " + *restart_error;
+        }
+        update_state([&cancel_msg, &restart_error](SyncState& state) {
+          state.status = "CANCELLED";
+          state.error_message = cancel_msg;
+          state.is_running = false;
+          if (restart_error.has_value()) {
+            state.replication_status = "FAILED";
+          }
+        });
+        mygram::utils::StructuredLog()
+            .Event("sync_cancelled")
+            .Field(log_fields::kFieldTable, table_name)
+            .Field("reason", "user_stop_request")
+            .Field("message", "Snapshot discarded after swap; live table restored")
+            .Info();
+      };
+      const auto user_cancel_requested = [this, &table_name]() {
+        std::lock_guard<std::mutex> lock(sync_mutex_);
+        const auto iter = sync_states_.find(table_name);
+        return iter != sync_states_.end() && iter->second.cancel_requested.load(std::memory_order_acquire);
+      };
+
       bool replication_started = false;
-      if (current_config->replication.enable && reader != nullptr) {
+      if (replication_handed_off) {
         // If replication is still running (e.g., was not stopped earlier because
         // it wasn't enabled at that point), stop it now before updating GTID.
         if (!replication_was_running && reader->IsRunning()) {
@@ -1025,6 +1094,7 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
             .Info();
 
         reader->SetCurrentGTID(restart_gtid);
+        reader_repositioned = true;
 
         // Log before attempting to start replication
         mygram::utils::StructuredLog()
@@ -1039,9 +1109,8 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         if (!start_result) {
           handoff_error = start_result.error();
         } else {
-          auto catchup_result = mysql::WaitForAppliedPosition(
-              *reader, catchup_target_gtid, kSyncCatchupTimeout, std::chrono::milliseconds(10),
-              [this]() { return shutdown_requested_.load(std::memory_order_acquire); });
+          auto catchup_result = mysql::WaitForAppliedPosition(*reader, catchup_target_gtid, kSyncCatchupTimeout,
+                                                              std::chrono::milliseconds(10), cancellation_requested);
           if (!catchup_result) {
             handoff_error = catchup_result.error();
           }
@@ -1050,24 +1119,15 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
         if (handoff_error.has_value()) {
           // Do not expose a snapshot whose replication hand-off failed. Swap
           // the exact previous states back into place before reporting failure.
-          reader->Stop();
-          {
-            std::unique_lock<std::shared_mutex> generation_lock(*ctx->generation_mutex);
-            ctx->index->ReplaceWithLoaded(*candidate_index);
-            ctx->doc_store->ReplaceWithLoaded(*candidate_doc_store);
-            ctx->bm25_stats.SetCorpusStats(previous_bm25_total_length, previous_bm25_doc_count);
-            std::lock_guard<std::mutex> replay_lock(ctx->replay_watermark->mutex);
-            ctx->replay_watermark->snapshot_gtid.clear();
+          const auto restart_error = roll_back_swap("sync_swap_rollback");
+          if (user_cancel_requested()) {
+            publish_cancelled_after_rollback(restart_error);
+            return;
           }
-          replay_watermark_published = false;
-          live_state_swapped = false;
 
           std::string error_msg = "Snapshot discarded because replication hand-off failed: " + handoff_error->message();
-          if (replication_was_running) {
-            auto rollback_restart = RestartReplicationFromGtid(reader, saved_gtid, table_name, "sync_swap_rollback");
-            if (!rollback_restart) {
-              error_msg += "; rollback replication restart failed: " + rollback_restart.error().message();
-            }
+          if (restart_error.has_value()) {
+            error_msg += "; rollback replication restart failed: " + *restart_error;
           }
           update_state([&error_msg](SyncState& state) {
             state.status = "FAILED";
@@ -1119,10 +1179,16 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
             .Info();
       }
 
-      // The replacement, cache invalidation and replication hand-off are now
-      // committed. Publish COMPLETED only after stale cached results are gone.
-      live_state_swapped = false;
-      update_state([&gtid, processed, replication_started](SyncState& state) {
+      // Publish COMPLETED only after stale cached results are gone. A stop
+      // acknowledged before this point still wins: checking it under the same
+      // lock that publishes COMPLETED leaves no window for a later stop to be
+      // acknowledged and then ignored.
+      bool cancel_acknowledged = false;
+      update_state([&gtid, processed, replication_started, &cancel_acknowledged](SyncState& state) {
+        if (state.cancel_requested.load(std::memory_order_acquire)) {
+          cancel_acknowledged = true;
+          return;
+        }
         state.status = "COMPLETED";
         state.gtid = gtid;
         state.processed_rows = processed;
@@ -1131,6 +1197,11 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
           state.replication_status = "DISABLED";
         }
       });
+      if (cancel_acknowledged) {
+        publish_cancelled_after_rollback(roll_back_swap("sync_cancelled"));
+        return;
+      }
+      live_state_swapped = false;
 
       if (completion_callback_) {
         completion_callback_(table_name);
@@ -1222,6 +1293,9 @@ void SyncOperationManager::BuildSnapshotAsync(const std::string& table_name) {
 
     // Restart replication from the saved GTID position (before SYNC started).
     // The exception prevented SYNC completion, so we restore to the pre-SYNC state.
+    if (!replication_was_running && reader_repositioned && reader != nullptr) {
+      reader->SetCurrentGTID(saved_gtid);
+    }
     if (replication_was_running) {
       auto restart_result = RestartReplicationFromGtid(reader, saved_gtid, table_name, "sync_exception");
       if (!restart_result) {

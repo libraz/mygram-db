@@ -995,7 +995,8 @@ TEST_F(CliSingleCommandExitStatusTest, DumpSaveWaitsForCompletion) {
 #endif
       constexpr std::array<std::string_view, 2> responses = {
           "OK DUMP_STARTED /tmp/cli-dump.dmp\r\n",
-          "OK DUMP_STATUS\r\nstatus: COMPLETED\r\nresult_filepath: /tmp/cli-dump.dmp\r\nEND\r\n",
+          "OK DUMP_STATUS\r\nstatus: COMPLETED\r\nfilepath: /tmp/cli-dump.dmp\r\nresult_filepath: "
+          "/tmp/cli-dump.dmp\r\nEND\r\n",
       };
       for (const auto response : responses) {
         std::array<char, 256> request{};

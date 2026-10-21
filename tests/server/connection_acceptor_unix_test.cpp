@@ -9,7 +9,9 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <thread>
@@ -145,6 +147,69 @@ TEST_F(ConnectionAcceptorUnixTest, StaleSocketCleanup) {
   ASSERT_TRUE(acceptor.StartAccepting().has_value());
 
   acceptor.Stop();
+}
+
+TEST_F(ConnectionAcceptorUnixTest, NonSocketFileAtPathIsLeftIntact) {
+  const std::string contents = "operator data";
+  {
+    FILE* file = std::fopen(socket_path_.c_str(), "w");
+    ASSERT_NE(file, nullptr) << strerror(errno);
+    ASSERT_EQ(std::fwrite(contents.data(), 1, contents.size(), file), contents.size());
+    std::fclose(file);
+  }
+
+  ServerConfig config;
+  config.unix_socket_path = socket_path_;
+  config.max_connections = 10;
+
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+
+  auto result = acceptor.Start();
+  ASSERT_FALSE(result.has_value()) << "startup must refuse a non-socket entry at the socket path";
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kNetworkUnixSocketStale);
+
+  struct stat st {};
+  ASSERT_EQ(lstat(socket_path_.c_str(), &st), 0) << "the regular file must not be unlinked";
+  EXPECT_TRUE(S_ISREG(st.st_mode));
+  EXPECT_EQ(static_cast<size_t>(st.st_size), contents.size());
+}
+
+TEST_F(ConnectionAcceptorUnixTest, LiveSocketAtPathIsLeftIntact) {
+  int live_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  ASSERT_GE(live_fd, 0);
+
+  struct sockaddr_un addr {};
+  addr.sun_family = AF_UNIX;
+  std::strncpy(addr.sun_path, socket_path_.c_str(), sizeof(addr.sun_path) - 1);
+
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+  ASSERT_EQ(bind(live_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)), 0);
+  ASSERT_EQ(listen(live_fd, 1), 0);
+
+  ServerConfig config;
+  config.unix_socket_path = socket_path_;
+  config.max_connections = 10;
+
+  ConnectionAcceptor acceptor(config);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+
+  auto result = acceptor.Start();
+  EXPECT_FALSE(result.has_value()) << "startup must not take over a socket another server is listening on";
+  if (!result) {
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kNetworkUnixSocketStale);
+  }
+
+  struct stat st {};
+  EXPECT_EQ(lstat(socket_path_.c_str(), &st), 0) << "the live socket must not be unlinked";
+  EXPECT_TRUE(S_ISSOCK(st.st_mode));
+  close(live_fd);
 }
 
 TEST_F(ConnectionAcceptorUnixTest, PathTooLongError) {

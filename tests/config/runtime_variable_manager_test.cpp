@@ -7,11 +7,14 @@
 
 #include <gtest/gtest.h>
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -543,6 +546,101 @@ TEST(RuntimeVariableManagerTest, SetLoggingLevelInvalid) {
   auto get_result = manager->GetVariable("logging.level");
   ASSERT_TRUE(get_result);
   EXPECT_EQ(*get_result, "info");
+}
+
+/**
+ * @brief SET logging.level and logging.format change the effective logger state
+ */
+TEST(RuntimeVariableManagerTest, SetLoggingLevelAndFormatTakeEffect) {
+  Config config = CreateTestConfig();
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+  const auto previous_spdlog_level = spdlog::get_level();
+  const auto previous_log_format = StructuredLog::GetFormat();
+
+  const std::vector<std::pair<std::string, spdlog::level::level_enum>> levels = {
+      {"debug", spdlog::level::debug},
+      {"info", spdlog::level::info},
+      {"warn", spdlog::level::warn},
+      {"error", spdlog::level::err},
+  };
+  for (const auto& [name, level] : levels) {
+    ASSERT_TRUE(manager->SetVariable("logging.level", name)) << name;
+    EXPECT_EQ(spdlog::get_level(), level) << name;
+  }
+
+  ASSERT_TRUE(manager->SetVariable("logging.format", "text"));
+  EXPECT_EQ(StructuredLog::GetFormat(), LogFormat::TEXT);
+  ASSERT_TRUE(manager->SetVariable("logging.format", "json"));
+  EXPECT_EQ(StructuredLog::GetFormat(), LogFormat::JSON);
+
+  // A batch that fails validation leaves both effects untouched.
+  auto failed =
+      manager->SetVariables({{"logging.level", "debug"}, {"logging.format", "text"}, {"api.default_limit", "0"}});
+  EXPECT_FALSE(failed);
+  EXPECT_EQ(spdlog::get_level(), spdlog::level::err);
+  EXPECT_EQ(StructuredLog::GetFormat(), LogFormat::JSON);
+
+  spdlog::set_level(previous_spdlog_level);
+  StructuredLog::SetFormat(previous_log_format);
+}
+
+/**
+ * @brief SET refuses a value the operator --schema forbids, as the loader would
+ */
+TEST(RuntimeVariableManagerTest, SetHonorsCustomSchemaConstraints) {
+  Config config = CreateTestConfig();
+  config.custom_schema = R"({"properties":{"api":{"properties":{"max_query_length":{"maximum":256}}}}})";
+  auto manager = std::move(*RuntimeVariableManager::Create(config));
+
+  auto refused = manager->SetVariable("api.max_query_length", "4096");
+  ASSERT_FALSE(refused);
+  EXPECT_EQ(refused.error().code(), ErrorCode::kConfigInvalidValue);
+  auto unchanged = manager->GetVariable("api.max_query_length");
+  ASSERT_TRUE(unchanged);
+  EXPECT_EQ(*unchanged, "128");
+
+  EXPECT_TRUE(manager->SetVariable("api.max_query_length", "200"));
+  auto accepted = manager->GetVariable("api.max_query_length");
+  ASSERT_TRUE(accepted);
+  EXPECT_EQ(*accepted, "200");
+}
+
+/**
+ * @brief The schema the loader was started with reaches runtime SET
+ */
+TEST(RuntimeVariableManagerTest, LoadedCustomSchemaConstrainsSet) {
+  const auto dir = std::filesystem::temp_directory_path() / ("rvm_custom_schema_" + std::to_string(::getpid()));
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  const auto config_path = dir / "config.yaml";
+  const auto schema_path = dir / "schema.json";
+  {
+    std::ofstream config_file(config_path);
+    config_file << "mysql:\n"
+                << "  user: \"test_user\"\n"
+                << "  database: \"test_db\"\n"
+                << "tables:\n"
+                << "  - name: \"docs\"\n"
+                << "    text_source:\n"
+                << "      column: \"body\"\n"
+                << "replication:\n"
+                << "  enable: false\n"
+                << "api:\n"
+                << "  max_query_length: 128\n";
+    std::ofstream schema_file(schema_path);
+    schema_file << R"({"properties":{"api":{"properties":{"max_query_length":{"maximum":256}}}}})";
+  }
+
+  auto loaded = LoadConfig(config_path.string(), schema_path.string());
+  ASSERT_TRUE(loaded) << loaded.error().to_string();
+  auto manager = std::move(*RuntimeVariableManager::Create(*loaded));
+
+  auto refused = manager->SetVariable("api.max_query_length", "4096");
+  ASSERT_FALSE(refused);
+  EXPECT_EQ(refused.error().code(), ErrorCode::kConfigInvalidValue);
+  EXPECT_TRUE(manager->SetVariable("api.max_query_length", "256"));
+
+  std::filesystem::remove_all(dir);
 }
 
 /**

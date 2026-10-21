@@ -106,6 +106,9 @@ class FilterIndex {
   static std::string DeserializeToDisplayString(const std::string& serialized);
 
  private:
+  // Lets tests inspect live entries without relying on map capacity.
+  friend struct FilterIndexTestAccess;
+
   static constexpr size_t kSerializedValuePayloadBytes = sizeof(double) > sizeof(uint64_t) ? sizeof(double)
                                                                                            : sizeof(uint64_t);
   using SerializedValueStorage = std::array<char, kSerializedValuePayloadBytes>;

@@ -2199,23 +2199,13 @@ TEST_F(RowsParserTest, InvalidUtf8Sanitized) {
     ASSERT_TRUE(result.has_value()) << "Failed for: " << tc.description;
     ASSERT_EQ(1, result->size());
 
-    std::string content = result->front().GetColumnValue("content");
+    const std::string content = result->front().GetColumnValue("content");
+    const std::string raw(tc.input.begin(), tc.input.end());
 
-    // The result should NOT contain the invalid bytes as-is
-    // It should either be sanitized or contain replacement characters
-    for (unsigned char c : tc.input) {
-      if (c >= 0x80 && c <= 0xBF) {
-        // Continuation bytes - these alone are invalid
-        // The sanitized string should not start with them
-      }
-    }
-
-    // The result should be valid UTF-8 (can be processed without errors)
-    // Check that it contains replacement characters for invalid sequences
-    EXPECT_TRUE(content.find(kReplacementChar) != std::string::npos || content.find("[") == 0 ||  // Error marker
-                content.empty() ||                                                                // Sanitized to empty
-                content == std::string(tc.input.begin(), tc.input.end()))                         // Or ASCII-safe
-        << "Invalid UTF-8 not handled for: " << tc.description;
+    // The binlog path must produce the same text the snapshot path does.
+    EXPECT_EQ(content, mygram::utils::SanitizeUtf8(raw)) << tc.description;
+    EXPECT_TRUE(mygram::utils::IsValidUtf8(content)) << tc.description;
+    EXPECT_NE(content.find(kReplacementChar), std::string::npos) << tc.description;
   }
 }
 

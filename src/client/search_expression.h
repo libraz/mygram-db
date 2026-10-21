@@ -17,6 +17,7 @@
  * - `"machine learning" tutorial` → `"machine learning" AND tutorial` (phrase search)
  * - `golang -old` → `golang AND NOT old`
  * - `python OR ruby` → `(python OR ruby)` (raw OR sub-expressions are always wrapped in parens)
+ * - `a OR b c` → `(a OR b c)` (an expression with a top-level OR is one group; implicit AND binds tighter)
  * - `golang +(tutorial OR guide)` → `golang AND (tutorial OR guide)`
  * - `機械学習　チュートリアル` → `機械学習 AND チュートリアル` (full-width space)
  */
@@ -52,7 +53,7 @@ struct SearchExpression {
    * Generates proper boolean query string:
    * - Required terms: joined with AND
    * - Excluded terms: prefixed with NOT
-   * - Optional terms: joined with OR (if no required terms)
+   * - Grouped and OR sub-expressions: wrapped in parentheses and joined with AND
    *
    * @return Query string compatible with QueryASTParser
    */

@@ -16,6 +16,8 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -23,13 +25,75 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <memory>
+#include <sstream>
+#include <string>
 #include <thread>
 
 #include "server/connection_acceptor.h"
+#include "server/server_stats.h"
 #include "server/server_types.h"
 #include "utils/network_utils.h"
 
 namespace mygramdb::server {
+
+namespace {
+
+/// Capture everything written to the default logger.
+class LogCapture {
+ public:
+  LogCapture() : previous_logger_(spdlog::default_logger()), previous_level_(spdlog::get_level()) {
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+    logger_ = std::make_shared<spdlog::logger>("acceptor_denial_capture", sink);
+    logger_->set_pattern("%v");
+    logger_->set_level(spdlog::level::trace);
+    logger_->flush_on(spdlog::level::trace);
+    spdlog::set_default_logger(logger_);
+    spdlog::set_level(spdlog::level::trace);
+  }
+
+  ~LogCapture() {
+    spdlog::set_default_logger(previous_logger_);
+    spdlog::set_level(previous_level_);
+  }
+
+  LogCapture(const LogCapture&) = delete;
+  LogCapture& operator=(const LogCapture&) = delete;
+  LogCapture(LogCapture&&) = delete;
+  LogCapture& operator=(LogCapture&&) = delete;
+
+  std::string Text() {
+    logger_->flush();
+    return stream_.str();
+  }
+
+ private:
+  std::ostringstream stream_;
+  std::shared_ptr<spdlog::logger> previous_logger_;
+  spdlog::level::level_enum previous_level_;
+  std::shared_ptr<spdlog::logger> logger_;
+};
+
+size_t CountOccurrences(const std::string& text, const std::string& needle) {
+  size_t count = 0;
+  for (size_t pos = text.find(needle); pos != std::string::npos; pos = text.find(needle, pos + needle.size())) {
+    ++count;
+  }
+  return count;
+}
+
+bool WaitForDenials(const ServerStats& stats, uint64_t expected) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (stats.GetRequestsDeniedConnectionLimitTcp() + stats.GetRequestsDeniedAclTcp() >= expected) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
+
+}  // namespace
 
 class ConnectionAcceptorTcpTest : public ::testing::Test {
  protected:
@@ -625,6 +689,61 @@ TEST_F(ConnectionAcceptorTcpTest, RestartAfterStopWorks) {
   ASSERT_TRUE(acceptor.Start().has_value());
   ASSERT_TRUE(acceptor.StartAccepting().has_value());
   acceptor.Stop();
+}
+
+TEST_F(ConnectionAcceptorTcpTest, ConnectionLimitDenialLogIsBounded) {
+  LogCapture capture;
+  auto config = MakeConfig(0, /*max_connections=*/0);
+  ServerStats stats;
+  ConnectionAcceptor acceptor(config, &stats);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+  ASSERT_TRUE(acceptor.Start().has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
+
+  constexpr uint64_t kRejected = 20;
+  for (uint64_t i = 1; i <= kRejected; ++i) {
+    const int client = ConnectToTcp("127.0.0.1", acceptor.GetPort());
+    ASSERT_GE(client, 0);
+    ASSERT_TRUE(WaitForDenials(stats, i)) << "connection " << i << " was not denied";
+    close(client);
+  }
+  acceptor.Stop();
+
+  EXPECT_EQ(stats.GetRequestsDeniedConnectionLimitTcp(), kRejected);
+  EXPECT_EQ(CountOccurrences(capture.Text(), "connection_limit_reached"), 1U)
+      << "repeated denials from one peer must be suppressed within the limiter interval";
+}
+
+TEST_F(ConnectionAcceptorTcpTest, PeerOutsideAllowListAtCapacityIsAnAclDenial) {
+  LogCapture capture;
+  auto config = MakeConfig(0, /*max_connections=*/0);
+  config.parsed_allow_cidrs.clear();
+  auto cidr = mygram::utils::CIDR::Parse("10.0.0.0/8");
+  ASSERT_TRUE(cidr.has_value());
+  config.parsed_allow_cidrs.push_back(*cidr);
+  ServerStats stats;
+  ConnectionAcceptor acceptor(config, &stats);
+  acceptor.SetReactorHandler([](int fd) {
+    close(fd);
+    return true;
+  });
+  ASSERT_TRUE(acceptor.Start().has_value());
+  ASSERT_TRUE(acceptor.StartAccepting().has_value());
+
+  const int client = ConnectToTcp("127.0.0.1", acceptor.GetPort());
+  ASSERT_GE(client, 0);
+  ASSERT_TRUE(WaitForDenials(stats, 1));
+  close(client);
+  acceptor.Stop();
+
+  EXPECT_EQ(stats.GetRequestsDeniedAclTcp(), 1U);
+  EXPECT_EQ(stats.GetRequestsDeniedConnectionLimitTcp(), 0U);
+  const std::string logs = capture.Text();
+  EXPECT_NE(logs.find("connection_rejected_acl"), std::string::npos) << logs;
+  EXPECT_EQ(logs.find("connection_limit_reached"), std::string::npos) << logs;
 }
 
 }  // namespace mygramdb::server

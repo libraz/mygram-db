@@ -37,8 +37,8 @@ const json& BuiltInSchema() {
   return schema;
 }
 
-const json* FindScalarSchema(std::string_view dotted_key) {
-  const json* current = &BuiltInSchema();
+const json* FindScalarSchema(const json& root, std::string_view dotted_key) {
+  const json* current = &root;
   size_t start = 0;
   while (start < dotted_key.size()) {
     const size_t end = dotted_key.find('.', start);
@@ -122,7 +122,8 @@ bool IsValidHostname(const std::string& address) {
 }  // namespace
 
 mygram::utils::Expected<json, mygram::utils::Error> ValidateConfigValue(std::string_view dotted_key,
-                                                                        std::string_view raw_value) {
+                                                                        std::string_view raw_value,
+                                                                        const std::string& custom_schema) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
@@ -134,7 +135,7 @@ mygram::utils::Expected<json, mygram::utils::Error> ValidateConfigValue(std::str
 
   const json* leaf_schema = nullptr;
   try {
-    leaf_schema = FindScalarSchema(dotted_key);
+    leaf_schema = FindScalarSchema(BuiltInSchema(), dotted_key);
   } catch (const std::exception& error) {
     return MakeUnexpected(MakeError(ErrorCode::kConfigSchemaError,
                                     "Failed to load built-in configuration schema: " + std::string(error.what())));
@@ -189,6 +190,29 @@ mygram::utils::Expected<json, mygram::utils::Error> ValidateConfigValue(std::str
     validator.validate(parsed_value);
   } catch (const std::exception& error) {
     return invalid_value(error.what());
+  }
+
+  if (custom_schema.empty()) {
+    return parsed_value;
+  }
+  // The operator schema leaf for this key narrows the built-in one, as --schema does at load.
+  json custom_root;
+  try {
+    custom_root = json::parse(custom_schema);
+  } catch (const std::exception& error) {
+    return MakeUnexpected(MakeError(ErrorCode::kConfigSchemaError,
+                                    "Failed to parse custom configuration schema: " + std::string(error.what())));
+  }
+  const json* custom_leaf = FindScalarSchema(custom_root, dotted_key);
+  if (custom_leaf == nullptr) {
+    return parsed_value;
+  }
+  try {
+    nlohmann::json_schema::json_validator validator;
+    validator.set_root_schema(*custom_leaf);
+    validator.validate(parsed_value);
+  } catch (const std::exception& error) {
+    return invalid_value(std::string("custom schema: ") + error.what());
   }
   return parsed_value;
 }

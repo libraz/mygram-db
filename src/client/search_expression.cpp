@@ -6,7 +6,6 @@
 #include "client/search_expression.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -148,8 +147,8 @@ class Tokenizer {
       return true;
     }
     const char current_char = input_[pos];
-    return std::isspace(static_cast<unsigned char>(current_char)) != 0 || current_char == '(' || current_char == ')' ||
-           current_char == '"' || IsFullWidthSpace(input_, pos);
+    return detail::IsAsciiSpace(static_cast<unsigned char>(current_char)) || current_char == '(' ||
+           current_char == ')' || current_char == '"' || IsFullWidthSpace(input_, pos);
   }
 
   /**
@@ -161,7 +160,7 @@ class Tokenizer {
       return true;
     }
     const char previous_char = input_[pos - 1];
-    return std::isspace(static_cast<unsigned char>(previous_char)) != 0 || previous_char == '(' ||
+    return detail::IsAsciiSpace(static_cast<unsigned char>(previous_char)) || previous_char == '(' ||
            previous_char == ')' || previous_char == '"' ||
            (pos >= kFullWidthSpaceBytes && IsFullWidthSpace(input_, pos - kFullWidthSpaceBytes));
   }
@@ -174,7 +173,7 @@ class Tokenizer {
         continue;
       }
       // Check for ASCII whitespace
-      if (std::isspace(static_cast<unsigned char>(input_[pos_])) != 0) {
+      if (detail::IsAsciiSpace(static_cast<unsigned char>(input_[pos_]))) {
         ++pos_;
         continue;
       }
@@ -193,8 +192,8 @@ class Tokenizer {
       // '+' and '-' are unary operators only when Next() sees them at a token
       // boundary. Once a term has started they are ordinary text, as in
       // "COVID-19", "e-mail", and "C++".
-      if (std::isspace(static_cast<unsigned char>(current_char)) != 0 || current_char == '(' || current_char == ')' ||
-          current_char == '"') {
+      if (detail::IsAsciiSpace(static_cast<unsigned char>(current_char)) || current_char == '(' ||
+          current_char == ')' || current_char == '"') {
         break;
       }
       term += current_char;
@@ -247,6 +246,15 @@ class Parser {
   Expected<SearchExpression, Error> Parse() {
     SearchExpression expr;
 
+    if (HasTopLevelOr()) {
+      auto group = CaptureTopLevelOrGroup();
+      if (!group) {
+        return MakeUnexpected(group.error());
+      }
+      expr.raw_expression = std::move(*group);
+      return expr;
+    }
+
     while (current_.type != TokenType::kEnd) {
       // Handle prefix operators
       if (current_.type == TokenType::kPlus) {
@@ -276,25 +284,13 @@ class Parser {
         }
         expr.raw_expression += paren_expr;
       } else if (current_.type == TokenType::kTerm || current_.type == TokenType::kQuotedTerm) {
-        // Check if this starts an OR expression
-        if (LooksLikeOrExpression()) {
-          auto or_expr = CaptureOrExpression();
-          if (!or_expr) {
-            return MakeUnexpected(or_expr.error());
-          }
-          if (!expr.raw_expression.empty()) {
-            expr.raw_expression += " ";
-          }
-          expr.raw_expression += *or_expr;
-        } else {
-          // Regular term (implicit AND). Stored as plain text regardless of
-          // whether it was quoted -- ToQueryString/SimplifySearchExpression
-          // re-apply wire quoting exactly once, at whichever destination the
-          // term is serialized onto (see wire_quoting.h).
-          expr.required_terms.push_back(current_.value);
-          expr.required_is_group.push_back(false);
-          Advance();
-        }
+        // Implicit AND. Stored as plain text regardless of
+        // whether it was quoted -- ToQueryString/SimplifySearchExpression
+        // re-apply wire quoting exactly once, at whichever destination the
+        // term is serialized onto (see wire_quoting.h).
+        expr.required_terms.push_back(current_.value);
+        expr.required_is_group.push_back(false);
+        Advance();
       } else if (current_.type == TokenType::kOr) {
         return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unexpected 'OR' operator"));
       } else if (current_.type == TokenType::kRParen) {
@@ -335,52 +331,99 @@ class Parser {
     return std::nullopt;
   }
 
-  bool LooksLikeOrExpression() {
-    // Save current state
-    size_t saved_pos = tokenizer_.GetPosition();
-    Token saved_current = current_;
-    auto saved_last_pos = last_pos_;
+  /**
+   * @brief Whether an OR operator appears outside every parenthesized group
+   */
+  bool HasTopLevelOr() {
+    const size_t saved_pos = tokenizer_.GetPosition();
+    const Token saved_current = current_;
+    const size_t saved_last_pos = last_pos_;
 
-    // Look ahead for OR
-    Advance();  // Skip current term
-    bool has_or = (current_.type == TokenType::kOr);
+    bool found = false;
+    int depth = 0;
+    while (current_.type != TokenType::kEnd && !found) {
+      if (current_.type == TokenType::kLParen) {
+        ++depth;
+      } else if (current_.type == TokenType::kRParen) {
+        --depth;
+      } else if (current_.type == TokenType::kOr && depth <= 0) {
+        found = true;
+      }
+      Advance();
+    }
 
-    // Restore state
     tokenizer_.SetPosition(saved_pos);
     current_ = saved_current;
     last_pos_ = saved_last_pos;
-
-    return has_or;
+    return found;
   }
 
-  Expected<std::string, Error> CaptureOrExpression() {
+  /**
+   * @brief Capture the whole expression as one group when it has a top-level OR
+   *
+   * Implicit AND binds tighter than OR, so "a OR b c" is "a OR (b c)", exactly
+   * what the parenthesized form "(a OR b c)" means to the server grammar.
+   */
+  Expected<std::string, Error> CaptureTopLevelOrGroup() {
     std::ostringstream oss;
+    TokenType previous_type = TokenType::kEnd;
+    bool pending_not = false;
 
-    // Capture first term. Every term (quoted or not) goes through the same
-    // wire-quoting decision as ToQueryString's required/excluded terms, so a
-    // plain word that collides with a reserved keyword (e.g. "order") is
-    // quoted here too instead of reaching the AST parser as a bare operator.
-    oss << detail::QuoteWireToken(current_.value);
-    Advance();
-
-    // Capture OR chain
-    while (current_.type == TokenType::kOr) {
-      oss << " OR ";
-      Advance();
-      if (current_.type == TokenType::kTerm || current_.type == TokenType::kQuotedTerm) {
-        oss << detail::QuoteWireToken(current_.value);
-        Advance();
-      } else if (current_.type == TokenType::kLParen) {
-        std::string paren = CaptureParenExpression();
-        if (paren.empty()) {
-          return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unbalanced parentheses after 'OR'"));
+    while (current_.type != TokenType::kEnd) {
+      switch (current_.type) {
+        case TokenType::kOr:
+          if (previous_type == TokenType::kEnd || previous_type == TokenType::kOr) {
+            return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unexpected 'OR' operator"));
+          }
+          pending_not = false;
+          oss << " OR ";
+          previous_type = TokenType::kOr;
+          Advance();
+          break;
+        case TokenType::kPlus:
+        case TokenType::kMinus:
+          if (previous_type == TokenType::kEnd || previous_type == TokenType::kOr) {
+            return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Expected term next to 'OR'"));
+          }
+          pending_not = current_.type == TokenType::kMinus;
+          Advance();
+          break;
+        case TokenType::kRParen:
+          return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Unexpected ')'"));
+        default: {
+          // A term, quoted term or parenthesized group
+          const bool is_group = current_.type == TokenType::kLParen;
+          const TokenType operand_type = current_.type;
+          std::string operand;
+          if (is_group) {
+            operand = CaptureParenExpression();
+            if (operand.empty()) {
+              return MakeUnexpected(MakeError(
+                  ErrorCode::kClientExpressionParseError,
+                  previous_type == TokenType::kOr ? "Unbalanced parentheses after 'OR'" : "Unbalanced parentheses"));
+            }
+          } else {
+            operand = detail::QuoteWireToken(current_.value);
+            Advance();
+          }
+          if (previous_type == TokenType::kTerm || previous_type == TokenType::kQuotedTerm ||
+              previous_type == TokenType::kRParen) {
+            oss << " ";
+          }
+          if (pending_not) {
+            oss << "NOT ";
+            pending_not = false;
+          }
+          oss << operand;
+          previous_type = is_group ? TokenType::kRParen : operand_type;
+          break;
         }
-        oss << paren;
-      } else {
-        return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Expected term after 'OR'"));
       }
     }
 
+    if (previous_type == TokenType::kOr) {
+      return MakeUnexpected(MakeError(ErrorCode::kClientExpressionParseError, "Expected term after 'OR'"));
+    }
     return oss.str();
   }
 

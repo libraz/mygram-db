@@ -473,10 +473,8 @@ TEST_F(GtidEncoderTest, InvalidIntervalEndBeforeStart) {
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidGTID);
 }
 
-TEST_F(GtidEncoderTest, InvalidIntervalStartEqualsEnd) {
-  // "3-3" means transaction 3 only, which should be valid
-  // But the code checks interval.end <= interval.start after converting to exclusive
-  // So "3-3" -> start=3, end=4, which is valid
+TEST_F(GtidEncoderTest, SingleTransactionRangeEncodesExclusiveEnd) {
+  // "3-3" is transaction 3 only: start 3, exclusive end 4
   std::string gtid = "00000000-0000-0000-0000-000000000001:3-3";
   auto result = GtidEncoder::Encode(gtid);
   ASSERT_TRUE(result.has_value());

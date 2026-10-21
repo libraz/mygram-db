@@ -133,7 +133,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
    */
   enum class ReadAppendStatus {
     kOk,                    ///< Bytes buffered; framing may have advanced.
-    kReadBufferOverflow,    ///< Unframed tail exceeds `kMaxReadBufferBytes`.
+    kReadBufferOverflow,    ///< A request frame or the unframed tail exceeds `kMaxReadBufferBytes`.
     kFrameQueueOverflow,    ///< Pending-frame caps or the shared read budget are exhausted.
     kInterestUpdateFailed,  ///< The multiplexer rejected the backpressure interest update.
   };
@@ -258,9 +258,11 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   /// Whether `closing_` has been set. Exposed for tests.
   [[nodiscard]] bool IsClosing() const { return closing_.load(std::memory_order_acquire); }
 
-  /// Timestamp of the last inbound socket event (read or write activity).
+  /// Timestamp of the last socket I/O that moved bytes (recv or send).
   /// Used by `IoReactor`'s idle-connection reaper. Updated by `OnReadable`
-  /// and `OnWritable`. Atomic load is sufficient — relaxed ordering is fine
+  /// after a successful recv() and by every successful send(), whether the
+  /// worker drains inline or the event loop drains via `OnWritable`. Atomic
+  /// load is sufficient — relaxed ordering is fine
   /// because the reaper compares against `now()` and a slightly stale value
   /// only delays reaping by one tick.
   [[nodiscard]] std::chrono::steady_clock::time_point LastActive() const {
@@ -330,6 +332,10 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
     return AppendReadBytes(bytes.data(), bytes.size(), enqueued) == ReadAppendStatus::kOk;
   }
 
+  [[nodiscard]] ReadAppendStatus AppendReadBytesStatusForTest(std::string_view bytes, size_t& enqueued) {
+    return AppendReadBytes(bytes.data(), bytes.size(), enqueued);
+  }
+
   [[nodiscard]] size_t ReadBufferSizeForTest() const {
     std::lock_guard<std::mutex> lock(frame_mutex_);
     return read_buf_.size();
@@ -393,10 +399,22 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   bool ShouldSendReadOverflowError();
   /// Publish a terminal close before deciding whether an error can be sent.
   /// Returns true when the caller may unregister immediately; false means an
-  /// already-accepted write remains queued and must drain first.
+  /// already-accepted write remains queued and must drain first, with read
+  /// interest already dropped.
   bool CloseWithError(std::string_view message, mygram::utils::ErrorCode code,
                       const std::function<void()>& under_lock_hook = {});
   [[nodiscard]] bool CloseWithServerBusy();
+  /// Log a read-side rejection and close through `CloseWithError` with the
+  /// wire code that belongs to @p status. Must not be called with
+  /// `frame_mutex_` held. Returns the `CloseWithError` result.
+  bool CloseWithReadRejection(ReadAppendStatus status);
+  /// Record why frame admission stopped. The first recorded reason wins.
+  /// Must be called with `frame_mutex_` held.
+  void RejectFramesLocked(ReadAppendStatus status);
+  /// Drop readable interest for a close that waits on queued writes. On
+  /// failure, escalates to an immediate close and returns false. Must be
+  /// called with `write_mutex_` held.
+  bool DisarmReadsForDeferredCloseLocked();
   /// Queue a response while `write_mutex_` is held. Terminal responses are
   /// accepted after publishing `closing_`; ordinary responses are rejected
   /// once closing has started.
@@ -495,7 +513,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   std::deque<std::string> pending_frames_;
   size_t pending_frame_bytes_ = 0;
   size_t pending_frame_overhead_bytes_ = 0;
-  bool frame_queue_overflow_ = false;
+  ReadAppendStatus frame_reject_status_ = ReadAppendStatus::kOk;
   bool read_paused_ = false;
 
   // Write queue: drain task (worker) produces; either the worker itself
@@ -529,7 +547,7 @@ class ReactorConnection : public std::enable_shared_from_this<ReactorConnection>
   std::atomic<size_t> pending_write_bytes_{0};
 
   // Last-activity timestamp for idle reaping. Initialised to
-  // construction time; refreshed at the start of OnReadable/OnWritable so a
+  // construction time; refreshed on every successful recv()/send() so a
   // connection that is actively performing I/O is never reaped, while a
   // connection that connected but never sent or read a byte ages out after
   // `IoReactor::idle_timeout_`.

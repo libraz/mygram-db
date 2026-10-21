@@ -249,9 +249,46 @@ void InvalidationManager::RunBeforeResidentIdentityInsertHookForTest() {
   }
 }
 
+std::vector<std::string> InvalidationManager::ChangedNgramsFor(const std::string& old_text, const std::string& new_text,
+                                                               const NgramSetting& setting) {
+  const auto& [ngram_size, kanji_ngram_size, cross_boundary_ngrams] = setting;
+  // Extract ngrams from old and new text (both are sorted vectors)
+  const auto old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  const auto new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  std::vector<std::string> changed_ngrams;
+  std::set_symmetric_difference(old_ngrams.begin(), old_ngrams.end(), new_ngrams.begin(), new_ngrams.end(),
+                                std::back_inserter(changed_ngrams));
+  return changed_ngrams;
+}
+
+ChangedNgrams InvalidationManager::PrecomputeChangedNgrams(const std::string& table_name, const std::string& old_text,
+                                                           const std::string& new_text, int ngram_size,
+                                                           int kanji_ngram_size, bool cross_boundary_ngrams) const {
+  std::set<NgramSetting> settings{NgramSetting{ngram_size, kanji_ngram_size, cross_boundary_ngrams}};
+  {
+    std::shared_lock lock(mutex_);
+    const auto table_entries_it = table_to_entry_identities_.find(table_name);
+    if (table_entries_it == table_to_entry_identities_.end() || table_entries_it->second.empty()) {
+      return {};
+    }
+    const auto settings_it = table_ngram_settings_.find(table_name);
+    if (settings_it != table_ngram_settings_.end()) {
+      for (const auto& [setting, count] : settings_it->second) {
+        settings.insert(setting);
+      }
+    }
+  }
+
+  ChangedNgrams changed;
+  for (const auto& setting : settings) {
+    changed.emplace(setting, ChangedNgramsFor(old_text, new_text, setting));
+  }
+  return changed;
+}
+
 std::unordered_set<CacheEntryIdentity> InvalidationManager::InvalidateAffectedEntryIdentities(
     const std::string& table_name, const std::string& old_text, const std::string& new_text, int ngram_size,
-    int kanji_ngram_size, bool cross_boundary_ngrams, bool filter_columns_changed) {
+    int kanji_ngram_size, bool cross_boundary_ngrams, bool filter_columns_changed, const ChangedNgrams* precomputed) {
   {
     std::shared_lock lock(mutex_);
     const auto table_entries_it = table_to_entry_identities_.find(table_name);
@@ -260,14 +297,20 @@ std::unordered_set<CacheEntryIdentity> InvalidationManager::InvalidateAffectedEn
     }
   }
 
-  // Extract ngrams from old and new text (both are sorted vectors)
-  std::vector<std::string> old_ngrams = ExtractNgrams(old_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
-  std::vector<std::string> new_ngrams = ExtractNgrams(new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams);
+  // Precomputed settings are reused; any other setting is extracted here.
+  auto changed_ngrams_for = [&](const NgramSetting& setting) {
+    if (precomputed != nullptr) {
+      const auto precomputed_it = precomputed->find(setting);
+      if (precomputed_it != precomputed->end()) {
+        return precomputed_it->second;
+      }
+    }
+    return ChangedNgramsFor(old_text, new_text, setting);
+  };
 
   // Find changed ngrams (symmetric difference on sorted vectors)
-  std::vector<std::string> changed_ngrams;
-  std::set_symmetric_difference(old_ngrams.begin(), old_ngrams.end(), new_ngrams.begin(), new_ngrams.end(),
-                                std::back_inserter(changed_ngrams));
+  std::vector<std::string> changed_ngrams =
+      changed_ngrams_for(NgramSetting{ngram_size, kanji_ngram_size, cross_boundary_ngrams});
 
   // Return residents for deferred erasure and mark pending identities in place.
   std::unordered_set<CacheEntryIdentity> affected_entries;
@@ -291,7 +334,7 @@ std::unordered_set<CacheEntryIdentity> InvalidationManager::InvalidateAffectedEn
     // Collect distinct historical ngram settings for this table that differ
     // from the current settings. Uses O(1) lookup via table_ngram_settings_ instead
     // of O(N) scan over all entry_metadata_ entries.
-    std::set<std::tuple<int, int, bool>> historical_settings;
+    std::set<NgramSetting> historical_settings;
     auto tbl_settings_it = table_ngram_settings_.find(table_name);
     if (tbl_settings_it != table_ngram_settings_.end()) {
       auto current_key = std::make_tuple(ngram_size, kanji_ngram_size, cross_boundary_ngrams);
@@ -303,12 +346,8 @@ std::unordered_set<CacheEntryIdentity> InvalidationManager::InvalidateAffectedEn
     }
 
     // Generate changed ngrams with each historical setting and merge
-    for (const auto& [hist_ngram, hist_kanji, hist_cross] : historical_settings) {
-      auto hist_old = ExtractNgrams(old_text, hist_ngram, hist_kanji, hist_cross);
-      auto hist_new = ExtractNgrams(new_text, hist_ngram, hist_kanji, hist_cross);
-      std::vector<std::string> hist_changed;
-      std::set_symmetric_difference(hist_old.begin(), hist_old.end(), hist_new.begin(), hist_new.end(),
-                                    std::back_inserter(hist_changed));
+    for (const auto& setting : historical_settings) {
+      const std::vector<std::string> hist_changed = changed_ngrams_for(setting);
       // Merge into changed_ngrams (both are sorted)
       std::vector<std::string> merged;
       merged.reserve(changed_ngrams.size() + hist_changed.size());

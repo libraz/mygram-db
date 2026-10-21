@@ -423,6 +423,53 @@ TEST_F(HttpServerTest, AclDeniedRequestDoesNotConsumeSharedRateLimitBucket) {
   EXPECT_EQ(shared_limiter->GetTrackedClientCount(), 0U);
 }
 
+TEST_F(HttpServerTest, HeadOnProbeRoutesIsNeitherRateLimitedNorCounted) {
+  auto shared_limiter = std::make_shared<RateLimiter>(/*capacity=*/1, /*refill_rate=*/0, /*max_clients=*/100,
+                                                      /*enabled=*/true);
+  ServerStats stats;
+
+  HttpServerConfig http_config;
+  http_config.bind = "127.0.0.1";
+  http_config.port = port_;
+  http_config.allow_cidrs = {"127.0.0.1/32"};
+
+  http_server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), nullptr, nullptr, nullptr,
+                                              &stats, shared_limiter);
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  auto drain = client.Get("/info");
+  ASSERT_TRUE(drain);
+  ASSERT_EQ(drain->status, 200);
+
+  const uint64_t requests_before = stats.GetTotalRequests();
+  for (const auto* probe : {"/health", "/health/live", "/health/ready"}) {
+    auto head = client.Head(probe);
+    ASSERT_TRUE(head) << probe;
+    EXPECT_NE(head->status, 429) << probe;
+  }
+  EXPECT_EQ(stats.GetTotalRequests(), requests_before);
+  EXPECT_EQ(stats.GetRequestsDeniedRateLimitHttp(), 0U);
+
+  auto head_info = client.Head("/info");
+  ASSERT_TRUE(head_info);
+  EXPECT_EQ(head_info->status, 429);
+}
+
+TEST_F(HttpServerTest, HeadOnDocumentRouteRoutesLikeGet) {
+  ASSERT_TRUE(http_server_->Start());
+
+  httplib::Client client(LoopbackUrl(port_));
+  auto get = client.Get("/tables/test/article_1");
+  ASSERT_TRUE(get);
+  ASSERT_EQ(get->status, 200) << get->body;
+
+  auto head = client.Head("/tables/test/article_1");
+  ASSERT_TRUE(head);
+  EXPECT_EQ(head->status, 200);
+  EXPECT_TRUE(head->body.empty());
+}
+
 TEST_F(HttpServerTest, IdleConnectionsAreCappedBeforeTheyCanExhaustDescriptors) {
   HttpServerConfig http_config;
   http_config.bind = "127.0.0.1";

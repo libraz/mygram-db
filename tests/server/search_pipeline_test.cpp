@@ -3204,15 +3204,65 @@ TEST_F(FullPipelineCacheTest, CacheMissReasonStaleVsNotFound) {
   // IsCacheStale flags as stale.
   doc_store_->RemoveDocument(first->results.front());
 
+  const auto before_stale = cache_manager_->GetStatistics();
   CacheMissReason reason = CacheMissReason::kHit;
   auto stale_result = TryCacheLookup(cache_query, cache_manager_.get(), doc_store_.get(), &reason);
   EXPECT_FALSE(stale_result.has_value());
   EXPECT_EQ(reason, CacheMissReason::kStale);
 
+  // The stale lookup is one invalidated miss, matching the reported reason.
+  const auto after_stale = cache_manager_->GetStatistics();
+  EXPECT_EQ(after_stale.cache_hits, before_stale.cache_hits);
+  EXPECT_EQ(after_stale.cache_misses, before_stale.cache_misses + 1);
+  EXPECT_EQ(after_stale.cache_misses_invalidated, before_stale.cache_misses_invalidated + 1);
+  EXPECT_DOUBLE_EQ(after_stale.total_query_saved_time_ms, before_stale.total_query_saved_time_ms);
+
   // Staleness detection must remove the resident key. Otherwise the next
   // completed search cannot be cached because QueryCache sees a duplicate.
   EXPECT_FALSE(cache_manager_->Lookup(cache_query).has_value());
   EXPECT_TRUE(cache_manager_->Insert(cache_query, {999}, {"learning"}, 1.0, 2, 0, false));
+}
+
+// An entry a data change marked invalidated is reported as invalidated, the
+// same reason the miss statistics record for it.
+TEST_F(FullPipelineCacheTest, CacheMissReasonInvalidatedForAnEntryMarkedByADataChange) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+  cache_config.min_query_cost_ms = 0.0;
+  // Keep the deferred erase from racing the lookup below.
+  cache_config.invalidation.batch_size = 1000;
+  cache_config.invalidation.max_delay_ms = 60000;
+  // Configuration resolves kanji_ngram_size 0 to ngram_size before the cache
+  // sees it, and n-gram invalidation extracts nothing for an unresolved 0.
+  cache::NgramConfigMap ngram_configs;
+  ngram_configs["test"] = cache::NgramConfig{
+      .ngram_size = 2,
+      .kanji_ngram_size = 2,
+      .cross_boundary_ngrams = false,
+  };
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = "test";
+  query.search_text = "learning";
+  query.limit = 100;
+
+  auto params = MakeParams();
+  params.cache_manager = &cache_manager;
+  params.kanji_ngram_size = 2;
+  const query::Query cache_query = BuildCanonicalCacheQuery(query, params);
+  auto first = ExecuteFullPipeline(query, params);
+  ASSERT_TRUE(first.has_value());
+  ASSERT_FALSE(first->results.empty());
+
+  cache_manager.Invalidate("test", "", "more learning material");
+
+  CacheMissReason reason = CacheMissReason::kHit;
+  EXPECT_FALSE(TryCacheLookup(cache_query, &cache_manager, doc_store_.get(), &reason).has_value());
+  EXPECT_EQ(reason, CacheMissReason::kInvalidated);
+  EXPECT_EQ(cache_manager.GetStatistics().cache_misses_invalidated, 1U);
 }
 
 // =============================================================================

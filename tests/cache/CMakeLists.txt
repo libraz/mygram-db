@@ -131,6 +131,7 @@ mygramdb_add_split_gtests(query_cache_test
     QueryCacheTest.M4_TTLExpirationCountedAtLookupTime
     QueryCacheTest.M4_TTLExpirationCountedAtLookupWithMetadataTime
     QueryCacheTest.M4_TTLExpirationNoDoubleCounting
+    QueryCacheTest.TTLExpirationCountedOnceWhenPendingSetIsFull
     QueryCacheTest.TTLExpiredIncrementsTTLExpiredCounter
     QueryCacheTest.TTLExpiredWithMetadataIncrementsTTLExpiredCounter
     QueryCacheTest.ConcurrentSetMinQueryCostAndSetTtlWithLookupInsert

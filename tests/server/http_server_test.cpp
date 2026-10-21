@@ -395,14 +395,13 @@ TEST_F(HttpServerStartupTest, RejectsBodyExceedingMaxSize) {
 }
 
 /**
- * @brief GET /{table}/:primary_key must apply the same table-name
- *        whitelist as SEARCH/COUNT.
+ * @brief GET /{table}/:primary_key resolves the table exactly as SEARCH/COUNT do.
  *
- * A name containing characters outside the parser-grammar safe set
- * (e.g. `te$st`) is syntactically invalid. ResolveHttpTableContext
- * is shared, so GET returns a 400 for invalid names just like SEARCH.
+ * No character set is imposed on the table name, so `te$st` is an ordinary
+ * unknown table: ResolveHttpTableContext is shared, so GET answers 404 for it
+ * just like SEARCH.
  */
-TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
+TEST_F(HttpServerStartupTest, HandleGetReportsUnknownTableWithPunctuation) {
   auto cfg = MakeConfig();
   ASSERT_GT(cfg.port, 0);
   HttpServer server(cfg, table_contexts_, config_.get());
@@ -410,13 +409,9 @@ TEST_F(HttpServerStartupTest, HandleGetRejectsInvalidTableName) {
 
   httplib::Client client("127.0.0.1", cfg.port);
 
-  // `te$st` contains an ASCII punctuation character that is rejected by the
-  // table-name whitelist (only [A-Za-z0-9._-] plus non-ASCII bytes are
-  // allowed). The cpp-httplib route regex `[^/]+` still matches, so the
-  // request reaches HandleGet, where ResolveHttpTableContext rejects it.
   auto res = client.Get("/tables/te$st/42");
   ASSERT_TRUE(res);
-  EXPECT_EQ(res->status, 400) << "Invalid table name should produce 400, got " << res->status;
+  EXPECT_EQ(res->status, 404) << "Unknown table should produce 404, got " << res->status;
 
   server.Stop();
 }

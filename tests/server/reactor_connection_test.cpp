@@ -105,16 +105,15 @@ struct ReadOverflowResult {
   bool keep_registered = false;
 };
 
-/// Feed a real oversized, unterminated frame through OnReadable. The peer is
-/// made nonblocking so the test can alternate socket writes with event-loop
-/// reads instead of relying on the socketpair's send-buffer size.
-static ReadOverflowResult DriveReadOverflow(ReactorConnection& conn, int peer_fd) {
+/// Feed @p tail through OnReadable until the connection publishes a terminal
+/// close. The peer is made nonblocking so the test can alternate socket writes
+/// with event-loop reads instead of relying on the socketpair's send-buffer size.
+static ReadOverflowResult DriveReadOverflow(ReactorConnection& conn, int peer_fd, const std::string& tail) {
   const int flags = ::fcntl(peer_fd, F_GETFL, 0);
   if (flags < 0 || ::fcntl(peer_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
     return {};
   }
 
-  const std::string tail(ReactorConnection::kMaxReadBufferBytes + 1, 'x');
   size_t written = 0;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while (std::chrono::steady_clock::now() < deadline) {
@@ -134,6 +133,11 @@ static ReadOverflowResult DriveReadOverflow(ReactorConnection& conn, int peer_fd
     std::this_thread::yield();
   }
   return {};
+}
+
+/// Feed a real oversized, unterminated frame through OnReadable.
+static ReadOverflowResult DriveReadOverflow(ReactorConnection& conn, int peer_fd) {
+  return DriveReadOverflow(conn, peer_fd, std::string(ReactorConnection::kMaxReadBufferBytes + 1, 'x'));
 }
 
 static bool WaitForDrainTaskToFinish(const ReactorConnection& conn) {
@@ -726,6 +730,27 @@ TEST_F(ReactorConnectionNoDispatcherTest, OversizedCompletedFrameIsRejectedBefor
   EXPECT_EQ(conn_->PendingFrameBytesForTest(), 0U);
 }
 
+TEST_F(ReactorConnectionNoDispatcherTest, OversizedFrameWithDelimiterInSameChunkIsRequestTooLarge) {
+  std::string payload(ReactorConnection::kMaxReadBufferBytes + 100, 'x');
+  payload += "\r\n";
+
+  size_t enqueued = 0;
+  EXPECT_EQ(conn_->AppendReadBytesStatusForTest(payload, enqueued),
+            ReactorConnection::ReadAppendStatus::kReadBufferOverflow)
+      << "an oversized frame is a request-size rejection, not a pending-queue overflow";
+  EXPECT_EQ(enqueued, 0U);
+}
+
+TEST_F(ReactorConnectionNoDispatcherTest, OversizedTerminatedFrameSendsRequestTooLarge) {
+  std::string payload(ReactorConnection::kMaxReadBufferBytes + 100, 'x');
+  payload += "\r\n";
+
+  const ReadOverflowResult overflow = DriveReadOverflow(*conn_, peer_fd_, payload);
+  ASSERT_TRUE(overflow.detected) << "OnReadable did not publish terminal overflow";
+  ASSERT_TRUE(WaitReadable(peer_fd_));
+  EXPECT_EQ(ReceiveAvailable(peer_fd_), "ERROR 6007 request too large\r\n");
+}
+
 TEST_F(ReactorConnectionNoDispatcherTest, ReadOverflowDoesNotInlineErrorAheadOfPendingWriteQueue) {
   EXPECT_TRUE(conn_->ShouldSendReadOverflowErrorForTest());
 
@@ -1020,6 +1045,52 @@ TEST_F(ReactorConnectionTest, ReadOverflowKeepsQueuedResponseRegisteredUntilDrai
 
   reactor.Unregister(rc_fd_, conn_.get());
   EXPECT_EQ(reactor.ConnectionCount(), 0U);
+}
+
+// The drain worker refills the pending queue from the buffered suffix once it
+// falls to the low watermark. A frame that cannot be admitted at that point
+// must be answered with the same best-effort error the event loop would send.
+TEST_F(ReactorConnectionTest, DrainSideFrameOverflowSendsServerBusyBeforeClose) {
+  conn_.reset();
+  ::close(peer_fd_);
+  peer_fd_ = -1;
+
+  int fds[2] = {-1, -1};
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+  peer_fd_ = fds[0];
+  rc_fd_ = fds[1];
+  SetNonBlocking(rc_fd_);
+
+  // High watermark 6 frames, low watermark 4, per-connection cap 64 bytes.
+  conn_ = ReactorConnection::Create(rc_fd_, nullptr, harness_.dispatcher.get(), pool_.get(), nullptr,
+                                    ReactorConnection::kDefaultMaxWriteQueueBytes, nullptr,
+                                    /*max_pending_frames=*/8, /*max_pending_frame_bytes=*/64);
+
+  // Six small frames reach the high watermark; the 100-byte frame behind
+  // them stays buffered and only overflows when the drain worker extracts it.
+  std::string payload;
+  for (int i = 0; i < 6; ++i) {
+    payload += "x\r\n";
+  }
+  payload += std::string(100, 'y') + "\r\n";
+  WriteAll(peer_fd_, payload);
+
+  ASSERT_TRUE(conn_->OnReadable());
+  ASSERT_TRUE(WaitForDrainTaskToFinish(*conn_)) << "drain task did not finish";
+  EXPECT_TRUE(conn_->IsClosing());
+
+  std::string received;
+  while (WaitReadable(peer_fd_, 200)) {
+    const std::string chunk = ReceiveAvailable(peer_fd_);
+    if (chunk.empty()) {
+      break;
+    }
+    received += chunk;
+  }
+  const std::string expected_tail = "ERROR 6030 server busy\r\n";
+  ASSERT_GE(received.size(), expected_tail.size()) << received;
+  EXPECT_EQ(received.substr(received.size() - expected_tail.size()), expected_tail)
+      << "drain-side overflow closed without the best-effort error frame: " << received;
 }
 
 TEST_F(ReactorConnectionNoDispatcherTest, EnqueueResponseOverflowSetsClosing) {

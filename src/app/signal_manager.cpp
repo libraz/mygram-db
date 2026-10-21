@@ -25,16 +25,16 @@ namespace {
  * This handler ONLY sets atomic flags. It performs NO other operations:
  * - No mutex locks
  * - No heap allocations
- * - No function calls (except assignment to sig_atomic_t)
+ * - No function calls (except lock-free atomic stores)
  * - No logging
  *
  * This is required for async-signal-safety (POSIX.1-2008 compliance).
  */
 void SignalHandlerFunction(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
-    SignalManager::signal_flags_.shutdown_requested = 1;
+    SignalManager::signal_flags_.shutdown_requested.store(1);
   } else if (signal == SIGUSR1) {
-    SignalManager::signal_flags_.log_reopen_requested = 1;
+    SignalManager::signal_flags_.log_reopen_requested.store(1);
   }
 }
 
@@ -70,23 +70,11 @@ SignalManager::~SignalManager() {
 }
 
 bool SignalManager::IsShutdownRequested() {  // static
-  return signal_flags_.shutdown_requested != 0;
+  return signal_flags_.shutdown_requested.load() != 0;
 }
 
 bool SignalManager::ConsumeLogReopenRequest() {  // static
-  // Block SIGUSR1 around the check-and-clear to prevent a signal from arriving
-  // between the read and the write (non-atomic read-modify-write on sig_atomic_t).
-  sigset_t block_set;
-  sigset_t old_set;
-  sigemptyset(&block_set);
-  sigaddset(&block_set, SIGUSR1);
-  pthread_sigmask(SIG_BLOCK, &block_set, &old_set);
-
-  bool was_requested = (signal_flags_.log_reopen_requested != 0);
-  signal_flags_.log_reopen_requested = 0;
-
-  pthread_sigmask(SIG_SETMASK, &old_set, nullptr);
-  return was_requested;
+  return signal_flags_.log_reopen_requested.exchange(0) != 0;
 }
 
 Expected<void, mygram::utils::Error> SignalManager::RegisterHandlers() {

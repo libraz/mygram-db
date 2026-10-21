@@ -680,7 +680,7 @@ int mygramclient_search_with_options(MygramClient_C* client, const char* table, 
     cpp_options.sort_column = options->sort_column;
   }
   if (field_available(offsetof(MygramSearchOptions_C, sort_desc), sizeof(options->sort_desc))) {
-    cpp_options.sort_desc = options->sort_desc != 0;
+    cpp_options.sort_desc = options->sort_desc >= 0;
   }
   if (field_available(offsetof(MygramSearchOptions_C, fuzzy_distance), sizeof(options->fuzzy_distance)) &&
       options->fuzzy_distance != 0) {

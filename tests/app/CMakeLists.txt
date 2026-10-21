@@ -78,7 +78,27 @@ target_compile_definitions(surface_snapshot_test
     MYGRAMDB_SPEC_DIR="${CMAKE_SOURCE_DIR}/spec"
 )
 
+# RESOURCE_LOCK: the command rows are checked against a running TCP server's dispatcher
 gtest_discover_tests(surface_snapshot_test
   DISCOVERY_MODE POST_BUILD
   DISCOVERY_TIMEOUT 30
+  PROPERTIES RESOURCE_LOCK server_port
+)
+
+# ServerOrchestrator teardown after a timed-out shutdown (waits out the 30 s TCP drain)
+add_executable(server_orchestrator_test server_orchestrator_test.cpp)
+target_link_libraries(server_orchestrator_test
+    PRIVATE
+    mygramdb_app
+    GTest::gtest_main
+)
+
+# RESOURCE_LOCK: binds loopback TCP and HTTP ports
+gtest_discover_tests(server_orchestrator_test
+  DISCOVERY_MODE POST_BUILD
+  DISCOVERY_TIMEOUT 30
+  PROPERTIES
+    LABELS "SLOW"
+    RESOURCE_LOCK server_port
+    TIMEOUT 120
 )

@@ -106,9 +106,14 @@ class CacheManager {
   /**
    * @brief Lookup cached query result with metadata
    * @param query Parsed query
+   * @param is_stale Optional check on the decoded payload; a payload it rejects
+   *        is counted as an invalidated miss and its entry is erased
+   * @param[out] outcome If non-null, receives the lookup outcome
    * @return Cached result with metadata if found and valid, nullopt otherwise
    */
-  [[nodiscard]] std::optional<CacheLookupResult> LookupWithMetadata(const query::Query& query);
+  [[nodiscard]] std::optional<CacheLookupResult> LookupWithMetadata(const query::Query& query,
+                                                                    const QueryCache::StalenessCheck& is_stale = {},
+                                                                    QueryCache::LookupOutcome* outcome = nullptr);
 
   /**
    * @brief Erase the cache entry resolved for a query

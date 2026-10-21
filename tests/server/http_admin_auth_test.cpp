@@ -138,9 +138,7 @@ class HttpAdminAuthTest : public ::testing::Test {
 
     server_ = std::make_unique<HttpServer>(http_config, table_contexts_, config_.get(), &binlog_reader_);
     auto started = server_->Start();
-    if (!started) {
-      GTEST_SKIP() << "HTTP server bind unavailable: " << started.error().to_string();
-    }
+    ASSERT_TRUE(started.has_value()) << "HTTP server failed to start: " << started.error().to_string();
   }
 
   void TearDown() override {

@@ -1478,6 +1478,70 @@ TEST_F(BinlogEventProcessorTest, AlterTableClearsTableCacheWithoutClearingData) 
 }
 
 /**
+ * Rows with empty text hold no postings, so deleting or updating one needs
+ * neither a scan of every term nor a table-wide cache clear.
+ */
+TEST_F(BinlogEventProcessorTest, EmptyTextRowChangesSkipPurgeScanAndTableCacheClear) {
+  config::CacheConfig cache_config;
+  cache_config.enabled = true;
+  cache_config.max_memory_bytes = 10 * 1024 * 1024;
+
+  cache::NgramConfigMap ngram_configs;
+  cache::NgramConfig ngram_config{};
+  ngram_config.ngram_size = index_->GetNgramSize();
+  ngram_config.kanji_ngram_size = index_->GetKanjiNgramSize();
+  ngram_config.cross_boundary_ngrams = index_->GetCrossBoundaryNgrams();
+  ngram_configs[table_config_.name] = ngram_config;
+  cache::CacheManager cache_manager(cache_config, std::move(ngram_configs));
+
+  BinlogEvent insert_text = BinlogEvent::CreateInsert(table_config_.name, "pk-text", "alpha beta");
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_text, *index_, *doc_store_, table_config_, mysql_config_,
+                                                 nullptr, &cache_manager));
+  for (const char* pk : {"pk-empty-delete", "pk-empty-update"}) {
+    BinlogEvent insert_empty = BinlogEvent::CreateInsert(table_config_.name, pk, "");
+    insert_empty.text_state = TextValueState::kPresent;
+    ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(insert_empty, *index_, *doc_store_, table_config_, mysql_config_,
+                                                   nullptr, &cache_manager));
+  }
+  auto text_doc_id = doc_store_->GetDocId("pk-text");
+  ASSERT_TRUE(text_doc_id.has_value());
+
+  query::Query query;
+  query.type = query::QueryType::SEARCH;
+  query.table = table_config_.name;
+  query.search_text = "alpha";
+  query.limit = 100;
+  AttachCanonicalCacheKey(query, *index_);
+  ASSERT_TRUE(cache_manager.Insert(query, {*text_doc_id}, {"al", "lp", "ph", "ha"}, 15.0, index_->GetNgramSize(),
+                                   index_->GetKanjiNgramSize(), index_->GetCrossBoundaryNgrams()));
+  ASSERT_TRUE(cache_manager.Lookup(query).has_value());
+
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  const uint64_t scans_before = index_->PurgeScanCountForTesting();
+#endif
+
+  BinlogEvent delete_event = BinlogEvent::CreateDelete(table_config_.name, "pk-empty-delete", "");
+  delete_event.text_state = TextValueState::kPresent;
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(delete_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                 nullptr, &cache_manager));
+  EXPECT_FALSE(doc_store_->GetDocId("pk-empty-delete").has_value());
+
+  BinlogEvent update_event = BinlogEvent::CreateUpdate(table_config_.name, "pk-empty-update", "zulu", "");
+  ASSERT_TRUE(BinlogEventProcessor::ProcessEvent(update_event, *index_, *doc_store_, table_config_, mysql_config_,
+                                                 nullptr, &cache_manager));
+  auto updated_doc_id = doc_store_->GetDocId("pk-empty-update");
+  ASSERT_TRUE(updated_doc_id.has_value());
+  EXPECT_EQ(index_->SearchAnd({"zu", "ul", "lu"}), std::vector<storage::DocId>{*updated_doc_id});
+
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  EXPECT_EQ(index_->PurgeScanCountForTesting(), scans_before) << "an empty-text row must not scan every term";
+#endif
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  EXPECT_TRUE(cache_manager.Lookup(query).has_value()) << "an empty-text row must not clear the table cache";
+  EXPECT_EQ(index_->SearchAnd({"al", "lp"}), std::vector<storage::DocId>{*text_doc_id});
+}
+
+/**
  * @brief Test DDLType classification via CreateDDL factory
  */
 TEST_F(BinlogEventProcessorTest, DDLTypeClassification) {
@@ -1503,8 +1567,12 @@ TEST_F(BinlogEventProcessorTest, DDLTypeClassification) {
   auto rename_event = BinlogEvent::CreateDDL(t, "RENAME TABLE t TO t2");
   EXPECT_EQ(rename_event.ddl_type, DDLType::kRename);
 
+  // Index DDL on the table is re-validated like ALTER TABLE
+  auto index_event = BinlogEvent::CreateDDL(t, "CREATE INDEX idx ON t(x)");
+  EXPECT_EQ(index_event.ddl_type, DDLType::kAlter);
+
   // Unknown DDL
-  auto unknown_event = BinlogEvent::CreateDDL(t, "CREATE INDEX idx ON t(x)");
+  auto unknown_event = BinlogEvent::CreateDDL(t, "CREATE VIEW v AS SELECT x FROM t");
   EXPECT_EQ(unknown_event.ddl_type, DDLType::kUnknown);
 
   // Case insensitive

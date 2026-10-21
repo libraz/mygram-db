@@ -10,6 +10,7 @@ add_library(mygramdb_utils STATIC
   sql_utils.cpp
   gtid_grammar.cpp
   periodic_worker.cpp
+  log_manager.cpp
 )
 
 # PIC is required because this static library is linked into the shared

@@ -4394,3 +4394,169 @@ TEST(WireQuotingTest, QuoteWireTokenEscapesControlCharactersReversibly) {
                                        3)),
             "\"a\\x01b\"");
 }
+
+TEST_F(MygramClientCApiTest, ZeroInitializedSearchOptionsSortLikeDefaultSearch) {
+  const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(::listen(listener, 1), 0);
+  socklen_t address_length = sizeof(address);
+  ASSERT_EQ(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_length), 0);
+
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.timeout_ms = 2000;
+  MygramClient_C* client = mygramclient_create(&config);
+  ASSERT_NE(client, nullptr);
+  ASSERT_EQ(mygramclient_connect(client), 0);
+
+  constexpr size_t kCommandCount = 3;
+  std::vector<std::string> commands;
+  std::thread server_thread([&] {
+    const int connection = ::accept(listener, nullptr, nullptr);
+    if (connection < 0) {
+      return;
+    }
+    constexpr std::string_view kResponse = "OK RESULTS 0\r\n\r\n";
+    while (commands.size() < kCommandCount) {
+      std::string command;
+      std::array<char, 256> buffer{};
+      while (command.find("\r\n") == std::string::npos) {
+        const ssize_t received = ::recv(connection, buffer.data(), buffer.size(), 0);
+        if (received <= 0) {
+          break;
+        }
+        command.append(buffer.data(), static_cast<size_t>(received));
+      }
+      if (command.find("\r\n") == std::string::npos) {
+        break;
+      }
+      command.resize(command.find("\r\n") + 2);
+      commands.push_back(std::move(command));
+      if (::send(connection, kResponse.data(), kResponse.size(), 0) != static_cast<ssize_t>(kResponse.size())) {
+        break;
+      }
+    }
+    ::close(connection);
+  });
+
+  MygramSearchResult_C* plain = nullptr;
+  EXPECT_EQ(mygramclient_search(client, "t", "q", 10, 0, &plain), 0) << mygramclient_get_last_error(client);
+  mygramclient_free_search_result(plain);
+
+  MygramSearchOptions_C options = {};
+  options.struct_size = sizeof(options);
+  options.limit = 10;
+  MygramSearchResultWithHighlights_C* typed = nullptr;
+  EXPECT_EQ(mygramclient_search_with_options(client, "t", "q", &options, &typed), 0)
+      << mygramclient_get_last_error(client);
+  mygramclient_free_search_result_with_highlights(typed);
+
+  options.sort_desc = -1;
+  typed = nullptr;
+  EXPECT_EQ(mygramclient_search_with_options(client, "t", "q", &options, &typed), 0)
+      << mygramclient_get_last_error(client);
+  mygramclient_free_search_result_with_highlights(typed);
+
+  mygramclient_disconnect(client);
+  server_thread.join();
+  mygramclient_destroy(client);
+  ::close(listener);
+
+  ASSERT_EQ(commands.size(), kCommandCount);
+  EXPECT_EQ(commands[1], commands[0]);
+  EXPECT_EQ(commands[0].find("SORT ASC"), std::string::npos) << commands[0];
+  EXPECT_NE(commands[2].find("SORT ASC"), std::string::npos) << commands[2];
+}
+
+TEST_F(MygramClientCApiTest, SharedHandleErrorStateIsPerHandleLastWriterWins) {
+  MygramClientConfig_C config = {};
+  config.host = "127.0.0.1";
+  config.port = 1;
+  MygramClient_C* client = mygramclient_create(&config);
+  ASSERT_NE(client, nullptr);
+
+  MygramSearchResult_C* result = nullptr;
+  std::thread first([&] { EXPECT_NE(mygramclient_search(client, "t", "q", 10, 0, &result), 0); });
+  first.join();
+  const std::string first_error = mygramclient_get_last_error(client);
+  ASSERT_FALSE(first_error.empty());
+
+  std::thread second([&] { EXPECT_NE(mygramclient_search(client, nullptr, "q", 10, 0, &result), 0); });
+  second.join();
+
+  // The documented contract: the state is the handle's, not the thread's.
+  EXPECT_NE(std::string(mygramclient_get_last_error(client)), first_error);
+  EXPECT_EQ(mygramclient_get_last_error_code(client),
+            static_cast<int>(mygram::utils::ErrorCode::kClientInvalidArgument));
+  mygramclient_destroy(client);
+}
+
+TEST(MygramClientDumpSaveTest, WaitIgnoresStatusRecordsOfOtherOperations) {
+  const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(listener, 0);
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  address.sin_port = 0;
+  ASSERT_EQ(::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+  ASSERT_EQ(::listen(listener, 1), 0);
+  socklen_t address_length = sizeof(address);
+  ASSERT_EQ(::getsockname(listener, reinterpret_cast<sockaddr*>(&address), &address_length), 0);
+
+  ClientConfig config;
+  config.host = "127.0.0.1";
+  config.port = ntohs(address.sin_port);
+  config.timeout_ms = 2000;
+  config.dump_save_timeout_ms = 5000;
+  MygramClient client(config);
+  ASSERT_TRUE(client.Connect());
+
+  // A foreign COMPLETED and a LOADING record precede the status of this save.
+  const std::array<std::string_view, 4> responses = {
+      "OK DUMP_STARTED /tmp/mine.dmp\r\n",
+      "OK DUMP_STATUS\r\nstatus: COMPLETED\r\nfilepath: /tmp/other.dmp\r\nresult_filepath: /tmp/other.dmp\r\nEND\r\n",
+      "OK DUMP_STATUS\r\nstatus: LOADING\r\nfilepath: /tmp/mine.dmp\r\nEND\r\n",
+      "OK DUMP_STATUS\r\nstatus: COMPLETED\r\nfilepath: /tmp/mine.dmp\r\nresult_filepath: /tmp/mine.dmp\r\nEND\r\n",
+  };
+  std::atomic<size_t> served{0};
+  std::thread server_thread([&] {
+    const int connection = ::accept(listener, nullptr, nullptr);
+    if (connection < 0) {
+      return;
+    }
+    for (const std::string_view response : responses) {
+      std::string command;
+      std::array<char, 256> buffer{};
+      while (command.find("\r\n") == std::string::npos) {
+        const ssize_t received = ::recv(connection, buffer.data(), buffer.size(), 0);
+        if (received <= 0) {
+          break;
+        }
+        command.append(buffer.data(), static_cast<size_t>(received));
+      }
+      if (command.find("\r\n") == std::string::npos ||
+          ::send(connection, response.data(), response.size(), 0) != static_cast<ssize_t>(response.size())) {
+        break;
+      }
+      ++served;
+    }
+    ::close(connection);
+  });
+
+  const auto saved = client.Save("/tmp/mine.dmp");
+  client.Disconnect();
+  server_thread.join();
+  ::close(listener);
+
+  ASSERT_TRUE(saved) << saved.error().message();
+  EXPECT_EQ(*saved, "/tmp/mine.dmp");
+  EXPECT_EQ(served.load(), responses.size());
+}

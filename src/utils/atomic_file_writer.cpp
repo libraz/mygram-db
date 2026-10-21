@@ -14,13 +14,16 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -45,11 +48,44 @@ namespace mygramdb::utils {
 
 namespace {
 
+/// Dump temps held by writers alive in this process.
+struct LiveDumpTemps {
+  std::mutex mutex;
+  std::unordered_multiset<std::string> basenames;
+};
+
+LiveDumpTemps& GetLiveDumpTemps() {
+  static LiveDumpTemps live_temps;
+  return live_temps;
+}
+
+void RegisterLiveDumpTemp(const std::string& temp_basename) {
+  auto& live_temps = GetLiveDumpTemps();
+  std::lock_guard<std::mutex> lock(live_temps.mutex);
+  live_temps.basenames.insert(temp_basename);
+}
+
+void UnregisterLiveDumpTemp(const std::string& temp_basename) {
+  auto& live_temps = GetLiveDumpTemps();
+  std::lock_guard<std::mutex> lock(live_temps.mutex);
+  if (auto found = live_temps.basenames.find(temp_basename); found != live_temps.basenames.end()) {
+    live_temps.basenames.erase(found);
+  }
+}
+
+bool IsLiveDumpTemp(const std::string& temp_basename) {
+  auto& live_temps = GetLiveDumpTemps();
+  std::lock_guard<std::mutex> lock(live_temps.mutex);
+  return live_temps.basenames.count(temp_basename) != 0;
+}
+
 #ifndef _WIN32
 
 constexpr char kDumpTempOwnerMagic[] = "MYGRAMDB_DUMP_TEMP_OWNER";
 constexpr char kDumpTempOwnerVersion[] = "1";
 constexpr size_t kMaxDumpTempOwnerMarkerSize = 1024;
+/// Inode recorded by a marker written before its temp exists; no regular file has inode 0.
+constexpr uint64_t kPendingTempInode = 0;
 
 using mygramdb::utils::Error;
 using mygramdb::utils::ErrorCode;
@@ -200,6 +236,20 @@ std::string SerializeOwnerMarker(pid_t process_id, std::string_view temp_basenam
   return contents;
 }
 
+// A marker naming this PID was left by an earlier incarnation (PID 1 in a container) unless a writer here holds it.
+Expected<bool, Error> IsDumpTempOwnerGone(const DumpTempOwnerRecord& record, const std::string& marker_basename) {
+  if (record.process_id == getpid()) {
+    return !IsLiveDumpTemp(record.temp_basename);
+  }
+  if (kill(record.process_id, 0) == 0 || errno == EPERM) {
+    return false;
+  }
+  if (errno != ESRCH) {
+    return MakeFileError("Failed to check dump temp owner process", marker_basename, errno);
+  }
+  return true;
+}
+
 bool IsOldEnough(const struct stat& file_stat, std::chrono::seconds min_age,
                  std::chrono::system_clock::time_point now) {
   const auto modified = std::chrono::system_clock::from_time_t(file_stat.st_mtime);
@@ -228,6 +278,71 @@ Expected<bool, Error> RemoveMarkerAt(int directory_fd, const std::string& marker
     return MakeFileError("Failed to remove dump owner marker", marker_basename, errno);
   }
   return true;
+}
+
+struct CreatedOwnerMarker {
+  std::string basename;
+  uint64_t device = 0;
+  uint64_t inode = 0;
+};
+
+// Create, fill and fsync a marker under a fresh name; the caller syncs the directory.
+Expected<CreatedOwnerMarker, Error> CreateOwnerMarker(int directory_fd, pid_t owner_pid, const std::string& contents) {
+  if (contents.size() > kMaxDumpTempOwnerMarkerSize) {
+    return MakeFileError("Failed to write dump owner marker", "", EFBIG);
+  }
+  static thread_local std::mt19937_64 rng(std::random_device{}());
+  std::uniform_int_distribution<uint64_t> nonce_distribution;
+  int marker_fd = -1;
+  std::string marker_basename;
+  for (size_t attempt = 0; attempt < 16; ++attempt) {
+    marker_basename = std::string(kDumpTempOwnerMarkerPrefix) + std::to_string(static_cast<uint64_t>(owner_pid)) + "." +
+                      std::to_string(nonce_distribution(rng));
+    marker_fd = openat(directory_fd, marker_basename.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                       S_IRUSR | S_IWUSR);
+    if (marker_fd >= 0 || errno != EEXIST) {
+      break;
+    }
+  }
+  if (marker_fd < 0) {
+    return MakeFileError("Failed to create dump owner marker", marker_basename, errno);
+  }
+  FDGuard marker_guard(marker_fd);
+
+  struct stat marker_stat {};
+  if (fstat(marker_fd, &marker_stat) != 0) {
+    const int saved_errno = errno;
+    unlinkat(directory_fd, marker_basename.c_str(), 0);
+    return MakeFileError("Failed to verify dump owner marker", marker_basename, saved_errno);
+  }
+  if (!S_ISREG(marker_stat.st_mode)) {
+    unlinkat(directory_fd, marker_basename.c_str(), 0);
+    return MakeUnexpected(
+        MakeError(ErrorCode::kStorageWriteError, "Dump owner marker is not regular", marker_basename));
+  }
+  if (fchmod(marker_fd, S_IRUSR | S_IWUSR) != 0) {
+    const int saved_errno = errno;
+    unlinkat(directory_fd, marker_basename.c_str(), 0);
+    return MakeFileError("Failed to secure dump owner marker", marker_basename, saved_errno);
+  }
+  if (!WriteAll(marker_fd, contents)) {
+    const int saved_errno = errno == 0 ? EIO : errno;
+    unlinkat(directory_fd, marker_basename.c_str(), 0);
+    return MakeFileError("Failed to write dump owner marker", marker_basename, saved_errno);
+  }
+  if (fsync(marker_fd) != 0) {
+    const int saved_errno = errno;
+    unlinkat(directory_fd, marker_basename.c_str(), 0);
+    return MakeFileError("Failed to sync dump owner marker", marker_basename, saved_errno);
+  }
+  marker_guard.Release();
+  if (close(marker_fd) != 0) {
+    const int saved_errno = errno;
+    unlinkat(directory_fd, marker_basename.c_str(), 0);
+    return MakeFileError("Failed to close dump owner marker", marker_basename, saved_errno);
+  }
+  return CreatedOwnerMarker{marker_basename, static_cast<uint64_t>(marker_stat.st_dev),
+                            static_cast<uint64_t>(marker_stat.st_ino)};
 }
 
 #endif  // !_WIN32
@@ -318,14 +433,12 @@ Expected<bool, Error> RemoveOrphanDumpTempFile(const std::filesystem::path& dire
     return false;
   }
 
-  if (kill(record.process_id, 0) == 0) {
-    return false;
+  auto owner_gone = IsDumpTempOwnerGone(record, marker_basename);
+  if (!owner_gone) {
+    return MakeUnexpected(std::move(owner_gone).error());
   }
-  if (errno == EPERM) {
+  if (!*owner_gone) {
     return false;
-  }
-  if (errno != ESRCH) {
-    return MakeFileError("Failed to check dump temp owner process", marker_basename, errno);
   }
 
   struct stat temp_entry_stat {};
@@ -367,10 +480,12 @@ Expected<bool, Error> RemoveOrphanDumpTempFile(const std::filesystem::path& dire
   if (fstat(temp_fd, &opened_temp_stat) != 0) {
     return MakeFileError("Failed to inspect dump temp file", record.temp_basename, errno);
   }
+  const bool identity_recorded = record.inode != kPendingTempInode;
   if (!S_ISREG(opened_temp_stat.st_mode) || opened_temp_stat.st_dev != temp_entry_stat.st_dev ||
       opened_temp_stat.st_uid != geteuid() || opened_temp_stat.st_ino != temp_entry_stat.st_ino ||
-      static_cast<uint64_t>(opened_temp_stat.st_dev) != record.device ||
-      static_cast<uint64_t>(opened_temp_stat.st_ino) != record.inode || !IsOldEnough(opened_temp_stat, min_age, now)) {
+      (identity_recorded && (static_cast<uint64_t>(opened_temp_stat.st_dev) != record.device ||
+                             static_cast<uint64_t>(opened_temp_stat.st_ino) != record.inode)) ||
+      !IsOldEnough(opened_temp_stat, min_age, now)) {
     return false;
   }
 
@@ -432,13 +547,81 @@ Expected<bool, Error> RemoveOrphanDumpTempFile(const std::filesystem::path& dire
 #endif
 }
 
-Expected<void, Error> AtomicFileWriter::TrackDumpTempFile(int already_open_fd) {
-#ifndef _WIN32
-  if (dump_temp_tracked_ || committed_ || rolled_back_) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Dump temp ownership is already finalized"));
+void SweepOrphanDumpTempFiles(const std::filesystem::path& directory, std::chrono::seconds min_age) {
+  std::error_code error;
+  const auto directory_status = std::filesystem::symlink_status(directory, error);
+  if (error || !std::filesystem::is_directory(directory_status) || std::filesystem::is_symlink(directory_status)) {
+    return;
   }
-  if (already_open_fd < 0) {
-    return MakeUnexpected(MakeError(ErrorCode::kInvalidArgument, "Invalid open dump temp file descriptor"));
+
+  std::filesystem::directory_iterator entry(directory, std::filesystem::directory_options::skip_permission_denied,
+                                            error);
+  if (error) {
+    StructuredLog()
+        .Event("dump_temp_sweep_error")
+        .Field("directory", directory.string())
+        .Field("error", error.message())
+        .Warn();
+    return;
+  }
+
+  std::vector<std::string> marker_basenames;
+  for (const std::filesystem::directory_iterator end; entry != end; entry.increment(error)) {
+    if (error) {
+      StructuredLog()
+          .Event("dump_temp_sweep_error")
+          .Field("directory", directory.string())
+          .Field("error", error.message())
+          .Warn();
+      break;
+    }
+
+    const auto entry_status = entry->symlink_status(error);
+    if (error) {
+      error.clear();
+      continue;
+    }
+    if (std::filesystem::is_symlink(entry_status)) {
+      continue;
+    }
+    if (std::filesystem::is_directory(entry_status)) {
+      SweepOrphanDumpTempFiles(entry->path(), min_age);
+      continue;
+    }
+    if (!std::filesystem::is_regular_file(entry_status)) {
+      continue;
+    }
+
+    const std::string marker_basename = entry->path().filename().string();
+    if (marker_basename.compare(0, kDumpTempOwnerMarkerPrefix.size(), kDumpTempOwnerMarkerPrefix) != 0) {
+      continue;
+    }
+    marker_basenames.push_back(marker_basename);
+  }
+
+  // The helper removes the marker it processes. Collect names before calling
+  // it so directory iteration does not depend on deletion behavior.
+  for (const auto& marker_basename : marker_basenames) {
+    auto removed = RemoveOrphanDumpTempFile(directory, marker_basename, min_age);
+    if (!removed) {
+      StructuredLog()
+          .Event("dump_temp_sweep_error")
+          .Field("filepath", (directory / marker_basename).string())
+          .FieldError(removed.error())
+          .Warn();
+    } else if (*removed) {
+      StructuredLog()
+          .Event("dump_orphan_temp_removed")
+          .Field("filepath", (directory / marker_basename).string())
+          .Info();
+    }
+  }
+}
+
+Expected<int, Error> AtomicFileWriter::CreateDumpTempFile() {
+#ifndef _WIN32
+  if (dump_temp_tracked_ || committed_ || rolled_back_ || !live_temp_basename_.empty()) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError, "Dump temp ownership is already finalized"));
   }
 
   const std::filesystem::path temp_path(temp_filepath_);
@@ -454,94 +637,80 @@ Expected<void, Error> AtomicFileWriter::TrackDumpTempFile(int already_open_fd) {
   }
   FDGuard directory_guard(directory_fd);
 
-  struct stat opened_temp_stat {};
-  if (fstat(already_open_fd, &opened_temp_stat) != 0) {
-    return MakeFileError("Failed to inspect open dump temp file", temp_filepath_, errno);
-  }
-  if (!S_ISREG(opened_temp_stat.st_mode) || opened_temp_stat.st_uid != geteuid()) {
-    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError,
-                                    "Dump temp file is not a regular file owned by this user", temp_filepath_));
-  }
-  struct stat temp_path_stat {};
-  if (fstatat(directory_fd, temp_basename.c_str(), &temp_path_stat, AT_SYMLINK_NOFOLLOW) != 0) {
-    return MakeFileError("Failed to verify dump temp path", temp_filepath_, errno);
-  }
-  if (!S_ISREG(temp_path_stat.st_mode) || temp_path_stat.st_dev != opened_temp_stat.st_dev ||
-      temp_path_stat.st_ino != opened_temp_stat.st_ino) {
-    return MakeUnexpected(
-        MakeError(ErrorCode::kStorageWriteError, "Dump temp path does not match open file", temp_filepath_));
-  }
+  RegisterLiveDumpTemp(temp_basename);
+  live_temp_basename_ = temp_basename;
 
   const pid_t owner_pid = getpid();
-  static thread_local std::mt19937_64 rng(std::random_device{}());
-  std::uniform_int_distribution<uint64_t> nonce_distribution;
-  int marker_fd = -1;
-  std::string marker_basename;
-  for (size_t attempt = 0; attempt < 16; ++attempt) {
-    marker_basename = std::string(kDumpTempOwnerMarkerPrefix) + std::to_string(static_cast<uint64_t>(owner_pid)) + "." +
-                      std::to_string(nonce_distribution(rng));
-    marker_fd = openat(directory_fd, marker_basename.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                       S_IRUSR | S_IWUSR);
-    if (marker_fd >= 0 || errno != EEXIST) {
-      break;
+  auto pending_marker =
+      CreateOwnerMarker(directory_fd, owner_pid, SerializeOwnerMarker(owner_pid, temp_basename, 0, kPendingTempInode));
+  if (!pending_marker) {
+    return MakeUnexpected(std::move(pending_marker).error());
+  }
+  const std::string marker_basename = pending_marker->basename;
+  auto discard = [&](bool remove_temp) {
+    if (remove_temp) {
+      unlinkat(directory_fd, temp_basename.c_str(), 0);
     }
-  }
-  if (marker_fd < 0) {
-    return MakeFileError("Failed to create dump owner marker", marker_basename, errno);
-  }
-  FDGuard marker_guard(marker_fd);
-
-  struct stat marker_stat {};
-  if (fstat(marker_fd, &marker_stat) != 0) {
-    const int saved_errno = errno;
     unlinkat(directory_fd, marker_basename.c_str(), 0);
-    return MakeFileError("Failed to verify dump owner marker", marker_basename, saved_errno);
-  }
-  if (!S_ISREG(marker_stat.st_mode)) {
-    unlinkat(directory_fd, marker_basename.c_str(), 0);
-    return MakeUnexpected(
-        MakeError(ErrorCode::kStorageWriteError, "Dump owner marker is not regular", marker_basename));
-  }
-  if (fchmod(marker_fd, S_IRUSR | S_IWUSR) != 0) {
-    const int saved_errno = errno;
-    unlinkat(directory_fd, marker_basename.c_str(), 0);
-    return MakeFileError("Failed to secure dump owner marker", marker_basename, saved_errno);
-  }
-  const std::string marker_contents =
-      SerializeOwnerMarker(owner_pid, temp_basename, static_cast<uint64_t>(opened_temp_stat.st_dev),
-                           static_cast<uint64_t>(opened_temp_stat.st_ino));
-  if (marker_contents.size() > kMaxDumpTempOwnerMarkerSize || !WriteAll(marker_fd, marker_contents)) {
-    const int saved_errno = marker_contents.size() > kMaxDumpTempOwnerMarkerSize ? EFBIG : (errno == 0 ? EIO : errno);
-    unlinkat(directory_fd, marker_basename.c_str(), 0);
-    return MakeFileError("Failed to write dump owner marker", marker_basename, saved_errno);
-  }
-  if (fsync(marker_fd) != 0) {
-    const int saved_errno = errno;
-    unlinkat(directory_fd, marker_basename.c_str(), 0);
-    return MakeFileError("Failed to sync dump owner marker", marker_basename, saved_errno);
-  }
-  marker_guard.Release();
-  if (close(marker_fd) != 0) {
-    const int saved_errno = errno;
-    unlinkat(directory_fd, marker_basename.c_str(), 0);
-    return MakeFileError("Failed to close dump owner marker", marker_basename, saved_errno);
-  }
+    (void)fsync(directory_fd);
+  };
   if (fsync(directory_fd) != 0) {
     const int saved_errno = errno;
-    unlinkat(directory_fd, marker_basename.c_str(), 0);
+    discard(false);
     return MakeFileError("Failed to sync dump directory after marker creation", directory.string(), saved_errno);
   }
 
-  const std::filesystem::path marker_path = directory / marker_basename;
-  owner_marker_filepath_ = marker_path.string();
-  tracked_temp_device_ = static_cast<uint64_t>(opened_temp_stat.st_dev);
-  tracked_temp_inode_ = static_cast<uint64_t>(opened_temp_stat.st_ino);
-  owner_marker_device_ = static_cast<uint64_t>(marker_stat.st_dev);
-  owner_marker_inode_ = static_cast<uint64_t>(marker_stat.st_ino);
+  const int temp_fd = openat(directory_fd, temp_basename.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                             S_IRUSR | S_IWUSR);
+  if (temp_fd < 0) {
+    const int saved_errno = errno;
+    discard(false);
+    return MakeFileError("Failed to create dump temp file", temp_filepath_, saved_errno);
+  }
+  FDGuard temp_guard(temp_fd);
+
+  struct stat temp_stat {};
+  if (fstat(temp_fd, &temp_stat) != 0) {
+    const int saved_errno = errno;
+    discard(true);
+    return MakeFileError("Failed to inspect dump temp file", temp_filepath_, saved_errno);
+  }
+  if (!S_ISREG(temp_stat.st_mode) || temp_stat.st_uid != geteuid()) {
+    discard(true);
+    return MakeUnexpected(MakeError(ErrorCode::kStorageWriteError,
+                                    "Dump temp file is not a regular file owned by this user", temp_filepath_));
+  }
+
+  // Atomically replace the pending marker with one that also records the temp's identity.
+  auto complete_marker =
+      CreateOwnerMarker(directory_fd, owner_pid,
+                        SerializeOwnerMarker(owner_pid, temp_basename, static_cast<uint64_t>(temp_stat.st_dev),
+                                             static_cast<uint64_t>(temp_stat.st_ino)));
+  if (!complete_marker) {
+    discard(true);
+    return MakeUnexpected(std::move(complete_marker).error());
+  }
+  if (renameat(directory_fd, complete_marker->basename.c_str(), directory_fd, marker_basename.c_str()) != 0) {
+    const int saved_errno = errno;
+    unlinkat(directory_fd, complete_marker->basename.c_str(), 0);
+    discard(true);
+    return MakeFileError("Failed to publish dump owner marker", marker_basename, saved_errno);
+  }
+  if (fsync(directory_fd) != 0) {
+    const int saved_errno = errno;
+    discard(true);
+    return MakeFileError("Failed to sync dump directory after marker creation", directory.string(), saved_errno);
+  }
+
+  owner_marker_filepath_ = (directory / marker_basename).string();
+  tracked_temp_device_ = static_cast<uint64_t>(temp_stat.st_dev);
+  tracked_temp_inode_ = static_cast<uint64_t>(temp_stat.st_ino);
+  owner_marker_device_ = complete_marker->device;
+  owner_marker_inode_ = complete_marker->inode;
   dump_temp_tracked_ = true;
-  return {};
+  temp_guard.Release();
+  return temp_fd;
 #else
-  (void)already_open_fd;
   return MakeUnexpected(MakeError(ErrorCode::kNotImplemented, "Dump temp ownership markers are unavailable"));
 #endif
 }
@@ -561,6 +730,9 @@ AtomicFileWriter::AtomicFileWriter(std::string filepath, bool unique_suffix) : f
 AtomicFileWriter::~AtomicFileWriter() {
   if (!committed_ && !rolled_back_) {
     Rollback();
+  }
+  if (!live_temp_basename_.empty()) {
+    UnregisterLiveDumpTemp(live_temp_basename_);
   }
 }
 

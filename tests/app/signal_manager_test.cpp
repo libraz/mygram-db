@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -84,8 +85,8 @@ class SignalManagerTest : public ::testing::Test {
  protected:
   void SetUp() override {
     // Reset signal flags before each test
-    SignalManager::signal_flags_.shutdown_requested = 0;
-    SignalManager::signal_flags_.log_reopen_requested = 0;
+    SignalManager::signal_flags_.shutdown_requested.store(0);
+    SignalManager::signal_flags_.log_reopen_requested.store(0);
   }
 };
 
@@ -240,13 +241,13 @@ TEST_F(SignalManagerTest, ConsumeLogReopenRequestAtomicClearFlag) {
   ASSERT_TRUE(signal_mgr.has_value());
 
   // Directly set the flag (simulating signal delivery)
-  SignalManager::signal_flags_.log_reopen_requested = 1;
+  SignalManager::signal_flags_.log_reopen_requested.store(1);
 
   // ConsumeLogReopenRequest should atomically read-and-clear
   EXPECT_TRUE(SignalManager::ConsumeLogReopenRequest());
 
   // Flag should be cleared after consume
-  EXPECT_EQ(SignalManager::signal_flags_.log_reopen_requested, 0);
+  EXPECT_EQ(SignalManager::signal_flags_.log_reopen_requested.load(), 0);
 
   // Second call should return false
   EXPECT_FALSE(SignalManager::ConsumeLogReopenRequest());
@@ -260,7 +261,45 @@ TEST_F(SignalManagerTest, ConsumeLogReopenRequestClearsEvenWhenFalse) {
   EXPECT_FALSE(SignalManager::ConsumeLogReopenRequest());
 
   // Flag should still be 0
-  EXPECT_EQ(SignalManager::signal_flags_.log_reopen_requested, 0);
+  EXPECT_EQ(SignalManager::signal_flags_.log_reopen_requested.load(), 0);
+}
+
+/**
+ * @brief A SIGUSR1 handled on another thread while the main thread consumes is never lost
+ *
+ * The worker raises SIGUSR1 on itself only after the previous request was
+ * consumed, so every raise must be observed by exactly one later consume.
+ */
+TEST_F(SignalManagerTest, LogReopenRequestFromAnotherThreadIsNeverLost) {
+  auto signal_mgr = SignalManager::Create();
+  ASSERT_TRUE(signal_mgr.has_value());
+
+  constexpr int kRequests = 2000;
+  std::atomic<int> consumed{0};
+  std::atomic<bool> stalled{false};
+  std::thread worker([&consumed, &stalled]() {
+    for (int i = 1; i <= kRequests; ++i) {
+      raise(SIGUSR1);
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+      while (consumed.load() < i) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          stalled.store(true);
+          return;
+        }
+        std::this_thread::yield();
+      }
+    }
+  });
+
+  while (consumed.load() < kRequests && !stalled.load()) {
+    if (SignalManager::ConsumeLogReopenRequest()) {
+      consumed.fetch_add(1);
+    }
+  }
+  worker.join();
+
+  EXPECT_FALSE(stalled.load()) << "a request was lost after " << consumed.load() << " consumes";
+  EXPECT_EQ(consumed.load(), kRequests);
 }
 
 }  // namespace

@@ -1031,6 +1031,8 @@ mygramdb_add_split_gtests(io_reactor_test
     IoReactorTest.StopReturnsPromptlyWithRealBackend
     IoReactorTest.RegisterRaceWithStopLeavesNoStaleEntries
     IoReactorTest.RegisterPublishIsSerializedBeforeStopClear
+    IoReactorTest.DeferredCloseDisarmsReadAndIsReapedByIdleTimeout
+    IoReactorTest.WorkerInlineReplyRefreshesIdleTimer
 )
 
 # ReactorConnection unit tests

@@ -2048,8 +2048,11 @@ TEST(QueryCacheTest, M4_TTLExpirationNoDoubleCounting) {
   // Wait for TTL to expire
   std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
-  // Lookup key1 and key2 (detected by Lookup, counted immediately)
-  cache.Lookup(key1);
+  // Lookup key1 and key2 (detected by Lookup, counted immediately). Looking
+  // the same expired entry up again must not count it again.
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_FALSE(cache.Lookup(key1).has_value());
+  }
   cache.Lookup(key2);
 
   // Wait for RefreshLRU to remove all 3 entries
@@ -3160,6 +3163,139 @@ TEST(QueryCacheTest, PeriodicRefreshResumePointIsResetByClear) {
   cache.RefreshLRUForTesting();
   EXPECT_EQ(cache.GetStatistics().current_entries, kEntryCount - kSliceSize)
       << "Clear() must drop the resume point so the first pass after a flush starts from the front";
+}
+
+/**
+ * @brief An expired entry the full pending set cannot hold is counted once,
+ *        by the RefreshLRU scan, not by the lookup that observed it as well.
+ */
+TEST(QueryCacheTest, TTLExpirationCountedOnceWhenPendingSetIsFull) {
+  // Matches QueryCache::kMaxPendingKeys.
+  constexpr size_t kPendingKeyCap = 10000;
+  constexpr size_t kEntryCount = kPendingKeyCap + 1;
+  QueryCache cache(64 * 1024 * 1024, 0.0, /*ttl_seconds=*/1, /*compression_enabled=*/true,
+                   /*eviction_batch_size=*/1, /*start_background_worker=*/false);
+
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+  std::vector<CacheKey> keys;
+  keys.reserve(kEntryCount);
+  for (size_t i = 0; i < kEntryCount; ++i) {
+    keys.push_back(CacheKeyGenerator::Generate("ttl-cap-" + std::to_string(i)));
+    ASSERT_TRUE(cache.Insert(keys.back(), {static_cast<DocId>(i)}, meta, 1.0));
+  }
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+  for (const auto& key : keys) {
+    EXPECT_FALSE(cache.Lookup(key).has_value());
+  }
+  EXPECT_EQ(cache.GetStatistics().ttl_expirations, kPendingKeyCap);
+
+  for (int pass = 0; pass < 4 && cache.GetStatistics().current_entries > 0; ++pass) {
+    cache.RefreshLRUForTesting();
+  }
+  const auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.current_entries, 0U);
+  EXPECT_EQ(stats.ttl_expirations, kEntryCount);
+  EXPECT_EQ(stats.cache_misses_ttl_expired, kEntryCount);
+}
+
+/**
+ * @brief A payload the caller's staleness check rejects is one invalidated
+ *        miss: no hit and no saved time are recorded for it.
+ */
+TEST(QueryCacheTest, StalePayloadIsCountedAsAnInvalidatedMissNotAHit) {
+  QueryCache cache(1024 * 1024, 0.0);
+  auto key = CacheKeyGenerator::Generate("stale-payload");
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+  ASSERT_TRUE(cache.Insert(key, {1, 2, 3}, meta, 25.0));
+
+  QueryCache::LookupMetadata lookup_meta;
+  const auto result = cache.LookupWithMetadata(key, /*discriminator=*/"", lookup_meta,
+                                               [](const std::vector<DocId>& /*payload*/) { return true; });
+  EXPECT_FALSE(result.has_value());
+  EXPECT_EQ(lookup_meta.outcome, QueryCache::LookupOutcome::kStale);
+
+  const auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.total_queries, 1U);
+  EXPECT_EQ(stats.cache_hits, 0U);
+  EXPECT_EQ(stats.cache_misses, 1U);
+  EXPECT_EQ(stats.cache_misses_invalidated, 1U);
+  EXPECT_DOUBLE_EQ(stats.total_query_saved_time_ms, 0.0);
+}
+
+/**
+ * @brief Every lookup outcome pairs the miss total with exactly one reason and
+ *        is reported back through LookupMetadata::outcome.
+ */
+TEST(QueryCacheTest, EveryMissCarriesExactlyOneReason) {
+  QueryCache cache(1024 * 1024, 0.0, 0, /*compression_enabled=*/true);
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+
+  auto lookup = [&](const CacheKey& key) {
+    QueryCache::LookupMetadata lookup_meta;
+    (void)cache.LookupWithMetadata(key, lookup_meta);
+    return lookup_meta.outcome;
+  };
+
+  EXPECT_EQ(lookup(CacheKeyGenerator::Generate("absent")), QueryCache::LookupOutcome::kNotFound);
+
+  auto invalidated_key = CacheKeyGenerator::Generate("invalidated");
+  ASSERT_TRUE(cache.Insert(invalidated_key, {1}, meta, 1.0));
+  ASSERT_TRUE(cache.MarkInvalidated(CacheEntryIdentity{invalidated_key, 0}));
+  EXPECT_EQ(lookup(invalidated_key), QueryCache::LookupOutcome::kInvalidated);
+
+  auto corrupt_key = CacheKeyGenerator::Generate("corrupt");
+  ASSERT_TRUE(cache.Insert(corrupt_key, {1, 2, 3}, meta, 1.0));
+  ASSERT_TRUE(cache.CorruptEntryForTest(corrupt_key));
+  EXPECT_EQ(lookup(corrupt_key), QueryCache::LookupOutcome::kNotFound);
+
+  auto hit_key = CacheKeyGenerator::Generate("hit");
+  ASSERT_TRUE(cache.Insert(hit_key, {4}, meta, 1.0));
+  EXPECT_EQ(lookup(hit_key), QueryCache::LookupOutcome::kHit);
+
+  const auto stats = cache.GetStatistics();
+  EXPECT_EQ(stats.decompression_failures, 1U);
+  EXPECT_EQ(stats.cache_hits, 1U);
+  EXPECT_EQ(stats.cache_misses, 3U);
+  EXPECT_EQ(stats.cache_misses,
+            stats.cache_misses_not_found + stats.cache_misses_ttl_expired + stats.cache_misses_invalidated);
+  EXPECT_EQ(stats.cache_misses_not_found, 2U);
+  EXPECT_EQ(stats.cache_misses_invalidated, 1U);
+  EXPECT_EQ(stats.total_queries, stats.cache_hits + stats.cache_misses);
+}
+
+/**
+ * @brief PreparePayload applies the cost threshold, InsertPrepared the
+ *        residency check, and a prepared payload round-trips.
+ */
+TEST(QueryCacheTest, PreparedPayloadMatchesInsert) {
+  QueryCache cache(1024 * 1024, /*min_query_cost_ms=*/5.0);
+  CacheMetadata meta;
+  meta.table = "t";
+  meta.ngrams = {"ab"};
+  const auto key = CacheKeyGenerator::Generate("prepared");
+  const std::vector<DocId> result = {3, 1, 4, 1, 5};
+
+  EXPECT_FALSE(cache.PreparePayload(key, result, /*query_cost_ms=*/1.0).has_value());
+  EXPECT_EQ(cache.GetStatistics().rejection_count, 1U);
+
+  auto payload = cache.PreparePayload(key, result, 10.0);
+  ASSERT_TRUE(payload.has_value());
+  ASSERT_TRUE(cache.InsertPrepared(key, std::move(*payload), meta, 10.0));
+  auto cached = cache.Lookup(key);
+  ASSERT_TRUE(cached.has_value());
+  EXPECT_EQ(*cached, result);
+
+  auto duplicate = cache.PreparePayload(key, result, 10.0);
+  ASSERT_TRUE(duplicate.has_value());
+  EXPECT_FALSE(cache.InsertPrepared(key, std::move(*duplicate), meta, 10.0));
+  EXPECT_EQ(cache.GetStatistics().rejection_duplicate, 1U);
 }
 
 }  // namespace mygramdb::cache

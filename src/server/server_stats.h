@@ -9,10 +9,13 @@
 #include <chrono>
 #include <cstdint>
 #include <ctime>
+#include <memory>
 
 #include "query/query_parser.h"
 
 namespace mygramdb::server {
+
+class StatisticsSnapshotCache;
 
 /**
  * @brief Server statistics snapshot
@@ -98,13 +101,22 @@ class ServerStats {
   ServerStats();
   /// Construct with an explicit monotonic start point (primarily useful for tests).
   explicit ServerStats(std::chrono::steady_clock::time_point steady_start_time);
-  ~ServerStats() = default;
+  ~ServerStats();
 
   // Disable copy and move
   ServerStats(const ServerStats&) = delete;
   ServerStats& operator=(const ServerStats&) = delete;
   ServerStats(ServerStats&&) = delete;
   ServerStats& operator=(ServerStats&&) = delete;
+
+  /**
+   * @brief Memory and index snapshot shared by every surface reporting from this instance
+   *
+   * TCP INFO, HTTP /info and HTTP /metrics read through one cache, so within
+   * its interval they report identical figures and the combined corpus walk
+   * rate stays at one per interval.
+   */
+  StatisticsSnapshotCache& SnapshotCache() { return *snapshot_cache_; }
 
   /**
    * @brief Increment command counter
@@ -266,6 +278,9 @@ class ServerStats {
   void Reset();
 
  private:
+  // Memory and index snapshot shared by TCP INFO, HTTP /info and HTTP /metrics
+  std::unique_ptr<StatisticsSnapshotCache> snapshot_cache_;
+
   // Server start time (Unix timestamp)
   const uint64_t start_time_;
   // Monotonic start point used for uptime calculations. Unlike wall-clock

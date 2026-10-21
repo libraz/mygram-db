@@ -7,12 +7,18 @@
 
 #include <algorithm>
 
+#include "server/statistics_service.h"
+
 namespace mygramdb::server {
 
 ServerStats::ServerStats() : ServerStats(std::chrono::steady_clock::now()) {}
 
 ServerStats::ServerStats(std::chrono::steady_clock::time_point steady_start_time)
-    : start_time_(static_cast<uint64_t>(std::time(nullptr))), steady_start_time_(steady_start_time) {}
+    : snapshot_cache_(std::make_unique<StatisticsSnapshotCache>()),
+      start_time_(static_cast<uint64_t>(std::time(nullptr))),
+      steady_start_time_(steady_start_time) {}
+
+ServerStats::~ServerStats() = default;
 
 // Per-command counters cover hot-path commands; less common commands accumulate
 // in cmd_other_. Always update GetTotalCommands and aggregate stats together

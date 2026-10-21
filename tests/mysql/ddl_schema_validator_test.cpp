@@ -7,6 +7,7 @@
 #ifdef USE_MYSQL
 
 #include "mysql/connection.h"
+#include "mysql/ddl_classifier.h"
 #include "mysql_test_helpers.h"
 
 namespace mygramdb::mysql {
@@ -357,6 +358,35 @@ TEST(DDLSchemaValidatorIntegrationTest, DetectsStoredGeneratedColumnChange) {
   auto comparison = DDLSchemaValidator::Compare(*before, *after, table_config);
   ASSERT_FALSE(comparison);
   EXPECT_NE(comparison.error().message().find("'slug' changed"), std::string::npos);
+}
+
+TEST(DDLSchemaValidatorIntegrationTest, DroppingTheUniqueKeyOfThePrimaryKeyColumnIsRevalidatedAndFails) {
+  if (!mygramdb::mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+  Connection connection(MakeIntegrationConnectionConfig());
+  ASSERT_TRUE(connection.Connect("ddl-drop-unique-key-test"));
+  ASSERT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS ddl_drop_unique_key"));
+  ASSERT_TRUE(connection.ExecuteUpdate(
+      "CREATE TABLE ddl_drop_unique_key (id BIGINT NOT NULL, content TEXT, UNIQUE KEY uq_id (id)) ENGINE=InnoDB"));
+
+  config::TableConfig table_config;
+  table_config.database = MakeIntegrationConnectionConfig().database;
+  table_config.name = "ddl_drop_unique_key";
+  table_config.primary_key = "id";
+  table_config.text_source.column = "content";
+  auto before = DDLSchemaValidator::Capture(connection, table_config);
+
+  // The standalone spelling reaches the same post-DDL validation as ALTER TABLE ... DROP INDEX.
+  const std::string drop_index = "DROP INDEX uq_id ON ddl_drop_unique_key";
+  EXPECT_EQ(FindConfiguredTableDDL(ClassifyQueryEvent(drop_index), table_config.database, table_config),
+            DDLType::kAlter);
+  ASSERT_TRUE(connection.ExecuteUpdate(drop_index));
+  auto after = DDLSchemaValidator::Capture(connection, table_config);
+  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE ddl_drop_unique_key"));
+
+  ASSERT_TRUE(before) << before.error().message();
+  EXPECT_FALSE(after) << "a primary-key column that is no longer unique must fail validation";
 }
 
 }  // namespace

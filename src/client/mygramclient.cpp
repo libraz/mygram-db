@@ -23,7 +23,6 @@
 #endif
 
 #include <array>
-#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
@@ -78,10 +77,10 @@ constexpr int kSendFlags = 0;
 #endif
 
 std::string TrimAsciiWhitespace(std::string_view value) {
-  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+  while (!value.empty() && detail::IsAsciiSpace(static_cast<unsigned char>(value.front()))) {
     value.remove_prefix(1);
   }
-  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())) != 0) {
+  while (!value.empty() && detail::IsAsciiSpace(static_cast<unsigned char>(value.back()))) {
     value.remove_suffix(1);
   }
   return std::string(value);
@@ -357,11 +356,11 @@ std::optional<std::vector<std::pair<std::string, std::string>>> ParseKeyValuePai
   std::vector<std::pair<std::string, std::string>> pairs;
   size_t pos = 0;
   while (pos < str.size()) {
-    while (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) != 0) {
+    while (pos < str.size() && detail::IsAsciiSpace(static_cast<unsigned char>(str[pos]))) {
       ++pos;
     }
     const size_t key_start = pos;
-    while (pos < str.size() && str[pos] != '=' && std::isspace(static_cast<unsigned char>(str[pos])) == 0) {
+    while (pos < str.size() && str[pos] != '=' && !detail::IsAsciiSpace(static_cast<unsigned char>(str[pos]))) {
       ++pos;
     }
     if (pos >= str.size() || str[pos] != '=') {
@@ -373,7 +372,7 @@ std::optional<std::vector<std::pair<std::string, std::string>>> ParseKeyValuePai
 
     std::string value;
     // An empty value is always quoted on the wire, so a bare '=' before whitespace is an empty bare token.
-    if (pos < str.size() && std::isspace(static_cast<unsigned char>(str[pos])) == 0 &&
+    if (pos < str.size() && !detail::IsAsciiSpace(static_cast<unsigned char>(str[pos])) &&
         !detail::ParseWireToken(str, pos, value)) {
       return std::nullopt;
     }
@@ -391,7 +390,7 @@ std::optional<std::vector<std::pair<std::string, std::string>>> ParseKeyValuePai
  */
 std::optional<std::string> ValidateNoControlCharacters(const std::string& value, const char* field_name) {
   for (unsigned char character : value) {
-    if (std::iscntrl(character) != 0) {
+    if (detail::IsAsciiControl(character)) {
       std::ostringstream oss;
       oss << "Input for " << field_name << " contains control character 0x" << std::uppercase << std::hex
           << std::setw(2) << std::setfill('0') << static_cast<int>(character) << ", which is not allowed";
@@ -421,7 +420,7 @@ std::optional<std::string> ValidateIdentifier(const std::string& value, const ch
   }
   for (size_t pos = 0; pos < value.size(); ++pos) {
     const auto character = static_cast<unsigned char>(value[pos]);
-    if (std::iscntrl(character) != 0) {
+    if (detail::IsAsciiControl(character)) {
       std::ostringstream oss;
       oss << "Input for " << field_name << " contains control character 0x" << std::uppercase << std::hex
           << std::setw(2) << std::setfill('0') << static_cast<int>(character) << ", which is not allowed";
@@ -967,7 +966,7 @@ class MygramClient::Impl {
       std::string token;
       while (true) {
         while (header_pos < header_line.size() &&
-               std::isspace(static_cast<unsigned char>(header_line[header_pos])) != 0) {
+               detail::IsAsciiSpace(static_cast<unsigned char>(header_line[header_pos]))) {
           ++header_pos;
         }
         if (header_pos >= header_line.size()) {
@@ -1579,26 +1578,30 @@ class MygramClient::Impl {
       }
 
       std::string status;
+      std::string status_filepath;
       std::string result_filepath;
       std::string error_message;
       for (const auto& [key, value] : ParseColonKeyValueLines(*status_result)) {
         if (key == "status") {
           status = value;
+        } else if (key == "filepath") {
+          status_filepath = value;
         } else if (key == "result_filepath") {
-          result_filepath = value;
-        } else if (key == "filepath" && result_filepath.empty()) {
           result_filepath = value;
         } else if (key == "error") {
           error_message = value;
         }
       }
 
-      if (status == "COMPLETED") {
-        return result_filepath.empty() ? started_filepath : result_filepath;
-      }
-      if (status == "FAILED") {
-        return MakeUnexpected(
-            MakeError(ErrorCode::kClientServerError, error_message.empty() ? "DUMP SAVE failed" : error_message));
+      // DUMP STATUS is server-wide: only a terminal record for the file this save started is its own result.
+      if (status_filepath == started_filepath) {
+        if (status == "COMPLETED") {
+          return result_filepath.empty() ? started_filepath : result_filepath;
+        }
+        if (status == "FAILED") {
+          return MakeUnexpected(
+              MakeError(ErrorCode::kClientServerError, error_message.empty() ? "DUMP SAVE failed" : error_message));
+        }
       }
 
       std::this_thread::sleep_for(kDumpStatusPollInterval);

@@ -756,17 +756,21 @@ void FilterIndex::Clear() {
 
 size_t FilterIndex::MemoryUsage() const {
   std::shared_lock lock(mutex_);
-  size_t total = 0;
+  // Slots (key, value and one control byte) via capacity(), plus each string's capacity() as DocumentStore does.
+  constexpr size_t kControlByteSize = 1;
+  size_t total = eq_bitmaps_.capacity() * (sizeof(decltype(eq_bitmaps_)::value_type) + kControlByteSize);
   for (const auto& [column, value_map] : eq_bitmaps_) {
-    total += column.size() + column.capacity();
+    total += column.capacity();
+    total += value_map.capacity() * (sizeof(ValueBitmapMap::value_type) + kControlByteSize);
     for (const auto& [key, bm] : value_map) {
-      total += key.size() + key.capacity();
+      total += key.capacity();
       total += roaring_bitmap_portable_size_in_bytes(bm.get());
     }
   }
+  total += column_ref_counts_.capacity() * (sizeof(decltype(column_ref_counts_)::value_type) + kControlByteSize);
   for (const auto& [column, count] : column_ref_counts_) {
     (void)count;
-    total += sizeof(decltype(column_ref_counts_)::value_type) + column.capacity();
+    total += column.capacity();
   }
   return total;
 }

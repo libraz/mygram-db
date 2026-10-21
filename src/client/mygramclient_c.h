@@ -11,8 +11,10 @@
  * A handle may be shared by threads. Connection lifecycle calls and commands
  * are serialized; disconnect waits for an in-flight command and does not
  * cancel it. mygramclient_destroy() must not race with another handle call.
- * Error-state access is synchronized and mygramclient_get_last_error() returns
- * a thread-local snapshot that remains valid until that thread calls it again.
+ * The error state is per handle and the last writer wins: when threads share a
+ * handle, mygramclient_get_last_error() may describe another thread's call.
+ * Its returned string is a thread-local snapshot that remains valid until that
+ * thread calls it again.
  * On failure, writable pointer out-parameters are set to NULL and numeric
  * out-parameters are set to zero. No C++ exception crosses this C ABI:
  * unexpected failures are translated to the documented failure return, safe
@@ -138,7 +140,7 @@ typedef struct {
   const MygramFilter_C* filters;
   size_t filter_count;
   const char* sort_column;
-  int sort_desc;
+  int sort_desc;            // 0 or positive = descending (default), negative = ascending
   uint32_t fuzzy_distance;  // 0 = disabled; otherwise 1 or 2
   int highlight;
   const char* highlight_open_tag;
@@ -610,7 +612,7 @@ void mygramclient_free_string(char* str);
  * @brief Parsed search expression components
  */
 typedef struct {
-  char* main_term;   // Main search term (first required or optional term)
+  char* main_term;   // Main search term (first required term)
   char** and_terms;  // Array of additional required terms (AND)
   size_t and_count;  // Number of AND terms
   char** not_terms;  // Array of excluded terms (NOT)

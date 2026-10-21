@@ -34,8 +34,27 @@ InvalidationQueue::~InvalidationQueue() {
   Stop();
 }
 
+NgramSetting InvalidationQueue::NgramSettingFor(const std::string& table_name) const {
+  auto config_iter = ngram_configs_.find(table_name);
+  if (config_iter == ngram_configs_.end()) {
+    return NgramSetting{index::kDefaultNgramSize, index::kDefaultKanjiNgramSize, /*cross_boundary_ngrams=*/true};
+  }
+  return NgramSetting{config_iter->second.ngram_size, config_iter->second.kanji_ngram_size,
+                      config_iter->second.cross_boundary_ngrams};
+}
+
+ChangedNgrams InvalidationQueue::PrecomputeChangedNgrams(const std::string& table_name, const std::string& old_text,
+                                                         const std::string& new_text) const {
+  if (invalidation_mgr_ == nullptr) {
+    return {};
+  }
+  const auto [ngram_size, kanji_ngram_size, cross_boundary_ngrams] = NgramSettingFor(table_name);
+  return invalidation_mgr_->PrecomputeChangedNgrams(table_name, old_text, new_text, ngram_size, kanji_ngram_size,
+                                                    cross_boundary_ngrams);
+}
+
 void InvalidationQueue::Enqueue(const std::string& table_name, const std::string& old_text, const std::string& new_text,
-                                bool filter_columns_changed) {
+                                bool filter_columns_changed, const ChangedNgrams* precomputed) {
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     if (stopped_.load()) {
@@ -48,21 +67,14 @@ void InvalidationQueue::Enqueue(const std::string& table_name, const std::string
   }
 
   // Get ngram settings for this specific table
-  int ngram_size = index::kDefaultNgramSize;
-  int kanji_ngram_size = index::kDefaultKanjiNgramSize;
-  bool cross_boundary_ngrams = true;  // Default
-  auto config_iter = ngram_configs_.find(table_name);
-  if (config_iter != ngram_configs_.end()) {
-    ngram_size = config_iter->second.ngram_size;
-    kanji_ngram_size = config_iter->second.kanji_ngram_size;
-    cross_boundary_ngrams = config_iter->second.cross_boundary_ngrams;
-  }
+  const auto [ngram_size, kanji_ngram_size, cross_boundary_ngrams] = NgramSettingFor(table_name);
 
   // Step 1: Immediate invalidation (mark entries)
   std::unordered_set<CacheEntryIdentity> affected_entries;
   if (invalidation_mgr_ != nullptr) {
-    affected_entries = invalidation_mgr_->InvalidateAffectedEntryIdentities(
-        table_name, old_text, new_text, ngram_size, kanji_ngram_size, cross_boundary_ngrams, filter_columns_changed);
+    affected_entries = invalidation_mgr_->InvalidateAffectedEntryIdentities(table_name, old_text, new_text, ngram_size,
+                                                                            kanji_ngram_size, cross_boundary_ngrams,
+                                                                            filter_columns_changed, precomputed);
   }
 
   // Step 2: Queue for deferred deletion or process immediately

@@ -155,9 +155,8 @@ void SearchHandler::PopulatePostPipelineDebugInfo(const query::Query& query,
   output.debug_info.index_time_ms = pipeline_output.query_time_ms;
 
   // Map the pipeline's authoritative miss reason to the debug protocol's
-  // CacheDebugInfo::Status. The pipeline distinguishes Stale vs NotFound vs
-  // Disabled; we collapse Stale and Disabled into the matching debug enums
-  // and report NotFound otherwise.
+  // CacheDebugInfo::Status. Stale and Invalidated both report invalidated,
+  // Disabled reports disabled, and everything else reports not_found.
   switch (pipeline_output.cache_miss_reason) {
     case search_pipeline::CacheMissReason::kHit:
       // Should not reach here: the cache-hit branch is handled by
@@ -166,6 +165,7 @@ void SearchHandler::PopulatePostPipelineDebugInfo(const query::Query& query,
       output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
       break;
     case search_pipeline::CacheMissReason::kStale:
+    case search_pipeline::CacheMissReason::kInvalidated:
       output.debug_info.cache_info.status = query::CacheDebugInfo::Status::MISS_INVALIDATED;
       output.debug_info.cache_info.query_cost_ms = output.query_time_ms;
       break;

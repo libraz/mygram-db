@@ -159,7 +159,7 @@ mygram::utils::Expected<void, mygram::utils::Error> InitialLoader::LoadInternal(
         .Field("primary_key", table_config_.primary_key)
         .Field("error", error_msg)
         .Error();
-    return MakeUnexpected(MakeError(ErrorCode::kStorageSnapshotBuildFailed, error_msg));
+    return MakeUnexpected(MakeError(validate_result.error().code(), error_msg));
   }
 
   start_gtid_.clear();

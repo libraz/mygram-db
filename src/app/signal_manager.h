@@ -8,6 +8,7 @@
 
 #include <signal.h>
 
+#include <atomic>
 #include <csignal>
 #include <memory>
 
@@ -23,19 +24,21 @@ using mygram::utils::Expected;
 /**
  * @brief Signal flags (async-signal-safe)
  *
- * This struct contains only sig_atomic_t flags that can be safely
- * modified by signal handlers. It must remain POD (Plain Old Data).
+ * This struct contains only lock-free atomic flags, which signal handlers may
+ * modify and any thread may read or consume without a data race, whichever
+ * thread the process-directed signal is delivered to.
  *
  * Note: Global state is unavoidable for POSIX signal handlers because:
  * - Signal handlers must be async-signal-safe
  * - Cannot use mutexes, heap allocations, or member access
- * - sig_atomic_t provides atomic read/write guarantees
  */
 struct SignalFlags {
+  static_assert(std::atomic<int>::is_always_lock_free, "signal flags must be lock-free to be async-signal-safe");
+
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-  volatile std::sig_atomic_t shutdown_requested = 0;
+  std::atomic<int> shutdown_requested{0};
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-  volatile std::sig_atomic_t log_reopen_requested = 0;
+  std::atomic<int> log_reopen_requested{0};
 };
 
 /**
@@ -45,7 +48,7 @@ struct SignalFlags {
  * Uses static storage for signal flags (unavoidable for async-signal-safety).
  *
  * Thread Safety:
- * - Signal handlers write to sig_atomic_t flags (atomic by definition)
+ * - Signal handlers write to lock-free atomic flags
  * - Application thread reads flags via member methods (safe polling)
  * - No mutexes or locks required
  *
@@ -111,7 +114,8 @@ class SignalManager {
    * @brief Check if log reopen was requested (SIGUSR1)
    * @return True if log reopen signal was received
    *
-   * This method reads and clears the log_reopen_requested flag.
+   * This method reads and clears the log_reopen_requested flag in one atomic
+   * exchange, so a signal arriving on any thread is never lost.
    * Typical usage: poll in main loop, then reopen log files.
    * Used for log rotation: mv log log.1 && kill -USR1 pid
    */

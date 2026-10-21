@@ -390,34 +390,14 @@ Expected<void, Error> WriteDumpV1(
     // Remove any existing temp file
     std::filesystem::remove(temp_filepath, error_code);
 
-    // SECURITY: Open temp file with O_NOFOLLOW to prevent symlink attacks (TOCTOU protection)
-    // O_CREAT | O_EXCL: Fail if file already exists (atomic creation)
-    // O_NOFOLLOW: Fail if the file is a symbolic link
-    // S_IRUSR | S_IWUSR: Set permissions to 600 (rw-------)
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX open() requires varargs for mode
-    int file_descriptor = open(temp_filepath.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    if (file_descriptor < 0) {
-      LogStorageError("create_temp_file", temp_filepath, std::strerror(errno));
+    // SECURITY: The temp is created O_EXCL | O_NOFOLLOW with mode 600 and verified owned by this user
+    auto created_temp = writer.CreateDumpTempFile();
+    if (!created_temp) {
+      LogStorageError("create_temp_file", temp_filepath, created_temp.error().message());
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
+    const int file_descriptor = *created_temp;
     FDGuard fd_guard(file_descriptor);
-
-    // Verify ownership (file must be owned by current process user)
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): stat struct is filled by fstat()
-    struct stat file_stat {};
-    if (fstat(file_descriptor, &file_stat) != 0 || file_stat.st_uid != geteuid()) {
-      StructuredLog()
-          .Event("storage_security_error")
-          .Field("type", "ownership_verification_failed")
-          .Field("filepath", temp_filepath)
-          .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-    }
-
-    if (auto result = writer.TrackDumpTempFile(file_descriptor); !result) {
-      LogStorageError("track_dump_temp", temp_filepath, result.error().message());
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-    }
 
     // SECURITY: Use the already-open file descriptor directly to prevent TOCTOU attacks.
     // Closing the fd and reopening by path would allow an attacker to replace the file
@@ -654,6 +634,8 @@ Expected<void, Error> WriteDumpV1(
     }
     // Calculate file size from the verified fd and patch header fields in place.
     // Reopening temp_filepath by name here would reintroduce a TOCTOU window.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): stat struct is filled by fstat()
+    struct stat file_stat {};
     if (fstat(file_descriptor, &file_stat) != 0) {
       LogStorageError("stat_temp_file", temp_filepath, std::strerror(errno));
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));

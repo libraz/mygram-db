@@ -21,9 +21,11 @@ namespace mygramdb::config::internal {
 
 /**
  * @brief Parse and validate one scalar runtime value against its built-in schema leaf.
+ * @param custom_schema Operator schema document; when non-empty, its leaf for @p dotted_key also applies
  */
 mygram::utils::Expected<nlohmann::json, mygram::utils::Error> ValidateConfigValue(std::string_view dotted_key,
-                                                                                  std::string_view raw_value);
+                                                                                  std::string_view raw_value,
+                                                                                  const std::string& custom_schema);
 
 /**
  * @brief Validate constraints that apply to the completed configuration state.

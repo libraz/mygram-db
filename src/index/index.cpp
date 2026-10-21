@@ -112,6 +112,8 @@ bool Index::AddDocument(DocId doc_id, std::string_view text) {
     return false;
   }
 
+  MarkIndexed({doc_id});
+
   // Add document to posting list for each unique n-gram
   for (const auto& ngram : ngrams) {
     AddToPostingList(ngram, doc_id);
@@ -137,6 +139,7 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
   // Step 1: Generate n-grams for all documents (no locking, CPU-intensive)
   // Map: term -> vector of doc_ids containing that term
   absl::flat_hash_map<std::string, std::vector<DocId>> term_to_docs;
+  std::vector<DocId> indexed_doc_ids;
 
   for (const auto& doc : documents) {
     // Generate n-grams
@@ -160,7 +163,10 @@ void Index::AddDocumentBatch(const std::vector<DocumentItem>& documents) {
     for (const auto& ngram : ngrams) {
       term_to_docs[ngram].push_back(doc.doc_id);
     }
+    indexed_doc_ids.push_back(doc.doc_id);
   }
+
+  MarkIndexed(indexed_doc_ids);
 
   // Step 2: Sort doc_ids for each term (enables batch insertion optimization)
   for (auto& [term, doc_ids] : term_to_docs) {
@@ -214,7 +220,14 @@ void Index::UpdateDocument(DocId doc_id, std::string_view old_text, std::string_
     }
   }
 
+  if (new_ngrams.empty()) {
+    UnmarkIndexed(doc_id);
+  }
+
   // Add doc to new n-grams
+  if (!to_add.empty()) {
+    MarkIndexed({doc_id});
+  }
   for (const auto& ngram : to_add) {
     AddToPostingList(ngram, doc_id);
   }
@@ -243,6 +256,7 @@ void Index::RemoveDocument(DocId doc_id, std::string_view text) {
       empty_lists_removed++;
     }
   }
+  UnmarkIndexed(doc_id);
 
   mygram::utils::StructuredLog()
       .Event("document_removed")
@@ -256,6 +270,15 @@ void Index::PurgeDocument(DocId doc_id) {
   std::vector<std::string> terms;
   {
     std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+    {
+      std::lock_guard<std::mutex> docs_lock(indexed_docs_mutex_);
+      if (EnsureIndexedDocsLocked() && !roaring_bitmap_contains(indexed_docs_.get(), doc_id)) {
+        return;
+      }
+    }
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+    purge_scan_count_.fetch_add(1, std::memory_order_relaxed);
+#endif
     for (const auto& [term, posting] : term_postings_) {
       if (posting->Contains(doc_id)) {
         terms.push_back(term);
@@ -269,6 +292,8 @@ void Index::PurgeDocument(DocId doc_id) {
       empty_lists_removed++;
     }
   }
+
+  UnmarkIndexed(doc_id);
 
   mygram::utils::StructuredLog()
       .Event("document_purged")
@@ -638,6 +663,58 @@ std::vector<DocId> Index::SearchByThreshold(const std::vector<std::string>& term
   return result;  // Already sorted (roaring guarantees sorted order)
 }
 
+bool Index::MayHavePostings(DocId doc_id) const {
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+  std::lock_guard<std::mutex> docs_lock(indexed_docs_mutex_);
+  return !EnsureIndexedDocsLocked() || roaring_bitmap_contains(indexed_docs_.get(), doc_id);
+}
+
+bool Index::EnsureIndexedDocsLocked() const {
+  const uint64_t generation = load_generation_.load(std::memory_order_acquire);
+  if (indexed_docs_ != nullptr && indexed_docs_generation_ == generation) {
+    return true;
+  }
+  mygramdb::utils::RoaringBitmapPtr rebuilt = mygramdb::utils::MakeEmptyRoaring();
+  if (rebuilt == nullptr) {
+    return false;
+  }
+  for (const auto& [term, posting] : term_postings_) {
+    const std::vector<DocId> doc_ids = posting->GetAll();
+    roaring_bitmap_add_many(rebuilt.get(), doc_ids.size(), doc_ids.data());
+  }
+  indexed_docs_ = std::move(rebuilt);
+  indexed_docs_generation_ = generation;
+  return true;
+}
+
+void Index::MarkIndexed(const std::vector<DocId>& doc_ids) {
+  if (doc_ids.empty()) {
+    return;
+  }
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+  std::lock_guard<std::mutex> docs_lock(indexed_docs_mutex_);
+  // An unallocatable bitmap stays invalid, which keeps every purge on the full scan.
+  if (EnsureIndexedDocsLocked()) {
+    roaring_bitmap_add_many(indexed_docs_.get(), doc_ids.size(), doc_ids.data());
+  }
+}
+
+void Index::UnmarkIndexed(DocId doc_id) {
+  std::shared_lock<std::shared_mutex> lock(postings_mutex_);
+  std::lock_guard<std::mutex> docs_lock(indexed_docs_mutex_);
+  if (EnsureIndexedDocsLocked()) {
+    roaring_bitmap_remove(indexed_docs_.get(), doc_id);
+  }
+}
+
+size_t Index::IndexedDocsMemoryUsageLocked() const {
+  std::lock_guard<std::mutex> docs_lock(indexed_docs_mutex_);
+  if (indexed_docs_ == nullptr) {
+    return 0;
+  }
+  return roaring_bitmap_portable_size_in_bytes(indexed_docs_.get());
+}
+
 uint64_t Index::PostingSize(std::string_view term) const {
   // RCU pattern: Take snapshot under short lock, then access without lock
   auto snapshot = TakePostingSnapshot(term);
@@ -682,7 +759,7 @@ size_t Index::PostingMemoryUsageLocked(const std::string& term, const PostingLis
 
 size_t Index::MemoryUsage() const {
   std::shared_lock<std::shared_mutex> lock(postings_mutex_);
-  size_t total = PostingMapMemoryUsageLocked();
+  size_t total = PostingMapMemoryUsageLocked() + IndexedDocsMemoryUsageLocked();
   for (const auto& [term, posting] : term_postings_) {
     total += PostingMemoryUsageLocked(term, *posting);
   }
@@ -696,7 +773,7 @@ Index::IndexStatistics Index::GetStatistics() const {
   stats.total_postings = 0;
   stats.delta_encoded_lists = 0;
   stats.roaring_bitmap_lists = 0;
-  stats.memory_usage_bytes = PostingMapMemoryUsageLocked();
+  stats.memory_usage_bytes = PostingMapMemoryUsageLocked() + IndexedDocsMemoryUsageLocked();
 
   for (const auto& [term, posting] : term_postings_) {
     // Count postings (no inner lock — outer shared lock is sufficient)
@@ -720,6 +797,7 @@ void Index::Clear() {
   std::unique_lock<std::shared_mutex> lock(postings_mutex_);
   term_postings_.clear();
   load_generation_.fetch_add(1, std::memory_order_acq_rel);
+  indexed_docs_.reset();
   mygram::utils::StructuredLog().Event("index_cleared").Info();
 }
 
@@ -735,8 +813,15 @@ void Index::ReplaceWithLoaded(Index& loaded) {
   // commit (Index + DocumentStore + replication restart) if a later step
   // fails. The loaded object retains the previous live postings until the
   // transaction is known to be durable.
+  const bool target_docs_valid = indexed_docs_generation_ == load_generation_.load(std::memory_order_acquire);
+  const bool loaded_docs_valid =
+      loaded.indexed_docs_generation_ == loaded.load_generation_.load(std::memory_order_acquire);
   term_postings_.swap(loaded.term_postings_);
+  indexed_docs_.swap(loaded.indexed_docs_);
   load_generation_.fetch_add(1, std::memory_order_acq_rel);
+  indexed_docs_generation_ = loaded_docs_valid ? load_generation_.load(std::memory_order_acquire) : kIndexedDocsInvalid;
+  loaded.indexed_docs_generation_ =
+      target_docs_valid ? loaded.load_generation_.load(std::memory_order_acquire) : kIndexedDocsInvalid;
 }
 
 void Index::AddToPostingList(std::string_view term, DocId doc_id) {

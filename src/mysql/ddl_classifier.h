@@ -34,12 +34,22 @@ enum class DDLType : uint8_t {
   kUnknown = 0,   ///< Not a table DDL statement
   kTruncate,      ///< TRUNCATE [TABLE] t
   kCreate,        ///< CREATE TABLE t
-  kAlter,         ///< ALTER TABLE t that keeps every row in place
+  kAlter,         ///< ALTER TABLE t, or CREATE|DROP INDEX ... ON t, that keeps every row in place
   kDrop,          ///< DROP TABLE|TABLES t [, ...]
   kRename,        ///< RENAME TABLE|TABLES a TO b [, ...], or ALTER TABLE a RENAME b
   kDropDatabase,  ///< DROP DATABASE|SCHEMA db
   kRowsReplaced,  ///< Removes, replaces or moves rows without row events (partition and tablespace
                   ///< maintenance, CREATE OR REPLACE TABLE)
+};
+
+/**
+ * @brief Transaction control a statement performs
+ */
+enum class TransactionControl : uint8_t {
+  kNone = 0,  ///< Neither opens nor closes a transaction
+  kBegin,     ///< BEGIN, START TRANSACTION, or CREATE TABLE ... START TRANSACTION (rows and an XID complete it)
+  kEnd,       ///< COMMIT or ROLLBACK [WORK]; ROLLBACK [WORK] TO [SAVEPOINT] is not an end
+  kXa,        ///< Any XA statement
 };
 
 /**
@@ -74,7 +84,7 @@ struct DdlStatement {
   std::string verb;                 ///< First token, ASCII-uppercased, when it is a word
   std::string object;               ///< Second token, ASCII-uppercased, when it is a word
   bool malformed = false;           ///< Starts like a table DDL but its table names could not all be read
-  bool starts_transaction = false;  ///< CREATE TABLE ... START TRANSACTION: rows and an XID complete it
+  TransactionControl transaction = TransactionControl::kNone;
 };
 
 /**
@@ -141,7 +151,13 @@ bool NamesConfiguredTable(const DdlStatement& statement, std::string_view event_
                           const config::TableConfig& table_config, bool names_case_insensitive = false);
 
 /**
- * @brief DDL type of the first statement that names the configured table
+ * @brief DDL type that the statements naming the configured table apply to it
+ *
+ * Every statement counts, so a benign statement cannot hide a later destructive
+ * one: the most destructive type wins (kRowsReplaced, kDropDatabase, kDrop,
+ * kRename, kTruncate, then kAlter and kCreate). TRUNCATE together with a schema
+ * change is reported as kUnknown, which no consumer treats as safe.
+ *
  * @return std::nullopt when no statement names it
  */
 std::optional<DDLType> FindConfiguredTableDDL(const std::vector<DdlStatement>& statements,

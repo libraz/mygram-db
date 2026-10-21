@@ -314,6 +314,20 @@ TEST(NetworkUtilsTest, IsIPAllowedSupportsMappedCidrsWithBothAclOverloads) {
   EXPECT_FALSE(IsIPAllowed("2001:db9::5", parsed_native_ipv6_cidrs));
 }
 
+TEST(NetworkUtilsTest, ZeroLengthPrefixOfEitherFamilyAdmitsEveryPeer) {
+  const std::vector<std::string> peers = {"127.0.0.1", "203.0.113.7", "::1", "2001:db8::5", "::ffff:192.0.2.1"};
+  for (const char* universal : {"0.0.0.0/0", "::/0"}) {
+    const std::vector<std::string> cidrs = {universal};
+    const auto parsed = ParseAllowCidrs(cidrs);
+    ASSERT_EQ(parsed.size(), 1U) << universal;
+    for (const auto& peer : peers) {
+      EXPECT_TRUE(IsIPAllowed(peer, cidrs)) << universal << " must admit " << peer;
+      EXPECT_TRUE(IsIPAllowed(peer, parsed)) << universal << " must admit " << peer;
+    }
+    EXPECT_FALSE(IsIPAllowed("unknown", parsed)) << "a non-address peer stays denied";
+  }
+}
+
 TEST(NetworkUtilsTest, ParseAllowCidrs_ValidEntries) {
   std::vector<std::string> cidrs = {"192.168.1.0/24", "10.0.0.0/8"};
   auto parsed = ParseAllowCidrs(cidrs);

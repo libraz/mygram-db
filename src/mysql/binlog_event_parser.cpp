@@ -14,10 +14,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cstdio>
 #include <cstring>
-#include <sstream>
 #include <string_view>
 
 #include "mysql/binlog_event_disposition.h"
@@ -94,8 +92,10 @@ size_t PackedIntegerSize(uint8_t first_byte) {
   return 9;
 }
 
-bool IsCommitStatement(std::string_view query) {
-  return mygram::utils::ToUpper(mygram::utils::TrimAsciiWhitespaceView(query)) == "COMMIT";
+/// COMMIT [WORK] [AND [NO] CHAIN] [[NO] RELEASE] as the event's first statement
+bool IsCommitStatement(const std::vector<DdlStatement>& statements) {
+  return !statements.empty() && statements.front().transaction == TransactionControl::kEnd &&
+         statements.front().verb == "COMMIT";
 }
 
 // ============================================================================
@@ -912,30 +912,30 @@ std::vector<BinlogEvent> BinlogEventParser::ParseBinlogEvent(
           .Field("query", query_data.query)
           .Debug();
 
-      if (!current_gtid.empty() && IsCommitStatement(query_data.query)) {
-        BinlogEvent event;
-        event.type = BinlogEventType::COMMIT;
-        event.gtid = current_gtid;
-        return {event};
-      }
-
-      // Check if this affects any of our target tables
-      // The DDL a configured table sees is the first one found under any mode the
-      // statement may have been logged with.
       const std::vector<QueryLexOptions> modes = LexModes(query_data);
       std::vector<std::vector<DdlStatement>> statements_by_mode;
       statements_by_mode.reserve(modes.size());
       for (const QueryLexOptions& mode : modes) {
         statements_by_mode.push_back(ClassifyQueryEvent(query_data.query, mode));
       }
+
+      if (!current_gtid.empty() && std::all_of(statements_by_mode.begin(), statements_by_mode.end(),
+                                               [](const auto& statements) { return IsCommitStatement(statements); })) {
+        BinlogEvent event;
+        event.type = BinlogEventType::COMMIT;
+        event.gtid = current_gtid;
+        return {event};
+      }
+
+      // The DDL a configured table sees is the most destructive one any statement
+      // applies to it under any mode the event may have been logged with.
+      std::vector<DdlStatement> statements_in_every_mode;
+      for (const auto& statements : statements_by_mode) {
+        statements_in_every_mode.insert(statements_in_every_mode.end(), statements.begin(), statements.end());
+      }
       const auto find_ddl = [&](const config::TableConfig& config) {
-        for (const auto& statements : statements_by_mode) {
-          if (auto match =
-                  FindConfiguredTableDDL(statements, query_data.database, config, table_names_case_insensitive)) {
-            return match;
-          }
-        }
-        return std::optional<DDLType>{};
+        return FindConfiguredTableDDL(statements_in_every_mode, query_data.database, config,
+                                      table_names_case_insensitive);
       };
       if (multi_table_mode) {
         // Multi-table mode: check all registered tables
@@ -1617,35 +1617,23 @@ std::optional<QueryEventData> BinlogEventParser::ExtractQueryString(const unsign
 
 BinlogEventParser::QueryTransactionBoundary BinlogEventParser::ClassifyQueryTransactionBoundary(
     std::string_view query, QueryLexOptions lex_options) {
-  std::string normalized = mygram::utils::ToUpper(mygram::utils::TrimAsciiWhitespaceView(query));
-  while (!normalized.empty() &&
-         (normalized.back() == ';' || std::isspace(static_cast<unsigned char>(normalized.back())) != 0)) {
-    normalized.pop_back();
+  const auto statements = ClassifyQueryEvent(query, lex_options);
+  if (statements.empty()) {
+    return QueryTransactionBoundary::kNone;
   }
-
-  std::istringstream tokens(normalized);
-  std::string first;
-  std::string second;
-  tokens >> first >> second;
-  if (first == "XA") {
-    // XA PREPARE is logged as a separate transaction group and may later be
-    // rolled back. The current materializer has no prepared-state staging,
-    // so every XA form is rejected by the reader before any row event can be
-    // published. XA BEGIN is a valid alias of XA START.
-    return QueryTransactionBoundary::kUnsupportedXa;
-  }
-  if (first == "BEGIN" || (first == "START" && second == "TRANSACTION")) {
-    return QueryTransactionBoundary::kBegin;
-  }
-  if (first == "CREATE") {
-    // CREATE TABLE ... SELECT is logged as CREATE TABLE ... START TRANSACTION, then the rows and an XID.
-    const auto statements = ClassifyQueryEvent(query, lex_options);
-    if (!statements.empty() && statements.front().starts_transaction) {
+  switch (statements.front().transaction) {
+    case TransactionControl::kXa:
+      // XA PREPARE is logged as a separate transaction group and may later be
+      // rolled back. The current materializer has no prepared-state staging,
+      // so every XA form is rejected by the reader before any row event can be
+      // published.
+      return QueryTransactionBoundary::kUnsupportedXa;
+    case TransactionControl::kBegin:
       return QueryTransactionBoundary::kBegin;
-    }
-  }
-  if (first == "COMMIT" || (first == "ROLLBACK" && second != "TO")) {
-    return QueryTransactionBoundary::kEnd;
+    case TransactionControl::kEnd:
+      return QueryTransactionBoundary::kEnd;
+    case TransactionControl::kNone:
+      return QueryTransactionBoundary::kNone;
   }
   return QueryTransactionBoundary::kNone;
 }

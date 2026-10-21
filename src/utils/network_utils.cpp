@@ -80,14 +80,19 @@ bool CIDR::Contains(uint32_t ip_addr) const {
 }
 
 bool CIDR::Contains(const std::string& ip_str) const {
+  // 0.0.0.0/0 and ::/0 are the documented allow-all entries for both families.
+  const bool universal = prefix_length == 0 && !ipv4_mapped;
   struct in_addr ipv4_addr = {};
   if (inet_pton(AF_INET, ip_str.c_str(), &ipv4_addr) == 1) {
-    return Contains(ntohl(ipv4_addr.s_addr));
+    return universal || Contains(ntohl(ipv4_addr.s_addr));
   }
 
   struct in6_addr ipv6_addr = {};
   if (inet_pton(AF_INET6, ip_str.c_str(), &ipv6_addr) != 1) {
     return false;
+  }
+  if (universal) {
+    return true;
   }
 
   // A dual-stack AF_INET6 listener commonly reports IPv4 peers this way.
@@ -149,7 +154,9 @@ std::optional<CIDR> CIDR::Parse(const std::string& cidr_str) {
     if (prefix_length < 96) {
       return std::nullopt;
     }
-    return MakeIPv4Cidr(MappedIpv4HostOrder(ipv6_addr), prefix_length - 96);
+    CIDR mapped = MakeIPv4Cidr(MappedIpv4HostOrder(ipv6_addr), prefix_length - 96);
+    mapped.ipv4_mapped = true;
+    return mapped;
   }
 
   CIDR cidr;

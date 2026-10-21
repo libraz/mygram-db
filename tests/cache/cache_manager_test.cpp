@@ -1792,4 +1792,57 @@ TEST(CacheManagerTest, MemoryPressureEvictsAtLeastEvictionBatchSizeEntriesPerPas
   EXPECT_GE(stats.evictions, static_cast<uint64_t>(config.eviction_batch_size));
 }
 
+// A payload rejected as stale is counted as one invalidated miss, reported as
+// stale, and erased so the next Insert of the key is not a duplicate.
+TEST(CacheManagerTest, StaleLookupIsCountedAsAMissAndErasesTheEntry) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.min_query_cost_ms = 0.0;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "stale");
+  ASSERT_TRUE(mgr.Insert(query, {1}, {"sta", "tal", "ale"}, 5.0));
+
+  QueryCache::LookupOutcome outcome = QueryCache::LookupOutcome::kHit;
+  auto looked_up = mgr.LookupWithMetadata(query, [](const std::vector<DocId>& /*payload*/) { return true; }, &outcome);
+  EXPECT_FALSE(looked_up.has_value());
+  EXPECT_EQ(outcome, QueryCache::LookupOutcome::kStale);
+
+  const auto stats = mgr.GetStatistics();
+  EXPECT_EQ(stats.cache_hits, 0U);
+  EXPECT_EQ(stats.cache_misses, 1U);
+  EXPECT_EQ(stats.cache_misses_invalidated, 1U);
+  EXPECT_DOUBLE_EQ(stats.total_query_saved_time_ms, 0.0);
+  EXPECT_EQ(stats.stale_entry_removals, 1U);
+  EXPECT_EQ(stats.current_entries, 0U);
+  EXPECT_TRUE(mgr.Insert(query, {2}, {"sta", "tal", "ale"}, 5.0));
+}
+
+// An entry a data change already marked invalidated reports that outcome, so
+// the caller does not describe it as not found.
+TEST(CacheManagerTest, InvalidatedLookupReportsTheInvalidatedOutcome) {
+  config::CacheConfig config;
+  config.enabled = true;
+  config.max_memory_bytes = 10 * 1024 * 1024;
+  config.min_query_cost_ms = 0.0;
+  // Keep the deferred erase from racing the lookup below.
+  config.invalidation.batch_size = 1000;
+  config.invalidation.max_delay_ms = 60000;
+  CacheManager mgr(config, CreateTestNgramConfigs(3, 2));
+
+  const auto query = CreateQuery("posts", "golang");
+  ASSERT_TRUE(mgr.Insert(query, {1, 2}, {"ang", "gol", "lan", "ola"}, 5.0));
+  mgr.Invalidate("posts", "", "new golang post");
+
+  QueryCache::LookupOutcome outcome = QueryCache::LookupOutcome::kHit;
+  EXPECT_FALSE(mgr.LookupWithMetadata(query, {}, &outcome).has_value());
+  EXPECT_EQ(outcome, QueryCache::LookupOutcome::kInvalidated);
+
+  const auto stats = mgr.GetStatistics();
+  EXPECT_EQ(stats.cache_misses, 1U);
+  EXPECT_EQ(stats.cache_misses_invalidated, 1U);
+  EXPECT_EQ(stats.cache_misses_not_found, 0U);
+}
+
 }  // namespace mygramdb::cache

@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -20,6 +21,8 @@
 #include "config/config.h"
 #include "index/index.h"
 #include "mysql/binlog_reader_interface.h"
+#include "mysql/connection.h"
+#include "mysql/mysql_test_helpers.h"
 #include "server/sync_operation_manager.h"
 #include "server/tcp_server.h"
 #include "storage/document_store.h"
@@ -41,6 +44,11 @@ class MockBinlogReader : public mysql::IBinlogReader {
 
   mygram::utils::Expected<void, mygram::utils::Error> Start() override {
     start_call_count_++;
+    if (on_start_) {
+      auto on_start = std::move(on_start_);
+      on_start_ = nullptr;
+      on_start();
+    }
     running_ = true;
     if (start_should_fail_) {
       running_ = false;
@@ -83,6 +91,8 @@ class MockBinlogReader : public mysql::IBinlogReader {
   void SetRunning(bool running) { running_ = running; }
   void SetGtid(const std::string& gtid) { current_gtid_ = gtid; }
   void SetStartShouldFail(bool fail) { start_should_fail_ = fail; }
+  /// Run @p callback once, inside the next Start() call.
+  void SetOnNextStart(std::function<void()> callback) { on_start_ = std::move(callback); }
 
  private:
   bool running_ = false;
@@ -92,6 +102,7 @@ class MockBinlogReader : public mysql::IBinlogReader {
   int start_call_count_ = 0;
   int stop_call_count_ = 0;
   std::vector<std::string> set_gtid_calls_;
+  std::function<void()> on_start_;
 };
 
 /**
@@ -396,6 +407,102 @@ TEST_F(SyncCancelReplicationTest, StalledSyncRestartsAfterTheSnapshotInsteadOfRe
   // Without a snapshot marker there is no position to skip to, and resuming
   // from an empty GTID would replay the binlog from its start.
   EXPECT_EQ(internal::ChooseSyncRestartGtid(true, "", drained), drained);
+}
+
+/**
+ * @brief Point the fixture at a one-row table on the integration MySQL server
+ * @return false when MySQL integration tests are disabled
+ */
+bool UseIntegrationTable(const std::string& table, std::unordered_map<std::string, TableContext*>& contexts,
+                         std::unordered_map<std::string, std::unique_ptr<TableContext>>& owned,
+                         config::Config& config) {
+  if (!mysql::testing::ShouldRunMySQLIntegrationTests()) {
+    return false;
+  }
+  const auto mysql_config = mysql::testing::GetMySQLTestConfig();
+  mysql::Connection connection(mysql_config);
+  EXPECT_TRUE(connection.Connect("sync-handoff-test"));
+  EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE IF EXISTS " + table));
+  EXPECT_TRUE(connection.ExecuteUpdate("CREATE TABLE " + table + " (id BIGINT PRIMARY KEY, content TEXT NOT NULL)"));
+  EXPECT_TRUE(connection.ExecuteUpdate("INSERT INTO " + table + " VALUES (1, 'hello')"));
+
+  config.mysql.host = mysql_config.host;
+  config.mysql.port = mysql_config.port;
+  config.mysql.user = mysql_config.user;
+  config.mysql.password = mysql_config.password;
+  config.mysql.database = mysql_config.database;
+
+  auto ctx = std::make_unique<TableContext>();
+  ctx->name = table;
+  ctx->config.database = mysql_config.database;
+  ctx->config.name = table;
+  ctx->config.primary_key = "id";
+  ctx->config.text_source.column = "content";
+  ctx->config.ngram_size = 2;
+  ctx->config.kanji_ngram_size = 1;
+  ctx->index = std::make_unique<index::Index>(2, 1);
+  ctx->doc_store = std::make_unique<storage::DocumentStore>();
+  contexts[table] = ctx.get();
+  owned[table] = std::move(ctx);
+  return true;
+}
+
+/**
+ * @brief A hand-off that fails after the swap leaves a stopped reader at the pre-SYNC position
+ *
+ * A reader stalled on an undecodable event is handed the snapshot GTID. When
+ * that hand-off fails and the old table comes back, the reader must come back
+ * to the position the old table was applied up to, or a later REPLICATION
+ * START skips the interval for this table.
+ */
+TEST_F(SyncCancelReplicationTest, FailedHandoffRestoresTheReaderPositionOfAStoppedReader) {
+  const std::string table = "sync_handoff_rollback";
+  if (!UseIntegrationTable(table, table_contexts_ptrs_, table_contexts_, *config_)) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+  const std::string saved = "00000000-0000-0000-0000-000000000001:1-5";
+  mock_reader_->SetRunning(false);
+  mock_reader_->SetGtid(saved);
+  mock_reader_->SetLastErrorForTest(
+      mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent, "compressed event"));
+  mock_reader_->SetStartShouldFail(true);
+
+  auto manager = std::make_unique<SyncOperationManager>(table_contexts_ptrs_, config_.get(), mock_reader_.get());
+  ASSERT_TRUE(manager->StartSync(table));
+  ASSERT_TRUE(manager->WaitForCompletion(20));
+
+  EXPECT_NE(manager->GetSyncStatus().find("status=FAILED"), std::string::npos) << manager->GetSyncStatus();
+  EXPECT_EQ(mock_reader_->GetCurrentGTID(), saved);
+  EXPECT_EQ(table_contexts_[table]->doc_store->Size(), 0U) << "the previous (empty) live table must be restored";
+  manager.reset();
+}
+
+/**
+ * @brief A SYNC STOP acknowledged during the catch-up wait ends CANCELLED, never COMPLETED
+ */
+TEST_F(SyncCancelReplicationTest, StopDuringCatchupWaitCancelsInsteadOfCompleting) {
+  const std::string table = "sync_catchup_stop";
+  if (!UseIntegrationTable(table, table_contexts_ptrs_, table_contexts_, *config_)) {
+    GTEST_SKIP() << "MySQL integration tests are disabled";
+  }
+  // A position on a server that never existed, so the catch-up target is never reached.
+  const std::string saved = "00000000-0000-0000-0000-000000000001:1-5";
+  mock_reader_->SetRunning(true);
+  mock_reader_->SetGtid(saved);
+
+  auto manager = std::make_unique<SyncOperationManager>(table_contexts_ptrs_, config_.get(), mock_reader_.get());
+  std::string stop_reply;
+  mock_reader_->SetOnNextStart([&manager, &stop_reply, &table]() { stop_reply = manager->StopSync(table); });
+  ASSERT_TRUE(manager->StartSync(table));
+  ASSERT_TRUE(manager->WaitForCompletion(20));
+
+  EXPECT_EQ(stop_reply.rfind("OK SYNC CANCELLATION REQUESTED", 0), 0U) << stop_reply;
+  const std::string status = manager->GetSyncStatus();
+  EXPECT_NE(status.find("status=CANCELLED"), std::string::npos) << status;
+  EXPECT_EQ(status.find("status=COMPLETED"), std::string::npos) << status;
+  EXPECT_EQ(mock_reader_->GetCurrentGTID(), saved);
+  EXPECT_EQ(table_contexts_[table]->doc_store->Size(), 0U) << "the previous (empty) live table must be restored";
+  manager.reset();
 }
 
 }  // namespace

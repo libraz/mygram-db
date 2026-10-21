@@ -277,8 +277,6 @@ class QueryParser {
   static constexpr size_t kMaxFilterValueLength = 1024;
   /// Maximum UTF-8 byte length for each HIGHLIGHT TAG argument.
   static constexpr size_t kMaxHighlightTagLength = 256;
-  /// Maximum UTF-8 byte length of a table identity.
-  static constexpr size_t kMaxTableNameLength = 256;
   /// Inclusive bounds accepted for HIGHLIGHT SNIPPET_LEN.
   static constexpr uint32_t kMinSnippetLength = 1;
   static constexpr uint32_t kMaxSnippetLength = 10000;
@@ -296,16 +294,6 @@ class QueryParser {
    * protocol tokens have the same grammar.
    */
   [[nodiscard]] static bool IsSafeColumnName(std::string_view column);
-
-  /**
-   * @brief Whether a table identity is safe to embed in a command string.
-   *
-   * Accepts ASCII letters, digits, `_`, `-` and `.`, plus any well-formed
-   * non-ASCII UTF-8 code point, up to kMaxTableNameLength bytes. Everything
-   * else — ASCII whitespace, control characters and other punctuation — would
-   * inject extra tokens into the command grammar and is rejected.
-   */
-  [[nodiscard]] static bool IsSafeTableName(std::string_view table);
 
   /**
    * @brief Whether a table identity carries a `<database>.<table>` qualifier.

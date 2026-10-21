@@ -85,8 +85,20 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
       return MakeUnexpected(error);
     }
 
-    // Stale socket detection
-    if (access(config_.unix_socket_path.c_str(), F_OK) == 0) {
+    // Stale socket detection. Only a socket entry whose probe connect() is
+    // refused is ever unlinked; anything else at the path aborts startup.
+    struct stat existing_entry {};
+    if (lstat(config_.unix_socket_path.c_str(), &existing_entry) == 0) {
+      if (!S_ISSOCK(existing_entry.st_mode)) {
+        auto error = MakeError(ErrorCode::kNetworkUnixSocketStale,
+                               "Refusing to replace non-socket file at unix socket path: " + config_.unix_socket_path);
+        mygram::utils::StructuredLog()
+            .Event("unix_socket_stale_check_failed")
+            .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
+            .FieldError(error)
+            .Error();
+        return MakeUnexpected(error);
+      }
       int probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
       if (probe_fd < 0) {
         auto error = MakeError(
@@ -115,7 +127,19 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionAcceptor::Start() 
             .Error();
         return MakeUnexpected(error);
       }
+      const int probe_errno = errno;
       close(probe_fd);
+      if (probe_errno != ECONNREFUSED) {
+        auto error = MakeError(ErrorCode::kNetworkUnixSocketStale,
+                               "Cannot verify existing unix socket " + config_.unix_socket_path +
+                                   " is stale: " + std::string(strerror(probe_errno)));
+        mygram::utils::StructuredLog()
+            .Event("unix_socket_stale_check_failed")
+            .Field(log_fields::kFieldFilepath, config_.unix_socket_path)
+            .FieldError(error)
+            .Error();
+        return MakeUnexpected(error);
+      }
       // Stale socket file - remove it
       unlink(config_.unix_socket_path.c_str());
       mygram::utils::StructuredLog()
@@ -483,26 +507,12 @@ void ConnectionAcceptor::AcceptLoop() {
       continue;
     }
 
-    // SECURITY: Check connection limit BEFORE any processing to prevent resource exhaustion
-    {
-      std::lock_guard<std::mutex> lock(fds_mutex_);
-      if (static_cast<int>(active_fds_.size()) >= config_.max_connections) {
-        if (stats_ != nullptr) {
-          stats_->IncrementRequestsDeniedConnectionLimitTcp();
-        }
-        mygram::utils::StructuredLog()
-            .Event("connection_limit_reached")
-            .Field("active_connections", static_cast<uint64_t>(active_fds_.size()))
-            .Field("max_connections", static_cast<uint64_t>(config_.max_connections))
-            .Warn();
-        close(client_fd);
-        continue;
-      }
-    }
-
+    // The ACL runs before the capacity check so a peer outside the allow
+    // list is always counted and logged as an ACL denial.
+    std::string client_ip = "unix";
     if (!IsUnixSocket()) {
       // Convert client IP to string for ACL checks
-      std::string client_ip = mygram::utils::GetPeerIP(client_fd);
+      client_ip = mygram::utils::GetPeerIP(client_fd);
       if (client_ip == "unknown") {
         mygram::utils::StructuredLog().Event("client_address_parse_failed").Warn();
       }
@@ -516,6 +526,28 @@ void ConnectionAcceptor::AcceptLoop() {
           mygram::utils::StructuredLog()
               .Event("connection_rejected_acl")
               .Field(log_fields::kFieldClientIp, client_ip)
+              .Field("suppressed_since_last_log", decision.suppressed_count)
+              .Warn();
+        }
+        close(client_fd);
+        continue;
+      }
+    }
+
+    // SECURITY: Check connection limit before any per-connection setup to prevent resource exhaustion
+    {
+      std::lock_guard<std::mutex> lock(fds_mutex_);
+      if (static_cast<int>(active_fds_.size()) >= config_.max_connections) {
+        if (stats_ != nullptr) {
+          stats_->IncrementRequestsDeniedConnectionLimitTcp();
+        }
+        const auto decision = connection_limit_log_limiter_.Record(client_ip);
+        if (decision.should_log) {
+          mygram::utils::StructuredLog()
+              .Event("connection_limit_reached")
+              .Field(log_fields::kFieldClientIp, client_ip)
+              .Field("active_connections", static_cast<uint64_t>(active_fds_.size()))
+              .Field("max_connections", static_cast<uint64_t>(config_.max_connections))
               .Field("suppressed_since_last_log", decision.suppressed_count)
               .Warn();
         }

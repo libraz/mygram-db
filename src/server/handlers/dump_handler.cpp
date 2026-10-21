@@ -103,6 +103,14 @@ std::string DumpHandler::HandleDumpSave(const query::Query& query) {
     return ResponseFormatter::FormatError(error_msg, mygram::utils::ErrorCode::kServerInitMissingDependency);
   }
 
+  // A table without its initial load would be restored as complete; refuse before any state changes.
+  if (ctx_.initial_data_ready_checker && !ctx_.initial_data_ready_checker()) {
+    return ResponseFormatter::FormatError(
+        "Cannot save dump before every table has completed its initial load. "
+        "Please wait for SYNC to complete.",
+        mygram::utils::ErrorCode::kServerNotReady);
+  }
+
   // Determine filepath
   std::string filepath;
   if (!query.filepath.empty()) {

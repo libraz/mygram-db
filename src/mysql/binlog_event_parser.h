@@ -139,7 +139,8 @@ class BinlogEventParser {
    * completes at the QUERY_EVENT) from statements inside an explicit
    * transaction (whose GTID completes at XID/COMMIT). A CREATE TABLE ... START
    * TRANSACTION statement, which MySQL logs for CREATE TABLE ... SELECT, opens
-   * a transaction that its row events and XID complete.
+   * a transaction that its row events and XID complete. The boundary is the
+   * TransactionControl ClassifyQueryEvent gives the first statement.
    *
    * @param query Query text as logged in the binlog
    * @param lex_options The event's sql_mode bits that change quoting

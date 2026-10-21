@@ -126,6 +126,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     std::unique_ptr<Connection>& metadata_conn;
     std::unique_ptr<IBinlogStream>& stream;
     std::atomic<bool>& should_stop;
+    std::mutex& queue_mutex;
     std::condition_variable& queue_cv;
     std::condition_variable& queue_full_cv;
     bool success = false;
@@ -133,7 +134,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     StartupGuard(std::atomic<bool>& running, std::atomic<bool>& starting, std::unique_ptr<std::thread>& worker,
                  std::unique_ptr<std::thread>& reader, std::unique_ptr<Connection>& conn,
                  std::unique_ptr<Connection>& meta_conn, std::unique_ptr<IBinlogStream>& binlog_stream,
-                 std::atomic<bool>& stop, std::condition_variable& event_cv, std::condition_variable& event_full_cv)
+                 std::atomic<bool>& stop, std::mutex& event_mutex, std::condition_variable& event_cv,
+                 std::condition_variable& event_full_cv)
         : running_flag(running),
           starting_flag(starting),
           worker_thread(worker),
@@ -142,6 +144,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
           metadata_conn(meta_conn),
           stream(binlog_stream),
           should_stop(stop),
+          queue_mutex(event_mutex),
           queue_cv(event_cv),
           queue_full_cv(event_full_cv) {}
 
@@ -152,6 +155,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
       // Failure - clean up all resources
       should_stop = true;
+      { std::scoped_lock lock(queue_mutex); }
       queue_cv.notify_all();
       queue_full_cv.notify_all();
 
@@ -186,7 +190,7 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   };
 
   StartupGuard guard(running_, starting_, worker_thread_, reader_thread_, binlog_connection_, metadata_connection_,
-                     binlog_stream_, should_stop_, queue_cv_, queue_full_cv_);
+                     binlog_stream_, should_stop_, queue_mutex_, queue_cv_, queue_full_cv_);
 
   // Validate server_id (must be non-zero for replication)
   if (config_.server_id == 0) {
@@ -306,6 +310,18 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     }
     configured_schema_baselines_.emplace(table_name, std::move(*schema));
   }
+  // Read after the capture, so every DDL the baselines may reflect is in this set.
+  auto baseline_gtid = metadata_connection_->GetExecutedGTID();
+  if (!baseline_gtid) {
+    SetLastError(baseline_gtid.error());
+    mygram::utils::StructuredLog()
+        .Event("binlog_error")
+        .Field("type", "configured_schema_capture_failed")
+        .Field("error", baseline_gtid.error().message())
+        .Error();
+    return MakeUnexpected(baseline_gtid.error());
+  }
+  schema_baseline_gtid_ = std::move(*baseline_gtid);
 
   // Validate connection before starting replication
   if (!ValidateConnection()) {
@@ -362,14 +378,12 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
       if (!signalled) {
         SetLastError(MakeError(ErrorCode::kMySQLBinlogError, "Timed out opening initial binlog stream"));
         should_stop_.store(true, std::memory_order_release);
-        queue_cv_.notify_all();
-        queue_full_cv_.notify_all();
+        WakeQueueWaiters();
         return MakeUnexpected(GetLastErrorObject());
       }
       if (stream_startup_state_ == StreamStartupState::kFailed) {
         should_stop_.store(true, std::memory_order_release);
-        queue_cv_.notify_all();
-        queue_full_cv_.notify_all();
+        WakeQueueWaiters();
         return MakeUnexpected(GetLastErrorObject());
       }
     }
@@ -425,8 +439,7 @@ void BinlogReader::Stop() {
   should_stop_.store(true, std::memory_order_release);
 
   // Wake up worker thread
-  queue_cv_.notify_all();
-  queue_full_cv_.notify_all();
+  WakeQueueWaiters();
 
   // Note: We cannot call binlog_connection_->Close() from this thread
   // because mysql_close() is not thread-safe when mysql_binlog_fetch()

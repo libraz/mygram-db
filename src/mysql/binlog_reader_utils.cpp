@@ -139,6 +139,15 @@ BinlogReader::DDLSchemaCheck BinlogReader::ValidateSchemaAfterDDL(const BinlogEv
       baseline_iter == configured_schema_baselines_.end()) {
     return incompatible("no startup schema fingerprint exists for the affected table");
   }
+  // A replayed DDL that the baseline already reflects compares equal whatever it changed.
+  if (!schema_baseline_gtid_.empty()) {
+    auto predates_baseline = GtidEncoder::PositionCoversAuto(event.gtid, schema_baseline_gtid_);
+    if (!predates_baseline || *predates_baseline) {
+      return incompatible("DDL " + event.gtid +
+                          " was committed before the startup schema fingerprint was captured, so its effect cannot "
+                          "be verified");
+    }
+  }
   std::lock_guard<std::mutex> metadata_lock(metadata_connection_mutex_);
   if (metadata_connection_ == nullptr) {
     SetLastError(MakeError(ErrorCode::kMySQLDisconnected, "DDL schema validation requires the metadata connection",

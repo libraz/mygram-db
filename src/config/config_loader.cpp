@@ -44,6 +44,14 @@ FileFormat DetectFileFormat(const std::string& path) {
   return FileFormat::kUnknown;
 }
 
+/// Read the operator --schema document; an empty path means the built-in schema only.
+mygram::utils::Expected<std::string, mygram::utils::Error> ReadCustomSchema(const std::string& schema_path) {
+  if (schema_path.empty()) {
+    return std::string{};
+  }
+  return internal::ReadFileToString(schema_path);
+}
+
 }  // namespace
 
 namespace internal {
@@ -96,7 +104,7 @@ mygram::utils::Expected<std::string, mygram::utils::Error> ReadFileToString(cons
 namespace {
 
 mygram::utils::Expected<Config, mygram::utils::Error> LoadJsonConfig(const std::string& path,
-                                                                     const std::string& schema_path,
+                                                                     const std::string& custom_schema,
                                                                      bool validation_only) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
@@ -132,18 +140,8 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadJsonConfig(const std::
       return MakeUnexpected(MakeError(ErrorCode::kConfigJsonError, err_msg.str(), path));
     }
 
-    // Read schema if provided
-    std::string schema_str;
-    if (!schema_path.empty()) {
-      auto schema_result = internal::ReadFileToString(schema_path);
-      if (!schema_result) {
-        return MakeUnexpected(schema_result.error());
-      }
-      schema_str = *schema_result;
-    }
-
     // Validate config
-    auto validation_result = ValidateConfigJson(config_str, schema_str);
+    auto validation_result = ValidateConfigJson(config_str, custom_schema);
     if (!validation_result) {
       return MakeUnexpected(validation_result.error());
     }
@@ -155,6 +153,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadJsonConfig(const std::
     }
     auto& config = *config_result;
     config.source_path = std::filesystem::canonical(path).string();
+    config.custom_schema = custom_schema;
 
     if (!validation_only) {
       mygram::utils::StructuredLog()
@@ -174,7 +173,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadJsonConfig(const std::
 }
 
 mygram::utils::Expected<Config, mygram::utils::Error> LoadYamlConfig(const std::string& path,
-                                                                     const std::string& schema_path,
+                                                                     const std::string& custom_schema,
                                                                      bool validation_only) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
@@ -182,20 +181,17 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadYamlConfig(const std::
   using mygram::utils::MakeUnexpected;
 
   try {
-    YAML::Node yaml_root = YAML::LoadFile(path);
+    // Shared with JSON so a missing, unreadable or empty file reports the same error.
+    auto config_str_result = internal::ReadFileToString(path);
+    if (!config_str_result) {
+      return MakeUnexpected(config_str_result.error());
+    }
+    YAML::Node yaml_root = YAML::Load(*config_str_result);
     json json_root = internal::YamlToJson(yaml_root);
 
     std::string config_json_str = json_root.dump();
-    std::string schema_str;
-    if (!schema_path.empty()) {
-      auto schema_result = internal::ReadFileToString(schema_path);
-      if (!schema_result) {
-        return MakeUnexpected(schema_result.error());
-      }
-      schema_str = *schema_result;
-    }
-    // ValidateConfigJson will use embedded schema if schema_str is empty.
-    auto validation_result = ValidateConfigJson(config_json_str, schema_str);
+    // ValidateConfigJson will use embedded schema if custom_schema is empty.
+    auto validation_result = ValidateConfigJson(config_json_str, custom_schema);
     if (!validation_result) {
       return MakeUnexpected(validation_result.error());
     }
@@ -207,6 +203,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadYamlConfig(const std::
     }
     auto& config = *config_result;
     config.source_path = std::filesystem::canonical(path).string();
+    config.custom_schema = custom_schema;
 
     if (!validation_only) {
       mygram::utils::StructuredLog()
@@ -248,13 +245,17 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigYaml(const std::
 
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigJson(const std::string& path,
                                                                      const std::string& schema_path) {
-  return LoadJsonConfig(path, schema_path, false);
+  auto custom_schema = ReadCustomSchema(schema_path);
+  if (!custom_schema) {
+    return mygram::utils::MakeUnexpected(custom_schema.error());
+  }
+  return LoadJsonConfig(path, *custom_schema, false);
 }
 
 namespace {
 
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigImpl(const std::string& path,
-                                                                     const std::string& schema_path,
+                                                                     const std::string& custom_schema,
                                                                      bool validation_only) {
   using mygram::utils::Error;
   using mygram::utils::ErrorCode;
@@ -270,7 +271,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigImpl(const std::
           .Field("format", "json")
           .Field(server::log_fields::kFieldFilepath, path)
           .Debug();
-      return LoadJsonConfig(path, schema_path, validation_only);
+      return LoadJsonConfig(path, custom_schema, validation_only);
 
     case FileFormat::kYaml:
       mygram::utils::StructuredLog()
@@ -278,7 +279,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigImpl(const std::
           .Field("format", "yaml")
           .Field(server::log_fields::kFieldFilepath, path)
           .Debug();
-      return LoadYamlConfig(path, schema_path, validation_only);
+      return LoadYamlConfig(path, custom_schema, validation_only);
 
     case FileFormat::kUnknown:
     default:
@@ -288,7 +289,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigImpl(const std::
           .Field(server::log_fields::kFieldFilepath, path)
           .Field("trying", "yaml_first")
           .Debug();
-      auto yaml_result = LoadYamlConfig(path, schema_path, validation_only);
+      auto yaml_result = LoadYamlConfig(path, custom_schema, validation_only);
       if (yaml_result) {
         return yaml_result;
       }
@@ -299,7 +300,7 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigImpl(const std::
           .Field("from", "yaml")
           .Field("to", "json")
           .Debug();
-      auto json_result = LoadJsonConfig(path, schema_path, validation_only);
+      auto json_result = LoadJsonConfig(path, custom_schema, validation_only);
       if (json_result) {
         return json_result;
       }
@@ -319,12 +320,25 @@ mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigImpl(const std::
 
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfig(const std::string& path,
                                                                  const std::string& schema_path) {
-  return LoadConfigImpl(path, schema_path, false);
+  auto custom_schema = ReadCustomSchema(schema_path);
+  if (!custom_schema) {
+    return mygram::utils::MakeUnexpected(custom_schema.error());
+  }
+  return LoadConfigImpl(path, *custom_schema, false);
 }
 
 mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigForValidation(const std::string& path,
                                                                               const std::string& schema_path) {
-  return LoadConfigImpl(path, schema_path, true);
+  auto custom_schema = ReadCustomSchema(schema_path);
+  if (!custom_schema) {
+    return mygram::utils::MakeUnexpected(custom_schema.error());
+  }
+  return LoadConfigImpl(path, *custom_schema, true);
+}
+
+mygram::utils::Expected<Config, mygram::utils::Error> LoadConfigForValidationWithSchemaText(
+    const std::string& path, const std::string& custom_schema) {
+  return LoadConfigImpl(path, custom_schema, true);
 }
 
 }  // namespace mygramdb::config

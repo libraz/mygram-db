@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 
@@ -348,6 +349,44 @@ TEST_F(ConfigHandlerTest, ConfigVerifyDoesNotResolveAgainstProcessWorkingDirecto
 
   EXPECT_NE(response.find("ERR"), std::string::npos);
   EXPECT_NE(response.find("file not found"), std::string::npos);
+}
+
+TEST_F(ConfigHandlerTest, ConfigVerifyAppliesTheLoadedCustomSchema) {
+  const auto nonce = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  // Canonical base: CONFIG VERIFY refuses any path that crosses a symlink (/var -> /private/var on macOS).
+  const std::filesystem::path dir =
+      std::filesystem::canonical(std::filesystem::temp_directory_path()) / ("mygram-config-schema-" + nonce);
+  std::filesystem::create_directories(dir);
+  const auto write_config = [&](const std::string& name, int max_query_length) {
+    std::ofstream file(dir / name);
+    file << "mysql:\n"
+         << "  user: test\n"
+         << "  database: test\n"
+         << "tables:\n"
+         << "  - name: docs\n"
+         << "    text_source: {column: body}\n"
+         << "replication:\n"
+         << "  enable: false\n"
+         << "api:\n"
+         << "  max_query_length: " << max_query_length << "\n";
+  };
+  write_config("within.yaml", 200);
+  write_config("beyond.yaml", 4096);
+
+  test_config_.source_path = (dir / "active.yaml").string();
+  test_config_.custom_schema = R"({"properties":{"api":{"properties":{"max_query_length":{"maximum":256}}}}})";
+
+  query::Query query;
+  query.type = query::QueryType::CONFIG_VERIFY;
+  query.filepath = "within.yaml";
+  const std::string within = handler_->Handle(query, conn_ctx_);
+  query.filepath = "beyond.yaml";
+  const std::string beyond = handler_->Handle(query, conn_ctx_);
+
+  std::filesystem::remove_all(dir);
+
+  EXPECT_NE(within.find("Configuration is valid"), std::string::npos) << within;
+  EXPECT_NE(beyond.find("Configuration validation failed"), std::string::npos) << beyond;
 }
 
 // Query Parser integration tests

@@ -47,10 +47,10 @@ std::string AdminHandler::Handle(const query::Query& query, ConnectionContext& c
                                               mygram::utils::ErrorCode::kCatalogNotInitialized);
       }
       const auto& tables = ctx_.table_catalog->GetTables();
-      // 1. Aggregate metrics (domain layer, pure function), reusing a bounded
-      // snapshot so a polling client cannot drive one corpus-sized walk per
-      // request.
-      auto metrics = statistics_snapshot_cache_.Get(tables);
+      // 1. Aggregate metrics (domain layer, pure function), reusing the bounded
+      // snapshot shared with HTTP /info and /metrics so a polling client cannot
+      // drive one corpus-sized walk per request.
+      auto metrics = ctx_.stats.SnapshotCache().Get(tables);
 
       // 2. Update stats (domain layer, explicit side effect)
       StatisticsService::UpdateServerStatistics(ctx_.stats, metrics);
@@ -238,7 +238,8 @@ std::string AdminHandler::HandleConfigVerify(const std::string& filepath) const 
   }
 
   // Try to load and validate the configuration file
-  auto config_result = config::LoadConfigForValidation(canonical_path);
+  auto config_result = config::LoadConfigForValidationWithSchemaText(
+      canonical_path, ctx_.full_config != nullptr ? ctx_.full_config->custom_schema : std::string{});
   if (!config_result) {
     // Logged at WARN: this is a client-input validation failure (user supplied
     // a bad YAML), not a server-side system error, so it should not raise

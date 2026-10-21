@@ -24,12 +24,9 @@ namespace mygramdb::mysql {
 
 // Apply/search consistency contract:
 // BinlogEventProcessor mutates DocumentStore and Index as a two-step per-table
-// apply. The caller serializes events for a table. Concurrent search paths may
-// observe the narrow midpoint between DocumentStore and Index updates; they
-// must treat missing store/index material as a transient miss rather than
-// undefined state. The next request observes the completed apply. This
-// eventual-consistency contract avoids holding a global table lock across every
-// search while preserving memory safety under ThreadSanitizer.
+// apply. The caller holds the table's generation_mutex unique for the whole
+// event, and every search holds it shared for the whole request, so a search
+// never observes the midpoint between the DocumentStore and Index updates.
 
 namespace {
 
@@ -38,6 +35,17 @@ bool HasMaterializedAfterText(const BinlogEvent& event) {
   // tests/callers. Parsed FULL row images always set text_state explicitly,
   // which is what distinguishes a real empty value from an absent column.
   return event.text_state != TextValueState::kAbsent || !event.text.empty();
+}
+
+/// The text a document's postings were built from: the stored text, empty when
+/// the store keeps none and the index holds no postings for it, otherwise unknown.
+std::optional<std::string> IndexedText(const index::Index& index, const storage::DocumentStore& doc_store,
+                                       storage::DocId doc_id) {
+  std::optional<std::string> text = doc_store.GetNormalizedText(doc_id);
+  if (!text.has_value() && !index.MayHavePostings(doc_id)) {
+    text.emplace();
+  }
+  return text;
 }
 
 /// Drop a document's postings. A store restored from a dump written without
@@ -249,9 +257,9 @@ static bool ProcessEventInternal(const BinlogEvent& event, index::Index& index, 
 
         // The store is the exact materialized text currently represented by
         // postings; it is safer than inferring availability from empty strings.
-        const std::optional<std::string> old_normalized = doc_store.GetNormalizedText(doc_id);
+        const std::optional<std::string> old_normalized = IndexedText(index, doc_store, doc_id);
         RemoveFromIndex(index, doc_id, old_normalized);
-        if (bm25_stats != nullptr && old_normalized.has_value()) {
+        if (bm25_stats != nullptr && old_normalized.has_value() && !old_normalized->empty()) {
           bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(*old_normalized));
         }
 
@@ -331,7 +339,7 @@ static bool ProcessEventInternal(const BinlogEvent& event, index::Index& index, 
       } else if (exists && matches_required) {
         // Still matches conditions -> UPDATE
         storage::DocId doc_id = doc_id_opt.value();
-        const std::optional<std::string> stored_normalized = doc_store.GetNormalizedText(doc_id);
+        const std::optional<std::string> stored_normalized = IndexedText(index, doc_store, doc_id);
         const std::string old_normalized = stored_normalized.value_or(std::string{});
         std::string new_normalized = old_normalized;
         const bool has_after_text = HasMaterializedAfterText(event);
@@ -457,9 +465,9 @@ static bool ProcessEventInternal(const BinlogEvent& event, index::Index& index, 
       if (exists) {
         // Remove document from index
         storage::DocId doc_id = doc_id_opt.value();
-        const std::optional<std::string> old_normalized = doc_store.GetNormalizedText(doc_id);
+        const std::optional<std::string> old_normalized = IndexedText(index, doc_store, doc_id);
         RemoveFromIndex(index, doc_id, old_normalized);
-        if (bm25_stats != nullptr && old_normalized.has_value()) {
+        if (bm25_stats != nullptr && old_normalized.has_value() && !old_normalized->empty()) {
           bm25_stats->RemoveDocument(mygram::utils::CountCodePoints(*old_normalized));
         }
 

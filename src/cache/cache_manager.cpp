@@ -173,7 +173,12 @@ std::optional<std::vector<DocId>> CacheManager::Lookup(const query::Query& query
   return query_cache_->Lookup(key->key, key->discriminator);
 }
 
-std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Query& query) {
+std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Query& query,
+                                                                  const QueryCache::StalenessCheck& is_stale,
+                                                                  QueryCache::LookupOutcome* outcome) {
+  if (outcome != nullptr) {
+    *outcome = QueryCache::LookupOutcome::kNotFound;
+  }
   auto key = ResolveCacheKey(query);
   if (!key.has_value()) {
     return std::nullopt;
@@ -185,7 +190,15 @@ std::optional<CacheLookupResult> CacheManager::LookupWithMetadata(const query::Q
   // precise invalidation without turning every table mutation into a full
   // table-cache miss.
   QueryCache::LookupMetadata metadata;
-  auto result = query_cache_->LookupWithMetadata(key->key, key->discriminator, metadata);
+  auto result = query_cache_->LookupWithMetadata(key->key, key->discriminator, metadata, is_stale);
+  if (outcome != nullptr) {
+    *outcome = metadata.outcome;
+  }
+  if (metadata.outcome == QueryCache::LookupOutcome::kStale) {
+    // A resident stale payload would make the next Insert of this key a duplicate.
+    std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
+    query_cache_->Erase(CacheEntryIdentity{key->key, metadata.entry_generation});
+  }
   if (!result.has_value()) {
     return std::nullopt;
   }
@@ -270,13 +283,20 @@ bool CacheManager::InsertIfPending(PendingInsert&& pending, const query::Query& 
 
   const auto resolved_key = ResolveCanonicalCacheKey(query);
   if (!resolved_key.has_value() || resolved_key->key != pending.identity_.key ||
-      pending.invalidation_manager_.get() != invalidation_mgr_.get()) {
+      pending.invalidation_manager_.get() != invalidation_mgr_.get() || !query_cache_) {
+    pending.Cancel();
+    return false;
+  }
+
+  // Encode outside serialize_mutex_: only the registration transition needs it.
+  auto payload = query_cache_->PreparePayload(pending.identity_.key, result, query_cost_ms);
+  if (!payload.has_value()) {
     pending.Cancel();
     return false;
   }
 
   std::lock_guard<std::mutex> serialize_lock(serialize_mutex_);
-  if (!invalidation_mgr_ || !query_cache_ || !invalidation_queue_) {
+  if (!invalidation_mgr_ || !invalidation_queue_) {
     pending.Cancel();
     return false;
   }
@@ -297,7 +317,8 @@ bool CacheManager::InsertIfPending(PendingInsert&& pending, const query::Query& 
     return false;
   }
 
-  const bool inserted = query_cache_->Insert(pending.identity_.key, result, metadata, query_cost_ms);
+  const bool inserted =
+      query_cache_->InsertPrepared(pending.identity_.key, std::move(*payload), metadata, query_cost_ms);
   if (inserted && after_query_cache_insert_hook_for_test_) {
     try {
       after_query_cache_insert_hook_for_test_();
@@ -390,6 +411,12 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   metadata.invalidate_on_any_text_change = invalidate_on_any_text_change;
   metadata.access_count = 0;
 
+  // Encode outside serialize_mutex_: only the version check and registration need it.
+  auto payload = query_cache_->PreparePayload(key, result, query_cost_ms);
+  if (!payload.has_value()) {
+    return false;
+  }
+
   // Serialize Insert with Clear/ClearTable so that we never end up with a key
   // registered in InvalidationManager but not present in QueryCache (or vice
   // versa). See serialize_mutex_ doc in cache_manager.h.
@@ -409,7 +436,7 @@ bool CacheManager::InsertIfVersion(const query::Query& query, const std::vector<
   metadata.entry_generation = next_entry_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
 
   // Insert into cache
-  const bool inserted = query_cache_->Insert(key, result, metadata, query_cost_ms);
+  const bool inserted = query_cache_->InsertPrepared(key, std::move(*payload), metadata, query_cost_ms);
   if (inserted && after_query_cache_insert_hook_for_test_) {
     try {
       after_query_cache_insert_hook_for_test_();
@@ -477,6 +504,10 @@ void CacheManager::Invalidate(const std::string& table_name, const std::string& 
     return;
   }
 
+  // N-gram extraction is pure, so it runs before the mutation boundary; a
+  // setting registered in between is extracted inside Enqueue.
+  const ChangedNgrams changed_ngrams = invalidation_queue_->PrecomputeChangedNgrams(table_name, old_text, new_text);
+
   // Serialize the data-version update and synchronous pending/resident mark as
   // one mutation boundary with pending insert commit. The queue worker never
   // takes serialize_mutex_, so the worker remains independent of this lock.
@@ -488,7 +519,7 @@ void CacheManager::Invalidate(const std::string& table_name, const std::string& 
 
   // Enqueue for asynchronous invalidation while the mutation boundary remains
   // closed; Enqueue performs the immediate registration mark synchronously.
-  invalidation_queue_->Enqueue(table_name, old_text, new_text, filter_columns_changed);
+  invalidation_queue_->Enqueue(table_name, old_text, new_text, filter_columns_changed, &changed_ngrams);
 }
 
 void CacheManager::Clear() {

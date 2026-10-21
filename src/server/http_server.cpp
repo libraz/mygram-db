@@ -140,6 +140,95 @@ Expected<bool, Error> ParseHttpQueryMode(const json& body) {
   return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Field 'mode' must be either 'literal' or 'boolean'"));
 }
 
+// Deepest array/object nesting a request body may carry. Request schemas are
+// at most three levels deep; the bound only has to stop a body that spends its
+// whole byte budget on brackets.
+constexpr size_t kMaxJsonBodyNestingDepth = 32;
+
+// Whether the document nests arrays/objects deeper than `max_depth`. Scans the
+// text once without materializing anything, so a rejected body costs no more
+// than its length.
+bool ExceedsJsonNestingDepth(std::string_view text, size_t max_depth) {
+  size_t depth = 0;
+  bool in_string = false;
+  bool escaped = false;
+  for (const char character : text) {
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (character == '\\') {
+        escaped = true;
+      } else if (character == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+    if (character == '"') {
+      in_string = true;
+    } else if (character == '[' || character == '{') {
+      if (++depth > max_depth) {
+        return true;
+      }
+    } else if ((character == ']' || character == '}') && depth > 0) {
+      --depth;
+    }
+  }
+  return false;
+}
+
+// Parse a request body, refusing over-nested documents before they are built.
+Expected<json, Error> ParseHttpJsonBody(const std::string& text) {
+  if (ExceedsJsonNestingDepth(text, kMaxJsonBodyNestingDepth)) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kQuerySyntaxError,
+                  "Invalid JSON: nesting exceeds " + std::to_string(kMaxJsonBodyNestingDepth) + " levels"));
+  }
+  try {
+    return json::parse(text);
+  } catch (const json::parse_error& error) {
+    return MakeUnexpected(MakeError(ErrorCode::kQuerySyntaxError, "Invalid JSON: " + std::string(error.what())));
+  }
+}
+
+// Build a query through QueryParser, the single path every HTTP search, count
+// and facet request takes, so table, search text and expression resolve exactly
+// as the TCP command for the same input would. Table and literal text are
+// quoted, so no character in either can split into extra tokens. Boolean
+// expressions are handed over unquoted; clauses a body field already owns
+// (FILTER, SORT, LIMIT, ...) are refused inside them.
+Expected<query::Query, Error> ParseHttpQuery(std::string_view command, const std::string& table_key,
+                                             const std::string& facet_column, const std::string& text,
+                                             bool boolean_mode, size_t max_query_length) {
+  std::string line(command);
+  line += ' ';
+  line += query::QueryParser::QuoteSearchLiteral(table_key);
+  if (!facet_column.empty()) {
+    line += ' ';
+    line += facet_column;
+  }
+  if (!text.empty()) {
+    line += ' ';
+    line += boolean_mode ? text : query::QueryParser::QuoteSearchLiteral(text);
+  }
+
+  query::QueryParser parser;
+  parser.SetMaxQueryLength(max_query_length);
+  auto parsed = parser.Parse(line);
+  if (!parsed) {
+    return parsed;
+  }
+  const query::Query& result = *parsed;
+  if (boolean_mode &&
+      (!result.filters.empty() || result.order_by.has_value() || result.limit_explicit || result.offset_explicit ||
+       result.highlight.has_value() || result.fuzzy_max_distance.has_value())) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kQuerySyntaxError,
+                  "Field 'q' must hold only a search expression; use the request fields for filters, sort and "
+                  "pagination"));
+  }
+  return parsed;
+}
+
 json FilterValueToJson(const storage::FilterValue& value) {
   json serialized = nullptr;
   std::visit(
@@ -677,7 +766,9 @@ const std::array<HttpServer::RouteDescriptor, HttpServer::kRouteCount>& HttpServ
 
 const HttpServer::RouteDescriptor* HttpServer::FindLiteralRoute(const std::string& method, const std::string& path) {
   for (const auto& route : Routes()) {
-    const bool method_matches = (route.method == RouteMethod::kGet) ? method == "GET" : method == "POST";
+    // cpp-httplib serves HEAD through the GET handler, so it takes the route's accounting too.
+    const bool method_matches =
+        (route.method == RouteMethod::kGet) ? (method == "GET" || method == "HEAD") : method == "POST";
     if (method_matches && route.pattern == path) {
       return &route;
     }
@@ -745,6 +836,18 @@ void HttpServer::SetupRoutes() {
   }
 }
 
+void HttpServer::RecordAclDenial(const std::string& client_ip) {
+  GetEffectiveStats().IncrementRequestsDeniedAclHttp();
+  const auto decision = denial_log_limiter_.Record("acl:" + client_ip);
+  if (decision.should_log) {
+    mygram::utils::StructuredLog()
+        .Event("http_request_rejected_acl")
+        .Field(log_fields::kFieldClientIp, client_ip)
+        .Field("suppressed_since_last_log", decision.suppressed_count)
+        .Warn();
+  }
+}
+
 void HttpServer::SetupAccessControl() {
   server_->set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
     // cpp-httplib's getnameinfo()-derived remote_addr can carry an IPv6
@@ -770,15 +873,7 @@ void HttpServer::SetupAccessControl() {
       if (counts_requests) {
         RecordRequest();
       }
-      GetEffectiveStats().IncrementRequestsDeniedAclHttp();
-      const auto decision = denial_log_limiter_.Record("acl:" + client_ip);
-      if (decision.should_log) {
-        mygram::utils::StructuredLog()
-            .Event("http_request_rejected_acl")
-            .Field(log_fields::kFieldClientIp, client_ip)
-            .Field("suppressed_since_last_log", decision.suppressed_count)
-            .Warn();
-      }
+      RecordAclDenial(client_ip);
       SendError(res, kHttpForbidden, MakeError(ErrorCode::kPermissionDenied, "Access denied by network.allow_cidrs"));
       return httplib::Server::HandlerResponse::Handled;
     }
@@ -805,7 +900,8 @@ void HttpServer::SetupAccessControl() {
     // dispatch it here by hand, after the same ACL/rate-limit gate every
     // other route just passed. Split on the first remaining '/' so identity
     // stops there and primary_key keeps any further '/' it contains.
-    if (req.method == "GET" && req.path.compare(0, kTablesPrefix.size(), kTablesPrefix) == 0) {
+    const bool is_get_or_head = req.method == "GET" || req.method == "HEAD";
+    if (is_get_or_head && req.path.compare(0, kTablesPrefix.size(), kTablesPrefix) == 0) {
       const std::string_view rest = std::string_view(req.path).substr(kTablesPrefix.size());
       const auto slash = rest.find('/');
       // identity ([^/]+) and primary_key ((.+)) both require at least one
@@ -1021,12 +1117,6 @@ void HttpServer::UpdateApiConfig(int default_limit, int max_query_length) {
 HttpServer::TableContextLookup HttpServer::ResolveHttpTableContext(const std::string& table_name) {
   TableContextLookup result;
 
-  if (!query::QueryParser::IsSafeTableName(table_name)) {
-    result.error = MakeError(ErrorCode::kQueryInvalidToken,
-                             "Invalid table name (allowed characters: letters, digits, '_', '-', '.')");
-    return result;
-  }
-
   // Multi-database configurations require a qualified `database.table` identity.
   if (config::RequiresQualifiedTableReferences(full_config_) &&
       !query::QueryParser::IsDatabaseQualifiedTableName(table_name)) {
@@ -1102,21 +1192,21 @@ std::optional<HttpServer::PreparedHttpRequest> HttpServer::PrepareHttpJsonReques
   if (RejectIfTableSyncing(lookup.table_key, res)) {
     return std::nullopt;
   }
-  std::shared_lock<std::shared_mutex> generation_lock(*lookup.table_ctx->generation_mutex);
 
-  json body;
-  try {
-    body = json::parse(req.body);
-  } catch (const json::parse_error& error) {
-    SendError(res, MakeError(ErrorCode::kQuerySyntaxError, "Invalid JSON: " + std::string(error.what())));
+  auto body = ParseHttpJsonBody(req.body);
+  if (!body) {
+    SendError(res, body.error());
     return std::nullopt;
   }
+  // The body is parsed before the lock so a large payload never holds off the
+  // writer that replication apply needs.
+  std::shared_lock<std::shared_mutex> generation_lock(*lookup.table_ctx->generation_mutex);
 
   PreparedHttpRequest prepared;
   prepared.generation_lock = std::move(generation_lock);
   prepared.table_ctx = lookup.table_ctx;
   prepared.table_key = std::move(lookup.table_key);
-  prepared.body = std::move(body);
+  prepared.body = std::move(*body);
   return prepared;
 }
 
@@ -1266,26 +1356,13 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpSearchQuery(
     return std::nullopt;
   }
 
-  query::Query parsed_query;
-  if (*boolean_mode) {
-    parsed_query.type = (command == "COUNT") ? query::QueryType::COUNT : query::QueryType::SEARCH;
-    parsed_query.table = request->table_key;
-    parsed_query.search_text = query_text;
-    parsed_query.search_expression = std::move(query_text);
-  } else {
-    // Route literal HTTP searches through the same command parser used by the
-    // raw TCP protocol. This keeps quote preservation, punctuation, and flat
-    // search-text extraction identical across every public surface.
-    query::QueryParser parser;
-    parser.SetMaxQueryLength(max_query_length);
-    auto base_query =
-        parser.Parse(command + " " + request->table_key + " " + query::QueryParser::QuoteSearchLiteral(query_text));
-    if (!base_query) {
-      SendError(res, base_query.error());
-      return std::nullopt;
-    }
-    parsed_query = std::move(*base_query);
+  auto base_query =
+      ParseHttpQuery(command, request->table_key, /*facet_column=*/"", query_text, *boolean_mode, max_query_length);
+  if (!base_query) {
+    SendError(res, base_query.error());
+    return std::nullopt;
   }
+  query::Query parsed_query = std::move(*base_query);
 
   if (!ApplyHttpQueryOptions(body, res, parsed_query, apply_pagination, apply_pagination)) {
     return std::nullopt;
@@ -1330,7 +1407,7 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     }
   }
 
-  std::string column = body["column"].get<std::string>();
+  const std::string column = body["column"].get<std::string>();
   if (!query::QueryParser::IsSafeColumnName(column)) {
     SendError(res, MakeError(ErrorCode::kQuerySyntaxError, "Invalid facet column"));
     return std::nullopt;
@@ -1342,22 +1419,20 @@ std::optional<HttpServer::PreparedHttpQuery> HttpServer::PrepareHttpFacetQuery(c
     return std::nullopt;
   }
 
-  query::Query parsed_query;
-  parsed_query.type = query::QueryType::FACET;
-  parsed_query.table = request->table_key;
-  parsed_query.facet_column = std::move(column);
-
+  std::string query_text;
   if (body.contains("q")) {
-    std::string query_text = body["q"].get<std::string>();
+    query_text = body["q"].get<std::string>();
     if (!ValidateHttpQueryText(query_text, res, /*allow_empty=*/true)) {
       return std::nullopt;
     }
-    if (!query_text.empty()) {
-      parsed_query.search_text = query_text;
-      parsed_query.search_expression =
-          *boolean_mode ? std::move(query_text) : query::QueryParser::QuoteSearchLiteral(parsed_query.search_text);
-    }
   }
+  auto base_query = ParseHttpQuery("FACET", request->table_key, column, query_text, *boolean_mode,
+                                   max_query_length_.load(std::memory_order_acquire));
+  if (!base_query) {
+    SendError(res, base_query.error());
+    return std::nullopt;
+  }
+  query::Query parsed_query = std::move(*base_query);
 
   if (!ApplyHttpQueryOptions(body, res, parsed_query, /*apply_pagination=*/true,
                              /*apply_ranked_options=*/false)) {
@@ -1632,9 +1707,9 @@ void HttpServer::HandleInfo(const httplib::Request& /*req*/, httplib::Response& 
     response["total_requests"] = srv_stats.total_requests;
     response["total_commands_processed"] = srv_stats.total_commands_processed;
 
-    // INFO and /metrics share a bounded snapshot because memory accounting
-    // traverses retained document/index data and is intentionally expensive.
-    const auto aggregated_metrics = statistics_snapshot_cache_.Get(table_contexts_);
+    // TCP INFO, /info and /metrics share one bounded snapshot because memory
+    // accounting traverses retained document/index data and is expensive.
+    const auto aggregated_metrics = effective_stats.SnapshotCache().Get(table_contexts_);
 
     json tables_obj;
     for (const auto& [table_name, ctx] : table_contexts_) {
@@ -2043,13 +2118,12 @@ void HttpServer::HandleOptimize(const httplib::Request& req, httplib::Response& 
     return;
   }
 
-  json body;
-  try {
-    body = json::parse(req.body);
-  } catch (const json::parse_error& error) {
-    SendError(res, MakeError(ErrorCode::kQuerySyntaxError, "Invalid JSON: " + std::string(error.what())));
+  auto parsed_body = ParseHttpJsonBody(req.body);
+  if (!parsed_body) {
+    SendError(res, parsed_body.error());
     return;
   }
+  const json body = std::move(*parsed_body);
   if (!body.is_object()) {
     SendError(res, MakeError(ErrorCode::kQuerySyntaxError, "Request body must be a JSON object"));
     return;
@@ -2110,7 +2184,7 @@ void HttpServer::HandleMetrics(const httplib::Request& req, httplib::Response& r
     ServerStats& effective_stats = GetEffectiveStats();
 
     // Aggregate metrics
-    auto aggregated_metrics = statistics_snapshot_cache_.Get(table_contexts_);
+    auto aggregated_metrics = effective_stats.SnapshotCache().Get(table_contexts_);
 
     // Update server statistics
     StatisticsService::UpdateServerStatistics(effective_stats, aggregated_metrics);

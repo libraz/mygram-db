@@ -7,9 +7,7 @@
 
 #include <array>
 #include <chrono>
-#include <filesystem>
 #include <string>
-#include <vector>
 
 #include "cache/cache_manager.h"
 #include "config/runtime_variable_manager.h"
@@ -35,79 +33,6 @@ namespace mygramdb::server {
 namespace {
 
 constexpr auto kOrphanDumpTempMaxAge = std::chrono::hours(1);
-
-void SweepOrphanTempFiles(const std::filesystem::path& directory) {
-  std::error_code error;
-  const auto directory_status = std::filesystem::symlink_status(directory, error);
-  if (error || !std::filesystem::is_directory(directory_status) || std::filesystem::is_symlink(directory_status)) {
-    return;
-  }
-
-  std::filesystem::directory_iterator entry(directory, std::filesystem::directory_options::skip_permission_denied,
-                                            error);
-  if (error) {
-    mygram::utils::StructuredLog()
-        .Event("dump_temp_sweep_error")
-        .Field("directory", directory.string())
-        .Field("error", error.message())
-        .Warn();
-    return;
-  }
-
-  std::vector<std::string> marker_basenames;
-  for (const std::filesystem::directory_iterator end; entry != end; entry.increment(error)) {
-    if (error) {
-      mygram::utils::StructuredLog()
-          .Event("dump_temp_sweep_error")
-          .Field("directory", directory.string())
-          .Field("error", error.message())
-          .Warn();
-      break;
-    }
-
-    const auto entry_status = entry->symlink_status(error);
-    if (error) {
-      error.clear();
-      continue;
-    }
-    if (std::filesystem::is_symlink(entry_status)) {
-      continue;
-    }
-    if (std::filesystem::is_directory(entry_status)) {
-      SweepOrphanTempFiles(entry->path());
-      continue;
-    }
-    if (!std::filesystem::is_regular_file(entry_status)) {
-      continue;
-    }
-
-    const std::string marker_basename = entry->path().filename().string();
-    if (marker_basename.compare(0, mygram::utils::kDumpTempOwnerMarkerPrefix.size(),
-                                mygram::utils::kDumpTempOwnerMarkerPrefix) != 0) {
-      continue;
-    }
-    marker_basenames.push_back(marker_basename);
-  }
-
-  // The helper removes the marker it processes. Collect names before calling
-  // it so directory iteration does not depend on deletion behavior.
-  for (const auto& marker_basename : marker_basenames) {
-    auto removed = mygram::utils::RemoveOrphanDumpTempFile(
-        directory, marker_basename, std::chrono::duration_cast<std::chrono::seconds>(kOrphanDumpTempMaxAge));
-    if (!removed) {
-      mygram::utils::StructuredLog()
-          .Event("dump_temp_sweep_error")
-          .Field("filepath", (directory / marker_basename).string())
-          .FieldError(removed.error())
-          .Warn();
-    } else if (*removed) {
-      mygram::utils::StructuredLog()
-          .Event("dump_orphan_temp_removed")
-          .Field("filepath", (directory / marker_basename).string())
-          .Info();
-    }
-  }
-}
 
 }  // namespace
 
@@ -198,7 +123,8 @@ mygram::utils::Expected<InitializedComponents, mygram::utils::Error> ServerLifec
   // Orphan cleanup belongs to server initialization, not periodic snapshot
   // retention, so it also runs when automatic snapshots are disabled or when
   // no full application config was supplied.
-  SweepOrphanTempFiles(dump_dir_);
+  mygram::utils::SweepOrphanDumpTempFiles(dump_dir_,
+                                          std::chrono::duration_cast<std::chrono::seconds>(kOrphanDumpTempMaxAge));
 
   // Step 1: Initialize ThreadPool (no dependencies)
   {

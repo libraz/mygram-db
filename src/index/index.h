@@ -22,6 +22,7 @@
 #include "utils/error.h"
 #include "utils/expected.h"
 #include "utils/hash_utils.h"
+#include "utils/roaring_bitmap_ptr.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::storage {
@@ -120,12 +121,23 @@ class Index {
    * @brief Remove a document from every posting list that holds it
    *
    * For a document whose indexed text is not known, such as one restored from
-   * a dump written without text. Visits every term, so prefer RemoveDocument
-   * whenever the text is available.
+   * a dump written without text. Visits every term unless the document never
+   * had postings, so prefer RemoveDocument whenever the text is available.
    *
    * @param doc_id Document ID
    */
   void PurgeDocument(DocId doc_id);
+
+  /**
+   * @brief Whether a document may hold postings in this index
+   *
+   * False means the document holds none, so its indexed text is empty for
+   * removal and cache invalidation even when the text itself is not known.
+   * True may be stale after postings were removed term by term.
+   *
+   * @param doc_id Document ID
+   */
+  [[nodiscard]] bool MayHavePostings(DocId doc_id) const;
 
   /**
    * @brief Search for documents containing all terms (AND)
@@ -335,6 +347,7 @@ class Index {
 
 #ifdef MYGRAMDB_INDEX_TEST_HOOKS
   [[nodiscard]] uint64_t LoadGenerationForTesting() const { return load_generation_.load(std::memory_order_acquire); }
+  [[nodiscard]] uint64_t PurgeScanCountForTesting() const { return purge_scan_count_.load(std::memory_order_relaxed); }
 #endif
 
  private:
@@ -379,6 +392,47 @@ class Index {
   // Generation counter incremented by LoadFromStream.
   // Optimize checks this before applying results to detect stale data.
   std::atomic<uint64_t> load_generation_{0};
+
+  static constexpr uint64_t kIndexedDocsInvalid = UINT64_MAX;
+
+  // Doc ids that have had postings added. Bits clear only when every posting
+  // of the document is removed, so a clear bit means it holds none. Valid while
+  // indexed_docs_generation_ equals load_generation_, otherwise rebuilt from
+  // the postings on first use. Accessed under postings_mutex_ exclusive, or
+  // shared plus indexed_docs_mutex_ (postings_mutex_ → indexed_docs_mutex_ →
+  // PostingList::mutex_).
+  mutable std::mutex indexed_docs_mutex_;
+  mutable mygramdb::utils::RoaringBitmapPtr indexed_docs_;
+  mutable uint64_t indexed_docs_generation_ = 0;
+
+#ifdef MYGRAMDB_INDEX_TEST_HOOKS
+  std::atomic<uint64_t> purge_scan_count_{0};
+#endif
+
+  /**
+   * @brief Rebuild indexed_docs_ from the postings unless it is current
+   * @return false if the bitmap could not be allocated
+   * @pre Caller holds postings_mutex_ exclusive, or shared plus indexed_docs_mutex_
+   */
+  bool EnsureIndexedDocsLocked() const;
+
+  /**
+   * @brief Record that documents are about to gain postings
+   * @param doc_ids Document IDs
+   */
+  void MarkIndexed(const std::vector<DocId>& doc_ids);
+
+  /**
+   * @brief Record that a document no longer holds postings
+   * @param doc_id Document ID
+   */
+  void UnmarkIndexed(DocId doc_id);
+
+  /**
+   * @brief Estimate indexed_docs_ storage
+   * @pre Caller holds postings_mutex_ (shared or exclusive)
+   */
+  [[nodiscard]] size_t IndexedDocsMemoryUsageLocked() const;
 
   /**
    * @brief Estimate memory for one posting while postings_mutex_ is held

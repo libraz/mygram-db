@@ -75,36 +75,69 @@ mygram::utils::Expected<void, mygram::utils::Error> QueryCache::StartBackgroundW
 }
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key) {
-  return LookupInternal(key, std::nullopt, nullptr);
+  return LookupInternal(key, std::nullopt, nullptr, nullptr);
 }
 
 std::optional<std::vector<DocId>> QueryCache::Lookup(const CacheKey& key, std::string_view discriminator) {
-  return LookupInternal(key, discriminator, nullptr);
+  return LookupInternal(key, discriminator, nullptr, nullptr);
 }
 
 std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey& key, LookupMetadata& metadata) {
-  return LookupInternal(key, std::nullopt, &metadata);
+  return LookupInternal(key, std::nullopt, &metadata, nullptr);
 }
 
 std::optional<std::vector<DocId>> QueryCache::LookupWithMetadata(const CacheKey& key, std::string_view discriminator,
-                                                                 LookupMetadata& metadata) {
-  return LookupInternal(key, discriminator, &metadata);
+                                                                 LookupMetadata& metadata,
+                                                                 const StalenessCheck& is_stale) {
+  return LookupInternal(key, discriminator, &metadata, &is_stale);
+}
+
+void QueryCache::RecordHit(double elapsed_ms, double query_cost_ms) {
+  stats_.cache_hits++;
+  std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+  stats_.total_cache_hit_time_ms += elapsed_ms;
+  stats_.total_query_saved_time_ms += query_cost_ms;
+}
+
+void QueryCache::RecordMiss(LookupOutcome reason, double elapsed_ms) {
+  std::atomic<uint64_t>* reason_counter = &stats_.cache_misses_not_found;
+  switch (reason) {
+    case LookupOutcome::kInvalidated:
+    case LookupOutcome::kStale:
+      reason_counter = &stats_.cache_misses_invalidated;
+      break;
+    case LookupOutcome::kTTLExpired:
+      reason_counter = &stats_.cache_misses_ttl_expired;
+      break;
+    case LookupOutcome::kHit:
+    case LookupOutcome::kNotFound:
+      break;
+  }
+  stats_.cache_misses++;
+  (*reason_counter)++;
+  std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
+  stats_.total_cache_miss_time_ms += elapsed_ms;
+}
+
+void QueryCache::RecordExpiration() {
+  stats_.ttl_expirations++;
 }
 
 std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key,
                                                              std::optional<std::string_view> discriminator,
-                                                             LookupMetadata* metadata) {
+                                                             LookupMetadata* metadata, const StalenessCheck* is_stale) {
   // Start timing
   auto start_time = std::chrono::high_resolution_clock::now();
+  auto elapsed_ms = [&]() {
+    return std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - start_time).count();
+  };
 
-  // Helper to record miss latency and return nullopt
-  auto record_miss = [&]() -> std::optional<std::vector<DocId>> {
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double miss_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-    {
-      std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
-      stats_.total_cache_miss_time_ms += miss_time_ms;
+  // Every miss exit records its one reason here.
+  auto record_miss = [&](LookupOutcome reason) -> std::optional<std::vector<DocId>> {
+    if (metadata != nullptr) {
+      metadata->outcome = reason;
     }
+    RecordMiss(reason, elapsed_ms());
     return std::nullopt;
   };
 
@@ -125,24 +158,18 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
 
   auto iter = cache_map_.find(key);
   if (iter == cache_map_.end()) {
-    stats_.cache_misses++;
-    stats_.cache_misses_not_found++;
-    return record_miss();
+    return record_miss(LookupOutcome::kNotFound);
   }
 
   // The MD5 digest is an index accelerator, not the cache identity. Compare
   // the canonical query before serving data so a collision fails closed.
   if (discriminator.has_value() && iter->second.first.metadata.cache_discriminator != *discriminator) {
-    stats_.cache_misses++;
-    stats_.cache_misses_not_found++;
-    return record_miss();
+    return record_miss(LookupOutcome::kNotFound);
   }
 
   // Check invalidation flag
   if (iter->second.first.invalidated.load()) {
-    stats_.cache_misses++;
-    stats_.cache_misses_invalidated++;
-    return record_miss();
+    return record_miss(LookupOutcome::kInvalidated);
   }
 
   const CacheEntryIdentity entry_identity{key, iter->second.first.metadata.entry_generation};
@@ -154,18 +181,20 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
     auto now = std::chrono::steady_clock::now();
     auto age = std::chrono::duration_cast<std::chrono::seconds>(now - entry.metadata.created_at).count();
     if (age >= current_ttl) {
-      // Entry expired - enqueue for cleanup by RefreshLRU
+      // Entry expired - enqueue for cleanup by RefreshLRU. The expiration is
+      // counted once per incarnation: only by the lookup that enqueues it, or,
+      // when the pending set is full, by the RefreshLRU scan that removes it.
+      bool first_detection = false;
       {
         std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
         if (pending_expired_keys_.size() < kMaxPendingKeys) {
-          pending_expired_keys_.insert(entry_identity);
+          first_detection = pending_expired_keys_.insert(entry_identity).second;
         }
       }
-
-      stats_.cache_misses++;
-      stats_.cache_misses_ttl_expired++;  // Count as TTL-expired miss
-      stats_.ttl_expirations++;           // Count TTL expiration at detection time
-      return record_miss();
+      if (first_detection) {
+        RecordExpiration();
+      }
+      return record_miss(LookupOutcome::kTTLExpired);
     }
   }
 
@@ -212,11 +241,10 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
         // avoid drift; the entry will still be served as a miss.
       }
 
-      stats_.cache_misses++;
       if (first_detection) {
         stats_.decompression_failures++;  // Count failure at detection time
       }
-      return record_miss();
+      return record_miss(LookupOutcome::kNotFound);
     }
     result = std::move(*decompress_result);
   } else {
@@ -225,6 +253,11 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
     if (original_size > 0) {
       std::memcpy(result.data(), compressed_ptr->data(), compressed_ptr->size());
     }
+  }
+
+  // A payload the caller rejects is a miss, never a hit that is taken back.
+  if (is_stale != nullptr && *is_stale && (*is_stale)(result)) {
+    return record_miss(LookupOutcome::kStale);
   }
 
   // Publish access only after the payload decoded successfully. Reacquire a
@@ -250,24 +283,25 @@ std::optional<std::vector<DocId>> QueryCache::LookupInternal(const CacheKey& key
   // ConcurrentQueryCountAccuracy regression test in cache_thread_safety_test
   // (and the StatsInvariantHitsPlusMissesEqualsTotal test for the
   // single-threaded invariant). Do not move this increment back under the
-  // shared lock without revisiting both tests and the timing-statistics
-  // path below.
-  stats_.cache_hits++;
-
-  // Record hit latency and saved time
-  auto end_time = std::chrono::high_resolution_clock::now();
-  double hit_time_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
-  {
-    std::lock_guard<std::mutex> timing_lock(stats_.timing_mutex_);
-    stats_.total_cache_hit_time_ms += hit_time_ms;
-    stats_.total_query_saved_time_ms += query_cost_ms;
+  // shared lock without revisiting both tests and RecordHit's timing
+  // statistics.
+  if (metadata != nullptr) {
+    metadata->outcome = LookupOutcome::kHit;
   }
+  RecordHit(elapsed_ms(), query_cost_ms);
 
   return result;
 }
 
 bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, const CacheMetadata& metadata,
                         double query_cost_ms) {
+  auto payload = PreparePayload(key, result, query_cost_ms);
+  return payload.has_value() && InsertPrepared(key, std::move(*payload), metadata, query_cost_ms);
+}
+
+std::optional<QueryCache::PreparedPayload> QueryCache::PreparePayload(const CacheKey& key,
+                                                                      const std::vector<DocId>& result,
+                                                                      double query_cost_ms) {
   // Check if query cost meets threshold
   if (query_cost_ms < min_query_cost_ms_.load(std::memory_order_relaxed)) {
     // Track inserts skipped because their cost is below the configured
@@ -275,15 +309,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     // already-present rejections below are not counted here (they have their
     // own observability via current_memory_bytes / current_entries).
     stats_.rejection_count.fetch_add(1, std::memory_order_relaxed);
-    return false;
-  }
-
-  {
-    std::shared_lock lock(mutex_);
-    if (cache_map_.find(key) != cache_map_.end()) {
-      stats_.rejection_duplicate.fetch_add(1, std::memory_order_relaxed);
-      return false;
-    }
+    return std::nullopt;
   }
 
   // Compress result (if enabled)
@@ -300,7 +326,7 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
           .Field("reason", "compression_failed")
           .FieldError(compress_result.error())
           .Warn();
-      return false;
+      return std::nullopt;
     }
     compressed = std::move(*compress_result);
   } else {
@@ -311,12 +337,25 @@ bool QueryCache::Insert(const CacheKey& key, const std::vector<DocId>& result, c
     }
   }
 
+  return PreparedPayload{std::make_shared<const std::vector<uint8_t>>(std::move(compressed)), result.size()};
+}
+
+bool QueryCache::InsertPrepared(const CacheKey& key, PreparedPayload payload, const CacheMetadata& metadata,
+                                double query_cost_ms) {
+  {
+    std::shared_lock lock(mutex_);
+    if (cache_map_.find(key) != cache_map_.end()) {
+      stats_.rejection_duplicate.fetch_add(1, std::memory_order_relaxed);
+      return false;
+    }
+  }
+
   // Create cache entry to calculate accurate memory usage
   CacheEntry temp_entry;
-  temp_entry.compressed = std::make_shared<const std::vector<uint8_t>>(std::move(compressed));
+  temp_entry.compressed = std::move(payload.encoded);
   temp_entry.metadata = metadata;
 
-  const size_t original_count = result.size();  // Number of DocId elements, not bytes
+  const size_t original_count = payload.original_count;  // Number of DocId elements, not bytes
   const size_t compressed_size = temp_entry.compressed->size();
   // account for std::unordered_map node overhead in the per-entry total.
   // MemoryUsage() returns the heap footprint of the entry's payload but does
@@ -691,7 +730,7 @@ void QueryCache::RemoveEntryLocked(decltype(cache_map_)::iterator iter, RemovalR
       stats_.evictions++;
       break;
     case RemovalReason::kTTLExpired:
-      stats_.ttl_expirations++;
+      RecordExpiration();
       break;
     case RemovalReason::kTTLExpiredAlreadyCounted:
       // Stats already incremented by Lookup() at detection time
@@ -745,20 +784,23 @@ void QueryCache::Touch(const CacheKey& key) {
 }
 
 void QueryCache::RefreshLRU() {
-  // Drain pending keys from Lookup() before acquiring main lock
   std::unordered_set<CacheEntryIdentity> lookup_expired_entries;
   std::unordered_set<CacheEntryIdentity> decomp_failed_entries;
-  {
-    std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
-    lookup_expired_entries.swap(pending_expired_keys_);
-    decomp_failed_entries.swap(pending_decompression_keys_);
-  }
 
   // collect evicted keys under the main lock and fire the
   // eviction callback after we release it.
   std::vector<CacheEntryIdentity> evicted_entries;
   {
     std::unique_lock lock(mutex_);
+
+    // Drain pending keys from Lookup() under mutex_ (the same mutex_ ->
+    // expired_keys_mutex_ order Lookup uses), so no lookup can enqueue and
+    // count an expired entry again between the drain and its removal.
+    {
+      std::lock_guard<std::mutex> expired_lock(expired_keys_mutex_);
+      lookup_expired_entries.swap(pending_expired_keys_);
+      decomp_failed_entries.swap(pending_decompression_keys_);
+    }
 
     auto now = std::chrono::steady_clock::now();
     int current_ttl = ttl_seconds_.load(std::memory_order_relaxed);

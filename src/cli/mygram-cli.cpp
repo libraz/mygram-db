@@ -14,7 +14,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <cctype>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>

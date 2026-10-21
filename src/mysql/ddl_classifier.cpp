@@ -370,6 +370,43 @@ DdlStatement ClassifyRenameTable(DdlStatement statement, StatementCursor& cursor
   return Finish(std::move(statement), DDLType::kRename, std::move(names), complete && cursor.AtEnd());
 }
 
+/// `[IF [NOT] EXISTS] index [USING type] ON table`: re-validated like the equivalent ALTER TABLE.
+DdlStatement ClassifyIndexStatement(DdlStatement statement, StatementCursor& cursor) {
+  cursor.AcceptIfExists();
+  cursor.AcceptIfNotExists();
+  const bool named = cursor.ReadIdentifier().has_value();
+  if (cursor.Accept("USING")) {
+    cursor.Skip(1);
+  }
+  std::vector<DdlTableName> names;
+  if (named && cursor.Accept("ON")) {
+    names = ReadOneName(cursor);
+  }
+  return Finish(std::move(statement), DDLType::kAlter, std::move(names), true);
+}
+
+/// Higher is more destructive; kAlter and kCreate share a rank because both re-validate the schema.
+int DestructiveRank(DDLType type) {
+  switch (type) {
+    case DDLType::kRowsReplaced:
+      return 6;
+    case DDLType::kDropDatabase:
+      return 5;
+    case DDLType::kDrop:
+      return 4;
+    case DDLType::kRename:
+      return 3;
+    case DDLType::kTruncate:
+      return 2;
+    case DDLType::kAlter:
+    case DDLType::kCreate:
+      return 1;
+    case DDLType::kUnknown:
+      return 0;
+  }
+  return 0;
+}
+
 }  // namespace
 
 DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
@@ -382,6 +419,27 @@ DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
   }
 
   StatementCursor cursor(tokens);
+  if (cursor.Accept("XA")) {
+    statement.transaction = TransactionControl::kXa;
+    return statement;
+  }
+  if (cursor.Accept("BEGIN") || (cursor.IsKeyword(0, "START") && cursor.IsKeyword(1, "TRANSACTION"))) {
+    statement.transaction = TransactionControl::kBegin;
+    return statement;
+  }
+  if (cursor.Accept("COMMIT")) {
+    statement.transaction = TransactionControl::kEnd;
+    return statement;
+  }
+  if (cursor.Accept("ROLLBACK")) {
+    cursor.Accept("WORK");
+    // ROLLBACK [WORK] TO [SAVEPOINT] s keeps the transaction open.
+    if (!cursor.IsKeyword(0, "TO")) {
+      statement.transaction = TransactionControl::kEnd;
+    }
+    return statement;
+  }
+
   if (cursor.Accept("TRUNCATE")) {
     cursor.Accept("TABLE");
     auto names = ReadOneName(cursor);
@@ -401,6 +459,12 @@ DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
     // A temporary table is session-local: it never touches the base table of the same name.
     if (cursor.Accept("TEMPORARY")) {
       return statement;
+    }
+    if (!cursor.Accept("ONLINE")) {
+      cursor.Accept("OFFLINE");
+    }
+    if (cursor.Accept("INDEX")) {
+      return ClassifyIndexStatement(std::move(statement), cursor);
     }
     if (cursor.Accept("TABLE") || cursor.Accept("TABLES")) {
       cursor.AcceptIfExists();
@@ -423,6 +487,15 @@ DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
       }
       replace = true;
     }
+    if (!cursor.Accept("ONLINE")) {
+      cursor.Accept("OFFLINE");
+    }
+    if (!cursor.Accept("UNIQUE") && !cursor.Accept("FULLTEXT")) {
+      cursor.Accept("SPATIAL");
+    }
+    if (cursor.Accept("INDEX")) {
+      return ClassifyIndexStatement(std::move(statement), cursor);
+    }
     if (cursor.Accept("TEMPORARY")) {
       return statement;
     }
@@ -432,7 +505,9 @@ DdlStatement ClassifyStatement(const std::vector<SqlToken>& tokens) {
     cursor.AcceptIfNotExists();
     auto names = ReadOneName(cursor);
     // CREATE TABLE ... SELECT is logged as `CREATE TABLE ... START TRANSACTION` and completes with the rows' XID.
-    statement.starts_transaction = cursor.HasTopLevelStartTransaction();
+    if (cursor.HasTopLevelStartTransaction()) {
+      statement.transaction = TransactionControl::kBegin;
+    }
     // CREATE OR REPLACE swaps out an existing table's rows without row events.
     return Finish(std::move(statement), replace ? DDLType::kRowsReplaced : DDLType::kCreate, std::move(names), true);
   }
@@ -599,13 +674,23 @@ bool NamesConfiguredTable(const DdlStatement& statement, std::string_view event_
 std::optional<DDLType> FindConfiguredTableDDL(const std::vector<DdlStatement>& statements,
                                               std::string_view event_database, const config::TableConfig& table_config,
                                               bool names_case_insensitive) {
+  std::optional<DDLType> result;
+  bool schema_changed = false;
   for (const auto& statement : statements) {
-    if (statement.type != DDLType::kUnknown &&
-        NamesConfiguredTable(statement, event_database, table_config, names_case_insensitive)) {
-      return statement.type;
+    if (statement.type == DDLType::kUnknown ||
+        !NamesConfiguredTable(statement, event_database, table_config, names_case_insensitive)) {
+      continue;
+    }
+    schema_changed = schema_changed || statement.type == DDLType::kAlter || statement.type == DDLType::kCreate;
+    if (!result || DestructiveRank(statement.type) > DestructiveRank(*result)) {
+      result = statement.type;
     }
   }
-  return std::nullopt;
+  // kTruncate skips schema validation, so it cannot also stand for a schema change.
+  if (result == DDLType::kTruncate && schema_changed) {
+    return DDLType::kUnknown;
+  }
+  return result;
 }
 
 }  // namespace mygramdb::mysql

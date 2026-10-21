@@ -251,6 +251,33 @@ Expected<void, Error> ValidateTableSectionRestorable(const WrittenTableSection& 
   return {};
 }
 
+/**
+ * @brief Refuse a written metadata section that ReadDumpV2 would refuse under the same limits.
+ *
+ * ReadDumpV2 bounds every section by both dump.restore_max_section_mb and
+ * dump.restore_memory_budget_mb.
+ *
+ * @param section_length Encoded length of the section just serialized
+ * @param section_name Section name used in the refusal message
+ * @param restore_limits Limits the dump must be restorable under
+ */
+Expected<void, Error> ValidateMetadataSectionRestorable(uint64_t section_length, const std::string& section_name,
+                                                        const RestoreLimits& restore_limits) {
+  if (section_length > restore_limits.max_section_bytes) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    section_name +
+                                        " section exceeds dump.restore_max_section_mb; increase the limit before "
+                                        "DUMP SAVE"));
+  }
+  if (section_length > restore_limits.memory_budget_bytes) {
+    return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError,
+                                    section_name +
+                                        " section exceeds dump.restore_memory_budget_mb; increase the limit before "
+                                        "DUMP SAVE"));
+  }
+  return {};
+}
+
 Expected<uint64_t, Error> GetV2SectionDataLength(std::ostringstream& section_stream, const std::string& section_name) {
   const std::streampos position = section_stream.tellp();
   if (position < 0) {
@@ -656,31 +683,14 @@ Expected<void, Error> WriteDumpV2(
     // Remove any existing temp file
     std::filesystem::remove(temp_filepath, error_code);
 
-    // SECURITY: Open with O_NOFOLLOW + O_CREAT + O_EXCL
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX open() requires varargs for mode
-    int file_descriptor = open(temp_filepath.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    if (file_descriptor < 0) {
-      LogStorageError("create_temp_file", temp_filepath, std::strerror(errno));
+    // SECURITY: The temp is created O_EXCL | O_NOFOLLOW with mode 600 and verified owned by this user
+    auto created_temp = writer.CreateDumpTempFile();
+    if (!created_temp) {
+      LogStorageError("create_temp_file", temp_filepath, created_temp.error().message());
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
     }
+    const int file_descriptor = *created_temp;
     FDGuard fd_guard(file_descriptor);
-
-    // Verify ownership
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): stat struct is filled by fstat()
-    struct stat file_stat {};
-    if (fstat(file_descriptor, &file_stat) != 0 || file_stat.st_uid != geteuid()) {
-      StructuredLog()
-          .Event("storage_security_error")
-          .Field("type", "ownership_verification_failed")
-          .Field("filepath", temp_filepath)
-          .Error();
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-    }
-
-    if (auto result = writer.TrackDumpTempFile(file_descriptor); !result) {
-      LogStorageError("track_dump_temp", temp_filepath, result.error().message());
-      return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));
-    }
 
     dump_internal::FdStreambuf fd_streambuf(file_descriptor);
     std::ostream ofs(&fd_streambuf);
@@ -738,10 +748,8 @@ Expected<void, Error> WriteDumpV2(
       if (!config_length) {
         return MakeUnexpected(config_length.error());
       }
-      if (config_length.value() > restore_limits.max_section_bytes) {
-        return MakeUnexpected(
-            MakeError(ErrorCode::kStorageDumpWriteError,
-                      "Config section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+      if (auto result = ValidateMetadataSectionRestorable(config_length.value(), "Config", restore_limits); !result) {
+        return result;
       }
       if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kConfig, config_stream); !result) {
         LogStorageError("write_config_section", temp_filepath, result.error().message());
@@ -765,10 +773,10 @@ Expected<void, Error> WriteDumpV2(
       if (!compatibility_length) {
         return MakeUnexpected(compatibility_length.error());
       }
-      if (compatibility_length.value() > restore_limits.max_section_bytes) {
-        return MakeUnexpected(MakeError(
-            ErrorCode::kStorageDumpWriteError,
-            "Compatibility section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+      if (auto result =
+              ValidateMetadataSectionRestorable(compatibility_length.value(), "Compatibility", restore_limits);
+          !result) {
+        return result;
       }
       if (auto result =
               WriteSectionEnvelope(ofs, dump_format::SectionType::kCompatibilityMetadata, compatibility_stream);
@@ -790,10 +798,9 @@ Expected<void, Error> WriteDumpV2(
       if (!stats_length) {
         return MakeUnexpected(stats_length.error());
       }
-      if (stats_length.value() > restore_limits.max_section_bytes) {
-        return MakeUnexpected(
-            MakeError(ErrorCode::kStorageDumpWriteError,
-                      "Statistics section exceeds dump.restore_max_section_mb; increase the limit before DUMP SAVE"));
+      if (auto result = ValidateMetadataSectionRestorable(stats_length.value(), "Statistics", restore_limits);
+          !result) {
+        return result;
       }
       if (auto result = WriteSectionEnvelope(ofs, dump_format::SectionType::kStatistics, stats_stream); !result) {
         LogStorageError("write_stats_section", temp_filepath, result.error().message());
@@ -934,6 +941,8 @@ Expected<void, Error> WriteDumpV2(
 #ifndef _WIN32
     // Calculate file size from the verified fd and patch header fields in place.
     // Reopening temp_filepath by name here would reintroduce a TOCTOU window.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): stat struct is filled by fstat()
+    struct stat file_stat {};
     if (fstat(file_descriptor, &file_stat) != 0) {
       LogStorageError("stat_temp_file", temp_filepath, std::strerror(errno));
       return MakeUnexpected(MakeError(ErrorCode::kStorageDumpWriteError, "Write operation failed"));

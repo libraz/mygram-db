@@ -1188,4 +1188,88 @@ TEST_F(IoReactorTest, RegisterPublishIsSerializedBeforeStopClear) {
   EXPECT_EQ(reactor->ConnectionCount(), 0u);
 }
 
+// A close deferred behind a queued response must stop read dispatch for good:
+// a level-triggered backend reports unread inbound bytes as readable for as
+// long as read interest stays armed, which would spin the loop and keep the
+// idle reaper from ever closing the connection.
+TEST_F(IoReactorTest, DeferredCloseDisarmsReadAndIsReapedByIdleTimeout) {
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 10;
+  cfg.idle_timeout_sec = 1;
+  cfg.reaper_interval_sec = 1;
+  reactor_ = std::make_unique<IoReactor>(cfg);
+  auto* mock = StartWithMock();
+  ASSERT_NE(mock, nullptr);
+
+  SocketPair sp;
+  const int client_fd = sp.TakeClient();
+  int send_buffer_bytes = 4096;
+  ASSERT_EQ(::setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &send_buffer_bytes, sizeof(send_buffer_bytes)), 0);
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(conn));
+
+  // The peer never reads, so the response stays queued and the close is deferred.
+  ASSERT_TRUE(conn->EnqueueResponse(std::string(1024 * 1024, 'Q')));
+  ASSERT_TRUE(conn->WriteArmedForTest());
+  ASSERT_FALSE(conn->SendReadOverflowErrorForTest("request too large", ErrorCode::kNetworkInvalidRequest))
+      << "a queued response must defer the close";
+  ASSERT_TRUE(conn->IsClosing());
+  EXPECT_EQ(mock->InterestFor(client_fd) & kReadable, 0U) << "deferred close must drop read interest";
+  EXPECT_NE(mock->InterestFor(client_fd) & kWritable, 0U) << "the queued response must still be able to drain";
+
+  const std::string unread = "INFO\r\n";
+  ASSERT_EQ(::send(sp.Peer(), unread.data(), unread.size(), 0), static_cast<ssize_t>(unread.size()));
+
+  // A stale readable event already in a poll batch must not count as activity.
+  const auto last_active = conn->LastActive();
+  const int polls_before = mock->PollCallCount();
+  mock->InjectReadable(client_fd);
+  ASSERT_TRUE(mock->WaitForPollCalled(polls_before + 2, std::chrono::milliseconds(2000)));
+  EXPECT_EQ(conn->LastActive(), last_active) << "a readable event without received bytes refreshed the idle timer";
+
+  // Model level-triggered readiness: report readable whenever interest is armed.
+  int readable_dispatches = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (reactor_->ConnectionCount() == 1U && std::chrono::steady_clock::now() < deadline) {
+    if ((mock->InterestFor(client_fd) & kReadable) != 0) {
+      mock->InjectReadable(client_fd);
+      ++readable_dispatches;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  EXPECT_EQ(readable_dispatches, 0) << "the loop kept dispatching readable events after the deferred close";
+  EXPECT_EQ(reactor_->ConnectionCount(), 0U) << "a deferred close whose queue never drains must be reaped as idle";
+}
+
+// A worker that answers a request inline after holding the drain slot longer
+// than the idle timeout has just performed I/O, so the next sweep must not
+// reap the connection.
+TEST_F(IoReactorTest, WorkerInlineReplyRefreshesIdleTimer) {
+  ReactorConfig cfg;
+  cfg.poll_timeout_ms = 10;
+  cfg.idle_timeout_sec = 2;
+  cfg.reaper_interval_sec = 1;
+  reactor_ = std::make_unique<IoReactor>(cfg);
+  ASSERT_NE(StartWithMock(), nullptr);
+
+  SocketPair sp;
+  const int client_fd = sp.TakeClient();
+  auto conn = MakeConn(client_fd);
+  ASSERT_TRUE(reactor_->Register(conn));
+
+  conn->SetDrainScheduledForTest(true);
+  std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+  ASSERT_EQ(reactor_->ConnectionCount(), 1U) << "an executing request must not be reaped as idle";
+
+  // The worker's inline drain sends the reply, then releases the drain slot.
+  ASSERT_TRUE(conn->EnqueueResponse("OK long command finished"));
+  EXPECT_EQ(conn->WriteQueueDepthForTest(), 0U) << "the reply must have been sent inline";
+  conn->SetDrainScheduledForTest(false);
+
+  // At least one sweep runs in this window; all of it is within the idle timeout of the reply.
+  std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+  EXPECT_EQ(reactor_->ConnectionCount(), 1U) << "a connection that just sent a reply was reaped as idle";
+}
+
 }  // namespace mygramdb::server

@@ -54,15 +54,40 @@ mygram::utils::ErrorCode internal::ClassifyConnectErrorCode(unsigned int native_
   }
 }
 
+bool internal::IsConnectionEndingError(unsigned int native_error) {
+  switch (native_error) {
+    case kMySQLErrServerLost:
+    case kMySQLErrGoneAway:
+    case kMySQLErrServerLostExtended:
+    case kMySQLErrServerShutdown:
+    case kMySQLErrAbortingConnection:
+    case kMySQLErrNetReadError:
+    case kMySQLErrNetReadInterrupted:
+    case kMySQLErrNetErrorOnWrite:
+    case kMySQLErrNetWriteInterrupted:
+    case kMariaDBErrConnectionKilled:
+    case kMySQLErrClientInteractionTimeout:
+      return true;
+    default:
+      return false;
+  }
+}
+
 mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_error) {
   // Stable server error numbers from the MySQL/MariaDB client protocol.
   constexpr unsigned int kUnknownColumn = 1054;
   constexpr unsigned int kCommandDenied = 1142;
   constexpr unsigned int kNoSuchTable = 1146;
+  constexpr unsigned int kLockDeadlock = 1213;          // ER_LOCK_DEADLOCK
   constexpr unsigned int kSpecificAccessDenied = 1227;  // Missing SUPER / REPLICATION CLIENT
-  constexpr unsigned int kServerGoneAway = 2006;        // CR_SERVER_GONE_ERROR
-  constexpr unsigned int kServerLost = 2013;            // CR_SERVER_LOST (includes read timeout)
-  constexpr unsigned int kServerLostExtended = 2055;    // CR_SERVER_LOST_EXTENDED
+  constexpr unsigned int kQueryInterrupted = 1317;      // ER_QUERY_INTERRUPTED (KILL QUERY)
+  if (IsConnectionEndingError(native_error)) {
+    // Schema validation runs after reconnect. A metadata query can lose its
+    // transport (including a read timeout) even though Connect() succeeded;
+    // preserving this as a retryable transport error prevents a transient
+    // lock wait or proxy reset from permanently stopping replication.
+    return mygram::utils::ErrorCode::kMySQLDisconnected;
+  }
   switch (native_error) {
     case kNoSuchTable:
       return mygram::utils::ErrorCode::kMySQLTableNotFound;
@@ -73,14 +98,10 @@ mygram::utils::ErrorCode internal::ClassifyQueryErrorCode(unsigned int native_er
     case kCommandDenied:
     case kSpecificAccessDenied:
       return mygram::utils::ErrorCode::kPermissionDenied;
-    case kServerGoneAway:
-    case kServerLost:
-    case kServerLostExtended:
-      // Schema validation runs after reconnect. A metadata query can lose its
-      // transport (including a read timeout) even though Connect() succeeded;
-      // preserving this as a retryable transport error prevents a transient
-      // lock wait or proxy reset from permanently stopping replication.
-      return mygram::utils::ErrorCode::kMySQLDisconnected;
+    case kLockDeadlock:
+    case kQueryInterrupted:
+      // The statement was aborted, not answered; running it again can succeed.
+      return mygram::utils::ErrorCode::kMySQLTimeout;
     default:
       return mygram::utils::ErrorCode::kMySQLQueryFailed;
   }
