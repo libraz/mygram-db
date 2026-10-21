@@ -124,48 +124,8 @@ TMPDIR=$(mktemp -d)
 CONFIG_FILE="${TMPDIR}/config-test.yaml"
 DOCKERFILE="${TMPDIR}/Dockerfile"
 
-# Write test config (for -t config-test and integration)
-cat > "$CONFIG_FILE" << 'YAML'
-mysql:
-  host: "mysql"
-  port: 3306
-  user: "repl_user"
-  password: "test_password"
-  database: "mydb"
-  datetime_timezone: "+00:00"
-
-tables:
-  - name: "articles"
-    primary_key: "id"
-    text_source:
-      column: "content"
-    ngram_size: 2
-
-replication:
-  enable: true
-  server_id: 12345
-
-api:
-  tcp:
-    bind: "0.0.0.0"
-    port: 11016
-  http:
-    enable: true
-    bind: "0.0.0.0"
-    port: 8080
-
-network:
-  allow_cidrs:
-    - "0.0.0.0/0"
-
-memory:
-  hard_limit_mb: 512
-  soft_target_mb: 256
-
-logging:
-  level: "info"
-  format: "json"
-YAML
+# Test config (for -t config-test and integration) is the shipped fixture
+cp "${ROOT_DIR}/support/testing/config-rpm-test.yaml" "$CONFIG_FILE"
 
 if [ "$PKG_TYPE" = "rpm" ]; then
     cat > "$DOCKERFILE" << DOCKERFILE

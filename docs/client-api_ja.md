@@ -40,7 +40,8 @@ typed clientとHTTPはリテラル検索が既定です。boolean syntaxは常�
 C options APIでは `MygramSearchOptions_C` をゼロ初期化し、`struct_size` を
 設定してください。`limit == 0` はserver既定値を使います。ゼロ既定の
 `MYGRAM_QUERY_LITERAL` はliteral検索を維持し、boolean式には
-`MYGRAM_QUERY_BOOLEAN` を指定します。比較filterは `=`、`!=`、`>`、`>=`、
+`MYGRAM_QUERY_BOOLEAN` を指定します。ゼロ既定の `sort_desc` は他の検索entry pointと同じく
+主キー降順で、負の値を指定すると昇順になります。比較filterは `=`、`!=`、`>`、`>=`、
 `<`、`<=`、fuzzy distanceは1または2を指定できます。
 
 facet navigationでは、C++ callerは `Facet` の最後の引数に `offset` を渡します。
@@ -85,9 +86,11 @@ macOSで103 byte、Linuxで107 byteです。
 
 C handleはthread間で共有できます。接続lifecycle callとcommandはhandle上で
 直列化され、disconnectは実行中commandをcancelせず完了まで待ちます。別threadが
-handleを使用中に `mygramclient_destroy()` を呼ばないでください。error stateへの
-accessは同期され、`mygramclient_get_last_error()` は同じthreadが次にgetterを
-呼ぶまで有効なthread-local snapshotを返します。失敗し得るoperationは、書き込み
+handleを使用中に `mygramclient_destroy()` を呼ばないでください。error stateは
+同期されますがhandleごとで、最後に書き込んだthreadが優先されます。handleを共有する
+threadは互いのerrorを読む可能性があるため、各threadが自分のerrorを必要とする場合は
+threadごとにhandleを持たせてください。`mygramclient_get_last_error()` は同じthreadが
+次にgetterを呼ぶまで有効なthread-local snapshotを返します。失敗し得るoperationは、書き込み
 可能なpointer out-parameterを事前に `NULL`、numeric outputを0に初期化します。
 
 `SendCommand` と `mygramclient_send_command` は、送信したcommandに応じて応答を

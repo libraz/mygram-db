@@ -6,8 +6,8 @@ import uuid
 import pytest
 
 from lib.data_generator import DataGenerator
-from lib.metrics import REPL_DDL_TOTAL, MetricsSnapshot, read_counter
-from lib.wait import wait_until, wait_until_gte
+from lib.metrics import REPL_DDL_TOTAL, read_counter
+from lib.wait import wait_until, wait_until_gte, wait_until_value
 
 pytestmark = pytest.mark.ddl
 
@@ -148,32 +148,47 @@ class TestDDLEdgeCases:
     """
 
     def test_ddl_on_non_tracked_table(self, mysql, mygramdb, seed_data):
-        """DDL on non-tracked table should not affect articles index."""
-        info_before = mygramdb.info()
-        doc_count_before = info_before.get(
-            "total_documents", info_before.get("doc_count", info_before.get("documents", 0))
+        """DDL on an untracked table leaves tracked indexes alone and advances the position."""
+        marker = f"untracked_{uuid.uuid4().hex[:8]}"
+        scratch = f"ddl_untracked_{uuid.uuid4().hex[:6]}"
+        mysql.insert_rows(
+            "articles",
+            [
+                {
+                    "title": f"{marker} {i}",
+                    "content": f"{marker} content {i}",
+                    "status": 1,
+                    "category": "tech",
+                    "enabled": 1,
+                }
+                for i in range(3)
+            ],
         )
-
-        MetricsSnapshot.capture(mygramdb)
-        ddl_before = read_counter(mygramdb, REPL_DDL_TOTAL)
-
-        cols = mysql.execute("SHOW COLUMNS FROM products LIKE 'ddl_test_col'")
-        if not cols:
-            mysql.execute("ALTER TABLE products ADD COLUMN ddl_test_col VARCHAR(50) DEFAULT NULL")
-            _await_ddl_replayed(mygramdb, ddl_before)
-
-        info_after = mygramdb.info()
-        doc_count_after = info_after.get(
-            "total_documents", info_after.get("doc_count", info_after.get("documents", 0))
+        wait_until_value(
+            lambda: mygramdb.count("testdb.articles", marker),
+            expected=3,
+            timeout=30,
+            interval=0.5,
+            description=f"{marker} rows to replicate",
         )
-        assert doc_count_after >= doc_count_before, (
-            f"Articles doc count should not decrease: {doc_count_before} -> {doc_count_after}"
-        )
+        before_gtid = mygramdb.replication_gtid()
 
+        try:
+            mysql.execute(f"CREATE TABLE {scratch} (id INT PRIMARY KEY, note VARCHAR(20))")
+            mysql.execute(f"ALTER TABLE {scratch} ADD COLUMN extra VARCHAR(50) DEFAULT NULL")
+            wait_until(
+                lambda: mygramdb.replication_gtid() != before_gtid,
+                timeout=30,
+                interval=0.5,
+                description="replication position to advance past the untracked DDL",
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                mysql.execute(f"DROP TABLE IF EXISTS {scratch}")
+
+        assert mygramdb.count("testdb.articles", marker) == 3
+        assert mygramdb.replication_is_running()
         assert mygramdb.ping()
-
-        with contextlib.suppress(Exception):
-            mysql.execute("ALTER TABLE products DROP COLUMN ddl_test_col")
 
     def test_sequential_ddl_with_dml(self, mysql, mygramdb, seed_data):
         """Sequential DDL + DML operations should all be handled correctly."""

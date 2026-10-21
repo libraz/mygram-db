@@ -95,6 +95,18 @@ class TestDDLDuringQueries:
         stop_event.set()
         search_thread.join(timeout=10)
 
+        # A table being rebuilt by SYNC refuses reads with a dedicated message;
+        # any other error, or a count outside the pre/post-truncate bounds,
+        # means a read path broke under the mutation.
+        assert search_counts, "the concurrent searcher recorded no counts"
+        unexpected = [error for error in errors if "synchronizing" not in error]
+        assert not unexpected, (
+            f"searches failed for reasons other than an in-progress sync: {unexpected[:5]}"
+        )
+        assert all(0 <= c <= 20 for c in search_counts), (
+            f"search counts outside 0..20 during truncate: {sorted(set(search_counts))}"
+        )
+
         # Re-seed for subsequent tests
         gen2 = DataGenerator(seed=42)
         new_rows = gen2.generate_articles(count=100)
@@ -212,4 +224,7 @@ class TestDDLDuringQueries:
         unexpected = [error for error in errors if "synchronizing" not in error]
         assert not unexpected, (
             f"searches failed for reasons other than an in-progress sync: {unexpected[:5]}"
+        )
+        assert all(10 <= c <= 50 for c in search_counts), (
+            f"search counts outside 10..50 during bulk delete: {sorted(set(search_counts))}"
         )

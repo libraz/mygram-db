@@ -1,6 +1,7 @@
 # MygramDB Configuration Example
 #
-# This is a complete example configuration file with all available options.
+# This is an example configuration file covering the commonly used options.
+# spec/config-keys.md lists every accepted key.
 # Copy this file and customize it for your environment.
 #
 # Documentation: https://mygramdb.libraz.net/docs/configuration (ja: https://mygramdb.libraz.net/ja/docs/configuration)
@@ -158,7 +159,7 @@ memory:
   soft_target_mb: 4096              # Reserved / not yet enforced (default: 4096)
   arena_chunk_mb: 64                # Reserved / not yet enforced (default: 64)
   roaring_threshold: 0.18           # Roaring bitmap threshold (default: 0.18)
-  minute_epoch: true                # Use minute-precision epoch (default: true)
+  minute_epoch: true                # Reserved / not yet enforced (default: true)
 
   # Text Normalization
   normalize:

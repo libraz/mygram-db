@@ -12,6 +12,8 @@ services:
       MYSQL_USER: ${MYSQL_USER:-repl_user}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD must be set}
     command:
+      # The in-network port follows MYSQL_PORT, the port mygramdb dials.
+      - --port=${MYSQL_PORT:-3306}
       - --server-id=1
       - --log-bin=mysql-bin
       - --gtid-mode=ON
@@ -25,7 +27,8 @@ services:
       # only so a local client can inspect the database. The host interface is
       # literal rather than variable: root credentials come from .env, and a
       # publish without it would put them on every interface the host has.
-      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+      # MYSQL_HOST_PORT only moves the host side; the container side is MYSQL_PORT.
+      - "127.0.0.1:${MYSQL_HOST_PORT:-3306}:${MYSQL_PORT:-3306}"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./support/docker/mysql/init:/docker-entrypoint-initdb.d:ro

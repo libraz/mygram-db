@@ -9,7 +9,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_secure_password}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-mydb}
       MYSQL_USER: ${MYSQL_USER:-repl_user}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-your_secure_password}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-test_password}
     command:
       - --server-id=1
       - --log-bin=mysql-bin
@@ -23,7 +23,7 @@ services:
       - "3307:3306"
     volumes:
       - mysql_rpm_test_data:/var/lib/mysql
-      - ./support/docker/mysql/init:/docker-entrypoint-initdb.d:ro
+      - ../docker/mysql/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # The password reaches the probe through the environment; a -p argument
       # would publish it in the process table on every interval.

@@ -83,7 +83,7 @@ All Configuration codes except 1007 reach TCP through the administrative command
 | 1005 | `kConfigSchemaError` | JSON schema error | `TCP+` (`CONFIG HELP`) | `src/config/config_help.cpp` |
 | 1006 | `kConfigYamlError` | YAML parsing error | `TCP+` (`CONFIG VERIFY`) | `src/config/config_loader.cpp` |
 | 1007 | `kConfigJsonError` | JSON parsing error | `internal` — only reachable for a JSON config file at startup; `CONFIG VERIFY` rejects any extension other than `.yaml`/`.yml` (`src/server/handlers/admin_handler.cpp`) | `src/config/config_loader.cpp` |
-| 1008 | `kConfigUnknownVariable` | No configuration variable by that name | `TCP+` (`SET`) — both construction sites are in `RuntimeVariableManager`, and a `SET` client receives the one raised by `GetVariable`, because `VariableHandler::HandleSet` (`src/server/handlers/variable_handler.cpp`) looks the name up before assigning and forwards that code | `src/config/runtime_variable_manager.cpp` |
+| 1008 | `kConfigUnknownVariable` | No configuration variable by that name | `TCP+` (`SET`) — a `SET` client receives the one raised by `RuntimeVariableManager::SetVariables`, which `VariableHandler::HandleSet` (`src/server/handlers/variable_handler.cpp`) forwards; the other construction site, `RuntimeVariableManager::GetVariable`, is not on the `SET` path | `src/config/runtime_variable_manager.cpp` |
 | 1009 | `kConfigVariableNotMutable` | Variable exists but cannot be changed at runtime | `TCP+` (`SET`) | `src/config/runtime_variable_manager.cpp` |
 
 ### Database/Connection (2000-2999)
@@ -207,7 +207,7 @@ Codes 6000-6025 are lifecycle and socket-layer failures raised before or outside
 | 6026 | `kServerInitMissingDependency` | Server initialization missing required dependency | `TCP+`, `HTTP` (503 on `GET /config` and `POST /optimize`), `internal` (startup) | `src/server/handlers/admin_handler.cpp`, `src/server/handlers/variable_handler.cpp`, `src/server/http_server.cpp` (9 sites total) |
 | 6027 | `kServerShuttingDown` | Server is shutting down | `TCP+` (`SYNC`), `internal` (TCP shutdown) | `src/server/sync_operation_manager.cpp`, `src/server/tcp_server.cpp` |
 | 6028 | `kServerLoading` | Server is loading | `TCP+`, `HTTP` (503) | `src/server/handlers/command_handler.cpp`, `src/server/search_pipeline.cpp`, `src/server/http_server.cpp` (4 sites total) |
-| 6029 | `kServerNotReady` | Server is not ready | `TCP+`, `HTTP` (503) | `src/server/handlers/command_handler.cpp`, `src/server/handlers/replication_handler.cpp`, `src/server/http_server.cpp` (6 sites total) |
+| 6029 | `kServerNotReady` | Server is not ready | `TCP+`, `HTTP` (503) | `src/server/handlers/command_handler.cpp`, `src/server/handlers/dump_handler.cpp`, `src/server/handlers/replication_handler.cpp`, `src/server/http_server.cpp` (8 sites total) |
 | 6030 | `kServerBusy` | Server is busy | `TCP+` (rate limit, long-operation conflict, backpressure), `HTTP` (429 on rate limit) | `src/server/request_dispatcher.cpp`, `src/server/http_server.cpp`, `src/server/handlers/dump_handler.cpp` (30 sites total) |
 
 6009 and 6022 are not assigned.

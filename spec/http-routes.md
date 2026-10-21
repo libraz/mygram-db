@@ -29,6 +29,8 @@ Every entry in this table is implemented in `src/server/http_server.cpp`.
 
 The *Rate limited* and *Counted in `total_requests`* columns are declared per route in the same descriptor table, whose fields are `HttpServer::RouteDescriptor` (`src/server/http_server.h`), and are read by the pre-routing handler through `FindLiteralRoute` (`src/server/http_server.cpp`), so a route's accounting is the same whether the request is served or rejected. A path the table does not name — including every regex route and every unmatched path — is counted and rate limited.
 
+`HEAD` is served through the `GET` handler, and `FindLiteralRoute` matches it to the same descriptor as `GET`, so a `HEAD` request takes the route's rate-limit exemption and counting exactly as `GET` does (`src/server/http_server.cpp`).
+
 `OPTIONS` is the exception to that generalization. `FindLiteralRoute` compares the request method against `GET` or `POST` only (`src/server/http_server.cpp`), so a preflight never resolves to a descriptor and is treated as an unnamed path: a preflight denied by the network ACL or the rate limiter increments `total_requests`, while a preflight that is served does not, because the CORS handler records nothing (`HttpServer::SetupCors`, `src/server/http_server.cpp`).
 
 The *Auth* column is the descriptor's `requires_admin_token` flag, declared in the same table and enforced by the shared route wrapper before the handler is dispatched (`src/server/http_server.cpp`). Three routes carry it: `GET /config`, `GET /replication/status` and `POST /optimize`. The credential gate lives only in that wrapper, so an uncredentialed request on those three routes never reaches handler code — see *Authentication*. Three handlers read the credential without gating on it: `HandleHealthReady`, `HandleHealthDetail` and `HandleMetrics` call `AdminCredentialsAccepted` to decide which replication fields to expose, not whether to admit the request (`src/server/http_server.cpp`).
@@ -103,8 +105,8 @@ Every citation in this table is `src/server/http_server.cpp`. The defaults are t
 
 ### Query construction
 
-- `mode: "literal"` (default): the request is turned into the text command `SEARCH <resolved_table> "<escaped q>"` and run through `QueryParser::Parse`, where `<escaped q>` is produced by `QueryParser::QuoteSearchLiteral`, the escaper the parser itself uses to re-emit a quoted token (`src/query/query_parser_commands.cpp`). A parser error is returned as 400 with the parser's own error code.
-- `mode: "boolean"`: `q` is assigned directly to both `search_text` and `search_expression` without invoking the parser (`src/server/http_server.cpp`).
+- `mode: "literal"` (default): the request is turned into the text command `SEARCH "<resolved_table>" "<escaped q>"` and run through `QueryParser::Parse`. Both the table key and `q` are produced by `QueryParser::QuoteSearchLiteral`, the escaper the parser itself uses to re-emit a quoted token (`src/query/query_parser_commands.cpp`), so no character in either splits into extra tokens (`src/server/http_server.cpp`). A parser error is returned as 400 with the parser's own error code.
+- `mode: "boolean"`: the command is `SEARCH "<resolved_table>" <q>` with `q` unquoted, run through `QueryParser::Parse` like the TCP command. A `q` that carries a clause a body field already owns (`FILTER`, `SORT`, `LIMIT`, `OFFSET`, `HIGHLIGHT`, `FUZZY`) is rejected with 400 `kQuerySyntaxError` (`src/server/http_server.cpp`).
 
 After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, highlight and fuzzy, then validates the assembled query against `api.max_query_length` via `QueryParser::ValidateQueryLength` (`src/server/http_server.cpp`, `src/query/query_parser.cpp`). This is the only length check on the route, and it counts code points, not bytes (`src/query/query_parser.cpp`).
 
@@ -137,7 +139,7 @@ After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, h
 
 | Status | Condition | `error_code` | Citation |
 |---|---|---|---|
-| 400 | Invalid JSON body | `kQuerySyntaxError` (3000) | `src/server/http_server.cpp` |
+| 400 | Invalid JSON body, or nesting deeper than 32 levels | `kQuerySyntaxError` (3000) | `src/server/http_server.cpp` |
 | 400 | Missing / non-string `q`, bad `mode` | `kQuerySyntaxError` (3000) | `src/server/http_server.cpp` |
 | 400 | `q` contains `\r`/`\n`/`\0` | `kQueryInvalidToken` (3001) | `src/server/http_server.cpp` |
 | 400 | `q` empty | `kQuerySyntaxError` (3000) | `src/server/http_server.cpp` |
@@ -149,7 +151,6 @@ After construction, `ApplyHttpQueryOptions` applies pagination, filters, sort, h
 | 400 | More than 64 filter conditions | `kQuerySyntaxError` (3000), matching TCP | `ParseFiltersFromJson`, `src/server/http_server.cpp` |
 | 400 | Bad `sort` | `kQueryInvalidSort` (3007) | `ParseSortFromJson`, `src/server/http_server.cpp` |
 | 400 | Bad `highlight` / `fuzzy` | `kQuerySyntaxError` (3000) | `ParseHighlightFromJson` / `ParseFuzzyFromJson`, `src/server/http_server.cpp` |
-| 400 | Invalid table name | `kQueryInvalidToken` (3001) | `src/server/http_server.cpp` |
 | 400 | `HIGHLIGHT` requested but normalized text storage is off | `kNotImplemented` (4) | `HttpServer::HandleSearch`, `src/server/http_server.cpp` |
 | 400 | `sort._score` with BM25 disabled | `kQueryInvalidSort` (3007) | `src/server/search_pipeline.cpp` |
 | 400 | `sort._score` with normalized text storage off | `kNotImplemented` (4) | `src/server/search_pipeline.cpp` |
@@ -207,7 +208,7 @@ Every citation in this table is `src/server/http_server.cpp`.
 
 `sort`, `highlight` and `fuzzy` are rejected with `kQuerySyntaxError` / 400 (`src/server/http_server.cpp`).
 
-In literal mode the search expression is quoted with the same escaper used by `/search` (`src/server/http_server.cpp`); in boolean mode `q` is used verbatim. Unlike `/search`, the facet path never invokes `QueryParser::Parse` — the query is assembled field by field (`src/server/http_server.cpp`).
+The facet query is built exactly as for `/search`: the command `FACET "<resolved_table>" <column> [<q>]` is run through `QueryParser::Parse`, with `q` quoted in literal mode and passed unquoted in boolean mode, where the same clause-keyword rejection applies (`src/server/http_server.cpp`).
 
 `limit`/`offset` are applied to the *value list*, after `total_count` has been recorded (`src/server/search_pipeline.cpp`).
 
@@ -245,7 +246,7 @@ The last of these is raised inside the pipeline and is mapped to HTTP 400 by `Ht
 
 Fetch one document by primary key. No body, no `Content-Type` requirement (`src/server/http_server.cpp`).
 
-Both path segments are percent-decoded by cpp-httplib before matching. `{identity}` goes through the same `QueryParser::IsSafeTableName` / qualification / catalog resolution as the POST routes (`src/server/http_server.cpp`). `{primary_key}` is everything after the table segment, used verbatim with no validation (`src/server/http_server.cpp`); because decoding happens before matching and the route's key group is greedy, a key containing `/` is reachable as `%2F`.
+Both path segments are percent-decoded by cpp-httplib before matching. `{identity}` goes through the same qualification / catalog resolution as the POST routes; an unknown name is `kTableNotFound` / 404 (`src/server/http_server.cpp`). `{primary_key}` is everything after the table segment, used verbatim with no validation (`src/server/http_server.cpp`); because decoding happens before matching and the route's key group is greedy, a key containing `/` is reachable as `%2F`.
 
 Success: `200`, `application/json`.
 
@@ -260,7 +261,6 @@ Success: `200`, `application/json`.
 
 | Status | Condition | `error_code` |
 |---|---|---|
-| 400 | Invalid table name | `kQueryInvalidToken` (3001) |
 | 404 | Bare table name under multi-database config or other unresolved identity | `kTableNotFound` (4007) |
 | 404 | No such primary key, or document fetch returned empty | `kIndexDocumentNotFound` (4004) |
 | 500 | Null index or document store; unhandled exception | `kInternalError` (5) |
@@ -384,7 +384,6 @@ Readiness is `data_initialized && !loading && !sync_in_progress && replication_a
 | 2 | `connected` | `IsRunning()` | yes |
 | 3 | `starting` | `IsStarting()` | yes |
 | 4 | `paused_for_dump` | `replication_paused_for_dump` | yes |
-| 5 | `paused_for_sync` | a SYNC is in progress; it stops the reader through `replication_pause::Scope` without raising the dump flag | yes |
 | 6 | `failed` | `GetReplicationState() == kFailed` | no |
 | 7 | `disconnected` | otherwise | no |
 
@@ -425,7 +424,6 @@ When not ready, `status` is `"not_ready"` and a `reason` field is added, chosen 
 | 2 | `Server is loading` | `is_loading` |
 | 3 | `Replication stopped due to an incompatible schema` | `HasSchemaIncompatibleError()` |
 | 4 | the error code's own description, never MySQL's text | `GetLastError()` non-empty (`src/server/readiness.cpp`) |
-| 5 | `SYNC is in progress` | `sync_in_progress` |
 | 6 | `Replication is not running` | otherwise |
 
 ## GET /health/detail
@@ -569,10 +567,9 @@ The body must be a JSON object (`src/server/http_server.cpp`) and **any field ot
 | Status | Condition | `error_code` |
 |---|---|---|
 | 400 | Body is not a JSON object | `kQuerySyntaxError` (3000) |
-| 400 | Invalid JSON | `kQuerySyntaxError` (3000) |
+| 400 | Invalid JSON, or nesting deeper than 32 levels | `kQuerySyntaxError` (3000) |
 | 400 | Unsupported field | `kQuerySyntaxError` (3000) |
 | 400 | `table` not a string | `kQuerySyntaxError` (3000) |
-| 400 | Invalid table name | `kQueryInvalidToken` (3001) |
 | 401 | Missing or wrong bearer token (adds `WWW-Authenticate: Bearer`) | `kPermissionDenied` (7) |
 | 404 | Table not resolvable | `kTableNotFound` (4007) |
 | 415 | `Content-Type` not `application/json` | `kNetworkInvalidRequest` (6007) |
@@ -630,7 +627,7 @@ A pre-routing handler runs before every route, including `/health*` and `/metric
 
 - The client identity is `req.remote_addr`, or the literal `"unknown"` when empty (`src/server/http_server.cpp`).
 - `X-Forwarded-For` is honoured only when the direct peer matches `api.http.trusted_proxies` exactly (`src/server/http_server.cpp`).
-- A peer outside `network.allow_cidrs` gets `403` with `kPermissionDenied` and message `Access denied by network.allow_cidrs` (`src/server/http_server.cpp`).
+- A peer outside `network.allow_cidrs` gets `403` with `kPermissionDenied` and message `Access denied by network.allow_cidrs`. The check runs in the pre-routing handler, after the request headers are parsed and before the body is read or any handler runs; until then the connection holds a worker and a connection slot (`src/server/http_server.cpp`).
 - ACL denials increment `requests_denied_total{reason="acl",surface="http"}`, and `total_requests` only on a route the table marks `counts_requests` (`src/server/http_server.cpp`).
 - ACL rejection happens **before** the rate limiter, so denied peers cannot consume or evict rate-limit buckets (`src/server/http_server.cpp`).
 - Repeated denials from the same IP are log-suppressed by `DenialLogLimiter` (`src/server/denial_log_limiter.h`), applied at `src/server/http_server.cpp`.
@@ -638,7 +635,7 @@ A pre-routing handler runs before every route, including `/health*` and `/metric
 ## Rate limiting
 
 - Applied in the same pre-routing handler, to every route the descriptor table marks `rate_limited` (`src/server/http_server.cpp`).
-- `GET /health`, `GET /health/live` and `GET /health/ready` are **exempt** (`src/server/http_server.cpp`). A `429` on a liveness or readiness probe is read as a dead process by whatever is polling it, so traffic that happens to share the bucket could take a healthy server out of rotation. What still bounds them: `network.allow_cidrs` is enforced first and is unaffected (`src/server/http_server.cpp`), `api.http.max_connections` caps accepted sockets, and each response is a fixed-size JSON object built from atomics — no index walk, no document store access, no amplification.
+- `GET /health`, `GET /health/live` and `GET /health/ready`, and `HEAD` on the same paths, are **exempt** (`src/server/http_server.cpp`). A `429` on a liveness or readiness probe is read as a dead process by whatever is polling it, so traffic that happens to share the bucket could take a healthy server out of rotation. What still bounds them: `network.allow_cidrs` is enforced first and is unaffected (`src/server/http_server.cpp`), `api.http.max_connections` caps accepted sockets, and each response is a fixed-size JSON object built from atomics — no index walk, no document store access, no amplification.
 - `GET /health/detail` stays rate limited (`src/server/http_server.cpp`): it walks every table's index and document store under the generation lock, so its cost grows with the corpus.
 - Bucket key is the client IP string (`src/server/http_server.cpp`).
 - The limiter instance is shared with the TCP server, so one client's quota spans both protocols. `TcpServer::AttachTo` (`src/server/tcp_server.cpp`) puts its own limiter into the shared-component bundle and `HttpServer::AdoptSharedComponents` (`src/server/http_server.cpp`) takes it.
@@ -734,7 +731,6 @@ Which operations are administrative does not differ between the surfaces: a rout
 
 | # | Aspect | TCP behaviour | HTTP behaviour |
 |---|---|---|---|
-| 5 | Table-name character set | No whitelist; the token is whatever the tokenizer produced (`src/query/query_parser_commands.cpp`) | `QueryParser::IsSafeTableName`: ≤ `kMaxTableNameLength` (256) bytes, ASCII limited to `[A-Za-z0-9_.-]` plus well-formed non-ASCII UTF-8; anything else is 400 `kQueryInvalidToken` (3001). The check is `QueryParser::IsSafeTableName` (`src/query/query_parser.cpp`) and the rejection is emitted by `ResolveHttpTableContext` |
 | 7 | Partially initialised table context | Reported as `Index not available` / `Document store not available`, `kInternalError` (`src/server/handlers/search_handler.cpp`) | Reported earlier during resolution as `Table context has null index or doc_store`, `kInternalError` / 500 |
 
 ### Accepted parameters
@@ -744,8 +740,6 @@ Which operations are administrative does not differ between the surfaces: a rout
 | 8 | Repeated conditions on one filter column | `FILTER` clauses are a list; the same column may appear more than once (`src/query/query_parser_clauses.cpp`) | `filters` is a JSON object, so at most one condition per column survives |
 | 9 | Filter value starting with an operator character | Rejected: `FILTER value must not start with an operator character`, `kQueryInvalidFilter` (`src/query/query_parser_clauses.cpp`) | No such check; the value is accepted |
 | 10 | Non-string filter values | Values arrive as text tokens only (`src/query/query_parser_clauses.cpp`) | JSON integers, floats and booleans are coerced: `true`→`"1"`, `false`→`"0"`, floats via `nlohmann::json::dump()` (shortest round-trip representation) |
-| 12 | Boolean-expression validation | `q` goes through `ParseSearchTextTokens`, which rejects unmatched/unclosed parentheses, the deprecated `ORDER` keyword, comma-separated table lists, and splits flat `AND`/`NOT` clauses (`src/query/query_parser_commands.cpp`) | `mode:"boolean"` assigns `q` straight to `search_text`/`search_expression`; none of those checks or the clause split run |
-| 13 | FACET search text | Runs through the parser's shared search-text extraction (`src/query/query_parser_commands.cpp`) | Assembled field by field; `QueryParser::Parse` is never invoked on the facet path |
 | 14 | COUNT clause rejection | Rejects `SORT`, `ORDER`, and any clause other than `AND`/`NOT`/`FILTER`, including `LIMIT`/`OFFSET`, all as `kQuerySyntaxError` (`src/query/query_parser_commands.cpp`) | Rejects exactly the fields `limit`, `offset`, `sort`, `highlight`, `fuzzy` as `kQuerySyntaxError`; other unknown JSON fields are silently ignored |
 | 15 | Unknown clause / field | On `FACET` and `COUNT` an unrecognised clause keyword is a hard `kQuerySyntaxError` (`src/query/query_parser_commands.cpp`). On `SEARCH` it is not: trailing tokens are absorbed into the search text, so `SEARCH t term BOGUSCLAUSE 3` answers `OK RESULTS 0` | Unknown JSON body fields are ignored on `/search`, `/count` and `/facet`; only `/optimize` enforces an allowlist |
 

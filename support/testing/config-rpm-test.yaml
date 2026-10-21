@@ -5,10 +5,11 @@ mysql:
   host: "mysql"
   port: 3306
   user: "repl_user"
-  password: "your_secure_password"
+  password: "test_password"
   database: "mydb"
   use_gtid: true
   connect_timeout_ms: 3000
+  datetime_timezone: "+00:00"
 
 # Table Configuration
 tables:
@@ -58,11 +59,18 @@ api:
   tcp:
     bind: "0.0.0.0"
     port: 11016
+  http:
+    enable: true
+    bind: "0.0.0.0"
+    port: 8080
+  # Required because the listeners bind a non-loopback address.
+  admin_token: "rpm-test-admin-token"
 
-# Network Configuration (allow all for testing)
+# Network Configuration: in-container probes and Docker's default bridge pool
 network:
   allow_cidrs:
-    - "0.0.0.0/0"
+    - "127.0.0.1/32"
+    - "172.16.0.0/12"
 
 # Logging
 logging:

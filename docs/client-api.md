@@ -45,7 +45,9 @@ line carrying a `-` flag is sent as typed, so the server rejects it.
 For the C options API, zero-initialize `MygramSearchOptions_C`, set
 `struct_size`, and use `limit == 0` for the server default. The zero default
 `MYGRAM_QUERY_LITERAL` preserves literal search; select `MYGRAM_QUERY_BOOLEAN`
-for a boolean expression. Comparison filters support `=`, `!=`, `>`, `>=`,
+for a boolean expression. The zero default `sort_desc` sorts primary keys
+descending like every other search entry point; a negative value sorts
+ascending. Comparison filters support `=`, `!=`, `>`, `>=`,
 `<`, and `<=`; fuzzy distance is 1 or 2.
 
 For facet navigation, C++ callers pass `offset` as the final `Facet` argument.
@@ -93,7 +95,9 @@ socket. The limit is 103 bytes on macOS and 107 on Linux.
 A C handle may be shared between threads. Connection lifecycle calls and
 commands are serialized on the handle; disconnect waits for an in-flight
 command to finish and does not cancel it. Do not call `mygramclient_destroy()`
-while another thread is using the handle. Its error state is synchronized, and
+while another thread is using the handle. Its error state is synchronized but
+per handle, and the last writer wins: threads sharing a handle may read each
+other's error, so give each thread its own handle when it needs its own error.
 `mygramclient_get_last_error()` returns a thread-local snapshot valid until the
 same thread calls that getter again. Every writable out-parameter is initialized
 to `NULL` (or zero for numeric outputs) before an operation that can fail.

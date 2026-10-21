@@ -1,6 +1,6 @@
 [Unit]
 Description=MygramDB - In-memory full-text search engine with MySQL replication
-Documentation=https://github.com/yourusername/mygram-db
+Documentation=https://github.com/libraz/mygram-db
 After=network.target mysql.service
 Wants=network-online.target
 
@@ -34,7 +34,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/mygramdb
+ReadWritePaths=/var/lib/mygramdb /var/log/mygramdb
 ReadOnlyPaths=/etc/mygramdb
 
 # Capabilities (minimal required)

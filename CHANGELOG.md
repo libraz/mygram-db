@@ -244,7 +244,7 @@ list the actions required before upgrading.
 - **Dump load safety** — a `DUMP LOAD` that would wipe a non-empty replication position is refused, and the loaded configuration and GTID are validated together before any live store is replaced.
 - **Posting list deserialization** — `PostingList::Deserialize` is overflow-safe and commits strategy and payload only after the full body validates; the V4 index term count is validated against the remaining payload before it is read.
 - **Portable primitives** — datetime conversion uses signed epoch seconds with a portable civil-date algorithm preserving valid pre-1970 values, CIDR matching covers IPv6 and IPv4-mapped IPv6 peers, `AF_UNIX` connections report a stable `unix` peer identity, and a failure to open the parent directory during a durability sync is reported instead of silently ignored.
-- **Startup signals** — a signal received during initialization or server startup is reported as an orderly shutdown instead of a startup failure, and the rotating log sink appends across restarts and SIGHUP reopen instead of truncating.
+- **Startup signals** — a signal received during initialization or server startup is reported as an orderly shutdown instead of a startup failure, and the rotating log sink appends across restarts and SIGUSR1 reopen instead of truncating.
 
 ### Changed
 

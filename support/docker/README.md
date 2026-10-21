@@ -28,8 +28,11 @@ Entrypoint script that:
 - `TABLE_*` - Table configuration
 - `REPLICATION_*` - Replication settings
 - `MEMORY_*` - Memory management
-- `SNAPSHOT_*` - Snapshot configuration
+- `BUILD_*` - Index build settings
+- `DUMP_*` - Dump persistence
+- `CACHE_*`, `BM25_*` - Query cache and relevance scoring
 - `API_*` - API server settings
+- `NETWORK_ALLOW_CIDRS` - Allowed client CIDRs
 - `LOG_*` - Logging configuration
 
 See `.env.example` for all available variables.
@@ -52,13 +55,6 @@ They will be executed in alphabetical order.
 ```bash
 # From project root
 docker-compose up -d
-```
-
-### Production
-
-```bash
-# From project root
-docker-compose -f docker-compose.prod.yml up -d
 ```
 
 ### Custom Configuration

@@ -277,6 +277,9 @@ with `(extras ignored)` here. The two disagree by construction; neither is stale
 Any unrecognized first token yields `ERROR 3000 Unknown command: <token>`
 (`src/query/query_parser.cpp`).
 
+`INFO` prints `cmd_save` and `cmd_load` only when non-zero; because `SAVE` and `LOAD` never
+parse, those lines never appear (`src/server/response_formatter.cpp`).
+
 ---
 
 ## 7. Global parser limits
@@ -808,7 +811,9 @@ and the same request succeeds once that window closes.
 | `REPLICATION START` | any in-flight `SYNC` | 4011 | `src/server/handlers/replication_handler.cpp` |
 | `REPLICATION STOP` | replication paused for dump | 6030 | `src/server/handlers/replication_handler.cpp` |
 
-`DUMP SAVE` additionally requires a non-empty GTID position →
+`DUMP SAVE` first requires every configured table to have completed its initial load, else
+`ERROR 6029 Cannot save dump before every table has completed its initial load. Please wait for
+SYNC to complete.` (`src/server/handlers/dump_handler.cpp`). It additionally requires a non-empty GTID position →
 `ERROR 6029 Cannot save dump without GTID position. Please run SYNC command first to establish
 initial position.` (`src/server/handlers/dump_handler.cpp`).
 
@@ -1142,7 +1147,7 @@ with the following escapes (`src/server/response_formatter.cpp`):
 ### 11.2 Tab- and line-delimited fields
 
 Applied to highlight snippets, facet values, `SYNC STATUS` fields, `DUMP` status/info fields,
-the filepath in the `DUMP_VERIFIED` success frame
+the filepath in the `DUMP_STARTED`, `SAVED`, `LOADED` and `DUMP_VERIFIED` success frames
 (`src/server/handlers/dump_handler.cpp`) and the table name inside the 6029 synchronizing
 error (`src/server/handlers/command_handler.cpp`). Exposed as
 `ResponseFormatter::SanitizeDelimitedField` (`src/server/response_formatter.cpp`).
@@ -1170,7 +1175,9 @@ Multi-line responses that terminate with a bare `END` line: `INFO`
 (`src/server/response_formatter.cpp`), `DUMP INFO`
 (`src/server/handlers/dump_handler.cpp`), `DUMP STATUS`
 (`src/server/handlers/dump_handler.cpp`), `CACHE STATS`
-(`src/server/handlers/cache_handler.cpp`).
+(`src/server/handlers/cache_handler.cpp`). `SYNC STATUS` is the exception: its body ends with
+`END\r\n`, so the frame ends `END\r\n\r\n` after the transport terminator
+(`src/server/sync_operation_manager.cpp`).
 
 ### 12.1 Error frame format
 
@@ -1227,7 +1234,7 @@ ERROR <numeric-code> <message>
 | 6026 | `kServerInitMissingDependency` | configuration or variable manager unavailable |
 | 6027 | `kServerShuttingDown` | `SYNC` requested after shutdown has been initiated |
 | 6028 | `kServerLoading` | request during `DUMP LOAD` |
-| 6029 | `kServerNotReady` | table synchronizing; missing GTID; replication not running |
+| 6029 | `kServerNotReady` | table synchronizing; initial load incomplete; missing GTID; replication not running |
 | 6030 | `kServerBusy` | rate limit; frame-queue overflow; thread-pool saturation; conflicts with `DUMP SAVE`/`DUMP LOAD`/`OPTIMIZE`; memory gates |
 | 8001 | `kCacheDisabled` | `CACHE` commands with the cache unconfigured or disabled; `SET cache.enabled = true` when the subsystem cannot start |
 
@@ -1258,66 +1265,3 @@ forwards the underlying error unchanged, so the code can come from any of:
 
 Clients must therefore treat `Failed to start replication` as carrying an open code set and
 not enumerate it.
-
----
-
-## 13. Known divergences
-
-The following are places where two code paths in the current tree disagree about the same
-thing. They are recorded as facts; no remedy is proposed here.
-
-1. **`SHOW VARIABLES` has no status prefix when it returns rows.** The empty result is
-   `+OK 0 rows` (`src/server/handlers/variable_handler.cpp`), but a non-empty result is
-   returned as a bare ASCII table beginning with `+---`. Every other command on this surface
-   begins with `OK `, `+OK` or `ERROR ` (`src/server/response_formatter.cpp`), so a
-   client keying on those prefixes cannot classify a non-empty `SHOW VARIABLES` reply.
-
-2. **`SEARCH` has two different frame terminations depending on `HIGHLIGHT`.**
-   `FormatSearchResponse` emits no trailing CRLF (`src/server/response_formatter.cpp`),
-   while `FormatSearchResponseWithHighlights` appends one and `FormatFacetResponse` does
-   likewise. After the transport terminator
-   (`src/server/reactor_connection.cpp`) the same command therefore ends in either `\r\n`
-   or `\r\n\r\n`.
-
-3. **Dump filepaths are sanitized on some responses and not others.** `DUMP VERIFY`
-   (`src/server/handlers/dump_handler.cpp`) and `DUMP INFO` pass the path through
-   `SanitizeDelimitedField`, while `DUMP SAVE` and `DUMP LOAD`
-   (`src/server/handlers/dump_handler.cpp` → `src/server/response_formatter.cpp`) emit it raw.
-
-4. **`SYNC STATUS` terminates its body differently from every other multi-line response.**
-   `GetSyncStatus` emits `END\r\n` (`src/server/sync_operation_manager.cpp`,
-   `src/server/response_formatter.cpp`), whereas `INFO`, `REPLICATION STATUS`, `DUMP INFO`
-   (`src/server/handlers/dump_handler.cpp`), `DUMP STATUS` and `CACHE STATS`
-   (`src/server/handlers/cache_handler.cpp`) all emit a bare `END`.
-
-5. **`QueryType::SAVE` and `QueryType::LOAD` are unreachable but still counted.** The enum
-   values exist (`src/query/query_parser.h`) and `ServerStats::IncrementCommand` has
-   dedicated counters for them (`src/server/server_stats.cpp`), which `INFO`
-   (`src/server/response_formatter.cpp`) and the Prometheus exposition can emit — yet `Parse`
-   rejects both keywords
-   outright (`src/query/query_parser.cpp`), so `cmd_save` and `cmd_load` can never be
-   non-zero. The same header's class documentation still lists `SAVE [filename]` and
-   `LOAD [filename]` as supported commands (`src/query/query_parser.h`).
-
-6. **The documented and configured defaults for `api.max_query_length` differ.**
-   `config::defaults::kDefaultQueryLengthLimit` is `128` (`src/config/config.h`), while
-   `ReactorConnection`'s read-cap rationale states the default is "~64 KiB" when justifying its
-   1 MiB read buffer (`src/server/reactor_connection.h`).
-
-7. **`INFO` and `CONFIG SHOW` are classified differently despite comparable disclosure.**
-   `INFO` is not in the administrative set (`src/server/request_dispatcher.cpp`) and is
-   therefore answerable before `AUTH`, yet it discloses the table list, memory figures, the
-   current replication GTID and the cache configuration snapshot
-   (`src/server/response_formatter.cpp`). `CONFIG SHOW` is administrative and requires
-   `AUTH` (`src/server/request_dispatcher.cpp`).
-
-8. **`CACHE CLEAR` requires the cache to be enabled; the sibling subcommands do not.**
-   `HandleClear` rejects a disabled cache with `ERROR 8001 Cache is disabled`
-   (`src/server/handlers/cache_handler.cpp`), while `CACHE STATS` and `CACHE DISABLE` proceed
-   and only require the cache manager to exist.
-
-9. **`ResponseFormatter::FormatSaveResponse` is dead code that duplicates a live format.** It
-   produces `OK SAVED <path>` (`src/server/response_formatter.cpp`) but has no caller;
-   the synchronous `DUMP SAVE` path builds the identical frame through `FormatStatus`
-   (`src/server/handlers/dump_handler.cpp`). Its sibling `FormatLoadResponse`
-   (`src/server/response_formatter.cpp`) is the one actually used by `DUMP LOAD`.
