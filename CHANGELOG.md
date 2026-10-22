@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-10-22
+
+Every change is corrective. A few change whether a configuration starts or
+which peers are admitted; the release notes list the actions required before
+upgrading.
+
+### Changed
+
+- **`0.0.0.0/0` and `::/0` admit both address families** — a zero-length prefix in `network.allow_cidrs` admitted only its own family; either entry now admits every IPv4 and IPv6 peer on TCP and HTTP.
+- **A regular file at `api.unix_socket.path` stops startup** — startup used to unlink it; only a stale socket is removed now.
+- **Runtime `SET` honours `--schema`** — a value the operator-supplied schema rejects returns `1004`.
+- **`DUMP SAVE` is refused with `6029` while a table is loading** instead of writing a dump restored as complete.
+- **Composite primary keys and primary keys on a nullable `UNIQUE` column are refused before the initial snapshot.**
+
+### Fixed
+
+- **Lifecycle** — `SIGUSR1` log rotation no longer races logging threads or loses a signal, a log reopen no longer reverts `SET logging.level`, shutdown past the 30 s drain timeout no longer crashes, a catch-up failure after a dump restore starts the server as `not_ready`, and orphaned dump temp files are reclaimed at startup, including under PID 1 in Docker.
+- **TCP** — a server-closed connection with unread input no longer spins the event loop, connections are no longer closed as idle right after a long command, an over-long request line returns `6007`, drain overflow answers with an error, rejected connections no longer flood the log, and `SYNC STOP` during catch-up takes effect.
+- **HTTP agrees with TCP** — boolean-mode search, count and facet parse quoted phrases and spacing as TCP does, table names outside a narrow ASCII set work, JSON bodies nested deeper than 32 levels return 400, `HEAD` on probe and document routes behaves, and `/info`/`/metrics` report the same figures as `INFO`.
+- **Search** — a bare expression and its parenthesized form agree, boolean `FUZZY` matches short and mixed CJK/ASCII terms and does not expand `NOT` terms, and byte `0xA0` no longer splits terms under a UTF-8 locale.
+- **Replication** — retryable server errors are retried instead of stopping replication, `DROP INDEX`/`CREATE INDEX` are re-validated, a failed `SYNC` no longer leaves the position at the snapshot GTID, commented transaction boundaries are classified correctly, and destructive DDL behind a harmless statement in one event is detected.
+- **Cache and statistics** — `ttl_expirations` counts each entry once, stale entries count as misses so `hit_rate` is no longer inflated, and the filter index no longer double-counts string memory.
+- **Dumps** — `DUMP SAVE` no longer writes sections `DUMP LOAD` rejects, and `mygram-cli DUMP SAVE` reports its own result.
+- **Client** — UTF-8 handling and whitespace trimming no longer depend on the locale, a zero-initialized C search options struct sorts descending, and threads sharing a C handle read their own last error.
+- **Configuration** — a missing YAML file reports `1000` and an empty one the empty-file error, as JSON does.
+- **Documentation and templates** — the spec divergence list, signal documentation, config templates, systemd unit, Docker README and package verification script match the server.
+
+### Build
+
+- CRoaring v5.3.0, json-schema-validator 2.4.1, cpp-httplib v0.62.0.
+
+**Detailed Release Notes**: [docs/releases/v1.11.1.md](docs/releases/v1.11.1.md)
+
 ## [1.11.0] - 2026-10-17
 
 Replication reads column metadata from each binlog `TABLE_MAP` event, so the
@@ -1015,7 +1048,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.11.0...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.11.1...HEAD
+[1.11.1]: https://github.com/libraz/mygram-db/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/libraz/mygram-db/compare/v1.10.2...v1.11.0
 [1.10.2]: https://github.com/libraz/mygram-db/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/libraz/mygram-db/compare/v1.10.0...v1.10.1
