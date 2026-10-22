@@ -1386,10 +1386,10 @@ TEST_F(ReactorConnectionTest, EofWithFrameDispatchedDoesNotDropResponse) {
   ASSERT_EQ(::shutdown(peer_fd_, SHUT_WR), 0) << "peer shutdown failed: " << std::strerror(errno);
 
   // First OnReadable drains the pending bytes, schedules the drain task,
-  // and observes recv()==0 → sets read_eof_. The drain task runs on the
-  // thread pool; the close-decision in OnReadable must NOT fire while the
-  // drain task is in-flight.
-  EXPECT_TRUE(conn_->OnReadable());
+  // and observes recv()==0 → sets read_eof_. It may return false only when
+  // the drain task has already finished and flushed the response, so the
+  // return value is not asserted; the response reaching the peer is.
+  (void)conn_->OnReadable();
 
   // The drain task dispatches the frame and enqueues a response. Wait for
   // it to arrive on the peer fd. If the race triggers, this read
