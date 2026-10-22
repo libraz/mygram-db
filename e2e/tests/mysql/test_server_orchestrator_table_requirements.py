@@ -25,7 +25,7 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _config(table: str, primary_key: str) -> str:
+def _config(table: str, primary_key: str, dump_dir: Path) -> str:
     return f"""mysql:
   host: "127.0.0.1"
   port: {MYSQL_PORT}
@@ -47,6 +47,10 @@ replication:
   server_id: 199995
   start_from: "snapshot"
 
+dump:
+  dir: "{dump_dir}"
+  interval_sec: 0
+
 api:
   tcp:
     bind: "127.0.0.1"
@@ -66,7 +70,7 @@ logging:
 
 def _run_startup(tmp_path: Path, table: str, primary_key: str) -> str:
     config_path = tmp_path / f"{table}.yaml"
-    config_path.write_text(_config(table, primary_key), encoding="utf-8")
+    config_path.write_text(_config(table, primary_key, tmp_path / "dumps"), encoding="utf-8")
     env = os.environ.copy()
     for name in (
         "MYGRAM_MYSQL_HOST",

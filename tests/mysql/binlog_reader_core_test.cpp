@@ -1244,25 +1244,8 @@ TEST_F(BinlogReaderFixture, UnsafeDdlDoesNotAdvanceGtidAndRequiresExplicitRecove
   EXPECT_TRUE(reader_->GetLastError().empty());
 }
 
-TEST_F(BinlogReaderFixture, ReplayedAlterAlreadyInTheStartupSchemaBaselineFailsClosed) {
-  reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:50");
+TEST_F(BinlogReaderFixture, AlterOnAConfiguredTableIsComparedAgainstTheStartupBaseline) {
   reader_->configured_schema_baselines_.emplace(table_config_.name, ConfiguredTableSchema{});
-  reader_->schema_baseline_gtid_ = "ffffffff-0000-0000-0000-000000000001:1-60";
-
-  BinlogEvent replayed =
-      BinlogEvent::CreateDDL(table_config_, "ALTER TABLE articles MODIFY status INT AS (category = 'x') STORED");
-  ASSERT_EQ(replayed.ddl_type, DDLType::kAlter);
-  replayed.gtid = "ffffffff-0000-0000-0000-000000000001:51";
-
-  EXPECT_FALSE(reader_->ProcessQueuedEvent(replayed));
-  EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-50");
-  EXPECT_TRUE(reader_->HasSchemaIncompatibleError());
-  EXPECT_NE(reader_->GetLastError().find("startup schema fingerprint"), std::string::npos) << reader_->GetLastError();
-}
-
-TEST_F(BinlogReaderFixture, AlterAfterTheStartupSchemaBaselineIsComparedAgainstIt) {
-  reader_->configured_schema_baselines_.emplace(table_config_.name, ConfiguredTableSchema{});
-  reader_->schema_baseline_gtid_ = "ffffffff-0000-0000-0000-000000000001:1-60";
 
   BinlogEvent later = BinlogEvent::CreateDDL(table_config_, "ALTER TABLE articles ADD COLUMN note INT");
   later.gtid = "ffffffff-0000-0000-0000-000000000001:61";

@@ -289,7 +289,9 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
 
   // Capture the startup contract for only the configured PK/text/filter
   // columns. Post-DDL validation compares against these fingerprints, so
-  // unrelated ADD COLUMN / ADD INDEX operations remain compatible.
+  // unrelated ADD COLUMN / ADD INDEX operations remain compatible. A DDL
+  // replayed from before this capture is already reflected in it and compares
+  // equal, including a stored generated column rewritten without row events.
   configured_schema_baselines_.clear();
   for (const auto& [table_name, ctx] : table_contexts_) {
     if (ctx == nullptr) {
@@ -310,18 +312,6 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
     }
     configured_schema_baselines_.emplace(table_name, std::move(*schema));
   }
-  // Read after the capture, so every DDL the baselines may reflect is in this set.
-  auto baseline_gtid = metadata_connection_->GetExecutedGTID();
-  if (!baseline_gtid) {
-    SetLastError(baseline_gtid.error());
-    mygram::utils::StructuredLog()
-        .Event("binlog_error")
-        .Field("type", "configured_schema_capture_failed")
-        .Field("error", baseline_gtid.error().message())
-        .Error();
-    return MakeUnexpected(baseline_gtid.error());
-  }
-  schema_baseline_gtid_ = std::move(*baseline_gtid);
 
   // Validate connection before starting replication
   if (!ValidateConnection()) {

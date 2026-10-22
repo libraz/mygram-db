@@ -496,8 +496,6 @@ class BinlogReader final : public IBinlogReader {
   TableSchemaCache schema_cache_;
   BinlogChecksumTracker checksum_tracker_;  // reader thread only
   std::unordered_map<std::string, ConfiguredTableSchema> configured_schema_baselines_;
-  // Source's executed GTID set read right after the baselines; a DDL it covers is already in them.
-  std::string schema_baseline_gtid_;
 
   // Binlog stream protocol handler (MySQL or MariaDB)
   std::unique_ptr<IBinlogStream> binlog_stream_;
