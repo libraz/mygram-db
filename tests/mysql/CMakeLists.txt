@@ -1,35 +1,5 @@
 # MySQL connection tests
 
-# GTID encoder tests (no MySQL dependency)
-add_executable(gtid_encoder_test
-  gtid_encoder_test.cpp
-)
-
-target_link_libraries(gtid_encoder_test
-  mygramdb_mysql
-  GTest::gtest_main
-)
-
-gtest_discover_tests(gtid_encoder_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-)
-
-# Binlog CRC32 verification tests (no MySQL dependency)
-add_executable(binlog_crc32_test
-  binlog_crc32_test.cpp
-)
-
-target_link_libraries(binlog_crc32_test
-  mygramdb_utils
-  GTest::gtest_main
-)
-
-gtest_discover_tests(binlog_crc32_test
-  DISCOVERY_MODE POST_BUILD
-  DISCOVERY_TIMEOUT 30
-)
-
 # NullBinlogReader tests (no MySQL dependency)
 add_executable(null_binlog_reader_test
   null_binlog_reader_test.cpp
@@ -71,21 +41,6 @@ if(USE_MYSQL AND MYSQL_FOUND)
   )
 
   gtest_discover_tests(ddl_schema_validator_test
-    DISCOVERY_MODE POST_BUILD
-    DISCOVERY_TIMEOUT 30
-  )
-
-  # MariaDB GTID parsing tests (no MySQL connection required)
-  add_executable(mariadb_gtid_test
-    mariadb_gtid_test.cpp
-  )
-
-  target_link_libraries(mariadb_gtid_test
-    mygramdb_mysql
-    GTest::gtest_main
-  )
-
-  gtest_discover_tests(mariadb_gtid_test
     DISCOVERY_MODE POST_BUILD
     DISCOVERY_TIMEOUT 30
   )

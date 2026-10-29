@@ -17,7 +17,7 @@ This file is normative for MygramDB's error-code surface. It describes what the 
 | 8000-8999 | Cache | 5 |
 | **Total** | | **129** |
 
-Of the 129 defined codes, 109 have at least one construction site in `src/` and 20 have none.
+Of the 129 defined codes, 108 have at least one construction site in `src/` and 21 have none.
 
 The enumerator names below are C++ identifiers (`mygramdb::utils::ErrorCode`). No surface transmits the name — only the unsigned 16-bit number travels over TCP, HTTP, and the C ABI.
 
@@ -59,7 +59,7 @@ HTTP error codes are carried in an `Error` to `HttpServer::SendError`, which use
 | 0 | `kSuccess` | Operation succeeded; not an error | `status field`, `C ABI` | `src/client/mygramclient_c.cpp`, `src/mysql/binlog_reader_interface.h` |
 | 1 | `kUnknown` | Unknown error | `HTTP`, `C ABI` | `src/server/http_server.cpp`, `src/client/mygramclient_c.cpp` |
 | 2 | `kInvalidArgument` | Invalid argument provided | `TCP+`, `HTTP`, `internal` | `src/server/handlers/admin_handler.cpp`, `src/utils/safe_path.cpp`, `src/index/bm25_scorer.cpp` (46 sites total). Not emitted by `SET`: the runtime-variable path reports through the Configuration range (1004, 1008, 1009) |
-| 3 | `kOutOfRange` | Value out of range | `internal` — masked into 2008 at `src/mysql/mysql_binlog_stream.cpp` | `src/mysql/gtid_encoder.cpp` |
+| 3 | `kOutOfRange` | Value out of range | `unreferenced` | — |
 | 4 | `kNotImplemented` | Feature not implemented | `TCP+`, `HTTP` | `src/server/handlers/replication_handler.cpp`, `src/server/response_formatter.cpp`, `src/server/http_server.cpp` (10 sites total) |
 | 5 | `kInternalError` | Internal error | `TCP+`, `HTTP`, `internal` | `src/server/handlers/search_handler.cpp`, `src/server/http_server.cpp`, `src/server/search_pipeline.cpp` (48 sites total) |
 | 6 | `kIOError` | I/O error (file read/write) | `internal` — startup configuration | `src/app/configuration_manager.cpp`, `src/app/application.cpp` (7 sites total) |
@@ -97,7 +97,7 @@ All Configuration codes except 1007 reach TCP through the administrative command
 | 2002 | `kMySQLDisconnected` | MySQL disconnected | `TCP+` (`REPLICATION START`), `status field` | `src/mysql/binlog_reader_threads.cpp`, `src/mysql/connection_validator.cpp`, `src/mysql/connection.cpp` (16 sites total) |
 | 2003 | `kMySQLAuthFailed` | MySQL authentication failed | `status field`, `internal` (startup) — a server that answered and refused the credentials, as opposed to 2000 for one that could not be reached | `src/mysql/connection.cpp` (classified from the native error) |
 | 2004 | `kMySQLTimeout` | MySQL timeout | `unreferenced` — the only appearance is a comparison in `IsRetryableSchemaValidationError` (`src/mysql/binlog_reader_utils.cpp`) | — |
-| 2005 | `kMySQLInvalidGTID` | Invalid GTID | `TCP+` (`REPLICATION START`), `status field`, `internal` | `src/mysql/connection_validator.cpp`, `src/mysql/gtid_encoder.cpp`, `src/mysql/connection.cpp` (18 sites total) |
+| 2005 | `kMySQLInvalidGTID` | Invalid GTID | `TCP+` (`REPLICATION START`), `status field`, `internal` | `src/mysql/connection.cpp`, `src/mysql/binlog_reader_utils.cpp`, `src/mysql/connection_validator.cpp` (8 sites total) |
 | 2006 | `kMySQLGTIDNotEnabled` | GTID mode not enabled | `TCP+` (`REPLICATION START`), `status field` | `src/mysql/connection_validator.cpp`, `src/mysql/binlog_reader.cpp` |
 | 2007 | `kMySQLReplicationError` | Replication error | `TCP+` (`REPLICATION START`), `status field` | `src/mysql/connection_validator.cpp` (4 sites total) |
 | 2008 | `kMySQLBinlogError` | Binlog error | `TCP+` (`REPLICATION START`), `status field`. The code the reader publishes for a failed binlog fetch and for a monitored row event it cannot parse. Also every unmet server setting listed under "Server requirements" in `spec/config-keys.md` | `src/mysql/binlog_reader_threads.cpp`, `src/mysql/connection_validator.cpp`, `src/mysql/mysql_binlog_stream.cpp` (54 sites total) |
@@ -105,12 +105,12 @@ All Configuration codes except 1007 reach TCP through the administrative command
 | 2010 | `kMySQLColumnNotFound` | Column not found | `TCP+` (`REPLICATION START` via `DDLSchemaValidator::Capture`), `status field` | `src/mysql/ddl_schema_validator.cpp`, `src/mysql/connection.cpp` |
 | 2011 | `kMySQLDuplicateColumn` | Duplicate column | `undetermined` — constructed in a column-metadata helper; no traced call chain reaches a client surface | `src/mysql/connection.cpp` |
 | 2012 | `kMySQLInvalidSchema` | Invalid schema | `TCP+` (`REPLICATION START`), `status field`. Also every unmet table requirement listed under "Table requirements" in `spec/config-keys.md` | `src/mysql/binlog_reader.cpp`, `src/mysql/ddl_schema_validator.cpp`, `src/mysql/binlog_reader_utils.cpp`, `src/mysql/connection.cpp` (15 sites total) |
-| 2013 | `kMySQLFieldTruncated` | Field data truncated | `status field` (checksum path only, `src/mysql/binlog_reader_threads.cpp`); `internal` on the row-decode path, where the outer handler masks it into 2008 | `src/mysql/binlog_checksum.h`, `src/mysql/rows_parser_field_decoder.cpp`, `src/mysql/binary_json.cpp` (39 sites total) |
-| 2014 | `kMySQLInvalidMetadata` | Invalid field metadata | `internal` — row-decode only; the outer handler reports 2008 instead | `src/mysql/rows_parser_field_decoder.cpp`, `src/mysql/binary_json.cpp`, `src/mysql/value_canonicalizer.cpp`, `src/mysql/binlog_util.h` (30 sites total) |
-| 2015 | `kMySQLUnsupportedType` | Unsupported column type | `internal` — row-decode only; the outer handler reports 2008 instead | `src/mysql/rows_parser.cpp`, `src/mysql/rows_parser_field_decoder.cpp` |
-| 2016 | `kMySQLBinlogChecksumMismatch` | Binlog checksum mismatch | `status field` | `src/mysql/binlog_checksum.h` |
-| 2017 | `kMySQLUndecodableBinlogEvent` | Undecodable binlog event | `status field` (reader-thread path); `internal` on the row-decode path, where a MariaDB `COMPRESSED` column payload that does not inflate is masked into 2008 | `src/mysql/binlog_reader_threads.cpp`, `src/mysql/binlog_event_parser.cpp`, `src/mysql/rows_parser_field_decoder.cpp` |
-| 2020 | `kMariaDBInvalidGTID` | Invalid MariaDB GTID | `undetermined` — constructed in GTID parsing shared by the reader thread and the validator; no single call chain traced to a surface | `src/mysql/mariadb_gtid.cpp` (6 sites total) |
+| 2013 | `kMySQLFieldTruncated` | Field data truncated | `status field` (checksum path only, `src/mysql/binlog_reader_threads.cpp`); `internal` on the row-decode path, where the outer handler masks it into 2008 | `src/mysql/binlog_reader_threads.cpp`, `src/mysql/value_canonicalizer.cpp` |
+| 2014 | `kMySQLInvalidMetadata` | Invalid field metadata | `internal` — row-decode only; the outer handler reports 2008 instead | `src/mysql/value_canonicalizer.cpp`, `src/mysql/rows_parser.cpp` (10 sites total) |
+| 2015 | `kMySQLUnsupportedType` | Unsupported column type | `internal` — row-decode only; the outer handler reports 2008 instead | `src/mysql/value_canonicalizer.cpp`, `src/mysql/rows_parser.cpp` |
+| 2016 | `kMySQLBinlogChecksumMismatch` | Binlog checksum mismatch | `status field` | `src/mysql/binlog_reader_threads.cpp` |
+| 2017 | `kMySQLUndecodableBinlogEvent` | Undecodable binlog event | `status field` (reader-thread path) | `src/mysql/binlog_reader_threads.cpp`, `src/mysql/binlog_event_parser.cpp`, `src/server/sync_operation_manager.cpp` (11 sites total) |
+| 2020 | `kMariaDBInvalidGTID` | Invalid MariaDB GTID | `undetermined` — constructed when the validator compares MariaDB GTID positions; no single call chain traced to a surface | `src/mysql/connection_validator.cpp` |
 | 2021 | `kMariaDBProtocolError` | MariaDB protocol error | `status field` — reaches `SetLastError` through `SetupSession`/`Open` (`src/mysql/binlog_reader_threads.cpp`) | `src/mysql/mariadb_binlog_stream.cpp` (6 sites total) |
 | 2022 | `kMariaDBUnsupportedVersion` | MariaDB version not supported | `unreferenced` | — |
 

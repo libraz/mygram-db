@@ -68,7 +68,7 @@ The snapshot and metadata session is pinned to `time_zone='+00:00'` and an empty
 
 ### Stream handling
 
-Properties of how the reader consumes the binlog that an operator can observe (`src/mysql/binlog_reader_threads.cpp`, `src/mysql/binlog_checksum.h`, `src/mysql/binlog_stream.cpp`).
+Properties of how the reader consumes the binlog that an operator can observe (`src/mysql/binlog_reader_threads.cpp`, `src/mysql/binlog_stream.cpp`).
 
 - **Checksum per file.** The source sends each binlog file with that file's own checksum algorithm, declared in its `FORMAT_DESCRIPTION_EVENT`. The reader verifies CRC32 frames and accepts frames of a file written with `binlog_checksum=NONE`, so a file written before the setting was changed still streams. A CRC32 mismatch, or an unknown algorithm byte, fails the frame and reconnects from the applied position.
 - **Column metadata from TABLE_MAP.** Column names, signedness and ENUM/SET labels are read from the optional metadata of each `TABLE_MAP_EVENT`; no schema query is made. A `TABLE_MAP_EVENT` of a monitored table written without full row metadata (`binlog_row_metadata` was not `FULL`) stops replication with `2017`, because the event stays in the binlog as written; the message names `binlog_row_metadata=FULL`. Optional metadata that does not parse also stops a monitored table with `2017`; for a table that is not replicated, or whose rows its SYNC snapshot covers, the block is not read.

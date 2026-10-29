@@ -4,7 +4,6 @@ if(USE_MYSQL AND MYSQL_FOUND)
   add_library(mygramdb_mysql
     connection.cpp
     connection_validator.cpp
-    binary_json.cpp
     column_type_support.cpp
     ddl_classifier.cpp
     ddl_schema_validator.cpp
@@ -20,14 +19,10 @@ if(USE_MYSQL AND MYSQL_FOUND)
     table_schema_cache.cpp
     value_canonicalizer.cpp
     rows_parser.cpp
-    rows_parser_field_decoder.cpp
     rows_parser_filter.cpp
-    gtid_encoder.cpp
     gtid_waiter.cpp
-    mariadb_gtid.cpp
     mysql_binlog_stream.cpp
     mariadb_binlog_stream.cpp
-    mariadb_event_parser.cpp
   )
 
   target_link_libraries(mygramdb_mysql

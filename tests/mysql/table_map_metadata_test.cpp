@@ -19,7 +19,6 @@
 
 #include "binlog_event_builder.h"
 #include "mysql/binlog_event_parser.h"
-#include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 #include "utils/error.h"
@@ -475,9 +474,6 @@ TEST(TableMapMetadataTest, LengthPrefixNearUint32MaxDoesNotWrapPastTheBoundsChec
   for (const auto type : {ColumnType::kLongBlob, ColumnType::kJson, ColumnType::kGeometry}) {
     SCOPED_TRACE(static_cast<int>(type));
     const std::vector<uint8_t> field = {0xFE, 0xFF, 0xFF, 0xFF, 'x', 'y'};
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(Code(type), field.data(), 4, field.data() + field.size()),
-              4ULL + 0xFFFFFFFEULL);
-
     auto table_map = BuildTableMap({{Code(ColumnType::kLong), {}}, {Code(type), {0x04}}});
     auto metadata = BinlogEventParser::ParseTableMapEvent(table_map.data(), table_map.size());
     ASSERT_TRUE(metadata.has_value());

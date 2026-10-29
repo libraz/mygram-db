@@ -8,7 +8,6 @@ add_library(mygramdb_utils STATIC
   datetime_converter.cpp
   safe_path.cpp
   sql_utils.cpp
-  gtid_grammar.cpp
   periodic_worker.cpp
   log_manager.cpp
 )
