@@ -14,8 +14,6 @@
 
 #ifdef USE_MYSQL
 
-#include "mysql/gtid_encoder.h"
-
 using namespace binlog_test;
 using mygram::utils::ErrorCode;
 
@@ -97,7 +95,7 @@ TEST_F(BinlogReaderFixture, EveryPathObservingOneUnevaluableFenceSharesOneRecove
 
   // The reader path: a TABLE_MAP for a table whose fence cannot be compared.
   const Observation reader_path = observe([this] {
-    const auto fence = GtidEncoder::PositionCoversAuto("ffffffff-0000-0000-0000-000000000001:5", kUnparsableWatermark);
+    const auto fence = GtidPositionCovers("ffffffff-0000-0000-0000-000000000001:5", kUnparsableWatermark);
     ASSERT_FALSE(fence);
     reader_->FailClosedOnUnevaluableReplayWatermark(table_config_.name, "ffffffff-0000-0000-0000-000000000001:5",
                                                     fence.error());

@@ -22,7 +22,6 @@
 
 #include "binlog_event_builder.h"
 #include "mysql/binlog_event_parser.h"
-#include "mysql/binlog_event_types.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
@@ -36,7 +35,7 @@ using namespace mygramdb;
 /**
  * @brief Test helper to create a minimal binlog header
  */
-std::vector<uint8_t> CreateBinlogHeader(MySQLBinlogEventType event_type, uint32_t event_size) {
+std::vector<uint8_t> CreateBinlogHeader(mybinlog::EventType event_type, uint32_t event_size) {
   std::vector<uint8_t> header(19);
   // timestamp (4 bytes) - zeros for test
   header[0] = header[1] = header[2] = header[3] = 0x00;
@@ -67,7 +66,7 @@ void PatchEventSize(std::vector<uint8_t>& event_without_ok_byte) {
 }
 
 std::vector<uint8_t> CreateMinimalTableMapEvent(uint8_t null_bitmap, bool include_null_bitmap) {
-  std::vector<uint8_t> event = CreateBinlogHeader(MySQLBinlogEventType::TABLE_MAP_EVENT, 0);
+  std::vector<uint8_t> event = CreateBinlogHeader(mybinlog::EventType::kTableMapEvent, 0);
 
   // table_id + flags
   event.insert(event.end(), {0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
@@ -83,9 +82,9 @@ std::vector<uint8_t> CreateMinimalTableMapEvent(uint8_t null_bitmap, bool includ
   event.push_back(0x00);
 
   event.push_back(3);  // column count
-  event.push_back(static_cast<uint8_t>(ColumnType::LONG));
-  event.push_back(static_cast<uint8_t>(ColumnType::VARCHAR));
-  event.push_back(static_cast<uint8_t>(ColumnType::BLOB));
+  event.push_back(static_cast<uint8_t>(ColumnType::kLong));
+  event.push_back(static_cast<uint8_t>(ColumnType::kVarchar));
+  event.push_back(static_cast<uint8_t>(ColumnType::kBlob));
 
   event.push_back(3);  // metadata length
   event.push_back(0xFF);
@@ -104,7 +103,7 @@ std::vector<uint8_t> CreateMinimalTableMapEvent(uint8_t null_bitmap, bool includ
 }
 
 std::vector<uint8_t> CreateTableMapEventPrefix() {
-  std::vector<uint8_t> event = CreateBinlogHeader(MySQLBinlogEventType::TABLE_MAP_EVENT, 0);
+  std::vector<uint8_t> event = CreateBinlogHeader(mybinlog::EventType::kTableMapEvent, 0);
 
   event.insert(event.end(), {0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
 
@@ -122,7 +121,7 @@ std::vector<uint8_t> CreateTableMapEventPrefix() {
 }
 
 std::vector<uint8_t> BuildQueryEvent(const std::string& database, const std::string& query) {
-  auto event = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::QUERY_EVENT);
+  auto event = test::BinlogEventBuilder::BuildHeader(mybinlog::EventType::kQueryEvent);
   test::BinlogEventBuilder::AppendLittleEndian32(event, 1);  // thread_id
   test::BinlogEventBuilder::AppendLittleEndian32(event, 0);  // query_exec_time
   event.push_back(static_cast<uint8_t>(database.size()));
@@ -149,13 +148,13 @@ TableMetadata CreateConcatTableMetadata(uint64_t table_id) {
 
   ColumnMetadata id;
   id.name = "id";
-  id.type = ColumnType::LONG;
+  id.type = ColumnType::kLong;
   metadata.columns.push_back(id);
 
   for (const std::string& name : {"title", "body", "tags"}) {
     ColumnMetadata column;
     column.name = name;
-    column.type = ColumnType::VARCHAR;
+    column.type = ColumnType::kVarchar;
     column.metadata = 255;
     metadata.columns.push_back(column);
   }
@@ -186,7 +185,7 @@ TEST(BinlogParsingTest, ExtractGTIDFromRealEvent) {
   gtid_event.push_back(0x00);
 
   // 19-byte header
-  auto header = CreateBinlogHeader(MySQLBinlogEventType::GTID_LOG_EVENT, 42);
+  auto header = CreateBinlogHeader(mybinlog::EventType::kGtidLogEvent, 42);
   gtid_event.insert(gtid_event.end(), header.begin(), header.end());
 
   // commit_flag (1 byte)
@@ -227,7 +226,7 @@ TEST(BinlogParsingTest, ExtractGTIDFromRealEvent) {
   // This would be called by BinlogReader::ExtractGTID (private method)
   // For now, we verify the buffer structure is correct
   ASSERT_GE(length, 42);
-  ASSERT_EQ(buffer[4], static_cast<uint8_t>(MySQLBinlogEventType::GTID_LOG_EVENT));
+  ASSERT_EQ(buffer[4], static_cast<uint8_t>(mybinlog::EventType::kGtidLogEvent));
 
   // Verify UUID bytes
   EXPECT_EQ(buffer[20], 0x3E);
@@ -239,14 +238,15 @@ TEST(BinlogParsingTest, ExtractGTIDFromRealEvent) {
 }
 
 TEST(BinlogParsingTest, ExtractGTIDRejectsBuffersTruncatedBeforeGno) {
-  constexpr size_t kHeaderLength = mygram::constants::kBinlogEventHeaderLen;
-  constexpr size_t kGtidPayloadLength = 1 + 16 + 8;
-  std::array<unsigned char, kHeaderLength + kGtidPayloadLength> event{};
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  const std::array<uint8_t, 16> uuid{};
+  const auto event = BinlogEventBuilder::BuildGtidEvent(uuid, 1);
 
   // The UUID is complete at offset 36, but ExtractGTID also reads the full
-  // eight-byte GNO that follows it. Reject both shorter lengths.
-  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::GTID_LOG_EVENT);
-  EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 2).has_value());
+  // eight-byte GNO that follows it and the trailer that closes the frame.
+  // Reject every shorter length.
+  EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 6).has_value());
+  EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 5).has_value());
   EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size() - 1).has_value());
   EXPECT_TRUE(BinlogEventParser::ExtractGTID(event.data(), event.size()).has_value());
 }
@@ -262,7 +262,7 @@ TEST(BinlogParsingTest, ParseTableMapEventActual) {
   table_map_event.push_back(0x00);
 
   // 19-byte header
-  auto header = CreateBinlogHeader(MySQLBinlogEventType::TABLE_MAP_EVENT, 50);
+  auto header = CreateBinlogHeader(mybinlog::EventType::kTableMapEvent, 50);
   table_map_event.insert(table_map_event.end(), header.begin(), header.end());
 
   // Post-header (6 bytes table_id + 2 bytes flags)
@@ -295,9 +295,9 @@ TEST(BinlogParsingTest, ParseTableMapEventActual) {
   table_map_event.push_back(column_count);
 
   // column types (1 byte per column)
-  table_map_event.push_back(static_cast<uint8_t>(ColumnType::LONG));     // id (INT)
-  table_map_event.push_back(static_cast<uint8_t>(ColumnType::VARCHAR));  // title (VARCHAR)
-  table_map_event.push_back(static_cast<uint8_t>(ColumnType::BLOB));     // content (TEXT)
+  table_map_event.push_back(static_cast<uint8_t>(ColumnType::kLong));     // id (INT)
+  table_map_event.push_back(static_cast<uint8_t>(ColumnType::kVarchar));  // title (VARCHAR)
+  table_map_event.push_back(static_cast<uint8_t>(ColumnType::kBlob));     // content (TEXT)
 
   // metadata length (packed integer)
   table_map_event.push_back(0x05);  // 5 bytes of metadata
@@ -315,7 +315,7 @@ TEST(BinlogParsingTest, ParseTableMapEventActual) {
 
   // Now verify the buffer is correctly structured
   ASSERT_EQ(table_map_event[0], 0x00);  // OK packet
-  ASSERT_EQ(table_map_event[5], static_cast<uint8_t>(MySQLBinlogEventType::TABLE_MAP_EVENT));
+  ASSERT_EQ(table_map_event[5], static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent));
 
   // Verify table_id
   uint64_t table_id = table_map_event[20] | (table_map_event[21] << 8);
@@ -353,7 +353,7 @@ TEST(BinlogParsingTest, WriteRowsEventStructure) {
   write_rows_event.push_back(0x00);
 
   // 19-byte header
-  auto header = CreateBinlogHeader(MySQLBinlogEventType::WRITE_ROWS_EVENT, 50);
+  auto header = CreateBinlogHeader(mybinlog::EventType::kWriteRowsEvent, 50);
   write_rows_event.insert(write_rows_event.end(), header.begin(), header.end());
 
   // Post-header
@@ -381,7 +381,7 @@ TEST(BinlogParsingTest, WriteRowsEventStructure) {
 
   // Verify structure
   ASSERT_EQ(write_rows_event[0], 0x00);  // OK byte
-  ASSERT_EQ(write_rows_event[5], static_cast<uint8_t>(MySQLBinlogEventType::WRITE_ROWS_EVENT));
+  ASSERT_EQ(write_rows_event[5], static_cast<uint8_t>(mybinlog::EventType::kWriteRowsEvent));
 
   // Verify flags indicate ROWS_EVENT_V2
   uint16_t flags = write_rows_event[26] | (write_rows_event[27] << 8);
@@ -404,7 +404,7 @@ TEST(BinlogParsingTest, UpdateRowsEventStructure) {
   update_rows_event.push_back(0x00);
 
   // 19-byte header
-  auto header = CreateBinlogHeader(MySQLBinlogEventType::UPDATE_ROWS_EVENT, 60);
+  auto header = CreateBinlogHeader(mybinlog::EventType::kUpdateRowsEvent, 60);
   update_rows_event.insert(update_rows_event.end(), header.begin(), header.end());
 
   // Post-header
@@ -432,7 +432,7 @@ TEST(BinlogParsingTest, UpdateRowsEventStructure) {
 
   // Verify structure
   ASSERT_EQ(update_rows_event[0], 0x00);
-  ASSERT_EQ(update_rows_event[5], static_cast<uint8_t>(MySQLBinlogEventType::UPDATE_ROWS_EVENT));
+  ASSERT_EQ(update_rows_event[5], static_cast<uint8_t>(mybinlog::EventType::kUpdateRowsEvent));
 
   // UPDATE events have both before and after bitmaps
   EXPECT_EQ(update_rows_event[30], 0x03);  // column_count
@@ -450,7 +450,7 @@ TEST(BinlogParsingTest, DeleteRowsEventStructure) {
   delete_rows_event.push_back(0x00);
 
   // 19-byte header
-  auto header = CreateBinlogHeader(MySQLBinlogEventType::DELETE_ROWS_EVENT, 50);
+  auto header = CreateBinlogHeader(mybinlog::EventType::kDeleteRowsEvent, 50);
   delete_rows_event.insert(delete_rows_event.end(), header.begin(), header.end());
 
   // Post-header (same as WRITE_ROWS)
@@ -475,7 +475,7 @@ TEST(BinlogParsingTest, DeleteRowsEventStructure) {
 
   // Verify structure
   ASSERT_EQ(delete_rows_event[0], 0x00);
-  ASSERT_EQ(delete_rows_event[5], static_cast<uint8_t>(MySQLBinlogEventType::DELETE_ROWS_EVENT));
+  ASSERT_EQ(delete_rows_event[5], static_cast<uint8_t>(mybinlog::EventType::kDeleteRowsEvent));
   EXPECT_EQ(delete_rows_event[30], 0x02);  // column_count
 }
 
@@ -648,7 +648,7 @@ TEST(BinlogParsingTest, TruncatedBufferHandling) {
   std::vector<uint8_t> truncated_event;
   truncated_event.push_back(0x00);  // OK byte
 
-  auto header = CreateBinlogHeader(MySQLBinlogEventType::GTID_LOG_EVENT, 42);
+  auto header = CreateBinlogHeader(mybinlog::EventType::kGtidLogEvent, 42);
   truncated_event.insert(truncated_event.end(), header.begin(), header.end());
 
   // Event is truncated (only 20 bytes instead of 42)
@@ -718,7 +718,7 @@ TEST(BinlogParsingSecurityTest, RemainingBytesTracking) {
 TEST(BinlogParsingSecurityTest, MetadataBoundsChecking) {
   auto truncated_meta_len_event = CreateTableMapEventPrefix();
   truncated_meta_len_event.push_back(1);  // column count
-  truncated_meta_len_event.push_back(static_cast<uint8_t>(ColumnType::LONG));
+  truncated_meta_len_event.push_back(static_cast<uint8_t>(ColumnType::kLong));
   // 0xfc declares a 3-byte metadata length, but only the first byte is present.
   truncated_meta_len_event.push_back(0xFC);
   truncated_meta_len_event.insert(truncated_meta_len_event.end(), {0xAA, 0xBB, 0xCC, 0xDD});
@@ -730,7 +730,7 @@ TEST(BinlogParsingSecurityTest, MetadataBoundsChecking) {
 
   auto oversized_metadata_event = CreateTableMapEventPrefix();
   oversized_metadata_event.push_back(1);  // column count
-  oversized_metadata_event.push_back(static_cast<uint8_t>(ColumnType::LONG));
+  oversized_metadata_event.push_back(static_cast<uint8_t>(ColumnType::kLong));
   oversized_metadata_event.push_back(4);  // metadata length, but no metadata bytes before CRC32
   oversized_metadata_event.insert(oversized_metadata_event.end(), {0xAA, 0xBB, 0xCC, 0xDD});
   PatchEventSize(oversized_metadata_event);
@@ -1408,7 +1408,7 @@ TEST(BinlogParsingTest, MultipleRowsWithChecksumBoundary) {
 }
 
 // ============================================================================
-// Step 3a: ExtractTaggedGTID tests (MySQL 8.4+)
+// Step 3a: ExtractGTID on tagged GTID events (MySQL 8.4+)
 // ============================================================================
 
 TEST(BinlogParsingTest, ExtractTaggedGTID_BasicFormat) {
@@ -1419,7 +1419,7 @@ TEST(BinlogParsingTest, ExtractTaggedGTID_BasicFormat) {
 
   auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 42, "mytag");
 
-  auto result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  auto result = BinlogEventParser::ExtractGTID(event.data(), event.size());
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "01020304-0506-0708-090a-0b0c0d0e0f10:mytag:42");
 }
@@ -1432,7 +1432,7 @@ TEST(BinlogParsingTest, ExtractTaggedGTID_EmptyTag) {
 
   auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 100, "");
 
-  auto result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  auto result = BinlogEventParser::ExtractGTID(event.data(), event.size());
   ASSERT_TRUE(result.has_value());
   // Empty tag => UUID:GNO format (no tag separator)
   EXPECT_EQ(*result, "aabbccdd-eeff-1122-3344-556677889900:100");
@@ -1442,7 +1442,7 @@ TEST(BinlogParsingTest, ExtractTaggedGTID_TruncatedBuffer) {
   // Buffer too short to contain a valid GTID_TAGGED_LOG_EVENT
   std::vector<uint8_t> short_buf(30, 0);
 
-  auto result = BinlogEventParser::ExtractTaggedGTID(short_buf.data(), short_buf.size());
+  auto result = BinlogEventParser::ExtractGTID(short_buf.data(), short_buf.size());
   EXPECT_FALSE(result.has_value());
 }
 
@@ -1453,14 +1453,14 @@ TEST(BinlogParsingTest, ExtractTaggedGTID_MultiByteGnoAndHighUuidBytes) {
   uuid.fill(0xFF);
 
   auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 123456789012LL, "t");
-  auto result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  auto result = BinlogEventParser::ExtractGTID(event.data(), event.size());
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "ffffffff-ffff-ffff-ffff-ffffffffffff:t:123456789012");
 
   // Longest tag allowed.
   const std::string longest(32, 'x');
   event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 1, longest);
-  result = BinlogEventParser::ExtractTaggedGTID(event.data(), event.size());
+  result = BinlogEventParser::ExtractGTID(event.data(), event.size());
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "ffffffff-ffff-ffff-ffff-ffffffffffff:" + longest + ":1");
 }
@@ -1472,30 +1472,30 @@ TEST(BinlogParsingTest, ExtractTaggedGTID_RejectsAMessageThatDoesNotFit) {
   uuid.fill(0x11);
 
   const auto tag_too_long = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 5, std::string(33, 'x'));
-  EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(tag_too_long.data(), tag_too_long.size()).has_value());
+  EXPECT_FALSE(BinlogEventParser::ExtractGTID(tag_too_long.data(), tag_too_long.size()).has_value());
 
   for (const int64_t gno : {int64_t{0}, int64_t{-5}}) {
     const auto event = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, gno, "t");
-    EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(event.data(), event.size()).has_value()) << gno;
+    EXPECT_FALSE(BinlogEventParser::ExtractGTID(event.data(), event.size()).has_value()) << gno;
   }
 
   // The first body byte is the serialization format version (1, encoded as 0x02).
   auto wrong_version = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 5, "t");
   wrong_version[19] = 0x04;
-  EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(wrong_version.data(), wrong_version.size()).has_value());
+  EXPECT_FALSE(BinlogEventParser::ExtractGTID(wrong_version.data(), wrong_version.size()).has_value());
 
   // No cut of a valid event may read as a different GTID.
   const auto full = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 987654, "tag");
-  const auto expected = BinlogEventParser::ExtractTaggedGTID(full.data(), full.size());
+  const auto expected = BinlogEventParser::ExtractGTID(full.data(), full.size());
   ASSERT_TRUE(expected.has_value());
   EXPECT_EQ(*expected, "11111111-1111-1111-1111-111111111111:tag:987654");
   for (size_t cut = 0; cut < full.size(); ++cut) {
-    const auto partial = BinlogEventParser::ExtractTaggedGTID(full.data(), cut);
+    const auto partial = BinlogEventParser::ExtractGTID(full.data(), cut);
     if (partial.has_value()) {
       EXPECT_EQ(*partial, *expected) << cut;
     }
   }
-  EXPECT_FALSE(BinlogEventParser::ExtractTaggedGTID(full.data(), 19 + 26).has_value());
+  EXPECT_FALSE(BinlogEventParser::ExtractGTID(full.data(), 19 + 26).has_value());
 }
 
 // ============================================================================
@@ -1672,7 +1672,7 @@ TEST(BinlogParsingTest, QueryDdlEventCarriesCurrentGtid) {
 }
 
 TEST(BinlogParsingTest, XidEventProducesCommitMarkerWithCurrentGtid) {
-  auto event = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::XID_EVENT);
+  auto event = test::BinlogEventBuilder::BuildHeader(mybinlog::EventType::kXidEvent);
   test::BinlogEventBuilder::AppendLittleEndian64(event, 123);  // xid
   test::BinlogEventBuilder::AppendLittleEndian32(event, 0);    // checksum placeholder
   test::BinlogEventBuilder::FixEventSizeWithChecksum(event);
@@ -2327,7 +2327,7 @@ TEST(BinlogParsingTest, MariaDBAnnotateRowsEventReturnsEmpty) {
 
 TEST(BinlogParsingTest, MariaDBBinlogCheckpointEventReturnsEmpty) {
   // Build a minimal event with type 161 (MARIADB_BINLOG_CHECKPOINT_EVENT)
-  auto buffer = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT);
+  auto buffer = test::BinlogEventBuilder::BuildHeader(mybinlog::EventType::kMariaDBBinlogCheckpointEvent);
   // Add some payload + CRC32
   test::BinlogEventBuilder::AppendLittleEndian32(buffer, 0);  // checkpoint data
   test::BinlogEventBuilder::AppendLittleEndian32(buffer, 0);  // CRC32 placeholder
@@ -2343,7 +2343,7 @@ TEST(BinlogParsingTest, MariaDBBinlogCheckpointEventReturnsEmpty) {
 
 TEST(BinlogParsingTest, MariaDBStartEncryptionEventReturnsEmpty) {
   // Build a minimal event with type 164 (MARIADB_START_ENCRYPTION_EVENT)
-  auto buffer = test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT);
+  auto buffer = test::BinlogEventBuilder::BuildHeader(mybinlog::EventType::kMariaDBStartEncryptionEvent);
   test::BinlogEventBuilder::AppendLittleEndian32(buffer, 0);  // CRC32 placeholder
   test::BinlogEventBuilder::FixEventSizeWithChecksum(buffer);
 
@@ -2368,10 +2368,10 @@ TEST(BinlogParsingTest, MariaDBGtidEventWithValidChecksum) {
 }
 
 TEST(BinlogParsingTest, TruncatedRowsEventsBeforeCompleteTableIdAreRejected) {
-  const std::vector<MySQLBinlogEventType> row_event_types = {
-      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1,  MySQLBinlogEventType::WRITE_ROWS_EVENT,
-      MySQLBinlogEventType::OBSOLETE_UPDATE_ROWS_EVENT_V1, MySQLBinlogEventType::UPDATE_ROWS_EVENT,
-      MySQLBinlogEventType::OBSOLETE_DELETE_ROWS_EVENT_V1, MySQLBinlogEventType::DELETE_ROWS_EVENT,
+  const std::vector<mybinlog::EventType> row_event_types = {
+      mybinlog::EventType::kWriteRowsEventV1,  mybinlog::EventType::kWriteRowsEvent,
+      mybinlog::EventType::kUpdateRowsEventV1, mybinlog::EventType::kUpdateRowsEvent,
+      mybinlog::EventType::kDeleteRowsEventV1, mybinlog::EventType::kDeleteRowsEvent,
   };
 
   TableMetadataCache cache;
@@ -2515,7 +2515,7 @@ TEST(BinlogParsingTest, RowEventParsersRefuseFramesShorterThanTheCommonHeader) {
   table_meta.database_name = "test_db";
   table_meta.table_name = "articles";
   ColumnMetadata column;
-  column.type = ColumnType::LONG;
+  column.type = ColumnType::kLong;
   column.name = "id";
   table_meta.columns.push_back(column);
 
@@ -2530,15 +2530,15 @@ TEST(BinlogParsingTest, RowEventParsersRefuseFramesShorterThanTheCommonHeader) {
     const auto size = static_cast<unsigned long>(length);
 
     auto write_result =
-        ParseWriteRowsEvent(guarded.data(), size, &table_meta, "id", "id", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+        ParseWriteRowsEvent(guarded.data(), size, &table_meta, "id", "id", mybinlog::EventType::kWriteRowsEvent);
     EXPECT_FALSE(write_result.has_value()) << "a " << length << "-byte frame was accepted as a write rows event";
 
     auto update_result =
-        ParseUpdateRowsEvent(guarded.data(), size, &table_meta, "id", "id", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+        ParseUpdateRowsEvent(guarded.data(), size, &table_meta, "id", "id", mybinlog::EventType::kUpdateRowsEvent);
     EXPECT_FALSE(update_result.has_value()) << "a " << length << "-byte frame was accepted as an update rows event";
 
     auto delete_result =
-        ParseDeleteRowsEvent(guarded.data(), size, &table_meta, "id", "id", MySQLBinlogEventType::DELETE_ROWS_EVENT);
+        ParseDeleteRowsEvent(guarded.data(), size, &table_meta, "id", "id", mybinlog::EventType::kDeleteRowsEvent);
     EXPECT_FALSE(delete_result.has_value()) << "a " << length << "-byte frame was accepted as a delete rows event";
   }
 }

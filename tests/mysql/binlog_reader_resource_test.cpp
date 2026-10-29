@@ -21,7 +21,6 @@
 #include "loader/initial_loader.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/connection.h"
-#include "mysql/gtid_encoder.h"
 #include "mysql_test_helpers.h"
 #include "server/server_stats.h"
 #include "storage/document_store.h"
@@ -529,10 +528,10 @@ TEST_F(BinlogReaderResourceTest, DdlSchemaValidationContinuesSafeChangesAndStops
     EXPECT_TRUE(reader_->HasSchemaIncompatibleError()) << ddl;
     EXPECT_NE(reader_->GetLastError().find("SCHEMA_INCOMPATIBLE"), std::string::npos) << ddl;
     const std::string stopped_gtid = reader_->GetCurrentGTID();
-    const auto covers_safe = GtidEncoder::PositionCoversAuto(safe_gtid, stopped_gtid);
+    const auto covers_safe = GtidPositionCovers(safe_gtid, stopped_gtid);
     ASSERT_TRUE(covers_safe) << covers_safe.error().message();
     EXPECT_TRUE(*covers_safe) << "reader stopped before the last safe GTID: " << ddl;
-    const auto covers_unsafe = GtidEncoder::PositionCoversAuto(*unsafe_gtid, stopped_gtid);
+    const auto covers_unsafe = GtidPositionCovers(*unsafe_gtid, stopped_gtid);
     ASSERT_TRUE(covers_unsafe) << covers_unsafe.error().message();
     EXPECT_FALSE(*covers_unsafe) << "unsafe DDL GTID advanced: " << ddl;
 
@@ -592,7 +591,7 @@ TEST_F(BinlogReaderResourceTest, StatementBasedDmlStopsBeforePublishingItsGtid) 
   ASSERT_TRUE(stopped_on_statement) << reader_->GetLastError();
   EXPECT_NE(reader_->GetLastError().find("unrecognized QUERY_EVENT"), std::string::npos);
   EXPECT_FALSE(doc_store_->GetDocId("1").has_value());
-  const auto covers_statement = GtidEncoder::PositionCoversAuto(*statement_gtid, reader_->GetCurrentGTID());
+  const auto covers_statement = GtidPositionCovers(*statement_gtid, reader_->GetCurrentGTID());
   ASSERT_TRUE(covers_statement) << covers_statement.error().message();
   EXPECT_FALSE(*covers_statement) << "statement DML GTID was published despite its row being unapplied";
 }
@@ -651,7 +650,7 @@ TEST_F(BinlogReaderResourceTest, XaTransactionStopsBeforePublishingPreparedGtid)
   ASSERT_FALSE(reader_->IsRunning()) << reader_->GetLastError();
   EXPECT_NE(reader_->GetLastError().find("XA"), std::string::npos);
   EXPECT_FALSE(doc_store_->GetDocId("1").has_value());
-  const auto covers_prepared = GtidEncoder::PositionCoversAuto(*prepared_gtid, reader_->GetCurrentGTID());
+  const auto covers_prepared = GtidPositionCovers(*prepared_gtid, reader_->GetCurrentGTID());
   ASSERT_TRUE(covers_prepared) << covers_prepared.error().message();
   EXPECT_FALSE(*covers_prepared) << "prepared XA GTID was published before commit";
 }

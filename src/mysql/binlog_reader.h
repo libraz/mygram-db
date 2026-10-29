@@ -23,8 +23,8 @@
 
 #include "config/config.h"
 #include "index/index.h"
-#include "mysql/binlog_checksum.h"
-#include "mysql/binlog_event_types.h"
+#include "mybinlog/checksum.h"
+#include "mybinlog/event_types.h"
 #include "mysql/binlog_reader_interface.h"
 #include "mysql/binlog_stream.h"
 #include "mysql/connection.h"
@@ -494,7 +494,11 @@ class BinlogReader final : public IBinlogReader {
 
   // TABLE_MAP metadata and replay-suppressed table ids; reader thread only.
   TableSchemaCache schema_cache_;
-  BinlogChecksumTracker checksum_tracker_;  // reader thread only
+  mybinlog::ChecksumTracker checksum_tracker_;  // reader thread only
+  // A frame of a file written without checksums, re-laid out with a zero trailer; reader thread only.
+  std::vector<unsigned char> trailer_framed_event_;
+  // Flavor of the source the stream reads; set before the threads start.
+  ServerFlavor source_flavor_ = ServerFlavor::kMySQL;
   std::unordered_map<std::string, ConfiguredTableSchema> configured_schema_baselines_;
 
   // Binlog stream protocol handler (MySQL or MariaDB)
@@ -544,8 +548,10 @@ class BinlogReader final : public IBinlogReader {
    * multi-UUID position keeps the same exclusion semantics as a single one.
    *
    * @param gtid GTID string to convert
-   * @return Converted GTID string. Entries that are already a range, tagged, or
-   *         carry multiple intervals are returned unchanged, as are MariaDB
+   * A tagged entry "uuid:tag:N" widens the same way, to "uuid:tag:1-N".
+   *
+   * @return Converted GTID string. Entries that are already a range or carry
+   *         multiple intervals are returned unchanged, as are MariaDB
    *         positions, colon-less input and the empty string.
    */
   static std::string ConvertSingleGtidToRange(const std::string& gtid);
@@ -595,17 +601,10 @@ class BinlogReader final : public IBinlogReader {
    * Covers every type classified fail-closed, so a type added to the
    * classification is rejected here without a second edit.
    *
+   * @param flags Header flags; a type outside mybinlog::EventType is skipped only when flagged ignorable
    * @return true when replication was stopped for an unsupported event
    */
-  bool RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type);
-
-  /**
-   * @brief Fail closed for a tagged GTID event, naming the position it carried.
-   *
-   * A tagged position cannot be encoded back into a reconnect request, so the
-   * stream can never be resumed from it.
-   */
-  void RejectTaggedGtidEvent(const std::optional<std::string>& tagged_gtid);
+  bool RejectUnsupportedRuntimeEvent(mybinlog::EventType event_type, uint16_t flags = 0);
 
   /**
    * @brief Fail closed for a transaction the source marked XA.
@@ -627,9 +626,11 @@ class BinlogReader final : public IBinlogReader {
    *
    * Handles GTID_LOG_EVENT, GTID_TAGGED_LOG_EVENT, MARIADB_GTID_EVENT and
    * MARIADB_GTID_LIST_EVENT alike: a frame that does not decode never leaves
-   * the received position silently behind.
+   * the received position silently behind. A frame cut short reconnects with
+   * the generic binlog code; one whose content is invalid publishes the
+   * undecodable-event code before reconnecting.
    */
-  PositionEventAction ObservePositionEvent(MySQLBinlogEventType event_type, const unsigned char* event_buffer,
+  PositionEventAction ObservePositionEvent(mybinlog::EventType event_type, const unsigned char* event_buffer,
                                            unsigned long event_length);
 
   /**
@@ -644,9 +645,10 @@ class BinlogReader final : public IBinlogReader {
    * parsers read, which carries a 4-byte checksum trailer even when the source
    * wrote the file without checksums.
    *
-   * @return false, with the error published, when the frame is shorter than a
-   *         header plus checksum, its CRC32 does not match or its format
-   *         description declares an unknown algorithm
+   * @return false, with the error published, when the frame's length differs
+   *         from its header's, a checksummed frame is shorter than a header plus
+   *         checksum, its CRC32 does not match or its format description
+   *         declares an unknown algorithm
    */
   bool VerifyFetchedFrame(const unsigned char*& event_buffer, size_t& event_length);
 
@@ -686,7 +688,7 @@ class BinlogReader final : public IBinlogReader {
   /**
    * @brief Return true when an empty parse result means a monitored row event failed to decode.
    */
-  [[nodiscard]] bool IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_type, const unsigned char* buffer,
+  [[nodiscard]] bool IsMonitoredRowsEventParseFailure(mybinlog::EventType event_type, const unsigned char* buffer,
                                                       unsigned long length) const;
 
   /**

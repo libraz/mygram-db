@@ -19,7 +19,6 @@
 
 #include "binlog_event_builder.h"
 #include "mysql/binlog_event_parser.h"
-#include "mysql/binlog_event_types.h"
 #include "mysql/binlog_util.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
@@ -31,7 +30,6 @@ namespace {
 
 using mygramdb::mysql::BinlogEventParser;
 using mygramdb::mysql::ColumnType;
-using mygramdb::mysql::MySQLBinlogEventType;
 using mygramdb::mysql::ParseWriteRowsEvent;
 using mygramdb::mysql::RetainedColumns;
 using mygramdb::mysql::test::BinlogEventBuilder;
@@ -56,7 +54,7 @@ struct WireColumn {
  */
 std::vector<uint8_t> BuildTableMap(const std::vector<WireColumn>& columns, int metadata_len_adj = 0,
                                    const std::vector<uint8_t>& optional_metadata = {}) {
-  auto buf = BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::TABLE_MAP_EVENT);
+  auto buf = BinlogEventBuilder::BuildHeader(mybinlog::EventType::kTableMapEvent);
 
   BinlogEventBuilder::AppendTableId(buf, kTableId);
   BinlogEventBuilder::AppendLittleEndian16(buf, 0);  // flags
@@ -99,7 +97,7 @@ uint8_t Code(ColumnType type) {
 
 /// CHAR(n) metadata bytes as Field_string writes them for a byte length of @p field_length.
 std::vector<uint8_t> CharMetadata(uint16_t field_length) {
-  return {static_cast<uint8_t>(Code(ColumnType::STRING) ^ ((field_length & 0x300) >> 4)),
+  return {static_cast<uint8_t>(Code(ColumnType::kString) ^ ((field_length & 0x300) >> 4)),
           static_cast<uint8_t>(field_length & 0xFF)};
 }
 
@@ -147,19 +145,19 @@ constexpr uint8_t kSimplePrimaryKey = 8;
 
 /// id INT, title VARCHAR, flag TINY, status ENUM, tags SET, price DECIMAL(10,2), ratio DOUBLE
 std::vector<WireColumn> OptionalMetadataColumns() {
-  return {{Code(ColumnType::LONG), {}},
-          {Code(ColumnType::VARCHAR), {0x28, 0x00}},
-          {Code(ColumnType::TINY), {}},
-          {Code(ColumnType::STRING), {kRealTypeEnum, 0x01}},
-          {Code(ColumnType::STRING), {kRealTypeSet, 0x01}},
-          {Code(ColumnType::NEWDECIMAL), {10, 2}},
-          {Code(ColumnType::DOUBLE), {0x08}}};
+  return {{Code(ColumnType::kLong), {}},
+          {Code(ColumnType::kVarchar), {0x28, 0x00}},
+          {Code(ColumnType::kTiny), {}},
+          {Code(ColumnType::kString), {kRealTypeEnum, 0x01}},
+          {Code(ColumnType::kString), {kRealTypeSet, 0x01}},
+          {Code(ColumnType::kNewDecimal), {10, 2}},
+          {Code(ColumnType::kDouble), {0x08}}};
 }
 
 std::vector<uint8_t> FullOptionalMetadata() {
   return Concat({
       Tlv(kSignedness, {0xA0}),  // id unsigned, flag signed, price unsigned, ratio signed
-      Tlv(kDefaultCharset, {45, 1, 8}),
+      Tlv(kDefaultCharset, {45, 0, 8}),
       Tlv(kColumnName, LengthPrefixed({"id", "title", "flag", "status", "tags", "price", "ratio"})),
       Tlv(kSetStrValue, LabelGroup({"a", "b", "c"})),
       Tlv(kEnumStrValue, LabelGroup({"draft", "published"})),
@@ -215,7 +213,7 @@ TEST(TableMapMetadataTest, RowDecodesWithTheLabelsAndSignednessFromTheTableMap) 
   auto rows = BinlogEventBuilder::BuildWriteRowsV2(kTableId, 0, 2, {}, 7, {0x7F}, row);
 
   auto result = ParseWriteRowsEvent(rows.data(), rows.size(), &*metadata, "id", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, nullptr);
+                                    mybinlog::EventType::kWriteRowsEvent, nullptr);
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
   ASSERT_EQ(1U, result->size());
@@ -242,7 +240,7 @@ TEST(TableMapMetadataTest, TableMapWithoutOptionalMetadataKeepsPlaceholderNames)
   EXPECT_EQ("col_6", metadata->columns[6].name);
 
   // Nothing numeric and nothing ENUM/SET: there is nothing for the block to supply.
-  auto text_only = BuildTableMap({{Code(ColumnType::VARCHAR), {0x28, 0x00}}, {Code(ColumnType::BLOB), {0x02}}});
+  auto text_only = BuildTableMap({{Code(ColumnType::kVarchar), {0x28, 0x00}}, {Code(ColumnType::kBlob), {0x02}}});
   auto text_metadata = BinlogEventParser::ParseTableMapEvent(text_only.data(), text_only.size());
   ASSERT_TRUE(text_metadata.has_value());
   EXPECT_TRUE(text_metadata->signedness_known);
@@ -253,7 +251,7 @@ TEST(TableMapMetadataTest, TableMapWithoutOptionalMetadataKeepsPlaceholderNames)
 TEST(TableMapMetadataTest, MinimalOptionalMetadataLeavesNamesAndLabelsUnknown) {
   // binlog_row_metadata=MINIMAL logs signedness and charsets but not names or labels.
   auto event =
-      BuildTableMap(OptionalMetadataColumns(), 0, Concat({Tlv(kSignedness, {0xA0}), Tlv(kDefaultCharset, {45, 1, 8})}));
+      BuildTableMap(OptionalMetadataColumns(), 0, Concat({Tlv(kSignedness, {0xA0}), Tlv(kDefaultCharset, {45, 0, 8})}));
 
   auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
 
@@ -312,13 +310,13 @@ TEST(TableMapMetadataTest, MalformedOptionalMetadataFailsTheEvent) {
 
 TEST(TableMapMetadataTest, SignednessBitmapCountsOnlyNumericColumnTypes) {
   // YEAR, FLOAT, DOUBLE, DECIMAL and the integer types carry a bit; BIT, TIME2, JSON and text do not.
-  auto event = BuildTableMap({{Code(ColumnType::BIT), {0x00, 0x01}},
-                              {Code(ColumnType::YEAR), {}},
-                              {Code(ColumnType::TIME2), {0x00}},
-                              {Code(ColumnType::FLOAT), {0x04}},
-                              {Code(ColumnType::JSON), {0x04}},
-                              {Code(ColumnType::INT24), {}},
-                              {Code(ColumnType::LONGLONG), {}}},
+  auto event = BuildTableMap({{Code(ColumnType::kBit), {0x00, 0x01}},
+                              {Code(ColumnType::kYear), {}},
+                              {Code(ColumnType::kTime2), {0x00}},
+                              {Code(ColumnType::kFloat), {0x04}},
+                              {Code(ColumnType::kJson), {0x04}},
+                              {Code(ColumnType::kInt24), {}},
+                              {Code(ColumnType::kLongLong), {}}},
                              0, Tlv(kSignedness, {0x50}));  // YEAR 0, FLOAT 1, INT24 0, LONGLONG 1
 
   auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
@@ -333,34 +331,34 @@ TEST(TableMapMetadataTest, SignednessBitmapCountsOnlyNumericColumnTypes) {
 
 TEST(TableMapMetadataTest, EveryMetadataCarryingTypeReadsItsOwnBytes) {
   const std::vector<std::pair<WireColumn, uint16_t>> cases = {
-      {{Code(ColumnType::LONG), {}}, 0},
-      {{Code(ColumnType::VARCHAR), {0xFC, 0x03}}, 1020},            // VARCHAR(255) utf8mb4
-      {{Code(ColumnType::JSON), {0x04}}, 4},                        // JSON in the middle
-      {{Code(ColumnType::VARCHAR), {0x28, 0x00}}, 40},              // must not shift after JSON
-      {{Code(ColumnType::GEOMETRY), {0x04}}, 4},                    // GEOMETRY in the middle
-      {{Code(ColumnType::DATETIME2), {0x03}}, 3},                   // must not shift after GEOMETRY
-      {{Code(ColumnType::NEWDECIMAL), {10, 2}}, (10 << 8) | 2},     // DECIMAL(10,2)
-      {{Code(ColumnType::STRING), CharMetadata(40)}, 0xFE28},       // CHAR(10) utf8mb4
-      {{Code(ColumnType::STRING), CharMetadata(1020)}, 0xCEFC},     // CHAR(255) utf8mb4
-      {{Code(ColumnType::STRING), {kRealTypeEnum, 0x01}}, 0xF701},  // ENUM, 1-byte pack
-      {{Code(ColumnType::STRING), {kRealTypeEnum, 0x02}}, 0xF702},  // ENUM, 2-byte pack
-      {{Code(ColumnType::STRING), {kRealTypeSet, 0x01}}, 0xF801},   // SET, 1-byte pack
-      {{Code(ColumnType::STRING), {kRealTypeSet, 0x08}}, 0xF808},   // SET, 8-byte pack
-      {{Code(ColumnType::BIT), {0x02, 0x01}}, 0x0102},              // BIT(10): 2 bits, 1 byte
-      {{Code(ColumnType::TINY_BLOB), {0x01}}, 1},
-      {{Code(ColumnType::BLOB), {0x02}}, 2},
-      {{Code(ColumnType::MEDIUM_BLOB), {0x03}}, 3},
-      {{Code(ColumnType::LONG_BLOB), {0x04}}, 4},
-      {{Code(ColumnType::VECTOR), {0x04}}, 4},
-      {{Code(ColumnType::VARCHAR_COMPRESSED), {0xB1, 0x04}}, 1201},  // VARCHAR(300) utf8mb4 COMPRESSED
-      {{Code(ColumnType::BLOB_COMPRESSED), {0x02}}, 2},              // TEXT COMPRESSED
-      {{Code(ColumnType::FLOAT), {0x04}}, 4},
-      {{Code(ColumnType::DOUBLE), {0x08}}, 8},
-      {{Code(ColumnType::TIMESTAMP2), {0x06}}, 6},
-      {{Code(ColumnType::TIME2), {0x01}}, 1},
-      {{Code(ColumnType::DATE), {}}, 0},
-      {{Code(ColumnType::YEAR), {}}, 0},
-      {{Code(ColumnType::NEWDECIMAL), {65, 30}}, (65 << 8) | 30},  // last column: block must add up
+      {{Code(ColumnType::kLong), {}}, 0},
+      {{Code(ColumnType::kVarchar), {0xFC, 0x03}}, 1020},            // VARCHAR(255) utf8mb4
+      {{Code(ColumnType::kJson), {0x04}}, 4},                        // JSON in the middle
+      {{Code(ColumnType::kVarchar), {0x28, 0x00}}, 40},              // must not shift after JSON
+      {{Code(ColumnType::kGeometry), {0x04}}, 4},                    // GEOMETRY in the middle
+      {{Code(ColumnType::kDatetime2), {0x03}}, 3},                   // must not shift after GEOMETRY
+      {{Code(ColumnType::kNewDecimal), {10, 2}}, (10 << 8) | 2},     // DECIMAL(10,2)
+      {{Code(ColumnType::kString), CharMetadata(40)}, 0xFE28},       // CHAR(10) utf8mb4
+      {{Code(ColumnType::kString), CharMetadata(1020)}, 0xCEFC},     // CHAR(255) utf8mb4
+      {{Code(ColumnType::kString), {kRealTypeEnum, 0x01}}, 0xF701},  // ENUM, 1-byte pack
+      {{Code(ColumnType::kString), {kRealTypeEnum, 0x02}}, 0xF702},  // ENUM, 2-byte pack
+      {{Code(ColumnType::kString), {kRealTypeSet, 0x01}}, 0xF801},   // SET, 1-byte pack
+      {{Code(ColumnType::kString), {kRealTypeSet, 0x08}}, 0xF808},   // SET, 8-byte pack
+      {{Code(ColumnType::kBit), {0x02, 0x01}}, 0x0102},              // BIT(10): 2 bits, 1 byte
+      {{Code(ColumnType::kTinyBlob), {0x01}}, 1},
+      {{Code(ColumnType::kBlob), {0x02}}, 2},
+      {{Code(ColumnType::kMediumBlob), {0x03}}, 3},
+      {{Code(ColumnType::kLongBlob), {0x04}}, 4},
+      {{Code(ColumnType::kVector), {0x04}}, 4},
+      {{Code(ColumnType::kVarcharCompressed), {0xB1, 0x04}}, 1201},  // VARCHAR(300) utf8mb4 COMPRESSED
+      {{Code(ColumnType::kBlobCompressed), {0x02}}, 2},              // TEXT COMPRESSED
+      {{Code(ColumnType::kFloat), {0x04}}, 4},
+      {{Code(ColumnType::kDouble), {0x08}}, 8},
+      {{Code(ColumnType::kTimestamp2), {0x06}}, 6},
+      {{Code(ColumnType::kTime2), {0x01}}, 1},
+      {{Code(ColumnType::kDate), {}}, 0},
+      {{Code(ColumnType::kYear), {}}, 0},
+      {{Code(ColumnType::kNewDecimal), {65, 30}}, (65 << 8) | 30},  // last column: block must add up
   };
 
   std::vector<WireColumn> columns;
@@ -384,7 +382,8 @@ TEST(TableMapMetadataTest, EveryMetadataCarryingTypeReadsItsOwnBytes) {
 
 TEST(TableMapMetadataTest, UnknownColumnTypeFailsTheEvent) {
   // 244 is not a code this parser can size, so every later column would be misread.
-  auto event = BuildTableMap({{Code(ColumnType::LONG), {}}, {244, {0x01}}, {Code(ColumnType::VARCHAR), {0xFF, 0x00}}});
+  auto event =
+      BuildTableMap({{Code(ColumnType::kLong), {}}, {244, {0x01}}, {Code(ColumnType::kVarchar), {0xFF, 0x00}}});
 
   auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
   ASSERT_FALSE(metadata.has_value());
@@ -393,7 +392,8 @@ TEST(TableMapMetadataTest, UnknownColumnTypeFailsTheEvent) {
 }
 
 TEST(TableMapMetadataTest, MetadataBlockLongerThanTheColumnsNeedFailsTheEvent) {
-  auto event = BuildTableMap({{Code(ColumnType::LONG), {}}, {Code(ColumnType::JSON), {0x04}}}, /*metadata_len_adj=*/1);
+  auto event =
+      BuildTableMap({{Code(ColumnType::kLong), {}}, {Code(ColumnType::kJson), {0x04}}}, /*metadata_len_adj=*/1);
 
   auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
   ASSERT_FALSE(metadata.has_value());
@@ -402,7 +402,7 @@ TEST(TableMapMetadataTest, MetadataBlockLongerThanTheColumnsNeedFailsTheEvent) {
 
 TEST(TableMapMetadataTest, MetadataBlockShorterThanTheColumnsNeedFailsTheEvent) {
   // The declared block ends inside the DECIMAL entry; the stray byte becomes the NULL bitmap.
-  auto event = BuildTableMap({{Code(ColumnType::LONG), {}}, {Code(ColumnType::NEWDECIMAL), {10, 2}}},
+  auto event = BuildTableMap({{Code(ColumnType::kLong), {}}, {Code(ColumnType::kNewDecimal), {10, 2}}},
                              /*metadata_len_adj=*/-1);
 
   auto metadata = BinlogEventParser::ParseTableMapEvent(event.data(), event.size());
@@ -414,16 +414,16 @@ TEST(TableMapMetadataTest, RowAfterJsonGeometryDecimalCharEnumSetDecodesAtTheRig
   // id INT, attrs JSON, title VARCHAR(255) utf8mb4, price DECIMAL(10,2), code CHAR(10) utf8mb4,
   // label CHAR(255) utf8mb4, status ENUM, tags SET, shape GEOMETRY, body TEXT
   auto table_map = BuildTableMap({
-      {Code(ColumnType::LONG), {}},
-      {Code(ColumnType::JSON), {0x04}},
-      {Code(ColumnType::VARCHAR), {0xFC, 0x03}},
-      {Code(ColumnType::NEWDECIMAL), {10, 2}},
-      {Code(ColumnType::STRING), CharMetadata(40)},
-      {Code(ColumnType::STRING), CharMetadata(1020)},
-      {Code(ColumnType::STRING), {kRealTypeEnum, 0x01}},
-      {Code(ColumnType::STRING), {kRealTypeSet, 0x01}},
-      {Code(ColumnType::GEOMETRY), {0x04}},
-      {Code(ColumnType::BLOB), {0x02}},
+      {Code(ColumnType::kLong), {}},
+      {Code(ColumnType::kJson), {0x04}},
+      {Code(ColumnType::kVarchar), {0xFC, 0x03}},
+      {Code(ColumnType::kNewDecimal), {10, 2}},
+      {Code(ColumnType::kString), CharMetadata(40)},
+      {Code(ColumnType::kString), CharMetadata(1020)},
+      {Code(ColumnType::kString), {kRealTypeEnum, 0x01}},
+      {Code(ColumnType::kString), {kRealTypeSet, 0x01}},
+      {Code(ColumnType::kGeometry), {0x04}},
+      {Code(ColumnType::kBlob), {0x02}},
   });
   auto metadata = BinlogEventParser::ParseTableMapEvent(table_map.data(), table_map.size());
   ASSERT_TRUE(metadata.has_value());
@@ -456,7 +456,7 @@ TEST(TableMapMetadataTest, RowAfterJsonGeometryDecimalCharEnumSetDecodesAtTheRig
   retained.by_ordinal = {true, false, true, true, true, true, true, true, false, true};
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                    mybinlog::EventType::kWriteRowsEvent, &retained);
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
   ASSERT_EQ(1U, result->size());
@@ -472,13 +472,13 @@ TEST(TableMapMetadataTest, RowAfterJsonGeometryDecimalCharEnumSetDecodesAtTheRig
 }
 
 TEST(TableMapMetadataTest, LengthPrefixNearUint32MaxDoesNotWrapPastTheBoundsCheck) {
-  for (const auto type : {ColumnType::LONG_BLOB, ColumnType::JSON, ColumnType::GEOMETRY}) {
+  for (const auto type : {ColumnType::kLongBlob, ColumnType::kJson, ColumnType::kGeometry}) {
     SCOPED_TRACE(static_cast<int>(type));
     const std::vector<uint8_t> field = {0xFE, 0xFF, 0xFF, 0xFF, 'x', 'y'};
     EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(Code(type), field.data(), 4, field.data() + field.size()),
               4ULL + 0xFFFFFFFEULL);
 
-    auto table_map = BuildTableMap({{Code(ColumnType::LONG), {}}, {Code(type), {0x04}}});
+    auto table_map = BuildTableMap({{Code(ColumnType::kLong), {}}, {Code(type), {0x04}}});
     auto metadata = BinlogEventParser::ParseTableMapEvent(table_map.data(), table_map.size());
     ASSERT_TRUE(metadata.has_value());
 
@@ -492,7 +492,7 @@ TEST(TableMapMetadataTest, LengthPrefixNearUint32MaxDoesNotWrapPastTheBoundsChec
     retained.by_ordinal = {true, false};
 
     auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                      MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                      mybinlog::EventType::kWriteRowsEvent, &retained);
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLFieldTruncated) << result.error().message();
@@ -502,11 +502,11 @@ TEST(TableMapMetadataTest, LengthPrefixNearUint32MaxDoesNotWrapPastTheBoundsChec
 /// id INT, v VARCHAR(300) COMPRESSED, s VARCHAR(20) COMPRESSED, b TEXT COMPRESSED, m MEDIUMTEXT COMPRESSED
 std::vector<uint8_t> BuildCompressedTableMap() {
   return BuildTableMap({
-      {Code(ColumnType::LONG), {}},
-      {Code(ColumnType::VARCHAR_COMPRESSED), {0xB1, 0x04}},
-      {Code(ColumnType::VARCHAR_COMPRESSED), {0x51, 0x00}},
-      {Code(ColumnType::BLOB_COMPRESSED), {0x02}},
-      {Code(ColumnType::BLOB_COMPRESSED), {0x03}},
+      {Code(ColumnType::kLong), {}},
+      {Code(ColumnType::kVarcharCompressed), {0xB1, 0x04}},
+      {Code(ColumnType::kVarcharCompressed), {0x51, 0x00}},
+      {Code(ColumnType::kBlobCompressed), {0x02}},
+      {Code(ColumnType::kBlobCompressed), {0x03}},
   });
 }
 
@@ -561,7 +561,7 @@ TEST(TableMapMetadataTest, MariaDbCompressedColumnsInflateToTheStoredText) {
   retained.by_ordinal = {true, true, true, true, true};
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                    mybinlog::EventType::kWriteRowsEvent, &retained);
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
   ASSERT_EQ(3U, result->size());
@@ -592,7 +592,7 @@ TEST(TableMapMetadataTest, SkippedMariaDbCompressedColumnsKeepLaterColumnsAligne
   retained.by_ordinal = {true, false, false, false, true};
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                    mybinlog::EventType::kWriteRowsEvent, &retained);
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
   ASSERT_EQ(3U, result->size());
@@ -609,7 +609,7 @@ TEST(TableMapMetadataTest, UndecodableMariaDbCompressedPayloadFailsTheEvent) {
       {0x90, 0x01, 'x'},                                             // compression method this build does not know
       {0x80, 'x'},                                                   // zlib with no original-length bytes
   };
-  auto table_map = BuildTableMap({{Code(ColumnType::LONG), {}}, {Code(ColumnType::VARCHAR_COMPRESSED), {0xB1, 0x04}}});
+  auto table_map = BuildTableMap({{Code(ColumnType::kLong), {}}, {Code(ColumnType::kVarcharCompressed), {0xB1, 0x04}}});
   auto metadata = BinlogEventParser::ParseTableMapEvent(table_map.data(), table_map.size());
   ASSERT_TRUE(metadata.has_value());
 
@@ -625,7 +625,7 @@ TEST(TableMapMetadataTest, UndecodableMariaDbCompressedPayloadFailsTheEvent) {
     retained.by_ordinal = {true, true};
 
     auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                      MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                      mybinlog::EventType::kWriteRowsEvent, &retained);
 
     EXPECT_FALSE(result.has_value());
   }

@@ -25,8 +25,8 @@ TableMetadata MakeMetadata(bool is_unsigned) {
   metadata.table_id = 7;
   metadata.database_name = "testdb";
   metadata.table_name = "articles";
-  metadata.columns.push_back({ColumnType::LONGLONG, "id", 0, false, is_unsigned, {}});
-  metadata.columns.push_back({ColumnType::BLOB, "content", 2, true, false, {}});
+  metadata.columns.push_back({ColumnType::kLongLong, "id", 0, false, is_unsigned, {}});
+  metadata.columns.push_back({ColumnType::kBlob, "content", 2, true, false, {}});
   metadata.RebuildColumnOrdinals();
   return metadata;
 }

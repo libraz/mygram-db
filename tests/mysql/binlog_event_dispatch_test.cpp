@@ -8,7 +8,6 @@
  */
 
 #include <array>
-#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -18,7 +17,7 @@
 
 #ifdef USE_MYSQL
 
-#include "mysql/binlog_event_disposition.h"
+#include "mysql/binlog_event_parser.h"
 #include "utils/constants.h"
 #include "utils/crc32.h"
 
@@ -27,52 +26,47 @@ using mygram::utils::ErrorCode;
 
 namespace {
 
-/** Every value of MySQLBinlogEventType, as it appears in the event header byte. */
-constexpr std::array<uint8_t, 49> kEnumeratedEventTypeBytes = {
-    0,  1,  2,  3,  4,  5,  7,  9,  11, 13, 14, 15,  16,  17,  18,  19,  23,  24,  25,  26,  27,  28,  29,  30, 31,
-    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 255};
+/** Every value of mybinlog::EventType, as it appears in the event header byte. */
+constexpr std::array<uint8_t, 50> kEnumeratedEventTypeBytes = {
+    0,  1,  2,  3,  4,  5,  7,  9,  11, 13, 14, 15,  16,  17,  18,  19,  23,  24,  25,  26,  27,  28,  29,  30,  31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 255};
 
 /** Types the reader is allowed to skip, each justified where it is classified. */
-const std::set<MySQLBinlogEventType>& DataNeutralTypes() {
-  static const std::set<MySQLBinlogEventType> types = {
-      MySQLBinlogEventType::STOP_EVENT,
-      MySQLBinlogEventType::ROTATE_EVENT,
-      MySQLBinlogEventType::FORMAT_DESCRIPTION_EVENT,
-      MySQLBinlogEventType::HEARTBEAT_LOG_EVENT,
-      MySQLBinlogEventType::HEARTBEAT_LOG_EVENT_V2,
-      MySQLBinlogEventType::INTVAR_EVENT,
-      MySQLBinlogEventType::RAND_EVENT,
-      MySQLBinlogEventType::USER_VAR_EVENT,
-      MySQLBinlogEventType::BEGIN_LOAD_QUERY_EVENT,
-      MySQLBinlogEventType::APPEND_BLOCK_EVENT,
-      MySQLBinlogEventType::DELETE_FILE_EVENT,
-      MySQLBinlogEventType::IGNORABLE_LOG_EVENT,
-      MySQLBinlogEventType::ROWS_QUERY_LOG_EVENT,
-      MySQLBinlogEventType::PREVIOUS_GTIDS_LOG_EVENT,
-      MySQLBinlogEventType::TRANSACTION_CONTEXT_EVENT,
-      MySQLBinlogEventType::VIEW_CHANGE_EVENT,
-      MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT,
-      MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT,
-      MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT,
+const std::set<mybinlog::EventType>& DataNeutralTypes() {
+  static const std::set<mybinlog::EventType> types = {
+      mybinlog::EventType::kStopEvent,
+      mybinlog::EventType::kRotateEvent,
+      mybinlog::EventType::kFormatDescriptionEvent,
+      mybinlog::EventType::kHeartbeatLogEvent,
+      mybinlog::EventType::kHeartbeatLogEventV2,
+      mybinlog::EventType::kIntvarEvent,
+      mybinlog::EventType::kRandEvent,
+      mybinlog::EventType::kUserVarEvent,
+      mybinlog::EventType::kBeginLoadQueryEvent,
+      mybinlog::EventType::kAppendBlockEvent,
+      mybinlog::EventType::kDeleteFileEvent,
+      mybinlog::EventType::kIgnorableLogEvent,
+      mybinlog::EventType::kRowsQueryLogEvent,
+      mybinlog::EventType::kPreviousGtidsEvent,
+      mybinlog::EventType::kTransactionContextEvent,
+      mybinlog::EventType::kViewChangeEvent,
+      mybinlog::EventType::kMariaDBAnnotateRowsEvent,
+      mybinlog::EventType::kMariaDBBinlogCheckpointEvent,
+      mybinlog::EventType::kMariaDBStartEncryptionEvent,
   };
   return types;
 }
 
 /** Types whose payload the reader or the parser turns into replicated state. */
-const std::set<MySQLBinlogEventType>& DecodedTypes() {
-  static const std::set<MySQLBinlogEventType> types = {
-      MySQLBinlogEventType::QUERY_EVENT,
-      MySQLBinlogEventType::XID_EVENT,
-      MySQLBinlogEventType::TABLE_MAP_EVENT,
-      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1,
-      MySQLBinlogEventType::OBSOLETE_UPDATE_ROWS_EVENT_V1,
-      MySQLBinlogEventType::OBSOLETE_DELETE_ROWS_EVENT_V1,
-      MySQLBinlogEventType::WRITE_ROWS_EVENT,
-      MySQLBinlogEventType::UPDATE_ROWS_EVENT,
-      MySQLBinlogEventType::DELETE_ROWS_EVENT,
-      MySQLBinlogEventType::GTID_LOG_EVENT,
-      MySQLBinlogEventType::MARIADB_GTID_EVENT,
-      MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT,
+const std::set<mybinlog::EventType>& DecodedTypes() {
+  static const std::set<mybinlog::EventType> types = {
+      mybinlog::EventType::kQueryEvent,           mybinlog::EventType::kXidEvent,
+      mybinlog::EventType::kTableMapEvent,        mybinlog::EventType::kWriteRowsEventV1,
+      mybinlog::EventType::kUpdateRowsEventV1,    mybinlog::EventType::kDeleteRowsEventV1,
+      mybinlog::EventType::kWriteRowsEvent,       mybinlog::EventType::kUpdateRowsEvent,
+      mybinlog::EventType::kDeleteRowsEvent,      mybinlog::EventType::kGtidLogEvent,
+      mybinlog::EventType::kGtidTaggedLogEvent,   mybinlog::EventType::kMariaDBGtidEvent,
+      mybinlog::EventType::kMariaDBGtidListEvent,
   };
   return types;
 }
@@ -88,16 +82,16 @@ const std::set<MySQLBinlogEventType>& DecodedTypes() {
  */
 TEST(BinlogEventDispositionTest, OnlyEnumeratedInformationalTypesAreSkipped) {
   for (const uint8_t type_byte : kEnumeratedEventTypeBytes) {
-    const auto type = static_cast<MySQLBinlogEventType>(type_byte);
-    SCOPED_TRACE(std::string(GetEventTypeName(type)) + " (" + std::to_string(type_byte) + ")");
-    const auto disposition = ClassifyBinlogEventDisposition(type);
+    const auto type = static_cast<mybinlog::EventType>(type_byte);
+    SCOPED_TRACE(std::string(mybinlog::EventTypeName(type)) + " (" + std::to_string(type_byte) + ")");
+    const auto disposition = ClassifyReaderEvent(type_byte);
 
     if (DataNeutralTypes().count(type) != 0) {
-      EXPECT_EQ(disposition, BinlogEventDisposition::kDataNeutral);
+      EXPECT_EQ(disposition, ReaderEventDisposition::kDataNeutral);
     } else if (DecodedTypes().count(type) != 0) {
-      EXPECT_EQ(disposition, BinlogEventDisposition::kDecodeAndApply);
+      EXPECT_EQ(disposition, ReaderEventDisposition::kDecodeAndApply);
     } else {
-      EXPECT_EQ(disposition, BinlogEventDisposition::kFailClosed);
+      EXPECT_EQ(disposition, ReaderEventDisposition::kFailClosed);
     }
   }
 }
@@ -113,8 +107,7 @@ TEST(BinlogEventDispositionTest, WireBytesOutsideTheEnumerationFailClosed) {
       continue;
     }
     SCOPED_TRACE("event type byte " + std::to_string(candidate));
-    EXPECT_EQ(ClassifyBinlogEventDisposition(static_cast<MySQLBinlogEventType>(type_byte)),
-              BinlogEventDisposition::kFailClosed);
+    EXPECT_EQ(ClassifyReaderEvent(type_byte), ReaderEventDisposition::kFailClosed);
   }
 }
 
@@ -122,25 +115,12 @@ TEST(BinlogEventDispositionTest, WireBytesOutsideTheEnumerationFailClosed) {
  * @brief Only an unrecognized type carrying the source's ignorable flag is skippable.
  */
 TEST(BinlogEventDispositionTest, UnrecognizedTypeIsSkippedOnlyWhenFlaggedIgnorable) {
-  const auto frame = [](uint8_t type_byte, uint16_t flags) {
-    std::vector<unsigned char> bytes(mygram::constants::kBinlogEventHeaderLen + mygram::constants::kBinlogChecksumSize,
-                                     0);
-    bytes[4] = type_byte;
-    bytes[17] = static_cast<unsigned char>(flags & 0xFFU);
-    bytes[18] = static_cast<unsigned char>(flags >> 8U);
-    return bytes;
-  };
-
-  auto flagged = frame(200, 0x0080);
-  EXPECT_TRUE(IsIgnorableUnrecognizedEvent(flagged.data(), flagged.size()));
-  auto flagged_among_others = frame(200, 0x0081);
-  EXPECT_TRUE(IsIgnorableUnrecognizedEvent(flagged_among_others.data(), flagged_among_others.size()));
-  auto unflagged = frame(200, 0x0001);
-  EXPECT_FALSE(IsIgnorableUnrecognizedEvent(unflagged.data(), unflagged.size()));
+  EXPECT_EQ(ClassifyReaderEvent(200, 0x0080), ReaderEventDisposition::kDataNeutral);
+  EXPECT_EQ(ClassifyReaderEvent(200, 0x0081), ReaderEventDisposition::kDataNeutral);
+  EXPECT_EQ(ClassifyReaderEvent(200, 0x0001), ReaderEventDisposition::kFailClosed);
   // A recognized type is never reclassified by the flag.
-  auto known_fail_closed = frame(static_cast<uint8_t>(MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT), 0x0080);
-  EXPECT_FALSE(IsIgnorableUnrecognizedEvent(known_fail_closed.data(), known_fail_closed.size()));
-  EXPECT_FALSE(IsIgnorableUnrecognizedEvent(flagged.data(), 10));
+  EXPECT_EQ(ClassifyReaderEvent(static_cast<uint8_t>(mybinlog::EventType::kTransactionPayloadEvent), 0x0080),
+            ReaderEventDisposition::kFailClosed);
 }
 
 /**
@@ -148,13 +128,13 @@ TEST(BinlogEventDispositionTest, UnrecognizedTypeIsSkippedOnlyWhenFlaggedIgnorab
  */
 TEST_F(BinlogReaderFixture, UnknownEventTypeStopReportsTheTypeByte) {
   reader_->should_stop_.store(false, std::memory_order_release);
-  ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(static_cast<MySQLBinlogEventType>(200)));
+  ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(static_cast<mybinlog::EventType>(200)));
 
   EXPECT_EQ(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
   EXPECT_NE(reader_->GetLastError().find("type 200"), std::string::npos) << reader_->GetLastError();
-  EXPECT_EQ(DescribeEventType(static_cast<MySQLBinlogEventType>(200)), "event type 200");
-  EXPECT_EQ(DescribeEventType(MySQLBinlogEventType::UNKNOWN_EVENT), "UNKNOWN_EVENT");
-  EXPECT_EQ(DescribeEventType(MySQLBinlogEventType::TABLE_MAP_EVENT), "TABLE_MAP_EVENT");
+  EXPECT_EQ(DescribeEventType(200), "event type 200");
+  EXPECT_EQ(DescribeEventType(static_cast<uint8_t>(mybinlog::EventType::kUnknown)), "UNKNOWN_EVENT");
+  EXPECT_EQ(DescribeEventType(static_cast<uint8_t>(mybinlog::EventType::kTableMapEvent)), "TABLE_MAP_EVENT");
   reader_->should_stop_.store(false, std::memory_order_release);
 }
 
@@ -166,13 +146,13 @@ TEST_F(BinlogReaderFixture, UnknownEventTypeStopReportsTheTypeByte) {
  */
 TEST_F(BinlogReaderFixture, EveryFailClosedEventTypeStopsWithTheUndecodableCode) {
   for (const uint8_t type_byte : kEnumeratedEventTypeBytes) {
-    const auto type = static_cast<MySQLBinlogEventType>(type_byte);
-    if (ClassifyBinlogEventDisposition(type) != BinlogEventDisposition::kFailClosed) {
+    const auto type = static_cast<mybinlog::EventType>(type_byte);
+    if (ClassifyReaderEvent(type_byte) != ReaderEventDisposition::kFailClosed) {
       EXPECT_FALSE(reader_->RejectUnsupportedRuntimeEvent(type))
-          << GetEventTypeName(type) << " is not classified fail-closed";
+          << mybinlog::EventTypeName(type) << " is not classified fail-closed";
       continue;
     }
-    SCOPED_TRACE(std::string(GetEventTypeName(type)) + " (" + std::to_string(type_byte) + ")");
+    SCOPED_TRACE(std::string(mybinlog::EventTypeName(type)) + " (" + std::to_string(type_byte) + ")");
 
     reader_->should_stop_.store(false, std::memory_order_release);
     reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
@@ -203,7 +183,7 @@ TEST_F(BinlogReaderFixture, AnonymousGtidEventStopsWithoutAdvancingAnyPosition) 
   reader_->position_state_.ObserveReceivedGTID("ffffffff-0000-0000-0000-000000000001:17", false, false);
   reader_->should_stop_.store(false, std::memory_order_release);
 
-  ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(MySQLBinlogEventType::ANONYMOUS_GTID_LOG_EVENT));
+  ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(mybinlog::EventType::kAnonymousGtidLogEvent));
 
   EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
   EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-17")
@@ -231,7 +211,7 @@ TEST_F(BinlogReaderFixture, IncidentEventStopsAndNamesTheOnlyRecovery) {
   reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
   reader_->should_stop_.store(false, std::memory_order_release);
 
-  ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(MySQLBinlogEventType::INCIDENT_EVENT));
+  ASSERT_TRUE(reader_->RejectUnsupportedRuntimeEvent(mybinlog::EventType::kIncidentEvent));
 
   EXPECT_TRUE(reader_->should_stop_.load(std::memory_order_acquire));
   EXPECT_EQ(reader_->GetCurrentGTID(), "ffffffff-0000-0000-0000-000000000001:1-17")
@@ -261,13 +241,6 @@ TEST_F(BinlogReaderFixture, StopsOnEventsThatSurviveAReconnectPublishTheUndecoda
     reader_->should_stop_.store(false, std::memory_order_release);
   };
 
-  reader_->RejectTaggedGtidEvent(std::string("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:tag:9"));
-  expect_undecodable("GTID_TAGGED_LOG_EVENT");
-  EXPECT_NE(reader_->GetLastError().find("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:tag:9"), std::string::npos);
-
-  reader_->RejectTaggedGtidEvent(std::nullopt);
-  expect_undecodable("malformed GTID_TAGGED_LOG_EVENT");
-
   reader_->RejectUnsupportedXaTransaction("MARIADB_GTID_EVENT", {});
   expect_undecodable("MariaDB GTID event flagged XA");
   EXPECT_NE(reader_->GetLastError().find("XA"), std::string::npos);
@@ -291,11 +264,11 @@ TEST_F(BinlogReaderFixture, StopsOnEventsThatSurviveAReconnectPublishTheUndecoda
  */
 TEST_F(BinlogReaderFixture, TransientAndReplayableFailuresDoNotPublishTheUndecodableCode) {
   for (const uint8_t type_byte : kEnumeratedEventTypeBytes) {
-    const auto type = static_cast<MySQLBinlogEventType>(type_byte);
-    if (ClassifyBinlogEventDisposition(type) == BinlogEventDisposition::kFailClosed) {
+    const auto type = static_cast<mybinlog::EventType>(type_byte);
+    if (ClassifyReaderEvent(type_byte) == ReaderEventDisposition::kFailClosed) {
       continue;
     }
-    SCOPED_TRACE(std::string(GetEventTypeName(type)) + " (" + std::to_string(type_byte) + ")");
+    SCOPED_TRACE(std::string(mybinlog::EventTypeName(type)) + " (" + std::to_string(type_byte) + ")");
     EXPECT_FALSE(reader_->RejectUnsupportedRuntimeEvent(type));
     EXPECT_NE(reader_->GetLastErrorCode(), ErrorCode::kMySQLUndecodableBinlogEvent);
   }
@@ -313,13 +286,14 @@ TEST_F(BinlogReaderFixture, MalformedPositionEventsReconnectFromTheLastProcessed
                                         0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa};
   const std::vector<std::pair<const char*, std::vector<uint8_t>>> events = {
       {"GTID_LOG_EVENT", BinlogEventBuilder::BuildGtidEvent(uuid, 7)},
+      {"GTID_TAGGED_LOG_EVENT", BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 7, "tag")},
       {"MariaDB GTID_EVENT", BinlogEventBuilder::BuildMariaDBGtidEvent(0, 1, 7)},
       {"MariaDB GTID_LIST_EVENT", BinlogEventBuilder::BuildMariaDBGtidListEvent({{0, 1, 7}})},
   };
 
   for (const auto& [name, intact] : events) {
     SCOPED_TRACE(name);
-    const auto type = static_cast<MySQLBinlogEventType>(intact[4]);
+    const auto type = static_cast<mybinlog::EventType>(intact[4]);
     EXPECT_EQ(reader_->ObservePositionEvent(type, intact.data(), intact.size()),
               BinlogReader::PositionEventAction::kContinue);
     const std::string received_before = reader_->position_state_.received_gtid();
@@ -336,7 +310,7 @@ TEST_F(BinlogReaderFixture, MalformedPositionEventsReconnectFromTheLastProcessed
   }
 
   const auto query = BinlogEventBuilder::BuildQueryEvent("db", "BEGIN");
-  EXPECT_EQ(reader_->ObservePositionEvent(MySQLBinlogEventType::QUERY_EVENT, query.data(), query.size()),
+  EXPECT_EQ(reader_->ObservePositionEvent(mybinlog::EventType::kQueryEvent, query.data(), query.size()),
             BinlogReader::PositionEventAction::kNotPositionEvent);
 }
 

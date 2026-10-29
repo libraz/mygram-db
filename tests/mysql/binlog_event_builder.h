@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-#include "mysql/binlog_event_types.h"
+#include "mybinlog/event_types.h"
 #include "utils/crc32.h"
 
 // NOLINTBEGIN(readability-magic-numbers)
@@ -183,8 +183,8 @@ class BinlogEventBuilder {
    *
    * event_size is set to 0; call FixEventSize() after building the full event.
    */
-  static inline std::vector<uint8_t> BuildHeader(MySQLBinlogEventType type, uint32_t server_id = 1,
-                                                 uint32_t log_pos = 0, uint16_t flags = 0) {
+  static inline std::vector<uint8_t> BuildHeader(mybinlog::EventType type, uint32_t server_id = 1, uint32_t log_pos = 0,
+                                                 uint16_t flags = 0) {
     std::vector<uint8_t> buf;
     buf.reserve(19);
 
@@ -212,7 +212,7 @@ class BinlogEventBuilder {
    * Tail: [CRC32 checksum placeholder(4B)]
    */
   static inline std::vector<uint8_t> BuildQueryEvent(const std::string& database, const std::string& query) {
-    auto buf = BuildHeader(MySQLBinlogEventType::QUERY_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kQueryEvent);
     AppendLittleEndian32(buf, 1);  // thread_id
     AppendLittleEndian32(buf, 0);  // query_exec_time
     buf.push_back(static_cast<uint8_t>(database.size()));
@@ -234,7 +234,7 @@ class BinlogEventBuilder {
   static inline std::vector<uint8_t> BuildQueryEventWithStatusVars(const std::string& database,
                                                                    const std::string& query,
                                                                    const std::vector<uint8_t>& status_vars) {
-    auto buf = BuildHeader(MySQLBinlogEventType::QUERY_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kQueryEvent);
     AppendLittleEndian32(buf, 1);  // thread_id
     AppendLittleEndian32(buf, 0);  // query_exec_time
     buf.push_back(static_cast<uint8_t>(database.size()));
@@ -260,7 +260,7 @@ class BinlogEventBuilder {
                                                       const std::vector<uint8_t>& extra_data, uint64_t column_count,
                                                       const std::vector<uint8_t>& columns_bitmap,
                                                       const std::vector<uint8_t>& row_data) {
-    auto buf = BuildHeader(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kWriteRowsEvent);
 
     // Post-header
     AppendTableId(buf, table_id);
@@ -290,7 +290,7 @@ class BinlogEventBuilder {
   static inline std::vector<uint8_t> BuildWriteRowsV1(uint64_t table_id, uint16_t flags, uint64_t column_count,
                                                       const std::vector<uint8_t>& columns_bitmap,
                                                       const std::vector<uint8_t>& row_data) {
-    auto buf = BuildHeader(MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+    auto buf = BuildHeader(mybinlog::EventType::kWriteRowsEventV1);
 
     // Post-header (V1: no var_header_len)
     AppendTableId(buf, table_id);
@@ -321,7 +321,7 @@ class BinlogEventBuilder {
                                                        const std::vector<uint8_t>& columns_before_bitmap,
                                                        const std::vector<uint8_t>& columns_after_bitmap,
                                                        const std::vector<uint8_t>& row_data) {
-    auto buf = BuildHeader(MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kUpdateRowsEvent);
 
     // Post-header
     AppendTableId(buf, table_id);
@@ -353,7 +353,7 @@ class BinlogEventBuilder {
                                                        const std::vector<uint8_t>& extra_data, uint64_t column_count,
                                                        const std::vector<uint8_t>& columns_bitmap,
                                                        const std::vector<uint8_t>& row_data) {
-    auto buf = BuildHeader(MySQLBinlogEventType::DELETE_ROWS_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kDeleteRowsEvent);
 
     // Post-header
     AppendTableId(buf, table_id);
@@ -381,7 +381,7 @@ class BinlogEventBuilder {
    */
   static inline std::vector<uint8_t> BuildGtidEvent(const std::array<uint8_t, 16>& uuid, uint64_t gno,
                                                     uint8_t commit_flag = 1) {
-    auto buf = BuildHeader(MySQLBinlogEventType::GTID_LOG_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kGtidLogEvent);
 
     // Post-header
     buf.push_back(commit_flag);
@@ -406,7 +406,7 @@ class BinlogEventBuilder {
    */
   static inline std::vector<uint8_t> BuildGtidTaggedEvent(const std::array<uint8_t, 16>& uuid, int64_t gno,
                                                           const std::string& tag, uint8_t gtid_flags = 1) {
-    auto buf = BuildHeader(MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kGtidTaggedLogEvent);
 
     std::vector<uint8_t> fields;
     AppendSerializedVarlen(fields, 0);  // field id: gtid_flags
@@ -427,8 +427,20 @@ class BinlogEventBuilder {
     AppendSerializedVarlen(fields, 6);  // field id: immediate_commit_timestamp
     AppendSerializedVarlen(fields, 1700000000000000ULL);
 
+    // The message size counts the whole message, its own varlen included; the
+    // format version and the last non-ignorable field id take one byte each.
+    std::vector<uint8_t> message_size;
+    size_t size_length = 1;
+    while (true) {
+      message_size.clear();
+      AppendSerializedVarlen(message_size, fields.size() + 2 + size_length);
+      if (message_size.size() == size_length) {
+        break;
+      }
+      size_length = message_size.size();
+    }
     AppendSerializedVarlen(buf, 1);  // serialization format version
-    AppendSerializedVarlen(buf, fields.size());
+    buf.insert(buf.end(), message_size.begin(), message_size.end());
     AppendSerializedVarlen(buf, 7);  // last non-ignorable field id
     buf.insert(buf.end(), fields.begin(), fields.end());
 
@@ -453,7 +465,7 @@ class BinlogEventBuilder {
    */
   static inline std::vector<uint8_t> BuildMariaDBGtidEvent(uint32_t domain_id, uint32_t server_id, uint64_t seq_no,
                                                            uint8_t flags = 0) {
-    auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_GTID_EVENT, server_id);
+    auto buf = BuildHeader(mybinlog::EventType::kMariaDBGtidEvent, server_id);
 
     // Post-header
     AppendLittleEndian64(buf, seq_no);
@@ -483,7 +495,7 @@ class BinlogEventBuilder {
 
   static inline std::vector<uint8_t> BuildMariaDBGtidListEvent(const std::vector<MariaDBGtidEntry>& entries,
                                                                uint32_t flags = 0) {
-    auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kMariaDBGtidListEvent);
 
     uint32_t count_and_flags = (flags << 28) | (static_cast<uint32_t>(entries.size()) & 0x0FFFFFFFu);
     AppendLittleEndian32(buf, count_and_flags);
@@ -509,7 +521,7 @@ class BinlogEventBuilder {
    * Tail: [CRC32 checksum placeholder(4B)]
    */
   static inline std::vector<uint8_t> BuildMariaDBAnnotateRowsEvent(const std::string& sql) {
-    auto buf = BuildHeader(MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT);
+    auto buf = BuildHeader(mybinlog::EventType::kMariaDBAnnotateRowsEvent);
 
     buf.insert(buf.end(), sql.begin(), sql.end());
 

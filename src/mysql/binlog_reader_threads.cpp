@@ -18,16 +18,14 @@
 #include <cstring>
 #include <utility>
 
-#include "mysql/binlog_checksum.h"
-#include "mysql/binlog_event_disposition.h"
+#include "mybinlog/checksum.h"
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
+#include "mybinlog/mariadb_gtid.h"
 #include "mysql/binlog_event_parser.h"
 #include "mysql/binlog_event_processor.h"
-#include "mysql/binlog_event_types.h"
 #include "mysql/binlog_reader_internal.h"
 #include "mysql/binlog_stream.h"
-#include "mysql/gtid_encoder.h"
-#include "mysql/mariadb_event_parser.h"
-#include "mysql/mariadb_gtid.h"
 #include "mysql/table_name_match.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/constants.h"
@@ -47,21 +45,27 @@ static constexpr int kNoDataPollIntervalMs = 10;
 /// Stop after this many retryable processing failures replay the same applied position.
 static constexpr int kMaxConsecutiveProcessingFailuresAtSameGtid = 3;
 
-bool IsRowsEventType(MySQLBinlogEventType event_type) {
+/// MariaDB GTID flags2 bits marking an XA transaction (FL_PREPARED_XA, FL_COMPLETED_XA).
+static constexpr uint8_t kMariaDbGtidXaFlags = 0x40 | 0x80;
+
+/// Offset of event_length in the common event header.
+static constexpr size_t kEventLengthOffset = 9;
+
+bool IsRowsEventType(mybinlog::EventType event_type) {
   switch (event_type) {
-    case MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1:
-    case MySQLBinlogEventType::OBSOLETE_UPDATE_ROWS_EVENT_V1:
-    case MySQLBinlogEventType::OBSOLETE_DELETE_ROWS_EVENT_V1:
-    case MySQLBinlogEventType::WRITE_ROWS_EVENT:
-    case MySQLBinlogEventType::UPDATE_ROWS_EVENT:
-    case MySQLBinlogEventType::DELETE_ROWS_EVENT:
-    case MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT:
-    case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT:
-    case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT:
-    case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT:
-    case MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
-    case MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
-    case MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
+    case mybinlog::EventType::kWriteRowsEventV1:
+    case mybinlog::EventType::kUpdateRowsEventV1:
+    case mybinlog::EventType::kDeleteRowsEventV1:
+    case mybinlog::EventType::kWriteRowsEvent:
+    case mybinlog::EventType::kUpdateRowsEvent:
+    case mybinlog::EventType::kDeleteRowsEvent:
+    case mybinlog::EventType::kPartialUpdateRowsEvent:
+    case mybinlog::EventType::kMariaDBWriteRowsCompressedEvent:
+    case mybinlog::EventType::kMariaDBUpdateRowsCompressedEvent:
+    case mybinlog::EventType::kMariaDBDeleteRowsCompressedEvent:
+    case mybinlog::EventType::kMariaDBWriteRowsCompressedEventV1:
+    case mybinlog::EventType::kMariaDBUpdateRowsCompressedEventV1:
+    case mybinlog::EventType::kMariaDBDeleteRowsCompressedEventV1:
       return true;
     default:
       return false;
@@ -94,7 +98,7 @@ mygram::utils::Expected<bool, mygram::utils::Error> BinlogReader::ShouldSuppress
     return false;
   }
 
-  return GtidEncoder::PositionCoversAuto(event_gtid, snapshot_gtid);
+  return GtidPositionCovers(event_gtid, snapshot_gtid);
 }
 
 uint64_t ExtractRowsEventTableId(const unsigned char* buffer) {
@@ -189,50 +193,51 @@ void BinlogReader::FailClosedOnUnevaluableReplayWatermark(const std::string& tab
   should_stop_.store(true, std::memory_order_release);
 }
 
-bool BinlogReader::RejectUnsupportedRuntimeEvent(MySQLBinlogEventType event_type) {
-  if (ClassifyBinlogEventDisposition(event_type) != BinlogEventDisposition::kFailClosed) {
+bool BinlogReader::RejectUnsupportedRuntimeEvent(mybinlog::EventType event_type, uint16_t flags) {
+  const auto type_code = static_cast<uint8_t>(event_type);
+  if (ClassifyReaderEvent(type_code, flags) != ReaderEventDisposition::kFailClosed) {
     return false;
   }
   FailClosedOnUnreplayableEvent(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
-                                UnreplayableEventRemediation(event_type), "unreplayable_binlog_event",
-                                DescribeEventType(event_type));
+                                UnreplayableEventRemediation(type_code), "unreplayable_binlog_event",
+                                DescribeEventType(type_code));
   return true;
 }
 
-void BinlogReader::RejectTaggedGtidEvent(const std::optional<std::string>& tagged_gtid) {
-  FailClosedOnUnreplayableEvent(
-      mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
-      "Received GTID_TAGGED_LOG_EVENT. Tagged GTIDs are not supported because reconnect cannot encode "
-      "UUID:TAG:GNO positions safely." +
-          (tagged_gtid.has_value() ? " Received position: " + *tagged_gtid : " The event payload was malformed") +
-          kUnreplayableEventRecovery,
-      "unsupported_runtime_event", "GTID_TAGGED_LOG_EVENT");
-}
-
-BinlogReader::PositionEventAction BinlogReader::ObservePositionEvent(MySQLBinlogEventType event_type,
+BinlogReader::PositionEventAction BinlogReader::ObservePositionEvent(mybinlog::EventType event_type,
                                                                      const unsigned char* event_buffer,
                                                                      unsigned long event_length) {
-  // A malformed frame is not proof that the event cannot be decoded: a replay
-  // from the last processed GTID can deliver it intact, so this must not
-  // publish the undecodable-event code.
-  const auto reconnect_on_malformed = [this](const char* event_name) {
-    SetLastError(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                 std::string("Malformed ") + event_name + "; reconnecting from last processed GTID"));
+  // A frame cut short is not proof that the event cannot be decoded: a replay
+  // from the last processed GTID can deliver it intact, so it keeps the generic
+  // binlog code. A complete frame whose content is invalid (a GNO outside
+  // [1, INT64_MAX), a bad tag, an unknown serialization version) arrives the
+  // same way on every replay, so it publishes the undecodable-event code; both
+  // reconnect rather than skip the position.
+  const auto reconnect_on_malformed = [this](const char* event_name, mybinlog::Status status) {
+    const bool truncated = status == mybinlog::Status::kTruncated;
+    std::string message = std::string("Malformed ") + event_name + " (" + mybinlog::StatusName(status) +
+                          "); reconnecting from last processed GTID";
+    if (!truncated) {
+      message += kUnreplayableEventRecovery;
+    }
+    SetLastError(mygram::utils::MakeError(truncated ? mygram::utils::ErrorCode::kMySQLBinlogError
+                                                    : mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
+                                          message));
     mygram::utils::StructuredLog()
         .Event("binlog_error")
         .Field("type", "malformed_position_event")
         .Field("event_type", event_name)
+        .Field("status", mybinlog::StatusName(status))
         .Error();
     return PositionEventAction::kReconnect;
   };
 
-  if (event_type == MySQLBinlogEventType::GTID_LOG_EVENT) {
-    auto gtid_opt = BinlogEventParser::ExtractGTID(event_buffer, event_length);
-    if (!gtid_opt) {
-      return reconnect_on_malformed("GTID_LOG_EVENT");
+  if (event_type == mybinlog::EventType::kGtidLogEvent || event_type == mybinlog::EventType::kGtidTaggedLogEvent) {
+    auto gtid = BinlogEventParser::ExtractGTID(event_buffer, event_length);
+    if (!gtid) {
+      return reconnect_on_malformed(mybinlog::EventTypeName(event_type), gtid.error());
     }
-    position_state_.ObserveReceivedGTID(*gtid_opt, false, false);
+    position_state_.ObserveReceivedGTID(*gtid, false, false);
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "reader_gtid_received")
@@ -241,25 +246,29 @@ BinlogReader::PositionEventAction BinlogReader::ObservePositionEvent(MySQLBinlog
     return PositionEventAction::kContinue;
   }
 
-  if (event_type == MySQLBinlogEventType::GTID_TAGGED_LOG_EVENT) {
-    RejectTaggedGtidEvent(BinlogEventParser::ExtractTaggedGTID(event_buffer, event_length));
-    return PositionEventAction::kStop;
+  if (event_type != mybinlog::EventType::kMariaDBGtidEvent &&
+      event_type != mybinlog::EventType::kMariaDBGtidListEvent) {
+    return PositionEventAction::kNotPositionEvent;
   }
 
-  // MariaDB GTID event (type 162): extract domain-server-seq GTID
-  if (event_type == MySQLBinlogEventType::MARIADB_GTID_EVENT) {
-    const auto flags = MariaDBEventParser::ExtractGTIDFlags(event_buffer, event_length);
-    if (flags.has_value() && ((*flags & MariaDBEventParser::kXaFlagMask) != 0U)) {
+  BinlogFrame frame;
+  mybinlog::Status status = BinlogEventParser::ReadFrame(event_buffer, event_length, &frame);
+
+  // MariaDB GTID event (type 162): domain-server-seq GTID and the group's flags
+  if (event_type == mybinlog::EventType::kMariaDBGtidEvent) {
+    mybinlog::MariaDbGtidEvent gtid_event;
+    if (status == mybinlog::Status::kOk) {
+      status = mybinlog::ParseMariaDbGtidEvent(frame.header, frame.body, frame.body_size, &gtid_event);
+    }
+    if (status != mybinlog::Status::kOk) {
+      return reconnect_on_malformed("MariaDB GTID_EVENT", status);
+    }
+    if ((gtid_event.flags & kMariaDbGtidXaFlags) != 0U) {
       RejectUnsupportedXaTransaction("MARIADB_GTID_EVENT", {});
       return PositionEventAction::kStop;
     }
-    auto gtid_opt = MariaDBEventParser::ExtractGTID(event_buffer, event_length);
-    if (!gtid_opt) {
-      return reconnect_on_malformed("MariaDB GTID_EVENT");
-    }
-    const bool transaction_open = flags.has_value() && BinlogEventParser::IsMariaDBGtidTransactionOpen(*flags);
-    const bool standalone = flags.has_value() && ((*flags & MariaDBEventParser::kStandaloneFlag) != 0U);
-    position_state_.ObserveReceivedGTID(*gtid_opt, transaction_open, standalone);
+    const bool transaction_open = BinlogEventParser::IsMariaDBGtidTransactionOpen(gtid_event.flags);
+    position_state_.ObserveReceivedGTID(gtid_event.gtid.ToString(), transaction_open, gtid_event.standalone());
     mygram::utils::StructuredLog()
         .Event("binlog_debug")
         .Field("action", "reader_mariadb_gtid_received")
@@ -268,20 +277,19 @@ BinlogReader::PositionEventAction BinlogReader::ObservePositionEvent(MySQLBinlog
     return PositionEventAction::kContinue;
   }
 
-  if (event_type == MySQLBinlogEventType::MARIADB_GTID_LIST_EVENT) {
-    const auto positions = MariaDBEventParser::ParseGTIDList(event_buffer, event_length);
-    if (!positions.has_value()) {
-      return reconnect_on_malformed("MariaDB GTID_LIST_EVENT");
-    }
-    mygram::utils::StructuredLog()
-        .Event("binlog_debug")
-        .Field("action", "mariadb_gtid_list_received")
-        .Field("domain_count", static_cast<uint64_t>(positions->size()))
-        .Debug();
-    return PositionEventAction::kContinue;
+  mybinlog::MariaDbGtidListEvent list_event;
+  if (status == mybinlog::Status::kOk) {
+    status = mybinlog::ParseMariaDbGtidListEvent(frame.header, frame.body, frame.body_size, &list_event);
   }
-
-  return PositionEventAction::kNotPositionEvent;
+  if (status != mybinlog::Status::kOk) {
+    return reconnect_on_malformed("MariaDB GTID_LIST_EVENT", status);
+  }
+  mygram::utils::StructuredLog()
+      .Event("binlog_debug")
+      .Field("action", "mariadb_gtid_list_received")
+      .Field("domain_count", static_cast<uint64_t>(list_event.gtids.gtids.size()))
+      .Debug();
+  return PositionEventAction::kContinue;
 }
 
 void BinlogReader::RejectUnsupportedXaTransaction(std::string_view source_event, const std::string& statement) {
@@ -320,22 +328,48 @@ void BinlogReader::RejectUnsafeStatementEvent(const std::string& statement) {
 }
 
 bool BinlogReader::VerifyFetchedFrame(const unsigned char*& event_buffer, size_t& event_length) {
-  // A frame too short to hold a header and its checksum is malformed, so it
-  // fails here like a mismatch instead of reaching dispatch unverified.
-  auto framed = checksum_tracker_.Admit(event_buffer, event_length);
-  if (framed) {
-    event_buffer = framed->data;
-    event_length = framed->length;
+  // A frame too short to hold a header, or one its header does not describe,
+  // fails here like a mismatch instead of reaching dispatch unverified. None of
+  // these is proof the event is undecodable: a replay can deliver it intact.
+  mybinlog::EventHeader header;
+  mybinlog::FrameLayout layout;
+  mybinlog::Status status = mybinlog::ParseEventHeader(event_buffer, event_length, &header);
+  if (status == mybinlog::Status::kOk) {
+    status = checksum_tracker_.OnEvent(header, event_buffer, event_length, &layout);
+  }
+  if (status == mybinlog::Status::kOk) {
+    if (!layout.has_trailer) {
+      // The parsers read a 4-byte trailer from every frame, so a frame sent
+      // without one gets a zeroed trailer and a header length that counts it.
+      trailer_framed_event_.assign(event_buffer, event_buffer + layout.payload_length);
+      trailer_framed_event_.resize(layout.payload_length + mybinlog::kChecksumSize, 0);
+      const auto framed_length = static_cast<uint32_t>(trailer_framed_event_.size());
+      for (size_t i = 0; i < sizeof(framed_length); ++i) {
+        trailer_framed_event_[kEventLengthOffset + i] = static_cast<unsigned char>((framed_length >> (8U * i)) & 0xFFU);
+      }
+      event_buffer = trailer_framed_event_.data();
+      event_length = trailer_framed_event_.size();
+    }
     return true;
   }
+
+  mygram::utils::ErrorCode code = mygram::utils::ErrorCode::kMySQLBinlogError;
+  if (status == mybinlog::Status::kChecksumMismatch) {
+    code = mygram::utils::ErrorCode::kMySQLBinlogChecksumMismatch;
+  } else if (status == mybinlog::Status::kTruncated) {
+    code = mygram::utils::ErrorCode::kMySQLFieldTruncated;
+  }
+  const mygram::utils::Error error =
+      mygram::utils::MakeError(code, std::string("Binlog event failed verification (") + mybinlog::StatusName(status) +
+                                         "); reconnecting from last processed GTID");
   crc_errors_++;
-  SetLastError(framed.error());
+  SetLastError(error);
   mygram::utils::StructuredLog()
       .Event("binlog_error")
       .Field("type", "crc32_checksum_mismatch")
       .Field("event_length", static_cast<uint64_t>(event_length))
       .Field("gtid", position_state_.received_gtid())
-      .FieldError(framed.error())
+      .FieldError(error)
       .Error();
   return false;
 }
@@ -355,7 +389,7 @@ BinlogReader::TableMapAction BinlogReader::HandleTableMapEvent(const unsigned ch
                                                       position_state_.received_gtid());
     return !suppressed || !*suppressed;
   };
-  auto metadata_opt = BinlogEventParser::ParseTableMapEvent(event_buffer, event_length, decodes_rows);
+  auto metadata_opt = BinlogEventParser::ParseTableMapEvent(event_buffer, event_length, decodes_rows, source_flavor_);
   if (!metadata_opt) {
     if (metadata_opt.error().code() == mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent) {
       FailClosedOnUnreplayableEvent(mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent,
@@ -891,11 +925,12 @@ void BinlogReader::ReaderThreadFunc() {
           break;
         }
 
-        MySQLBinlogEventType event_type = MySQLBinlogEventType::UNKNOWN_EVENT;
+        mybinlog::EventType event_type = mybinlog::EventType::kUnknown;
 
         // Check for GTID events first (need to update current_gtid)
-        if (event_length >= mygram::constants::kBinlogEventHeaderLen) {
-          event_type = static_cast<MySQLBinlogEventType>(event_buffer[4]);
+        mybinlog::EventHeader event_header;
+        if (mybinlog::ParseEventHeader(event_buffer, event_length, &event_header) == mybinlog::Status::kOk) {
+          event_type = static_cast<mybinlog::EventType>(event_header.type_code);
 
           const PositionEventAction position_action = ObservePositionEvent(event_type, event_buffer, event_length);
           if (position_action == PositionEventAction::kContinue) {
@@ -909,25 +944,28 @@ void BinlogReader::ReaderThreadFunc() {
             break;
           }
 
-          if (event_type == MySQLBinlogEventType::MARIADB_ANNOTATE_ROWS_EVENT) {
-            const auto annotation = MariaDBEventParser::ExtractAnnotateRows(event_buffer, event_length);
-            if (annotation.has_value()) {
+          if (event_type == mybinlog::EventType::kMariaDBAnnotateRowsEvent) {
+            BinlogFrame frame;
+            mybinlog::MariaDbAnnotateRowsEvent annotation;
+            if (BinlogEventParser::ReadFrame(event_buffer, event_length, &frame) == mybinlog::Status::kOk &&
+                mybinlog::ParseMariaDbAnnotateRowsEvent(frame.header, frame.body, frame.body_size, &annotation) ==
+                    mybinlog::Status::kOk) {
               mygram::utils::StructuredLog()
                   .Event("binlog_debug")
                   .Field("action", "mariadb_rows_annotation")
-                  .Field("query", *annotation)
+                  .Field("query", annotation.query)
                   .Debug();
             }
             continue;
           }
 
           // Skip other MariaDB-specific events that don't need processing.
-          if (event_type == MySQLBinlogEventType::MARIADB_BINLOG_CHECKPOINT_EVENT ||
-              event_type == MySQLBinlogEventType::MARIADB_START_ENCRYPTION_EVENT) {
+          if (event_type == mybinlog::EventType::kMariaDBBinlogCheckpointEvent ||
+              event_type == mybinlog::EventType::kMariaDBStartEncryptionEvent) {
             continue;
           }
 
-          if (event_type == MySQLBinlogEventType::TABLE_MAP_EVENT) {
+          if (event_type == mybinlog::EventType::kTableMapEvent) {
             mygram::utils::StructuredLog()
                 .Event("binlog_debug")
                 .Field("action", "table_map_event_detected")
@@ -945,29 +983,19 @@ void BinlogReader::ReaderThreadFunc() {
             continue;
           }
 
-          // A type this build does not know, flagged ignorable by the source, is
-          // skipped like the source's own replicas do.
-          if (IsIgnorableUnrecognizedEvent(event_buffer, event_length)) {
-            mygram::utils::StructuredLog()
-                .Event("binlog_debug")
-                .Field("action", "skipped_ignorable_unrecognized_event")
-                .Field("event_type", static_cast<int64_t>(event_type))
-                .Debug();
-            continue;
-          }
-
           // Reject unsupported wire formats before replay suppression. A SYNC
           // watermark may justify skipping a decoded row, but it must never turn
           // an event format we cannot decode into an accepted transaction.
-          if (RejectUnsupportedRuntimeEvent(event_type)) {
+          if (RejectUnsupportedRuntimeEvent(event_type, event_header.flags)) {
             break;
           }
 
           // Everything the reader did not decode above is skipped only when it
           // is one of the informational types enumerated with a reason why
-          // skipping cannot lose a row or a position. Nothing reaches the
-          // parser by default.
-          if (ClassifyBinlogEventDisposition(event_type) == BinlogEventDisposition::kDataNeutral) {
+          // skipping cannot lose a row or a position, or a type this build does
+          // not know that the source flagged ignorable, as the source's own
+          // replicas skip it. Nothing reaches the parser by default.
+          if (ClassifyReaderEvent(event_header.type_code, event_header.flags) == ReaderEventDisposition::kDataNeutral) {
             continue;
           }
 
@@ -986,7 +1014,7 @@ void BinlogReader::ReaderThreadFunc() {
         const bool query_was_inside_transaction = position_state_.reader_transaction_open();
         bool query_parsed = false;
         QueryEventData query_data;
-        if (event_type == MySQLBinlogEventType::QUERY_EVENT) {
+        if (event_type == mybinlog::EventType::kQueryEvent) {
           auto query = BinlogEventParser::ExtractQueryString(event_buffer, event_length);
           if (!query.has_value()) {
             // The statement text is unreadable in this frame, not proven
@@ -1067,7 +1095,7 @@ void BinlogReader::ReaderThreadFunc() {
 
             PushEvent(std::make_unique<BinlogEvent>(std::move(event)));
           }
-          if (event_type == MySQLBinlogEventType::QUERY_EVENT &&
+          if (event_type == mybinlog::EventType::kQueryEvent &&
               query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd) {
             position_state_.EndReaderTransaction();
           }
@@ -1078,7 +1106,7 @@ void BinlogReader::ReaderThreadFunc() {
           mygram::utils::StructuredLog()
               .Event("binlog_error")
               .Field("type", "rows_event_parse_failed")
-              .Field("event_type", GetEventTypeName(event_type))
+              .Field("event_type", mybinlog::EventTypeName(event_type))
               .Field("reader_gtid", position_state_.received_gtid())
               .Field("current_gtid", GetCurrentGTID())
               .Error();
@@ -1094,7 +1122,7 @@ void BinlogReader::ReaderThreadFunc() {
           const bool safe_ignored_query =
               query_parsed && BinlogEventParser::IsSafeIgnoredQuery(query_data, mysql_config_.ignored_ddl_prefixes);
           const bool standalone_query_completed =
-              event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
+              event_type == mybinlog::EventType::kQueryEvent && query_parsed &&
               !position_state_.received_gtid().empty() &&
               (query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd ||
                (query_boundary == BinlogEventParser::QueryTransactionBoundary::kNone && !query_was_inside_transaction &&
@@ -1104,19 +1132,19 @@ void BinlogReader::ReaderThreadFunc() {
             progress->type = BinlogEventType::COMMIT;
             progress->gtid = position_state_.received_gtid();
             PushEvent(std::move(progress));
-          } else if (event_type == MySQLBinlogEventType::QUERY_EVENT && query_parsed &&
+          } else if (event_type == mybinlog::EventType::kQueryEvent && query_parsed &&
                      query_boundary == BinlogEventParser::QueryTransactionBoundary::kNone && !safe_ignored_query) {
             RejectUnsafeStatementEvent(query_data.query);
             break;
           }
-          if (event_type == MySQLBinlogEventType::QUERY_EVENT &&
+          if (event_type == mybinlog::EventType::kQueryEvent &&
               query_boundary == BinlogEventParser::QueryTransactionBoundary::kEnd) {
             position_state_.EndReaderTransaction();
           }
           mygram::utils::StructuredLog().Event("binlog_debug").Field("action", "event_skipped").Debug();
         }
 
-        if (event_type == MySQLBinlogEventType::XID_EVENT) {
+        if (event_type == mybinlog::EventType::kXidEvent) {
           position_state_.EndReaderTransaction();
         }
         if (position_state_.mariadb_standalone_group_open() &&
@@ -1126,7 +1154,7 @@ void BinlogReader::ReaderThreadFunc() {
           progress->gtid = position_state_.received_gtid();
           PushEvent(std::move(progress));
           position_state_.CloseMariaDBStandaloneGroup();
-        } else if (position_state_.mariadb_standalone_group_open() && event_type == MySQLBinlogEventType::QUERY_EVENT) {
+        } else if (position_state_.mariadb_standalone_group_open() && event_type == mybinlog::EventType::kQueryEvent) {
           // Standalone QUERY_EVENT completion is handled above. Clear the group
           // marker so a later row event cannot publish the query's GTID.
           position_state_.CloseMariaDBStandaloneGroup();
@@ -1379,7 +1407,7 @@ bool BinlogReader::ProcessQueuedEvent(const BinlogEvent& event, ProcessingFailur
   return true;
 }
 
-bool BinlogReader::IsMonitoredRowsEventParseFailure(MySQLBinlogEventType event_type, const unsigned char* buffer,
+bool BinlogReader::IsMonitoredRowsEventParseFailure(mybinlog::EventType event_type, const unsigned char* buffer,
                                                     unsigned long length) const {
   if (!IsRowsEventType(event_type)) {
     return false;

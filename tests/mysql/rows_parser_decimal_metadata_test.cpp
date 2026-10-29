@@ -15,8 +15,8 @@
 #include <vector>
 
 #include "binlog_event_builder.h"
+#include "mybinlog/event_types.h"
 #include "mysql/binlog_event_parser.h"
-#include "mysql/binlog_event_types.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 #include "utils/error.h"
@@ -28,7 +28,6 @@ namespace {
 using mygram::utils::ErrorCode;
 using mygramdb::mysql::BinlogEventParser;
 using mygramdb::mysql::ColumnType;
-using mygramdb::mysql::MySQLBinlogEventType;
 using mygramdb::mysql::ParseWriteRowsEvent;
 using mygramdb::mysql::RetainedColumns;
 using mygramdb::mysql::TableMetadata;
@@ -44,7 +43,7 @@ constexpr uint64_t kTableId = 0x42;
  * @return Complete event bytes, header through checksum
  */
 std::vector<uint8_t> BuildDecimalTableMap(uint8_t precision, uint8_t scale) {
-  auto buf = BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::TABLE_MAP_EVENT);
+  auto buf = BinlogEventBuilder::BuildHeader(mybinlog::EventType::kTableMapEvent);
 
   BinlogEventBuilder::AppendTableId(buf, kTableId);
   BinlogEventBuilder::AppendLittleEndian16(buf, 0);  // flags
@@ -60,8 +59,8 @@ std::vector<uint8_t> BuildDecimalTableMap(uint8_t precision, uint8_t scale) {
   buf.push_back(0);
 
   BinlogEventBuilder::AppendPackedInt(buf, 2);  // column count
-  buf.push_back(static_cast<uint8_t>(ColumnType::LONG));
-  buf.push_back(static_cast<uint8_t>(ColumnType::NEWDECIMAL));
+  buf.push_back(static_cast<uint8_t>(ColumnType::kLong));
+  buf.push_back(static_cast<uint8_t>(ColumnType::kNewDecimal));
 
   // Only NEWDECIMAL carries metadata here: precision byte, then scale byte.
   BinlogEventBuilder::AppendPackedInt(buf, 2);
@@ -98,7 +97,7 @@ TEST(RowsParserDecimalMetadataTest, TableMapKeepsDeclaredPrecisionAndScale) {
 
   ASSERT_TRUE(metadata.has_value());
   ASSERT_EQ(2U, metadata->columns.size());
-  EXPECT_EQ(ColumnType::NEWDECIMAL, metadata->columns[1].type);
+  EXPECT_EQ(ColumnType::kNewDecimal, metadata->columns[1].type);
   EXPECT_EQ(static_cast<uint16_t>((1 << 8) | 5), metadata->columns[1].metadata);
 }
 
@@ -115,7 +114,7 @@ TEST(RowsParserDecimalMetadataTest, ScaleAbovePrecisionIsRejectedWhenTheColumnIs
   retained.by_ordinal = {true, false};
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                    mybinlog::EventType::kWriteRowsEvent, &retained);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(ErrorCode::kMySQLUnsupportedType, result.error().code());
@@ -129,7 +128,7 @@ TEST(RowsParserDecimalMetadataTest, ScaleAbovePrecisionIsRejectedWhenTheColumnIs
   auto event = BuildDecimalWriteRows(/*key=*/7, std::vector<uint8_t>(8, 0x80));
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, nullptr);
+                                    mybinlog::EventType::kWriteRowsEvent, nullptr);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(ErrorCode::kMySQLInvalidMetadata, result.error().code());
@@ -148,7 +147,7 @@ TEST(RowsParserDecimalMetadataTest, PrecisionAboveTheProtocolMaximumIsRejected) 
   retained.by_ordinal = {true, false};
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                    mybinlog::EventType::kWriteRowsEvent, &retained);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(ErrorCode::kMySQLUnsupportedType, result.error().code());
@@ -166,7 +165,7 @@ TEST(RowsParserDecimalMetadataTest, WellFormedDecimalStillParses) {
   auto event = BuildDecimalWriteRows(/*key=*/7, decimal_body);
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, nullptr);
+                                    mybinlog::EventType::kWriteRowsEvent, nullptr);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1U, result->size());
@@ -188,7 +187,7 @@ TEST(RowsParserDecimalMetadataTest, MariaDbScaleAboveThirtyKeepsTheRowStreamAlig
     RetainedColumns retained;
     retained.by_ordinal = {true, decode_decimal};
     auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                      MySQLBinlogEventType::WRITE_ROWS_EVENT, &retained);
+                                      mybinlog::EventType::kWriteRowsEvent, &retained);
 
     ASSERT_TRUE(result.has_value()) << result.error().message();
     ASSERT_EQ(1U, result->size());
@@ -204,7 +203,7 @@ TEST(RowsParserDecimalMetadataTest, ScaleAboveThirtyEightIsStillRejected) {
   auto event = BuildDecimalWriteRows(/*key=*/7, std::vector<uint8_t>(30, 0x80));
 
   auto result = ParseWriteRowsEvent(event.data(), event.size(), &*metadata, "col_0", "",
-                                    MySQLBinlogEventType::WRITE_ROWS_EVENT, nullptr);
+                                    mybinlog::EventType::kWriteRowsEvent, nullptr);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(ErrorCode::kMySQLInvalidMetadata, result.error().code());

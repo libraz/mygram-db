@@ -50,9 +50,9 @@ namespace {
 /// Debug-log placeholder for a column whose value was deliberately not decoded.
 const std::string kSkippedColumnPreview = "<not decoded>";
 
-bool IsV2Event(MySQLBinlogEventType event_type) {
-  return event_type == MySQLBinlogEventType::WRITE_ROWS_EVENT ||
-         event_type == MySQLBinlogEventType::UPDATE_ROWS_EVENT || event_type == MySQLBinlogEventType::DELETE_ROWS_EVENT;
+bool IsV2Event(mybinlog::EventType event_type) {
+  return event_type == mybinlog::EventType::kWriteRowsEvent || event_type == mybinlog::EventType::kUpdateRowsEvent ||
+         event_type == mybinlog::EventType::kDeleteRowsEvent;
 }
 
 bool AllColumnsPresent(const unsigned char* columns_present, uint64_t column_count) {
@@ -74,7 +74,7 @@ bool AllColumnsPresent(const unsigned char* columns_present, uint64_t column_cou
 // ---------------------------------------------------------------------------
 
 mygram::utils::Expected<internal::RowsEventHeader, mygram::utils::Error> internal::ParseRowsEventHeader(
-    const unsigned char* buffer, unsigned long length, MySQLBinlogEventType event_type,
+    const unsigned char* buffer, unsigned long length, mybinlog::EventType event_type,
     const TableMetadata* table_metadata, const std::string& pk_column_name, const std::string& text_column_name,
     const char* event_type_label) {
   using mygram::utils::ErrorCode;
@@ -473,7 +473,7 @@ mygram::utils::Expected<internal::SingleRowResult, mygram::utils::Error> interna
 
 mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const std::string& pk_column_name, const std::string& text_column_name, mybinlog::EventType event_type,
     const RetainedColumns* retained_columns) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -540,7 +540,7 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRo
 
 mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils::Error> ParseUpdateRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const std::string& pk_column_name, const std::string& text_column_name, mybinlog::EventType event_type,
     const RetainedColumns* retained_columns) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
@@ -674,7 +674,7 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
 
 mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const std::string& pk_column_name, const std::string& text_column_name, mybinlog::EventType event_type,
     const RetainedColumns* retained_columns) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;

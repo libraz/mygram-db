@@ -21,9 +21,9 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mybinlog/mariadb_gtid.h"
 #include "mysql/binary_json.h"
 #include "mysql/binlog_event_parser.h"
-#include "mysql/mariadb_event_parser.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 #include "query/query_parser.h"
@@ -35,18 +35,17 @@ namespace {
 
 using mygramdb::mysql::ColumnMetadata;
 using mygramdb::mysql::ColumnType;
-using mygramdb::mysql::MySQLBinlogEventType;
 using mygramdb::mysql::TableMetadata;
 
 /// Column types the row decoder handles differently enough to be worth steering
 /// the fuzzer across. One input byte selects from this table.
 constexpr ColumnType kFuzzableColumnTypes[] = {
-    ColumnType::TINY,       ColumnType::SHORT, ColumnType::LONG,       ColumnType::FLOAT,     ColumnType::DOUBLE,
-    ColumnType::LONGLONG,   ColumnType::INT24, ColumnType::DATE,       ColumnType::TIME2,     ColumnType::DATETIME2,
-    ColumnType::TIMESTAMP2, ColumnType::YEAR,  ColumnType::VARCHAR,    ColumnType::BIT,       ColumnType::JSON,
-    ColumnType::NEWDECIMAL, ColumnType::ENUM,  ColumnType::SET,        ColumnType::TINY_BLOB, ColumnType::MEDIUM_BLOB,
-    ColumnType::LONG_BLOB,  ColumnType::BLOB,  ColumnType::VAR_STRING, ColumnType::STRING,    ColumnType::GEOMETRY,
-    ColumnType::VECTOR,
+    ColumnType::kTiny,       ColumnType::kShort, ColumnType::kLong,      ColumnType::kFloat,    ColumnType::kDouble,
+    ColumnType::kLongLong,   ColumnType::kInt24, ColumnType::kDate,      ColumnType::kTime2,    ColumnType::kDatetime2,
+    ColumnType::kTimestamp2, ColumnType::kYear,  ColumnType::kVarchar,   ColumnType::kBit,      ColumnType::kJson,
+    ColumnType::kNewDecimal, ColumnType::kEnum,  ColumnType::kSet,       ColumnType::kTinyBlob, ColumnType::kMediumBlob,
+    ColumnType::kLongBlob,   ColumnType::kBlob,  ColumnType::kVarString, ColumnType::kString,   ColumnType::kGeometry,
+    ColumnType::kVector,
 };
 
 constexpr size_t kMaxFuzzColumns = 16;
@@ -109,11 +108,11 @@ void FuzzRowsParser(const uint8_t* data, size_t size) {
 
   for (const auto* mask : {static_cast<const mygramdb::mysql::RetainedColumns*>(nullptr), &retained}) {
     (void)mygramdb::mysql::ParseWriteRowsEvent(payload, payload_size, &metadata, "c0", "c1",
-                                               MySQLBinlogEventType::WRITE_ROWS_EVENT, mask);
+                                               mybinlog::EventType::kWriteRowsEvent, mask);
     (void)mygramdb::mysql::ParseUpdateRowsEvent(payload, payload_size, &metadata, "c0", "c1",
-                                                MySQLBinlogEventType::UPDATE_ROWS_EVENT, mask);
+                                                mybinlog::EventType::kUpdateRowsEvent, mask);
     (void)mygramdb::mysql::ParseDeleteRowsEvent(payload, payload_size, &metadata, "c0", "c1",
-                                                MySQLBinlogEventType::DELETE_ROWS_EVENT, mask);
+                                                mybinlog::EventType::kDeleteRowsEvent, mask);
   }
 }
 
@@ -177,14 +176,18 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   // MySQL and MariaDB parsers must reject arbitrary/truncated frames without
   // dereferencing outside the supplied input.
   (void)mygramdb::mysql::BinlogEventParser::ExtractGTID(bytes, length);
-  (void)mygramdb::mysql::BinlogEventParser::ExtractTaggedGTID(bytes, length);
   (void)mygramdb::mysql::BinlogEventParser::ParseTableMapEvent(bytes, length);
   (void)mygramdb::mysql::BinlogEventParser::ExtractQueryString(bytes, length);
   (void)mygramdb::mysql::BinlogEventParser::IsRowsStatementEnd(bytes, length);
-  (void)mygramdb::mysql::MariaDBEventParser::ExtractGTID(bytes, size);
-  (void)mygramdb::mysql::MariaDBEventParser::ExtractGTIDFlags(bytes, size);
-  (void)mygramdb::mysql::MariaDBEventParser::ParseGTIDList(bytes, size);
-  (void)mygramdb::mysql::MariaDBEventParser::ExtractAnnotateRows(bytes, size);
+  mygramdb::mysql::BinlogFrame frame;
+  if (mygramdb::mysql::BinlogEventParser::ReadFrame(bytes, length, &frame) == mybinlog::Status::kOk) {
+    mybinlog::MariaDbGtidEvent gtid;
+    mybinlog::MariaDbGtidListEvent gtid_list;
+    mybinlog::MariaDbAnnotateRowsEvent annotation;
+    (void)mybinlog::ParseMariaDbGtidEvent(frame.header, frame.body, frame.body_size, &gtid);
+    (void)mybinlog::ParseMariaDbGtidListEvent(frame.header, frame.body, frame.body_size, &gtid_list);
+    (void)mybinlog::ParseMariaDbAnnotateRowsEvent(frame.header, frame.body, frame.body_size, &annotation);
+  }
 
   FuzzRowsParser(data, size);
   FuzzBinaryJson(data, size);

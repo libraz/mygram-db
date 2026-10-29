@@ -209,11 +209,11 @@ void AppendIntegerCases(std::vector<AgreementCase>& cases) {
     uint64_t unsigned_high;
   };
   const std::vector<Width> widths = {
-      {"tinyint", ColumnType::TINY, 1, -128, 127, 255},
-      {"smallint", ColumnType::SHORT, 2, -32768, 32767, 65535},
-      {"mediumint", ColumnType::INT24, 3, -8388608, 8388607, 16777215},
-      {"int", ColumnType::LONG, 4, -2147483648LL, 2147483647LL, 4294967295ULL},
-      {"bigint", ColumnType::LONGLONG, 8, INT64_MIN, INT64_MAX, UINT64_MAX},
+      {"tinyint", ColumnType::kTiny, 1, -128, 127, 255},
+      {"smallint", ColumnType::kShort, 2, -32768, 32767, 65535},
+      {"mediumint", ColumnType::kInt24, 3, -8388608, 8388607, 16777215},
+      {"int", ColumnType::kLong, 4, -2147483648LL, 2147483647LL, 4294967295ULL},
+      {"bigint", ColumnType::kLongLong, 8, INT64_MIN, INT64_MAX, UINT64_MAX},
   };
 
   for (const auto& width : widths) {
@@ -265,9 +265,9 @@ constexpr DoubleRendering kDoubleRenderings[] = {
 void AppendApproximateNumericCases(std::vector<AgreementCase>& cases) {
   for (const auto& rendering : kDoubleRenderings) {
     cases.push_back({std::string("double ") + rendering.rendered,
-                     ColumnType::DOUBLE,
+                     ColumnType::kDouble,
                      rendering.rendered,
-                     ColumnType::DOUBLE,
+                     ColumnType::kDouble,
                      0,
                      EncodeDouble(rendering.value),
                      false,
@@ -279,41 +279,41 @@ void AppendDecimalCases(std::vector<AgreementCase>& cases) {
   // Measured: a DECIMAL column returns every declared fractional digit, and
   // drops the leading zeros an INSERT wrote.
   cases.push_back({"decimal 12.30",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    "12.30",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    (10 << 8) | 2,
                    EncodeDecimal(false, 12, 30, 10, 2),
                    false,
                    {}});
   cases.push_back({"decimal -12.30",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    "-12.30",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    (10 << 8) | 2,
                    EncodeDecimal(true, 12, 30, 10, 2),
                    false,
                    {}});
   cases.push_back({"decimal 0.00",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    "0.00",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    (10 << 8) | 2,
                    EncodeDecimal(false, 0, 0, 10, 2),
                    false,
                    {}});
   cases.push_back({"decimal -0.0500",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    "-0.0500",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    (10 << 8) | 4,
                    EncodeDecimal(true, 0, 500, 10, 4),
                    false,
                    {}});
   cases.push_back({"decimal 0",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    "0",
-                   ColumnType::NEWDECIMAL,
+                   ColumnType::kNewDecimal,
                    (6 << 8) | 0,
                    EncodeDecimal(false, 0, 0, 6, 0),
                    false,
@@ -323,31 +323,31 @@ void AppendDecimalCases(std::vector<AgreementCase>& cases) {
 void AppendTemporalCases(std::vector<AgreementCase>& cases) {
   // Measured: DATE returns the calendar date, including the all-zero date a
   // permissive sql_mode allows.
-  cases.push_back({"date", ColumnType::DATE, "2024-01-01", ColumnType::DATE, 0, EncodeDate(2024, 1, 1), false, {}});
-  cases.push_back({"zero date", ColumnType::DATE, "0000-00-00", ColumnType::DATE, 0, EncodeDate(0, 0, 0), false, {}});
+  cases.push_back({"date", ColumnType::kDate, "2024-01-01", ColumnType::kDate, 0, EncodeDate(2024, 1, 1), false, {}});
+  cases.push_back({"zero date", ColumnType::kDate, "0000-00-00", ColumnType::kDate, 0, EncodeDate(0, 0, 0), false, {}});
 
   // Measured: DATETIME(n) returns exactly n fractional digits, and none at all
   // for DATETIME.
   cases.push_back({"datetime",
-                   ColumnType::DATETIME,
+                   ColumnType::kDatetime,
                    "2024-01-01 12:00:00",
-                   ColumnType::DATETIME2,
+                   ColumnType::kDatetime2,
                    0,
                    EncodeDatetime2(2024, 1, 1, 12, 0, 0, 0, 0),
                    false,
                    {}});
   cases.push_back({"datetime(3)",
-                   ColumnType::DATETIME,
+                   ColumnType::kDatetime,
                    "2024-01-01 12:00:00.500",
-                   ColumnType::DATETIME2,
+                   ColumnType::kDatetime2,
                    3,
                    EncodeDatetime2(2024, 1, 1, 12, 0, 0, 500000, 3),
                    false,
                    {}});
   cases.push_back({"datetime(6)",
-                   ColumnType::DATETIME,
+                   ColumnType::kDatetime,
                    "2024-01-01 00:00:00.000001",
-                   ColumnType::DATETIME2,
+                   ColumnType::kDatetime2,
                    6,
                    EncodeDatetime2(2024, 1, 1, 0, 0, 0, 1, 6),
                    false,
@@ -356,17 +356,17 @@ void AppendTemporalCases(std::vector<AgreementCase>& cases) {
   // Measured with the session time zone pinned to UTC, which is what the load
   // connection sets: TIMESTAMP returns the UTC wall clock of the stored epoch.
   cases.push_back({"timestamp",
-                   ColumnType::TIMESTAMP,
+                   ColumnType::kTimestamp,
                    "2024-01-01 12:00:00",
-                   ColumnType::TIMESTAMP2,
+                   ColumnType::kTimestamp2,
                    0,
                    EncodeTimestamp2(1704110400, 0, 0),
                    false,
                    {}});
   cases.push_back({"timestamp(3)",
-                   ColumnType::TIMESTAMP,
+                   ColumnType::kTimestamp,
                    "2024-01-01 00:00:00.500",
-                   ColumnType::TIMESTAMP2,
+                   ColumnType::kTimestamp2,
                    3,
                    EncodeTimestamp2(1704067200, 500000, 3),
                    false,
@@ -375,78 +375,84 @@ void AppendTemporalCases(std::vector<AgreementCase>& cases) {
   // Measured: TIME(n) returns n fractional digits, keeps the sign, and lets the
   // hour run past a day.
   cases.push_back(
-      {"time", ColumnType::TIME, "12:00:00", ColumnType::TIME2, 0, EncodeTime2(false, 12, 0, 0, 0, 0), false, {}});
+      {"time", ColumnType::kTime, "12:00:00", ColumnType::kTime2, 0, EncodeTime2(false, 12, 0, 0, 0, 0), false, {}});
   cases.push_back({"time(1) zero",
-                   ColumnType::TIME,
+                   ColumnType::kTime,
                    "00:00:00.0",
-                   ColumnType::TIME2,
+                   ColumnType::kTime2,
                    1,
                    EncodeTime2(false, 0, 0, 0, 0, 1),
                    false,
                    {}});
   cases.push_back({"time(3)",
-                   ColumnType::TIME,
+                   ColumnType::kTime,
                    "12:00:00.500",
-                   ColumnType::TIME2,
+                   ColumnType::kTime2,
                    3,
                    EncodeTime2(false, 12, 0, 0, 500000, 3),
                    false,
                    {}});
   cases.push_back({"negative time(3)",
-                   ColumnType::TIME,
+                   ColumnType::kTime,
                    "-10:20:30.500",
-                   ColumnType::TIME2,
+                   ColumnType::kTime2,
                    3,
                    EncodeTime2(true, 10, 20, 30, 500000, 3),
                    false,
                    {}});
   cases.push_back({"negative time",
-                   ColumnType::TIME,
+                   ColumnType::kTime,
                    "-10:20:30",
-                   ColumnType::TIME2,
+                   ColumnType::kTime2,
                    0,
                    EncodeTime2(true, 10, 20, 30, 0, 0),
                    false,
                    {}});
   cases.push_back({"time(6) past a day",
-                   ColumnType::TIME,
+                   ColumnType::kTime,
                    "100:00:00.000001",
-                   ColumnType::TIME2,
+                   ColumnType::kTime2,
                    6,
                    EncodeTime2(false, 100, 0, 0, 1, 6),
                    false,
                    {}});
   cases.push_back({"negative time(6)",
-                   ColumnType::TIME,
+                   ColumnType::kTime,
                    "-838:59:59.999999",
-                   ColumnType::TIME2,
+                   ColumnType::kTime2,
                    6,
                    EncodeTime2(true, 838, 59, 59, 999999, 6),
                    false,
                    {}});
 
   // Measured: YEAR returns four digits, and the zero year as four zeros.
-  cases.push_back({"year", ColumnType::YEAR, "2024", ColumnType::YEAR, 0, {0x7C}, false, {}});
-  cases.push_back({"zero year", ColumnType::YEAR, "0000", ColumnType::YEAR, 0, {0x00}, false, {}});
+  cases.push_back({"year", ColumnType::kYear, "2024", ColumnType::kYear, 0, {0x7C}, false, {}});
+  cases.push_back({"zero year", ColumnType::kYear, "0000", ColumnType::kYear, 0, {0x00}, false, {}});
 }
 
 void AppendBitCases(std::vector<AgreementCase>& cases) {
   // Measured: a BIT column returns its raw storage bytes, most significant
   // first, and not a printed number.
   cases.push_back(
-      {"bit(1) set", ColumnType::BIT, std::string("\x01", 1), ColumnType::BIT, (0 << 8) | 1, {0x01}, false, {}});
-  cases.push_back(
-      {"bit(12)", ColumnType::BIT, std::string("\x0A\xAA", 2), ColumnType::BIT, (1 << 8) | 4, {0x0A, 0xAA}, false, {}});
+      {"bit(1) set", ColumnType::kBit, std::string("\x01", 1), ColumnType::kBit, (0 << 8) | 1, {0x01}, false, {}});
+  cases.push_back({"bit(12)",
+                   ColumnType::kBit,
+                   std::string("\x0A\xAA", 2),
+                   ColumnType::kBit,
+                   (1 << 8) | 4,
+                   {0x0A, 0xAA},
+                   false,
+                   {}});
   cases.push_back({"bit(64)",
-                   ColumnType::BIT,
+                   ColumnType::kBit,
                    std::string(8, '\xFF'),
-                   ColumnType::BIT,
+                   ColumnType::kBit,
                    (8 << 8) | 0,
                    {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
                    false,
                    {}});
   cases.push_back(
-      {"bit(8) zero", ColumnType::BIT, std::string("\x00", 1), ColumnType::BIT, (1 << 8) | 0, {0x00}, false, {}});
+      {"bit(8) zero", ColumnType::kBit, std::string("\x00", 1), ColumnType::kBit, (1 << 8) | 0, {0x00}, false, {}});
 }
 
 void AppendStringCases(std::vector<AgreementCase>& cases) {
@@ -457,53 +463,53 @@ void AppendStringCases(std::vector<AgreementCase>& cases) {
   for (const auto& value : values) {
     // VARCHAR: the client reports VAR_STRING, a row event carries VARCHAR.
     cases.push_back({"varchar '" + value + "'",
-                     ColumnType::VAR_STRING,
+                     ColumnType::kVarString,
                      value,
-                     ColumnType::VARCHAR,
+                     ColumnType::kVarchar,
                      300,
                      LengthPrefixed(value, 2),
                      false,
                      {}});
     cases.push_back({"short varchar '" + value + "'",
-                     ColumnType::VAR_STRING,
+                     ColumnType::kVarString,
                      value,
-                     ColumnType::VARCHAR,
+                     ColumnType::kVarchar,
                      64,
                      LengthPrefixed(value, 1),
                      false,
                      {}});
     // CHAR, whose declared byte length is folded into the metadata high byte.
     cases.push_back({"char '" + value + "'",
-                     ColumnType::STRING,
+                     ColumnType::kString,
                      value,
-                     ColumnType::STRING,
+                     ColumnType::kString,
                      static_cast<uint16_t>((0xFE << 8) | 40),
                      LengthPrefixed(value, 1),
                      false,
                      {}});
     // TEXT and its siblings, whose metadata is the width of the length prefix.
     cases.push_back({"tinytext '" + value + "'",
-                     ColumnType::TINY_BLOB,
+                     ColumnType::kTinyBlob,
                      value,
-                     ColumnType::TINY_BLOB,
+                     ColumnType::kTinyBlob,
                      1,
                      LengthPrefixed(value, 1),
                      false,
                      {}});
     cases.push_back(
-        {"text '" + value + "'", ColumnType::BLOB, value, ColumnType::BLOB, 2, LengthPrefixed(value, 2), false, {}});
+        {"text '" + value + "'", ColumnType::kBlob, value, ColumnType::kBlob, 2, LengthPrefixed(value, 2), false, {}});
     cases.push_back({"mediumtext '" + value + "'",
-                     ColumnType::MEDIUM_BLOB,
+                     ColumnType::kMediumBlob,
                      value,
-                     ColumnType::MEDIUM_BLOB,
+                     ColumnType::kMediumBlob,
                      3,
                      LengthPrefixed(value, 3),
                      false,
                      {}});
     cases.push_back({"longtext '" + value + "'",
-                     ColumnType::LONG_BLOB,
+                     ColumnType::kLongBlob,
                      value,
-                     ColumnType::LONG_BLOB,
+                     ColumnType::kLongBlob,
                      4,
                      LengthPrefixed(value, 4),
                      false,
@@ -511,17 +517,17 @@ void AppendStringCases(std::vector<AgreementCase>& cases) {
     // MariaDB COMPRESSED columns: the client reports the plain type and the
     // inflated text; a value too short to deflate is stored behind a 0x00 header.
     cases.push_back({"compressed varchar '" + value + "'",
-                     ColumnType::VAR_STRING,
+                     ColumnType::kVarString,
                      value,
-                     ColumnType::VARCHAR_COMPRESSED,
+                     ColumnType::kVarcharCompressed,
                      1201,
                      StoredUncompressed(value, 2),
                      false,
                      {}});
     cases.push_back({"compressed text '" + value + "'",
-                     ColumnType::BLOB,
+                     ColumnType::kBlob,
                      value,
-                     ColumnType::BLOB_COMPRESSED,
+                     ColumnType::kBlobCompressed,
                      2,
                      StoredUncompressed(value, 2),
                      false,
@@ -540,17 +546,17 @@ void AppendStringCases(std::vector<AgreementCase>& cases) {
     japanese += "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\xE3\x83\x86\xE3\x82\xAD\xE3\x82\xB9\xE3\x83\x88";
   }
   cases.push_back({"deflated varchar",
-                   ColumnType::VAR_STRING,
+                   ColumnType::kVarString,
                    abc,
-                   ColumnType::VARCHAR_COMPRESSED,
+                   ColumnType::kVarcharCompressed,
                    1201,
                    {0x0a, 0x00, 0x89, 0xb4, 0x4b, 0x4c, 0x4a, 0x4e, 0x1c, 0x6a, 0x08, 0x00},
                    false,
                    {}});
   cases.push_back({"deflated text",
-                   ColumnType::BLOB,
+                   ColumnType::kBlob,
                    japanese,
-                   ColumnType::BLOB_COMPRESSED,
+                   ColumnType::kBlobCompressed,
                    2,
                    {0x25, 0x00, 0x8a, 0x03, 0x48, 0x7b, 0x36, 0x7d, 0xe9, 0xb3, 0x39, 0x6b, 0x5e,
                     0xac, 0x9a, 0xf7, 0xb8, 0xb9, 0xed, 0x71, 0xd3, 0xda, 0xc7, 0x4d, 0x3b, 0x1f,
@@ -562,14 +568,14 @@ void AppendStringCases(std::vector<AgreementCase>& cases) {
   // the selected labels joined by commas, in declaration order. The client
   // reports both as CHAR.
   const std::vector<std::string> enum_labels = {"draft", "published"};
-  cases.push_back({"enum first", ColumnType::STRING, "draft", ColumnType::ENUM, 1, {0x01}, false, enum_labels});
-  cases.push_back({"enum second", ColumnType::STRING, "published", ColumnType::ENUM, 1, {0x02}, false, enum_labels});
-  cases.push_back({"enum empty", ColumnType::STRING, "", ColumnType::ENUM, 1, {0x00}, false, enum_labels});
+  cases.push_back({"enum first", ColumnType::kString, "draft", ColumnType::kEnum, 1, {0x01}, false, enum_labels});
+  cases.push_back({"enum second", ColumnType::kString, "published", ColumnType::kEnum, 1, {0x02}, false, enum_labels});
+  cases.push_back({"enum empty", ColumnType::kString, "", ColumnType::kEnum, 1, {0x00}, false, enum_labels});
 
   const std::vector<std::string> set_labels = {"a", "b", "c"};
-  cases.push_back({"set none", ColumnType::STRING, "", ColumnType::SET, 1, {0x00}, false, set_labels});
-  cases.push_back({"set two", ColumnType::STRING, "a,b", ColumnType::SET, 1, {0x03}, false, set_labels});
-  cases.push_back({"set all", ColumnType::STRING, "a,b,c", ColumnType::SET, 1, {0x07}, false, set_labels});
+  cases.push_back({"set none", ColumnType::kString, "", ColumnType::kSet, 1, {0x00}, false, set_labels});
+  cases.push_back({"set two", ColumnType::kString, "a,b", ColumnType::kSet, 1, {0x03}, false, set_labels});
+  cases.push_back({"set all", ColumnType::kString, "a,b,c", ColumnType::kSet, 1, {0x07}, false, set_labels});
 }
 
 std::vector<AgreementCase> GenerateCases() {
@@ -661,7 +667,7 @@ TEST(ColumnValueAgreementTest, EveryAcceptedTypeIsCoveredByAValue) {
  * documents unless the snapshot side is padded.
  */
 TEST(ColumnValueAgreementTest, SubSecondTemporalTextIsPaddedToTheDecodedWidth) {
-  for (const auto snapshot_type : {ColumnType::TIME, ColumnType::DATETIME, ColumnType::TIMESTAMP}) {
+  for (const auto snapshot_type : {ColumnType::kTime, ColumnType::kDatetime, ColumnType::kTimestamp}) {
     const auto kind = DescribeColumnType(snapshot_type).snapshot_normalization;
     EXPECT_EQ(kind, CanonicalValueKind::kTemporal) << static_cast<int>(snapshot_type);
   }
@@ -678,10 +684,10 @@ TEST(ColumnValueAgreementTest, SubSecondTemporalTextIsPaddedToTheDecodedWidth) {
  * not in the snapshot text to be normalized back.
  */
 TEST(ColumnValueAgreementTest, FloatColumnsCannotBeReconciledAndAreRefused) {
-  EXPECT_EQ(DescribeColumnType(ColumnType::FLOAT).acceptance, ColumnAcceptance::kRejectedPathsDisagree);
+  EXPECT_EQ(DescribeColumnType(ColumnType::kFloat).acceptance, ColumnAcceptance::kRejectedPathsDisagree);
 
   const Bytes image = EncodeFloat(16777216.0F);
-  auto decoded = DecodeFieldValue(static_cast<uint8_t>(ColumnType::FLOAT), image.data(), 0, false,
+  auto decoded = DecodeFieldValue(static_cast<uint8_t>(ColumnType::kFloat), image.data(), 0, false,
                                   image.data() + image.size(), false, nullptr);
   ASSERT_TRUE(decoded) << decoded.error().message();
   EXPECT_EQ(*decoded, "16777216");
@@ -697,7 +703,7 @@ TEST(ColumnValueAgreementTest, FloatColumnsCannotBeReconciledAndAreRefused) {
  * collapse onto one key.
  */
 TEST(ColumnValueAgreementTest, BitColumnsAreReadAsANumberOnBothPaths) {
-  EXPECT_EQ(DescribeColumnType(ColumnType::BIT).snapshot_normalization, CanonicalValueKind::kBitset);
+  EXPECT_EQ(DescribeColumnType(ColumnType::kBit).snapshot_normalization, CanonicalValueKind::kBitset);
   EXPECT_EQ(CanonicalizeColumnValue(std::string("\x0A\xAA", 2), CanonicalValueKind::kBitset), "2730");
   EXPECT_NE(CanonicalizeColumnValue(std::string("\x0A\xAA", 2), CanonicalValueKind::kBitset),
             CanonicalizeColumnValue(std::string("\x0A\xAB", 2), CanonicalValueKind::kText));

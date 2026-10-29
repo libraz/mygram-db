@@ -429,10 +429,10 @@ Expected<std::string, Error> DecodeFieldValue(uint8_t col_type, const unsigned c
 
     case 254: {  // MYSQL_TYPE_STRING (CHAR)
       unsigned char type = metadata >> 8;
-      if (type == static_cast<unsigned char>(mysql::ColumnType::ENUM) ||
-          type == static_cast<unsigned char>(mysql::ColumnType::SET)) {
+      if (type == static_cast<unsigned char>(mysql::ColumnType::kEnum) ||
+          type == static_cast<unsigned char>(mysql::ColumnType::kSet)) {
         const auto kind =
-            type == static_cast<unsigned char>(mysql::ColumnType::ENUM) ? EnumSetKind::kEnum : EnumSetKind::kSet;
+            type == static_cast<unsigned char>(mysql::ColumnType::kEnum) ? EnumSetKind::kEnum : EnumSetKind::kSet;
         return DecodeEnumSetValue(kind, data, end, metadata & 0xFF, enum_set_values);
       }
       uint32_t max_len = (((metadata >> 4) & 0x300) ^ 0x300) + (metadata & 0xff);

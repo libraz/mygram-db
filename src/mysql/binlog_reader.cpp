@@ -23,7 +23,6 @@
 #include "mysql/binlog_reader_internal.h"
 #include "mysql/mariadb_binlog_stream.h"
 #include "mysql/mysql_binlog_stream.h"
-#include "mysql/server_flavor.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/structured_log.h"
 
@@ -322,7 +321,8 @@ mygram::utils::Expected<void, mygram::utils::Error> BinlogReader::Start() {
   mygram::utils::StructuredLog().Event("binlog_connection_validated").Field("gtid", current_gtid_).Info();
 
   // Create binlog stream protocol handler based on server flavor
-  if (binlog_connection_->GetFlavor() == ServerFlavor::kMariaDB) {
+  source_flavor_ = binlog_connection_->GetFlavor();
+  if (source_flavor_ == ServerFlavor::kMariaDB) {
     binlog_stream_ = std::make_unique<MariaDBBinlogStream>();
     mygram::utils::StructuredLog().Event("binlog_stream_flavor").Field("flavor", "MariaDB").Info();
   } else {

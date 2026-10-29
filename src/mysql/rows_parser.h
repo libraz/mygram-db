@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "config/config.h"
-#include "mysql/binlog_event_types.h"
+#include "mybinlog/event_types.h"
 #include "mysql/table_metadata.h"
 #include "storage/document_store.h"
 #include "storage/filter_index.h"
@@ -114,7 +114,7 @@ RetainedColumns BuildRetainedColumns(const TableMetadata& metadata, const config
  */
 mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const std::string& pk_column_name, const std::string& text_column_name, mybinlog::EventType event_type,
     const RetainedColumns* retained_columns = nullptr);
 
 /**
@@ -129,7 +129,7 @@ mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseWriteRo
  */
 mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils::Error> ParseUpdateRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const std::string& pk_column_name, const std::string& text_column_name, mybinlog::EventType event_type,
     const RetainedColumns* retained_columns = nullptr);
 
 /**
@@ -144,7 +144,7 @@ mygram::utils::Expected<std::vector<std::pair<RowData, RowData>>, mygram::utils:
  */
 mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseDeleteRowsEvent(
     const unsigned char* buffer, unsigned long length, const TableMetadata* table_metadata,
-    const std::string& pk_column_name, const std::string& text_column_name, MySQLBinlogEventType event_type,
+    const std::string& pk_column_name, const std::string& text_column_name, mybinlog::EventType event_type,
     const RetainedColumns* retained_columns = nullptr);
 
 /** Raw column text of each filter whose conversion failed, keyed by column name. */

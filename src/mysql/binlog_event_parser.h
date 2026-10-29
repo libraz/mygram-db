@@ -7,12 +7,17 @@
 
 #ifdef USE_MYSQL
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "mybinlog/event_header.h"
+#include "mybinlog/event_types.h"
+#include "mybinlog/status.h"
 #include "mysql/binlog_reader.h"
 #include "mysql/ddl_classifier.h"
 #include "mysql/rows_parser.h"
@@ -21,6 +26,50 @@
 #include "utils/expected.h"
 
 namespace mygramdb::mysql {
+
+/// How the reader treats one wire event type: decode it, skip it as data-neutral, or stop.
+enum class ReaderEventDisposition : uint8_t {
+  kDecodeAndApply,  ///< Carries replicated data or position; the reader decodes it.
+  kDataNeutral,     ///< Informational; skipping it cannot lose a row or a position.
+  kFailClosed,      ///< Cannot be applied and cannot be proven harmless to skip.
+};
+
+/**
+ * @brief MygramDB's disposition of a wire event type
+ *
+ * mybinlog::ClassifyEvent under the flavor that writes the type, so the answer
+ * does not depend on the source; compressed events and PARTIAL_UPDATE_ROWS,
+ * which libmybinlog can read, stay fail-closed because the reader does not
+ * decode them.
+ *
+ * @param type_code Header byte 4
+ * @param flags Header flags; a type outside mybinlog::EventType is data-neutral only when flagged ignorable
+ */
+ReaderEventDisposition ClassifyReaderEvent(uint8_t type_code, uint16_t flags = 0);
+
+/// Diagnostic name of an event type; a byte outside mybinlog::EventType is reported by value.
+std::string DescribeEventType(uint8_t type_code);
+
+/**
+ * @brief Recovery sentence shared by every fail-closed binlog event.
+ *
+ * The event that stopped the stream stays in the binlog, so replication can
+ * never resume from a position before it; the first SYNC moves the shared
+ * stream past it, so the rebuild has to cover every replicated table.
+ */
+inline constexpr const char* kUnreplayableEventRecovery =
+    ". The event stays in the binlog, so replication cannot resume from before it: run SYNC for every "
+    "replicated table to rebuild past it.";
+
+/// Operator-facing reason a fail-closed event stopped replication, ending with kUnreplayableEventRecovery.
+std::string UnreplayableEventRemediation(uint8_t type_code);
+
+/// A frame in the reader's layout: the common header and the body without the 4-byte trailer that closes every frame.
+struct BinlogFrame {
+  mybinlog::EventHeader header;
+  const uint8_t* body = nullptr;
+  size_t body_size = 0;
+};
 
 /**
  * @brief Decoded QUERY_EVENT: default database, statement text, and the lexing mode it was logged under
@@ -63,26 +112,23 @@ class BinlogEventParser {
       bool table_names_case_insensitive = false);
 
   /**
-   * @brief Extract GTID from GTID_LOG_EVENT
-   * @param buffer Event buffer
-   * @param length Buffer length
-   * @return GTID string if found
+   * @brief Locate the header and body of a frame in the reader's layout
+   *
+   * The header's event_length bounds the frame and must fit in @p length.
+   *
+   * @return kOk, or kTruncated when the buffer cannot hold the header, the
+   *         declared frame, or a frame large enough for its trailer
    */
-  static std::optional<std::string> ExtractGTID(const unsigned char* buffer, unsigned long length);
+  static mybinlog::Status ReadFrame(const unsigned char* buffer, unsigned long length, BinlogFrame* out);
 
   /**
-   * @brief Extract tagged GTID from GTID_TAGGED_LOG_EVENT (MySQL 8.4+)
-   *
-   * The event body is a serialization-framework message: a format version, the
-   * message size and the last non-ignorable field id, then fields in order
-   * (flags, TSID bytes, GNO, tag, ...) each preceded by its id, with integers
-   * as variable-length integers. Returns GTID in "UUID:TAG:GNO" or "UUID:GNO" format.
-   *
+   * @brief GTID a GTID_LOG_EVENT or GTID_TAGGED_LOG_EVENT carries
    * @param buffer Event buffer
    * @param length Buffer length
-   * @return GTID string if found
+   * @return "UUID:GNO" or "UUID:TAG:GNO", or the status libmybinlog refused the frame with
    */
-  static std::optional<std::string> ExtractTaggedGTID(const unsigned char* buffer, unsigned long length);
+  static mygram::utils::Expected<std::string, mybinlog::Status> ExtractGTID(const unsigned char* buffer,
+                                                                            unsigned long length);
 
   /**
    * @brief Parse TABLE_MAP_EVENT
@@ -95,22 +141,26 @@ class BinlogEventParser {
    * @param buffer Event buffer (post-header)
    * @param length Buffer length
    * @param wants_row_metadata Called with the table identity before the optional
-   *        block is read; returning false skips it (the result then reports no
-   *        row metadata). Empty means always read it.
+   *        block is used; returning false ignores it (the result then reports no
+   *        row metadata, and a block that does not parse is not an error). Empty
+   *        means always use it.
+   * @param flavor Source flavor; decides which columns the charset fields index
    * @return TableMetadata, kMySQLUndecodableBinlogEvent for an intact frame with a
    *         column type that cannot be sized or optional metadata that does not add up,
    *         or kMySQLBinlogError for a frame that is malformed before that point
    */
   static mygram::utils::Expected<TableMetadata, mygram::utils::Error> ParseTableMapEvent(
       const unsigned char* buffer, unsigned long length,
-      const std::function<bool(const TableMetadata&)>& wants_row_metadata = {});
+      const std::function<bool(const TableMetadata&)>& wants_row_metadata = {},
+      ServerFlavor flavor = ServerFlavor::kMySQL);
 
   /**
    * @brief Extract the default database, SQL text and quoting-relevant sql_mode bits from QUERY_EVENT
    *
    * The mode comes from the Q_SQL_MODE_CODE status variable, found by walking
-   * the status variables in write order; an unknown variable ends the walk, and
-   * a mode not reached by then is reported as unknown (sql_mode_known).
+   * the status variables in write order; an unknown or unreadable variable ends
+   * the walk, and a mode not reached by then is reported as unknown
+   * (sql_mode_known).
    *
    * @param buffer Event buffer
    * @param length Buffer length

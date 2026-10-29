@@ -71,7 +71,7 @@ class RowsParserTest : public ::testing::Test {
         const std::string& value = row[col_idx];
 
         switch (col_meta.type) {
-          case ColumnType::LONG: {
+          case ColumnType::kLong: {
             // 4 bytes, little-endian
             int32_t int_val = std::stoi(value);
             buffer.push_back(int_val & 0xFF);
@@ -81,7 +81,7 @@ class RowsParserTest : public ::testing::Test {
             break;
           }
 
-          case ColumnType::LONGLONG: {
+          case ColumnType::kLongLong: {
             // 8 bytes, little-endian
             int64_t long_val = std::stoll(value);
             for (int i = 0; i < 8; i++) {
@@ -90,7 +90,7 @@ class RowsParserTest : public ::testing::Test {
             break;
           }
 
-          case ColumnType::VARCHAR: {
+          case ColumnType::kVarchar: {
             // Length (1 or 2 bytes) + data
             size_t str_len = value.length();
             if (col_meta.metadata > 255) {
@@ -107,7 +107,7 @@ class RowsParserTest : public ::testing::Test {
             break;
           }
 
-          case ColumnType::BLOB: {
+          case ColumnType::kBlob: {
             // Length bytes (1-4) + data
             size_t str_len = value.length();
             switch (col_meta.metadata) {
@@ -272,13 +272,13 @@ TEST_F(RowsParserTest, ParseSimpleIntRow) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_value;
-  col_value.type = ColumnType::LONG;
+  col_value.type = ColumnType::kLong;
   col_value.name = "value";
   col_value.metadata = 0;
   table_meta.columns.push_back(col_value);
@@ -288,8 +288,8 @@ TEST_F(RowsParserTest, ParseSimpleIntRow) {
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
 
   // Parse the event
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -308,13 +308,13 @@ TEST_F(RowsParserTest, ParseVarcharRow) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_name;
-  col_name.type = ColumnType::VARCHAR;
+  col_name.type = ColumnType::kVarchar;
   col_name.name = "name";
   col_name.metadata = 255;  // max length 255 (1 byte length prefix)
   table_meta.columns.push_back(col_name);
@@ -325,7 +325,7 @@ TEST_F(RowsParserTest, ParseVarcharRow) {
 
   // Parse the event
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                    mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -343,20 +343,20 @@ TEST_F(RowsParserTest, EmptyStringPrimaryKeyIsPresentAndNotNull) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::VARCHAR;
+  col_id.type = ColumnType::kVarchar;
   col_id.name = "id";
   col_id.metadata = 255;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_content;
-  col_content.type = ColumnType::VARCHAR;
+  col_content.type = ColumnType::kVarchar;
   col_content.name = "content";
   col_content.metadata = 255;
   table_meta.columns.push_back(col_content);
 
   auto buffer = CreateWriteRowsEvent(table_meta, {{"", "empty primary key document"}});
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "content",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                    mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(result->size(), 1U);
@@ -373,13 +373,13 @@ TEST_F(RowsParserTest, ParseTextRow) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONGLONG;
+  col_id.type = ColumnType::kLongLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_content;
-  col_content.type = ColumnType::BLOB;  // TEXT is stored as BLOB
+  col_content.type = ColumnType::kBlob;  // TEXT is stored as BLOB
   col_content.name = "content";
   col_content.metadata = 2;  // 2 byte length prefix (TEXT)
   table_meta.columns.push_back(col_content);
@@ -390,7 +390,7 @@ TEST_F(RowsParserTest, ParseTextRow) {
 
   // Parse the event
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "content",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                    mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -411,13 +411,13 @@ TEST_F(RowsParserTest, ParseMultipleRows) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_name;
-  col_name.type = ColumnType::VARCHAR;
+  col_name.type = ColumnType::kVarchar;
   col_name.name = "name";
   col_name.metadata = 100;
   table_meta.columns.push_back(col_name);
@@ -428,7 +428,7 @@ TEST_F(RowsParserTest, ParseMultipleRows) {
 
   // Parse the event
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "name",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                    mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(3, result->size());
@@ -449,19 +449,16 @@ TEST_F(RowsParserTest, ParseInvalidBuffer) {
   table_meta.columns.resize(2);
 
   // Parse with nullptr buffer
-  auto result1 =
-      ParseWriteRowsEvent(nullptr, 100, &table_meta, "id", "", MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result1 = ParseWriteRowsEvent(nullptr, 100, &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
   EXPECT_FALSE(result1.has_value());
 
   // Parse with nullptr table_meta
   unsigned char dummy_buffer[100] = {0};
-  auto result2 =
-      ParseWriteRowsEvent(dummy_buffer, 100, nullptr, "id", "", MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result2 = ParseWriteRowsEvent(dummy_buffer, 100, nullptr, "id", "", mybinlog::EventType::kWriteRowsEventV1);
   EXPECT_FALSE(result2.has_value());
 
   // Parse with too short buffer (less than post-header)
-  auto result3 =
-      ParseWriteRowsEvent(dummy_buffer, 10, &table_meta, "id", "", MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result3 = ParseWriteRowsEvent(dummy_buffer, 10, &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
   EXPECT_FALSE(result3.has_value());
 }
 
@@ -910,7 +907,7 @@ class DateTimeParsingTest : public RowsParserTest {
     table_meta.table_name = "datetime_test";
 
     ColumnMetadata col_id;
-    col_id.type = ColumnType::LONG;
+    col_id.type = ColumnType::kLong;
     col_id.name = "id";
     col_id.metadata = 0;
     table_meta.columns.push_back(col_id);
@@ -934,11 +931,11 @@ class DateTimeParsingTest : public RowsParserTest {
 TEST_F(DateTimeParsingTest, Datetime2BasicParsing) {
   // Test case: 2025-11-25 14:30:45
   auto datetime_bytes = EncodeDatetime2(2025, 11, 25, 14, 30, 45);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -951,7 +948,7 @@ TEST_F(DateTimeParsingTest, Datetime2NegativePackedValueRejected) {
   // DATETIMEF_INT_OFS - 1 decodes to a negative intpart. The decoder must not
   // turn that into an unrelated positive date by taking abs(intpart).
   std::vector<unsigned char> datetime_bytes = {0x7F, 0xFF, 0xFF, 0xFF, 0xFF};
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME2), datetime_bytes.data(), 0,
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 0,
                                            /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
                                            /*is_unsigned=*/false);
 
@@ -965,11 +962,11 @@ TEST_F(DateTimeParsingTest, Datetime2NegativePackedValueRejected) {
 TEST_F(DateTimeParsingTest, Datetime2YearBoundary) {
   // Test case: 2000-01-01 00:00:00 (Y2K)
   auto datetime_bytes = EncodeDatetime2(2000, 1, 1, 0, 0, 0);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -982,11 +979,11 @@ TEST_F(DateTimeParsingTest, Datetime2YearBoundary) {
 TEST_F(DateTimeParsingTest, Datetime2MaxTimeValues) {
   // Test case: 2023-12-31 23:59:59
   auto datetime_bytes = EncodeDatetime2(2023, 12, 31, 23, 59, 59);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2023-12-31 23:59:59", result->front().GetColumnValue("dt_col"));
@@ -998,11 +995,11 @@ TEST_F(DateTimeParsingTest, Datetime2MaxTimeValues) {
 TEST_F(DateTimeParsingTest, Datetime2WithMicroseconds) {
   // Test case: 2025-06-15 10:20:30.123456
   auto datetime_bytes = EncodeDatetime2(2025, 6, 15, 10, 20, 30, 6, 123456);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 6);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 6);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-06-15 10:20:30.123456", result->front().GetColumnValue("dt_col"));
@@ -1014,11 +1011,11 @@ TEST_F(DateTimeParsingTest, Datetime2WithMicroseconds) {
 TEST_F(DateTimeParsingTest, Datetime2WithMilliseconds) {
   // Test case: 2025-06-15 10:20:30.123 (precision 3 = milliseconds)
   auto datetime_bytes = EncodeDatetime2(2025, 6, 15, 10, 20, 30, 3, 123000);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 3);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 3);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-06-15 10:20:30.123000", result->front().GetColumnValue("dt_col"));
@@ -1027,11 +1024,11 @@ TEST_F(DateTimeParsingTest, Datetime2WithMilliseconds) {
 TEST_F(DateTimeParsingTest, Datetime2Precision1UsesMySQLStoredByteScale) {
   auto datetime_bytes = EncodeDatetime2(2025, 6, 15, 10, 20, 30);
   datetime_bytes.push_back(0x0A);  // MySQL stores .1 as 10 in the single fractional byte.
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 1);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 1);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-06-15 10:20:30.100000", result->front().GetColumnValue("dt_col"));
@@ -1041,11 +1038,11 @@ TEST_F(DateTimeParsingTest, Datetime2Precision3UsesMySQLStoredByteScale) {
   auto datetime_bytes = EncodeDatetime2(2025, 6, 15, 10, 20, 30);
   datetime_bytes.push_back(0x04);
   datetime_bytes.push_back(0xD2);  // 1234 stored fractional units => 123400 usec for odd precision 3.
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 3);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 3);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-06-15 10:20:30.123400", result->front().GetColumnValue("dt_col"));
@@ -1057,11 +1054,11 @@ TEST_F(DateTimeParsingTest, Datetime2Precision3UsesMySQLStoredByteScale) {
 TEST_F(DateTimeParsingTest, Time2BasicParsing) {
   // Test case: 14:30:45
   auto time_bytes = EncodeTime2(14, 30, 45);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTime2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("14:30:45", result->front().GetColumnValue("dt_col"));
@@ -1073,11 +1070,11 @@ TEST_F(DateTimeParsingTest, Time2BasicParsing) {
 TEST_F(DateTimeParsingTest, Time2WithMicroseconds) {
   // Test case: 10:20:30.654321
   auto time_bytes = EncodeTime2(10, 20, 30, false, 6, 654321);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 6);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTime2, 6);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("10:20:30.654321", result->front().GetColumnValue("dt_col"));
@@ -1085,11 +1082,11 @@ TEST_F(DateTimeParsingTest, Time2WithMicroseconds) {
 
 TEST_F(DateTimeParsingTest, Time2NegativeWithMicrosecondsUsesSignedFraction) {
   auto time_bytes = EncodeTime2(10, 20, 30, true, 6, 654321);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 6);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTime2, 6);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("-10:20:30.654321", result->front().GetColumnValue("dt_col"));
@@ -1100,11 +1097,11 @@ TEST_F(DateTimeParsingTest, Time2Precision5UsesMySQLStoredByteScale) {
   time_bytes.push_back(0x01);
   time_bytes.push_back(0xE2);
   time_bytes.push_back(0x3A);  // 123450 stored units => 123450 usec for odd precision 5.
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 5);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTime2, 5);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("10:20:30.123450", result->front().GetColumnValue("dt_col"));
@@ -1116,11 +1113,11 @@ TEST_F(DateTimeParsingTest, Time2Precision5UsesMySQLStoredByteScale) {
 TEST_F(DateTimeParsingTest, Time2MaxHour) {
   // Test case: 838:59:59 (MySQL TIME max is 838:59:59)
   auto time_bytes = EncodeTime2(838, 59, 59);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME2, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTime2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("838:59:59", result->front().GetColumnValue("dt_col"));
@@ -1133,7 +1130,7 @@ TEST_F(DateTimeParsingTest, Time2RejectsOutOfRangeHourWithoutMasking) {
                                            static_cast<unsigned char>((packed >> 8) & 0xFF),
                                            static_cast<unsigned char>(packed & 0xFF)};
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIME2), time_bytes.data(), 0,
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTime2), time_bytes.data(), 0,
                                            /*is_null=*/false, time_bytes.data() + time_bytes.size(),
                                            /*is_unsigned=*/false);
 
@@ -1147,11 +1144,11 @@ TEST_F(DateTimeParsingTest, Time2RejectsOutOfRangeHourWithoutMasking) {
 TEST_F(DateTimeParsingTest, TimeOldFormat) {
   // Test case: 12:34:56
   auto time_bytes = EncodeTime(12, 34, 56);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIME, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTime, 0);
   auto buffer = CreateDateTimeEvent(table_meta, time_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("12:34:56", result->front().GetColumnValue("dt_col"));
@@ -1160,7 +1157,7 @@ TEST_F(DateTimeParsingTest, TimeOldFormat) {
 TEST_F(DateTimeParsingTest, OldTimeRejectsOutOfRangeComponents) {
   auto time_bytes = EncodeTime(12, 60, 0);
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIME), time_bytes.data(), 0,
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTime), time_bytes.data(), 0,
                                            /*is_null=*/false, time_bytes.data() + time_bytes.size(),
                                            /*is_unsigned=*/false);
 
@@ -1171,7 +1168,7 @@ TEST_F(DateTimeParsingTest, OldTimeRejectsOutOfRangeComponents) {
 // MariaDB Field_time0 reads the 3 bytes with sint3korr: a negative time is a negative HHMMSS number.
 TEST_F(DateTimeParsingTest, OldTimeReadsTheThreeBytesAsSigned) {
   const auto decode = [](std::vector<unsigned char> bytes) {
-    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIME), bytes.data(), 0, /*is_null=*/false,
+    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTime), bytes.data(), 0, /*is_null=*/false,
                                       bytes.data() + bytes.size(), /*is_unsigned=*/false);
   };
 
@@ -1196,14 +1193,14 @@ TEST_F(DateTimeParsingTest, Datetime2RejectsAFractionOfOneMillionMicrosecondsOrM
   auto datetime_bytes = EncodeDatetime2(2000, 1, 1, 0, 0, 0);
   datetime_bytes.push_back(100);  // precision 2: 100 hundredths of a second
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME2), datetime_bytes.data(), 2,
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 2,
                                            /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
                                            /*is_unsigned=*/false);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
 
   datetime_bytes.back() = 99;
-  auto accepted = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME2), datetime_bytes.data(), 2,
+  auto accepted = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 2,
                                              /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
                                              /*is_unsigned=*/false);
   ASSERT_TRUE(accepted.has_value());
@@ -1216,11 +1213,11 @@ TEST_F(DateTimeParsingTest, Datetime2RejectsAFractionOfOneMillionMicrosecondsOrM
 TEST_F(DateTimeParsingTest, Timestamp2BasicParsing) {
   // Test case: Unix timestamp 1732545600 (2024-11-25 12:00:00 UTC)
   auto timestamp_bytes = EncodeTimestamp2(1732545600);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIMESTAMP2, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTimestamp2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, timestamp_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2024-11-25 14:40:00", result->front().GetColumnValue("dt_col"));
@@ -1232,11 +1229,11 @@ TEST_F(DateTimeParsingTest, Timestamp2BasicParsing) {
 TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
   // Test case: 1732545600.123456
   auto timestamp_bytes = EncodeTimestamp2(1732545600, 6, 123456);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIMESTAMP2, 6);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTimestamp2, 6);
   auto buffer = CreateDateTimeEvent(table_meta, timestamp_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2024-11-25 14:40:00.123456", result->front().GetColumnValue("dt_col"));
@@ -1245,13 +1242,13 @@ TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
 TEST_F(DateTimeParsingTest, ZeroTimestampMatchesSnapshotCanonicalText) {
   const std::array<unsigned char, 4> zero_timestamp{};
 
-  auto legacy = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIMESTAMP), zero_timestamp.data(), 0, false,
-                                           zero_timestamp.data() + zero_timestamp.size(), false);
+  auto legacy = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTimestamp), zero_timestamp.data(), 0,
+                                           false, zero_timestamp.data() + zero_timestamp.size(), false);
   ASSERT_TRUE(legacy.has_value()) << legacy.error().message();
   EXPECT_EQ(*legacy, CanonicalizeColumnValue("0000-00-00 00:00:00", CanonicalValueKind::kTemporal));
 
   std::array<unsigned char, 7> zero_timestamp2{};
-  auto modern = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIMESTAMP2), zero_timestamp2.data(), 6,
+  auto modern = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTimestamp2), zero_timestamp2.data(), 6,
                                            false, zero_timestamp2.data() + zero_timestamp2.size(), false);
   ASSERT_TRUE(modern.has_value()) << modern.error().message();
   EXPECT_EQ(*modern, CanonicalizeColumnValue("0000-00-00 00:00:00.000000", CanonicalValueKind::kTemporal));
@@ -1269,7 +1266,7 @@ TEST_F(DateTimeParsingTest, ZeroTimestampRejectsNonZeroFraction) {
   std::array<unsigned char, 7> invalid_timestamp2{};
   invalid_timestamp2.back() = 1;
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::TIMESTAMP2), invalid_timestamp2.data(), 6,
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTimestamp2), invalid_timestamp2.data(), 6,
                                            false, invalid_timestamp2.data() + invalid_timestamp2.size(), false);
 
   ASSERT_FALSE(result.has_value());
@@ -1279,11 +1276,11 @@ TEST_F(DateTimeParsingTest, ZeroTimestampRejectsNonZeroFraction) {
 TEST_F(DateTimeParsingTest, Timestamp2Precision1UsesMySQLStoredByteScale) {
   auto timestamp_bytes = EncodeTimestamp2(1732545600);
   timestamp_bytes.push_back(0x0A);  // MySQL stores .1 as 10 in the single fractional byte.
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::TIMESTAMP2, 1);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kTimestamp2, 1);
   auto buffer = CreateDateTimeEvent(table_meta, timestamp_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2024-11-25 14:40:00.100000", result->front().GetColumnValue("dt_col"));
@@ -1297,9 +1294,9 @@ TEST_F(DateTimeParsingTest, TemporalBinlogValuesMatchCanonicalSnapshotText) {
     std::string snapshot;
   };
   const std::vector<Case> cases = {
-      {ColumnType::DATETIME2, 6, EncodeDatetime2(1960, 1, 1, 0, 0, 0, 6, 123456), "1960-01-01 00:00:00.123456"},
-      {ColumnType::TIMESTAMP2, 6, EncodeTimestamp2(1704153600, 6, 654321), "2024-01-02 00:00:00.654321"},
-      {ColumnType::TIME2, 6, EncodeTime2(10, 20, 30, true, 6, 654321), "-10:20:30.654321"},
+      {ColumnType::kDatetime2, 6, EncodeDatetime2(1960, 1, 1, 0, 0, 0, 6, 123456), "1960-01-01 00:00:00.123456"},
+      {ColumnType::kTimestamp2, 6, EncodeTimestamp2(1704153600, 6, 654321), "2024-01-02 00:00:00.654321"},
+      {ColumnType::kTime2, 6, EncodeTime2(10, 20, 30, true, 6, 654321), "-10:20:30.654321"},
   };
 
   for (const auto& test_case : cases) {
@@ -1317,11 +1314,11 @@ TEST_F(DateTimeParsingTest, TemporalBinlogValuesMatchCanonicalSnapshotText) {
 TEST_F(DateTimeParsingTest, DateParsing) {
   // Test case: 2025-11-25
   auto date_bytes = EncodeDate(2025, 11, 25);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATE, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDate, 0);
   auto buffer = CreateDateTimeEvent(table_meta, date_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2025-11-25", result->front().GetColumnValue("dt_col"));
@@ -1330,7 +1327,7 @@ TEST_F(DateTimeParsingTest, DateParsing) {
 TEST_F(DateTimeParsingTest, DateRejectsOutOfRangeComponents) {
   auto date_bytes = EncodeDate(2025, 13, 1);
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATE), date_bytes.data(), 0,
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDate), date_bytes.data(), 0,
                                            /*is_null=*/false, date_bytes.data() + date_bytes.size(),
                                            /*is_unsigned=*/false);
 
@@ -1341,7 +1338,7 @@ TEST_F(DateTimeParsingTest, DateRejectsOutOfRangeComponents) {
 TEST_F(DateTimeParsingTest, OldDatetimeRejectsOutOfRangeComponents) {
   auto datetime_bytes = EncodeDatetime(2025, 13, 1, 12, 0, 0);
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DATETIME), datetime_bytes.data(), 0,
+  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime), datetime_bytes.data(), 0,
                                            /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
                                            /*is_unsigned=*/false);
 
@@ -1355,11 +1352,11 @@ TEST_F(DateTimeParsingTest, OldDatetimeRejectsOutOfRangeComponents) {
 TEST_F(DateTimeParsingTest, DateLeapYear) {
   // Test case: 2024-02-29 (leap year)
   auto date_bytes = EncodeDate(2024, 2, 29);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATE, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDate, 0);
   auto buffer = CreateDateTimeEvent(table_meta, date_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2024-02-29", result->front().GetColumnValue("dt_col"));
@@ -1375,11 +1372,11 @@ TEST_F(DateTimeParsingTest, DateLeapYear) {
 TEST_F(DateTimeParsingTest, Datetime2BugReproduction) {
   // The exact case from the bug report
   auto datetime_bytes = EncodeDatetime2(2025, 11, 25, 14, 30, 0);
-  auto table_meta = CreateDateTimeTableMeta(ColumnType::DATETIME2, 0);
+  auto table_meta = CreateDateTimeTableMeta(ColumnType::kDatetime2, 0);
   auto buffer = CreateDateTimeEvent(table_meta, datetime_bytes);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   // Before fix: was "0110-00-25 14:30:00" (year=110, month=0)
@@ -1452,13 +1449,13 @@ TEST_F(RowsParserTest, BlobInvalidMetadataZero) {
   table_meta.table_name = "blob_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_blob;
-  col_blob.type = ColumnType::BLOB;
+  col_blob.type = ColumnType::kBlob;
   col_blob.name = "data";
   col_blob.metadata = 0;  // Invalid metadata
   table_meta.columns.push_back(col_blob);
@@ -1483,8 +1480,8 @@ TEST_F(RowsParserTest, BlobInvalidMetadataZero) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_FALSE(result.has_value()) << "a BLOB with no length-prefix width must not decode";
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
@@ -1503,13 +1500,13 @@ TEST_F(RowsParserTest, BlobInvalidMetadataFive) {
   table_meta.table_name = "blob_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_blob;
-  col_blob.type = ColumnType::BLOB;
+  col_blob.type = ColumnType::kBlob;
   col_blob.name = "data";
   col_blob.metadata = 5;  // Invalid - should be 1-4
   table_meta.columns.push_back(col_blob);
@@ -1528,8 +1525,8 @@ TEST_F(RowsParserTest, BlobInvalidMetadataFive) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_FALSE(result.has_value()) << "a BLOB length-prefix width of five must not decode";
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
@@ -1552,13 +1549,13 @@ TEST_F(RowsParserTest, YearTypeParsing) {
   table_meta.table_name = "year_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_year;
-  col_year.type = ColumnType::YEAR;
+  col_year.type = ColumnType::kYear;
   col_year.name = "birth_year";
   col_year.metadata = 0;
   table_meta.columns.push_back(col_year);
@@ -1576,8 +1573,8 @@ TEST_F(RowsParserTest, YearTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1601,13 +1598,13 @@ TEST_F(RowsParserTest, YearMinValue) {
   table_meta.table_name = "year_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_year;
-  col_year.type = ColumnType::YEAR;
+  col_year.type = ColumnType::kYear;
   col_year.name = "year_col";
   col_year.metadata = 0;
   table_meta.columns.push_back(col_year);
@@ -1622,8 +1619,8 @@ TEST_F(RowsParserTest, YearMinValue) {
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("1901", result->front().GetColumnValue("year_col"));
@@ -1639,13 +1636,13 @@ TEST_F(RowsParserTest, YearMaxValue) {
   table_meta.table_name = "year_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_year;
-  col_year.type = ColumnType::YEAR;
+  col_year.type = ColumnType::kYear;
   col_year.name = "year_col";
   col_year.metadata = 0;
   table_meta.columns.push_back(col_year);
@@ -1660,8 +1657,8 @@ TEST_F(RowsParserTest, YearMaxValue) {
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ("2155", result->front().GetColumnValue("year_col"));
@@ -1677,13 +1674,13 @@ TEST_F(RowsParserTest, YearZeroValue) {
   table_meta.table_name = "year_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_year;
-  col_year.type = ColumnType::YEAR;
+  col_year.type = ColumnType::kYear;
   col_year.name = "year_col";
   col_year.metadata = 0;
   table_meta.columns.push_back(col_year);
@@ -1698,8 +1695,8 @@ TEST_F(RowsParserTest, YearZeroValue) {
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   // 0 is a special value in MySQL YEAR type representing 0000
@@ -1716,13 +1713,13 @@ TEST_F(RowsParserTest, FloatTypeParsing) {
   table_meta.table_name = "float_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_float;
-  col_float.type = ColumnType::FLOAT;
+  col_float.type = ColumnType::kFloat;
   col_float.name = "price";
   col_float.metadata = 0;
   table_meta.columns.push_back(col_float);
@@ -1741,8 +1738,8 @@ TEST_F(RowsParserTest, FloatTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1763,7 +1760,7 @@ TEST_F(RowsParserTest, FloatTypeUsesRoundTripPrecision) {
   const float value = 123456.789f;
   auto bytes = EncodeFloat(value);
 
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::FLOAT), bytes.data(), 0, false,
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kFloat), bytes.data(), 0, false,
                                             bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
@@ -1774,7 +1771,7 @@ TEST_F(RowsParserTest, FloatTypeUsesRoundTripPrecision) {
 TEST_F(RowsParserTest, FloatBinlogValueMatchesCanonicalSnapshotText) {
   const float value = 3.14f;
   const auto bytes = EncodeFloat(value);
-  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::FLOAT), bytes.data(), 0, false,
+  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kFloat), bytes.data(), 0, false,
                                                   bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
@@ -1791,13 +1788,13 @@ TEST_F(RowsParserTest, DoubleTypeParsing) {
   table_meta.table_name = "double_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_double;
-  col_double.type = ColumnType::DOUBLE;
+  col_double.type = ColumnType::kDouble;
   col_double.name = "price";
   col_double.metadata = 0;
   table_meta.columns.push_back(col_double);
@@ -1816,8 +1813,8 @@ TEST_F(RowsParserTest, DoubleTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1838,7 +1835,7 @@ TEST_F(RowsParserTest, DoubleTypeUsesRoundTripPrecision) {
   const double value = 0.12345678901234566;
   auto bytes = EncodeDouble(value);
 
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DOUBLE), bytes.data(), 0, false,
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDouble), bytes.data(), 0, false,
                                             bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
@@ -1849,7 +1846,7 @@ TEST_F(RowsParserTest, DoubleTypeUsesRoundTripPrecision) {
 TEST_F(RowsParserTest, DoubleBinlogValueMatchesCanonicalSnapshotText) {
   const double value = 0.12345678901234566;
   const auto bytes = EncodeDouble(value);
-  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::DOUBLE), bytes.data(), 0, false,
+  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDouble), bytes.data(), 0, false,
                                                   bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
@@ -1866,13 +1863,13 @@ TEST_F(RowsParserTest, FloatSpecialValues) {
   table_meta.table_name = "float_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_float;
-  col_float.type = ColumnType::FLOAT;
+  col_float.type = ColumnType::kFloat;
   col_float.name = "val";
   col_float.metadata = 0;
   table_meta.columns.push_back(col_float);
@@ -1888,7 +1885,7 @@ TEST_F(RowsParserTest, FloatSpecialValues) {
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
     auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                      mybinlog::EventType::kWriteRowsEventV1);
 
     ASSERT_TRUE(result.has_value());
     double parsed = std::stod(result->front().GetColumnValue("val"));
@@ -1906,7 +1903,7 @@ TEST_F(RowsParserTest, FloatSpecialValues) {
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
     auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                      mybinlog::EventType::kWriteRowsEventV1);
 
     ASSERT_TRUE(result.has_value());
     double parsed = std::stod(result->front().GetColumnValue("val"));
@@ -1929,13 +1926,13 @@ TEST_F(RowsParserTest, BitTypeParsing) {
   table_meta.table_name = "bit_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_bit;
-  col_bit.type = ColumnType::BIT;
+  col_bit.type = ColumnType::kBit;
   col_bit.name = "flags";
   // BIT(8) = 1 byte, 0 extra bits -> metadata = (1 << 8) | 0 = 256
   // But actually for BIT(8), it's stored as (0 << 8) | 8 = 8 bytes=0, bits=8
@@ -1957,8 +1954,8 @@ TEST_F(RowsParserTest, BitTypeParsing) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -1982,13 +1979,13 @@ TEST_F(RowsParserTest, BitMultipleBytes) {
   table_meta.table_name = "bit_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_bit;
-  col_bit.type = ColumnType::BIT;
+  col_bit.type = ColumnType::kBit;
   col_bit.name = "flags";
   // BIT(16): 2 bytes, 0 extra bits -> metadata = (2 << 8) | 0 = 512
   col_bit.metadata = (2 << 8) | 0;
@@ -2008,8 +2005,8 @@ TEST_F(RowsParserTest, BitMultipleBytes) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2031,13 +2028,13 @@ TEST_F(RowsParserTest, BitPartialByte) {
   table_meta.table_name = "bit_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_bit;
-  col_bit.type = ColumnType::BIT;
+  col_bit.type = ColumnType::kBit;
   col_bit.name = "flags";
   // BIT(5): 0 bytes, 5 extra bits -> metadata = (0 << 8) | 5 = 5
   // This means 1 byte total (0 full bytes + 5 bits requires 1 byte)
@@ -2057,8 +2054,8 @@ TEST_F(RowsParserTest, BitPartialByte) {
 
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2082,13 +2079,13 @@ TEST_F(RowsParserTest, ValidUtf8PassThrough) {
   table_meta.table_name = "utf8_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_text;
-  col_text.type = ColumnType::VARCHAR;
+  col_text.type = ColumnType::kVarchar;
   col_text.name = "content";
   col_text.metadata = 255;  // max length 255, 1-byte length prefix
   table_meta.columns.push_back(col_text);
@@ -2122,7 +2119,7 @@ TEST_F(RowsParserTest, ValidUtf8PassThrough) {
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
     auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                      mybinlog::EventType::kWriteRowsEventV1);
 
     ASSERT_TRUE(result.has_value()) << "Failed for string: " << test_str;
     ASSERT_EQ(1, result->size());
@@ -2142,13 +2139,13 @@ TEST_F(RowsParserTest, InvalidUtf8Sanitized) {
   table_meta.table_name = "utf8_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_text;
-  col_text.type = ColumnType::VARCHAR;
+  col_text.type = ColumnType::kVarchar;
   col_text.name = "content";
   col_text.metadata = 255;
   table_meta.columns.push_back(col_text);
@@ -2194,7 +2191,7 @@ TEST_F(RowsParserTest, InvalidUtf8Sanitized) {
     std::vector<unsigned char> null_bitmap = {0x00};
     auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
     auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                      MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                      mybinlog::EventType::kWriteRowsEventV1);
 
     ASSERT_TRUE(result.has_value()) << "Failed for: " << tc.description;
     ASSERT_EQ(1, result->size());
@@ -2219,13 +2216,13 @@ TEST_F(RowsParserTest, BlobTextUtf8Sanitization) {
   table_meta.table_name = "blob_utf8_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_blob;
-  col_blob.type = ColumnType::BLOB;
+  col_blob.type = ColumnType::kBlob;
   col_blob.name = "data";
   col_blob.metadata = 2;  // BLOB/TEXT (2-byte length prefix)
   table_meta.columns.push_back(col_blob);
@@ -2247,8 +2244,8 @@ TEST_F(RowsParserTest, BlobTextUtf8Sanitization) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2269,13 +2266,13 @@ TEST_F(RowsParserTest, EmptyStringHandling) {
   table_meta.table_name = "empty_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_text;
-  col_text.type = ColumnType::VARCHAR;
+  col_text.type = ColumnType::kVarchar;
   col_text.name = "content";
   col_text.metadata = 255;
   table_meta.columns.push_back(col_text);
@@ -2291,8 +2288,8 @@ TEST_F(RowsParserTest, EmptyStringHandling) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2316,7 +2313,7 @@ TEST_F(RowsParserTest, UnsignedIntLargeValue) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.is_unsigned = true;  // UNSIGNED INT
   table_meta.columns.push_back(col_id);
@@ -2329,8 +2326,8 @@ TEST_F(RowsParserTest, UnsignedIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2353,7 +2350,7 @@ TEST_F(RowsParserTest, UnsignedTinyIntLargeValue) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::TINY;
+  col_id.type = ColumnType::kTiny;
   col_id.name = "id";
   col_id.is_unsigned = true;  // UNSIGNED TINYINT
   table_meta.columns.push_back(col_id);
@@ -2363,8 +2360,8 @@ TEST_F(RowsParserTest, UnsignedTinyIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2386,7 +2383,7 @@ TEST_F(RowsParserTest, UnsignedSmallIntLargeValue) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::SHORT;
+  col_id.type = ColumnType::kShort;
   col_id.name = "id";
   col_id.is_unsigned = true;  // UNSIGNED SMALLINT
   table_meta.columns.push_back(col_id);
@@ -2398,8 +2395,8 @@ TEST_F(RowsParserTest, UnsignedSmallIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2419,7 +2416,7 @@ TEST_F(RowsParserTest, UnsignedBigIntLargeValue) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONGLONG;
+  col_id.type = ColumnType::kLongLong;
   col_id.name = "id";
   col_id.is_unsigned = true;  // UNSIGNED BIGINT
   table_meta.columns.push_back(col_id);
@@ -2433,8 +2430,8 @@ TEST_F(RowsParserTest, UnsignedBigIntLargeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2457,7 +2454,7 @@ TEST_F(RowsParserTest, SignedIntNegativeValue) {
   table_meta.table_name = "test_table";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.is_unsigned = false;  // SIGNED INT (default)
   table_meta.columns.push_back(col_id);
@@ -2470,8 +2467,8 @@ TEST_F(RowsParserTest, SignedIntNegativeValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2498,13 +2495,13 @@ TEST_F(RowsParserTest, GeometryTypeBasic) {
   table_meta.table_name = "geo_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_geo;
-  col_geo.type = ColumnType::GEOMETRY;  // col_type = 255
+  col_geo.type = ColumnType::kGeometry;  // col_type = 255
   col_geo.name = "location";
   col_geo.metadata = 4;  // 4 bytes for length prefix (like BLOB)
   table_meta.columns.push_back(col_geo);
@@ -2538,8 +2535,8 @@ TEST_F(RowsParserTest, GeometryTypeBasic) {
 
   std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value()) << "GEOMETRY type should be parsed successfully";
   ASSERT_EQ(1, result->size());
@@ -2561,13 +2558,13 @@ TEST_F(RowsParserTest, GeometryTypeEmpty) {
   table_meta.table_name = "geo_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_geo;
-  col_geo.type = ColumnType::GEOMETRY;
+  col_geo.type = ColumnType::kGeometry;
   col_geo.name = "location";
   col_geo.metadata = 4;
   table_meta.columns.push_back(col_geo);
@@ -2585,8 +2582,8 @@ TEST_F(RowsParserTest, GeometryTypeEmpty) {
 
   std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2613,13 +2610,13 @@ TEST_F(RowsParserTest, VectorTypeBasic) {
   table_meta.table_name = "vec_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_vec;
-  col_vec.type = ColumnType::VECTOR;  // col_type = 242
+  col_vec.type = ColumnType::kVector;  // col_type = 242
   col_vec.name = "embedding";
   col_vec.metadata = 4;  // 4 bytes for length prefix
   table_meta.columns.push_back(col_vec);
@@ -2651,8 +2648,8 @@ TEST_F(RowsParserTest, VectorTypeBasic) {
 
   std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value()) << "VECTOR type should be parsed successfully";
   ASSERT_EQ(1, result->size());
@@ -2676,13 +2673,13 @@ TEST_F(RowsParserTest, VectorTypeEmpty) {
   table_meta.table_name = "vec_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_vec;
-  col_vec.type = ColumnType::VECTOR;
+  col_vec.type = ColumnType::kVector;
   col_vec.name = "embedding";
   col_vec.metadata = 4;
   table_meta.columns.push_back(col_vec);
@@ -2700,8 +2697,8 @@ TEST_F(RowsParserTest, VectorTypeEmpty) {
 
   std::vector<unsigned char> null_bitmap = {0x00};  // No NULLs
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2817,13 +2814,13 @@ TEST_F(RowsParserTest, DecimalPositiveInteger) {
   table_meta.table_name = "decimal_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_decimal;
-  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.type = ColumnType::kNewDecimal;
   col_decimal.name = "amount";
   // DECIMAL(5,0): precision=5, scale=0, metadata = (5 << 8) | 0 = 1280
   col_decimal.metadata = (5 << 8) | 0;
@@ -2839,8 +2836,8 @@ TEST_F(RowsParserTest, DecimalPositiveInteger) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2859,13 +2856,13 @@ TEST_F(RowsParserTest, DecimalNegativeInteger) {
   table_meta.table_name = "decimal_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_decimal;
-  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.type = ColumnType::kNewDecimal;
   col_decimal.name = "amount";
   col_decimal.metadata = (5 << 8) | 0;  // DECIMAL(5,0)
   table_meta.columns.push_back(col_decimal);
@@ -2880,8 +2877,8 @@ TEST_F(RowsParserTest, DecimalNegativeInteger) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2900,13 +2897,13 @@ TEST_F(RowsParserTest, DecimalWithFraction) {
   table_meta.table_name = "decimal_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_decimal;
-  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.type = ColumnType::kNewDecimal;
   col_decimal.name = "price";
   col_decimal.metadata = (10 << 8) | 2;  // DECIMAL(10,2)
   table_meta.columns.push_back(col_decimal);
@@ -2921,8 +2918,8 @@ TEST_F(RowsParserTest, DecimalWithFraction) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -2944,7 +2941,7 @@ TEST_F(RowsParserTest, DecimalLeadingZeroPartialGroupMatchesSnapshotText) {
 
   for (const auto& test_case : cases) {
     auto encoded = EncodeDecimalValue(test_case.value, test_case.precision, test_case.scale);
-    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), encoded.data(),
+    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), encoded.data(),
                                               static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
                                               false, encoded.data() + encoded.size(), false);
     ASSERT_TRUE(decoded.has_value()) << test_case.value;
@@ -2956,11 +2953,11 @@ TEST_F(RowsParserTest, DecimalRejectsOutOfRangeMetadata) {
   const unsigned char data[] = {0x80};
 
   auto zero_precision =
-      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data, 0, false, data + sizeof(data));
-  auto excessive_precision = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data,
+      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data, 0, false, data + sizeof(data));
+  auto excessive_precision = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data,
                                                         static_cast<uint16_t>(66U << 8U), false, data + sizeof(data));
   auto excessive_scale =
-      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data,
+      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data,
                                  static_cast<uint16_t>((40U << 8U) | 39U), false, data + sizeof(data));
 
   ASSERT_FALSE(zero_precision.has_value());
@@ -2992,7 +2989,7 @@ TEST_F(RowsParserTest, DecimalRejectsOutOfRangeDigitGroup) {
   };
 
   for (const auto& test_case : cases) {
-    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), test_case.bytes.data(),
+    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), test_case.bytes.data(),
                                               static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
                                               false, test_case.bytes.data() + test_case.bytes.size(), false);
     ASSERT_FALSE(decoded.has_value()) << test_case.label << " decoded as " << *decoded;
@@ -3001,7 +2998,7 @@ TEST_F(RowsParserTest, DecimalRejectsOutOfRangeDigitGroup) {
 
   // The largest in-range groups still decode.
   const std::vector<unsigned char> max_groups = {0x89, 0x63};
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), max_groups.data(),
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), max_groups.data(),
                                             static_cast<uint16_t>((3U << 8U) | 2U), false,
                                             max_groups.data() + max_groups.size(), false);
   ASSERT_TRUE(decoded.has_value());
@@ -3018,13 +3015,13 @@ TEST_F(RowsParserTest, DecimalNegativeWithFraction) {
   table_meta.table_name = "decimal_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_decimal;
-  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.type = ColumnType::kNewDecimal;
   col_decimal.name = "balance";
   col_decimal.metadata = (10 << 8) | 2;  // DECIMAL(10,2)
   table_meta.columns.push_back(col_decimal);
@@ -3039,8 +3036,8 @@ TEST_F(RowsParserTest, DecimalNegativeWithFraction) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -3059,13 +3056,13 @@ TEST_F(RowsParserTest, DecimalZero) {
   table_meta.table_name = "decimal_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_decimal;
-  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.type = ColumnType::kNewDecimal;
   col_decimal.name = "amount";
   col_decimal.metadata = (5 << 8) | 2;  // DECIMAL(5,2)
   table_meta.columns.push_back(col_decimal);
@@ -3080,8 +3077,8 @@ TEST_F(RowsParserTest, DecimalZero) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -3102,13 +3099,13 @@ TEST_F(RowsParserTest, DecimalSmallValue) {
   table_meta.table_name = "decimal_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_decimal;
-  col_decimal.type = ColumnType::NEWDECIMAL;
+  col_decimal.type = ColumnType::kNewDecimal;
   col_decimal.name = "rate";
   col_decimal.metadata = (5 << 8) | 4;  // DECIMAL(5,4)
   table_meta.columns.push_back(col_decimal);
@@ -3123,8 +3120,8 @@ TEST_F(RowsParserTest, DecimalSmallValue) {
 
   std::vector<unsigned char> null_bitmap = {0x00};
   auto buffer = CreateWriteRowsEventRaw(table_meta, row_data, null_bitmap);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -3203,7 +3200,7 @@ TEST_F(RowsParserTest, RejectsTruncatedTrailingWriteRow) {
   table_meta.table_name = "truncated_rows";
   for (size_t index = 0; index < 9; ++index) {
     table_meta.columns.push_back(
-        {ColumnType::LONG, index == 0 ? "id" : "col_" + std::to_string(index), 0, false, false});
+        {ColumnType::kLong, index == 0 ? "id" : "col_" + std::to_string(index), 0, false, false});
   }
 
   std::vector<unsigned char> first_row;
@@ -3216,8 +3213,8 @@ TEST_F(RowsParserTest, RejectsTruncatedTrailingWriteRow) {
   const std::vector<unsigned char> null_bitmap = {0x00, 0x00};
   auto buffer = CreateWriteRowsEventWithBitmap(table_meta, first_row, null_bitmap, columns_present);
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLFieldTruncated);
@@ -3239,19 +3236,19 @@ TEST_F(RowsParserTest, RejectsMinimalModePartialColumns) {
 
   // 3 columns: id, name, status
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_name;
-  col_name.type = ColumnType::VAR_STRING;
+  col_name.type = ColumnType::kVarString;
   col_name.name = "name";
   col_name.metadata = 255;  // Max length 255
   table_meta.columns.push_back(col_name);
 
   ColumnMetadata col_status;
-  col_status.type = ColumnType::LONG;
+  col_status.type = ColumnType::kLong;
   col_status.name = "status";
   col_status.metadata = 0;
   table_meta.columns.push_back(col_status);
@@ -3271,8 +3268,8 @@ TEST_F(RowsParserTest, RejectsMinimalModePartialColumns) {
   std::vector<unsigned char> null_bitmap = {0x00};
 
   auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
@@ -3289,13 +3286,13 @@ TEST_F(RowsParserTest, RejectsMinimalModeOnlyPrimaryKey) {
   table_meta.table_name = "minimal_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
 
   ColumnMetadata col_data;
-  col_data.type = ColumnType::VAR_STRING;
+  col_data.type = ColumnType::kVarString;
   col_data.name = "data";
   col_data.metadata = 255;
   table_meta.columns.push_back(col_data);
@@ -3310,8 +3307,8 @@ TEST_F(RowsParserTest, RejectsMinimalModeOnlyPrimaryKey) {
   std::vector<unsigned char> null_bitmap = {0x00};
 
   auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
@@ -3328,7 +3325,7 @@ TEST_F(RowsParserTest, RejectsNoColumnsPresent) {
   table_meta.table_name = "empty_test";
 
   ColumnMetadata col_id;
-  col_id.type = ColumnType::LONG;
+  col_id.type = ColumnType::kLong;
   col_id.name = "id";
   col_id.metadata = 0;
   table_meta.columns.push_back(col_id);
@@ -3339,8 +3336,8 @@ TEST_F(RowsParserTest, RejectsNoColumnsPresent) {
   std::vector<unsigned char> null_bitmap = {0x00};
 
   auto buffer = CreateWriteRowsEventWithBitmap(table_meta, row_data, null_bitmap, columns_present);
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
@@ -3364,7 +3361,7 @@ TableMetadata CreateTestTableMeta() {
 
   ColumnMetadata id_col;
   id_col.name = "id";
-  id_col.type = ColumnType::LONG;
+  id_col.type = ColumnType::kLong;
   id_col.metadata = 0;
   id_col.is_nullable = false;
   id_col.is_unsigned = false;
@@ -3372,7 +3369,7 @@ TableMetadata CreateTestTableMeta() {
 
   ColumnMetadata name_col;
   name_col.name = "name";
-  name_col.type = ColumnType::VARCHAR;
+  name_col.type = ColumnType::kVarchar;
   name_col.metadata = 100;
   name_col.is_nullable = false;
   name_col.is_unsigned = false;
@@ -3427,7 +3424,7 @@ TEST_F(RowsParserV2Test, V2WriteRowsWithoutStmtEndFlag) {
   auto event = BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_bitmap, row_data);
 
   auto result =
-      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEvent);
 
   ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with flags=0x0000 should parse (was the bug case)";
   ASSERT_EQ(1, result->size());
@@ -3455,7 +3452,7 @@ TEST_F(RowsParserV2Test, V2WriteRowsWithExtraDataPresent) {
       BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0002, 6, extra_data, 2, columns_bitmap, row_data);
 
   auto result =
-      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEvent);
 
   ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with extra data should skip extra bytes and parse correctly";
   ASSERT_EQ(1, result->size());
@@ -3480,7 +3477,7 @@ TEST_F(RowsParserV2Test, V2WriteRowsBothFlagsSet) {
       BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0003, 6, extra_data, 2, columns_bitmap, row_data);
 
   auto result =
-      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEvent);
 
   ASSERT_TRUE(result.has_value()) << "V2 WRITE_ROWS with both flags should parse correctly";
   ASSERT_EQ(1, result->size());
@@ -3502,8 +3499,8 @@ TEST_F(RowsParserV2Test, V1WriteRowsNoVarHeader) {
   // V1 event: no var_header_len, flags=0x0001 (STMT_END_F)
   auto event = BinlogEventBuilder::BuildWriteRowsV1(table_meta.table_id, 0x0001, 2, columns_bitmap, row_data);
 
-  auto result = ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
 
   ASSERT_TRUE(result.has_value()) << "V1 WRITE_ROWS should parse without var_header_len";
   ASSERT_EQ(1, result->size());
@@ -3530,7 +3527,7 @@ TEST_F(RowsParserV2Test, V2UpdateRowsWithoutStmtEndFlag) {
                                                      columns_after_bitmap, row_data);
 
   auto result =
-      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kUpdateRowsEvent);
 
   ASSERT_TRUE(result.has_value()) << "V2 UPDATE_ROWS with flags=0x0000 should parse correctly";
   ASSERT_EQ(1, result->size());
@@ -3555,7 +3552,7 @@ TEST_F(RowsParserV2Test, V2UpdateRowsRejectsPartialAfterImageBitmap) {
                                                      columns_after_bitmap, row_data);
 
   auto result =
-      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kUpdateRowsEvent);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
@@ -3574,7 +3571,7 @@ TEST_F(RowsParserV2Test, V2UpdateRowsRejectsTruncatedBeforeImage) {
                                                      columns_after_bitmap, before_only);
 
   auto result =
-      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kUpdateRowsEvent);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
@@ -3592,7 +3589,7 @@ TEST_F(RowsParserV2Test, V2UpdateRowsRejectsTruncatedAfterImage) {
                                                      columns_after_bitmap, row_data);
 
   auto result =
-      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+      ParseUpdateRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kUpdateRowsEvent);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
@@ -3614,7 +3611,7 @@ TEST_F(RowsParserV2Test, V2DeleteRowsWithoutStmtEndFlag) {
   auto event = BinlogEventBuilder::BuildDeleteRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_bitmap, row_data);
 
   auto result =
-      ParseDeleteRowsEvent(event.data(), event.size(), &table_meta, "id", "", MySQLBinlogEventType::DELETE_ROWS_EVENT);
+      ParseDeleteRowsEvent(event.data(), event.size(), &table_meta, "id", "", mybinlog::EventType::kDeleteRowsEvent);
 
   ASSERT_TRUE(result.has_value()) << "V2 DELETE_ROWS with flags=0x0000 should parse correctly";
   ASSERT_EQ(1, result->size());
@@ -3637,7 +3634,7 @@ TEST_F(RowsParserV2Test, V2BatchInsertMultipleEvents) {
   auto event1 = BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0000, 2, {}, 2, columns_bitmap, row_data1);
 
   auto result1 =
-      ParseWriteRowsEvent(event1.data(), event1.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+      ParseWriteRowsEvent(event1.data(), event1.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEvent);
 
   ASSERT_TRUE(result1.has_value()) << "Intermediate batch event (flags=0x0000) should parse correctly";
   ASSERT_EQ(1, result1->size());
@@ -3649,7 +3646,7 @@ TEST_F(RowsParserV2Test, V2BatchInsertMultipleEvents) {
   auto event2 = BinlogEventBuilder::BuildWriteRowsV2(table_meta.table_id, 0x0001, 2, {}, 2, columns_bitmap, row_data2);
 
   auto result2 =
-      ParseWriteRowsEvent(event2.data(), event2.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+      ParseWriteRowsEvent(event2.data(), event2.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEvent);
 
   ASSERT_TRUE(result2.has_value()) << "Final batch event (flags=0x0001) should parse correctly";
   ASSERT_EQ(1, result2->size());
@@ -3669,7 +3666,7 @@ TEST_F(RowsParserTest, WriteRowsEventSizeTooSmall) {
   table_meta.table_id = 1;
   table_meta.database_name = "test_db";
   table_meta.table_name = "test_table";
-  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  table_meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   // Create a minimal buffer with 19-byte header but event_size set to 3 (< 4)
   std::vector<unsigned char> buffer(32, 0);
@@ -3679,8 +3676,8 @@ TEST_F(RowsParserTest, WriteRowsEventSizeTooSmall) {
   buffer[11] = 0;
   buffer[12] = 0;
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -3692,7 +3689,7 @@ TEST_F(RowsParserTest, UpdateRowsEventSizeTooSmall) {
   table_meta.table_id = 1;
   table_meta.database_name = "test_db";
   table_meta.table_name = "test_table";
-  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  table_meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   // Create a minimal buffer with event_size set to 2 (< 4)
   std::vector<unsigned char> buffer(32, 0);
@@ -3701,8 +3698,8 @@ TEST_F(RowsParserTest, UpdateRowsEventSizeTooSmall) {
   buffer[11] = 0;
   buffer[12] = 0;
 
-  auto result = ParseUpdateRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                     MySQLBinlogEventType::UPDATE_ROWS_EVENT);
+  auto result =
+      ParseUpdateRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kUpdateRowsEvent);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -3714,7 +3711,7 @@ TEST_F(RowsParserTest, DeleteRowsEventSizeTooSmall) {
   table_meta.table_id = 1;
   table_meta.database_name = "test_db";
   table_meta.table_name = "test_table";
-  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  table_meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   // Create a minimal buffer with event_size set to 0 (< 4)
   std::vector<unsigned char> buffer(32, 0);
@@ -3723,8 +3720,8 @@ TEST_F(RowsParserTest, DeleteRowsEventSizeTooSmall) {
   buffer[11] = 0;
   buffer[12] = 0;
 
-  auto result = ParseDeleteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                     MySQLBinlogEventType::DELETE_ROWS_EVENT);
+  auto result =
+      ParseDeleteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kDeleteRowsEvent);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -3736,7 +3733,7 @@ TEST_F(RowsParserTest, WriteRowsEventSizeExceedsLength) {
   table_meta.table_id = 1;
   table_meta.database_name = "test_db";
   table_meta.table_name = "test_table";
-  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  table_meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   // Create a buffer of size 32 but set event_size to 1000
   std::vector<unsigned char> buffer(32, 0);
@@ -3745,8 +3742,8 @@ TEST_F(RowsParserTest, WriteRowsEventSizeExceedsLength) {
   buffer[11] = 0;
   buffer[12] = 0;
 
-  auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+  auto result =
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEventV1);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -3755,7 +3752,7 @@ TEST_F(RowsParserTest, WriteRowsEventRejectsTruncatedPackedColumnCount) {
   table_meta.table_id = 1;
   table_meta.database_name = "test_db";
   table_meta.table_name = "test_table";
-  table_meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  table_meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   std::vector<unsigned char> buffer(19, 0);
   for (int i = 0; i < 6; ++i) {
@@ -3777,7 +3774,7 @@ TEST_F(RowsParserTest, WriteRowsEventRejectsTruncatedPackedColumnCount) {
   buffer[12] = (event_size >> 24) & 0xFF;
 
   auto result =
-      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", MySQLBinlogEventType::WRITE_ROWS_EVENT);
+      ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "", mybinlog::EventType::kWriteRowsEvent);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
 }
@@ -3801,8 +3798,8 @@ TEST_F(ParseSingleRowTest, BasicIntRow) {
   meta.table_id = 1;
   meta.database_name = "db";
   meta.table_name = "tbl";
-  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
-  meta.columns.push_back({ColumnType::LONG, "value", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "id", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "value", 0, false});
 
   auto cols_present = AllColumnsPresent(2);
   size_t null_bitmap_size = (2 + 7) / 8;  // 1 byte
@@ -3837,8 +3834,8 @@ TEST_F(ParseSingleRowTest, NullColumn) {
   meta.table_id = 1;
   meta.database_name = "db";
   meta.table_name = "tbl";
-  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
-  meta.columns.push_back({ColumnType::LONG, "value", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "id", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "value", 0, false});
 
   auto cols_present = AllColumnsPresent(2);
   size_t null_bitmap_size = 1;
@@ -3872,7 +3869,7 @@ TEST_F(ParseSingleRowTest, VarcharColumn) {
   meta.table_id = 1;
   meta.database_name = "db";
   meta.table_name = "tbl";
-  meta.columns.push_back({ColumnType::VARCHAR, "name", 255, false});
+  meta.columns.push_back({ColumnType::kVarchar, "name", 255, false});
 
   auto cols_present = AllColumnsPresent(1);
   size_t null_bitmap_size = 1;
@@ -3901,7 +3898,7 @@ TEST_F(ParseSingleRowTest, TruncatedAtNullBitmap) {
   meta.table_id = 1;
   meta.database_name = "db";
   meta.table_name = "tbl";
-  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   auto cols_present = AllColumnsPresent(1);
   size_t null_bitmap_size = 1;
@@ -3922,7 +3919,7 @@ TEST_F(ParseSingleRowTest, TruncatedFixedLengthColumnFailsBeforeDecode) {
   meta.table_id = 1;
   meta.database_name = "db";
   meta.table_name = "tbl";
-  meta.columns.push_back({ColumnType::LONG, "id", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   auto cols_present = AllColumnsPresent(1);
   size_t null_bitmap_size = 1;
@@ -3945,9 +3942,9 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
   meta.table_id = 1;
   meta.database_name = "db";
   meta.table_name = "tbl";
-  meta.columns.push_back({ColumnType::LONG, "a", 0, false});
-  meta.columns.push_back({ColumnType::LONG, "b", 0, false});
-  meta.columns.push_back({ColumnType::LONG, "c", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "a", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "b", 0, false});
+  meta.columns.push_back({ColumnType::kLong, "c", 0, false});
 
   // columns_present: bits 0 and 2 set, bit 1 clear -> 0b00000101 = 0x05
   std::vector<unsigned char> cols_present = {0x05};
@@ -3978,7 +3975,7 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
 TEST(BitFieldDecodeTest, RejectsMoreThanEightBytes) {
   const std::vector<unsigned char> data(16, 0xFF);
   const auto decode = [&data](uint16_t metadata) {
-    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::BIT), data.data(), metadata, /*is_null=*/false,
+    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kBit), data.data(), metadata, /*is_null=*/false,
                                       data.data() + data.size(), /*is_unsigned=*/false);
   };
 
@@ -3990,7 +3987,7 @@ TEST(BitFieldDecodeTest, RejectsMoreThanEightBytes) {
     auto rejected = decode(metadata);
     ASSERT_FALSE(rejected.has_value()) << metadata;
     EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, rejected.error().code()) << metadata;
-    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::BIT), data.data(), metadata,
+    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kBit), data.data(), metadata,
                                                data.data() + data.size()))
         << metadata;
   }
@@ -4002,22 +3999,22 @@ TEST(FieldSizeBoundsTest, LengthPrefixPastTheEndIsReportedAsTruncated) {
 
   // A VARCHAR(1000) prefix is two bytes; with one byte left it cannot be read.
   EXPECT_EQ(binlog_util::kFieldSizeTruncated,
-            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::VARCHAR), end - 1, 1000, end));
+            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kVarchar), end - 1, 1000, end));
   EXPECT_EQ(binlog_util::kFieldSizeTruncated,
-            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::BLOB), end, 2, end));
+            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kBlob), end, 2, end));
   EXPECT_EQ(binlog_util::kFieldSizeTruncated,
-            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::LONG_BLOB), data.data(), 4, end));
-  EXPECT_EQ(7U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::BLOB), data.data(), 2, end));
-  EXPECT_EQ(6U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::VARCHAR), data.data(), 100, end));
+            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kLongBlob), data.data(), 4, end));
+  EXPECT_EQ(7U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kBlob), data.data(), 2, end));
+  EXPECT_EQ(6U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kVarchar), data.data(), 100, end));
 }
 
 TEST(FieldSizeBoundsTest, JsonLengthWidthOutsideOneToFourIsRejectedBySizerAndDecoder) {
   const std::vector<unsigned char> data(8, 0);
   const unsigned char* end = data.data() + data.size();
   for (const uint16_t metadata : {0, 5, 255, 257}) {
-    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::JSON), data.data(), metadata, end))
+    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kJson), data.data(), metadata, end))
         << metadata;
-    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::JSON), data.data(), metadata,
+    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kJson), data.data(), metadata,
                                               /*is_null=*/false, end, /*is_unsigned=*/false);
     ASSERT_FALSE(decoded.has_value()) << metadata;
     EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, decoded.error().code()) << metadata;
@@ -4029,13 +4026,13 @@ TEST(FieldSizeBoundsTest, NewDecimalAcceptsAScaleUpToThirtyEight) {
   const auto metadata = static_cast<uint16_t>((50 << 8) | 35);
   std::vector<unsigned char> data(32, 0);
   data[0] = 0x80;  // positive zero
-  EXPECT_EQ(23U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data.data(), metadata,
+  EXPECT_EQ(23U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kNewDecimal), data.data(), metadata,
                                               data.data() + data.size()));
   EXPECT_EQ(23U, *binlog_util::decimal_binary_size(50, 35));
   EXPECT_TRUE(binlog_util::decimal_binary_size(65, 38).has_value());
   EXPECT_FALSE(binlog_util::decimal_binary_size(65, 39).has_value());
 
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::NEWDECIMAL), data.data(), metadata,
+  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data.data(), metadata,
                                             /*is_null=*/false, data.data() + data.size(), /*is_unsigned=*/false);
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
 }
@@ -4064,11 +4061,11 @@ TEST_F(RowsParserTest, UnreferencedColumnsAreNotDecoded) {
     column.metadata = metadata;
     table_meta.columns.push_back(column);
   };
-  add_column(ColumnType::LONG, "id", 0);
-  add_column(ColumnType::VARCHAR, "body", 255);
-  add_column(ColumnType::VARCHAR, "payload", 255);
-  add_column(ColumnType::LONG, "status", 0);
-  add_column(ColumnType::VARCHAR, "tail", 255);
+  add_column(ColumnType::kLong, "id", 0);
+  add_column(ColumnType::kVarchar, "body", 255);
+  add_column(ColumnType::kVarchar, "payload", 255);
+  add_column(ColumnType::kLong, "status", 0);
+  add_column(ColumnType::kVarchar, "tail", 255);
 
   std::vector<std::vector<std::string>> rows = {{"7", "searchable body", "ignored payload", "3", "ignored tail"}};
   auto buffer = CreateWriteRowsEvent(table_meta, rows);
@@ -4083,7 +4080,7 @@ TEST_F(RowsParserTest, UnreferencedColumnsAreNotDecoded) {
 
   const auto retained = BuildRetainedColumns(table_meta, table_config);
   auto result = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "body",
-                                    MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1, &retained);
+                                    mybinlog::EventType::kWriteRowsEventV1, &retained);
 
   ASSERT_TRUE(result.has_value());
   ASSERT_EQ(1, result->size());
@@ -4102,7 +4099,7 @@ TEST_F(RowsParserTest, UnreferencedColumnsAreNotDecoded) {
 
   // Without a retained mask every column is still decoded.
   auto full = ParseWriteRowsEvent(buffer.data(), buffer.size(), &table_meta, "id", "body",
-                                  MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1);
+                                  mybinlog::EventType::kWriteRowsEventV1);
   ASSERT_TRUE(full.has_value());
   ASSERT_EQ(1, full->size());
   EXPECT_EQ("ignored payload", full->front().GetColumnValue("payload"));
@@ -4125,11 +4122,11 @@ TEST_F(RowsParserTest, RetainedColumnsCoverConcatSourcesAndRequiredFilters) {
     column.metadata = metadata;
     table_meta.columns.push_back(column);
   };
-  add_column(ColumnType::LONG, "id", 0);
-  add_column(ColumnType::VARCHAR, "title", 255);
-  add_column(ColumnType::VARCHAR, "summary", 255);
-  add_column(ColumnType::LONG, "deleted", 0);
-  add_column(ColumnType::VARCHAR, "blob_like", 255);
+  add_column(ColumnType::kLong, "id", 0);
+  add_column(ColumnType::kVarchar, "title", 255);
+  add_column(ColumnType::kVarchar, "summary", 255);
+  add_column(ColumnType::kLong, "deleted", 0);
+  add_column(ColumnType::kVarchar, "blob_like", 255);
 
   mygramdb::config::TableConfig table_config;
   table_config.primary_key = "id";

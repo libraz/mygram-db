@@ -30,8 +30,8 @@ class TableMetadataCacheTest : public ::testing::Test {
 
 TEST_F(TableMetadataCacheTest, AddAndGet) {
   auto metadata = CreateTestMetadata(100, "testdb", "users");
-  metadata.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  metadata.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  metadata.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  metadata.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   cache_.Add(100, metadata);
 
@@ -70,7 +70,7 @@ TEST_F(TableMetadataCacheTest, AddMultipleTables) {
 
 TEST_F(TableMetadataCacheTest, NewTableMapIdReplacesStaleIdForSameTable) {
   auto first = CreateTestMetadata(1, "db1", "table1");
-  first.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  first.columns.push_back({ColumnType::kLong, "id", 0, false, false});
   auto replacement = first;
   replacement.table_id = 99;
 
@@ -85,9 +85,9 @@ TEST_F(TableMetadataCacheTest, NewTableMapIdReplacesStaleIdForSameTable) {
 
 TEST_F(TableMetadataCacheTest, NewTableMapIdPreservesSchemaChangeDetection) {
   auto first = CreateTestMetadata(1, "db1", "table1");
-  first.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  first.columns.push_back({ColumnType::kLong, "id", 0, false, false});
   auto changed = CreateTestMetadata(99, "db1", "table1");
-  changed.columns.push_back({ColumnType::LONGLONG, "id", 0, false, false});
+  changed.columns.push_back({ColumnType::kLongLong, "id", 0, false, false});
 
   cache_.AddOrUpdate(1, first);
   EXPECT_EQ(cache_.AddOrUpdate(99, changed), TableMetadataCache::AddResult::kSchemaChanged);
@@ -183,17 +183,17 @@ TEST_F(TableMetadataCacheTest, ColumnTypes) {
   metadata.table_name = "all_types";
 
   // Add various column types
-  metadata.columns.push_back({ColumnType::TINY, "tiny_col", 0, false, false});
-  metadata.columns.push_back({ColumnType::SHORT, "short_col", 0, false, true});
-  metadata.columns.push_back({ColumnType::LONG, "int_col", 0, true, false});
-  metadata.columns.push_back({ColumnType::LONGLONG, "bigint_col", 0, false, true});
-  metadata.columns.push_back({ColumnType::FLOAT, "float_col", 0, true, false});
-  metadata.columns.push_back({ColumnType::DOUBLE, "double_col", 0, true, false});
-  metadata.columns.push_back({ColumnType::VARCHAR, "varchar_col", 255, true, false});
-  metadata.columns.push_back({ColumnType::BLOB, "text_col", 0, true, false});
-  metadata.columns.push_back({ColumnType::DATETIME, "datetime_col", 0, true, false});
-  metadata.columns.push_back({ColumnType::DATETIME2, "datetime2_col", 6, true, false});
-  metadata.columns.push_back({ColumnType::JSON, "json_col", 0, true, false});
+  metadata.columns.push_back({ColumnType::kTiny, "tiny_col", 0, false, false});
+  metadata.columns.push_back({ColumnType::kShort, "short_col", 0, false, true});
+  metadata.columns.push_back({ColumnType::kLong, "int_col", 0, true, false});
+  metadata.columns.push_back({ColumnType::kLongLong, "bigint_col", 0, false, true});
+  metadata.columns.push_back({ColumnType::kFloat, "float_col", 0, true, false});
+  metadata.columns.push_back({ColumnType::kDouble, "double_col", 0, true, false});
+  metadata.columns.push_back({ColumnType::kVarchar, "varchar_col", 255, true, false});
+  metadata.columns.push_back({ColumnType::kBlob, "text_col", 0, true, false});
+  metadata.columns.push_back({ColumnType::kDatetime, "datetime_col", 0, true, false});
+  metadata.columns.push_back({ColumnType::kDatetime2, "datetime2_col", 6, true, false});
+  metadata.columns.push_back({ColumnType::kJson, "json_col", 0, true, false});
 
   cache_.Add(1, metadata);
 
@@ -202,17 +202,17 @@ TEST_F(TableMetadataCacheTest, ColumnTypes) {
   ASSERT_EQ(retrieved->columns.size(), 11);
 
   // Verify specific columns
-  EXPECT_EQ(retrieved->columns[0].type, ColumnType::TINY);
+  EXPECT_EQ(retrieved->columns[0].type, ColumnType::kTiny);
   EXPECT_FALSE(retrieved->columns[0].is_nullable);
   EXPECT_FALSE(retrieved->columns[0].is_unsigned);
 
-  EXPECT_EQ(retrieved->columns[1].type, ColumnType::SHORT);
+  EXPECT_EQ(retrieved->columns[1].type, ColumnType::kShort);
   EXPECT_TRUE(retrieved->columns[1].is_unsigned);
 
-  EXPECT_EQ(retrieved->columns[6].type, ColumnType::VARCHAR);
+  EXPECT_EQ(retrieved->columns[6].type, ColumnType::kVarchar);
   EXPECT_EQ(retrieved->columns[6].metadata, 255);
 
-  EXPECT_EQ(retrieved->columns[9].type, ColumnType::DATETIME2);
+  EXPECT_EQ(retrieved->columns[9].type, ColumnType::kDatetime2);
   EXPECT_EQ(retrieved->columns[9].metadata, 6);  // Fractional seconds precision
 }
 
@@ -240,9 +240,9 @@ TEST_F(TableMetadataCacheTest, ColumnBitmaps) {
 
 TEST(TableMetadataTest, RebuildsConstantTimeColumnOrdinalLookup) {
   TableMetadata metadata;
-  metadata.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  metadata.columns.push_back({ColumnType::VARCHAR, "title", 255, false, false});
-  metadata.columns.push_back({ColumnType::BLOB, "body", 4, true, false});
+  metadata.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  metadata.columns.push_back({ColumnType::kVarchar, "title", 255, false, false});
+  metadata.columns.push_back({ColumnType::kBlob, "body", 4, true, false});
 
   metadata.RebuildColumnOrdinals();
 
@@ -332,8 +332,8 @@ TEST_F(TableMetadataCacheTest, MultipleAddRemoveCycles) {
 
 TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsNewEntry) {
   TableMetadata meta = CreateTestMetadata(100, "test_db", "users");
-  meta.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  meta.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  meta.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   auto result = cache_.AddOrUpdate(100, meta);
   EXPECT_EQ(TableMetadataCache::AddResult::kAdded, result);
@@ -346,8 +346,8 @@ TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsNewEntry) {
 
 TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsUnchangedSchema) {
   TableMetadata meta = CreateTestMetadata(100, "test_db", "users");
-  meta.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  meta.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  meta.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   cache_.AddOrUpdate(100, meta);
 
@@ -358,16 +358,16 @@ TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsUnchangedSchema) {
 
 TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnCountChange) {
   TableMetadata meta1 = CreateTestMetadata(100, "test_db", "users");
-  meta1.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  meta1.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta1.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  meta1.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   cache_.AddOrUpdate(100, meta1);
 
   // Add a new column (ALTER TABLE ADD COLUMN)
   TableMetadata meta2 = CreateTestMetadata(100, "test_db", "users");
-  meta2.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  meta2.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
-  meta2.columns.push_back({ColumnType::VARCHAR, "email", 255, true, false});
+  meta2.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  meta2.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
+  meta2.columns.push_back({ColumnType::kVarchar, "email", 255, true, false});
 
   auto result = cache_.AddOrUpdate(100, meta2);
   EXPECT_EQ(TableMetadataCache::AddResult::kSchemaChanged, result);
@@ -380,15 +380,15 @@ TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnCountChange) {
 
 TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnTypeChange) {
   TableMetadata meta1 = CreateTestMetadata(100, "test_db", "users");
-  meta1.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  meta1.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta1.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  meta1.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   cache_.AddOrUpdate(100, meta1);
 
   // Change column type (ALTER TABLE MODIFY COLUMN)
   TableMetadata meta2 = CreateTestMetadata(100, "test_db", "users");
-  meta2.columns.push_back({ColumnType::LONGLONG, "id", 0, false, false});
-  meta2.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta2.columns.push_back({ColumnType::kLongLong, "id", 0, false, false});
+  meta2.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   auto result = cache_.AddOrUpdate(100, meta2);
   EXPECT_EQ(TableMetadataCache::AddResult::kSchemaChanged, result);
@@ -396,15 +396,15 @@ TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnTypeChange) {
 
 TEST_F(TableMetadataCacheTest, AddOrUpdateDetectsColumnNameChange) {
   TableMetadata meta1 = CreateTestMetadata(100, "test_db", "users");
-  meta1.columns.push_back({ColumnType::LONG, "id", 0, false, false});
-  meta1.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta1.columns.push_back({ColumnType::kLong, "id", 0, false, false});
+  meta1.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   cache_.AddOrUpdate(100, meta1);
 
   // Rename column (ALTER TABLE CHANGE COLUMN)
   TableMetadata meta2 = CreateTestMetadata(100, "test_db", "users");
-  meta2.columns.push_back({ColumnType::LONG, "user_id", 0, false, false});
-  meta2.columns.push_back({ColumnType::VARCHAR, "name", 255, true, false});
+  meta2.columns.push_back({ColumnType::kLong, "user_id", 0, false, false});
+  meta2.columns.push_back({ColumnType::kVarchar, "name", 255, true, false});
 
   auto result = cache_.AddOrUpdate(100, meta2);
   EXPECT_EQ(TableMetadataCache::AddResult::kSchemaChanged, result);
@@ -414,7 +414,7 @@ TEST_F(TableMetadataCacheTest, ContainsMethod) {
   EXPECT_FALSE(cache_.Contains(100));
 
   TableMetadata meta = CreateTestMetadata(100, "test_db", "users");
-  meta.columns.push_back({ColumnType::LONG, "id", 0, false, false});
+  meta.columns.push_back({ColumnType::kLong, "id", 0, false, false});
   cache_.AddOrUpdate(100, meta);
 
   EXPECT_TRUE(cache_.Contains(100));

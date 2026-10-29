@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-#include "mysql/binlog_event_types.h"
+#include "mybinlog/event_types.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
 #include "utils/error.h"
@@ -60,7 +60,7 @@ struct RowsEventHeader {
  * @return Parsed header on success, Error on any parse error
  */
 mygram::utils::Expected<RowsEventHeader, mygram::utils::Error> ParseRowsEventHeader(
-    const unsigned char* buffer, unsigned long length, MySQLBinlogEventType event_type,
+    const unsigned char* buffer, unsigned long length, mybinlog::EventType event_type,
     const TableMetadata* table_metadata, const std::string& pk_column_name, const std::string& text_column_name,
     const char* event_type_label);
 

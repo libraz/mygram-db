@@ -54,11 +54,11 @@ TableMetadata WideTableMetadata() {
     metadata.columns.push_back(column);
   };
 
-  add_column(ColumnType::LONG, "id", 0);
-  add_column(ColumnType::VARCHAR, "body", 255);
-  add_column(ColumnType::LONG, "status", 0);
+  add_column(ColumnType::kLong, "id", 0);
+  add_column(ColumnType::kVarchar, "body", 255);
+  add_column(ColumnType::kLong, "status", 0);
   for (size_t i = 0; i < kUnreferencedColumns; ++i) {
-    add_column(ColumnType::VARCHAR, "payload" + std::to_string(i), 255);
+    add_column(ColumnType::kVarchar, "payload" + std::to_string(i), 255);
   }
   return metadata;
 }
@@ -123,7 +123,7 @@ TEST_F(RowsParserBenchmarkTest, DecodeCostOfColumnsNothingReads) {
 
   const auto parse = [&](const RetainedColumns* mask) {
     return ParseWriteRowsEvent(buffer.data(), buffer.size(), &metadata, "id", "body",
-                               MySQLBinlogEventType::OBSOLETE_WRITE_ROWS_EVENT_V1, mask);
+                               mybinlog::EventType::kWriteRowsEventV1, mask);
   };
 
   auto full = parse(nullptr);

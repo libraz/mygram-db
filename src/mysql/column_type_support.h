@@ -76,32 +76,32 @@ constexpr ColumnTypeSupport DescribeColumnType(ColumnType type) {
   switch (type) {
     // Integers. Both paths render the stored integer in decimal, and the
     // snapshot text is already the canonical form.
-    case ColumnType::TINY:
-    case ColumnType::SHORT:
-    case ColumnType::LONG:
-    case ColumnType::LONGLONG:
-    case ColumnType::INT24:
+    case ColumnType::kTiny:
+    case ColumnType::kShort:
+    case ColumnType::kLong:
+    case ColumnType::kLongLong:
+    case ColumnType::kInt24:
     // YEAR renders as four digits on both paths, including the zero year.
-    case ColumnType::YEAR:
+    case ColumnType::kYear:
       return ColumnTypeSupport{CanonicalValueKind::kText, BinlogDecoding::kDecoded, ColumnAcceptance::kAccepted};
 
     // FLOAT. A result set renders it to six significant digits, which is fewer
     // than a float needs to be recovered: 16777217 comes back as 16777200
     // while the row image carries the stored 16777216. The lost digits are not
     // in the text at all, so no normalization can bring the two together.
-    case ColumnType::FLOAT:
+    case ColumnType::kFloat:
       return ColumnTypeSupport{CanonicalValueKind::kFloat, BinlogDecoding::kDecoded,
                                ColumnAcceptance::kRejectedPathsDisagree};
 
     // DOUBLE. The result set renders the shortest decimal that reads back as
     // the stored value, so parsing it recovers the row image's value exactly
     // and both sides reprint it the same way.
-    case ColumnType::DOUBLE:
+    case ColumnType::kDouble:
       return ColumnTypeSupport{CanonicalValueKind::kDouble, BinlogDecoding::kDecoded, ColumnAcceptance::kAccepted};
 
     // DECIMAL. Both paths carry every declared digit; only leading zeros and a
     // negative zero differ, and normalization removes both.
-    case ColumnType::NEWDECIMAL:
+    case ColumnType::kNewDecimal:
       return ColumnTypeSupport{CanonicalValueKind::kDecimal, BinlogDecoding::kDecoded, ColumnAcceptance::kAccepted};
 
     // Temporal types. The snapshot text carries exactly the declared fractional
@@ -109,66 +109,73 @@ constexpr ColumnTypeSupport DescribeColumnType(ColumnType type) {
     // the snapshot side is padded to six. TIMESTAMP agrees only because the
     // load connection pins its session time zone to UTC, which is the offset
     // the row decoder formats in.
-    case ColumnType::DATE:
-    case ColumnType::DATETIME:
-    case ColumnType::DATETIME2:
-    case ColumnType::TIMESTAMP:
-    case ColumnType::TIMESTAMP2:
-    case ColumnType::TIME:
-    case ColumnType::TIME2:
+    case ColumnType::kDate:
+    case ColumnType::kDatetime:
+    case ColumnType::kDatetime2:
+    case ColumnType::kTimestamp:
+    case ColumnType::kTimestamp2:
+    case ColumnType::kTime:
+    case ColumnType::kTime2:
       return ColumnTypeSupport{CanonicalValueKind::kTemporal, BinlogDecoding::kDecoded, ColumnAcceptance::kAccepted};
 
     // BIT. The result set carries the raw big-endian bytes and the row decoder
     // reads the same bytes as an unsigned integer, so the snapshot bytes are
     // read the same way rather than being treated as text.
-    case ColumnType::BIT:
+    case ColumnType::kBit:
       return ColumnTypeSupport{CanonicalValueKind::kBitset, BinlogDecoding::kDecoded, ColumnAcceptance::kAccepted};
 
     // Character strings. Both paths sanitize the bytes the server stored.
     // Whether the column is character or binary is not visible in the type
     // code - BLOB and TEXT share one - so the binary variants are refused by
     // their declared type name, next to the collation check.
-    case ColumnType::VARCHAR:
-    case ColumnType::STRING:
-    case ColumnType::TINY_BLOB:
-    case ColumnType::MEDIUM_BLOB:
-    case ColumnType::LONG_BLOB:
-    case ColumnType::BLOB:
+    case ColumnType::kVarchar:
+    case ColumnType::kString:
+    case ColumnType::kTinyBlob:
+    case ColumnType::kMediumBlob:
+    case ColumnType::kLongBlob:
+    case ColumnType::kBlob:
     // MariaDB COMPRESSED columns. A result set returns the inflated text and
     // reports the plain type; only a row event carries these codes, and the
     // decoder inflates the payload to the same bytes.
-    case ColumnType::BLOB_COMPRESSED:
-    case ColumnType::VARCHAR_COMPRESSED:
+    case ColumnType::kBlobCompressed:
+    case ColumnType::kVarcharCompressed:
     // ENUM and SET reach the row decoder as a member ordinal or a bitmask and
     // are turned back into the declared labels, which is what the result set
     // returns. A label list that changed under a running server is caught as a
     // schema change before a row is decoded against it.
-    case ColumnType::ENUM:
-    case ColumnType::SET:
+    case ColumnType::kEnum:
+    case ColumnType::kSet:
       return ColumnTypeSupport{CanonicalValueKind::kText, BinlogDecoding::kDecoded, ColumnAcceptance::kAccepted};
 
     // The client library reports VAR_STRING for a VARCHAR column; a row event
     // always uses VARCHAR for the same column. The type is usable, but a row
     // event carrying this code is not a stream this decoder understands.
-    case ColumnType::VAR_STRING:
+    case ColumnType::kVarString:
       return ColumnTypeSupport{CanonicalValueKind::kText, BinlogDecoding::kNotOnTheWire, ColumnAcceptance::kAccepted};
 
     // JSON. The server renders a document with a space after every ':' and ','
     // and in the order the binary form stores keys, while the row decoder
     // writes the same document compactly. Both are valid JSON for the same
     // value and neither is derivable from the other by normalization.
-    case ColumnType::JSON:
+    case ColumnType::kJson:
     // GEOMETRY and VECTOR. The result set returns the raw payload, which is not
     // UTF-8 and does not survive sanitizing, while the row decoder returns it
     // hex-encoded.
-    case ColumnType::GEOMETRY:
-    case ColumnType::VECTOR:
+    case ColumnType::kGeometry:
+    case ColumnType::kVector:
       return ColumnTypeSupport{CanonicalValueKind::kText, BinlogDecoding::kDecoded,
                                ColumnAcceptance::kRejectedPathsDisagree};
 
     // An internal type of the server's own date handling. No case decodes it.
-    case ColumnType::NEWDATE:
+    case ColumnType::kNewDate:
       return ColumnTypeSupport{CanonicalValueKind::kTemporal, BinlogDecoding::kUndecodable,
+                               ColumnAcceptance::kRejectedUndecodable};
+
+    // The pre-5.0 DECIMAL storage format, and the replication-only element
+    // array of a multi-valued index. No case decodes either.
+    case ColumnType::kDecimal:
+    case ColumnType::kTypedArray:
+      return ColumnTypeSupport{CanonicalValueKind::kText, BinlogDecoding::kUndecodable,
                                ColumnAcceptance::kRejectedUndecodable};
   }
 

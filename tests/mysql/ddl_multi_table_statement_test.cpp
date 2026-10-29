@@ -31,7 +31,6 @@ using mygramdb::mysql::BinlogEventType;
 using mygramdb::mysql::ClassifyQueryEvent;
 using mygramdb::mysql::DDLType;
 using mygramdb::mysql::FindConfiguredTableDDL;
-using mygramdb::mysql::MySQLBinlogEventType;
 using mygramdb::mysql::TableMetadataCache;
 
 TableConfig MakeTableConfig(const std::string& name, const std::string& database = "") {
@@ -55,7 +54,7 @@ void ExpectNoDDLMatch(const std::string& query, const TableConfig& table_config,
 }
 
 std::vector<uint8_t> BuildQueryEvent(const std::string& database, const std::string& query) {
-  auto event = mygramdb::mysql::test::BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::QUERY_EVENT);
+  auto event = mygramdb::mysql::test::BinlogEventBuilder::BuildHeader(mybinlog::EventType::kQueryEvent);
   mygramdb::mysql::test::BinlogEventBuilder::AppendLittleEndian32(event, 1);  // thread_id
   mygramdb::mysql::test::BinlogEventBuilder::AppendLittleEndian32(event, 0);  // query_exec_time
   event.push_back(static_cast<uint8_t>(database.size()));

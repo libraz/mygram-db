@@ -152,18 +152,18 @@ TEST_F(BinlogReaderFixture, RepeatedProcessingFailureAtSameGtidStopsOnThirdRepla
 TEST_F(BinlogReaderFixture, UnsupportedRuntimeEventsStopBeforeGtidAdvance) {
   using mygramdb::mysql::test::BinlogEventBuilder;
   const std::array unsupported_types{
-      MySQLBinlogEventType::TRANSACTION_PAYLOAD_EVENT,
-      MySQLBinlogEventType::PARTIAL_UPDATE_ROWS_EVENT,
-      MySQLBinlogEventType::XA_PREPARE_LOG_EVENT,
-      MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT,
+      mybinlog::EventType::kTransactionPayloadEvent,
+      mybinlog::EventType::kPartialUpdateRowsEvent,
+      mybinlog::EventType::kXaPrepareLogEvent,
+      mybinlog::EventType::kMariaDBWriteRowsCompressedEvent,
   };
 
   for (const auto expected_type : unsupported_types) {
-    SCOPED_TRACE(GetEventTypeName(expected_type));
+    SCOPED_TRACE(mybinlog::EventTypeName(expected_type));
     auto wire_event = BinlogEventBuilder::BuildHeader(expected_type);
     BinlogEventBuilder::AppendLittleEndian32(wire_event, 0);
     BinlogEventBuilder::FixEventSizeWithChecksum(wire_event);
-    const auto decoded_type = static_cast<MySQLBinlogEventType>(wire_event[4]);
+    const auto decoded_type = static_cast<mybinlog::EventType>(wire_event[4]);
 
     reader_->should_stop_.store(false, std::memory_order_release);
     reader_->SetCurrentGTID("ffffffff-0000-0000-0000-000000000001:17");
@@ -229,7 +229,7 @@ std::vector<uint8_t> BuildBareTableMap(uint64_t table_id, const std::string& dat
                                        const std::vector<uint8_t>& column_types,
                                        const std::vector<uint8_t>& optional_metadata = {}) {
   using test::BinlogEventBuilder;
-  auto buf = BinlogEventBuilder::BuildHeader(MySQLBinlogEventType::TABLE_MAP_EVENT);
+  auto buf = BinlogEventBuilder::BuildHeader(mybinlog::EventType::kTableMapEvent);
   BinlogEventBuilder::AppendTableId(buf, table_id);
   BinlogEventBuilder::AppendLittleEndian16(buf, 0);  // flags
   buf.push_back(static_cast<uint8_t>(database.size()));
@@ -257,7 +257,7 @@ std::vector<uint8_t> SingleIntColumnRowMetadata() {
 
 std::vector<unsigned char> BuildRowsEventHeader(uint64_t table_id) {
   std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
-  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  event[4] = static_cast<unsigned char>(mybinlog::EventType::kWriteRowsEvent);
   for (int i = 0; i < 6; ++i) {
     event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((table_id >> (i * 8)) & 0xFF);
   }
@@ -340,7 +340,7 @@ TEST_F(BinlogReaderFixture, ReusedTableIdForUnmonitoredTableDropsTheReplicatedMa
   reader_->schema_cache_.RecordTableMap(monitored);
   const auto rows = BuildRowsEventHeader(kTableId);
   ASSERT_TRUE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, rows.data(), rows.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kWriteRowsEvent, rows.data(), rows.size()));
 
   const auto table_map = BuildBareTableMap(kTableId, "app", "audit_log", {0x03});
   BinlogReader::ProcessingFailureKind failure_kind = BinlogReader::ProcessingFailureKind::kNone;
@@ -349,7 +349,7 @@ TEST_F(BinlogReaderFixture, ReusedTableIdForUnmonitoredTableDropsTheReplicatedMa
 
   EXPECT_EQ(reader_->schema_cache_.table_maps().Get(kTableId), nullptr);
   EXPECT_FALSE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, rows.data(), rows.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kWriteRowsEvent, rows.data(), rows.size()));
 }
 
 /**
@@ -433,7 +433,7 @@ TEST_F(BinlogReaderFixture, TableMapNamesMatchCaseInsensitivelyOnlyWhenTheSource
   // A missing row map is only a parse failure for a table the reader recognizes.
   const auto rows = BuildRowsEventHeader(64);
   EXPECT_TRUE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, rows.data(), rows.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kWriteRowsEvent, rows.data(), rows.size()));
 }
 
 /**

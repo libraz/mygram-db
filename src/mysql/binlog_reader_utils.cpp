@@ -26,7 +26,6 @@
 #include "mysql/binlog_event_processor.h"
 #include "mysql/binlog_reader_internal.h"
 #include "mysql/connection_validator.h"
-#include "mysql/gtid_encoder.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/numeric_parse.h"
 #include "utils/structured_log.h"
@@ -348,7 +347,7 @@ bool BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid)
       continue;
     }
     // The reader and worker paths compare fences the same way; one fence must report one error on every path.
-    auto reached = GtidEncoder::PositionCoversAuto(watermark, applied_gtid);
+    auto reached = GtidPositionCovers(watermark, applied_gtid);
     if (!reached) {
       // The same unevaluable fence the reader and worker paths stop on. Leaving
       // it in place silently would keep suppressing rows for this table under a

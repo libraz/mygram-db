@@ -3,6 +3,12 @@
  * @brief Unit tests for binlog reader - Event processing (INSERT/UPDATE/DELETE/DDL)
  */
 
+#include <array>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "binlog_event_builder.h"
 #include "binlog_test_fixtures.h"
 
 #ifdef USE_MYSQL
@@ -227,7 +233,7 @@ TEST_F(BinlogReaderFixture, TracksGtidUpdates) {
 TEST_F(BinlogReaderFixture, EmptyParseForMonitoredRowsEventIsFailure) {
   constexpr uint64_t kTableId = 7;
   std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
-  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  event[4] = static_cast<unsigned char>(mybinlog::EventType::kWriteRowsEvent);
   for (int i = 0; i < 6; ++i) {
     event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((kTableId >> (i * 8)) & 0xFF);
   }
@@ -239,13 +245,13 @@ TEST_F(BinlogReaderFixture, EmptyParseForMonitoredRowsEventIsFailure) {
   reader_->schema_cache_.RecordTableMap(metadata);
 
   EXPECT_TRUE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kWriteRowsEvent, event.data(), event.size()));
 }
 
 TEST_F(BinlogReaderFixture, EmptyParseForUnmonitoredRowsEventIsSkipped) {
   constexpr uint64_t kTableId = 8;
   std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
-  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  event[4] = static_cast<unsigned char>(mybinlog::EventType::kWriteRowsEvent);
   for (int i = 0; i < 6; ++i) {
     event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((kTableId >> (i * 8)) & 0xFF);
   }
@@ -257,7 +263,7 @@ TEST_F(BinlogReaderFixture, EmptyParseForUnmonitoredRowsEventIsSkipped) {
   reader_->schema_cache_.RecordTableMap(metadata);
 
   EXPECT_FALSE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kWriteRowsEvent, event.data(), event.size()));
 }
 
 TEST_F(BinlogReaderFixture, EmptyParseForSameTableDifferentDatabaseIsSkipped) {
@@ -266,7 +272,7 @@ TEST_F(BinlogReaderFixture, EmptyParseForSameTableDifferentDatabaseIsSkipped) {
 
   constexpr uint64_t kTableId = 9;
   std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen + 6, 0);
-  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  event[4] = static_cast<unsigned char>(mybinlog::EventType::kWriteRowsEvent);
   for (int i = 0; i < 6; ++i) {
     event[mygram::constants::kBinlogEventHeaderLen + i] = static_cast<unsigned char>((kTableId >> (i * 8)) & 0xFF);
   }
@@ -278,17 +284,17 @@ TEST_F(BinlogReaderFixture, EmptyParseForSameTableDifferentDatabaseIsSkipped) {
   reader_->schema_cache_.RecordTableMap(metadata);
 
   EXPECT_FALSE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kWriteRowsEvent, event.data(), event.size()));
 }
 
 TEST_F(BinlogReaderFixture, EmptyParseForMalformedRowsEventIsFailure) {
   std::vector<unsigned char> event(mygram::constants::kBinlogEventHeaderLen, 0);
-  event[4] = static_cast<unsigned char>(MySQLBinlogEventType::WRITE_ROWS_EVENT);
+  event[4] = static_cast<unsigned char>(mybinlog::EventType::kWriteRowsEvent);
 
   EXPECT_TRUE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::WRITE_ROWS_EVENT, event.data(), event.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kWriteRowsEvent, event.data(), event.size()));
   EXPECT_FALSE(
-      reader_->IsMonitoredRowsEventParseFailure(MySQLBinlogEventType::ROTATE_EVENT, event.data(), event.size()));
+      reader_->IsMonitoredRowsEventParseFailure(mybinlog::EventType::kRotateEvent, event.data(), event.size()));
 }
 
 /**
@@ -553,17 +559,58 @@ TEST_F(BinlogReaderFixture, HandlesTaggedGTIDFormat) {
 /**
  * @brief Test that tagged GTIDs are extracted correctly from event buffers
  *
- * Verifies the ExtractTaggedGTID function via BinlogEventParser directly.
+ * Verifies BinlogEventParser::ExtractGTID on GTID_TAGGED_LOG_EVENT buffers directly.
  */
 TEST(BinlogReaderTest, ExtractTaggedGTIDFromEventBuffer) {
-  // Use BinlogEventParser::ExtractTaggedGTID with a manually constructed buffer
   // (Full tests are in binlog_parsing_test.cpp; this validates the integration path)
-  auto result = BinlogEventParser::ExtractTaggedGTID(nullptr, 0);
+  auto result = BinlogEventParser::ExtractGTID(nullptr, 0);
   EXPECT_FALSE(result.has_value()) << "Null buffer should return empty";
 
   std::vector<uint8_t> short_buf(10, 0);
-  result = BinlogEventParser::ExtractTaggedGTID(short_buf.data(), short_buf.size());
+  result = BinlogEventParser::ExtractGTID(short_buf.data(), short_buf.size());
   EXPECT_FALSE(result.has_value()) << "Short buffer should return empty";
+}
+
+/**
+ * @brief A GTID event whose content is invalid reconnects instead of being skipped or applied.
+ *
+ * GNO 0 and INT64_MAX are outside the range a server assigns. Skipping the event
+ * would attribute the rows that follow to the previous transaction; the frame
+ * is complete, so a replay delivers the same bytes and the undecodable code is
+ * what tells SYNC to rebuild past it.
+ */
+TEST_F(BinlogReaderFixture, MalformedGtidEventReconnects) {
+  using mygramdb::mysql::test::BinlogEventBuilder;
+  std::array<uint8_t, 16> uuid{};
+  uuid.fill(0xaa);
+  const std::string uuid_text = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+
+  const auto intact = BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 7, "tag");
+  ASSERT_EQ(reader_->ObservePositionEvent(mybinlog::EventType::kGtidTaggedLogEvent, intact.data(), intact.size()),
+            BinlogReader::PositionEventAction::kContinue);
+  EXPECT_EQ(reader_->position_state_.received_gtid(), uuid_text + ":tag:7");
+
+  constexpr uint64_t kGnoEnd = 0x7FFFFFFFFFFFFFFFULL;
+  const std::vector<std::pair<const char*, std::vector<uint8_t>>> events = {
+      {"GTID_LOG_EVENT with GNO 0", BinlogEventBuilder::BuildGtidEvent(uuid, 0)},
+      {"GTID_LOG_EVENT with GNO INT64_MAX", BinlogEventBuilder::BuildGtidEvent(uuid, kGnoEnd)},
+      {"GTID_TAGGED_LOG_EVENT with GNO 0", BinlogEventBuilder::BuildGtidTaggedEvent(uuid, 0, "tag")},
+      {"GTID_TAGGED_LOG_EVENT with GNO INT64_MAX",
+       BinlogEventBuilder::BuildGtidTaggedEvent(uuid, static_cast<int64_t>(kGnoEnd), "tag")},
+  };
+  for (const auto& [name, event] : events) {
+    SCOPED_TRACE(name);
+    reader_->should_stop_.store(false, std::memory_order_release);
+    const auto type = static_cast<mybinlog::EventType>(event[4]);
+    EXPECT_EQ(reader_->ObservePositionEvent(type, event.data(), event.size()),
+              BinlogReader::PositionEventAction::kReconnect);
+    EXPECT_EQ(reader_->GetLastErrorCode(), mygram::utils::ErrorCode::kMySQLUndecodableBinlogEvent)
+        << reader_->GetLastError();
+    EXPECT_NE(reader_->GetLastError().find("Malformed"), std::string::npos) << reader_->GetLastError();
+    EXPECT_EQ(reader_->position_state_.received_gtid(), uuid_text + ":tag:7")
+        << "the rejected event must not become the received position";
+    EXPECT_FALSE(reader_->should_stop_.load(std::memory_order_acquire)) << "a reconnect, not a stop";
+  }
 }
 
 /**
