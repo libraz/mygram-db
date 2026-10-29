@@ -24,6 +24,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MYGRAMDB_BINARY = Path(os.environ.get("MYGRAMDB_BINARY", PROJECT_ROOT / "build/bin/mygramdb"))
 
 
+def _show_variable_query(name: str) -> bytes:
+    """The text of the validator's query for one server variable."""
+    return b"SHOW VARIABLES WHERE Variable_name = _utf8mb4 X'" + name.encode().hex().upper().encode() + b"'"
+
+
 def _free_port() -> int:
     """Return an ephemeral loopback port for an isolated MygramDB process."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -190,15 +195,12 @@ def _has_recovery_sequence(records: list[dict[str, Any]]) -> bool:
 @pytest.mark.parametrize(
     "fault_query_fragment",
     [
-        pytest.param(b"SELECT @@GLOBAL.gtid_mode", id="early-gtid-mode"),
+        pytest.param(_show_variable_query("gtid_mode"), id="early-gtid-mode"),
         pytest.param(
             b"SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA",
             id="middle-required-table",
         ),
-        pytest.param(
-            b"SHOW VARIABLES LIKE 'binlog_checksum'",
-            id="late-binlog-checksum",
-        ),
+        pytest.param(_show_variable_query("binlog_checksum"), id="late-binlog-checksum"),
     ],
 )
 def test_reconnect_retries_transport_failure_during_schema_validation(
