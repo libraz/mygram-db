@@ -21,11 +21,12 @@
 #include <sstream>
 #include <utility>
 
+#include "mybinlog/mariadb_gtid.h"
+#include "mybinlog/mysql_gtid.h"
 #include "mysql/binlog_event_processor.h"
 #include "mysql/binlog_reader_internal.h"
 #include "mysql/connection_validator.h"
 #include "mysql/gtid_encoder.h"
-#include "mysql/mariadb_gtid.h"
 #include "server/server_types.h"  // For TableContext definition
 #include "utils/numeric_parse.h"
 #include "utils/structured_log.h"
@@ -33,6 +34,35 @@
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
 
 namespace mygramdb::mysql {
+
+namespace {
+
+/**
+ * Merge one MySQL GTID, untagged or tagged, into a GTID set's text.
+ * @return The merged set's text, or nullopt when either input does not parse
+ *         or @p next_gtid is not one source with one interval
+ */
+std::optional<std::string> MergeSingleMysqlGtid(const std::string& current_gtid, const std::string& next_gtid) {
+  mybinlog::GtidSet next_set;
+  if (mybinlog::GtidSet::Parse(next_gtid, &next_set) != mybinlog::Status::kOk) {
+    return std::nullopt;
+  }
+  // One source with one interval prints as "uuid[:tag]:a-b": no comma and a single dash after the UUID.
+  const std::string next_text = next_set.ToString();
+  const size_t uuid_end = next_text.find(':');
+  if (uuid_end == std::string::npos || next_text.find(',') != std::string::npos ||
+      next_text.find('-', uuid_end) != next_text.rfind('-')) {
+    return std::nullopt;
+  }
+  mybinlog::GtidSet merged;
+  if (mybinlog::GtidSet::Parse(current_gtid, &merged) != mybinlog::Status::kOk ||
+      merged.Merge(next_set) != mybinlog::Status::kOk) {
+    return std::nullopt;
+  }
+  return FormatGtidSet(merged);
+}
+
+}  // namespace
 
 bool BinlogReader::ProcessEvent(const BinlogEvent& event, mygram::utils::Error* error_out) {
   if (error_out != nullptr) {
@@ -172,7 +202,7 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
 
   // MariaDB GTIDs (domain-server-seq) don't need range conversion.
   // MariaDB uses @slave_connect_state which takes the GTID as-is.
-  if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
+  if (mybinlog::MariaDbGtid::IsMariaDbGtidFormat(gtid)) {
     return gtid;
   }
 
@@ -211,9 +241,18 @@ std::string BinlogReader::ConvertSingleGtidToRange(const std::string& gtid) {
     return gtid;
   }
 
-  // If it contains another colon, it could be tagged GTID or multiple intervals - pass through
-  if (after_colon.find(':') != std::string::npos) {
-    return gtid;
+  // A tagged single transaction ("uuid:tag:101") widens like an untagged one;
+  // several intervals pass through
+  const size_t tag_end = after_colon.find(':');
+  if (tag_end != std::string::npos) {
+    std::string normalized_tag;
+    const std::string_view number = std::string_view(after_colon).substr(tag_end + 1);
+    if (number.find(':') != std::string_view::npos ||
+        mybinlog::NormalizeGtidTag(std::string_view(after_colon).substr(0, tag_end), &normalized_tag) !=
+            mybinlog::Status::kOk) {
+      return gtid;
+    }
+    return gtid.substr(0, colon_pos + 1 + tag_end) + ":1-" + std::string(number);
   }
 
   // It's a single transaction number (e.g., "uuid:101")
@@ -244,37 +283,38 @@ mygram::utils::Expected<std::string, mygram::utils::Error> BinlogReader::UpdateC
         mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLInvalidGTID, "Cannot advance an empty GTID"));
   }
   std::string applied_gtid;
-  if (MariaDBGTID::IsMariaDBGtidFormat(gtid)) {
-    auto parsed = MariaDBGTID::Parse(gtid);
-    auto current_set = MariaDBGTID::ParseSet(current_gtid_);
-    if (!parsed || !current_set) {
+  if (mybinlog::MariaDbGtid::IsMariaDbGtidFormat(gtid)) {
+    mybinlog::MariaDbGtid parsed;
+    mybinlog::MariaDbGtidPosition current_set;
+    if (mybinlog::MariaDbGtid::Parse(gtid, &parsed) != mybinlog::Status::kOk ||
+        mybinlog::MariaDbGtidPosition::Parse(current_gtid_, &current_set) != mybinlog::Status::kOk) {
       return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
           mygram::utils::ErrorCode::kMySQLInvalidGTID,
           "Cannot merge MariaDB GTID '" + gtid + "' into applied position '" + current_gtid_ + "'"));
     }
 
-    std::map<uint32_t, MariaDBGTID> by_domain;
-    for (const auto& existing : *current_set) {
+    std::map<uint32_t, mybinlog::MariaDbGtid> by_domain;
+    for (const auto& existing : current_set.gtids) {
       auto iter = by_domain.find(existing.domain_id);
       if (iter == by_domain.end() || existing.sequence_no > iter->second.sequence_no) {
         by_domain[existing.domain_id] = existing;
       }
     }
 
-    auto iter = by_domain.find(parsed->domain_id);
-    if (iter == by_domain.end() || parsed->sequence_no >= iter->second.sequence_no) {
-      by_domain[parsed->domain_id] = *parsed;
+    auto iter = by_domain.find(parsed.domain_id);
+    if (iter == by_domain.end() || parsed.sequence_no >= iter->second.sequence_no) {
+      by_domain[parsed.domain_id] = parsed;
     }
 
-    std::vector<MariaDBGTID> merged;
-    merged.reserve(by_domain.size());
+    mybinlog::MariaDbGtidPosition merged;
+    merged.gtids.reserve(by_domain.size());
     for (const auto& [domain_id, domain_gtid] : by_domain) {
       (void)domain_id;
-      merged.push_back(domain_gtid);
+      merged.gtids.push_back(domain_gtid);
     }
-    applied_gtid = MariaDBGTID::SetToString(merged);
+    applied_gtid = merged.ToString();
   } else {
-    auto merged = GtidEncoder::MergeSingleGtidIntoSet(current_gtid_, gtid);
+    auto merged = MergeSingleMysqlGtid(current_gtid_, gtid);
     if (!merged.has_value()) {
       return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
           mygram::utils::ErrorCode::kMySQLInvalidGTID,
@@ -311,6 +351,7 @@ bool BinlogReader::ClearReachedReplayWatermarks(const std::string& applied_gtid)
     if (watermark.empty()) {
       continue;
     }
+    // The reader and worker paths compare fences the same way; one fence must report one error on every path.
     auto reached = GtidEncoder::PositionCoversAuto(watermark, applied_gtid);
     if (!reached) {
       // The same unevaluable fence the reader and worker paths stop on. Leaving

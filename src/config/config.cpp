@@ -19,9 +19,10 @@
 #include <sstream>
 
 #include "config/config_internal.h"
+#include "mybinlog/mariadb_gtid.h"
+#include "mybinlog/mysql_gtid.h"
 #include "utils/constants.h"
 #include "utils/datetime_converter.h"
-#include "utils/gtid_grammar.h"
 #include "utils/memory_utils.h"
 #include "utils/network_utils.h"
 #include "utils/numeric_parse.h"
@@ -52,6 +53,29 @@ namespace {
 using json = nlohmann::json;
 
 constexpr size_t kGtidPrefixLength = mygram::constants::kGtidPrefixLength;
+
+/**
+ * @brief Why a start position is neither a MySQL GTID set nor a MariaDB GTID list
+ * @return nullopt when it is one of them; empty or separator-only text holds no position
+ */
+std::optional<std::string> InvalidGtidPositionReason(std::string_view position) {
+  if (mygramdb::utils::TrimAsciiWhitespaceView(position).empty()) {
+    return "GTID position is empty";
+  }
+  mybinlog::MariaDbGtidPosition mariadb_position;
+  if (mybinlog::MariaDbGtidPosition::Parse(position, &mariadb_position) == mybinlog::Status::kOk) {
+    return std::nullopt;
+  }
+  mybinlog::GtidSet mysql_set;
+  switch (mybinlog::GtidSet::Parse(position, &mysql_set)) {
+    case mybinlog::Status::kOk:
+      return std::nullopt;
+    case mybinlog::Status::kLimitExceeded:
+      return "Too many intervals for one GTID source";
+    default:
+      return "Neither a MySQL GTID set nor a MariaDB GTID list";
+  }
+}
 
 mygram::utils::Expected<void, mygram::utils::Error> ValidateSQLIdentifier(const std::string& identifier,
                                                                           const std::string& context) {
@@ -1089,10 +1113,10 @@ mygram::utils::Expected<Config, mygram::utils::Error> ParseConfigFromJsonImpl(co
       // If gtid= format, validate the GTID format
       if (start.find("gtid=") == 0) {
         std::string gtid_str = start.substr(kGtidPrefixLength);  // Remove "gtid=" prefix
-        if (auto position = mygramdb::utils::ValidateGtidPosition(gtid_str); !position) {
+        if (auto reason = InvalidGtidPositionReason(gtid_str); reason.has_value()) {
           std::stringstream err_msg;
           err_msg << "Replication configuration error: Invalid GTID format: '" << gtid_str << "'\n";
-          err_msg << "  " << position.error().message() << "\n";
+          err_msg << "  " << *reason << "\n";
           err_msg << "  Expected format: gtid=UUID:transaction_id (MySQL) or gtid=domain-server-seq (MariaDB)\n";
           err_msg << "  Example: gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1 or gtid=0-1-5,1-1-3";
           return MakeUnexpected(MakeError(ErrorCode::kConfigInvalidValue, err_msg.str()));

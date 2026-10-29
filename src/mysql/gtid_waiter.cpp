@@ -11,7 +11,7 @@
 #include <thread>
 #include <utility>
 
-#include "mysql/gtid_encoder.h"
+#include "mysql/connection.h"
 
 namespace mygramdb::mysql {
 
@@ -50,7 +50,7 @@ mygram::utils::Expected<void, mygram::utils::Error> WaitForAppliedPosition(const
 
   while (true) {
     const std::string current = reader.GetCurrentGTID();
-    auto covers = GtidEncoder::PositionCoversAuto(target_gtid, current);
+    auto covers = GtidPositionCovers(target_gtid, current);
     if (!covers) {
       return MakeUnexpected(covers.error());
     }
@@ -73,12 +73,12 @@ mygram::utils::Expected<void, mygram::utils::Error> WaitForAppliedPosition(const
       last_position = current;
       have_last_position = true;
     } else {
-      auto advances = GtidEncoder::PositionCoversAuto(last_position, current);
+      auto advances = GtidPositionCovers(last_position, current);
       if (!advances) {
         return MakeUnexpected(advances.error());
       }
       if (*advances) {
-        auto unchanged = GtidEncoder::PositionCoversAuto(current, last_position);
+        auto unchanged = GtidPositionCovers(current, last_position);
         if (!unchanged) {
           return MakeUnexpected(unchanged.error());
         }

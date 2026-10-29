@@ -9,14 +9,14 @@
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
+#include <initializer_list>
 
+#include "mybinlog/mariadb_gtid.h"
+#include "mybinlog/mysql_gtid.h"
+#include "mybinlog/server_settings.h"
 #include "mysql/connection.h"
-#include "mysql/mariadb_gtid.h"
-#include "mysql/server_flavor.h"
 #include "utils/error.h"
 #include "utils/expected.h"
-#include "utils/gtid_grammar.h"
 #include "utils/sql_utils.h"
 #include "utils/string_utils.h"
 #include "utils/structured_log.h"
@@ -25,11 +25,20 @@ namespace mygramdb::mysql {
 
 namespace {
 
-/// Read one server variable; nullopt when the server does not define it.
-mygram::utils::Expected<std::optional<std::string>, mygram::utils::Error> ReadServerVariable(Connection& conn,
-                                                                                             std::string_view name) {
+using mybinlog::RuleId;
+using mygram::utils::Error;
+using mygram::utils::ErrorCode;
+using mygram::utils::MakeError;
+
+/// SHOW VARIABLES for exactly one name.
+std::string ShowVariableQuery(std::string_view name) {
   // LIKE takes only a plain quoted literal; WHERE takes the encoded expression and has no wildcards.
-  auto result = conn.Execute("SHOW VARIABLES WHERE Variable_name = " + mygramdb::utils::EncodeMySQLStringLiteral(name));
+  return "SHOW VARIABLES WHERE Variable_name = " + mygramdb::utils::EncodeMySQLStringLiteral(name);
+}
+
+/// Read one server variable; nullopt when the server does not define it.
+mygram::utils::Expected<std::optional<std::string>, Error> ReadServerVariable(Connection& conn, std::string_view name) {
+  auto result = conn.Execute(ShowVariableQuery(name));
   if (!result) {
     return mygram::utils::MakeUnexpected(result.error());
   }
@@ -38,6 +47,163 @@ mygram::utils::Expected<std::optional<std::string>, mygram::utils::Error> ReadSe
     return std::optional<std::string>{};
   }
   return std::optional<std::string>{row[1]};
+}
+
+/// Lookup context for EvaluateServerSettings that queries a live server.
+struct LiveVariableLookup {
+  Connection* conn = nullptr;
+  std::optional<Error> error;  ///< A failed query or a NULL value; the rule cannot be judged.
+};
+
+bool LookupLiveVariable(void* ctx, std::string_view variable, std::string* value) {
+  auto* lookup = static_cast<LiveVariableLookup*>(ctx);
+  auto result = lookup->conn->Execute(ShowVariableQuery(variable));
+  if (!result) {
+    lookup->error = result.error();
+    return false;
+  }
+  MYSQL_ROW row = mysql_fetch_row(result->get());
+  if (row == nullptr) {
+    return false;
+  }
+  if (row[1] == nullptr) {
+    lookup->error = MakeError(ErrorCode::kMySQLBinlogError, "Unable to determine " + std::string(variable) + " value.");
+    return false;
+  }
+  *value = row[1];
+  return true;
+}
+
+/// Lookup that answers every variable with one value already read; nullopt is an absent variable.
+bool LookupKnownValue(void* ctx, std::string_view /*variable*/, std::string* value) {
+  const auto* known = static_cast<const std::optional<std::string>*>(ctx);
+  if (!known->has_value()) {
+    return false;
+  }
+  *value = **known;
+  return true;
+}
+
+/// The error MygramDB reports for a violated server-setting rule.
+Error ViolationError(const mybinlog::Violation& violation) {
+  const std::string& name = violation.variable;
+  const std::string& value = violation.observed;
+  switch (violation.id) {
+    case RuleId::kLogBin:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       violation.absent ? "Unable to determine log_bin. MygramDB requires log_bin=ON."
+                                        : "log_bin=" + value +
+                                              " is not supported. MygramDB reads the binary log; enable it in the "
+                                              "server configuration and restart the server.");
+    case RuleId::kGtidMode:
+      return MakeError(ErrorCode::kMySQLGTIDNotEnabled, "GTID mode is not enabled on MySQL server (gtid_mode != ON)");
+    case RuleId::kBinlogFormat:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       violation.absent ? "Unable to determine binlog_format. MygramDB requires binlog_format=ROW."
+                                        : "binlog_format=" + value +
+                                              " is not supported. "
+                                              "MygramDB requires binlog_format=ROW for row-level replication. "
+                                              "Set it with: SET GLOBAL binlog_format=ROW");
+    case RuleId::kBinlogRowImage:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       violation.absent
+                           ? "Unable to determine binlog_row_image. MygramDB requires binlog_row_image=FULL."
+                           : "binlog_row_image=" + value +
+                                 " is not supported. "
+                                 "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
+                                 "Set it with: SET GLOBAL binlog_row_image=FULL");
+    case RuleId::kNoTransactionCompression:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       "binlog_transaction_compression=ON is not supported. "
+                       "TRANSACTION_PAYLOAD_EVENT (compressed binlog events) cannot be decoded. "
+                       "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF");
+    case RuleId::kNoPartialJson:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       "binlog_row_value_options contains PARTIAL_JSON. PARTIAL_UPDATE_ROWS_EVENT is not supported "
+                       "and cannot be decoded safely. Disable it with: SET GLOBAL binlog_row_value_options=''");
+    case RuleId::kNoLogBinCompress:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       "MariaDB log_bin_compress=ON is not supported. Disable it before starting MygramDB.");
+    case RuleId::kChecksumCrc32:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       violation.absent ? "binlog_checksum is unavailable. MygramDB requires binlog_checksum=CRC32 so "
+                                          "that every replicated event is integrity-checked."
+                                        : "binlog_checksum=" + value +
+                                              " is not supported. MygramDB requires binlog_checksum=CRC32 so that "
+                                              "every replicated event is integrity-checked. Set it with: SET GLOBAL "
+                                              "binlog_checksum=CRC32");
+    case RuleId::kRowMetadataFull:
+      return MakeError(ErrorCode::kMySQLBinlogError,
+                       violation.absent
+                           ? "Unable to determine binlog_row_metadata. MygramDB requires binlog_row_metadata=FULL."
+                           : "binlog_row_metadata=" + value +
+                                 " is not supported. MygramDB requires binlog_row_metadata=FULL so that TABLE_MAP "
+                                 "events carry column names. Set it with: SET GLOBAL binlog_row_metadata=FULL");
+    case RuleId::kLogReplicaUpdates:
+      return MakeError(
+          ErrorCode::kMySQLBinlogError,
+          violation.absent
+              ? "Unable to determine " + name + " on a server that is itself a replica."
+              : name + "=" + value +
+                    " is not supported on a server that is itself a replica. Replicated writes never reach its "
+                    "binary log, so MygramDB would stop seeing changes. Enable it in the server configuration and "
+                    "restart the server.");
+  }
+  return MakeError(ErrorCode::kMySQLBinlogError,
+                   std::string("Server setting rule ") + mybinlog::RuleIdName(violation.id) + " is not satisfied.");
+}
+
+/// Evaluate one rule; the first violation, or nullopt when it holds or does not apply.
+std::optional<mybinlog::Violation> EvaluateRule(RuleId rule, mybinlog::ServerFlavor flavor,
+                                                mybinlog::VariableLookupFn lookup, void* ctx) {
+  std::vector<mybinlog::Violation> violations;
+  mybinlog::EvaluateServerSettings(lookup, ctx, flavor, &rule, 1, &violations);
+  if (violations.empty()) {
+    return std::nullopt;
+  }
+  return violations.front();
+}
+
+/// Evaluate the given rules against the server in order and report the first that fails.
+mygram::utils::Expected<void, Error> CheckServerSettings(Connection& conn, std::initializer_list<RuleId> rules) {
+  for (const RuleId rule : rules) {
+    LiveVariableLookup lookup{&conn, std::nullopt};
+    auto violation = EvaluateRule(rule, conn.GetFlavor(), &LookupLiveVariable, &lookup);
+    if (lookup.error.has_value()) {
+      return mygram::utils::MakeUnexpected(*lookup.error);
+    }
+    if (violation.has_value()) {
+      return mygram::utils::MakeUnexpected(ViolationError(*violation));
+    }
+  }
+  return {};
+}
+
+/// Whether a value read for a rule's variable satisfies the rule.
+bool SatisfiesRule(RuleId rule, std::string_view value) {
+  std::optional<std::string> known{std::string(value)};
+  // The rules judged this way apply to both flavors.
+  return !EvaluateRule(rule, mybinlog::ServerFlavor::kMySQL, &LookupKnownValue, &known).has_value();
+}
+
+/// MariaDB PositionCovers over position text; kMariaDBInvalidGTID when either side does not parse.
+mygram::utils::Expected<bool, Error> MariaDBPositionCovers(const std::string& required, const std::string& available) {
+  auto invalid = [](const std::string& text, mybinlog::Status status) {
+    return mygram::utils::MakeUnexpected(
+        MakeError(ErrorCode::kMariaDBInvalidGTID,
+                  std::string("Invalid MariaDB GTID position (") + mybinlog::StatusName(status) + ")", text));
+  };
+  mybinlog::MariaDbGtidPosition required_position;
+  mybinlog::MariaDbGtidPosition available_position;
+  if (const auto status = mybinlog::MariaDbGtidPosition::Parse(required, &required_position);
+      status != mybinlog::Status::kOk) {
+    return invalid(required, status);
+  }
+  if (const auto status = mybinlog::MariaDbGtidPosition::Parse(available, &available_position);
+      status != mybinlog::Status::kOk) {
+    return invalid(available, status);
+  }
+  return mybinlog::PositionCovers(required_position, available_position);
 }
 
 }  // namespace
@@ -55,15 +221,15 @@ bool ConnectionValidator::IsValidIdentifier(std::string_view identifier) {
 }
 
 bool ConnectionValidator::IsSupportedBinlogFormatValue(std::string_view value) {
-  return mygram::utils::EqualsAsciiCaseInsensitive(value, "ROW");
+  return SatisfiesRule(RuleId::kBinlogFormat, value);
 }
 
 bool ConnectionValidator::IsSupportedBinlogChecksumValue(std::string_view value) {
-  return mygram::utils::EqualsAsciiCaseInsensitive(value, "CRC32");
+  return SatisfiesRule(RuleId::kChecksumCrc32, value);
 }
 
 bool ConnectionValidator::IsSupportedBinlogRowMetadataValue(std::string_view value) {
-  return mygram::utils::EqualsAsciiCaseInsensitive(value, "FULL");
+  return SatisfiesRule(RuleId::kRowMetadataFull, value);
 }
 
 bool ConnectionValidator::HasAppliedReplicatedGtids(std::string_view gtid_slave_pos) {
@@ -74,34 +240,15 @@ bool ConnectionValidator::IsBinlogStorageEngineEnabled(std::string_view value) {
   return !mygram::utils::TrimAsciiWhitespaceView(value).empty();
 }
 
-bool ConnectionValidator::ContainsTaggedGtid(std::string_view gtid_set) {
-  auto parsed = mygram::utils::ParseMysqlGtidSet(gtid_set);
-  if (!parsed) {
-    // A set the grammar rejects cannot be shown to be untagged.
-    return true;
-  }
-  // A tagged entry is keyed "uuid:tag", wherever in the entry the tag appears.
-  return std::any_of(parsed->begin(), parsed->end(),
-                     [](const auto& entry) { return entry.first.size() != mygram::utils::kGtidUuidTextLength; });
-}
-
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::EvaluateLogReplicaUpdates(
-    ServerFlavor flavor, bool is_replica, const std::optional<std::string>& value) {
+    mybinlog::ServerFlavor flavor, bool is_replica, const std::optional<std::string>& value) {
   if (!is_replica) {
     return {};
   }
-  const char* name = flavor == ServerFlavor::kMariaDB ? "log_slave_updates" : "log_replica_updates";
-  if (!value.has_value()) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError,
-        std::string("Unable to determine ") + name + " on a server that is itself a replica."));
-  }
-  if (!mygram::utils::EqualsAsciiCaseInsensitive(*value, "ON") && *value != "1") {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError,
-        std::string(name) + "=" + *value +
-            " is not supported on a server that is itself a replica. Replicated writes never reach its binary log, "
-            "so MygramDB would stop seeing changes. Enable it in the server configuration and restart the server."));
+  std::optional<std::string> known = value;
+  auto violation = EvaluateRule(RuleId::kLogReplicaUpdates, flavor, &LookupKnownValue, &known);
+  if (violation.has_value()) {
+    return mygram::utils::MakeUnexpected(ViolationError(*violation));
   }
   return {};
 }
@@ -130,7 +277,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
     return result;
   }
 
-  // 1. Check GTID mode
+  // 1. Check the binary log and GTID mode
   auto gtid_check = CheckGTIDEnabled(conn);
   if (!gtid_check) {
     result.error_message = gtid_check.error().message();
@@ -242,19 +389,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
     return result;
   }
 
-  // 10. Check tagged GTID support (unsupported)
-  auto tagged_gtid_check = CheckTaggedGTIDSupport(conn);
-  if (!tagged_gtid_check) {
-    result.error_message = tagged_gtid_check.error().message();
-    result.error_code = tagged_gtid_check.error().code();
-    mygram::utils::StructuredLog()
-        .Event("connection_validation_failed")
-        .Field("reason", "tagged_gtid_unsupported")
-        .Error();
-    return result;
-  }
-
-  // 11. Check binlog_row_metadata=FULL (column names must come from TABLE_MAP)
+  // 10. Check binlog_row_metadata=FULL (column names must come from TABLE_MAP)
   auto row_metadata_check = CheckBinlogRowMetadata(conn);
   if (!row_metadata_check) {
     result.error_message = row_metadata_check.error().message();
@@ -266,7 +401,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
     return result;
   }
 
-  // 12. Check MariaDB engine-integrated binlog (unsupported)
+  // 11. Check MariaDB engine-integrated binlog (unsupported)
   auto storage_engine_check = CheckBinlogStorageEngine(conn);
   if (!storage_engine_check) {
     result.error_message = storage_engine_check.error().message();
@@ -278,7 +413,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
     return result;
   }
 
-  // 13. Check that a replica source logs replicated writes
+  // 12. Check that a replica source logs replicated writes
   auto log_updates_check = CheckLogReplicaUpdates(conn);
   if (!log_updates_check) {
     result.error_message = log_updates_check.error().message();
@@ -304,15 +439,7 @@ ValidationResult ConnectionValidator::ValidateServer(Connection& conn,
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGTIDEnabled(Connection& conn) {
-  auto gtid_mode_enabled = conn.IsGTIDModeEnabled();
-  if (!gtid_mode_enabled) {
-    return mygram::utils::MakeUnexpected(gtid_mode_enabled.error());
-  }
-  if (!*gtid_mode_enabled) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLGTIDNotEnabled, "GTID mode is not enabled on MySQL server (gtid_mode != ON)"));
-  }
-  return {};
+  return CheckServerSettings(conn, {RuleId::kLogBin, RuleId::kGtidMode});
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTablesExist(
@@ -424,7 +551,7 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
   // MariaDB has no GTID_SUBSET function. Compare the highest sequence for
   // every required domain; server IDs are allowed to change on failover.
   if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
-    auto covered = MariaDBGTID::PositionCovers(*last_gtid, *executed_gtid);
+    auto covered = MariaDBPositionCovers(*last_gtid, *executed_gtid);
     if (!covered) {
       return MakeUnexpected(covered.error());
     }
@@ -474,14 +601,11 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
     return {};
   }
 
-  // Only the canonical text of a parsed position is embedded in SQL. Tagged
-  // GTIDs parse here and are rejected separately when the server advertises
-  // unsupported tagged transactions.
-  auto parsed_position = mygram::utils::ParseMysqlGtidSet(*last_gtid);
-  if (!parsed_position) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, parsed_position.error().message(), *last_gtid));
+  auto canonical_position = CanonicalMySQLGtidPosition(*last_gtid);
+  if (!canonical_position) {
+    return MakeUnexpected(canonical_position.error());
   }
-  const std::string gtid_str = mygram::utils::FormatMysqlGtidSet(*parsed_position);
+  const std::string& gtid_str = *canonical_position;
 
   // A safe hand-off requires both: the candidate has executed everything we
   // processed, and it has not purged any transaction absent from our position.
@@ -521,9 +645,20 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckGT
   return {};
 }
 
+mygram::utils::Expected<std::string, mygram::utils::Error> ConnectionValidator::CanonicalMySQLGtidPosition(
+    std::string_view position) {
+  mybinlog::GtidSet parsed;
+  if (const auto status = mybinlog::GtidSet::Parse(position, &parsed); status != mybinlog::Status::kOk) {
+    return mygram::utils::MakeUnexpected(
+        MakeError(ErrorCode::kMySQLInvalidGTID, std::string("Invalid GTID set (") + mybinlog::StatusName(status) + ")",
+                  std::string(position)));
+  }
+  return FormatGtidSet(parsed);
+}
+
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckMariaDBPositionNotPurged(
     const std::string& processed_position, const std::string& purge_boundary) {
-  auto covered = MariaDBGTID::PositionCovers(purge_boundary, processed_position);
+  auto covered = MariaDBPositionCovers(purge_boundary, processed_position);
   if (!covered) {
     return mygram::utils::MakeUnexpected(covered.error());
   }
@@ -538,192 +673,27 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckMa
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogCompression(Connection& conn) {
-  if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
-    auto result = conn.Execute("SHOW VARIABLES LIKE 'log_bin_compress'");
-    if (!result) {
-      return mygram::utils::MakeUnexpected(result.error());
-    }
-    MYSQL_ROW row = mysql_fetch_row(result->get());
-    if (row != nullptr && row[1] == nullptr) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kMySQLBinlogError, "Unable to determine MariaDB log_bin_compress value."));
-    }
-    if (row != nullptr && row[1] != nullptr && mygram::utils::ToUpper(row[1]) == "ON") {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kMySQLBinlogError,
-          "MariaDB log_bin_compress=ON is not supported. Disable it before starting MygramDB."));
-    }
-    return {};
-  }
-
-  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_transaction_compression'");
-  if (!result) {
-    // A missing variable is represented by a successful empty result. A query
-    // error means capability validation could not be completed.
-    return mygram::utils::MakeUnexpected(result.error());
-  }
-
-  MYSQL_ROW row = mysql_fetch_row(result->get());
-  if (row == nullptr) {
-    // Variable not found - OK (MySQL < 8.0.20)
-    return {};
-  }
-  if (row[1] == nullptr) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError, "Unable to determine binlog_transaction_compression value."));
-  }
-
-  // row[0] = variable name, row[1] = value
-  if (std::string(row[1]) == "ON") {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                 "binlog_transaction_compression=ON is not supported. "
-                                 "TRANSACTION_PAYLOAD_EVENT (compressed binlog events) cannot be decoded. "
-                                 "Disable compression with: SET GLOBAL binlog_transaction_compression=OFF"));
-  }
-
-  return {};
+  return CheckServerSettings(conn, {RuleId::kNoTransactionCompression, RuleId::kNoLogBinCompress});
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogRowImage(Connection& conn) {
-  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_image'");
-  if (!result) {
-    return mygram::utils::MakeUnexpected(result.error());
-  }
-
-  MYSQL_ROW row = mysql_fetch_row(result->get());
-  if (row == nullptr || row[1] == nullptr) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                 "Unable to determine binlog_row_image. MygramDB requires binlog_row_image=FULL."));
-  }
-
-  std::string value(row[1]);
-  if (!mygram::utils::EqualsAsciiCaseInsensitive(value, "FULL")) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                 "binlog_row_image=" + value +
-                                     " is not supported. "
-                                     "MygramDB requires binlog_row_image=FULL for correct NULL bitmap parsing. "
-                                     "Set it with: SET GLOBAL binlog_row_image=FULL"));
-  }
-
-  return {};
+  return CheckServerSettings(conn, {RuleId::kBinlogRowImage});
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogFormat(Connection& conn) {
-  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_format'");
-  if (!result) {
-    return mygram::utils::MakeUnexpected(result.error());
-  }
-
-  MYSQL_ROW row = mysql_fetch_row(result->get());
-  if (row == nullptr || row[1] == nullptr) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                 "Unable to determine binlog_format. MygramDB requires binlog_format=ROW."));
-  }
-
-  std::string value(row[1]);
-  if (!IsSupportedBinlogFormatValue(value)) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                 "binlog_format=" + value +
-                                     " is not supported. "
-                                     "MygramDB requires binlog_format=ROW for row-level replication. "
-                                     "Set it with: SET GLOBAL binlog_format=ROW"));
-  }
-
-  return {};
+  return CheckServerSettings(conn, {RuleId::kBinlogFormat});
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogChecksum(Connection& conn) {
-  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_checksum'");
-  if (!result) {
-    return mygram::utils::MakeUnexpected(result.error());
-  }
-
-  MYSQL_ROW row = mysql_fetch_row(result->get());
-  if (row == nullptr || row[1] == nullptr) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError,
-        "binlog_checksum is unavailable. MygramDB requires binlog_checksum=CRC32 so that every replicated event is "
-        "integrity-checked."));
-  }
-
-  std::string value(row[1]);
-  if (!IsSupportedBinlogChecksumValue(value)) {
-    return mygram::utils::MakeUnexpected(
-        mygram::utils::MakeError(mygram::utils::ErrorCode::kMySQLBinlogError,
-                                 "binlog_checksum=" + value +
-                                     " is not supported. MygramDB requires binlog_checksum=CRC32 so that every "
-                                     "replicated event is integrity-checked. Set it with: SET GLOBAL "
-                                     "binlog_checksum=CRC32"));
-  }
-
-  return {};
+  return CheckServerSettings(conn, {RuleId::kChecksumCrc32});
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckPartialJsonMode(Connection& conn) {
-  // MariaDB doesn't have binlog_row_value_options
-  if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
-    return {};
-  }
-
-  auto result = conn.Execute("SHOW VARIABLES LIKE 'binlog_row_value_options'");
-  if (!result) {
-    return mygram::utils::MakeUnexpected(result.error());
-  }
-
-  MYSQL_ROW row = mysql_fetch_row(result->get());
-  if (row == nullptr) {
-    return {};
-  }
-  if (row[1] == nullptr) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError, "Unable to determine binlog_row_value_options value."));
-  }
-
-  {
-    const std::string_view value(row[1]);
-    // Check if PARTIAL_JSON is in the value (case-insensitive)
-    constexpr std::string_view kPartialJson = "PARTIAL_JSON";
-    bool contains_partial_json = false;
-    for (size_t offset = 0; offset + kPartialJson.size() <= value.size(); ++offset) {
-      if (mygram::utils::EqualsAsciiCaseInsensitive(value.substr(offset, kPartialJson.size()), kPartialJson)) {
-        contains_partial_json = true;
-        break;
-      }
-    }
-    if (contains_partial_json) {
-      return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-          mygram::utils::ErrorCode::kMySQLBinlogError,
-          "binlog_row_value_options contains PARTIAL_JSON. PARTIAL_UPDATE_ROWS_EVENT is not supported and cannot be "
-          "decoded safely. Disable it with: SET GLOBAL binlog_row_value_options=''"));
-    }
-  }
-
-  return {};
+  return CheckServerSettings(conn, {RuleId::kNoPartialJson});
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogRowMetadata(Connection& conn) {
-  auto value = ReadServerVariable(conn, "binlog_row_metadata");
-  if (!value) {
-    return mygram::utils::MakeUnexpected(value.error());
-  }
-  if (!value->has_value()) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError,
-        "Unable to determine binlog_row_metadata. MygramDB requires binlog_row_metadata=FULL."));
-  }
-  if (!IsSupportedBinlogRowMetadataValue(**value)) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLBinlogError,
-        "binlog_row_metadata=" + **value +
-            " is not supported. MygramDB requires binlog_row_metadata=FULL so that TABLE_MAP events carry column "
-            "names. Set it with: SET GLOBAL binlog_row_metadata=FULL"));
-  }
-  return {};
+  return CheckServerSettings(conn, {RuleId::kRowMetadataFull});
 }
 
 mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckBinlogStorageEngine(Connection& conn) {
@@ -773,35 +743,12 @@ mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckLo
     return {};
   }
 
-  auto value = ReadServerVariable(conn, mariadb ? "log_slave_updates" : "log_replica_updates");
+  const auto& rule = mybinlog::GetRule(RuleId::kLogReplicaUpdates);
+  auto value = ReadServerVariable(conn, mariadb ? rule.mariadb_variable : rule.mysql_variable);
   if (!value) {
     return mygram::utils::MakeUnexpected(value.error());
   }
   return EvaluateLogReplicaUpdates(conn.GetFlavor(), is_replica, *value);
-}
-
-mygram::utils::Expected<void, mygram::utils::Error> ConnectionValidator::CheckTaggedGTIDSupport(Connection& conn) {
-  // Tagged GTIDs are a MySQL 8.4+ feature, not applicable to MariaDB
-  if (conn.GetFlavor() == ServerFlavor::kMariaDB) {
-    return {};
-  }
-
-  auto executed = conn.GetExecutedGTID();
-  if (!executed) {
-    // A transient query failure must not turn an unsupported tagged GTID set
-    // into a successful validation. Runtime parsing also fails closed, but
-    // rejecting here keeps startup/failover transactional and predictable.
-    return mygram::utils::MakeUnexpected(executed.error());
-  }
-
-  if (ContainsTaggedGtid(*executed)) {
-    return mygram::utils::MakeUnexpected(mygram::utils::MakeError(
-        mygram::utils::ErrorCode::kMySQLInvalidGTID,
-        "Tagged GTIDs are not supported. MygramDB cannot encode UUID:TAG:GNO positions for MySQL binlog reconnect. "
-        "Use an untagged GTID source or run a full resync from a compatible server."));
-  }
-
-  return {};
 }
 
 }  // namespace mygramdb::mysql

@@ -11,8 +11,8 @@
 #include <cstring>
 #include <string>
 
+#include "mybinlog/mysql_gtid.h"
 #include "mysql/binlog_reader_internal.h"
-#include "mysql/gtid_encoder.h"
 #include "utils/structured_log.h"
 
 // NOLINTBEGIN(cppcoreguidelines-pro-*,cppcoreguidelines-avoid-*,readability-magic-numbers)
@@ -68,14 +68,15 @@ mygram::utils::Expected<void, mygram::utils::Error> MySQLBinlogStream::Open(Conn
   rpl_.server_id = server_id;   // Use configured server ID for replica
   rpl_.flags = MYSQL_RPL_GTID;  // Use GTID mode (allow heartbeat events)
 
-  // Encode GTID set to binary format if we have one
+  // Encode GTID set to binary format if we have one; a tagged set takes the tagged encoding
   if (!gtid.empty()) {
-    auto encode_result = GtidEncoder::Encode(gtid);
-    if (!encode_result) {
-      return MakeUnexpected(
-          MakeError(ErrorCode::kMySQLBinlogError, "Failed to encode GTID set: " + encode_result.error().message()));
+    mybinlog::GtidSet gtid_set;
+    if (const auto status = mybinlog::GtidSet::Parse(gtid, &gtid_set); status != mybinlog::Status::kOk) {
+      return MakeUnexpected(MakeError(
+          ErrorCode::kMySQLBinlogError,
+          std::string("Failed to encode GTID set: invalid MySQL GTID set (") + mybinlog::StatusName(status) + ")"));
     }
-    gtid_encoded_data_ = std::move(*encode_result);
+    gtid_set.EncodeBinary(&gtid_encoded_data_);
 
     // Use callback approach: MySQL will call our callback to encode the GTID into the packet
     rpl_.gtid_set_encoded_size = gtid_encoded_data_.size();

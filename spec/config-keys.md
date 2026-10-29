@@ -51,6 +51,7 @@ The source server is probed at startup, before any snapshot is built, and again 
 
 | Requirement | Applies to | Code |
 |---|---|---|
+| `log_bin=ON` | both | `2008` |
 | `gtid_mode=ON` (MariaDB: always on) | MySQL | `2006` |
 | `binlog_format=ROW` | both | `2008` |
 | `binlog_row_image=FULL` | both | `2008` |
@@ -59,7 +60,6 @@ The source server is probed at startup, before any snapshot is built, and again 
 | no binlog compression: `binlog_transaction_compression` OFF (MySQL), `log_bin_compress` OFF (MariaDB) | both | `2008` |
 | `binlog_row_value_options` without `PARTIAL_JSON` | MySQL | `2008` |
 | `binlog_storage_engine` unset (the engine-integrated binary log has no per-event checksum) | MariaDB | `2008` |
-| no tagged GTID (`uuid:tag:n`) anywhere in `gtid_executed`, including after untagged intervals | MySQL | `2005` |
 | `log_replica_updates=ON` (MySQL) / `log_slave_updates=ON` (MariaDB) when the server is itself a replica | both | `2008` |
 
 Whether the server is a replica is decided by `SHOW REPLICA STATUS` returning rows (MySQL) or by a non-empty `@@GLOBAL.gtid_slave_pos` (MariaDB: the SQL thread records every replicated GTID group there, in GTID and in file/position mode, and reading it needs no privilege). On MySQL the statement needs `REPLICATION CLIENT`; when it is refused, validation fails with the server's privilege error rather than assuming the server is not a replica. A MariaDB server that was once a replica keeps a non-empty `gtid_slave_pos`, so it is held to the same requirement. The required account grants are `REPLICATION SLAVE`, `REPLICATION CLIENT` and `SELECT` on the monitored schema.
@@ -150,14 +150,14 @@ This value is applied only to tables that do not carry their own `ngram_size` (`
 | `replication.enable` | boolean | — | `true` | startup-only | `src/config/config-schema.json` |
 | `replication.auto_initial_snapshot` | boolean | — | `false` | startup-only | `src/config/config-schema.json`, cross-check `src/config/config.cpp` |
 | `replication.server_id` | integer | 0–4294967295; must be non-zero when replication is enabled (including when the block is omitted) and operationally unique among replication clients | `0` (valid only when disabled) | startup-only | `src/config/config-schema.json`, final-state validation in `src/config/config_validator.cpp` |
-| `replication.start_from` | string | `snapshot`, `latest`, or `gtid=<position>`, where the position is a MySQL GTID set (`UUID:txn[-txn]`, comma-separated per source; a transaction number must be below 2^63−1) or a MariaDB GTID list (`domain-server-seq`, comma-separated per domain); a value neither grammar accepts is rejected | `snapshot` | startup-only | `src/config/config.cpp`, `src/utils/gtid_grammar.cpp` |
+| `replication.start_from` | string | `snapshot`, `latest`, or `gtid=<position>`, where the position is a MySQL GTID set (`UUID[:tag]:txn[-txn]`, comma-separated per source; a transaction number must be below 2^63−1) or a MariaDB GTID list (`domain-server-seq`, comma-separated per domain); a value neither grammar accepts, including one holding only separators (`gtid=,`), is rejected | `snapshot` | startup-only | `src/config/config.cpp` |
 | `replication.queue_size` | integer | 100–1000000 | `10000` | startup-only | `src/config/config-schema.json` |
 | `replication.reconnect_backoff_min_ms` | integer | 100–60000 | `500` | startup-only · unread | `src/config/config-schema.json` |
 | `replication.reconnect_backoff_max_ms` | integer | 1000–600000 | `10000` | startup-only · unread | `src/config/config-schema.json` |
 
 `auto_initial_snapshot: true` requires `start_from: snapshot`; any other start position is a hard failure (`src/config/config.cpp`).
 
-A bare `UUID:N` entry in a MySQL start position means "through N": the reader widens it to `UUID:1-N` once, when the position enters the reader (`src/mysql/binlog_reader.cpp`), for each source separately. An entry that is already a range, carries several intervals or a tag is taken as written. Every later reconnect resumes from the applied position, which stays a single range from that start.
+A bare `UUID:N` or `UUID:tag:N` entry in a MySQL start position means "through N": the reader widens it to `UUID:1-N` or `UUID:tag:1-N` once, when the position enters the reader (`src/mysql/binlog_reader.cpp`, `src/mysql/binlog_reader_utils.cpp`), for each source separately. An entry that is already a range or carries several intervals is taken as written. Every later reconnect resumes from the applied position, which stays a single range from that start.
 
 ## `memory`
 
@@ -454,7 +454,7 @@ The types that pass are the ones both paths render identically: the integer widt
 
 - `replication.enable: true` with `server_id` of 0, including when the `replication` block is omitted and `enable` defaults to true — final-state validation in `src/config/config_validator.cpp`
 - `start_from` that is not `snapshot`, `latest`, or `gtid=…` — `src/config/config.cpp`
-- `gtid=` value that neither the MySQL GTID-set grammar nor the MariaDB GTID-list grammar accepts — `src/config/config.cpp`, `src/utils/gtid_grammar.cpp`
+- `gtid=` value that neither the MySQL GTID-set grammar nor the MariaDB GTID-list grammar accepts, including `gtid=,` — `src/config/config.cpp`
 - `auto_initial_snapshot: true` with a `start_from` other than `snapshot` — `src/config/config.cpp`
 - `dump.load_on_startup: true` with replication enabled and `start_from` other than `snapshot` — `src/config/config.cpp`
 

@@ -13,14 +13,46 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "mysql/server_flavor.h"
+#include "mybinlog/mysql_gtid.h"
+#include "mybinlog/server_flavor.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
 namespace mygramdb::mysql {
+
+/// Database server flavor.
+using ServerFlavor = mybinlog::ServerFlavor;
+
+/**
+ * Return the query for the GTID position actually available in this server's
+ * binary log. MariaDB gtid_current_pos also includes gtid_slave_pos, which may
+ * describe transactions this server cannot serve to a binlog client.
+ */
+const char* GetBinlogExecutedPositionQuery(ServerFlavor flavor);
+
+/**
+ * @brief Text of a MySQL GTID set in the form MygramDB stores and reports
+ *
+ * The entries and their order are those of mybinlog::GtidSet::ToString(), but a
+ * single transaction prints as "N" rather than "N-N".
+ */
+std::string FormatGtidSet(const mybinlog::GtidSet& gtid_set);
+
+/**
+ * @brief Whether every transaction of one GTID position is in another
+ *
+ * Both operands are read as MariaDB GTID positions when both parse as one, and
+ * as MySQL GTID sets otherwise.
+ *
+ * @return Whether @p available covers @p required, or kMySQLInvalidGTID when
+ *         neither reading accepts both operands
+ */
+mygram::utils::Expected<bool, mygram::utils::Error> GtidPositionCovers(std::string_view required,
+                                                                       std::string_view available);
 
 /// MySQL error code: server connection lost (CR_SERVER_LOST)
 constexpr unsigned int kMySQLErrServerLost = 2013;
@@ -81,8 +113,9 @@ struct GTID {
   /**
    * @brief Parse GTID from string format (UUID:transaction_id)
    *
-   * Uses the GtidEncoder grammar: the UUID is validated and stored in
-   * lowercase, and a range "UUID:start-end" yields its end.
+   * The text must be a MySQL GTID set holding one untagged interval: the UUID
+   * is validated and stored in lowercase, and a range "UUID:start-end" yields
+   * its end.
    *
    * @param gtid_str GTID string in format "UUID:transaction_id"
    * @return Expected<GTID, Error> with parsed GTID or kMySQLInvalidGTID

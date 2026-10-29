@@ -12,7 +12,7 @@
 #include <string_view>
 #include <vector>
 
-#include "mysql/server_flavor.h"
+#include "mybinlog/server_flavor.h"
 #include "utils/error.h"
 #include "utils/expected.h"
 
@@ -66,13 +66,6 @@ class ConnectionValidator {
   static bool IsBinlogStorageEngineEnabled(std::string_view value);
 
   /**
-   * @brief True when any GTID entry carries a tag, in any position of the entry
-   *
-   * A set the GTID grammar rejects counts as tagged: it cannot be shown to be untagged.
-   */
-  static bool ContainsTaggedGtid(std::string_view gtid_set);
-
-  /**
    * @brief Decide whether a replica keeps replicated writes in its own binary log
    *
    * @param is_replica Whether the replica status statement returned rows
@@ -80,7 +73,7 @@ class ConnectionValidator {
    * @return kMySQLBinlogError when a replica does not log replicated writes
    */
   static mygram::utils::Expected<void, mygram::utils::Error> EvaluateLogReplicaUpdates(
-      ServerFlavor flavor, bool is_replica, const std::optional<std::string>& value);
+      mybinlog::ServerFlavor flavor, bool is_replica, const std::optional<std::string>& value);
 
   /**
    * @brief Validate MySQL server connection
@@ -100,8 +93,8 @@ class ConnectionValidator {
 
  private:
   /**
-   * @brief Check if GTID mode is enabled
-   * @return Expected<void, Error> - success or error with kMySQLGTIDNotEnabled
+   * @brief Check that the binary log is enabled and, on MySQL, gtid_mode is ON
+   * @return Expected<void, Error> - success, kMySQLBinlogError for log_bin, or kMySQLGTIDNotEnabled
    */
   static mygram::utils::Expected<void, mygram::utils::Error> CheckGTIDEnabled(Connection& conn);
 
@@ -129,6 +122,16 @@ class ConnectionValidator {
    */
   static mygram::utils::Expected<void, mygram::utils::Error> CheckGTIDConsistency(
       Connection& conn, const std::optional<std::string>& last_gtid);
+
+  /**
+   * @brief Canonical text of a MySQL GTID position, the only form embedded in SQL
+   *
+   * Tagged sets are accepted; the text is that of FormatGtidSet().
+   *
+   * @return The canonical text, or kMySQLInvalidGTID when the position is not a MySQL GTID set
+   */
+  static mygram::utils::Expected<std::string, mygram::utils::Error> CanonicalMySQLGtidPosition(
+      std::string_view position);
 
   /**
    * @brief Reject a MariaDB position whose transactions the server has purged
@@ -219,14 +222,6 @@ class ConnectionValidator {
    * status query (missing privilege) fails validation.
    */
   static mygram::utils::Expected<void, mygram::utils::Error> CheckLogReplicaUpdates(Connection& conn);
-
-  /**
-   * @brief Check for tagged GTID usage
-   *
-   * MySQL 8.4+ supports tagged GTIDs (UUID:TAG:GNO).
-   * Detect usage and reject it until GTID encode/decode supports tags end-to-end.
-   */
-  static mygram::utils::Expected<void, mygram::utils::Error> CheckTaggedGTIDSupport(Connection& conn);
 };
 
 }  // namespace mygramdb::mysql

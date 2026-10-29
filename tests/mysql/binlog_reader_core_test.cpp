@@ -1522,12 +1522,11 @@ TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidMixed) {
 }
 
 /**
- * @brief Test ConvertSingleGtidToRange with multi-UUID tagged GTID passthrough
+ * @brief A bare tagged GTID (UUID:TAG:GNO) means "up to GNO", like an untagged one
  */
-TEST(BinlogReaderTest, ConvertSingleGtidToRangeMultiUuidWithTagged) {
-  // Tagged GTID entries (UUID:TAG:GNO) should pass through unchanged
+TEST(BinlogReaderTest, ConvertSingleGtidToRangeWidensTaggedEntries) {
   std::string result = BinlogReader::ConvertSingleGtidToRange("uuid1:101,uuid2:tag1:50");
-  EXPECT_EQ(result, "uuid1:1-101,uuid2:tag1:50");
+  EXPECT_EQ(result, "uuid1:1-101,uuid2:tag1:1-50");
 }
 
 /**

@@ -1,61 +1,40 @@
 /**
  * @file server_flavor.h
- * @brief MySQL/MariaDB server flavor detection
+ * @brief MySQL/MariaDB server flavor, as libmybinlog defines it
  */
 
 #pragma once
 
-#include <cstdint>
 #include <optional>
-#include <string>
+
+#include "mybinlog/server_flavor.h"
 
 namespace mygramdb::mysql {
 
-/**
- * @brief Database server flavor
- */
-enum class ServerFlavor : uint8_t {
-  kMySQL,    ///< MySQL (including Percona Server)
-  kMariaDB,  ///< MariaDB
-};
+/// Database server flavor.
+using ServerFlavor = mybinlog::ServerFlavor;
 
 /**
  * @brief Get human-readable name for server flavor
  */
 inline const char* GetServerFlavorName(ServerFlavor flavor) {
-  switch (flavor) {
-    case ServerFlavor::kMySQL:
-      return "MySQL";
-    case ServerFlavor::kMariaDB:
-      return "MariaDB";
-    default:
-      return "Unknown";
-  }
+  return mybinlog::ServerFlavorName(flavor);
 }
 
 /**
  * Return the query for the GTID position actually available in this server's
- * binary log. MariaDB gtid_current_pos also includes gtid_slave_pos, which may
- * describe transactions this server cannot serve to a binlog client.
+ * binary log (defined in connection.cpp).
  */
-inline const char* GetBinlogExecutedPositionQuery(ServerFlavor flavor) {
-  return flavor == ServerFlavor::kMariaDB ? "SELECT @@GLOBAL.gtid_binlog_pos" : "SELECT @@GLOBAL.gtid_executed";
-}
+const char* GetBinlogExecutedPositionQuery(ServerFlavor flavor);
 
-inline constexpr unsigned int kMySQLUnknownSystemVariableError = 1193;
+inline constexpr unsigned int kMySQLUnknownSystemVariableError = mybinlog::kErUnknownSystemVariable;
 
 /**
- * Classify a probe for MariaDB's source-binlog GTID variable. A successful
- * query identifies MariaDB; MySQL reports ER_UNKNOWN_SYSTEM_VARIABLE. Any
- * other query or result-read failure remains unknown so callers fail closed.
+ * Classify a probe for MariaDB's source-binlog GTID variable; see mybinlog::ClassifyFlavorProbe.
  */
 inline std::optional<ServerFlavor> ClassifyServerFlavorCapabilityProbe(bool query_succeeded, bool result_read_succeeded,
                                                                        unsigned int error_number) {
-  if (query_succeeded) {
-    return result_read_succeeded ? std::optional<ServerFlavor>(ServerFlavor::kMariaDB) : std::nullopt;
-  }
-  return error_number == kMySQLUnknownSystemVariableError ? std::optional<ServerFlavor>(ServerFlavor::kMySQL)
-                                                          : std::nullopt;
+  return mybinlog::ClassifyFlavorProbe(query_succeeded, result_read_succeeded, error_number);
 }
 
 }  // namespace mygramdb::mysql

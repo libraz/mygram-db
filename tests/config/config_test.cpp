@@ -1022,6 +1022,29 @@ TEST(ConfigTest, StartFromRejectsMalformedGtid) {
   EXPECT_NE(result.error().message().find("Invalid GTID format"), std::string::npos) << result.error().message();
 }
 
+/**
+ * @brief A gtid= value holding only a separator names no position and is a configuration error
+ */
+TEST(ConfigTest, StartFromRejectsSeparatorOnlyGtid) {
+  const auto path = WriteStartFromConfig("separator_gtid_start_from.yaml", "gtid=,");
+
+  auto result = LoadConfig(path);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kConfigInvalidValue);
+  EXPECT_NE(result.error().message().find("Invalid GTID format"), std::string::npos) << result.error().message();
+}
+
+/**
+ * @brief A tagged MySQL GTID set is a valid start_from position
+ */
+TEST(ConfigTest, StartFromAcceptsTaggedGtid) {
+  const auto path =
+      WriteStartFromConfig("tagged_gtid_start_from.yaml", "gtid=3E11FA47-71CA-11E1-9E33-C80AA9429562:1-5:mytag:1-2");
+
+  auto result = LoadConfig(path);
+  ASSERT_TRUE(result) << result.error().message();
+}
+
 TEST(ConfigTest, MultiTableAutoInitialSnapshotRejectsLatestStartFrom) {
   const auto path = TempConfigPath("multi_table_latest_start_from.yaml");
   std::ofstream f(path);

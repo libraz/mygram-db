@@ -13,7 +13,8 @@
 #include <string_view>
 #include <vector>
 
-#include "mysql/binlog_event_types.h"
+#include "mybinlog/disposition.h"
+#include "mybinlog/event_types.h"
 #include "mysql/connection.h"
 #include "utils/error.h"
 #include "utils/expected.h"
@@ -158,50 +159,46 @@ TEST(ConnectionValidatorUnitTest, BinlogFormatValidationRequiresRow) {
 }
 
 TEST(ConnectionValidatorUnitTest, MariaDBCompressedEventsAreExplicitlyFailClosed) {
-  using mygramdb::mysql::IsUnsupportedMariaDBCompressedEvent;
-  using mygramdb::mysql::MySQLBinlogEventType;
+  using mybinlog::EventType;
+  const auto is_compressed = [](EventType type) {
+    return mybinlog::ClassifyEvent(type, ServerFlavor::kMariaDB).disposition == mybinlog::Disposition::kCompressed;
+  };
 
-  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_QUERY_COMPRESSED_EVENT));
-  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1));
-  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1));
-  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1));
-  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT));
-  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_UPDATE_ROWS_COMPRESSED_EVENT));
-  EXPECT_TRUE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_DELETE_ROWS_COMPRESSED_EVENT));
-  EXPECT_FALSE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::MARIADB_GTID_EVENT));
-  EXPECT_FALSE(IsUnsupportedMariaDBCompressedEvent(MySQLBinlogEventType::WRITE_ROWS_EVENT));
+  EXPECT_TRUE(is_compressed(EventType::kMariaDBQueryCompressedEvent));
+  EXPECT_TRUE(is_compressed(EventType::kMariaDBWriteRowsCompressedEventV1));
+  EXPECT_TRUE(is_compressed(EventType::kMariaDBUpdateRowsCompressedEventV1));
+  EXPECT_TRUE(is_compressed(EventType::kMariaDBDeleteRowsCompressedEventV1));
+  EXPECT_TRUE(is_compressed(EventType::kMariaDBWriteRowsCompressedEvent));
+  EXPECT_TRUE(is_compressed(EventType::kMariaDBUpdateRowsCompressedEvent));
+  EXPECT_TRUE(is_compressed(EventType::kMariaDBDeleteRowsCompressedEvent));
+  EXPECT_FALSE(is_compressed(EventType::kMariaDBGtidEvent));
+  EXPECT_FALSE(is_compressed(EventType::kWriteRowsEvent));
 
-  EXPECT_STREQ(mygramdb::mysql::GetEventTypeName(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT),
+  EXPECT_STREQ(mybinlog::EventTypeName(EventType::kMariaDBWriteRowsCompressedEvent),
                "MARIADB_WRITE_ROWS_COMPRESSED_EVENT");
-  EXPECT_STREQ(mygramdb::mysql::GetEventTypeName(MySQLBinlogEventType::MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1),
+  EXPECT_STREQ(mybinlog::EventTypeName(EventType::kMariaDBWriteRowsCompressedEventV1),
                "MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1");
 }
 
-TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsOnlyTaggedEntries) {
-  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid(""));
-  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1"));
-  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-3:5-7"));
-  EXPECT_FALSE(ConnectionValidator::ContainsTaggedGtid(
-      "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:2-4"));
+/**
+ * @brief A tagged executed GTID set, as MySQL 8.4 prints it, is a valid position for the consistency check
+ */
+TEST(ConnectionValidatorUnitTest, TaggedExecutedGtidSetPassesTheConsistencyCheck) {
+  auto tagged = ConnectionValidator::CanonicalMySQLGtidPosition(
+      "01020304-0506-0708-090a-0b0c0d0e0f10:1-100:TAG:1-5,11111111-2222-3333-4444-555555555555:7");
+  ASSERT_TRUE(tagged.has_value()) << tagged.error().message();
+  EXPECT_EQ(*tagged,
+            "01020304-0506-0708-090a-0b0c0d0e0f10:1-100,01020304-0506-0708-090a-0b0c0d0e0f10:tag:1-5,"
+            "11111111-2222-3333-4444-555555555555:7");
 
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:mytag:100"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid(
-      "01020304-0506-0708-090a-0b0c0d0e0f10:1,11111111-2222-3333-4444-555555555555:tag:2"));
+  auto invalid = ConnectionValidator::CanonicalMySQLGtidPosition("01020304-0506-0708-090a-0b0c0d0e0f10:my-tag:100");
+  ASSERT_FALSE(invalid.has_value());
+  EXPECT_EQ(invalid.error().code(), mygram::utils::ErrorCode::kMySQLInvalidGTID);
 }
 
-TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidDetectsATagAfterUntaggedIntervals) {
-  // MySQL 8.4 prints the untagged intervals first, then each tag with its own.
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-100:tag:1-5"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-3:5-7:tag:9"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:tag_a:1-5:other:7"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:1-9:TAG:1"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid(
-      "01020304-0506-0708-090a-0b0c0d0e0f10:1-9,11111111-2222-3333-4444-555555555555:5:tag:1-2"));
-}
-
-TEST(ConnectionValidatorUnitTest, ContainsTaggedGtidTreatsUnparseableSetAsTagged) {
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("01020304-0506-0708-090a-0b0c0d0e0f10:my-tag:100"));
-  EXPECT_TRUE(ConnectionValidator::ContainsTaggedGtid("not-a-gtid"));
+TEST(ConnectionValidatorUnitTest, ExecutedPositionQueryReadsTheSourceBinlogPosition) {
+  EXPECT_STREQ(GetBinlogExecutedPositionQuery(ServerFlavor::kMariaDB), "SELECT @@GLOBAL.gtid_binlog_pos");
+  EXPECT_STREQ(GetBinlogExecutedPositionQuery(ServerFlavor::kMySQL), "SELECT @@GLOBAL.gtid_executed");
 }
 
 TEST(ConnectionValidatorUnitTest, BinlogRowMetadataMustBeFull) {

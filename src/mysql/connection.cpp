@@ -24,7 +24,7 @@
 #include <sys/socket.h>
 #endif
 
-#include "utils/gtid_grammar.h"
+#include "mybinlog/mariadb_gtid.h"
 #include "utils/numeric_parse.h"
 #include "utils/sql_utils.h"
 #include "utils/string_utils.h"
@@ -134,25 +134,99 @@ mygram::utils::Expected<internal::BinlogSnapshotPosition, mygram::utils::Error> 
 
 // GTID implementation
 
+const char* GetBinlogExecutedPositionQuery(ServerFlavor flavor) {
+  return flavor == ServerFlavor::kMariaDB ? "SELECT @@GLOBAL.gtid_binlog_pos" : "SELECT @@GLOBAL.gtid_executed";
+}
+
+std::string FormatGtidSet(const mybinlog::GtidSet& gtid_set) {
+  // ToString() prints every interval as "a-b"; the UUID is the only other piece holding a dash.
+  const std::string canonical = gtid_set.ToString();
+  std::string text;
+  text.reserve(canonical.size());
+  size_t piece_start = 0;
+  bool uuid_piece = true;
+  while (piece_start <= canonical.size()) {
+    size_t piece_end = canonical.find_first_of(",:", piece_start);
+    if (piece_end == std::string::npos) {
+      piece_end = canonical.size();
+    }
+    const std::string_view piece(canonical.data() + piece_start, piece_end - piece_start);
+    const size_t dash = piece.find('-');
+    if (!uuid_piece && dash != std::string_view::npos && piece.substr(0, dash) == piece.substr(dash + 1)) {
+      text.append(piece.substr(0, dash));
+    } else {
+      text.append(piece);
+    }
+    if (piece_end == canonical.size()) {
+      break;
+    }
+    text.push_back(canonical[piece_end]);
+    uuid_piece = canonical[piece_end] == ',';
+    piece_start = piece_end + 1;
+  }
+  return text;
+}
+
+mygram::utils::Expected<bool, mygram::utils::Error> GtidPositionCovers(std::string_view required,
+                                                                       std::string_view available) {
+  using mygram::utils::ErrorCode;
+  using mygram::utils::MakeError;
+  using mygram::utils::MakeUnexpected;
+
+  mybinlog::MariaDbGtidPosition required_mariadb;
+  mybinlog::MariaDbGtidPosition available_mariadb;
+  if (mybinlog::MariaDbGtidPosition::Parse(required, &required_mariadb) == mybinlog::Status::kOk &&
+      mybinlog::MariaDbGtidPosition::Parse(available, &available_mariadb) == mybinlog::Status::kOk) {
+    return mybinlog::PositionCovers(required_mariadb, available_mariadb);
+  }
+
+  auto invalid = [](std::string_view text, mybinlog::Status status) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID,
+                                    std::string("Invalid GTID position (") + mybinlog::StatusName(status) +
+                                        "): neither a MySQL GTID set nor a MariaDB GTID list",
+                                    std::string(text)));
+  };
+  mybinlog::GtidSet required_set;
+  mybinlog::GtidSet available_set;
+  if (const auto status = mybinlog::GtidSet::Parse(required, &required_set); status != mybinlog::Status::kOk) {
+    return invalid(required, status);
+  }
+  if (const auto status = mybinlog::GtidSet::Parse(available, &available_set); status != mybinlog::Status::kOk) {
+    return invalid(available, status);
+  }
+  return required_set.IsSubsetOf(available_set);
+}
+
 mygram::utils::Expected<GTID, mygram::utils::Error> GTID::Parse(const std::string& gtid_str) {
   using mygram::utils::ErrorCode;
   using mygram::utils::MakeError;
   using mygram::utils::MakeUnexpected;
 
   // Format: "UUID:transaction_id" or "UUID:start-end"; a range yields its end.
-  auto parsed = mygram::utils::ParseMysqlGtidSet(gtid_str);
-  if (!parsed) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, parsed.error().message(), gtid_str));
+  mybinlog::GtidSet parsed;
+  const mybinlog::Status status = mybinlog::GtidSet::Parse(gtid_str, &parsed);
+  if (status != mybinlog::Status::kOk) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID,
+                                    std::string("Invalid GTID format (") + mybinlog::StatusName(status) + ")",
+                                    gtid_str));
   }
-  if (parsed->size() != 1 || parsed->begin()->first.size() != mygram::utils::kGtidUuidTextLength ||
-      parsed->begin()->second.size() != 1) {
+  // One untagged interval is canonically "uuid:start-end": one colon, no comma.
+  const std::string canonical = parsed.ToString();
+  const size_t colon = canonical.find(':');
+  const size_t dash = canonical.rfind('-');
+  if (colon == std::string::npos || canonical.find_first_of(",:", colon + 1) != std::string::npos ||
+      dash == std::string::npos || dash < colon) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID,
                                     "Invalid GTID format: expected a single untagged UUID:transaction_id", gtid_str));
   }
+  const auto transaction_id = mygram::utils::ParseNumeric<uint64_t>(std::string_view(canonical).substr(dash + 1));
+  if (!transaction_id.has_value()) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format", gtid_str));
+  }
 
   GTID gtid;
-  gtid.server_uuid = parsed->begin()->first;
-  gtid.transaction_id = parsed->begin()->second.front().end;
+  gtid.server_uuid = canonical.substr(0, colon);
+  gtid.transaction_id = *transaction_id;
   return gtid;
 }
 
@@ -389,7 +463,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
   if (flavor_query_result == 0) {
     MySQLResult flavor_probe(mysql_store_result(mysql_));
     const bool result_read_succeeded = flavor_probe != nullptr || mysql_field_count(mysql_) == 0;
-    const auto detected_flavor = ClassifyServerFlavorCapabilityProbe(true, result_read_succeeded, mysql_errno(mysql_));
+    const auto detected_flavor = mybinlog::ClassifyFlavorProbe(true, result_read_succeeded, mysql_errno(mysql_));
     if (!detected_flavor.has_value()) {
       const std::string error = GetMySQLErrorMessage();
       Close();
@@ -398,7 +472,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
     }
     flavor_ = *detected_flavor;
   } else {
-    const auto detected_flavor = ClassifyServerFlavorCapabilityProbe(false, false, mysql_errno(mysql_));
+    const auto detected_flavor = mybinlog::ClassifyFlavorProbe(false, false, mysql_errno(mysql_));
     if (detected_flavor.has_value()) {
       flavor_ = *detected_flavor;
     } else {
@@ -419,7 +493,7 @@ mygram::utils::Expected<void, mygram::utils::Error> Connection::Connect(const st
       .Field("port", static_cast<uint64_t>(config_.port))
       .Field("database", config_.database)
       .Field("ssl", config_.ssl_enable)
-      .Field("flavor", GetServerFlavorName(flavor_))
+      .Field("flavor", mybinlog::ServerFlavorName(flavor_))
       .Field("version", server_version_)
       .Debug();
   return {};
