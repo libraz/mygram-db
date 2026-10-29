@@ -47,11 +47,7 @@ std::optional<std::string> MergeSingleMysqlGtid(const std::string& current_gtid,
   if (mybinlog::GtidSet::Parse(next_gtid, &next_set) != mybinlog::Status::kOk) {
     return std::nullopt;
   }
-  // One source with one interval prints as "uuid[:tag]:a-b": no comma and a single dash after the UUID.
-  const std::string next_text = next_set.ToString();
-  const size_t uuid_end = next_text.find(':');
-  if (uuid_end == std::string::npos || next_text.find(',') != std::string::npos ||
-      next_text.find('-', uuid_end) != next_text.rfind('-')) {
+  if (next_set.sources().size() != 1 || next_set.sources().begin()->second.size() != 1) {
     return std::nullopt;
   }
   mybinlog::GtidSet merged;

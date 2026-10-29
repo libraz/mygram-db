@@ -76,7 +76,7 @@ endif()
 FetchContent_Declare(
   libmybinlog
   GIT_REPOSITORY https://github.com/libraz/libmybinlog.git
-  GIT_TAG 717db77389ced67bd18bd6263a1f059fc196a981
+  GIT_TAG c28141d8b3cf1d9844a09dcb8878b8c332495d6c
 )
 FetchContent_MakeAvailable(libmybinlog)
 get_target_property(MYBINLOG_IID mybinlog INTERFACE_INCLUDE_DIRECTORIES)

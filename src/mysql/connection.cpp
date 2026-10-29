@@ -139,30 +139,27 @@ const char* GetBinlogExecutedPositionQuery(ServerFlavor flavor) {
 }
 
 std::string FormatGtidSet(const mybinlog::GtidSet& gtid_set) {
-  // ToString() prints every interval as "a-b"; the UUID is the only other piece holding a dash.
-  const std::string canonical = gtid_set.ToString();
   std::string text;
-  text.reserve(canonical.size());
-  size_t piece_start = 0;
-  bool uuid_piece = true;
-  while (piece_start <= canonical.size()) {
-    size_t piece_end = canonical.find_first_of(",:", piece_start);
-    if (piece_end == std::string::npos) {
-      piece_end = canonical.size();
+  for (const auto& [tsid, intervals] : gtid_set.sources()) {
+    if (intervals.empty()) {
+      continue;
     }
-    const std::string_view piece(canonical.data() + piece_start, piece_end - piece_start);
-    const size_t dash = piece.find('-');
-    if (!uuid_piece && dash != std::string_view::npos && piece.substr(0, dash) == piece.substr(dash + 1)) {
-      text.append(piece.substr(0, dash));
-    } else {
-      text.append(piece);
+    if (!text.empty()) {
+      text.push_back(',');
     }
-    if (piece_end == canonical.size()) {
-      break;
+    text += mybinlog::FormatUuid(tsid.uuid);
+    if (!tsid.tag.empty()) {
+      text.push_back(':');
+      text += tsid.tag;
     }
-    text.push_back(canonical[piece_end]);
-    uuid_piece = canonical[piece_end] == ',';
-    piece_start = piece_end + 1;
+    for (const auto& interval : intervals) {
+      text.push_back(':');
+      text += std::to_string(interval.start);
+      if (interval.end - interval.start > 1) {
+        text.push_back('-');
+        text += std::to_string(interval.end - 1);
+      }
+    }
   }
   return text;
 }
@@ -210,23 +207,15 @@ mygram::utils::Expected<GTID, mygram::utils::Error> GTID::Parse(const std::strin
                                     std::string("Invalid GTID format (") + mybinlog::StatusName(status) + ")",
                                     gtid_str));
   }
-  // One untagged interval is canonically "uuid:start-end": one colon, no comma.
-  const std::string canonical = parsed.ToString();
-  const size_t colon = canonical.find(':');
-  const size_t dash = canonical.rfind('-');
-  if (colon == std::string::npos || canonical.find_first_of(",:", colon + 1) != std::string::npos ||
-      dash == std::string::npos || dash < colon) {
+  const auto& sources = parsed.sources();
+  if (sources.size() != 1 || !sources.begin()->first.tag.empty() || sources.begin()->second.size() != 1) {
     return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID,
                                     "Invalid GTID format: expected a single untagged UUID:transaction_id", gtid_str));
   }
-  const auto transaction_id = mygram::utils::ParseNumeric<uint64_t>(std::string_view(canonical).substr(dash + 1));
-  if (!transaction_id.has_value()) {
-    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidGTID, "Invalid GTID format", gtid_str));
-  }
 
   GTID gtid;
-  gtid.server_uuid = canonical.substr(0, colon);
-  gtid.transaction_id = *transaction_id;
+  gtid.server_uuid = mybinlog::FormatUuid(sources.begin()->first.uuid);
+  gtid.transaction_id = sources.begin()->second.front().end - 1;
   return gtid;
 }
 
