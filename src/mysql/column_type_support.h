@@ -36,9 +36,9 @@ namespace mygramdb::mysql {
  * @brief What the binlog row decoder can do with a column type code.
  */
 enum class BinlogDecoding : uint8_t {
-  kDecoded,       ///< DecodeFieldValue has a case for this type code.
+  kDecoded,       ///< The row decoder renders this type code.
   kNotOnTheWire,  ///< No row event carries this code; the server writes a sibling code instead.
-  kUndecodable,   ///< No case decodes it, so a row containing it stops replication.
+  kUndecodable,   ///< Not rendered: a row image retaining it or holding a value in it fails the event.
 };
 
 /**
@@ -153,10 +153,9 @@ constexpr ColumnTypeSupport DescribeColumnType(ColumnType type) {
     case ColumnType::kVarString:
       return ColumnTypeSupport{CanonicalValueKind::kText, BinlogDecoding::kNotOnTheWire, ColumnAcceptance::kAccepted};
 
-    // JSON. The server renders a document with a space after every ':' and ','
-    // and in the order the binary form stores keys, while the row decoder
-    // writes the same document compactly. Both are valid JSON for the same
-    // value and neither is derivable from the other by normalization.
+    // JSON. The row decoder prints a document as the server's CAST(j AS CHAR);
+    // that the result set renders every document the same way has not been
+    // measured, so a configured column may not have the type.
     case ColumnType::kJson:
     // GEOMETRY and VECTOR. The result set returns the raw payload, which is not
     // UTF-8 and does not survive sanitizing, while the row decoder returns it

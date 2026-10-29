@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "binlog_event_builder.h"
-#include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
 #include "mysql/table_metadata.h"
 #include "mysql/text_materializer.h"
@@ -948,9 +947,9 @@ TEST_F(DateTimeParsingTest, Datetime2NegativePackedValueRejected) {
   // DATETIMEF_INT_OFS - 1 decodes to a negative intpart. The decoder must not
   // turn that into an unrelated positive date by taking abs(intpart).
   std::vector<unsigned char> datetime_bytes = {0x7F, 0xFF, 0xFF, 0xFF, 0xFF};
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 0,
-                                           /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
-                                           /*is_unsigned=*/false);
+  auto result = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 0,
+                                            /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                            /*is_unsigned=*/false);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
@@ -1130,9 +1129,9 @@ TEST_F(DateTimeParsingTest, Time2RejectsOutOfRangeHourWithoutMasking) {
                                            static_cast<unsigned char>((packed >> 8) & 0xFF),
                                            static_cast<unsigned char>(packed & 0xFF)};
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTime2), time_bytes.data(), 0,
-                                           /*is_null=*/false, time_bytes.data() + time_bytes.size(),
-                                           /*is_unsigned=*/false);
+  auto result = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kTime2), time_bytes.data(), 0,
+                                            /*is_null=*/false, time_bytes.data() + time_bytes.size(),
+                                            /*is_unsigned=*/false);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
@@ -1157,9 +1156,9 @@ TEST_F(DateTimeParsingTest, TimeOldFormat) {
 TEST_F(DateTimeParsingTest, OldTimeRejectsOutOfRangeComponents) {
   auto time_bytes = EncodeTime(12, 60, 0);
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTime), time_bytes.data(), 0,
-                                           /*is_null=*/false, time_bytes.data() + time_bytes.size(),
-                                           /*is_unsigned=*/false);
+  auto result = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kTime), time_bytes.data(), 0,
+                                            /*is_null=*/false, time_bytes.data() + time_bytes.size(),
+                                            /*is_unsigned=*/false);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
@@ -1168,8 +1167,8 @@ TEST_F(DateTimeParsingTest, OldTimeRejectsOutOfRangeComponents) {
 // MariaDB Field_time0 reads the 3 bytes with sint3korr: a negative time is a negative HHMMSS number.
 TEST_F(DateTimeParsingTest, OldTimeReadsTheThreeBytesAsSigned) {
   const auto decode = [](std::vector<unsigned char> bytes) {
-    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTime), bytes.data(), 0, /*is_null=*/false,
-                                      bytes.data() + bytes.size(), /*is_unsigned=*/false);
+    return internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kTime), bytes.data(), 0, /*is_null=*/false,
+                                       bytes.data() + bytes.size(), /*is_unsigned=*/false);
   };
 
   auto negative = decode({0xC0, 0x1D, 0xFE});  // -123456
@@ -1193,16 +1192,16 @@ TEST_F(DateTimeParsingTest, Datetime2RejectsAFractionOfOneMillionMicrosecondsOrM
   auto datetime_bytes = EncodeDatetime2(2000, 1, 1, 0, 0, 0);
   datetime_bytes.push_back(100);  // precision 2: 100 hundredths of a second
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 2,
-                                           /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
-                                           /*is_unsigned=*/false);
+  auto result = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 2,
+                                            /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                            /*is_unsigned=*/false);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
 
   datetime_bytes.back() = 99;
-  auto accepted = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 2,
-                                             /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
-                                             /*is_unsigned=*/false);
+  auto accepted = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kDatetime2), datetime_bytes.data(), 2,
+                                              /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                              /*is_unsigned=*/false);
   ASSERT_TRUE(accepted.has_value());
   EXPECT_EQ("2000-01-01 00:00:00.990000", *accepted);
 }
@@ -1242,14 +1241,14 @@ TEST_F(DateTimeParsingTest, Timestamp2WithMicroseconds) {
 TEST_F(DateTimeParsingTest, ZeroTimestampMatchesSnapshotCanonicalText) {
   const std::array<unsigned char, 4> zero_timestamp{};
 
-  auto legacy = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTimestamp), zero_timestamp.data(), 0,
-                                           false, zero_timestamp.data() + zero_timestamp.size(), false);
+  auto legacy = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kTimestamp), zero_timestamp.data(), 0,
+                                            false, zero_timestamp.data() + zero_timestamp.size(), false);
   ASSERT_TRUE(legacy.has_value()) << legacy.error().message();
   EXPECT_EQ(*legacy, CanonicalizeColumnValue("0000-00-00 00:00:00", CanonicalValueKind::kTemporal));
 
   std::array<unsigned char, 7> zero_timestamp2{};
-  auto modern = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTimestamp2), zero_timestamp2.data(), 6,
-                                           false, zero_timestamp2.data() + zero_timestamp2.size(), false);
+  auto modern = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kTimestamp2), zero_timestamp2.data(), 6,
+                                            false, zero_timestamp2.data() + zero_timestamp2.size(), false);
   ASSERT_TRUE(modern.has_value()) << modern.error().message();
   EXPECT_EQ(*modern, CanonicalizeColumnValue("0000-00-00 00:00:00.000000", CanonicalValueKind::kTemporal));
 }
@@ -1266,8 +1265,8 @@ TEST_F(DateTimeParsingTest, ZeroTimestampRejectsNonZeroFraction) {
   std::array<unsigned char, 7> invalid_timestamp2{};
   invalid_timestamp2.back() = 1;
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kTimestamp2), invalid_timestamp2.data(), 6,
-                                           false, invalid_timestamp2.data() + invalid_timestamp2.size(), false);
+  auto result = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kTimestamp2), invalid_timestamp2.data(), 6,
+                                            false, invalid_timestamp2.data() + invalid_timestamp2.size(), false);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
@@ -1301,8 +1300,8 @@ TEST_F(DateTimeParsingTest, TemporalBinlogValuesMatchCanonicalSnapshotText) {
 
   for (const auto& test_case : cases) {
     auto decoded =
-        internal::DecodeFieldValue(static_cast<uint8_t>(test_case.type), test_case.encoded.data(), test_case.metadata,
-                                   false, test_case.encoded.data() + test_case.encoded.size(), false);
+        internal::DecodeColumnValue(static_cast<uint8_t>(test_case.type), test_case.encoded.data(), test_case.metadata,
+                                    false, test_case.encoded.data() + test_case.encoded.size(), false);
     ASSERT_TRUE(decoded.has_value()) << test_case.snapshot;
     EXPECT_EQ(*decoded, CanonicalizeColumnValue(test_case.snapshot, mygramdb::mysql::CanonicalValueKind::kTemporal));
   }
@@ -1327,9 +1326,9 @@ TEST_F(DateTimeParsingTest, DateParsing) {
 TEST_F(DateTimeParsingTest, DateRejectsOutOfRangeComponents) {
   auto date_bytes = EncodeDate(2025, 13, 1);
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDate), date_bytes.data(), 0,
-                                           /*is_null=*/false, date_bytes.data() + date_bytes.size(),
-                                           /*is_unsigned=*/false);
+  auto result = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kDate), date_bytes.data(), 0,
+                                            /*is_null=*/false, date_bytes.data() + date_bytes.size(),
+                                            /*is_unsigned=*/false);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
@@ -1338,9 +1337,9 @@ TEST_F(DateTimeParsingTest, DateRejectsOutOfRangeComponents) {
 TEST_F(DateTimeParsingTest, OldDatetimeRejectsOutOfRangeComponents) {
   auto datetime_bytes = EncodeDatetime(2025, 13, 1, 12, 0, 0);
 
-  auto result = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDatetime), datetime_bytes.data(), 0,
-                                           /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
-                                           /*is_unsigned=*/false);
+  auto result = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kDatetime), datetime_bytes.data(), 0,
+                                            /*is_null=*/false, datetime_bytes.data() + datetime_bytes.size(),
+                                            /*is_unsigned=*/false);
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, result.error().code());
@@ -1760,8 +1759,8 @@ TEST_F(RowsParserTest, FloatTypeUsesRoundTripPrecision) {
   const float value = 123456.789f;
   auto bytes = EncodeFloat(value);
 
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kFloat), bytes.data(), 0, false,
-                                            bytes.data() + bytes.size());
+  auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kFloat), bytes.data(), 0, false,
+                                             bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
   EXPECT_NE(*decoded, std::to_string(value));
@@ -1771,8 +1770,8 @@ TEST_F(RowsParserTest, FloatTypeUsesRoundTripPrecision) {
 TEST_F(RowsParserTest, FloatBinlogValueMatchesCanonicalSnapshotText) {
   const float value = 3.14f;
   const auto bytes = EncodeFloat(value);
-  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kFloat), bytes.data(), 0, false,
-                                                  bytes.data() + bytes.size());
+  const auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kFloat), bytes.data(), 0, false,
+                                                   bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
   EXPECT_EQ(*decoded, CanonicalizeColumnValue("3.14", mygramdb::mysql::CanonicalValueKind::kFloat));
@@ -1835,8 +1834,8 @@ TEST_F(RowsParserTest, DoubleTypeUsesRoundTripPrecision) {
   const double value = 0.12345678901234566;
   auto bytes = EncodeDouble(value);
 
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDouble), bytes.data(), 0, false,
-                                            bytes.data() + bytes.size());
+  auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kDouble), bytes.data(), 0, false,
+                                             bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
   EXPECT_NE(*decoded, std::to_string(value));
@@ -1846,8 +1845,8 @@ TEST_F(RowsParserTest, DoubleTypeUsesRoundTripPrecision) {
 TEST_F(RowsParserTest, DoubleBinlogValueMatchesCanonicalSnapshotText) {
   const double value = 0.12345678901234566;
   const auto bytes = EncodeDouble(value);
-  const auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kDouble), bytes.data(), 0, false,
-                                                  bytes.data() + bytes.size());
+  const auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kDouble), bytes.data(), 0, false,
+                                                   bytes.data() + bytes.size());
 
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
   EXPECT_EQ(*decoded, CanonicalizeColumnValue("0.12345678901234566", mygramdb::mysql::CanonicalValueKind::kDouble));
@@ -2941,9 +2940,9 @@ TEST_F(RowsParserTest, DecimalLeadingZeroPartialGroupMatchesSnapshotText) {
 
   for (const auto& test_case : cases) {
     auto encoded = EncodeDecimalValue(test_case.value, test_case.precision, test_case.scale);
-    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), encoded.data(),
-                                              static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
-                                              false, encoded.data() + encoded.size(), false);
+    auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kNewDecimal), encoded.data(),
+                                               static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
+                                               false, encoded.data() + encoded.size(), false);
     ASSERT_TRUE(decoded.has_value()) << test_case.value;
     EXPECT_EQ(*decoded, test_case.value) << test_case.value;
   }
@@ -2953,12 +2952,12 @@ TEST_F(RowsParserTest, DecimalRejectsOutOfRangeMetadata) {
   const unsigned char data[] = {0x80};
 
   auto zero_precision =
-      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data, 0, false, data + sizeof(data));
-  auto excessive_precision = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data,
-                                                        static_cast<uint16_t>(66U << 8U), false, data + sizeof(data));
+      internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data, 0, false, data + sizeof(data));
+  auto excessive_precision = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data,
+                                                         static_cast<uint16_t>(66U << 8U), false, data + sizeof(data));
   auto excessive_scale =
-      internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data,
-                                 static_cast<uint16_t>((40U << 8U) | 39U), false, data + sizeof(data));
+      internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data,
+                                  static_cast<uint16_t>((40U << 8U) | 39U), false, data + sizeof(data));
 
   ASSERT_FALSE(zero_precision.has_value());
   ASSERT_FALSE(excessive_precision.has_value());
@@ -2989,18 +2988,18 @@ TEST_F(RowsParserTest, DecimalRejectsOutOfRangeDigitGroup) {
   };
 
   for (const auto& test_case : cases) {
-    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), test_case.bytes.data(),
-                                              static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
-                                              false, test_case.bytes.data() + test_case.bytes.size(), false);
+    auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kNewDecimal), test_case.bytes.data(),
+                                               static_cast<uint16_t>((test_case.precision << 8) | test_case.scale),
+                                               false, test_case.bytes.data() + test_case.bytes.size(), false);
     ASSERT_FALSE(decoded.has_value()) << test_case.label << " decoded as " << *decoded;
     EXPECT_EQ(decoded.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata) << test_case.label;
   }
 
   // The largest in-range groups still decode.
   const std::vector<unsigned char> max_groups = {0x89, 0x63};
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), max_groups.data(),
-                                            static_cast<uint16_t>((3U << 8U) | 2U), false,
-                                            max_groups.data() + max_groups.size(), false);
+  auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kNewDecimal), max_groups.data(),
+                                             static_cast<uint16_t>((3U << 8U) | 2U), false,
+                                             max_groups.data() + max_groups.size(), false);
   ASSERT_TRUE(decoded.has_value());
   EXPECT_EQ(*decoded, "9.99");
 }
@@ -3780,19 +3779,29 @@ TEST_F(RowsParserTest, WriteRowsEventRejectsTruncatedPackedColumnCount) {
 }
 
 // ---------------------------------------------------------------------------
-// ParseSingleRow direct tests
+// Single row image tests
 // ---------------------------------------------------------------------------
 
-class ParseSingleRowTest : public ::testing::Test {
+class SingleRowImageTest : public ::testing::Test {
  protected:
   /// Build a columns_present bitmap with all bits set for @p col_count columns.
   static std::vector<unsigned char> AllColumnsPresent(size_t col_count) {
     size_t bitmap_bytes = (col_count + 7) / 8;
     return std::vector<unsigned char>(bitmap_bytes, 0xFF);
   }
+
+  /// Parse @p row_image (NULL bitmap and values) as the only row of a WRITE_ROWS v1 event.
+  static mygram::utils::Expected<std::vector<RowData>, mygram::utils::Error> ParseImage(
+      const TableMetadata& meta, const std::vector<unsigned char>& columns_present,
+      const std::vector<unsigned char>& row_image, const std::string& pk_column, const std::string& text_column) {
+    const auto event = mygramdb::mysql::test::BinlogEventBuilder::BuildWriteRowsV1(
+        meta.table_id, 0, meta.columns.size(), columns_present, row_image);
+    return ParseWriteRowsEvent(event.data(), event.size(), &meta, pk_column, text_column,
+                               mybinlog::EventType::kWriteRowsEventV1);
+  }
 };
 
-TEST_F(ParseSingleRowTest, BasicIntRow) {
+TEST_F(SingleRowImageTest, BasicIntRow) {
   // Two INT columns: id=42, value=99
   TableMetadata meta;
   meta.table_id = 1;
@@ -3802,7 +3811,6 @@ TEST_F(ParseSingleRowTest, BasicIntRow) {
   meta.columns.push_back({ColumnType::kLong, "value", 0, false});
 
   auto cols_present = AllColumnsPresent(2);
-  size_t null_bitmap_size = (2 + 7) / 8;  // 1 byte
 
   // Row buffer: null_bitmap (1 byte, no NULLs) + id (4 bytes LE) + value (4 bytes LE)
   std::vector<unsigned char> buf;
@@ -3817,18 +3825,16 @@ TEST_F(ParseSingleRowTest, BasicIntRow) {
   for (int i = 0; i < 4; i++)
     buf.push_back((val_val >> (i * 8)) & 0xFF);
 
-  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
-                                                          cols_present.data(), null_bitmap_size, 2,
-                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+  auto result = ParseImage(meta, cols_present, buf, meta.columns[0].name, "");
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
-  EXPECT_EQ("42", result->row.primary_key);
-  EXPECT_EQ("42", result->row.GetColumnValue("id"));
-  EXPECT_EQ("99", result->row.GetColumnValue("value"));
-  EXPECT_EQ(result->next_ptr, buf.data() + buf.size());
+  ASSERT_EQ(1U, result->size());
+  EXPECT_EQ("42", result->front().primary_key);
+  EXPECT_EQ("42", result->front().GetColumnValue("id"));
+  EXPECT_EQ("99", result->front().GetColumnValue("value"));
 }
 
-TEST_F(ParseSingleRowTest, NullColumn) {
+TEST_F(SingleRowImageTest, NullColumn) {
   // Two INT columns: id=7, value=NULL
   TableMetadata meta;
   meta.table_id = 1;
@@ -3838,7 +3844,6 @@ TEST_F(ParseSingleRowTest, NullColumn) {
   meta.columns.push_back({ColumnType::kLong, "value", 0, false});
 
   auto cols_present = AllColumnsPresent(2);
-  size_t null_bitmap_size = 1;
 
   // null bitmap: bit 1 set (column index 1 is NULL)
   std::vector<unsigned char> buf;
@@ -3850,20 +3855,18 @@ TEST_F(ParseSingleRowTest, NullColumn) {
     buf.push_back((id_val >> (i * 8)) & 0xFF);
   // value is NULL -- no data bytes
 
-  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
-                                                          cols_present.data(), null_bitmap_size, 2,
-                                                          /*pk_col_idx=*/0, /*text_col_idx=*/1, "test", "");
+  auto result = ParseImage(meta, cols_present, buf, meta.columns[0].name, meta.columns[1].name);
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
-  EXPECT_EQ("7", result->row.primary_key);
-  EXPECT_EQ("", result->row.text);  // NULL is represented as empty string
-  EXPECT_EQ("", result->row.GetColumnValue("value"));
-  EXPECT_TRUE(result->row.IsColumnNull("value"));
-  EXPECT_FALSE(result->row.IsColumnNull("id"));
-  EXPECT_EQ(result->next_ptr, buf.data() + buf.size());
+  ASSERT_EQ(1U, result->size());
+  EXPECT_EQ("7", result->front().primary_key);
+  EXPECT_EQ("", result->front().text);  // NULL is represented as empty string
+  EXPECT_EQ("", result->front().GetColumnValue("value"));
+  EXPECT_TRUE(result->front().IsColumnNull("value"));
+  EXPECT_FALSE(result->front().IsColumnNull("id"));
 }
 
-TEST_F(ParseSingleRowTest, VarcharColumn) {
+TEST_F(SingleRowImageTest, VarcharColumn) {
   // One VARCHAR column (metadata=255, so 1-byte length prefix)
   TableMetadata meta;
   meta.table_id = 1;
@@ -3872,7 +3875,6 @@ TEST_F(ParseSingleRowTest, VarcharColumn) {
   meta.columns.push_back({ColumnType::kVarchar, "name", 255, false});
 
   auto cols_present = AllColumnsPresent(1);
-  size_t null_bitmap_size = 1;
 
   std::vector<unsigned char> buf;
   buf.push_back(0x00);  // null bitmap: no NULLs
@@ -3883,38 +3885,35 @@ TEST_F(ParseSingleRowTest, VarcharColumn) {
   for (char c : text)
     buf.push_back(static_cast<unsigned char>(c));
 
-  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
-                                                          cols_present.data(), null_bitmap_size, 1,
-                                                          /*pk_col_idx=*/-1, /*text_col_idx=*/0, "test", "");
+  auto result = ParseImage(meta, cols_present, buf, "", meta.columns[0].name);
 
   ASSERT_TRUE(result.has_value()) << result.error().message();
-  EXPECT_EQ("hello", result->row.text);
-  EXPECT_EQ("hello", result->row.GetColumnValue("name"));
+  ASSERT_EQ(1U, result->size());
+  EXPECT_EQ("hello", result->front().text);
+  EXPECT_EQ("hello", result->front().GetColumnValue("name"));
 }
 
-TEST_F(ParseSingleRowTest, TruncatedAtNullBitmap) {
-  // Buffer too short for null bitmap
+TEST_F(SingleRowImageTest, TruncatedAtNullBitmap) {
+  // Nine columns take a two-byte null bitmap; the row stops after one byte.
   TableMetadata meta;
   meta.table_id = 1;
   meta.database_name = "db";
   meta.table_name = "tbl";
   meta.columns.push_back({ColumnType::kLong, "id", 0, false});
+  for (int i = 1; i < 9; i++)
+    meta.columns.push_back({ColumnType::kLong, "c" + std::to_string(i), 0, false});
 
-  auto cols_present = AllColumnsPresent(1);
-  size_t null_bitmap_size = 1;
+  auto cols_present = AllColumnsPresent(9);
 
-  // Empty buffer -- can't even read null bitmap
-  std::vector<unsigned char> buf;
+  std::vector<unsigned char> buf = {0x00};
 
-  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
-                                                          cols_present.data(), null_bitmap_size, 1,
-                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+  auto result = ParseImage(meta, cols_present, buf, meta.columns[0].name, "");
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
 }
 
-TEST_F(ParseSingleRowTest, TruncatedFixedLengthColumnFailsBeforeDecode) {
+TEST_F(SingleRowImageTest, TruncatedFixedLengthColumnFailsBeforeDecode) {
   TableMetadata meta;
   meta.table_id = 1;
   meta.database_name = "db";
@@ -3922,21 +3921,18 @@ TEST_F(ParseSingleRowTest, TruncatedFixedLengthColumnFailsBeforeDecode) {
   meta.columns.push_back({ColumnType::kLong, "id", 0, false});
 
   auto cols_present = AllColumnsPresent(1);
-  size_t null_bitmap_size = 1;
 
   std::vector<unsigned char> buf;
   buf.push_back(0x00);  // null bitmap: no NULLs
   buf.push_back(0x01);  // only one of four LONG bytes
 
-  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
-                                                          cols_present.data(), null_bitmap_size, 1,
-                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+  auto result = ParseImage(meta, cols_present, buf, meta.columns[0].name, "");
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, result.error().code());
 }
 
-TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
+TEST_F(SingleRowImageTest, PartialColumnBitmapRejected) {
   // 3 columns but only column 0 and 2 present in bitmap
   TableMetadata meta;
   meta.table_id = 1;
@@ -3948,7 +3944,6 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
 
   // columns_present: bits 0 and 2 set, bit 1 clear -> 0b00000101 = 0x05
   std::vector<unsigned char> cols_present = {0x05};
-  size_t null_bitmap_size = 1;
 
   std::vector<unsigned char> buf;
   buf.push_back(0x00);  // null bitmap: no NULLs
@@ -3963,9 +3958,7 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
   for (int i = 0; i < 4; i++)
     buf.push_back((c_val >> (i * 8)) & 0xFF);
 
-  auto result = mygramdb::mysql::internal::ParseSingleRow(buf.data(), buf.data() + buf.size(), &meta,
-                                                          cols_present.data(), null_bitmap_size, 3,
-                                                          /*pk_col_idx=*/0, /*text_col_idx=*/-1, "test", "");
+  auto result = ParseImage(meta, cols_present, buf, meta.columns[0].name, "");
 
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(mygram::utils::ErrorCode::kMySQLBinlogError, result.error().code());
@@ -3975,8 +3968,8 @@ TEST_F(ParseSingleRowTest, PartialColumnBitmapRejected) {
 TEST(BitFieldDecodeTest, RejectsMoreThanEightBytes) {
   const std::vector<unsigned char> data(16, 0xFF);
   const auto decode = [&data](uint16_t metadata) {
-    return internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kBit), data.data(), metadata, /*is_null=*/false,
-                                      data.data() + data.size(), /*is_unsigned=*/false);
+    return internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kBit), data.data(), metadata, /*is_null=*/false,
+                                       data.data() + data.size(), /*is_unsigned=*/false);
   };
 
   auto widest = decode(8 << 8);  // BIT(64)
@@ -3987,35 +3980,31 @@ TEST(BitFieldDecodeTest, RejectsMoreThanEightBytes) {
     auto rejected = decode(metadata);
     ASSERT_FALSE(rejected.has_value()) << metadata;
     EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, rejected.error().code()) << metadata;
-    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kBit), data.data(), metadata,
-                                               data.data() + data.size()))
-        << metadata;
   }
 }
 
 TEST(FieldSizeBoundsTest, LengthPrefixPastTheEndIsReportedAsTruncated) {
   const std::vector<unsigned char> data = {0x05, 0x00};
   const unsigned char* end = data.data() + data.size();
+  const auto decode = [end](ColumnType type, const unsigned char* start, uint16_t metadata) {
+    return internal::DecodeColumnValue(static_cast<uint8_t>(type), start, metadata, /*is_null=*/false, end);
+  };
 
   // A VARCHAR(1000) prefix is two bytes; with one byte left it cannot be read.
-  EXPECT_EQ(binlog_util::kFieldSizeTruncated,
-            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kVarchar), end - 1, 1000, end));
-  EXPECT_EQ(binlog_util::kFieldSizeTruncated,
-            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kBlob), end, 2, end));
-  EXPECT_EQ(binlog_util::kFieldSizeTruncated,
-            binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kLongBlob), data.data(), 4, end));
-  EXPECT_EQ(7U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kBlob), data.data(), 2, end));
-  EXPECT_EQ(6U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kVarchar), data.data(), 100, end));
+  for (const auto& decoded :
+       {decode(ColumnType::kVarchar, end - 1, 1000), decode(ColumnType::kBlob, end, 2),
+        decode(ColumnType::kLongBlob, data.data(), 4), decode(ColumnType::kBlob, data.data(), 2)}) {
+    ASSERT_FALSE(decoded.has_value());
+    EXPECT_EQ(mygram::utils::ErrorCode::kMySQLFieldTruncated, decoded.error().code());
+  }
 }
 
-TEST(FieldSizeBoundsTest, JsonLengthWidthOutsideOneToFourIsRejectedBySizerAndDecoder) {
+TEST(FieldSizeBoundsTest, JsonLengthWidthOutsideOneToFourIsRejected) {
   const std::vector<unsigned char> data(8, 0);
   const unsigned char* end = data.data() + data.size();
   for (const uint16_t metadata : {0, 5, 255, 257}) {
-    EXPECT_EQ(0U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kJson), data.data(), metadata, end))
-        << metadata;
-    auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kJson), data.data(), metadata,
-                                              /*is_null=*/false, end, /*is_unsigned=*/false);
+    auto decoded = internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kJson), data.data(), metadata,
+                                               /*is_null=*/false, end, /*is_unsigned=*/false);
     ASSERT_FALSE(decoded.has_value()) << metadata;
     EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, decoded.error().code()) << metadata;
   }
@@ -4023,18 +4012,21 @@ TEST(FieldSizeBoundsTest, JsonLengthWidthOutsideOneToFourIsRejectedBySizerAndDec
 
 TEST(FieldSizeBoundsTest, NewDecimalAcceptsAScaleUpToThirtyEight) {
   // MariaDB DECIMAL(50,35): 15 integer digits (4+3 bytes), 35 fractional digits (3*4+4 bytes)
-  const auto metadata = static_cast<uint16_t>((50 << 8) | 35);
   std::vector<unsigned char> data(32, 0);
   data[0] = 0x80;  // positive zero
-  EXPECT_EQ(23U, binlog_util::calc_field_size(static_cast<uint8_t>(ColumnType::kNewDecimal), data.data(), metadata,
-                                              data.data() + data.size()));
-  EXPECT_EQ(23U, *binlog_util::decimal_binary_size(50, 35));
-  EXPECT_TRUE(binlog_util::decimal_binary_size(65, 38).has_value());
-  EXPECT_FALSE(binlog_util::decimal_binary_size(65, 39).has_value());
+  const auto decode = [&data](uint8_t precision, uint8_t scale) {
+    return internal::DecodeColumnValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data.data(),
+                                       static_cast<uint16_t>((precision << 8) | scale),
+                                       /*is_null=*/false, data.data() + data.size(), /*is_unsigned=*/false);
+  };
 
-  auto decoded = internal::DecodeFieldValue(static_cast<uint8_t>(ColumnType::kNewDecimal), data.data(), metadata,
-                                            /*is_null=*/false, data.data() + data.size(), /*is_unsigned=*/false);
+  auto decoded = decode(50, 35);
   ASSERT_TRUE(decoded.has_value()) << decoded.error().message();
+  auto widest = decode(65, 38);
+  EXPECT_TRUE(widest.has_value()) << widest.error().message();
+  auto excessive_scale = decode(65, 39);
+  ASSERT_FALSE(excessive_scale.has_value());
+  EXPECT_EQ(mygram::utils::ErrorCode::kMySQLInvalidMetadata, excessive_scale.error().code());
 }
 
 #endif  // USE_MYSQL

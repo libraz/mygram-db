@@ -12,12 +12,20 @@
 #include <limits>
 #include <locale>
 #include <sstream>
+#include <utility>
 
+#include "mybinlog/json.h"
 #include "utils/string_utils.h"
 
 namespace mygramdb::mysql {
 
 namespace {
+
+using mygram::utils::Error;
+using mygram::utils::ErrorCode;
+using mygram::utils::Expected;
+using mygram::utils::MakeError;
+using mygram::utils::MakeUnexpected;
 
 template <typename T>
 std::string FormatClassicLocale(T value) {
@@ -41,6 +49,91 @@ std::string CanonicalizeFloatingPoint(std::string_view value) {
   }
 
   return FormatClassicLocale(parsed);
+}
+
+/// Append @p value in decimal, left-padded with zeros to at least @p width digits.
+void AppendPadded(std::string& out, uint64_t value, size_t width) {
+  const std::string digits = std::to_string(value);
+  if (digits.size() < width) {
+    out.append(width - digits.size(), '0');
+  }
+  out += digits;
+}
+
+void AppendDate(std::string& out, const mybinlog::Temporal& temporal) {
+  AppendPadded(out, temporal.year, 4);
+  out.push_back('-');
+  AppendPadded(out, temporal.month, 2);
+  out.push_back('-');
+  AppendPadded(out, temporal.day, 2);
+}
+
+/// HH:MM:SS, then six fractional digits when the column declares a fractional precision.
+void AppendClock(std::string& out, const mybinlog::Temporal& temporal) {
+  AppendPadded(out, temporal.hour, 2);
+  out.push_back(':');
+  AppendPadded(out, temporal.minute, 2);
+  out.push_back(':');
+  AppendPadded(out, temporal.second, 2);
+  if (temporal.fsp > 0) {
+    out.push_back('.');
+    AppendPadded(out, temporal.microsecond, 6);
+  }
+}
+
+std::string HexEncode(const std::string& bytes) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::string hex;
+  hex.reserve(bytes.size() * 2);
+  for (const char byte : bytes) {
+    const auto value = static_cast<unsigned char>(byte);
+    hex.push_back(kDigits[value >> 4]);
+    hex.push_back(kDigits[value & 0x0F]);
+  }
+  return hex;
+}
+
+/// The declared labels an ENUM ordinal or a SET bitmask selects, as the result set returns them.
+Expected<std::string, Error> EnumSetText(mybinlog::Value::Kind kind, uint64_t value,
+                                         const std::vector<std::string>* labels) {
+  const bool is_enum = kind == mybinlog::Value::Kind::kEnum;
+  const char* kind_name = is_enum ? "ENUM" : "SET";
+  if (labels == nullptr) {
+    return std::to_string(value);
+  }
+  if (labels->empty()) {
+    return MakeUnexpected(
+        MakeError(ErrorCode::kMySQLInvalidMetadata, std::string(kind_name) + " labels are unavailable"));
+  }
+
+  if (is_enum) {
+    if (value == 0) {
+      return std::string{};
+    }
+    if (value > labels->size()) {
+      return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "ENUM ordinal is outside label table"));
+    }
+    return (*labels)[value - 1];
+  }
+
+  constexpr size_t kMaxSetMembers = 64;
+  if (labels->size() > kMaxSetMembers) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET has more than 64 labels"));
+  }
+  std::string decoded_labels;
+  for (size_t index = 0; index < labels->size(); ++index) {
+    if ((value & (uint64_t{1} << index)) == 0) {
+      continue;
+    }
+    if (!decoded_labels.empty()) {
+      decoded_labels.push_back(',');
+    }
+    decoded_labels += (*labels)[index];
+  }
+  if (labels->size() < kMaxSetMembers && (value >> labels->size()) != 0) {
+    return MakeUnexpected(MakeError(ErrorCode::kMySQLInvalidMetadata, "SET bitmask is outside label table"));
+  }
+  return decoded_labels;
 }
 
 }  // namespace
@@ -161,6 +254,102 @@ mygram::utils::Expected<std::string, mygram::utils::Error> FormatUtcTimestamp(ui
     oss << '.' << std::setfill('0') << std::setw(6) << microseconds;
   }
   return oss.str();
+}
+
+ErrorCode RowDecodeErrorCode(mybinlog::Status status) {
+  switch (status) {
+    case mybinlog::Status::kTruncated:
+    case mybinlog::Status::kLimitExceeded:
+      return ErrorCode::kMySQLFieldTruncated;
+    case mybinlog::Status::kInvalidMetadata:
+    case mybinlog::Status::kMalformedValue:
+      return ErrorCode::kMySQLInvalidMetadata;
+    case mybinlog::Status::kUnsupported:
+      return ErrorCode::kMySQLUnsupportedType;
+    case mybinlog::Status::kOk:
+    case mybinlog::Status::kChecksumMismatch:
+    case mybinlog::Status::kNeedMoreData:
+      break;
+  }
+  return ErrorCode::kMySQLBinlogError;
+}
+
+Expected<std::string, Error> CanonicalizeBinlogValue(mybinlog::Value&& value, const std::vector<std::string>* labels) {
+  using Kind = mybinlog::Value::Kind;
+  switch (value.kind) {
+    case Kind::kNull:
+      return std::string{};
+    case Kind::kInt:
+      return std::to_string(value.i);
+    case Kind::kUInt:
+    case Kind::kBit:
+      return std::to_string(value.u);
+    case Kind::kYear:
+      // The zero year is four zeros on both paths; any other YEAR is 1901..2155.
+      return value.u == 0 ? std::string{"0000"} : std::to_string(value.u);
+    case Kind::kDouble:
+      // A FLOAT arrives widened to double; narrowing it back is exact, and it
+      // has to be printed with a float's round-trip digits.
+      if (value.type == mybinlog::ColumnType::kFloat) {
+        return FormatFloatingPoint(static_cast<float>(value.d));
+      }
+      return FormatFloatingPoint(value.d);
+    case Kind::kDecimal:
+      return CanonicalizeColumnValue(value.bytes, CanonicalValueKind::kDecimal);
+    case Kind::kDate: {
+      std::string text;
+      AppendDate(text, value.t);
+      return text;
+    }
+    case Kind::kDateTime: {
+      std::string text;
+      AppendDate(text, value.t);
+      text.push_back(' ');
+      AppendClock(text, value.t);
+      return text;
+    }
+    case Kind::kTime: {
+      std::string text;
+      if (value.t.negative) {
+        text.push_back('-');
+      }
+      AppendClock(text, value.t);
+      return text;
+    }
+    case Kind::kTimestamp:
+      // A TIMESTAMP's seconds are four unsigned bytes on the wire.
+      return FormatUtcTimestamp(static_cast<uint32_t>(value.epoch_seconds), value.microsecond, value.fsp);
+    case Kind::kEnum:
+    case Kind::kSet:
+      return EnumSetText(value.kind, value.u, labels);
+    case Kind::kText:
+    case Kind::kBytes:
+      // GEOMETRY and VECTOR payloads are not text; they publish as lowercase hex.
+      if (value.type == mybinlog::ColumnType::kGeometry || value.type == mybinlog::ColumnType::kVector) {
+        return HexEncode(value.bytes);
+      }
+      if (mygram::utils::IsValidUtf8(value.bytes)) {
+        return std::move(value.bytes);
+      }
+      return CanonicalizeColumnValue(value.bytes, CanonicalValueKind::kText);
+    case Kind::kJson: {
+      std::string text;
+      const auto status =
+          mybinlog::JsonBinaryToText(reinterpret_cast<const uint8_t*>(value.bytes.data()), value.bytes.size(), &text);
+      if (status != mybinlog::Status::kOk) {
+        return MakeUnexpected(MakeError(RowDecodeErrorCode(status),
+                                        std::string("Undecodable JSON value: ") + mybinlog::StatusName(status)));
+      }
+      return text;
+    }
+    case Kind::kJsonDiff:
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLUnsupportedType, "Partial JSON update requires binlog_row_value_options=''"));
+    case Kind::kAbsent:
+      return MakeUnexpected(
+          MakeError(ErrorCode::kMySQLBinlogError, "Column absent from row image requires binlog_row_image=FULL"));
+  }
+  return MakeUnexpected(MakeError(ErrorCode::kMySQLUnsupportedType, "Unknown decoded value kind"));
 }
 
 }  // namespace mygramdb::mysql

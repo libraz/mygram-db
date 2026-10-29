@@ -108,8 +108,8 @@ TEST(RowsParserDecimalMetadataTest, ScaleAbovePrecisionIsRejectedWhenTheColumnIs
 
   auto event = BuildDecimalWriteRows(/*key=*/7, std::vector<uint8_t>(8, 0x80));
 
-  // Retaining only the key column routes the DECIMAL through the field-size
-  // path without decoding its value.
+  // Retaining only the key column sizes the DECIMAL without decoding its
+  // value; its metadata is still checked, because the size depends on it.
   RetainedColumns retained;
   retained.by_ordinal = {true, false};
 
@@ -117,7 +117,7 @@ TEST(RowsParserDecimalMetadataTest, ScaleAbovePrecisionIsRejectedWhenTheColumnIs
                                     mybinlog::EventType::kWriteRowsEvent, &retained);
 
   ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(ErrorCode::kMySQLUnsupportedType, result.error().code());
+  EXPECT_EQ(ErrorCode::kMySQLInvalidMetadata, result.error().code());
 }
 
 TEST(RowsParserDecimalMetadataTest, ScaleAbovePrecisionIsRejectedWhenTheColumnIsDecoded) {
@@ -150,7 +150,7 @@ TEST(RowsParserDecimalMetadataTest, PrecisionAboveTheProtocolMaximumIsRejected) 
                                     mybinlog::EventType::kWriteRowsEvent, &retained);
 
   ASSERT_FALSE(result.has_value());
-  EXPECT_EQ(ErrorCode::kMySQLUnsupportedType, result.error().code());
+  EXPECT_EQ(ErrorCode::kMySQLInvalidMetadata, result.error().code());
 }
 
 TEST(RowsParserDecimalMetadataTest, WellFormedDecimalStillParses) {

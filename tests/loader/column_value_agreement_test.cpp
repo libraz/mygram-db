@@ -33,7 +33,7 @@
 namespace mygramdb::mysql {
 namespace {
 
-using internal::DecodeFieldValue;
+using internal::DecodeColumnValue;
 
 // ===========================================================================
 // Row image encoders
@@ -598,8 +598,8 @@ std::string SnapshotValue(const AgreementCase& generated) {
 /// What the binlog path publishes for the same stored value.
 std::string BinlogValue(const AgreementCase& generated) {
   const auto* data = generated.row_image.data();
-  auto decoded = DecodeFieldValue(static_cast<uint8_t>(generated.binlog_type), data, generated.metadata, false,
-                                  data + generated.row_image.size(), generated.is_unsigned, &generated.labels);
+  auto decoded = DecodeColumnValue(static_cast<uint8_t>(generated.binlog_type), data, generated.metadata, false,
+                                   data + generated.row_image.size(), generated.is_unsigned, &generated.labels);
   return decoded ? *decoded : "<decode failed: " + decoded.error().message() + ">";
 }
 
@@ -629,8 +629,8 @@ TEST(ColumnValueAgreementTest, EveryAcceptedTypeDecodesIdenticallyOnBothPaths) {
 TEST(ColumnValueAgreementTest, NullIsTheEmptyStringOnBothPaths) {
   for (const auto& generated : GenerateCases()) {
     const auto* data = generated.row_image.data();
-    auto decoded = DecodeFieldValue(static_cast<uint8_t>(generated.binlog_type), data, generated.metadata, true,
-                                    data + generated.row_image.size(), generated.is_unsigned, &generated.labels);
+    auto decoded = DecodeColumnValue(static_cast<uint8_t>(generated.binlog_type), data, generated.metadata, true,
+                                     data + generated.row_image.size(), generated.is_unsigned, &generated.labels);
     ASSERT_TRUE(decoded) << generated.label << ": " << decoded.error().message();
     EXPECT_EQ(*decoded, "") << generated.label;
   }
@@ -687,8 +687,8 @@ TEST(ColumnValueAgreementTest, FloatColumnsCannotBeReconciledAndAreRefused) {
   EXPECT_EQ(DescribeColumnType(ColumnType::kFloat).acceptance, ColumnAcceptance::kRejectedPathsDisagree);
 
   const Bytes image = EncodeFloat(16777216.0F);
-  auto decoded = DecodeFieldValue(static_cast<uint8_t>(ColumnType::kFloat), image.data(), 0, false,
-                                  image.data() + image.size(), false, nullptr);
+  auto decoded = DecodeColumnValue(static_cast<uint8_t>(ColumnType::kFloat), image.data(), 0, false,
+                                   image.data() + image.size(), false, nullptr);
   ASSERT_TRUE(decoded) << decoded.error().message();
   EXPECT_EQ(*decoded, "16777216");
   EXPECT_NE(CanonicalizeColumnValue("16777200", CanonicalValueKind::kFloat), *decoded)

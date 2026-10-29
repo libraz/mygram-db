@@ -1,6 +1,6 @@
 /**
  * @file rows_parser_enum_set_test.cpp
- * @brief Unit tests for ENUM and SET column type decoding in DecodeFieldValue
+ * @brief Unit tests for ENUM and SET column type decoding in DecodeColumnValue
  */
 
 #include <gtest/gtest.h>
@@ -9,12 +9,12 @@
 #include <string>
 #include <vector>
 
-#include "mysql/binlog_util.h"
 #include "mysql/rows_parser_internal.h"
+#include "utils/error.h"
 
 #ifdef USE_MYSQL
 
-using mygramdb::mysql::internal::DecodeFieldValue;
+using mygramdb::mysql::internal::DecodeColumnValue;
 
 // MYSQL_TYPE_ENUM = 247
 // MYSQL_TYPE_SET = 248
@@ -30,7 +30,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteValue) {
   unsigned char data[] = {42};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "42");
 }
@@ -40,7 +40,7 @@ TEST_F(EnumSetDecodeTest, EnumUsesDeclarationLabelWhenMetadataIsAvailable) {
   unsigned char data[] = {2};
   const std::vector<std::string> labels = {"draft", "published"};
 
-  auto result = DecodeFieldValue(247, data, metadata, false, data + sizeof(data), false, &labels);
+  auto result = DecodeColumnValue(247, data, metadata, false, data + sizeof(data), false, &labels);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "published");
@@ -51,7 +51,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteZero) {
   unsigned char data[] = {0};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "0");
 }
@@ -61,7 +61,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteMax) {
   unsigned char data[] = {255};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "255");
 }
@@ -72,7 +72,7 @@ TEST_F(EnumSetDecodeTest, Enum2ByteValue) {
   unsigned char data[] = {0x01, 0x03};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "769");
 }
@@ -82,20 +82,20 @@ TEST_F(EnumSetDecodeTest, Enum2ByteZero) {
   unsigned char data[] = {0x00, 0x00};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "0");
 }
 
-TEST_F(EnumSetDecodeTest, EnumDefaultTo1ByteWhenMetadataZero) {
-  // When metadata high byte is 0, default to 1-byte enum
+TEST_F(EnumSetDecodeTest, EnumRejectsAZeroPackLength) {
+  // An ENUM is stored in one or two bytes; a pack length of 0 is not guessed.
   uint16_t metadata = 0;
   unsigned char data[] = {5};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
-  ASSERT_TRUE(result.has_value());
-  EXPECT_EQ(*result, "5");
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
 }
 
 TEST_F(EnumSetDecodeTest, Enum1ByteTruncated) {
@@ -103,7 +103,7 @@ TEST_F(EnumSetDecodeTest, Enum1ByteTruncated) {
   unsigned char data[] = {42};
   const unsigned char* end = data;  // No data available
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -112,7 +112,7 @@ TEST_F(EnumSetDecodeTest, Enum2ByteTruncated) {
   unsigned char data[] = {0x01};
   const unsigned char* end = data + 1;  // Only 1 byte, need 2
 
-  auto result = DecodeFieldValue(247, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -121,7 +121,7 @@ TEST_F(EnumSetDecodeTest, EnumNull) {
   unsigned char data[] = {42};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(247, data, metadata, true, end, false);
+  auto result = DecodeColumnValue(247, data, metadata, true, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "");
 }
@@ -135,7 +135,7 @@ TEST_F(EnumSetDecodeTest, Set1ByteValue) {
   unsigned char data[] = {0x05};  // bits 0 and 2 set
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(248, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "5");
 }
@@ -145,7 +145,7 @@ TEST_F(EnumSetDecodeTest, SetUsesCommaSeparatedDeclarationLabels) {
   unsigned char data[] = {0x05};
   const std::vector<std::string> labels = {"red", "green", "blue"};
 
-  auto result = DecodeFieldValue(248, data, metadata, false, data + sizeof(data), false, &labels);
+  auto result = DecodeColumnValue(248, data, metadata, false, data + sizeof(data), false, &labels);
 
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "red,blue");
@@ -154,13 +154,13 @@ TEST_F(EnumSetDecodeTest, SetUsesCommaSeparatedDeclarationLabels) {
 TEST_F(EnumSetDecodeTest, EnumAndSetBinlogValuesMatchSnapshotLabels) {
   const std::vector<std::string> enum_labels = {"draft", "published"};
   unsigned char enum_data[] = {2};
-  auto enum_value = DecodeFieldValue(247, enum_data, 1, false, enum_data + sizeof(enum_data), false, &enum_labels);
+  auto enum_value = DecodeColumnValue(247, enum_data, 1, false, enum_data + sizeof(enum_data), false, &enum_labels);
   ASSERT_TRUE(enum_value.has_value());
   EXPECT_EQ(*enum_value, "published");
 
   const std::vector<std::string> set_labels = {"red", "green", "blue"};
   unsigned char set_data[] = {0x05};
-  auto set_value = DecodeFieldValue(248, set_data, 1, false, set_data + sizeof(set_data), false, &set_labels);
+  auto set_value = DecodeColumnValue(248, set_data, 1, false, set_data + sizeof(set_data), false, &set_labels);
   ASSERT_TRUE(set_value.has_value());
   EXPECT_EQ(*set_value, "red,blue");
 }
@@ -171,7 +171,7 @@ TEST_F(EnumSetDecodeTest, Set2ByteValue) {
   unsigned char data[] = {0x01, 0x03};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(248, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "769");
 }
@@ -182,7 +182,7 @@ TEST_F(EnumSetDecodeTest, Set4ByteValue) {
   const unsigned char* end = data + sizeof(data);
 
   // 0x0F | (0 << 8) | (0 << 16) | (1 << 24) = 16777231
-  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(248, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "16777231");
 }
@@ -194,19 +194,19 @@ TEST_F(EnumSetDecodeTest, Set8ByteValue) {
 
   // 1 | (0x80 << 56) = 9223372036854775809
   uint64_t expected = 1ULL | (static_cast<uint64_t>(0x80) << 56);
-  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(248, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, std::to_string(expected));
 }
 
-TEST_F(EnumSetDecodeTest, SetDefaultTo1ByteWhenMetadataZero) {
+TEST_F(EnumSetDecodeTest, SetRejectsAZeroPackLength) {
   uint16_t metadata = 0;
   unsigned char data[] = {7};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
-  ASSERT_TRUE(result.has_value());
-  EXPECT_EQ(*result, "7");
+  auto result = DecodeColumnValue(248, data, metadata, false, end, false);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata);
 }
 
 TEST_F(EnumSetDecodeTest, Set1ByteTruncated) {
@@ -214,7 +214,7 @@ TEST_F(EnumSetDecodeTest, Set1ByteTruncated) {
   unsigned char data[] = {0x05};
   const unsigned char* end = data;  // No data available
 
-  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(248, data, metadata, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -223,7 +223,7 @@ TEST_F(EnumSetDecodeTest, Set4ByteTruncated) {
   unsigned char data[] = {0x01, 0x02};
   const unsigned char* end = data + 2;  // Only 2 bytes, need 4
 
-  auto result = DecodeFieldValue(248, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(248, data, metadata, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -232,7 +232,7 @@ TEST_F(EnumSetDecodeTest, SetNull) {
   unsigned char data[] = {0xFF, 0xFF};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(248, data, metadata, true, end, false);
+  auto result = DecodeColumnValue(248, data, metadata, true, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "");
 }
@@ -242,10 +242,9 @@ TEST_F(EnumSetDecodeTest, StringEncodedEnumReadsConfiguredPackLength) {
   unsigned char data[] = {0x01, 0x03};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(254, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(254, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "769");
-  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata, end), 2U);
 }
 
 TEST_F(EnumSetDecodeTest, StringEncodedSetReadsEightBytePackLength) {
@@ -254,10 +253,9 @@ TEST_F(EnumSetDecodeTest, StringEncodedSetReadsEightBytePackLength) {
   const unsigned char* end = data + sizeof(data);
   uint64_t expected = 1ULL | (static_cast<uint64_t>(0x80) << 56);
 
-  auto result = DecodeFieldValue(254, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(254, data, metadata, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, std::to_string(expected));
-  EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(254, data, metadata, end), 8U);
 }
 
 TEST_F(EnumSetDecodeTest, StringEncodedEnumReportsTruncatedPackLength) {
@@ -265,15 +263,15 @@ TEST_F(EnumSetDecodeTest, StringEncodedEnumReportsTruncatedPackLength) {
   unsigned char data[] = {0x01};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(254, data, metadata, false, end, false);
+  auto result = DecodeColumnValue(254, data, metadata, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(EnumSetDecodeTest, NativeAndStringEncodedEnumRejectTheSameInvalidPackLength) {
   unsigned char data[] = {0x01, 0x02, 0x03};
-  const auto native = DecodeFieldValue(247, data, 3, false, data + sizeof(data), false);
+  const auto native = DecodeColumnValue(247, data, 3, false, data + sizeof(data), false);
   const auto string_encoded =
-      DecodeFieldValue(254, data, static_cast<uint16_t>((247 << 8) | 3), false, data + sizeof(data), false);
+      DecodeColumnValue(254, data, static_cast<uint16_t>((247 << 8) | 3), false, data + sizeof(data), false);
 
   ASSERT_FALSE(native.has_value());
   ASSERT_FALSE(string_encoded.has_value());
@@ -283,9 +281,9 @@ TEST_F(EnumSetDecodeTest, NativeAndStringEncodedEnumRejectTheSameInvalidPackLeng
 
 TEST_F(EnumSetDecodeTest, NativeAndStringEncodedSetRejectTheSameInvalidPackLength) {
   unsigned char data[] = {0};
-  const auto native = DecodeFieldValue(248, data, 9, false, data + sizeof(data), false);
+  const auto native = DecodeColumnValue(248, data, 9, false, data + sizeof(data), false);
   const auto string_encoded =
-      DecodeFieldValue(254, data, static_cast<uint16_t>((248 << 8) | 9), false, data + sizeof(data), false);
+      DecodeColumnValue(254, data, static_cast<uint16_t>((248 << 8) | 9), false, data + sizeof(data), false);
 
   ASSERT_FALSE(native.has_value());
   ASSERT_FALSE(string_encoded.has_value());
@@ -293,30 +291,15 @@ TEST_F(EnumSetDecodeTest, NativeAndStringEncodedSetRejectTheSameInvalidPackLengt
   EXPECT_EQ(native.error().message(), string_encoded.error().message());
 }
 
-TEST_F(EnumSetDecodeTest, TinyMediumAndLongBlobTypesFallbackToBlobDecoder) {
-  {
-    unsigned char data[] = {3, 'a', 'b', 'c'};
-    const unsigned char* end = data + sizeof(data);
-    auto result = DecodeFieldValue(249, data, 0, false, end, false);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, "abc");
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(249, data, 0, end), 4U);
-  }
-  {
-    unsigned char data[] = {3, 0, 0, 'd', 'e', 'f'};
-    const unsigned char* end = data + sizeof(data);
-    auto result = DecodeFieldValue(250, data, 0, false, end, false);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, "def");
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(250, data, 0, end), 6U);
-  }
-  {
-    unsigned char data[] = {3, 0, 0, 0, 'g', 'h', 'i'};
-    const unsigned char* end = data + sizeof(data);
-    auto result = DecodeFieldValue(251, data, 0, false, end, false);
-    ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, "ghi");
-    EXPECT_EQ(mygramdb::mysql::binlog_util::calc_field_size(251, data, 0, end), 7U);
+TEST_F(EnumSetDecodeTest, TinyMediumAndLongBlobTypesRejectAZeroWidthLengthPrefix) {
+  // Every server writes the length-prefix width (1..4) as BLOB metadata; a
+  // width of 0 is not guessed from the type code.
+  unsigned char data[] = {3, 0, 0, 0, 'a', 'b', 'c'};
+  const unsigned char* end = data + sizeof(data);
+  for (const uint8_t type : {249, 250, 251}) {
+    auto result = DecodeColumnValue(type, data, 0, false, end, false);
+    ASSERT_FALSE(result.has_value()) << static_cast<int>(type);
+    EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLInvalidMetadata) << static_cast<int>(type);
   }
 }
 
@@ -329,7 +312,7 @@ TEST_F(EnumSetDecodeTest, OldDatetimeFormatsAsComparableTimestampString) {
       static_cast<unsigned char>((encoded >> 48) & 0xFF), static_cast<unsigned char>((encoded >> 56) & 0xFF)};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(12, data, 0, false, end, false);
+  auto result = DecodeColumnValue(12, data, 0, false, end, false);
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(*result, "2024-06-05 12:34:56");
 }
@@ -338,7 +321,7 @@ TEST_F(EnumSetDecodeTest, OldDatetimeReportsTruncatedPayload) {
   unsigned char data[] = {0x01, 0x02, 0x03, 0x04};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(12, data, 0, false, end, false);
+  auto result = DecodeColumnValue(12, data, 0, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -346,7 +329,7 @@ TEST_F(EnumSetDecodeTest, GeometryReportsTruncatedLengthPrefix) {
   unsigned char data[] = {0x03, 0x00};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(255, data, 4, false, end, false);
+  auto result = DecodeColumnValue(255, data, 4, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 
@@ -354,7 +337,7 @@ TEST_F(EnumSetDecodeTest, GeometryReportsTruncatedPayload) {
   unsigned char data[] = {0x04, 0x00, 0x00, 0x00, 0x01, 0x02};
   const unsigned char* end = data + sizeof(data);
 
-  auto result = DecodeFieldValue(255, data, 4, false, end, false);
+  auto result = DecodeColumnValue(255, data, 4, false, end, false);
   EXPECT_FALSE(result.has_value());
 }
 

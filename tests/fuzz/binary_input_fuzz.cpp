@@ -21,8 +21,8 @@
 
 #include "config/config.h"
 #include "index/index.h"
+#include "mybinlog/json.h"
 #include "mybinlog/mariadb_gtid.h"
-#include "mysql/binary_json.h"
 #include "mysql/binlog_event_parser.h"
 #include "mysql/rows_parser.h"
 #include "mysql/table_metadata.h"
@@ -116,14 +116,10 @@ void FuzzRowsParser(const uint8_t* data, size_t size) {
   }
 }
 
-/// Binary JSON arrives inside row images, so it decodes untrusted bytes with
-/// its own nesting, count and output-size limits.
+/// Binary JSON arrives inside row images; a retained JSON column is printed from untrusted bytes.
 void FuzzBinaryJson(const uint8_t* data, size_t size) {
-  const auto* bytes = reinterpret_cast<const unsigned char*>(data);
-  (void)mygramdb::mysql::DecodeBinaryJson(bytes, size);
-  // A small budget exercises the truncation refusal rather than the default
-  // ceiling, which no reachable input would hit.
-  (void)mygramdb::mysql::DecodeBinaryJson(bytes, size, 4096);
+  std::string text;
+  (void)mybinlog::JsonBinaryToText(data, size, &text);
 }
 
 /// Query text is the one surface an unauthenticated client controls directly.

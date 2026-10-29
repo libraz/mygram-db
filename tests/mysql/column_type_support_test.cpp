@@ -18,15 +18,16 @@
 
 #ifdef USE_MYSQL
 
-#include "mysql/binlog_util.h"
+#include "binlog_event_builder.h"
 #include "mysql/column_type_support.h"
 #include "mysql/ddl_schema_validator.h"
+#include "mysql/rows_parser.h"
 #include "mysql/rows_parser_internal.h"
 
 namespace mygramdb::mysql {
 namespace {
 
-using internal::DecodeFieldValue;
+using internal::DecodeColumnValue;
 
 /// Every value of ColumnType, as it appears in a TABLE_MAP or a MYSQL_FIELD.
 constexpr uint8_t kEnumeratedTypeCodes[] = {1,   2,   3,   4,   5,   7,   8,   9,   10,  11,  12,
@@ -55,7 +56,7 @@ bool IsEnumerated(uint8_t code) {
 bool RowDecoderHasACase(uint8_t code, uint16_t metadata) {
   const std::vector<unsigned char> buffer(16, 0);
   const std::vector<std::string> labels = {"a", "b"};
-  auto decoded = DecodeFieldValue(code, buffer.data(), metadata, false, buffer.data() + buffer.size(), false, &labels);
+  auto decoded = DecodeColumnValue(code, buffer.data(), metadata, false, buffer.data() + buffer.size(), false, &labels);
   return decoded.has_value() || decoded.error().code() != mygram::utils::ErrorCode::kMySQLUnsupportedType;
 }
 
@@ -125,25 +126,45 @@ TEST(ColumnTypeSupportTest, TypesOutsideTheDecodableSetAreRefusedByTheRowDecoder
 }
 
 /**
- * @brief The field sizer and the decoder cover the same types.
+ * @brief A type the table does not call decodable fails the event even when nothing reads it.
  *
- * The row loop advances by the size the sizer computes and reads the value the
- * decoder produces. A type only one of them knows either skips the wrong number
- * of bytes or drops a value the row needs, and both corrupt every column after
- * it in the same row.
+ * An unread column is sized and skipped rather than rendered. A value in a
+ * column of a type the table refuses still stops the event: the stream carries
+ * a column this build cannot vouch for. A NULL there carries nothing.
  */
-TEST(ColumnTypeSupportTest, TheFieldSizerCoversExactlyTheDecodableTypes) {
-  const std::vector<unsigned char> buffer(16, 0);
+TEST(ColumnTypeSupportTest, AnUnreadUndecodableColumnFailsTheEventOnlyWhenItHoldsAValue) {
   for (int candidate = 0; candidate <= 255; ++candidate) {
-    const auto code = static_cast<uint8_t>(candidate);
-    bool sized_somewhere = false;
-    for (const uint16_t metadata : kSampleMetadata) {
-      sized_somewhere = sized_somewhere ||
-                        binlog_util::calc_field_size(code, buffer.data(), metadata, buffer.data() + buffer.size()) != 0;
+    const auto type = static_cast<ColumnType>(candidate);
+    if (DescribeColumnType(type).binlog_decoding == BinlogDecoding::kDecoded) {
+      continue;
     }
-    const bool decodable =
-        DescribeColumnType(static_cast<ColumnType>(code)).binlog_decoding == BinlogDecoding::kDecoded;
-    EXPECT_EQ(sized_somewhere, decodable) << "column type " << candidate;
+    TableMetadata metadata;
+    metadata.table_id = 7;
+    metadata.columns.resize(2);
+    metadata.columns[0].type = ColumnType::kLong;
+    metadata.columns[0].name = "id";
+    metadata.columns[1].type = type;
+    metadata.columns[1].name = "other";
+    metadata.RebuildColumnOrdinals();
+    RetainedColumns retained;
+    retained.by_ordinal = {true, false};
+
+    for (const bool is_null : {false, true}) {
+      std::vector<uint8_t> row = {static_cast<uint8_t>(is_null ? 0x02 : 0x00), 0x01, 0x00, 0x00, 0x00};
+      if (!is_null) {
+        row.insert(row.end(), 16, 0x00);
+      }
+      const auto event = test::BinlogEventBuilder::BuildWriteRowsV1(metadata.table_id, 0, 2, {0x03}, row);
+      auto result = ParseWriteRowsEvent(event.data(), event.size(), &metadata, "id", "",
+                                        mybinlog::EventType::kWriteRowsEventV1, &retained);
+      if (is_null) {
+        EXPECT_TRUE(result.has_value()) << "column type " << candidate << ": " << result.error().message();
+      } else {
+        ASSERT_FALSE(result.has_value()) << "column type " << candidate;
+        EXPECT_EQ(result.error().code(), mygram::utils::ErrorCode::kMySQLUnsupportedType)
+            << "column type " << candidate;
+      }
+    }
   }
 }
 
