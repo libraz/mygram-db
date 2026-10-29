@@ -35,6 +35,7 @@ if(USE_MYSQL AND MYSQL_FOUND)
     mygramdb_utils
     mygramdb_storage  # Includes mygramdb_index transitively
     mygramdb_cache    # binlog_event_processor calls cache::CacheManager
+    mybinlog::mybinlog
     spdlog
   )
 

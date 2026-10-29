@@ -53,7 +53,8 @@ For detailed development environment setup, see [Development Guide](https://mygr
 # Install dependencies (macOS example)
 brew install cmake llvm@18 mysql-client icu4c
 
-# Build project
+# Build project (fetches pinned dependencies; offline, point
+# MYBINLOG_SOURCE_DIR at a libmybinlog checkout)
 make
 
 # Run tests

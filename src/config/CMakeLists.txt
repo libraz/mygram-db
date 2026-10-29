@@ -42,6 +42,7 @@ target_link_libraries(mygramdb_config PUBLIC
   nlohmann_json_schema_validator
   spdlog::spdlog
   mygramdb_utils
+  mybinlog::mybinlog
 )
 
 add_library(mygramdb_runtime_config STATIC

@@ -1,9 +1,9 @@
-# 3.16 is what building from source actually needs: Abseil and GoogleTest, both
-# fetched in third_party/, declare that floor themselves. Consuming the installed
-# client package is a separate, lower floor -- MygramDBClientConfig.cmake only
-# pulls in Threads -- so the consumer projects under examples/ and tests/client/
-# stay at 3.15 deliberately.
-cmake_minimum_required(VERSION 3.16)
+# 3.18 is what building from source actually needs: libmybinlog, fetched in
+# third_party/, declares that floor itself (Abseil and GoogleTest need 3.16).
+# Consuming the installed client package is a separate, lower floor --
+# MygramDBClientConfig.cmake only pulls in Threads -- so the consumer projects
+# under examples/ and tests/client/ stay at 3.15 deliberately.
+cmake_minimum_required(VERSION 3.18)
 # Set CMake policy to suppress deprecation warnings from dependencies
 cmake_policy(SET CMP0048 NEW)
 cmake_policy(SET CMP0077 NEW)

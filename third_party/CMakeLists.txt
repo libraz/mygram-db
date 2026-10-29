@@ -67,6 +67,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog)
 
+# libmybinlog decodes the binlog wire format. MYBINLOG_SOURCE_DIR (environment,
+# exported by the Makefile) points the build at a local checkout instead.
+if(NOT "$ENV{MYBINLOG_SOURCE_DIR}" STREQUAL "" AND NOT DEFINED FETCHCONTENT_SOURCE_DIR_LIBMYBINLOG)
+  set(FETCHCONTENT_SOURCE_DIR_LIBMYBINLOG "$ENV{MYBINLOG_SOURCE_DIR}" CACHE PATH
+      "Local libmybinlog checkout")
+endif()
+FetchContent_Declare(
+  libmybinlog
+  GIT_REPOSITORY https://github.com/libraz/libmybinlog.git
+  GIT_TAG 717db77389ced67bd18bd6263a1f059fc196a981
+)
+FetchContent_MakeAvailable(libmybinlog)
+get_target_property(MYBINLOG_IID mybinlog INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(mybinlog PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${MYBINLOG_IID}")
+
 # Mark spdlog includes as system to exclude from clang-tidy
 get_target_property(SPDLOG_IID spdlog INTERFACE_INCLUDE_DIRECTORIES)
 if(SPDLOG_IID)

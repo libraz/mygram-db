@@ -25,6 +25,10 @@ NPROC ?= $(shell command -v nproc >/dev/null 2>&1 && nproc || sysctl -n hw.ncpu 
 # MySQL password for benchmark (can be overridden: make MYSQL_PASSWORD=secret bench-run)
 MYSQL_PASSWORD ?= mygramdb
 
+# Local libmybinlog checkout to build against instead of the pinned fetch
+MYBINLOG_SOURCE_DIR ?=
+export MYBINLOG_SOURCE_DIR
+
 # Default target
 .DEFAULT_GOAL := build
 
