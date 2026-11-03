@@ -49,14 +49,12 @@ if(APPLE)
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
 
-  # Use SDK path if available
+  # Use SDK path if available. -isysroot alone keeps the SDK headers on the
+  # implicit system path, behind every dependency's -isystem; naming the SDK's
+  # usr/include explicitly lets its partial unicode/ headers shadow ICU's.
   if(MACOS_SDK_PATH)
     message(STATUS "Using macOS SDK path: ${MACOS_SDK_PATH}")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${MACOS_SDK_PATH}")
-
-    # Explicitly specify the path to C++ standard library headers
-    include_directories(SYSTEM "${MACOS_SDK_PATH}/usr/include/c++/v1")
-    include_directories(SYSTEM "${MACOS_SDK_PATH}/usr/include")
   endif()
 
   # Homebrew installs outside the prefixes CMake searches by default, so name it
