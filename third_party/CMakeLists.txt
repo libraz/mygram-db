@@ -76,11 +76,13 @@ endif()
 FetchContent_Declare(
   libmybinlog
   GIT_REPOSITORY https://github.com/libraz/libmybinlog.git
-  GIT_TAG v0.2.0
+  GIT_TAG v0.3.0
 )
 FetchContent_MakeAvailable(libmybinlog)
-get_target_property(MYBINLOG_IID mybinlog INTERFACE_INCLUDE_DIRECTORIES)
-set_target_properties(mybinlog PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${MYBINLOG_IID}")
+# Properties go on the library mybinlog::mybinlog aliases, not on the alias.
+get_target_property(MYBINLOG_TARGET mybinlog::mybinlog ALIASED_TARGET)
+get_target_property(MYBINLOG_IID ${MYBINLOG_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(${MYBINLOG_TARGET} PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${MYBINLOG_IID}")
 
 # Mark spdlog includes as system to exclude from clang-tidy
 get_target_property(SPDLOG_IID spdlog INTERFACE_INCLUDE_DIRECTORIES)
