@@ -10,7 +10,7 @@
 #   universal: false
 
 -e file:.
-certifi==2026.10.19
+certifi==2026.10.23
     # via requests
 charset-normalizer==3.5.2
     # via requests
@@ -20,7 +20,7 @@ idna==3.20
     # via requests
 iniconfig==2.3.1
     # via pytest
-mysql-connector-python==26.7.0
+mysql-connector-python==26.10.0
     # via mygramdb-e2e
 packaging==26.3
     # via pytest
@@ -30,11 +30,11 @@ py-cpuinfo2==10.1.1
     # via pytest-benchmark
 pygments==2.21.0
     # via pytest
-pytest==9.1.1
+pytest==9.2.0
     # via mygramdb-e2e
     # via pytest-benchmark
     # via pytest-timeout
-pytest-benchmark==5.3.0
+pytest-benchmark==5.3.1
     # via mygramdb-e2e
 pytest-timeout==2.4.0
     # via mygramdb-e2e
