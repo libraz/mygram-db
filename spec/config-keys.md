@@ -82,7 +82,7 @@ Properties of how the reader consumes the binlog that an operator can observe (`
 Checked for each monitored table at startup and again after every DDL on it (`src/mysql/ddl_schema_validator.cpp`, `src/mysql/connection.cpp`). Failure is `2012` unless noted.
 
 - The primary-key column is a single-column `PRIMARY KEY`, or a single-column `UNIQUE` key declared `NOT NULL` (a nullable `UNIQUE` column fails with `2012`; a column that is not unique fails with `2011`).
-- The table is not the child of a foreign key with `ON UPDATE` or `ON DELETE` `CASCADE`, `SET NULL` or `SET DEFAULT`, because InnoDB applies those changes without writing row events. MySQL 9.x with `innodb_native_foreign_keys=OFF` is exempt: the server layer writes a row event for every child row.
+- The table is not the child of a foreign key with `ON UPDATE` or `ON DELETE` `CASCADE`, `SET NULL` or `SET DEFAULT`, because InnoDB applies those changes without writing row events. MySQL 9.0 or later with `innodb_native_foreign_keys=OFF` is exempt: the server layer writes a row event for every child row.
 - No column, configured or not, is an old-format MariaDB `TIME(n)`, `DATETIME(n)` or `TIMESTAMP(n)` with `n > 0` (`SHOW COLUMNS` shows `/* mariadb-5.3 */`); the width of such a column is not described by TABLE_MAP, so no row of the table can be decoded. The same types with `n = 0` are accepted.
 - No configured column is declared `year(2)`.
 - A change to a configured column's type, nullability, collation, generation kind (`STORED`/`VIRTUAL`) or generation expression after DDL is a schema change, including `MODIFY ... AS (expr) STORED`.

@@ -323,7 +323,7 @@ TEST(DDLSchemaValidatorIntegrationTest, RejectsChildTableWithCascadingForeignKey
   EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE fk_cascade_child"));
   EXPECT_TRUE(connection.ExecuteUpdate("DROP TABLE fk_cascade_parent"));
 
-  // MySQL 9.x with innodb_native_foreign_keys=OFF writes child row events and accepts the cascade.
+  // MySQL 9.0+ with innodb_native_foreign_keys=OFF writes child row events and accepts the cascade.
   if (!cascading) {
     EXPECT_EQ(cascading.error().code(), mygram::utils::ErrorCode::kMySQLInvalidSchema);
     EXPECT_NE(cascading.error().message().find("fk_cascade_parent_ref"), std::string::npos);

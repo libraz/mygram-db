@@ -243,7 +243,7 @@ Expected<void, Error> ValidateNoCascadingForeignKeys(Connection& connection, con
     return {};
   }
 
-  // With SQL-layer foreign keys (MySQL 9.x, innodb_native_foreign_keys=OFF) the
+  // With SQL-layer foreign keys (MySQL 9.0+, innodb_native_foreign_keys=OFF) the
   // server writes a row event for every child row a cascade touches.
   auto native = connection.Execute("SHOW GLOBAL VARIABLES LIKE 'innodb_native_foreign_keys'");
   if (!native) {
@@ -255,13 +255,13 @@ Expected<void, Error> ValidateNoCascadingForeignKeys(Connection& connection, con
     return {};
   }
 
-  return MakeUnexpected(
-      MakeError(ErrorCode::kMySQLInvalidSchema,
-                "Table '" + table_name + "' is the child of foreign keys that cascade: " + cascading +
-                    ". InnoDB applies these changes without writing row events, so the index would silently diverge. "
-                    "Use ON UPDATE/ON DELETE NO ACTION or RESTRICT on a monitored table, or run MySQL 9.x with "
-                    "innodb_native_foreign_keys=OFF",
-                table_name));
+  return MakeUnexpected(MakeError(
+      ErrorCode::kMySQLInvalidSchema,
+      "Table '" + table_name + "' is the child of foreign keys that cascade: " + cascading +
+          ". InnoDB applies these changes without writing row events, so the index would silently diverge. "
+          "Use ON UPDATE/ON DELETE NO ACTION or RESTRICT on a monitored table, or run MySQL 9.0 or later with "
+          "innodb_native_foreign_keys=OFF",
+      table_name));
 }
 
 }  // namespace

@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MySQL 26.x Innovation releases are supported** alongside the 8.4 and 9.7 LTS series; the binlog wire format, GTID encoding and required server settings are unchanged from 9.7. libmybinlog decodes 26.x as it is: its capture matrix replays binlogs from a real 26.10 server.
+
+### Fixed
+
+- **macOS builds against the macOS 27 SDK** — the SDK now ships partial `unicode/` headers, which shadowed ICU's because the build put the SDK's `usr/include` ahead of every dependency.
+
 ## [1.11.1] - 2026-10-22
 
 Every change is corrective. A few change whether a configuration starts or

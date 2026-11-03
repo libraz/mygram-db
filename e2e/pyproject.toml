@@ -43,7 +43,7 @@ testpaths = [
 ]
 markers = [
     "mysql: MySQL server configuration and connection tests",
-    "mysql9: Requires MySQL 9.x features",
+    "mysql9: Requires MySQL 9.0+ features",
     "mysql_only: Not supported by MariaDB",
     "mariadb_only: Requires MariaDB",
     "smoke: Basic connectivity and health checks",

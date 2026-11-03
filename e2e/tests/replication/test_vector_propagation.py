@@ -1,4 +1,4 @@
-"""Test VECTOR column replication from MySQL 9.x to MygramDB.
+"""Test VECTOR column replication from MySQL 9.0+ to MygramDB.
 
 These tests verify that tables containing VECTOR columns can be replicated
 without errors. VECTOR data itself is not indexed by MygramDB (it's a
