@@ -22,7 +22,7 @@ jobs:
             docker_platform: linux/amd64
           - arch: aarch64
             el_version: "9"
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             docker_platform: linux/arm64
           # el10
           - arch: x86_64
@@ -31,7 +31,7 @@ jobs:
             docker_platform: linux/amd64
           - arch: aarch64
             el_version: "10"
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             docker_platform: linux/arm64
       fail-fast: false
 
@@ -140,7 +140,7 @@ jobs:
             ubuntu_version: "22.04"
             codename: jammy
             deb_arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             docker_platform: linux/arm64
           # Ubuntu 24.04 (noble)
           - arch: x86_64
@@ -153,7 +153,7 @@ jobs:
             ubuntu_version: "24.04"
             codename: noble
             deb_arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             docker_platform: linux/arm64
       fail-fast: false
 
