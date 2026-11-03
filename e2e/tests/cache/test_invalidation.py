@@ -231,7 +231,7 @@ class TestCacheInvalidation:
             f"UPDATE `{table.split('.', 1)[1]}` SET content = %s WHERE id = %s",
             (f"document {new_marker}", 1),
         )
-        first_cleared_search: dict[str, int] = {}
+        first_cleared_search: dict[str, float] = {}
 
         def old_result_was_invalidated() -> bool:
             hits_before_search = read_counter(client, CACHE_HITS)

@@ -26,7 +26,8 @@ MYGRAMDB_BINARY = Path(os.environ.get("MYGRAMDB_BINARY", PROJECT_ROOT / "build/b
 
 def _show_variable_query(name: str) -> bytes:
     """The text of the validator's query for one server variable."""
-    return b"SHOW VARIABLES WHERE Variable_name = _utf8mb4 X'" + name.encode().hex().upper().encode() + b"'"
+    hex_name = name.encode().hex().upper().encode()
+    return b"SHOW VARIABLES WHERE Variable_name = _utf8mb4 X'" + hex_name + b"'"
 
 
 def _free_port() -> int:

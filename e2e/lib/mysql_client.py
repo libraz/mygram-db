@@ -19,7 +19,7 @@ class MysqlClient:
         password: str = os.environ.get("MYSQL_TEST_PASSWORD", "test_root_password"),
         database: str = "testdb",
     ) -> None:
-        self.config = {
+        self.config: dict[str, Any] = {
             "host": host,
             "port": port,
             "user": user,

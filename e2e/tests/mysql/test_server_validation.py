@@ -55,8 +55,12 @@ class TestServerValidation:
 
     def test_startup_rejects_binlog_row_metadata_minimal(self, mysql: MysqlClient) -> None:
         """A source without full row metadata must stop startup before any snapshot."""
-        config_path = Path(os.environ.get("MYGRAMDB_CONFIG", E2E_ROOT / "docker" / "mygramdb-test.yaml"))
-        binary = Path(os.environ.get("MYGRAMDB_BINARY", PROJECT_ROOT / "build" / "bin" / "mygramdb"))
+        config_path = Path(
+            os.environ.get("MYGRAMDB_CONFIG", E2E_ROOT / "docker" / "mygramdb-test.yaml")
+        )
+        binary = Path(
+            os.environ.get("MYGRAMDB_BINARY", PROJECT_ROOT / "build" / "bin" / "mygramdb")
+        )
 
         try:
             mysql.execute("SET GLOBAL binlog_row_metadata = MINIMAL")
