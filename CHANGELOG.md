@@ -10,13 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-04
+
+Binlog decoding moves to libmybinlog, which lets a source using tagged GTIDs
+replicate. One server setting that was never checked is now required at
+startup; the release notes list it under the upgrade actions.
+
 ### Added
 
+- **Tagged GTIDs are accepted.** A MySQL 8.4+ source whose `gtid_executed` holds `uuid:tag:n` entries is no longer refused with `2005`, tagged GTID events replicate and resume across reconnects, and a bare `UUID:tag:N` start position is widened to `UUID:tag:1-N` as `UUID:N` is.
 - **MySQL 26.x Innovation releases are supported** alongside the 8.4 and 9.7 LTS series; the binlog wire format, GTID encoding and required server settings are unchanged from 9.7. libmybinlog decodes 26.x as it is: its capture matrix replays binlogs from a real 26.10 server.
+
+### Changed
+
+- **The source must run `log_bin=ON`** — a server with binary logging off is refused at startup with `2008`, like the other unmet server settings.
+- **`replication.start_from: gtid=,` is a configuration error** — a position holding only separators used to be accepted.
+- **Binlog framing, checksums, `TABLE_MAP`, GTID, `QUERY` and rows events are decoded by libmybinlog.** Row values render as the snapshot path renders them. Malformed input that used to be guessed at — a zero-width BLOB length prefix, a zero ENUM/SET pack length, packed integers `0xFB`/`0xFF`, a column count of 0 — now fails with `2014`, and a GTID event with GNO 0 or `INT64_MAX` is an undecodable event (`2017`) that reconnects.
 
 ### Fixed
 
 - **macOS builds against the macOS 27 SDK** — the SDK now ships partial `unicode/` headers, which shadowed ICU's because the build put the SDK's `usr/include` ahead of every dependency.
+
+### Build
+
+- libmybinlog v0.3.0 is a new dependency, and the CMake floor rises to 3.18.
+- CRoaring v5.4.0, cpp-httplib v0.64.0.
+
+**Detailed Release Notes**: [docs/releases/v1.12.0.md](docs/releases/v1.12.0.md)
 
 ## [1.11.1] - 2026-10-22
 
@@ -1056,7 +1076,8 @@ Initial release with core search engine functionality and MySQL replication supp
 
 ---
 
-[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.11.1...HEAD
+[Unreleased]: https://github.com/libraz/mygram-db/compare/v1.12.0...HEAD
+[1.12.0]: https://github.com/libraz/mygram-db/compare/v1.11.1...v1.12.0
 [1.11.1]: https://github.com/libraz/mygram-db/compare/v1.11.0...v1.11.1
 [1.11.0]: https://github.com/libraz/mygram-db/compare/v1.10.2...v1.11.0
 [1.10.2]: https://github.com/libraz/mygram-db/compare/v1.10.1...v1.10.2
