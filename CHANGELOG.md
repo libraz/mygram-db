@@ -33,7 +33,7 @@ startup; the release notes list it under the upgrade actions.
 
 ### Build
 
-- libmybinlog v0.3.0 is a new dependency, and the CMake floor rises to 3.18.
+- libmybinlog v0.3.1 is a new dependency, and the CMake floor rises to 3.18.
 - CRoaring v5.4.0, cpp-httplib v0.64.0.
 
 **Detailed Release Notes**: [docs/releases/v1.12.0.md](docs/releases/v1.12.0.md)
