@@ -33,7 +33,7 @@ jobs:
     name: Linux Build and Test
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # apt.llvm.org publishes no LLVM 18 for Ubuntu 26.04
 
     steps:
     - name: Checkout code
