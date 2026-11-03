@@ -17,6 +17,9 @@ make e2e-test-load
 # Full database-version matrix
 make e2e-matrix
 
+# Selected matrix targets (image tags; each run pulls the tag first)
+bash e2e/run-matrix.sh --only mysql:innovation,mariadb:12.3
+
 # Focused MariaDB replication check
 bash e2e/test_mariadb_replication.sh
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import os
 import signal
 import subprocess
@@ -39,9 +40,9 @@ MYGRAMDB_DUMP_DIR = Path(
 
 
 def _mysql_major_minor(version_str: str) -> tuple[int, int]:
-    """Parse MySQL version string (e.g. '9.6.0') into (major, minor)."""
-    parts = version_str.split(".")
-    return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    """Parse a server version string (e.g. '26.10.0', '11.8.9-MariaDB') into (major, minor)."""
+    major, minor = (version_str.split(".") + ["0"])[:2]
+    return int(major), int("".join(itertools.takewhile(str.isdigit, minor)) or 0)
 
 
 @pytest.fixture(scope="session")
@@ -62,12 +63,6 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(scope="session")
-def mysql_version() -> tuple[int, int]:
-    """MySQL/MariaDB version as (major, minor) tuple, from MYSQL_VERSION env var."""
-    return _mysql_major_minor(os.environ.get("MYSQL_VERSION", "8.4"))
-
-
-@pytest.fixture(scope="session")
 def mysql() -> MysqlClient:
     """Session-scoped MySQL client connected to the test database."""
     client = MysqlClient(
@@ -84,6 +79,12 @@ def mysql() -> MysqlClient:
         description="MySQL to be ready",
     )
     return client
+
+
+@pytest.fixture(scope="session")
+def mysql_version(mysql: MysqlClient) -> tuple[int, int]:
+    """Running server's (major, minor); MYSQL_VERSION is an image tag, not a version."""
+    return _mysql_major_minor(mysql.execute("SELECT VERSION() AS v")[0]["v"])
 
 
 def _kill_stale_process_on_port(port: int) -> None:

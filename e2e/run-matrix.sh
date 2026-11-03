@@ -29,10 +29,13 @@ done
 
 # Default: all targets
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
-    # Every entry is a supported LTS. Innovation releases are superseded by the
-    # next one a quarter later, so they are reached with --only rather than
-    # carried here, where they would go out of support between runs.
-    TARGETS=("mysql:8.4" "mysql:9.7" "mariadb:10.11" "mariadb:11.8" "mariadb:12.3")
+    # Every supported LTS series of both flavors, plus the current MySQL
+    # Innovation release through the floating "innovation" tag, which always
+    # names the current one and so never goes out of support between runs.
+    TARGETS=(
+        "mysql:8.4" "mysql:9.7" "mysql:innovation"
+        "mariadb:10.11" "mariadb:11.4" "mariadb:11.8" "mariadb:12.3"
+    )
 fi
 
 # Check binary
@@ -95,9 +98,10 @@ for target in "${TARGETS[@]}"; do
     docker compose -p "$COMPOSE_PROJECT" -f "docker/docker-compose.yml" down -v 2>/dev/null || true
     docker compose -p "$COMPOSE_PROJECT" -f "docker/docker-compose.mariadb.yml" down -v 2>/dev/null || true
 
-    # Start database
+    # Start database. Tags are series names, so pull to test the series' latest
+    # patch release rather than whatever a previous run left in the local cache.
     echo "Starting $flavor $version..."
-    docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" up -d --wait --wait-timeout 120 2>&1
+    docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" up -d --pull always --wait --wait-timeout 120 2>&1
 
     if [[ $? -ne 0 ]]; then
         echo "FAIL: Could not start $flavor $version"
@@ -106,6 +110,17 @@ for target in "${TARGETS[@]}"; do
         docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" down -v 2>/dev/null || true
         continue
     fi
+
+    # The tag names a series; record the exact server release under test.
+    if [[ "$flavor" == "mariadb" ]]; then
+        server_version=$(docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" exec -T mariadb \
+            sh -c 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N -e "SELECT VERSION()"' 2>/dev/null)
+    else
+        server_version=$(docker compose -p "$COMPOSE_PROJECT" -f "$compose_file" exec -T mysql \
+            sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -e "SELECT VERSION()"' 2>/dev/null)
+    fi
+    server_version="${server_version:-unknown}"
+    echo "Server version: $server_version"
 
     # Run pytest
     echo "Running tests..."
@@ -119,10 +134,10 @@ for target in "${TARGETS[@]}"; do
 
     # Collect summary
     if [[ $rc -eq 0 ]]; then
-        summary_lines+=("PASS  $flavor $version")
+        summary_lines+=("PASS  $flavor $version  ($server_version)")
         ((overall_pass++))
     else
-        summary_lines+=("FAIL  $flavor $version  (exit code $rc)")
+        summary_lines+=("FAIL  $flavor $version  ($server_version, exit code $rc)")
         ((overall_fail++))
     fi
 
